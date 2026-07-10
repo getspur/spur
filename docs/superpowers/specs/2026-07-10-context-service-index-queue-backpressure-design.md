@@ -160,6 +160,7 @@ Terraform-managed GSI before non-zero queue caps are enabled.
 | `GLOBAL#QUEUE#<shard>` | Sharded service-wide queued counters for approximate global queued backpressure |
 | `RUNNING#<job_id>` | Release token for exactly-once running quota release |
 | `GLOBAL#RUNNING_TOKEN#<n>` | Optional hard global running token claimed at dispatch time |
+| `CURSOR#<shard>` | Durable CAS-versioned drainer continuation key, stored under cursor-only attributes so it stays out of the sparse queue GSI |
 
 ### Sparse Queue GSI
 
@@ -187,6 +188,19 @@ write-hot `GLOBAL#QUOTA` item. This makes global queued enforcement
 conservative/approximate under heavy contention; operators should set the
 global queued cap with slack and rely on the per-owner cap as the hard fairness
 boundary.
+
+To prevent a small global cap from inflating total capacity, the number of
+counter shards is `min(shard_count, max_queued_global)` (the *effective* shard
+count). Each effective shard gets a budget of
+`floor(max_queued_global / effective_shards) ≥ 1`. Total service-wide queued
+capacity is `effective_shards × per_shard_budget`, which is always
+`≤ max_queued_global`. For example, `max_queued_global=1, shard_count=16`
+uses 1 effective counter shard with a budget of 1, not 16 shards each allowing
+1. The global counter shard for a job is computed deterministically from
+`(owner_kind, owner_id, job_id)` modulo the effective count — it is separate
+from the queue GSI shard (which uses `shard_count`). Dispatch recomputes the
+same shard from the job record + config so it decrements the exact counter
+that enqueue incremented.
 
 Global running caps are hard when configured: dispatch claims one
 `GLOBAL#RUNNING_TOKEN#<n>` item before starting Step Functions and releases that
@@ -221,6 +235,17 @@ state if TTL or operator repair removes an item unexpectedly.
 9. Return the queued job response.
 10. Optionally invoke a small best-effort dispatch kick for low latency. The
     EventBridge drainer remains the correctness path.
+
+The enqueue transaction may be cancelled atomically by DynamoDB. A
+`ConditionalCheckFailed` cancellation reason at the dedupe item means a
+duplicate; at the owner/global counter item it means the cap is genuinely full
+(`queue_full`/`global_queue_full`). A `TransactionConflict` reason is transient
+write contention — the cap may have room — and is surfaced as a retryable
+conflict instead. This distinction also covers the no-reasons paths
+(`TransactionInProgressException`, or a message-only `TransactionConflict`
+without populated item reasons): these are surfaced for retry, never reported as
+quota-full, so concurrent enqueue contention does not produce false capacity
+rejections.
 
 `force=true` bypasses the warm-catalog hit only. It does not bypass request
 rate limits, owner/global queued caps, owner/global running caps, URL abuse
@@ -346,16 +371,31 @@ owner from monopolizing all worker slots:
 
 - Per-owner running cap controls local concurrency.
 - Global running cap protects the whole service.
-- Drainer scans rotate queue shards and per-shard start cursors between runs.
+- Drainer scans rotate queue shards by the configured schedule tick (not raw
+  wall-clock seconds), so a whole-minute cadence visits every shard even when
+  the schedule interval and shard count share factors.
+- Each shard cursor stores the complete DynamoDB `LastEvaluatedKey`
+  (`queue_shard`, `queue_sort_key`, and base-table `pk`) plus a CAS version.
+  Each invocation queries at most one configured candidate page per shard.
 - If a candidate owner is at running cap, the drainer skips that job and looks
   at later jobs up to a bounded scan limit, so other owners can make progress.
 - If the hard global running cap is saturated, the drainer exits before scanning
   and relies on the completion kick or next schedule tick.
 
 Exact queue position is not required for the first version, but starvation is
-not allowed. The implementation must document a scan bound such as "every
-eligible queued job is scanned within K drainer runs at current shard count and
-scan limit." A future status response can add a best-effort
+not allowed. Let `A` be the eligible candidates ahead of a job in the persisted
+cursor's circular scan order (including the remaining tail and wrapped prefix),
+`L` the page limit, `B` the global dispatch budget, and `R = min(L, B)`. When
+the target shard is the scheduled starting shard and hard global capacity is
+available, at least `R` candidates are examined, so the job is reached within
+`ceil((A + 1) / R) + 1` shard starts. Since the schedule makes every shard the
+start once per `shard_count` ticks, this is at most
+`shard_count * (ceil((A + 1) / R) + 1)` scheduled invocations. The extra start
+covers the conservative case where a full final page has a `LastEvaluatedKey`
+and an empty follow-up page is needed to prove the tail. Total eligible
+per-shard depth bounds `A`; the bound cannot be derived from
+`max_queued_jobs_per_owner` alone. Continuous arrivals that sort behind the
+target do not increase `A`. A future status response can add a best-effort
 `queue_position_hint` if operators need it.
 
 ## Configuration

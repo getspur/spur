@@ -150,9 +150,131 @@ variable "index_rate_limit_per_minute" {
 }
 
 variable "index_max_concurrent_jobs_per_caller" {
-  description = "Maximum queued/running external_index jobs per authenticated caller"
+  description = "Legacy per-caller running cap used when index_max_running_jobs_per_owner is null."
   type        = number
   default     = 2
+}
+
+# ─── Bounded Backlog Queueing ────────────────────────────────────────────────
+# Config surface for the DynamoDB backlog/backpressure design. Defaults keep
+# durable queue admission disabled until an operator sets a finite queue cap.
+# See
+# docs/superpowers/specs/2026-07-10-context-service-index-queue-backpressure-design.md
+
+variable "index_queue_gsi_name" {
+  description = "Name of the sparse DynamoDB GSI keyed by (queue_shard, queue_sort_key) used by the drainer to scan queued jobs in FIFO order."
+  type        = string
+  default     = "queue-gsi"
+}
+
+variable "index_queue_shard_count" {
+  description = "Number of shards for the sparse queue GSI partition key. The drainer rotates the starting shard between invocations. Default 16 per the design spec."
+  type        = number
+  default     = 16
+
+  validation {
+    condition     = var.index_queue_shard_count > 0 && var.index_queue_shard_count <= 1024 && floor(var.index_queue_shard_count) == var.index_queue_shard_count
+    error_message = "index_queue_shard_count must be a whole number between 1 and 1024."
+  }
+}
+
+variable "index_max_running_jobs_per_owner" {
+  description = "Maximum concurrent running/dispatching index jobs per backlog owner. Null inherits index_max_concurrent_jobs_per_caller for backward-compatible deployments."
+  type        = number
+  default     = null
+
+  validation {
+    condition     = var.index_max_running_jobs_per_owner == null || (var.index_max_running_jobs_per_owner >= 0 && floor(var.index_max_running_jobs_per_owner) == var.index_max_running_jobs_per_owner)
+    error_message = "index_max_running_jobs_per_owner must be null or a non-negative integer."
+  }
+}
+
+variable "index_max_queued_jobs_per_owner" {
+  description = "Maximum accepted queued backlog per backlog owner. 0 (default) rejects cold admissions until queueing is explicitly enabled."
+  type        = number
+  default     = 0
+
+  validation {
+    condition     = var.index_max_queued_jobs_per_owner >= 0 && floor(var.index_max_queued_jobs_per_owner) == var.index_max_queued_jobs_per_owner
+    error_message = "index_max_queued_jobs_per_owner must be a non-negative integer."
+  }
+}
+
+variable "index_max_running_jobs_global" {
+  description = "Global concurrent running/dispatching job cap enforced via a RUNNING# token pool. 0 (default) disables the hard global running cap; small deployments rely on per-owner caps plus API Gateway throttles."
+  type        = number
+  default     = 0
+
+  validation {
+    condition     = var.index_max_running_jobs_global >= 0 && var.index_max_running_jobs_global <= 32 && floor(var.index_max_running_jobs_global) == var.index_max_running_jobs_global
+    error_message = "index_max_running_jobs_global must be a whole number between 0 and 32."
+  }
+}
+
+variable "index_max_queued_jobs_global" {
+  description = "Global accepted queued backlog, enforced via sharded GLOBAL#QUEUE# counters (conservative/approximate under contention). 0 (default) disables the global queued cap."
+  type        = number
+  default     = 0
+
+  validation {
+    condition     = var.index_max_queued_jobs_global >= 0 && floor(var.index_max_queued_jobs_global) == var.index_max_queued_jobs_global
+    error_message = "index_max_queued_jobs_global must be a non-negative integer."
+  }
+}
+
+variable "index_drainer_batch_limit" {
+  description = "Maximum jobs dispatched by one scheduled or admission-kick drainer invocation."
+  type        = number
+  default     = 8
+
+  validation {
+    condition     = var.index_drainer_batch_limit >= 1 && floor(var.index_drainer_batch_limit) == var.index_drainer_batch_limit
+    error_message = "index_drainer_batch_limit must be a positive integer."
+  }
+}
+
+variable "index_drainer_scan_limit_per_shard" {
+  description = "Maximum queued candidates queried from each queue GSI shard per drainer invocation."
+  type        = number
+  default     = 32
+
+  validation {
+    condition     = var.index_drainer_scan_limit_per_shard >= 1 && floor(var.index_drainer_scan_limit_per_shard) == var.index_drainer_scan_limit_per_shard
+    error_message = "index_drainer_scan_limit_per_shard must be a positive integer."
+  }
+}
+
+variable "index_drainer_schedule_rate_minutes" {
+  description = "EventBridge correctness-drainer cadence in whole minutes. The same value drives runtime shard-start rotation so every shard is visited even when cadence and shard count share factors."
+  type        = number
+  default     = 1
+
+  validation {
+    condition     = var.index_drainer_schedule_rate_minutes >= 1 && floor(var.index_drainer_schedule_rate_minutes) == var.index_drainer_schedule_rate_minutes
+    error_message = "index_drainer_schedule_rate_minutes must be a positive whole number of minutes."
+  }
+}
+
+variable "index_dispatch_max_attempts" {
+  description = "Maximum transient-dispatch retry attempts before a queued job is marked failed with error_code=dispatch_exhausted."
+  type        = number
+  default     = 3
+
+  validation {
+    condition     = var.index_dispatch_max_attempts > 0
+    error_message = "index_dispatch_max_attempts must be greater than zero."
+  }
+}
+
+variable "index_dispatch_backoff_base_seconds" {
+  description = "Base seconds for exponential backoff when re-queuing a job after a transient dispatch failure. The actual backoff is base * 2^(attempt-1), capped at a sane maximum."
+  type        = number
+  default     = 5
+
+  validation {
+    condition     = var.index_dispatch_backoff_base_seconds > 0
+    error_message = "index_dispatch_backoff_base_seconds must be greater than zero."
+  }
 }
 
 variable "context_max_tarball_bytes" {

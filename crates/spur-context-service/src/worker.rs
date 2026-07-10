@@ -321,6 +321,13 @@ pub async fn run_job_and_report_with_services(
                 return Err(worker_error);
             }
             handle_spot_interruption(env, &stage.get()).await?;
+            // Cancellation path: the job was running and holds a running slot.
+            // The spot handler writes a checkpoint + Step Functions failure but
+            // does not touch the job store, so release running quota here
+            // (best-effort) to avoid leaking owner/global running capacity. The
+            // release is idempotent — if a reconciler or duplicate event already
+            // released the token, this is a no-op.
+            release_running_quota_best_effort(jobs.as_ref(), &env.job_id).await;
             Err(WorkerError::SpotInterrupted)
         }
     }
@@ -3388,12 +3395,24 @@ async fn record_job_stage_best_effort(jobs: &dyn JobStore, job_id: &str, stage: 
 }
 
 async fn mark_job_complete_best_effort(jobs: &dyn JobStore, env: &JobEnv, stats: &TranslateStats) {
+    // Record terminal status AND release running quota exactly once. The
+    // combined method releases the owner running count + global running token
+    // after the status is recorded; a duplicate terminal event is an idempotent
+    // no-op (token already gone). A transient release `Conflict` is logged here
+    // rather than propagated (the worker cannot retry safely): the terminal
+    // status IS recorded, so the next `external_index_status` poll hits the
+    // terminal-repair branch in `update_stale_job` and retries the release,
+    // closing the leak.
     if let Err(error) = jobs
-        .mark_complete(&env.job_id, stats.snapshot_id, json!(&stats.rows_inserted))
+        .mark_complete_and_release_running_quota(
+            &env.job_id,
+            stats.snapshot_id,
+            json!(&stats.rows_inserted),
+        )
         .await
     {
         eprintln!(
-            "[worker] warning: failed to mark job `{}` complete in JobStore: {error:#}",
+            "[worker] warning: failed to mark job `{}` complete / release running quota in JobStore: {error:#}",
             env.job_id
         );
     }
@@ -3405,14 +3424,45 @@ async fn mark_job_failed_best_effort(
     error_code: &str,
     error_detail: &str,
 ) {
+    // Record terminal failure AND release running quota exactly once. Same
+    // exactly-once guarantees as the complete path. A transient release
+    // `Conflict` is logged here; the next `external_index_status` poll retries
+    // the release via the terminal-repair branch in `update_stale_job`.
     if let Err(error) = jobs
-        .mark_failed(&env.job_id, error_code, error_detail)
+        .mark_failed_and_release_running_quota(&env.job_id, error_code, error_detail)
         .await
     {
         eprintln!(
-            "[worker] warning: failed to mark job `{}` failed in JobStore: {error:#}",
+            "[worker] warning: failed to mark job `{}` failed / release running quota in JobStore: {error:#}",
             env.job_id
         );
+    }
+}
+
+/// Best-effort running-quota release for a job that reached a terminal/cancelled
+/// state without going through the combined `mark_*_and_release_running_quota`
+/// path (e.g. a Spot interruption that writes a checkpoint but does not update
+/// job status). Looks up the job record so the owner-scoped release token can be
+/// deleted, then releases exactly once. Failures are logged, not propagated —
+/// the next `external_index_status` poll retries the release via the
+/// terminal-repair branch in `update_stale_job`.
+async fn release_running_quota_best_effort(jobs: &dyn JobStore, job_id: &str) {
+    match jobs.lookup_job(job_id).await {
+        Ok(Some(record)) => {
+            if let Err(error) = jobs.release_running_quota(&record).await {
+                eprintln!(
+                    "[worker] warning: failed to release running quota for job `{job_id}`: {error:#}"
+                );
+            }
+        }
+        Ok(None) => {
+            eprintln!("[worker] warning: job `{job_id}` not found for running quota release");
+        }
+        Err(error) => {
+            eprintln!(
+                "[worker] warning: failed to look up job `{job_id}` for running quota release: {error:#}"
+            );
+        }
     }
 }
 
@@ -4003,7 +4053,7 @@ impl TempWorkspace {
             "spur-context-worker-{}-{}-{}",
             sanitize_path_part(job_id),
             std::process::id(),
-            unix_secs()
+            Uuid::new_v4().simple()
         ));
         fs::create_dir_all(&path).map_err(|error| {
             WorkerError::Fetch(format!(
