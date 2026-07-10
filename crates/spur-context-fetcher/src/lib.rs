@@ -312,3 +312,114 @@ fn env_u64(name: &str, default: u64) -> u64 {
         .filter(|value| *value > 0)
         .unwrap_or(default)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fetch::{CommandOutput, CommandSpec};
+    use crate::store::{ArchiveStore, StoreError, StoredArchive};
+    use async_trait::async_trait;
+    use std::collections::BTreeMap;
+    use std::fs;
+    use std::sync::Mutex;
+    use tempfile::TempDir;
+
+    #[derive(Default)]
+    struct RecordingRunner;
+
+    impl CommandRunner for RecordingRunner {
+        fn run(&mut self, spec: CommandSpec) -> Result<CommandOutput, std::io::Error> {
+            if spec.program == "git" && spec.args.iter().any(|arg| arg == "clone") {
+                let repo_dir = spec
+                    .args
+                    .last()
+                    .map(PathBuf::from)
+                    .expect("clone destination argument");
+                fs::create_dir_all(repo_dir.join("src"))?;
+            }
+            if spec.program == "tar" {
+                let archive_path = spec
+                    .args
+                    .get(1)
+                    .map(PathBuf::from)
+                    .expect("tar output argument");
+                fs::File::create(archive_path)?;
+            }
+            Ok(CommandOutput {
+                status_success: true,
+                stderr: String::new(),
+            })
+        }
+
+        fn remove_dir_all(&mut self, path: &Path) -> Result<(), std::io::Error> {
+            if path.exists() {
+                fs::remove_dir_all(path)?;
+            }
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct FailingPutStore {
+        put_keys: Mutex<Vec<String>>,
+    }
+
+    #[async_trait]
+    impl ArchiveStore for FailingPutStore {
+        async fn head_archive(&self, _key: &str) -> Result<Option<StoredArchive>, StoreError> {
+            Ok(None)
+        }
+
+        async fn put_archive(
+            &self,
+            key: &str,
+            _archive_path: &Path,
+            _metadata: BTreeMap<String, String>,
+        ) -> Result<(), StoreError> {
+            self.put_keys.lock().unwrap().push(key.to_owned());
+            Err(StoreError::S3("put failed".to_owned()))
+        }
+
+        async fn presign_archive(&self, _key: &str, _ttl: Duration) -> Result<String, StoreError> {
+            Ok("https://example.com/presigned".to_owned())
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_request_cleans_workspace_when_store_put_fails() {
+        let temp = TempDir::new().unwrap();
+        let config = FetchConfig {
+            bucket: "bucket".to_owned(),
+            prefix: "fetch".to_owned(),
+            presign_seconds: 60,
+            validate_options: spur_context_source::ValidateOptions {
+                tarball_size_cap_bytes: 1024 * 1024,
+                git_size_cap_bytes: 1024 * 1024,
+                allowed_domains: vec!["github.com".to_owned()],
+            },
+            tmp_root: temp.path().to_path_buf(),
+        };
+        let request = FetchRequest {
+            job_id: "job-cleanup".to_owned(),
+            package: "getspur/spur".to_owned(),
+            revision: "abc123".to_owned(),
+            source: "github".to_owned(),
+            source_url: "git+https://github.com/getspur/spur.git".to_owned(),
+            source_kind: "git".to_owned(),
+            limits: Some(FetchLimits {
+                max_source_bytes: Some(1024 * 1024),
+                max_build_seconds: None,
+            }),
+        };
+        let store = FailingPutStore::default();
+        let client = http_client().unwrap();
+        let mut runner = RecordingRunner;
+
+        let error = handle_request(request, &config, &store, &client, &mut runner)
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("put failed"));
+        assert!(temp.path().read_dir().unwrap().next().is_none());
+    }
+}
