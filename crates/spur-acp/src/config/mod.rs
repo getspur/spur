@@ -1202,6 +1202,24 @@ mod tests {
     }
 
     #[test]
+    fn seed_template_codex_uses_agentclientprotocol_adapter_1_1_2() {
+        let seeds = load_seed_template();
+        let codex = seeds
+            .entries
+            .iter()
+            .find(|agent| agent.name == "codex")
+            .expect("codex should be in seed template");
+
+        assert_eq!(
+            codex.effective_args(),
+            vec![
+                "--yes".to_owned(),
+                "@agentclientprotocol/codex-acp@1.1.2".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
     fn seed_template_kimi_uses_yolo_via_l2_auto_approve() {
         // kimi requires `-y` BEFORE the `acp` subcommand and relies on the
         // L2 auto-approve path (orchestrator drops `permission_tx` when
