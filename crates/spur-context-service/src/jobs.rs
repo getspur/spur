@@ -12,7 +12,9 @@ use async_trait::async_trait;
 use aws_sdk_dynamodb::{
     error::SdkError,
     operation::transact_write_items::TransactWriteItemsError,
-    types::{AttributeValue, CancellationReason, Delete, Put, ReturnValue, TransactWriteItem, Update},
+    types::{
+        AttributeValue, CancellationReason, Delete, Put, ReturnValue, TransactWriteItem, Update,
+    },
     Client as DynamoDbClient,
 };
 use uuid::Uuid;
@@ -444,11 +446,7 @@ pub trait JobStore: Send + Sync {
     /// creating the `RUNNING#<job_id>` release token. Skeleton for the drainer:
     /// it removes the sparse queue-GSI attributes from the job in the same
     /// transition so the job stops appearing in drainer scans.
-    async fn dispatch_queued_job(
-        &self,
-        job_id: &str,
-        config: &QueueConfig,
-    ) -> Result<JobRecord> {
+    async fn dispatch_queued_job(&self, job_id: &str, config: &QueueConfig) -> Result<JobRecord> {
         let _ = (job_id, config);
         Err(JobsError::NotFound)
     }
@@ -459,6 +457,23 @@ pub trait JobStore: Send + Sync {
     async fn release_running_quota(&self, record: &JobRecord) -> Result<()> {
         let _ = record;
         Ok(())
+    }
+
+    /// List queued jobs eligible for dispatch from a queue shard, in FIFO order
+    /// (ascending `queue_sort_key`). Returns at most `limit` jobs whose
+    /// `next_eligible_at <= now_unix_secs`. The drainer uses this to discover
+    /// candidates before attempting a transactional dispatch transition.
+    ///
+    /// Legacy stores that have not implemented queue GSI reads return an empty
+    /// list — no queued work is visible, so the drainer is a no-op.
+    async fn list_queued_jobs(
+        &self,
+        shard: &str,
+        now_unix_secs: u64,
+        limit: usize,
+    ) -> Result<Vec<JobRecord>> {
+        let _ = (shard, now_unix_secs, limit);
+        Ok(Vec::new())
     }
 }
 
@@ -975,11 +990,7 @@ impl JobStore for DynamoDbJobStore {
         }
     }
 
-    async fn dispatch_queued_job(
-        &self,
-        job_id: &str,
-        config: &QueueConfig,
-    ) -> Result<JobRecord> {
+    async fn dispatch_queued_job(&self, job_id: &str, config: &QueueConfig) -> Result<JobRecord> {
         // Read the full job record to capture owner AND queue_shard before the
         // dispatch transition removes the GSI attributes.
         let record = self.lookup_job(job_id).await?.ok_or(JobsError::NotFound)?;
@@ -1011,7 +1022,10 @@ impl JobStore for DynamoDbJobStore {
             ":dispatching".to_string(),
             AttributeValue::S(JobStatus::Dispatching.as_str().to_string()),
         );
-        values.insert(":updated_at".to_string(), AttributeValue::S(now_millis.clone()));
+        values.insert(
+            ":updated_at".to_string(),
+            AttributeValue::S(now_millis.clone()),
+        );
         let job_update = Update::builder()
             .table_name(&self.table_name)
             .key("pk", AttributeValue::S(job_pk(job_id)))
@@ -1023,11 +1037,8 @@ impl JobStore for DynamoDbJobStore {
             .set_expression_attribute_values(Some(values))
             .build()
             .map_err(dynamodb_error)?;
-        let quota_update = owner_quota_dispatch_update(
-            &self.table_name,
-            &owner,
-            config.max_running_per_owner,
-        )?;
+        let quota_update =
+            owner_quota_dispatch_update(&self.table_name, &owner, config.max_running_per_owner)?;
         // Pass the real queue_shard captured from the job record so the token
         // carries correct metadata for the drainer/reconciler.
         let token = running_token_item(job_id, &now_millis, &owner, &queue_shard);
@@ -1068,9 +1079,7 @@ impl JobStore for DynamoDbJobStore {
             Ok(_) => {
                 // `transact_write_items` does not return updated attributes;
                 // re-read the job to return the post-transition record.
-                self.lookup_job(job_id)
-                    .await?
-                    .ok_or(JobsError::NotFound)
+                self.lookup_job(job_id).await?.ok_or(JobsError::NotFound)
             }
             Err(error) if is_transaction_conflict(&error) => {
                 // Another drainer dispatched it, or the owner is at the running
@@ -1123,6 +1132,40 @@ impl JobStore for DynamoDbJobStore {
             }
             Err(error) => Err(dynamodb_error(error)),
         }
+    }
+
+    async fn list_queued_jobs(
+        &self,
+        shard: &str,
+        now_secs: u64,
+        limit: usize,
+    ) -> Result<Vec<JobRecord>> {
+        // Query the sparse queue GSI: partition = queue_shard, range =
+        // queue_sort_key <= ceiling. The ceiling is the zero-padded now-secs
+        // prefix followed by a character that sorts after every real suffix
+        // (`#` < digits < letters < `~`), so all jobs with
+        // `next_eligible_at <= now_secs` are included. The GSI is sparse — only
+        // queued items carry these attributes — so the result set is bounded by
+        // the live queue depth on this shard.
+        let ceiling = format!("{now_secs:0QUEUE_SORT_KEY_PAD$}~~~~~~~~~~~~~~~~~~");
+        let output = self
+            .client
+            .query()
+            .table_name(&self.table_name)
+            .index_name(QUEUE_GSI_NAME)
+            .key_condition_expression("queue_shard = :shard AND queue_sort_key <= :ceiling")
+            .expression_attribute_values(":shard", AttributeValue::S(shard.to_string()))
+            .expression_attribute_values(":ceiling", AttributeValue::S(ceiling))
+            .limit(limit.max(1) as i32)
+            .send()
+            .await
+            .map_err(dynamodb_error)?;
+        output
+            .items
+            .unwrap_or_default()
+            .iter()
+            .map(job_record_from_item)
+            .collect()
     }
 }
 
@@ -1184,7 +1227,10 @@ fn owner_pk(kind: BacklogOwnerKind, id: &str) -> String {
 /// `OWNER#<kind>#<id>#QUOTA` — partition key for the per-owner queued/running
 /// counter item.
 fn owner_quota_pk(kind: BacklogOwnerKind, id: &str) -> String {
-    format!("{OWNER_PK_PREFIX}{}#{id}{OWNER_QUOTA_SUFFIX}", kind.as_str())
+    format!(
+        "{OWNER_PK_PREFIX}{}#{id}{OWNER_QUOTA_SUFFIX}",
+        kind.as_str()
+    )
 }
 
 /// `GLOBAL#QUEUE#<shard>` — partition key for a sharded global queued counter.
@@ -1252,10 +1298,7 @@ fn write_queue_gsi_attributes(
     let shard = queue_shard_for(kind, owner_id, job_id, shard_count);
     let sort_key = queue_sort_key_for(next_eligible_at, queued_at, job_id);
     item.insert("queue_shard".to_string(), AttributeValue::S(shard));
-    item.insert(
-        "queue_sort_key".to_string(),
-        AttributeValue::S(sort_key),
-    );
+    item.insert("queue_sort_key".to_string(), AttributeValue::S(sort_key));
     item.insert(
         "next_eligible_at".to_string(),
         AttributeValue::N(next_eligible_at.to_string()),
@@ -1355,7 +1398,11 @@ fn job_item(record: &JobRecord) -> HashMap<String, AttributeValue> {
     }
     insert_optional_string(&mut item, "owner_id", record.owner_id.as_deref());
     insert_optional_string(&mut item, "queue_shard", record.queue_shard.as_deref());
-    insert_optional_string(&mut item, "queue_sort_key", record.queue_sort_key.as_deref());
+    insert_optional_string(
+        &mut item,
+        "queue_sort_key",
+        record.queue_sort_key.as_deref(),
+    );
     if let Some(next_eligible_at) = record.next_eligible_at {
         item.insert(
             "next_eligible_at".to_string(),
@@ -1537,10 +1584,7 @@ fn owner_quota_enqueue_update(
         ":owner_kind".to_string(),
         AttributeValue::S(owner.kind.as_str().to_string()),
     );
-    values.insert(
-        ":owner_id".to_string(),
-        AttributeValue::S(owner.id.clone()),
-    );
+    values.insert(":owner_id".to_string(), AttributeValue::S(owner.id.clone()));
     values.insert(":updated_at".to_string(), AttributeValue::S(now_string()));
     values.insert(
         ":expires_at".to_string(),
@@ -1776,18 +1820,12 @@ fn running_token_item(
         "item_type".to_string(),
         AttributeValue::S("running_token".to_string()),
     );
-    item.insert(
-        "job_id".to_string(),
-        AttributeValue::S(job_id.to_string()),
-    );
+    item.insert("job_id".to_string(), AttributeValue::S(job_id.to_string()));
     item.insert(
         "owner_kind".to_string(),
         AttributeValue::S(owner.kind.as_str().to_string()),
     );
-    item.insert(
-        "owner_id".to_string(),
-        AttributeValue::S(owner.id.clone()),
-    );
+    item.insert("owner_id".to_string(), AttributeValue::S(owner.id.clone()));
     item.insert(
         "queue_shard".to_string(),
         AttributeValue::S(queue_shard.to_string()),
@@ -1876,8 +1914,7 @@ fn job_record_from_item(item: &HashMap<String, AttributeValue>) -> Result<JobRec
         .map_err(|error| malformed_item(error.to_string()))?;
     let owner_kind = optional_string_attr(item, "owner_kind")?
         .map(|raw| {
-            BacklogOwnerKind::from_str(&raw)
-                .map_err(|error| malformed_item(error.to_string()))
+            BacklogOwnerKind::from_str(&raw).map_err(|error| malformed_item(error.to_string()))
         })
         .transpose()?;
     Ok(JobRecord {
@@ -2011,7 +2048,9 @@ fn transaction_conflict_message(message: &str) -> bool {
 /// `TransactWriteItems` SDK error, if present. DynamoDB orders the reasons to
 /// match the request item ordering, so the index of the first failing reason
 /// identifies which transaction item caused the cancellation.
-fn cancellation_reasons(error: &SdkError<TransactWriteItemsError>) -> Option<&[CancellationReason]> {
+fn cancellation_reasons(
+    error: &SdkError<TransactWriteItemsError>,
+) -> Option<&[CancellationReason]> {
     match error {
         SdkError::ServiceError(service_error) => {
             if let TransactWriteItemsError::TransactionCanceledException(inner) =
@@ -2152,7 +2191,10 @@ fn enqueue_unknown_is_retryable_conflict(error: &SdkError<TransactWriteItemsErro
 /// capacity may exist but a concurrent transaction collided. We distinguish
 /// the two so concurrent enqueue contention does not produce false
 /// `queue_full`/`global_queue_full` rejections.
-fn classify_enqueue_reasons(reasons: &[CancellationReason], has_global_item: bool) -> EnqueueCancellation {
+fn classify_enqueue_reasons(
+    reasons: &[CancellationReason],
+    has_global_item: bool,
+) -> EnqueueCancellation {
     // Transaction items: [job_put(0), dedupe_put(1), owner_update(2), global?(3)]
     // Iterate in order; the first failing item identifies the primary cause.
     for (index, reason) in reasons.iter().enumerate() {
@@ -2434,10 +2476,8 @@ mod tests {
 
     #[test]
     fn queue_shard_is_stable_and_bounded() {
-        let shard_a =
-            queue_shard_for(BacklogOwnerKind::Caller, "alice", "job-1", 16);
-        let shard_b =
-            queue_shard_for(BacklogOwnerKind::Caller, "alice", "job-1", 16);
+        let shard_a = queue_shard_for(BacklogOwnerKind::Caller, "alice", "job-1", 16);
+        let shard_b = queue_shard_for(BacklogOwnerKind::Caller, "alice", "job-1", 16);
         assert_eq!(shard_a, shard_b, "shard must be deterministic");
 
         let value: u32 = shard_a.parse().unwrap();
@@ -2455,10 +2495,8 @@ mod tests {
 
     #[test]
     fn queue_sort_key_orders_chronologically() {
-        let earlier =
-            queue_sort_key_for(100, "100", "job-a");
-        let later =
-            queue_sort_key_for(2_000, "2000", "job-b");
+        let earlier = queue_sort_key_for(100, "100", "job-a");
+        let later = queue_sort_key_for(2_000, "2000", "job-b");
         assert!(
             earlier < later,
             "earlier next_eligible_at must sort before later"
@@ -2494,7 +2532,10 @@ mod tests {
             16,
         );
         assert!(wrote);
-        assert!(matches!(item.get("queue_shard"), Some(AttributeValue::S(_))));
+        assert!(matches!(
+            item.get("queue_shard"),
+            Some(AttributeValue::S(_))
+        ));
         assert!(matches!(
             item.get("queue_sort_key"),
             Some(AttributeValue::S(_))
@@ -2652,10 +2693,8 @@ mod tests {
 
     #[test]
     fn global_counter_shard_is_deterministic() {
-        let shard_a =
-            global_counter_shard_for(BacklogOwnerKind::Caller, "alice", "job-1", 10, 16);
-        let shard_b =
-            global_counter_shard_for(BacklogOwnerKind::Caller, "alice", "job-1", 10, 16);
+        let shard_a = global_counter_shard_for(BacklogOwnerKind::Caller, "alice", "job-1", 10, 16);
+        let shard_b = global_counter_shard_for(BacklogOwnerKind::Caller, "alice", "job-1", 10, 16);
         assert_eq!(shard_a, shard_b, "must be deterministic for same inputs");
     }
 
@@ -2663,15 +2702,14 @@ mod tests {
     fn global_counter_shard_bounded_by_effective_count() {
         // When cap < shard_count, effective = cap, so shards are in [0, cap).
         for cap in [1u32, 3, 5] {
-            for shards in [16u32] {
-                let shard =
-                    global_counter_shard_for(BacklogOwnerKind::Caller, "alice", "job-1", cap, shards);
-                let value: u32 = shard.parse().unwrap();
-                assert!(
-                    value < cap,
-                    "shard {shard} must be < effective={cap} (cap={cap}, shards={shards})"
-                );
-            }
+            let shards = 16u32;
+            let shard =
+                global_counter_shard_for(BacklogOwnerKind::Caller, "alice", "job-1", cap, shards);
+            let value: u32 = shard.parse().unwrap();
+            assert!(
+                value < cap,
+                "shard {shard} must be < effective={cap} (cap={cap}, shards={shards})"
+            );
         }
         // When cap >= shard_count, effective = shard_count.
         let shard = global_counter_shard_for(BacklogOwnerKind::Caller, "alice", "job-1", 100, 16);
@@ -2717,7 +2755,11 @@ mod tests {
             let dispatch = global_queue_dispatch_update("tbl", &shard).unwrap();
 
             let enqueue_pk = enqueue.key().get("pk").and_then(|v| v.as_s().ok()).unwrap();
-            let dispatch_pk = dispatch.key().get("pk").and_then(|v| v.as_s().ok()).unwrap();
+            let dispatch_pk = dispatch
+                .key()
+                .get("pk")
+                .and_then(|v| v.as_s().ok())
+                .unwrap();
 
             assert_eq!(
                 enqueue_pk, dispatch_pk,
