@@ -1072,6 +1072,13 @@ fn jobs_error(context: &'static str) -> impl FnOnce(JobsError) -> McpHandlerErro
         JobsError::Conflict => McpHandlerError::Internal(format!("{context}: {error}")),
         JobsError::ConcurrentLimit => McpHandlerError::Internal(format!("{context}: {error}")),
         JobsError::RateLimited => McpHandlerError::Internal(format!("{context}: {error}")),
+        // Queue-full rejections are not produced by the current admission path
+        // (it still uses the legacy active-job cap). They are mapped to Internal
+        // here so the match stays exhaustive; a downstream task will surface a
+        // dedicated `queue_full` MCP error when it switches admission to enqueue.
+        JobsError::QueueFull | JobsError::GlobalQueueFull => {
+            McpHandlerError::Internal(format!("{context}: {error}"))
+        }
         JobsError::Db(error) => McpHandlerError::Internal(format!("{context}: {error}")),
     }
 }
