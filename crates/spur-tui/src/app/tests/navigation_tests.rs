@@ -289,15 +289,39 @@ mod plan_browser_navigation_tests {
         app.process_action(Action::RetryPlanTask {
             plan_id: Some("plan-42".into()),
             issue_id: "task-7".into(),
+            append_prompt: Some("include more context".into()),
         });
 
         match rx.try_recv() {
-            Ok(UserInput::RetryPlanTask { plan_id, issue_id }) => {
+            Ok(UserInput::RetryPlanTask {
+                plan_id,
+                issue_id,
+                append_prompt,
+            }) => {
                 assert_eq!(plan_id.as_deref(), Some("plan-42"));
                 assert_eq!(issue_id, "task-7");
+                assert_eq!(append_prompt.as_deref(), Some("include more context"));
             }
             Ok(_) => panic!("expected RetryPlanTask, got different user input"),
             Err(err) => panic!("expected RetryPlanTask user input, got {err}"),
+        }
+    }
+
+    #[test]
+    fn cancel_delegation_action_sends_user_input() {
+        let (tx, mut rx) = mpsc::channel(8);
+        let mut app = App::new(Some(tx), false);
+
+        app.process_action(Action::CancelDelegation {
+            delegation_id: "del-7".into(),
+        });
+
+        match rx.try_recv() {
+            Ok(UserInput::CancelDelegation { delegation_id }) => {
+                assert_eq!(delegation_id, "del-7");
+            }
+            Ok(_) => panic!("expected CancelDelegation, got different user input"),
+            Err(err) => panic!("expected CancelDelegation user input, got {err}"),
         }
     }
 

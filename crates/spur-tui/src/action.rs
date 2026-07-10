@@ -198,6 +198,11 @@ pub enum Action {
     CancelStream {
         session: SessionId,
     },
+    /// Cancel a running worker delegation by id. This targets a delegated
+    /// plan task, not the active brain session stream.
+    CancelDelegation {
+        delegation_id: String,
+    },
     /// Refresh the tracked issues list from the PM backend.
     RefreshIssues,
     /// Refresh persisted plan summaries from the PM backend.
@@ -232,10 +237,12 @@ pub enum Action {
     ResumePlan {
         plan_id: String,
     },
-    /// Retry one persisted plan task by beads issue id.
+    /// Retry one persisted plan task by beads issue id, optionally appending
+    /// additional prompt text to the retry.
     RetryPlanTask {
         plan_id: Option<String>,
         issue_id: String,
+        append_prompt: Option<String>,
     },
     /// Open a persisted implementation-plan snapshot by plan id.
     InspectPlan {

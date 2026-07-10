@@ -40,6 +40,7 @@ fn action_kind(action: &UserInput) -> &'static str {
         UserInput::SubmitReview { .. } => "SubmitReview",
         UserInput::VendorExec { .. } => "VendorExec",
         UserInput::CancelStream { .. } => "CancelStream",
+        UserInput::CancelDelegation { .. } => "CancelDelegation",
         UserInput::RefreshIssues => "RefreshIssues",
         UserInput::RefreshPlans => "RefreshPlans",
         UserInput::RefreshLoops => "RefreshLoops",
