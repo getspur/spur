@@ -1301,7 +1301,7 @@ async fn apply_retry_task(
     }));
     let exec_idx = executed_ops.len() - 1;
 
-    if let Some(append_prompt) = append_prompt {
+    if let Some(append_prompt) = append_prompt.map(str::trim).filter(|s| !s.is_empty()) {
         let amended_body = format!(
             "{}\n\n--- Additional instructions (operator) ---\n{}",
             issue.body, append_prompt
@@ -1338,13 +1338,18 @@ async fn apply_retry_task(
             attempt,
             error: "brain-directed retry via submit_plan_mutation".to_string(),
             worker_branch: None,
-            amended_prompt_summary: append_prompt.map(|prompt| {
+            amended_prompt_summary: append_prompt.and_then(|prompt| {
+                let trimmed = prompt.trim();
+                if trimmed.is_empty() {
+                    return None;
+                }
                 const MAX_SUMMARY_CHARS: usize = 160;
-                let mut summary: String = prompt.chars().take(MAX_SUMMARY_CHARS).collect();
-                if prompt.chars().count() > MAX_SUMMARY_CHARS {
+                let char_count = trimmed.chars().count();
+                let mut summary: String = trimmed.chars().take(MAX_SUMMARY_CHARS).collect();
+                if char_count > MAX_SUMMARY_CHARS {
                     summary.push_str("...");
                 }
-                summary
+                Some(summary)
             }),
         }),
     )
