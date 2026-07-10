@@ -18,7 +18,8 @@ use spur_context_service::catalog::{
     FrozenSnapshotManifest, SnapshotCleanupOptions,
 };
 use spur_context_service::jobs::{
-    CreateJobOutcome, CreateJobRequest, JobKey, JobRecord, JobStatus, JobStore, JobsError,
+    BacklogOwner, BacklogOwnerKind, CreateJobOutcome, CreateJobRequest, EnqueueOutcome, JobKey,
+    JobRecord, JobStatus, JobStore, JobsError, QueueConfig,
 };
 use spur_context_service::mcp::{
     handle_tool, handle_tool_without_catalog, route_index, route_index_status,
@@ -965,7 +966,7 @@ async fn external_index_rejects_missing_source_url() -> Result<()> {
 }
 
 #[tokio::test]
-async fn external_index_without_serving_catalog_starts_execution() -> Result<()> {
+async fn external_index_without_serving_catalog_enqueues_without_starting() -> Result<()> {
     let jobs = FakeJobStore::default();
     let sfn = StubIndexExecutionStarter::default();
 
@@ -982,88 +983,18 @@ async fn external_index_without_serving_catalog_starts_execution() -> Result<()>
     )
     .await?;
 
+    // Enqueue path: job is queued, no execution started (drainer is a later
+    // task).
     assert_eq!(response["status"], "queued");
     assert_eq!(response["job_id"], "job-1");
-    assert_eq!(response["execution_arn"], "arn:stub:job-1");
+    assert_eq!(response["execution_arn"], Value::Null);
     assert_eq!(response["revision"], "main");
-    assert_eq!(sfn.started_count(), 1);
+    assert_eq!(sfn.started_count(), 0);
     let stored = jobs.lookup_job_sync("job-1").context("created job")?;
     assert_eq!(stored.caller_id, "caller-bootstrap");
-    Ok(())
-}
-
-#[tokio::test]
-async fn external_index_payload_prefetches_github_git_sources() -> Result<()> {
-    let jobs = FakeJobStore::default();
-    let sfn = StubIndexExecutionStarter::default();
-
-    let response = route_index_without_catalog(
-        &json!({
-            "package": PACKAGE,
-            "revision": "main",
-            "source_url": "https://github.com/getspur/spur",
-        }),
-        &jobs,
-        &sfn,
-        "caller-prefetch-github",
-    )
-    .await?;
-
-    assert_eq!(response["status"], "queued");
-    let started = sfn.started_requests();
-    assert_eq!(started.len(), 1);
-    assert_eq!(started[0].input["source_kind"], "git");
-    assert_eq!(started[0].input["prefetch_source"], json!(true));
-    Ok(())
-}
-
-#[tokio::test]
-async fn external_index_payload_prefetches_non_s3_https_tarballs() -> Result<()> {
-    let jobs = FakeJobStore::default();
-    let sfn = StubIndexExecutionStarter::default();
-
-    let response = route_index_without_catalog(
-        &json!({
-            "package": PACKAGE,
-            "revision": "main",
-            "source_url": "https://example.com/x.tar.gz",
-        }),
-        &jobs,
-        &sfn,
-        "caller-prefetch-tarball",
-    )
-    .await?;
-
-    assert_eq!(response["status"], "queued");
-    let started = sfn.started_requests();
-    assert_eq!(started.len(), 1);
-    assert_eq!(started[0].input["source_kind"], "tarball");
-    assert_eq!(started[0].input["prefetch_source"], json!(true));
-    Ok(())
-}
-
-#[tokio::test]
-async fn external_index_payload_skips_prefetch_for_presigned_s3_https_tarballs() -> Result<()> {
-    let jobs = FakeJobStore::default();
-    let sfn = StubIndexExecutionStarter::default();
-
-    let response = route_index_without_catalog(
-        &json!({
-            "package": PACKAGE,
-            "revision": "main",
-            "source_url": "https://s3.amazonaws.com/spur-context-test/source.tar.gz?X-Amz-Expires=3600&X-Amz-Signature=test",
-        }),
-        &jobs,
-        &sfn,
-        "caller-prefetch-s3",
-    )
-    .await?;
-
-    assert_eq!(response["status"], "queued");
-    let started = sfn.started_requests();
-    assert_eq!(started.len(), 1);
-    assert_eq!(started[0].input["source_kind"], "tarball");
-    assert_eq!(started[0].input["prefetch_source"], json!(false));
+    assert_eq!(stored.execution_arn, None);
+    assert_eq!(stored.owner_kind, Some(BacklogOwnerKind::Caller));
+    assert_eq!(stored.owner_id.as_deref(), Some("caller-bootstrap"));
     Ok(())
 }
 
@@ -1261,7 +1192,7 @@ async fn external_index_returns_complete_for_warm_catalog_hit() -> Result<()> {
 }
 
 #[tokio::test]
-async fn external_index_creates_job_starts_execution_and_records_arn() -> Result<()> {
+async fn external_index_enqueues_job_without_starting_execution() -> Result<()> {
     let fixture = McpFixture::new("index-create")?;
     let jobs = FakeJobStore::default();
     let sfn = StubIndexExecutionStarter::default();
@@ -1281,42 +1212,50 @@ async fn external_index_creates_job_starts_execution_and_records_arn() -> Result
     )
     .await?;
 
+    // Enqueue path: job is queued, no execution started (drainer is a later
+    // task).
     assert_eq!(response["status"], "queued");
     assert_eq!(response["job_id"], "job-1");
-    assert_eq!(response["execution_arn"], "arn:stub:job-1");
+    assert_eq!(response["execution_arn"], Value::Null);
     assert_eq!(response["revision"], "main");
-    assert_eq!(sfn.started_count(), 1);
+    assert_eq!(sfn.started_count(), 0);
     let stored = jobs.lookup_job_sync("job-1").context("created job")?;
-    assert_eq!(stored.execution_arn.as_deref(), Some("arn:stub:job-1"));
+    assert_eq!(stored.execution_arn, None);
     assert_eq!(stored.caller_id, "caller-create");
     assert_eq!(stored.source_kind, "git");
-    let started = sfn.started_requests();
-    assert_eq!(
-        started[0].input["limits"],
-        json!({
-            "max_source_bytes": 2147483648_u64,
-            "max_build_seconds": 1800_u64
-        })
-    );
     Ok(())
 }
 
 #[test]
-fn external_index_allows_second_active_job_by_default() -> Result<()> {
-    let _env = EnvVarGuard::remove("SPUR_INDEX_MAX_CONCURRENT_JOBS_PER_CALLER");
-    let fixture = McpFixture::new("index-default-concurrent-cap")?;
+fn external_index_enqueues_second_unique_job_by_default() -> Result<()> {
+    let _env = EnvVarGuard::remove("SPUR_INDEX_MAX_QUEUED_JOBS_PER_OWNER");
+    let fixture = McpFixture::new("index-default-queue-cap")?;
     let jobs = FakeJobStore::default();
     let sfn = StubIndexExecutionStarter::default();
-    jobs.seed_queued_job("arn:busy", |record| {
-        record.caller_id = "caller-concurrent".to_owned();
-        record.revision = "busy".to_owned();
-    });
 
     let runtime = tokio::runtime::Runtime::new().context("create tokio runtime")?;
-    let response = runtime.block_on(route_index(
+
+    // First unique request enqueued.
+    let first = runtime.block_on(route_index(
         &json!({
             "package": PACKAGE,
-            "revision": "new-work",
+            "revision": "first",
+            "source_url": SOURCE_URL,
+            "source_kind": "git",
+        }),
+        &fixture.conn,
+        &fixture.catalog,
+        &jobs,
+        &sfn,
+        "caller-concurrent",
+    ))?;
+    assert_eq!(first["status"], "queued");
+
+    // Second unique request also enqueued — default queue cap (20) > 1.
+    let second = runtime.block_on(route_index(
+        &json!({
+            "package": PACKAGE,
+            "revision": "second",
             "source_url": SOURCE_URL,
             "source_kind": "git",
         }),
@@ -1327,30 +1266,26 @@ fn external_index_allows_second_active_job_by_default() -> Result<()> {
         "caller-concurrent",
     ))?;
 
-    assert_eq!(response["status"], "queued");
-    assert_eq!(response["job_id"], "job-2");
-    assert_eq!(response["execution_arn"], "arn:stub:job-2");
-    assert_eq!(sfn.started_count(), 1);
+    assert_eq!(second["status"], "queued");
+    assert_eq!(sfn.started_count(), 0);
     assert_eq!(jobs.job_count(), 2);
     Ok(())
 }
 
 #[test]
-fn external_index_honors_concurrent_cap_override_of_one() -> Result<()> {
-    let _env = EnvVarGuard::set("SPUR_INDEX_MAX_CONCURRENT_JOBS_PER_CALLER", "1");
-    let fixture = McpFixture::new("index-override-sequential-cap")?;
+fn external_index_rejects_when_owner_queue_cap_is_one() -> Result<()> {
+    let _env = EnvVarGuard::set("SPUR_INDEX_MAX_QUEUED_JOBS_PER_OWNER", "1");
+    let fixture = McpFixture::new("index-queue-cap-one")?;
     let jobs = FakeJobStore::default();
     let sfn = StubIndexExecutionStarter::default();
-    jobs.seed_queued_job("arn:busy", |record| {
-        record.caller_id = "caller-sequential".to_owned();
-        record.revision = "busy".to_owned();
-    });
 
     let runtime = tokio::runtime::Runtime::new().context("create tokio runtime")?;
-    let response = runtime.block_on(route_index(
+
+    // First unique request is enqueued (fills the owner's single queued slot).
+    let first = runtime.block_on(route_index(
         &json!({
             "package": PACKAGE,
-            "revision": "new-work",
+            "revision": "first",
             "source_url": SOURCE_URL,
             "source_kind": "git",
         }),
@@ -1358,34 +1293,63 @@ fn external_index_honors_concurrent_cap_override_of_one() -> Result<()> {
         &fixture.catalog,
         &jobs,
         &sfn,
-        "caller-sequential",
+        "caller-queue-cap",
+    ))?;
+    assert_eq!(first["status"], "queued");
+
+    // Second unique request is rejected — owner queue is full.
+    let second = runtime.block_on(route_index(
+        &json!({
+            "package": PACKAGE,
+            "revision": "second",
+            "source_url": SOURCE_URL,
+            "source_kind": "git",
+        }),
+        &fixture.conn,
+        &fixture.catalog,
+        &jobs,
+        &sfn,
+        "caller-queue-cap",
     ))?;
 
-    assert_eq!(response["status"], "rejected");
-    assert_eq!(response["reason"], "concurrent_job_limit");
-    assert_eq!(response["max_active_jobs_per_caller"], 1);
+    assert_eq!(second["status"], "rejected");
+    assert_eq!(second["reason"], "queue_full");
+    assert_eq!(second["max_queued_jobs_per_owner"], 1);
     assert_eq!(sfn.started_count(), 0);
     Ok(())
 }
 
 #[tokio::test]
-async fn external_index_rejects_when_caller_concurrent_cap_is_full() -> Result<()> {
-    let fixture = McpFixture::new("index-concurrent-cap")?;
+async fn external_index_rejects_when_owner_queue_is_full_at_two() -> Result<()> {
+    let _env = EnvVarGuard::set("SPUR_INDEX_MAX_QUEUED_JOBS_PER_OWNER", "2");
+    let fixture = McpFixture::new("index-queue-cap-two")?;
     let jobs = FakeJobStore::default();
     let sfn = StubIndexExecutionStarter::default();
-    jobs.seed_queued_job("arn:busy-a", |record| {
-        record.caller_id = "caller-full".to_owned();
-        record.revision = "busy-a".to_owned();
-    });
-    jobs.seed_queued_job("arn:busy-b", |record| {
-        record.caller_id = "caller-full".to_owned();
-        record.revision = "busy-b".to_owned();
-    });
 
+    // Enqueue two unique requests to fill the owner queue.
+    for revision in ["first", "second"] {
+        let response = route_index(
+            &json!({
+                "package": PACKAGE,
+                "revision": revision,
+                "source_url": SOURCE_URL,
+                "source_kind": "git",
+            }),
+            &fixture.conn,
+            &fixture.catalog,
+            &jobs,
+            &sfn,
+            "caller-full",
+        )
+        .await?;
+        assert_eq!(response["status"], "queued");
+    }
+
+    // Third unique request overflows the queue cap.
     let response = route_index(
         &json!({
             "package": PACKAGE,
-            "revision": "new-work",
+            "revision": "third",
             "source_url": SOURCE_URL,
             "source_kind": "git",
         }),
@@ -1398,7 +1362,211 @@ async fn external_index_rejects_when_caller_concurrent_cap_is_full() -> Result<(
     .await?;
 
     assert_eq!(response["status"], "rejected");
-    assert_eq!(response["reason"], "concurrent_job_limit");
+    assert_eq!(response["reason"], "queue_full");
+    assert_eq!(response["max_queued_jobs_per_owner"], 2);
+    assert_eq!(sfn.started_count(), 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn external_index_rejects_when_global_queue_is_full() -> Result<()> {
+    let _env = EnvVarGuard::set("SPUR_INDEX_MAX_QUEUED_JOBS_GLOBAL", "1");
+    let fixture = McpFixture::new("index-global-queue-full")?;
+    let jobs = FakeJobStore::default();
+    let sfn = StubIndexExecutionStarter::default();
+
+    // First caller fills the single global queued slot.
+    let first = route_index(
+        &json!({
+            "package": PACKAGE,
+            "revision": "caller-a-rev",
+            "source_url": SOURCE_URL,
+            "source_kind": "git",
+        }),
+        &fixture.conn,
+        &fixture.catalog,
+        &jobs,
+        &sfn,
+        "caller-a",
+    )
+    .await?;
+    assert_eq!(first["status"], "queued");
+
+    // Different caller, different package coordinate — still rejected because
+    // the global queue is full.
+    let second = route_index(
+        &json!({
+            "package": PACKAGE,
+            "revision": "caller-b-rev",
+            "source_url": SOURCE_URL,
+            "source_kind": "git",
+        }),
+        &fixture.conn,
+        &fixture.catalog,
+        &jobs,
+        &sfn,
+        "caller-b",
+    )
+    .await?;
+
+    assert_eq!(second["status"], "rejected");
+    assert_eq!(second["reason"], "global_queue_full");
+    assert_eq!(second["max_queued_jobs_global"], 1);
+    assert_eq!(sfn.started_count(), 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn external_index_force_true_does_not_bypass_queue_caps_or_dedupe() -> Result<()> {
+    let _env = EnvVarGuard::set("SPUR_INDEX_MAX_QUEUED_JOBS_PER_OWNER", "1");
+    let fixture = McpFixture::new("index-force-queue-cap")?;
+    let jobs = FakeJobStore::default();
+    let sfn = StubIndexExecutionStarter::default();
+
+    // First request enqueued (fills the owner's single slot).
+    let first = route_index(
+        &json!({
+            "package": PACKAGE,
+            "revision": "main",
+            "source_url": SOURCE_URL,
+            "source_kind": "git",
+            "force": true,
+        }),
+        &fixture.conn,
+        &fixture.catalog,
+        &jobs,
+        &sfn,
+        "caller-force",
+    )
+    .await?;
+    assert_eq!(first["status"], "queued");
+
+    // Same dedupe key with force=true — dedupe is NOT bypassed, returns the
+    // existing active job.
+    let dedup = route_index(
+        &json!({
+            "package": PACKAGE,
+            "revision": "main",
+            "source_url": SOURCE_URL,
+            "source_kind": "git",
+            "force": true,
+        }),
+        &fixture.conn,
+        &fixture.catalog,
+        &jobs,
+        &sfn,
+        "caller-force",
+    )
+    .await?;
+    assert_eq!(dedup["job_id"], first["job_id"]);
+    assert_eq!(dedup["status"], "queued");
+
+    // Different revision with force=true — queue cap is NOT bypassed.
+    let rejected = route_index(
+        &json!({
+            "package": PACKAGE,
+            "revision": "other",
+            "source_url": SOURCE_URL,
+            "source_kind": "git",
+            "force": true,
+        }),
+        &fixture.conn,
+        &fixture.catalog,
+        &jobs,
+        &sfn,
+        "caller-force",
+    )
+    .await?;
+
+    assert_eq!(rejected["status"], "rejected");
+    assert_eq!(rejected["reason"], "queue_full");
+    assert_eq!(sfn.started_count(), 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn external_index_admission_assigns_stable_backlog_owner() -> Result<()> {
+    let fixture = McpFixture::new("index-owner-stability")?;
+    let jobs = FakeJobStore::default();
+    let sfn = StubIndexExecutionStarter::default();
+
+    let response = route_index(
+        &json!({
+            "package": PACKAGE,
+            "revision": "main",
+            "source_url": SOURCE_URL,
+            "source_kind": "git",
+        }),
+        &fixture.conn,
+        &fixture.catalog,
+        &jobs,
+        &sfn,
+        "caller-owner-stability",
+    )
+    .await?;
+
+    assert_eq!(response["status"], "queued");
+    let stored = jobs
+        .lookup_job_sync(response["job_id"].as_str().context("job_id")?)
+        .context("stored job")?;
+    // The owner is derived from the caller identity, not from the request args.
+    // This makes it stable for later per-user backlog extension: only the
+    // backlog_owner_from_caller function would need to change.
+    assert_eq!(stored.owner_kind, Some(BacklogOwnerKind::Caller));
+    assert_eq!(stored.owner_id.as_deref(), Some("caller-owner-stability"));
+    // Verify the owner has exactly one queued slot consumed.
+    let owner = BacklogOwner::caller("caller-owner-stability");
+    assert_eq!(jobs.owner_queued(&owner), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn external_index_enqueue_dedupe_returns_existing_running_job() -> Result<()> {
+    let fixture = McpFixture::new("index-enqueue-dedup-running")?;
+    let jobs = FakeJobStore::default();
+    let sfn = StubIndexExecutionStarter::default();
+
+    // First request enqueues a queued job.
+    let first = route_index(
+        &json!({
+            "package": PACKAGE,
+            "revision": "main",
+            "source_url": SOURCE_URL,
+            "source_kind": "git",
+        }),
+        &fixture.conn,
+        &fixture.catalog,
+        &jobs,
+        &sfn,
+        "caller-dedup-running",
+    )
+    .await?;
+    assert_eq!(first["status"], "queued");
+
+    // Simulate the drainer dispatching the job (sets status to Dispatching).
+    let job_id = first["job_id"].as_str().context("job_id")?.to_owned();
+    jobs.update_job(&job_id, |record| {
+        record.status = JobStatus::Dispatching;
+    })?;
+
+    // Duplicate request returns the existing dispatching job.
+    let second = route_index(
+        &json!({
+            "package": PACKAGE,
+            "revision": "main",
+            "source_url": SOURCE_URL,
+            "source_kind": "git",
+        }),
+        &fixture.conn,
+        &fixture.catalog,
+        &jobs,
+        &sfn,
+        "caller-dedup-running",
+    )
+    .await?;
+
+    assert_eq!(second["job_id"], first["job_id"]);
+    assert_eq!(second["status"], "dispatching");
     assert_eq!(sfn.started_count(), 0);
     Ok(())
 }
@@ -1444,7 +1612,9 @@ async fn external_index_rejects_when_caller_rate_limit_is_full() -> Result<()> {
 
     assert_eq!(second["status"], "rejected");
     assert_eq!(second["reason"], "rate_limit");
-    assert_eq!(sfn.started_count(), 1);
+    // Rate limit fires before enqueue, so no execution is started and the first
+    // job was only enqueued (not dispatched).
+    assert_eq!(sfn.started_count(), 0);
     Ok(())
 }
 
@@ -1501,7 +1671,8 @@ async fn external_index_status_supports_cold_index_then_retry_eval_flow() -> Res
 
     assert_eq!(queued["status"], "queued");
     assert_eq!(queued["job_id"], "job-1");
-    assert_eq!(sfn.started_count(), 1);
+    // Enqueue path: no execution started yet (drainer is a later task).
+    assert_eq!(sfn.started_count(), 0);
 
     let retry_before_catalog = handle_tool(
         "external_code_search",
@@ -1517,7 +1688,10 @@ async fn external_index_status_supports_cold_index_then_retry_eval_flow() -> Res
     .expect_err("cold revision should not be queryable before catalog is populated");
     assert!(matches!(retry_before_catalog, McpHandlerError::NotFound(_)));
 
+    // Simulate the drainer having dispatched this job (the drainer is a later
+    // task): give the job a stale execution ARN so status repair can kick in.
     jobs.update_job("job-1", |record| {
+        record.execution_arn = Some("arn:stub:job-1".to_owned());
         record.updated_at = "0".to_owned();
     })?;
     let checker = StubExecutionStatusChecker::new(Some(ExecutionOutcome {
@@ -2628,6 +2802,15 @@ struct FakeJobState {
     dedupe: HashMap<JobKey, String>,
     rate_limit_max: Option<u32>,
     rate_counts: HashMap<String, u32>,
+    // ─── Bounded queueing accounting ──────────────────────────────────────
+    owner_counters: HashMap<String, OwnerCounters>,
+    global_queued: u32,
+}
+
+#[derive(Default, Clone, Copy)]
+struct OwnerCounters {
+    queued: u32,
+    running: u32,
 }
 
 #[async_trait]
@@ -2795,6 +2978,96 @@ impl JobStore for FakeJobStore {
         }
         Ok(())
     }
+
+    async fn find_active_dedupe_job(
+        &self,
+        key: &JobKey,
+    ) -> spur_context_service::jobs::Result<Option<JobRecord>> {
+        let state = self.state.lock().expect("fake store lock");
+        Ok(active_dedupe_in_state(&state, key))
+    }
+
+    async fn enqueue_job(
+        &self,
+        request: CreateJobRequest,
+        owner: BacklogOwner,
+        config: &QueueConfig,
+    ) -> spur_context_service::jobs::Result<EnqueueOutcome> {
+        let key = request.key();
+        let mut state = self.state.lock().expect("fake store lock");
+
+        // Idempotent admission: return an existing active job.
+        if let Some(existing) = active_dedupe_in_state(&state, &key) {
+            return Ok(EnqueueOutcome::Existing(existing));
+        }
+
+        if config.max_queued_per_owner == 0 {
+            return Err(JobsError::QueueFull);
+        }
+        let owner_pk = owner.pk();
+        let queued = state
+            .owner_counters
+            .get(&owner_pk)
+            .map(|c| c.queued)
+            .unwrap_or_default();
+        if queued >= config.max_queued_per_owner {
+            return Err(JobsError::QueueFull);
+        }
+        if config.max_queued_global > 0 && state.global_queued >= config.max_queued_global {
+            return Err(JobsError::GlobalQueueFull);
+        }
+
+        let n = self.next_id.fetch_add(1, Ordering::Relaxed) + 1;
+        let job_id = format!("job-{n}");
+        let shard = format!("{:02}", n % u64::from(config.shard_count.max(1)));
+        let sort_key = format!("{:011}#queued#{job_id}", n);
+        let record = JobRecord {
+            job_id: job_id.clone(),
+            status: JobStatus::Queued,
+            source: request.source,
+            package: request.package,
+            revision: request.revision,
+            source_url: request.source_url,
+            source_url_hash: request.source_url_hash,
+            source_kind: request.source_kind,
+            caller_id: request.caller_id,
+            execution_arn: None,
+            attempt: 1,
+            stage: None,
+            snapshot_id: None,
+            row_counts: None,
+            error_code: None,
+            error_detail: None,
+            created_at: "now".to_owned(),
+            updated_at: "now".to_owned(),
+            owner_kind: Some(owner.kind),
+            owner_id: Some(owner.id),
+            queue_shard: Some(shard),
+            queue_sort_key: Some(sort_key),
+            next_eligible_at: Some(n),
+            dispatched_at: None,
+        };
+
+        state
+            .owner_counters
+            .entry(owner_pk)
+            .or_default()
+            .queued += 1;
+        state.global_queued += 1;
+        state.dedupe.insert(key, job_id.clone());
+        state.jobs.insert(job_id, record.clone());
+        Ok(EnqueueOutcome::Enqueued(record))
+    }
+}
+
+fn active_dedupe_in_state(state: &FakeJobState, key: &JobKey) -> Option<JobRecord> {
+    let job_id = state.dedupe.get(key)?;
+    let record = state.jobs.get(job_id)?;
+    if record.status.holds_running_quota() || record.status == JobStatus::Queued {
+        Some(record.clone())
+    } else {
+        None
+    }
 }
 
 impl FakeJobStore {
@@ -2843,6 +3116,16 @@ impl FakeJobStore {
 
     fn job_count(&self) -> usize {
         self.state.lock().expect("fake store lock").jobs.len()
+    }
+
+    fn owner_queued(&self, owner: &BacklogOwner) -> u32 {
+        self.state
+            .lock()
+            .expect("fake store lock")
+            .owner_counters
+            .get(&owner.pk())
+            .map(|c| c.queued)
+            .unwrap_or_default()
     }
 
     fn lookup_job_sync(&self, job_id: &str) -> Option<JobRecord> {
