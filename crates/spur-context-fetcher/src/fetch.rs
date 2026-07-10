@@ -646,6 +646,8 @@ fn validation_error(error: AbuseError) -> FetchError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
+    use tempfile::TempDir;
 
     #[test]
     fn tar_gz_validation_reads_entry_bodies_instead_of_trusting_headers() {
@@ -672,5 +674,261 @@ mod tests {
         encoder.write_all(header.as_bytes()).unwrap();
         encoder.write_all(b"short").unwrap();
         encoder.finish().unwrap();
+    }
+
+    #[derive(Default)]
+    struct RecordingRunner {
+        commands: Vec<CommandSpec>,
+        removals: Vec<PathBuf>,
+        fail_checkout: bool,
+    }
+
+    impl CommandRunner for RecordingRunner {
+        fn run(&mut self, spec: CommandSpec) -> Result<CommandOutput, std::io::Error> {
+            if spec.program == "git" && spec.args.iter().any(|arg| arg == "clone") {
+                let repo_dir = spec
+                    .args
+                    .last()
+                    .map(PathBuf::from)
+                    .expect("clone destination argument");
+                fs::create_dir_all(repo_dir.join("src"))?;
+                fs::write(repo_dir.join("src/lib.rs"), "pub fn fetched() {}\n")?;
+            }
+            let status_success = !(self.fail_checkout
+                && spec.program == "git"
+                && spec.args.iter().any(|arg| arg == "checkout"));
+            if spec.program == "tar" && status_success {
+                let archive_path = spec
+                    .args
+                    .get(1)
+                    .map(PathBuf::from)
+                    .expect("tar output argument");
+                fs::File::create(archive_path)?;
+            }
+            self.commands.push(spec);
+            Ok(CommandOutput {
+                status_success,
+                stderr: if status_success {
+                    String::new()
+                } else {
+                    "checkout failed".to_owned()
+                },
+            })
+        }
+
+        fn remove_dir_all(&mut self, path: &Path) -> Result<(), std::io::Error> {
+            self.removals.push(path.to_path_buf());
+            if path.exists() {
+                fs::remove_dir_all(path)?;
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn git_fetch_uses_hardened_clone_checkout_archive_and_cleanup() {
+        let temp = TempDir::new().unwrap();
+        let repo_dir = temp.path().join("repo");
+        let archive = temp.path().join("source.tar.gz");
+        let mut runner = RecordingRunner::default();
+
+        let metadata = fetch_git_archive(
+            &mut runner,
+            "git+https://github.com/getspur/spur.git",
+            "abc123",
+            &repo_dir,
+            &archive,
+            1024 * 1024,
+        )
+        .unwrap();
+
+        assert_eq!(metadata.bytes, 0);
+        assert_eq!(runner.commands.len(), 3);
+        assert_eq!(runner.commands[2].program, "tar");
+        assert_eq!(runner.removals, vec![repo_dir.clone(), repo_dir]);
+    }
+
+    #[test]
+    fn git_fetch_rejects_option_like_revision_before_commands() {
+        let temp = TempDir::new().unwrap();
+        let repo_dir = temp.path().join("repo");
+        let archive = temp.path().join("source.tar.gz");
+        let mut runner = RecordingRunner::default();
+
+        let error = fetch_git_archive(
+            &mut runner,
+            "git+https://github.com/getspur/spur.git",
+            "--no-checkout",
+            &repo_dir,
+            &archive,
+            1024 * 1024,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("invalid git revision"));
+        assert!(runner.commands.is_empty());
+        assert!(runner.removals.is_empty());
+    }
+
+    #[test]
+    fn git_fetch_cleans_repo_dir_when_checkout_fails() {
+        let temp = TempDir::new().unwrap();
+        let repo_dir = temp.path().join("repo");
+        let archive = temp.path().join("source.tar.gz");
+        let mut runner = RecordingRunner {
+            fail_checkout: true,
+            ..RecordingRunner::default()
+        };
+
+        let error = fetch_git_archive(
+            &mut runner,
+            "git+https://github.com/getspur/spur.git",
+            "abc123",
+            &repo_dir,
+            &archive,
+            1024 * 1024,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("git checkout failed"));
+        assert_eq!(runner.removals, vec![repo_dir.clone(), repo_dir]);
+    }
+
+    #[test]
+    fn zip_normalization_writes_readable_tar_gz_without_zip_container() {
+        let temp = TempDir::new().unwrap();
+        let zip_path = temp.path().join("source.zip");
+        let tar_path = temp.path().join("source.tar.gz");
+
+        {
+            let file = fs::File::create(&zip_path).unwrap();
+            let mut zip = zip::ZipWriter::new(file);
+            zip.add_directory("pkg/", zip::write::SimpleFileOptions::default())
+                .unwrap();
+            zip.start_file("pkg/Cargo.toml", zip::write::SimpleFileOptions::default())
+                .unwrap();
+            zip.write_all(b"[package]\nname = \"pkg\"\n").unwrap();
+            zip.finish().unwrap();
+        }
+
+        let metadata = normalize_zip_to_tar_gz(&zip_path, &tar_path, 1024 * 1024).unwrap();
+
+        assert!(metadata.bytes > 0);
+        assert_eq!(metadata.bytes, fs::metadata(&tar_path).unwrap().len());
+    }
+
+    #[test]
+    fn zip_normalization_rejects_underreported_unpacked_size() {
+        let temp = TempDir::new().unwrap();
+        let zip_path = temp.path().join("source.zip");
+        let tar_path = temp.path().join("source.tar.gz");
+
+        {
+            let file = fs::File::create(&zip_path).unwrap();
+            let mut zip = zip::ZipWriter::new(file);
+            zip.start_file(
+                "pkg/big.txt",
+                zip::write::SimpleFileOptions::default()
+                    .compression_method(zip::CompressionMethod::Deflated),
+            )
+            .unwrap();
+            zip.write_all(b"0123456789abcdef").unwrap();
+            zip.finish().unwrap();
+        }
+        let mut bytes = fs::read(&zip_path).unwrap();
+        patch_zip_uncompressed_sizes(&mut bytes, 1);
+        fs::write(&zip_path, bytes).unwrap();
+
+        let error = normalize_zip_to_tar_gz(&zip_path, &tar_path, 8).unwrap_err();
+
+        assert!(error.to_string().contains("unpacked zip exceeded cap"));
+    }
+
+    fn patch_zip_uncompressed_sizes(bytes: &mut [u8], size: u32) {
+        let size = size.to_le_bytes();
+        let mut index = 0;
+        while index + 28 <= bytes.len() {
+            if bytes[index..].starts_with(&[0x50, 0x4b, 0x03, 0x04]) {
+                bytes[index + 22..index + 26].copy_from_slice(&size);
+            } else if bytes[index..].starts_with(&[0x50, 0x4b, 0x01, 0x02]) {
+                bytes[index + 24..index + 28].copy_from_slice(&size);
+            }
+            index += 1;
+        }
+    }
+
+    #[test]
+    fn is_redirect_covers_all_redirect_statuses_and_rejects_others() {
+        for status in [
+            StatusCode::MOVED_PERMANENTLY,
+            StatusCode::FOUND,
+            StatusCode::SEE_OTHER,
+            StatusCode::TEMPORARY_REDIRECT,
+            StatusCode::PERMANENT_REDIRECT,
+        ] {
+            assert!(is_redirect(status), "{status} should be a redirect");
+        }
+        assert!(!is_redirect(StatusCode::OK));
+        assert!(!is_redirect(StatusCode::NOT_FOUND));
+    }
+
+    #[test]
+    fn redirect_location_extracts_header_or_errors() {
+        let mut headers = HeaderMap::new();
+        headers.insert(LOCATION, "https://example.com/next".parse().unwrap());
+        assert_eq!(
+            redirect_location(&headers).unwrap(),
+            "https://example.com/next"
+        );
+
+        let missing = HeaderMap::new();
+        let error = redirect_location(&missing).unwrap_err();
+        assert!(error.to_string().contains("missing Location header"));
+    }
+
+    #[test]
+    fn git_clone_url_normalizes_git_https_and_rejects_ssh_and_credentials() {
+        assert_eq!(
+            git_clone_url("https://github.com/getspur/spur.git").unwrap(),
+            "https://github.com/getspur/spur.git"
+        );
+        assert_eq!(
+            git_clone_url("git+https://github.com/getspur/spur.git").unwrap(),
+            "https://github.com/getspur/spur.git"
+        );
+
+        let ssh_error = git_clone_url("git+ssh://git@github.com/getspur/spur.git").unwrap_err();
+        assert!(ssh_error.to_string().contains("git+ssh"));
+
+        let creds_error =
+            git_clone_url("https://token:secret@github.com/getspur/spur.git").unwrap_err();
+        assert!(creds_error.to_string().contains("embedded credentials"));
+    }
+
+    #[test]
+    fn archive_kind_from_url_detects_zip_by_path_suffix() {
+        assert_eq!(
+            archive_kind_from_url("https://example.com/pkg.zip"),
+            ArchiveKind::Zip
+        );
+        assert_eq!(
+            archive_kind_from_url("https://example.com/pkg.zip?x=1"),
+            ArchiveKind::Zip
+        );
+        assert_eq!(
+            archive_kind_from_url("https://example.com/pkg.tar.gz"),
+            ArchiveKind::TarGz
+        );
+    }
+
+    #[test]
+    fn validate_relative_archive_path_rejects_absolute_and_traversal() {
+        assert!(validate_relative_archive_path(Path::new("pkg/file.txt")).is_ok());
+
+        let absolute = validate_relative_archive_path(Path::new("/etc/passwd")).unwrap_err();
+        assert!(absolute.to_string().contains("is absolute"));
+
+        let traversal = validate_relative_archive_path(Path::new("../outside.txt")).unwrap_err();
+        assert!(traversal.to_string().contains("escapes the archive root"));
     }
 }
