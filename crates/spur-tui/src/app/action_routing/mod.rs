@@ -75,6 +75,7 @@ impl App {
             | Action::NewSessionRequested
             | Action::RefreshSessions
             | Action::CancelStream { .. }
+            | Action::CancelDelegation { .. }
             | Action::CopySessionId(_)) => self.process_session_lifecycle(action),
 
             action @ (Action::VendorExec { .. }

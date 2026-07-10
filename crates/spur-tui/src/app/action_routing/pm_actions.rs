@@ -84,10 +84,18 @@ impl App {
                 None
             }
 
-            Action::RetryPlanTask { plan_id, issue_id } => {
+            Action::RetryPlanTask {
+                plan_id,
+                issue_id,
+                append_prompt,
+            } => {
                 self.flash_hint_short(format!("Retrying task {issue_id}..."));
                 if let Some(ref tx) = self.user_input_tx {
-                    let _ = tx.try_send(UserInput::RetryPlanTask { plan_id, issue_id });
+                    let _ = tx.try_send(UserInput::RetryPlanTask {
+                        plan_id,
+                        issue_id,
+                        append_prompt,
+                    });
                 }
                 None
             }

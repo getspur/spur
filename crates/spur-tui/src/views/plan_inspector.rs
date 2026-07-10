@@ -563,6 +563,7 @@ impl PlanInspectorView {
             } => Some(Action::RetryPlanTask {
                 plan_id: Some(plan_id),
                 issue_id,
+                append_prompt: None,
             }),
             PlanInspectorConfirm::Review {
                 executor_id,
@@ -3058,7 +3059,8 @@ mod tests {
             action,
             Some(Action::RetryPlanTask {
                 plan_id: Some(plan_id),
-                issue_id
+                issue_id,
+                append_prompt: None,
             }) if plan_id == "plan-1" && issue_id == "bd-epic.1"
         ));
     }
