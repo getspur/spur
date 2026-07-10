@@ -2,7 +2,9 @@ pub mod apply;
 pub mod catalog;
 pub mod gate;
 pub mod materialize;
+pub mod migrate;
 pub mod pool;
+pub mod store;
 pub mod sync;
 
 use anyhow::{bail, Context};
@@ -19,7 +21,7 @@ pub fn validate_skill_names(repo_root: Option<&Path>, skills: &[String]) -> Resu
             skills[0]
         ));
     };
-    let manifest = crate::explore::pool::Manifest::load(repo_root).map_err(|error| {
+    let manifest = crate::explore::pool::Manifest::load_layered(repo_root).map_err(|error| {
         format!(
             "Invalid explore skills: failed to load explore manifest: {error:#}; run `spur explore sync`"
         )
@@ -134,6 +136,7 @@ mod tests {
 
     #[test]
     fn validate_skill_names_matches_delegation_semantics() {
+        let _global_root = crate::explore::store::force_global_root_for_tests(None);
         let root = tempfile::tempdir().unwrap();
         Manifest {
             sources: vec![],

@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use schemars::{schema_for, JsonSchema};
 use serde::{Deserialize, Serialize};
@@ -23,122 +23,35 @@ pub fn schema_object<T: JsonSchema>() -> serde_json::Map<String, Value> {
 }
 
 fn normalize_defs_refs(value: &mut Value) {
-    let definitions = match value {
-        Value::Object(map) => {
-            let definitions = map.remove("definitions").or_else(|| map.remove("$defs"));
-            map.remove("$defs");
-            definitions
+    if let Value::Object(map) = value {
+        if let Some(definitions) = map.remove("definitions") {
+            map.insert("$defs".to_string(), definitions);
         }
-        _ => None,
-    };
-    let Some(Value::Object(definitions)) = definitions else {
-        return;
-    };
+    }
 
-    // opencode's MCP client does not resolve nested `$ref`s in tool input schemas.
-    inline_refs(value, &definitions, &mut HashSet::new());
-    collapse_single_all_of(value);
+    rewrite_definitions_refs(value);
 }
 
-fn inline_refs(
-    value: &mut Value,
-    definitions: &serde_json::Map<String, Value>,
-    resolving: &mut HashSet<String>,
-) {
+fn rewrite_definitions_refs(value: &mut Value) {
     match value {
         Value::Object(map) => {
-            if let Some(Value::String(reference)) = map.remove("$ref") {
-                let resolved = definition_ref_name(&reference)
-                    .map(|name| resolve_ref(name, definitions, resolving))
-                    .unwrap_or_else(permissive_object_schema);
-
-                if let Value::Object(resolved_map) = resolved {
-                    for (key, nested) in resolved_map {
-                        map.entry(key).or_insert(nested);
-                    }
+            if let Some(Value::String(reference)) = map.get_mut("$ref") {
+                if let Some(suffix) = reference.strip_prefix("#/definitions/") {
+                    *reference = format!("#/$defs/{suffix}");
                 }
             }
 
             for nested in map.values_mut() {
-                inline_refs(nested, definitions, resolving);
+                rewrite_definitions_refs(nested);
             }
         }
         Value::Array(values) => {
             for nested in values {
-                inline_refs(nested, definitions, resolving);
+                rewrite_definitions_refs(nested);
             }
         }
         _ => {}
     }
-}
-
-fn resolve_ref(
-    name: &str,
-    definitions: &serde_json::Map<String, Value>,
-    resolving: &mut HashSet<String>,
-) -> Value {
-    if !resolving.insert(name.to_string()) {
-        return permissive_object_schema();
-    }
-
-    let mut resolved = definitions
-        .get(name)
-        .cloned()
-        .unwrap_or_else(permissive_object_schema);
-    inline_refs(&mut resolved, definitions, resolving);
-    resolving.remove(name);
-    resolved
-}
-
-fn definition_ref_name(reference: &str) -> Option<&str> {
-    reference
-        .strip_prefix("#/definitions/")
-        .or_else(|| reference.strip_prefix("#/$defs/"))
-}
-
-fn collapse_single_all_of(value: &mut Value) {
-    match value {
-        Value::Object(map) => {
-            let sole_object = match map.remove("allOf") {
-                Some(Value::Array(mut values)) if values.len() == 1 => {
-                    match values.pop().unwrap() {
-                        Value::Object(sole) => Some(sole),
-                        other => {
-                            map.insert("allOf".to_string(), Value::Array(vec![other]));
-                            None
-                        }
-                    }
-                }
-                Some(other) => {
-                    map.insert("allOf".to_string(), other);
-                    None
-                }
-                None => None,
-            };
-
-            if let Some(sole_object) = sole_object {
-                for (key, nested) in sole_object {
-                    map.entry(key).or_insert(nested);
-                }
-            }
-
-            for nested in map.values_mut() {
-                collapse_single_all_of(nested);
-            }
-        }
-        Value::Array(values) => {
-            for nested in values {
-                collapse_single_all_of(nested);
-            }
-        }
-        _ => {}
-    }
-}
-
-fn permissive_object_schema() -> Value {
-    let mut map = serde_json::Map::new();
-    map.insert("type".to_string(), Value::String("object".to_string()));
-    Value::Object(map)
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
@@ -437,8 +350,15 @@ mod tests {
 
     #[test]
     fn submit_loop_params_schema_is_fully_inlined() {
+        // Regression: opencode's MCP client does not resolve nested `$ref`s in
+        // tool input schemas, so any `$ref` on a required object field (like
+        // `spec`) caused the client to stringify the argument. serde then
+        // rejected it with "invalid type: string, expected struct LoopSpec".
+        // The published schema must inline every `$defs` ref so clients
+        // recognize object fields without `$ref` resolution.
         let schema = schema_value::<SubmitLoopParams>();
         let pretty = serde_json::to_string_pretty(&schema).unwrap();
+
         assert!(
             !pretty.contains("$ref"),
             "tool schema still contains a $ref after normalization:\n{pretty}"
@@ -447,6 +367,7 @@ mod tests {
             schema.get("$defs").is_none() && schema.get("definitions").is_none(),
             "tool schema must drop top-level defs once refs are inlined:\n{pretty}"
         );
+
         let spec = &schema["properties"]["spec"];
         assert_eq!(
             spec["type"], "object",
@@ -468,6 +389,8 @@ mod tests {
                 "`spec.{field}` was not inlined into the schema"
             );
         }
+
+        // Nested struct (LoopGovernors) must also be inlined, proving recursion.
         let governors = &spec["properties"]["governors"];
         assert_eq!(
             governors["type"], "object",
