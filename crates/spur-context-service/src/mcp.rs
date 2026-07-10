@@ -50,9 +50,9 @@ pub struct IndexExecutionRequest {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)]
-struct IndexResourceLimits {
-    max_source_bytes: u64,
-    max_build_seconds: u64,
+pub struct IndexResourceLimits {
+    pub max_source_bytes: u64,
+    pub max_build_seconds: u64,
 }
 
 pub trait IndexExecutionStarter {
@@ -1223,18 +1223,16 @@ fn source_kind_label(source_kind: SourceKind) -> &'static str {
 }
 
 /// Whether the Step Functions worker should prefetch the source before
-/// building. Kept for the drainer task which will construct the payload at
-/// dispatch time.
-#[allow(dead_code)]
-fn should_prefetch_source(source_kind: SourceKind, hostname: &str) -> bool {
+/// building. Used by the drainer to construct the dispatch payload from the
+/// queued `JobRecord`.
+pub fn should_prefetch_source(source_kind: SourceKind, hostname: &str) -> bool {
     match source_kind {
         SourceKind::Git => true,
         SourceKind::Tarball => !is_s3_https_hostname(hostname),
     }
 }
 
-#[allow(dead_code)]
-fn is_s3_https_hostname(hostname: &str) -> bool {
+pub fn is_s3_https_hostname(hostname: &str) -> bool {
     let Some(prefix) = hostname.strip_suffix(".amazonaws.com") else {
         return false;
     };
@@ -1256,8 +1254,7 @@ fn is_s3_https_hostname(hostname: &str) -> bool {
         .is_some_and(|(bucket, region)| !bucket.is_empty() && is_single_label(region))
 }
 
-#[allow(dead_code)]
-fn is_single_label(value: &str) -> bool {
+pub fn is_single_label(value: &str) -> bool {
     !value.is_empty() && !value.contains('.')
 }
 
@@ -1282,10 +1279,9 @@ fn index_validate_options() -> ValidateOptions {
     }
 }
 
-/// Resource limits for the Step Functions index worker payload. Kept for the
-/// drainer task which will construct the payload at dispatch time.
-#[allow(dead_code)]
-fn index_resource_limits(source_kind: SourceKind) -> IndexResourceLimits {
+/// Resource limits for the Step Functions index worker payload. Used by the
+/// drainer to construct the dispatch payload from the queued `JobRecord`.
+pub fn index_resource_limits(source_kind: SourceKind) -> IndexResourceLimits {
     let max_source_bytes = match source_kind {
         SourceKind::Git => env_u64("SPUR_CONTEXT_MAX_GIT_BYTES", DEFAULT_GIT_SIZE_CAP_BYTES),
         SourceKind::Tarball => env_u64(
@@ -1296,6 +1292,92 @@ fn index_resource_limits(source_kind: SourceKind) -> IndexResourceLimits {
     IndexResourceLimits {
         max_source_bytes,
         max_build_seconds: env_u64("SPUR_CONTEXT_MAX_BUILD_SECONDS", DEFAULT_MAX_BUILD_SECONDS),
+    }
+}
+
+/// Build the [`IndexExecutionRequest`] payload for a dispatched job from its
+/// persisted [`JobRecord`].
+///
+/// This reconstructs the exact payload contract the old immediate-start
+/// admission path used to build inline:
+///
+/// ```json
+/// {
+///   "job_id": "<job_id>",
+///   "source": "<source>",
+///   "package": "<package>",
+///   "revision": "<revision>",
+///   "source_url": "<source_url>",
+///   "source_kind": "<git|tarball>",
+///   "prefetch_source": <bool>,
+///   "caller_id": "<caller_id>",
+///   "limits": { "max_source_bytes": <u64>, "max_build_seconds": <u64> }
+/// }
+/// ```
+///
+/// The drainer calls this after the transactional queued→dispatching
+/// transition succeeds, then hands the resulting [`IndexExecutionRequest`] to
+/// the production Step Functions starter. The `name` is the `job_id` so Step
+/// Functions execution names deduplicate dispatch (a retry for the same job
+/// lands on the same execution name).
+///
+/// `prefetch_source` and `limits` are derived from the stored `source_url` /
+/// `source_kind` using the same helpers as the old admission path. The URL was
+/// already validated at enqueue time; if re-parsing the hostname fails
+/// unexpectedly (e.g. env-var-driven allowlist drift), `prefetch_source`
+/// defaults to `true` — a safe, conservative choice that never silently drops
+/// a dispatch.
+pub fn build_index_execution_request(record: &JobRecord) -> IndexExecutionRequest {
+    let source_kind = parse_source_kind(&record.source_kind);
+    let hostname = hostname_from_url(&record.source_url);
+    let prefetch_source = should_prefetch_source(source_kind, &hostname);
+    let limits = index_resource_limits(source_kind);
+    let input = json!({
+        "job_id": record.job_id,
+        "source": record.source,
+        "package": record.package,
+        "revision": record.revision,
+        "source_url": record.source_url,
+        "source_kind": record.source_kind,
+        "prefetch_source": prefetch_source,
+        "caller_id": record.caller_id,
+        "limits": {
+            "max_source_bytes": limits.max_source_bytes,
+            "max_build_seconds": limits.max_build_seconds
+        }
+    });
+    IndexExecutionRequest {
+        name: record.job_id.clone(),
+        input,
+    }
+}
+
+/// Parse a `source_kind` label string ("git" / "tarball") back into the typed
+/// enum. Defaults to [`SourceKind::Git`] for unrecognized labels (git is the
+/// safer default — it always prefetches).
+fn parse_source_kind(label: &str) -> SourceKind {
+    match label.trim() {
+        "tarball" => SourceKind::Tarball,
+        _ => SourceKind::Git,
+    }
+}
+
+/// Extract the lower-cased hostname from a URL string for the prefetch-source
+/// decision. This is a lightweight parse (no DNS, no validation) — the URL was
+/// already validated at enqueue time. Returns an empty string if the hostname
+/// cannot be extracted, in which case `should_prefetch_source` defaults to
+/// `true`.
+fn hostname_from_url(url: &str) -> String {
+    let after_scheme = url.split("://").nth(1).unwrap_or(url);
+    let authority = after_scheme.split('/').next().unwrap_or(after_scheme);
+    let host = authority.split(':').next().unwrap_or(authority);
+    let host = host.strip_prefix('@').unwrap_or(host).trim().to_lowercase();
+    if host.is_empty() {
+        // Fallback: try the whole URL lower-cased so the S3-hostname check has
+        // something to work with.
+        url.trim().to_lowercase()
+    } else {
+        host
     }
 }
 
@@ -1321,7 +1403,7 @@ const DEFAULT_QUEUE_SHARD_COUNT: u32 = 16;
 /// variables. Maps the existing `SPUR_INDEX_MAX_CONCURRENT_JOBS_PER_CALLER` to
 /// `max_running_per_owner` (the legacy active-job cap becomes the running cap)
 /// and adds new queue-specific variables.
-fn index_queue_config() -> QueueConfig {
+pub fn index_queue_config() -> QueueConfig {
     QueueConfig {
         max_queued_per_owner: env_u32(
             "SPUR_INDEX_MAX_QUEUED_JOBS_PER_OWNER",
@@ -1330,10 +1412,7 @@ fn index_queue_config() -> QueueConfig {
         max_queued_global: env_u32("SPUR_INDEX_MAX_QUEUED_JOBS_GLOBAL", 0),
         max_running_per_owner: index_max_concurrent_jobs_per_caller(),
         max_running_global: env_u32("SPUR_INDEX_MAX_RUNNING_JOBS_GLOBAL", 0),
-        shard_count: env_u32(
-            "SPUR_INDEX_QUEUE_SHARD_COUNT",
-            DEFAULT_QUEUE_SHARD_COUNT,
-        ),
+        shard_count: env_u32("SPUR_INDEX_QUEUE_SHARD_COUNT", DEFAULT_QUEUE_SHARD_COUNT),
     }
 }
 
