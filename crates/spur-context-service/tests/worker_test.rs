@@ -23,9 +23,7 @@ use spur_context_service::jobs::{
     CreateJobOutcome, CreateJobRequest, JobKey, JobRecord, JobStatus, JobStore, JobsError,
     QueueConfig,
 };
-use spur_context_service::mcp::{
-    self, IndexExecutionRequest, IndexExecutionStarter, McpHandlerError,
-};
+use spur_context_service::mcp::{IndexExecutionRequest, IndexExecutionStarter, McpHandlerError};
 use spur_context_service::worker::{
     build_graph, fetch_source, fetch_source_with_bronze_services, handle_spot_interruption,
     persist_silver_graph_artifact, prepare_job_with_services, retrieve_bronze_source_by_coordinate,

@@ -39,6 +39,7 @@ const RATE_WINDOW_TTL_SECS: u64 = 10 * 60;
 const OWNER_PK_PREFIX: &str = "OWNER#";
 const OWNER_QUOTA_SUFFIX: &str = "#QUOTA";
 const GLOBAL_QUEUE_PK_PREFIX: &str = "GLOBAL#QUEUE#";
+const GLOBAL_RUNNING_TOKEN_PK_PREFIX: &str = "GLOBAL#RUNNING_TOKEN#";
 const RUNNING_TOKEN_PK_PREFIX: &str = "RUNNING#";
 const RUNNING_TOKEN_TTL_SECS: u64 = 24 * 60 * 60;
 const DEFAULT_QUEUE_SHARD_COUNT: u32 = 16;
@@ -530,19 +531,26 @@ pub trait JobStore: Send + Sync {
 pub struct DynamoDbJobStore {
     client: DynamoDbClient,
     table_name: String,
+    queue_gsi_name: String,
 }
 
 impl DynamoDbJobStore {
     pub fn new(client: DynamoDbClient) -> Self {
         let table_name = env::var("SPUR_INDEX_JOBS_TABLE")
             .unwrap_or_else(|_| DEFAULT_INDEX_JOBS_TABLE.to_string());
-        Self { client, table_name }
+        let queue_gsi_name = configured_queue_gsi_name();
+        Self {
+            client,
+            table_name,
+            queue_gsi_name,
+        }
     }
 
     pub fn with_table_name(client: DynamoDbClient, table_name: impl Into<String>) -> Self {
         Self {
             client,
             table_name: table_name.into(),
+            queue_gsi_name: QUEUE_GSI_NAME.to_string(),
         }
     }
 
@@ -559,15 +567,38 @@ impl DynamoDbJobStore {
     }
 
     async fn get_item(&self, pk: &str) -> Result<Option<HashMap<String, AttributeValue>>> {
+        // Control-plane reads must observe tokens created by the immediately
+        // preceding dispatch transaction; treating a stale miss as an
+        // idempotent release would leak owner/global running capacity.
         let output = self
             .client
             .get_item()
             .table_name(&self.table_name)
             .key("pk", AttributeValue::S(pk.to_string()))
+            .consistent_read(true)
             .send()
             .await
             .map_err(dynamodb_error)?;
         Ok(output.item)
+    }
+
+    async fn find_available_global_running_token(
+        &self,
+        job_id: &str,
+        max_running_global: u32,
+    ) -> Result<Option<(u32, String)>> {
+        if max_running_global == 0 {
+            return Ok(None);
+        }
+        let start = (fnv1a_64(job_id.as_bytes()) % u64::from(max_running_global)) as u32;
+        for offset in 0..max_running_global {
+            let slot = start.wrapping_add(offset) % max_running_global;
+            let pk = global_running_token_pk(slot);
+            if self.get_item(&pk).await?.is_none() {
+                return Ok(Some((slot, pk)));
+            }
+        }
+        Ok(None)
     }
 
     async fn update_job(
@@ -1049,12 +1080,18 @@ impl JobStore for DynamoDbJobStore {
         // they are missing the job was already dispatched.
         let queue_shard = record.queue_shard.clone().ok_or(JobsError::Conflict)?;
 
-        // Global running enforcement is not yet implemented in the DynamoDB path.
-        // When configured, surface it explicitly rather than silently ignoring
-        // the cap — the drainer task will add the GLOBAL#RUNNING_TOKEN#<n> pool.
-        if config.max_running_global > 0 {
-            return Err(JobsError::Conflict);
-        }
+        // Select a candidate from the fixed global token pool. The later
+        // conditional Put inside the dispatch transaction is the hard cap;
+        // this read only avoids attempting slots that are visibly occupied.
+        let global_running_token = if config.max_running_global > 0 {
+            Some(
+                self.find_available_global_running_token(job_id, config.max_running_global)
+                    .await?
+                    .ok_or(JobsError::GlobalRunningFull)?,
+            )
+        } else {
+            None
+        };
 
         let now_millis = now_string();
 
@@ -1090,7 +1127,13 @@ impl JobStore for DynamoDbJobStore {
             owner_quota_dispatch_update(&self.table_name, &owner, config.max_running_per_owner)?;
         // Pass the real queue_shard captured from the job record so the token
         // carries correct metadata for the drainer/reconciler.
-        let token = running_token_item(job_id, &now_millis, &owner, &queue_shard);
+        let token = running_token_item(
+            job_id,
+            &now_millis,
+            &owner,
+            &queue_shard,
+            global_running_token.as_ref().map(|(_, pk)| pk.as_str()),
+        );
         let token_put = Put::builder()
             .table_name(&self.table_name)
             .set_item(Some(token))
@@ -1104,6 +1147,16 @@ impl JobStore for DynamoDbJobStore {
             .transact_items(TransactWriteItem::builder().update(job_update).build())
             .transact_items(TransactWriteItem::builder().update(quota_update).build())
             .transact_items(TransactWriteItem::builder().put(token_put).build());
+
+        if let Some((slot, _)) = global_running_token {
+            let global_token_put = Put::builder()
+                .table_name(&self.table_name)
+                .set_item(Some(global_running_token_item(slot, job_id, &now_millis)))
+                .condition_expression("attribute_not_exists(pk)")
+                .build()
+                .map_err(dynamodb_error)?;
+            tx = tx.transact_items(TransactWriteItem::builder().put(global_token_put).build());
+        }
 
         // Decrement the matching sharded global queued counter so dispatch
         // frees global queue capacity. Omitted when the global cap is disabled.
@@ -1145,28 +1198,40 @@ impl JobStore for DynamoDbJobStore {
             // release; treat as already released.
             return Ok(());
         };
+        let Some(token) = self.get_item(&running_token_pk(&record.job_id)).await? else {
+            return Ok(());
+        };
+        let global_running_token_pk = optional_string_attr(&token, "global_running_token_pk")?;
         let token_delete = running_token_delete(&self.table_name, &record.job_id)?;
         let quota_update = owner_quota_release_update(&self.table_name, &owner)?;
-        let result = self
+        let mut tx = self
             .client
             .transact_write_items()
             .transact_items(TransactWriteItem::builder().delete(token_delete).build())
-            .transact_items(TransactWriteItem::builder().update(quota_update).build())
-            .send()
-            .await;
+            .transact_items(TransactWriteItem::builder().update(quota_update).build());
+        if let Some(global_token_pk) = global_running_token_pk {
+            let global_token_delete =
+                global_running_token_delete(&self.table_name, &global_token_pk, &record.job_id)?;
+            tx = tx.transact_items(
+                TransactWriteItem::builder()
+                    .delete(global_token_delete)
+                    .build(),
+            );
+        }
+        let result = tx.send().await;
         match result {
             Ok(_) => Ok(()),
             Err(error) if is_transaction_conflict(&error) => {
                 // Distinguish why the release transaction was cancelled. Items:
-                // [token_delete(0), quota_update(1)].
+                // [token_delete(0), quota_update(1), global_token_delete?(2)].
                 match classify_release_cancellation(&error) {
                     // The RUNNING#<job_id> token was already deleted → the
                     // release already happened. Idempotent no-op.
                     ReleaseCancellation::TokenGone => Ok(()),
-                    // The quota-update condition failed (counter drifted) but
-                    // the token still exists. Surface the error so the
-                    // reconciler can repair the counter; do not pretend
-                    // success.
+                    // An owner-quota update or global-token delete condition
+                    // failed while the per-job token still exists. Surface the
+                    // error so reconciliation can repair the related item; do
+                    // not pretend the release succeeded.
                     ReleaseCancellation::QuotaConflict => Err(JobsError::Conflict),
                     // TransactionConflict: concurrent write contention on the
                     // token or counter. The token may still exist — must NOT
@@ -1201,7 +1266,7 @@ impl JobStore for DynamoDbJobStore {
             .client
             .query()
             .table_name(&self.table_name)
-            .index_name(QUEUE_GSI_NAME)
+            .index_name(&self.queue_gsi_name)
             .key_condition_expression("queue_shard = :shard AND queue_sort_key <= :ceiling")
             .expression_attribute_values(":shard", AttributeValue::S(shard.to_string()))
             .expression_attribute_values(":ceiling", AttributeValue::S(ceiling))
@@ -1216,6 +1281,10 @@ impl JobStore for DynamoDbJobStore {
             .map(job_record_from_item)
             .collect()
     }
+}
+
+fn configured_queue_gsi_name() -> String {
+    env::var("SPUR_INDEX_QUEUE_GSI_NAME").unwrap_or_else(|_| QUEUE_GSI_NAME.to_string())
 }
 
 impl DynamoDbJobStore {
@@ -1291,6 +1360,10 @@ fn global_queue_pk(shard: &str) -> String {
 /// token created at dispatch time and deleted on the terminal transition.
 fn running_token_pk(job_id: &str) -> String {
     format!("{RUNNING_TOKEN_PK_PREFIX}{job_id}")
+}
+
+fn global_running_token_pk(slot: u32) -> String {
+    format!("{GLOBAL_RUNNING_TOKEN_PK_PREFIX}{slot}")
 }
 
 /// Deterministic FNV-1a 64-bit hash so queue shard assignment is stable across
@@ -1859,6 +1932,7 @@ fn running_token_item(
     updated_at: &str,
     owner: &BacklogOwner,
     queue_shard: &str,
+    global_running_token_pk: Option<&str>,
 ) -> HashMap<String, AttributeValue> {
     let mut item = HashMap::new();
     item.insert(
@@ -1887,7 +1961,38 @@ fn running_token_item(
         "expires_at".to_string(),
         AttributeValue::N((now_unix_secs() + RUNNING_TOKEN_TTL_SECS).to_string()),
     );
+    insert_optional_string(
+        &mut item,
+        "global_running_token_pk",
+        global_running_token_pk,
+    );
     item
+}
+
+fn global_running_token_item(
+    slot: u32,
+    job_id: &str,
+    updated_at: &str,
+) -> HashMap<String, AttributeValue> {
+    HashMap::from([
+        (
+            "pk".to_string(),
+            AttributeValue::S(global_running_token_pk(slot)),
+        ),
+        (
+            "item_type".to_string(),
+            AttributeValue::S("global_running_token".to_string()),
+        ),
+        ("job_id".to_string(), AttributeValue::S(job_id.to_string())),
+        (
+            "created_at".to_string(),
+            AttributeValue::S(updated_at.to_string()),
+        ),
+        (
+            "expires_at".to_string(),
+            AttributeValue::N((now_unix_secs() + RUNNING_TOKEN_TTL_SECS).to_string()),
+        ),
+    ])
 }
 
 /// Delete of the `RUNNING#<job_id>` release token, conditioned on its
@@ -1899,6 +2004,16 @@ fn running_token_delete(table_name: &str, job_id: &str) -> Result<Delete> {
         .table_name(table_name)
         .key("pk", AttributeValue::S(running_token_pk(job_id)))
         .condition_expression("attribute_exists(pk)")
+        .build()
+        .map_err(dynamodb_error)
+}
+
+fn global_running_token_delete(table_name: &str, token_pk: &str, job_id: &str) -> Result<Delete> {
+    Delete::builder()
+        .table_name(table_name)
+        .key("pk", AttributeValue::S(token_pk.to_string()))
+        .condition_expression("job_id = :job_id")
+        .expression_attribute_values(":job_id", AttributeValue::S(job_id.to_string()))
         .build()
         .map_err(dynamodb_error)
 }
@@ -2276,10 +2391,9 @@ enum ReleaseCancellation {
     /// `ConditionalCheckFailed`) — the release is already complete; the caller
     /// treats it as a no-op.
     TokenGone,
-    /// The quota-update condition failed (item 1, code
-    /// `ConditionalCheckFailed`) — the token still exists but the owner
-    /// running counter is inconsistent (e.g. drifted to 0). The caller should
-    /// surface this so the reconciler can repair it.
+    /// An owner-quota update or global-token delete condition failed (item 1+
+    /// with `ConditionalCheckFailed`) while the per-job token still exists.
+    /// The caller should surface this so the reconciler can repair it.
     QuotaConflict,
     /// A `TransactionConflict` at either item — concurrent write contention.
     /// The token may still exist (not gone) and the counter may be consistent;
@@ -2307,8 +2421,7 @@ fn classify_release_reasons(reasons: &[CancellationReason]) -> ReleaseCancellati
             Some(ItemCancellation::ConditionalCheckFailed) => {
                 return match index {
                     0 => ReleaseCancellation::TokenGone,
-                    1 => ReleaseCancellation::QuotaConflict,
-                    _ => ReleaseCancellation::Unknown,
+                    1.. => ReleaseCancellation::QuotaConflict,
                 };
             }
             Some(ItemCancellation::TransactionConflict) => {
@@ -2357,6 +2470,8 @@ pub enum JobsError {
     QueueFull,
     #[error("global backlog queue is full")]
     GlobalQueueFull,
+    #[error("global running token pool is full")]
+    GlobalRunningFull,
 }
 
 #[derive(Debug)]
@@ -2389,6 +2504,20 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn queue_gsi_name_uses_runtime_environment() {
+        let previous = env::var_os("SPUR_INDEX_QUEUE_GSI_NAME");
+        env::set_var("SPUR_INDEX_QUEUE_GSI_NAME", "custom-queue-index");
+
+        let configured = configured_queue_gsi_name();
+
+        match previous {
+            Some(value) => env::set_var("SPUR_INDEX_QUEUE_GSI_NAME", value),
+            None => env::remove_var("SPUR_INDEX_QUEUE_GSI_NAME"),
+        }
+        assert_eq!(configured, "custom-queue-index");
+    }
 
     #[test]
     fn transaction_canceled_conditional_check_is_conflict() {
@@ -2618,7 +2747,7 @@ mod tests {
     #[test]
     fn running_token_item_carries_owner_metadata() {
         let owner = BacklogOwner::caller("alice");
-        let item = running_token_item("job-7", "now", &owner, "03");
+        let item = running_token_item("job-7", "now", &owner, "03", None);
         assert_eq!(
             item.get("pk").and_then(|v| v.as_s().ok()),
             Some(&"RUNNING#job-7".to_string())
@@ -3095,6 +3224,21 @@ mod tests {
     }
 
     #[test]
+    fn release_cancel_at_global_token_delete_is_quota_conflict() {
+        let reasons = vec![
+            CancellationReason::builder().code("None").build(),
+            CancellationReason::builder().code("None").build(),
+            CancellationReason::builder()
+                .code("ConditionalCheckFailed")
+                .build(),
+        ];
+        assert_eq!(
+            classify_release_reasons(&reasons),
+            ReleaseCancellation::QuotaConflict
+        );
+    }
+
+    #[test]
     fn release_cancel_with_no_failure_is_unknown() {
         let reasons = vec![
             CancellationReason::builder().code("None").build(),
@@ -3170,11 +3314,29 @@ mod tests {
     #[test]
     fn running_token_item_with_real_shard() {
         let owner = BacklogOwner::caller("alice");
-        let item = running_token_item("job-9", "now", &owner, "07");
+        let item = running_token_item("job-9", "now", &owner, "07", Some("GLOBAL#RUNNING_TOKEN#1"));
         assert_eq!(
             item.get("queue_shard").and_then(|v| v.as_s().ok()),
             Some(&"07".to_string()),
             "token must carry the real shard from the job record"
+        );
+        assert_eq!(
+            item.get("global_running_token_pk")
+                .and_then(|v| v.as_s().ok()),
+            Some(&"GLOBAL#RUNNING_TOKEN#1".to_string())
+        );
+    }
+
+    #[test]
+    fn global_running_token_item_claims_slot_for_job() {
+        let item = global_running_token_item(1, "job-9", "now");
+        assert_eq!(
+            item.get("pk").and_then(|v| v.as_s().ok()),
+            Some(&"GLOBAL#RUNNING_TOKEN#1".to_string())
+        );
+        assert_eq!(
+            item.get("job_id").and_then(|v| v.as_s().ok()),
+            Some(&"job-9".to_string())
         );
     }
 
