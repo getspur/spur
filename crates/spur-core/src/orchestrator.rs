@@ -63,6 +63,7 @@ pub mod connection;
 mod delegation;
 pub mod input;
 pub mod interactive_loop;
+pub(crate) mod loop_runtime;
 mod plan_ops;
 mod pm_bridge;
 pub mod prompt;

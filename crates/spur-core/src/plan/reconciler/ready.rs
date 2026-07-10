@@ -16,6 +16,9 @@ impl super::Reconciler {
         };
 
         let summaries = if let Some(plan_id) = self.plan_id.as_deref() {
+            if !self.scoped_plan_ids().await?.iter().any(|id| id == plan_id) {
+                return Ok(Vec::new());
+            }
             let mut plan_activation_cache = HashMap::new();
             if matches!(
                 self.plan_allows_dispatch(plan_id, &mut plan_activation_cache)
@@ -36,12 +39,7 @@ impl super::Reconciler {
             self.record_tick_plans_enumerated(1).await;
             summaries
         } else {
-            let mut labels = vec![crate::plan::labels::PLAN_COMPLETE.to_string()];
-            if let Some(dispatch) = self.dispatch.as_ref() {
-                labels.push(crate::plan::labels::plan_owner(
-                    &dispatch.brain_session_id().as_session_id().0,
-                ));
-            }
+            let labels = self.scoped_epic_labels();
             let epics = self
                 .pm
                 .list_issues(IssueFilter {

@@ -1450,7 +1450,7 @@ async fn terminal_loop_epic_appends_one_loop_run_to_loop_issue() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn l3_loop_arms_generation_without_brain() {
+async fn system_l3_runtime_arms_generation_without_brain() {
     let pm = crate::plan::test_util::MockPm::new().arc();
     let loop_id = "loopl3arm";
     let triage_body = "Triage the stored template\nkeep this body byte-exact";
@@ -1481,14 +1481,19 @@ async fn l3_loop_arms_generation_without_brain() {
         Some(123_456),
     )
     .await;
-    let brain_session_id =
-        spur_acp::BrainSessionId::new(spur_acp::SessionId("brain-l3-arm".into()));
+    let brain_session_id = spur_acp::BrainSessionId::new(spur_acp::SessionId(
+        crate::plan::loops::LOOP_RUNTIME_OWNER_ID.into(),
+    ));
     let event_sink = Arc::new(RecordingEventSink::default());
     let (delegation_tx, _delegation_rx) = tokio::sync::mpsc::channel::<crate::DelegationRequest>(4);
     let (dispatch, continuations) =
         test_dispatch_ctx_with_recording(delegation_tx, brain_session_id, Some(event_sink.clone()));
     let mut reconciler = Reconciler::new_with_pm_like(
-        ReconcilerConfig::default(),
+        ReconcilerConfig {
+            loop_sweep_scope: crate::plan::loops::LoopSweepScope::L3Only,
+            plan_scope: PlanScope::SystemL3Only,
+            ..Default::default()
+        },
         pm.clone(),
         Arc::new(Notify::new()),
         Some(dispatch.into_dispatch()),
@@ -1523,6 +1528,7 @@ async fn l3_loop_arms_generation_without_brain() {
         crate::plan::labels::loop_generation_label(1),
         format!("{}l3", crate::plan::labels::AUTONOMY_PREFIX),
         format!("{}123456", crate::plan::labels::LOOP_BUDGET_MICROS_PREFIX),
+        crate::plan::labels::plan_owner(crate::plan::loops::LOOP_RUNTIME_OWNER_ID),
     ] {
         assert!(
             epic.labels.contains(&expected),
@@ -1571,6 +1577,442 @@ async fn l3_loop_arms_generation_without_brain() {
         )),
         "expected LoopGenerationStarted event, got {events:?}"
     );
+}
+
+#[test]
+fn loop_sweep_scopes_select_only_their_autonomy_levels() {
+    use crate::plan::loops::spec::AutonomyLevel;
+    use crate::plan::loops::LoopSweepScope;
+
+    assert!(LoopSweepScope::L3Only.allows(AutonomyLevel::L3));
+    assert!(!LoopSweepScope::L3Only.allows(AutonomyLevel::L1));
+    assert!(!LoopSweepScope::BrainArmedOnly.allows(AutonomyLevel::L3));
+    assert!(LoopSweepScope::BrainArmedOnly.allows(AutonomyLevel::L2));
+}
+
+#[tokio::test]
+async fn system_l3_reconciler_ignores_brain_owned_non_l3_plans() {
+    let pm = crate::plan::test_util::MockPm::new().arc();
+    let brain_session_id =
+        spur_acp::BrainSessionId::new(spur_acp::SessionId("brain-owned-l2".into()));
+    let ready_task_id =
+        seed_mock_ready_task_plan(&pm, "P-BRAIN-READY", "T1", &brain_session_id).await;
+    add_mock_epic_label(
+        &pm,
+        "P-BRAIN-READY",
+        format!("{}l2", crate::plan::labels::AUTONOMY_PREFIX),
+    )
+    .await;
+
+    let terminal_task_id =
+        seed_mock_ready_task_plan(&pm, "P-BRAIN-TERMINAL", "T1", &brain_session_id).await;
+    add_mock_epic_label(
+        &pm,
+        "P-BRAIN-TERMINAL",
+        format!("{}l2", crate::plan::labels::AUTONOMY_PREFIX),
+    )
+    .await;
+    close_mock_task_with_completion_cost(&pm, &terminal_task_id, 0).await;
+
+    let system_id = spur_acp::BrainSessionId::new(spur_acp::SessionId(
+        crate::plan::loops::LOOP_RUNTIME_OWNER_ID.into(),
+    ));
+    let (delegation_tx, _delegation_rx) = tokio::sync::mpsc::channel(1);
+    let reconciler = Reconciler::new_with_pm_like(
+        ReconcilerConfig {
+            loop_sweep_scope: crate::plan::loops::LoopSweepScope::L3Only,
+            plan_scope: PlanScope::SystemL3Only,
+            ..Default::default()
+        },
+        pm.clone(),
+        Arc::new(Notify::new()),
+        Some(test_dispatch_ctx(delegation_tx, system_id).into_dispatch()),
+        None,
+        pro_feature_gate(),
+    );
+
+    let ready = reconciler.observe_ready_summaries().await.unwrap();
+    assert!(
+        ready
+            .iter()
+            .all(|candidate| candidate.summary.id != ready_task_id),
+        "system reconciler discovered a brain-owned ready task"
+    );
+    reconciler.tick_once().await.unwrap();
+
+    let issues = pm.issues().await;
+    let terminal_epic = issues
+        .iter()
+        .find(|issue| {
+            issue.issue_type.as_deref() == Some("epic")
+                && issue
+                    .labels
+                    .contains(&crate::plan::labels::plan_id("P-BRAIN-TERMINAL"))
+        })
+        .expect("terminal brain-owned epic");
+    assert_eq!(terminal_epic.status, "open");
+}
+
+async fn seed_historical_l3_plan(
+    pm: &Arc<crate::plan::test_util::MockPm>,
+    plan_id: &str,
+    owner: &str,
+) -> (String, String) {
+    let owner_id = spur_acp::BrainSessionId::new(spur_acp::SessionId(owner.into()));
+    let task_id = seed_mock_ready_task_plan(pm, plan_id, "T1", &owner_id).await;
+    add_mock_epic_label(
+        pm,
+        plan_id,
+        format!("{}l3", crate::plan::labels::AUTONOMY_PREFIX),
+    )
+    .await;
+    let epic_id = pm
+        .issues()
+        .await
+        .into_iter()
+        .find(|issue| {
+            issue.issue_type.as_deref() == Some("epic")
+                && issue
+                    .labels
+                    .contains(&crate::plan::labels::plan_id(plan_id))
+        })
+        .expect("historical L3 epic")
+        .id;
+    (epic_id, task_id)
+}
+
+#[tokio::test]
+async fn system_l3_runtime_does_not_adopt_live_historical_owner() {
+    let pm = crate::plan::test_util::MockPm::new().arc();
+    let plan_id = "P-L3-LIVE-OWNER";
+    let prior_owner = "historical-live-brain";
+    let (epic_id, _) = seed_historical_l3_plan(&pm, plan_id, prior_owner).await;
+    pm.update_issue(
+        &epic_id,
+        spur_pm::IssueUpdate {
+            add_labels: vec![crate::plan::labels::plan_owner_lease_expires_at(2_000)],
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("add live owner lease");
+
+    let reconciler = system_l3_reconciler(pm.clone(), 1_000);
+    reconciler.tick_once().await.expect("system L3 tick");
+
+    let epic = pm.issue(&epic_id).await;
+    assert!(
+        epic.labels
+            .contains(&crate::plan::labels::plan_owner(prior_owner)),
+        "live historical owner must be preserved"
+    );
+    assert!(
+        !epic.labels.contains(&crate::plan::labels::plan_owner(
+            crate::plan::loops::LOOP_RUNTIME_OWNER_ID
+        )),
+        "system runtime must not steal a live historical owner"
+    );
+}
+
+#[tokio::test]
+async fn system_l3_runtime_graces_then_adopts_stale_historical_owner_and_resumes() {
+    let pm = crate::plan::test_util::MockPm::new().arc();
+    let plan_id = "P-L3-STALE-OWNER";
+    let prior_owner = "historical-stale-brain";
+    let (epic_id, task_issue_id) = seed_historical_l3_plan(&pm, plan_id, prior_owner).await;
+
+    // A pre-upgrade epic has no owner lease. The first current-version leader
+    // must establish a durable grace window instead of stealing immediately.
+    let first = system_l3_reconciler(pm.clone(), 1_000);
+    first.tick_once().await.expect("legacy grace tick");
+    let graced = pm.issue(&epic_id).await;
+    let grace_expiry = graced
+        .labels
+        .iter()
+        .filter_map(|label| crate::plan::labels::parse_plan_owner_lease_expires_at(label))
+        .max()
+        .expect("legacy owner grace lease");
+    assert!(grace_expiry > 1_000);
+    assert!(
+        graced
+            .labels
+            .contains(&crate::plan::labels::plan_owner(prior_owner)),
+        "missing-lease owner must survive its adoption grace"
+    );
+
+    let system_id = spur_acp::BrainSessionId::new(spur_acp::SessionId(
+        crate::plan::loops::LOOP_RUNTIME_OWNER_ID.into(),
+    ));
+    let (delegation_tx, mut delegation_rx) = tokio::sync::mpsc::channel(4);
+    let mut successor = Reconciler::new_with_pm_like(
+        ReconcilerConfig {
+            loop_sweep_scope: crate::plan::loops::LoopSweepScope::L3Only,
+            plan_scope: PlanScope::SystemL3Only,
+            predispatch_preview: PreviewStrategy::AlwaysClean,
+            ..Default::default()
+        },
+        pm.clone(),
+        Arc::new(Notify::new()),
+        Some(test_dispatch_ctx(delegation_tx, system_id).into_dispatch()),
+        None,
+        pro_feature_gate(),
+    );
+    successor.set_clock(Arc::new(FixedClock {
+        now: SystemTime::UNIX_EPOCH + Duration::from_secs((grace_expiry + 1) as u64),
+    }));
+    successor.tick_once().await.expect("stale adoption tick");
+
+    let adopted = pm.issue(&epic_id).await;
+    assert!(
+        adopted.labels.contains(&crate::plan::labels::plan_owner(
+            crate::plan::loops::LOOP_RUNTIME_OWNER_ID
+        )),
+        "stale L3 epic must transfer to the system owner"
+    );
+    assert!(
+        !adopted
+            .labels
+            .contains(&crate::plan::labels::plan_owner(prior_owner)),
+        "stale historical owner label must be fenced"
+    );
+    let audits = crate::plan::projector::collect_sorted_audits_for_issue(
+        &epic_id,
+        pm.comments(&epic_id).await,
+    )
+    .expect("parse adoption audits");
+    assert!(audits.iter().any(|audit| matches!(
+        audit,
+        crate::plan::audit_sentinel::AuditSentinelKind::PlanForceReclaimed {
+            plan_id: audit_plan_id,
+            prior_owner: Some(audit_prior_owner),
+            new_owner,
+            reason: Some(reason),
+            ..
+        } if audit_plan_id == plan_id
+            && audit_prior_owner == prior_owner
+            && new_owner == crate::plan::loops::LOOP_RUNTIME_OWNER_ID
+            && reason.contains("expired")
+    )));
+    let request = tokio::time::timeout(Duration::from_secs(1), delegation_rx.recv())
+        .await
+        .expect("adopted plan did not resume dispatch")
+        .expect("delegation channel closed");
+    assert_eq!(request.issue_id.as_deref(), Some(task_issue_id.as_str()));
+}
+
+fn system_l3_reconciler(pm: Arc<crate::plan::test_util::MockPm>, now: u64) -> Reconciler {
+    let system_id = spur_acp::BrainSessionId::new(spur_acp::SessionId(
+        crate::plan::loops::LOOP_RUNTIME_OWNER_ID.into(),
+    ));
+    let (delegation_tx, _delegation_rx) = tokio::sync::mpsc::channel(4);
+    let mut reconciler = Reconciler::new_with_pm_like(
+        ReconcilerConfig {
+            loop_sweep_scope: crate::plan::loops::LoopSweepScope::L3Only,
+            plan_scope: PlanScope::SystemL3Only,
+            ..Default::default()
+        },
+        pm,
+        Arc::new(Notify::new()),
+        Some(test_dispatch_ctx(delegation_tx, system_id).into_dispatch()),
+        None,
+        pro_feature_gate(),
+    );
+    reconciler.set_clock(Arc::new(FixedClock {
+        now: SystemTime::UNIX_EPOCH + Duration::from_secs(now),
+    }));
+    reconciler
+}
+
+fn l3_recovery_template() -> serde_json::Value {
+    serde_json::json!({
+        "epic_title": "Recovered L3 generation",
+        "tasks": [{
+            "task_id": "T1",
+            "agent": "codex",
+            "task": "Run the recovered generation"
+        }]
+    })
+}
+
+async fn seed_mock_l3_generation_epic(
+    pm: &Arc<crate::plan::test_util::MockPm>,
+    loop_id: &str,
+    generation: u32,
+) -> String {
+    let owner = spur_acp::SessionId(crate::plan::loops::LOOP_RUNTIME_OWNER_ID.into());
+    let plan_id = format!("P-{loop_id}-{generation}");
+    let epic_id = seed_mock_complete_epic_for_owner(pm, &plan_id, &owner).await;
+    for label in [
+        crate::plan::labels::loop_id_label(loop_id),
+        crate::plan::labels::loop_generation_label(generation),
+        format!("{}l3", crate::plan::labels::AUTONOMY_PREFIX),
+    ] {
+        add_mock_epic_label(pm, &plan_id, label).await;
+    }
+    epic_id
+}
+
+async fn generation_epics_for(
+    pm: &Arc<crate::plan::test_util::MockPm>,
+    loop_id: &str,
+    generation: u32,
+) -> Vec<spur_pm::Issue> {
+    pm.issues()
+        .await
+        .into_iter()
+        .filter(|issue| {
+            issue.issue_type.as_deref() == Some("epic")
+                && issue
+                    .labels
+                    .contains(&crate::plan::labels::loop_id_label(loop_id))
+                && issue
+                    .labels
+                    .contains(&crate::plan::labels::loop_generation_label(generation))
+        })
+        .collect()
+}
+
+async fn loop_has_future_next_run(
+    pm: &Arc<crate::plan::test_util::MockPm>,
+    loop_issue_id: &str,
+    now: i64,
+) -> bool {
+    pm.issues()
+        .await
+        .into_iter()
+        .find(|issue| issue.id == loop_issue_id)
+        .is_some_and(|issue| {
+            issue
+                .labels
+                .iter()
+                .filter_map(|label| crate::plan::labels::parse_loop_next_run(label))
+                .any(|next_run| next_run > now)
+        })
+}
+
+async fn loop_has_arming_label(
+    pm: &Arc<crate::plan::test_util::MockPm>,
+    loop_issue_id: &str,
+) -> bool {
+    pm.issues()
+        .await
+        .into_iter()
+        .find(|issue| issue.id == loop_issue_id)
+        .is_some_and(|issue| {
+            issue
+                .labels
+                .iter()
+                .any(|label| crate::plan::labels::parse_loop_arming(label).is_some())
+        })
+}
+
+async fn loop_run_outcomes(
+    pm: &Arc<crate::plan::test_util::MockPm>,
+    loop_issue_id: &str,
+) -> Vec<String> {
+    pm.comments(loop_issue_id)
+        .await
+        .into_iter()
+        .filter_map(|comment| crate::plan::audit_sentinel::parse_comment(&comment.body))
+        .filter_map(Result::ok)
+        .filter_map(|audit| match audit {
+            crate::plan::audit_sentinel::AuditSentinelKind::LoopRun { outcome, .. } => {
+                Some(outcome)
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn l3_claim_with_exact_generation_repairs_without_false_overlap() {
+    let pm = crate::plan::test_util::MockPm::new().arc();
+    let loop_id = "claimed-exact";
+    let loop_issue_id = create_mock_loop_issue(
+        &pm,
+        loop_id,
+        crate::plan::loops::spec::AutonomyLevel::L3,
+        l3_recovery_template(),
+        None,
+    )
+    .await;
+    pm.update_issue(
+        &loop_issue_id,
+        spur_pm::IssueUpdate {
+            add_labels: vec![crate::plan::labels::loop_arming_label(1)],
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    seed_mock_l3_generation_epic(&pm, loop_id, 1).await;
+    let reconciler = system_l3_reconciler(pm.clone(), 10);
+
+    reconciler.tick_once().await.unwrap();
+
+    assert_eq!(generation_epics_for(&pm, loop_id, 1).await.len(), 1);
+    assert!(loop_has_future_next_run(&pm, &loop_issue_id, 10).await);
+    assert!(!loop_has_arming_label(&pm, &loop_issue_id).await);
+    assert!(!loop_run_outcomes(&pm, &loop_issue_id)
+        .await
+        .contains(&"skipped_overlap".to_string()));
+}
+
+#[tokio::test]
+async fn l3_claim_without_generation_creates_exact_generation_once() {
+    let pm = crate::plan::test_util::MockPm::new().arc();
+    let loop_id = "claimed-absent";
+    let loop_issue_id = create_mock_loop_issue(
+        &pm,
+        loop_id,
+        crate::plan::loops::spec::AutonomyLevel::L3,
+        l3_recovery_template(),
+        None,
+    )
+    .await;
+    pm.update_issue(
+        &loop_issue_id,
+        spur_pm::IssueUpdate {
+            add_labels: vec![crate::plan::labels::loop_arming_label(1)],
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let reconciler = system_l3_reconciler(pm.clone(), 10);
+
+    reconciler.tick_once().await.unwrap();
+    reconciler.tick_once().await.unwrap();
+
+    assert_eq!(generation_epics_for(&pm, loop_id, 1).await.len(), 1);
+    assert!(loop_has_future_next_run(&pm, &loop_issue_id, 10).await);
+    assert!(!loop_has_arming_label(&pm, &loop_issue_id).await);
+    assert!(!loop_run_outcomes(&pm, &loop_issue_id)
+        .await
+        .contains(&"skipped_overlap".to_string()));
+}
+
+#[tokio::test]
+async fn l3_without_claim_retains_real_older_generation_overlap() {
+    let pm = crate::plan::test_util::MockPm::new().arc();
+    let loop_id = "older-live";
+    let loop_issue_id = create_mock_loop_issue(
+        &pm,
+        loop_id,
+        crate::plan::loops::spec::AutonomyLevel::L3,
+        l3_recovery_template(),
+        None,
+    )
+    .await;
+    seed_mock_l3_generation_epic(&pm, loop_id, 1).await;
+    let reconciler = system_l3_reconciler(pm.clone(), 10);
+
+    reconciler.tick_once().await.unwrap();
+
+    assert!(generation_epics_for(&pm, loop_id, 2).await.is_empty());
+    assert!(loop_run_outcomes(&pm, &loop_issue_id)
+        .await
+        .contains(&"skipped_overlap".to_string()));
 }
 
 #[tokio::test(start_paused = true)]

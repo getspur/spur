@@ -41,6 +41,7 @@ __pycache__/
 .spur/session_metadata.json
 **/.spur/session_metadata.json
 **/.spur/session_metadata.json.tmp
+.spur/loop-runtime.lock
 **/.spur/analyst*/**
 **/.spur/analyst-overlays/**
 .spur/bot/
