@@ -2,6 +2,7 @@
 
 pub mod abuse;
 pub mod catalog;
+pub mod drainer;
 pub mod jobs;
 pub mod knowledge;
 #[cfg(feature = "lambda")]
