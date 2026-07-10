@@ -6,12 +6,11 @@
 //!
 //! Both `brain_session_id` and `delegation_id` accept EITHER a 36-char UUID
 //! (legacy) OR a 16-char `[0-9a-f]+` short hex form (post-`bd-ttyo`):
-//!   * `delegation_id` shortened by `mint_delegation_id` to fit the
-//!     `br create --label` 50-char cap (60 random bits from the high 64 of a
-//!     v4 UUID).
+//!   * `delegation_id` shortened by `mint_delegation_id` (60 random bits
+//!     from the high 64 of a v4 UUID).
 //!   * `brain_session_id` shortened by `derive_brain_session_id`
-//!     (sha256-truncated from the ACP session_id) for the same cap and to
-//!     make plan ownership labels deterministic across spur restarts.
+//!     (sha256-truncated from the ACP session_id) to make plan ownership
+//!     labels deterministic across spur restarts.
 //!
 //! Both forms are safe against directory-traversal and shell-meta injection.
 //!
@@ -504,10 +503,9 @@ mod tests {
     #[tokio::test]
     async fn fs_store_accepts_short_hex_delegation_id() {
         // Regression: bd-ttyo's `mint_delegation_id` produces 16-char `[0-9a-f]+`
-        // ids to fit the `br create --label` 50-char cap. Before this fix the
-        // outcome store rejected them as "non-uuid delegation_id: wrong length
-        // (16)", forcing fallback to legacy artifact storage and breaking the
-        // worker-output invariant downstream.
+        // ids. Before this fix the outcome store rejected them as "non-uuid
+        // delegation_id: wrong length (16)", forcing fallback to legacy
+        // artifact storage and breaking the worker-output invariant downstream.
         let td = TempDir::new().unwrap();
         let store = FsOutcomeStore::new(td.path().to_path_buf());
         let k = key(

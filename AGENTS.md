@@ -224,8 +224,6 @@ SPUR emits audit breadcrumbs as sentinel comments on beads issues. This replaces
 | `spur:signal-processed:<compact-uuid>` | Signal consumed marker | brain mutation executor (label-add path) |
 | `ready-for-review` | Explicit review-ready | reconciler on completion (**not yet wired — see spec §Known Correctness Gaps**) |
 
-All labels must use br-legal characters: `[A-Za-z0-9_:-]+`. `br create --label`
-enforces a 50-character cap; `br label add` does not. Constructors used at
-create time (`mutation_id_label`) use the compact (hyphen-free) UUID suffix
-to stay under the cap. See `crates/spur-mcp/src/plan/labels.rs` for the
-authoritative list.
+All labels must use br-legal characters: `[A-Za-z0-9_:-]+`. `beads_rust` no
+longer enforces a label length cap (the previous 50-char limit was removed).
+See `crates/spur-mcp/src/plan/labels.rs` for the authoritative list.
