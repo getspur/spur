@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
 import json
 import os
 import re
@@ -32,7 +33,7 @@ import time
 import uuid
 import zlib
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -156,9 +157,43 @@ class CodexRolloutActivity:
     evidence_errors: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True, eq=False)
+class CodexRolloutEvidence:
+    path: Path
+    device: int = field(repr=False)
+    inode: int = field(repr=False)
+    content_sha256: bytes = field(repr=False)
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, CodexRolloutEvidence):
+            return (
+                self.path,
+                self.device,
+                self.inode,
+                self.content_sha256,
+            ) == (
+                other.path,
+                other.device,
+                other.inode,
+                other.content_sha256,
+            )
+        if isinstance(other, Path):
+            return self.path == other
+        return NotImplemented
+
+    def __hash__(self) -> int:
+        return hash(self.path)
+
+    def __fspath__(self) -> str:
+        return os.fspath(self.path)
+
+    def __str__(self) -> str:
+        return str(self.path)
+
+
 @dataclass(frozen=True)
 class CodexRolloutAudit:
-    paths: tuple[Path, ...]
+    paths: tuple[CodexRolloutEvidence, ...]
     directory_count: int
     failures: tuple[str, ...]
 
@@ -466,26 +501,75 @@ def open_private_text(path: Path) -> Any:
     return os.fdopen(open_private_descriptor(path), "w", encoding="utf-8")
 
 
-def read_text_no_follow(path: Path) -> str:
+def _rollout_path(source: Path | CodexRolloutEvidence) -> Path:
+    return source.path if isinstance(source, CodexRolloutEvidence) else source
+
+
+def _read_descriptor_bytes(descriptor: int) -> bytes:
+    chunks = []
+    while chunk := os.read(descriptor, 1024 * 1024):
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def _validate_audited_rollout_state(
+    state: os.stat_result,
+    evidence: CodexRolloutEvidence,
+) -> None:
+    path = evidence.path
+    if not stat.S_ISREG(state.st_mode):
+        raise OSError(f"audited rollout is not a regular file: {path}")
+    if state.st_nlink != 1:
+        raise OSError(
+            f"audited rollout link count is {state.st_nlink}, expected 1: {path}"
+        )
+    if state.st_mode & 0o777 != 0o600:
+        raise OSError(f"audited rollout mode changed from 0600: {path}")
+    if (state.st_dev, state.st_ino) != (evidence.device, evidence.inode):
+        raise OSError(f"audited rollout identity changed: {path}")
+
+
+def read_text_no_follow(path: Path | CodexRolloutEvidence) -> str:
     require_posix_private_filesystem()
-    parent_descriptor = _open_directory_no_follow(path.parent)
+    evidence = path if isinstance(path, CodexRolloutEvidence) else None
+    actual_path = _rollout_path(path)
+    parent_descriptor = _open_directory_no_follow(actual_path.parent)
     try:
         descriptor = os.open(
-            path.name,
+            actual_path.name,
             os.O_RDONLY | os.O_NOFOLLOW,
             dir_fd=parent_descriptor,
         )
+        try:
+            before = os.fstat(descriptor)
+            if not stat.S_ISREG(before.st_mode):
+                raise OSError(
+                    f"private evidence path is not a regular file: {actual_path}"
+                )
+            if evidence is not None:
+                _validate_audited_rollout_state(before, evidence)
+                entry_before = os.stat(
+                    actual_path.name,
+                    dir_fd=parent_descriptor,
+                    follow_symlinks=False,
+                )
+                _validate_audited_rollout_state(entry_before, evidence)
+            raw = _read_descriptor_bytes(descriptor)
+            if evidence is not None:
+                _validate_audited_rollout_state(os.fstat(descriptor), evidence)
+                entry_after = os.stat(
+                    actual_path.name,
+                    dir_fd=parent_descriptor,
+                    follow_symlinks=False,
+                )
+                _validate_audited_rollout_state(entry_after, evidence)
+                if hashlib.sha256(raw).digest() != evidence.content_sha256:
+                    raise OSError(f"audited rollout content changed: {actual_path}")
+            return raw.decode("utf-8", errors="replace")
+        finally:
+            os.close(descriptor)
     finally:
         os.close(parent_descriptor)
-    try:
-        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
-            raise OSError(f"private evidence path is not a regular file: {path}")
-        with os.fdopen(descriptor, "r", encoding="utf-8", errors="replace") as stream:
-            descriptor = -1
-            return stream.read()
-    finally:
-        if descriptor >= 0:
-            os.close(descriptor)
 
 
 def protect_artifact_tree(root: Path) -> None:
@@ -852,6 +936,73 @@ def _rollout_directory_chain(session_root: Path, parent: Path) -> tuple[Path, ..
         current = current.parent
 
 
+def _capture_codex_rollout_evidence(path: Path) -> CodexRolloutEvidence:
+    parent_descriptor = _open_directory_no_follow(path.parent)
+    try:
+        descriptor = os.open(
+            path.name,
+            os.O_RDONLY | os.O_NOFOLLOW,
+            dir_fd=parent_descriptor,
+        )
+        try:
+            before = os.fstat(descriptor)
+            if not stat.S_ISREG(before.st_mode):
+                raise OSError(f"rollout path is not a regular file: {path}")
+            if before.st_nlink != 1:
+                raise OSError(
+                    f"rollout file link count is {before.st_nlink}, expected 1: {path}"
+                )
+            entry_before = os.stat(
+                path.name,
+                dir_fd=parent_descriptor,
+                follow_symlinks=False,
+            )
+            if not stat.S_ISREG(entry_before.st_mode):
+                raise OSError(f"rollout path is not a regular file: {path}")
+            if entry_before.st_nlink != 1:
+                raise OSError(
+                    "rollout file link count is "
+                    f"{entry_before.st_nlink}, expected 1: {path}"
+                )
+            identity = (before.st_dev, before.st_ino)
+            if (entry_before.st_dev, entry_before.st_ino) != identity:
+                raise OSError(f"rollout identity changed during audit: {path}")
+            if before.st_mode & 0o777 != 0o600:
+                os.fchmod(descriptor, 0o600)
+
+            pending = CodexRolloutEvidence(
+                path=path,
+                device=identity[0],
+                inode=identity[1],
+                content_sha256=b"",
+            )
+            _validate_audited_rollout_state(os.fstat(descriptor), pending)
+            entry_private = os.stat(
+                path.name,
+                dir_fd=parent_descriptor,
+                follow_symlinks=False,
+            )
+            _validate_audited_rollout_state(entry_private, pending)
+            raw = _read_descriptor_bytes(descriptor)
+            _validate_audited_rollout_state(os.fstat(descriptor), pending)
+            entry_after = os.stat(
+                path.name,
+                dir_fd=parent_descriptor,
+                follow_symlinks=False,
+            )
+            _validate_audited_rollout_state(entry_after, pending)
+            return CodexRolloutEvidence(
+                path=path,
+                device=identity[0],
+                inode=identity[1],
+                content_sha256=hashlib.sha256(raw).digest(),
+            )
+        finally:
+            os.close(descriptor)
+    finally:
+        os.close(parent_descriptor)
+
+
 def audit_codex_rollouts(
     session_root: Path,
     rollout_paths: set[Path] | list[Path] | tuple[Path, ...],
@@ -904,6 +1055,11 @@ def audit_codex_rollouts(
         if not stat.S_ISREG(state.st_mode):
             failures.append(f"rollout path is not a regular file: {path}")
             continue
+        if state.st_nlink != 1:
+            failures.append(
+                f"rollout file link count is {state.st_nlink}, expected 1: {path}"
+            )
+            continue
         try:
             for directory in _rollout_directory_chain(canonical_root, path.parent):
                 directory_state = os.lstat(directory)
@@ -917,11 +1073,11 @@ def audit_codex_rollouts(
                     )
                 _harden_directory(directory)
                 directories.add(directory)
-            _harden_regular_file(path)
+            evidence = _capture_codex_rollout_evidence(path)
         except OSError as exc:
             failures.append(str(exc))
             continue
-        safe_paths.append(path)
+        safe_paths.append(evidence)
 
     if failures:
         safe_paths = []
@@ -933,7 +1089,11 @@ def audit_codex_rollouts(
 
 
 def load_codex_rollout_activity(
-    rollout_paths: list[Path] | set[Path] | tuple[Path, ...],
+    rollout_paths: (
+        list[Path | CodexRolloutEvidence]
+        | set[Path | CodexRolloutEvidence]
+        | tuple[Path | CodexRolloutEvidence, ...]
+    ),
     workspace: Path,
 ) -> CodexRolloutActivity:
     workspace = workspace.resolve()
@@ -942,10 +1102,11 @@ def load_codex_rollout_activity(
     response_item_types = []
     evidence_errors = []
     matched_sessions = 0
-    for path in sorted(rollout_paths):
+    for source in sorted(rollout_paths, key=_rollout_path):
+        path = _rollout_path(source)
         records = []
         try:
-            raw_lines = read_text_no_follow(path).splitlines()
+            raw_lines = read_text_no_follow(source).splitlines()
         except OSError as exc:
             evidence_errors.append(f"{path}: read failed: {type(exc).__name__}: {exc}")
             continue
@@ -1007,16 +1168,21 @@ def load_codex_rollout_activity(
 
 
 def load_codex_role_binding(
-    rollout_paths: list[Path] | set[Path] | tuple[Path, ...],
+    rollout_paths: (
+        list[Path | CodexRolloutEvidence]
+        | set[Path | CodexRolloutEvidence]
+        | tuple[Path | CodexRolloutEvidence, ...]
+    ),
     workspace: Path,
 ) -> CodexRoleBinding:
     workspace = workspace.resolve()
     rollouts = []
     sessions_by_id: dict[str, dict[str, Any]] = {}
-    for path in sorted(rollout_paths):
+    for source in sorted(rollout_paths, key=_rollout_path):
+        path = _rollout_path(source)
         records = []
         try:
-            raw_lines = read_text_no_follow(path).splitlines()
+            raw_lines = read_text_no_follow(source).splitlines()
         except OSError as exc:
             return CodexRoleBinding(
                 parent_thread_id=None,
@@ -2257,6 +2423,40 @@ def run_codex_profile_probe(args: argparse.Namespace) -> int:
         raise
 
 
+def _cleanup_failed_adapter_process(proc: subprocess.Popen) -> None:
+    try:
+        try:
+            running = proc.poll() is None
+        except Exception:
+            running = True
+        if running:
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            try:
+                proc.wait(timeout=5)
+            except Exception:
+                pass
+        except Exception:
+            pass
+    finally:
+        for stream in (proc.stdin, proc.stdout, proc.stderr):
+            if stream is None:
+                continue
+            try:
+                stream.close()
+            except Exception:
+                pass
+
+
 def run_probe(args: argparse.Namespace) -> int:
     out_path = args.out
     if out_path is None:
@@ -2303,6 +2503,7 @@ def run_probe(args: argparse.Namespace) -> int:
             restricted_artifacts=restricted_profile_probe,
         )
     except BaseException:
+        _cleanup_failed_adapter_process(proc)
         if retained_root is not None:
             _release_private_root(retained_root)
         raise
