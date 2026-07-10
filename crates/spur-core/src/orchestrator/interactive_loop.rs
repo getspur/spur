@@ -1214,15 +1214,48 @@ impl Orchestrator {
                         }
                     }
 
+                    // ── CancelDelegation ─────────────────────────────────
+                    InteractiveInput::CancelDelegation { delegation_id } => {
+                        let outcome = self
+                            .cancellation_control
+                            .cancel_with_reason(
+                                delegation_id.as_str(),
+                                "TUI user requested cancel".to_string(),
+                            )
+                            .await;
+                        match outcome {
+                            spur_acp::CancelOutcome::Cancelled => {
+                                tracing::info!(
+                                    delegation_id = %delegation_id,
+                                    "Cancellation requested from TUI"
+                                );
+                            }
+                            spur_acp::CancelOutcome::NotFound => {
+                                tracing::info!(
+                                    delegation_id = %delegation_id,
+                                    "TUI cancellation requested for unknown or completed delegation"
+                                );
+                            }
+                        }
+                    }
+
                     // ── RetryPlanTask ────────────────────────────────────
-                    InteractiveInput::RetryPlanTask { plan_id, issue_id } => {
+                    InteractiveInput::RetryPlanTask {
+                        plan_id,
+                        issue_id,
+                        append_prompt,
+                    } => {
                         let server = brain
                             .as_ref()
                             .and_then(|b| b.mcp_server.as_ref())
                             .map(Arc::clone);
                         if let Some(server) = server {
                             if let Err(error) = server
-                                .call_retry_plan_task(plan_id.as_deref(), &issue_id)
+                                .call_retry_plan_task(
+                                    plan_id.as_deref(),
+                                    &issue_id,
+                                    append_prompt.as_deref(),
+                                )
                                 .await
                             {
                                 self.funnel.emit(SpurEventBody::PlanCommandError {

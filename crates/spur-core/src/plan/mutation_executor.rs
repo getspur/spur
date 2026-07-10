@@ -264,12 +264,16 @@ pub async fn apply_mutation(
                     removed_parent_from: rewire_plan.removed_parent_from,
                 }));
             }
-            PlanMutationOp::RetryTask { issue_id } => {
+            PlanMutationOp::RetryTask {
+                issue_id,
+                append_prompt,
+            } => {
                 affected_task_ids.push(issue_id.clone());
                 apply_retry_task(
                     pm.as_ref(),
                     adv,
                     issue_id,
+                    append_prompt.as_deref(),
                     &batch.mutation_id,
                     &mut executed_ops,
                 )
@@ -545,6 +549,7 @@ struct RetryExecution {
     issue_id: String,
     original_status: String,
     removed_labels: Vec<String>,
+    original_body: Option<String>,
 }
 
 /// bd-2m2u Phase 2c — captured pre-image for `ModifyTaskSpec` rollback.
@@ -813,6 +818,26 @@ impl ReversibleOp for RetryExecution {
                 None,
                 format!("{error:#}"),
             ),
+        }
+        if let Some(original_body) = self.original_body.as_deref() {
+            match pm
+                .update_issue(
+                    &self.issue_id,
+                    IssueUpdate {
+                        body: Some(original_body.to_string()),
+                        ..Default::default()
+                    },
+                )
+                .await
+            {
+                Ok(()) => report.record_success("restore_retry_task_body", &self.issue_id, None),
+                Err(error) => report.record_failure(
+                    "restore_retry_task_body",
+                    &self.issue_id,
+                    None,
+                    format!("{error:#}"),
+                ),
+            }
         }
     }
 }
@@ -1230,6 +1255,7 @@ async fn apply_retry_task(
     pm: &PmService,
     adv: &dyn BeadsAdvanced,
     issue_id: &str,
+    append_prompt: Option<&str>,
     mutation_id: &uuid::Uuid,
     executed_ops: &mut Vec<ExecutedOp>,
 ) -> Result<()> {
@@ -1271,7 +1297,28 @@ async fn apply_retry_task(
         issue_id: issue_id.to_string(),
         original_status,
         removed_labels: removable.clone(),
+        original_body: None,
     }));
+    let exec_idx = executed_ops.len() - 1;
+
+    if let Some(append_prompt) = append_prompt {
+        let amended_body = format!(
+            "{}\n\n--- Additional instructions (operator) ---\n{}",
+            issue.body, append_prompt
+        );
+        pm.update_issue(
+            issue_id,
+            IssueUpdate {
+                body: Some(amended_body),
+                ..Default::default()
+            },
+        )
+        .await
+        .with_context(|| format!("append retry prompt for {issue_id}"))?;
+        if let ExecutedOp::RetryTask(slot) = &mut executed_ops[exec_idx] {
+            slot.original_body = Some(issue.body.clone());
+        }
+    }
 
     pm.update_issue(
         issue_id,
@@ -1291,7 +1338,14 @@ async fn apply_retry_task(
             attempt,
             error: "brain-directed retry via submit_plan_mutation".to_string(),
             worker_branch: None,
-            amended_prompt_summary: None,
+            amended_prompt_summary: append_prompt.map(|prompt| {
+                const MAX_SUMMARY_CHARS: usize = 160;
+                let mut summary: String = prompt.chars().take(MAX_SUMMARY_CHARS).collect();
+                if prompt.chars().count() > MAX_SUMMARY_CHARS {
+                    summary.push_str("...");
+                }
+                summary
+            }),
         }),
     )
     .await
@@ -1792,7 +1846,7 @@ pub async fn submit_plan_mutation(
             PlanMutationOp::SplitTask { parent, .. } => {
                 affected.push(parent.clone());
             }
-            PlanMutationOp::RetryTask { issue_id }
+            PlanMutationOp::RetryTask { issue_id, .. }
             | PlanMutationOp::ModifyTaskSpec { issue_id, .. }
             | PlanMutationOp::AbandonTask { issue_id, .. }
             | PlanMutationOp::AddDependency { issue_id, .. }
@@ -2241,6 +2295,7 @@ mod tests {
             pm.as_ref(),
             adv,
             &issue_id,
+            None,
             &test_uuid("000000000001"),
             &mut executed_ops,
         )
@@ -2283,6 +2338,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn apply_retry_task_appends_operator_prompt_before_reopen() {
+        let (pm, _dir) = test_pm().await;
+        let adv = test_advanced(pm.as_ref());
+        let issue_id = create_task(pm.as_ref(), "Retry with operator prompt").await;
+        pm.update_issue(
+            &issue_id,
+            IssueUpdate {
+                status: Some(pm.closed_status().to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("seed closed issue");
+
+        let mut executed_ops = Vec::new();
+        apply_retry_task(
+            pm.as_ref(),
+            adv,
+            &issue_id,
+            Some("Prefer the narrow parser fix."),
+            &test_uuid("000000000003"),
+            &mut executed_ops,
+        )
+        .await
+        .expect("retry task applies");
+
+        let issue = pm.get_issue(&issue_id).await.expect("load issue");
+        assert_eq!(issue.status, "open");
+        assert!(issue
+            .body
+            .contains("Retry with operator prompt body\n\n--- Additional instructions (operator) ---\nPrefer the narrow parser fix."));
+        match executed_ops.as_slice() {
+            [ExecutedOp::RetryTask(retry)] => {
+                assert_eq!(
+                    retry.original_body.as_deref(),
+                    Some("Retry with operator prompt body")
+                );
+            }
+            other => panic!("expected one RetryTask rollback record, got {other:?}"),
+        }
+
+        let sentinels = audit_sentinels(&adv.list_comments(&issue_id).await.expect("comments"));
+        assert!(sentinels.iter().any(|sentinel| matches!(
+            sentinel,
+            AuditSentinelKind::RetryRequested {
+                amended_prompt_summary: Some(summary),
+                ..
+            } if summary == "Prefer the narrow parser fix."
+        )));
+    }
+
+    #[tokio::test]
     async fn apply_retry_task_rejects_at_max_attempts_before_mutating() {
         let (pm, _dir) = test_pm().await;
         let adv = test_advanced(pm.as_ref());
@@ -2315,6 +2422,7 @@ mod tests {
             pm.as_ref(),
             adv,
             &issue_id,
+            None,
             &test_uuid("000000000002"),
             &mut executed_ops,
         )
