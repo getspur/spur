@@ -51,3 +51,25 @@ where
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::advance_offset;
+
+    #[test]
+    fn advance_offset_keeps_current_when_batch_empty() {
+        assert_eq!(advance_offset(42, &[]), 42);
+    }
+
+    #[test]
+    fn advance_offset_moves_past_highest_update_id() {
+        assert_eq!(advance_offset(0, &[5, 2, 9, 1]), 10);
+    }
+
+    #[test]
+    fn advance_offset_ignores_current_when_batch_present() {
+        // A stale `current` below the batch's ids must not suppress the
+        // advance — the max of the *batch* always wins when non-empty.
+        assert_eq!(advance_offset(100, &[3]), 4);
+    }
+}
