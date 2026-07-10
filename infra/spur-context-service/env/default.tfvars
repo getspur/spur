@@ -46,6 +46,17 @@ api_authorization_type = "NONE"
 # still shares the per-caller rate limit / active-job cap.
 allow_anonymous_mutations = true
 
+# Enable the bounded external-index backlog for the public demo/eval stack.
+# A single queue shard makes the small global cap exact rather than approximate.
+index_max_queued_jobs_per_owner     = 10
+index_max_queued_jobs_global        = 10
+index_max_running_jobs_per_owner    = 2
+index_max_running_jobs_global       = 2
+index_queue_shard_count             = 1
+index_drainer_batch_limit           = 2
+index_drainer_scan_limit_per_shard  = 10
+index_drainer_schedule_rate_minutes = 1
+
 # Preserve current reality (live cluster has protection off). The module default
 # is true; pinning false here keeps a scoped worker-Lambda deploy from silently
 # enabling deletion protection. Flip to true deliberately when desired.
