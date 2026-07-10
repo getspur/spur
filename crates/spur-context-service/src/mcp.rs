@@ -1079,7 +1079,32 @@ async fn update_stale_job(
     jobs: &dyn JobStore,
     checker: Option<&dyn ExecutionStatusChecker>,
 ) -> Result<JobRecord, McpHandlerError> {
-    if !matches!(record.status, JobStatus::Queued | JobStatus::Running) {
+    // ─── Terminal-with-leftover-token repair ────────────────────────────
+    //
+    // A live worker may record terminal status and then fail the running-quota
+    // release with a transient `TransactionConflict`. The release error is
+    // logged best-effort by the worker; this poll is the durable retry path.
+    // When a poll finds a terminal job that still holds a `RUNNING#` token,
+    // release it exactly once. The release is idempotent: if the token is
+    // already gone the call is a no-op, and a `Conflict` surfaces so the next
+    // poll retries rather than silently leaking capacity.
+    if record.status.is_terminal_for_quota() {
+        jobs.release_running_quota(&record)
+            .await
+            .map_err(jobs_error(
+                "external_index_status terminal quota release repair",
+            ))?;
+        return Ok(record);
+    }
+
+    // Include `Dispatching` so a job that was dispatched but whose worker never
+    // reported its first stage (Step Functions failed before the first update)
+    // can still be reconciled here. Without it the job would be stuck
+    // indefinitely holding running capacity.
+    if !matches!(
+        record.status,
+        JobStatus::Queued | JobStatus::Dispatching | JobStatus::Running
+    ) {
         return Ok(record);
     }
     if !is_stale_job(&record) {
@@ -1121,7 +1146,11 @@ async fn update_stale_job(
                 .cloned()
                 .unwrap_or_else(|| json!({}));
 
-            jobs.mark_complete(&record.job_id, snapshot_id, row_counts)
+            // Use the combined method so running quota is released exactly once
+            // after the terminal status is recorded. A stale running/dispatching
+            // job repaired here would otherwise leak owner/global running
+            // capacity.
+            jobs.mark_complete_and_release_running_quota(&record.job_id, snapshot_id, row_counts)
                 .await
                 .map_err(jobs_error("external_index_status update complete failed"))
         }
@@ -1132,7 +1161,7 @@ async fn update_stale_job(
                 .filter(|error| !error.trim().is_empty())
                 .unwrap_or("execution: failed");
             let (code, detail) = split_job_error(error);
-            jobs.mark_failed(&record.job_id, code, detail)
+            jobs.mark_failed_and_release_running_quota(&record.job_id, code, detail)
                 .await
                 .map_err(jobs_error(
                     "external_index_status update failed status failed",
