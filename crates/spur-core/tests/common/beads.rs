@@ -396,9 +396,6 @@ fn validate_create_label(label: &str) -> Result<(), String> {
     if label.is_empty() {
         return Err("Validation failed: label: cannot be empty".to_string());
     }
-    if label.len() > 50 {
-        return Err("Validation failed: label: exceeds 50 characters".to_string());
-    }
     if !label
         .chars()
         .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == ':')

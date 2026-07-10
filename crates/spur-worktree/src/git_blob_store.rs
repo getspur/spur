@@ -71,9 +71,8 @@ impl GitBlobOutcomeStore {
 
     /// Accept either a 36-char UUID (legacy) or a 16-char `[0-9a-f]+` short
     /// id (post-`bd-ttyo`). See `spur-mcp/src/plan/labels.rs::mint_delegation_id`
-    /// — the short form is derived from the high 64 bits of a v4 UUID to fit
-    /// the `br create --label` 50-char cap. Both forms are safe against
-    /// directory-traversal and shell-meta injection.
+    /// — the short form is derived from the high 64 bits of a v4 UUID.
+    /// Both forms are safe against directory-traversal and shell-meta injection.
     fn validate_id(value: &str, field: &str) -> Result<(), StoreError> {
         match value.len() {
             16 => {
