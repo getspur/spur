@@ -96,7 +96,12 @@ pub(crate) struct WorkerAttemptOutcome {
 }
 
 #[cfg(any(test, feature = "test-support"))]
-type WorkerConnectionFactory<'a> = dyn Fn(&spur_acp::config::AgentConfig, Vec<String>, &std::path::Path) -> Box<dyn AgentConnection>
+type WorkerConnectionFactory<'a> = dyn Fn(
+        &spur_acp::config::AgentConfig,
+        Vec<String>,
+        std::collections::BTreeMap<String, String>,
+        &std::path::Path,
+    ) -> Box<dyn AgentConnection>
     + Send
     + Sync
     + 'a;
@@ -789,14 +794,21 @@ pub(crate) async fn run_one_worker_attempt(
         ctx.profile,
         &profile_strategy,
     );
+    let launch_env = std::collections::BTreeMap::new();
     #[cfg(any(test, feature = "test-support"))]
     let mut connection: Box<dyn AgentConnection> =
         if let Some(connection_factory) = ctx.connection_factory {
-            connection_factory(ctx.agent_config, spawn_args, &worktrees.repo_root)
+            connection_factory(
+                ctx.agent_config,
+                spawn_args,
+                launch_env,
+                &worktrees.repo_root,
+            )
         } else {
             connection::build_connection_from_transport(
                 ctx.agent_config,
                 spawn_args,
+                launch_env,
                 None,
                 &worktrees.repo_root,
             )
@@ -805,6 +817,7 @@ pub(crate) async fn run_one_worker_attempt(
     let mut connection: Box<dyn AgentConnection> = connection::build_connection_from_transport(
         ctx.agent_config,
         spawn_args,
+        launch_env,
         None,
         &worktrees.repo_root,
     );
@@ -2190,7 +2203,7 @@ mod model_effort_override_tests {
                 worker_mcp_server: None,
                 pm_service: None,
                 feature_gate: &feature_gate,
-                connection_factory: Some(&move |_cfg, _spawn_args, _repo_root| {
+                connection_factory: Some(&move |_cfg, _spawn_args, _launch_env, _repo_root| {
                     Box::new(WorkerPathRecordingConnection {
                         events: Arc::clone(&events_for_factory),
                     })
@@ -2763,6 +2776,8 @@ mod profile_override_tests {
         );
         let spawn_args = Arc::new(Mutex::new(Vec::<String>::new()));
         let spawn_args_for_factory = Arc::clone(&spawn_args);
+        let launch_env = Arc::new(Mutex::new(std::collections::BTreeMap::new()));
+        let launch_env_for_factory = Arc::clone(&launch_env);
         let calls = Arc::new(Mutex::new(Vec::new()));
         let calls_for_factory = Arc::clone(&calls);
         let session = session_response(vec![]);
@@ -2794,10 +2809,13 @@ mod profile_override_tests {
                 worker_mcp_server: None,
                 pm_service: None,
                 feature_gate: &feature_gate,
-                connection_factory: Some(&move |_cfg, args, _repo_root| {
+                connection_factory: Some(&move |_cfg, args, env, _repo_root| {
                     *spawn_args_for_factory
                         .lock()
                         .expect("spawn args recorder poisoned") = args;
+                    *launch_env_for_factory
+                        .lock()
+                        .expect("launch env recorder poisoned") = env;
                     Box::new(ProfileRecordingConnection {
                         calls: Arc::clone(&calls_for_factory),
                         rejected_config_id: None,
@@ -2821,6 +2839,10 @@ mod profile_override_tests {
                 "code-reviewer".to_string(),
             ]
         );
+        assert!(launch_env
+            .lock()
+            .expect("launch env recorder poisoned")
+            .is_empty());
         assert_eq!(
             *calls.lock().expect("profile recorder poisoned"),
             vec![OverrideCall::Prompt]
@@ -3080,7 +3102,7 @@ mod profile_override_tests {
                 worker_mcp_server: None,
                 pm_service: None,
                 feature_gate: &feature_gate,
-                connection_factory: Some(&move |_cfg, _spawn_args, _repo_root| {
+                connection_factory: Some(&move |_cfg, _spawn_args, _launch_env, _repo_root| {
                     Box::new(ProfileRecordingConnection {
                         calls: Arc::clone(&calls_for_factory),
                         rejected_config_id: None,
@@ -3205,7 +3227,7 @@ mod profile_override_tests {
                 worker_mcp_server: None,
                 pm_service: None,
                 feature_gate: &feature_gate,
-                connection_factory: Some(&move |_cfg, _spawn_args, _repo_root| {
+                connection_factory: Some(&move |_cfg, _spawn_args, _launch_env, _repo_root| {
                     Box::new(SkillMaterializationConnection {
                         checked: Arc::clone(&checked_for_factory),
                         skill_rel_path: ".codex/skills/clean-a/SKILL.md".to_string(),
