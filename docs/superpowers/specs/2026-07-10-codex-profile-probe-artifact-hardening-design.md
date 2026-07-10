@@ -1,10 +1,25 @@
-# Codex Profile Probe Artifact Hardening Design
+# Codex Explicit-Agent Support and Profile Probe Artifact Hardening Design
 
 **Date:** 2026-07-10
-**Status:** Approved recovery design
+**Status:** Approved design; written-spec review pending
 **Recovery base:** `spur/worker/v2/codex/c5a8f46529983e46/06370a6f-5d92-43f9-b7b4-2328c9ceca38`
 
 ## Context
+
+SPUR has three different agent-selection concepts that must not be conflated:
+
+- `agent: "codex"` selects the outer SPUR worker implementation.
+- `profile: "rust-engineer"` selects the persona for the primary Codex session.
+- Codex `spawn_agent(agent_type="rust-engineer")` selects a native child role after
+  the primary session is running.
+
+The approved contract is **deterministic primary plus native child available**. A
+Codex delegation with an explicit profile must inject that profile into the primary
+session at startup and must materialize the same named role in Codex's native role
+format. The first production version does not promise that every delegation creates
+a child: the primary Codex model still decides whether to invoke its native
+`spawn_agent` tool. Forcing a child would require a separate adapter or app-server
+control surface and is outside this recovery.
 
 The Codex `0.144.1` reprobe established the functional result: Codex native
 subagents work through `@agentclientprotocol/codex-acp@1.1.2`. A restricted
@@ -30,6 +45,14 @@ artifact boundaries plus one normalization mismatch found during review.
 
 ## Goals
 
+- Make `profile: "PROFILE_NAME"` deterministic for the primary Codex session by passing
+  the selected profile body through the adapter's startup `CODEX_CONFIG` object.
+- Materialize that same profile as `.codex/agents/PROFILE_NAME.toml` so Codex native
+  children can load it through `spawn_agent(agent_type="PROFILE_NAME")`.
+- Preserve explicit request precedence: request model/effort beats profile defaults,
+  which beat agent defaults.
+- Keep startup configuration scoped to the one worker subprocess, with no
+  process-global environment mutation or cross-attempt leakage.
 - Keep every canary-bearing local artifact and newly created Codex rollout
   inaccessible to group and other users for the entire restricted run.
 - Reject a symlinked output root, nested artifact directory, app-server log
@@ -44,18 +67,51 @@ artifact boundaries plus one normalization mismatch found during review.
 
 ## Non-goals
 
+- Forcing every Codex delegation to create a native child.
+- Adding a private ACP extension that directly invokes Codex `spawn_agent`.
+- Treating `agent`, SPUR `profile`, and native Codex `agent_type` as aliases.
 - Changing Codex's global rollout policy outside the opt-in restricted probe.
 - Rewriting the general ACP probe or removing its filesystem and terminal
   capabilities.
 - Copying, persisting, or logging Codex authentication material into a probe
   artifact directory.
-- Changing profile selection semantics, model/effort precedence, native-role
-  rendering, or the shipped adapter version.
+- Redesigning the already-implemented startup-profile selection mechanism,
+  model/effort precedence, native-role rendering, or the shipped adapter version.
 - Retrofitting permissions on unrelated historical Codex rollout files.
 
-## Approaches considered
+## Explicit-agent approaches considered
 
-### A. Restricted-process umask plus exact rollout hardening (selected)
+### A. Primary startup injection plus native role materialization (selected)
+
+SPUR merges the selected profile body into
+`CODEX_CONFIG.developer_instructions` for the one ACP adapter subprocess and also
+renders `.codex/agents/PROFILE_NAME.toml`. The adapter passes the startup object into
+Codex `threadStart`, making the primary persona deterministic. If the primary later
+calls `spawn_agent(agent_type="PROFILE_NAME")`, Codex's native role loader applies the
+same named role to the child.
+
+This approach uses two documented, independently testable boundaries and requires no
+private protocol extension. It also preserves the distinction between selecting the
+primary persona and selecting a child role.
+
+### B. Native role materialization only
+
+Writing `.codex/agents/PROFILE_NAME.toml` makes a role available to native children, but
+does not select the primary persona. It also leaves child creation to a model tool
+choice. This is useful as one half of the design but cannot satisfy an explicit SPUR
+profile request by itself.
+
+### C. Direct native-child control through an adapter extension
+
+SPUR could add a private ACP or app-server operation that directly creates a named
+child. That would make child creation deterministic, but it would couple SPUR to a
+non-standard control surface and would still need a policy for which session receives
+the original task. This is deferred until a concrete use case requires forced child
+creation.
+
+## Artifact-boundary approaches considered
+
+### D. Restricted-process umask plus exact rollout hardening (selected)
 
 The inner restricted probe sets a private process umask before it launches
 `npx`; the adapter and Codex descendants inherit it. The outer probe then
@@ -67,7 +123,7 @@ This is the smallest approach that addresses both confidentiality and live
 probe reliability. It also gives the verdict explicit evidence about every
 new rollout rather than treating the global session tree as implicitly safe.
 
-### B. Dedicated per-run `CODEX_HOME`
+### E. Dedicated per-run `CODEX_HOME`
 
 This gives the cleanest filesystem isolation, but Codex authentication and
 configuration also live beneath `CODEX_HOME`. Making the live run work would
@@ -75,7 +131,7 @@ require copying credentials, linking to the user's auth state, or inventing a
 new authentication handoff. Each option creates a larger and riskier security
 surface than the artifact problem being fixed. This approach is rejected.
 
-### C. Post-run `chmod` only
+### F. Post-run `chmod` only
 
 This is simple, but canary-bearing rollout files remain group/world-readable
 while the model turn is active. It also cannot substantiate the claim that the
@@ -83,6 +139,41 @@ artifacts were private for the entire run. Post-run repair remains useful as
 defense in depth, but it is insufficient by itself.
 
 ## Design
+
+### 0. Explicit-agent data flow
+
+For a request such as:
+
+```text
+agent=codex
+profile=rust-engineer
+model=gpt-5.6-sol
+effort=high
+```
+
+SPUR performs these operations in order:
+
+1. Resolve `.spur/agents/rust-engineer.md` and retain its body plus optional
+   model/effort defaults.
+2. Render a schema-safe `.codex/agents/rust-engineer.toml` in the worker worktree.
+   SPUR ownership metadata remains a TOML comment, not an unknown schema field.
+3. Merge the profile body into an object-valued inherited `CODEX_CONFIG` under
+   `developer_instructions`. Preserve unrelated keys. A malformed or non-object
+   inherited value fails soft with an explicit skipped reason and a safe adapter
+   subprocess value.
+4. Pass the resulting environment entry through `NativeAcpConnection` and
+   `Command::envs`; never call `std::env::set_var` for the delegation.
+5. Launch `@agentclientprotocol/codex-acp@1.1.2`, which parses `CODEX_CONFIG` and
+   includes it in the Codex `threadStart` configuration.
+6. Create the session, then apply explicit request model/effort values through the
+   advertised ACP configuration options before sending the task prompt.
+7. Record whether primary activation was applied or skipped. An explicit profile must
+   not be reported as applied merely because its native child-role file exists.
+8. If Codex invokes `spawn_agent(agent_type="rust-engineer")`, verify that the bound
+   child session reports `agent_role="rust-engineer"`.
+
+Only native ACP transport supports the startup environment path. Other transports
+remain fail-soft and report the profile as skipped.
 
 ### 1. Fresh, no-follow artifact root
 
@@ -179,6 +270,17 @@ and scanned for both generated canaries.
 Implementation follows two commits for the bugfix: a failing regression commit
 followed by the minimal fix commit.
 
+The proof runs in three phases:
+
+1. **Deterministic local contract:** Rust tests prove profile resolution, JSON merge,
+   per-worker subprocess environment delivery, model/effort precedence, and cross-attempt
+   isolation.
+2. **Restricted live POC:** a positive control proves both the primary token and exact
+   `agent_type` to child `agent_role` binding; an independent negative control proves
+   no profile and no child activity.
+3. **Production gate:** artifact hardening, full crate/workspace tests, clippy, and
+   diff checks must all pass before integration.
+
 Unit regressions cover:
 
 - explicit output root is a symlink;
@@ -205,6 +307,33 @@ The focused live probe must then prove, without printing canary values:
 - clean adapter and app-server warning surfaces;
 - private local artifacts and private exact rollout evidence.
 
+The positive-control prompt may require a child for the purpose of proving native role
+loading. That test instruction does not change the production contract: ordinary SPUR
+delegations make the role available but do not force a child.
+
+## Evidence basis
+
+- Current `main` still maps `CodexAcp` to `SelectStrategy::None`; it materializes a
+  role but does not activate a primary persona.
+- The recovery base maps `CodexAcp` to a per-worker-process
+  `SpawnEnvJson { variable: "CODEX_CONFIG", field: "developer_instructions" }`
+  strategy and contains regressions for JSON preservation, escaping, malformed input,
+  cross-attempt isolation, and native launch-environment delivery.
+- Indexed `openai/codex` tag `rust-v0.144.1` defines optional `agent_type` in both V1
+  and V2 `SpawnAgentArgs`; the V1 handler applies the requested role before spawning
+  and reports the resulting child role.
+- The same tag loads standalone role TOML from each active configuration layer's
+  `agents/` directory.
+- Indexed `@agentclientprotocol/codex-acp@1.1.2` parses `CODEX_CONFIG`, merges it into
+  the session configuration, and passes that configuration to Codex `threadStart`.
+- The prior restricted live POC bound the exact requested `agent_type` to the exact
+  child `agent_role`, proved both canary sources, and passed its negative control. Its
+  functional evidence remains valid; its artifact-privacy claim is superseded by this
+  hardening design.
+- Fresh isolated-worktree verification on 2026-07-10 passed 4 ACP profile-strategy
+  tests, 3 startup-JSON tests, 2 native launch-environment tests, and all 49 Python
+  probe tests through the required local/remote paths.
+
 ## Final integration gate
 
 After the hardening task is approved, a separate regression task runs the
@@ -224,6 +353,16 @@ July 10 addendum, with automated, live, and source-only evidence kept separate.
 
 ## Acceptance criteria
 
+- `profile: "rust-engineer"` is reported applied only when the primary Codex
+  `threadStart` receives the selected body through startup configuration.
+- The same request creates a schema-safe `.codex/agents/rust-engineer.toml` without
+  modifying an existing user-owned profile or `~/.codex/config.toml`.
+- A controlled `spawn_agent(agent_type="rust-engineer")` binds a child whose
+  `session_meta.agent_role` is exactly `rust-engineer`.
+- A no-profile control receives no startup persona, loads no project role, and spawns
+  no child.
+- Explicit request model/effort values win over profile defaults, and no startup
+  environment value leaks into another attempt.
 - The two reproduced Important findings have RED tests that fail on recovery
   base `803ed3ff2` and pass after the fix.
 - A symlinked output/log path cannot modify an external victim.
