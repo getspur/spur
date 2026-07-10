@@ -15,7 +15,8 @@ use spur_core::explore::{
     apply::{self, ApplyOutcome},
     catalog::{Catalog, CatalogEntry, ItemKind},
     materialize::MaterializationRecord,
-    pool::{pool_dir, Manifest, StatusReport},
+    pool::{Manifest, StatusReport},
+    store,
 };
 
 use crate::action::{Action, ViewId};
@@ -44,6 +45,21 @@ pub enum ExploreStage {
 pub(crate) struct StarKey {
     kind: ItemKind,
     name: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StoreLayer {
+    Global,
+    Local,
+}
+
+impl StoreLayer {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            StoreLayer::Global => "global",
+            StoreLayer::Local => "local",
+        }
+    }
 }
 
 impl StarKey {
@@ -83,7 +99,9 @@ pub struct ExploreBrowserView {
     pub(crate) manage_lens: ManageLens,
     pub(crate) manage_selected: usize,
     pub(crate) catalog: Catalog,
+    pub(crate) catalog_layers: BTreeMap<String, StoreLayer>,
     pub(crate) manifest: Manifest,
+    pub(crate) manifest_layers: BTreeMap<String, StoreLayer>,
     pub(crate) selected: usize,
     pub(crate) filter: Option<String>,
     filter_input_active: bool,
@@ -97,23 +115,34 @@ pub struct ExploreBrowserView {
     pub(crate) cached_materializations: Option<Vec<MaterializationRecord>>,
 }
 
+struct LoadedExploreState {
+    catalog: Catalog,
+    catalog_layers: BTreeMap<String, StoreLayer>,
+    manifest: Manifest,
+    manifest_layers: BTreeMap<String, StoreLayer>,
+    cached_bundled_ids: Vec<String>,
+    load_error: Option<String>,
+}
+
 impl ExploreBrowserView {
     pub fn new(repo_root: PathBuf) -> Self {
-        let (catalog, manifest, cached_bundled_ids, load_error) = load_state(&repo_root);
+        let loaded = load_state(&repo_root);
         let mut view = Self {
             repo_root,
             tab: ExploreTab::Skills,
             stage: ExploreStage::Browse,
             manage_lens: ManageLens::Pool,
             manage_selected: 0,
-            catalog,
-            manifest,
+            catalog: loaded.catalog,
+            catalog_layers: loaded.catalog_layers,
+            manifest: loaded.manifest,
+            manifest_layers: loaded.manifest_layers,
             selected: 0,
             filter: None,
             filter_input_active: false,
             starred: BTreeSet::new(),
-            cached_bundled_ids,
-            load_error,
+            cached_bundled_ids: loaded.cached_bundled_ids,
+            load_error: loaded.load_error,
             gate: gate::GateState::default(),
             apply_log: None,
             apply_summary: None,
@@ -199,11 +228,13 @@ impl ExploreBrowserView {
 
     fn reload(&mut self) {
         self.invalidate_manage_cache();
-        let (catalog, manifest, cached_bundled_ids, load_error) = load_state(&self.repo_root);
-        self.catalog = catalog;
-        self.manifest = manifest;
-        self.cached_bundled_ids = cached_bundled_ids;
-        self.load_error = load_error;
+        let loaded = load_state(&self.repo_root);
+        self.catalog = loaded.catalog;
+        self.catalog_layers = loaded.catalog_layers;
+        self.manifest = loaded.manifest;
+        self.manifest_layers = loaded.manifest_layers;
+        self.cached_bundled_ids = loaded.cached_bundled_ids;
+        self.load_error = loaded.load_error;
         self.refresh_manage_cache();
         self.clamp_selection();
         self.clamp_manage_selection();
@@ -285,7 +316,7 @@ impl ExploreBrowserView {
             self.load_error = Some("no resolved gate cards to apply".to_string());
             return;
         }
-        match apply::apply(
+        match apply_gate_selections(
             &self.repo_root,
             &mut self.manifest,
             &selections,
@@ -299,7 +330,9 @@ impl ExploreBrowserView {
                     unresolved_skipped
                 ));
                 self.apply_log = Some(outcome);
-                self.manifest = Manifest::load(&self.repo_root).unwrap_or_default();
+                let loaded = load_state(&self.repo_root);
+                self.manifest = loaded.manifest;
+                self.manifest_layers = loaded.manifest_layers;
                 self.invalidate_manage_cache();
                 self.stage = ExploreStage::Browse;
                 self.gate = gate::GateState::default();
@@ -382,6 +415,10 @@ impl ExploreBrowserView {
             .any(|item| item.name == entry.name && item.kind == entry.kind)
     }
 
+    fn catalog_layer(&self, entry: &CatalogEntry) -> Option<StoreLayer> {
+        self.catalog_layers.get(&entry.name).copied()
+    }
+
     fn render_header(&self, frame: &mut Frame, area: Rect) {
         let title = Line::from(vec![
             Span::styled(
@@ -415,7 +452,13 @@ impl ExploreBrowserView {
     fn render_sources(&self, frame: &mut Frame, area: Rect) {
         let mut source_counts = BTreeMap::<String, usize>::new();
         for entry in &self.catalog.entries {
-            *source_counts.entry(entry.source.clone()).or_default() += 1;
+            let layer = self
+                .catalog_layer(entry)
+                .map(StoreLayer::label)
+                .unwrap_or("unknown");
+            *source_counts
+                .entry(format!("{} [{layer}]", entry.source))
+                .or_default() += 1;
         }
 
         let mut lines = vec![
@@ -502,6 +545,12 @@ impl ExploreBrowserView {
                 ];
                 if self.is_in_pool(entry) {
                     spans.push(Span::styled("  in pool", Style::default().fg(Color::Green)));
+                }
+                if let Some(layer) = self.catalog_layer(entry) {
+                    spans.push(Span::styled(
+                        format!("  {}", layer.label()),
+                        Style::default().fg(Color::DarkGray),
+                    ));
                 }
                 if self
                     .cached_bundled_ids
@@ -666,9 +715,9 @@ impl View for ExploreBrowserView {
     fn tick(&mut self) {}
 }
 
-fn load_state(repo_root: &Path) -> (Catalog, Manifest, Vec<String>, Option<String>) {
+fn load_state(repo_root: &Path) -> LoadedExploreState {
     let mut errors = Vec::new();
-    let catalog = match Catalog::load(repo_root) {
+    let catalog = match load_catalog_for_view(repo_root) {
         Ok(catalog) => catalog,
         Err(error) => {
             tracing::warn!(%error, "explore catalog load failed");
@@ -676,12 +725,28 @@ fn load_state(repo_root: &Path) -> (Catalog, Manifest, Vec<String>, Option<Strin
             Catalog::default()
         }
     };
-    let manifest = match Manifest::load(repo_root) {
+    let catalog_layers = match catalog_layers(repo_root) {
+        Ok(layers) => layers,
+        Err(error) => {
+            tracing::warn!(%error, "explore catalog provenance load failed");
+            errors.push(format!("catalog provenance: {error:#}"));
+            BTreeMap::new()
+        }
+    };
+    let manifest = match load_manifest_for_view(repo_root) {
         Ok(manifest) => manifest,
         Err(error) => {
             tracing::warn!(%error, "explore manifest load failed");
             errors.push(format!("manifest: {error:#}"));
             Manifest::default()
+        }
+    };
+    let manifest_layers = match manifest_layers(repo_root) {
+        Ok(layers) => layers,
+        Err(error) => {
+            tracing::warn!(%error, "explore manifest provenance load failed");
+            errors.push(format!("manifest provenance: {error:#}"));
+            BTreeMap::new()
         }
     };
     let cached_bundled_ids = match bundled_ids(repo_root) {
@@ -693,7 +758,101 @@ fn load_state(repo_root: &Path) -> (Catalog, Manifest, Vec<String>, Option<Strin
         }
     };
     let load_error = (!errors.is_empty()).then(|| errors.join("; "));
-    (catalog, manifest, cached_bundled_ids, load_error)
+    LoadedExploreState {
+        catalog,
+        catalog_layers,
+        manifest,
+        manifest_layers,
+        cached_bundled_ids,
+        load_error,
+    }
+}
+
+fn catalog_layers(repo_root: &Path) -> anyhow::Result<BTreeMap<String, StoreLayer>> {
+    let mut layers = BTreeMap::new();
+    if global_layer_enabled() {
+        if let Some(global_root) = store::global_root().filter(|root| root.exists()) {
+            for entry in Catalog::load_from_store(&global_root)?.entries {
+                layers.insert(entry.name, StoreLayer::Global);
+            }
+        }
+    }
+    for entry in Catalog::load(repo_root)?.entries {
+        layers.insert(entry.name, StoreLayer::Local);
+    }
+    Ok(layers)
+}
+
+fn manifest_layers(repo_root: &Path) -> anyhow::Result<BTreeMap<String, StoreLayer>> {
+    let mut layers = BTreeMap::new();
+    if global_layer_enabled() {
+        if let Some(global_root) = store::global_root().filter(|root| root.exists()) {
+            for item in Manifest::load_from_store(&global_root)?.items {
+                layers.insert(item.name, StoreLayer::Global);
+            }
+        }
+    }
+    for item in Manifest::load(repo_root)?.items {
+        layers.insert(item.name, StoreLayer::Local);
+    }
+    Ok(layers)
+}
+
+fn load_catalog_for_view(repo_root: &Path) -> anyhow::Result<Catalog> {
+    if global_layer_enabled() {
+        Catalog::load_merged(repo_root)
+    } else {
+        Catalog::load(repo_root)
+    }
+}
+
+fn load_manifest_for_view(repo_root: &Path) -> anyhow::Result<Manifest> {
+    if global_layer_enabled() {
+        Manifest::load_layered(repo_root)
+    } else {
+        Manifest::load(repo_root)
+    }
+}
+
+fn global_layer_enabled() -> bool {
+    global_layer_enabled_for_build()
+}
+
+#[cfg(not(test))]
+fn global_layer_enabled_for_build() -> bool {
+    true
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_GLOBAL_LAYER_ENABLED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+fn global_layer_enabled_for_build() -> bool {
+    TEST_GLOBAL_LAYER_ENABLED.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+fn set_test_global_layer_enabled(enabled: bool) -> bool {
+    TEST_GLOBAL_LAYER_ENABLED.with(|cell| {
+        let previous = cell.get();
+        cell.set(enabled);
+        previous
+    })
+}
+
+fn apply_gate_selections(
+    repo_root: &Path,
+    manifest: &mut Manifest,
+    selections: &[apply::Selection],
+    bundled_ids: &[String],
+) -> anyhow::Result<ApplyOutcome> {
+    if global_layer_enabled() {
+        apply::apply_layered(repo_root, manifest, selections, bundled_ids)
+    } else {
+        apply::apply(repo_root, manifest, selections, bundled_ids)
+    }
 }
 
 fn bundled_ids(repo_root: &Path) -> anyhow::Result<Vec<String>> {
@@ -868,11 +1027,32 @@ fn sha7(value: &str) -> &str {
 }
 
 pub(crate) fn explore_item_path(repo_root: &Path, entry: &CatalogEntry) -> PathBuf {
-    let pooled = pool_dir(repo_root, &entry.source, &entry.name, &entry.pinned_commit);
+    let pooled = explore_pool_dir(repo_root, entry);
     if pooled.exists() {
         pooled
     } else {
-        spur_core::explore::sync::cache_dir(repo_root, &entry.source).join(&entry.rel_path)
+        explore_cache_dir(repo_root, &entry.source).join(&entry.rel_path)
+    }
+}
+
+fn explore_pool_dir(repo_root: &Path, entry: &CatalogEntry) -> PathBuf {
+    if global_layer_enabled() {
+        store::layered_pool_dir(repo_root, &entry.source, &entry.name, &entry.pinned_commit)
+    } else {
+        spur_core::explore::pool::pool_dir(
+            repo_root,
+            &entry.source,
+            &entry.name,
+            &entry.pinned_commit,
+        )
+    }
+}
+
+fn explore_cache_dir(repo_root: &Path, source: &str) -> PathBuf {
+    if global_layer_enabled() {
+        store::layered_cache_dir(repo_root, source)
+    } else {
+        spur_core::explore::sync::cache_dir(repo_root, source)
     }
 }
 
@@ -896,9 +1076,11 @@ mod tests {
     use spur_core::explore::apply::Resolution;
     use spur_core::explore::pool::{item_from_entry, GateRecord};
     use spur_core::lineage::projection::ExecutorLineage;
+    use std::sync::{Mutex, MutexGuard};
 
     const COMMIT: &str = "abcdef1234567890abcdef1234567890abcdef12";
     const SOURCE: &str = "acme/repo";
+    static HOME_ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
@@ -1012,6 +1194,36 @@ mod tests {
         }
     }
 
+    struct HomeEnvGuard {
+        previous: Option<String>,
+        previous_enable_global: bool,
+        _lock: MutexGuard<'static, ()>,
+    }
+
+    impl HomeEnvGuard {
+        fn set(home: &Path) -> Self {
+            let lock = HOME_ENV_LOCK.lock().unwrap();
+            let previous = std::env::var("HOME").ok();
+            let previous_enable_global = set_test_global_layer_enabled(true);
+            std::env::set_var("HOME", home);
+            Self {
+                previous,
+                previous_enable_global,
+                _lock: lock,
+            }
+        }
+    }
+
+    impl Drop for HomeEnvGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+            set_test_global_layer_enabled(self.previous_enable_global);
+        }
+    }
+
     fn repo_with_pool_item() -> tempfile::TempDir {
         let repo = tempfile::tempdir().expect("temp repo");
         let entry = sample_entry();
@@ -1035,6 +1247,79 @@ mod tests {
         .save(repo.path())
         .expect("save manifest");
         repo
+    }
+
+    #[test]
+    fn load_state_merges_global_and_local_layers_and_renders_provenance() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = HomeEnvGuard::set(home.path());
+        let repo = tempfile::tempdir().unwrap();
+        let global_store = home.path().join(".spur/explore");
+        let global_entry = sample_entry();
+        Catalog {
+            synced_at_epoch: Some(1_700_000_000),
+            entries: vec![global_entry.clone()],
+        }
+        .save_to_store(&global_store)
+        .unwrap();
+        Manifest {
+            sources: Vec::new(),
+            items: vec![item_from_entry(
+                &global_entry,
+                GateRecord {
+                    verdict: "clean".into(),
+                    justification: None,
+                    decided_at_epoch: Some(1_700_000_001),
+                },
+            )],
+        }
+        .save_to_store(&global_store)
+        .unwrap();
+
+        let local_entry = write_skill(repo.path(), "local-skill", "local body");
+        save_catalog(repo.path(), vec![local_entry.clone()]);
+        Manifest {
+            sources: Vec::new(),
+            items: vec![item_from_entry(
+                &local_entry,
+                GateRecord {
+                    verdict: "clean".into(),
+                    justification: None,
+                    decided_at_epoch: Some(1_700_000_002),
+                },
+            )],
+        }
+        .save(repo.path())
+        .unwrap();
+
+        let view = ExploreBrowserView::new(repo.path().to_path_buf());
+        let names: Vec<_> = view
+            .visible_entries()
+            .into_iter()
+            .map(|entry| entry.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["review-helper", "local-skill"]);
+        assert_eq!(view.manifest.items.len(), 2);
+
+        let catalog_text = render_catalog_to_string(&view, 100, 12);
+        assert!(
+            catalog_text.contains("global"),
+            "catalog should tag global entries:\n{catalog_text}"
+        );
+        assert!(
+            catalog_text.contains("local"),
+            "catalog should tag local entries:\n{catalog_text}"
+        );
+
+        let sources_text = render_sources_to_string(&view, 80, 12);
+        assert!(
+            sources_text.contains("global"),
+            "sources pane should show global provenance:\n{sources_text}"
+        );
+        assert!(
+            sources_text.contains("local"),
+            "sources pane should show local provenance:\n{sources_text}"
+        );
     }
 
     #[test]
@@ -1508,6 +1793,22 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal
             .draw(|frame| view.render_catalog(frame, frame.area()))
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        let mut out = String::new();
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                out.push_str(buf[(x, y)].symbol());
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    fn render_sources_to_string(view: &ExploreBrowserView, width: u16, height: u16) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|frame| view.render_sources(frame, frame.area()))
             .unwrap();
         let buf = terminal.backend().buffer();
         let mut out = String::new();
