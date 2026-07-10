@@ -16,6 +16,7 @@ use crate::action::Action;
 
 use super::{
     scroll_offset_for_selected_line, selected_marker_line, sha7, ExploreBrowserView, ExploreStage,
+    StoreLayer,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -146,7 +147,7 @@ impl ExploreBrowserView {
             return;
         }
         let name = self.manifest.items[self.manage_selected].name.clone();
-        match apply::remove(&self.repo_root, &mut self.manifest, &name) {
+        match apply::remove_layered(&self.repo_root, &mut self.manifest, &name) {
             Ok(()) => {
                 self.invalidate_manage_cache();
                 self.reload();
@@ -175,8 +176,14 @@ impl ExploreBrowserView {
                 .iter()
                 .map(|item| {
                     let verdict = item.gate.verdict.clone();
+                    let layer = self
+                        .manifest_layers
+                        .get(&item.name)
+                        .map(StoreLayer::label)
+                        .unwrap_or("");
                     Row::new(vec![
                         Cell::from(item.name.clone()),
+                        Cell::from(layer),
                         Cell::from(kind_label(item.kind)),
                         Cell::from(sha7(&item.pinned_commit).to_string()),
                         Cell::from(Span::styled(verdict.clone(), verdict_style(&verdict))),
@@ -206,12 +213,14 @@ impl ExploreBrowserView {
                 Constraint::Min(10),
                 Constraint::Length(6),
                 Constraint::Length(7),
+                Constraint::Length(7),
                 Constraint::Length(12),
                 Constraint::Length(12),
             ],
         )
         .header(
-            Row::new(vec!["name", "kind", "sha", "verdict", "license"]).style(Style::new().bold()),
+            Row::new(vec!["name", "layer", "kind", "sha", "verdict", "license"])
+                .style(Style::new().bold()),
         )
         .footer(footer)
         .row_highlight_style(Style::new().reversed())
