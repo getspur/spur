@@ -311,6 +311,7 @@ impl McpCallbackServer {
         &self,
         plan_id: Option<&str>,
         issue_id: &str,
+        append_prompt: Option<&str>,
     ) -> Result<(), String> {
         let mut args = serde_json::json!({
             "trigger_task_id": issue_id,
@@ -322,6 +323,9 @@ impl McpCallbackServer {
         });
         if let Some(plan_id) = plan_id {
             args["plan_id"] = serde_json::Value::String(plan_id.to_string());
+        }
+        if let Some(append_prompt) = append_prompt {
+            args["ops"][0]["append_prompt"] = serde_json::Value::String(append_prompt.to_string());
         }
 
         let resp = self
