@@ -11,7 +11,11 @@ use std::{
 use async_trait::async_trait;
 use aws_sdk_dynamodb::{
     error::SdkError,
-    operation::transact_write_items::TransactWriteItemsError,
+    operation::{
+        query::QueryInput,
+        transact_write_items::TransactWriteItemsError,
+        update_item::{UpdateItemError, UpdateItemInput},
+    },
     types::{
         AttributeValue, CancellationReason, Delete, Put, ReturnValue, TransactWriteItem, Update,
     },
@@ -42,6 +46,10 @@ const GLOBAL_QUEUE_PK_PREFIX: &str = "GLOBAL#QUEUE#";
 const GLOBAL_RUNNING_TOKEN_PK_PREFIX: &str = "GLOBAL#RUNNING_TOKEN#";
 const RUNNING_TOKEN_PK_PREFIX: &str = "RUNNING#";
 const RUNNING_TOKEN_TTL_SECS: u64 = 24 * 60 * 60;
+/// Per-shard drainer scan-cursor item prefix: `CURSOR#<shard>`. Stores a
+/// versioned copy of the complete DynamoDB continuation key under cursor-only
+/// attribute names (so the cursor row does not enter the sparse queue GSI).
+const QUEUE_CURSOR_PK_PREFIX: &str = "CURSOR#";
 const DEFAULT_QUEUE_SHARD_COUNT: u32 = 16;
 /// Name of the sparse DynamoDB GSI keyed by `(queue_shard, queue_sort_key)`.
 pub const QUEUE_GSI_NAME: &str = "queue-gsi";
@@ -356,6 +364,77 @@ impl Default for QueueConfig {
     }
 }
 
+/// Complete DynamoDB continuation key for the sparse queue GSI.
+///
+/// DynamoDB requires `ExclusiveStartKey` to contain the GSI partition/range
+/// keys plus the base-table primary key. Keeping all three fields prevents
+/// lossy sort-key-only pagination and lets a cursor resume using the official
+/// Query `LastEvaluatedKey` contract.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueuePageKey {
+    pub queue_shard: String,
+    pub queue_sort_key: String,
+    pub job_pk: String,
+}
+
+impl QueuePageKey {
+    fn to_dynamodb_key(&self) -> HashMap<String, AttributeValue> {
+        HashMap::from([
+            (
+                "queue_shard".to_string(),
+                AttributeValue::S(self.queue_shard.clone()),
+            ),
+            (
+                "queue_sort_key".to_string(),
+                AttributeValue::S(self.queue_sort_key.clone()),
+            ),
+            ("pk".to_string(), AttributeValue::S(self.job_pk.clone())),
+        ])
+    }
+
+    pub(crate) fn from_job_record(record: &JobRecord) -> Result<Self> {
+        Ok(Self {
+            queue_shard: record.queue_shard.clone().ok_or_else(|| {
+                malformed_item(format!(
+                    "queued job {} is missing queue_shard",
+                    record.job_id
+                ))
+            })?,
+            queue_sort_key: record.queue_sort_key.clone().ok_or_else(|| {
+                malformed_item(format!(
+                    "queued job {} is missing queue_sort_key",
+                    record.job_id
+                ))
+            })?,
+            job_pk: job_pk(&record.job_id),
+        })
+    }
+}
+
+/// One bounded DynamoDB Query page plus the exact key DynamoDB returned for a
+/// possible continuation. An absent `last_evaluated_key` is the only tail
+/// signal; returned item count is deliberately not used for wrap detection.
+#[derive(Debug, Clone, Default)]
+pub struct QueuedJobsPage {
+    pub jobs: Vec<JobRecord>,
+    pub last_evaluated_key: Option<QueuePageKey>,
+}
+
+/// Durable per-shard cursor state. The version is compare-and-set on every
+/// progress or wrap update so a stale concurrent drainer cannot overwrite or
+/// clear newer progress.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct QueueScanCursor {
+    pub position: Option<QueuePageKey>,
+    pub version: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueueCursorSaveOutcome {
+    Saved,
+    Stale,
+}
+
 #[async_trait]
 pub trait JobStore: Send + Sync {
     async fn create_or_get_active_job(&self, request: CreateJobRequest)
@@ -514,6 +593,10 @@ pub trait JobStore: Send + Sync {
     /// `next_eligible_at <= now_unix_secs`. The drainer uses this to discover
     /// candidates before attempting a transactional dispatch transition.
     ///
+    /// When `exclusive_start_key` is present, it must be the complete key from
+    /// a prior page's `LastEvaluatedKey` (or the complete key of the last item
+    /// examined when stopping mid-page).
+    ///
     /// Legacy stores that have not implemented queue GSI reads return an empty
     /// list — no queued work is visible, so the drainer is a no-op.
     async fn list_queued_jobs(
@@ -521,9 +604,35 @@ pub trait JobStore: Send + Sync {
         shard: &str,
         now_unix_secs: u64,
         limit: usize,
-    ) -> Result<Vec<JobRecord>> {
-        let _ = (shard, now_unix_secs, limit);
-        Ok(Vec::new())
+        exclusive_start_key: Option<&QueuePageKey>,
+    ) -> Result<QueuedJobsPage> {
+        let _ = (shard, now_unix_secs, limit, exclusive_start_key);
+        Ok(QueuedJobsPage::default())
+    }
+
+    /// Read the persisted, versioned drainer scan cursor for a shard.
+    ///
+    /// Default: version zero at the head (no cursor persistence). Stores
+    /// implementing bounded queueing override this to return the durable row.
+    async fn queue_scan_cursor(&self, shard: &str) -> Result<QueueScanCursor> {
+        let _ = shard;
+        Ok(QueueScanCursor::default())
+    }
+
+    /// Compare-and-set the drainer cursor. `position = None` records a versioned
+    /// wrap marker without deleting the cursor row, avoiding an ABA window in
+    /// which a stale writer could recreate old progress after a clear.
+    ///
+    /// Default: reports success without persistence. Stores implementing
+    /// bounded queueing override this with a conditional version update.
+    async fn save_queue_scan_cursor(
+        &self,
+        shard: &str,
+        expected_version: u64,
+        position: Option<&QueuePageKey>,
+    ) -> Result<QueueCursorSaveOutcome> {
+        let _ = (shard, expected_version, position);
+        Ok(QueueCursorSaveOutcome::Saved)
     }
 }
 
@@ -1253,34 +1362,241 @@ impl JobStore for DynamoDbJobStore {
         shard: &str,
         now_secs: u64,
         limit: usize,
-    ) -> Result<Vec<JobRecord>> {
-        // Query the sparse queue GSI: partition = queue_shard, range =
-        // queue_sort_key <= ceiling. The ceiling is the zero-padded now-secs
-        // prefix followed by a character that sorts after every real suffix
-        // (`#` < digits < letters < `~`), so all jobs with
-        // `next_eligible_at <= now_secs` are included. The GSI is sparse — only
-        // queued items carry these attributes — so the result set is bounded by
-        // the live queue depth on this shard.
-        let ceiling = format!("{now_secs:0QUEUE_SORT_KEY_PAD$}~~~~~~~~~~~~~~~~~~");
+        exclusive_start_key: Option<&QueuePageKey>,
+    ) -> Result<QueuedJobsPage> {
+        let input = queued_jobs_query_input(
+            &self.table_name,
+            &self.queue_gsi_name,
+            shard,
+            now_secs,
+            limit,
+            exclusive_start_key,
+        )?;
         let output = self
             .client
             .query()
-            .table_name(&self.table_name)
-            .index_name(&self.queue_gsi_name)
-            .key_condition_expression("queue_shard = :shard AND queue_sort_key <= :ceiling")
-            .expression_attribute_values(":shard", AttributeValue::S(shard.to_string()))
-            .expression_attribute_values(":ceiling", AttributeValue::S(ceiling))
-            .limit(limit.max(1) as i32)
+            .set_table_name(input.table_name)
+            .set_index_name(input.index_name)
+            .set_key_condition_expression(input.key_condition_expression)
+            .set_expression_attribute_values(input.expression_attribute_values)
+            .set_exclusive_start_key(input.exclusive_start_key)
+            .set_limit(input.limit)
             .send()
             .await
             .map_err(dynamodb_error)?;
-        output
+        let last_evaluated_key = output
+            .last_evaluated_key
+            .as_ref()
+            .map(queue_page_key_from_dynamodb)
+            .transpose()?;
+        let jobs = output
             .items
             .unwrap_or_default()
             .iter()
             .map(job_record_from_item)
-            .collect()
+            .collect::<Result<Vec<_>>>()?;
+        Ok(QueuedJobsPage {
+            jobs,
+            last_evaluated_key,
+        })
     }
+
+    async fn queue_scan_cursor(&self, shard: &str) -> Result<QueueScanCursor> {
+        let Some(item) = self.get_item(&queue_cursor_pk(shard)).await? else {
+            return Ok(QueueScanCursor::default());
+        };
+        let stored_shard = optional_string_attr(&item, "cursor_queue_shard")?
+            .or(optional_string_attr(&item, "queue_shard")?);
+        if stored_shard
+            .as_deref()
+            .is_some_and(|stored| stored != shard)
+        {
+            return Err(malformed_item(format!(
+                "queue cursor shard does not match requested shard {shard}"
+            )));
+        }
+        let version = optional_u64_attr(&item, "cursor_version")?.unwrap_or(0);
+        let queue_sort_key = optional_string_attr(&item, "cursor_queue_sort_key")?;
+        let job_pk = optional_string_attr(&item, "cursor_job_pk")?;
+        let position = match (queue_sort_key, job_pk) {
+            (Some(queue_sort_key), Some(job_pk)) => Some(QueuePageKey {
+                queue_shard: shard.to_string(),
+                queue_sort_key,
+                job_pk,
+            }),
+            (None, None) => None,
+            _ => {
+                return Err(malformed_item(format!(
+                    "queue cursor {shard} has an incomplete continuation key"
+                )))
+            }
+        };
+        Ok(QueueScanCursor { position, version })
+    }
+
+    async fn save_queue_scan_cursor(
+        &self,
+        shard: &str,
+        expected_version: u64,
+        position: Option<&QueuePageKey>,
+    ) -> Result<QueueCursorSaveOutcome> {
+        let input = queue_cursor_update_input(
+            &self.table_name,
+            shard,
+            expected_version,
+            position,
+            &now_string(),
+        )?;
+        let result = self
+            .client
+            .update_item()
+            .set_table_name(input.table_name)
+            .set_key(input.key)
+            .set_update_expression(input.update_expression)
+            .set_condition_expression(input.condition_expression)
+            .set_expression_attribute_names(input.expression_attribute_names)
+            .set_expression_attribute_values(input.expression_attribute_values)
+            .send()
+            .await;
+        match result {
+            Ok(_) => Ok(QueueCursorSaveOutcome::Saved),
+            Err(error) if update_was_stale(&error) => Ok(QueueCursorSaveOutcome::Stale),
+            Err(error) => Err(dynamodb_error(error)),
+        }
+    }
+}
+
+fn queued_jobs_query_input(
+    table_name: &str,
+    queue_gsi_name: &str,
+    shard: &str,
+    now_secs: u64,
+    limit: usize,
+    exclusive_start_key: Option<&QueuePageKey>,
+) -> Result<QueryInput> {
+    if exclusive_start_key.is_some_and(|cursor| cursor.queue_shard != shard) {
+        return Err(malformed_item(format!(
+            "queue cursor shard does not match query shard {shard}"
+        )));
+    }
+    let ceiling = format!("{now_secs:0QUEUE_SORT_KEY_PAD$}~~~~~~~~~~~~~~~~~~");
+    let expression_attribute_values = HashMap::from([
+        (":shard".to_string(), AttributeValue::S(shard.to_string())),
+        (":ceiling".to_string(), AttributeValue::S(ceiling)),
+    ]);
+    QueryInput::builder()
+        .table_name(table_name)
+        .index_name(queue_gsi_name)
+        // DynamoDB permits one sort-key predicate. Pagination is expressed
+        // exclusively through ExclusiveStartKey, never by combining > and <=.
+        .key_condition_expression("queue_shard = :shard AND queue_sort_key <= :ceiling")
+        .set_expression_attribute_values(Some(expression_attribute_values))
+        .set_exclusive_start_key(exclusive_start_key.map(QueuePageKey::to_dynamodb_key))
+        .limit(i32::try_from(limit.max(1)).unwrap_or(i32::MAX))
+        .build()
+        .map_err(dynamodb_error)
+}
+
+fn queue_page_key_from_dynamodb(key: &HashMap<String, AttributeValue>) -> Result<QueuePageKey> {
+    Ok(QueuePageKey {
+        queue_shard: string_attr(key, "queue_shard")?,
+        queue_sort_key: string_attr(key, "queue_sort_key")?,
+        job_pk: string_attr(key, "pk")?,
+    })
+}
+
+fn queue_cursor_update_input(
+    table_name: &str,
+    shard: &str,
+    expected_version: u64,
+    position: Option<&QueuePageKey>,
+    updated_at: &str,
+) -> Result<UpdateItemInput> {
+    if position.is_some_and(|cursor| cursor.queue_shard != shard) {
+        return Err(malformed_item(format!(
+            "queue cursor position does not match shard {shard}"
+        )));
+    }
+    let next_version = expected_version
+        .checked_add(1)
+        .ok_or_else(|| malformed_item(format!("queue cursor {shard} version overflow")))?;
+    let names = HashMap::from([
+        ("#item_type".to_string(), "item_type".to_string()),
+        (
+            "#cursor_queue_shard".to_string(),
+            "cursor_queue_shard".to_string(),
+        ),
+        ("#cursor_version".to_string(), "cursor_version".to_string()),
+        ("#updated_at".to_string(), "updated_at".to_string()),
+        (
+            "#cursor_queue_sort_key".to_string(),
+            "cursor_queue_sort_key".to_string(),
+        ),
+        ("#cursor_job_pk".to_string(), "cursor_job_pk".to_string()),
+        ("#last_sort_key".to_string(), "last_sort_key".to_string()),
+        ("#expires_at".to_string(), "expires_at".to_string()),
+    ]);
+    let mut values = HashMap::from([
+        (
+            ":item_type".to_string(),
+            AttributeValue::S("queue_cursor".to_string()),
+        ),
+        (
+            ":queue_shard".to_string(),
+            AttributeValue::S(shard.to_string()),
+        ),
+        (
+            ":next_version".to_string(),
+            AttributeValue::N(next_version.to_string()),
+        ),
+        (
+            ":updated_at".to_string(),
+            AttributeValue::S(updated_at.to_string()),
+        ),
+    ]);
+    let update_expression = if let Some(position) = position {
+        values.insert(
+            ":queue_sort_key".to_string(),
+            AttributeValue::S(position.queue_sort_key.clone()),
+        );
+        values.insert(
+            ":job_pk".to_string(),
+            AttributeValue::S(position.job_pk.clone()),
+        );
+        "SET #item_type = :item_type, #cursor_queue_shard = :queue_shard, \
+         #cursor_queue_sort_key = :queue_sort_key, #cursor_job_pk = :job_pk, \
+         #cursor_version = :next_version, #updated_at = :updated_at \
+         REMOVE #last_sort_key, #expires_at"
+    } else {
+        "SET #item_type = :item_type, #cursor_queue_shard = :queue_shard, \
+         #cursor_version = :next_version, #updated_at = :updated_at \
+         REMOVE #cursor_queue_sort_key, #cursor_job_pk, #last_sort_key, #expires_at"
+    };
+    let condition_expression = if expected_version == 0 {
+        "attribute_not_exists(#cursor_version)"
+    } else {
+        values.insert(
+            ":expected_version".to_string(),
+            AttributeValue::N(expected_version.to_string()),
+        );
+        "#cursor_version = :expected_version"
+    };
+
+    UpdateItemInput::builder()
+        .table_name(table_name)
+        .key("pk", AttributeValue::S(queue_cursor_pk(shard)))
+        .update_expression(update_expression)
+        .condition_expression(condition_expression)
+        .set_expression_attribute_names(Some(names))
+        .set_expression_attribute_values(Some(values))
+        .build()
+        .map_err(dynamodb_error)
+}
+
+fn update_was_stale(error: &SdkError<UpdateItemError>) -> bool {
+    error
+        .as_service_error()
+        .is_some_and(UpdateItemError::is_conditional_check_failed_exception)
 }
 
 fn configured_queue_gsi_name() -> String {
@@ -1354,6 +1670,11 @@ fn owner_quota_pk(kind: BacklogOwnerKind, id: &str) -> String {
 /// `GLOBAL#QUEUE#<shard>` — partition key for a sharded global queued counter.
 fn global_queue_pk(shard: &str) -> String {
     format!("{GLOBAL_QUEUE_PK_PREFIX}{shard}")
+}
+
+/// `CURSOR#<shard>` — partition key for the persisted drainer scan cursor.
+fn queue_cursor_pk(shard: &str) -> String {
+    format!("{QUEUE_CURSOR_PK_PREFIX}{shard}")
 }
 
 /// `RUNNING#<job_id>` — partition key for the exactly-once running release
@@ -2504,6 +2825,105 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn queued_jobs_query_uses_complete_exclusive_start_key_and_one_sort_condition() {
+        let cursor = QueuePageKey {
+            queue_shard: "03".to_string(),
+            queue_sort_key: "00000000042#queued#job-42".to_string(),
+            job_pk: "JOB#job-42".to_string(),
+        };
+
+        let input =
+            queued_jobs_query_input("jobs-table", "queue-index", "03", 42, 7, Some(&cursor))
+                .expect("valid production query input");
+
+        assert_eq!(input.table_name(), Some("jobs-table"));
+        assert_eq!(input.index_name(), Some("queue-index"));
+        assert_eq!(input.limit(), Some(7));
+        assert_eq!(
+            input.key_condition_expression(),
+            Some("queue_shard = :shard AND queue_sort_key <= :ceiling")
+        );
+        assert!(!input
+            .key_condition_expression()
+            .expect("key condition")
+            .contains(":after"));
+        let exclusive_start_key = input
+            .exclusive_start_key()
+            .expect("cursor becomes ExclusiveStartKey");
+        assert_eq!(exclusive_start_key.len(), 3);
+        assert_eq!(
+            exclusive_start_key["queue_shard"]
+                .as_s()
+                .expect("queue shard"),
+            "03"
+        );
+        assert_eq!(
+            exclusive_start_key["queue_sort_key"]
+                .as_s()
+                .expect("queue sort key"),
+            "00000000042#queued#job-42"
+        );
+        assert_eq!(
+            exclusive_start_key["pk"].as_s().expect("base table pk"),
+            "JOB#job-42"
+        );
+    }
+
+    #[test]
+    fn queue_cursor_update_is_versioned_for_progress_and_wrap() {
+        let cursor = QueuePageKey {
+            queue_shard: "03".to_string(),
+            queue_sort_key: "00000000042#queued#job-42".to_string(),
+            job_pk: "JOB#job-42".to_string(),
+        };
+        let progress = queue_cursor_update_input("jobs-table", "03", 4, Some(&cursor), "now")
+            .expect("progress update input");
+        assert_eq!(
+            progress.condition_expression(),
+            Some("#cursor_version = :expected_version")
+        );
+        assert!(progress
+            .update_expression()
+            .expect("progress update expression")
+            .contains("#cursor_queue_sort_key = :queue_sort_key"));
+        assert!(progress
+            .update_expression()
+            .expect("progress update expression")
+            .contains("#cursor_job_pk = :job_pk"));
+        let names = progress
+            .expression_attribute_names()
+            .expect("cursor update attribute names");
+        assert_eq!(
+            names["#cursor_queue_shard"], "cursor_queue_shard",
+            "cursor rows must not carry the sparse GSI partition attribute"
+        );
+        assert_eq!(
+            names["#cursor_queue_sort_key"], "cursor_queue_sort_key",
+            "cursor rows must not carry the sparse GSI range attribute"
+        );
+        assert_eq!(names["#cursor_job_pk"], "cursor_job_pk");
+        assert!(!names.values().any(|name| name == "queue_shard"));
+        assert!(!names.values().any(|name| name == "queue_sort_key"));
+
+        let wrap = queue_cursor_update_input("jobs-table", "03", 5, None, "later")
+            .expect("wrap update input");
+        assert_eq!(
+            wrap.condition_expression(),
+            Some("#cursor_version = :expected_version")
+        );
+        let expression = wrap.update_expression().expect("wrap update expression");
+        assert!(expression.contains("REMOVE #cursor_queue_sort_key, #cursor_job_pk"));
+        assert!(expression.contains("#cursor_version = :next_version"));
+
+        let initial = queue_cursor_update_input("jobs-table", "03", 0, None, "initial")
+            .expect("initial update input");
+        assert_eq!(
+            initial.condition_expression(),
+            Some("attribute_not_exists(#cursor_version)")
+        );
+    }
 
     #[test]
     fn queue_gsi_name_uses_runtime_environment() {

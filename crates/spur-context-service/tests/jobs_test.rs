@@ -4,7 +4,8 @@ use serde_json::json;
 use spur_context_service::drainer::{self, DrainSummary};
 use spur_context_service::jobs::{
     BacklogOwner, BacklogOwnerKind, CreateJobOutcome, CreateJobRequest, EnqueueOutcome, JobKey,
-    JobRecord, JobStatus, JobStore, JobsError, QueueConfig,
+    JobRecord, JobStatus, JobStore, JobsError, QueueConfig, QueueCursorSaveOutcome, QueuePageKey,
+    QueueScanCursor, QueuedJobsPage,
 };
 use spur_context_service::mcp::{
     self, IndexExecutionRequest, IndexExecutionStarter, McpHandlerError,
@@ -733,6 +734,11 @@ struct FakeJobState {
     global_running: u32,
     running_tokens: HashSet<String>,
     dispatch_attempts: usize,
+    /// Durable per-shard drainer cursor state, including its CAS version.
+    scan_cursors: HashMap<String, QueueScanCursor>,
+    /// Ordered shard-query log used to assert the bounded page and rotation
+    /// contracts through the public drainer behavior.
+    queried_shards: Vec<String>,
 }
 
 #[derive(Default, Clone, Copy)]
@@ -1047,8 +1053,14 @@ impl JobStore for FakeJobStore {
         shard: &str,
         now_unix_secs: u64,
         limit: usize,
-    ) -> spur_context_service::jobs::Result<Vec<JobRecord>> {
-        let state = self.state.lock().expect("fake store lock");
+        exclusive_start_key: Option<&QueuePageKey>,
+    ) -> spur_context_service::jobs::Result<QueuedJobsPage> {
+        if exclusive_start_key.is_some_and(|cursor| cursor.queue_shard != shard) {
+            return Err(JobsError::Conflict);
+        }
+
+        let mut state = self.state.lock().expect("fake store lock");
+        state.queried_shards.push(shard.to_string());
         let mut candidates: Vec<JobRecord> = state
             .jobs
             .values()
@@ -1058,13 +1070,76 @@ impl JobStore for FakeJobStore {
                     && record
                         .next_eligible_at
                         .is_some_and(|eligible| eligible <= now_unix_secs)
+                    && match exclusive_start_key {
+                        Some(cursor) => record
+                            .queue_sort_key
+                            .as_deref()
+                            .is_some_and(|sk| sk > cursor.queue_sort_key.as_str()),
+                        None => true,
+                    }
             })
             .cloned()
             .collect();
         // FIFO order: ascending queue_sort_key.
         candidates.sort_by(|a, b| a.queue_sort_key.cmp(&b.queue_sort_key));
-        candidates.truncate(limit);
-        Ok(candidates)
+        candidates.truncate(limit.max(1));
+        // DynamoDB's contract is deliberately conservative: a page that
+        // evaluates exactly Limit items may carry LastEvaluatedKey even when a
+        // follow-up request will discover the tail. Only an absent key proves
+        // that the query reached the tail.
+        let last_evaluated_key = if candidates.len() == limit.max(1) {
+            candidates.last().map(queue_page_key)
+        } else {
+            None
+        };
+        Ok(QueuedJobsPage {
+            jobs: candidates,
+            last_evaluated_key,
+        })
+    }
+
+    async fn queue_scan_cursor(
+        &self,
+        shard: &str,
+    ) -> spur_context_service::jobs::Result<QueueScanCursor> {
+        Ok(self
+            .state
+            .lock()
+            .expect("fake store lock")
+            .scan_cursors
+            .get(shard)
+            .cloned()
+            .unwrap_or_default())
+    }
+
+    async fn save_queue_scan_cursor(
+        &self,
+        shard: &str,
+        expected_version: u64,
+        position: Option<&QueuePageKey>,
+    ) -> spur_context_service::jobs::Result<QueueCursorSaveOutcome> {
+        let mut state = self.state.lock().expect("fake store lock");
+        let current = state.scan_cursors.entry(shard.to_string()).or_default();
+        if current.version != expected_version {
+            return Ok(QueueCursorSaveOutcome::Stale);
+        }
+        current.version = current.version.checked_add(1).ok_or(JobsError::Conflict)?;
+        current.position = position.cloned();
+        Ok(QueueCursorSaveOutcome::Saved)
+    }
+}
+
+fn queue_page_key(record: &JobRecord) -> QueuePageKey {
+    QueuePageKey {
+        queue_shard: record
+            .queue_shard
+            .clone()
+            .expect("queued fake record has queue_shard"),
+        queue_sort_key: record
+            .queue_sort_key
+            .clone()
+            .expect("queued fake record has queue_sort_key"),
+        job_pk: format!("JOB#{}", record.job_id),
     }
 }
 
@@ -1123,6 +1198,10 @@ impl FakeJobStore {
             .expect("fake store lock")
             .running_tokens
             .contains(job_id)
+    }
+
+    fn take_queried_shards(&self) -> Vec<String> {
+        std::mem::take(&mut self.state.lock().expect("fake store lock").queried_shards)
     }
 }
 
@@ -1576,6 +1655,613 @@ fn drainer_production_entrypoint_delegates_to_drainer() -> Result<()> {
 
         assert_eq!(summary.dispatched, 1);
         assert_eq!(starter.call_count(), 1);
+        Ok(())
+    })
+}
+
+// ─── End-to-end burst / backpressure integration ───────────────────────────
+
+/// Release all running jobs as terminal-complete. Helper for the burst-drain
+/// integration test. Propagates release errors so a leaked running slot fails
+/// the test instead of silently blocking future dispatches.
+async fn release_all_running(store: &FakeJobStore) -> Result<()> {
+    let running_ids: Vec<String> = store
+        .state
+        .lock()
+        .expect("fake store lock")
+        .jobs
+        .values()
+        .filter(|r| r.status.holds_running_quota())
+        .map(|r| r.job_id.clone())
+        .collect();
+    for id in &running_ids {
+        store
+            .mark_complete_and_release_running_quota(id, 1, json!({}))
+            .await
+            .context("release_all_running: mark_complete_and_release_running_quota")?;
+    }
+    Ok(())
+}
+
+#[test]
+fn release_all_running_propagates_terminal_release_errors() -> Result<()> {
+    block_on(async {
+        let store = FakeJobStore::default();
+        let owner = BacklogOwner::caller("alice");
+        let config = QueueConfig {
+            max_queued_per_owner: 1,
+            max_queued_global: 10,
+            max_running_per_owner: 1,
+            max_running_global: 1,
+            shard_count: 1,
+        };
+        let job = store
+            .enqueue_job(create_job_request(), owner, &config)
+            .await?
+            .into_record();
+        store.dispatch_queued_job(&job.job_id, &config).await?;
+        store.fail_release.store(true, Ordering::SeqCst);
+
+        let error = release_all_running(&store)
+            .await
+            .expect_err("release helper must not swallow a leaked-slot conflict");
+
+        assert!(error
+            .to_string()
+            .contains("release_all_running: mark_complete_and_release_running_quota"));
+        assert!(store.has_running_token(&job.job_id));
+        Ok(())
+    })
+}
+
+#[test]
+fn stale_concurrent_cursor_save_cannot_regress_or_clear_newer_progress() -> Result<()> {
+    block_on(async {
+        let store = FakeJobStore::default();
+        let initial = store.queue_scan_cursor("00").await?;
+        let first_position = QueuePageKey {
+            queue_shard: "00".to_string(),
+            queue_sort_key: "00000000001#queued#job-1".to_string(),
+            job_pk: "JOB#job-1".to_string(),
+        };
+        let newer_position = QueuePageKey {
+            queue_shard: "00".to_string(),
+            queue_sort_key: "00000000002#queued#job-2".to_string(),
+            job_pk: "JOB#job-2".to_string(),
+        };
+
+        assert_eq!(
+            store
+                .save_queue_scan_cursor("00", initial.version, Some(&first_position))
+                .await?,
+            QueueCursorSaveOutcome::Saved
+        );
+        let after_first = store.queue_scan_cursor("00").await?;
+        assert_eq!(
+            store
+                .save_queue_scan_cursor("00", after_first.version, Some(&newer_position))
+                .await?,
+            QueueCursorSaveOutcome::Saved
+        );
+
+        assert_eq!(
+            store
+                .save_queue_scan_cursor("00", initial.version, Some(&first_position))
+                .await?,
+            QueueCursorSaveOutcome::Stale,
+            "stale writer cannot move the cursor backward"
+        );
+        assert_eq!(
+            store
+                .save_queue_scan_cursor("00", initial.version, None)
+                .await?,
+            QueueCursorSaveOutcome::Stale,
+            "stale writer cannot clear a newer cursor"
+        );
+
+        let current = store.queue_scan_cursor("00").await?;
+        assert_eq!(current.version, 2);
+        assert_eq!(current.position, Some(newer_position));
+        Ok(())
+    })
+}
+
+#[test]
+fn tail_wraps_only_after_query_returns_no_last_evaluated_key() -> Result<()> {
+    block_on(async {
+        let store = FakeJobStore::default();
+        let owner = BacklogOwner::caller("alice");
+        let config = QueueConfig {
+            max_queued_per_owner: 2,
+            max_queued_global: 10,
+            max_running_per_owner: 0,
+            max_running_global: 0,
+            shard_count: 1,
+        };
+        store
+            .enqueue_job(with_package("a-1"), owner.clone(), &config)
+            .await?;
+        store
+            .enqueue_job(with_package("a-2"), owner, &config)
+            .await?;
+        let starter = FakeStarter::new();
+
+        drainer::Drainer::new(&store, &starter, config)
+            .with_limits(8, 2)
+            .drain(now_secs_large())
+            .await;
+        let after_full_page = store.queue_scan_cursor("00").await?;
+        assert!(
+            after_full_page.position.is_some(),
+            "a full page carries LastEvaluatedKey and must not wrap"
+        );
+        assert_eq!(store.take_queried_shards(), vec!["00"]);
+
+        drainer::Drainer::new(&store, &starter, config)
+            .with_limits(8, 2)
+            .drain(now_secs_large())
+            .await;
+        let after_tail_probe = store.queue_scan_cursor("00").await?;
+        assert_eq!(
+            after_tail_probe.position, None,
+            "only an absent LastEvaluatedKey proves tail and permits wrap"
+        );
+        assert_eq!(after_tail_probe.version, after_full_page.version + 1);
+        assert_eq!(store.take_queried_shards(), vec!["00"]);
+        Ok(())
+    })
+}
+
+#[test]
+fn dispatch_cap_persists_last_examined_position_mid_page() -> Result<()> {
+    block_on(async {
+        let store = FakeJobStore::default();
+        let config = QueueConfig {
+            max_queued_per_owner: 3,
+            max_queued_global: 10,
+            max_running_per_owner: 1,
+            max_running_global: 0,
+            shard_count: 1,
+        };
+        let first = store
+            .enqueue_job(
+                with_package("first"),
+                BacklogOwner::caller("first"),
+                &config,
+            )
+            .await?
+            .into_record();
+        let second = store
+            .enqueue_job(
+                with_package("second"),
+                BacklogOwner::caller("second"),
+                &config,
+            )
+            .await?
+            .into_record();
+        store
+            .enqueue_job(
+                with_package("third"),
+                BacklogOwner::caller("third"),
+                &config,
+            )
+            .await?;
+        let starter = FakeStarter::new();
+
+        drainer::Drainer::new(&store, &starter, config)
+            .with_limits(1, 3)
+            .drain(now_secs_large())
+            .await;
+        let cursor = store.queue_scan_cursor("00").await?;
+        assert_eq!(cursor.position, Some(queue_page_key(&first)));
+
+        // A fresh instance must resume at the last examined item, not at the
+        // page's LastEvaluatedKey (which points at the unexamined third item).
+        drainer::Drainer::new(&store, &starter, config)
+            .with_limits(1, 3)
+            .drain(now_secs_large())
+            .await;
+        let second_after = store
+            .lookup_job(&second.job_id)
+            .await?
+            .context("second job")?;
+        assert!(second_after.status.holds_running_quota());
+        assert_eq!(store.take_queried_shards(), vec!["00", "00"]);
+        Ok(())
+    })
+}
+
+#[test]
+fn dispatch_budget_limited_fairness_uses_effective_page_progress() -> Result<()> {
+    block_on(async {
+        let store = FakeJobStore::default();
+        let config = QueueConfig {
+            max_queued_per_owner: 1,
+            max_queued_global: 20,
+            max_running_per_owner: 1,
+            max_running_global: 0,
+            shard_count: 1,
+        };
+        let jobs_ahead = 10usize;
+        for index in 0..jobs_ahead {
+            store
+                .enqueue_job(
+                    with_package(&format!("ahead-{index}")),
+                    BacklogOwner::caller(format!("owner-{index}")),
+                    &config,
+                )
+                .await?;
+        }
+        let target = store
+            .enqueue_job(
+                with_package("target"),
+                BacklogOwner::caller("target-owner"),
+                &config,
+            )
+            .await?
+            .into_record();
+        let starter = FakeStarter::new();
+        let page_limit = 32usize;
+        let dispatch_budget = 2usize;
+        let effective_progress = page_limit.min(dispatch_budget);
+        let visit_bound = (jobs_ahead + 1).div_ceil(effective_progress) + 1;
+
+        for _ in 0..visit_bound {
+            drainer::Drainer::new(&store, &starter, config)
+                .with_limits(dispatch_budget, page_limit)
+                .drain(now_secs_large())
+                .await;
+            assert_eq!(store.take_queried_shards(), vec!["00"]);
+            let record = store.lookup_job(&target.job_id).await?.context("target")?;
+            if record.status.holds_running_quota() {
+                return Ok(());
+            }
+        }
+
+        anyhow::bail!(
+            "target with {jobs_ahead} jobs ahead was not dispatched within \
+             {visit_bound} dispatch-budget-limited shard visits"
+        );
+    })
+}
+
+#[test]
+fn scheduled_rotation_covers_all_shards_when_rate_shares_factor_with_count() {
+    block_on(async {
+        let store = FakeJobStore::default();
+        let starter = FakeStarter::new();
+        let config = QueueConfig {
+            shard_count: 16,
+            ..QueueConfig::default()
+        };
+        let drainer = drainer::Drainer::new(&store, &starter, config)
+            .with_limits(8, 2)
+            .with_rotation_interval_secs(2 * 60);
+        let mut first_shards = HashSet::new();
+
+        for tick in 0..16_u64 {
+            drainer.drain(tick * 2 * 60).await;
+            let queried = store.take_queried_shards();
+            first_shards.insert(
+                queried
+                    .first()
+                    .expect("each invocation queries at least one shard")
+                    .clone(),
+            );
+        }
+
+        assert_eq!(first_shards.len(), 16);
+        for shard in 0..16 {
+            assert!(first_shards.contains(&format!("{shard:02}")));
+        }
+    })
+}
+
+/// Return one job_id currently holding a running slot (Dispatching/Running).
+fn one_running_job(store: &FakeJobStore) -> Option<String> {
+    store
+        .state
+        .lock()
+        .expect("fake store lock")
+        .jobs
+        .values()
+        .find(|r| r.status.holds_running_quota())
+        .map(|r| r.job_id.clone())
+}
+
+#[test]
+fn burst_enqueue_dispatches_only_running_cap_then_drains_after_release() -> Result<()> {
+    block_on(async {
+        let store = FakeJobStore::default();
+        let owner = BacklogOwner::caller("alice");
+        // Global cap is set to 10 (not disabled) so the burst exercises the
+        // global queue accounting path: all 10 are accepted, dispatch frees
+        // capacity, and subsequent enqueue after terminal release succeeds.
+        let config = QueueConfig {
+            max_queued_per_owner: 20,
+            max_queued_global: 10,
+            max_running_per_owner: 2,
+            max_running_global: 0,
+            shard_count: 5,
+        };
+
+        // Burst: 10 unique cold requests are all durably accepted.
+        for i in 1..=10 {
+            store
+                .enqueue_job(with_package(&format!("burst-{i}")), owner.clone(), &config)
+                .await?;
+        }
+        assert_eq!(store.owner_queued(&owner), 10, "all 10 accepted");
+        assert_eq!(store.owner_running(&owner), 0);
+
+        let starter = FakeStarter::new();
+
+        // Drainer starts only the configured running capacity (2).
+        let summary =
+            drainer::drain_queued_jobs_with_services(&store, &starter, config, now_secs_large())
+                .await;
+        assert_eq!(summary.dispatched, 2, "only running cap dispatched");
+        assert_eq!(store.owner_running(&owner), 2);
+        assert_eq!(store.owner_queued(&owner), 8, "8 remain queued");
+
+        // A duplicate request for an already-queued coordinate is deduped.
+        let dedup = store
+            .enqueue_job(with_package("burst-3"), owner.clone(), &config)
+            .await
+            .context("dedupe during burst")?;
+        assert!(
+            matches!(dedup, EnqueueOutcome::Existing(_)),
+            "duplicate must dedupe, not consume another slot"
+        );
+        assert_eq!(
+            store.owner_queued(&owner),
+            8,
+            "dedupe did not consume a slot"
+        );
+
+        // After terminal release of one running job, the drainer dispatches
+        // the next queued job to re-saturate the running cap.
+        let running_id =
+            one_running_job(&store).context("at least one running job expected after drain")?;
+        store
+            .mark_complete_and_release_running_quota(&running_id, 1, json!({}))
+            .await?;
+        assert_eq!(store.owner_running(&owner), 1, "one slot freed by terminal");
+        let summary =
+            drainer::drain_queued_jobs_with_services(&store, &starter, config, now_secs_large())
+                .await;
+        assert_eq!(summary.dispatched, 1, "one more dispatched after release");
+        assert_eq!(store.owner_running(&owner), 2, "running cap re-saturated");
+
+        // Drain the rest: alternate terminal-release + drainer until queue empty.
+        for _ in 0..20 {
+            release_all_running(&store).await?;
+            let summary = drainer::drain_queued_jobs_with_services(
+                &store,
+                &starter,
+                config,
+                now_secs_large(),
+            )
+            .await;
+            if store.owner_queued(&owner) == 0 && summary.dispatched == 0 {
+                break;
+            }
+        }
+
+        // All 10 jobs were durably accepted and eventually dispatched.
+        assert_eq!(starter.call_count(), 10, "all 10 eventually dispatched");
+        assert_eq!(store.owner_queued(&owner), 0, "queue fully drained");
+        assert_eq!(store.owner_running(&owner), 0, "all running released");
+        Ok(())
+    })
+}
+
+#[test]
+fn max_queued_global_one_rejects_second_owner_until_dispatch_frees_capacity() -> Result<()> {
+    block_on(async {
+        let config = QueueConfig {
+            max_queued_per_owner: 10,
+            max_queued_global: 1,
+            max_running_per_owner: u32::MAX,
+            max_running_global: 0,
+            shard_count: 4,
+        };
+        let store = FakeJobStore::default();
+        let alice = BacklogOwner::caller("alice");
+        let bob = BacklogOwner::caller("bob");
+
+        // Alice fills the single global queued slot.
+        let alice_job = store
+            .enqueue_job(create_job_request(), alice.clone(), &config)
+            .await
+            .context("alice enqueue")?
+            .into_record();
+
+        // Bob is rejected — global queue is full.
+        let err = store
+            .enqueue_job(with_package("bob-pkg"), bob.clone(), &config)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, JobsError::GlobalQueueFull));
+
+        // Dispatch frees the global queued slot.
+        store
+            .dispatch_queued_job(&alice_job.job_id, &config)
+            .await?;
+
+        // Bob can now enqueue — global capacity was released by dispatch.
+        let bob_outcome = store
+            .enqueue_job(with_package("bob-pkg"), bob.clone(), &config)
+            .await
+            .context("bob enqueue after dispatch")?;
+        assert!(bob_outcome.is_enqueued());
+        assert_eq!(store.owner_queued(&bob), 1);
+        Ok(())
+    })
+}
+
+// ─── Bounded multi-owner fairness (no starvation) ───────────────────────────
+//
+// Proves the drainer's per-shard scan cursor guarantees that a later eligible
+// owner's job is dispatched within a finite, documented K drainer runs — even
+// when an earlier owner continuously replenishes their backlog to stay at the
+// scan-limit boundary. Without the cursor, a continuously-replenished backlog
+// can fill the scan window indefinitely and starve later owners on the same
+// shard.
+//
+// If a job has A eligible jobs ahead of it in its shard when admitted and each
+// shard visit examines L candidates, it is examined within
+// ceil((A + 1) / L) visits from a head cursor, or one extra visit if the
+// persisted cursor must wrap first. This bound depends on actual per-shard
+// depth/jobs ahead, not on one owner's configured maximum.
+
+/// Helper: enqueue a unique package for an owner, returning the job_id. Uses a
+/// monotonically increasing package suffix so each job gets a distinct dedupe
+/// key and a higher `queue_sort_key` than all prior jobs.
+async fn enqueue_unique(
+    store: &FakeJobStore,
+    owner: &BacklogOwner,
+    config: &QueueConfig,
+    counter: &mut u64,
+    prefix: &str,
+) -> Result<String> {
+    *counter += 1;
+    let pkg = format!("{prefix}-{counter}");
+    let record = store
+        .enqueue_job(with_package(&pkg), owner.clone(), config)
+        .await
+        .context("enqueue_unique")?
+        .into_record();
+    Ok(record.job_id)
+}
+
+#[test]
+fn drainer_no_starvation_continuous_replenishment_within_k_runs() -> Result<()> {
+    block_on(async {
+        let store = FakeJobStore::default();
+        let owner_a = BacklogOwner::caller("alice");
+        let owner_b = BacklogOwner::caller("bob");
+        let config = QueueConfig {
+            max_queued_per_owner: 10,
+            max_queued_global: 0,
+            max_running_per_owner: 1,
+            max_running_global: 0,
+            shard_count: 1, // force all jobs onto one shard (worst case)
+        };
+
+        // Alice fills her backlog with 10 jobs (all sort ahead of Bob).
+        let mut a_counter = 0u64;
+        for _ in 0..10 {
+            enqueue_unique(&store, &owner_a, &config, &mut a_counter, "a").await?;
+        }
+        // Bob enqueues 1 job AFTER all of Alice's.
+        let b_id = store
+            .enqueue_job(with_package("b-1"), owner_b.clone(), &config)
+            .await?
+            .into_record()
+            .job_id;
+
+        let starter = FakeStarter::new();
+        // Bob initially has A=10 jobs ahead and each invocation examines one
+        // L=2 page, so the head-cursor bound is ceil((10 + 1) / 2) = 6 shard
+        // visits. Continuous Alice replenishment sorts behind Bob and cannot
+        // increase the number of jobs already ahead of him.
+        let jobs_ahead = 10usize;
+        let scan_limit = 2usize;
+        let max_runs = (jobs_ahead + 1).div_ceil(scan_limit);
+
+        for run in 1..=max_runs {
+            // Release any running Alice job and immediately replenish to keep
+            // Alice's backlog at max_queued_per_owner — the starvation scenario.
+            release_all_running(&store).await?;
+            // Replenish Alice: if she has room, enqueue new jobs.
+            while store.owner_queued(&owner_a) < 10 {
+                enqueue_unique(&store, &owner_a, &config, &mut a_counter, "a").await?;
+            }
+
+            // Recreate the drainer every time to prove progress lives in the
+            // store rather than in one warm Lambda/Drainer instance.
+            drainer::Drainer::new(&store, &starter, config)
+                .with_limits(8, scan_limit)
+                .drain(now_secs_large())
+                .await;
+            assert_eq!(
+                store.take_queried_shards(),
+                vec!["00"],
+                "one configured Query page per shard visit"
+            );
+
+            // Check if Bob dispatched.
+            let b = store.lookup_job(&b_id).await?.context("b job")?;
+            if b.status.holds_running_quota() {
+                // Bob dispatched within K runs — success!
+                eprintln!("Bob dispatched on run {run} (bound={max_runs})");
+                return Ok(());
+            }
+        }
+
+        anyhow::bail!(
+            "Bob was NOT dispatched within {max_runs} runs \
+             despite continuous Alice replenishment — starvation!"
+        );
+    })
+}
+
+#[test]
+fn drainer_no_starvation_smoke_fewer_jobs_than_scan_limit() -> Result<()> {
+    // Simpler scenario: Alice has 3 jobs, Bob has 1, scan_limit=2. Without the
+    // cursor, Bob is hidden behind Alice's 3rd job. With the cursor, Bob is
+    // reached in run 2. This is a smoke test for the basic pagination path
+    // without continuous replenishment.
+    block_on(async {
+        let store = FakeJobStore::default();
+        let owner_a = BacklogOwner::caller("alice");
+        let owner_b = BacklogOwner::caller("bob");
+        let config = QueueConfig {
+            max_queued_per_owner: 10,
+            max_queued_global: 0,
+            max_running_per_owner: 1,
+            max_running_global: 0,
+            shard_count: 1,
+        };
+
+        store
+            .enqueue_job(with_package("a-1"), owner_a.clone(), &config)
+            .await?;
+        store
+            .enqueue_job(with_package("a-2"), owner_a.clone(), &config)
+            .await?;
+        store
+            .enqueue_job(with_package("a-3"), owner_a.clone(), &config)
+            .await?;
+        let b_id = store
+            .enqueue_job(with_package("b-1"), owner_b.clone(), &config)
+            .await?
+            .into_record()
+            .job_id;
+
+        let starter = FakeStarter::new();
+        // Run 1: a-1 dispatches (A at cap=1), a-2 skipped. Cursor saved.
+        drainer::Drainer::new(&store, &starter, config)
+            .with_limits(8, 2)
+            .drain(now_secs_large())
+            .await;
+        assert_eq!(store.owner_running(&owner_a), 1, "A at cap after run 1");
+
+        // Release A's job, then construct a fresh drainer — the durable cursor
+        // should resume past the previously-examined page and reach Bob.
+        release_all_running(&store).await?;
+        drainer::Drainer::new(&store, &starter, config)
+            .with_limits(8, 2)
+            .drain(now_secs_large())
+            .await;
+
+        let b_final = store.lookup_job(&b_id).await?.context("b")?;
+        assert!(
+            b_final.status.holds_running_quota(),
+            "Bob should have dispatched by run 2 with cursor pagination, got {:?}",
+            b_final.status
+        );
         Ok(())
     })
 }

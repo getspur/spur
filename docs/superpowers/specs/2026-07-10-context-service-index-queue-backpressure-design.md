@@ -160,6 +160,7 @@ Terraform-managed GSI before non-zero queue caps are enabled.
 | `GLOBAL#QUEUE#<shard>` | Sharded service-wide queued counters for approximate global queued backpressure |
 | `RUNNING#<job_id>` | Release token for exactly-once running quota release |
 | `GLOBAL#RUNNING_TOKEN#<n>` | Optional hard global running token claimed at dispatch time |
+| `CURSOR#<shard>` | Durable CAS-versioned drainer continuation key, stored under cursor-only attributes so it stays out of the sparse queue GSI |
 
 ### Sparse Queue GSI
 
@@ -370,16 +371,31 @@ owner from monopolizing all worker slots:
 
 - Per-owner running cap controls local concurrency.
 - Global running cap protects the whole service.
-- Drainer scans rotate queue shards and per-shard start cursors between runs.
+- Drainer scans rotate queue shards by the configured schedule tick (not raw
+  wall-clock seconds), so a whole-minute cadence visits every shard even when
+  the schedule interval and shard count share factors.
+- Each shard cursor stores the complete DynamoDB `LastEvaluatedKey`
+  (`queue_shard`, `queue_sort_key`, and base-table `pk`) plus a CAS version.
+  Each invocation queries at most one configured candidate page per shard.
 - If a candidate owner is at running cap, the drainer skips that job and looks
   at later jobs up to a bounded scan limit, so other owners can make progress.
 - If the hard global running cap is saturated, the drainer exits before scanning
   and relies on the completion kick or next schedule tick.
 
 Exact queue position is not required for the first version, but starvation is
-not allowed. The implementation must document a scan bound such as "every
-eligible queued job is scanned within K drainer runs at current shard count and
-scan limit." A future status response can add a best-effort
+not allowed. Let `A` be the eligible candidates ahead of a job in the persisted
+cursor's circular scan order (including the remaining tail and wrapped prefix),
+`L` the page limit, `B` the global dispatch budget, and `R = min(L, B)`. When
+the target shard is the scheduled starting shard and hard global capacity is
+available, at least `R` candidates are examined, so the job is reached within
+`ceil((A + 1) / R) + 1` shard starts. Since the schedule makes every shard the
+start once per `shard_count` ticks, this is at most
+`shard_count * (ceil((A + 1) / R) + 1)` scheduled invocations. The extra start
+covers the conservative case where a full final page has a `LastEvaluatedKey`
+and an empty follow-up page is needed to prove the tail. Total eligible
+per-shard depth bounds `A`; the bound cannot be derived from
+`max_queued_jobs_per_owner` alone. Continuous arrivals that sort behind the
+target do not increase `A`. A future status response can add a best-effort
 `queue_position_hint` if operators need it.
 
 ## Configuration
