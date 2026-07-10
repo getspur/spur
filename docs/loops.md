@@ -101,6 +101,58 @@ Promotion is ratcheted. A loop must have at least three consecutive approved rea
 generations at its current level before it can move up one level. Demotion is
 immediate. A direct `l1` to `l3` promotion is rejected.
 
+## L3 Project Runtime Leadership
+
+L3 execution requires at least one interactive SPUR process to remain running, but it
+does not require an active brain session. For each repository, exactly one running TUI
+holds the advisory lock at `.spur/loop-runtime.lock`. That leader schedules L3
+generations under the stable `spur-loop-runtime` owner, reconciles their durable beads
+state, and dispatches workers. It never creates an ACP brain connection or sends a
+brain prompt for that system identity.
+
+Scope is fenced in both directions. Brain-session reconcilers sweep L1/L2 loops and
+plans owned by that brain; the project reconciler sweeps only L3 loops and plans owned
+by `spur-loop-runtime`. Successful unattended work still crosses a checker boundary:
+on a later reconciliation pass, the project runtime reprojects durable task and plan
+audits, and approves only a current `AwaitingReview` completion whose delegation id and
+worker branch match the latest dispatch and whose issue has no worker signal. The
+worker completion callback cannot approve its own result. A matching signal leaves the
+task for explicit intervention instead of silently approving it.
+
+Additional TUIs for the same repository remain passive standbys. They periodically
+retry the lock and observe durable loop and plan state when the issue tracker view is
+refreshed; phase one does not forward the leader's process-local live event stream to
+standbys. After a clean leader exit or process crash, the operating system releases
+the advisory lock, a standby takes leadership, and it resumes from beads state.
+Exact-generation labels and the transient `spur:loop-arming:<generation>` claim make
+handoff recovery deterministic across the plan-persistence and loop-rearm crash
+window.
+
+Live L3 generations created by an older SPUR version keep their historical owner while
+that owner's durable lease is live. A legacy generation with no lease receives one
+full grace window before it can be adopted. Only after the lease expires may the
+elected project runtime atomically fence the old owner labels, install a new owner
+token and lease for `spur-loop-runtime`, append a `plan-force-reclaimed` audit, and
+resume the generation from beads. This prevents an upgrade from stealing work from a
+still-running older process while ensuring a stale pre-upgrade owner cannot park an L3
+loop forever.
+
+Advisory locking is a safety boundary. If the repository filesystem does not support
+safe advisory locking, SPUR disables project L3 execution and leaves due loops parked;
+it never falls back to multiple leaders. L1 and L2 loops still require an active brain
+session. Leadership shutdown is bounded: the runtime first requests cancellation and
+allows durable delegation cleanup through the grace period, then aborts a child that
+does not stop, evicts and drains the stable-key worker MCP server, and releases the
+lock only after its owned callback server is stopped or force-aborted. A same-process
+successor therefore constructs fresh runtime dependencies instead of reusing a server
+bound to the retired leader.
+
+This first phase is tied to the interactive process lifetime, so L3 also stops after
+all TUIs exit. Always-on execution belongs to a later daemon phase. The daemon should
+reuse the same lock, stable owner, beads recovery, owner-lease, and arming-claim
+protocols; it changes process supervision and deployment, not the repository-scoped
+single-leader contract.
+
 ## Governors
 
 `max_cost_micros_per_generation` is copied to generation epics as

@@ -164,6 +164,10 @@ pub struct FaultInjectionHooks {
         Option<std::sync::Arc<std::sync::Mutex<Vec<Vec<spur_acp::config::AgentConfig>>>>>,
     #[cfg(test)]
     pub short_circuit_delegations: bool,
+    #[cfg(test)]
+    pub delegation_started: Option<std::sync::Arc<tokio::sync::Notify>>,
+    #[cfg(test)]
+    pub delegation_blocker: Option<std::sync::Arc<tokio::sync::Notify>>,
 }
 
 #[cfg(not(any(test, feature = "fault-injection")))]
