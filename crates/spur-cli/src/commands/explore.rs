@@ -4,6 +4,7 @@ use std::path::Path;
 
 use spur_core::explore::apply::{self, Resolution, Selection};
 use spur_core::explore::catalog::{Catalog, CatalogEntry, ItemKind};
+use spur_core::explore::migrate;
 use spur_core::explore::pool::{self, Manifest};
 use spur_core::explore::store;
 use spur_core::explore::sync;
@@ -46,6 +47,12 @@ pub enum ExploreCommands {
     },
     /// Remove an item from the pool
     Remove { name: String },
+    /// Move legacy project-local explore catalog/cache/pool into the shared global store
+    MigrateGlobal {
+        /// Print planned moves without changing files
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Verify manifest/pool consistency and report drift
     Status,
 }
@@ -84,6 +91,7 @@ pub fn run(cmd: ExploreCommands, repo_root: &Path) -> Result<()> {
             }
         }
         ExploreCommands::Remove { name } => run_remove(repo_root, &name),
+        ExploreCommands::MigrateGlobal { dry_run } => run_migrate_global(repo_root, dry_run),
         ExploreCommands::Status => run_status(repo_root),
     }
 }
@@ -207,6 +215,56 @@ pub fn run_remove(repo_root: &Path, name: &str) -> Result<()> {
     let mut manifest = Manifest::load_layered(repo_root)?;
     apply::remove_layered(repo_root, &mut manifest, name)?;
     println!("removed {name}");
+    Ok(())
+}
+
+pub fn run_migrate_global(repo_root: &Path, dry_run: bool) -> Result<()> {
+    let global_root = store::global_root()
+        .context("global explore store unavailable; HOME is not configured for this user")?;
+    let report = migrate::migrate_global(repo_root, &global_root, dry_run)?;
+
+    for operation in &report.operations {
+        let prefix = if dry_run { "would" } else { "did" };
+        println!(
+            "{prefix} {} {} {} -> {}",
+            operation.action,
+            operation.kind,
+            operation.path,
+            operation.destination.display()
+        );
+    }
+
+    for conflict in &report.conflicts {
+        println!(
+            "skipped {} {} -> {}: {}",
+            conflict.kind,
+            conflict.path,
+            conflict.destination.display(),
+            conflict.reason
+        );
+    }
+
+    if report.manifest_preserved {
+        println!(
+            "kept project-local manifest at {}",
+            store::local_manifest_path(repo_root).display()
+        );
+    }
+
+    let verb = if dry_run { "would migrate" } else { "migrated" };
+    println!(
+        "{verb} {} explore store entries into {}",
+        report.operations.len(),
+        report.target_root.display()
+    );
+
+    if !report.conflicts.is_empty() {
+        bail!(
+            "migration left {} conflicting entries in place; no destination was overwritten",
+            report.conflicts.len()
+        );
+    }
+
     Ok(())
 }
 

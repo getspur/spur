@@ -2,6 +2,7 @@ pub mod apply;
 pub mod catalog;
 pub mod gate;
 pub mod materialize;
+pub mod migrate;
 pub mod pool;
 pub mod store;
 pub mod sync;
