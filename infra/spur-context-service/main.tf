@@ -49,6 +49,30 @@ resource "aws_dynamodb_table" "index_jobs" {
     type = "S"
   }
 
+  # Sparse queue GSI keyed by (queue_shard, queue_sort_key). Only queued job
+  # records carry these attributes (set at enqueue, removed at dispatch), so the
+  # GSI only indexes the active backlog — keeping it sparse and cheap. The
+  # drainer queries this GSI in FIFO order to find dispatch candidates, then
+  # fetches the full JOB#<job_id> record by the table primary key. KEYS_ONLY
+  # projection minimizes write/storage cost; the GSI always projects `pk`.
+  # See docs/superpowers/specs/2026-07-10-context-service-index-queue-backpressure-design.md
+  attribute {
+    name = "queue_shard"
+    type = "S"
+  }
+
+  attribute {
+    name = "queue_sort_key"
+    type = "S"
+  }
+
+  global_secondary_index {
+    name            = var.index_queue_gsi_name
+    hash_key        = "queue_shard"
+    range_key       = "queue_sort_key"
+    projection_type = "KEYS_ONLY"
+  }
+
   point_in_time_recovery {
     enabled = true
   }
@@ -168,6 +192,7 @@ resource "aws_lambda_function" "service" {
       SPUR_CATALOG_S3_URI                       = var.catalog_s3_uri
       SPUR_INDEX_STATE_MACHINE_ARN              = aws_sfn_state_machine.index_build.arn
       SPUR_INDEX_JOBS_TABLE                     = aws_dynamodb_table.index_jobs.name
+      SPUR_INDEX_QUEUE_GSI_NAME                 = aws_dynamodb_table.index_jobs.global_secondary_index[0].name
       SPUR_CATALOG_LEASES_TABLE                 = aws_dynamodb_table.catalog_leases.name
       SPUR_INDEX_RATE_LIMIT_PER_MINUTE          = tostring(var.index_rate_limit_per_minute)
       SPUR_INDEX_MAX_CONCURRENT_JOBS_PER_CALLER = tostring(var.index_max_concurrent_jobs_per_caller)
@@ -176,6 +201,15 @@ resource "aws_lambda_function" "service" {
       SPUR_CONTEXT_MAX_BUILD_SECONDS            = tostring(var.context_max_build_seconds)
       SPUR_CONTEXT_ALLOWED_SOURCE_DOMAINS       = join(",", var.allowed_source_domains)
       SPUR_CONTEXT_ALLOW_ANONYMOUS_MUTATIONS    = var.allow_anonymous_mutations ? "1" : "0"
+      # Bounded backlog queueing config. Defaults preserve current behavior
+      # (reject over capacity) until the admission path switches to enqueue.
+      SPUR_INDEX_QUEUE_SHARD_COUNT             = tostring(var.index_queue_shard_count)
+      SPUR_INDEX_MAX_RUNNING_JOBS_PER_OWNER    = tostring(var.index_max_running_jobs_per_owner)
+      SPUR_INDEX_MAX_QUEUED_JOBS_PER_OWNER     = tostring(var.index_max_queued_jobs_per_owner)
+      SPUR_INDEX_MAX_RUNNING_JOBS_GLOBAL       = tostring(var.index_max_running_jobs_global)
+      SPUR_INDEX_MAX_QUEUED_JOBS_GLOBAL        = tostring(var.index_max_queued_jobs_global)
+      SPUR_INDEX_DISPATCH_MAX_ATTEMPTS         = tostring(var.index_dispatch_max_attempts)
+      SPUR_INDEX_DISPATCH_BACKOFF_BASE_SECONDS = tostring(var.index_dispatch_backoff_base_seconds)
     }
   }
 
