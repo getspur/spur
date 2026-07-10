@@ -160,6 +160,11 @@ pub enum UserInput {
     CancelStream {
         session: SessionId,
     },
+    /// Cancel a running worker delegation by id. Maps to the orchestrator's
+    /// delegation cancellation path, not session stream cancellation.
+    CancelDelegation {
+        delegation_id: String,
+    },
     /// Request the orchestrator to refresh the issue list and re-emit IssuesLoaded.
     RefreshIssues,
     /// Request the orchestrator to refresh persisted plan summaries.
@@ -194,10 +199,12 @@ pub enum UserInput {
     ResumePlan {
         plan_id: String,
     },
-    /// Request the orchestrator to retry one persisted plan task by beads issue id.
+    /// Request the orchestrator to retry one persisted plan task by beads issue id,
+    /// optionally appending prompt text to the retry.
     RetryPlanTask {
         plan_id: Option<String>,
         issue_id: String,
+        append_prompt: Option<String>,
     },
     /// Request a read-only persisted implementation-plan snapshot.
     InspectPlan {

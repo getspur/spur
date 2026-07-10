@@ -231,6 +231,15 @@ impl App {
                 None
             }
 
+            Action::CancelDelegation { delegation_id } => {
+                tracing::debug!(delegation_id = %delegation_id, "dispatching CancelDelegation to orchestrator");
+                self.flash_hint_short(format!("Stopping delegation {delegation_id}..."));
+                if let Some(ref tx) = self.user_input_tx {
+                    let _ = tx.try_send(UserInput::CancelDelegation { delegation_id });
+                }
+                None
+            }
+
             Action::CopySessionId(session_id) => {
                 use base64::{engine::general_purpose::STANDARD, Engine};
                 use std::io::Write;
