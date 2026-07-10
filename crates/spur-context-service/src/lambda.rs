@@ -139,8 +139,40 @@ struct ToolRequest {
     clippy::await_holding_lock,
     reason = "route_index only consults the catalog before its first await"
 )]
-pub async fn handler(event: LambdaEvent<ApiGatewayRequest>) -> Result<ApiGatewayResponse, Error> {
-    let request = parse_tool_request(&event.payload);
+pub async fn handler(event: LambdaEvent<Value>) -> Result<Value, Error> {
+    if is_scheduled_drainer_event(&event.payload) {
+        let summary = drain_queued_jobs().await?;
+        return Ok(json!({
+            "operation": "drain_queued_jobs",
+            "dispatched": summary.dispatched,
+            "skipped": summary.skipped,
+            "failed": summary.failed
+        }));
+    }
+
+    let request = serde_json::from_value::<ApiGatewayRequest>(event.payload).map_err(|error| {
+        lambda_error(format!(
+            "failed to deserialize API Gateway invocation: {error}"
+        ))
+    })?;
+    let response = handle_api_gateway_request(request).await?;
+    serde_json::to_value(response).map_err(Error::from)
+}
+
+fn is_scheduled_drainer_event(payload: &Value) -> bool {
+    payload.get("source").and_then(Value::as_str) == Some("aws.events")
+        && payload.get("detail-type").and_then(Value::as_str) == Some("Scheduled Event")
+        && payload.pointer("/detail/operation").and_then(Value::as_str) == Some("drain_queued_jobs")
+}
+
+#[allow(
+    clippy::await_holding_lock,
+    reason = "route_index only consults the catalog before its first await"
+)]
+async fn handle_api_gateway_request(
+    api_gateway_request: ApiGatewayRequest,
+) -> Result<ApiGatewayResponse, Error> {
+    let request = parse_tool_request(&api_gateway_request);
     let request = match request {
         Ok(request) => request,
         Err(error) => return tool_error_response(error),
@@ -148,7 +180,7 @@ pub async fn handler(event: LambdaEvent<ApiGatewayRequest>) -> Result<ApiGateway
 
     let authenticated_caller = match request.tool.as_str() {
         "external_index" | "external_index_status" => Some(
-            match authenticated_caller_id(&event.payload, anonymous_mutations_allowed()) {
+            match authenticated_caller_id(&api_gateway_request, anonymous_mutations_allowed()) {
                 Ok(caller_id) => caller_id,
                 Err(error) => return auth_error_response(error),
             },
@@ -669,18 +701,22 @@ fn sfn_client() -> Result<SfnIndexExecutionStarter, Error> {
 /// and Step Functions starter. This is the correctness path that dispatches
 /// queued index jobs under configured running caps.
 ///
-/// It is called as a best-effort kick after a successful enqueue (see
-/// [`handler`]) and should also be wired to an EventBridge-scheduled Lambda
-/// trigger. Errors are logged and do not affect the admission response.
+/// It is called by the EventBridge-scheduled correctness trigger and as a
+/// best-effort kick after a successful enqueue (see [`handler`]). Kick errors
+/// are logged and do not affect the admission response.
 pub async fn drain_queued_jobs() -> Result<drainer::DrainSummary, Error> {
     let jobs = job_store();
     let starter = sfn_client()?;
     let config = mcp::index_queue_config();
+    let limits = mcp::index_drainer_limits();
     let now_secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_secs())
         .unwrap_or(0);
-    Ok(drainer::drain_queued_jobs_with_services(&jobs, &starter, config, now_secs).await)
+    Ok(drainer::Drainer::new(&jobs, &starter, config)
+        .with_limits(limits.max_dispatches_per_run, limits.scan_limit_per_shard)
+        .drain(now_secs)
+        .await)
 }
 
 /// Whether an `external_index` response represents a job accepted into the
@@ -979,6 +1015,38 @@ fn lambda_error(message: impl Into<String>) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn eventbridge_schedule_routes_to_queue_drainer() {
+        let event = json!({
+            "source": "aws.events",
+            "detail-type": "Scheduled Event",
+            "detail": {
+                "operation": "drain_queued_jobs"
+            }
+        });
+
+        assert!(is_scheduled_drainer_event(&event));
+    }
+
+    #[tokio::test]
+    async fn api_gateway_event_keeps_proxy_response_shape() {
+        let event = LambdaEvent::new(
+            json!({
+                "body": null,
+                "isBase64Encoded": false
+            }),
+            lambda_runtime::Context::default(),
+        );
+
+        let response = handler(event)
+            .await
+            .expect("invalid tool input should return an API Gateway error response");
+
+        assert_eq!(response["statusCode"], 200);
+        assert!(response["body"].is_string());
+        assert_eq!(response["isBase64Encoded"], false);
+    }
 
     fn request_from_context(request_context: Value) -> ApiGatewayRequest {
         serde_json::from_value(json!({

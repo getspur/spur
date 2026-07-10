@@ -22,10 +22,10 @@ use spur_context_service::jobs::{
     JobRecord, JobStatus, JobStore, JobsError, QueueConfig,
 };
 use spur_context_service::mcp::{
-    handle_tool, handle_tool_without_catalog, route_index, route_index_status,
-    route_index_status_for_caller, route_index_without_catalog, tool_definitions, ExecutionOutcome,
-    ExecutionOutcomeStatus, ExecutionStatusChecker, IndexExecutionRequest, IndexExecutionStarter,
-    McpHandlerError,
+    handle_tool, handle_tool_without_catalog, index_drainer_limits, index_queue_config,
+    route_index, route_index_status, route_index_status_for_caller, route_index_without_catalog,
+    tool_definitions, ExecutionOutcome, ExecutionOutcomeStatus, ExecutionStatusChecker,
+    IndexExecutionRequest, IndexExecutionStarter, McpHandlerError,
 };
 
 const PACKAGE: &str = "demo";
@@ -36,6 +36,34 @@ const DIMENSIONS: usize = 768;
 const EMBEDDING_MODEL: &str = "EmbeddingGemma300M";
 const EMBED_TEXT_VERSION: &str = "v4-embeddinggemma-300m-titled";
 static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+#[test]
+fn queue_config_uses_dedicated_per_owner_running_cap() {
+    let _env = EnvVarGuard::set("SPUR_INDEX_MAX_RUNNING_JOBS_PER_OWNER", "7");
+
+    assert_eq!(index_queue_config().max_running_per_owner, 7);
+}
+
+#[test]
+fn drainer_limits_use_runtime_environment() {
+    let _env = EnvVarGuard::set("SPUR_INDEX_DRAINER_BATCH_LIMIT", "5");
+
+    assert_eq!(index_drainer_limits().max_dispatches_per_run, 5);
+}
+
+#[test]
+fn drainer_scan_limit_uses_runtime_environment() {
+    let _env = EnvVarGuard::set("SPUR_INDEX_DRAINER_SCAN_LIMIT_PER_SHARD", "11");
+
+    assert_eq!(index_drainer_limits().scan_limit_per_shard, 11);
+}
+
+#[test]
+fn queue_config_bounds_global_running_token_probes() {
+    let _env = EnvVarGuard::set("SPUR_INDEX_MAX_RUNNING_JOBS_GLOBAL", "100");
+
+    assert_eq!(index_queue_config().max_running_global, 32);
+}
 
 struct EnvVarGuard {
     name: &'static str,
