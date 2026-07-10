@@ -21,23 +21,22 @@ impl Reconciler {
         };
 
         let mut summaries_by_id = HashMap::new();
+        let scoped_plan_ids = self.scoped_plan_ids().await?;
         for status in ["open", "in_progress"] {
-            let mut filter_labels = Vec::new();
-            if let Some(plan_id) = self.plan_id.as_deref() {
-                filter_labels.push(crate::plan::labels::plan_id(plan_id));
-            }
-            for summary in self
-                .pm
-                .list_issues(IssueFilter {
-                    labels: filter_labels,
-                    status: Some(status.to_string()),
-                    issue_type: Some("task".to_string()),
-                    limit: Some(10_000),
-                    ..Default::default()
-                })
-                .await?
-            {
-                summaries_by_id.entry(summary.id.clone()).or_insert(summary);
+            for plan_id in &scoped_plan_ids {
+                for summary in self
+                    .pm
+                    .list_issues(IssueFilter {
+                        labels: vec![crate::plan::labels::plan_id(plan_id)],
+                        status: Some(status.to_string()),
+                        issue_type: Some("task".to_string()),
+                        limit: Some(10_000),
+                        ..Default::default()
+                    })
+                    .await?
+                {
+                    summaries_by_id.entry(summary.id.clone()).or_insert(summary);
+                }
             }
         }
 
