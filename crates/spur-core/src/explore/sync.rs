@@ -9,8 +9,15 @@ pub fn cache_dir(root: &Path, repo: &str) -> PathBuf {
     crate::explore::store::local_cache_dir(root, repo)
 }
 
-fn ensure_cache_checkout(root: &Path, src: &SourceSpec) -> anyhow::Result<(PathBuf, String)> {
-    let dir = cache_dir(root, &src.repo);
+pub fn cache_dir_in_store(store_root: &Path, repo: &str) -> PathBuf {
+    crate::explore::store::cache_dir_in_store(store_root, repo)
+}
+
+fn ensure_cache_checkout_in_store(
+    store_root: &Path,
+    src: &SourceSpec,
+) -> anyhow::Result<(PathBuf, String)> {
+    let dir = cache_dir_in_store(store_root, &src.repo);
     let dir_arg = dir.to_string_lossy().to_string();
     let url = src
         .url
@@ -37,10 +44,15 @@ fn ensure_cache_checkout(root: &Path, src: &SourceSpec) -> anyhow::Result<(PathB
 }
 
 pub fn sync(root: &Path, manifest: &Manifest) -> anyhow::Result<Catalog> {
+    let store_root = crate::explore::store::local_root(root);
+    sync_to_store(&store_root, manifest)
+}
+
+pub fn sync_to_store(store_root: &Path, manifest: &Manifest) -> anyhow::Result<Catalog> {
     let mut entries = Vec::new();
 
     for source in &manifest.sources {
-        let (checkout, pinned_commit) = ensure_cache_checkout(root, source)
+        let (checkout, pinned_commit) = ensure_cache_checkout_in_store(store_root, source)
             .with_context(|| format!("sync source {}", source.repo))?;
         let mut source_entries =
             catalog::scan_source_checkout(&checkout, &source.repo, &pinned_commit)
@@ -56,7 +68,7 @@ pub fn sync(root: &Path, manifest: &Manifest) -> anyhow::Result<Catalog> {
         synced_at_epoch: Some(synced_at_epoch),
         entries,
     };
-    catalog.save(root)?;
+    catalog.save_to_store(store_root)?;
     Ok(catalog)
 }
 
