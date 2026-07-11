@@ -17,12 +17,18 @@ use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::{Mutex, MutexGuard, OnceLock};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use lambda_runtime::{Error, LambdaEvent};
+use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
+use crate::api_keys::{
+    generate_api_key, ApiKeyRecord, ApiKeyScopes, ApiKeyStore, ApiKeyStoreError, CreateKeyRecord,
+    DynamoDbApiKeyStore, KeyEnvironment, RevokeResult,
+};
 use crate::auth::{self, AuthConfig, AuthDecision, AuthFailure, IamContext, RequestRoute};
 use crate::catalog::{self, CatalogResolver};
 use crate::drainer;
@@ -63,6 +69,8 @@ pub struct ApiGatewayRequest {
     pub path: Option<String>,
     #[serde(rename = "rawPath", default)]
     pub raw_path: Option<String>,
+    #[serde(rename = "queryStringParameters", default)]
+    pub query_string_parameters: Option<BTreeMap<String, String>>,
     #[serde(rename = "requestContext", default)]
     pub request_context: Option<ApiGatewayRequestContext>,
 }
@@ -85,6 +93,8 @@ pub struct ApiGatewayAuthorizer {
     pub iam: Option<IamAuthorizer>,
     #[serde(default)]
     pub jwt: Option<JwtAuthorizer>,
+    #[serde(default)]
+    pub lambda: Option<Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -185,9 +195,42 @@ fn is_scheduled_drainer_event(payload: &Value) -> bool {
 async fn handle_api_gateway_request(
     api_gateway_request: ApiGatewayRequest,
 ) -> Result<ApiGatewayResponse, Error> {
+    if let Some(response) = handle_reserved_route_before_body(&api_gateway_request) {
+        return response;
+    }
+    let route = request_route(&api_gateway_request);
+    if let Err(error) = reject_api_key_auth_on_wrong_route(&api_gateway_request) {
+        return authorization_error_response(error);
+    }
+    if matches!(
+        route,
+        RequestRoute::ApiKeyCreate | RequestRoute::ApiKeyList | RequestRoute::ApiKeyRevoke
+    ) {
+        let Some(config) = ApiKeyManagementConfig::from_environment() else {
+            return reserved_route_disabled_response(route);
+        };
+        let store = api_key_store();
+        return handle_api_key_management(
+            route,
+            &api_gateway_request,
+            &store,
+            &config,
+            unix_now_seconds()?,
+        )
+        .await;
+    }
     if let Err(error) = reject_jwt_auth_on_wrong_route(&api_gateway_request) {
         return authorization_error_response(error);
     }
+
+    let api_key_context = if route == RequestRoute::ApiKeyMcp {
+        match api_key_context(&api_gateway_request) {
+            Ok(context) => Some(context),
+            Err(error) => return authorization_error_response(error),
+        }
+    } else {
+        None
+    };
 
     let request = parse_tool_request(&api_gateway_request);
     let request = match request {
@@ -195,8 +238,12 @@ async fn handle_api_gateway_request(
         Err(error) => return tool_error_response(error),
     };
 
-    let is_oauth_request = is_oauth_route(&api_gateway_request);
-    let authenticated_caller = if is_oauth_request {
+    let authenticated_caller = if route == RequestRoute::ApiKeyMcp {
+        match auth::authorize_api_key_tool(&request.tool, api_key_context.as_ref()) {
+            Ok(decision) => Some(decision.identity.caller_id().to_owned()),
+            Err(error) => return authorization_error_response(error),
+        }
+    } else if route == RequestRoute::OAuth {
         let config = match AuthConfig::from_environment() {
             Ok(Some(config)) => config,
             Ok(None) => return authorization_error_response(AuthFailure::AuthDisabled),
@@ -283,6 +330,547 @@ async fn handle_api_gateway_request(
     }
 }
 
+const SECONDS_PER_DAY: u64 = 86_400;
+const DEFAULT_API_KEY_TTL_DAYS: u64 = 90;
+const MAX_API_KEY_TTL_DAYS: u64 = 365;
+const API_KEY_LIST_LIMIT: usize = 100;
+const API_KEY_CREATE_MAX_ATTEMPTS: usize = 3;
+const API_KEY_CURSOR_MAX_LEN: usize = 128;
+
+#[derive(Debug, Clone)]
+struct ApiKeyManagementConfig {
+    auth: AuthConfig,
+    environment: KeyEnvironment,
+    default_ttl_days: u64,
+    max_ttl_days: u64,
+}
+
+impl ApiKeyManagementConfig {
+    fn new(
+        auth: AuthConfig,
+        environment: KeyEnvironment,
+        default_ttl_days: u64,
+        max_ttl_days: u64,
+    ) -> Option<Self> {
+        if default_ttl_days == 0
+            || max_ttl_days == 0
+            || default_ttl_days > max_ttl_days
+            || max_ttl_days > MAX_API_KEY_TTL_DAYS
+        {
+            return None;
+        }
+        Some(Self {
+            auth,
+            environment,
+            default_ttl_days,
+            max_ttl_days,
+        })
+    }
+
+    fn from_environment() -> Option<Self> {
+        if !api_key_routes_configured() {
+            return None;
+        }
+        let auth = AuthConfig::from_environment().ok().flatten()?;
+        let environment = match env::var("SPUR_API_KEY_ENVIRONMENT")
+            .unwrap_or_else(|_| "live".to_owned())
+            .as_str()
+        {
+            "live" => KeyEnvironment::Live,
+            "test" => KeyEnvironment::Test,
+            _ => return None,
+        };
+        let default_ttl_days =
+            environment_u64("SPUR_API_KEY_DEFAULT_TTL_DAYS", DEFAULT_API_KEY_TTL_DAYS)?;
+        let max_ttl_days = environment_u64("SPUR_API_KEY_MAX_TTL_DAYS", MAX_API_KEY_TTL_DAYS)?;
+        Self::new(auth, environment, default_ttl_days, max_ttl_days)
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CreateApiKeyRequest {
+    name: String,
+    scopes: Vec<String>,
+    #[serde(default)]
+    expires_at: Option<u64>,
+}
+
+async fn handle_api_key_management(
+    route: RequestRoute,
+    request: &ApiGatewayRequest,
+    store: &dyn ApiKeyStore,
+    config: &ApiKeyManagementConfig,
+    now_epoch_seconds: u64,
+) -> Result<ApiGatewayResponse, Error> {
+    let claims = request
+        .request_context
+        .as_ref()
+        .and_then(|context| context.authorizer.as_ref())
+        .and_then(|authorizer| authorizer.jwt.as_ref())
+        .and_then(|jwt| jwt.claims.as_ref());
+    let decision = match auth::authorize_key_management(&config.auth, claims, now_epoch_seconds) {
+        Ok(decision) => decision,
+        Err(error) => return authorization_error_response(error),
+    };
+    let owner_id = decision.identity.caller_id();
+    match route {
+        RequestRoute::ApiKeyCreate => {
+            create_api_key(request, store, config, owner_id, now_epoch_seconds).await
+        }
+        RequestRoute::ApiKeyList => list_api_keys(request, store, owner_id).await,
+        RequestRoute::ApiKeyRevoke => {
+            revoke_api_key(request, store, owner_id, now_epoch_seconds).await
+        }
+        _ => reserved_route_disabled_response(route),
+    }
+}
+
+async fn create_api_key(
+    request: &ApiGatewayRequest,
+    store: &dyn ApiKeyStore,
+    config: &ApiKeyManagementConfig,
+    owner_id: &str,
+    now_epoch_seconds: u64,
+) -> Result<ApiGatewayResponse, Error> {
+    create_api_key_with_generator(
+        request,
+        store,
+        config,
+        owner_id,
+        now_epoch_seconds,
+        generate_api_key,
+    )
+    .await
+}
+
+async fn create_api_key_with_generator<F>(
+    request: &ApiGatewayRequest,
+    store: &dyn ApiKeyStore,
+    config: &ApiKeyManagementConfig,
+    owner_id: &str,
+    now_epoch_seconds: u64,
+    mut generator: F,
+) -> Result<ApiGatewayResponse, Error>
+where
+    F: FnMut(
+        KeyEnvironment,
+        &str,
+        &str,
+        ApiKeyScopes,
+        u64,
+        u64,
+    ) -> Result<crate::api_keys::GeneratedApiKey, crate::api_keys::ApiKeyError>,
+{
+    if request.is_base64_encoded {
+        return management_error_response(400, "invalid_request");
+    }
+    let create = request
+        .body
+        .as_deref()
+        .and_then(|body| serde_json::from_str::<CreateApiKeyRequest>(body).ok());
+    let Some(create) = create else {
+        return management_error_response(400, "invalid_request");
+    };
+    let scope_refs = create.scopes.iter().map(String::as_str).collect::<Vec<_>>();
+    let scopes = match ApiKeyScopes::parse(&scope_refs) {
+        Ok(scopes) => scopes,
+        Err(_) => return management_error_response(400, "invalid_scope"),
+    };
+    let default_expiry = now_epoch_seconds.checked_add(
+        config
+            .default_ttl_days
+            .checked_mul(SECONDS_PER_DAY)
+            .ok_or_else(|| lambda_error("API key default expiry overflow"))?,
+    );
+    let max_expiry = now_epoch_seconds.checked_add(
+        config
+            .max_ttl_days
+            .checked_mul(SECONDS_PER_DAY)
+            .ok_or_else(|| lambda_error("API key maximum expiry overflow"))?,
+    );
+    let (Some(default_expiry), Some(max_expiry)) = (default_expiry, max_expiry) else {
+        return management_error_response(503, "key_service_unavailable");
+    };
+    let expires_at = create.expires_at.unwrap_or(default_expiry);
+    if expires_at <= now_epoch_seconds || expires_at > max_expiry {
+        return management_error_response(400, "invalid_expiry");
+    }
+    for attempt in 0..API_KEY_CREATE_MAX_ATTEMPTS {
+        let generated = match generator(
+            config.environment,
+            owner_id,
+            &create.name,
+            scopes.clone(),
+            now_epoch_seconds,
+            expires_at,
+        ) {
+            Ok(generated) => generated,
+            Err(crate::api_keys::ApiKeyError::InvalidName) => {
+                return management_error_response(400, "invalid_name");
+            }
+            Err(crate::api_keys::ApiKeyError::InvalidScope) => {
+                return management_error_response(400, "invalid_scope");
+            }
+            Err(crate::api_keys::ApiKeyError::InvalidExpiry) => {
+                return management_error_response(400, "invalid_expiry");
+            }
+            Err(_) => return management_error_response(503, "key_service_unavailable"),
+        };
+        match store
+            .create_key(CreateKeyRecord::new(generated.record.clone()))
+            .await
+        {
+            Ok(()) => {
+                let plaintext = generated.plaintext.expose_secret().to_owned();
+                let record = generated.record;
+                return json_response(
+                    201,
+                    &json!({
+                        "key": plaintext,
+                        "key_id": record.public_id,
+                        "name": record.name,
+                        "scopes": record.scopes.as_strings(),
+                        "created_at": record.created_at,
+                        "expires_at": record.expires_at,
+                    }),
+                );
+            }
+            Err(ApiKeyStoreError::DuplicatePublicId)
+                if attempt + 1 < API_KEY_CREATE_MAX_ATTEMPTS => {}
+            Err(error) => return api_key_store_error_response(error),
+        }
+    }
+    management_error_response(503, "key_store_unavailable")
+}
+
+async fn list_api_keys(
+    request: &ApiGatewayRequest,
+    store: &dyn ApiKeyStore,
+    owner_id: &str,
+) -> Result<ApiGatewayResponse, Error> {
+    let query = request.query_string_parameters.as_ref();
+    let cursor = query
+        .and_then(|parameters| parameters.get("cursor"))
+        .map(String::as_str);
+    if cursor.is_some_and(|value| value.is_empty() || value.len() > API_KEY_CURSOR_MAX_LEN) {
+        return management_error_response(400, "invalid_request");
+    }
+    let limit = match query.and_then(|parameters| parameters.get("limit")) {
+        Some(value) => match parse_api_key_list_limit(value) {
+            Some(limit) => limit,
+            None => return management_error_response(400, "invalid_request"),
+        },
+        None => API_KEY_LIST_LIMIT,
+    };
+    let page = match store.list_owner_keys(owner_id, cursor, limit).await {
+        Ok(page) => page,
+        Err(error) => return api_key_store_error_response(error),
+    };
+    let keys = page.keys.iter().map(api_key_metadata).collect::<Vec<_>>();
+    json_response(
+        200,
+        &json!({ "keys": keys, "next_cursor": page.next_cursor }),
+    )
+}
+
+fn parse_api_key_list_limit(value: &str) -> Option<usize> {
+    if value.is_empty()
+        || !value.bytes().all(|byte| byte.is_ascii_digit())
+        || (value.len() > 1 && value.starts_with('0'))
+    {
+        return None;
+    }
+    value
+        .parse()
+        .ok()
+        .filter(|limit| (1..=API_KEY_LIST_LIMIT).contains(limit))
+}
+
+fn api_key_metadata(record: &ApiKeyRecord) -> Value {
+    json!({
+        "key_id": record.public_id,
+        "name": record.name,
+        "scopes": record.scopes.as_strings(),
+        "status": record.status.as_str(),
+        "created_at": record.created_at,
+        "expires_at": record.expires_at,
+        "revoked_at": record.revoked_at,
+    })
+}
+
+async fn revoke_api_key(
+    request: &ApiGatewayRequest,
+    store: &dyn ApiKeyStore,
+    owner_id: &str,
+    now_epoch_seconds: u64,
+) -> Result<ApiGatewayResponse, Error> {
+    let key_id = request
+        .raw_path
+        .as_deref()
+        .or(request.path.as_deref())
+        .and_then(|path| path.strip_prefix("/auth/api-keys/"))
+        .filter(|key_id| valid_public_key_id(key_id));
+    let Some(key_id) = key_id else {
+        return management_error_response(404, "not_found");
+    };
+    match store.revoke_key(owner_id, key_id, now_epoch_seconds).await {
+        Ok(RevokeResult::Revoked | RevokeResult::AlreadyRevoked) => {
+            json_response(200, &json!({ "key_id": key_id, "status": "revoked" }))
+        }
+        Ok(RevokeResult::NotFound) => management_error_response(404, "not_found"),
+        Err(error) => api_key_store_error_response(error),
+    }
+}
+
+fn api_key_store_error_response(error: ApiKeyStoreError) -> Result<ApiGatewayResponse, Error> {
+    match error {
+        ApiKeyStoreError::OwnerLimit => management_error_response(409, "key_limit_reached"),
+        ApiKeyStoreError::InvalidRequest => management_error_response(400, "invalid_request"),
+        ApiKeyStoreError::DuplicatePublicId
+        | ApiKeyStoreError::LeaseBusy
+        | ApiKeyStoreError::Conflict
+        | ApiKeyStoreError::Backend => management_error_response(503, "key_store_unavailable"),
+    }
+}
+
+fn management_error_response(
+    status_code: u16,
+    code: &'static str,
+) -> Result<ApiGatewayResponse, Error> {
+    json_response(status_code, &json!({ "error": { "code": code } }))
+}
+
+fn valid_public_key_id(key_id: &str) -> bool {
+    key_id.len() == 26
+        && key_id
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || (b'2'..=b'7').contains(&byte))
+}
+
+fn environment_u64(name: &str, default: u64) -> Option<u64> {
+    match env::var(name) {
+        Ok(value) => value.parse().ok(),
+        Err(env::VarError::NotPresent) => Some(default),
+        Err(env::VarError::NotUnicode(_)) => None,
+    }
+}
+
+fn unix_now_seconds() -> Result<u64, Error> {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .map_err(|_| lambda_error("system clock is before Unix epoch"))
+}
+
+#[derive(Debug, Clone)]
+struct DiscoveryConfig {
+    issuer: String,
+    human_client_id: String,
+    authorization_endpoint: String,
+    token_endpoint: String,
+    service_base_url: String,
+}
+
+impl DiscoveryConfig {
+    fn from_environment() -> Option<Self> {
+        if !environment_is_truthy("SPUR_COGNITO_AUTH_ENABLED") {
+            return None;
+        }
+        Self::new(
+            env::var("SPUR_COGNITO_ISSUER").ok()?,
+            env::var("SPUR_COGNITO_HUMAN_CLIENT_ID").ok()?,
+            env::var("SPUR_COGNITO_AUTHORIZATION_ENDPOINT").ok()?,
+            env::var("SPUR_COGNITO_TOKEN_ENDPOINT").ok()?,
+            env::var("SPUR_CONTEXT_SERVICE_BASE_URL").ok()?,
+        )
+    }
+
+    fn new(
+        issuer: String,
+        human_client_id: String,
+        authorization_endpoint: String,
+        token_endpoint: String,
+        service_base_url: String,
+    ) -> Option<Self> {
+        let bounded = [
+            issuer.as_str(),
+            human_client_id.as_str(),
+            authorization_endpoint.as_str(),
+            token_endpoint.as_str(),
+            service_base_url.as_str(),
+        ]
+        .into_iter()
+        .all(|value| {
+            !value.is_empty()
+                && value.len() <= 2_048
+                && value.trim() == value
+                && !value.chars().any(char::is_control)
+        });
+        let secure_urls = [
+            &issuer,
+            &authorization_endpoint,
+            &token_endpoint,
+            &service_base_url,
+        ]
+        .into_iter()
+        .all(|value| value.starts_with("https://"));
+        let service_origin_is_bounded =
+            https_origin(&service_base_url).is_some() && !service_base_url.contains(['?', '#']);
+        let oauth_endpoints_are_consistent = https_origin(&authorization_endpoint).is_some()
+            && https_origin(&authorization_endpoint) == https_origin(&token_endpoint)
+            && !authorization_endpoint.contains(['?', '#'])
+            && !token_endpoint.contains(['?', '#']);
+        if !bounded || !secure_urls || !service_origin_is_bounded || !oauth_endpoints_are_consistent
+        {
+            return None;
+        }
+        Some(Self {
+            issuer,
+            human_client_id,
+            authorization_endpoint,
+            token_endpoint,
+            service_base_url: service_base_url.trim_end_matches('/').to_owned(),
+        })
+    }
+
+    #[cfg(test)]
+    fn from_contract_fixture(value: &Value) -> Option<Self> {
+        Self::new(
+            value.get("issuer")?.as_str()?.to_owned(),
+            value.get("human_client_id")?.as_str()?.to_owned(),
+            value.get("authorization_endpoint")?.as_str()?.to_owned(),
+            value.get("token_endpoint")?.as_str()?.to_owned(),
+            value.get("service_base_url")?.as_str()?.to_owned(),
+        )
+    }
+}
+
+fn https_origin(value: &str) -> Option<&str> {
+    let authority_and_path = value.strip_prefix("https://")?;
+    let authority_len = authority_and_path
+        .find(['/', '?', '#'])
+        .unwrap_or(authority_and_path.len());
+    let authority = &authority_and_path[..authority_len];
+    if authority.is_empty() || authority.contains('@') {
+        return None;
+    }
+    Some(&value[.."https://".len() + authority_len])
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+struct DiscoveryDocument {
+    schema_version: u8,
+    issuer: String,
+    human_client_id: String,
+    authorization_endpoint: String,
+    token_endpoint: String,
+    supported_scopes: Vec<String>,
+    api_key_auth_enabled: bool,
+    api_key_mcp_url: String,
+    api_key_management_url: String,
+}
+
+fn discovery_document(
+    config: &DiscoveryConfig,
+    api_key_auth_enabled: bool,
+) -> Option<DiscoveryDocument> {
+    let resource_server_id = env::var("SPUR_COGNITO_RESOURCE_SERVER_ID")
+        .unwrap_or_else(|_| "urn:spur:context-service".to_owned());
+    if resource_server_id.trim().is_empty()
+        || resource_server_id.len() > 256
+        || resource_server_id.chars().any(char::is_control)
+    {
+        return None;
+    }
+    Some(DiscoveryDocument {
+        schema_version: 1,
+        issuer: config.issuer.clone(),
+        human_client_id: config.human_client_id.clone(),
+        authorization_endpoint: config.authorization_endpoint.clone(),
+        token_endpoint: config.token_endpoint.clone(),
+        supported_scopes: [
+            "external.index",
+            "external.read",
+            "external.status",
+            "keys.manage",
+        ]
+        .into_iter()
+        .map(|scope| format!("{resource_server_id}/{scope}"))
+        .collect(),
+        api_key_auth_enabled,
+        api_key_mcp_url: format!("{}{}", config.service_base_url, auth::API_KEY_MCP_PATH),
+        api_key_management_url: format!(
+            "{}{}",
+            config.service_base_url,
+            auth::API_KEY_MANAGEMENT_PATH
+        ),
+    })
+}
+
+fn handle_reserved_route_before_body(
+    request: &ApiGatewayRequest,
+) -> Option<Result<ApiGatewayResponse, Error>> {
+    let route = request_route(request);
+    match route {
+        RequestRoute::ReservedUnavailable => Some(reserved_route_disabled_response(route)),
+        RequestRoute::Discovery => {
+            let Some(config) = DiscoveryConfig::from_environment() else {
+                return Some(reserved_route_disabled_response(route));
+            };
+            let enabled = ApiKeyManagementConfig::from_environment().is_some();
+            Some(match discovery_document(&config, enabled) {
+                Some(document) => serde_json::to_value(document)
+                    .map_err(Error::from)
+                    .and_then(|value| json_response(200, &value)),
+                None => reserved_route_disabled_response(route),
+            })
+        }
+        route if route.is_api_key() && !api_key_routes_configured() => {
+            Some(reserved_route_disabled_response(route))
+        }
+        _ => None,
+    }
+}
+
+fn request_route(request: &ApiGatewayRequest) -> RequestRoute {
+    auth::classify_route(
+        request.raw_path.as_deref().or(request.path.as_deref()),
+        request
+            .request_context
+            .as_ref()
+            .and_then(|context| context.http.as_ref())
+            .and_then(|http| http.method.as_deref()),
+    )
+}
+
+fn reserved_route_disabled_response(_route: RequestRoute) -> Result<ApiGatewayResponse, Error> {
+    json_response(404, &json!({ "error": { "code": "route_unavailable" } }))
+}
+
+fn api_key_auth_enabled() -> bool {
+    environment_is_truthy("SPUR_API_KEY_AUTH_ENABLED")
+}
+
+fn api_key_store_configured() -> bool {
+    env::var("SPUR_CONTEXT_API_KEYS_TABLE")
+        .ok()
+        .is_some_and(|name| !name.trim().is_empty() && name.len() <= 255)
+}
+
+fn api_key_routes_configured() -> bool {
+    api_key_auth_enabled()
+        && api_key_store_configured()
+        && DiscoveryConfig::from_environment().is_some()
+}
+
+fn environment_is_truthy(name: &str) -> bool {
+    matches!(
+        env::var(name).ok().as_deref().map(str::trim),
+        Some("1") | Some("true") | Some("TRUE") | Some("yes")
+    )
+}
+
 pub async fn route_index_status_control_plane(
     args: &Value,
     jobs: &dyn JobStore,
@@ -326,18 +914,9 @@ fn routed_tool_name(request: &ApiGatewayRequest) -> Option<&'static str> {
     }
 }
 
+#[cfg(test)]
 fn is_oauth_route(request: &ApiGatewayRequest) -> bool {
-    matches!(
-        auth::classify_route(
-            request.raw_path.as_deref().or(request.path.as_deref()),
-            request
-                .request_context
-                .as_ref()
-                .and_then(|context| context.http.as_ref())
-                .and_then(|http| http.method.as_deref()),
-        ),
-        RequestRoute::OAuth
-    )
+    matches!(request_route(request), RequestRoute::OAuth)
 }
 
 fn reject_jwt_auth_on_wrong_route(request: &ApiGatewayRequest) -> Result<(), AuthFailure> {
@@ -348,11 +927,55 @@ fn reject_jwt_auth_on_wrong_route(request: &ApiGatewayRequest) -> Result<(), Aut
         .and_then(|authorizer| authorizer.jwt.as_ref())
         .is_some();
 
-    if has_jwt_context && !is_oauth_route(request) {
+    if has_jwt_context
+        && !matches!(
+            request_route(request),
+            RequestRoute::OAuth
+                | RequestRoute::ApiKeyCreate
+                | RequestRoute::ApiKeyList
+                | RequestRoute::ApiKeyRevoke
+        )
+    {
         Err(AuthFailure::WrongRoute)
     } else {
         Ok(())
     }
+}
+
+fn reject_api_key_auth_on_wrong_route(request: &ApiGatewayRequest) -> Result<(), AuthFailure> {
+    let has_api_key_context = request
+        .request_context
+        .as_ref()
+        .and_then(|context| context.authorizer.as_ref())
+        .and_then(|authorizer| authorizer.lambda.as_ref())
+        .is_some();
+    if has_api_key_context && request_route(request) != RequestRoute::ApiKeyMcp {
+        Err(AuthFailure::WrongRoute)
+    } else {
+        Ok(())
+    }
+}
+
+fn api_key_context(
+    request: &ApiGatewayRequest,
+) -> Result<crate::api_key_authorizer::ApiKeyAuthContext, AuthFailure> {
+    let value = request
+        .request_context
+        .as_ref()
+        .and_then(|context| context.authorizer.as_ref())
+        .and_then(|authorizer| authorizer.lambda.as_ref())
+        .ok_or(AuthFailure::MissingContext)?;
+    crate::api_key_authorizer::ApiKeyAuthContext::from_value(value)
+        .map_err(|_| AuthFailure::InvalidApiKeyContext)
+}
+
+#[cfg(test)]
+fn authorize_api_key_request(
+    request: &ApiGatewayRequest,
+    tool: &str,
+) -> Result<AuthDecision, AuthFailure> {
+    let context = api_key_context(request)?;
+    auth::authorize_api_key_tool(tool, Some(&context))
 }
 
 fn authorize_oauth_request_now(
@@ -770,6 +1393,10 @@ fn job_store() -> DynamoDbJobStore {
     DynamoDbJobStore::new(aws_clients().dynamodb.clone())
 }
 
+fn api_key_store() -> DynamoDbApiKeyStore {
+    DynamoDbApiKeyStore::new(aws_clients().dynamodb.clone())
+}
+
 fn status_checker() -> mcp::SfnExecutionStatusChecker {
     mcp::SfnExecutionStatusChecker::new(aws_clients().sfn.clone())
 }
@@ -1145,6 +1772,11 @@ mod tests {
             .expect("hybrid auth contract fixture should be valid JSON")
     }
 
+    fn api_key_auth_fixture() -> Value {
+        serde_json::from_str(include_str!("../tests/fixtures/api-key-auth-contract.json"))
+            .expect("API-key auth contract fixture should be valid JSON")
+    }
+
     fn poc_external_index_fixture() -> &'static str {
         include_str!(
             "../../../infra/spur-context-service/poc/fixtures/external-index-validation-only.json"
@@ -1164,12 +1796,735 @@ mod tests {
     }
 
     #[test]
+    fn api_key_fixture_reserves_exact_routes_and_publishes_bounded_discovery() {
+        let fixture = api_key_auth_fixture();
+
+        for case in fixture_cases(&fixture, "route_cases") {
+            let route = auth::classify_route(
+                Some(fixture_str(case, "path")),
+                case.get("method").and_then(Value::as_str),
+            );
+            assert_eq!(route.as_str(), fixture_str(case, "expected"));
+        }
+
+        let config = DiscoveryConfig::from_contract_fixture(&fixture["discovery_config"])
+            .expect("fixture discovery configuration should be valid");
+        let document = discovery_document(&config, true)
+            .expect("configured Cognito discovery should be available");
+        assert_eq!(
+            serde_json::to_value(document).expect("discovery document should serialize"),
+            fixture["discovery_document"]
+        );
+    }
+
+    #[test]
+    fn api_key_discovery_rejects_insecure_or_mismatched_endpoint_configuration() {
+        assert!(DiscoveryConfig::new(
+            "https://issuer.example/pool".to_owned(),
+            "human-client".to_owned(),
+            "https://auth-a.example/oauth2/authorize".to_owned(),
+            "https://auth-b.example/oauth2/token".to_owned(),
+            "https://context.example".to_owned(),
+        )
+        .is_none());
+        assert!(DiscoveryConfig::new(
+            "https://issuer.example/pool".to_owned(),
+            "human-client".to_owned(),
+            "https://auth.example/oauth2/authorize".to_owned(),
+            "https://auth.example/oauth2/token".to_owned(),
+            "x".to_owned(),
+        )
+        .is_none());
+        assert!(DiscoveryConfig::new(
+            "https://issuer.example/pool".to_owned(),
+            "human-client".to_owned(),
+            "http://auth.example/oauth2/authorize".to_owned(),
+            "https://auth.example/oauth2/token".to_owned(),
+            "https://context.example".to_owned(),
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn api_key_fixture_reserved_routes_fail_closed_before_body_parsing() {
+        let fixture = api_key_auth_fixture();
+        for case in fixture_cases(&fixture, "route_cases") {
+            let route = auth::classify_route(
+                Some(fixture_str(case, "path")),
+                case.get("method").and_then(Value::as_str),
+            );
+            if matches!(route, RequestRoute::OAuth | RequestRoute::Legacy) {
+                continue;
+            }
+
+            let response = reserved_route_disabled_response(route)
+                .expect("every reserved route must return before parsing a malformed body");
+            assert_eq!(response.status_code, 404);
+            assert_eq!(
+                serde_json::from_str::<Value>(&response.body)
+                    .expect("reserved-route body should be bounded JSON"),
+                json!({ "error": { "code": "route_unavailable" } })
+            );
+        }
+    }
+
+    #[test]
+    fn api_key_fixture_context_is_typed_versioned_and_exact_scope_checked() {
+        let fixture = api_key_auth_fixture();
+        let context = crate::auth::ApiKeyAuthContext::from_value(&fixture["api_key_context"])
+            .expect("fixture authorizer context should satisfy v1");
+
+        assert_eq!(context.owner_id(), "cognito:user:fixture-human");
+        assert_eq!(context.key_id(), "aaaaaaaaaaaaaaaaaaaaaaaaaa");
+        for tool in [
+            "external_catalog",
+            "external_index",
+            "external_index_status",
+        ] {
+            let decision = crate::auth::authorize_api_key_tool(tool, Some(&context))
+                .unwrap_or_else(|error| panic!("{tool} should authorize: {error:?}"));
+            assert_eq!(decision.identity.caller_id(), "cognito:user:fixture-human");
+        }
+
+        let mut wrong_version = fixture["api_key_context"].clone();
+        wrong_version["auth_context_version"] = json!(2);
+        assert_eq!(
+            crate::auth::ApiKeyAuthContext::from_value(&wrong_version)
+                .unwrap_err()
+                .to_string(),
+            "invalid API key authorizer context"
+        );
+        let mut delegated_management = fixture["api_key_context"].clone();
+        delegated_management["scopes"] = json!("external.read keys.manage");
+        assert_eq!(
+            crate::auth::ApiKeyAuthContext::from_value(&delegated_management)
+                .unwrap_err()
+                .to_string(),
+            "invalid API key authorizer context"
+        );
+    }
+
+    #[test]
+    fn api_key_fixture_management_is_human_client_and_keys_manage_only() {
+        let fixture = api_key_auth_fixture();
+        let config = crate::auth::AuthConfig::new(
+            "https://issuer.example/pool",
+            "human-client",
+            ["m2m-client"],
+            std::iter::empty::<&str>(),
+            "urn:spur:context-service",
+        );
+
+        let decision = crate::auth::authorize_key_management(
+            &config,
+            Some(&fixture["human_management_claims"]),
+            1_700_000_000,
+        )
+        .expect("human management token should authorize");
+        assert_eq!(decision.identity.caller_id(), "cognito:user:fixture-human");
+        assert_eq!(
+            decision.identity.scheme(),
+            crate::auth::AuthScheme::CognitoUser
+        );
+        assert_eq!(
+            decision.identity.principal_kind(),
+            crate::auth::PrincipalKind::Human
+        );
+
+        let mut m2m = fixture["human_management_claims"].clone();
+        m2m["client_id"] = json!("m2m-client");
+        m2m.as_object_mut()
+            .expect("claims should be an object")
+            .remove("sub");
+        assert_eq!(
+            crate::auth::authorize_key_management(&config, Some(&m2m), 1_700_000_000),
+            Err(crate::auth::AuthFailure::HumanManagementRequired)
+        );
+
+        let mut wrong_scope = fixture["human_management_claims"].clone();
+        wrong_scope["scope"] = json!("urn:spur:context-service/external.read");
+        assert_eq!(
+            crate::auth::authorize_key_management(&config, Some(&wrong_scope), 1_700_000_000),
+            Err(crate::auth::AuthFailure::MissingScope)
+        );
+        assert_eq!(
+            crate::auth::authorize_key_management(&config, None, 1_700_000_000),
+            Err(crate::auth::AuthFailure::MissingContext)
+        );
+    }
+
+    fn management_config() -> ApiKeyManagementConfig {
+        ApiKeyManagementConfig::new(
+            crate::auth::AuthConfig::new(
+                "https://issuer.example/pool",
+                "human-client",
+                ["m2m-client"],
+                std::iter::empty::<&str>(),
+                "urn:spur:context-service",
+            ),
+            crate::api_keys::KeyEnvironment::Live,
+            90,
+            365,
+        )
+        .expect("test management configuration should be valid")
+    }
+
+    fn management_request(
+        method: &str,
+        path: &str,
+        body: Option<Value>,
+        sub: &str,
+    ) -> ApiGatewayRequest {
+        serde_json::from_value(json!({
+            "rawPath": path,
+            "body": body.map(|value| value.to_string()),
+            "requestContext": {
+                "authorizer": {
+                    "jwt": {
+                        "claims": {
+                            "iss": "https://issuer.example/pool",
+                            "token_use": "access",
+                            "client_id": "human-client",
+                            "sub": sub,
+                            "exp": "2000000000",
+                            "scope": "urn:spur:context-service/keys.manage"
+                        }
+                    }
+                },
+                "http": { "method": method }
+            }
+        }))
+        .expect("management request should deserialize")
+    }
+
+    fn response_body(response: &ApiGatewayResponse) -> Value {
+        serde_json::from_str(&response.body).expect("response body should be JSON")
+    }
+
+    #[tokio::test]
+    async fn api_key_management_create_list_and_revoke_reveal_plaintext_once() {
+        let now = 1_700_000_000;
+        let store = crate::api_keys::FakeApiKeyStore::new();
+        let create = management_request(
+            "POST",
+            "/auth/api-keys",
+            Some(json!({
+                "name": "workstation",
+                "scopes": ["external.read", "external.index", "external.status"]
+            })),
+            "owner-a",
+        );
+        let created = handle_api_key_management(
+            RequestRoute::ApiKeyCreate,
+            &create,
+            &store,
+            &management_config(),
+            now,
+        )
+        .await
+        .expect("create response should serialize");
+        let created_body = response_body(&created);
+        assert_eq!(created.status_code, 201);
+        assert!(created_body["key"]
+            .as_str()
+            .is_some_and(|key| key.starts_with("spur_live_")));
+        assert_eq!(created_body["expires_at"], now + 90 * 86_400);
+        let key_id = fixture_str(&created_body, "key_id").to_owned();
+
+        let list = management_request("GET", "/auth/api-keys", None, "owner-a");
+        let listed = handle_api_key_management(
+            RequestRoute::ApiKeyList,
+            &list,
+            &store,
+            &management_config(),
+            now,
+        )
+        .await
+        .expect("list response should serialize");
+        let listed_body = response_body(&listed);
+        assert_eq!(listed.status_code, 200);
+        assert_eq!(listed_body["keys"][0]["key_id"], key_id);
+        assert!(listed.body.find("spur_live_").is_none());
+        assert!(listed.body.find("secret_hash").is_none());
+        assert!(listed.body.find("cognito:user:owner-a").is_none());
+
+        let revoke_path = format!("/auth/api-keys/{key_id}");
+        let revoke = management_request("DELETE", &revoke_path, None, "owner-a");
+        for _ in 0..2 {
+            let revoked = handle_api_key_management(
+                RequestRoute::ApiKeyRevoke,
+                &revoke,
+                &store,
+                &management_config(),
+                now + 1,
+            )
+            .await
+            .expect("revoke response should serialize");
+            assert_eq!(revoked.status_code, 200);
+            assert_eq!(response_body(&revoked)["status"], "revoked");
+            assert!(revoked.body.find("spur_live_").is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn api_key_management_enforces_owner_scope_expiry_and_active_cap() {
+        let now = 1_700_000_000;
+        let store = crate::api_keys::FakeApiKeyStore::new();
+        let config = management_config();
+        for index in 0..10 {
+            let request = management_request(
+                "POST",
+                "/auth/api-keys",
+                Some(json!({
+                    "name": format!("key-{index}"),
+                    "scopes": ["external.read"],
+                    "expires_at": now + 365 * 86_400
+                })),
+                "owner-a",
+            );
+            let response = handle_api_key_management(
+                RequestRoute::ApiKeyCreate,
+                &request,
+                &store,
+                &config,
+                now,
+            )
+            .await
+            .expect("bounded create response should serialize");
+            assert_eq!(response.status_code, 201);
+        }
+        let eleventh = management_request(
+            "POST",
+            "/auth/api-keys",
+            Some(json!({ "name": "eleventh", "scopes": ["external.read"] })),
+            "owner-a",
+        );
+        let response =
+            handle_api_key_management(RequestRoute::ApiKeyCreate, &eleventh, &store, &config, now)
+                .await
+                .expect("cap response should serialize");
+        assert_eq!(response.status_code, 409);
+        assert_eq!(
+            response_body(&response)["error"]["code"],
+            "key_limit_reached"
+        );
+
+        for body in [
+            json!({ "name": "delegated", "scopes": ["keys.manage"] }),
+            json!({ "name": "too-long", "scopes": ["external.read"], "expires_at": now + 365 * 86_400 + 1 }),
+        ] {
+            let request = management_request("POST", "/auth/api-keys", Some(body), "owner-b");
+            let response = handle_api_key_management(
+                RequestRoute::ApiKeyCreate,
+                &request,
+                &store,
+                &config,
+                now,
+            )
+            .await
+            .expect("validation response should serialize");
+            assert_eq!(response.status_code, 400);
+        }
+
+        let owner_a_list = management_request("GET", "/auth/api-keys", None, "owner-a");
+        let owner_b_list = management_request("GET", "/auth/api-keys", None, "owner-b");
+        let owner_a = handle_api_key_management(
+            RequestRoute::ApiKeyList,
+            &owner_a_list,
+            &store,
+            &config,
+            now,
+        )
+        .await
+        .expect("owner list should serialize");
+        let owner_b = handle_api_key_management(
+            RequestRoute::ApiKeyList,
+            &owner_b_list,
+            &store,
+            &config,
+            now,
+        )
+        .await
+        .expect("owner list should serialize");
+        assert_eq!(
+            response_body(&owner_a)["keys"].as_array().map(Vec::len),
+            Some(10)
+        );
+        assert_eq!(response_body(&owner_b)["keys"], json!([]));
+
+        let key_id = response_body(&owner_a)["keys"][0]["key_id"]
+            .as_str()
+            .expect("key id should be present")
+            .to_owned();
+        let cross_owner = management_request(
+            "DELETE",
+            &format!("/auth/api-keys/{key_id}"),
+            None,
+            "owner-b",
+        );
+        let response = handle_api_key_management(
+            RequestRoute::ApiKeyRevoke,
+            &cross_owner,
+            &store,
+            &config,
+            now,
+        )
+        .await
+        .expect("cross-owner response should serialize");
+        assert_eq!(response.status_code, 404);
+        assert_eq!(response_body(&response)["error"]["code"], "not_found");
+    }
+
+    #[tokio::test]
+    async fn api_key_create_retries_only_public_id_collisions_and_reveals_the_winner() {
+        let now = 1_700_000_000;
+        let owner = "cognito:user:collision-owner";
+        let scopes = ApiKeyScopes::parse(&["external.read"]).expect("scope should be valid");
+        let collision = generate_api_key(
+            KeyEnvironment::Live,
+            owner,
+            "collision",
+            scopes.clone(),
+            now,
+            now + 3_600,
+        )
+        .expect("collision key should generate");
+        let collision_plaintext = collision.plaintext.expose_secret().to_owned();
+        let winner = generate_api_key(
+            KeyEnvironment::Live,
+            owner,
+            "collision",
+            scopes,
+            now,
+            now + 3_600,
+        )
+        .expect("winner key should generate");
+        let winner_plaintext = winner.plaintext.expose_secret().to_owned();
+        let store = crate::api_keys::FakeApiKeyStore::new();
+        store
+            .create_key(CreateKeyRecord::new(collision.record.clone()))
+            .await
+            .expect("collision record should already exist");
+        let mut generated = std::collections::VecDeque::from([collision, winner]);
+        let request = management_request(
+            "POST",
+            "/auth/api-keys",
+            Some(json!({ "name": "collision", "scopes": ["external.read"] })),
+            "collision-owner",
+        );
+
+        let response = create_api_key_with_generator(
+            &request,
+            &store,
+            &management_config(),
+            owner,
+            now,
+            |_, _, _, _, _, _| {
+                generated
+                    .pop_front()
+                    .ok_or(crate::api_keys::ApiKeyError::GenerationUnavailable)
+            },
+        )
+        .await
+        .expect("duplicate followed by success should return a response");
+
+        assert_eq!(response.status_code, 201);
+        assert_eq!(response_body(&response)["key"], winner_plaintext);
+        assert!(!response.body.contains(&collision_plaintext));
+        assert!(generated.is_empty());
+    }
+
+    #[tokio::test]
+    async fn api_key_create_bounds_collision_retries_and_does_not_retry_owner_limit() {
+        let now = 1_700_000_000;
+        let owner = "cognito:user:retry-owner";
+        let scopes = ApiKeyScopes::parse(&["external.read"]).expect("scope should be valid");
+        let store = crate::api_keys::FakeApiKeyStore::new();
+        let mut collisions = std::collections::VecDeque::new();
+        for index in 0..3 {
+            let generated = generate_api_key(
+                KeyEnvironment::Live,
+                owner,
+                &format!("collision-{index}"),
+                scopes.clone(),
+                now,
+                now + 3_600,
+            )
+            .expect("collision key should generate");
+            store
+                .create_key(CreateKeyRecord::new(generated.record.clone()))
+                .await
+                .expect("collision record should already exist");
+            collisions.push_back(generated);
+        }
+        let request = management_request(
+            "POST",
+            "/auth/api-keys",
+            Some(json!({ "name": "collision", "scopes": ["external.read"] })),
+            "retry-owner",
+        );
+        let response = create_api_key_with_generator(
+            &request,
+            &store,
+            &management_config(),
+            owner,
+            now,
+            |_, _, _, _, _, _| {
+                collisions
+                    .pop_front()
+                    .ok_or(crate::api_keys::ApiKeyError::GenerationUnavailable)
+            },
+        )
+        .await
+        .expect("retry exhaustion should return a bounded response");
+        assert_eq!(response.status_code, 503);
+        assert_eq!(
+            response_body(&response)["error"]["code"],
+            "key_store_unavailable"
+        );
+        assert!(collisions.is_empty());
+
+        let capped_owner = "cognito:user:capped-owner";
+        for index in 0..10 {
+            let generated = generate_api_key(
+                KeyEnvironment::Live,
+                capped_owner,
+                &format!("cap-{index}"),
+                ApiKeyScopes::parse(&["external.read"]).expect("scope should be valid"),
+                now,
+                now + 3_600,
+            )
+            .expect("cap key should generate");
+            store
+                .create_key(CreateKeyRecord::new(generated.record))
+                .await
+                .expect("cap record should persist");
+        }
+        let mut attempts = 0;
+        let capped_request = management_request(
+            "POST",
+            "/auth/api-keys",
+            Some(json!({ "name": "capped", "scopes": ["external.read"] })),
+            "capped-owner",
+        );
+        let response = create_api_key_with_generator(
+            &capped_request,
+            &store,
+            &management_config(),
+            capped_owner,
+            now,
+            |environment, owner, name, scopes, created_at, expires_at| {
+                attempts += 1;
+                generate_api_key(environment, owner, name, scopes, created_at, expires_at)
+            },
+        )
+        .await
+        .expect("owner cap should return a bounded response");
+        assert_eq!(response.status_code, 409);
+        assert_eq!(attempts, 1);
+    }
+
+    #[tokio::test]
+    async fn api_key_list_accepts_bounded_query_pagination_and_reaches_history() {
+        let now = 1_700_000_000;
+        let owner = "cognito:user:history-owner";
+        let store = crate::api_keys::FakeApiKeyStore::new();
+        for index in 0..101_u64 {
+            let generated = generate_api_key(
+                KeyEnvironment::Live,
+                owner,
+                &format!("history-{index}"),
+                ApiKeyScopes::parse(&["external.read"]).expect("scope should be valid"),
+                now + index,
+                now + 10_000,
+            )
+            .expect("historical key should generate");
+            let key_id = generated.public_id.clone();
+            store
+                .create_key(CreateKeyRecord::new(generated.record))
+                .await
+                .expect("historical key should persist");
+            assert_eq!(
+                store
+                    .revoke_key(owner, &key_id, now + 1_000)
+                    .await
+                    .expect("historical key should revoke"),
+                RevokeResult::Revoked
+            );
+        }
+
+        let first = management_request(
+            "GET",
+            "/auth/api-keys",
+            Some(json!({ "cursor": "not-a-cursor", "limit": 1 })),
+            "history-owner",
+        );
+        let first = handle_api_key_management(
+            RequestRoute::ApiKeyList,
+            &first,
+            &store,
+            &management_config(),
+            now,
+        )
+        .await
+        .expect("first history page should serialize");
+        let first_body = response_body(&first);
+        assert_eq!(first_body["keys"].as_array().map(Vec::len), Some(100));
+        let cursor = fixture_str(&first_body, "next_cursor");
+
+        let second = serde_json::from_value::<ApiGatewayRequest>(json!({
+            "rawPath": "/auth/api-keys",
+            "queryStringParameters": { "cursor": cursor, "limit": "100" },
+            "requestContext": {
+                "authorizer": { "jwt": { "claims": {
+                    "iss": "https://issuer.example/pool",
+                    "token_use": "access",
+                    "client_id": "human-client",
+                    "sub": "history-owner",
+                    "exp": "2000000000",
+                    "scope": "urn:spur:context-service/keys.manage"
+                }}},
+                "http": { "method": "GET" }
+            }
+        }))
+        .expect("paginated request should deserialize");
+        let second = handle_api_key_management(
+            RequestRoute::ApiKeyList,
+            &second,
+            &store,
+            &management_config(),
+            now,
+        )
+        .await
+        .expect("second history page should serialize");
+        assert_eq!(
+            response_body(&second)["keys"].as_array().map(Vec::len),
+            Some(1)
+        );
+
+        for parameters in [
+            json!({ "limit": "0" }),
+            json!({ "limit": "101" }),
+            json!({ "limit": "many" }),
+            json!({ "limit": "+1" }),
+            json!({ "limit": "01" }),
+            json!({ "cursor": "not-a-cursor" }),
+        ] {
+            let malformed = serde_json::from_value::<ApiGatewayRequest>(json!({
+                "rawPath": "/auth/api-keys",
+                "queryStringParameters": parameters,
+                "requestContext": {
+                    "authorizer": { "jwt": { "claims": {
+                        "iss": "https://issuer.example/pool",
+                        "token_use": "access",
+                        "client_id": "human-client",
+                        "sub": "history-owner",
+                        "exp": "2000000000",
+                        "scope": "urn:spur:context-service/keys.manage"
+                    }}},
+                    "http": { "method": "GET" }
+                }
+            }))
+            .expect("malformed query request should deserialize");
+            let response = handle_api_key_management(
+                RequestRoute::ApiKeyList,
+                &malformed,
+                &store,
+                &management_config(),
+                now,
+            )
+            .await
+            .expect("malformed query should return a bounded response");
+            assert_eq!(response.status_code, 400);
+            assert_eq!(response_body(&response)["error"]["code"], "invalid_request");
+        }
+    }
+
+    #[test]
+    fn api_key_mcp_trusts_only_v1_lambda_context_and_rechecks_body_scope() {
+        let fixture = api_key_auth_fixture();
+        let request = serde_json::from_value::<ApiGatewayRequest>(json!({
+            "rawPath": "/mcp/api-key",
+            "requestContext": {
+                "authorizer": {
+                    "lambda": fixture["api_key_context"].clone(),
+                    "principalId": "fallback-principal",
+                    "iam": {
+                        "accountId": "123456789012",
+                        "userId": "AROAFALLBACK:session"
+                    }
+                },
+                "http": { "method": "POST", "sourceIp": "203.0.113.24" }
+            }
+        }))
+        .expect("API-key request should deserialize");
+
+        let decision = authorize_api_key_request(&request, "external_index")
+            .expect("context with external.index should authorize");
+        assert_eq!(decision.identity.caller_id(), "cognito:user:fixture-human");
+
+        let mut read_only = fixture["api_key_context"].clone();
+        read_only["scopes"] = json!("external.read");
+        let read_only_request = serde_json::from_value::<ApiGatewayRequest>(json!({
+            "rawPath": "/mcp/api-key",
+            "requestContext": {
+                "authorizer": { "lambda": read_only },
+                "http": { "method": "POST" }
+            }
+        }))
+        .expect("read-only API-key request should deserialize");
+        assert_eq!(
+            authorize_api_key_request(&read_only_request, "external_index"),
+            Err(crate::auth::AuthFailure::MissingScope)
+        );
+
+        let fallback_only = serde_json::from_value::<ApiGatewayRequest>(json!({
+            "rawPath": "/mcp/api-key",
+            "requestContext": {
+                "authorizer": {
+                    "principalId": "fallback-principal",
+                    "iam": { "accountId": "123456789012", "userId": "AROAFALLBACK:session" },
+                    "jwt": { "claims": fixture["human_management_claims"].clone() }
+                },
+                "http": { "method": "POST", "sourceIp": "203.0.113.24" }
+            }
+        }))
+        .expect("wrong-context API-key request should deserialize");
+        assert_eq!(
+            authorize_api_key_request(&fallback_only, "external_catalog"),
+            Err(crate::auth::AuthFailure::MissingContext)
+        );
+    }
+
+    #[test]
+    fn api_key_context_on_any_other_route_fails_without_legacy_downgrade() {
+        let fixture = api_key_auth_fixture();
+        let request = serde_json::from_value::<ApiGatewayRequest>(json!({
+            "rawPath": "/mcp",
+            "requestContext": {
+                "authorizer": {
+                    "lambda": fixture["api_key_context"].clone(),
+                    "principalId": "fallback-principal"
+                },
+                "http": { "method": "POST", "sourceIp": "203.0.113.24" }
+            }
+        }))
+        .expect("wrong-route context should deserialize");
+
+        assert_eq!(
+            reject_api_key_auth_on_wrong_route(&request),
+            Err(crate::auth::AuthFailure::WrongRoute)
+        );
+    }
+
+    #[test]
     fn poc_external_index_fixture_parses_through_oauth_request_contract() {
         let request = ApiGatewayRequest {
             body: Some(poc_external_index_fixture().to_owned()),
             is_base64_encoded: false,
             path: None,
             raw_path: Some("/mcp/oauth".to_owned()),
+            query_string_parameters: None,
             request_context: Some(ApiGatewayRequestContext {
                 authorizer: None,
                 http: Some(ApiGatewayHttp {

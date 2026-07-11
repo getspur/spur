@@ -16,6 +16,11 @@ path = "src/main.rs"
 required-features = ["lambda"]
 
 [[bin]]
+name = "spur-context-api-key-authorizer"
+path = "src/bin/api_key_authorizer.rs"
+required-features = ["api-key-authorizer"]
+
+[[bin]]
 name = "spur-context-indexer"
 path = "src/bin/index.rs"
 
@@ -30,10 +35,12 @@ path = "src/bin/worker_lambda.rs"
 required-features = ["worker-lambda"]
 
 [features]
-default = []
-analyst = []
-lambda = ["dep:lambda_runtime"]
-worker = []
+default = ["service"]
+service = ["dep:duckdb"]
+analyst = ["service"]
+lambda = ["service", "api-key-authorizer"]
+api-key-authorizer = ["dep:lambda_runtime"]
+worker = ["service"]
 worker-lambda = ["worker", "dep:lambda_runtime"]
 
 [dependencies]
@@ -47,7 +54,7 @@ aws-sdk-sfn = "1"
 clap = { version = "4", features = ["derive", "env"] }
 # DuckDB v1.5.4 (crate 1.10504.0) — DuckLake 1.0 with S3 write support.
 # Isolated from the workspace's duckdb v1.4.4 (needed by spur-analyst for DuckPGQ).
-duckdb = { version = "=1.10504.0", features = ["bundled"] }
+duckdb = { version = "=1.10504.0", features = ["bundled"], optional = true }
 lambda_runtime = { version = "1.2.1", optional = true, features = ["concurrency-tokio"] }
 rand = "0.8"
 secrecy = "0.10"
