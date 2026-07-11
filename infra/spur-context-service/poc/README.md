@@ -1,4 +1,4 @@
-# Disposable Cognito authentication POC
+# Disposable Cognito and personal API-key authentication POC
 
 This directory is an isolated Terraform root and state contract for `bd-2hv5u`.
 It models only the Cognito authentication ingress and a validation-only job
@@ -17,7 +17,10 @@ does **not** run `terraform apply`, live smoke tests, or `terraform destroy`.
 - Replace the `poc_suffix`, `Owner`, and `CostCenter` placeholders. Every
   taggable resource gets `PocId`, `Environment`, `ManagedBy`, and ownership tags.
 - The root creates its own Lite pool/domain/clients, API/JWT route, published
-  Lambda and alias, job table, log groups, IAM role, and invoke policy.
+  Lambda and alias, job table, log groups, IAM role, and invoke policy. The
+  independently disabled `api_key_auth_enabled` gate can add only a dedicated
+  key table, synthetic-test-key authorizer, exact management/MCP/discovery
+  routes, bounded cleanup function/schedule, and their isolated IAM/logs.
 - It creates no S3 bucket, worker, Step Functions state machine, VPC, queue
   drainer, or production data-plane reference. Lambda receives an empty state
   machine ARN and global/per-owner running and queued caps of zero. A uniquely
@@ -46,10 +49,12 @@ From the repository root:
 infra/spur-context-service/poc/scripts/offline-smoke.sh
 ```
 
-The runner uses `scripts/spur-cargo --dir` for both Rust packages, executes the
+The runner uses `scripts/spur-cargo --dir` for both standalone Rust packages,
+and `scripts/spur-cargo` for workspace packages. It executes the
 standalone client's PKCE/OIDC, Basic-auth, cache, redirect, and redaction tests,
-runs the context-service semantic auth tests, validates the sanitized evidence
-matrix, checks shell syntax and teardown fixtures, and runs only Terraform
+runs the service/core/CLI route, owner/quota, auth isolation, cleanup capacity,
+and secret-redaction regressions, validates the sanitized API-key evidence
+matrix, checks shell syntax and expanded teardown fixtures, and runs only Terraform
 `fmt`, `init -backend=false`, `validate`, and mock-provider `test`/`plan` actions.
 It does not read AWS credentials or call AWS.
 
@@ -70,7 +75,10 @@ candidate commit, evidence location, retention deadline, and teardown owner.
 3. **Create local configuration outside version control.** Copy
    `terraform.tfvars.example` and `backends/poc.s3.tfbackend.example`; replace
    every marker with sandbox-only values. Set `poc_enabled=true` and set
-   `creation_confirmation` to the exact guard string only after review.
+   `creation_confirmation` to the exact guard string only after review. Keep
+   `api_key_auth_enabled=false` for the Cognito baseline; a later reviewed plan
+   may set it true with separately built authorizer/cleanup artifacts. This POC
+   accepts only synthetic `spur_test_...` keys, never `spur_live_...` values.
 4. **Initialize only the POC state.** From this directory, run
    `terraform init -reconfigure -backend-config=/secure/path/poc.s3.tfbackend`.
    Reject any backend key or inventory that overlaps the production baseline.
@@ -93,8 +101,13 @@ candidate commit, evidence location, retention deadline, and teardown owner.
 7. **Run live smoke only against POC outputs.** Configure the standalone client
    from an approved secret channel/environment, never arguments or fixtures.
    Execute the objective cases in `fixtures/evidence-cases.json`, using the
-   validation-only index input. Capture only request IDs, statuses, bounded
-   reason enums, non-secret claim names, resource addresses, and metrics.
+   validation-only index input. For API keys, observe authorizer event/context,
+   allow and deny caching, create/revoke strong-read behavior, rejection within
+   30 seconds, header presence after request mapping, route isolation, and
+   cleanup progress. Capture only request IDs, statuses, bounded reason enums,
+   non-secret claim names, resource addresses, and metrics. The committed
+   `api-key-gateway-evidence.json` deliberately says `not-observed-offline`;
+   replace that statement only in separately retained, sanitized live evidence.
 8. **Prove production unchanged.** Recreate sanitized `after` plan/inventory
    artifacts and run:
 
@@ -125,7 +138,8 @@ candidate commit, evidence location, retention deadline, and teardown owner.
 
 The teardown inventory explicitly covers the tagged-resource API, user pool,
 domain, resource server, all human/M2M app clients and generated-secret owners,
-API Gateway API, Lambda function, published version and alias, DynamoDB table, both log groups,
-IAM role, and invoke policy. Finally re-run the production comparison and delete
+API Gateway API and request authorizer, all Lambda functions, versions, aliases,
+resource policies, both DynamoDB tables, cleanup rule/target, log groups, IAM
+roles, and invoke policy. Finally re-run the production comparison and delete
 the POC backend state under the sandbox retention policy. Keep only approved,
 sanitized evidence.

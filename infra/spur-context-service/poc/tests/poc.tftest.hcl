@@ -10,9 +10,103 @@ run "disabled_default_plans_no_poc_resources" {
       length(aws_cognito_user_pool.poc) == 0 &&
       length(aws_apigatewayv2_api.poc) == 0 &&
       length(aws_lambda_function.validation) == 0 &&
-      length(aws_dynamodb_table.index_jobs) == 0
+      length(aws_dynamodb_table.index_jobs) == 0 &&
+      length(aws_dynamodb_table.api_keys) == 0 &&
+      length(aws_lambda_function.api_key_authorizer) == 0 &&
+      length(aws_lambda_function.api_key_cleanup) == 0 &&
+      length(aws_apigatewayv2_route.api_key_mcp) == 0 &&
+      length(aws_apigatewayv2_route.api_key_management) == 0 &&
+      length(aws_cloudwatch_event_rule.api_key_cleanup) == 0
     )
     error_message = "the default safety gate must plan no POC resources"
+  }
+}
+
+run "api_key_feature_is_independently_disabled" {
+  command = plan
+
+  variables {
+    poc_enabled           = true
+    creation_confirmation = "I_UNDERSTAND_THIS_CREATES_DISPOSABLE_POC_RESOURCES"
+    poc_suffix            = "unit-test-no-key"
+    poc_owner             = "fixture-owner"
+    cost_center           = "fixture-cost"
+  }
+
+  assert {
+    condition = (
+      length(aws_dynamodb_table.api_keys) == 0 &&
+      length(aws_lambda_function.api_key_authorizer) == 0 &&
+      length(aws_lambda_function.api_key_cleanup) == 0 &&
+      length(aws_apigatewayv2_route.api_key_mcp) == 0 &&
+      length(aws_apigatewayv2_route.api_key_management) == 0 &&
+      aws_apigatewayv2_route.oauth[0].route_key == "POST /mcp/oauth" &&
+      aws_apigatewayv2_route.legacy[0].authorization_type == "AWS_IAM"
+    )
+    error_message = "API-key resources must be independently disabled without changing OAuth or IAM"
+  }
+}
+
+run "mock_enabled_api_key_plan_is_exact_bounded_and_isolated" {
+  command = plan
+
+  variables {
+    poc_enabled                 = true
+    api_key_auth_enabled        = true
+    creation_confirmation       = "I_UNDERSTAND_THIS_CREATES_DISPOSABLE_POC_RESOURCES"
+    poc_suffix                  = "unit-test-key"
+    poc_owner                   = "fixture-owner"
+    cost_center                 = "fixture-cost"
+    api_key_authorizer_zip_path = "./artifacts/synthetic-authorizer.zip"
+    api_key_cleanup_zip_path    = "./artifacts/synthetic-cleanup.zip"
+  }
+
+  assert {
+    condition = (
+      aws_apigatewayv2_route.api_key_discovery[0].route_key == "GET /.well-known/spur-context-service" &&
+      aws_apigatewayv2_route.api_key_mcp[0].route_key == "POST /mcp/api-key" &&
+      aws_apigatewayv2_route.api_key_mcp[0].authorization_type == "CUSTOM" &&
+      toset(keys(aws_apigatewayv2_route.api_key_management)) == toset([
+        "POST /auth/api-keys",
+        "GET /auth/api-keys",
+        "DELETE /auth/api-keys/{key_id}",
+      ])
+    )
+    error_message = "mock-enabled mode must add only the exact discovery, API-key MCP, and management routes"
+  }
+
+  assert {
+    condition = (
+      aws_apigatewayv2_authorizer.api_key[0].authorizer_result_ttl_in_seconds == 30 &&
+      toset(aws_apigatewayv2_authorizer.api_key[0].identity_sources) == toset([
+        "$context.routeKey",
+        "$request.header.X-SPUR-API-Key",
+      ]) &&
+      aws_apigatewayv2_integration.api_key[0].request_parameters["remove:header.X-SPUR-API-Key"] == "''" &&
+      aws_lambda_function.api_key_authorizer[0].environment[0].variables["SPUR_API_KEY_ENVIRONMENT"] == "test"
+    )
+    error_message = "the POC authorizer must use synthetic test keys, route-aware 30-second caching, and header removal"
+  }
+
+  assert {
+    condition = (
+      aws_cloudwatch_event_rule.api_key_cleanup[0].schedule_expression == "rate(5 minutes)" &&
+      jsondecode(aws_cloudwatch_event_target.api_key_cleanup[0].input).detail.operation == "sweep_expired_api_keys" &&
+      aws_lambda_function.api_key_cleanup[0].environment[0].variables["SPUR_API_KEY_CLEANUP_MAX_BUCKETS"] == "4" &&
+      aws_lambda_function.api_key_cleanup[0].environment[0].variables["SPUR_API_KEY_CLEANUP_MAX_PAGES"] == "8" &&
+      aws_lambda_function.api_key_cleanup[0].environment[0].variables["SPUR_API_KEY_CLEANUP_MAX_RECORDS"] == "100"
+    )
+    error_message = "cleanup must retain the bounded five-minute 1,200-record/hour contract"
+  }
+
+  assert {
+    condition = (
+      aws_apigatewayv2_route.oauth[0].route_key == "POST /mcp/oauth" &&
+      aws_apigatewayv2_route.legacy[0].authorization_type == "AWS_IAM" &&
+      aws_lambda_function.validation[0].environment[0].variables["SPUR_INDEX_MAX_RUNNING_JOBS_GLOBAL"] == "0" &&
+      aws_lambda_function.validation[0].environment[0].variables["SPUR_INDEX_MAX_QUEUED_JOBS_GLOBAL"] == "0"
+    )
+    error_message = "API-key POC mode must preserve OAuth/IAM and zero-dispatch isolation"
   }
 }
 

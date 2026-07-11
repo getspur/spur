@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "evidence_state": "offline-contract-only",
+  "live_observation_status": "not-observed-offline",
+  "header_mapping_key": "remove:header.X-SPUR-API-Key",
+  "expected_serving_event_header": "absent-if-supported",
+  "trust_if_header_present": "typed-authorizer-context-only",
+  "authorizer_cache_seconds": 30,
+  "cache_identity": ["route_key", "api_key_header"],
+  "cache_decisions": ["allow", "deny"],
+  "revocation_slo_seconds": 30,
+  "strong_read_expectation": "create-and-revoke-visible-on-cache-miss",
+  "observed_gateway_status_body": "pending-separately-approved-live-poc",
+  "prohibited_claim": "offline checks do not claim API Gateway runtime observation"
+}

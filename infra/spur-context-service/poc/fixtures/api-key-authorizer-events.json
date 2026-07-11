@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "evidence_state": "offline-synthetic",
+  "events": [
+    {
+      "name": "synthetic_test_key_allow",
+      "route_key": "POST /mcp/api-key",
+      "identity_source_order": ["route_key", "api_key_header"],
+      "api_key": "spur_test_aaaaaaaaaaaaaaaaaaaaaaaaaa_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "expected_decision": "allow",
+      "expected_owner": "cognito:user:fixture-human",
+      "expected_scope": "external.read"
+    },
+    {
+      "name": "synthetic_test_key_deny",
+      "route_key": "POST /mcp/api-key",
+      "identity_source_order": ["api_key_header", "route_key"],
+      "api_key": "spur_test_aaaaaaaaaaaaaaaaaaaaaaaaaa_cccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "expected_decision": "deny",
+      "expected_reason_class": "non-enumerating-unauthorized"
+    }
+  ]
+}
