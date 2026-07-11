@@ -1,0 +1,29 @@
+[package]
+name = "spur-context-auth-client"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# This is deliberately an independent package: OAuth/OIDC dependencies must not
+# enter the production context-service Lambda dependency graph.
+[workspace]
+
+[dependencies]
+oauth2 = { version = "5", default-features = false, features = ["reqwest", "rustls-tls"] }
+openidconnect = { version = "4", default-features = false, features = ["reqwest", "rustls-tls"] }
+rand = "0.8"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots"] }
+serde = { version = "1", features = ["derive"] }
+subtle = "2"
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
+url = "2"
+
+[dev-dependencies]
+base64 = "0.22"
+jsonwebtoken = "9"
+rand = "0.8"
+rsa = { version = "0.9", features = ["pem"] }
+serde_json = "1"
+sha2 = "0.10"
+wiremock = "0.6"
