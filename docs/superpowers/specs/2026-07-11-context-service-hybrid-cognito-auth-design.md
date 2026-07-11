@@ -150,6 +150,66 @@ rotation, revocation, and tenant registry; Cognito does not natively validate
 such keys. Revisit a Lambda authorizer only if audience scale or immediate
 revocation becomes more important than the native-authorizer simplicity.
 
+### Chosen Rust libraries and dependency boundary
+
+The production `spur-context-service` Lambda does not add an OAuth, OIDC, JWT,
+JWKS, or HTTP-client dependency for Cognito authentication. API Gateway remains
+the cryptographic verifier, and `src/auth.rs` performs only semantic checks over
+the validated authorizer context. This avoids duplicate key caches, network I/O
+on the request path, and disagreement between two signature verifiers.
+
+The isolated POC/client utility uses mature standards-based crates instead:
+
+- [`oauth2` 5.x][rust-oauth2] for M2M `client_credentials`, Basic client
+  authentication, typed scopes and token responses, secret redaction, and PKCE
+  primitives;
+- [`openidconnect` 4.x][rust-openidconnect] for the human authorization-code
+  flow, provider metadata, ID-token issuer/audience/signature verification,
+  nonce verification, and access-token hash verification when the ID token
+  supplies that claim; and
+- `reqwest` with Rustls, redirect following disabled, bounded connect/request
+  timeouts, and no proxy inherited from untrusted request data.
+
+These dependencies live in a standalone POC package under
+`infra/spur-context-service/poc/auth-client/`, with its own `Cargo.toml`. They
+must not become normal dependencies of `spur-context-service`. Build and test
+that package through `scripts/spur-cargo --dir infra/spur-context-service/poc/auth-client`,
+never bare `cargo`.
+
+For M2M, configure `AuthType::BasicAuth`, request only the exact custom scopes,
+and cache the returned token by `(client_id, normalized_scope_set)`. The HTTP
+client must reject redirects: the `oauth2` crate explicitly warns that following
+token-endpoint redirects can expose requests to SSRF and credential leakage
+([`oauth2` security guidance][rust-oauth2-security]). The human client always
+uses `PkceCodeChallenge::new_random_sha256`, verifies one-time `state`, retains
+the verifier only until code exchange, and verifies the returned ID token with
+the original nonce. Although `ClientSecret` debug formatting is redacted, some
+token-response parse errors retain raw response bytes. The POC maps library
+errors immediately into a bounded local reason enum and never logs or returns a
+raw `RequestTokenError`.
+
+### Rejected: `cognito-jwt-verify` in the Lambda
+
+An external-index inspection of `cognito-jwt-verify` 0.2.0 found that it does
+not match this design's Cognito access-token contract:
+
+- its base claims require user-shaped `sub`, `auth_time`, and `jti` values;
+- its `jsonwebtoken::Validation` requires `sub`, enables `validate_aud`, and
+  configures app client IDs as JWT audiences;
+- Cognito access-token `aud` is present only when resource binding is requested,
+  while this design deliberately classifies clients with `client_id`;
+- an empty configured client-ID list skips client validation;
+- the default permits both ID and access tokens instead of failing closed to
+  access tokens; and
+- its access-token integration test proves only that a dummy-signature token
+  fails, not that a real user or M2M Cognito token succeeds.
+
+The crate's RS256 header check, JWK caching, and exact scope splitting are useful
+reference patterns, but adopting or forking it would duplicate API Gateway and
+would require correcting the claim and audience model first. It is therefore a
+research reference only, not an implementation dependency
+([indexed crate source][rust-cognito-jwt-source]).
+
 ## Architecture and trust boundaries
 
 ```text
@@ -567,6 +627,7 @@ state rather than forcing app-client replacement.
 | `src/mcp.rs` tool definitions | Expose or test the authoritative external-tool name set so policy-map exhaustiveness cannot drift. Routing and input schemas remain unchanged. |
 | `src/mcp.rs::route_index_inner`, `route_index_status_inner` | No behavioral rewrite; add focused tests proving namespaced owner/rate and exact status ownership. |
 | `src/jobs.rs::BacklogOwner`, `JobRecord`, `enqueue_job` | No schema change. Add tests for namespaced caller strings in owner keys and records. |
+| Create `infra/spur-context-service/poc/auth-client/` | Standalone Rust package for human PKCE and M2M token acquisition. Use `oauth2` 5.x, `openidconnect` 4.x, and redirect-disabled Rustls `reqwest`; keep these out of the Lambda dependency graph. |
 | `infra/spur-context-service/main.tf` | Cognito resources, authorizer, exact OAuth route, environment values, alarms, optional budget. |
 | `infra/spur-context-service/variables.tf` | Feature flag, client, URL, TTL, org/scope, denylist, and budget contracts with validations. |
 | `infra/spur-context-service/outputs.tf` | Public discovery values and IDs only; no secrets. |
@@ -581,6 +642,7 @@ state rather than forcing app-client replacement.
 | Non-immediate revocation | App-client deletion/secret rotation stops new issuance; Lambda denylist blocks a client ID after config rollout | Offline signature/expiry verification still accepts a previously issued revoked JWT until expiry. AWS explicitly notes signature/expiry-only libraries still accept revoked tokens ([token revocation][aws-revocation]). |
 | Authorization-code interception/injection | SPUR human client always sends a unique PKCE `S256` challenge, exact redirect URI, state, nonce, and single-use verifier; Cognito verifies PKCE when supplied | Cognito app-client configuration cannot enforce challenge presence on every authorize request. Client compliance is mandatory and must be tested; compromised client storage/browser remains in scope. |
 | CSRF/login swap | One-time session-bound `state`, PKCE, nonce validation | Client implementation must never continue after mismatch. |
+| Token-endpoint redirect or SSRF | Standalone Rust client uses a fixed configured Cognito domain, HTTPS, Rustls, redirect policy `none`, and bounded timeouts | Operators must not derive token endpoints, proxies, or redirect policy from request input. DNS and host policy remain part of POC review. |
 | ID token used as API token | Broad route scopes plus Lambda `token_use=access` | API Gateway alone cannot universally distinguish JWT types; Lambda check is mandatory. |
 | Wrong tenant/client | API Gateway audience list, Lambda client allowlist, explicit human-client classification, namespaced ID | V1 audience quota limits one route to 49 M2M orgs. |
 | Scope confusion | Exact full-token scope comparison and exhaustive tool matrix | Any new external tool fails CI and must receive a reviewed scope. |
@@ -594,6 +656,12 @@ state rather than forcing app-client replacement.
 Cognito access tokens can be configured from five minutes to one day
 ([access-token lifetime][aws-access-token], [Cognito quotas][aws-cognito-quotas]).
 The maximum is a cost knob, not a revocation control.
+
+The production backend must not add `cognito-jwt-verify`, `jsonwebtoken`,
+`oauth2`, or `openidconnect` merely to interpret API Gateway authorizer claims.
+Claim parsing and exact scope authorization use existing structured event/Serde
+types. The standalone POC package is the only approved location for OAuth/OIDC
+client dependencies in v1.
 
 ## Cost model and controls
 
@@ -714,18 +782,24 @@ production resources into POC state.
    unchanged by every POC command.
 2. Build the backend from the candidate commit through `scripts/spur-cargo`; do
    not deploy an uncommitted local binary.
-3. Create an isolated Lite pool, domain, resource server, public PKCE client,
+3. Build and test the standalone Rust POC client through
+   `scripts/spur-cargo --dir infra/spur-context-service/poc/auth-client`.
+   Configure its reusable
+   Rustls `reqwest` client with redirects disabled and bounded connect/request
+   timeouts. Read client secrets from the approved secret channel or environment,
+   never from command-line arguments, source files, or fixture snapshots.
+4. Create an isolated Lite pool, domain, resource server, public PKCE client,
    two M2M clients with different scope subsets, JWT authorizer, exact OAuth
    route, POC Lambda, POC log group, and POC DynamoDB job table.
-4. Set the POC index queue/running limits so no production Step Functions or
+5. Set the POC index queue/running limits so no production Step Functions or
    workers can start. Use an invalid-but-safe source URL to prove a scoped
    `external_index` request reached application validation without outbound
    fetch or job dispatch.
-5. Capture sanitized request IDs, HTTP statuses, response reason enums, decoded
+6. Capture sanitized request IDs, HTTP statuses, response reason enums, decoded
    non-secret claim names, Terraform resource addresses, and CloudWatch metrics.
-6. Run the objective matrix below.
-7. Re-run the production plan and prove zero changes.
-8. Destroy the isolated POC from its own state; verify the user pool, domain,
+7. Run the objective matrix below.
+8. Re-run the production plan and prove zero changes.
+9. Destroy the isolated POC from its own state; verify the user pool, domain,
    clients, API, Lambda, table, log group, and secrets are gone. Retain only
    sanitized evidence under the issue's approved artifact policy.
 
@@ -740,8 +814,12 @@ configuration is not itself proof of PKCE enforcement.
 | Case | Expected evidence |
 |---|---|
 | Human code + PKCE S256 | Sanitized client trace shows a unique `S256` challenge; matching verifier returns access/ID/refresh; API accepts access token only |
+| Human OIDC validation | `openidconnect` verifies issuer, audience, signature, nonce, and any supplied access-token hash before the client accepts the login |
 | Missing/wrong verifier for a code issued with a challenge, or reused `state` | Client/token exchange fails; API is never called |
-| M2M allowed read | Read tool succeeds with `cognito:client` principal kind in hashed audit |
+| M2M Basic authentication | Mock/live evidence shows the outbound request carries the secret only in the token-endpoint Basic header, requests exact scopes, and emits no secret/token in application logs |
+| Token endpoint redirect | Redirect response is not followed; no Authorization header or body is replayed to the redirect target |
+| M2M allowed read | Token cache is keyed by client plus normalized scopes; read tool succeeds with `cognito:client` principal kind in hashed audit |
+| M2M token without user claims | Valid access token with `client_id`, `token_use=access`, and scope but no human `sub` is accepted as `cognito:client:<client_id>` |
 | M2M missing exact scope | Edge broad scope may pass; Lambda returns 403 `missing_scope` |
 | ID token on API | Rejected, never reaches tool execution |
 | Expired/wrong issuer/wrong client | API Gateway 401 |
@@ -761,7 +839,8 @@ configuration is not itself proof of PKCE enforcement.
 - any unknown `external_*` name fails closed;
 - scope parsing is whitespace-delimited, exact, case-sensitive, and duplicate-safe;
 - human client + opaque `sub` yields `cognito:user:<sub>`;
-- M2M client yields `cognito:client:<client_id>` even if `sub` is present;
+- M2M client without `sub` or resource-binding `aud` yields
+  `cognito:client:<client_id>`; an unexpected `sub` does not change that owner;
 - human missing/blank/control-character `sub` fails;
 - missing/unknown/denylisted `client_id`, wrong issuer, wrong `token_use`, expired
   or malformed `exp`, malformed scope, and unexpected audience fail;
@@ -772,6 +851,19 @@ configuration is not itself proof of PKCE enforcement.
 - 401 and 403 bodies expose bounded reasons but no claims/token; and
 - legacy fallback and `anonymous-internal` fixtures remain byte-compatible where
   required.
+
+The standalone POC client has mock-server tests proving:
+
+- `client_credentials` uses Basic authentication and exact scopes;
+- client-secret debug formatting is redacted, and a local error mapper prevents
+  raw token-response bodies or bearer tokens from reaching logs/responses;
+- redirects are rejected rather than followed with credentials;
+- cache keys include client ID and normalized scope set, concurrent misses are
+  single-flight, and refresh timing applies jitter without exceeding expiry;
+- PKCE uses a fresh S256 challenge/verifier and one-time state/nonce per attempt;
+  and
+- wrong state, nonce, verifier, issuer, audience, or access-token hash fails
+  closed.
 
 ### Service and queue tests
 
@@ -810,7 +902,10 @@ overlap, and sanitized logging. Tests that compile Rust must use
 
 Implement typed auth and exhaustive matrix tests behind
 `cognito_auth_enabled=false`. Add representative API Gateway v2 Cognito, IAM,
-malformed, and EventBridge fixtures. No Terraform resource exists yet.
+malformed, and EventBridge fixtures. Add explicit M2M fixtures without `sub` or
+`aud`. Create the standalone POC client package and its mock HTTP tests, without
+adding OAuth/OIDC dependencies to `spur-context-service`. No Terraform resource
+exists yet.
 
 ### Phase 1 — Isolated POC
 
@@ -909,6 +1004,7 @@ These do not block this specification, but each blocks its named rollout step:
 | Observability and budgets | Observability; cost governance |
 | POC evidence and teardown | Backend-only isolated POC |
 | File/symbol impact and tests | Rust impact map; test strategy |
+| Rust library selection and dependency isolation | Decision record; Rust impact map; POC |
 | Deployment and open decisions | Runbook; open decisions |
 
 ## Authoritative sources
@@ -931,6 +1027,15 @@ These do not block this specification, but each blocks its named rollout step:
 - [RFC 6749][rfc6749], [RFC 7636][rfc7636], [RFC 9700][rfc9700], and
   [OpenID Connect Core 1.0][oidc-core] — OAuth grants, PKCE, current security BCP,
   state, and nonce.
+- [`oauth2` 5.x][rust-oauth2] and its [security guidance][rust-oauth2-security]
+  — typed client-credentials/PKCE requests, secret handling, state, and the
+  requirement to disable HTTP redirects.
+- [`openidconnect` 4.x][rust-openidconnect] — provider metadata, human OIDC flow,
+  ID-token signature/issuer/audience/nonce validation, and supplied access-token
+  hashes.
+- [`cognito-jwt-verify` 0.2.0 source][rust-cognito-jwt-source] — evaluated as a
+  Cognito-specific Rust reference and rejected for the production Lambda claim
+  and audience contract.
 
 [aws-access-token]: https://docs.aws.amazon.com/cognito/latest/developerguide/amazon-cognito-user-pools-using-the-access-token.html
 [aws-add-secret]: https://docs.aws.amazon.com/cognito-user-identity-pools/latest/APIReference/API_AddUserPoolClientSecret.html
@@ -951,3 +1056,7 @@ These do not block this specification, but each blocks its named rollout step:
 [rfc6749]: https://www.rfc-editor.org/rfc/rfc6749.html
 [rfc7636]: https://www.rfc-editor.org/rfc/rfc7636.html
 [rfc9700]: https://www.rfc-editor.org/rfc/rfc9700.html
+[rust-cognito-jwt-source]: https://docs.rs/crate/cognito-jwt-verify/0.2.0/source/
+[rust-oauth2]: https://docs.rs/oauth2/5.0.0/oauth2/
+[rust-oauth2-security]: https://docs.rs/oauth2/5.0.0/oauth2/#security-warning
+[rust-openidconnect]: https://docs.rs/openidconnect/4.0.1/openidconnect/
