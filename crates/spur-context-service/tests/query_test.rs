@@ -194,7 +194,15 @@ fn catalog_queries_list_packages_revisions_tree_and_symbols() -> Result<()> {
         [("README.md", "file", 1), ("src", "dir", 3)]
     );
 
-    let src = list_tree_entries(&fixture.conn, SOURCE, PACKAGE, REVISION, Some("src"), 50, None)?;
+    let src = list_tree_entries(
+        &fixture.conn,
+        SOURCE,
+        PACKAGE,
+        REVISION,
+        Some("src"),
+        50,
+        None,
+    )?;
     assert_eq!(
         src.rows
             .iter()

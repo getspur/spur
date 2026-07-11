@@ -103,9 +103,10 @@ that re-requests a cached package short-circuits cheaply.
 ```mermaid
 sequenceDiagram
     autonumber
-    participant C as Caller (SigV4)
-    participant GW as API GW (AWS_IAM)
+    participant C as Caller (OAuth or SigV4)
+    participant GW as API GW (JWT exact route / AWS_IAM default)
     participant L as Serving Lambda
+    participant EB as EventBridge schedule
     participant D as DynamoDB
     participant SF as Step Functions
     participant W as Worker (Lambda→Fargate)
@@ -113,13 +114,17 @@ sequenceDiagram
     participant S3 as S3 (bronze/silver/gold)
 
     C->>GW: external_index(pkg@rev, source_url)
-    GW->>L: event + IAM authorizer identity
-    L->>L: authenticated_caller_id()  (401 if none)
-    L->>D: rate-limit + concurrent-cap (atomic)
+    GW->>L: validated JWT or IAM authorizer context
+    L->>L: exact tool scope + namespaced caller (401/403 on failure)
+    L->>D: rate-limit + per-owner/global queue caps (atomic)
     alt over quota
-        L-->>C: rejected (rate_limit / concurrent_job_limit)
+        L-->>C: rejected (rate_limit / queue_full / global_queue_full)
     else admitted
-        L->>D: create job + dedupe + active_job + quota (TransactWrite)
+        L->>D: create queued job + global dedupe + owner quota (TransactWrite)
+        L-->>C: queued (job_id)
+        L->>L: best-effort low-latency drainer kick
+        EB->>L: scheduled drain_queued_jobs correctness event
+        L->>D: claim queued job + running quota (TransactWrite)
         L->>SF: start execution (job_id, limits)
         SF->>W: run worker (max_source_bytes, max_build_seconds)
         W->>S3: fetch → bronze (cap-enforced)
@@ -128,7 +133,6 @@ sequenceDiagram
         W->>A: reserve generation (sequence)
         W->>S3: export frozen snapshot, flip current.json
         W->>D: record_completed → release active_job + quota
-        L-->>C: queued (job_id)
     end
     C->>L: external_index_status(job_id)  (caller-scoped)
 ```
@@ -183,28 +187,31 @@ indexes** (a plain `COPY FROM DATABASE` fails on DuckLake metadata indexes).
 ```mermaid
 flowchart TD
     subgraph A[Authentication]
-      a1[API GW route = AWS_IAM<br/>SigV4 + execute-api:Invoke policy]
-      a2[Lambda authenticated_caller_id<br/>JWT sub / IAM userArn / principalId<br/>→ 401 if absent]
+      a1[POST /mcp/oauth = Cognito JWT<br/>$default = AWS_IAM or explicit demo NONE]
+      a2[Lambda exact tool scope + semantic claims<br/>human / M2M / stable IAM namespaced caller<br/>401 auth · 403 authorization · no downgrade]
     end
     subgraph T[Tenancy isolation]
       t1[external_index_status scoped to caller_id<br/>cross-caller → not_found]
       t2[shared catalog = PUBLIC packages only<br/>no private data-plane isolation]
     end
     subgraph Q[Quotas / caps - DynamoDB atomic]
-      q1[fixed-window rate limit / caller / min]
-      q2[concurrent active-job cap / caller]
+      q1[fixed-window rate limit / namespaced owner / min]
+      q2[queued + running caps / owner and global]
       q3[source-size caps + build timeout]
       q4[API GW route throttle rate/burst]
     end
     A --> T --> Q
 ```
 
-- **Auth is defense-in-depth:** even if the route were misconfigured open, the
-  Lambda refuses mutating tools (`external_index`, `external_index_status`)
-  without an authenticated identity. The old source-IP fallback is test-only.
+- **Auth is defense-in-depth:** API Gateway verifies JWT/SigV4 at the edge;
+  Lambda requires the exact body-selected OAuth scope, derives collision-safe
+  human/M2M/IAM identities, and never downgrades malformed JWT context to IAM,
+  principal ID, source IP, or anonymous. The explicit demo compatibility path
+  alone retains the literal `anonymous-internal` mutation owner.
 - **Quotas are atomic** DynamoDB conditional writes (rate counter per
-  epoch-minute window; `active_count < limit` guard transacted with job
-  creation; released on terminal state).
+  epoch-minute window; queued owner/global counters transacted with admission;
+  running owner/global counters and release tokens claimed by the drainer and
+  released exactly once on terminal state).
 
 ---
 
