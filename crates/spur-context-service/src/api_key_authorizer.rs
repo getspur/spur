@@ -2,7 +2,7 @@
 //!
 //! This module deliberately depends only on [`crate::api_keys`] plus serde. The
 //! dedicated authorizer binary includes it directly and never imports the
-//! context-service library, catalog, or DuckDB modules.
+//! context-service library, catalog, or `DuckDB` modules.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -216,6 +216,11 @@ impl ApiKeyAuthContext {
     }
 
     /// Parses and validates an untrusted API Gateway authorizer context value.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the context shape, version, identity, key ID, or
+    /// normalized scopes do not exactly match the API-key context contract.
     pub fn from_value(value: &Value) -> Result<Self, ApiKeyContextError> {
         let wire = serde_json::from_value::<WireApiKeyAuthContext>(value.clone())
             .map_err(|_| ApiKeyContextError)?;
@@ -251,6 +256,11 @@ impl ApiKeyAuthContext {
 }
 
 /// Authenticates one API-key request using exactly one strongly consistent lookup.
+///
+/// # Errors
+///
+/// Returns an authentication failure for an invalid request or credential, and
+/// an unavailable failure when the durable store or persisted context is unsafe.
 pub async fn authorize_api_key(
     request: &ApiKeyAuthorizerRequest,
     store: &dyn ApiKeyStore,
@@ -294,6 +304,11 @@ pub async fn authorize_api_key(
 /// decision. Configuration and store failures remain Lambda failures and must
 /// never be cached as an allow. The setting defaults to `live`; any present
 /// value other than exactly `live` or `test` fails closed before a store lookup.
+///
+/// # Errors
+///
+/// Returns an unavailable failure for invalid environment configuration or a
+/// durable-store failure. Credential failures are returned as cacheable denies.
 pub async fn authorize_api_key_with_environment(
     request: &ApiKeyAuthorizerRequest,
     store: &dyn ApiKeyStore,
@@ -331,7 +346,12 @@ fn credential_for_exact_route(
         .identity_source
         .as_deref()
         .ok_or(ApiKeyAuthorizerError::AuthenticationFailed)?;
-    if identity_source != [*credential, API_KEY_ROUTE_KEY] {
+    let [first, second] = identity_source else {
+        return Err(ApiKeyAuthorizerError::AuthenticationFailed);
+    };
+    if !((first == credential && second == API_KEY_ROUTE_KEY)
+        || (first == API_KEY_ROUTE_KEY && second == credential))
+    {
         return Err(ApiKeyAuthorizerError::AuthenticationFailed);
     }
     Ok(credential)
@@ -641,6 +661,75 @@ mod tests {
             .await
             .expect_err("wrong route must not use the store");
         assert_eq!(error.status_code(), 401);
+        assert_eq!(store.lookup_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn identity_source_accepts_provider_order_and_rejects_non_exact_shapes_without_lookup() {
+        let now = 1_700_000_000;
+        let generated = generated(now);
+        let credential = generated.plaintext.expose_secret().to_owned();
+        let inner = FakeApiKeyStore::new();
+        inner
+            .create_key(CreateKeyRecord::new(generated.record))
+            .await
+            .expect("record should persist");
+        let store = CountingStore::new(inner);
+
+        let mut route_first = request(Some(&credential));
+        route_first.identity_source =
+            Some(vec!["POST /mcp/api-key".to_owned(), credential.clone()]);
+        let response = authorize_api_key(&route_first, &store, KeyEnvironment::Live, now)
+            .await
+            .expect("provider-normalized route-first identity must authorize");
+        assert!(response.is_authorized);
+        assert_eq!(store.lookup_count(), 1);
+
+        let malformed_identities = [
+            None,
+            Some(vec![credential.clone()]),
+            Some(vec![credential.clone(), credential.clone()]),
+            Some(vec![
+                "POST /mcp/api-key".to_owned(),
+                "POST /mcp/api-key".to_owned(),
+            ]),
+            Some(vec![
+                credential.clone(),
+                "POST /mcp/api-key".to_owned(),
+                "extra".to_owned(),
+            ]),
+            Some(vec![
+                "POST /mcp/api-key".to_owned(),
+                "mismatched-credential".to_owned(),
+            ]),
+            Some(vec![credential.clone(), "POST /mcp/oauth".to_owned()]),
+        ];
+        for identity_source in malformed_identities {
+            let mut malformed = request(Some(&credential));
+            malformed.identity_source = identity_source;
+            assert_eq!(
+                authorize_api_key(&malformed, &store, KeyEnvironment::Live, now).await,
+                Err(ApiKeyAuthorizerError::AuthenticationFailed)
+            );
+            assert_eq!(store.lookup_count(), 1);
+        }
+
+        let mut duplicate_header = request(Some(&credential));
+        duplicate_header
+            .headers
+            .insert("X-SPUR-API-Key".to_owned(), credential.clone());
+        assert_eq!(
+            authorize_api_key(&duplicate_header, &store, KeyEnvironment::Live, now).await,
+            Err(ApiKeyAuthorizerError::AuthenticationFailed)
+        );
+        assert_eq!(store.lookup_count(), 1);
+
+        let mut missing_header = request(Some(&credential));
+        missing_header.headers.clear();
+        assert_eq!(
+            authorize_api_key(&missing_header, &store, KeyEnvironment::Live, now).await,
+            Err(ApiKeyAuthorizerError::AuthenticationFailed)
+        );
         assert_eq!(store.lookup_count(), 1);
     }
 

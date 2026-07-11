@@ -50,6 +50,229 @@ variable "cognito_auth_enabled" {
   default     = false
 }
 
+# ─── Additive personal API-key ingress ───────────────────────────────────────
+# API-key resources are independent of the legacy $default and OAuth routes and
+# are omitted entirely unless this feature is explicitly enabled.
+
+variable "api_key_auth_enabled" {
+  description = "Enable personal API-key discovery, management, authorizer, MCP, storage, cleanup, logs, and alarms. Requires Cognito human authentication and is disabled by default."
+  type        = bool
+  default     = false
+
+  validation {
+    condition     = !var.api_key_auth_enabled || var.cognito_auth_enabled
+    error_message = "api_key_auth_enabled requires cognito_auth_enabled so only Cognito humans can manage personal keys."
+  }
+}
+
+variable "api_key_table_name" {
+  description = "Dedicated DynamoDB table for personal API-key records, owner counters, and the persisted cleanup cursor."
+  type        = string
+  default     = "spur-context-api-keys"
+
+  validation {
+    condition     = can(regex("^[A-Za-z0-9_.-]{3,255}$", var.api_key_table_name))
+    error_message = "api_key_table_name must be a valid 3-255 character DynamoDB table name."
+  }
+}
+
+variable "api_key_owner_gsi_name" {
+  description = "Owner GSI used for personal-key listing and bounded revoke-by-owner operations. Fixed to the backend contract in v1."
+  type        = string
+  default     = "owner-gsi"
+
+  validation {
+    condition     = var.api_key_owner_gsi_name == "owner-gsi"
+    error_message = "api_key_owner_gsi_name must be owner-gsi in v1."
+  }
+}
+
+variable "api_key_expiry_gsi_name" {
+  description = "Sparse UTC expiry-hour GSI used by the bounded cleanup worker. Fixed to the backend contract in v1."
+  type        = string
+  default     = "expiry-gsi"
+
+  validation {
+    condition     = var.api_key_expiry_gsi_name == "expiry-gsi"
+    error_message = "api_key_expiry_gsi_name must be expiry-gsi in v1."
+  }
+}
+
+variable "api_key_authorizer_zip_path" {
+  description = "Independent lean Lambda zip produced by scripts/package-context-api-key-lambdas.sh for the API-key authorizer bootstrap."
+  type        = string
+  default     = "../../target/lambda/spur-context-api-key-authorizer.zip"
+
+  validation {
+    condition     = !var.api_key_auth_enabled || var.api_key_authorizer_zip_path != var.lambda_zip_path
+    error_message = "api_key_authorizer_zip_path must be independent from the serving lambda_zip_path."
+  }
+}
+
+variable "api_key_cleanup_zip_path" {
+  description = "Independent lean Lambda zip produced by scripts/package-context-api-key-lambdas.sh for bounded API-key expiry cleanup. It must not reuse the serving or authorizer artifact."
+  type        = string
+  default     = "../../target/lambda/spur-context-api-key-cleanup.zip"
+
+  validation {
+    condition = !var.api_key_auth_enabled || (
+      var.api_key_cleanup_zip_path != var.lambda_zip_path &&
+      var.api_key_cleanup_zip_path != var.api_key_authorizer_zip_path
+    )
+    error_message = "api_key_cleanup_zip_path must be independent from the serving and authorizer artifacts."
+  }
+}
+
+variable "api_key_environment" {
+  description = "Key prefix environment accepted by production infrastructure. Use test only in isolated POC stacks."
+  type        = string
+  default     = "live"
+
+  validation {
+    condition     = contains(["live", "test"], var.api_key_environment)
+    error_message = "api_key_environment must be live or test."
+  }
+}
+
+variable "api_key_authorizer_cache_seconds" {
+  description = "API Gateway request-authorizer result TTL. V1 fixes this at 30 seconds to bound revocation delay."
+  type        = number
+  default     = 30
+
+  validation {
+    condition     = var.api_key_authorizer_cache_seconds == 30
+    error_message = "api_key_authorizer_cache_seconds must be exactly 30 seconds in v1."
+  }
+}
+
+variable "api_key_default_ttl_days" {
+  description = "Default personal API-key lifetime in whole days."
+  type        = number
+  default     = 90
+
+  validation {
+    condition     = var.api_key_default_ttl_days >= 1 && var.api_key_default_ttl_days <= var.api_key_max_ttl_days && floor(var.api_key_default_ttl_days) == var.api_key_default_ttl_days
+    error_message = "api_key_default_ttl_days must be a whole number from 1 through api_key_max_ttl_days."
+  }
+}
+
+variable "api_key_max_ttl_days" {
+  description = "Maximum personal API-key lifetime in whole days. V1 caps this at 365."
+  type        = number
+  default     = 365
+
+  validation {
+    condition     = var.api_key_max_ttl_days >= 1 && var.api_key_max_ttl_days <= 365 && floor(var.api_key_max_ttl_days) == var.api_key_max_ttl_days
+    error_message = "api_key_max_ttl_days must be a whole number from 1 through 365."
+  }
+}
+
+variable "api_key_max_active_per_user" {
+  description = "Maximum active personal keys per Cognito human. V1 fixes this at ten."
+  type        = number
+  default     = 10
+
+  validation {
+    condition     = var.api_key_max_active_per_user == 10
+    error_message = "api_key_max_active_per_user must be exactly 10 in v1."
+  }
+}
+
+variable "api_key_authorizer_memory_mb" {
+  description = "Memory allocation for the lean API-key authorizer Lambda."
+  type        = number
+  default     = 256
+
+  validation {
+    condition     = var.api_key_authorizer_memory_mb >= 128 && var.api_key_authorizer_memory_mb <= 1024
+    error_message = "api_key_authorizer_memory_mb must be between 128 and 1024 MB."
+  }
+}
+
+variable "api_key_authorizer_timeout_sec" {
+  description = "Timeout for the lean API-key authorizer Lambda."
+  type        = number
+  default     = 5
+
+  validation {
+    condition     = var.api_key_authorizer_timeout_sec >= 1 && var.api_key_authorizer_timeout_sec <= 30
+    error_message = "api_key_authorizer_timeout_sec must be between 1 and 30 seconds."
+  }
+}
+
+variable "api_key_authorizer_log_retention_days" {
+  description = "CloudWatch retention for the lean API-key authorizer logs."
+  type        = number
+  default     = 14
+}
+
+variable "api_key_cleanup_memory_mb" {
+  description = "Memory allocation for the bounded API-key expiry cleanup Lambda."
+  type        = number
+  default     = 256
+
+  validation {
+    condition     = var.api_key_cleanup_memory_mb >= 128 && var.api_key_cleanup_memory_mb <= 1024
+    error_message = "api_key_cleanup_memory_mb must be between 128 and 1024 MB."
+  }
+}
+
+variable "api_key_cleanup_timeout_sec" {
+  description = "Timeout for one bounded API-key expiry cleanup invocation."
+  type        = number
+  default     = 60
+
+  validation {
+    condition     = var.api_key_cleanup_timeout_sec >= 1 && var.api_key_cleanup_timeout_sec <= 300
+    error_message = "api_key_cleanup_timeout_sec must be between 1 and 300 seconds."
+  }
+}
+
+variable "api_key_cleanup_log_retention_days" {
+  description = "CloudWatch retention for API-key expiry cleanup logs."
+  type        = number
+  default     = 14
+}
+
+variable "api_key_cleanup_max_catchup_hours" {
+  description = "Maximum persisted expiry-hour cursor catch-up processed by one cleanup invocation."
+  type        = number
+  default     = 168
+
+  validation {
+    condition     = var.api_key_cleanup_max_catchup_hours >= 1 && var.api_key_cleanup_max_catchup_hours <= 8760 && floor(var.api_key_cleanup_max_catchup_hours) == var.api_key_cleanup_max_catchup_hours
+    error_message = "api_key_cleanup_max_catchup_hours must be a whole number between 1 and 8760."
+  }
+}
+
+variable "api_key_cleanup_page_limit" {
+  description = "Maximum expiry-GSI records processed in one cleanup page."
+  type        = number
+  default     = 100
+
+  validation {
+    condition     = var.api_key_cleanup_page_limit >= 1 && var.api_key_cleanup_page_limit <= 100 && floor(var.api_key_cleanup_page_limit) == var.api_key_cleanup_page_limit
+    error_message = "api_key_cleanup_page_limit must be a whole number between 1 and the backend maximum of 100."
+  }
+}
+
+variable "api_key_cleanup_cursor_lag_alarm_hours" {
+  description = "Cleanup cursor lag in hours that triggers the API-key cleanup alarm."
+  type        = number
+  default     = 2
+
+  validation {
+    condition     = var.api_key_cleanup_cursor_lag_alarm_hours >= 1
+    error_message = "api_key_cleanup_cursor_lag_alarm_hours must be at least one hour."
+  }
+}
+
+variable "api_key_alarm_action_arns" {
+  description = "Optional SNS topic ARNs notified by API-key route, authorizer, and cleanup alarms."
+  type        = set(string)
+  default     = []
+}
+
 variable "cognito_user_pool_name" {
   description = "Environment-qualified Cognito user-pool name. Required when cognito_auth_enabled is true."
   type        = string
@@ -750,13 +973,19 @@ locals {
   aurora_master_secret_arn        = aws_rds_cluster.catalog.master_user_secret[0].secret_arn
   aurora_master_password_valuearn = "${local.aurora_master_secret_arn}:password::"
 
-  cognito_scope_descriptions = {
+  cognito_external_scope_descriptions = {
     "external.read"   = "Read external context-service catalog and code data"
     "external.index"  = "Submit external context-service indexing jobs"
     "external.status" = "Read external context-service indexing job status"
   }
+  cognito_scope_descriptions = merge(
+    local.cognito_external_scope_descriptions,
+    var.api_key_auth_enabled ? {
+      "keys.manage" = "Create, list, and revoke personal SPUR context-service API keys"
+    } : {},
+  )
   cognito_custom_scopes = [
-    for suffix in keys(local.cognito_scope_descriptions) :
+    for suffix in keys(local.cognito_external_scope_descriptions) :
     "${var.cognito_resource_server_identifier}/${suffix}"
   ]
   cognito_human_allowed_oauth_scopes = concat(
@@ -765,7 +994,29 @@ locals {
       for suffix in var.cognito_human_custom_scopes :
       "${var.cognito_resource_server_identifier}/${suffix}"
     ],
+    var.api_key_auth_enabled ? [
+      "${var.cognito_resource_server_identifier}/keys.manage"
+    ] : [],
   )
+  api_key_management_scope = "${var.cognito_resource_server_identifier}/keys.manage"
+  api_key_authorizer_dynamodb_actions = [
+    "dynamodb:GetItem",
+  ]
+  api_key_management_dynamodb_actions = [
+    "dynamodb:GetItem",
+    "dynamodb:TransactWriteItems",
+  ]
+  api_key_management_query_actions = [
+    "dynamodb:Query",
+  ]
+  api_key_cleanup_dynamodb_actions = [
+    "dynamodb:GetItem",
+    "dynamodb:UpdateItem",
+    "dynamodb:TransactWriteItems",
+  ]
+  api_key_cleanup_query_actions = [
+    "dynamodb:Query",
+  ]
   cognito_enabled_m2m_organizations = var.cognito_auth_enabled ? {
     for key, organization in var.cognito_m2m_organizations : key => organization
     if organization.enabled
