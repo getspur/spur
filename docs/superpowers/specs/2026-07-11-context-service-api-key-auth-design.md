@@ -238,6 +238,14 @@ identity sources. Both allow and deny responses may be cached for 30 seconds.
 The route key prevents a decision from being reused across routes. A cache miss
 uses a strongly consistent primary-key read.
 
+HTTP API payload v2 simple authorizer responses can return a cacheable
+`isAuthorized: false` decision but cannot attach the custom bounded 401 body
+described in the domain failure table. The production boundary therefore uses
+the secure cacheable deny contract; API Gateway controls the client-visible
+denial status/body. Task C must configure simple responses and the two-part
+cache identity, and Task F's POC must record the observed gateway status/body
+rather than claiming that the Lambda emits a custom 401 payload.
+
 The serving Lambda never reads the raw API-key header. A separate API-key
 integration should remove the header before invoking it when HTTP API parameter
 mapping supports that operation. Header removal is defense-in-depth only; the
