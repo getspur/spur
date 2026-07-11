@@ -148,6 +148,14 @@ resource "aws_lambda_function" "validation" {
       SPUR_COGNITO_RESOURCE_SERVER_ID           = local.resource_server_identifier
       SPUR_COGNITO_DENY_CLIENT_IDS              = join(",", var.emergency_deny_client_ids)
       SPUR_COGNITO_OAUTH_PATH                   = "/mcp/oauth"
+      SPUR_COGNITO_AUTHORIZATION_ENDPOINT       = "https://${aws_cognito_user_pool_domain.poc[0].domain}.auth.${var.aws_region}.amazoncognito.com/oauth2/authorize"
+      SPUR_COGNITO_TOKEN_ENDPOINT               = "https://${aws_cognito_user_pool_domain.poc[0].domain}.auth.${var.aws_region}.amazoncognito.com/oauth2/token"
+      SPUR_CONTEXT_SERVICE_BASE_URL             = aws_apigatewayv2_api.poc[0].api_endpoint
+      SPUR_API_KEY_AUTH_ENABLED                 = local.api_key_poc_enabled ? "1" : "0"
+      SPUR_API_KEY_ENVIRONMENT                  = "test"
+      SPUR_API_KEY_DEFAULT_TTL_DAYS             = tostring(local.api_key_default_ttl_days)
+      SPUR_API_KEY_MAX_TTL_DAYS                 = "365"
+      SPUR_CONTEXT_API_KEYS_TABLE               = local.api_key_poc_enabled ? aws_dynamodb_table.api_keys[0].name : ""
       SPUR_CATALOG_DSN                          = "ducklake:sqlite:/tmp/${local.name_prefix}.ducklake"
       SPUR_CONTEXT_ALLOW_ANONYMOUS_MUTATIONS    = var.allow_anonymous_mutations ? "1" : "0"
       SPUR_CONTEXT_ALLOWED_SOURCE_DOMAINS       = "poc-no-source.invalid"
@@ -174,6 +182,7 @@ resource "aws_lambda_function" "validation" {
   depends_on = [
     aws_cloudwatch_log_group.lambda,
     aws_iam_role_policy.lambda,
+    aws_iam_role_policy.api_key_management,
   ]
 }
 
@@ -229,7 +238,7 @@ resource "aws_apigatewayv2_route" "oauth" {
   target               = "integrations/${aws_apigatewayv2_integration.lambda[0].id}"
   authorization_type   = "JWT"
   authorizer_id        = aws_apigatewayv2_authorizer.cognito[0].id
-  authorization_scopes = local.custom_scopes
+  authorization_scopes = local.external_scopes
 }
 
 resource "aws_apigatewayv2_route" "legacy" {

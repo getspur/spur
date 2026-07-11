@@ -187,7 +187,7 @@ indexes** (a plain `COPY FROM DATABASE` fails on DuckLake metadata indexes).
 ```mermaid
 flowchart TD
     subgraph A[Authentication]
-      a1[POST /mcp/oauth = Cognito JWT<br/>$default = AWS_IAM or explicit demo NONE]
+      a1[POST /mcp/oauth = Cognito JWT<br/>POST /mcp/api-key = request authorizer<br/>$default = AWS_IAM or explicit demo NONE]
       a2[Lambda exact tool scope + semantic claims<br/>human / M2M / stable IAM namespaced caller<br/>401 auth · 403 authorization · no downgrade]
     end
     subgraph T[Tenancy isolation]
@@ -208,6 +208,11 @@ flowchart TD
   human/M2M/IAM identities, and never downgrades malformed JWT context to IAM,
   principal ID, source IP, or anonymous. The explicit demo compatibility path
   alone retains the literal `anonymous-internal` mutation owner.
+- **Personal keys are one human identity:** Cognito human OAuth manages keys;
+  routine MCP calls use the exact API-key route and typed authorizer context.
+  Both resolve to `cognito:user:<sub>`, so multiple keys share rate, queue,
+  dedupe, and status ownership. Cached decisions are bounded to 30 seconds;
+  EventBridge drainer and expiry-cleanup discriminators bypass HTTP auth.
 - **Quotas are atomic** DynamoDB conditional writes (rate counter per
   epoch-minute window; queued owner/global counters transacted with admission;
   running owner/global counters and release tokens claimed by the drainer and
@@ -258,6 +263,9 @@ flowchart LR
 | `aws_rds_cluster` (Aurora Serverless v2) | Postgres **ingest-only** catalog, scale-to-zero |
 | Secrets Manager | Aurora master password |
 | `aws_dynamodb_table.index_jobs` | jobs, dedupe, active-job + caller quota records |
+| `aws_dynamodb_table.api_keys` | digest-only personal keys, owner counters, owner/expiry GSIs, cleanup cursor |
+| `aws_lambda_function.api_key_authorizer` | strongly consistent synthetic/production key lookup and typed owner/scope context |
+| `aws_lambda_function.api_key_cleanup` | lease-fenced, page/bucket/record-bounded expiry cleanup |
 | `aws_dynamodb_table.catalog_leases` | DuckLake catalog write leases |
 | `aws_sfn_state_machine.index_build` | on-demand indexing orchestration |
 | `aws_lambda_function.worker` / ECS Fargate | indexing worker (fast-start → fallback) |

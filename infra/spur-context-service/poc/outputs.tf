@@ -42,3 +42,33 @@ output "iam_invoke_policy_arn" {
   description = "Dedicated POC API invoke policy for the IAM compatibility smoke."
   value       = var.poc_enabled ? aws_iam_policy.invoke[0].arn : null
 }
+
+output "api_key_auth_enabled" {
+  description = "Whether the isolated POC includes personal API-key ingress."
+  value       = local.api_key_poc_enabled
+}
+
+output "api_key_mcp_url" {
+  description = "Exact synthetic-test-key MCP route; null when independently disabled."
+  value       = local.api_key_poc_enabled ? "${aws_apigatewayv2_api.poc[0].api_endpoint}/mcp/api-key" : null
+}
+
+output "api_key_management_url" {
+  description = "Cognito-human-only personal-key management base URL; null when independently disabled."
+  value       = local.api_key_poc_enabled ? "${aws_apigatewayv2_api.poc[0].api_endpoint}/auth/api-keys" : null
+}
+
+output "api_key_table_name" {
+  description = "Dedicated disposable API-key table name; null when independently disabled."
+  value       = local.api_key_poc_enabled ? aws_dynamodb_table.api_keys[0].name : null
+}
+
+output "api_key_authorizer_function_name" {
+  description = "Dedicated disposable request-authorizer function name; null when disabled."
+  value       = local.api_key_poc_enabled ? aws_lambda_function.api_key_authorizer[0].function_name : null
+}
+
+output "api_key_cleanup_function_name" {
+  description = "Dedicated disposable expiry-cleanup function name; null when disabled."
+  value       = local.api_key_poc_enabled ? aws_lambda_function.api_key_cleanup[0].function_name : null
+}

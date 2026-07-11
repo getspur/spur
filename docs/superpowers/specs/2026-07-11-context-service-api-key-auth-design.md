@@ -787,6 +787,26 @@ POC must prove:
 
 ## Rollout
 
+### Verified implementation note (Task F)
+
+The isolated POC now has an independent, disabled-by-default API-key gate and
+mock-enabled plan coverage for the exact routes, request-authorizer cache,
+header-removal mapping, digest-only table, synthetic `test` key environment,
+bounded cleanup schedule, and unchanged OAuth/IAM/zero-dispatch paths. Committed
+authorizer, management, gateway, and cleanup evidence is synthetic and offline.
+In particular, `api-key-gateway-evidence.json` records header behavior, cache
+behavior, revocation timing, and client-visible gateway status/body as **not
+observed offline**; those remain separately approved live-POC checks rather than
+claims made by this implementation task.
+
+The consolidated offline runner executes the existing service regressions for
+exact/reserved routes, shared human ownership and quota buckets, M2M/IAM/demo
+compatibility, EventBridge isolation, cleanup burst capacity, plus the core/CLI
+exact route/header and redaction tests. The operator runbook now covers
+enablement/discovery, desktop and headless CLI flows, revocation and route kill,
+cleanup lag/capacity, owner offboarding, metrics/cost, rollback, and isolated
+teardown categories.
+
 1. Land pure key/store logic and CLI credential abstractions behind disabled
    code paths.
 2. Land disabled Terraform resources and mock tests.
