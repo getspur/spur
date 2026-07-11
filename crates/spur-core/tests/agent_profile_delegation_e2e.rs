@@ -154,7 +154,7 @@ async fn claude_profile_materializes_selects_before_prompt_and_stays_out_of_diff
         agent_config,
         Some("code-reviewer".to_string()),
         "review the task".to_string(),
-        &move |_cfg, _spawn_args, _repo_root| {
+        &move |_cfg, _spawn_args, _launch_env, _repo_root| {
             Box::new(RecordingConnection {
                 calls: Arc::clone(&calls_for_factory),
                 worktree: Arc::clone(&worktree_for_factory),

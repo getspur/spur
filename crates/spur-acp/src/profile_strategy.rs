@@ -9,6 +9,9 @@ pub enum SelectStrategy {
     SessionMode,
     /// Append this CLI flag and the profile name before spawning the agent process.
     SpawnArg { flag: String },
+    /// Install the profile body into one field of a JSON-valued environment
+    /// variable before spawning the agent process.
+    SpawnEnvJson { variable: String, field: String },
     /// No selection surface.
     None,
 }
@@ -37,7 +40,14 @@ impl ProfileStrategy {
                 },
                 materialize: true,
             },
-            AgentKind::CodexAcp | AgentKind::ClaudeStreamJson => Self {
+            AgentKind::CodexAcp => Self {
+                select: SelectStrategy::SpawnEnvJson {
+                    variable: "CODEX_CONFIG".into(),
+                    field: "developer_instructions".into(),
+                },
+                materialize: true,
+            },
+            AgentKind::ClaudeStreamJson => Self {
                 select: SelectStrategy::None,
                 materialize: true,
             },
@@ -74,6 +84,16 @@ fn parse_select_strategy(raw: &str) -> Option<SelectStrategy> {
     if let Some(flag) = raw.strip_prefix("spawn_arg:") {
         if !flag.is_empty() {
             return Some(SelectStrategy::SpawnArg { flag: flag.into() });
+        }
+    }
+    if let Some(parts) = raw.strip_prefix("spawn_env_json:") {
+        if let Some((variable, field)) = parts.split_once(':') {
+            if !variable.is_empty() && !field.is_empty() {
+                return Some(SelectStrategy::SpawnEnvJson {
+                    variable: variable.into(),
+                    field: field.into(),
+                });
+            }
         }
     }
     match raw {
