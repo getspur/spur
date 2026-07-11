@@ -5,7 +5,7 @@ pub mod plan;
 pub mod signals;
 pub mod worker;
 
-pub use context_service::ContextServiceClient;
+pub use context_service::{ContextServiceAuth, ContextServiceClient};
 use spur_acp::config::ContextServiceConfig;
 
 const WORKER_DENIED_TOOL_CALLS: &[&str] = &[
@@ -74,10 +74,13 @@ fn context_service_client(
         .ok()
         .and_then(non_empty_trimmed)
         .or_else(|| config.token.clone().and_then(non_empty_trimmed));
-    Some(context_service::ContextServiceClient::with_optional_token(
-        base_url,
-        bearer_token,
-    ))
+    match context_service::ContextServiceClient::with_optional_token(base_url, bearer_token) {
+        Ok(client) => Some(client),
+        Err(_error) => {
+            tracing::warn!("rejected insecure authenticated context-service endpoint");
+            None
+        }
+    }
 }
 
 fn non_empty_trimmed(value: String) -> Option<String> {
