@@ -107,8 +107,8 @@ An agent can request indexing of any fetchable source — `(package, revision, s
 ### Key flows
 
 - **Cold path (new index):** agent → `/index` → SF execution → Fargate worker → DuckLake commit → agent polls → agent queries.
-- **Warm path (already indexed):** agent → `/index` → serve Lambda queries `package_catalog` first → returns `{status: "complete", ...}` without ever starting an SF execution. No job created, no cost.
-- **Dedup (concurrent identical):** two simultaneous `external_index` calls for the same `(source, package, revision, source_url)` race to create the same DynamoDB dedupe item; the loser reads the pointed active job and returns the winner's `job_id`. Exactly one SF execution runs.
+- **Warm path (already indexed):** agent → `/index` → serve Lambda validates URL syntax, canonicalizes the identity, and queries `package_catalog` → returns `{status: "complete", ...}` without DNS, mutable rate accounting, queue admission, or an SF execution. For an explicit legacy `crates.io` or `crates-io` source alias, a canonical miss also checks that exact trimmed legacy namespace so catalog rows written before canonicalization remain warm. No job created, no cost.
+- **Dedup (concurrent identical):** two simultaneous `external_index` calls for the same canonical `(source, package, revision, source_url)` race to create the same DynamoDB dedupe item; the loser reads the pointed active job and returns the winner's `job_id`. Exactly one SF execution runs.
 - **Spot interruption:** worker receives SIGTERM + 2-min window → writes checkpoint to S3 + `SendTaskFailure` → SF `Catch` retries up to 2x on spot, then routes to `FallbackBuild` (FARGATE on-demand only).
 - **Future pollers** (the "shared queue" property): crates.io / git pollers simply call `StartExecution` against the same state machine — zero new infra.
 
@@ -309,7 +309,7 @@ infra/spur-context-service/     + state machine (ASL JSON)
 
 Each `external_index` call generates a fresh UUID `job_id`. The SF execution name is set to this `job_id` for traceability (SF execution ARN embeds the name) — **not** as the dedup mechanism.
 
-Dedup is application-layer, via a DynamoDB `DEDUP#<source>#<package>#<revision_as_given>#<source_url_hash>` item created in the same transaction as the job item. SF execution names cannot be reused within 90 days (even after the prior execution terminates), so a name-based dedup strategy would block retry-after-failure; UUID-per-call avoids that entirely.
+Dedup is application-layer, via a DynamoDB `DEDUP#<canonical_source>#<canonical_package>#<canonical_revision>#<canonical_source_url_hash>` item created in the same transaction as the job item. Generic git/tarball inputs are canonicalized only by trimming surrounding whitespace; standard crates.io requests additionally converge aliases and equivalent download URLs. SF execution names cannot be reused within 90 days (even after the prior execution terminates), so a name-based dedup strategy would block retry-after-failure; UUID-per-call avoids that entirely.
 
 ### Top-level Catch
 
@@ -319,15 +319,22 @@ Worker failures mark the DynamoDB job failed when possible, and `external_index_
 
 ```
 external_index(
-  package:     string,   required  — e.g., "serde", "tokio", or any identifier
-  revision:    string,   required  — semver "1.0.197" | git SHA | tag | branch
-  source_url:  string,   required  — fetchable URL (see source_kind)
+  package:     string,   required  — e.g., "serde", "tokio", or any identifier;
+                                       trimmed, and crates.io names are lowercased
+                                       with underscores normalized to hyphens
+  revision:    string,   required  — trimmed semver "1.0.197" | git SHA | tag | branch
+  source_url:  string,   required  — trimmed fetchable URL (see source_kind)
   source_kind: string,   optional  — "git" | "tarball", default inferred from URL:
                                        .git suffix or git+ssh → "git"
                                        http(s) to .tar.gz/.tgz/.zip → "tarball"
-  source:      string,   optional  — catalog source label, default "git:custom"
-                                       (anything other than source_url is informational;
-                                        used to namespace the revision in package_catalog)
+  source:      string,   optional  — trimmed catalog source label; no static
+                                       schema default because inference depends
+                                       on source_url. Standard
+                                       crates.io download URLs map omission,
+                                       "crates.io", "crates-io", and
+                                       "registry:crates-io" to
+                                       "registry:crates-io"; other omission
+                                       remains "git:custom"
   force:       bool,     optional  — bypass warm-path catalog check, default false
 ) → {
   job_id:       string,             // also the SF execution name suffix
@@ -367,6 +374,18 @@ external_index_status(
 | `git` (inferred from `.git` suffix, `git+https://`, `git+ssh://`, or github.com URL) | `https://github.com/tokio-rs/tokio`, `https://github.com/tokio-rs/tokio.git`, `git+ssh://git@github.com/tokio-rs/tokio` | `git clone --filter=blob:none <url> && git checkout <revision>`. Revision may be branch, tag, or SHA. |
 | `tarball` (inferred from `.tar.gz`, `.tgz`, `.zip` suffix on http(s) URL) | `https://crates.io/api/v1/crates/serde/1.0.197/download`, `https://example.com/pkg.tar.gz` | HTTP GET with size cap → extract to temp dir. **Revision is informational only** — the tarball is treated as the truth. |
 
+For the standard crates.io shape
+`https://crates.io/api/v1/crates/<package>/<version>/download`, admission
+validates that the URL package/version match the requested coordinate. It then
+uses the normalized package, trimmed version, `registry:crates-io`, tarball
+source kind, and a canonical URL (without harmless host casing, default port,
+query, fragment, or trailing-slash differences) for both catalog lookup and the
+active-job dedupe hash. An explicit unknown/custom source namespace is still
+preserved. On `force=false`, an explicit `crates.io` or `crates-io` request
+checks the canonical coordinate first, then the exact trimmed legacy source
+coordinate. This bounded compatibility lookup does not apply when source is
+omitted and never changes the canonical namespace used for a cold enqueue.
+
 ### Abuse rules applied to `source_url`
 
 Applied in `abuse.rs` before `StartExecution`:
@@ -383,29 +402,33 @@ The agent may pass a branch name, tag, or SHA. Worker runs `git rev-parse <revis
 
 ### Routing decision in serve Lambda
 
-The `/index` handler performs these steps before any SF call:
+The `/index` handler performs these steps before queue admission:
 
 ```
-1. abuse::validate(source_url)          → on fail: return rejected
-2. rate_limit::check(caller)            → on fail: return rejected with retry_after
-3. resolved_revision = git_rev_parse_if_git(source_url, revision)
-                                       // git_https URLs and Lambdas cannot run git.
-                                       // For git sources this returns None and
-                                       // the routing below uses revision_as_given.
-4. catalog::lookup(source, package, resolved_revision.unwrap_or(revision_as_given))
+1. parse_and_validate_args()
+2. abuse::validate(trimmed_source_url)  // pure syntax/host/allow-list checks; no DNS
+3. canonicalize_identity(source, package, revision, source_url, source_kind)
+   → crates.io coordinate mismatch: return rejected
+4. catalog::lookup(canonical_source, canonical_package, canonical_revision)
+   → on canonical miss for an explicit crates.io/crates-io alias only:
+       catalog::lookup(exact_trimmed_legacy_source, canonical_package,
+                       canonical_revision)
    → if row exists with index_status='complete' && !force:
        return {status: "complete", snapshot_id, revision}
-5. jobs.create_or_get_active_job(source, package, revision_as_given, source_url_hash)
-   → if existing active DynamoDB job exists:
-       return {job_id: existing, status: <current>, execution_arn: existing}
-   → if created:
-       continue
-6. StartExecution(index_build_v1, name = job_id, payload)
-7. jobs.record_execution_started(job_id, execution_arn)
-8. return {job_id, status: "queued", execution_arn}
+5. abuse::resolve_and_check_dns(canonical host)
+6. rate_limit::check(caller)            → on fail: return rejected with retry_after
+7. jobs.enqueue_job(canonical identity, backlog owner, queue limits)
+   → existing active canonical dedupe: return the existing job
+   → queue cap exceeded: return queue_full/global_queue_full
+8. return {job_id, status: "queued"}
 ```
 
-Note step 3 — for git sources, the serve Lambda **cannot** resolve the SHA (would require a git operation in the Lambda, which we don't want). When unresolved, the dedup uses `(source, package, revision_as_given, source_url_hash)` — if two agents request the same branch name while a job is active, they share an execution even if the branch moves between requests. The worker resolves the SHA after clone and the catalog stores the canonical mapping.
+The successful `force=false` catalog hit is deliberately before DNS and mutable
+rate accounting. A cold miss and every `force=true` call still performs DNS,
+rate limiting, active dedupe, and bounded queue admission. For generic git
+sources, dedupe continues to use the trimmed revision as given; the worker
+resolves a symbolic revision after clone and the catalog stores the canonical
+mapping.
 
 ### Retry-after-failure
 
