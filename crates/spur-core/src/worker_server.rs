@@ -274,13 +274,44 @@ struct ActiveCallGuard {
 #[derive(Default)]
 struct HandlerAbortRegistry {
     next_id: AtomicU64,
-    handles: Mutex<std::collections::HashMap<u64, futures::future::AbortHandle>>,
+    state: Mutex<HandlerAbortState>,
     changed: tokio::sync::Notify,
 }
 
+#[derive(Default)]
+struct HandlerAbortState {
+    closing: bool,
+    handles: std::collections::HashMap<u64, futures::future::AbortHandle>,
+}
+
 struct HandlerAbortRegistration {
-    id: u64,
+    id: Option<u64>,
     registry: Arc<HandlerAbortRegistry>,
+}
+
+#[cfg(test)]
+pub(crate) struct TestHandlerLifecycle {
+    abort_registration: Option<futures::future::AbortRegistration>,
+    _handler_registration: HandlerAbortRegistration,
+    _active_guard: ActiveCallGuard,
+}
+
+#[cfg(test)]
+impl TestHandlerLifecycle {
+    pub(crate) async fn aborted_within(&mut self, deadline: Duration) -> bool {
+        let registration = self
+            .abort_registration
+            .take()
+            .expect("test handler abort registration consumed once");
+        matches!(
+            tokio::time::timeout(
+                deadline,
+                futures::future::Abortable::new(std::future::pending::<()>(), registration),
+            )
+            .await,
+            Ok(Err(_))
+        )
+    }
 }
 
 impl HandlerAbortRegistry {
@@ -289,7 +320,14 @@ impl HandlerAbortRegistry {
     ) -> (futures::future::AbortRegistration, HandlerAbortRegistration) {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (handle, registration) = futures::future::AbortHandle::new_pair();
-        self.handles.lock().insert(id, handle);
+        let mut state = self.state.lock();
+        let id = if state.closing {
+            handle.abort();
+            None
+        } else {
+            state.handles.insert(id, handle);
+            Some(id)
+        };
         (
             registration,
             HandlerAbortRegistration {
@@ -299,8 +337,14 @@ impl HandlerAbortRegistry {
         )
     }
 
+    fn begin_closing(&self) {
+        self.state.lock().closing = true;
+    }
+
     fn abort_all(&self) {
-        for handle in self.handles.lock().values() {
+        self.begin_closing();
+        let state = self.state.lock();
+        for handle in state.handles.values() {
             handle.abort();
         }
     }
@@ -308,7 +352,7 @@ impl HandlerAbortRegistry {
     async fn wait(&self) {
         loop {
             let changed = self.changed.notified();
-            if self.handles.lock().is_empty() {
+            if self.state.lock().handles.is_empty() {
                 return;
             }
             changed.await;
@@ -318,7 +362,9 @@ impl HandlerAbortRegistry {
 
 impl Drop for HandlerAbortRegistration {
     fn drop(&mut self) {
-        self.registry.handles.lock().remove(&self.id);
+        if let Some(id) = self.id {
+            self.registry.state.lock().handles.remove(&id);
+        }
         self.registry.changed.notify_waiters();
     }
 }
@@ -2209,6 +2255,37 @@ impl WorkerMcpServer {
         buf
     }
 
+    #[cfg(test)]
+    pub(crate) fn replace_background_handles_for_test(
+        &self,
+        accept_loop: JoinHandle<()>,
+        flusher: JoinHandle<()>,
+    ) -> (Option<JoinHandle<()>>, Option<JoinHandle<()>>) {
+        (
+            self.accept_loop_handle.lock().replace(accept_loop),
+            self.flusher_handle.lock().replace(flusher),
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn accept_loop_handle_taken_for_test(&self) -> bool {
+        self.accept_loop_handle.lock().is_none()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn register_handler_lifecycle_for_test(&self) -> TestHandlerLifecycle {
+        let active_guard = ActiveCallGuard::new(
+            Arc::clone(&self.active_delegations),
+            &self.peak_active_delegations,
+        );
+        let (abort_registration, handler_registration) = self.deps.handler_aborts.register();
+        TestHandlerLifecycle {
+            abort_registration: Some(abort_registration),
+            _handler_registration: handler_registration,
+            _active_guard: active_guard,
+        }
+    }
+
     /// Number of dispatchers currently in flight. Read by [`shutdown`] to
     /// drain in-flight requests; exposed publicly so callers and tests can
     /// observe pressure without reaching into `DispatcherDeps`.
@@ -2293,8 +2370,8 @@ impl WorkerMcpServer {
     /// (`drained = false`, `active_at_deadline > 0`).
     ///
     /// Drain semantics:
-    /// 1. The accept loop is cancelled first, so the listener stops accepting
-    ///    new connections immediately.
+    /// 1. Handler registration closes monotonically, then the accept loop is
+    ///    cancelled so the listener stops accepting new connections.
     /// 2. Active RMCP sessions are closed so long-lived SSE streams are
     ///    proactively terminated.
     /// 3. Existing dispatchers continue and decrement `active_delegations`
@@ -2312,6 +2389,7 @@ impl WorkerMcpServer {
     /// handles already taken and returns immediately with `drained = true`.
     pub async fn shutdown(self: Arc<Self>, deadline: Duration) -> ShutdownOutcome {
         let drain_deadline = Instant::now() + deadline;
+        self.deps.handler_aborts.begin_closing();
         self.shutdown.cancel();
         self.close_all_sessions(deadline).await;
 
@@ -2344,11 +2422,7 @@ impl WorkerMcpServer {
         let accept_handle = self.accept_loop_handle.lock().take();
         if let Some(handle) = accept_handle {
             let wait = drain_deadline.saturating_duration_since(Instant::now());
-            if wait.is_zero() {
-                handle.abort();
-            } else {
-                let _ = tokio::time::timeout(wait, handle).await;
-            }
+            await_or_abort_background_task(handle, wait).await;
         }
 
         let flusher_handle = self.flusher_handle.lock().take();
@@ -2357,11 +2431,7 @@ impl WorkerMcpServer {
                 Duration::from_secs(1),
                 drain_deadline.saturating_duration_since(Instant::now()),
             );
-            if wait.is_zero() {
-                handle.abort();
-            } else {
-                let _ = tokio::time::timeout(wait, handle).await;
-            }
+            await_or_abort_background_task(handle, wait).await;
         }
         // Reference held only to keep the deps Arc alive until shutdown
         // completes; explicit drop documents intent.
@@ -2374,6 +2444,14 @@ impl WorkerMcpServer {
 /// draining. Bounded so the polling loop never busy-spins, small enough that
 /// a fast-completing dispatcher doesn't materially extend shutdown latency.
 const DRAIN_POLL_INTERVAL: Duration = Duration::from_millis(10);
+
+async fn await_or_abort_background_task(mut handle: JoinHandle<()>, wait: Duration) {
+    if !wait.is_zero() && tokio::time::timeout(wait, &mut handle).await.is_ok() {
+        return;
+    }
+    handle.abort();
+    let _ = handle.await;
+}
 
 /// Append a read-tool call to the per-delegation aggregation buffer. Lazily
 /// creates the buffer on first call. Lock scope is intentionally tight — the
@@ -3589,6 +3667,102 @@ mod tests {
         assert_eq!(server.active_count(), 0);
         call.abort();
         let _ = call.await;
+    }
+
+    #[tokio::test]
+    async fn retirement_cancels_handler_registration_after_abort_all() {
+        let registry = Arc::new(HandlerAbortRegistry::default());
+        registry.abort_all();
+
+        let (abort_registration, handler_registration) = registry.register();
+        let result = tokio::time::timeout(
+            Duration::from_millis(50),
+            futures::future::Abortable::new(std::future::pending::<()>(), abort_registration),
+        )
+        .await
+        .expect("late handler registration escaped shutdown cancellation");
+        assert!(result.is_err(), "late handler must be force-aborted");
+        drop(handler_registration);
+        tokio::time::timeout(Duration::from_millis(50), registry.wait())
+            .await
+            .expect("late registration wedged handler drain");
+    }
+
+    #[tokio::test]
+    async fn retirement_awaits_timed_out_accept_loop_and_flusher_handles() {
+        let dir = TempDir::new().expect("tempdir");
+        let pm = pm_service_fixture(dir.path()).await;
+        let server = WorkerMcpServer::start(
+            "brain-A".into(),
+            worker_mcp_deps_fixture(
+                pm,
+                pro_feature_gate(),
+                Arc::new(RecordingWorkerSignalSink::default()),
+            ),
+        )
+        .await
+        .expect("start worker server");
+
+        let (accept_started_tx, accept_started_rx) = std::sync::mpsc::sync_channel(1);
+        let (accept_release_tx, accept_release_rx) = std::sync::mpsc::sync_channel(1);
+        let accept_loop = tokio::task::spawn_blocking(move || {
+            accept_started_tx.send(()).expect("signal accept start");
+            let _ = accept_release_rx.recv();
+        });
+        let (flusher_started_tx, flusher_started_rx) = std::sync::mpsc::sync_channel(1);
+        let (flusher_release_tx, flusher_release_rx) = std::sync::mpsc::sync_channel(1);
+        let flusher = tokio::task::spawn_blocking(move || {
+            flusher_started_tx.send(()).expect("signal flusher start");
+            let _ = flusher_release_rx.recv();
+        });
+        accept_started_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("accept blocker did not start");
+        flusher_started_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("flusher blocker did not start");
+        let (old_accept, old_flusher) =
+            server.replace_background_handles_for_test(accept_loop, flusher);
+        for handle in [old_accept, old_flusher].into_iter().flatten() {
+            handle.abort();
+            let _ = handle.await;
+        }
+
+        let shutdown_server = Arc::clone(&server);
+        let shutdown = tokio::spawn(async move {
+            shutdown_server.shutdown(Duration::ZERO).await;
+        });
+        let returned_before_accept_ack = tokio::time::timeout(Duration::from_millis(50), async {
+            while !shutdown.is_finished() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .is_ok();
+        accept_release_tx.send(()).expect("release accept blocker");
+        let returned_before_flusher_ack = tokio::time::timeout(Duration::from_millis(50), async {
+            while !shutdown.is_finished() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .is_ok();
+        flusher_release_tx
+            .send(())
+            .expect("release flusher blocker");
+        tokio::time::timeout(Duration::from_secs(1), shutdown)
+            .await
+            .expect("shutdown did not finish after background acknowledgements")
+            .expect("shutdown task panicked");
+
+        assert!(
+            !returned_before_accept_ack,
+            "shutdown returned before the timed-out accept loop acknowledged abort"
+        );
+        assert!(
+            !returned_before_flusher_ack,
+            "shutdown returned before the timed-out flusher acknowledged abort"
+        );
     }
 
     #[tokio::test]
