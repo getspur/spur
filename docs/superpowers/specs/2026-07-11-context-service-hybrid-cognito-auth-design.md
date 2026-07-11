@@ -150,6 +150,14 @@ rotation, revocation, and tenant registry; Cognito does not natively validate
 such keys. Revisit a Lambda authorizer only if audience scale or immediate
 revocation becomes more important than the native-authorizer simplicity.
 
+**Supersession note (2026-07-11):** The later approved companion design,
+`2026-07-11-context-service-api-key-auth-design.md`, adds personal API keys for
+SPUR CLI use as a separate, feature-flagged authentication mode. It does not
+replace the Cognito human/M2M or IAM decisions in this document. The companion
+spec owns API-key issuance, Lambda-authorizer, storage, revocation, and CLI
+contracts; this historical rejection explains why they were excluded from the
+initial Cognito implementation.
+
 ### Chosen Rust libraries and dependency boundary
 
 The production `spur-context-service` Lambda does not add an OAuth, OIDC, JWT,
