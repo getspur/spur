@@ -11142,6 +11142,7 @@ dependencies = [
  "nix 0.29.0",
  "reqwest 0.12.28",
  "rustls 0.23.38",
+ "secrecy",
  "semver",
  "serde",
  "serde_json",
@@ -11150,6 +11151,7 @@ dependencies = [
  "spur-blob-store",
  "spur-bot",
  "spur-context",
+ "spur-context-auth",
  "spur-core",
  "spur-cost",
  "spur-graph",
@@ -11167,6 +11169,7 @@ dependencies = [
  "tracing-appender",
  "tracing-subscriber",
  "uuid",
+ "url",
  "wiremock",
 ]
 
@@ -11271,6 +11274,7 @@ dependencies = [
  "rmcp",
  "rusqlite",
  "schemars 0.8.22",
+ "secrecy",
  "serde",
  "serde_json",
  "sha2 0.10.9",
