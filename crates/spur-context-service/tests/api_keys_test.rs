@@ -370,6 +370,8 @@ async fn expired_keys_are_denied_and_swept_with_persisted_catch_up_cursor() {
         now_epoch_seconds: now,
         start_hour,
         max_buckets: 1,
+        max_pages: 3,
+        max_records: 100,
         page_limit: 100,
         lease_owner: "worker-a".to_string(),
         lease_duration_seconds: 60,
@@ -442,6 +444,8 @@ async fn list_cursor_and_partial_expiry_pages_do_not_double_decrement() {
         now_epoch_seconds: (hour + 1) * 3_600 + 60,
         start_hour: hour,
         max_buckets: 1,
+        max_pages: 1,
+        max_records: 2,
         page_limit: 2,
         lease_owner: "worker-pages".to_string(),
         lease_duration_seconds: 60,
@@ -512,6 +516,8 @@ async fn open_expiry_hour_is_revisited_after_it_closes() {
         now_epoch_seconds: hour_start + 100,
         start_hour: open_hour,
         max_buckets: 1,
+        max_pages: 3,
+        max_records: 10,
         page_limit: 10,
         lease_owner: "worker-open-hour".to_string(),
         lease_duration_seconds: 60,
@@ -590,6 +596,8 @@ async fn late_expiry_index_arrival_is_reclaimed_without_starving_forward_work() 
         now_epoch_seconds: (late_hour + 1) * 3_600 + 60,
         start_hour: late_hour,
         max_buckets: 1,
+        max_pages: 3,
+        max_records: 10,
         page_limit: 10,
         lease_owner: "late-worker".to_string(),
         lease_duration_seconds: 60,
@@ -632,6 +640,140 @@ async fn late_expiry_index_arrival_is_reclaimed_without_starving_forward_work() 
         .expect("overlap rescan is idempotent");
     assert_eq!(repeated.processed, 0);
     assert_eq!(repeated.completed_hour, Some(late_hour + 1));
+}
+
+#[tokio::test]
+async fn sweep_limits_historical_catchup_by_pages_buckets_and_records() {
+    let record_store = FakeApiKeyStore::new();
+    let hour = 850_000_u64;
+    for index in 0..3 {
+        record_store
+            .create_key(CreateKeyRecord::new(key_record(
+                "owner-record-budget",
+                &format!("bounded-{index}"),
+                hour * 3_600,
+                hour * 3_600 + 10 + index,
+            )))
+            .await
+            .expect("bounded fixture should persist");
+    }
+
+    let record_bounded = SweepRequest {
+        now_epoch_seconds: (hour + 1) * 3_600 + 60,
+        start_hour: hour,
+        max_buckets: 8,
+        max_pages: 8,
+        max_records: 2,
+        page_limit: 100,
+        lease_owner: "record-budget".to_string(),
+        lease_duration_seconds: 60,
+    };
+    let first = record_store
+        .sweep_expired(record_bounded.clone())
+        .await
+        .expect("record-bounded sweep should succeed");
+    assert_eq!(first.processed, 2);
+    assert!(first.has_more);
+
+    let second = record_store
+        .sweep_expired(record_bounded)
+        .await
+        .expect("record-bounded continuation should succeed");
+    assert_eq!(second.processed, 1);
+
+    for index in 0..10 {
+        record_store
+            .create_key(CreateKeyRecord::new(key_record(
+                "owner-record-budget",
+                &format!("replacement-{index}"),
+                (hour + 1) * 3_600 + index,
+                (hour + 10) * 3_600,
+            )))
+            .await
+            .expect("exactly ten replacements should fit after cleanup");
+    }
+    assert_eq!(
+        record_store
+            .create_key(CreateKeyRecord::new(key_record(
+                "owner-record-budget",
+                "eleventh-replacement",
+                (hour + 1) * 3_600 + 20,
+                (hour + 10) * 3_600,
+            )))
+            .await,
+        Err(ApiKeyStoreError::OwnerLimit)
+    );
+
+    let horizon_store = FakeApiKeyStore::new();
+    let page_bounded = SweepRequest {
+        now_epoch_seconds: (hour + 4) * 3_600 + 60,
+        start_hour: hour,
+        max_buckets: 4,
+        max_pages: 2,
+        max_records: 100,
+        page_limit: 100,
+        lease_owner: "page-budget".to_string(),
+        lease_duration_seconds: 60,
+    };
+    let page_limited = horizon_store
+        .sweep_expired(page_bounded)
+        .await
+        .expect("page-bounded sweep should succeed");
+    assert_eq!(page_limited.completed_hour, Some(hour + 1));
+    assert!(page_limited.has_more);
+
+    let bucket_bounded = SweepRequest {
+        now_epoch_seconds: (hour + 4) * 3_600 + 60,
+        start_hour: hour + 2,
+        max_buckets: 1,
+        max_pages: 8,
+        max_records: 100,
+        page_limit: 100,
+        lease_owner: "bucket-budget".to_string(),
+        lease_duration_seconds: 60,
+    };
+    let bucket_limited = horizon_store
+        .sweep_expired(bucket_bounded)
+        .await
+        .expect("bucket-bounded sweep should succeed");
+    assert_eq!(bucket_limited.completed_hour, Some(hour + 2));
+    assert!(bucket_limited.has_more);
+
+    for invalid in [
+        SweepRequest {
+            max_buckets: 9,
+            lease_owner: "invalid-buckets".to_string(),
+            ..bucket_limited_request(hour)
+        },
+        SweepRequest {
+            max_pages: 17,
+            lease_owner: "invalid-pages".to_string(),
+            ..bucket_limited_request(hour)
+        },
+        SweepRequest {
+            max_records: 101,
+            lease_owner: "invalid-records".to_string(),
+            ..bucket_limited_request(hour)
+        },
+    ] {
+        assert_eq!(
+            horizon_store.sweep_expired(invalid).await,
+            Err(ApiKeyStoreError::InvalidRequest)
+        );
+    }
+}
+
+fn bucket_limited_request(hour: u64) -> SweepRequest {
+    SweepRequest {
+        now_epoch_seconds: (hour + 4) * 3_600 + 60,
+        start_hour: hour + 3,
+        max_buckets: 1,
+        max_pages: 1,
+        max_records: 1,
+        page_limit: 1,
+        lease_owner: "invalid-base".to_string(),
+        lease_duration_seconds: 60,
+    }
 }
 
 #[test]

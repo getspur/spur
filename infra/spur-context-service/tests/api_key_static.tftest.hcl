@@ -127,6 +127,43 @@ run "cleanup_page_limit_cannot_exceed_backend_bound" {
   expect_failures = [var.api_key_cleanup_page_limit]
 }
 
+run "cleanup_invocation_and_schedule_bounds_are_enforced" {
+  command = plan
+
+  variables {
+    api_key_cleanup_schedule_minutes = 16
+    api_key_cleanup_max_buckets      = 9
+    api_key_cleanup_max_records      = 101
+  }
+
+  expect_failures = [
+    var.api_key_cleanup_schedule_minutes,
+    var.api_key_cleanup_max_buckets,
+    var.api_key_cleanup_max_records,
+  ]
+}
+
+run "cleanup_page_budget_has_a_finite_upper_bound" {
+  command = plan
+
+  variables {
+    api_key_cleanup_max_pages = 17
+  }
+
+  expect_failures = [var.api_key_cleanup_max_pages]
+}
+
+run "cleanup_page_budget_preserves_late_index_overlap" {
+  command = plan
+
+  variables {
+    api_key_cleanup_max_buckets = 4
+    api_key_cleanup_max_pages   = 5
+  }
+
+  expect_failures = [var.api_key_cleanup_max_pages]
+}
+
 run "enabled_api_keys_create_exact_isolated_contract" {
   command = plan
 
@@ -274,16 +311,26 @@ run "enabled_api_keys_create_exact_isolated_contract" {
 
   assert {
     condition = (
-      aws_cloudwatch_event_rule.api_key_cleanup[0].schedule_expression == "rate(1 hour)" &&
+      aws_cloudwatch_event_rule.api_key_cleanup[0].schedule_expression == "rate(5 minutes)" &&
       aws_cloudwatch_event_target.api_key_cleanup[0].input != null &&
+      aws_lambda_function.api_key_cleanup[0].environment[0].variables["SPUR_API_KEY_CLEANUP_MAX_CATCHUP_HOURS"] == "168" &&
+      aws_lambda_function.api_key_cleanup[0].environment[0].variables["SPUR_API_KEY_CLEANUP_MAX_BUCKETS"] == "4" &&
+      aws_lambda_function.api_key_cleanup[0].environment[0].variables["SPUR_API_KEY_CLEANUP_MAX_PAGES"] == "8" &&
+      aws_lambda_function.api_key_cleanup[0].environment[0].variables["SPUR_API_KEY_CLEANUP_MAX_RECORDS"] == "100" &&
+      aws_lambda_function.api_key_cleanup[0].environment[0].variables["SPUR_API_KEY_CLEANUP_PAGE_LIMIT"] == "100" &&
+      var.api_key_cleanup_max_catchup_hours > var.api_key_cleanup_max_buckets &&
+      floor(60 / var.api_key_cleanup_schedule_minutes) * var.api_key_cleanup_max_records > ceil(50000 * var.api_key_max_active_per_user / (var.api_key_default_ttl_days * 24)) &&
       length(aws_cloudwatch_log_group.api_key_authorizer) == 1 &&
       length(aws_cloudwatch_log_group.api_key_cleanup) == 1 &&
       length(aws_cloudwatch_metric_alarm.api_key_route_5xx) == 1 &&
       length(aws_cloudwatch_metric_alarm.api_key_authorizer_errors) == 1 &&
       length(aws_cloudwatch_metric_alarm.api_key_cleanup_errors) == 1 &&
-      length(aws_cloudwatch_metric_alarm.api_key_cleanup_cursor_lag) == 1
+      length(aws_cloudwatch_metric_alarm.api_key_cleanup_cursor_lag) == 1 &&
+      aws_cloudwatch_metric_alarm.api_key_cleanup_errors[0].period == 300 &&
+      aws_cloudwatch_metric_alarm.api_key_cleanup_cursor_lag[0].period == 300 &&
+      aws_cloudwatch_metric_alarm.api_key_cleanup_cursor_lag[0].treat_missing_data == "breaching"
     )
-    error_message = "enabled mode must create hourly cleanup plus dedicated logs and alarms"
+    error_message = "enabled mode must provide bounded five-minute cleanup capacity above steady-state expiry plus dedicated lag/error alarms"
   }
 
   assert {

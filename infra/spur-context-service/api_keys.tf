@@ -2,6 +2,14 @@
 # resource in this file is gated so existing IAM, demo, OAuth, M2M, and queue
 # deployments are unchanged until an operator explicitly enables the feature.
 
+locals {
+  api_key_supported_user_count           = 50000
+  api_key_steady_state_expiries_per_hour = ceil(local.api_key_supported_user_count * var.api_key_max_active_per_user / (var.api_key_default_ttl_days * 24))
+  api_key_cleanup_invocations_per_hour   = floor(60 / var.api_key_cleanup_schedule_minutes)
+  api_key_cleanup_records_per_invocation = min(var.api_key_cleanup_max_records, var.api_key_cleanup_page_limit)
+  api_key_cleanup_capacity_per_hour      = local.api_key_cleanup_invocations_per_hour * local.api_key_cleanup_records_per_invocation
+}
+
 resource "aws_dynamodb_table" "api_keys" {
   count = var.api_key_auth_enabled ? 1 : 0
 
@@ -223,7 +231,17 @@ resource "aws_lambda_function" "api_key_cleanup" {
       SPUR_API_KEY_OWNER_GSI_NAME            = var.api_key_owner_gsi_name
       SPUR_API_KEY_EXPIRY_GSI_NAME           = var.api_key_expiry_gsi_name
       SPUR_API_KEY_CLEANUP_MAX_CATCHUP_HOURS = tostring(var.api_key_cleanup_max_catchup_hours)
+      SPUR_API_KEY_CLEANUP_MAX_BUCKETS       = tostring(var.api_key_cleanup_max_buckets)
+      SPUR_API_KEY_CLEANUP_MAX_PAGES         = tostring(var.api_key_cleanup_max_pages)
+      SPUR_API_KEY_CLEANUP_MAX_RECORDS       = tostring(var.api_key_cleanup_max_records)
       SPUR_API_KEY_CLEANUP_PAGE_LIMIT        = tostring(var.api_key_cleanup_page_limit)
+    }
+  }
+
+  lifecycle {
+    precondition {
+      condition     = local.api_key_cleanup_capacity_per_hour > local.api_key_steady_state_expiries_per_hour
+      error_message = "API-key cleanup capacity must exceed the supported 50k-user steady-state expiry rate."
     }
   }
 
@@ -237,8 +255,8 @@ resource "aws_cloudwatch_event_rule" "api_key_cleanup" {
   count = var.api_key_auth_enabled ? 1 : 0
 
   name                = "spur-context-api-key-cleanup"
-  description         = "Hourly bounded cleanup of expired personal API keys"
-  schedule_expression = "rate(1 hour)"
+  description         = "Short-cadence bounded cleanup of expired personal API keys"
+  schedule_expression = "rate(${var.api_key_cleanup_schedule_minutes} minutes)"
 }
 
 resource "aws_cloudwatch_event_target" "api_key_cleanup" {
@@ -325,7 +343,7 @@ resource "aws_cloudwatch_metric_alarm" "api_key_cleanup_errors" {
   evaluation_periods  = 1
   metric_name         = "Errors"
   namespace           = "AWS/Lambda"
-  period              = 3600
+  period              = var.api_key_cleanup_schedule_minutes * 60
   statistic           = "Sum"
   threshold           = 1
   treat_missing_data  = "notBreaching"
@@ -345,7 +363,7 @@ resource "aws_cloudwatch_metric_alarm" "api_key_cleanup_cursor_lag" {
   evaluation_periods  = 1
   metric_name         = "ApiKeyCleanupCursorLagHours"
   namespace           = "SPUR/ContextServiceAuth"
-  period              = 3600
+  period              = var.api_key_cleanup_schedule_minutes * 60
   statistic           = "Maximum"
   threshold           = var.api_key_cleanup_cursor_lag_alarm_hours
   treat_missing_data  = "breaching"
