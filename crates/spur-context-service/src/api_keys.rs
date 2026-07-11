@@ -133,6 +133,10 @@ pub struct ApiKeyScopes(BTreeSet<ApiKeyScope>);
 
 impl ApiKeyScopes {
     /// Parses and normalizes scope names.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the input is empty or contains an unsupported scope.
     pub fn parse(values: &[&str]) -> Result<Self, ApiKeyError> {
         if values.is_empty() {
             return Err(ApiKeyError::InvalidScope);
@@ -145,6 +149,10 @@ impl ApiKeyScopes {
     }
 
     /// Builds a normalized set from typed scopes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the resulting set is empty.
     pub fn new(values: impl IntoIterator<Item = ApiKeyScope>) -> Result<Self, ApiKeyError> {
         let scopes = values.into_iter().collect::<BTreeSet<_>>();
         if scopes.is_empty() {
@@ -301,6 +309,11 @@ pub enum ApiKeyError {
 }
 
 /// Generates a new API key from OS-provided cryptographically secure random bytes.
+///
+/// # Errors
+///
+/// Returns an error for invalid owner/name/expiry values or when the operating
+/// system random source is unavailable.
 pub fn generate_api_key(
     environment: KeyEnvironment,
     owner_id: &str,
@@ -354,6 +367,10 @@ pub fn generate_api_key(
 }
 
 /// Parses and validates an API key without allocating secret material.
+///
+/// # Errors
+///
+/// Returns an error when the key grammar, environment, or base32 encoding is invalid.
 pub fn parse_api_key(value: &str) -> Result<ParsedApiKey<'_>, ApiKeyError> {
     let mut segments = value.split('_');
     let prefix = segments.next().ok_or(ApiKeyError::InvalidFormat)?;
@@ -417,10 +434,13 @@ fn decode_base32<const N: usize>(value: &str) -> Result<[u8; N], ApiKeyError> {
     let mut buffer = 0_u32;
     let mut bits = 0_u8;
     for byte in value.bytes() {
-        let index = BASE32_ALPHABET
-            .iter()
-            .position(|candidate| *candidate == byte)
-            .ok_or(ApiKeyError::InvalidEncoding)? as u32;
+        let index = u32::try_from(
+            BASE32_ALPHABET
+                .iter()
+                .position(|candidate| *candidate == byte)
+                .ok_or(ApiKeyError::InvalidEncoding)?,
+        )
+        .map_err(|_| ApiKeyError::InvalidEncoding)?;
         buffer = (buffer << 5) | index;
         bits += 5;
         if bits >= 8 {
@@ -526,7 +546,7 @@ pub enum ApiKeyStoreError {
     /// A concurrent conditional write must be retried.
     #[error("API key store conflict")]
     Conflict,
-    /// DynamoDB or persisted data failed without exposing provider details.
+    /// `DynamoDB` or persisted data failed without exposing provider details.
     #[error("API key store unavailable")]
     Backend,
 }
@@ -588,7 +608,7 @@ impl fmt::Debug for FakeApiKeyState {
             .field("completed_hour", &self.completed_hour)
             .field("lease_held", &self.lease_token.is_some())
             .field("cursor_version", &self.cursor_version)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -647,6 +667,10 @@ impl FakeApiKeyStore {
 
     /// Controls whether a fake record is visible through the eventual expiry
     /// index, allowing deterministic propagation-lag tests.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the record does not exist or the fake lock is poisoned.
     pub fn set_expiry_index_visible(
         &self,
         public_id: &str,
@@ -665,6 +689,10 @@ impl FakeApiKeyStore {
     }
 
     /// Acquires a fake fenced lease only when no unexpired invocation owns it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid lease values, a held lease, or a poisoned lock.
     pub fn acquire_expiry_lease(
         &self,
         lease_owner: &str,
@@ -696,6 +724,11 @@ impl FakeApiKeyStore {
 
     /// Conditionally advances the fake cursor with token, version, expected
     /// cursor, lease-expiry, and monotonicity fences.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a lease fence fails, progression is not monotonic,
+    /// or the fake lock is poisoned.
     pub fn save_expiry_cursor(
         &self,
         lease: &mut FakeSweepLease,
@@ -727,6 +760,10 @@ impl FakeApiKeyStore {
 
     /// Conditionally releases a fake lease. A stale token/version cannot clear
     /// a newer invocation's lease.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the lease fence fails or the fake lock is poisoned.
     pub fn release_expiry_lease(&self, lease: &FakeSweepLease) -> Result<(), ApiKeyStoreError> {
         let mut state = self.lock()?;
         if state.lease_token.as_deref() != Some(lease.token.as_str())
@@ -741,6 +778,10 @@ impl FakeApiKeyStore {
     }
 
     /// Returns the fake durable high-water cursor.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the fake lock is poisoned.
     pub fn expiry_completed_hour(&self) -> Result<Option<u64>, ApiKeyStoreError> {
         Ok(self.lock()?.completed_hour)
     }
@@ -1675,9 +1716,8 @@ fn record_from_item(
             .map_err(|_| ApiKeyStoreError::Backend)?,
         _ => return Err(ApiKeyStoreError::Backend),
     };
-    let scope_values = match item.get("scopes") {
-        Some(AttributeValue::Ss(values)) => values,
-        _ => return Err(ApiKeyStoreError::Backend),
+    let Some(AttributeValue::Ss(scope_values)) = item.get("scopes") else {
+        return Err(ApiKeyStoreError::Backend);
     };
     let scope_refs = scope_values.iter().map(String::as_str).collect::<Vec<_>>();
     let scopes = ApiKeyScopes::parse(&scope_refs).map_err(|_| ApiKeyStoreError::Backend)?;
