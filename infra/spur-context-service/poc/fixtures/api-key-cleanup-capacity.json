@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "evidence_state": "offline-calculated",
+  "supported_users": 50000,
+  "max_active_keys_per_user": 10,
+  "supported_active_keys": 500000,
+  "default_ttl_days": 90,
+  "steady_state_expiries_per_hour": 232,
+  "schedule_minutes": 5,
+  "invocations_per_hour": 12,
+  "max_buckets_per_invocation": 4,
+  "max_pages_per_invocation": 8,
+  "max_records_per_invocation": 100,
+  "page_limit": 100,
+  "configured_capacity_per_hour": 1200,
+  "steady_state_bucket_max_invocations": 12,
+  "burst_fixture_records": 232,
+  "expected_counter_release": "exactly-once",
+  "expected_cursor_behavior": "advance-only-after-fully-drained-hour"
+}
