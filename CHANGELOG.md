@@ -277,3 +277,17 @@ Spur 0.4.5 focuses on getting around faster and trusting what you see. A new uni
 - **`spur-tui`: Explore view UX refresh.** Scroll-follow, preview caching, render-path caching, browse presentation, gate interaction feedback, and search filtering all landed together, making the Explore surface steadier under frequent updates. (`12b626b4c`)
 - **`spur-tui`: Loop browser polish.** The loop browser now documents `g`/`G`, masks notices correctly, shows governor placeholders, and wraps confirmations cleanly so long-running loop inspection reads more predictably. (`36f09d00a`)
 - **`spur-tui`: Session picker polish and render-frame cleanup.** Session picker theme tokens, preview styling, key handling, and render-path cleanup reduce visual churn and keep filtering responsive while moving through long session lists. (`e560f9995`)
+
+## [2026-07-11]
+
+### Added
+- **`spur-core`: Autonomous L3 loop ownership.** Spur now lets the project runtime hold L3 loop leadership under the stable `spur-loop-runtime` owner, with dedicated reviewer dispatch and failover semantics for unattended project loops. This removes the need for an active brain session to keep L3 execution moving while preserving a separate maker/checker review boundary. (`e359653a3`)
+
+### Fixed
+- **`spur-context-service`: Queue repair and cursor hardening for external indexing.** Queued index jobs now recover terminal and stale dispatch paths without leaking running capacity, and the queue cursor protocol is hardened so backlog draining does not strand work after retries or partial failures. (`7dd56ef6f`, `7986ca2cd`)
+- **`spur-context-service`: Legacy crates.io warm-hit preservation.** Existing crates.io cache hits are now preserved for legacy records, which avoids unnecessary reindexing when a package was already warm in the catalog. (`16fceaf59`)
+- **`spur-core`: Codex role TOML compatibility.** Generated Codex agent role files now use a schema-safe managed marker format, keeping SPUR-managed profiles compatible with Codex’s supported TOML shape while still detecting edited files correctly. (`0884f5404`)
+- **`spur-core`: Exact global catalog verification during migration.** Global catalog migration now verifies the fully merged catalog state instead of only checking for surviving entries, which prevents incomplete or stale merged catalogs from being accepted as successful migrations. (`806618c72`)
+
+### Changed
+- **`spur-context-service`: Bounded external-index admission.** `external_index` now enqueues accepted work behind per-owner and optional global backlog caps, then dispatches it through a correctness drainer instead of starting execution inline. This adds explicit backpressure controls while ensuring queued indexing jobs still start and complete under the configured limits. (`edae14a2e`, `9ca1a9568`, `e8eac0eba`)
