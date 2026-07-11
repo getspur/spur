@@ -8,13 +8,15 @@
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use crate::api_keys::{ApiKeyStore, ApiKeyStoreError, SweepRequest};
+use crate::api_keys::{
+    ApiKeyStore, ApiKeyStoreError, SweepRequest, MAX_PAGE_LIMIT, MAX_SWEEP_BUCKETS,
+    MAX_SWEEP_PAGES, MAX_SWEEP_RECORDS,
+};
 
 const CLEANUP_OPERATION: &str = "sweep_expired_api_keys";
 const EVENT_SOURCE: &str = "aws.events";
 const EVENT_DETAIL_TYPE: &str = "Scheduled Event";
 const MAX_CATCHUP_HOURS: usize = 8_760;
-const MAX_PAGE_LIMIT: usize = 100;
 const LEASE_DURATION_SECONDS: u64 = 330;
 const MAX_LEASE_OWNER_LEN: usize = 128;
 
@@ -46,6 +48,9 @@ impl ApiKeyCleanupEvent {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ApiKeyCleanupConfig {
     max_catchup_hours: usize,
+    max_buckets: usize,
+    max_pages: usize,
+    max_records: usize,
     page_limit: usize,
 }
 
@@ -62,23 +67,29 @@ impl ApiKeyCleanupConfig {
     /// ```
     /// use spur_context_service::api_key_cleanup::ApiKeyCleanupConfig;
     ///
-    /// assert!(ApiKeyCleanupConfig::parse("168", "100").is_ok());
-    /// assert!(ApiKeyCleanupConfig::parse("0", "100").is_err());
+    /// assert!(ApiKeyCleanupConfig::parse("168", "4", "8", "100", "100").is_ok());
+    /// assert!(ApiKeyCleanupConfig::parse("0", "4", "8", "100", "100").is_err());
     /// ```
-    pub fn parse(max_catchup_hours: &str, page_limit: &str) -> Result<Self, ApiKeyCleanupError> {
-        let max_catchup_hours = max_catchup_hours
-            .parse::<usize>()
-            .map_err(|_| ApiKeyCleanupError::InvalidConfig)?;
-        let page_limit = page_limit
-            .parse::<usize>()
-            .map_err(|_| ApiKeyCleanupError::InvalidConfig)?;
-        if !(1..=MAX_CATCHUP_HOURS).contains(&max_catchup_hours)
-            || !(1..=MAX_PAGE_LIMIT).contains(&page_limit)
-        {
+    pub fn parse(
+        max_catchup_hours: &str,
+        max_buckets: &str,
+        max_pages: &str,
+        max_records: &str,
+        page_limit: &str,
+    ) -> Result<Self, ApiKeyCleanupError> {
+        let max_catchup_hours = parse_bounded_limit(max_catchup_hours, MAX_CATCHUP_HOURS)?;
+        let max_buckets = parse_bounded_limit(max_buckets, MAX_SWEEP_BUCKETS)?;
+        let max_pages = parse_bounded_limit(max_pages, MAX_SWEEP_PAGES)?;
+        let max_records = parse_bounded_limit(max_records, MAX_SWEEP_RECORDS)?;
+        let page_limit = parse_bounded_limit(page_limit, MAX_PAGE_LIMIT)?;
+        if max_pages < max_buckets + 2 {
             return Err(ApiKeyCleanupError::InvalidConfig);
         }
         Ok(Self {
             max_catchup_hours,
+            max_buckets,
+            max_pages,
+            max_records,
             page_limit,
         })
     }
@@ -88,12 +99,24 @@ impl ApiKeyCleanupConfig {
         SweepRequest {
             now_epoch_seconds,
             start_hour: current_hour.saturating_sub(self.max_catchup_hours as u64),
-            max_buckets: self.max_catchup_hours,
+            max_buckets: self.max_buckets,
+            max_pages: self.max_pages,
+            max_records: self.max_records,
             page_limit: self.page_limit,
             lease_owner: lease_owner.to_owned(),
             lease_duration_seconds: LEASE_DURATION_SECONDS,
         }
     }
+}
+
+fn parse_bounded_limit(value: &str, maximum: usize) -> Result<usize, ApiKeyCleanupError> {
+    let value = value
+        .parse::<usize>()
+        .map_err(|_| ApiKeyCleanupError::InvalidConfig)?;
+    if !(1..=maximum).contains(&value) {
+        return Err(ApiKeyCleanupError::InvalidConfig);
+    }
+    Ok(value)
 }
 
 /// Sanitized result returned by the cleanup Lambda and logged as EMF.
