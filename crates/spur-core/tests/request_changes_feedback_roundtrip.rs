@@ -147,7 +147,7 @@ async fn request_changes_feedback_survives_reprojection_and_reaches_worker() {
         Arc::new(Notify::new()),
         Some(ReconcilerDispatchCtx {
             delegation_tx,
-            task_tracker: tokio_util::task::TaskTracker::new(),
+            task_tracker: spur_core::server::AbortableTaskTracker::new(),
             brain_session_id: BrainSessionId::new(SessionId("brain".into())),
             event_sink: None,
             materializer: test_materializer(),

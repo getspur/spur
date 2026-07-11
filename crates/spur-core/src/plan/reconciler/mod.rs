@@ -40,9 +40,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
+use crate::server::AbortableTaskTracker;
 use futures::future::BoxFuture;
 use tokio::sync::Notify;
-use tokio_util::task::TaskTracker;
 
 use crate::plan::outcomes::{
     DispatchOutcome, NoReadyReason, OutcomeLogDecision, OutcomeStore, SkipReason, StuckTask,
@@ -722,7 +722,7 @@ async fn emit_setup_conflict_continuation(input: SetupConflictContinuation<'_>) 
 #[derive(Clone)]
 pub struct ReconcilerDispatchCtx {
     pub delegation_tx: tokio::sync::mpsc::Sender<crate::DelegationRequest>,
-    pub task_tracker: TaskTracker,
+    pub task_tracker: AbortableTaskTracker,
     pub brain_session_id: spur_acp::BrainSessionId,
     pub event_sink: Option<Arc<dyn spur_mcp::events::McpEventSink>>,
     pub materializer: Arc<crate::outcome_materializer::OutcomeMaterializer>,

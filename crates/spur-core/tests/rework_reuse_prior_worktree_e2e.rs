@@ -9,11 +9,11 @@ use spur_acp::{BrainSessionId, DelegationResult, DelegationStatus, SessionId};
 use spur_core::plan::audit_sentinel::{self, AuditSentinelKind};
 use spur_core::plan::reconciler::{Reconciler, ReconcilerConfig, ReconcilerDispatchCtx};
 use spur_core::plan::PlanTask;
+use spur_core::server::AbortableTaskTracker;
 use spur_core::McpCallbackServer;
 use spur_core::{BaseSpec, DelegationRequest};
 use tempfile::TempDir;
 use tokio::sync::Notify;
-use tokio_util::task::TaskTracker;
 
 mod common;
 
@@ -91,7 +91,7 @@ struct Runtime {
     server: McpCallbackServer,
     reconciler: Reconciler,
     request_rx: tokio::sync::mpsc::Receiver<DelegationRequest>,
-    _task_tracker: TaskTracker,
+    _task_tracker: AbortableTaskTracker,
 }
 
 impl Runtime {
@@ -147,7 +147,7 @@ async fn new_runtime() -> Runtime {
     server.set_repo_root(repo.clone());
 
     let (delegation_tx, request_rx) = tokio::sync::mpsc::channel(8);
-    let task_tracker = TaskTracker::new();
+    let task_tracker = AbortableTaskTracker::new();
     let reconciler = Reconciler::new(
         ReconcilerConfig {
             repo_root: repo.clone(),

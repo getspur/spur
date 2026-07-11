@@ -271,6 +271,58 @@ struct ActiveCallGuard {
     counter: Arc<AtomicU32>,
 }
 
+#[derive(Default)]
+struct HandlerAbortRegistry {
+    next_id: AtomicU64,
+    handles: Mutex<std::collections::HashMap<u64, futures::future::AbortHandle>>,
+    changed: tokio::sync::Notify,
+}
+
+struct HandlerAbortRegistration {
+    id: u64,
+    registry: Arc<HandlerAbortRegistry>,
+}
+
+impl HandlerAbortRegistry {
+    fn register(
+        self: &Arc<Self>,
+    ) -> (futures::future::AbortRegistration, HandlerAbortRegistration) {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let (handle, registration) = futures::future::AbortHandle::new_pair();
+        self.handles.lock().insert(id, handle);
+        (
+            registration,
+            HandlerAbortRegistration {
+                id,
+                registry: Arc::clone(self),
+            },
+        )
+    }
+
+    fn abort_all(&self) {
+        for handle in self.handles.lock().values() {
+            handle.abort();
+        }
+    }
+
+    async fn wait(&self) {
+        loop {
+            let changed = self.changed.notified();
+            if self.handles.lock().is_empty() {
+                return;
+            }
+            changed.await;
+        }
+    }
+}
+
+impl Drop for HandlerAbortRegistration {
+    fn drop(&mut self) {
+        self.registry.handles.lock().remove(&self.id);
+        self.registry.changed.notify_waiters();
+    }
+}
+
 impl ActiveCallGuard {
     fn new(counter: Arc<AtomicU32>, peak: &AtomicU32) -> Self {
         // `fetch_add` returns the prior value; the new in-flight count is +1.
@@ -452,6 +504,7 @@ struct DispatcherDeps {
     /// increment (never lowered). Same `Arc` instance held by
     /// [`WorkerMcpServer`].
     peak_active_delegations: Arc<AtomicU32>,
+    handler_aborts: Arc<HandlerAbortRegistry>,
     /// Per-delegation summary guards. Each entry emits one
     /// `WorkerMcpDelegationSummary` on removal (or on server shutdown).
     delegation_guards:
@@ -946,6 +999,21 @@ struct ReportProgressParams {
     percent: Option<f64>,
 }
 
+#[derive(Debug, Deserialize, JsonSchema, Serialize)]
+struct SubmitReviewVerdictParams {
+    target_issue_id: String,
+    decision: SubmitReviewDecisionParam,
+    feedback: String,
+    evidence: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum SubmitReviewDecisionParam {
+    Approve,
+    RequestChanges,
+}
+
 /// RMCP `ServerHandler` for the curated worker tool subset.
 struct WorkerToolHandler {
     deps: Arc<DispatcherDeps>,
@@ -1018,18 +1086,26 @@ impl WorkerToolHandler {
             Arc::clone(&self.deps.active_delegations),
             &self.deps.peak_active_delegations,
         );
+        let (abort_registration, _handler_registration) = self.deps.handler_aborts.register();
         let call_start = Instant::now();
 
         if let Some(target_issue_id) = read_audit_target {
             append_read_audit_entry(&self.deps, &delegation_id, tool_name, target_issue_id);
         }
 
-        let result = invoke(worker_ctx).await;
+        let result: Result<Value, McpError> =
+            match futures::future::Abortable::new(invoke(worker_ctx), abort_registration).await {
+                Ok(result) => result.map_err(Into::into),
+                Err(_) => Err(McpError::internal_error(
+                    "worker MCP handler force-aborted during server shutdown",
+                    None,
+                )),
+            };
         let latency_ms = call_start.elapsed().as_millis() as u64;
         let is_error = result.is_err();
         record_call(&self.deps, &delegation_id, tool_name, latency_ms, is_error);
 
-        result.map(structured_only_result).map_err(Into::into)
+        result.map(structured_only_result)
     }
 
     #[tool(
@@ -1475,6 +1551,34 @@ impl WorkerToolHandler {
     }
 
     #[tool(
+        name = "submit_review_verdict",
+        description = "Reviewer-only. Submit one authenticated durable verdict for the current maker completion bound to this reviewer delegation.",
+        input_schema = crate::tool_schemas::schema_object::<SubmitReviewVerdictParams>()
+    )]
+    async fn submit_review_verdict_tool(
+        &self,
+        arguments: JsonObject,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let args = Value::Object(arguments);
+        let deps = Arc::clone(&self.deps);
+        self.invoke_with_lifecycle(
+            "submit_review_verdict",
+            context,
+            None,
+            move |worker_ctx| async move {
+                crate::mcp::review_verdict::submit_review_verdict(
+                    deps.pm_service.as_ref(),
+                    &worker_ctx,
+                    args,
+                )
+                .await
+            },
+        )
+        .await
+    }
+
+    #[tool(
         name = "report_progress",
         description = "Worker-facing fire-and-forget progress emission. Sends a free-form `message` (and optional `percent`) to the brain as a `WorkerReportProgress` event. The handler returns `{ok: true}` on accept; the side effect IS the event. No PM writes, no audit sentinel — distinct from `report_signal` (which persists). Workers stream rich progress text without minting structured milestone names. Consumers (TUI / dashboards) decide how to render `percent` (no clamping).",
         input_schema = crate::tool_schemas::schema_object::<ReportProgressParams>()
@@ -1826,6 +1930,7 @@ impl WorkerMcpServer {
             flush_tx,
             active_delegations: Arc::clone(&active_delegations),
             peak_active_delegations: Arc::clone(&peak_active_delegations),
+            handler_aborts: Arc::new(HandlerAbortRegistry::default()),
             delegation_guards: Arc::clone(&delegation_guards),
         });
 
@@ -2118,6 +2223,16 @@ impl WorkerMcpServer {
     /// concurrency tests to assert real parallelism deterministically.
     pub fn peak_active_count(&self) -> u32 {
         self.peak_active_delegations.load(Ordering::SeqCst)
+    }
+
+    /// Force-abort every in-flight worker tool handler and wait until each
+    /// aborted future has unwound through its lifecycle guard.
+    pub async fn force_abort_handlers_and_wait(&self) {
+        self.deps.handler_aborts.abort_all();
+        self.deps.handler_aborts.wait().await;
+        while self.active_count() != 0 {
+            tokio::task::yield_now().await;
+        }
     }
 
     /// `true` while the accept loop is still running — i.e. [`shutdown`]
@@ -2657,6 +2772,33 @@ mod tests {
         progress: Mutex<Vec<(WorkerCallContext, Value)>>,
     }
 
+    #[derive(Default)]
+    struct HangingWorkerSignalSink {
+        entered: tokio::sync::Notify,
+        release: tokio::sync::Notify,
+    }
+
+    #[async_trait]
+    impl WorkerSignalSink for HangingWorkerSignalSink {
+        async fn report_signal(
+            &self,
+            _ctx: &WorkerCallContext,
+            _args: Value,
+        ) -> Result<Value, McpHandlerError> {
+            std::future::pending().await
+        }
+
+        async fn report_progress(
+            &self,
+            _ctx: &WorkerCallContext,
+            _args: Value,
+        ) -> Result<Value, McpHandlerError> {
+            self.entered.notify_one();
+            self.release.notified().await;
+            Ok(json!({ "ok": true }))
+        }
+    }
+
     impl RecordingWorkerSignalSink {
         fn progress_count(&self) -> usize {
             self.progress.lock().unwrap().len()
@@ -2778,6 +2920,7 @@ mod tests {
             flush_tx,
             active_delegations: Arc::new(AtomicU32::new(0)),
             peak_active_delegations: Arc::new(AtomicU32::new(0)),
+            handler_aborts: Arc::new(HandlerAbortRegistry::default()),
             delegation_guards: Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new())),
         })
     }
@@ -3351,6 +3494,101 @@ mod tests {
         drop(guards);
 
         server.shutdown(Duration::from_secs(5)).await;
+    }
+
+    #[tokio::test]
+    async fn shutdown_reports_active_call_until_durable_handler_acknowledges() {
+        let dir = TempDir::new().expect("tempdir");
+        let pm = pm_service_fixture(dir.path()).await;
+        let signal_sink = Arc::new(HangingWorkerSignalSink::default());
+        let signal_sink_trait: Arc<dyn WorkerSignalSink> = signal_sink.clone();
+        let server = WorkerMcpServer::start(
+            "brain-A".into(),
+            worker_mcp_deps_fixture(pm, pro_feature_gate(), signal_sink_trait),
+        )
+        .await
+        .expect("start worker server");
+        server.register_delegation(
+            "del-hanging".into(),
+            DelegationContext {
+                enable_worker_progress: true,
+            },
+        );
+        let token = server.issue_token("del-hanging", Duration::from_secs(60));
+        let call_server = Arc::clone(&server);
+        let mut call = tokio::spawn(async move {
+            call_report_progress(call_server.as_ref(), &token, "hang").await
+        });
+        signal_sink.entered.notified().await;
+        assert_eq!(server.active_count(), 1);
+
+        let outcome = Arc::clone(&server)
+            .shutdown(Duration::from_millis(20))
+            .await;
+        let active_after_shutdown = server.active_count();
+        signal_sink.release.notify_waiters();
+        if tokio::time::timeout(Duration::from_secs(1), &mut call)
+            .await
+            .is_err()
+        {
+            call.abort();
+            let _ = call.await;
+        }
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while server.active_count() != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("active handler did not acknowledge completion");
+
+        assert_eq!(
+            outcome,
+            ShutdownOutcome {
+                drained: false,
+                active_at_deadline: 1,
+            },
+            "shutdown must report the still-running durable handler so leadership remains fenced"
+        );
+        assert_eq!(active_after_shutdown, 1);
+        assert_eq!(server.active_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn force_abort_handlers_awaits_permanently_hung_call_acknowledgement() {
+        let dir = TempDir::new().expect("tempdir");
+        let pm = pm_service_fixture(dir.path()).await;
+        let signal_sink = Arc::new(HangingWorkerSignalSink::default());
+        let signal_sink_trait: Arc<dyn WorkerSignalSink> = signal_sink.clone();
+        let server = WorkerMcpServer::start(
+            "brain-A".into(),
+            worker_mcp_deps_fixture(pm, pro_feature_gate(), signal_sink_trait),
+        )
+        .await
+        .expect("start worker server");
+        server.register_delegation(
+            "del-hanging".into(),
+            DelegationContext {
+                enable_worker_progress: true,
+            },
+        );
+        let token = server.issue_token("del-hanging", Duration::from_secs(60));
+        let call_server = Arc::clone(&server);
+        let call = tokio::spawn(async move {
+            call_report_progress(call_server.as_ref(), &token, "hang forever").await
+        });
+        signal_sink.entered.notified().await;
+        let outcome = Arc::clone(&server)
+            .shutdown(Duration::from_millis(20))
+            .await;
+        assert!(!outcome.drained);
+        assert_eq!(server.active_count(), 1);
+
+        server.force_abort_handlers_and_wait().await;
+
+        assert_eq!(server.active_count(), 0);
+        call.abort();
+        let _ = call.await;
     }
 
     #[tokio::test]

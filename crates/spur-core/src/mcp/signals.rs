@@ -224,6 +224,9 @@ pub async fn report_signal(
             FeatureKey::PM_PRO_BEADS_ADVANCED.as_str()
         )));
     }
+    let _target_guard = crate::plan::system_review_target_lock(&args.task_id)
+        .lock()
+        .await;
 
     let adv = pm
         .advanced()
