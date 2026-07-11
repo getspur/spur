@@ -4,11 +4,16 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
 
+pub(crate) use crate::api_key_authorizer::ApiKeyAuthContext;
+
 #[cfg(test)]
 use std::collections::BTreeMap;
 
 const DEFAULT_RESOURCE_SERVER_ID: &str = "urn:spur:context-service";
 pub(crate) const OAUTH_PATH: &str = "/mcp/oauth";
+pub(crate) const DISCOVERY_PATH: &str = "/.well-known/spur-context-service";
+pub(crate) const API_KEY_MCP_PATH: &str = "/mcp/api-key";
+pub(crate) const API_KEY_MANAGEMENT_PATH: &str = "/auth/api-keys";
 
 const EXTERNAL_TOOL_SCOPE_SUFFIXES: [(&str, &str); 8] = [
     ("external_catalog", "external.read"),
@@ -24,15 +29,83 @@ const EXTERNAL_TOOL_SCOPE_SUFFIXES: [(&str, &str); 8] = [
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RequestRoute {
     OAuth,
+    Discovery,
+    ApiKeyMcp,
+    ApiKeyCreate,
+    ApiKeyList,
+    ApiKeyRevoke,
+    ReservedUnavailable,
     Legacy,
 }
 
-pub(crate) fn classify_route(path: Option<&str>, method: Option<&str>) -> RequestRoute {
-    if path == Some(OAUTH_PATH) && method == Some("POST") {
-        RequestRoute::OAuth
-    } else {
-        RequestRoute::Legacy
+impl RequestRoute {
+    #[cfg(test)]
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::OAuth => "oauth",
+            Self::Discovery => "discovery",
+            Self::ApiKeyMcp => "api_key_mcp",
+            Self::ApiKeyCreate => "api_key_create",
+            Self::ApiKeyList => "api_key_list",
+            Self::ApiKeyRevoke => "api_key_revoke",
+            Self::ReservedUnavailable => "reserved_unavailable",
+            Self::Legacy => "legacy",
+        }
     }
+
+    pub(crate) const fn is_api_key(self) -> bool {
+        matches!(
+            self,
+            Self::ApiKeyMcp | Self::ApiKeyCreate | Self::ApiKeyList | Self::ApiKeyRevoke
+        )
+    }
+}
+
+pub(crate) fn classify_route(path: Option<&str>, method: Option<&str>) -> RequestRoute {
+    let Some(path) = path else {
+        return RequestRoute::Legacy;
+    };
+    let Some(method) = method else {
+        return if is_reserved_api_key_namespace(path) {
+            RequestRoute::ReservedUnavailable
+        } else {
+            RequestRoute::Legacy
+        };
+    };
+    match (method, path) {
+        ("POST", OAUTH_PATH) => RequestRoute::OAuth,
+        ("GET", DISCOVERY_PATH) => RequestRoute::Discovery,
+        (_, DISCOVERY_PATH) => RequestRoute::ReservedUnavailable,
+        (_, path) if path.starts_with("/.well-known/spur-context-service/") => {
+            RequestRoute::ReservedUnavailable
+        }
+        ("POST", API_KEY_MCP_PATH) => RequestRoute::ApiKeyMcp,
+        (_, API_KEY_MCP_PATH) => RequestRoute::ReservedUnavailable,
+        (_, path) if path.starts_with("/mcp/api-key/") => RequestRoute::ReservedUnavailable,
+        ("POST", API_KEY_MANAGEMENT_PATH) => RequestRoute::ApiKeyCreate,
+        ("GET", API_KEY_MANAGEMENT_PATH) => RequestRoute::ApiKeyList,
+        (_, API_KEY_MANAGEMENT_PATH) => RequestRoute::ReservedUnavailable,
+        ("DELETE", path)
+            if path
+                .strip_prefix("/auth/api-keys/")
+                .is_some_and(|key_id| !key_id.is_empty() && !key_id.contains('/')) =>
+        {
+            RequestRoute::ApiKeyRevoke
+        }
+        (_, path) if path.starts_with("/auth/api-keys/") => RequestRoute::ReservedUnavailable,
+        _ => RequestRoute::Legacy,
+    }
+}
+
+fn is_reserved_api_key_namespace(path: &str) -> bool {
+    [DISCOVERY_PATH, API_KEY_MCP_PATH, API_KEY_MANAGEMENT_PATH]
+        .into_iter()
+        .any(|prefix| {
+            path == prefix
+                || path
+                    .strip_prefix(prefix)
+                    .is_some_and(|rest| rest.starts_with('/'))
+        })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -112,13 +185,15 @@ pub(crate) enum AuthFailure {
     MissingScope,
     NonExternalTool,
     InvalidIamIdentity,
+    InvalidApiKeyContext,
+    HumanManagementRequired,
     InvalidConfiguration,
 }
 
 impl AuthFailure {
     pub(crate) fn status_code(&self) -> u16 {
         match self {
-            Self::MissingScope | Self::NonExternalTool => 403,
+            Self::MissingScope | Self::NonExternalTool | Self::HumanManagementRequired => 403,
             Self::AuthDisabled
             | Self::MissingContext
             | Self::WrongRoute
@@ -132,6 +207,7 @@ impl AuthFailure {
             | Self::MalformedScope
             | Self::UnexpectedAudience
             | Self::InvalidIamIdentity
+            | Self::InvalidApiKeyContext
             | Self::InvalidConfiguration => 401,
         }
     }
@@ -153,9 +229,115 @@ impl AuthFailure {
             Self::MissingScope => "missing_scope",
             Self::NonExternalTool => "non_external_tool",
             Self::InvalidIamIdentity => "invalid_iam_identity",
+            Self::InvalidApiKeyContext => "invalid_api_key_context",
+            Self::HumanManagementRequired => "human_management_required",
             Self::InvalidConfiguration => "invalid_configuration",
         }
     }
+}
+
+pub(crate) fn authorize_api_key_tool(
+    tool: &str,
+    context: Option<&ApiKeyAuthContext>,
+) -> Result<AuthDecision, AuthFailure> {
+    let context = context.ok_or(AuthFailure::MissingContext)?;
+    let required_scope = required_scope_suffix(tool).ok_or(AuthFailure::NonExternalTool)?;
+    if !context
+        .scopes
+        .as_strings()
+        .into_iter()
+        .any(|scope| scope == required_scope)
+    {
+        return Err(AuthFailure::MissingScope);
+    }
+    Ok(AuthDecision {
+        identity: CallerIdentity::new(
+            context.owner_id.clone(),
+            AuthScheme::CognitoUser,
+            PrincipalKind::Human,
+        ),
+    })
+}
+
+pub(crate) fn authorize_key_management(
+    config: &AuthConfig,
+    claims: Option<&Value>,
+    now_epoch_seconds: u64,
+) -> Result<AuthDecision, AuthFailure> {
+    config.validate()?;
+    let claims = claims
+        .and_then(Value::as_object)
+        .ok_or(AuthFailure::MissingContext)?;
+    if claims
+        .get("iss")
+        .and_then(Value::as_str)
+        .and_then(valid_claim_value)
+        != Some(config.issuer.as_str())
+    {
+        return Err(AuthFailure::WrongIssuer);
+    }
+    if claims
+        .get("token_use")
+        .and_then(Value::as_str)
+        .and_then(valid_claim_value)
+        != Some("access")
+    {
+        return Err(AuthFailure::WrongTokenUse);
+    }
+    let client_id = claims
+        .get("client_id")
+        .and_then(Value::as_str)
+        .and_then(valid_claim_value)
+        .ok_or(AuthFailure::MissingClient)?;
+    if config.deny_client_ids.contains(client_id) {
+        return Err(AuthFailure::DenylistedClient);
+    }
+    if client_id != config.human_client_id {
+        return Err(AuthFailure::HumanManagementRequired);
+    }
+    if let Some(audience) = claims.get("aud") {
+        if audience
+            .as_str()
+            .and_then(valid_claim_value)
+            .filter(|audience| *audience == config.resource_server_id)
+            .is_none()
+        {
+            return Err(AuthFailure::UnexpectedAudience);
+        }
+    }
+    claims
+        .get("exp")
+        .and_then(parse_expiry)
+        .filter(|expiry| *expiry > now_epoch_seconds)
+        .ok_or(AuthFailure::InvalidExpiry)?;
+    let scopes = parse_scopes(
+        claims
+            .get("scope")
+            .and_then(Value::as_str)
+            .ok_or(AuthFailure::MalformedScope)?,
+    )?;
+    let required_scope = format!("{}/keys.manage", config.resource_server_id);
+    if !scopes.contains(&required_scope) {
+        return Err(AuthFailure::MissingScope);
+    }
+    let subject = claims
+        .get("sub")
+        .and_then(Value::as_str)
+        .and_then(valid_claim_value)
+        .ok_or(AuthFailure::InvalidSubject)?;
+    Ok(AuthDecision {
+        identity: CallerIdentity::new(
+            format!("cognito:user:{subject}"),
+            AuthScheme::CognitoUser,
+            PrincipalKind::Human,
+        ),
+    })
+}
+
+fn required_scope_suffix(tool: &str) -> Option<&'static str> {
+    EXTERNAL_TOOL_SCOPE_SUFFIXES
+        .iter()
+        .find_map(|(candidate, scope)| (*candidate == tool).then_some(*scope))
 }
 
 #[derive(Debug, Clone)]
@@ -509,7 +691,8 @@ mod tests {
 
     use super::{
         authorize_oauth_tool, classify_route, external_tool_scopes, parse_scopes, AuthConfig,
-        AuthFailure, AuthScheme, IamContext, PrincipalKind, RequestRoute,
+        AuthFailure, AuthScheme, IamContext, PrincipalKind, RequestRoute, API_KEY_MANAGEMENT_PATH,
+        API_KEY_MCP_PATH, DISCOVERY_PATH,
     };
 
     fn config() -> AuthConfig {
@@ -566,6 +749,28 @@ mod tests {
         );
         assert_eq!(
             classify_route(Some("/mcp/oauth/"), Some("POST")),
+            RequestRoute::Legacy
+        );
+    }
+
+    #[test]
+    fn reserved_api_key_namespaces_fail_closed_when_the_method_is_missing() {
+        for path in [
+            DISCOVERY_PATH,
+            "/.well-known/spur-context-service/child",
+            API_KEY_MCP_PATH,
+            "/mcp/api-key/child",
+            API_KEY_MANAGEMENT_PATH,
+            "/auth/api-keys/aaaaaaaaaaaaaaaaaaaaaaaaaa",
+        ] {
+            assert_eq!(
+                classify_route(Some(path), None),
+                RequestRoute::ReservedUnavailable,
+                "reserved path {path} must not downgrade without a method"
+            );
+        }
+        assert_eq!(
+            classify_route(Some("/mcp/api-key-legacy"), None),
             RequestRoute::Legacy
         );
     }
