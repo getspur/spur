@@ -23,6 +23,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
+use crate::auth::{self, AuthConfig, AuthDecision, AuthFailure, IamContext, RequestRoute};
 use crate::catalog::{self, CatalogResolver};
 use crate::drainer;
 use crate::jobs::{DynamoDbJobStore, JobStore};
@@ -106,6 +107,8 @@ pub struct JwtAuthorizer {
 
 #[derive(Debug, Deserialize)]
 pub struct ApiGatewayHttp {
+    #[serde(default)]
+    pub method: Option<String>,
     #[serde(rename = "sourceIp", default)]
     pub source_ip: Option<String>,
 }
@@ -178,14 +181,27 @@ async fn handle_api_gateway_request(
         Err(error) => return tool_error_response(error),
     };
 
-    let authenticated_caller = match request.tool.as_str() {
-        "external_index" | "external_index_status" => Some(
-            match authenticated_caller_id(&api_gateway_request, anonymous_mutations_allowed()) {
-                Ok(caller_id) => caller_id,
-                Err(error) => return auth_error_response(error),
-            },
-        ),
-        _ => None,
+    let is_oauth_request = is_oauth_route(&api_gateway_request);
+    let authenticated_caller = if is_oauth_request {
+        let config = match AuthConfig::from_environment() {
+            Ok(Some(config)) => config,
+            Ok(None) => return authorization_error_response(AuthFailure::AuthDisabled),
+            Err(error) => return authorization_error_response(error),
+        };
+        match authorize_oauth_request_now(&api_gateway_request, &request.tool, &config) {
+            Ok(decision) => Some(decision.identity.caller_id().to_owned()),
+            Err(error) => return authorization_error_response(error),
+        }
+    } else {
+        match request.tool.as_str() {
+            "external_index" | "external_index_status" => Some(
+                match authenticated_caller_id(&api_gateway_request, anonymous_mutations_allowed()) {
+                    Ok(caller_id) => caller_id,
+                    Err(error) => return auth_error_response(error),
+                },
+            ),
+            _ => None,
+        }
     };
 
     let result = match request.tool.as_str() {
@@ -294,6 +310,50 @@ fn routed_tool_name(request: &ApiGatewayRequest) -> Option<&'static str> {
         Some("index_status") => Some("external_index_status"),
         _ => None,
     }
+}
+
+fn is_oauth_route(request: &ApiGatewayRequest) -> bool {
+    matches!(
+        auth::classify_route(
+            request.raw_path.as_deref().or(request.path.as_deref()),
+            request
+                .request_context
+                .as_ref()
+                .and_then(|context| context.http.as_ref())
+                .and_then(|http| http.method.as_deref()),
+        ),
+        RequestRoute::OAuth
+    )
+}
+
+fn authorize_oauth_request_now(
+    request: &ApiGatewayRequest,
+    tool: &str,
+    config: &AuthConfig,
+) -> Result<AuthDecision, AuthFailure> {
+    let claims = request
+        .request_context
+        .as_ref()
+        .and_then(|context| context.authorizer.as_ref())
+        .and_then(|authorizer| authorizer.jwt.as_ref())
+        .and_then(|jwt| jwt.claims.as_ref());
+    auth::authorize_oauth_tool_now(config, tool, claims)
+}
+
+#[cfg(test)]
+fn authorize_oauth_request(
+    request: &ApiGatewayRequest,
+    tool: &str,
+    config: &AuthConfig,
+    now_epoch_seconds: u64,
+) -> Result<AuthDecision, AuthFailure> {
+    let claims = request
+        .request_context
+        .as_ref()
+        .and_then(|context| context.authorizer.as_ref())
+        .and_then(|authorizer| authorizer.jwt.as_ref())
+        .and_then(|jwt| jwt.claims.as_ref());
+    auth::authorize_oauth_tool(config, tool, claims, now_epoch_seconds)
 }
 
 fn catalog_resolver() -> Result<MutexGuard<'static, Option<CatalogCacheEntry>>, Error> {
@@ -886,35 +946,51 @@ fn authenticated_caller_id(
     request: &ApiGatewayRequest,
     allow_anonymous: bool,
 ) -> Result<String, McpHandlerError> {
-    request
+    let caller = request
         .request_context
         .as_ref()
         .and_then(|context| {
-            context
-                .authorizer
-                .as_ref()
+            let authorizer = context.authorizer.as_ref();
+            let strict_iam_identity = authorizer.and_then(|authorizer| {
+                authorizer.iam.as_ref().and_then(|iam| {
+                    IamContext {
+                        account_id: iam.account_id.as_deref(),
+                        user_id: iam.user_id.as_deref(),
+                        user_arn: iam.user_arn.as_deref(),
+                    }
+                    .authenticate()
+                    .ok()
+                    .map(|identity| identity.caller_id().to_owned())
+                })
+            });
+
+            authorizer
                 .and_then(jwt_caller_id)
-                .or_else(|| context.authorizer.as_ref().and_then(iam_caller_id))
+                .map(str::to_owned)
+                .or(strict_iam_identity)
+                .or_else(|| authorizer.and_then(iam_caller_id).map(str::to_owned))
                 .or_else(|| {
-                    context
-                        .authorizer
-                        .as_ref()
+                    authorizer
                         .and_then(|authorizer| non_blank(authorizer.principal_id.as_deref()))
+                        .map(str::to_owned)
                 })
                 .or_else(|| {
                     context
                         .identity
                         .as_ref()
                         .and_then(|identity| non_blank(identity.user_arn.as_deref()))
+                        .map(str::to_owned)
                 })
         })
-        .map(str::to_owned)
-        .or_else(|| allow_anonymous.then(|| ANONYMOUS_CALLER_ID.to_owned()))
-        .ok_or_else(|| {
-            McpHandlerError::InvalidParams(
-                "authenticated caller is required for mutating context-service tools".to_owned(),
-            )
-        })
+        .or_else(|| {
+            allow_anonymous.then(|| auth::legacy_anonymous_identity().caller_id().to_owned())
+        });
+
+    caller.ok_or_else(|| {
+        McpHandlerError::InvalidParams(
+            "authenticated caller is required for mutating context-service tools".to_owned(),
+        )
+    })
 }
 
 fn jwt_caller_id(authorizer: &ApiGatewayAuthorizer) -> Option<&str> {
@@ -996,6 +1072,23 @@ fn auth_error_response(error: McpHandlerError) -> Result<ApiGatewayResponse, Err
     )
 }
 
+fn authorization_error_response(error: AuthFailure) -> Result<ApiGatewayResponse, Error> {
+    let code = if error.status_code() == 401 {
+        "authentication_failed"
+    } else {
+        "authorization_failed"
+    };
+    json_response(
+        error.status_code(),
+        &json!({
+            "error": {
+                "code": code,
+                "reason": error.reason(),
+            }
+        }),
+    )
+}
+
 fn json_response(status_code: u16, value: &Value) -> Result<ApiGatewayResponse, Error> {
     Ok(ApiGatewayResponse {
         status_code,
@@ -1016,6 +1109,28 @@ fn lambda_error(message: impl Into<String>) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct EnvVarRestore {
+        name: &'static str,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl EnvVarRestore {
+        fn set(name: &'static str, value: &str) -> Self {
+            let previous = std::env::var_os(name);
+            std::env::set_var(name, value);
+            Self { name, previous }
+        }
+    }
+
+    impl Drop for EnvVarRestore {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(value) => std::env::set_var(self.name, value),
+                None => std::env::remove_var(self.name),
+            }
+        }
+    }
 
     #[test]
     fn eventbridge_schedule_routes_to_queue_drainer() {
@@ -1131,6 +1246,24 @@ mod tests {
     }
 
     #[test]
+    fn authenticated_caller_id_uses_stable_iam_principal_without_session_name() {
+        let request = request_from_context(json!({
+            "authorizer": {
+                "iam": {
+                    "accountId": "123456789012",
+                    "userId": "AROASTABLE:untrusted-session-name",
+                    "userArn": "arn:aws:sts::123456789012:assumed-role/context-indexer/untrusted-session-name"
+                }
+            }
+        }));
+
+        assert_eq!(
+            authenticated_caller_id(&request, false).expect("IAM caller should authenticate"),
+            "iam:123456789012:AROASTABLE"
+        );
+    }
+
+    #[test]
     fn authenticated_caller_id_rejects_source_ip_only_request() {
         let request = request_from_context(json!({
             "http": {
@@ -1172,6 +1305,124 @@ mod tests {
             authenticated_caller_id(&request, true).expect("real caller should authenticate"),
             "arn:aws:iam::123456789012:user/real"
         );
+    }
+
+    #[test]
+    fn oauth_route_requires_the_exact_post_path() {
+        let oauth = serde_json::from_value::<ApiGatewayRequest>(json!({
+            "rawPath": "/mcp/oauth",
+            "requestContext": { "http": { "method": "POST" } }
+        }))
+        .expect("OAuth request should deserialize");
+        let wrong_method = serde_json::from_value::<ApiGatewayRequest>(json!({
+            "rawPath": "/mcp/oauth",
+            "requestContext": { "http": { "method": "GET" } }
+        }))
+        .expect("non-POST request should deserialize");
+
+        assert!(is_oauth_route(&oauth));
+        assert!(!is_oauth_route(&wrong_method));
+    }
+
+    #[test]
+    fn oauth_route_cannot_be_moved_by_an_environment_override() {
+        let _path = EnvVarRestore::set("SPUR_COGNITO_OAUTH_PATH", "/different-path");
+        let oauth = serde_json::from_value::<ApiGatewayRequest>(json!({
+            "rawPath": "/mcp/oauth",
+            "requestContext": { "http": { "method": "POST" } }
+        }))
+        .expect("OAuth request should deserialize");
+
+        assert!(is_oauth_route(&oauth));
+    }
+
+    #[test]
+    fn oauth_api_gateway_string_claims_authorize_human_identity() {
+        let request = serde_json::from_value::<ApiGatewayRequest>(json!({
+            "rawPath": "/mcp/oauth",
+            "requestContext": {
+                "authorizer": {
+                    "jwt": {
+                        "claims": {
+                            "iss": "https://issuer.example/pool",
+                            "token_use": "access",
+                            "client_id": "human-client",
+                            "sub": "human-subject",
+                            "exp": "2000000000",
+                            "scope": "urn:spur:context-service/external.read"
+                        }
+                    }
+                },
+                "http": { "method": "POST" }
+            }
+        }))
+        .expect("API Gateway JWT claims should deserialize as strings");
+        let config = crate::auth::AuthConfig::new(
+            "https://issuer.example/pool",
+            "human-client",
+            ["m2m-client"],
+            std::iter::empty::<&str>(),
+            "urn:spur:context-service",
+        );
+
+        let decision =
+            authorize_oauth_request(&request, "external_catalog", &config, 1_700_000_000)
+                .expect("a valid API Gateway JWT claim map should authorize");
+
+        assert_eq!(decision.identity.caller_id(), "cognito:user:human-subject");
+    }
+
+    #[test]
+    fn malformed_oauth_jwt_never_falls_back_to_iam_or_principal_id() {
+        let request = serde_json::from_value::<ApiGatewayRequest>(json!({
+            "rawPath": "/mcp/oauth",
+            "requestContext": {
+                "authorizer": {
+                    "principalId": "legacy-principal",
+                    "iam": {
+                        "accountId": "123456789012",
+                        "userId": "AROATEST:session"
+                    },
+                    "jwt": {
+                        "claims": {
+                            "iss": "unexpected-issuer",
+                            "token_use": "access",
+                            "client_id": "human-client",
+                            "sub": "human-subject",
+                            "exp": 2000000000,
+                            "scope": "urn:spur:context-service/external.read"
+                        }
+                    }
+                },
+                "http": { "method": "POST", "sourceIp": "203.0.113.24" }
+            }
+        }))
+        .expect("OAuth request should deserialize");
+        let config = crate::auth::AuthConfig::new(
+            "https://issuer.example/pool",
+            "human-client",
+            ["m2m-client"],
+            std::iter::empty::<&str>(),
+            "urn:spur:context-service",
+        );
+
+        assert_eq!(
+            authorize_oauth_request(&request, "external_catalog", &config, 1_700_000_000),
+            Err(crate::auth::AuthFailure::WrongIssuer)
+        );
+    }
+
+    #[test]
+    fn oauth_errors_return_bounded_401_or_403_bodies() {
+        let unauthorized = authorization_error_response(crate::auth::AuthFailure::WrongIssuer)
+            .expect("authorization response should serialize");
+        let forbidden = authorization_error_response(crate::auth::AuthFailure::MissingScope)
+            .expect("authorization response should serialize");
+
+        assert_eq!(unauthorized.status_code, 401);
+        assert_eq!(forbidden.status_code, 403);
+        assert!(unauthorized.body.contains("wrong_issuer"));
+        assert!(!unauthorized.body.contains("token"));
     }
 
     #[test]
