@@ -54,10 +54,10 @@ dispatch = "prompt_text"
 [agents.entries.permissions]
 session_mode = "bypassPermissions"
 
-# ── codex-bin (via zed-industries/codex-acp, direct binary) ───────────
-# Rust binary that bridges OpenAI Codex runtime with ACP over stdio.
-# Install: https://github.com/zed-industries/codex-acp/releases
-# Or: npx @zed-industries/codex-acp (see codex entry below).
+# ── codex-bin (via agentclientprotocol/codex-acp, direct binary) ──────
+# Executable that bridges the OpenAI Codex runtime with ACP over stdio.
+# Install: npm install -g @agentclientprotocol/codex-acp@1.1.2
+# Or use the version-pinned npx entry below.
 [[agents.entries]]
 name = "codex-bin"
 command = "codex-acp"
@@ -80,7 +80,7 @@ dispatch = "prompt_text"
 [[agents.entries]]
 name = "codex"
 command = "npx"
-args = ["--yes", "@zed-industries/codex-acp@0.14.0"]
+args = ["--yes", "@agentclientprotocol/codex-acp@1.1.2"]
 transport = "acp"
 kind = "codex-acp"
 role = "both"

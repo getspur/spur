@@ -177,7 +177,7 @@ name = "codex"
 command = "npx"
 args = [
     "--yes",
-    "@agentclientprotocol/codex-acp@1.0.2",
+    "@agentclientprotocol/codex-acp@1.1.2",
 ]
 transport = "acp"
 kind = "codex-acp"

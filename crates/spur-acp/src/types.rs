@@ -167,7 +167,7 @@ pub enum AgentKind {
     ClaudeStreamJson,
     /// Claude Code via `@agentclientprotocol/claude-agent-acp`.
     ClaudeCodeAcp,
-    /// Codex via `@zed-industries/codex-acp` (npx or native binary).
+    /// Codex via `@agentclientprotocol/codex-acp@1.1.2` (npx or global install).
     CodexAcp,
     /// Kiro CLI via `kiro-cli acp`.
     Kiro,
