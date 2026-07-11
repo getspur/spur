@@ -1576,8 +1576,13 @@ async fn resume_orphaned_dispatch_session_from_configs(
     };
 
     let spawn_args = cfg.effective_args();
-    let mut connection =
-        super::connection::build_connection_from_transport(&cfg, spawn_args, None, &repo_root);
+    let mut connection = super::connection::build_connection_from_transport(
+        &cfg,
+        spawn_args,
+        std::collections::BTreeMap::new(),
+        None,
+        &repo_root,
+    );
 
     let init_request = InitializeRequest::new(ProtocolVersion::LATEST);
     if let Err(error) = connection.initialize(init_request).await {
