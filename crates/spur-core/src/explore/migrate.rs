@@ -490,6 +490,45 @@ mod tests {
     }
 
     #[test]
+    fn migrate_global_merges_duplicate_local_names_with_last_entry_winning() {
+        let repo = tempfile::tempdir().unwrap();
+        let global = tempfile::tempdir().unwrap();
+
+        write_catalog(
+            repo.path(),
+            vec![
+                entry("shared", "first/local-source"),
+                entry("shared", "second/local-source"),
+            ],
+        );
+        Catalog {
+            synced_at_epoch: Some(1),
+            entries: vec![
+                entry("shared", "global/source"),
+                entry("global-only", "global/source"),
+            ],
+        }
+        .save_to_store(global.path())
+        .unwrap();
+
+        super::migrate_global(repo.path(), global.path(), false).unwrap();
+
+        let merged = Catalog::load_from_store(global.path()).unwrap();
+        let shared = merged
+            .entries
+            .iter()
+            .filter(|entry| entry.name == "shared")
+            .collect::<Vec<_>>();
+        assert_eq!(shared.len(), 1);
+        assert_eq!(shared[0].source, "second/local-source");
+        assert!(merged
+            .entries
+            .iter()
+            .any(|entry| entry.name == "global-only"));
+        assert!(!store::local_catalog_path(repo.path()).exists());
+    }
+
+    #[test]
     fn migrate_global_dry_run_reports_without_mutating() {
         let repo = tempfile::tempdir().unwrap();
         let global = tempfile::tempdir().unwrap();
