@@ -15,6 +15,7 @@ PATTERNS = (
     re.compile(r"eyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{3,}\.[A-Za-z0-9_-]{3,}"),
     re.compile(r"-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----"),
     re.compile(r"(?i)(client_secret|access_token|refresh_token|id_token|authorization_code|pkce_verifier)\s*[:=]\s*[\"'][^\"']{4,}[\"']"),
+    re.compile(r"spur_live_[a-z2-7]{26}_[a-z2-7]{52}"),
 )
 CREDENTIAL_KEYS = {
     "access_token",

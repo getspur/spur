@@ -22,6 +22,15 @@
     {"id": "iam_legacy_compatibility", "mode": "offline", "principal_fixture": "iam:fixture-account:fixture-principal", "expected": "IAM path admitted without Cognito issuance"},
     {"id": "anonymous_internal_compatibility", "mode": "offline", "authorization_fixture": "NONE plus anonymous flag", "expected_owner": "anonymous-internal", "expected": "legacy status owner preserved"},
     {"id": "token_endpoint_redirect_rejection", "mode": "offline", "evidence": "auth-client security redirect test", "expected": "redirect not followed and request not replayed"},
-    {"id": "validation_only_external_index", "mode": "offline", "fixture": "external-index-validation-only.json", "expected": "direct tool/args OAuth body parses as external_index, then reaches domain-not-allowlisted rejection before DNS, rate accounting, DynamoDB, enqueue, or dispatch"}
+    {"id": "validation_only_external_index", "mode": "offline", "fixture": "external-index-validation-only.json", "expected": "direct tool/args OAuth body parses as external_index, then reaches domain-not-allowlisted rejection before DNS, rate accounting, DynamoDB, enqueue, or dispatch"},
+    {"id": "api_key_authorizer_allow", "mode": "offline", "fixture": "api-key-authorizer-events.json", "expected": "canonical synthetic test key plus exact route yields typed human owner context"},
+    {"id": "api_key_authorizer_deny", "mode": "offline", "fixture": "api-key-authorizer-events.json", "expected": "wrong synthetic secret yields the same non-enumerating deny class"},
+    {"id": "api_key_management_create", "mode": "offline", "fixture": "api-key-management-events.json", "expected": "exact POST route requires human keys.manage and reveals one synthetic key only to the caller"},
+    {"id": "api_key_management_list", "mode": "offline", "fixture": "api-key-management-events.json", "expected": "exact GET route lists metadata for the same human owner without secrets"},
+    {"id": "api_key_management_revoke", "mode": "offline", "fixture": "api-key-management-events.json", "expected": "exact DELETE route idempotently revokes only the same human owner key"},
+    {"id": "api_key_header_removal", "mode": "offline", "fixture": "api-key-gateway-evidence.json", "expected": "Terraform mapping is asserted; runtime event observation remains pending separate live approval"},
+    {"id": "api_key_allow_deny_cache", "mode": "offline", "fixture": "api-key-gateway-evidence.json", "expected": "allow and deny decisions use route plus header identity for at most 30 seconds"},
+    {"id": "api_key_revocation_slo", "mode": "offline", "fixture": "api-key-gateway-evidence.json", "expected": "cache miss observes revoke immediately and all cached decisions expire within 30 seconds"},
+    {"id": "api_key_cleanup_burst_capacity", "mode": "offline", "fixture": "api-key-cleanup-capacity.json", "expected": "232-record steady-state burst drains within twelve invocations and default capacity is 1200 records per hour"}
   ]
 }

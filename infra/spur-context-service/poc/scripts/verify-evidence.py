@@ -23,6 +23,7 @@ SECRET_PATTERNS = (
     re.compile(r"AKIA[0-9A-Z]{16}"),
     re.compile(r"eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+"),
     re.compile(r"(?i)authorization\s*:\s*bearer\s+\S+"),
+    re.compile(r"spur_live_[a-z2-7]{26}_[a-z2-7]{52}"),
 )
 
 
@@ -50,8 +51,24 @@ def main() -> int:
     request = json.loads(
         (FIXTURES / "external-index-validation-only.json").read_text(encoding="utf-8")
     )
+    authorizer = json.loads(
+        (FIXTURES / "api-key-authorizer-events.json").read_text(encoding="utf-8")
+    )
+    management = json.loads(
+        (FIXTURES / "api-key-management-events.json").read_text(encoding="utf-8")
+    )
+    gateway = json.loads(
+        (FIXTURES / "api-key-gateway-evidence.json").read_text(encoding="utf-8")
+    )
+    cleanup = json.loads(
+        (FIXTURES / "api-key-cleanup-capacity.json").read_text(encoding="utf-8")
+    )
     walk(manifest)
     walk(request)
+    walk(authorizer)
+    walk(management)
+    walk(gateway)
+    walk(cleanup)
 
     cases = {case["id"]: case for case in manifest["cases"]}
     if len(cases) != len(manifest["cases"]):
@@ -84,7 +101,31 @@ def main() -> int:
     if not all(assertions[key] for key in ("must_not_resolve_dns", "must_not_enqueue", "must_not_dispatch")):
         fail("validation fixture must stop before outbound effects")
 
-    print(f"offline evidence verified: {len(cases)} sanitized cases")
+    if authorizer["evidence_state"] != "offline-synthetic":
+        fail("authorizer events must be explicitly synthetic")
+    for event in authorizer["events"]:
+        if not event["api_key"].startswith("spur_test_") or "spur_live_" in event["api_key"]:
+            fail("authorizer fixtures may contain synthetic test keys only")
+        if event["route_key"] != "POST /mcp/api-key":
+            fail("authorizer fixtures must bind the exact API-key route")
+
+    exact_management_routes = {
+        ("POST", "/auth/api-keys"),
+        ("GET", "/auth/api-keys"),
+        ("DELETE", "/auth/api-keys/aaaaaaaaaaaaaaaaaaaaaaaaaa"),
+    }
+    if {(event["method"], event["path"]) for event in management["events"]} != exact_management_routes:
+        fail("management fixtures must cover the three exact routes")
+    if gateway["live_observation_status"] != "not-observed-offline":
+        fail("offline evidence must not claim a live API Gateway observation")
+    if gateway["authorizer_cache_seconds"] != 30 or gateway["revocation_slo_seconds"] != 30:
+        fail("cache and revocation fixtures must retain the 30-second bound")
+    if cleanup["configured_capacity_per_hour"] != 1200:
+        fail("cleanup fixture must retain 1,200 records/hour default capacity")
+    if cleanup["steady_state_expiries_per_hour"] != 232:
+        fail("cleanup fixture must retain the supported 232 keys/hour rate")
+
+    print(f"offline evidence verified: {len(cases)} sanitized cases and API-key contracts")
     return 0
 
 

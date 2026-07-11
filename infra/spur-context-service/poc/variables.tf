@@ -4,6 +4,17 @@ variable "poc_enabled" {
   default     = false
 }
 
+variable "api_key_auth_enabled" {
+  description = "Independent personal API-key POC gate. Requires the disposable Cognito POC and accepts synthetic test keys only."
+  type        = bool
+  default     = false
+
+  validation {
+    condition     = !var.api_key_auth_enabled || var.poc_enabled
+    error_message = "api_key_auth_enabled requires poc_enabled so only disposable Cognito humans can manage POC keys."
+  }
+}
+
 variable "creation_confirmation" {
   description = "Apply guard. Set only after the isolated account, state, names, tags, caps, and plan have been reviewed."
   type        = string
@@ -63,6 +74,28 @@ variable "lambda_zip_path" {
   validation {
     condition     = endswith(var.lambda_zip_path, ".zip")
     error_message = "lambda_zip_path must name the committed candidate Lambda zip."
+  }
+}
+
+variable "api_key_authorizer_zip_path" {
+  description = "Candidate API-key authorizer zip built from a committed revision."
+  type        = string
+  default     = "./artifacts/spur-context-api-key-authorizer-poc.zip"
+
+  validation {
+    condition     = endswith(var.api_key_authorizer_zip_path, ".zip")
+    error_message = "api_key_authorizer_zip_path must name a zip artifact."
+  }
+}
+
+variable "api_key_cleanup_zip_path" {
+  description = "Candidate API-key cleanup zip built from a committed revision."
+  type        = string
+  default     = "./artifacts/spur-context-api-key-cleanup-poc.zip"
+
+  validation {
+    condition     = endswith(var.api_key_cleanup_zip_path, ".zip")
+    error_message = "api_key_cleanup_zip_path must name a zip artifact."
   }
 }
 
