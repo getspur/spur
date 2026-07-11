@@ -28,12 +28,15 @@ does **not** run `terraform apply`, live smoke tests, or `terraform destroy`.
   secret-bearing even though outputs expose client IDs only. Never publish a
   plan, state, logs, environment dump, authorization code, verifier, or token.
 - `external_index` uses
-  `fixtures/external-index-validation-only.json`. The Lambda allowlist contains
-  only the nonmatching `poc-no-source.invalid` sentinel, so the fixture host
-  `validation-only.invalid` is synchronously rejected as not allow-listed by
-  pure URL validation before DNS, rate accounting, DynamoDB, enqueue, or
-  dispatch. Zero queue/running caps and the empty state-machine ARN remain
-  defense in depth; the reserved `.invalid` hostname alone is not the guard.
+  `fixtures/external-index-validation-only.json`. Its top-level `tool` and
+  `args` fields are the exact body contract parsed by `POST /mcp/oauth`; the
+  service regression feeds those committed bytes through `parse_tool_request`.
+  The Lambda allowlist contains only the nonmatching `poc-no-source.invalid`
+  sentinel, so the fixture host `validation-only.invalid` is synchronously
+  rejected as not allow-listed by pure URL validation before DNS, rate
+  accounting, DynamoDB, enqueue, or dispatch. Zero queue/running caps and the
+  empty state-machine ARN remain defense in depth; the reserved `.invalid`
+  hostname alone is not the guard.
 
 ## Offline verification run in this task
 

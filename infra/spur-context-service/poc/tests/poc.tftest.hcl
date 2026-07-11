@@ -55,7 +55,7 @@ run "enabled_fixture_is_isolated_and_dispatch_disabled" {
     condition = (
       lookup(aws_lambda_function.validation[0].environment[0].variables, "SPUR_CATALOG_DSN", "") == "ducklake:sqlite:/tmp/spur-context-auth-poc-unit-test-a1.ducklake" &&
       aws_lambda_function.validation[0].environment[0].variables["SPUR_CONTEXT_ALLOWED_SOURCE_DOMAINS"] == "poc-no-source.invalid" &&
-      jsondecode(file("${path.module}/fixtures/external-index-validation-only.json")).params.arguments.source_url == "https://validation-only.invalid/spur-context-poc.tar.gz"
+      jsondecode(file("${path.module}/fixtures/external-index-validation-only.json")).args.source_url == "https://validation-only.invalid/spur-context-poc.tar.gz"
     )
     error_message = "the Lambda must bootstrap a local catalog before denying the committed hostname before DNS"
   }

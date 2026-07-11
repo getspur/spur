@@ -188,6 +188,117 @@ terraform -chdir=infra/spur-context-service test \
   -filter=tests/cognito_static.tftest.hcl
 ```
 
+## Cognito operator runbook
+
+The steps below describe an approved deployment lifecycle. They are not
+authorization to apply this module. Repository verification uses mock-provider
+plans and `init -backend=false`; it never needs AWS credentials.
+
+### Enablement and discovery
+
+1. Keep `cognito_auth_enabled=false` while configuring exact callback/logout
+   URLs, the environment-qualified pool/domain names, organization scopes and
+   TTLs, budget recipients, and the emergency denylist. Confirm the existing
+   `$default` route remains `AWS_IAM` (or the explicitly reviewed demo `NONE`),
+   and retain the EventBridge drainer configuration.
+2. Run `terraform fmt -check -recursive`, `terraform init -backend=false`,
+   `terraform validate`, and the mock-provider tests. Review a real remote-state
+   plan only in the separately approved environment; enabling Cognito must add
+   the exact `POST /mcp/oauth` route without replacing `$default`.
+3. After an approved apply, distribute only the nonsensitive discovery outputs:
+   `cognito_issuer`, `cognito_domain_url`, `cognito_human_client_id`,
+   `cognito_m2m_client_ids`, `cognito_resource_server_identifier`, and
+   `oauth_api_url`. Use `cognito_issuer` for OIDC discovery and JWKS
+   (`/.well-known/openid-configuration` and `/.well-known/jwks.json`). Use
+   `cognito_domain_url` for hosted `/oauth2/authorize`, `/oauth2/token`, and
+   logout endpoints. No output contains an M2M secret.
+4. Smoke one least-privilege human/M2M call on `/mcp/oauth`, then smoke the
+   unchanged IAM route. Verify that OAuth identities are namespaced, IAM issued
+   no Cognito token, cross-owner status is `not_found`, and queue/drainer health
+   did not regress before onboarding another organization.
+
+### Credential delivery and rotation
+
+Generated M2M secrets can be present in Terraform state. A restricted
+provisioning step must copy a new secret directly from Cognito/provider state
+into the approved secret manager without printing it, placing it in a plan
+artifact, shell history, email, chat, or issue comment. Deliver the organization
+its stable client ID, exact allowed scopes, TTL, and an audited one-time secret
+reference; revoke delivery access after acknowledgment. The human client is
+public and receives no secret.
+
+Rotate without changing ownership:
+
+1. Add a second secret to the existing app client and write it to the approved
+   secret manager.
+2. Have the customer deploy the new reference and prove it can mint a token and
+   invoke only an allowed scope.
+3. Observe a full agreed overlap with no old-secret issuance, then delete the
+   old secret. Preserve the app client ID so queued jobs and status ownership
+   remain `cognito:client:<client_id>`.
+4. Record actor, timestamps, client-ID hash, and secret descriptor ID, never the
+   secret value. If compromise is suspected, denylist the client ID as part of
+   the same incident response.
+
+### TTL and audience risk gates
+
+The balanced default is a six-hour M2M token. A 24-hour token enlarges the
+bearer replay and non-immediate-revocation window to as much as 24 hours and
+requires the committed risk-acceptance metadata. Secret deletion stops new
+issuance but does not invalidate an already issued access token; shorten the TTL
+or deploy the emergency denylist when that residual window is unacceptable.
+
+One human client plus enabled organization clients must fit API Gateway's fixed
+50-audience limit, so this route supports at most 49 enabled M2M organizations.
+Alert before that boundary and select a reviewed sharding/authorizer design
+before onboarding another organization; never truncate the audience list.
+
+### Monitoring
+
+Monitor the redacted OAuth access log and alarms for route-specific
+401/403/429 rates, JWT 401 spikes during key rotation, OAuth/Lambda 5xx, and
+sustained throttling. Correlate those with Cognito token operations and budget
+forecasts, per-owner/global queue saturation, dedupe outcomes, dispatch latency,
+scheduled-drainer invocations, retries, and stuck jobs. The module provides the
+OAuth-route 5xx alarm and optional 50/80/100% forecast budget notifications;
+the operating dashboard must retain the existing queue and Lambda signals.
+Never add Authorization headers, claims, client IDs, subjects, request bodies,
+secrets, or tokens to access-log formats or alert payloads.
+
+### Rollback
+
+For one compromised organization, add its client ID to the Lambda denylist and
+delete/rotate its secret to stop new issuance. For broader rollback, prepare a
+reviewed configuration deployment that deny-lists the human client ID and every
+enabled M2M client ID; this fails all OAuth callers closed while the unchanged
+IAM `$default` route remains the internal path. If the route itself must be
+removed, use a reviewed incident change that removes only `POST /mcp/oauth` and
+keeps the user pool/logs retained. Do not use `cognito_auth_enabled=false` as a
+fast rollback: in the current module that is a teardown request for all guarded
+Cognito resources and deletion protection will block it. The demo route, when
+intentionally enabled, retains the literal `anonymous-internal` owner. Do not
+rewrite queue records: existing namespaced jobs remain available after the same
+client is restored or through an audited IAM operator path. Preserve logs and
+the user pool through the maximum token TTL and incident-retention window.
+
+### Teardown
+
+Stop onboarding and token issuance, wait through the maximum issued-token TTL,
+and wait for active namespaced jobs to become terminal (or record an audited IAM
+operator disposition). Capture a resource inventory and a destroy plan before
+changing state. Because production defaults to deletion protection, first apply
+a separately reviewed update with
+`cognito_user_pool_deletion_protection=false` while Cognito remains enabled;
+then set `cognito_auth_enabled=false` and review that the next plan removes only
+the Cognito clients/pool/domain, JWT authorizer/route, OAuth log/alarm, and
+optional budget. It must not remove `$default`, the service Lambda, job table,
+EventBridge schedule, or drainer permissions.
+
+After an approved destroy, verify the Cognito/JWT outputs are null/empty, the
+targeted resources are absent, `$default` still has its expected authorization,
+the scheduled drainer remains configured, and no secret-bearing plan/state/log
+artifact was retained outside the state policy.
+
 ## Bounded Backlog Operations
 
 The module keeps queue admission opt-in: `index_max_queued_jobs_per_owner=0`
