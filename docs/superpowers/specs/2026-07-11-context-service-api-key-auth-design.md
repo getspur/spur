@@ -238,6 +238,14 @@ identity sources. Both allow and deny responses may be cached for 30 seconds.
 The route key prevents a decision from being reused across routes. A cache miss
 uses a strongly consistent primary-key read.
 
+Verified Task C provider behavior exposes the two configured identity sources
+in route-key-first order, even when configuration lists the header first. The
+authorizer therefore treats the exact two values as an order-independent pair:
+one value must equal the single raw `X-SPUR-API-Key` header and the other must
+equal the exact `POST /mcp/api-key` route key. Missing, duplicate, extra, or
+mismatched values fail before lookup. Terraform tests assert the observed
+route-key-first provider order without converting the result to a set.
+
 HTTP API payload v2 simple authorizer responses can return a cacheable
 `isAuthorized: false` decision but cannot attach the custom bounded 401 body
 described in the domain failure table. The production boundary therefore uses
@@ -459,6 +467,12 @@ cursor, with an operator-configured maximum catch-up horizon and an alarm when
 the cursor lags. Capacity is therefore reclaimed within one hour under normal
 operation. A user can revoke an expired key manually for immediate capacity.
 The sweeper has bounded pages, retries, metrics, and no access to raw secrets.
+Task C implements this as the independent
+`spur-context-api-key-cleanup` Rust Lambda. It accepts only the exact
+`sweep_expired_api_keys` EventBridge discriminator, derives the lease owner from
+the Lambda request ID, applies the configured catch-up/page bounds to the
+persisted store sweep, and emits secret-free CloudWatch EMF cursor-lag metrics.
+Store, lease, clock, event, and configuration failures remain Lambda errors.
 
 ## Authorization semantics
 
@@ -595,6 +609,14 @@ serving Lambda. Terraform mock tests assert the configured mapping. A separately
 approved live POC must verify the observed Lambda event. The serving trust model
 does not depend on removal.
 
+The repository command `scripts/package-context-api-key-lambdas.sh` builds both
+lean binaries as stripped, static `aarch64-unknown-linux-musl` bootstraps and
+creates deterministic ZIPs at the Terraform defaults:
+`target/lambda/spur-context-api-key-authorizer.zip` and
+`target/lambda/spur-context-api-key-cleanup.zip`. The command uses the dedicated
+crate lockfile, normalizes bootstrap timestamps, and packages exactly one
+`bootstrap` entry per archive.
+
 ## Rust component boundaries
 
 ### `spur-context-auth-client`
@@ -621,6 +643,15 @@ semantics, and store traits. Pure logic and fake-store tests do not require AWS.
 A lean Lambda binary owns API Gateway authorizer event/response types, bounded
 input validation, strongly consistent lookup, status/expiry checks, digest
 comparison, and typed context output. It does not link catalog/DuckDB logic.
+
+### Cleanup binary
+
+A second lean Lambda binary validates the exact scheduled event and bounded
+configuration, then invokes the shared store's fenced expiry sweep. The store
+queries the sparse expiry GSI, transactionally transitions only still-active
+expired keys, decrements owner accounting exactly once, advances only fully
+drained hour buckets, and safely tolerates already-terminal/raced records. The
+binary links neither serving/catalog code nor DuckDB.
 
 ### Serving Lambda
 
@@ -688,7 +719,8 @@ OAuth refresh during API-key MCP operation.
 - enabling API keys while Cognito is disabled fails validation;
 - Cognito-enabled discovery is an exact public route with bounded output;
 - management routes use JWT plus `keys.manage`;
-- API-key route uses CUSTOM authorization and exact authorizer identity sources;
+- API-key route uses CUSTOM authorization and the provider-observed
+  route-key-first identity-source order;
 - cache TTL is 30 seconds and includes route key;
 - table encryption, PITR, TTL, keys and owner GSI match the contract;
 - expiry GSI and cleanup cursor support bounded catch-up without table scans;

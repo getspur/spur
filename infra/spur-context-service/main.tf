@@ -223,12 +223,24 @@ resource "aws_lambda_function" "service" {
       SPUR_COGNITO_RESOURCE_SERVER_ID = var.cognito_resource_server_identifier
       SPUR_COGNITO_DENY_CLIENT_IDS    = join(",", var.cognito_emergency_deny_client_ids)
       SPUR_COGNITO_OAUTH_PATH         = "/mcp/oauth"
+      # API-key configuration contains identifiers and bounds only. Raw keys,
+      # digests, headers, and OAuth credentials never enter Lambda environment
+      # state or the access-log format.
+      SPUR_API_KEY_AUTH_ENABLED           = var.api_key_auth_enabled ? "1" : "0"
+      SPUR_API_KEY_ENVIRONMENT            = var.api_key_environment
+      SPUR_API_KEY_DEFAULT_TTL_DAYS       = tostring(var.api_key_default_ttl_days)
+      SPUR_API_KEY_MAX_TTL_DAYS           = tostring(var.api_key_max_ttl_days)
+      SPUR_CONTEXT_API_KEYS_TABLE         = var.api_key_auth_enabled ? aws_dynamodb_table.api_keys[0].name : ""
+      SPUR_COGNITO_AUTHORIZATION_ENDPOINT = var.cognito_auth_enabled ? "${local.cognito_domain_url}/oauth2/authorize" : ""
+      SPUR_COGNITO_TOKEN_ENDPOINT         = var.cognito_auth_enabled ? "${local.cognito_domain_url}/oauth2/token" : ""
+      SPUR_CONTEXT_SERVICE_BASE_URL       = var.cognito_auth_enabled ? aws_apigatewayv2_api.http.api_endpoint : ""
     }
   }
 
   depends_on = [
     aws_iam_role_policy_attachment.lambda_basic,
     aws_cloudwatch_log_group.lambda,
+    aws_iam_role_policy.api_key_management,
   ]
 }
 
