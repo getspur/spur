@@ -31,7 +31,6 @@ use spur_mcp::McpEventSink;
 use tempfile::TempDir;
 use tokio::sync::Notify;
 use tokio::time::{sleep, timeout};
-use tokio_util::task::TaskTracker;
 
 const SOURCE_BEADS_DIR: &str = "/Volumes/Projects/otobank/.beads";
 const PLAN_ID: &str = "cec4a975-0614-4536-9fab-b2e0499c0f2a";
@@ -755,7 +754,7 @@ fn spawn_reconciler_tick_worker(fixture: &TestFixture, stop: Arc<AtomicBool>) ->
 
             let dispatch = ReconcilerDispatchCtx {
                 delegation_tx,
-                task_tracker: TaskTracker::new(),
+                task_tracker: spur_core::server::AbortableTaskTracker::new(),
                 brain_session_id,
                 event_sink: Some(event_sink as Arc<dyn McpEventSink>),
                 materializer,

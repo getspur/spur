@@ -23,6 +23,13 @@ pub enum CompletionState {
     Superseded,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SystemReviewDecision {
+    Approve,
+    RequestChanges,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EpicCompletionOutcome {
@@ -203,6 +210,22 @@ pub enum AuditSentinelKind {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reuse_prior_worktree: Option<bool>,
     },
+    SystemReviewDispatch {
+        plan_id: String,
+        task_id: String,
+        attempt: u32,
+        maker_delegation_id: String,
+        reviewer_delegation_id: String,
+        review_issue_id: String,
+    },
+    SystemReviewVerdict {
+        maker_delegation_id: String,
+        reviewer_delegation_id: String,
+        review_issue_id: String,
+        decision: SystemReviewDecision,
+        feedback: String,
+        evidence: Vec<String>,
+    },
     TaskTransition {
         plan_id: String,
         task_id: String,
@@ -378,6 +401,8 @@ impl AuditSentinelKind {
             Self::Approval { .. } => "approval",
             Self::Rejection { .. } => "rejection",
             Self::ReviewFeedback { .. } => "review-feedback",
+            Self::SystemReviewDispatch { .. } => "system-review-dispatch",
+            Self::SystemReviewVerdict { .. } => "system-review-verdict",
             Self::TaskTransition { .. } => "task-transition",
             Self::RetryRequested { .. } => "retry-requested",
             Self::EscalationRequested { .. } => "escalation-requested",
@@ -398,7 +423,10 @@ impl AuditSentinelKind {
     }
 
     pub fn is_plan_critical_kind(kind: &str) -> bool {
-        matches!(kind, "completion" | "review-feedback")
+        matches!(
+            kind,
+            "completion" | "review-feedback" | "system-review-dispatch" | "system-review-verdict"
+        )
     }
 }
 
@@ -540,6 +568,42 @@ mod tests {
         let parsed = parse_comment(&encoded).unwrap().unwrap();
         assert_eq!(parsed, kind);
         assert_eq!(parsed.kind_str(), "loop-run");
+    }
+
+    #[test]
+    fn system_review_dispatch_round_trips_with_stable_kind() {
+        let kind = AuditSentinelKind::SystemReviewDispatch {
+            plan_id: "P1".into(),
+            task_id: "T1".into(),
+            attempt: 2,
+            maker_delegation_id: "maker-2".into(),
+            reviewer_delegation_id: "reviewer-2".into(),
+            review_issue_id: "bd-review-2".into(),
+        };
+
+        let encoded = encode_comment(&kind);
+        let parsed = parse_comment(&encoded).unwrap().unwrap();
+
+        assert_eq!(parsed, kind);
+        assert_eq!(parsed.kind_str(), "system-review-dispatch");
+    }
+
+    #[test]
+    fn system_review_verdict_round_trips_with_stable_kind() {
+        let kind = AuditSentinelKind::SystemReviewVerdict {
+            maker_delegation_id: "maker-2".into(),
+            reviewer_delegation_id: "reviewer-2".into(),
+            review_issue_id: "bd-review-2".into(),
+            decision: SystemReviewDecision::RequestChanges,
+            feedback: "The empty diff is not justified by the acceptance criteria.".into(),
+            evidence: vec!["inspected get_task_diff for P1/T1".into()],
+        };
+
+        let encoded = encode_comment(&kind);
+        let parsed = parse_comment(&encoded).unwrap().unwrap();
+
+        assert_eq!(parsed, kind);
+        assert_eq!(parsed.kind_str(), "system-review-verdict");
     }
 
     #[test]

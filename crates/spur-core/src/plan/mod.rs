@@ -22,6 +22,18 @@ pub mod scope_snapshot;
 pub mod shadow_projector;
 pub mod signal_watcher;
 pub mod signals;
+
+pub(crate) fn system_review_target_lock(issue_id: &str) -> &'static tokio::sync::Mutex<()> {
+    use std::hash::{Hash, Hasher};
+    use std::sync::OnceLock;
+
+    const STRIPES: usize = 64;
+    static LOCKS: OnceLock<Vec<tokio::sync::Mutex<()>>> = OnceLock::new();
+    let locks = LOCKS.get_or_init(|| (0..STRIPES).map(|_| tokio::sync::Mutex::new(())).collect());
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    issue_id.hash(&mut hasher);
+    &locks[hasher.finish() as usize % STRIPES]
+}
 pub mod snapshot;
 pub mod staging;
 #[doc(hidden)]
@@ -2016,7 +2028,7 @@ pub(crate) async fn emit_approval_audit(
     }
 }
 
-async fn apply_issue_update(
+pub(crate) async fn apply_issue_update(
     pm: &dyn PmLike,
     issue_id: &str,
     mut update: spur_pm::IssueUpdate,
@@ -2449,7 +2461,7 @@ fn review_ready_label_removals() -> Vec<String> {
     ]
 }
 
-fn approve_review_update(closed_status: &str, comment: String) -> spur_pm::IssueUpdate {
+pub(crate) fn approve_review_update(closed_status: &str, comment: String) -> spur_pm::IssueUpdate {
     spur_pm::IssueUpdate {
         status: Some(closed_status.to_string()),
         comment: Some(comment),
@@ -3950,7 +3962,7 @@ pub async fn review_task(
     pm: Option<&spur_pm::PmService>,
     sink: Option<&dyn spur_mcp::events::McpEventSink>,
     _delegation_tx: Option<&tokio::sync::mpsc::Sender<crate::DelegationRequest>>,
-    _task_tracker: Option<&tokio_util::task::TaskTracker>,
+    _task_tracker: Option<&crate::server::AbortableTaskTracker>,
     _plan_arc: Option<std::sync::Arc<tokio::sync::Mutex<PlanState>>>,
 ) -> Result<serde_json::Value, String> {
     let mut warnings: Vec<String> = Vec::new();
@@ -4590,7 +4602,7 @@ fn apply_decision_and_extract(
     state: &mut PlanState,
     pm_closed_status: Option<&str>,
     _delegation_tx: Option<&tokio::sync::mpsc::Sender<crate::DelegationRequest>>,
-    _task_tracker: Option<&tokio_util::task::TaskTracker>,
+    _task_tracker: Option<&crate::server::AbortableTaskTracker>,
     _plan_arc: Option<std::sync::Arc<tokio::sync::Mutex<PlanState>>>,
     _sink: Option<&dyn spur_mcp::events::McpEventSink>,
     _pm_arc: Option<&Arc<dyn PmLike>>,
@@ -4950,7 +4962,7 @@ pub async fn handle_review_task(
     pm: Option<Arc<dyn PmLike>>,
     sink: Option<&dyn spur_mcp::events::McpEventSink>,
     delegation_tx: Option<&tokio::sync::mpsc::Sender<crate::DelegationRequest>>,
-    task_tracker: Option<&tokio_util::task::TaskTracker>,
+    task_tracker: Option<&crate::server::AbortableTaskTracker>,
     feature_gate: Arc<spur_license::FeatureGate>,
 ) -> Result<serde_json::Value, String> {
     handle_review_task_with_write_mode(
@@ -5071,7 +5083,7 @@ pub async fn handle_review_task_with_write_mode(
     pm: Option<Arc<dyn PmLike>>,
     sink: Option<&dyn spur_mcp::events::McpEventSink>,
     delegation_tx: Option<&tokio::sync::mpsc::Sender<crate::DelegationRequest>>,
-    task_tracker: Option<&tokio_util::task::TaskTracker>,
+    task_tracker: Option<&crate::server::AbortableTaskTracker>,
     feature_gate: Arc<spur_license::FeatureGate>,
     write_mode: ReviewWriteMode,
 ) -> Result<serde_json::Value, String> {

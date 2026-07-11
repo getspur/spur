@@ -3,9 +3,9 @@ use std::sync::Arc;
 
 use spur_acp::domain::{BrainContinuation, ContinuationSource, DelegationResult, DelegationStatus};
 use spur_acp::SessionId;
+use spur_core::server::AbortableTaskTracker;
 use spur_core::server::{DetachedCompletionHandle, DetachedContinuationCtx, DetachedSourceKind};
 use tokio_util::sync::CancellationToken;
-use tokio_util::task::TaskTracker;
 
 fn test_materializer() -> spur_core::outcome_materializer::OutcomeMaterializer {
     spur_core::outcome_materializer::OutcomeMaterializer::new(Arc::new(
@@ -45,7 +45,7 @@ async fn test_block_timeout_fires_continuation() {
     });
 
     let (tx, rx) = tokio::sync::oneshot::channel::<DelegationResult>();
-    let tracker = TaskTracker::new();
+    let tracker = AbortableTaskTracker::new();
 
     let active = Arc::new(tokio::sync::Mutex::new(std::collections::HashSet::new()));
     let completed = Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
@@ -109,7 +109,7 @@ async fn test_attempt_threaded_into_continuation() {
     });
 
     let (tx, rx) = tokio::sync::oneshot::channel::<DelegationResult>();
-    let tracker = TaskTracker::new();
+    let tracker = AbortableTaskTracker::new();
     let active = Arc::new(tokio::sync::Mutex::new(std::collections::HashSet::new()));
     let completed = Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
 

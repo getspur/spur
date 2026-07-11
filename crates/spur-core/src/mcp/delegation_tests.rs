@@ -232,6 +232,57 @@ mod retirement_state_tests {
     }
 
     #[tokio::test]
+    async fn test_server_force_abort_and_wait_aborts_tracked_children() {
+        let session_id = BrainSessionId::new(SessionId("brain".into()));
+        let (server, _channel) = super::McpCallbackServer::new(
+            Some(&session_id),
+            None,
+            None,
+            no_op_ctx(),
+            Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+            super::community_feature_gate(),
+        );
+        let dropped = Arc::new(AtomicBool::new(false));
+        let started = Arc::new(Notify::new());
+
+        server.task_tracker_handle().spawn({
+            let dropped = Arc::clone(&dropped);
+            let started = Arc::clone(&started);
+            async move {
+                let _flag = DropFlag(dropped);
+                started.notify_one();
+                pending::<()>().await;
+            }
+        });
+
+        started.notified().await;
+        tokio::time::timeout(
+            Duration::from_millis(200),
+            server.force_abort_and_wait(),
+        )
+        .await
+        .expect("force-abort must terminate tracked callback children");
+
+        assert!(
+            dropped.load(Ordering::SeqCst),
+            "force-abort must await tracked child termination"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_tracked_child_spawned_after_abort_is_immediately_aborted() {
+        let tracker = crate::server::AbortableTaskTracker::new();
+        tracker.close();
+        tracker.abort_all();
+
+        tracker.spawn(pending::<()>());
+
+        tokio::time::timeout(Duration::from_millis(200), tracker.wait())
+            .await
+            .expect("a child racing after abort must not keep the tracker alive");
+    }
+
+    #[tokio::test]
     async fn test_server_shutdown_signals_root_listener() {
         let session_id = BrainSessionId::new(SessionId("brain".into()));
         let (server, _channel) = super::McpCallbackServer::new(
@@ -650,7 +701,7 @@ mod continuation_producer_tests {
     };
     use spur_acp::{DelegationId, SessionId};
     use tokio_util::sync::CancellationToken;
-    use tokio_util::task::TaskTracker;
+    use crate::server::AbortableTaskTracker;
 
     #[derive(Default)]
     struct RecordingSink {
@@ -670,7 +721,7 @@ mod continuation_producer_tests {
         brain_session: SessionId,
         event_sink: Option<Arc<dyn spur_mcp::events::McpEventSink>>,
     ) -> BrainContinuation {
-        let tracker = TaskTracker::new();
+        let tracker = AbortableTaskTracker::new();
         let active = Arc::new(tokio::sync::Mutex::new(HashSet::new()));
         let completed = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
         let captured = Arc::new(tokio::sync::Mutex::new(Vec::new()));
