@@ -219,21 +219,31 @@ state if TTL or operator repair removes an item unexpectedly.
 `external_index` changes from "create and start" to "create and enqueue":
 
 1. Parse and validate args.
-2. Validate and resolve source URL abuse controls.
-3. Apply the existing per-owner request-rate limit.
-4. Return a warm catalog hit unless `force=true`.
-5. Compute `BacklogOwner` from auth context.
-6. Try to find an existing queued/running dedupe job. If found, return it.
-7. Transactionally create:
+2. Validate pure source URL syntax and abuse controls without DNS.
+3. Build one canonical identity for catalog lookup and enqueue. Standard
+   crates.io download URLs normalize package/source/URL/source kind and reject
+   package or version mismatches; generic sources only trim surrounding
+   whitespace.
+4. Return a complete canonical catalog hit unless `force=true`. If an explicit
+   recognized noncanonical crates.io alias was supplied and the canonical
+   coordinate misses, also check that exact trimmed legacy source coordinate.
+   Omitted source never scans legacy or arbitrary namespaces. This read-only
+   warm path does not consume rate accounting or perform DNS.
+5. On a cold miss or `force=true`, resolve DNS and apply the existing per-owner
+   request-rate limit.
+6. Compute `BacklogOwner` from auth context.
+7. Try to find an existing queued/running canonical dedupe job. If found,
+   return it.
+8. Transactionally create:
    - `JOB#<job_id>` with `status=queued`
    - dedupe pointer
    - queue GSI attributes on the job record
    - owner queued counter increment
    - sharded global queued counter increment, when configured
-8. If owner/global queued cap would be exceeded, reject with `queue_full` or
+9. If owner/global queued cap would be exceeded, reject with `queue_full` or
    `global_queue_full`.
-9. Return the queued job response.
-10. Optionally invoke a small best-effort dispatch kick for low latency. The
+10. Return the queued job response.
+11. Optionally invoke a small best-effort dispatch kick for low latency. The
     EventBridge drainer remains the correctness path.
 
 The enqueue transaction may be cancelled atomically by DynamoDB. A
@@ -250,7 +260,7 @@ rejections.
 `force=true` bypasses the warm-catalog hit only. It does not bypass request
 rate limits, owner/global queued caps, owner/global running caps, URL abuse
 checks, or dedupe against an already queued/running job for the same coordinate
-and source URL.
+and canonical source URL.
 
 This keeps the client contract simple: an accepted request always has a durable
 job ID and can be polled with `external_index_status`.

@@ -31,6 +31,7 @@ use spur_context_service::mcp::{
 const PACKAGE: &str = "demo";
 const REVISION: &str = "1.0.0";
 const SOURCE_URL: &str = "https://1.1.1.1/example/demo";
+const CRATES_IO_SOURCE_URL: &str = "https://crates.io/api/v1/crates/demo/1.0.0/download";
 const GIT_SOURCE: &str = "git:github.com/example/demo";
 const DIMENSIONS: usize = 768;
 const EMBEDDING_MODEL: &str = "EmbeddingGemma300M";
@@ -170,10 +171,21 @@ fn tool_definitions_match_external_context_surface() {
         required(index_schema),
         ["package", "revision", "source_url"]
     );
-    assert_eq!(
-        index_schema["properties"]["source"]["default"],
-        "git:custom"
-    );
+    assert!(index_schema["properties"]["source"]
+        .get("default")
+        .is_none());
+    assert!(index_schema["properties"]["package"]["description"]
+        .as_str()
+        .unwrap()
+        .contains("crates.io"));
+    assert!(index_schema["properties"]["source_url"]["description"]
+        .as_str()
+        .unwrap()
+        .contains("canonical"));
+    assert!(index_schema["properties"]["source"]["description"]
+        .as_str()
+        .unwrap()
+        .contains("registry:crates-io"));
     assert_eq!(
         index_schema["properties"]["source_kind"]["enum"],
         json!(["git", "tarball"])
@@ -1410,7 +1422,7 @@ async fn external_index_returns_complete_for_warm_catalog_hit() -> Result<()> {
         &json!({
             "package": PACKAGE,
             "revision": REVISION,
-            "source_url": SOURCE_URL,
+            "source_url": "https://warm-hit.invalid/example/demo",
             "source": "registry:crates-io"
         }),
         &fixture.conn,
@@ -1426,6 +1438,237 @@ async fn external_index_returns_complete_for_warm_catalog_hit() -> Result<()> {
     assert_eq!(response["revision"], REVISION);
     assert_eq!(sfn.started_count(), 0);
     assert_eq!(jobs.job_count(), 0);
+    assert_eq!(jobs.rate_count("caller-warm"), 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn external_index_crates_io_aliases_share_the_canonical_warm_identity() -> Result<()> {
+    let fixture = McpFixture::new("index-warm-crates-aliases")?;
+    let jobs = FakeJobStore::default();
+    let sfn = StubIndexExecutionStarter::default();
+
+    for source in [
+        None,
+        Some("crates.io"),
+        Some("crates-io"),
+        Some("registry:crates-io"),
+    ] {
+        let mut args = json!({
+            "package": " DEMO ",
+            "revision": " 1.0.0 ",
+            "source_url": " HTTPS://CRATES.IO/api/v1/crates/Demo/1.0.0/download "
+        });
+        if let Some(source) = source {
+            args["source"] = Value::String(source.to_owned());
+        }
+
+        let response = route_index(
+            &args,
+            &fixture.conn,
+            &fixture.catalog,
+            &jobs,
+            &sfn,
+            "caller-warm-aliases",
+        )
+        .await?;
+
+        assert_eq!(response["status"], "complete", "source={source:?}");
+        assert_eq!(response["snapshot_id"], 100);
+    }
+
+    assert_eq!(jobs.rate_count("caller-warm-aliases"), 0);
+    assert_eq!(jobs.job_count(), 0);
+    assert_eq!(sfn.started_count(), 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn external_index_explicit_crates_io_aliases_find_legacy_warm_rows() -> Result<()> {
+    for alias in ["crates.io", "crates-io"] {
+        let fixture = McpFixture::new(&format!("index-warm-legacy-{alias}"))?;
+        fixture.catalog.connection().execute(
+            "UPDATE package_catalog SET source = ? WHERE source = 'registry:crates-io'",
+            params![alias],
+        )?;
+        fixture.catalog.connection().execute(
+            "UPDATE refs SET source = ? WHERE source = 'registry:crates-io'",
+            params![alias],
+        )?;
+        let jobs = FakeJobStore::default();
+        let sfn = StubIndexExecutionStarter::default();
+
+        let response = route_index(
+            &json!({
+                "package": "demo",
+                "revision": REVISION,
+                "source_url": CRATES_IO_SOURCE_URL,
+                "source": format!(" {alias} ")
+            }),
+            &fixture.conn,
+            &fixture.catalog,
+            &jobs,
+            &sfn,
+            "caller-warm-legacy",
+        )
+        .await?;
+
+        assert_eq!(response["status"], "complete", "alias={alias}");
+        assert_eq!(response["snapshot_id"], 100, "alias={alias}");
+        assert_eq!(jobs.rate_count("caller-warm-legacy"), 0, "alias={alias}");
+        assert_eq!(jobs.job_count(), 0, "alias={alias}");
+        assert_eq!(sfn.started_count(), 0, "alias={alias}");
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn external_index_cold_crates_io_request_stores_canonical_identity() -> Result<()> {
+    let fixture = McpFixture::new("index-cold-crates-canonical")?;
+    let jobs = FakeJobStore::default();
+    let sfn = StubIndexExecutionStarter::default();
+
+    let response = route_index(
+        &json!({
+            "package": " Demo_Crate ",
+            "revision": " 2.0.0 ",
+            "source_url": " HTTPS://CRATES.IO:443/api/v1/crates/demo-crate/2.0.0/download?mirror=1#fetch ",
+            "source": " crates.io "
+        }),
+        &fixture.conn,
+        &fixture.catalog,
+        &jobs,
+        &sfn,
+        "caller-cold-crates",
+    )
+    .await?;
+
+    assert_eq!(response["status"], "queued");
+    let stored = jobs
+        .lookup_job_sync(response["job_id"].as_str().context("job_id")?)
+        .context("stored job")?;
+    let canonical_url = "https://crates.io/api/v1/crates/demo-crate/2.0.0/download";
+    assert_eq!(stored.source, "registry:crates-io");
+    assert_eq!(stored.package, "demo-crate");
+    assert_eq!(stored.revision, "2.0.0");
+    assert_eq!(stored.source_url, canonical_url);
+    assert_eq!(stored.source_url_hash, source_url_hash(canonical_url));
+    assert_eq!(stored.source_kind, "tarball");
+    Ok(())
+}
+
+#[tokio::test]
+async fn external_index_equivalent_crates_io_requests_share_one_active_job() -> Result<()> {
+    let fixture = McpFixture::new("index-active-crates-canonical")?;
+    let jobs = FakeJobStore::default();
+    let sfn = StubIndexExecutionStarter::default();
+
+    let first = route_index(
+        &json!({
+            "package": "demo",
+            "revision": "2.0.0",
+            "source_url": "https://crates.io/api/v1/crates/demo/2.0.0/download"
+        }),
+        &fixture.conn,
+        &fixture.catalog,
+        &jobs,
+        &sfn,
+        "caller-active-crates",
+    )
+    .await?;
+    let second = route_index(
+        &json!({
+            "package": " DEMO ",
+            "revision": " 2.0.0 ",
+            "source_url": "HTTPS://CRATES.IO:443/api/v1/crates/Demo/2.0.0/download?download=1",
+            "source": " crates.io "
+        }),
+        &fixture.conn,
+        &fixture.catalog,
+        &jobs,
+        &sfn,
+        "caller-active-crates",
+    )
+    .await?;
+
+    assert_eq!(first["status"], "queued");
+    assert_eq!(second["job_id"], first["job_id"]);
+    assert_eq!(jobs.job_count(), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn external_index_rejects_crates_io_coordinate_mismatches_before_admission() -> Result<()> {
+    let fixture = McpFixture::new("index-crates-coordinate-mismatch")?;
+    let jobs = FakeJobStore::default();
+    let sfn = StubIndexExecutionStarter::default();
+
+    let package_mismatch = route_index(
+        &json!({
+            "package": "other",
+            "revision": "2.0.0",
+            "source_url": "https://crates.io/api/v1/crates/demo/2.0.0/download"
+        }),
+        &fixture.conn,
+        &fixture.catalog,
+        &jobs,
+        &sfn,
+        "caller-crates-mismatch",
+    )
+    .await?;
+    let revision_mismatch = route_index(
+        &json!({
+            "package": "demo",
+            "revision": "3.0.0",
+            "source_url": "https://crates.io/api/v1/crates/demo/2.0.0/download"
+        }),
+        &fixture.conn,
+        &fixture.catalog,
+        &jobs,
+        &sfn,
+        "caller-crates-mismatch",
+    )
+    .await?;
+
+    assert_eq!(package_mismatch["status"], "rejected");
+    assert_eq!(package_mismatch["reason"], "source_url_package_mismatch");
+    assert_eq!(revision_mismatch["status"], "rejected");
+    assert_eq!(revision_mismatch["reason"], "source_url_revision_mismatch");
+    assert_eq!(jobs.rate_count("caller-crates-mismatch"), 0);
+    assert_eq!(jobs.job_count(), 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn external_index_custom_identity_only_trims_surrounding_whitespace() -> Result<()> {
+    let fixture = McpFixture::new("index-custom-trimming")?;
+    let jobs = FakeJobStore::default();
+    let sfn = StubIndexExecutionStarter::default();
+
+    let response = route_index(
+        &json!({
+            "package": " demo ",
+            "revision": " main ",
+            "source_url": " https://1.1.1.1/example/demo ",
+            "source": " vendor:custom "
+        }),
+        &fixture.conn,
+        &fixture.catalog,
+        &jobs,
+        &sfn,
+        "caller-custom-trimming",
+    )
+    .await?;
+
+    assert_eq!(response["status"], "queued");
+    let stored = jobs
+        .lookup_job_sync(response["job_id"].as_str().context("job_id")?)
+        .context("stored job")?;
+    assert_eq!(stored.source, "vendor:custom");
+    assert_eq!(stored.package, "demo");
+    assert_eq!(stored.revision, "main");
+    assert_eq!(stored.source_url, SOURCE_URL);
+    assert_eq!(stored.source_url_hash, source_url_hash(SOURCE_URL));
     Ok(())
 }
 
@@ -1723,6 +1966,66 @@ async fn external_index_force_true_does_not_bypass_queue_caps_or_dedupe() -> Res
 }
 
 #[tokio::test]
+async fn external_index_force_bypasses_warm_lookup_but_not_canonical_dedupe_or_rate_limit(
+) -> Result<()> {
+    let fixture = McpFixture::new("index-force-canonical")?;
+    let jobs = FakeJobStore::default();
+    jobs.set_rate_limit_per_minute(2);
+    let sfn = StubIndexExecutionStarter::default();
+
+    let first = route_index(
+        &json!({
+            "package": "demo",
+            "revision": REVISION,
+            "source_url": CRATES_IO_SOURCE_URL,
+            "force": true
+        }),
+        &fixture.conn,
+        &fixture.catalog,
+        &jobs,
+        &sfn,
+        "caller-force-canonical",
+    )
+    .await?;
+    let dedup = route_index(
+        &json!({
+            "package": "DEMO",
+            "revision": REVISION,
+            "source_url": "HTTPS://CRATES.IO/api/v1/crates/Demo/1.0.0/download",
+            "source": "crates-io",
+            "force": true
+        }),
+        &fixture.conn,
+        &fixture.catalog,
+        &jobs,
+        &sfn,
+        "caller-force-canonical",
+    )
+    .await?;
+    let rate_limited = route_index(
+        &json!({
+            "package": "demo",
+            "revision": REVISION,
+            "source_url": CRATES_IO_SOURCE_URL,
+            "force": true
+        }),
+        &fixture.conn,
+        &fixture.catalog,
+        &jobs,
+        &sfn,
+        "caller-force-canonical",
+    )
+    .await?;
+
+    assert_eq!(first["status"], "queued");
+    assert_eq!(dedup["job_id"], first["job_id"]);
+    assert_eq!(rate_limited["status"], "rejected");
+    assert_eq!(rate_limited["reason"], "rate_limit");
+    assert_eq!(jobs.job_count(), 1);
+    Ok(())
+}
+
+#[tokio::test]
 async fn external_index_admission_assigns_stable_backlog_owner() -> Result<()> {
     let fixture = McpFixture::new("index-owner-stability")?;
     let jobs = FakeJobStore::default();
@@ -1982,6 +2285,7 @@ async fn external_index_rejects_localhost_source_url_before_starting_job() -> Re
             "package": PACKAGE,
             "revision": "main",
             "source_url": "https://localhost/example/demo",
+            "force": true,
         }),
         &fixture.conn,
         &fixture.catalog,
@@ -3383,6 +3687,16 @@ fn active_dedupe_in_state(state: &FakeJobState, key: &JobKey) -> Option<JobRecor
 impl FakeJobStore {
     fn set_rate_limit_per_minute(&self, max: u32) {
         self.state.lock().expect("fake store lock").rate_limit_max = Some(max);
+    }
+
+    fn rate_count(&self, caller_id: &str) -> u32 {
+        self.state
+            .lock()
+            .expect("fake store lock")
+            .rate_counts
+            .get(caller_id)
+            .copied()
+            .unwrap_or_default()
     }
 
     fn seed_queued_job(
