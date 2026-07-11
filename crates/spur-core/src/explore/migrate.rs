@@ -2,7 +2,7 @@ use anyhow::{bail, Context};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use crate::explore::catalog::{Catalog, CatalogEntry};
+use crate::explore::catalog::Catalog;
 use crate::explore::store;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -142,7 +142,7 @@ fn migrate_catalog(
     merged.save_to_store(global_store_root)?;
 
     let verified = Catalog::load_from_store(global_store_root)?;
-    if !catalog_contains_entries(&verified, &local.entries) {
+    if verified.synced_at_epoch != merged.synced_at_epoch || verified.entries != merged.entries {
         bail!(
             "global catalog verification failed after merging {}",
             source.display()
@@ -308,15 +308,6 @@ fn merge_catalog(merged: &mut Catalog, local: Catalog) {
         }
     }
     merged.synced_at_epoch = synced_at_epoch.or(merged.synced_at_epoch);
-}
-
-fn catalog_contains_entries(catalog: &Catalog, entries: &[CatalogEntry]) -> bool {
-    entries.iter().all(|entry| {
-        catalog
-            .entries
-            .iter()
-            .any(|candidate| candidate.name == entry.name && candidate == entry)
-    })
 }
 
 fn same_content(left: &Path, right: &Path) -> anyhow::Result<bool> {
