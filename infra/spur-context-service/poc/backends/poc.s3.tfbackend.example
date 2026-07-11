@@ -1,0 +1,7 @@
+# POC-only partial backend configuration. Copy outside version control and
+# replace every marker. Never substitute a production bucket, key, or lock table.
+bucket         = "replace-with-poc-state-bucket"
+key            = "replace-with-unique-poc-key/terraform.tfstate"
+region         = "us-east-1"
+dynamodb_table = "replace-with-poc-lock-table"
+encrypt        = true
