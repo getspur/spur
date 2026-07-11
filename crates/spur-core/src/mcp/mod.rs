@@ -141,6 +141,14 @@ pub fn worker_tools_list() -> Vec<spur_mcp::ToolDefinition> {
         .list_tools()
 }
 
+/// Claude-format tool names (`mcp__spur-worker-mcp__<tool>`) for every tool
+/// the curated worker MCP server advertises via `list_tools`. Used to augment
+/// Claude agent-profile `tools:` allowlists so a restricted persona keeps the
+/// worker MCP surface its delegation ships.
+pub fn worker_mcp_claude_tool_names() -> Vec<String> {
+    Vec::new()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -174,6 +182,34 @@ mod tests {
                 err.message
             );
         }
+    }
+
+    #[test]
+    fn worker_mcp_claude_tool_names_cover_the_advertised_registry() {
+        let names = worker_mcp_claude_tool_names();
+        let advertised = worker_tools_list();
+        assert_eq!(names.len(), advertised.len());
+        for def in &advertised {
+            let expected = format!("mcp__spur-worker-mcp__{}", def.name);
+            assert!(names.contains(&expected), "missing {expected}");
+        }
+        let unique: std::collections::BTreeSet<_> = names.iter().collect();
+        assert_eq!(unique.len(), names.len(), "names must not repeat");
+
+        // Signals, graph, and analyst tools must be present…
+        for sentinel in [
+            "mcp__spur-worker-mcp__report_progress",
+            "mcp__spur-worker-mcp__report_signal",
+            "mcp__spur-worker-mcp__code_read_symbol",
+            "mcp__spur-worker-mcp__query",
+        ] {
+            assert!(
+                names.iter().any(|name| name == sentinel),
+                "missing sentinel {sentinel}"
+            );
+        }
+        // …and brain-only tools must not leak in.
+        assert!(!names.iter().any(|name| name.contains("delegate_to_worker")));
     }
 
     #[tokio::test]
