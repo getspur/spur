@@ -9,12 +9,12 @@ use spur_acp::{
 };
 use spur_core::plan::audit_sentinel::{self, AuditSentinelKind, CompletionState};
 use spur_core::plan::reconciler::{Reconciler, ReconcilerConfig, ReconcilerDispatchCtx};
+use spur_core::server::AbortableTaskTracker;
 use spur_core::server::{DetachedContinuationCtx, McpCallbackServer};
 use spur_mcp::McpEventSink;
 use spur_pm::{IssueUpdate, PmService};
 use tempfile::TempDir;
 use tokio::sync::Notify;
-use tokio_util::task::TaskTracker;
 
 mod common;
 
@@ -364,7 +364,7 @@ async fn reconciler_dispatch_and_completion_emit_refreshed_snapshots() {
     fixture.sink.events.lock().unwrap().clear();
 
     let (delegation_tx, mut delegation_rx) = tokio::sync::mpsc::channel(1);
-    let tracker = TaskTracker::new();
+    let tracker = AbortableTaskTracker::new();
     let sink_ref: Arc<dyn McpEventSink> = Arc::clone(&fixture.sink) as Arc<dyn McpEventSink>;
     let reconciler = Reconciler::new(
         ReconcilerConfig::default(),

@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::outcome_materializer::OutcomeMaterializer;
+use crate::server::AbortableTaskTracker;
 use crate::server::McpCallbackServer;
 use crate::server::{
     dispatch_error_response, new_attempt_tracker, spawn_result_collector, DetachedCompletionHandle,
@@ -19,7 +20,6 @@ use spur_mcp::{ToolCallContext, ToolDefinition, ToolModule, ToolResponse};
 use tokio::sync::{mpsc, OnceCell};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
-use tokio_util::task::TaskTracker;
 
 #[cfg(test)]
 use crate::server::{build_detached_continuation, community_feature_gate};
@@ -37,7 +37,7 @@ pub struct DelegationMcpDeps {
     active_delegations: Arc<tokio::sync::Mutex<HashSet<DelegationId>>>,
     completed_delegations:
         Arc<tokio::sync::Mutex<HashMap<DelegationId, (DelegationResult, tokio::time::Instant)>>>,
-    task_tracker: TaskTracker,
+    task_tracker: AbortableTaskTracker,
     cancellation_control: Option<CancellationControl>,
     continuation_ctx: Arc<DetachedContinuationCtx>,
     materializer: OutcomeMaterializer,
@@ -83,7 +83,7 @@ impl DelegationMcpDeps {
             repo_root: None,
             active_delegations: Arc::new(tokio::sync::Mutex::new(HashSet::new())),
             completed_delegations: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
-            task_tracker: TaskTracker::new(),
+            task_tracker: AbortableTaskTracker::new(),
             cancellation_control: None,
             continuation_ctx: Arc::new(DetachedContinuationCtx {
                 on_complete: Arc::new(|_, _| Box::pin(async {})),

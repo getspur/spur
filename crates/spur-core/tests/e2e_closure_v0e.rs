@@ -20,7 +20,6 @@ use spur_core::plan::{PlanState, PlanTask, PlanTaskEntry, PlanTaskStatus};
 use spur_core::server::{DetachedContinuationCtx, McpCallbackServer};
 use tempfile::TempDir;
 use tokio::sync::Notify;
-use tokio_util::task::TaskTracker;
 
 mod common;
 
@@ -377,7 +376,7 @@ fn test_dispatch_ctx() -> ReconcilerDispatchCtx {
     let (delegation_tx, _delegation_rx) = tokio::sync::mpsc::channel(1);
     ReconcilerDispatchCtx {
         delegation_tx,
-        task_tracker: TaskTracker::new(),
+        task_tracker: spur_core::server::AbortableTaskTracker::new(),
         brain_session_id: BrainSessionId::new(SessionId("brain".into())),
         event_sink: None,
         materializer: test_materializer(),
@@ -605,7 +604,7 @@ async fn t_v0e_3_fast_forward_matches_polling() {
         Arc::new(Notify::new()),
         Some(ReconcilerDispatchCtx {
             delegation_tx: poll_tx,
-            task_tracker: TaskTracker::new(),
+            task_tracker: spur_core::server::AbortableTaskTracker::new(),
             brain_session_id: BrainSessionId::new(SessionId("brain".into())),
             event_sink: None,
             materializer: test_materializer(),
@@ -645,7 +644,7 @@ async fn t_v0e_3_fast_forward_matches_polling() {
         Arc::clone(&fast_forward),
         Some(ReconcilerDispatchCtx {
             delegation_tx: ff_tx,
-            task_tracker: TaskTracker::new(),
+            task_tracker: spur_core::server::AbortableTaskTracker::new(),
             brain_session_id: BrainSessionId::new(SessionId("brain".into())),
             event_sink: None,
             materializer: test_materializer(),

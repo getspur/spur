@@ -727,11 +727,11 @@ impl McpCallbackServer {
         }
     }
 
-    /// Operator-initiated force-reclaim. Removes any existing
-    /// `spur:plan-owner:*` labels from the plan's epic and stamps the current
-    /// brain. Records a `PlanForceReclaimed` audit sentinel with the prior
-    /// owner (or `None` if Unowned) and an optional operator-supplied reason.
-    /// Refuses unless `confirm: true` is passed.
+    /// Operator-initiated force-reclaim. The compatibility default stamps the
+    /// current brain; `target_owner = "system_l3"` explicitly migrates an open
+    /// L3 generation to the stable project runtime owner and replaces all
+    /// owner fencing labels. Records a `PlanForceReclaimed` audit sentinel and
+    /// refuses unless `confirm: true` is passed.
     pub(crate) async fn handle_force_reclaim_plan(
         &self,
         id: Value,
@@ -741,6 +741,22 @@ impl McpCallbackServer {
             Some(plan_id) => plan_id,
             None => {
                 return JsonRpcResponse::invalid_params(id, "force_reclaim_plan: missing plan_id")
+            }
+        };
+        let target_owner = args
+            .get("target_owner")
+            .and_then(|v| v.as_str())
+            .unwrap_or("current_brain");
+        let migrate_to_system_l3 = match target_owner {
+            "current_brain" => false,
+            "system_l3" => true,
+            other => {
+                return JsonRpcResponse::invalid_params(
+                    id,
+                    format!(
+                        "force_reclaim_plan: invalid target_owner {other:?}; expected current_brain or system_l3"
+                    ),
+                )
             }
         };
         let confirm = args
@@ -760,7 +776,7 @@ impl McpCallbackServer {
             .and_then(|v| v.as_str())
             .map(str::to_string);
 
-        let pm = match self.pm_service.as_deref() {
+        let pm = match self.submit_plan_substrate_pm() {
             Some(pm) => pm,
             None => {
                 return JsonRpcResponse::internal_error(
@@ -826,6 +842,34 @@ impl McpCallbackServer {
             }
         };
 
+        if migrate_to_system_l3 {
+            let is_l3 = epic.labels.iter().any(|label| {
+                crate::plan::labels::parse_autonomy(label)
+                    == Some(crate::plan::labels::AutonomyLevel::L3)
+            });
+            let has_loop_id = epic
+                .labels
+                .iter()
+                .any(|label| crate::plan::labels::parse_loop_id(label).is_some());
+            let has_generation = epic
+                .labels
+                .iter()
+                .any(|label| crate::plan::labels::parse_loop_generation(label).is_some());
+            if epic.status != "open"
+                || !epic
+                    .labels
+                    .contains(&crate::plan::labels::PLAN_COMPLETE.to_string())
+                || !is_l3
+                || !has_loop_id
+                || !has_generation
+            {
+                return JsonRpcResponse::invalid_params(
+                    id,
+                    "force_reclaim_plan: target_owner=system_l3 requires an open, fully persisted L3 generation epic with loop-id and loop-generation labels",
+                );
+            }
+        }
+
         // Capture prior owner(s) for the audit sentinel BEFORE rewriting labels.
         // The single-owner case yields `Some("<owner>")`; the rare ambiguous
         // multi-owner case preserves the comma-joined list verbatim so operators
@@ -843,62 +887,117 @@ impl McpCallbackServer {
             _ => Some(prior_owners.join(",")),
         };
 
-        let new_owner_label =
-            crate::plan::labels::plan_owner(&self.brain_session_id().as_session_id().0);
+        let new_owner = if migrate_to_system_l3 {
+            crate::plan::loops::LOOP_RUNTIME_OWNER_ID.to_string()
+        } else {
+            self.brain_session_id().to_string()
+        };
+        let token = uuid::Uuid::new_v4().to_string();
+        let new_owner_label = crate::plan::labels::plan_owner(&new_owner);
         let mut remove_labels: Vec<String> = epic
             .labels
             .iter()
             .filter(|label| crate::plan::labels::parse_plan_owner(label).is_some())
             .cloned()
             .collect();
-        let add_labels = vec![new_owner_label.clone()];
+        let mut add_labels = vec![new_owner_label.clone()];
+        if migrate_to_system_l3 {
+            remove_labels.extend(
+                epic.labels
+                    .iter()
+                    .filter(|label| crate::plan::labels::parse_plan_owner_token(label).is_some())
+                    .cloned(),
+            );
+            remove_labels.extend(
+                epic.labels
+                    .iter()
+                    .filter(|label| {
+                        crate::plan::labels::parse_plan_owner_lease_expires_at(label).is_some()
+                    })
+                    .cloned(),
+            );
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs()
+                .min(i64::MAX as u64) as i64;
+            let lease_secs = self
+                .dispatch_lease_duration
+                .as_secs()
+                .max(1)
+                .min(i64::MAX as u64) as i64;
+            add_labels.push(crate::plan::labels::plan_owner_token(&token));
+            add_labels.push(crate::plan::labels::plan_owner_lease_expires_at(
+                now.saturating_add(lease_secs),
+            ));
+        }
         filter_remove_labels(&mut remove_labels, &add_labels);
 
-        if let Err(error) = apply_issue_update(
-            pm,
-            &epic_id,
-            IssueUpdate {
-                add_labels,
-                remove_labels,
-                ..Default::default()
-            },
-        )
-        .await
-        {
+        let Some(advanced) = pm.advanced() else {
             return JsonRpcResponse::internal_error(
                 id,
-                format!(
-                    "force_reclaim_plan: failed to write owner labels on epic {epic_id}: {error}"
-                ),
+                "force_reclaim_plan requires beads advanced audit support",
             );
-        }
-        self.fast_forward_reconciler();
+        };
+        let audit = crate::plan::audit_sentinel::AuditSentinelKind::PlanForceReclaimed {
+            plan_id: plan_id.to_string(),
+            prior_owner: prior_owner.clone(),
+            new_owner: new_owner.clone(),
+            token: token.clone(),
+            reason: reason.clone(),
+        };
+        let body = crate::plan::audit_sentinel::encode_comment(&audit);
 
-        let new_owner = self.brain_session_id().to_string();
-        let token = uuid::Uuid::new_v4().to_string();
+        if migrate_to_system_l3 {
+            if let Err(error) = pm
+                .update_issue(
+                    &epic_id,
+                    IssueUpdate {
+                        comment: Some(body),
+                        add_labels,
+                        remove_labels,
+                        ..Default::default()
+                    },
+                )
+                .await
+            {
+                return JsonRpcResponse::internal_error(
+                    id,
+                    format!(
+                        "force_reclaim_plan: atomic ownership migration failed on epic {epic_id}: {error}"
+                    ),
+                );
+            }
+        } else {
+            if let Err(error) = advanced.add_comment(&epic_id, &body).await {
+                return JsonRpcResponse::internal_error(
+                    id,
+                    format!(
+                        "force_reclaim_plan: required ownership audit failed before owner migration on epic {epic_id}: {error}"
+                    ),
+                );
+            }
 
-        if let Err(error) = self.require_feature(FeatureKey::PM_PRO_BEADS_ADVANCED) {
-            return JsonRpcResponse::mcp_error(id, error);
-        }
-        if let Some(adv) = pm.advanced() {
-            let audit = crate::plan::audit_sentinel::AuditSentinelKind::PlanForceReclaimed {
-                plan_id: plan_id.to_string(),
-                prior_owner: prior_owner.clone(),
-                new_owner: new_owner.clone(),
-                token: token.clone(),
-                reason: reason.clone(),
-            };
-            let body = crate::plan::audit_sentinel::encode_comment(&audit);
-            if let Err(e) = adv.add_comment(&epic_id, &body).await {
-                tracing::warn!(
-                    target: "spur.audit.emit_failure",
-                    kind = "plan_force_reclaimed",
-                    epic_id = %epic_id,
-                    plan_id = %plan_id,
-                    "PlanForceReclaimed audit comment emission failed (owner label is persisted; audit missing): {e}"
+            if let Err(error) = apply_issue_update(
+                pm,
+                &epic_id,
+                IssueUpdate {
+                    add_labels,
+                    remove_labels,
+                    ..Default::default()
+                },
+            )
+            .await
+            {
+                return JsonRpcResponse::internal_error(
+                    id,
+                    format!(
+                        "force_reclaim_plan: failed to write owner labels on epic {epic_id}: {error}"
+                    ),
                 );
             }
         }
+        self.fast_forward_reconciler();
 
         let result = json!({
             "prior_owner": prior_owner,

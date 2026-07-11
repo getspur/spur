@@ -4,7 +4,9 @@ use std::collections::HashSet;
 use std::str::FromStr;
 
 use async_trait::async_trait;
+use beads_rust::model::EventType;
 use chrono::{DateTime, Utc};
+use rusqlite::params;
 
 use crate::adapter::IssueTracker;
 use crate::beads_crate::adapter::BeadsCrateAdapter;
@@ -42,6 +44,70 @@ fn validate_added_labels<'a>(labels: impl IntoIterator<Item = &'a String>) -> an
     for label in labels {
         validate_added_label(label)?;
     }
+    Ok(())
+}
+
+fn apply_label_comment_update(
+    storage: &mut beads_rust::storage::sqlite::SqliteStorage,
+    issue_id: &str,
+    actor: &str,
+    add_labels: &[String],
+    remove_labels: &[String],
+    comment: Option<&str>,
+) -> anyhow::Result<()> {
+    storage.mutate("update_issue_labels_comment", actor, |tx, context| {
+        let mut changed = false;
+
+        for label in add_labels {
+            let rows = tx.execute(
+                "INSERT OR IGNORE INTO labels (issue_id, label) VALUES (?, ?)",
+                params![issue_id, label],
+            )?;
+            if rows > 0 {
+                context.record_event(
+                    EventType::LabelAdded,
+                    issue_id,
+                    Some(format!("Added label {label}")),
+                );
+                changed = true;
+            }
+        }
+
+        for label in remove_labels {
+            let rows = tx.execute(
+                "DELETE FROM labels WHERE issue_id = ? AND label = ?",
+                params![issue_id, label],
+            )?;
+            if rows > 0 {
+                context.record_event(
+                    EventType::LabelRemoved,
+                    issue_id,
+                    Some(format!("Removed label {label}")),
+                );
+                changed = true;
+            }
+        }
+
+        if let Some(comment) = comment {
+            tx.execute(
+                "INSERT INTO comments (issue_id, author, text, created_at)
+                 VALUES (?, ?, ?, CURRENT_TIMESTAMP)",
+                params![issue_id, actor, comment],
+            )?;
+            context.record_event(EventType::Commented, issue_id, Some(comment.to_string()));
+            changed = true;
+        }
+
+        if changed {
+            tx.execute(
+                "UPDATE issues SET updated_at = ? WHERE id = ?",
+                params![Utc::now().to_rfc3339(), issue_id],
+            )?;
+            context.mark_dirty(issue_id);
+        }
+
+        Ok(())
+    })?;
     Ok(())
 }
 
@@ -483,15 +549,18 @@ impl IssueTracker for BeadsCrateAdapter {
                 s.update_issue(&id, &br_update, &actor)?;
             }
 
-            for label in &update.add_labels {
-                s.add_label(&id, label, &actor)?;
-            }
-            for label in &update.remove_labels {
-                s.remove_label(&id, label, &actor)?;
-            }
-
-            if let Some(comment) = update.comment.as_deref() {
-                s.add_comment(&id, &actor, comment)?;
+            if !update.add_labels.is_empty()
+                || !update.remove_labels.is_empty()
+                || update.comment.is_some()
+            {
+                apply_label_comment_update(
+                    s,
+                    &id,
+                    &actor,
+                    &update.add_labels,
+                    &update.remove_labels,
+                    update.comment.as_deref(),
+                )?;
             }
 
             Ok(())
@@ -886,6 +955,99 @@ mod tests {
         let mut labels = after.labels;
         labels.sort();
         assert_eq!(labels, vec!["keep".to_string(), "new".to_string()]);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn combined_label_comment_update_rolls_back_after_comment_failure() {
+        let dir = TempDir::new().unwrap();
+        let adapter = BeadsCrateAdapter::open(dir.path(), AdapterConfig::default())
+            .await
+            .unwrap();
+
+        let id = adapter
+            .create_issue(IssueCreate {
+                title: "Owned plan".into(),
+                labels: vec!["owner:prior".into()],
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        let dirty_issue_id = id.clone();
+        adapter
+            .write(move |storage| {
+                storage.clear_dirty_issues(&[dirty_issue_id])?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let baseline_issue_id = id.clone();
+        let (updated_at_before, event_count_before) = adapter
+            .read(move |storage| {
+                let issue = storage
+                    .get_issue(&baseline_issue_id)?
+                    .expect("created issue must exist");
+                let events = storage.get_events(&baseline_issue_id, 1_000)?;
+                Ok((issue.updated_at, events.len()))
+            })
+            .await
+            .unwrap();
+
+        adapter
+            .write(|storage| {
+                storage.mutate("inject_comment_failure", "test", |tx, _ctx| {
+                    tx.execute_batch(
+                        "CREATE TRIGGER fail_comment_insert
+                         BEFORE INSERT ON comments
+                         BEGIN
+                           SELECT RAISE(ABORT, 'injected comment failure');
+                         END;",
+                    )?;
+                    Ok(())
+                })?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let audit = "[[spur-audit v1]]\n{\"kind\":\"ownership-migration\"}";
+        let error = adapter
+            .update_issue(
+                &id,
+                IssueUpdate {
+                    add_labels: vec!["owner:system-l3".into()],
+                    remove_labels: vec!["owner:prior".into()],
+                    comment: Some(audit.into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect_err("injected comment failure must reject the combined update");
+        assert!(error.to_string().contains("injected comment failure"));
+
+        let issue = adapter.get_issue(&id).await.unwrap();
+        let stored_issue_id = id.clone();
+        let (updated_at_after, comments, events, dirty_ids) = adapter
+            .read(move |storage| {
+                let issue = storage
+                    .get_issue(&stored_issue_id)?
+                    .expect("created issue must remain after rollback");
+                let comments = storage.get_comments(&stored_issue_id)?;
+                let events = storage.get_events(&stored_issue_id, 1_000)?;
+                let dirty_ids = storage.get_dirty_issue_ids()?;
+                Ok((issue.updated_at, comments, events, dirty_ids))
+            })
+            .await
+            .unwrap();
+        assert!(issue.labels.contains(&"owner:prior".to_string()));
+        assert!(!issue.labels.contains(&"owner:system-l3".to_string()));
+        assert!(
+            comments.iter().all(|comment| comment.body != audit),
+            "failed migration must not persist its audit comment"
+        );
+        assert_eq!(events.len(), event_count_before);
+        assert_eq!(updated_at_after, updated_at_before);
+        assert!(!dirty_ids.contains(&id));
     }
 
     #[tokio::test(flavor = "multi_thread")]
