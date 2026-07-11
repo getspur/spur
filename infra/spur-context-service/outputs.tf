@@ -132,3 +132,38 @@ output "aws_region" {
   description = "AWS region for deployed resources"
   value       = var.aws_region
 }
+
+# Cognito discovery values are intentionally nonsensitive. Do not add
+# aws_cognito_user_pool_client.*.client_secret to this file: generated M2M
+# secrets can remain in Terraform state and must be delivered out of band.
+output "cognito_issuer" {
+  description = "Exact Cognito issuer used by the API Gateway JWT authorizer and Lambda semantic validation, or null when Cognito is disabled."
+  value       = var.cognito_auth_enabled ? local.cognito_issuer : null
+}
+
+output "cognito_domain_url" {
+  description = "Cognito hosted-domain base URL for OIDC discovery, authorize, token, and JWKS paths, or null when Cognito is disabled."
+  value       = var.cognito_auth_enabled ? local.cognito_domain_url : null
+}
+
+output "cognito_human_client_id" {
+  description = "Public human authorization-code app-client ID, never a secret value. Null when Cognito is disabled."
+  value       = var.cognito_auth_enabled ? aws_cognito_user_pool_client.human[0].id : null
+}
+
+output "cognito_m2m_client_ids" {
+  description = "Enabled M2M organization app-client IDs keyed by opaque organization key. Generated client secrets are intentionally absent."
+  value = {
+    for key, client in aws_cognito_user_pool_client.m2m : key => client.id
+  }
+}
+
+output "cognito_resource_server_identifier" {
+  description = "Cognito resource-server identifier that prefixes the three custom OAuth scopes, or null when Cognito is disabled."
+  value       = var.cognito_auth_enabled ? var.cognito_resource_server_identifier : null
+}
+
+output "oauth_api_url" {
+  description = "Exact JWT-protected OAuth API URL, or null when Cognito is disabled."
+  value       = var.cognito_auth_enabled ? "${aws_apigatewayv2_api.http.api_endpoint}/mcp/oauth" : null
+}

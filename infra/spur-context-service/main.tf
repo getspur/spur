@@ -213,6 +213,16 @@ resource "aws_lambda_function" "service" {
       SPUR_INDEX_DRAINER_SCHEDULE_RATE_MINUTES = tostring(var.index_drainer_schedule_rate_minutes)
       SPUR_INDEX_DISPATCH_MAX_ATTEMPTS         = tostring(var.index_dispatch_max_attempts)
       SPUR_INDEX_DISPATCH_BACKOFF_BASE_SECONDS = tostring(var.index_dispatch_backoff_base_seconds)
+      # Cognito values are validation/discovery metadata only. Never pass an
+      # app-client secret, bearer token, authorization code, or PKCE value to
+      # this Lambda; API Gateway performs cryptographic JWT verification.
+      SPUR_COGNITO_AUTH_ENABLED       = var.cognito_auth_enabled ? "1" : "0"
+      SPUR_COGNITO_ISSUER             = local.cognito_issuer
+      SPUR_COGNITO_HUMAN_CLIENT_ID    = var.cognito_auth_enabled ? aws_cognito_user_pool_client.human[0].id : ""
+      SPUR_COGNITO_M2M_CLIENT_IDS     = join(",", [for client in values(aws_cognito_user_pool_client.m2m) : client.id])
+      SPUR_COGNITO_RESOURCE_SERVER_ID = var.cognito_resource_server_identifier
+      SPUR_COGNITO_DENY_CLIENT_IDS    = join(",", var.cognito_emergency_deny_client_ids)
+      SPUR_COGNITO_OAUTH_PATH         = "/mcp/oauth"
     }
   }
 
@@ -279,6 +289,211 @@ resource "aws_apigatewayv2_stage" "default" {
   default_route_settings {
     throttling_burst_limit = var.api_throttle_burst_limit
     throttling_rate_limit  = var.api_throttle_rate_limit
+  }
+
+  # The format deliberately contains route, status, latency, and bounded API
+  # error metadata only. It never includes Authorization, JWT claims, client
+  # secrets, OAuth codes, or request/response bodies.
+  dynamic "access_log_settings" {
+    for_each = var.cognito_auth_enabled ? [1] : []
+
+    content {
+      destination_arn = aws_cloudwatch_log_group.oauth_api_access[0].arn
+      format = jsonencode({
+        request_id         = "$context.requestId"
+        request_time       = "$context.requestTime"
+        route_key          = "$context.routeKey"
+        status             = "$context.status"
+        integration_status = "$context.integrationStatus"
+        response_latency   = "$context.responseLatency"
+        error_message      = "$context.error.message"
+      })
+    }
+  }
+}
+
+# Cognito resources are deliberately all guarded by cognito_auth_enabled so a
+# disabled default configuration has no user pool, domain, resource server, app
+# client, JWT authorizer, OAuth route, or Cognito-specific observability state.
+resource "aws_cognito_user_pool" "context_service" {
+  count = var.cognito_auth_enabled ? 1 : 0
+
+  name                = var.cognito_user_pool_name
+  user_pool_tier      = "LITE"
+  deletion_protection = var.cognito_user_pool_deletion_protection ? "ACTIVE" : "INACTIVE"
+
+  username_attributes = ["email"]
+  mfa_configuration   = "OPTIONAL"
+
+  software_token_mfa_configuration {
+    enabled = true
+  }
+
+  tags = {
+    Service   = "spur-context-service"
+    ManagedBy = "terraform"
+  }
+}
+
+resource "aws_cognito_user_pool_domain" "context_service" {
+  count = var.cognito_auth_enabled ? 1 : 0
+
+  domain       = var.cognito_domain_prefix
+  user_pool_id = aws_cognito_user_pool.context_service[0].id
+}
+
+resource "aws_cognito_resource_server" "context_service" {
+  count = var.cognito_auth_enabled ? 1 : 0
+
+  identifier   = var.cognito_resource_server_identifier
+  name         = "spur-context-service"
+  user_pool_id = aws_cognito_user_pool.context_service[0].id
+
+  dynamic "scope" {
+    for_each = local.cognito_scope_descriptions
+
+    content {
+      scope_name        = scope.key
+      scope_description = scope.value
+    }
+  }
+}
+
+resource "aws_cognito_user_pool_client" "human" {
+  count = var.cognito_auth_enabled ? 1 : 0
+
+  name                                 = "spur-context-human"
+  user_pool_id                         = aws_cognito_user_pool.context_service[0].id
+  depends_on                           = [aws_cognito_resource_server.context_service]
+  generate_secret                      = false
+  allowed_oauth_flows_user_pool_client = true
+  allowed_oauth_flows                  = ["code"]
+  allowed_oauth_scopes                 = local.cognito_human_allowed_oauth_scopes
+  callback_urls                        = tolist(var.cognito_human_callback_urls)
+  logout_urls                          = tolist(var.cognito_human_logout_urls)
+  supported_identity_providers         = ["COGNITO"]
+  enable_token_revocation              = true
+  prevent_user_existence_errors        = "ENABLED"
+
+  access_token_validity  = var.cognito_human_access_token_minutes
+  id_token_validity      = var.cognito_human_access_token_minutes
+  refresh_token_validity = var.cognito_human_refresh_token_days
+
+  token_validity_units {
+    access_token  = "minutes"
+    id_token      = "minutes"
+    refresh_token = "days"
+  }
+}
+
+resource "aws_cognito_user_pool_client" "m2m" {
+  for_each = local.cognito_enabled_m2m_organizations
+
+  name                                 = "spur-context-${each.key}"
+  user_pool_id                         = aws_cognito_user_pool.context_service[0].id
+  depends_on                           = [aws_cognito_resource_server.context_service]
+  generate_secret                      = true
+  allowed_oauth_flows_user_pool_client = true
+  allowed_oauth_flows                  = ["client_credentials"]
+  allowed_oauth_scopes = [
+    for suffix in each.value.allowed_scopes :
+    "${var.cognito_resource_server_identifier}/${suffix}"
+  ]
+  access_token_validity = local.cognito_m2m_access_token_hours[each.key]
+
+  token_validity_units {
+    access_token = "hours"
+  }
+}
+
+resource "aws_apigatewayv2_authorizer" "cognito" {
+  count = var.cognito_auth_enabled ? 1 : 0
+
+  api_id           = aws_apigatewayv2_api.http.id
+  authorizer_type  = "JWT"
+  identity_sources = ["$request.header.Authorization"]
+  name             = "spur-context-cognito"
+
+  jwt_configuration {
+    audience = concat(
+      [aws_cognito_user_pool_client.human[0].id],
+      [for client in values(aws_cognito_user_pool_client.m2m) : client.id],
+    )
+    issuer = local.cognito_issuer
+  }
+}
+
+resource "aws_apigatewayv2_route" "oauth" {
+  count = var.cognito_auth_enabled ? 1 : 0
+
+  api_id               = aws_apigatewayv2_api.http.id
+  route_key            = "POST /mcp/oauth"
+  target               = "integrations/${aws_apigatewayv2_integration.lambda.id}"
+  authorization_type   = "JWT"
+  authorizer_id        = aws_apigatewayv2_authorizer.cognito[0].id
+  authorization_scopes = local.cognito_custom_scopes
+}
+
+resource "aws_cloudwatch_log_group" "oauth_api_access" {
+  count = var.cognito_auth_enabled ? 1 : 0
+
+  name              = "/aws/apigateway/spur-context-service"
+  retention_in_days = 14
+}
+
+resource "aws_cloudwatch_log_metric_filter" "oauth_route_5xx" {
+  count = var.cognito_auth_enabled ? 1 : 0
+
+  name           = "spur-context-oauth-route-5xx"
+  log_group_name = aws_cloudwatch_log_group.oauth_api_access[0].name
+  pattern        = "{ $.route_key = \"POST /mcp/oauth\" && $.status = 5* }"
+
+  metric_transformation {
+    name      = "OAuthRoute5xx"
+    namespace = "SPUR/ContextServiceAuth"
+    value     = "1"
+  }
+}
+
+resource "aws_cloudwatch_metric_alarm" "oauth_route_5xx" {
+  count = var.cognito_auth_enabled ? 1 : 0
+
+  alarm_name          = "spur-context-oauth-route-5xx"
+  alarm_description   = "POST /mcp/oauth returned one or more 5xx responses in five minutes."
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+  evaluation_periods  = 1
+  metric_name         = aws_cloudwatch_log_metric_filter.oauth_route_5xx[0].metric_transformation[0].name
+  namespace           = "SPUR/ContextServiceAuth"
+  period              = 300
+  statistic           = "Sum"
+  threshold           = 1
+  treat_missing_data  = "notBreaching"
+}
+
+resource "aws_budgets_budget" "cognito" {
+  count = var.cognito_auth_enabled && var.cognito_monthly_budget_usd != null ? 1 : 0
+
+  name         = "spur-context-cognito-monthly"
+  budget_type  = "COST"
+  limit_amount = tostring(var.cognito_monthly_budget_usd)
+  limit_unit   = "USD"
+  time_unit    = "MONTHLY"
+
+  cost_filter {
+    name   = "Service"
+    values = ["Amazon Cognito"]
+  }
+
+  dynamic "notification" {
+    for_each = toset([50, 80, 100])
+
+    content {
+      comparison_operator        = "GREATER_THAN"
+      threshold                  = notification.value
+      threshold_type             = "PERCENTAGE"
+      notification_type          = "FORECASTED"
+      subscriber_email_addresses = tolist(var.cognito_budget_subscriber_emails)
+    }
   }
 }
 

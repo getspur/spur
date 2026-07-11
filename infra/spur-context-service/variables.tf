@@ -39,6 +39,257 @@ variable "api_authorization_type" {
   }
 }
 
+# ─── Additive Cognito OAuth ingress ─────────────────────────────────────────
+# These values are intentionally metadata only. Generated M2M app-client
+# secrets remain provider-state data and must never be supplied to Lambda,
+# committed to tfvars, or exposed through an output.
+
+variable "cognito_auth_enabled" {
+  description = "Enable the additive Cognito Lite user pool, JWT authorizer, and exact POST /mcp/oauth route. Disabled by default so existing $default behavior is unchanged."
+  type        = bool
+  default     = false
+}
+
+variable "cognito_user_pool_name" {
+  description = "Environment-qualified Cognito user-pool name. Required when cognito_auth_enabled is true."
+  type        = string
+  default     = null
+
+  validation {
+    condition = !var.cognito_auth_enabled || (
+      var.cognito_user_pool_name != null &&
+      can(regex("^[A-Za-z0-9][A-Za-z0-9 _+=,.@-]{0,127}$", var.cognito_user_pool_name))
+    )
+    error_message = "cognito_user_pool_name must be a nonblank Cognito-compatible, environment-qualified name when Cognito auth is enabled."
+  }
+}
+
+variable "cognito_domain_prefix" {
+  description = "Unique lowercase Cognito hosted-domain prefix. Required when cognito_auth_enabled is true; use a non-production placeholder in committed examples."
+  type        = string
+  default     = null
+
+  validation {
+    condition = !var.cognito_auth_enabled || (
+      var.cognito_domain_prefix != null &&
+      can(regex("^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$", var.cognito_domain_prefix))
+    )
+    error_message = "cognito_domain_prefix must be a 1-63 character lowercase Cognito-compatible domain prefix when Cognito auth is enabled."
+  }
+}
+
+variable "cognito_user_pool_deletion_protection" {
+  description = "Keep Cognito deletion protection active except for an explicitly disposable isolated POC."
+  type        = bool
+  default     = true
+}
+
+variable "cognito_resource_server_identifier" {
+  description = "Stable resource-server identifier used to construct Cognito access-token custom scopes. Changing it after launch breaks tokens and Lambda authorization."
+  type        = string
+  default     = "urn:spur:context-service"
+
+  validation {
+    condition     = length(trimspace(var.cognito_resource_server_identifier)) > 0 && length(var.cognito_resource_server_identifier) <= 256
+    error_message = "cognito_resource_server_identifier must be a nonblank value of at most 256 characters."
+  }
+}
+
+variable "cognito_human_callback_urls" {
+  description = "Exact human OAuth callback URLs. Required when enabled; URLs must be HTTPS except localhost/127.0.0.1/[::1] loopback POC callbacks, and wildcards are forbidden."
+  type        = set(string)
+  default     = []
+
+  validation {
+    condition = !var.cognito_auth_enabled || (
+      length(var.cognito_human_callback_urls) > 0 &&
+      alltrue([
+        for url in var.cognito_human_callback_urls :
+        !strcontains(url, "*") && (
+          can(regex("^https://[^/?#\\s@]+(?::[0-9]{1,5})?(?:/[^?#\\s]*)?(?:\\?[^#\\s]*)?$", url)) ||
+          can(regex("^http://(localhost|127\\.0\\.0\\.1|\\[::1\\])(?::[0-9]{1,5})?(?:/[^?#\\s]*)?(?:\\?[^#\\s]*)?$", url))
+        )
+      ])
+    )
+    error_message = "cognito_human_callback_urls must be nonempty when enabled and contain exact HTTPS URLs or loopback-only HTTP POC URLs without wildcards."
+  }
+}
+
+variable "cognito_human_logout_urls" {
+  description = "Exact human OAuth logout URLs. Required when enabled; URLs must be HTTPS except localhost/127.0.0.1/[::1] loopback POC URLs, and wildcards are forbidden."
+  type        = set(string)
+  default     = []
+
+  validation {
+    condition = !var.cognito_auth_enabled || (
+      length(var.cognito_human_logout_urls) > 0 &&
+      alltrue([
+        for url in var.cognito_human_logout_urls :
+        !strcontains(url, "*") && (
+          can(regex("^https://[^/?#\\s@]+(?::[0-9]{1,5})?(?:/[^?#\\s]*)?(?:\\?[^#\\s]*)?$", url)) ||
+          can(regex("^http://(localhost|127\\.0\\.0\\.1|\\[::1\\])(?::[0-9]{1,5})?(?:/[^?#\\s]*)?(?:\\?[^#\\s]*)?$", url))
+        )
+      ])
+    )
+    error_message = "cognito_human_logout_urls must be nonempty when enabled and contain exact HTTPS URLs or loopback-only HTTP POC URLs without wildcards."
+  }
+}
+
+variable "cognito_human_oidc_scopes" {
+  description = "OIDC scopes for the public human client. Keep profile/email opt-in; openid is required for the authorization-code login flow."
+  type        = set(string)
+  default     = ["openid"]
+
+  validation {
+    condition = contains(var.cognito_human_oidc_scopes, "openid") && alltrue([
+      for scope in var.cognito_human_oidc_scopes :
+      contains(["openid", "profile", "email"], scope)
+    ])
+    error_message = "cognito_human_oidc_scopes must include openid and may contain only openid, profile, and email."
+  }
+}
+
+variable "cognito_human_custom_scopes" {
+  description = "Least-privilege custom-scope suffixes for the human public client."
+  type        = set(string)
+  default     = ["external.read", "external.index", "external.status"]
+
+  validation {
+    condition = alltrue([
+      for scope in var.cognito_human_custom_scopes :
+      contains(["external.read", "external.index", "external.status"], scope)
+    ])
+    error_message = "cognito_human_custom_scopes may contain only external.read, external.index, and external.status."
+  }
+}
+
+variable "cognito_human_access_token_minutes" {
+  description = "Human access and ID token lifetime in whole minutes. The balanced production recommendation is 60 minutes."
+  type        = number
+  default     = 60
+
+  validation {
+    condition     = var.cognito_human_access_token_minutes >= 5 && var.cognito_human_access_token_minutes <= 1440 && floor(var.cognito_human_access_token_minutes) == var.cognito_human_access_token_minutes
+    error_message = "cognito_human_access_token_minutes must be a whole number between 5 and 1440."
+  }
+}
+
+variable "cognito_human_refresh_token_days" {
+  description = "Human refresh-token lifetime in whole days. Align this value with the product session policy."
+  type        = number
+  default     = 30
+
+  validation {
+    condition     = var.cognito_human_refresh_token_days >= 1 && var.cognito_human_refresh_token_days <= 3650 && floor(var.cognito_human_refresh_token_days) == var.cognito_human_refresh_token_days
+    error_message = "cognito_human_refresh_token_days must be a whole number between 1 and 3650."
+  }
+}
+
+variable "cognito_m2m_default_access_token_hours" {
+  description = "Default M2M access-token lifetime in whole hours. Six hours is the balanced default; 24-hour enabled clients require recorded risk metadata."
+  type        = number
+  default     = 6
+
+  validation {
+    condition     = var.cognito_m2m_default_access_token_hours >= 1 && var.cognito_m2m_default_access_token_hours <= 24 && floor(var.cognito_m2m_default_access_token_hours) == var.cognito_m2m_default_access_token_hours
+    error_message = "cognito_m2m_default_access_token_hours must be a whole number between 1 and 24."
+  }
+}
+
+variable "cognito_m2m_organizations" {
+  description = "Per-organization confidential M2M clients keyed by an opaque lowercase Terraform-safe key. allowed_scopes are custom-scope suffixes; 24-hour enabled clients require recorded risk acceptance metadata."
+  type = map(object({
+    display_name       = string
+    enabled            = bool
+    allowed_scopes     = set(string)
+    access_token_hours = optional(number, null)
+    risk_acceptance = optional(object({
+      accepted_by = string
+      accepted_at = string
+      ticket      = string
+    }), null)
+  }))
+  default = {}
+
+  validation {
+    condition = alltrue([
+      for key, organization in var.cognito_m2m_organizations :
+      can(regex("^[a-z0-9][a-z0-9-]{0,62}$", key)) &&
+      length(trimspace(organization.display_name)) > 0 &&
+      (!organization.enabled || length(organization.allowed_scopes) > 0) &&
+      alltrue([
+        for scope in organization.allowed_scopes :
+        contains(["external.read", "external.index", "external.status"], scope)
+      ]) &&
+      (
+        organization.access_token_hours == null ||
+        (organization.access_token_hours >= 1 && organization.access_token_hours <= 24 && floor(organization.access_token_hours) == organization.access_token_hours)
+      ) &&
+      (
+        !organization.enabled ||
+        coalesce(organization.access_token_hours, var.cognito_m2m_default_access_token_hours) < 24 ||
+        (
+          organization.risk_acceptance != null &&
+          length(trimspace(organization.risk_acceptance.accepted_by)) > 0 &&
+          length(trimspace(organization.risk_acceptance.ticket)) > 0 &&
+          can(formatdate("YYYY-MM-DD'T'hh:mm:ssZ", organization.risk_acceptance.accepted_at))
+        )
+      )
+    ])
+    error_message = "Each Cognito M2M organization needs a Terraform-safe key, nonblank display name, least-privilege valid scope subset, valid 1-24 hour TTL, and accepted_by/accepted_at/ticket metadata for an enabled 24-hour client."
+  }
+
+  validation {
+    condition = !var.cognito_auth_enabled || (
+      1 + length([for organization in values(var.cognito_m2m_organizations) : organization if organization.enabled]) <= 50
+    )
+    error_message = "Cognito JWT authorizer audiences are limited to one human client plus at most 49 enabled M2M organizations."
+  }
+}
+
+variable "cognito_emergency_deny_client_ids" {
+  description = "Restricted, non-secret emergency denylist of Cognito client IDs that Lambda rejects after deployment. Do not commit real client IDs."
+  type        = set(string)
+  default     = []
+  sensitive   = true
+
+  validation {
+    condition     = alltrue([for client_id in var.cognito_emergency_deny_client_ids : length(trimspace(client_id)) > 0 && length(client_id) <= 256])
+    error_message = "cognito_emergency_deny_client_ids entries must be nonblank values of at most 256 characters."
+  }
+}
+
+variable "cognito_monthly_budget_usd" {
+  description = "Optional positive monthly Cognito cost budget in USD. A budget resource is created only when Cognito is enabled and subscribers are configured."
+  type        = number
+  default     = null
+
+  validation {
+    condition     = var.cognito_monthly_budget_usd == null || var.cognito_monthly_budget_usd > 0
+    error_message = "cognito_monthly_budget_usd must be null or greater than zero."
+  }
+
+  validation {
+    condition     = var.cognito_monthly_budget_usd == null || nonsensitive(length(var.cognito_budget_subscriber_emails)) > 0
+    error_message = "cognito_monthly_budget_usd requires at least one cognito_budget_subscriber_email."
+  }
+}
+
+variable "cognito_budget_subscriber_emails" {
+  description = "Sensitive budget-notification email addresses. This is personal contact data, not a Cognito credential."
+  type        = set(string)
+  default     = []
+  sensitive   = true
+
+  validation {
+    condition = alltrue([
+      for email in var.cognito_budget_subscriber_emails :
+      can(regex("^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$", email))
+    ])
+    error_message = "cognito_budget_subscriber_emails must contain valid nonblank email addresses."
+  }
+}
+
 variable "context_ducklake_data_path" {
   description = "DuckLake data path used by worker translate jobs. Must end in /gold/data so the frozen snapshot pointer lands at s3://<bucket>/gold/catalog-snapshot/current.json. Defaults to s3://<bucket_name>/gold/data/."
   type        = string
@@ -498,4 +749,31 @@ locals {
   aurora_catalog_dsn              = "postgres:host=${aws_rds_cluster.catalog.endpoint} port=${aws_rds_cluster.catalog.port} dbname=${var.aurora_database_name} user=${var.aurora_master_username} sslmode=require"
   aurora_master_secret_arn        = aws_rds_cluster.catalog.master_user_secret[0].secret_arn
   aurora_master_password_valuearn = "${local.aurora_master_secret_arn}:password::"
+
+  cognito_scope_descriptions = {
+    "external.read"   = "Read external context-service catalog and code data"
+    "external.index"  = "Submit external context-service indexing jobs"
+    "external.status" = "Read external context-service indexing job status"
+  }
+  cognito_custom_scopes = [
+    for suffix in keys(local.cognito_scope_descriptions) :
+    "${var.cognito_resource_server_identifier}/${suffix}"
+  ]
+  cognito_human_allowed_oauth_scopes = concat(
+    tolist(var.cognito_human_oidc_scopes),
+    [
+      for suffix in var.cognito_human_custom_scopes :
+      "${var.cognito_resource_server_identifier}/${suffix}"
+    ],
+  )
+  cognito_enabled_m2m_organizations = var.cognito_auth_enabled ? {
+    for key, organization in var.cognito_m2m_organizations : key => organization
+    if organization.enabled
+  } : {}
+  cognito_m2m_access_token_hours = {
+    for key, organization in var.cognito_m2m_organizations :
+    key => coalesce(organization.access_token_hours, var.cognito_m2m_default_access_token_hours)
+  }
+  cognito_issuer     = var.cognito_auth_enabled ? "https://cognito-idp.${var.aws_region}.amazonaws.com/${aws_cognito_user_pool.context_service[0].id}" : ""
+  cognito_domain_url = var.cognito_auth_enabled ? "https://${aws_cognito_user_pool_domain.context_service[0].domain}.auth.${var.aws_region}.amazoncognito.com" : ""
 }
