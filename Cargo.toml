@@ -20,6 +20,7 @@ members = [
     "crates/spur-context",
     "crates/spur-context-source",
     "crates/spur-context-fetcher",
+    "crates/spur-context-auth",
     "crates/spur-graph",
     "xtask",
 ]
