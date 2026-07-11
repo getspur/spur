@@ -1,9 +1,12 @@
 # SPUR Architecture
 
 SPUR is a Rust workspace for running agentic software work under explicit process
-control. A long-lived brain session reasons about a task, calls MCP tools to
-inspect or delegate work, workers execute in isolated git worktrees, and the
-orchestrator routes results through review, merge, retry, or rejection paths.
+control. Most work is brain-led: a long-lived brain session reasons about a
+task, calls MCP tools to inspect or delegate work, workers execute in isolated
+git worktrees, and the orchestrator routes results through review, merge,
+retry, or rejection paths. The same control plane also owns unattended L3
+project loops, where a repository-scoped runtime can schedule maker and
+reviewer delegations without an active brain ACP session.
 
 The current workspace contains 20 member crates under `crates/`, plus `xtask`.
 `crates/spur-context-service` also lives in the repository but is excluded from
@@ -46,7 +49,8 @@ flowchart LR
 
 At a high level, the workspace is split into five concerns:
 
-1. Control plane: session lifecycle, delegation, review, and plan scheduling.
+1. Control plane: session lifecycle, delegation, review, plan scheduling, and
+   unattended loop ownership.
 2. Frontends: CLI, TUI, Telegram, and non-TUI bridges.
 3. Execution infrastructure: worktree isolation, artifact storage, telemetry,
    licensing, and cost tracking.
@@ -58,19 +62,41 @@ At a high level, the workspace is split into five concerns:
 
 The load-bearing path is:
 
-1. A frontend submits a task into `spur-core`.
-2. `spur-core` creates or resumes a brain session through `spur-acp`.
-3. The brain reasons in ACP, but causes side effects by calling MCP tools
-   exposed through `spur-mcp`.
-4. Delegations become isolated worker runs: `spur-core` provisions a worktree
-   through `spur-worktree`, starts a worker session through `spur-acp`, and
-   collects notifications, diffs, and artifacts.
-5. Worker outcomes enter a single event funnel inside `spur-core`, which stamps
-   sequence numbers and timestamps before broadcasting to subscribers.
-6. Read models such as executor lineage, TUI state, and durable event sinks are
-   derived from that ordered event stream.
-7. Review decisions feed back into the running delegation: approve/merge,
-   modify/merge, reject/preserve worktree, retry, or timeout fallback.
+1. Work enters `spur-core` either from a frontend (`spur-cli`, `spur-tui`,
+   `spur-bot`) or from the loop scheduler when a durable L3 generation becomes
+   due.
+2. For ad-hoc, interactive, and L1/L2 loop work, `spur-core` creates or
+   resumes a brain session through `spur-acp`. For unattended L3 work, the
+   project runtime owns the generation directly under the stable
+   `spur-loop-runtime` owner.
+3. Brain-owned flows reason in ACP and cause side effects through MCP tool
+   calls exposed by `spur-mcp`. Project-owned L3 flows instantiate persisted
+   plan templates directly and skip the brain ACP channel.
+4. Executable tasks become isolated worker runs: `spur-core` provisions a
+   worktree through `spur-worktree`, starts worker sessions through `spur-acp`,
+   and collects notifications, diffs, and artifacts.
+5. All emitted `SpurEvent`s pass through a single event funnel inside
+   `spur-core`, which stamps sequence numbers and timestamps before
+   broadcasting an ordered runtime stream to subscribers.
+6. Runtime consumers such as executor lineage, TUI state, and durable event
+   sinks consume that stream. Durable plan snapshots still originate from
+   beads-backed projection in `spur-mcp`; `spur-core` caches and reflects those
+   already-shaped snapshots through `PlanSnapshotUpdated` events.
+7. Review closes the loop: interactive work can merge, retry, reject, or
+   preserve worktrees, while unattended L3 work adds an independent reviewer
+   delegation that must submit a durable verdict before approval.
+
+That produces two orchestration modes:
+
+- Brain-owned runtime: ad-hoc runs, interactive sessions, and L1/L2 loops keep
+  a brain session in the planner role and use MCP as the brain's side-effect
+  surface.
+- Project-owned L3 runtime: at most one elected interactive SPUR process per
+  repo holds `.spur/loop-runtime.lock` at a time, while additional interactive
+  processes remain passive standbys. That leader schedules due generations,
+  reconciles durable beads state under `spur-loop-runtime`, and dispatches a
+  separate reviewer worker before unattended work is accepted; without a
+  leader, or when advisory locking is unsafe, L3 work stays parked.
 
 Two protocol planes stay deliberately separate:
 
@@ -84,20 +110,24 @@ Two protocol planes stay deliberately separate:
 
 Within `spur-core`, the most important subsystems are:
 
-- `orchestrator`, `scheduler`, `plan`, and `handlers` for session and plan flow
-- `event_funnel`, `event_sink`, and `event_replay` for ordered event handling
+- `orchestrator`, `orchestrator/loop_runtime`, `scheduler`, `plan`,
+  `plan/loops`, `plan/reconciler`, and `server/handlers` for session, plan,
+  and loop flow
+- `event_funnel`, `event_sink`, `event_replay`, `notification_pump`, and
+  `notification_drain` for ordered event capture, replay, and delivery
 - `lineage`, `plan_projection`, and `review_sink` for read models and review
-- `notification_pump`, `notification_drain`, and `worker_server` for runtime
-  coordination with agents and worker tools
-- `skills`, `session_synopsis`, `outcome_materializer`, and `server` for
-  higher-level orchestration support
+  coordination
+- `worker_server`, `peer_mailbox`, and `continuation_bridge` for runtime
+  coordination with agents, reviewers, and worker tools
+- `agent_profiles`, `skills`, `session_synopsis`, `outcome_materializer`,
+  `explore`, and `server` for higher-level orchestration support
 
 ## Workspace map
 
 | Area | Crates | Responsibility |
 |---|---|---|
 | Entry points and UX | `spur-cli`, `spur-tui`, `spur-interactive`, `spur-bot` | User-facing command entrypoint, ratatui dashboard, non-TUI bridge, and Telegram runtime |
-| Control plane | `spur-core`, `spur-acp`, `spur-mcp` | Orchestration, agent session transport, MCP registry/server, plans, review, and event flow |
+| Control plane | `spur-core`, `spur-acp`, `spur-mcp` | Orchestration, agent session transport, MCP registry/server, plan scheduling/reconciliation, unattended loop runtime, review, and event flow |
 | Execution infrastructure | `spur-worktree`, `spur-blob-store`, `spur-telemetry`, `spur-cost` | Worktree isolation, delegation artifacts, tracing/logging, pricing and cost tracking |
 | PM and governance | `spur-pm`, `spur-license`, `spur-license-admin` | Issue/PR adapters, beads and GitHub backends, graph triage/planning tools, license policy and admin surface |
 | Code and session intelligence | `spur-graph`, `spur-analyst`, `spur-context` | Worktree code graph, DuckDB-backed semantic/indexed queries, and local agent-session analytics |
@@ -247,10 +277,13 @@ the current worktree.
 - `spur-context-fetcher` is the fetch/archive normalization runtime used by the
   external indexing flow; it validates sources, fetches git or tarball content,
   normalizes it into an archive, and persists it to object storage.
-- `spur-context-service` layers an AWS service over that substrate. Its
-  architecture separates an ingest plane (workers, Aurora/DynamoDB, bronze /
-  silver / gold promotion) from a serving plane that answers external package
-  queries from immutable DuckLake snapshots.
+- `spur-context-service` layers an AWS service over that substrate. Its ingest
+  plane admits caller-scoped jobs into bounded DynamoDB queues, drains them
+  through Step Functions-backed workers that fetch, graph-build, and publish
+  bronze / silver / gold artifacts with Aurora as an ingest-only catalog, and
+  short-circuits warm hits when cached package content can be reused. Its
+  serving plane answers external package queries from immutable DuckLake
+  snapshots on S3 and never queries Aurora directly.
 
 This service crate is intentionally adjacent to the main workspace rather than
 fully inside it.
