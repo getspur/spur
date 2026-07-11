@@ -1,5 +1,105 @@
 use super::*;
 
+/// Tracks callback-server children and retains an abort handle for every live
+/// task so repository leadership can be released only after forced shutdown
+/// has been acknowledged by each child.
+#[derive(Clone)]
+pub struct AbortableTaskTracker {
+    inner: TaskTracker,
+    next_id: Arc<std::sync::atomic::AtomicU64>,
+    abort_state: Arc<Mutex<AbortState>>,
+}
+
+#[derive(Default)]
+struct AbortState {
+    aborting: bool,
+    handles: HashMap<u64, tokio::task::AbortHandle>,
+}
+
+struct AbortRegistration {
+    id: u64,
+    abort_state: Arc<Mutex<AbortState>>,
+}
+
+impl Drop for AbortRegistration {
+    fn drop(&mut self) {
+        self.abort_state.lock().unwrap().handles.remove(&self.id);
+    }
+}
+
+impl Default for AbortableTaskTracker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl AbortableTaskTracker {
+    pub fn new() -> Self {
+        Self {
+            inner: TaskTracker::new(),
+            next_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
+            abort_state: Arc::new(Mutex::new(AbortState::default())),
+        }
+    }
+
+    pub fn spawn<F>(&self, future: F) -> JoinHandle<F::Output>
+    where
+        F: Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let (start_tx, start_rx) = tokio::sync::oneshot::channel();
+        let abort_state = Arc::clone(&self.abort_state);
+        let handle = self.inner.spawn(async move {
+            let _ = start_rx.await;
+            let _registration = AbortRegistration { id, abort_state };
+            future.await
+        });
+        let abort_handle = handle.abort_handle();
+        let abort_immediately = {
+            let mut state = self.abort_state.lock().unwrap();
+            if state.aborting {
+                true
+            } else {
+                state.handles.insert(id, abort_handle.clone());
+                false
+            }
+        };
+        if abort_immediately {
+            abort_handle.abort();
+        }
+        let _ = start_tx.send(());
+        handle
+    }
+
+    pub fn close(&self) {
+        self.inner.close();
+    }
+
+    pub fn is_closed(&self) -> bool {
+        self.inner.is_closed()
+    }
+
+    pub fn abort_all(&self) {
+        let handles = {
+            let mut state = self.abort_state.lock().unwrap();
+            state.aborting = true;
+            state
+                .handles
+                .drain()
+                .map(|(_id, handle)| handle)
+                .collect::<Vec<_>>()
+        };
+        for handle in handles {
+            handle.abort();
+        }
+    }
+
+    pub async fn wait(&self) {
+        self.inner.wait().await;
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum BeadsVersion {
     /// The persisted plan version could not be derived or is intentionally
@@ -98,6 +198,14 @@ impl ReconcilerTaskHandle {
         }
         let _ = self.handle.await;
     }
+
+    pub(crate) async fn abort_and_wait(mut self) {
+        if let Some(tx) = self.cancel_tx.take() {
+            let _ = tx.send(());
+        }
+        self.handle.abort();
+        let _ = self.handle.await;
+    }
 }
 
 pub(crate) struct StartupRecoveryTaskHandle {
@@ -117,6 +225,14 @@ impl StartupRecoveryTaskHandle {
         if let Some(tx) = self.cancel_tx.take() {
             let _ = tx.send(());
         }
+        let _ = self.handle.await;
+    }
+
+    pub(crate) async fn abort_and_wait(mut self) {
+        if let Some(tx) = self.cancel_tx.take() {
+            let _ = tx.send(());
+        }
+        self.handle.abort();
         let _ = self.handle.await;
     }
 
@@ -361,7 +477,7 @@ pub fn new_attempt_tracker() -> Arc<AtomicU32> {
 /// continuation callback to route the result back into the orchestrator
 /// ingress (INV-C3 ordering: UI event before ingress).
 pub fn spawn_result_collector(
-    tracker: &TaskTracker,
+    tracker: &AbortableTaskTracker,
     delegation_id: DelegationId,
     rx: tokio::sync::oneshot::Receiver<DelegationResult>,
     cancel_token: CancellationToken,

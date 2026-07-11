@@ -63,7 +63,7 @@ fn dispatch_ctx(continuation_ctx: Arc<DetachedContinuationCtx>) -> Arc<dyn Recon
     let (delegation_tx, _delegation_rx) = mpsc::channel(1);
     Arc::new(ReconcilerDispatchCtx {
         delegation_tx,
-        task_tracker: tokio_util::task::TaskTracker::new(),
+        task_tracker: spur_core::server::AbortableTaskTracker::new(),
         brain_session_id: BrainSessionId::new(SessionId("brain-loop-test".to_string())),
         event_sink: None,
         materializer: test_materializer(),
