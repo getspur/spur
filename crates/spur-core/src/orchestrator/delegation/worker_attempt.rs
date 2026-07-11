@@ -96,7 +96,12 @@ pub(crate) struct WorkerAttemptOutcome {
 }
 
 #[cfg(any(test, feature = "test-support"))]
-type WorkerConnectionFactory<'a> = dyn Fn(&spur_acp::config::AgentConfig, Vec<String>, &std::path::Path) -> Box<dyn AgentConnection>
+type WorkerConnectionFactory<'a> = dyn Fn(
+        &spur_acp::config::AgentConfig,
+        Vec<String>,
+        std::collections::BTreeMap<String, String>,
+        &std::path::Path,
+    ) -> Box<dyn AgentConnection>
     + Send
     + Sync
     + 'a;
@@ -262,6 +267,7 @@ async fn apply_session_overrides(
     agent_kind: spur_acp::types::AgentKind,
     profile: Option<&str>,
     strategy: &spur_acp::ProfileStrategy,
+    startup_profile: &StartupProfileResolution,
     model: Option<&str>,
     effort: Option<&str>,
     config_overrides: Option<&std::collections::HashMap<String, String>>,
@@ -272,9 +278,9 @@ async fn apply_session_overrides(
     let mut resolved = spur_acp::ResolvedSessionConfig::default();
 
     if let Some(profile) = profile {
-        resolved.profile = Some(profile.to_string());
         match &strategy.select {
             spur_acp::SelectStrategy::ConfigOption { id } => {
+                resolved.profile = Some(profile.to_string());
                 let request = spur_acp::SetSessionConfigOptionRequest::new(
                     session_id.clone(),
                     spur_acp::SessionConfigId::new(id.as_str()),
@@ -303,6 +309,7 @@ async fn apply_session_overrides(
                 }
             }
             spur_acp::SelectStrategy::SessionMode => {
+                resolved.profile = Some(profile.to_string());
                 let mode_snapshot = connection.session_mode_snapshot(&session_id);
                 let advertised_modes = mode_snapshot
                     .as_ref()
@@ -340,6 +347,7 @@ async fn apply_session_overrides(
                 }
             }
             spur_acp::SelectStrategy::SpawnArg { flag } => {
+                resolved.profile = Some(profile.to_string());
                 tracing::debug!(
                     target: "spur::worker::profile",
                     session_id = %session_id_for_log,
@@ -348,7 +356,23 @@ async fn apply_session_overrides(
                     "profile selected at process spawn; skipped post-spawn RPC"
                 );
             }
+            spur_acp::SelectStrategy::SpawnEnvJson { variable, field } => {
+                if startup_profile.applied {
+                    resolved.profile = Some(profile.to_string());
+                    tracing::debug!(
+                        target: "spur::worker::profile",
+                        session_id = %session_id_for_log,
+                        variable = %variable,
+                        field = %field,
+                        value = %profile,
+                        "profile selected in startup environment; skipped post-spawn RPC"
+                    );
+                } else {
+                    resolved.skipped.extend(startup_profile.skipped.clone());
+                }
+            }
             spur_acp::SelectStrategy::None => {
+                resolved.profile = Some(profile.to_string());
                 tracing::debug!(
                     target: "spur::worker::profile",
                     session_id = %session_id_for_log,
@@ -495,6 +519,184 @@ fn append_spawn_profile_args(
         spawn_args.push(profile.to_string());
     }
     spawn_args
+}
+
+#[derive(Debug, Default)]
+struct StartupProfileResolution {
+    applied: bool,
+    skipped: Vec<String>,
+}
+
+#[derive(Debug, Default)]
+struct StartupProfileSelection {
+    launch_env: std::collections::BTreeMap<String, String>,
+    resolution: StartupProfileResolution,
+}
+
+fn json_value_kind(value: &serde_json::Value) -> &'static str {
+    match value {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "boolean",
+        serde_json::Value::Number(_) => "number",
+        serde_json::Value::String(_) => "string",
+        serde_json::Value::Array(_) => "array",
+        serde_json::Value::Object(_) => "object",
+    }
+}
+
+fn skipped_startup_profile(
+    variable: &str,
+    field: &str,
+    profile: &str,
+    reason: String,
+) -> StartupProfileSelection {
+    tracing::warn!(
+        target: "spur::worker::profile",
+        variable = %variable,
+        field = %field,
+        value = %profile,
+        reason = %reason,
+        "startup profile environment skipped; inherited value preserved"
+    );
+    StartupProfileSelection {
+        launch_env: std::collections::BTreeMap::new(),
+        resolution: StartupProfileResolution {
+            applied: false,
+            skipped: vec![format!(
+                "profile: startup environment {variable} skipped: {reason}; inherited value preserved"
+            )],
+        },
+    }
+}
+
+fn skipped_startup_profile_with_safe_json(
+    variable: &str,
+    field: &str,
+    profile: &str,
+    reason: String,
+) -> StartupProfileSelection {
+    tracing::warn!(
+        target: "spur::worker::profile",
+        variable = %variable,
+        field = %field,
+        value = %profile,
+        reason = %reason,
+        "startup profile environment skipped; child receives safe JSON object"
+    );
+    StartupProfileSelection {
+        launch_env: std::collections::BTreeMap::from([(variable.to_string(), "{}".to_string())]),
+        resolution: StartupProfileResolution {
+            applied: false,
+            skipped: vec![format!(
+                "profile: startup environment {variable} skipped: {reason}; \
+                 parent environment unchanged; child receives safe empty JSON object"
+            )],
+        },
+    }
+}
+
+fn resolve_startup_profile_launch_env(
+    strategy: &spur_acp::ProfileStrategy,
+    selected_profile: Option<&str>,
+    profile_def: Option<&crate::agent_profiles::AgentProfile>,
+    inherited: Option<&str>,
+) -> StartupProfileSelection {
+    let spur_acp::SelectStrategy::SpawnEnvJson { variable, field } = &strategy.select else {
+        return StartupProfileSelection::default();
+    };
+    let Some(selected_profile) = selected_profile else {
+        return StartupProfileSelection::default();
+    };
+    let mut object = match inherited {
+        None => serde_json::Map::new(),
+        Some(raw) => match serde_json::from_str::<serde_json::Value>(raw) {
+            Ok(serde_json::Value::Object(object)) => object,
+            Ok(value) => {
+                return skipped_startup_profile_with_safe_json(
+                    variable,
+                    field,
+                    selected_profile,
+                    format!(
+                        "inherited value is not a JSON object (found {})",
+                        json_value_kind(&value)
+                    ),
+                );
+            }
+            Err(error) => {
+                return skipped_startup_profile_with_safe_json(
+                    variable,
+                    field,
+                    selected_profile,
+                    format!("inherited value is malformed JSON: {error}"),
+                );
+            }
+        },
+    };
+    let Some(profile_def) = profile_def else {
+        return skipped_startup_profile(
+            variable,
+            field,
+            selected_profile,
+            format!("selected profile '{selected_profile}' has no managed profile body"),
+        );
+    };
+    object.insert(
+        field.clone(),
+        serde_json::Value::String(profile_def.body.clone()),
+    );
+
+    let mut launch_env = std::collections::BTreeMap::new();
+    launch_env.insert(
+        variable.clone(),
+        serde_json::Value::Object(object).to_string(),
+    );
+    StartupProfileSelection {
+        launch_env,
+        resolution: StartupProfileResolution {
+            applied: true,
+            skipped: Vec::new(),
+        },
+    }
+}
+
+fn startup_profile_launch_env(
+    strategy: &spur_acp::ProfileStrategy,
+    selected_profile: Option<&str>,
+    profile_def: Option<&crate::agent_profiles::AgentProfile>,
+    transport: spur_acp::types::TransportKind,
+) -> StartupProfileSelection {
+    let spur_acp::SelectStrategy::SpawnEnvJson { variable, field } = &strategy.select else {
+        return StartupProfileSelection::default();
+    };
+    let Some(selected_profile) = selected_profile else {
+        return StartupProfileSelection::default();
+    };
+    if transport != spur_acp::types::TransportKind::Acp {
+        return skipped_startup_profile(
+            variable,
+            field,
+            selected_profile,
+            format!("transport {transport:?} does not support launch environment entries"),
+        );
+    }
+    let inherited = match std::env::var(variable) {
+        Ok(value) => Some(value),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(std::env::VarError::NotUnicode(_)) => {
+            return skipped_startup_profile_with_safe_json(
+                variable,
+                field,
+                selected_profile,
+                "inherited value is not valid Unicode JSON".to_string(),
+            );
+        }
+    };
+    resolve_startup_profile_launch_env(
+        strategy,
+        Some(selected_profile),
+        profile_def,
+        inherited.as_deref(),
+    )
 }
 
 async fn materialize_profile(
@@ -789,14 +991,29 @@ pub(crate) async fn run_one_worker_attempt(
         ctx.profile,
         &profile_strategy,
     );
+    let StartupProfileSelection {
+        launch_env,
+        resolution: startup_profile,
+    } = startup_profile_launch_env(
+        &profile_strategy,
+        ctx.profile,
+        ctx.profile_def,
+        ctx.agent_config.transport,
+    );
     #[cfg(any(test, feature = "test-support"))]
     let mut connection: Box<dyn AgentConnection> =
         if let Some(connection_factory) = ctx.connection_factory {
-            connection_factory(ctx.agent_config, spawn_args, &worktrees.repo_root)
+            connection_factory(
+                ctx.agent_config,
+                spawn_args,
+                launch_env,
+                &worktrees.repo_root,
+            )
         } else {
             connection::build_connection_from_transport(
                 ctx.agent_config,
                 spawn_args,
+                launch_env,
                 None,
                 &worktrees.repo_root,
             )
@@ -805,6 +1022,7 @@ pub(crate) async fn run_one_worker_attempt(
     let mut connection: Box<dyn AgentConnection> = connection::build_connection_from_transport(
         ctx.agent_config,
         spawn_args,
+        launch_env,
         None,
         &worktrees.repo_root,
     );
@@ -904,6 +1122,7 @@ pub(crate) async fn run_one_worker_attempt(
         ctx.agent_config.kind,
         ctx.profile,
         &profile_strategy,
+        &startup_profile,
         ctx.model,
         ctx.effort,
         ctx.config_overrides,
@@ -1644,6 +1863,7 @@ mod model_effort_override_tests {
         let _guard = tracing::subscriber::set_default(events.clone());
 
         let strategy = spur_acp::ProfileStrategy::for_kind(spur_acp::types::AgentKind::CodexAcp);
+        let startup_profile = StartupProfileResolution::default();
         let resolved = apply_session_overrides(
             &mut connection,
             &init,
@@ -1651,6 +1871,7 @@ mod model_effort_override_tests {
             spur_acp::types::AgentKind::CodexAcp,
             None,
             &strategy,
+            &startup_profile,
             model,
             effort,
             config_overrides,
@@ -2190,7 +2411,7 @@ mod model_effort_override_tests {
                 worker_mcp_server: None,
                 pm_service: None,
                 feature_gate: &feature_gate,
-                connection_factory: Some(&move |_cfg, _spawn_args, _repo_root| {
+                connection_factory: Some(&move |_cfg, _spawn_args, _launch_env, _repo_root| {
                     Box::new(WorkerPathRecordingConnection {
                         events: Arc::clone(&events_for_factory),
                     })
@@ -2223,6 +2444,7 @@ mod profile_override_tests {
     use super::*;
     use async_trait::async_trait;
     use futures::Stream;
+    use std::ffi::OsString;
     use std::path::Path;
     use std::pin::Pin;
     use std::process::Command;
@@ -2238,6 +2460,7 @@ mod profile_override_tests {
 
     struct ProfileRecordingConnection {
         calls: Arc<Mutex<Vec<OverrideCall>>>,
+        initialize_error: Option<String>,
         rejected_config_id: Option<String>,
         reject_mode: bool,
         session_response: spur_acp::NewSessionResponse,
@@ -2249,6 +2472,9 @@ mod profile_override_tests {
             &mut self,
             _request: InitializeRequest,
         ) -> anyhow::Result<spur_acp::InitializeResponse> {
+            if let Some(error) = &self.initialize_error {
+                return Err(anyhow::anyhow!(error.clone()));
+            }
             Ok(spur_acp::InitializeResponse::new(
                 spur_acp::ProtocolVersion::LATEST,
             ))
@@ -2517,11 +2743,40 @@ mod profile_override_tests {
         CapturedEvents,
         spur_acp::ResolvedSessionConfig,
     ) {
+        apply_profile_with_startup(
+            kind,
+            strategy,
+            profile,
+            model,
+            effort,
+            rejected_config_id,
+            reject_mode,
+            &StartupProfileResolution::default(),
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn apply_profile_with_startup(
+        kind: spur_acp::types::AgentKind,
+        strategy: spur_acp::ProfileStrategy,
+        profile: Option<&str>,
+        model: Option<&str>,
+        effort: Option<&str>,
+        rejected_config_id: Option<&str>,
+        reject_mode: bool,
+        startup_profile: &StartupProfileResolution,
+    ) -> (
+        Vec<OverrideCall>,
+        CapturedEvents,
+        spur_acp::ResolvedSessionConfig,
+    ) {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let init = spur_acp::InitializeResponse::new(spur_acp::ProtocolVersion::LATEST);
         let response = model_and_effort_session_response();
         let mut connection = ProfileRecordingConnection {
             calls: Arc::clone(&calls),
+            initialize_error: None,
             rejected_config_id: rejected_config_id.map(str::to_owned),
             reject_mode,
             session_response: response.clone(),
@@ -2537,6 +2792,7 @@ mod profile_override_tests {
             kind,
             profile,
             &strategy,
+            startup_profile,
             model,
             effort,
             None,
@@ -2588,6 +2844,357 @@ mod profile_override_tests {
             "---\nname: code-reviewer\ndescription: Reviews diffs\nmodel: opus\neffort: high\n---\nmanaged persona\n",
         )
         .unwrap()
+    }
+
+    fn profile_with_body(name: &str, body: &str) -> crate::agent_profiles::AgentProfile {
+        crate::agent_profiles::AgentProfile::parse(
+            name,
+            &format!("---\nname: {name}\ndescription: Test profile\n---\n{body}"),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn startup_json_profile_merges_existing_config_and_preserves_unrelated_keys() {
+        let strategy = spur_acp::ProfileStrategy::for_kind(spur_acp::types::AgentKind::CodexAcp);
+        let profile = managed_profile();
+        let selection = resolve_startup_profile_launch_env(
+            &strategy,
+            Some("code-reviewer"),
+            Some(&profile),
+            Some(r#"{"model":"gpt-5","nested":{"keep":true},"list":[1,2]}"#),
+        );
+
+        assert!(selection.resolution.applied);
+        assert!(selection.resolution.skipped.is_empty());
+        let config: serde_json::Value = serde_json::from_str(
+            selection
+                .launch_env
+                .get("CODEX_CONFIG")
+                .expect("CODEX_CONFIG launch override"),
+        )
+        .expect("valid merged JSON");
+        assert_eq!(config["model"], "gpt-5");
+        assert_eq!(config["nested"]["keep"], true);
+        assert_eq!(config["list"], serde_json::json!([1, 2]));
+        assert_eq!(config["developer_instructions"], profile.body);
+    }
+
+    #[test]
+    fn startup_json_profile_serializes_multiline_quotes_unicode_and_backslashes() {
+        let strategy = spur_acp::ProfileStrategy::for_kind(spur_acp::types::AgentKind::CodexAcp);
+        let profile = profile_with_body(
+            "special",
+            "First line\nSay \"héllo\" 世界 🚀\nWindows C:\\\\tools\\\\bin\n",
+        );
+        let selection =
+            resolve_startup_profile_launch_env(&strategy, Some("special"), Some(&profile), None);
+
+        let encoded = selection
+            .launch_env
+            .get("CODEX_CONFIG")
+            .expect("CODEX_CONFIG launch override");
+        assert!(encoded.contains("\\n"));
+        assert!(encoded.contains("\\\"héllo\\\""));
+        assert!(encoded.contains("C:\\\\\\\\tools"));
+        let config: serde_json::Value = serde_json::from_str(encoded).expect("valid JSON");
+        assert_eq!(config["developer_instructions"], profile.body);
+    }
+
+    #[tokio::test]
+    async fn invalid_inherited_startup_json_is_sanitized_warned_and_not_applied() {
+        let strategy = spur_acp::ProfileStrategy::for_kind(spur_acp::types::AgentKind::CodexAcp);
+        let profile = managed_profile();
+        let events = CapturedEvents::default();
+        let selections = {
+            let _serialize = crate::tracing_test_lock::guard();
+            let _guard = tracing::subscriber::set_default(events.clone());
+            ["{not-json", r#"["not","an","object"]"#]
+                .into_iter()
+                .map(|inherited| {
+                    resolve_startup_profile_launch_env(
+                        &strategy,
+                        Some("code-reviewer"),
+                        Some(&profile),
+                        Some(inherited),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+
+        assert!(events.contains(
+            tracing::Level::WARN,
+            "spur::worker::profile",
+            "startup profile environment skipped; child receives safe JSON object",
+        ));
+
+        for (selection, expected_reason) in selections
+            .into_iter()
+            .zip(["malformed JSON", "not a JSON object (found array)"])
+        {
+            assert_eq!(
+                selection.launch_env.get("CODEX_CONFIG").map(String::as_str),
+                Some("{}")
+            );
+            assert!(!selection.resolution.applied);
+            assert_eq!(selection.resolution.skipped.len(), 1);
+            assert!(selection.resolution.skipped[0].contains(expected_reason));
+            assert!(selection.resolution.skipped[0]
+                .contains("parent environment unchanged; child receives safe empty JSON object"));
+
+            let (calls, _, resolved) = apply_profile_with_startup(
+                spur_acp::types::AgentKind::CodexAcp,
+                strategy.clone(),
+                Some("code-reviewer"),
+                None,
+                None,
+                None,
+                false,
+                &selection.resolution,
+            )
+            .await;
+            assert!(
+                calls.is_empty(),
+                "startup selection must send no profile RPC"
+            );
+            assert_eq!(resolved.profile, None);
+            assert_eq!(resolved.skipped, selection.resolution.skipped);
+        }
+    }
+
+    async fn assert_invalid_inherited_startup_json_is_sanitized_before_initialize_and_reported(
+        profile_def: Option<&crate::agent_profiles::AgentProfile>,
+    ) {
+        let mut cases = vec![
+            ("malformed", OsString::from("{not-json"), "malformed JSON"),
+            (
+                "non-object",
+                OsString::from(r#"["not","an","object"]"#),
+                "not a JSON object (found array)",
+            ),
+        ];
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStringExt as _;
+            cases.push((
+                "non-unicode",
+                OsString::from_vec(vec![b'{', 0xff, b'}']),
+                "not valid Unicode JSON",
+            ));
+        }
+
+        for (case, inherited, expected_reason) in cases {
+            let repo = setup_repo_with_committed_agent();
+            let mut worktrees =
+                spur_worktree::manager::WorktreeManager::new(repo.path().to_path_buf());
+            let (funnel, _events_rx) = crate::event_funnel::test_channel();
+            let brain_session_id = spur_acp::BrainSessionId::new(SessionId::new());
+            let worker_session = SessionId::new();
+            let variable = format!(
+                "SPUR_TEST_CODEX_CONFIG_{}_{}",
+                case,
+                uuid::Uuid::new_v4().simple()
+            );
+            std::env::set_var(&variable, &inherited);
+
+            let mut agent_config = spur_acp::AgentConfig::with_defaults("codex");
+            agent_config.kind = spur_acp::types::AgentKind::CodexAcp;
+            agent_config.profile = Some(spur_acp::ProfileConfig {
+                select: Some(format!("spawn_env_json:{variable}:developer_instructions")),
+                materialize: Some(true),
+            });
+            let fault_hooks = FaultInjectionHooks::default();
+            let feature_gate = spur_license::FeatureGate::new_with_install_id(
+                spur_license::policy::PolicyResolver::embedded(),
+                spur_license::InstallId::from_uuid(uuid::Uuid::nil()),
+            );
+            let effective_child_config = Arc::new(Mutex::new(None));
+            let effective_child_config_for_factory = Arc::clone(&effective_child_config);
+            let calls = Arc::new(Mutex::new(Vec::new()));
+            let calls_for_factory = Arc::clone(&calls);
+            let session = session_response(vec![]);
+            let variable_for_factory = variable.clone();
+            let inherited_for_factory = inherited.clone();
+            let request_id = format!("delegation-codex-invalid-config-{case}");
+            let events = CapturedEvents::default();
+
+            let attempt = {
+                let _serialize = crate::tracing_test_lock::guard();
+                let _guard = tracing::subscriber::set_default(events.clone());
+                run_one_worker_attempt(
+                    worker_session,
+                    WorkerAttemptCtx {
+                        brain_session_id: &brain_session_id,
+                        agent: "codex",
+                        profile: Some("code-reviewer"),
+                        profile_def,
+                        skills: None,
+                        model: None,
+                        effort: None,
+                        config_overrides: None,
+                        task: "do the task",
+                        request_id: &request_id,
+                        attempt: 1,
+                        agent_config: &agent_config,
+                        delegation_plan: None,
+                        issue_id: None,
+                        prior_branch_for_reuse: None,
+                        peer_mailbox: None,
+                        ack_tx: None,
+                        base: None,
+                        dispatched_base_oid_tx: None,
+                        fault_injection_hooks: &fault_hooks,
+                        worker_mcp_servers: &[],
+                        worker_mcp_server: None,
+                        pm_service: None,
+                        feature_gate: &feature_gate,
+                        connection_factory: Some(&move |_cfg, _args, env, _repo_root| {
+                            let effective = env
+                                .get(&variable_for_factory)
+                                .cloned()
+                                .or_else(|| inherited_for_factory.to_str().map(str::to_owned));
+                            let initialize_error = match effective.as_deref() {
+                                Some(raw) => match serde_json::from_str::<serde_json::Value>(raw) {
+                                    Ok(serde_json::Value::Object(_)) => None,
+                                    Ok(value) => Some(format!(
+                                        "startup config is not an object (found {})",
+                                        json_value_kind(&value)
+                                    )),
+                                    Err(error) => {
+                                        Some(format!("startup config parse failed: {error}"))
+                                    }
+                                },
+                                None => Some("startup config is not valid Unicode".to_string()),
+                            };
+                            *effective_child_config_for_factory
+                                .lock()
+                                .expect("effective child config recorder poisoned") = effective;
+                            Box::new(ProfileRecordingConnection {
+                                calls: Arc::clone(&calls_for_factory),
+                                initialize_error,
+                                rejected_config_id: None,
+                                reject_mode: false,
+                                session_response: session.clone(),
+                            })
+                        }),
+                    },
+                    &mut worktrees,
+                    &funnel,
+                )
+                .await
+            };
+
+            let inherited_after_attempt = std::env::var_os(&variable);
+            std::env::remove_var(&variable);
+            assert_eq!(inherited_after_attempt, Some(inherited.clone()));
+
+            let outcome = attempt.expect("worker attempt succeeds with default persona");
+            assert_eq!(
+                effective_child_config
+                    .lock()
+                    .expect("effective child config recorder poisoned")
+                    .as_deref(),
+                Some("{}")
+            );
+            assert_eq!(
+                *calls.lock().expect("profile recorder poisoned"),
+                vec![OverrideCall::Prompt]
+            );
+            assert_eq!(outcome.resolved_config.profile, None);
+            assert_eq!(outcome.resolved_config.skipped.len(), 1);
+            assert!(outcome.resolved_config.skipped[0].contains(expected_reason));
+            assert!(outcome.resolved_config.skipped[0]
+                .contains("parent environment unchanged; child receives safe empty JSON object"));
+            assert!(events.contains(
+                tracing::Level::WARN,
+                "spur::worker::profile",
+                "startup profile environment skipped; child receives safe JSON object",
+            ));
+            if let Some(raw) = inherited.to_str() {
+                assert!(!events
+                    .events
+                    .lock()
+                    .expect("event capture poisoned")
+                    .iter()
+                    .any(|event| event.fields.contains(raw)));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn invalid_inherited_startup_json_is_sanitized_before_initialize_and_reported() {
+        let profile = managed_profile();
+        assert_invalid_inherited_startup_json_is_sanitized_before_initialize_and_reported(Some(
+            &profile,
+        ))
+        .await;
+    }
+
+    #[tokio::test]
+    async fn invalid_inherited_startup_json_is_sanitized_when_profile_body_is_missing() {
+        assert_invalid_inherited_startup_json_is_sanitized_before_initialize_and_reported(None)
+            .await;
+    }
+
+    #[test]
+    fn valid_inherited_startup_json_is_preserved_when_profile_body_is_missing() {
+        let strategy = spur_acp::ProfileStrategy::for_kind(spur_acp::types::AgentKind::CodexAcp);
+        let selection = resolve_startup_profile_launch_env(
+            &strategy,
+            Some("missing-profile"),
+            None,
+            Some(r#"{"model":"gpt-5"}"#),
+        );
+
+        assert!(selection.launch_env.is_empty());
+        assert!(!selection.resolution.applied);
+        assert_eq!(
+            selection.resolution.skipped,
+            vec![
+                "profile: startup environment CODEX_CONFIG skipped: selected profile \
+                 'missing-profile' has no managed profile body; inherited value preserved"
+                    .to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn startup_json_profile_does_not_leak_between_attempts() {
+        let strategy = spur_acp::ProfileStrategy::for_kind(spur_acp::types::AgentKind::CodexAcp);
+        let first = profile_with_body("first", "first persona\n");
+        let second = profile_with_body("second", "second persona\n");
+
+        let first_selection = resolve_startup_profile_launch_env(
+            &strategy,
+            Some("first"),
+            Some(&first),
+            Some(r#"{"keep":"base"}"#),
+        );
+        let second_selection = resolve_startup_profile_launch_env(
+            &strategy,
+            Some("second"),
+            Some(&second),
+            Some(r#"{"keep":"base"}"#),
+        );
+
+        let first_config: serde_json::Value = serde_json::from_str(
+            first_selection
+                .launch_env
+                .get("CODEX_CONFIG")
+                .expect("first launch env"),
+        )
+        .unwrap();
+        let second_config: serde_json::Value = serde_json::from_str(
+            second_selection
+                .launch_env
+                .get("CODEX_CONFIG")
+                .expect("second launch env"),
+        )
+        .unwrap();
+        assert_eq!(first_config["developer_instructions"], first.body);
+        assert_eq!(second_config["developer_instructions"], second.body);
+        assert_eq!(first_config["keep"], "base");
+        assert_eq!(second_config["keep"], "base");
     }
 
     fn write_pool_skill(repo: &Path, name: &str, verdict: &str) {
@@ -2763,6 +3370,8 @@ mod profile_override_tests {
         );
         let spawn_args = Arc::new(Mutex::new(Vec::<String>::new()));
         let spawn_args_for_factory = Arc::clone(&spawn_args);
+        let launch_env = Arc::new(Mutex::new(std::collections::BTreeMap::new()));
+        let launch_env_for_factory = Arc::clone(&launch_env);
         let calls = Arc::new(Mutex::new(Vec::new()));
         let calls_for_factory = Arc::clone(&calls);
         let session = session_response(vec![]);
@@ -2794,12 +3403,16 @@ mod profile_override_tests {
                 worker_mcp_server: None,
                 pm_service: None,
                 feature_gate: &feature_gate,
-                connection_factory: Some(&move |_cfg, args, _repo_root| {
+                connection_factory: Some(&move |_cfg, args, env, _repo_root| {
                     *spawn_args_for_factory
                         .lock()
                         .expect("spawn args recorder poisoned") = args;
+                    *launch_env_for_factory
+                        .lock()
+                        .expect("launch env recorder poisoned") = env;
                     Box::new(ProfileRecordingConnection {
                         calls: Arc::clone(&calls_for_factory),
+                        initialize_error: None,
                         rejected_config_id: None,
                         reject_mode: false,
                         session_response: session.clone(),
@@ -2821,6 +3434,10 @@ mod profile_override_tests {
                 "code-reviewer".to_string(),
             ]
         );
+        assert!(launch_env
+            .lock()
+            .expect("launch env recorder poisoned")
+            .is_empty());
         assert_eq!(
             *calls.lock().expect("profile recorder poisoned"),
             vec![OverrideCall::Prompt]
@@ -2828,8 +3445,207 @@ mod profile_override_tests {
     }
 
     #[tokio::test]
-    async fn codex_profile_has_no_selection_rpc_but_model_still_applies() {
-        let (calls, _, resolved) = apply_profile_with(
+    async fn codex_attempt_delivers_profile_in_startup_env_without_profile_rpc() {
+        let repo = setup_repo_with_committed_agent();
+        let mut worktrees = spur_worktree::manager::WorktreeManager::new(repo.path().to_path_buf());
+        let (funnel, _events_rx) = crate::event_funnel::test_channel();
+        let brain_session_id = spur_acp::BrainSessionId::new(SessionId::new());
+        let worker_session = SessionId::new();
+        let variable = format!("SPUR_TEST_CODEX_CONFIG_{}", uuid::Uuid::new_v4().simple());
+        assert!(std::env::var_os(&variable).is_none());
+
+        let mut agent_config = spur_acp::AgentConfig::with_defaults("codex");
+        agent_config.kind = spur_acp::types::AgentKind::CodexAcp;
+        agent_config.profile = Some(spur_acp::ProfileConfig {
+            select: Some(format!("spawn_env_json:{variable}:developer_instructions")),
+            materialize: Some(true),
+        });
+        let profile = managed_profile();
+        let (model, effort) =
+            crate::orchestrator::delegation::execute::resolve_effective_model_effort(
+                Some("sonnet"),
+                None,
+                Some(&profile),
+            );
+        let fault_hooks = FaultInjectionHooks::default();
+        let feature_gate = spur_license::FeatureGate::new_with_install_id(
+            spur_license::policy::PolicyResolver::embedded(),
+            spur_license::InstallId::from_uuid(uuid::Uuid::nil()),
+        );
+        let launch_env = Arc::new(Mutex::new(std::collections::BTreeMap::new()));
+        let launch_env_for_factory = Arc::clone(&launch_env);
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let calls_for_factory = Arc::clone(&calls);
+        let session = model_and_effort_session_response();
+
+        let outcome = run_one_worker_attempt(
+            worker_session,
+            WorkerAttemptCtx {
+                brain_session_id: &brain_session_id,
+                agent: "codex",
+                profile: Some("code-reviewer"),
+                profile_def: Some(&profile),
+                skills: None,
+                model: model.as_deref(),
+                effort: effort.as_deref(),
+                config_overrides: None,
+                task: "do the task",
+                request_id: "delegation-codex-profile",
+                attempt: 1,
+                agent_config: &agent_config,
+                delegation_plan: None,
+                issue_id: None,
+                prior_branch_for_reuse: None,
+                peer_mailbox: None,
+                ack_tx: None,
+                base: None,
+                dispatched_base_oid_tx: None,
+                fault_injection_hooks: &fault_hooks,
+                worker_mcp_servers: &[],
+                worker_mcp_server: None,
+                pm_service: None,
+                feature_gate: &feature_gate,
+                connection_factory: Some(&move |_cfg, _args, env, _repo_root| {
+                    *launch_env_for_factory
+                        .lock()
+                        .expect("launch env recorder poisoned") = env;
+                    Box::new(ProfileRecordingConnection {
+                        calls: Arc::clone(&calls_for_factory),
+                        initialize_error: None,
+                        rejected_config_id: None,
+                        reject_mode: false,
+                        session_response: session.clone(),
+                    })
+                }),
+            },
+            &mut worktrees,
+            &funnel,
+        )
+        .await
+        .expect("worker attempt succeeds");
+
+        let launch_env = launch_env.lock().expect("launch env recorder poisoned");
+        let config: serde_json::Value = serde_json::from_str(
+            launch_env
+                .get(&variable)
+                .expect("per-attempt startup config was delivered"),
+        )
+        .expect("startup config is valid JSON");
+        assert_eq!(config["developer_instructions"], profile.body);
+        assert_eq!(
+            *calls.lock().expect("profile recorder poisoned"),
+            vec![
+                OverrideCall::Config {
+                    config_id: "model".to_string(),
+                    value: "sonnet".to_string(),
+                },
+                OverrideCall::Config {
+                    config_id: "reasoning_effort".to_string(),
+                    value: "high".to_string(),
+                },
+                OverrideCall::Prompt,
+            ]
+        );
+        assert_eq!(
+            outcome.resolved_config.profile.as_deref(),
+            Some("code-reviewer")
+        );
+        assert_eq!(outcome.resolved_config.model.as_deref(), Some("sonnet"));
+        assert_eq!(outcome.resolved_config.effort.as_deref(), Some("high"));
+        assert!(outcome.resolved_config.skipped.is_empty());
+    }
+
+    #[tokio::test]
+    async fn startup_env_profile_fails_soft_on_transport_that_cannot_install_it() {
+        let repo = setup_repo_with_committed_agent();
+        let mut worktrees = spur_worktree::manager::WorktreeManager::new(repo.path().to_path_buf());
+        let (funnel, _events_rx) = crate::event_funnel::test_channel();
+        let brain_session_id = spur_acp::BrainSessionId::new(SessionId::new());
+        let worker_session = SessionId::new();
+        let mut agent_config = spur_acp::AgentConfig::with_defaults("codex-stdio");
+        agent_config.kind = spur_acp::types::AgentKind::CodexAcp;
+        agent_config.transport = spur_acp::types::TransportKind::Stdio;
+        let profile = managed_profile();
+        let fault_hooks = FaultInjectionHooks::default();
+        let feature_gate = spur_license::FeatureGate::new_with_install_id(
+            spur_license::policy::PolicyResolver::embedded(),
+            spur_license::InstallId::from_uuid(uuid::Uuid::nil()),
+        );
+        let launch_env = Arc::new(Mutex::new(std::collections::BTreeMap::new()));
+        let launch_env_for_factory = Arc::clone(&launch_env);
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let calls_for_factory = Arc::clone(&calls);
+        let session = session_response(vec![]);
+
+        let outcome = run_one_worker_attempt(
+            worker_session,
+            WorkerAttemptCtx {
+                brain_session_id: &brain_session_id,
+                agent: "codex-stdio",
+                profile: Some("code-reviewer"),
+                profile_def: Some(&profile),
+                skills: None,
+                model: None,
+                effort: None,
+                config_overrides: None,
+                task: "do the task",
+                request_id: "delegation-codex-stdio-profile",
+                attempt: 1,
+                agent_config: &agent_config,
+                delegation_plan: None,
+                issue_id: None,
+                prior_branch_for_reuse: None,
+                peer_mailbox: None,
+                ack_tx: None,
+                base: None,
+                dispatched_base_oid_tx: None,
+                fault_injection_hooks: &fault_hooks,
+                worker_mcp_servers: &[],
+                worker_mcp_server: None,
+                pm_service: None,
+                feature_gate: &feature_gate,
+                connection_factory: Some(&move |_cfg, _args, env, _repo_root| {
+                    *launch_env_for_factory
+                        .lock()
+                        .expect("launch env recorder poisoned") = env;
+                    Box::new(ProfileRecordingConnection {
+                        calls: Arc::clone(&calls_for_factory),
+                        initialize_error: None,
+                        rejected_config_id: None,
+                        reject_mode: false,
+                        session_response: session.clone(),
+                    })
+                }),
+            },
+            &mut worktrees,
+            &funnel,
+        )
+        .await
+        .expect("worker attempt succeeds with default persona");
+
+        assert!(launch_env
+            .lock()
+            .expect("launch env recorder poisoned")
+            .is_empty());
+        assert_eq!(
+            *calls.lock().expect("profile recorder poisoned"),
+            vec![OverrideCall::Prompt]
+        );
+        assert_eq!(outcome.resolved_config.profile, None);
+        assert!(outcome
+            .resolved_config
+            .skipped
+            .iter()
+            .any(|entry| entry.contains("transport Stdio does not support launch environment")));
+    }
+
+    #[tokio::test]
+    async fn codex_startup_profile_has_no_selection_rpc_but_model_still_applies() {
+        let startup_profile = StartupProfileResolution {
+            applied: true,
+            skipped: vec![],
+        };
+        let (calls, _, resolved) = apply_profile_with_startup(
             spur_acp::types::AgentKind::CodexAcp,
             spur_acp::ProfileStrategy::for_kind(spur_acp::types::AgentKind::CodexAcp),
             Some("code-reviewer"),
@@ -2837,6 +3653,7 @@ mod profile_override_tests {
             None,
             None,
             false,
+            &startup_profile,
         )
         .await;
 
@@ -2847,16 +3664,9 @@ mod profile_override_tests {
                 value: "opus".to_string(),
             }]
         );
-        // Codex has no profile selection surface — the receipt still names
-        // the requested profile, but flags it as skipped, while model is
-        // recorded as cleanly applied.
         assert_eq!(resolved.profile.as_deref(), Some("code-reviewer"));
         assert_eq!(resolved.model.as_deref(), Some("opus"));
-        assert!(
-            resolved.skipped.iter().any(|s| s.starts_with("profile:")),
-            "expected a skipped note for codex's missing profile selection surface, got {:?}",
-            resolved.skipped
-        );
+        assert!(resolved.skipped.is_empty());
     }
 
     #[tokio::test]
@@ -3080,9 +3890,10 @@ mod profile_override_tests {
                 worker_mcp_server: None,
                 pm_service: None,
                 feature_gate: &feature_gate,
-                connection_factory: Some(&move |_cfg, _spawn_args, _repo_root| {
+                connection_factory: Some(&move |_cfg, _spawn_args, _launch_env, _repo_root| {
                     Box::new(ProfileRecordingConnection {
                         calls: Arc::clone(&calls_for_factory),
+                        initialize_error: None,
                         rejected_config_id: None,
                         reject_mode: false,
                         session_response: session.clone(),
@@ -3205,7 +4016,7 @@ mod profile_override_tests {
                 worker_mcp_server: None,
                 pm_service: None,
                 feature_gate: &feature_gate,
-                connection_factory: Some(&move |_cfg, _spawn_args, _repo_root| {
+                connection_factory: Some(&move |_cfg, _spawn_args, _launch_env, _repo_root| {
                     Box::new(SkillMaterializationConnection {
                         checked: Arc::clone(&checked_for_factory),
                         skill_rel_path: ".codex/skills/clean-a/SKILL.md".to_string(),

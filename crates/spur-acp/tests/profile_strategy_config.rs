@@ -23,7 +23,14 @@ fn defaults_encode_the_probe_matrix() {
             },
             true,
         ),
-        (CodexAcp, SelectStrategy::None, true),
+        (
+            CodexAcp,
+            SelectStrategy::SpawnEnvJson {
+                variable: "CODEX_CONFIG".into(),
+                field: "developer_instructions".into(),
+            },
+            true,
+        ),
         (Kimi, SelectStrategy::None, false),
         (Gemini, SelectStrategy::None, false),
         (Generic, SelectStrategy::None, false),
@@ -73,6 +80,20 @@ fn config_block_supports_all_select_strings_and_materialize_override() {
         strategy.select,
         SelectStrategy::SpawnArg {
             flag: "--agent".into()
+        }
+    );
+    assert!(strategy.materialize);
+
+    let cfg = ProfileConfig {
+        select: Some("spawn_env_json:CUSTOM_CONFIG:instructions".into()),
+        materialize: Some(true),
+    };
+    let strategy = ProfileStrategy::resolve(AgentKind::Generic, Some(&cfg));
+    assert_eq!(
+        strategy.select,
+        SelectStrategy::SpawnEnvJson {
+            variable: "CUSTOM_CONFIG".into(),
+            field: "instructions".into(),
         }
     );
     assert!(strategy.materialize);

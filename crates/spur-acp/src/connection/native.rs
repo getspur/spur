@@ -34,7 +34,7 @@
 //! | `shutdown()` | Close stdin (drop the SDK connection), SIGTERM the process group, then SIGKILL if needed |
 //! | `health()` | Return cached `AgentHealth` |
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -144,7 +144,7 @@ pub fn spur_client_capabilities() -> ClientCapabilities {
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub async fn spawn_native_worker_for_test(
+pub fn spawn_native_worker_for_test(
     command: &str,
     args: &[&str],
 ) -> std::io::Result<tokio::process::Child> {
@@ -248,6 +248,8 @@ pub struct NativeAcpConnection {
     command: String,
     /// Extra arguments passed to the binary on startup.
     extra_args: Vec<String>,
+    /// Environment entries applied only to this subprocess launch.
+    launch_env: BTreeMap<String, String>,
     /// Additional absolute workspace roots sent with ACP `session/new`.
     additional_directories: Vec<PathBuf>,
     /// Channel to send commands to the dedicated ACP thread.
@@ -558,6 +560,7 @@ impl NativeAcpConnection {
             agent_kind,
             command: command.into(),
             extra_args,
+            launch_env: BTreeMap::new(),
             additional_directories: Vec::new(),
             cmd_tx: None,
             thread_handle: None,
@@ -587,6 +590,11 @@ impl NativeAcpConnection {
     /// Configure additional workspace roots sent on every new ACP session.
     pub fn set_additional_directories(&mut self, additional_directories: Vec<PathBuf>) {
         self.additional_directories = additional_directories;
+    }
+
+    /// Configure environment entries applied only to the spawned ACP child.
+    pub fn set_launch_env(&mut self, launch_env: BTreeMap<String, String>) {
+        self.launch_env = launch_env;
     }
 
     /// Override the log configuration used by the spawn site (controls the
@@ -708,6 +716,7 @@ impl AgentConnection for NativeAcpConnection {
         let agent_kind = self.agent_kind;
         let command = self.command.clone();
         let extra_args = self.extra_args.clone();
+        let launch_env = self.launch_env.clone();
 
         // Create the command channel.
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<AcpCommand>();
@@ -737,6 +746,7 @@ impl AgentConnection for NativeAcpConnection {
                     agent_kind,
                     command,
                     extra_args,
+                    launch_env,
                     cmd_rx,
                     permission_tx,
                     ext_tx,
@@ -1348,6 +1358,7 @@ fn acp_thread_main(
     agent_kind: AgentKind,
     command: String,
     extra_args: Vec<String>,
+    launch_env: BTreeMap<String, String>,
     mut cmd_rx: mpsc::UnboundedReceiver<AcpCommand>,
     permission_tx: Option<mpsc::UnboundedSender<crate::types::PermissionRequest>>,
     ext_notification_tx: mpsc::UnboundedSender<ExtNotificationPayload>,
@@ -1436,6 +1447,7 @@ fn acp_thread_main(
 
         let mut cmd = tokio::process::Command::new(&command);
         cmd.args(&extra_args)
+            .envs(&launch_env)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(stderr_cfg)
@@ -3247,6 +3259,75 @@ mod native_helper_tests {
         conn.shutdown()
             .await
             .expect("initialized stub should shut down cleanly");
+    }
+
+    #[cfg(unix)]
+    async fn initialize_env_probe(
+        shell_probe: &str,
+        launch_env: std::collections::BTreeMap<String, String>,
+    ) -> String {
+        let tempdir = tempfile::tempdir().expect("tempdir should be created");
+        let observed_path = tempdir.path().join("observed-env");
+        let stub = format!(
+            "{}/tests/fixtures/load_error_stub.py",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let mut conn = NativeAcpConnection::new(
+            "env-probe",
+            "/bin/sh",
+            vec![
+                "-c".to_string(),
+                shell_probe.to_string(),
+                "spur-native-env-test".to_string(),
+                observed_path.display().to_string(),
+                stub,
+            ],
+            None,
+        );
+        conn.set_repo_root(tempdir.path().to_path_buf());
+        conn.set_launch_env(launch_env);
+
+        conn.initialize(InitializeRequest::new(ProtocolVersion::LATEST))
+            .await
+            .expect("environment-probe child should initialize");
+        let observed = std::fs::read_to_string(&observed_path)
+            .expect("environment-probe child should write its observation");
+
+        conn.shutdown()
+            .await
+            .expect("environment-probe child should shut down cleanly");
+        observed
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn native_child_receives_injected_launch_env() {
+        let launch_env = std::collections::BTreeMap::from([(
+            "SPUR_NATIVE_ENV_PROBE".to_string(),
+            "per-attempt-value".to_string(),
+        )]);
+
+        let observed = initialize_env_probe(
+            "printf '%s' \"${SPUR_NATIVE_ENV_PROBE-<unset>}\" > \"$1\"; exec python3 \"$2\"",
+            launch_env,
+        )
+        .await;
+
+        assert_eq!(observed, "per-attempt-value");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn empty_launch_env_preserves_parent_inheritance() {
+        let expected_home = std::env::var("HOME").expect("test process should define HOME");
+
+        let observed = initialize_env_probe(
+            "printf '%s' \"${HOME-<unset>}\" > \"$1\"; exec python3 \"$2\"",
+            std::collections::BTreeMap::new(),
+        )
+        .await;
+
+        assert_eq!(observed, expected_home);
     }
 }
 
