@@ -504,10 +504,7 @@ async fn route_index_inner(
     args.validate()?;
 
     let validate_options = index_validate_options();
-    let parsed_url = match abuse::validate(&args.source_url, &validate_options).and_then(|parsed| {
-        abuse::resolve_and_check_dns(&parsed)?;
-        Ok(parsed)
-    }) {
+    let parsed_url = match abuse::validate(args.source_url.trim(), &validate_options) {
         Ok(parsed) => parsed,
         Err(error) => {
             return Ok(json!({
@@ -517,9 +514,59 @@ async fn route_index_inner(
         }
     };
 
-    // Preserve the existing per-owner request rate limit before enqueue. This
-    // protects the API from high-frequency callers before queue admission,
-    // independent of queue capacity.
+    let identity = match ExternalIndexIdentity::canonicalize(&args, &parsed_url) {
+        Ok(identity) => identity,
+        Err(reason) => {
+            return Ok(json!({
+                "status": "rejected",
+                "reason": reason
+            }));
+        }
+    };
+
+    // A successful warm lookup is a read-only catalog operation. Keep it ahead
+    // of DNS and mutable rate accounting so repeated discovery calls remain
+    // cheap. force=true bypasses only this lookup.
+    if !args.force.unwrap_or(false) {
+        if let Some(catalog) = catalog {
+            if let Some(resolved) = lookup_complete_catalog_revision(
+                catalog,
+                &identity.source,
+                &identity.package,
+                &identity.revision,
+            )? {
+                return Ok(json!({
+                    "status": "complete",
+                    "snapshot_id": resolved.snapshot_id,
+                    "revision": resolved.revision
+                }));
+            }
+            if let Some(legacy_source) = identity.legacy_warm_source.as_deref() {
+                if let Some(resolved) = lookup_complete_catalog_revision(
+                    catalog,
+                    legacy_source,
+                    &identity.package,
+                    &identity.revision,
+                )? {
+                    return Ok(json!({
+                        "status": "complete",
+                        "snapshot_id": resolved.snapshot_id,
+                        "revision": resolved.revision
+                    }));
+                }
+            }
+        }
+    }
+
+    if let Err(error) = abuse::resolve_and_check_dns(&parsed_url) {
+        return Ok(json!({
+            "status": "rejected",
+            "reason": format!("source_url: {error}")
+        }));
+    }
+
+    // Preserve the existing per-owner request rate limit for every request
+    // that can enqueue, including force=true and active-dedupe repeats.
     match jobs
         .check_index_rate_limit(caller_id, index_rate_limit_per_minute())
         .await
@@ -535,27 +582,6 @@ async fn route_index_inner(
         Err(error) => return Err(jobs_error("external_index rate limit failed")(error)),
     }
 
-    let source = args.source();
-    let revision = args.revision.trim();
-    let source_url_hash = source_url_hash(&args.source_url);
-    let source_kind = args.source_kind(parsed_url.source_kind);
-
-    // Warm catalog hit: return immediately unless force=true bypasses it.
-    // force=true does NOT bypass rate limits, queue caps, or dedupe.
-    if !args.force.unwrap_or(false) {
-        if let Some(catalog) = catalog {
-            if let Some(resolved) =
-                lookup_complete_catalog_revision(catalog, source, &args.package, revision)?
-            {
-                return Ok(json!({
-                    "status": "complete",
-                    "snapshot_id": resolved.snapshot_id,
-                    "revision": resolved.revision
-                }));
-            }
-        }
-    }
-
     // ─── Bounded enqueue admission ─────────────────────────────────────────
     //
     // Build the BacklogOwner from the authenticated caller context. The first
@@ -567,12 +593,12 @@ async fn route_index_inner(
     let config = index_queue_config();
 
     let request = CreateJobRequest {
-        source: source.to_owned(),
-        package: args.package.clone(),
-        revision: revision.to_owned(),
-        source_url: args.source_url.clone(),
-        source_url_hash: source_url_hash.clone(),
-        source_kind: source_kind_label(source_kind).to_owned(),
+        source: identity.source,
+        package: identity.package,
+        revision: identity.revision,
+        source_url: identity.source_url,
+        source_url_hash: identity.source_url_hash,
+        source_kind: source_kind_label(identity.source_kind).to_owned(),
         caller_id: caller_id.to_owned(),
     };
 
@@ -812,10 +838,6 @@ impl ExternalIndexArgs {
         Ok(())
     }
 
-    fn source(&self) -> &str {
-        self.source.as_deref().unwrap_or(DEFAULT_INDEX_SOURCE)
-    }
-
     fn source_kind(&self, inferred: SourceKind) -> SourceKind {
         match self.source_kind {
             Some(ExternalIndexSourceKind::Git) => SourceKind::Git,
@@ -823,6 +845,136 @@ impl ExternalIndexArgs {
             None => inferred,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ExternalIndexIdentity {
+    source: String,
+    legacy_warm_source: Option<String>,
+    package: String,
+    revision: String,
+    source_url: String,
+    source_url_hash: String,
+    source_kind: SourceKind,
+}
+
+impl ExternalIndexIdentity {
+    fn canonicalize(
+        args: &ExternalIndexArgs,
+        parsed_url: &abuse::ParsedSourceUrl,
+    ) -> Result<Self, &'static str> {
+        let package = args.package.trim();
+        let revision = args.revision.trim();
+        let source_url = args.source_url.trim();
+        let source = args.source.as_deref().map(str::trim);
+
+        let (source, legacy_warm_source, package, source_url, source_kind) = if let Some((
+            url_package,
+            url_revision,
+        )) = crates_io_download_coordinates(source_url, &parsed_url.hostname)
+        {
+            let package = normalize_crates_io_package(package);
+            let url_package = normalize_crates_io_package(url_package);
+            if package != url_package {
+                return Err("source_url_package_mismatch");
+            }
+            if revision != url_revision {
+                return Err("source_url_revision_mismatch");
+            }
+
+            let source = match source {
+                None => DEFAULT_SOURCE.to_owned(),
+                Some(value) if is_crates_io_source_alias(value) => DEFAULT_SOURCE.to_owned(),
+                Some(value) => value.to_owned(),
+            };
+            let legacy_warm_source = args
+                .source
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| is_legacy_crates_io_source_alias(value))
+                .map(str::to_owned);
+            let canonical_url =
+                format!("https://crates.io/api/v1/crates/{package}/{revision}/download");
+            (
+                source,
+                legacy_warm_source,
+                package,
+                canonical_url,
+                SourceKind::Tarball,
+            )
+        } else {
+            (
+                source.unwrap_or(DEFAULT_INDEX_SOURCE).to_owned(),
+                None,
+                package.to_owned(),
+                source_url.to_owned(),
+                args.source_kind(parsed_url.source_kind),
+            )
+        };
+        let source_url_hash = source_url_hash(&source_url);
+
+        Ok(Self {
+            source,
+            legacy_warm_source,
+            package,
+            revision: revision.to_owned(),
+            source_url,
+            source_url_hash,
+            source_kind,
+        })
+    }
+}
+
+fn crates_io_download_coordinates<'a>(
+    source_url: &'a str,
+    hostname: &str,
+) -> Option<(&'a str, &'a str)> {
+    if hostname != "crates.io" {
+        return None;
+    }
+
+    let (scheme, rest) = source_url.split_once("://")?;
+    if !scheme.eq_ignore_ascii_case("https") {
+        return None;
+    }
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let authority = &rest[..authority_end];
+    let authority_host = authority.strip_suffix(":443").unwrap_or(authority);
+    if !authority_host.eq_ignore_ascii_case("crates.io")
+        && !authority_host.eq_ignore_ascii_case("crates.io.")
+    {
+        return None;
+    }
+    let path = rest[authority_end..]
+        .split(['?', '#'])
+        .next()
+        .unwrap_or_default();
+    let segments = path.split('/').collect::<Vec<_>>();
+    match segments.as_slice() {
+        ["", "api", "v1", "crates", package, revision, "download"]
+        | ["", "api", "v1", "crates", package, revision, "download", ""]
+            if !package.is_empty() && !revision.is_empty() =>
+        {
+            Some((package, revision))
+        }
+        _ => None,
+    }
+}
+
+fn normalize_crates_io_package(package: &str) -> String {
+    package.trim().to_ascii_lowercase().replace('_', "-")
+}
+
+fn is_crates_io_source_alias(source: &str) -> bool {
+    ["crates.io", "crates-io", DEFAULT_SOURCE]
+        .iter()
+        .any(|alias| source.eq_ignore_ascii_case(alias))
+}
+
+fn is_legacy_crates_io_source_alias(source: &str) -> bool {
+    ["crates.io", "crates-io"]
+        .iter()
+        .any(|alias| source.eq_ignore_ascii_case(alias))
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -1813,30 +1965,29 @@ fn external_index_def() -> ToolDefinition {
             "properties": {
                 "package": {
                     "type": "string",
-                    "description": "Package name, for example serde or tokio."
+                    "description": "Package name, for example serde or tokio. Surrounding whitespace is ignored; standard crates.io requests also lowercase the name and treat underscores as hyphens."
                 },
                 "revision": {
                     "type": "string",
-                    "description": "Version, branch, tag, or SHA to index."
+                    "description": "Version, branch, tag, or SHA to index. Surrounding whitespace is ignored. For a standard crates.io download URL this version must match the URL."
                 },
                 "source_url": {
                     "type": "string",
-                    "description": "Fetchable git or tarball URL for the source."
+                    "description": "Fetchable git or tarball URL for the source. Standard crates.io download URLs are validated against package/revision and stored as one canonical https://crates.io URL."
                 },
                 "source_kind": {
                     "type": "string",
                     "enum": ["git", "tarball"],
-                    "description": "Optional source fetch strategy. When omitted it is inferred from source_url."
+                    "description": "Optional source fetch strategy. When omitted it is inferred from source_url; standard crates.io download URLs always use tarball."
                 },
                 "source": {
                     "type": "string",
-                    "default": DEFAULT_INDEX_SOURCE,
-                    "description": "Catalog source namespace for this package revision."
+                    "description": "Catalog source namespace. For a standard crates.io download URL, omission and the aliases crates.io, crates-io, and registry:crates-io canonicalize to registry:crates-io. Other explicit namespaces are preserved after trimming; non-crates.io omission remains git:custom."
                 },
                 "force": {
                     "type": "boolean",
                     "default": false,
-                    "description": "Bypass the warm-path catalog hit check."
+                    "description": "Bypass only the warm-path catalog hit check. Abuse and DNS checks, rate limits, active dedupe, and queue caps still apply."
                 }
             },
             "additionalProperties": false
