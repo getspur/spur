@@ -88,6 +88,7 @@ pub(crate) async fn handle_delegations(
     dispatch_lease_heartbeat: std::time::Duration,
     worker_mcp_fetcher: WorkerMcpFetcher,
     normalize_bypass_hooks: bool,
+    shutdown: tokio_util::sync::CancellationToken,
 ) {
     let semaphore = Arc::new(Semaphore::new(max_concurrent.max(1)));
     // Debounce: skip post-delegation refresh if another completed <3s ago.
@@ -95,8 +96,17 @@ pub(crate) async fn handle_delegations(
     let last_refresh_at = Arc::new(tokio::sync::Mutex::new(
         tokio::time::Instant::now() - std::time::Duration::from_secs(60),
     ));
+    let mut delegation_tasks = tokio::task::JoinSet::new();
 
-    while let Some(request) = channel.request_rx.recv().await {
+    loop {
+        let request = tokio::select! {
+            biased;
+            _ = shutdown.cancelled() => break,
+            request = channel.request_rx.recv() => request,
+        };
+        let Some(request) = request else {
+            break;
+        };
         // Destructure the request — it is not Clone, so we move each field.
         let DelegationRequest {
             id: request_id,
@@ -182,17 +192,31 @@ pub(crate) async fn handle_delegations(
         };
         let (cancel_token, abort_handle) = cancel_token;
         let cancellation_control_for_task = cancellation_control.clone();
+        let cancellation_control_for_shutdown = cancellation_control.clone();
+        let request_id_for_shutdown = request_id.clone();
+        let shutdown_for_task = shutdown.clone();
 
-        tokio::spawn(async move {
-            let mut guard = DelegationGuard {
-                funnel: funnel.clone(),
-                respond_to: Some(respond_to),
-                request_id: request_id.clone(),
-                disarmed: false,
-            };
+        delegation_tasks.spawn(async move {
+            let delegation = async move {
+                let mut guard = DelegationGuard {
+                    funnel: funnel.clone(),
+                    respond_to: Some(respond_to),
+                    request_id: request_id.clone(),
+                    disarmed: false,
+                };
 
-            // Acquire a permit before starting the delegation.
-            let _permit = tokio::select! {
+                #[cfg(test)]
+                {
+                    if let Some(started) = &fault_injection_hooks.delegation_started {
+                        started.notify_waiters();
+                    }
+                    if let Some(blocker) = &fault_injection_hooks.delegation_blocker {
+                        blocker.notified().await;
+                    }
+                }
+
+                // Acquire a permit before starting the delegation.
+                let _permit = tokio::select! {
                 biased;
                 _ = abort_handle.cancelled() => {
                     let status = crate::delegation_watchdog::status_from_abort_reason(&abort_handle).await;
@@ -232,18 +256,18 @@ pub(crate) async fn handle_delegations(
                         return; // guard fires DelegationCompleted(Failed)
                     }
                 },
-            };
+                };
 
-            let heartbeat_watchdog_stop =
-                crate::delegation_watchdog::maybe_spawn_heartbeat_watchdog(
+                let heartbeat_watchdog_stop =
+                    crate::delegation_watchdog::maybe_spawn_heartbeat_watchdog(
                     &worktree_config,
                     request_id.clone(),
                     abort_handle.clone(),
                     &event_tx,
                 );
 
-            // Claim issue on delegation start (10f).
-            if let (Some(ref issue_id), Some(ref pm)) = (&issue_id, &pm_service) {
+                // Claim issue on delegation start (10f).
+                if let (Some(ref issue_id), Some(ref pm)) = (&issue_id, &pm_service) {
                 let worker_name = format!("spur-worker-{}", request_id);
                 if let Err(e) = pm
                     .update_issue(
@@ -265,9 +289,9 @@ pub(crate) async fn handle_delegations(
                         assignee: Some(worker_name),
                     });
                 }
-            }
+                }
 
-            let dispatch_lease_heartbeat_handle = maybe_spawn_dispatch_lease_heartbeat(
+                let dispatch_lease_heartbeat_handle = maybe_spawn_dispatch_lease_heartbeat(
                 pm_service.clone(),
                 issue_id.clone(),
                 request_id.clone(),
@@ -293,7 +317,7 @@ pub(crate) async fn handle_delegations(
             // INV-6: race execute_delegation against the per-delegation
             // cancellation token. If cancel() arrives first, we return
             // DelegationStatus::Cancelled without waiting for the worker.
-            let (result, executor_id_opt) = tokio::select! {
+                let (result, executor_id_opt) = tokio::select! {
                 biased;
                 _ = cancel_token.cancelled() => {
                     let executor_id_opt = match abort_handle.observed_reason().await {
@@ -371,15 +395,15 @@ pub(crate) async fn handle_delegations(
                     feature_gate,
                     normalize_bypass_hooks,
                 ) => r,
-            };
-            drop(dispatch_lease_heartbeat_handle);
-            drop(heartbeat_watchdog_stop);
-            // Always clean up the token entry (avoids stale entries
-            // when the delegation completes normally before cancel fires).
-            cancellation_control_for_task.remove(&request_id).await;
+                };
+                drop(dispatch_lease_heartbeat_handle);
+                drop(heartbeat_watchdog_stop);
+                // Always clean up the token entry (avoids stale entries
+                // when the delegation completes normally before cancel fires).
+                cancellation_control_for_task.remove(&request_id).await;
 
             // Comment on / revert issue on completion (10g).
-            if let (Some(ref issue_id), Some(ref pm)) = (&issue_id, &pm_service) {
+                if let (Some(ref issue_id), Some(ref pm)) = (&issue_id, &pm_service) {
                 let (new_status, comment) = match &result.status {
                     // Success — DON'T close, just comment. Brain decides when to close.
                     DelegationStatus::Success => {
@@ -411,13 +435,13 @@ pub(crate) async fn handle_delegations(
                         assignee: None,
                     });
                 }
-            }
+                }
 
             // Refresh issue list + graph alerts after delegation completes
             // so TUI picks up changes made by the worker (F19).
             // Debounce: skip if another delegation refreshed <3s ago
             // (prevents thundering herd from delegate_parallel).
-            if let Some(ref pm) = pm_service {
+                if let Some(ref pm) = pm_service {
                 let mut last = last_refresh_at.lock().await;
                 if last.elapsed() >= std::time::Duration::from_secs(3) {
                     *last = tokio::time::Instant::now();
@@ -426,13 +450,13 @@ pub(crate) async fn handle_delegations(
                 } else {
                     tracing::debug!("Skipping post-delegation refresh (debounced)");
                 }
-            }
+                }
 
             // Normal path: disarm the guard and send result manually.
-            guard.disarmed = true;
-            let respond_to = guard.respond_to.take().unwrap();
+                guard.disarmed = true;
+                let respond_to = guard.respond_to.take().unwrap();
 
-            if let Err(_returned_result) = respond_to.send(result) {
+                if let Err(_returned_result) = respond_to.send(result) {
                 // Brain's MCP tool call was cancelled — the oneshot
                 // receiver was dropped before we could deliver the
                 // result. If a review was still pending on this
@@ -443,8 +467,30 @@ pub(crate) async fn handle_delegations(
                     cleanup_cancelled_review(eid, "brain call cancelled", &funnel, &review_sink)
                         .await;
                 }
+                }
+            };
+
+            tokio::select! {
+                biased;
+                _ = shutdown_for_task.cancelled() => {}
+                _ = delegation => {}
             }
+            cancellation_control_for_shutdown
+                .remove(&request_id_for_shutdown)
+                .await;
         });
+
+        while let Some(result) = delegation_tasks.try_join_next() {
+            if let Err(error) = result {
+                tracing::error!(%error, "delegation task exited unexpectedly");
+            }
+        }
+    }
+
+    while let Some(result) = delegation_tasks.join_next().await {
+        if let Err(error) = result {
+            tracing::error!(%error, "delegation task exited unexpectedly during shutdown");
+        }
     }
 }
 
@@ -636,6 +682,7 @@ mod tests {
             std::time::Duration::from_secs(10),
             worker_mcp_fetcher,
             false,
+            tokio_util::sync::CancellationToken::new(),
         ));
 
         let (first_request, first_result_rx) = delegation_request("worker");
@@ -657,5 +704,58 @@ mod tests {
         assert_eq!(snapshots[0][0].additional_directories, vec![first_dir]);
         assert_eq!(snapshots[1][0].args, vec!["new-arg".to_string()]);
         assert_eq!(snapshots[1][0].additional_directories, vec![second_dir]);
+    }
+
+    #[tokio::test]
+    async fn shutdown_joins_blocked_delegation_children() {
+        let repo = TempDir::new().expect("temp repo");
+        std::fs::create_dir_all(repo.path().join(".spur")).expect("create .spur dir");
+        let config = SpurConfig::default();
+        let orchestrator =
+            Orchestrator::new(repo.path().to_path_buf(), config, None).expect("orchestrator");
+        let started = Arc::new(tokio::sync::Notify::new());
+        let blocker = Arc::new(tokio::sync::Notify::new());
+        let hooks = FaultInjectionHooks {
+            delegation_started: Some(Arc::clone(&started)),
+            delegation_blocker: Some(blocker),
+            ..Default::default()
+        };
+        let (tx, request_rx) = tokio::sync::mpsc::channel(4);
+        let channel = DelegationChannel { request_rx };
+        let (event_tx, _) = broadcast::channel(16);
+        let (funnel, _events) = crate::event_funnel::test_channel();
+        let worker_mcp_fetcher = test_worker_mcp_fetcher(repo.path().to_path_buf(), funnel.clone());
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let handle = tokio::spawn(handle_delegations(
+            channel,
+            repo.path().to_path_buf(),
+            Arc::clone(&orchestrator.agent_configs),
+            1,
+            orchestrator.config.worktree.clone(),
+            event_tx,
+            funnel,
+            ReviewSink::new(),
+            None,
+            crate::server::community_feature_gate(),
+            CancellationControl::new(),
+            None,
+            hooks,
+            std::time::Duration::from_secs(60),
+            std::time::Duration::from_secs(10),
+            worker_mcp_fetcher,
+            false,
+            shutdown.clone(),
+        ));
+        let (request, result_rx) = delegation_request("worker");
+        let started_wait = started.notified();
+        tx.send(request).await.expect("send delegation request");
+        started_wait.await;
+
+        shutdown.cancel();
+        tokio::time::timeout(std::time::Duration::from_secs(5), handle)
+            .await
+            .expect("delegation handler did not join blocked child")
+            .expect("delegation handler panicked");
+        let _ = result_rx.await;
     }
 }

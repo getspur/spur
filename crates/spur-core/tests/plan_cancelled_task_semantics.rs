@@ -89,7 +89,7 @@ async fn approve_does_not_enqueue_new_dispatches() {
     };
 
     let (dtx, mut drx) = mpsc::channel(8);
-    let tracker = tokio_util::task::TaskTracker::new();
+    let tracker = spur_core::server::AbortableTaskTracker::new();
     let plan = Arc::new(Mutex::new(state));
 
     let _ = spur_core::plan::handle_review_task(

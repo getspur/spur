@@ -101,6 +101,82 @@ Promotion is ratcheted. A loop must have at least three consecutive approved rea
 generations at its current level before it can move up one level. Demotion is
 immediate. A direct `l1` to `l3` promotion is rejected.
 
+## L3 Project Runtime Leadership
+
+L3 execution requires at least one interactive SPUR process to remain running, but it
+does not require an active brain session. For each repository, exactly one running TUI
+holds the advisory lock at `.spur/loop-runtime.lock`. That leader schedules L3
+generations under the stable `spur-loop-runtime` owner, reconciles their durable beads
+state, and dispatches workers. It never creates an ACP brain connection or sends a
+brain prompt for that system identity.
+
+Scope is fenced in both directions. Brain-session reconcilers sweep L1/L2 loops and
+plans owned by that brain; the project reconciler sweeps only L3 loops and plans owned
+by `spur-loop-runtime`.
+
+Successful unattended work crosses an independent maker/checker boundary. After a
+maker reaches `AwaitingReview`, the runtime persists a reviewer companion issue and a
+`system-review-dispatch` audit before sending a separate reviewer delegation based on
+the maker branch. The reviewer has worker MCP access for `get_task_diff` and must use
+`submit_review_verdict`; that tool binds its authenticated delegation identity to the
+current maker completion and durable review intent. A maker, an earlier reviewer, or a
+reviewer for a superseded maker completion cannot forge the verdict. Completion
+metadata alone never counts as review. The reviewer branch is throwaway and is never
+merged; a reviewer that makes no code changes is valid when its durable verdict exists.
+
+Signals are classified by meaning, not merely by their label prefix. A valid
+`MarkNoop` remains reviewable and its justification is shown to the checker. An
+unresolved non-`MarkNoop` signal, an unknown or malformed signal, or an unprocessed
+blocking signal fails closed and prevents reviewer dispatch. A processed historical
+signal does not keep blocking solely because its original signal label remains.
+
+Additional TUIs for the same repository remain passive standbys. They periodically
+retry the lock and observe durable loop and plan state when the issue tracker view is
+refreshed; phase one does not forward the leader's process-local live event stream to
+standbys. After a clean leader exit or process crash, the operating system releases
+the advisory lock, a standby takes leadership, and it resumes from beads state.
+Exact-generation labels and the transient `spur:loop-arming:<generation>` claim make
+handoff recovery deterministic across the plan-persistence and loop-rearm crash
+window.
+
+There is no automatic legacy adoption. `SystemL3Only` reconciliation lists and
+heartbeats only generations already owned by `spur-loop-runtime`; it never modifies a
+foreign brain-owned generation, regardless of lease presence or age. Mixed-version
+legacy generations therefore remain parked until an operator stops or otherwise
+verifies the former owner and explicitly migrates the open L3 generation:
+
+```json
+{
+  "plan_id": "<legacy-plan-id>",
+  "target_owner": "system_l3",
+  "confirm": true,
+  "reason": "former owner stopped; migrate to project runtime"
+}
+```
+
+That `force_reclaim_plan` call is an operator action. It removes the old owner, token,
+and lease labels, installs the stable owner with fresh fencing, and records a
+`plan-force-reclaimed` audit. New L3 generations need no owner `BrainSession` and fail
+over automatically between current-version TUIs; manual migration is deliberately not
+an inferred liveness decision.
+
+Advisory locking is a safety boundary. If the repository filesystem does not support
+safe advisory locking, SPUR disables project L3 execution and leaves due loops parked;
+it never falls back to multiple leaders. L1 and L2 loops still require an active brain
+session. Leadership shutdown is caller-bounded but ownership is not: after the public
+deadline returns, the supervisor remains in `LeaderDraining` and the drain task keeps
+the advisory-lock guard. It requests cancellation, aborts a delegation child that
+exceeds the grace period, awaits that child's termination acknowledgement, and drains
+the stable-key worker MCP and callback servers before dropping the guard. A standby
+cannot promote during this interval, and a same-process successor constructs fresh
+runtime dependencies instead of reusing a server bound to the retired leader.
+
+This first phase is tied to the interactive process lifetime, so L3 also stops after
+all TUIs exit. Always-on execution belongs to a later daemon phase. The daemon should
+reuse the same lock, stable owner, beads recovery, owner-lease, and arming-claim
+protocols; it changes process supervision and deployment, not the repository-scoped
+single-leader contract.
+
 ## Governors
 
 `max_cost_micros_per_generation` is copied to generation epics as

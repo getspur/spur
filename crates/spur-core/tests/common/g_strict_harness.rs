@@ -10,11 +10,11 @@ use serde_json::{json, Value};
 use spur_acp::{BrainSessionId, DelegationResult, DelegationStatus, SessionId};
 use spur_core::plan::audit_sentinel::{self, AuditSentinelKind};
 use spur_core::plan::reconciler::{Reconciler, ReconcilerConfig, ReconcilerDispatchCtx};
+use spur_core::server::AbortableTaskTracker;
 use spur_core::server::McpCallbackServer;
 use spur_core::{BaseSpec, BaseTarget, DelegationRequest};
 use tempfile::TempDir;
 use tokio::sync::{mpsc, Notify, OwnedMutexGuard};
-use tokio_util::task::TaskTracker;
 
 static CWD_LOCK: LazyLock<Arc<tokio::sync::Mutex<()>>> =
     LazyLock::new(|| Arc::new(tokio::sync::Mutex::new(())));
@@ -131,7 +131,7 @@ pub struct TestHarness {
     reconciler: Reconciler,
     request_rx: mpsc::Receiver<DelegationRequest>,
     pending_requests: VecDeque<DelegationRequest>,
-    task_tracker: TaskTracker,
+    task_tracker: AbortableTaskTracker,
     task_issue_ids: HashMap<String, String>,
     fault_injection_hooks: FaultInjectionHooks,
 }
@@ -219,7 +219,7 @@ impl TestHarness {
         McpCallbackServer,
         Reconciler,
         mpsc::Receiver<DelegationRequest>,
-        TaskTracker,
+        AbortableTaskTracker,
     ) {
         let pm = Arc::new(
             spur_pm::PmService::try_new(None, true, false, repo, None)
@@ -240,7 +240,7 @@ impl TestHarness {
         server.set_repo_root(repo.to_path_buf());
 
         let (delegation_tx, request_rx) = mpsc::channel(8);
-        let task_tracker = TaskTracker::new();
+        let task_tracker = AbortableTaskTracker::new();
         let reconciler = Reconciler::new(
             ReconcilerConfig {
                 repo_root: repo.to_path_buf(),
