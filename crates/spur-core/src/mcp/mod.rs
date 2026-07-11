@@ -2,6 +2,7 @@ pub(crate) mod catalog;
 pub mod context_service;
 pub mod delegation;
 pub mod plan;
+pub mod review_verdict;
 pub mod signals;
 pub mod worker;
 
@@ -128,6 +129,7 @@ pub fn worker_tool_registry() -> Result<spur_mcp::ToolRegistry, spur_mcp::ToolRe
             event_sink: None,
             feature_gate: crate::server::community_feature_gate(),
         }))?
+        .with(review_verdict::ReviewVerdictMcpModule)?
         .with_alias("code_search", "code_symbol_search")?
         .with_denied_tool_calls(WORKER_DENIED_TOOL_CALLS.iter().copied());
     Ok(builder.build())

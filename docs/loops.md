@@ -112,12 +112,23 @@ brain prompt for that system identity.
 
 Scope is fenced in both directions. Brain-session reconcilers sweep L1/L2 loops and
 plans owned by that brain; the project reconciler sweeps only L3 loops and plans owned
-by `spur-loop-runtime`. Successful unattended work still crosses a checker boundary:
-on a later reconciliation pass, the project runtime reprojects durable task and plan
-audits, and approves only a current `AwaitingReview` completion whose delegation id and
-worker branch match the latest dispatch and whose issue has no worker signal. The
-worker completion callback cannot approve its own result. A matching signal leaves the
-task for explicit intervention instead of silently approving it.
+by `spur-loop-runtime`.
+
+Successful unattended work crosses an independent maker/checker boundary. After a
+maker reaches `AwaitingReview`, the runtime persists a reviewer companion issue and a
+`system-review-dispatch` audit before sending a separate reviewer delegation based on
+the maker branch. The reviewer has worker MCP access for `get_task_diff` and must use
+`submit_review_verdict`; that tool binds its authenticated delegation identity to the
+current maker completion and durable review intent. A maker, an earlier reviewer, or a
+reviewer for a superseded maker completion cannot forge the verdict. Completion
+metadata alone never counts as review. The reviewer branch is throwaway and is never
+merged; a reviewer that makes no code changes is valid when its durable verdict exists.
+
+Signals are classified by meaning, not merely by their label prefix. A valid
+`MarkNoop` remains reviewable and its justification is shown to the checker. An
+unresolved non-`MarkNoop` signal, an unknown or malformed signal, or an unprocessed
+blocking signal fails closed and prevents reviewer dispatch. A processed historical
+signal does not keep blocking solely because its original signal label remains.
 
 Additional TUIs for the same repository remain passive standbys. They periodically
 retry the lock and observe durable loop and plan state when the issue tracker view is
@@ -128,24 +139,37 @@ Exact-generation labels and the transient `spur:loop-arming:<generation>` claim 
 handoff recovery deterministic across the plan-persistence and loop-rearm crash
 window.
 
-Live L3 generations created by an older SPUR version keep their historical owner while
-that owner's durable lease is live. A legacy generation with no lease receives one
-full grace window before it can be adopted. Only after the lease expires may the
-elected project runtime atomically fence the old owner labels, install a new owner
-token and lease for `spur-loop-runtime`, append a `plan-force-reclaimed` audit, and
-resume the generation from beads. This prevents an upgrade from stealing work from a
-still-running older process while ensuring a stale pre-upgrade owner cannot park an L3
-loop forever.
+There is no automatic legacy adoption. `SystemL3Only` reconciliation lists and
+heartbeats only generations already owned by `spur-loop-runtime`; it never modifies a
+foreign brain-owned generation, regardless of lease presence or age. Mixed-version
+legacy generations therefore remain parked until an operator stops or otherwise
+verifies the former owner and explicitly migrates the open L3 generation:
+
+```json
+{
+  "plan_id": "<legacy-plan-id>",
+  "target_owner": "system_l3",
+  "confirm": true,
+  "reason": "former owner stopped; migrate to project runtime"
+}
+```
+
+That `force_reclaim_plan` call is an operator action. It removes the old owner, token,
+and lease labels, installs the stable owner with fresh fencing, and records a
+`plan-force-reclaimed` audit. New L3 generations need no owner `BrainSession` and fail
+over automatically between current-version TUIs; manual migration is deliberately not
+an inferred liveness decision.
 
 Advisory locking is a safety boundary. If the repository filesystem does not support
 safe advisory locking, SPUR disables project L3 execution and leaves due loops parked;
 it never falls back to multiple leaders. L1 and L2 loops still require an active brain
-session. Leadership shutdown is bounded: the runtime first requests cancellation and
-allows durable delegation cleanup through the grace period, then aborts a child that
-does not stop, evicts and drains the stable-key worker MCP server, and releases the
-lock only after its owned callback server is stopped or force-aborted. A same-process
-successor therefore constructs fresh runtime dependencies instead of reusing a server
-bound to the retired leader.
+session. Leadership shutdown is caller-bounded but ownership is not: after the public
+deadline returns, the supervisor remains in `LeaderDraining` and the drain task keeps
+the advisory-lock guard. It requests cancellation, aborts a delegation child that
+exceeds the grace period, awaits that child's termination acknowledgement, and drains
+the stable-key worker MCP and callback servers before dropping the guard. A standby
+cannot promote during this interval, and a same-process successor constructs fresh
+runtime dependencies instead of reusing a server bound to the retired leader.
 
 This first phase is tied to the interactive process lifetime, so L3 also stops after
 all TUIs exit. Always-on execution belongs to a later daemon phase. The daemon should

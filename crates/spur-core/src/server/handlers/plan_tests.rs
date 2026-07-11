@@ -848,6 +848,74 @@ mod plan_handler_mcp_tests {
         (Arc::new(server), mock_pm)
     }
 
+    struct FailAddCommentPm {
+        inner: Arc<crate::plan::test_util::MockPm>,
+        add_comment_calls: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::plan::PmLike for FailAddCommentPm {
+        async fn get_issue(&self, id: &str) -> anyhow::Result<spur_pm::Issue> {
+            self.inner.get_issue(id).await
+        }
+
+        async fn list_issues(
+            &self,
+            filter: spur_pm::IssueFilter,
+        ) -> anyhow::Result<Vec<spur_pm::IssueSummary>> {
+            self.inner.list_issues(filter).await
+        }
+
+        async fn create_issue(&self, params: spur_pm::IssueCreate) -> anyhow::Result<String> {
+            self.inner.create_issue(params).await
+        }
+
+        async fn update_issue(&self, id: &str, update: spur_pm::IssueUpdate) -> anyhow::Result<()> {
+            self.inner.update_issue(id, update).await
+        }
+
+        fn closed_status(&self) -> &str {
+            self.inner.closed_status()
+        }
+
+        fn advanced(&self) -> Option<&dyn spur_pm::BeadsAdvanced> {
+            Some(self)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl spur_pm::BeadsAdvanced for FailAddCommentPm {
+        async fn list_ready(
+            &self,
+            filter: spur_pm::ReadyFilter,
+        ) -> anyhow::Result<Vec<spur_pm::IssueSummary>> {
+            spur_pm::BeadsAdvanced::list_ready(self.inner.as_ref(), filter).await
+        }
+
+        async fn list_comments(&self, issue_id: &str) -> anyhow::Result<Vec<spur_pm::Comment>> {
+            spur_pm::BeadsAdvanced::list_comments(self.inner.as_ref(), issue_id).await
+        }
+
+        async fn add_comment(&self, _issue_id: &str, _body: &str) -> anyhow::Result<String> {
+            self.add_comment_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            anyhow::bail!("injected force-reclaim audit failure")
+        }
+
+        async fn remove_dependency(
+            &self,
+            issue_id: &str,
+            depends_on_id: &str,
+        ) -> anyhow::Result<()> {
+            spur_pm::BeadsAdvanced::remove_dependency(self.inner.as_ref(), issue_id, depends_on_id)
+                .await
+        }
+
+        async fn dep_cycles(&self) -> anyhow::Result<Vec<spur_pm::DependencyCycle>> {
+            spur_pm::BeadsAdvanced::dep_cycles(self.inner.as_ref()).await
+        }
+    }
+
     fn manifest_item(name: &str, verdict: &str) -> crate::explore::pool::ManifestItem {
         crate::explore::pool::ManifestItem {
             name: name.to_string(),
@@ -1154,13 +1222,229 @@ mod plan_handler_mcp_tests {
     }
 
     #[tokio::test]
+    async fn force_reclaim_plan_migrates_open_l3_generation_to_system_owner() {
+        let (_dir, _workspace, server, pm) = new_beads_server().await;
+        let old_owner = crate::plan::labels::plan_owner("legacy-brain");
+        let old_token = crate::plan::labels::plan_owner_token("legacy-token");
+        let old_lease = crate::plan::labels::plan_owner_lease_expires_at(123);
+        let epic_id = create_epic(
+            pm.as_ref(),
+            "force-system-l3",
+            vec![
+                crate::plan::labels::PLAN_COMPLETE.to_string(),
+                format!("{}l3", crate::plan::labels::AUTONOMY_PREFIX),
+                crate::plan::labels::loop_id_label("nightly"),
+                crate::plan::labels::loop_generation_label(7),
+                old_owner.clone(),
+                old_token.clone(),
+                old_lease.clone(),
+            ],
+        )
+        .await;
+
+        let response = server
+            .handle_force_reclaim_plan(
+                serde_json::Value::from(1),
+                json!({
+                    "plan_id": "force-system-l3",
+                    "target_owner": "system_l3",
+                    "confirm": true,
+                    "reason": "operator stopped the legacy owner"
+                }),
+            )
+            .await;
+
+        assert!(
+            response.error.is_none(),
+            "explicit system migration should succeed: {response:?}"
+        );
+        let output = response_text_json(&response);
+        assert_eq!(output["prior_owner"], "legacybrain");
+        assert_eq!(
+            output["new_owner"],
+            crate::plan::loops::LOOP_RUNTIME_OWNER_ID
+        );
+        let epic = pm.get_issue(&epic_id).await.expect("epic");
+        assert!(!epic.labels.contains(&old_owner));
+        assert!(!epic.labels.contains(&old_token));
+        assert!(!epic.labels.contains(&old_lease));
+        assert!(epic.labels.contains(&crate::plan::labels::plan_owner(
+            crate::plan::loops::LOOP_RUNTIME_OWNER_ID
+        )));
+        let tokens = epic
+            .labels
+            .iter()
+            .filter_map(|label| crate::plan::labels::parse_plan_owner_token(label))
+            .collect::<Vec<_>>();
+        assert_eq!(tokens.len(), 1, "migration must install one fresh token");
+        assert_ne!(tokens[0], "legacytoken");
+        let leases = epic
+            .labels
+            .iter()
+            .filter_map(|label| crate::plan::labels::parse_plan_owner_lease_expires_at(label))
+            .collect::<Vec<_>>();
+        assert_eq!(leases.len(), 1, "migration must install one fresh lease");
+        assert_ne!(leases[0], 123);
+
+        let visible = pm
+            .list_issues(spur_pm::IssueFilter {
+                labels: vec![
+                    crate::plan::labels::PLAN_COMPLETE.to_string(),
+                    crate::plan::labels::plan_owner(
+                        crate::plan::loops::LOOP_RUNTIME_OWNER_ID,
+                    ),
+                    format!("{}l3", crate::plan::labels::AUTONOMY_PREFIX),
+                ],
+                status: Some("open".to_string()),
+                issue_type: Some("epic".to_string()),
+                ..Default::default()
+            })
+            .await
+            .expect("list system-owned L3 generations");
+        assert!(visible.iter().any(|issue| issue.id == epic_id));
+
+        let audits = parse_audit_comments(
+            pm.advanced()
+                .expect("advanced pm")
+                .list_comments(&epic_id)
+                .await
+                .expect("list comments"),
+        );
+        assert!(audits.iter().any(|audit| matches!(
+            audit,
+            crate::plan::audit_sentinel::AuditSentinelKind::PlanForceReclaimed {
+                plan_id,
+                prior_owner: Some(prior_owner),
+                new_owner,
+                reason: Some(reason),
+                ..
+            } if plan_id == "force-system-l3"
+                && prior_owner == "legacybrain"
+                && new_owner == crate::plan::loops::LOOP_RUNTIME_OWNER_ID
+                && reason == "operator stopped the legacy owner"
+        )));
+    }
+
+    #[tokio::test]
+    async fn force_reclaim_plan_audit_failure_cannot_commit_system_migration() {
+        let session_id = BrainSessionId::new(SessionId("brain".into()));
+        let inner = crate::plan::test_util::MockPm::new().arc();
+        let failing = Arc::new(FailAddCommentPm {
+            inner: Arc::clone(&inner),
+            add_comment_calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let (mut server, _channel) = McpCallbackServer::new(
+            Some(&session_id),
+            None,
+            None,
+            no_op_ctx(),
+            Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+            super::pro_feature_gate(),
+        );
+        server.__test_set_pm_like(Arc::clone(&failing) as Arc<dyn crate::plan::PmLike>);
+        let old_owner = crate::plan::labels::plan_owner("legacy-brain");
+        let epic_id = create_epic(
+            inner.as_ref(),
+            "force-system-l3-audit-fault",
+            vec![
+                crate::plan::labels::PLAN_COMPLETE.to_string(),
+                format!("{}l3", crate::plan::labels::AUTONOMY_PREFIX),
+                crate::plan::labels::loop_id_label("nightly"),
+                crate::plan::labels::loop_generation_label(8),
+                old_owner.clone(),
+                crate::plan::labels::plan_owner_token("legacy-token"),
+                crate::plan::labels::plan_owner_lease_expires_at(123),
+            ],
+        )
+        .await;
+
+        let response = server
+            .handle_force_reclaim_plan(
+                serde_json::Value::from(1),
+                json!({
+                    "plan_id": "force-system-l3-audit-fault",
+                    "target_owner": "system_l3",
+                    "confirm": true,
+                    "reason": "operator confirmed legacy owner stopped"
+                }),
+            )
+            .await;
+
+        let error = response.error.expect("audit failure must fail migration");
+        assert!(error.message.contains("audit"), "{error:?}");
+        assert_eq!(
+            failing
+                .add_comment_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "migration must attempt its required audit"
+        );
+        let epic = inner.issue(&epic_id).await;
+        assert!(epic.labels.contains(&old_owner));
+        assert!(!epic.labels.contains(&crate::plan::labels::plan_owner(
+            crate::plan::loops::LOOP_RUNTIME_OWNER_ID
+        )));
+    }
+
+    #[tokio::test]
+    async fn force_reclaim_plan_rejects_invalid_system_l3_targets() {
+        let (_dir, _workspace, server, pm) = new_beads_server().await;
+        for (plan_id, labels) in [
+            (
+                "force-system-l2",
+                vec![
+                    crate::plan::labels::PLAN_COMPLETE.to_string(),
+                    format!("{}l2", crate::plan::labels::AUTONOMY_PREFIX),
+                    crate::plan::labels::loop_id_label("nightly"),
+                    crate::plan::labels::loop_generation_label(2),
+                ],
+            ),
+            (
+                "force-system-not-generation",
+                vec![
+                    crate::plan::labels::PLAN_COMPLETE.to_string(),
+                    format!("{}l3", crate::plan::labels::AUTONOMY_PREFIX),
+                ],
+            ),
+        ] {
+            let old_owner = crate::plan::labels::plan_owner("legacy-brain");
+            let mut labels = labels;
+            labels.push(old_owner.clone());
+            let epic_id = create_epic(pm.as_ref(), plan_id, labels).await;
+            let response = server
+                .handle_force_reclaim_plan(
+                    serde_json::Value::from(1),
+                    json!({
+                        "plan_id": plan_id,
+                        "target_owner": "system_l3",
+                        "confirm": true
+                    }),
+                )
+                .await;
+            let error = response.error.expect("invalid migration target must fail");
+            assert_eq!(error.code, -32602);
+            assert!(
+                pm.get_issue(&epic_id)
+                    .await
+                    .expect("epic")
+                    .labels
+                    .contains(&old_owner),
+                "rejected migration must preserve the prior owner"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn force_reclaim_plan_requires_explicit_confirmation() {
         let (_dir, _workspace, server, _pm) = new_beads_server().await;
 
         let response = server
             .handle_force_reclaim_plan(
                 serde_json::Value::from(1),
-                json!({ "plan_id": "force-plan" }),
+                json!({
+                    "plan_id": "force-plan",
+                    "target_owner": "system_l3"
+                }),
             )
             .await;
 

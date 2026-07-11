@@ -217,7 +217,7 @@ pub struct McpCallbackServer {
     pub(crate) completed_delegations:
         Arc<tokio::sync::Mutex<HashMap<DelegationId, (DelegationResult, tokio::time::Instant)>>>,
     /// Tracks spawned result-collector tasks for graceful shutdown.
-    pub(crate) task_tracker: TaskTracker,
+    pub(crate) task_tracker: AbortableTaskTracker,
     /// Optional PM service for direct issue/PR operations.
     pub(crate) pm_service: Option<Arc<PmService>>,
     pub(crate) pm_service_like: Option<Arc<dyn crate::plan::PmLike>>,
@@ -398,7 +398,7 @@ impl McpCallbackServer {
             brain_session_id_notify: Arc::new(tokio::sync::Notify::new()),
             active_delegations: Arc::new(tokio::sync::Mutex::new(HashSet::new())),
             completed_delegations: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
-            task_tracker: TaskTracker::new(),
+            task_tracker: AbortableTaskTracker::new(),
             pm_service,
             pm_service_like: None,
             event_sink,
@@ -622,7 +622,7 @@ impl McpCallbackServer {
         Arc::clone(&self.completed_delegations)
     }
 
-    pub fn task_tracker_handle(&self) -> TaskTracker {
+    pub fn task_tracker_handle(&self) -> AbortableTaskTracker {
         self.task_tracker.clone()
     }
 
@@ -660,6 +660,7 @@ impl McpCallbackServer {
 
     pub fn force_abort(&self) {
         self.task_tracker.close();
+        self.task_tracker.abort_all();
         self.root_shutdown_tx.lock().unwrap().take();
         let startup_recovery_handle = {
             let mut state = self.startup_recovery.lock().unwrap();
@@ -675,6 +676,40 @@ impl McpCallbackServer {
         if let Some(handle) = self.root_handle.lock().unwrap().take() {
             handle.abort();
         }
+    }
+
+    /// Force-abort callback-server children and await their termination.
+    /// Used by the project runtime before releasing repository leadership.
+    pub(crate) async fn force_abort_and_wait(&self) {
+        self.task_tracker.close();
+        self.task_tracker.abort_all();
+        self.root_shutdown_tx.lock().unwrap().take();
+        let startup_recovery_handle = {
+            let mut state = self.startup_recovery.lock().unwrap();
+            state.pending = false;
+            state.handle.take()
+        };
+        let reconciler_handle = self.reconciler_handle.lock().unwrap().take();
+        let root_handle = self.root_handle.lock().unwrap().take();
+
+        let startup = async move {
+            if let Some(handle) = startup_recovery_handle {
+                handle.abort_and_wait().await;
+            }
+        };
+        let reconciler = async move {
+            if let Some(handle) = reconciler_handle {
+                handle.abort_and_wait().await;
+            }
+        };
+        let root = async move {
+            if let Some(handle) = root_handle {
+                handle.abort();
+                let _ = handle.await;
+            }
+        };
+        tokio::join!(startup, reconciler, root);
+        self.task_tracker.wait().await;
     }
 
     /// v0a.3: Configure whether the reconciler should be spawned once the

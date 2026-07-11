@@ -68,6 +68,10 @@ pub const LEASE_EXPIRES_AT_PREFIX: &str = "spur:lease-expires-at:";
 pub const PLAN_OWNER_PREFIX: &str = "spur:plan-owner:";
 pub const PLAN_OWNER_TOKEN_PREFIX: &str = "spur:plan-owner-token:";
 pub const PLAN_OWNER_LEASE_EXPIRES_AT_PREFIX: &str = "spur:plan-owner-lease-expires-at:";
+pub const SYSTEM_REVIEW: &str = "spur:system-review";
+pub const REVIEW_TARGET_PREFIX: &str = "spur:review-target:";
+pub const REVIEW_MAKER_DELEGATION_PREFIX: &str = "spur:review-maker-delegation:";
+pub const REVIEW_REVIEWER_DELEGATION_PREFIX: &str = "spur:review-reviewer-delegation:";
 
 fn assert_br_legal_compact_component(component: &str) {
     assert!(
@@ -87,6 +91,18 @@ pub fn compact_label_component(value: &str) -> String {
 
 pub fn delegation_id(delegation_id: &str) -> String {
     format!("{DELEGATION_ID_PREFIX}{delegation_id}")
+}
+
+pub fn review_target(issue_id: &str) -> String {
+    format!("{REVIEW_TARGET_PREFIX}{}", encode_label_id(issue_id))
+}
+
+pub fn review_maker_delegation(delegation_id: &str) -> String {
+    format!("{REVIEW_MAKER_DELEGATION_PREFIX}{delegation_id}")
+}
+
+pub fn review_reviewer_delegation(delegation_id: &str) -> String {
+    format!("{REVIEW_REVIEWER_DELEGATION_PREFIX}{delegation_id}")
 }
 
 pub fn dispatched_base_oid(oid: &str) -> String {
@@ -217,6 +233,25 @@ pub const SOURCE_ISSUE_PREFIX: &str = "spur:source-issue:";
 
 pub fn parse_delegation_id(label: &str) -> Option<&str> {
     label.strip_prefix(DELEGATION_ID_PREFIX)
+}
+
+pub fn parse_review_target(label: &str) -> Option<String> {
+    label
+        .strip_prefix(REVIEW_TARGET_PREFIX)
+        .filter(|value| !value.is_empty())
+        .map(decode_label_id)
+}
+
+pub fn parse_review_maker_delegation(label: &str) -> Option<&str> {
+    label
+        .strip_prefix(REVIEW_MAKER_DELEGATION_PREFIX)
+        .filter(|value| !value.is_empty())
+}
+
+pub fn parse_review_reviewer_delegation(label: &str) -> Option<&str> {
+    label
+        .strip_prefix(REVIEW_REVIEWER_DELEGATION_PREFIX)
+        .filter(|value| !value.is_empty())
 }
 
 pub fn parse_lease_expires_at(label: &str) -> Option<i64> {

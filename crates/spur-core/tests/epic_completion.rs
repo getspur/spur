@@ -102,7 +102,7 @@ fn test_dispatch_ctx() -> ReconcilerDispatchCtx {
     let (delegation_tx, _delegation_rx) = tokio::sync::mpsc::channel(1);
     ReconcilerDispatchCtx {
         delegation_tx,
-        task_tracker: tokio_util::task::TaskTracker::new(),
+        task_tracker: spur_core::server::AbortableTaskTracker::new(),
         brain_session_id: BrainSessionId::new(SessionId("brain".into())),
         event_sink: None,
         materializer: test_materializer(),
@@ -227,10 +227,10 @@ fn mock_dispatch_ctx(
 ) -> (
     ReconcilerDispatchCtx,
     tokio::sync::mpsc::Receiver<spur_core::DelegationRequest>,
-    tokio_util::task::TaskTracker,
+    spur_core::server::AbortableTaskTracker,
 ) {
     let (delegation_tx, delegation_rx) = tokio::sync::mpsc::channel(4);
-    let task_tracker = tokio_util::task::TaskTracker::new();
+    let task_tracker = spur_core::server::AbortableTaskTracker::new();
     (
         ReconcilerDispatchCtx {
             delegation_tx,
@@ -847,7 +847,7 @@ async fn reconciler_pushes_plan_completed_continuation_after_worker_completion_c
 
     let (continuation_tx, mut continuation_rx) = tokio::sync::mpsc::unbounded_channel();
     let (delegation_tx, mut delegation_rx) = tokio::sync::mpsc::channel(1);
-    let task_tracker = tokio_util::task::TaskTracker::new();
+    let task_tracker = spur_core::server::AbortableTaskTracker::new();
     let reconciler = Reconciler::new(
         ReconcilerConfig::default(),
         Arc::clone(&pm),
@@ -994,7 +994,7 @@ async fn t_v0d_2_all_approved_epic_still_yields_plan_ready_to_merge() {
         Arc::new(Notify::new()),
         Some(ReconcilerDispatchCtx {
             delegation_tx,
-            task_tracker: tokio_util::task::TaskTracker::new(),
+            task_tracker: spur_core::server::AbortableTaskTracker::new(),
             brain_session_id: BrainSessionId::new(SessionId("brain".into())),
             event_sink: Some(sink_ref),
             materializer: test_materializer(),
@@ -1144,7 +1144,7 @@ async fn three_task_plan_drops_plan_outcomes_on_epic_close_but_retains_global_ri
     }
 
     let (delegation_tx, mut delegation_rx) = tokio::sync::mpsc::channel(3);
-    let task_tracker = tokio_util::task::TaskTracker::new();
+    let task_tracker = spur_core::server::AbortableTaskTracker::new();
     let mut reconciler = Reconciler::new(
         ReconcilerConfig::default(),
         Arc::clone(&pm),
@@ -1341,7 +1341,7 @@ async fn closed_epic_backfill_emits_plan_completed_event() {
         Arc::new(Notify::new()),
         Some(ReconcilerDispatchCtx {
             delegation_tx,
-            task_tracker: tokio_util::task::TaskTracker::new(),
+            task_tracker: spur_core::server::AbortableTaskTracker::new(),
             brain_session_id: BrainSessionId::new(SessionId("brain".into())),
             event_sink: Some(sink_ref),
             materializer: test_materializer(),
