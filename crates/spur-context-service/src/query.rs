@@ -550,8 +550,9 @@ pub fn list_revisions_and_refs(
         }
     }
 
-    let (truncated, next_cursor) =
-        trim_catalog_page(&mut rows, limit, |row| encode_cursor([row.revision.as_str()]));
+    let (truncated, next_cursor) = trim_catalog_page(&mut rows, limit, |row| {
+        encode_cursor([row.revision.as_str()])
+    });
 
     Ok(CatalogPage {
         level: CatalogLevel::Revisions,
@@ -2074,7 +2075,10 @@ mod pkg_symbol_uri_tests {
     fn round_trips_github_owner_repo_package_with_slash() {
         let uri = build_uri("github", "BurntSushi/memchr", "master", "465192211e73e0bf");
         // Exactly one encoded slash inside the package; URI has 3 literal slashes.
-        assert_eq!(uri.matches('/').count(), 3 + "pkg-symbol://".matches('/').count());
+        assert_eq!(
+            uri.matches('/').count(),
+            3 + "pkg-symbol://".matches('/').count()
+        );
         let parsed = parse_pkg_symbol_uri(&uri).expect("parse");
         assert_eq!(parsed.source, "github");
         assert_eq!(parsed.package, "BurntSushi/memchr");

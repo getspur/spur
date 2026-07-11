@@ -868,49 +868,48 @@ impl ExternalIndexIdentity {
         let source_url = args.source_url.trim();
         let source = args.source.as_deref().map(str::trim);
 
-        let (source, legacy_warm_source, package, source_url, source_kind) = if let Some((
-            url_package,
-            url_revision,
-        )) = crates_io_download_coordinates(source_url, &parsed_url.hostname)
-        {
-            let package = normalize_crates_io_package(package);
-            let url_package = normalize_crates_io_package(url_package);
-            if package != url_package {
-                return Err("source_url_package_mismatch");
-            }
-            if revision != url_revision {
-                return Err("source_url_revision_mismatch");
-            }
+        let (source, legacy_warm_source, package, source_url, source_kind) =
+            if let Some((url_package, url_revision)) =
+                crates_io_download_coordinates(source_url, &parsed_url.hostname)
+            {
+                let package = normalize_crates_io_package(package);
+                let url_package = normalize_crates_io_package(url_package);
+                if package != url_package {
+                    return Err("source_url_package_mismatch");
+                }
+                if revision != url_revision {
+                    return Err("source_url_revision_mismatch");
+                }
 
-            let source = match source {
-                None => DEFAULT_SOURCE.to_owned(),
-                Some(value) if is_crates_io_source_alias(value) => DEFAULT_SOURCE.to_owned(),
-                Some(value) => value.to_owned(),
+                let source = match source {
+                    None => DEFAULT_SOURCE.to_owned(),
+                    Some(value) if is_crates_io_source_alias(value) => DEFAULT_SOURCE.to_owned(),
+                    Some(value) => value.to_owned(),
+                };
+                let legacy_warm_source = args
+                    .source
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| is_legacy_crates_io_source_alias(value))
+                    .map(str::to_owned);
+                let canonical_url =
+                    format!("https://crates.io/api/v1/crates/{package}/{revision}/download");
+                (
+                    source,
+                    legacy_warm_source,
+                    package,
+                    canonical_url,
+                    SourceKind::Tarball,
+                )
+            } else {
+                (
+                    source.unwrap_or(DEFAULT_INDEX_SOURCE).to_owned(),
+                    None,
+                    package.to_owned(),
+                    source_url.to_owned(),
+                    args.source_kind(parsed_url.source_kind),
+                )
             };
-            let legacy_warm_source = args
-                .source
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| is_legacy_crates_io_source_alias(value))
-                .map(str::to_owned);
-            let canonical_url =
-                format!("https://crates.io/api/v1/crates/{package}/{revision}/download");
-            (
-                source,
-                legacy_warm_source,
-                package,
-                canonical_url,
-                SourceKind::Tarball,
-            )
-        } else {
-            (
-                source.unwrap_or(DEFAULT_INDEX_SOURCE).to_owned(),
-                None,
-                package.to_owned(),
-                source_url.to_owned(),
-                args.source_kind(parsed_url.source_kind),
-            )
-        };
         let source_url_hash = source_url_hash(&source_url);
 
         Ok(Self {
