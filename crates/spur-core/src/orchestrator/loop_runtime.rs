@@ -472,8 +472,8 @@ impl ProjectLoopRuntimeInstance for RunningProjectLoopRuntime {
                             active_at_deadline = outcome.active_at_deadline,
                             "project L3 worker MCP server exceeded drain grace"
                         );
-                        worker_server.force_abort_handlers_and_wait().await;
                     }
+                    worker_server.force_abort_handlers_and_wait().await;
                 }
             };
             let server_drain = async move {
@@ -977,7 +977,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn standby_waits_for_permanently_hung_worker_handler_abort() {
+    async fn retirement_keeps_leadership_until_worker_server_acknowledges() {
         let (repo, deps) = runtime_deps_fixture().await;
         let (runtime, system_id) = bare_runtime(&deps, None);
         let funnel: Arc<dyn spur_mcp::McpEventSink> = Arc::new(deps.funnel.clone());
@@ -1023,6 +1023,31 @@ mod tests {
         });
         signal_sink.entered.notified().await;
 
+        let (accept_started_tx, accept_started_rx) = std::sync::mpsc::sync_channel(1);
+        let (accept_release_tx, accept_release_rx) = std::sync::mpsc::sync_channel(1);
+        let accept_loop = tokio::task::spawn_blocking(move || {
+            accept_started_tx.send(()).expect("signal accept start");
+            let _ = accept_release_rx.recv();
+        });
+        let (flusher_started_tx, flusher_started_rx) = std::sync::mpsc::sync_channel(1);
+        let (flusher_release_tx, flusher_release_rx) = std::sync::mpsc::sync_channel(1);
+        let flusher = tokio::task::spawn_blocking(move || {
+            flusher_started_tx.send(()).expect("signal flusher start");
+            let _ = flusher_release_rx.recv();
+        });
+        accept_started_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("accept blocker did not start");
+        flusher_started_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("flusher blocker did not start");
+        let (old_accept, old_flusher) =
+            worker_server.replace_background_handles_for_test(accept_loop, flusher);
+        for handle in [old_accept, old_flusher].into_iter().flatten() {
+            handle.abort();
+            let _ = handle.await;
+        }
+
         let leader_starts = Arc::new(AtomicUsize::new(0));
         let leader_factory = Arc::new(SingleRuntimeFactory {
             runtime: std::sync::Mutex::new(Some(runtime)),
@@ -1046,9 +1071,14 @@ mod tests {
 
         leader.shutdown().await;
         assert_eq!(leader.state(), ProjectLoopRuntimeState::LeaderDraining);
+        tokio::time::sleep(RUNTIME_SHUTDOWN_TIMEOUT + Duration::from_millis(250)).await;
+        let state_before_accept_ack = standby.state();
+        accept_release_tx.send(()).expect("release accept blocker");
         tokio::time::sleep(Duration::from_millis(100)).await;
-        assert_eq!(standby.state(), ProjectLoopRuntimeState::Standby);
-        assert_eq!(standby_factory.starts.load(Ordering::SeqCst), 0);
+        let state_before_flusher_ack = standby.state();
+        flusher_release_tx
+            .send(())
+            .expect("release flusher blocker");
 
         tokio::time::timeout(Duration::from_secs(7), async {
             loop {
@@ -1060,6 +1090,8 @@ mod tests {
         })
         .await
         .expect("standby did not promote after hung handler force-abort");
+        assert_eq!(state_before_accept_ack, ProjectLoopRuntimeState::Standby);
+        assert_eq!(state_before_flusher_ack, ProjectLoopRuntimeState::Standby);
         assert_eq!(worker_server.active_count(), 0);
         assert_eq!(leader_starts.load(Ordering::SeqCst), 1);
         assert_eq!(standby_factory.starts.load(Ordering::SeqCst), 1);
@@ -1067,6 +1099,88 @@ mod tests {
         call.abort();
         let _ = call.await;
         standby.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn zero_active_retirement_rejects_late_handler_and_holds_leadership_for_ack() {
+        let (repo, deps) = runtime_deps_fixture().await;
+        let (runtime, system_id) = bare_runtime(&deps, None);
+        worker_fetcher(&deps, &runtime)
+            .fetch_url_token(&system_id, "late-handler")
+            .await
+            .expect("start worker MCP server");
+        let worker_server = Arc::clone(
+            deps.worker_mcp_servers
+                .get(&system_id)
+                .expect("worker MCP server cached")
+                .value(),
+        );
+
+        let (accept_started_tx, accept_started_rx) = std::sync::mpsc::sync_channel(1);
+        let (accept_release_tx, accept_release_rx) = std::sync::mpsc::sync_channel(1);
+        let accept_loop = tokio::task::spawn_blocking(move || {
+            accept_started_tx.send(()).expect("signal accept start");
+            let _ = accept_release_rx.recv();
+        });
+        let flusher = tokio::spawn(async {});
+        accept_started_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("accept blocker did not start");
+        let (old_accept, old_flusher) =
+            worker_server.replace_background_handles_for_test(accept_loop, flusher);
+        for handle in [old_accept, old_flusher].into_iter().flatten() {
+            handle.abort();
+            let _ = handle.await;
+        }
+
+        let leader_factory = Arc::new(SingleRuntimeFactory {
+            runtime: std::sync::Mutex::new(Some(runtime)),
+            starts: Arc::new(AtomicUsize::new(0)),
+        });
+        let standby_factory = Arc::new(CountingFactory::immediate());
+        let mut leader = ProjectLoopRuntimeSupervisor::start_with(
+            repo.path().to_path_buf(),
+            leader_factory,
+            filesystem_acquirer(),
+            Duration::from_millis(10),
+        );
+        wait_for_state(&leader, ProjectLoopRuntimeState::LeaderRunning).await;
+        let mut standby = ProjectLoopRuntimeSupervisor::start_with(
+            repo.path().to_path_buf(),
+            Arc::clone(&standby_factory) as Arc<dyn ProjectLoopRuntimeFactory>,
+            filesystem_acquirer(),
+            Duration::from_millis(10),
+        );
+        wait_for_state(&standby, ProjectLoopRuntimeState::Standby).await;
+
+        leader.shutdown().await;
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !worker_server.accept_loop_handle_taken_for_test() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("shutdown did not pass the zero-active snapshot");
+        assert_eq!(worker_server.active_count(), 0);
+
+        // Model an already-accepted request entering the lifecycle wrapper
+        // after shutdown observed zero but before the accept task acknowledged.
+        let mut late_handler = worker_server.register_handler_lifecycle_for_test();
+        let late_handler_aborted = late_handler
+            .aborted_within(Duration::from_millis(100))
+            .await;
+        accept_release_tx.send(()).expect("release accept blocker");
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        let leadership_held_for_ack = standby.state() == ProjectLoopRuntimeState::Standby;
+
+        drop(late_handler);
+        wait_for_state(&standby, ProjectLoopRuntimeState::LeaderRunning).await;
+        standby.shutdown().await;
+
+        assert!(
+            late_handler_aborted && leadership_held_for_ack,
+            "late_handler_aborted={late_handler_aborted}, leadership_held_for_ack={leadership_held_for_ack}"
+        );
     }
 
     #[tokio::test]

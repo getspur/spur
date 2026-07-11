@@ -947,32 +947,55 @@ impl McpCallbackServer {
             reason: reason.clone(),
         };
         let body = crate::plan::audit_sentinel::encode_comment(&audit);
-        if let Err(error) = advanced.add_comment(&epic_id, &body).await {
-            return JsonRpcResponse::internal_error(
-                id,
-                format!(
-                    "force_reclaim_plan: required ownership audit failed before owner migration on epic {epic_id}: {error}"
-                ),
-            );
-        }
 
-        if let Err(error) = apply_issue_update(
-            pm,
-            &epic_id,
-            IssueUpdate {
-                add_labels,
-                remove_labels,
-                ..Default::default()
-            },
-        )
-        .await
-        {
-            return JsonRpcResponse::internal_error(
-                id,
-                format!(
-                    "force_reclaim_plan: failed to write owner labels on epic {epic_id}: {error}"
-                ),
-            );
+        if migrate_to_system_l3 {
+            if let Err(error) = pm
+                .update_issue(
+                    &epic_id,
+                    IssueUpdate {
+                        comment: Some(body),
+                        add_labels,
+                        remove_labels,
+                        ..Default::default()
+                    },
+                )
+                .await
+            {
+                return JsonRpcResponse::internal_error(
+                    id,
+                    format!(
+                        "force_reclaim_plan: atomic ownership migration failed on epic {epic_id}: {error}"
+                    ),
+                );
+            }
+        } else {
+            if let Err(error) = advanced.add_comment(&epic_id, &body).await {
+                return JsonRpcResponse::internal_error(
+                    id,
+                    format!(
+                        "force_reclaim_plan: required ownership audit failed before owner migration on epic {epic_id}: {error}"
+                    ),
+                );
+            }
+
+            if let Err(error) = apply_issue_update(
+                pm,
+                &epic_id,
+                IssueUpdate {
+                    add_labels,
+                    remove_labels,
+                    ..Default::default()
+                },
+            )
+            .await
+            {
+                return JsonRpcResponse::internal_error(
+                    id,
+                    format!(
+                        "force_reclaim_plan: failed to write owner labels on epic {epic_id}: {error}"
+                    ),
+                );
+            }
         }
         self.fast_forward_reconciler();
 
