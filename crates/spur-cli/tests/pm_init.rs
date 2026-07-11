@@ -243,7 +243,7 @@ fn spur_init_filters_skills_to_discovered_adapter_only() {
         root.join(".spur").join("skills").is_dir(),
         ".spur/skills/ must always be materialized"
     );
-    // Stubbing `npx` may also satisfy `codex` (npx @zed-industries/codex-acp)
+    // Stubbing `npx` may also satisfy `codex` (the pinned codex-acp npm adapter).
     // — that's discovery doing its job, not a filter bug. We only assert on
     // adapters whose seed agents have NO dependency on `npx`.
     for unwanted in [".gemini", ".kiro", ".opencode", ".cursor", ".kimi"] {

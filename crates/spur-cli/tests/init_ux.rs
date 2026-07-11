@@ -45,6 +45,25 @@ fn install_hints_cover_all_seed_agents() {
 }
 
 #[test]
+fn codex_onboarding_pins_current_acp_adapter() {
+    const ADAPTER: &str = "@agentclientprotocol/codex-acp@1.1.2";
+    let init_source = include_str!("../src/commands/init.rs");
+    let cookbook = include_str!("../../../docs/spur/agent-onboarding-cookbook.md");
+
+    assert_eq!(
+        init_source.matches(ADAPTER).count(),
+        2,
+        "both codex-bin and codex install hints must pin {ADAPTER}"
+    );
+    assert!(
+        cookbook.contains(ADAPTER),
+        "the onboarding cookbook must name the pinned Codex ACP adapter"
+    );
+    assert!(!init_source.contains("@zed-industries/codex-acp"));
+    assert!(!cookbook.contains("@zed-industries/codex-acp"));
+}
+
+#[test]
 fn seed_agents_do_not_include_legacy_claude_stream_json() {
     let seeds = spur_acp::config::load_seed_template();
     let names: Vec<_> = seeds.entries.iter().map(|a| a.name.as_str()).collect();
