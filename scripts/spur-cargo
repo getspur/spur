@@ -49,8 +49,8 @@
 #                     strictly better there.
 #
 # Wrapper options:
-#   --workdir <dir> → run cargo from <dir>, resolved relative to the caller's
-#                     current directory. Defaults to the caller's cwd.
+#   --workdir <dir> / --dir <dir> → run cargo from <dir>, resolved relative to
+#                     the caller's current directory. Defaults to the caller's cwd.
 #
 # See: docs/rca/2026-04-27-sccache-worktree-cache-miss.md
 #      scripts/cloud-build/ — centralized remote build pipeline
@@ -106,18 +106,18 @@ WORKDIR="$ORIGINAL_PWD"
 CARGO_ARGV=()
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --workdir)
+        --workdir|--dir)
             if [[ $# -lt 2 || -z "${2:-}" ]]; then
-                echo "[spur-cargo] --workdir requires a directory" >&2
+                echo "[spur-cargo] --workdir/--dir requires a directory" >&2
                 exit 2
             fi
             WORKDIR="$2"
             shift 2
             ;;
-        --workdir=*)
-            WORKDIR="${1#--workdir=}"
+        --workdir=*|--dir=*)
+            WORKDIR="${1#*=}"
             if [[ -z "$WORKDIR" ]]; then
-                echo "[spur-cargo] --workdir requires a directory" >&2
+                echo "[spur-cargo] --workdir/--dir requires a directory" >&2
                 exit 2
             fi
             shift
