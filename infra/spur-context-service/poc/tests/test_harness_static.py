@@ -26,6 +26,10 @@ HARNESS_FILES = (
     "terraform.tfvars.example",
     "backends/poc.s3.tfbackend.example",
     "fixtures/evidence-cases.json",
+    "fixtures/api-key-authorizer-events.json",
+    "fixtures/api-key-management-events.json",
+    "fixtures/api-key-gateway-evidence.json",
+    "fixtures/api-key-cleanup-capacity.json",
     "fixtures/external-index-validation-only.json",
     "fixtures/empty-inventory.json",
     "fixtures/sanitized-plan-log.json",
@@ -60,6 +64,15 @@ REQUIRED_CASES = {
     "anonymous_internal_compatibility",
     "token_endpoint_redirect_rejection",
     "validation_only_external_index",
+    "api_key_authorizer_allow",
+    "api_key_authorizer_deny",
+    "api_key_management_create",
+    "api_key_management_list",
+    "api_key_management_revoke",
+    "api_key_header_removal",
+    "api_key_allow_deny_cache",
+    "api_key_revocation_slo",
+    "api_key_cleanup_burst_capacity",
 }
 
 
@@ -105,6 +118,39 @@ class PocHarnessStaticTests(unittest.TestCase):
             with self.subTest(required_contract=required_contract):
                 self.assertIn(required_contract, readme)
 
+    def test_production_operator_runbook_covers_the_api_key_lifecycle(self) -> None:
+        readme = (INFRA_ROOT / "README.md").read_text(encoding="utf-8")
+        for heading in (
+            "### API-key enablement and discovery",
+            "### CLI-managed personal keys",
+            "### Headless credential delivery",
+            "### API-key revocation and emergency route kill switch",
+            "### Cleanup capacity and cursor lag",
+            "### Owner offboarding",
+            "### API-key metrics and cost evidence",
+            "### API-key rollback and teardown",
+        ):
+            with self.subTest(heading=heading):
+                self.assertIn(heading, readme)
+
+        for required_contract in (
+            "api_key_auth_enabled=true",
+            "/.well-known/spur-context-service",
+            "spur context auth login",
+            "spur context key create",
+            "spur context key use",
+            "spur context key revoke",
+            "spur context key add --stdin",
+            "SPUR_CONTEXT_SERVICE_API_KEY",
+            "30-second revocation SLO",
+            "POST /mcp/api-key",
+            "1,200 records/hour",
+            "232 keys/hour",
+            "revoke-by-owner",
+        ):
+            with self.subTest(required_contract=required_contract):
+                self.assertIn(required_contract, readme)
+
     def test_evidence_manifest_covers_the_approved_matrix(self) -> None:
         manifest = json.loads(
             (POC_ROOT / "fixtures/evidence-cases.json").read_text(encoding="utf-8")
@@ -112,6 +158,106 @@ class PocHarnessStaticTests(unittest.TestCase):
         case_ids = {case["id"] for case in manifest["cases"]}
         self.assertEqual(REQUIRED_CASES, case_ids)
         self.assertTrue(all(case["mode"] == "offline" for case in manifest["cases"]))
+
+    def test_api_key_evidence_fixtures_are_synthetic_bounded_and_offline(self) -> None:
+        authorizer = json.loads(
+            (POC_ROOT / "fixtures/api-key-authorizer-events.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        management = json.loads(
+            (POC_ROOT / "fixtures/api-key-management-events.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        gateway = json.loads(
+            (POC_ROOT / "fixtures/api-key-gateway-evidence.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        capacity = json.loads(
+            (POC_ROOT / "fixtures/api-key-cleanup-capacity.json").read_text(
+                encoding="utf-8"
+            )
+        )
+
+        self.assertEqual(1, authorizer["schema_version"])
+        self.assertEqual("offline-synthetic", authorizer["evidence_state"])
+        self.assertEqual(
+            {"allow", "deny"},
+            {event["expected_decision"] for event in authorizer["events"]},
+        )
+        for event in authorizer["events"]:
+            self.assertEqual("POST /mcp/api-key", event["route_key"])
+            self.assertTrue(event["api_key"].startswith("spur_test_"))
+            self.assertNotIn("spur_live_", event["api_key"])
+
+        self.assertEqual(
+            {
+                ("POST", "/auth/api-keys"),
+                ("GET", "/auth/api-keys"),
+                ("DELETE", "/auth/api-keys/aaaaaaaaaaaaaaaaaaaaaaaaaa"),
+            },
+            {(event["method"], event["path"]) for event in management["events"]},
+        )
+        self.assertTrue(
+            all(
+                event["expected_owner"] == "cognito:user:fixture-human"
+                for event in management["events"]
+            )
+        )
+
+        self.assertEqual("not-observed-offline", gateway["live_observation_status"])
+        self.assertEqual(30, gateway["authorizer_cache_seconds"])
+        self.assertEqual(30, gateway["revocation_slo_seconds"])
+        self.assertEqual("remove:header.X-SPUR-API-Key", gateway["header_mapping_key"])
+        self.assertEqual(["allow", "deny"], gateway["cache_decisions"])
+
+        self.assertEqual(500_000, capacity["supported_active_keys"])
+        self.assertEqual(232, capacity["steady_state_expiries_per_hour"])
+        self.assertEqual(1_200, capacity["configured_capacity_per_hour"])
+        self.assertEqual(100, capacity["max_records_per_invocation"])
+        self.assertEqual(12, capacity["invocations_per_hour"])
+        self.assertGreater(
+            capacity["configured_capacity_per_hour"],
+            capacity["steady_state_expiries_per_hour"],
+        )
+
+    def test_poc_api_key_plan_is_disabled_by_default_and_isolated_when_enabled(self) -> None:
+        terraform = "\n".join(
+            path.read_text(encoding="utf-8") for path in POC_ROOT.glob("*.tf")
+        )
+        for required_contract in (
+            'variable "api_key_auth_enabled"',
+            'default     = false',
+            'resource "aws_dynamodb_table" "api_keys"',
+            'resource "aws_lambda_function" "api_key_authorizer"',
+            'resource "aws_lambda_function" "api_key_cleanup"',
+            'resource "aws_apigatewayv2_route" "api_key_mcp"',
+            'resource "aws_apigatewayv2_route" "api_key_management"',
+            'resource "aws_cloudwatch_event_rule" "api_key_cleanup"',
+            '"remove:header.X-SPUR-API-Key"',
+            'SPUR_API_KEY_ENVIRONMENT',
+            '"test"',
+            'detail-type = "Scheduled Event"',
+            'operation = "sweep_expired_api_keys"',
+        ):
+            with self.subTest(required_contract=required_contract):
+                self.assertIn(required_contract, terraform)
+
+    def test_offline_runner_executes_cross_component_api_key_regressions(self) -> None:
+        runner = (POC_ROOT / "scripts/offline-smoke.sh").read_text(encoding="utf-8")
+        for required_regression in (
+            "api_key_fixture_",
+            "scheduled_drainer_fixture_bypasses_http_deserialization_and_auth",
+            "hybrid_auth_fixture_covers_scope_identity_denial_and_route_contracts",
+            "personal_api_keys_reuse_one_human_owner_for_rate_dedupe_queue_and_status",
+            "five_minute_schedule_drains_steady_state_bucket_without_double_decrement",
+            "scripts/spur-cargo test -p spur-core context_service",
+            "scripts/spur-cargo test -p spur-cli --test context_auth_cli",
+        ):
+            with self.subTest(required_regression=required_regression):
+                self.assertIn(required_regression, runner)
 
     def test_external_index_fixture_is_validation_only(self) -> None:
         fixture = json.loads(
@@ -239,6 +385,21 @@ class PocHarnessStaticTests(unittest.TestCase):
             text=True,
         )
         self.assertEqual(0, verified.returncode, verified.stderr)
+
+    def test_teardown_inventory_covers_api_key_resources(self) -> None:
+        inventory = json.loads(
+            (POC_ROOT / "fixtures/empty-inventory.json").read_text(encoding="utf-8")
+        )
+        for category in (
+            "api_key_tables",
+            "api_key_authorizers",
+            "api_key_cleanup_functions",
+            "api_key_cleanup_rules",
+            "api_key_cleanup_targets",
+            "lambda_resource_policies",
+        ):
+            with self.subTest(category=category):
+                self.assertEqual([], inventory[category])
 
     def test_teardown_verifier_rejects_a_mismatched_poc_id(self) -> None:
         rejected = subprocess.run(
