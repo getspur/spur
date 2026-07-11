@@ -1,16 +1,11 @@
 {
-  "jsonrpc": "2.0",
-  "id": "fixture-validation-only",
-  "method": "tools/call",
-  "params": {
-    "name": "external_index",
-    "arguments": {
-      "package": "validation-only-fixture",
-      "revision": "offline",
-      "source_url": "https://validation-only.invalid/spur-context-poc.tar.gz",
-      "source_kind": "tarball",
-      "force": false
-    }
+  "tool": "external_index",
+  "args": {
+    "package": "validation-only-fixture",
+    "revision": "offline",
+    "source_url": "https://validation-only.invalid/spur-context-poc.tar.gz",
+    "source_kind": "tarball",
+    "force": false
   },
   "poc_assertions": {
     "queue_caps": {

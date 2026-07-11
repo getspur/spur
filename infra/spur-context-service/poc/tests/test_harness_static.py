@@ -14,6 +14,7 @@ from urllib.parse import urlsplit
 
 
 POC_ROOT = Path(__file__).resolve().parents[1]
+INFRA_ROOT = POC_ROOT.parent
 HARNESS_FILES = (
     "README.md",
     "versions.tf",
@@ -76,6 +77,34 @@ class PocHarnessStaticTests(unittest.TestCase):
         missing = [relative for relative in HARNESS_FILES if not (POC_ROOT / relative).is_file()]
         self.assertEqual([], missing)
 
+    def test_production_operator_runbook_covers_the_auth_lifecycle(self) -> None:
+        readme = (INFRA_ROOT / "README.md").read_text(encoding="utf-8")
+        for heading in (
+            "### Enablement and discovery",
+            "### Credential delivery and rotation",
+            "### TTL and audience risk gates",
+            "### Monitoring",
+            "### Rollback",
+            "### Teardown",
+        ):
+            with self.subTest(heading=heading):
+                self.assertIn(heading, readme)
+
+        for required_contract in (
+            "cognito_issuer",
+            "oauth_api_url",
+            "/.well-known/openid-configuration",
+            "/oauth2/token",
+            "approved secret manager",
+            "six-hour",
+            "49 enabled M2M",
+            "401/403/429",
+            "anonymous-internal",
+            "cognito_user_pool_deletion_protection=false",
+        ):
+            with self.subTest(required_contract=required_contract):
+                self.assertIn(required_contract, readme)
+
     def test_evidence_manifest_covers_the_approved_matrix(self) -> None:
         manifest = json.loads(
             (POC_ROOT / "fixtures/evidence-cases.json").read_text(encoding="utf-8")
@@ -90,15 +119,19 @@ class PocHarnessStaticTests(unittest.TestCase):
                 encoding="utf-8"
             )
         )
-        self.assertEqual("external_index", fixture["params"]["name"])
+        self.assertEqual(
+            {"tool", "args", "poc_assertions"},
+            set(fixture),
+        )
+        self.assertEqual("external_index", fixture["tool"])
         self.assertEqual(
             {"package", "revision", "source_url", "source_kind", "force"},
-            set(fixture["params"]["arguments"]),
+            set(fixture["args"]),
         )
         self.assertEqual(0, fixture["poc_assertions"]["queue_caps"]["running"])
         self.assertEqual(0, fixture["poc_assertions"]["queue_caps"]["queued"])
         self.assertTrue(
-            fixture["params"]["arguments"]["source_url"].startswith(
+            fixture["args"]["source_url"].startswith(
                 "https://validation-only.invalid/"
             )
         )
@@ -120,9 +153,7 @@ class PocHarnessStaticTests(unittest.TestCase):
             for value in match.group(1).split(",")
             if value.strip()
         ]
-        source_host = urlsplit(
-            fixture["params"]["arguments"]["source_url"]
-        ).hostname
+        source_host = urlsplit(fixture["args"]["source_url"]).hostname
 
         self.assertEqual(["poc-no-source.invalid"], allowed_domains)
         self.assertEqual("validation-only.invalid", source_host)

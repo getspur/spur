@@ -22,6 +22,6 @@
     {"id": "iam_legacy_compatibility", "mode": "offline", "principal_fixture": "iam:fixture-account:fixture-principal", "expected": "IAM path admitted without Cognito issuance"},
     {"id": "anonymous_internal_compatibility", "mode": "offline", "authorization_fixture": "NONE plus anonymous flag", "expected_owner": "anonymous-internal", "expected": "legacy status owner preserved"},
     {"id": "token_endpoint_redirect_rejection", "mode": "offline", "evidence": "auth-client security redirect test", "expected": "redirect not followed and request not replayed"},
-    {"id": "validation_only_external_index", "mode": "offline", "fixture": "external-index-validation-only.json", "expected": "domain-not-allowlisted rejection before DNS, rate accounting, DynamoDB, enqueue, or dispatch"}
+    {"id": "validation_only_external_index", "mode": "offline", "fixture": "external-index-validation-only.json", "expected": "direct tool/args OAuth body parses as external_index, then reaches domain-not-allowlisted rejection before DNS, rate accounting, DynamoDB, enqueue, or dispatch"}
   ]
 }
