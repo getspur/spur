@@ -167,3 +167,30 @@ output "oauth_api_url" {
   description = "Exact JWT-protected OAuth API URL, or null when Cognito is disabled."
   value       = var.cognito_auth_enabled ? "${aws_apigatewayv2_api.http.api_endpoint}/mcp/oauth" : null
 }
+
+# API-key outputs deliberately expose discovery metadata only. Raw keys,
+# digests, authorizer context, and Cognito credentials are never outputs.
+output "api_key_auth_enabled" {
+  description = "Whether the additive personal API-key infrastructure is enabled."
+  value       = var.api_key_auth_enabled
+}
+
+output "api_key_table_name" {
+  description = "Dedicated personal API-key DynamoDB table name, or null when API-key auth is disabled."
+  value       = var.api_key_auth_enabled ? aws_dynamodb_table.api_keys[0].name : null
+}
+
+output "api_key_mcp_url" {
+  description = "Exact CUSTOM-authorized personal API-key MCP URL, or null when API-key auth is disabled."
+  value       = var.api_key_auth_enabled ? "${aws_apigatewayv2_api.http.api_endpoint}/mcp/api-key" : null
+}
+
+output "api_key_management_url" {
+  description = "Exact Cognito JWT-protected personal API-key management collection URL, or null when API-key auth is disabled."
+  value       = var.api_key_auth_enabled ? "${aws_apigatewayv2_api.http.api_endpoint}/auth/api-keys" : null
+}
+
+output "api_key_authorizer_function_name" {
+  description = "Lean personal API-key authorizer Lambda function name, or null when API-key auth is disabled."
+  value       = var.api_key_auth_enabled ? aws_lambda_function.api_key_authorizer[0].function_name : null
+}
