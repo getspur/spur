@@ -9,6 +9,8 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use toml::value::Table;
 
+use spur_acp::config::ContextServiceAuthMode;
+
 pub fn run(repo_root: &Path, key: &str, value: &str, global: bool) -> Result<()> {
     let target = resolve_target_path(repo_root, global)?;
 
@@ -57,6 +59,45 @@ fn set_config_value(target: &Path, key: &str, value: toml::Value) -> Result<()> 
     let path_segments = key.split('.').collect::<Vec<_>>();
     set_key_path(&mut table, &path_segments, value);
     write_table_atomic(target, table)
+}
+
+pub(crate) fn set_context_service_selection(
+    repo_root: &Path,
+    url: &str,
+    auth_mode: ContextServiceAuthMode,
+    profile: &str,
+    public_id_hint: Option<&str>,
+) -> Result<()> {
+    let target = repo_root.join(".spur").join("config.toml");
+    if let Some(parent) = target.parent() {
+        std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    }
+    let mut table = read_target_table(&target)?;
+    let mut context = Table::new();
+    context.insert("url".to_owned(), toml::Value::String(url.to_owned()));
+    context.insert(
+        "auth_mode".to_owned(),
+        toml::Value::String(
+            match auth_mode {
+                ContextServiceAuthMode::None => "none",
+                ContextServiceAuthMode::OAuthBearer => "oauth_bearer",
+                ContextServiceAuthMode::ApiKey => "api_key",
+            }
+            .to_owned(),
+        ),
+    );
+    context.insert(
+        "profile".to_owned(),
+        toml::Value::String(profile.to_owned()),
+    );
+    if let Some(public_id) = public_id_hint {
+        context.insert(
+            "public_id_hint".to_owned(),
+            toml::Value::String(public_id.to_owned()),
+        );
+    }
+    table.insert("context_service".to_owned(), toml::Value::Table(context));
+    write_table_atomic(&target, table)
 }
 
 fn read_target_table(target: &Path) -> Result<Table> {
