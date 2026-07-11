@@ -91,6 +91,16 @@ pub fn render_for_kind(profile: &AgentProfile, kind: AgentKind) -> Option<Render
     }
 }
 
+/// Claude agent frontmatter `tools:` is an allowlist — a profile that
+/// restricts tools hides every MCP tool from the selected agent, including
+/// the `spur-worker-mcp` server the delegation ships. Append `extra_tools`
+/// to an existing allowlist so restricted personas keep the worker MCP
+/// surface. Profiles without a `tools:` line inherit all tools and are
+/// returned unchanged.
+pub fn augment_tools_allowlist(profile: &AgentProfile, _extra_tools: &[String]) -> AgentProfile {
+    profile.clone()
+}
+
 fn log_tools_drop(profile: &AgentProfile) {
     if let Some(tools) = &profile.tools {
         tracing::debug!(
@@ -637,6 +647,64 @@ mod tests {
         assert!(r
             .contents
             .starts_with("---\ndescription: Reviews diffs\n---\n"));
+    }
+
+    fn worker_mcp_extras() -> Vec<String> {
+        vec![
+            "mcp__spur-worker-mcp__report_progress".to_string(),
+            "mcp__spur-worker-mcp__code_read_symbol".to_string(),
+        ]
+    }
+
+    #[test]
+    fn augment_appends_worker_mcp_tools_to_existing_allowlist() {
+        let augmented = augment_tools_allowlist(&profile_with_tools(), &worker_mcp_extras());
+        let expected = "Read, Edit, mcp__spur-worker-mcp__report_progress, mcp__spur-worker-mcp__code_read_symbol";
+        assert_eq!(augmented.tools.as_deref(), Some(expected));
+        assert!(
+            augmented.raw.contains(&format!("tools: {expected}")),
+            "raw frontmatter must carry the augmented allowlist; got {:?}",
+            augmented.raw
+        );
+        let reparsed =
+            crate::agent_profiles::AgentProfile::parse("code-reviewer", &augmented.raw).unwrap();
+        assert_eq!(reparsed.body, profile_with_tools().body);
+        assert_eq!(reparsed.description, profile_with_tools().description);
+        assert_eq!(reparsed.tools.as_deref(), Some(expected));
+    }
+
+    #[test]
+    fn augment_dedupes_tools_already_in_the_allowlist() {
+        let profile = crate::agent_profiles::AgentProfile::parse(
+            "code-reviewer",
+            "---\nname: code-reviewer\ndescription: Reviews diffs\ntools: Read, mcp__spur-worker-mcp__report_progress\n---\nYou review code.\n",
+        )
+        .unwrap();
+        let augmented = augment_tools_allowlist(&profile, &worker_mcp_extras());
+        assert_eq!(
+            augmented.tools.as_deref(),
+            Some("Read, mcp__spur-worker-mcp__report_progress, mcp__spur-worker-mcp__code_read_symbol")
+        );
+    }
+
+    #[test]
+    fn augment_leaves_profiles_without_tools_line_unchanged() {
+        let original = profile();
+        let augmented = augment_tools_allowlist(&original, &worker_mcp_extras());
+        assert_eq!(augmented, original);
+    }
+
+    #[test]
+    fn augmented_profile_renders_managed_claude_file() {
+        let augmented = augment_tools_allowlist(&profile_with_tools(), &worker_mcp_extras());
+        let rendered = render_for_kind(&augmented, AgentKind::ClaudeCodeAcp).unwrap();
+        assert!(rendered
+            .contents
+            .contains("mcp__spur-worker-mcp__report_progress"));
+        assert_eq!(
+            classify_existing(&rendered, &rendered.contents).unwrap(),
+            ExistingProfile::Unchanged
+        );
     }
 
     // Claim D regression guard: extract_marker must find a marker on a body
