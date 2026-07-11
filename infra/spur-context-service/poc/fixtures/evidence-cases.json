@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "artifact_policy": "sanitized-offline-only",
+  "cases": [
+    {"id": "human_pkce_s256_success", "mode": "offline", "evidence": "auth-client human_pkce fresh S256 test", "expected": "unique challenge and verifier accepted"},
+    {"id": "human_oidc_validation_success", "mode": "offline", "evidence": "auth-client human_oidc signed fixture test", "expected": "issuer audience signature nonce and access hash accepted"},
+    {"id": "human_wrong_verifier_failure", "mode": "offline", "evidence": "auth-client token exchange mock", "expected": "exchange rejected and API not called"},
+    {"id": "human_reused_state_failure", "mode": "offline", "evidence": "auth-client one-time state test", "expected": "callback rejected"},
+    {"id": "m2m_basic_success", "mode": "offline", "evidence": "auth-client m2m_http request-shape test", "expected": "Basic client authentication and no body credential"},
+    {"id": "m2m_token_cache_success", "mode": "offline", "evidence": "auth-client m2m_cache single-flight test", "expected": "cache key is client plus normalized scopes"},
+    {"id": "m2m_read_scope_success", "mode": "offline", "scope": "external.read", "expected": "read tools admitted"},
+    {"id": "m2m_index_scope_success", "mode": "offline", "scope": "external.index", "expected": "validation-only index reaches source validation"},
+    {"id": "m2m_status_scope_success", "mode": "offline", "scope": "external.status", "expected": "same owner may poll status"},
+    {"id": "m2m_missing_scope_failure", "mode": "offline", "scope": "external.read", "requested_tool": "external_index", "expected": "missing_scope"},
+    {"id": "missing_token_failure", "mode": "offline", "credential_fixture": "absent", "expected": "unauthorized"},
+    {"id": "wrong_token_failure", "mode": "offline", "credential_fixture": "synthetic-invalid-shape", "expected": "unauthorized"},
+    {"id": "expired_token_failure", "mode": "offline", "claim_fixture": "expired-time-marker", "expected": "token_expired"},
+    {"id": "id_token_rejection", "mode": "offline", "token_use_fixture": "id", "expected": "wrong_token_use"},
+    {"id": "denylisted_client_rejection", "mode": "offline", "client_fixture": "denylisted-client", "expected": "denylisted_client"},
+    {"id": "cross_owner_status_isolation", "mode": "offline", "job_owner": "cognito:client:fixture-client-a", "poll_owner": "cognito:client:fixture-client-b", "expected": "not_found"},
+    {"id": "secret_overlap_same_owner", "mode": "offline", "client_fixture": "fixture-client-a", "secret_descriptors": ["current", "next"], "expected_owner": "cognito:client:fixture-client-a", "expected": "both descriptors retain one owner; no values captured"},
+    {"id": "iam_legacy_compatibility", "mode": "offline", "principal_fixture": "iam:fixture-account:fixture-principal", "expected": "IAM path admitted without Cognito issuance"},
+    {"id": "anonymous_internal_compatibility", "mode": "offline", "authorization_fixture": "NONE plus anonymous flag", "expected_owner": "anonymous-internal", "expected": "legacy status owner preserved"},
+    {"id": "token_endpoint_redirect_rejection", "mode": "offline", "evidence": "auth-client security redirect test", "expected": "redirect not followed and request not replayed"},
+    {"id": "validation_only_external_index", "mode": "offline", "fixture": "external-index-validation-only.json", "expected": "domain-not-allowlisted rejection before DNS, rate accounting, DynamoDB, enqueue, or dispatch"}
+  ]
+}

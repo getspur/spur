@@ -1,0 +1,15 @@
+# Safe, version-controlled placeholders. This file deliberately plans no AWS
+# resources. Copy it outside version control, replace every marker with sandbox
+# metadata, and follow README.md before setting poc_enabled=true.
+poc_enabled          = false
+creation_confirmation = "offline-only"
+aws_region            = "us-east-1"
+poc_suffix            = "replace-me"
+poc_owner             = "replace-with-owner"
+cost_center           = "replace-with-cost-center"
+lambda_zip_path       = "./artifacts/spur-context-service-poc.zip"
+
+# Live POC compatibility defaults remain IAM-only and fail closed.
+legacy_authorization_type = "AWS_IAM"
+allow_anonymous_mutations = false
+emergency_deny_client_ids = []

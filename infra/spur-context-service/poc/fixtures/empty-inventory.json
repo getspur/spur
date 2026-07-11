@@ -1,0 +1,16 @@
+{
+  "poc_id": "fixture-empty",
+  "tagged_resources": [],
+  "cognito_user_pools": [],
+  "cognito_domains": [],
+  "cognito_resource_servers": [],
+  "cognito_app_clients": [],
+  "api_gateway_apis": [],
+  "lambda_functions": [],
+  "lambda_versions": [],
+  "lambda_aliases": [],
+  "dynamodb_tables": [],
+  "cloudwatch_log_groups": [],
+  "iam_roles": [],
+  "iam_policies": []
+}
