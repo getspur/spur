@@ -1,6 +1,7 @@
 //! DuckLake-backed code context service for external packages.
 
 pub mod abuse;
+pub mod api_keys;
 mod auth;
 pub mod catalog;
 pub mod drainer;
