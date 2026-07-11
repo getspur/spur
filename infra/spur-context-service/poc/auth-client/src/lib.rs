@@ -242,7 +242,7 @@ pub fn secure_http_client() -> Result<reqwest::Client, ClientError> {
         .map_err(|_| ClientError::InvalidConfiguration)
 }
 
-/// M2M client-credentials client. The next TDD step adds its shared cache.
+/// M2M client-credentials client backed by a shared in-memory token cache.
 #[derive(Clone)]
 pub struct M2mClient {
     config: Arc<M2mConfig>,
@@ -271,60 +271,62 @@ impl M2mClient {
             scopes: self.config.scopes.clone(),
         };
 
-        loop {
-            let waiting_for_leader = {
-                let mut state = self.cache.state.lock().await;
-                let now = Instant::now();
-                if let Some(cached) = state.entries.get(&key) {
-                    if now < cached.refresh_at && now < cached.expires_at {
-                        return Ok(cached.access_token.clone());
-                    }
-                }
-
-                if let Some(waiters) = state.in_flight.get_mut(&key) {
-                    let (sender, receiver) = oneshot::channel();
-                    waiters.push(sender);
-                    Some(receiver)
-                } else {
-                    state.in_flight.insert(key.clone(), Vec::new());
-                    None
-                }
-            };
-
-            if let Some(receiver) = waiting_for_leader {
-                let _ = receiver.await;
-                continue;
-            }
-
-            let result = self
-                .request_token()
-                .await
-                .and_then(|(access_token, expires_in)| {
-                    let issued_at = Instant::now();
-                    let expires_at = issued_at
-                        .checked_add(expires_in)
-                        .ok_or(ClientError::TokenResponseInvalid)?;
-                    let refresh_at = refresh_at(issued_at, expires_in)
-                        .ok_or(ClientError::TokenResponseInvalid)?;
-                    Ok((access_token, refresh_at, expires_at))
-                });
+        let receiver = {
             let mut state = self.cache.state.lock().await;
-            if let Ok((access_token, refresh_at, expires_at)) = &result {
-                state.entries.insert(
-                    key.clone(),
-                    CachedToken {
-                        access_token: access_token.clone(),
-                        expires_at: *expires_at,
-                        refresh_at: *refresh_at,
-                    },
-                );
+            let now = Instant::now();
+            if let Some(cached) = state.entries.get(&key) {
+                if now < cached.refresh_at && now < cached.expires_at {
+                    return Ok(cached.access_token.clone());
+                }
             }
-            let waiters = state.in_flight.remove(&key).unwrap_or_default();
-            drop(state);
-            for waiter in waiters {
-                let _ = waiter.send(());
+
+            let (sender, receiver) = oneshot::channel();
+            if let Some(waiters) = state.in_flight.get_mut(&key) {
+                waiters.push(sender);
+            } else {
+                state.in_flight.insert(key.clone(), vec![sender]);
+                let client = self.clone();
+                drop(tokio::spawn(async move {
+                    client.fetch_and_publish_token(key).await;
+                }));
             }
-            return result.map(|(access_token, _, _)| access_token);
+            receiver
+        };
+
+        receiver
+            .await
+            .unwrap_or(Err(ClientError::TokenRequestFailed))
+    }
+
+    async fn fetch_and_publish_token(self, key: CacheKey) {
+        let result = self
+            .request_token()
+            .await
+            .and_then(|(access_token, expires_in)| {
+                let issued_at = Instant::now();
+                let expires_at = issued_at
+                    .checked_add(expires_in)
+                    .ok_or(ClientError::TokenResponseInvalid)?;
+                let refresh_at =
+                    refresh_at(issued_at, expires_in).ok_or(ClientError::TokenResponseInvalid)?;
+                Ok((access_token, refresh_at, expires_at))
+            });
+        let mut state = self.cache.state.lock().await;
+        if let Ok((access_token, refresh_at, expires_at)) = &result {
+            state.entries.insert(
+                key.clone(),
+                CachedToken {
+                    access_token: access_token.clone(),
+                    expires_at: *expires_at,
+                    refresh_at: *refresh_at,
+                },
+            );
+        }
+        let waiters = state.in_flight.remove(&key).unwrap_or_default();
+        drop(state);
+        let result = result.map(|(access_token, _, _)| access_token);
+        for waiter in waiters {
+            let _ = waiter.send(result.clone());
         }
     }
 
@@ -374,7 +376,7 @@ struct CachedToken {
 #[derive(Default)]
 struct CacheState {
     entries: HashMap<CacheKey, CachedToken>,
-    in_flight: HashMap<CacheKey, Vec<oneshot::Sender<()>>>,
+    in_flight: HashMap<CacheKey, Vec<oneshot::Sender<Result<AccessToken, ClientError>>>>,
 }
 
 /// A process-local M2M token cache. It does not persist bearer values.

@@ -1,8 +1,18 @@
-use std::{sync::Arc, time::Duration};
+use std::{
+    future::{poll_fn, Future},
+    sync::Arc,
+    task::Poll,
+    time::Duration,
+};
 
 use rand::{distributions::Alphanumeric, Rng};
-use spur_context_auth_client::{M2mClient, M2mConfig, SecretString, TokenCache};
+use spur_context_auth_client::{
+    AccessToken, ClientError, M2mClient, M2mConfig, SecretString, TokenCache,
+};
 use wiremock::{matchers, Mock, MockServer, ResponseTemplate};
+
+const REGRESSION_TIMEOUT: Duration = Duration::from_secs(2);
+const CONCURRENT_CALLERS: usize = 8;
 
 fn generated_opaque_value() -> String {
     rand::thread_rng()
@@ -21,6 +31,147 @@ fn test_client(server: &MockServer) -> M2mClient {
     )
     .expect("test configuration is valid");
     M2mClient::new(config).expect("client configuration is valid")
+}
+
+async fn wait_for_request_count(server: &MockServer, expected: usize) {
+    tokio::time::timeout(REGRESSION_TIMEOUT, async {
+        loop {
+            let requests = server
+                .received_requests()
+                .await
+                .expect("requests are recorded");
+            if requests.len() >= expected {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("mock server observes the request before the regression timeout");
+}
+
+async fn call_concurrently(
+    client: &M2mClient,
+    caller_count: usize,
+) -> Vec<Result<AccessToken, ClientError>> {
+    let mut calls = (0..caller_count)
+        .map(|_| Some(Box::pin(client.access_token())))
+        .collect::<Vec<_>>();
+    let mut results = (0..caller_count).map(|_| None).collect::<Vec<_>>();
+
+    poll_fn(|context| {
+        for (call, result) in calls.iter_mut().zip(&mut results) {
+            let Some(future) = call else {
+                continue;
+            };
+            if let Poll::Ready(value) = future.as_mut().poll(context) {
+                *call = None;
+                *result = Some(value);
+            }
+        }
+        if calls.iter().all(Option::is_none) {
+            Poll::Ready(
+                results
+                    .iter_mut()
+                    .map(|result| result.take().expect("completed call has a result"))
+                    .collect(),
+            )
+        } else {
+            Poll::Pending
+        }
+    })
+    .await
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn concurrent_endpoint_failure_is_shared_by_every_caller() {
+    let server = MockServer::start().await;
+    Mock::given(matchers::method("POST"))
+        .and(matchers::path("/oauth2/token"))
+        .respond_with(ResponseTemplate::new(503))
+        .mount(&server)
+        .await;
+
+    let client = test_client(&server);
+    tokio::time::timeout(
+        REGRESSION_TIMEOUT,
+        call_concurrently(&client, CONCURRENT_CALLERS),
+    )
+    .await
+    .expect("all callers receive the shared endpoint failure")
+    .into_iter()
+    .for_each(|result| {
+        assert_eq!(result.err(), Some(ClientError::TokenRequestFailed));
+    });
+
+    let requests = server
+        .received_requests()
+        .await
+        .expect("requests are recorded");
+    assert_eq!(requests.len(), 1, "one failed token flight is shared");
+}
+
+#[tokio::test]
+async fn aborting_initiator_does_not_cancel_or_poison_token_acquisition() {
+    let server = MockServer::start().await;
+    let expected_token = generated_opaque_value();
+    let response = serde_json::json!({
+        "access_token": expected_token,
+        "token_type": "Bearer",
+        "expires_in": 300
+    });
+    Mock::given(matchers::method("POST"))
+        .and(matchers::path("/oauth2/token"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_delay(Duration::from_millis(250))
+                .set_body_json(response),
+        )
+        .mount(&server)
+        .await;
+
+    let client = test_client(&server);
+    let initiator = {
+        let client = client.clone();
+        tokio::spawn(async move { client.access_token().await })
+    };
+    wait_for_request_count(&server, 1).await;
+    initiator.abort();
+    assert!(
+        initiator
+            .await
+            .expect_err("initiator is aborted")
+            .is_cancelled(),
+        "only the initiating caller is cancelled"
+    );
+
+    let mut waiters = Vec::new();
+    for _ in 0..CONCURRENT_CALLERS {
+        let client = client.clone();
+        waiters.push(tokio::spawn(async move { client.access_token().await }));
+    }
+    tokio::time::timeout(REGRESSION_TIMEOUT, async {
+        for waiter in waiters {
+            let token = waiter
+                .await
+                .expect("waiter task completes")
+                .expect("detached token acquisition succeeds");
+            assert_eq!(token.as_str(), expected_token);
+        }
+    })
+    .await
+    .expect("initiator cancellation cannot hang waiters");
+
+    let cached = tokio::time::timeout(REGRESSION_TIMEOUT, client.access_token())
+        .await
+        .expect("cache lookup cannot hang")
+        .expect("completed detached acquisition populates the cache");
+    assert_eq!(cached.as_str(), expected_token);
+    let requests = server
+        .received_requests()
+        .await
+        .expect("requests are recorded");
+    assert_eq!(requests.len(), 1, "initiator cancellation cannot refetch");
 }
 
 #[tokio::test]
