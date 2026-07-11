@@ -235,7 +235,7 @@ variable "api_key_cleanup_log_retention_days" {
 }
 
 variable "api_key_cleanup_max_catchup_hours" {
-  description = "Maximum persisted expiry-hour cursor catch-up processed by one cleanup invocation."
+  description = "Historical expiry-hour horizon used only when the persisted cleanup cursor is absent or behind. Per-invocation work is bounded separately."
   type        = number
   default     = 168
 
@@ -245,8 +245,52 @@ variable "api_key_cleanup_max_catchup_hours" {
   }
 }
 
+variable "api_key_cleanup_schedule_minutes" {
+  description = "EventBridge cadence for lease-fenced API-key cleanup. At most 15 minutes preserves supported steady-state capacity with the bounded record limit."
+  type        = number
+  default     = 5
+
+  validation {
+    condition     = var.api_key_cleanup_schedule_minutes >= 2 && var.api_key_cleanup_schedule_minutes <= 15 && floor(var.api_key_cleanup_schedule_minutes) == var.api_key_cleanup_schedule_minutes
+    error_message = "api_key_cleanup_schedule_minutes must be a whole number between 2 and 15."
+  }
+}
+
+variable "api_key_cleanup_max_buckets" {
+  description = "Maximum forward expiry-hour buckets completed by one cleanup invocation."
+  type        = number
+  default     = 4
+
+  validation {
+    condition     = var.api_key_cleanup_max_buckets >= 1 && var.api_key_cleanup_max_buckets <= 8 && floor(var.api_key_cleanup_max_buckets) == var.api_key_cleanup_max_buckets
+    error_message = "api_key_cleanup_max_buckets must be a whole number between 1 and 8."
+  }
+}
+
+variable "api_key_cleanup_max_pages" {
+  description = "Maximum expiry-GSI query pages, including late-index overlap pages, attempted by one cleanup invocation."
+  type        = number
+  default     = 8
+
+  validation {
+    condition     = var.api_key_cleanup_max_pages >= var.api_key_cleanup_max_buckets + 2 && var.api_key_cleanup_max_pages <= 16 && floor(var.api_key_cleanup_max_pages) == var.api_key_cleanup_max_pages
+    error_message = "api_key_cleanup_max_pages must be a whole number no smaller than max_buckets + 2 and no greater than 16."
+  }
+}
+
+variable "api_key_cleanup_max_records" {
+  description = "Maximum expiry records attempted by one cleanup invocation across all forward and overlap pages."
+  type        = number
+  default     = 100
+
+  validation {
+    condition     = var.api_key_cleanup_max_records >= 1 && var.api_key_cleanup_max_records <= 100 && floor(var.api_key_cleanup_max_records) == var.api_key_cleanup_max_records
+    error_message = "api_key_cleanup_max_records must be a whole number between 1 and 100."
+  }
+}
+
 variable "api_key_cleanup_page_limit" {
-  description = "Maximum expiry-GSI records processed in one cleanup page."
+  description = "Maximum expiry-GSI records attempted in one query page; the per-invocation record bound applies across pages."
   type        = number
   default     = 100
 

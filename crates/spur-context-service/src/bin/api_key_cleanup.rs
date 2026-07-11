@@ -62,9 +62,21 @@ async fn handle_request<S: ApiKeyStore + ?Sized>(
 fn config() -> Result<ApiKeyCleanupConfig, ApiKeyCleanupError> {
     let max_catchup_hours = env::var("SPUR_API_KEY_CLEANUP_MAX_CATCHUP_HOURS")
         .map_err(|_| ApiKeyCleanupError::InvalidConfig)?;
+    let max_buckets = env::var("SPUR_API_KEY_CLEANUP_MAX_BUCKETS")
+        .map_err(|_| ApiKeyCleanupError::InvalidConfig)?;
+    let max_pages = env::var("SPUR_API_KEY_CLEANUP_MAX_PAGES")
+        .map_err(|_| ApiKeyCleanupError::InvalidConfig)?;
+    let max_records = env::var("SPUR_API_KEY_CLEANUP_MAX_RECORDS")
+        .map_err(|_| ApiKeyCleanupError::InvalidConfig)?;
     let page_limit = env::var("SPUR_API_KEY_CLEANUP_PAGE_LIMIT")
         .map_err(|_| ApiKeyCleanupError::InvalidConfig)?;
-    ApiKeyCleanupConfig::parse(&max_catchup_hours, &page_limit)
+    ApiKeyCleanupConfig::parse(
+        &max_catchup_hours,
+        &max_buckets,
+        &max_pages,
+        &max_records,
+        &page_limit,
+    )
 }
 
 fn store() -> Result<&'static DynamoDbApiKeyStore, ApiKeyCleanupError> {
@@ -148,7 +160,8 @@ mod tests {
         let error = handle_request(
             &event,
             &FakeApiKeyStore::new(),
-            &ApiKeyCleanupConfig::parse("24", "100").expect("config should be valid"),
+            &ApiKeyCleanupConfig::parse("24", "4", "8", "100", "100")
+                .expect("config should be valid"),
             100 * 3_600 + 120,
             "request-id",
         )

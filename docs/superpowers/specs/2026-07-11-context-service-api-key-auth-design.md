@@ -460,18 +460,44 @@ The authorizer rejects `expires_at <= now` immediately. Expired records remain
 counted until explicit revoke or cleanup; DynamoDB TTL is not an enforcement or
 capacity mechanism.
 
-An hourly EventBridge cleanup invokes a bounded sweeper that queries due sparse
-expiry-GSI hour buckets and applies the same idempotent revoke transaction.
-Late or retried sweeps process every uncompleted bucket since the persisted
-cursor, with an operator-configured maximum catch-up horizon and an alarm when
-the cursor lags. Capacity is therefore reclaimed within one hour under normal
-operation. A user can revoke an expired key manually for immediate capacity.
-The sweeper has bounded pages, retries, metrics, and no access to raw secrets.
+EventBridge invokes a lease-fenced cleanup every five minutes. The sweeper
+queries due sparse expiry-GSI hour buckets and applies the same idempotent
+revoke transaction. Late or retried sweeps resume from the persisted cursor,
+but the historical catch-up horizon is not an invocation work limit: the
+default 168-hour horizon only selects the oldest bucket when no usable cursor
+exists. Each invocation is independently capped at four forward buckets, eight
+total GSI pages including late-index overlap, 100 attempted records, and 100
+records per query page. Runtime validation fixes the supported maxima at eight
+buckets, 16 pages, and 100 records, so worst-case work cannot become
+`max_catchup_hours * page_limit`. The page budget must be at least the forward
+bucket budget plus two, reserving capacity for both late-index overlap hours.
+
+The supported normal-operation capacity model assumes 50,000 users, ten active
+keys per user, and the 90-day default TTL. Even if all 500,000 slots are
+occupied, uniform steady-state expiry is
+`500,000 / (90 * 24) = 231.48`, rounded up to 232 keys/hour. Twelve scheduled
+invocations/hour times the 100-record invocation/page cap provides 1,200
+records/hour of configured default capacity, more than 5.1 times steady state.
+A bucket larger than one page therefore drains through durable `has_more`
+continuations on subsequent five-minute invocations and completes within the
+documented one-hour normal-operation SLO. Transactional active-to-revoked
+conditions release each owner counter exactly once across retries or sparse-GSI
+overlap. Cursor-lag EMF is evaluated every five minutes with missing data
+breaching; cleanup errors alarm on the same cadence. Operators may choose only
+configurations whose calculated hourly capacity remains above 232.
+
+The 330-second durable lease fences overlapping five-minute invocations and
+survives the 60-second Lambda timeout; normal completion releases it
+conditionally, while a timed-out invocation can delay at most the next
+scheduled attempt before the lease expires. A user can revoke an expired key
+manually for immediate capacity. The sweeper has bounded pages, retries,
+metrics, and no access to raw secrets.
 Task C implements this as the independent
 `spur-context-api-key-cleanup` Rust Lambda. It accepts only the exact
 `sweep_expired_api_keys` EventBridge discriminator, derives the lease owner from
-the Lambda request ID, applies the configured catch-up/page bounds to the
-persisted store sweep, and emits secret-free CloudWatch EMF cursor-lag metrics.
+the Lambda request ID, applies the configured catch-up horizon plus independent
+bucket/page/record invocation bounds to the persisted store sweep, and emits
+secret-free CloudWatch EMF cursor-lag metrics.
 Store, lease, clock, event, and configuration failures remain Lambda errors.
 
 ## Authorization semantics
@@ -584,6 +610,12 @@ New variables are feature-flagged and validated:
 - `api_key_default_ttl_days` (default `90`);
 - `api_key_max_ttl_days` (default/max `365`);
 - `api_key_max_active_per_user` (fixed/default `10` in v1);
+- `api_key_cleanup_max_catchup_hours` (historical horizon, default `168`);
+- `api_key_cleanup_schedule_minutes` (default `5`, bounded to `2..=15`);
+- `api_key_cleanup_max_buckets` (default `4`, maximum `8`);
+- `api_key_cleanup_max_pages` (default `8`, maximum `16`);
+- `api_key_cleanup_max_records` (default/maximum `100`);
+- `api_key_cleanup_page_limit` (default/maximum `100`);
 - authorizer and cleanup memory/timeout/log retention; and
 - optional budget/alarm notification configuration.
 
@@ -679,6 +711,10 @@ OAuth refresh during API-key MCP operation.
 - create transaction enforces ten keys under concurrency;
 - revoke decrements exactly once under concurrent retries;
 - expiry rejects immediately and cleanup is idempotent;
+- a 232-record expiry bucket drains within twelve five-minute invocations and
+  owner counters are released exactly once;
+- historical catch-up is independently bounded by per-invocation bucket, page,
+  and record caps;
 - cross-owner list/revoke returns non-enumerating results; and
 - store failures fail closed.
 
@@ -724,6 +760,9 @@ OAuth refresh during API-key MCP operation.
 - cache TTL is 30 seconds and includes route key;
 - table encryption, PITR, TTL, keys and owner GSI match the contract;
 - expiry GSI and cleanup cursor support bounded catch-up without table scans;
+- the five-minute schedule and 100-record cap provide 1,200 records/hour of
+  default cleanup capacity against the 232-record/hour supported steady state;
+- cleanup cursor-lag and error alarms evaluate on the cleanup cadence;
 - authorizer, management and cleanup IAM are least privilege;
 - API-key header is absent from access-log format;
 - header-removal mapping is configured as defense-in-depth;
