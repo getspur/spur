@@ -3,6 +3,7 @@
 #[cfg(feature = "service")]
 pub mod abuse;
 pub mod api_key_authorizer;
+pub mod api_key_cleanup;
 pub mod api_keys;
 #[cfg(feature = "service")]
 mod auth;

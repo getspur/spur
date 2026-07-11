@@ -61,7 +61,7 @@ fn store() -> Result<&'static DynamoDbApiKeyStore, ApiKeyAuthorizerError> {
             .ok()
             .as_deref()
             .map(str::trim),
-        Some("1") | Some("true") | Some("TRUE") | Some("yes")
+        Some("1" | "true" | "TRUE" | "yes")
     ) {
         return Err(ApiKeyAuthorizerError::Unavailable);
     }
