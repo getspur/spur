@@ -1,5 +1,7 @@
 use async_trait::async_trait;
+use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::watch;
@@ -20,13 +22,31 @@ type LeadershipAcquirer = dyn Fn(&Path) -> LoopRuntimeLeadershipOutcome + Send +
 pub(crate) enum ProjectLoopRuntimeState {
     Standby,
     LeaderRunning,
+    LeaderDraining,
     UnsafeDisabled,
     Stopped,
 }
 
+pub(crate) struct ProjectLoopRuntimeDrain {
+    completion: Pin<Box<dyn Future<Output = ()> + Send + 'static>>,
+}
+
+impl ProjectLoopRuntimeDrain {
+    fn new(future: impl Future<Output = ()> + Send + 'static) -> Self {
+        Self {
+            completion: Box::pin(future),
+        }
+    }
+
+    #[cfg(test)]
+    fn completed() -> Self {
+        Self::new(std::future::ready(()))
+    }
+}
+
 #[async_trait]
 pub(crate) trait ProjectLoopRuntimeInstance: Send {
-    async fn shutdown(self: Box<Self>);
+    async fn shutdown(self: Box<Self>) -> ProjectLoopRuntimeDrain;
 
     async fn wait_for_exit(&mut self) {
         std::future::pending::<()>().await;
@@ -107,10 +127,25 @@ impl ProjectLoopRuntimeSupervisor {
 impl Drop for ProjectLoopRuntimeSupervisor {
     fn drop(&mut self) {
         self.cancel.cancel();
-        if let Some(handle) = self.handle.take() {
-            handle.abort();
-        }
+        // Dropping a Tokio JoinHandle detaches the task. Keep the supervisor
+        // task alive so it can transfer the leadership guard into its drain;
+        // aborting it here would drop the guard before runtime children
+        // acknowledge cancellation.
+        let _ = self.handle.take();
     }
+}
+
+fn detach_leader_drain(
+    leadership: LoopRuntimeLeadership,
+    drain: ProjectLoopRuntimeDrain,
+    state_tx: watch::Sender<ProjectLoopRuntimeState>,
+) {
+    state_tx.send_replace(ProjectLoopRuntimeState::LeaderDraining);
+    tokio::spawn(async move {
+        drain.completion.await;
+        drop(leadership);
+        state_tx.send_replace(ProjectLoopRuntimeState::Stopped);
+    });
 }
 
 async fn run_supervisor(
@@ -165,9 +200,18 @@ async fn run_supervisor(
                         _ = cancel.cancelled() => false,
                         _ = runtime.wait_for_exit() => true,
                     };
-                    runtime.shutdown().await;
+                    let mut drain = runtime.shutdown().await;
                     if !unexpected_exit || cancel.is_cancelled() {
-                        break;
+                        detach_leader_drain(leadership, drain, state_tx.clone());
+                        return;
+                    }
+                    tokio::select! {
+                        biased;
+                        _ = cancel.cancelled() => {
+                            detach_leader_drain(leadership, drain, state_tx.clone());
+                            return;
+                        }
+                        _ = &mut drain.completion => {}
                     }
                     tracing::warn!(
                         "project L3 runtime child exited unexpectedly; retaining leadership and restarting"
@@ -241,6 +285,8 @@ struct ProjectLoopRuntimeDeps {
     versioned_cache_serve: bool,
     nonadvisory_review_writes: bool,
     normalize_bypass_hooks: bool,
+    #[cfg(feature = "test-support")]
+    delegation_capture: Option<tokio::sync::mpsc::Sender<crate::DelegationRequest>>,
 }
 
 impl ProjectLoopRuntimeDeps {
@@ -310,7 +356,61 @@ impl ProjectLoopRuntimeDeps {
                 .substrate_migration
                 .nonadvisory_review_writes,
             normalize_bypass_hooks: orchestrator.config.delegation.normalize.bypass_hooks,
+            #[cfg(feature = "test-support")]
+            delegation_capture: orchestrator.project_loop_runtime_delegation_capture.clone(),
         })
+    }
+
+    fn spawn_delegation_handler(
+        &self,
+        delegation_channel: crate::DelegationChannel,
+        worker_mcp_fetcher: WorkerMcpFetcher,
+        delegation_shutdown: CancellationToken,
+    ) -> JoinHandle<()> {
+        #[cfg(feature = "test-support")]
+        if let Some(capture) = self.delegation_capture.clone() {
+            let mut request_rx = delegation_channel.request_rx;
+            return tokio::spawn(async move {
+                loop {
+                    let request = tokio::select! {
+                        _ = delegation_shutdown.cancelled() => break,
+                        request = request_rx.recv() => match request {
+                            Some(request) => request,
+                            None => break,
+                        },
+                    };
+                    tokio::select! {
+                        _ = delegation_shutdown.cancelled() => break,
+                        result = capture.send(request) => {
+                            if result.is_err() {
+                                break;
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
+        tokio::spawn(super::delegation::handle_delegations(
+            delegation_channel,
+            self.repo_root.clone(),
+            Arc::clone(&self.agent_configs),
+            self.max_concurrent,
+            self.worktree_config.clone(),
+            self.event_tx.clone(),
+            self.funnel.clone(),
+            self.review_sink.clone(),
+            Some(Arc::clone(&self.pm_service)),
+            Arc::clone(&self.feature_gate),
+            self.cancellation_control.clone(),
+            None,
+            self.fault_injection_hooks.clone(),
+            self.dispatch_lease_duration,
+            self.dispatch_lease_heartbeat,
+            worker_mcp_fetcher,
+            self.normalize_bypass_hooks,
+            delegation_shutdown,
+        ))
     }
 }
 
@@ -321,15 +421,17 @@ struct RunningProjectLoopRuntime {
     delegation_shutdown: CancellationToken,
     worker_mcp_servers:
         Arc<dashmap::DashMap<spur_acp::BrainSessionId, Arc<crate::worker_server::WorkerMcpServer>>>,
+    shutdown_transferred_to_drain: bool,
 }
 
 #[async_trait]
 impl ProjectLoopRuntimeInstance for RunningProjectLoopRuntime {
-    async fn shutdown(mut self: Box<Self>) {
+    async fn shutdown(mut self: Box<Self>) -> ProjectLoopRuntimeDrain {
         let deadline = tokio::time::Instant::now() + RUNTIME_SHUTDOWN_TIMEOUT;
         self.server.mark_retiring();
         self.server.cancel_in_flight_workers();
         self.delegation_shutdown.cancel();
+        let mut pending_delegation = None;
         if let Some(delegation_handle) = self.delegation_handle.take() {
             let mut delegation_handle = delegation_handle;
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -342,40 +444,43 @@ impl ProjectLoopRuntimeInstance for RunningProjectLoopRuntime {
                     "project L3 delegation shutdown exceeded grace; force-aborting child"
                 );
                 delegation_handle.abort();
-                tokio::task::yield_now().await;
-                if delegation_handle.is_finished() {
-                    let _ = delegation_handle.await;
-                } else {
-                    tracing::warn!(
-                        "project L3 delegation child did not acknowledge abort immediately"
-                    );
+                pending_delegation = Some(delegation_handle);
+            }
+        }
+
+        let pending_worker_server = self
+            .worker_mcp_servers
+            .remove(&self.system_id)
+            .map(|(_system_id, worker_server)| worker_server);
+        let server = Arc::clone(&self.server);
+        self.shutdown_transferred_to_drain = true;
+
+        ProjectLoopRuntimeDrain::new(async move {
+            let delegation_drain = async move {
+                if let Some(handle) = pending_delegation {
+                    let _ = handle.await;
                 }
-            }
-        }
-
-        if let Some((_system_id, worker_server)) = self.worker_mcp_servers.remove(&self.system_id) {
-            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-            let outcome = worker_server.shutdown(remaining).await;
-            if !outcome.drained {
-                tracing::warn!(
-                    timeout_ms = RUNTIME_SHUTDOWN_TIMEOUT.as_millis() as u64,
-                    active_at_deadline = outcome.active_at_deadline,
-                    "project L3 worker MCP server exceeded drain grace"
-                );
-            }
-        }
-
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        if tokio::time::timeout(remaining, self.server.shutdown())
-            .await
-            .is_err()
-        {
-            tracing::warn!(
-                timeout_ms = RUNTIME_SHUTDOWN_TIMEOUT.as_millis() as u64,
-                "project L3 server shutdown exceeded grace; force-aborting tasks"
-            );
-            self.server.force_abort();
-        }
+            };
+            let worker_server_drain = async move {
+                if let Some(worker_server) = pending_worker_server {
+                    let outcome = Arc::clone(&worker_server)
+                        .shutdown(RUNTIME_SHUTDOWN_TIMEOUT)
+                        .await;
+                    if !outcome.drained {
+                        tracing::warn!(
+                            timeout_ms = RUNTIME_SHUTDOWN_TIMEOUT.as_millis() as u64,
+                            active_at_deadline = outcome.active_at_deadline,
+                            "project L3 worker MCP server exceeded drain grace"
+                        );
+                        worker_server.force_abort_handlers_and_wait().await;
+                    }
+                }
+            };
+            let server_drain = async move {
+                server.force_abort_and_wait().await;
+            };
+            tokio::join!(delegation_drain, worker_server_drain, server_drain);
+        })
     }
 
     async fn wait_for_exit(&mut self) {
@@ -395,7 +500,9 @@ impl ProjectLoopRuntimeInstance for RunningProjectLoopRuntime {
 impl Drop for RunningProjectLoopRuntime {
     fn drop(&mut self) {
         self.delegation_shutdown.cancel();
-        self.server.force_abort();
+        if !self.shutdown_transferred_to_drain {
+            self.server.force_abort();
+        }
         if let Some(delegation_handle) = self.delegation_handle.take() {
             delegation_handle.abort();
         }
@@ -449,26 +556,11 @@ impl ProjectLoopRuntimeFactory for ProjectLoopRuntimeDeps {
             repo_root: Some(self.repo_root.clone()),
         };
         let delegation_shutdown = CancellationToken::new();
-        let delegation_handle = tokio::spawn(super::delegation::handle_delegations(
+        let delegation_handle = self.spawn_delegation_handler(
             delegation_channel,
-            self.repo_root.clone(),
-            Arc::clone(&self.agent_configs),
-            self.max_concurrent,
-            self.worktree_config.clone(),
-            self.event_tx.clone(),
-            self.funnel.clone(),
-            self.review_sink.clone(),
-            Some(Arc::clone(&self.pm_service)),
-            Arc::clone(&self.feature_gate),
-            self.cancellation_control.clone(),
-            None,
-            self.fault_injection_hooks.clone(),
-            self.dispatch_lease_duration,
-            self.dispatch_lease_heartbeat,
             worker_mcp_fetcher,
-            self.normalize_bypass_hooks,
             delegation_shutdown.clone(),
-        ));
+        );
         if let Err(error) = Arc::clone(&server).enable_reconciler().await {
             delegation_shutdown.cancel();
             let _ = delegation_handle.await;
@@ -481,6 +573,7 @@ impl ProjectLoopRuntimeFactory for ProjectLoopRuntimeDeps {
             delegation_handle: Some(delegation_handle),
             delegation_shutdown,
             worker_mcp_servers: Arc::clone(&self.worker_mcp_servers),
+            shutdown_transferred_to_drain: false,
         }))
     }
 }
@@ -489,6 +582,14 @@ impl ProjectLoopRuntimeFactory for ProjectLoopRuntimeDeps {
 mod tests {
     use super::*;
     use async_trait::async_trait;
+    use rmcp::{
+        model::CallToolRequestParams,
+        transport::{
+            streamable_http_client::StreamableHttpClientTransportConfig,
+            StreamableHttpClientTransport,
+        },
+        ServiceExt,
+    };
     use std::path::Path;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
@@ -500,14 +601,18 @@ mod tests {
 
     #[async_trait]
     impl ProjectLoopRuntimeInstance for ImmediateRuntime {
-        async fn shutdown(self: Box<Self>) {}
+        async fn shutdown(self: Box<Self>) -> ProjectLoopRuntimeDrain {
+            ProjectLoopRuntimeDrain::completed()
+        }
     }
 
     struct ExitImmediatelyRuntime;
 
     #[async_trait]
     impl ProjectLoopRuntimeInstance for ExitImmediatelyRuntime {
-        async fn shutdown(self: Box<Self>) {}
+        async fn shutdown(self: Box<Self>) -> ProjectLoopRuntimeDrain {
+            ProjectLoopRuntimeDrain::completed()
+        }
 
         async fn wait_for_exit(&mut self) {}
     }
@@ -519,9 +624,87 @@ mod tests {
 
     #[async_trait]
     impl ProjectLoopRuntimeInstance for BlockingRuntime {
-        async fn shutdown(self: Box<Self>) {
+        async fn shutdown(self: Box<Self>) -> ProjectLoopRuntimeDrain {
             self.shutdown_started.notify_waiters();
             self.shutdown_release.notified().await;
+            ProjectLoopRuntimeDrain::completed()
+        }
+    }
+
+    struct ControlledDrainRuntime {
+        drain_started: Arc<Notify>,
+        drain_release: Arc<Notify>,
+    }
+
+    #[async_trait]
+    impl ProjectLoopRuntimeInstance for ControlledDrainRuntime {
+        async fn shutdown(self: Box<Self>) -> ProjectLoopRuntimeDrain {
+            self.drain_started.notify_one();
+            let drain_release = Arc::clone(&self.drain_release);
+            ProjectLoopRuntimeDrain::new(async move {
+                drain_release.notified().await;
+            })
+        }
+    }
+
+    struct ControlledDrainFactory {
+        starts: Arc<AtomicUsize>,
+        drain_started: Arc<Notify>,
+        drain_release: Arc<Notify>,
+    }
+
+    struct SingleRuntimeFactory {
+        runtime: std::sync::Mutex<Option<RunningProjectLoopRuntime>>,
+        starts: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl ProjectLoopRuntimeFactory for SingleRuntimeFactory {
+        async fn start(&self) -> anyhow::Result<Box<dyn ProjectLoopRuntimeInstance>> {
+            self.starts.fetch_add(1, Ordering::SeqCst);
+            Ok(Box::new(
+                self.runtime
+                    .lock()
+                    .expect("single runtime lock")
+                    .take()
+                    .expect("single runtime starts once"),
+            ))
+        }
+    }
+
+    #[derive(Default)]
+    struct PermanentlyHangingSignalSink {
+        entered: Notify,
+    }
+
+    #[async_trait]
+    impl crate::worker_server::WorkerSignalSink for PermanentlyHangingSignalSink {
+        async fn report_signal(
+            &self,
+            _ctx: &crate::handlers::WorkerCallContext,
+            _args: serde_json::Value,
+        ) -> Result<serde_json::Value, crate::handlers::McpHandlerError> {
+            std::future::pending().await
+        }
+
+        async fn report_progress(
+            &self,
+            _ctx: &crate::handlers::WorkerCallContext,
+            _args: serde_json::Value,
+        ) -> Result<serde_json::Value, crate::handlers::McpHandlerError> {
+            self.entered.notify_one();
+            std::future::pending().await
+        }
+    }
+
+    #[async_trait]
+    impl ProjectLoopRuntimeFactory for ControlledDrainFactory {
+        async fn start(&self) -> anyhow::Result<Box<dyn ProjectLoopRuntimeInstance>> {
+            self.starts.fetch_add(1, Ordering::SeqCst);
+            Ok(Box::new(ControlledDrainRuntime {
+                drain_started: Arc::clone(&self.drain_started),
+                drain_release: Arc::clone(&self.drain_release),
+            }))
         }
     }
 
@@ -653,6 +836,7 @@ mod tests {
                 delegation_handle,
                 delegation_shutdown: CancellationToken::new(),
                 worker_mcp_servers: Arc::clone(&deps.worker_mcp_servers),
+                shutdown_transferred_to_drain: false,
             },
             system_id,
         )
@@ -671,6 +855,22 @@ mod tests {
             outcome_store: Arc::clone(&deps.outcome_store),
             repo_root: Some(deps.repo_root.clone()),
         }
+    }
+
+    async fn call_hanging_worker_progress(
+        server: &crate::worker_server::WorkerMcpServer,
+        token: &str,
+    ) {
+        let config = StreamableHttpClientTransportConfig::with_uri(server.url()).auth_header(token);
+        let client =
+            ().serve(StreamableHttpClientTransport::from_config(config))
+                .await
+                .expect("rmcp client initialize");
+        let mut request = CallToolRequestParams::new("report_progress");
+        request.arguments = serde_json::json!({ "message": "hang forever" })
+            .as_object()
+            .cloned();
+        let _ = client.call_tool(request).await;
     }
 
     #[tokio::test]
@@ -712,24 +912,219 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn runtime_shutdown_aborts_a_delegation_child_after_the_grace_bound() {
+    async fn runtime_shutdown_awaits_aborted_child() {
         let (_repo, deps) = runtime_deps_fixture().await;
-        let delegation = tokio::spawn(std::future::pending::<()>());
+        let (started_tx, started_rx) = std::sync::mpsc::sync_channel(1);
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+        let delegation = tokio::task::spawn_blocking(move || {
+            started_tx.send(()).expect("signal blocking child start");
+            release_rx.recv().expect("release blocking child");
+        });
+        started_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("blocking child did not start");
         let (runtime, _system_id) = bare_runtime(&deps, Some(delegation));
-        let mut shutdown = tokio::spawn(async move { Box::new(runtime).shutdown().await });
+        let shutdown = tokio::spawn(async move {
+            let drain = Box::new(runtime).shutdown().await;
+            drain.completion.await;
+        });
 
         tokio::task::yield_now().await;
         tokio::time::advance(RUNTIME_SHUTDOWN_TIMEOUT + Duration::from_millis(100)).await;
         tokio::task::yield_now().await;
-        let finished = shutdown.is_finished();
-        if !finished {
-            shutdown.abort();
-            let _ = (&mut shutdown).await;
-        }
         assert!(
-            finished,
-            "shutdown must force-abort a child that outlives the grace period"
+            !shutdown.is_finished(),
+            "drain must retain and await a child that has not acknowledged abort"
         );
+        release_tx.send(()).expect("release blocking child");
+        tokio::time::timeout(Duration::from_secs(1), shutdown)
+            .await
+            .expect("drain did not finish after child acknowledgement")
+            .expect("shutdown task panicked");
+    }
+
+    #[tokio::test]
+    async fn runtime_drain_force_aborts_and_acknowledges_callback_task() {
+        struct DropAck(Option<tokio::sync::oneshot::Sender<()>>);
+
+        impl Drop for DropAck {
+            fn drop(&mut self) {
+                if let Some(tx) = self.0.take() {
+                    let _ = tx.send(());
+                }
+            }
+        }
+
+        let (_repo, deps) = runtime_deps_fixture().await;
+        let (runtime, _) = bare_runtime(&deps, None);
+        let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let callback = tokio::spawn(async move {
+            let _ack = DropAck(Some(ack_tx));
+            let _ = started_tx.send(());
+            std::future::pending::<()>().await;
+        });
+        started_rx.await.expect("callback task started");
+        *runtime.server.root_handle.lock().unwrap() = Some(callback);
+
+        let drain = Box::new(runtime).shutdown().await;
+        drain.completion.await;
+
+        tokio::time::timeout(Duration::from_secs(1), ack_rx)
+            .await
+            .expect("callback abort acknowledgement timed out")
+            .expect("callback acknowledgement sender dropped");
+    }
+
+    #[tokio::test]
+    async fn standby_waits_for_permanently_hung_worker_handler_abort() {
+        let (repo, deps) = runtime_deps_fixture().await;
+        let (runtime, system_id) = bare_runtime(&deps, None);
+        let funnel: Arc<dyn spur_mcp::McpEventSink> = Arc::new(deps.funnel.clone());
+        let signal_sink = Arc::new(PermanentlyHangingSignalSink::default());
+        let plan_resolver: Arc<dyn crate::handlers::PlanResolver> =
+            Arc::clone(&runtime.server) as Arc<dyn crate::handlers::PlanResolver>;
+        let worker_read_sink = Arc::new(crate::mcp::worker::WorkerReadMcpModule::new(
+            crate::mcp::worker::WorkerReadMcpDeps {
+                pm_service: Some(Arc::clone(&deps.pm_service)),
+                feature_gate: Arc::clone(&deps.feature_gate),
+                plan_resolver,
+                reconciler_outcomes: runtime.server.reconciler_outcomes_handle(),
+                outcome_store: Arc::clone(&deps.outcome_store),
+                repo_root: Some(deps.repo_root.clone()),
+            },
+        ));
+        let worker_server = crate::worker_server::WorkerMcpServer::start(
+            system_id.to_string(),
+            crate::worker_server::WorkerMcpDeps {
+                pm_service: Arc::clone(&deps.pm_service),
+                feature_gate: Arc::clone(&deps.feature_gate),
+                funnel,
+                worker_signal_sink: Arc::clone(&signal_sink)
+                    as Arc<dyn crate::worker_server::WorkerSignalSink>,
+                worker_read_sink,
+                repo_root: Some(deps.repo_root.clone()),
+            },
+        )
+        .await
+        .expect("start hanging worker server");
+        worker_server.register_delegation(
+            "hung-reviewer".into(),
+            crate::worker_server::DelegationContext {
+                enable_worker_progress: true,
+            },
+        );
+        let token = worker_server.issue_token("hung-reviewer", Duration::from_secs(60));
+        deps.worker_mcp_servers
+            .insert(system_id, Arc::clone(&worker_server));
+        let call_server = Arc::clone(&worker_server);
+        let call = tokio::spawn(async move {
+            call_hanging_worker_progress(call_server.as_ref(), &token).await;
+        });
+        signal_sink.entered.notified().await;
+
+        let leader_starts = Arc::new(AtomicUsize::new(0));
+        let leader_factory = Arc::new(SingleRuntimeFactory {
+            runtime: std::sync::Mutex::new(Some(runtime)),
+            starts: Arc::clone(&leader_starts),
+        });
+        let standby_factory = Arc::new(CountingFactory::immediate());
+        let mut leader = ProjectLoopRuntimeSupervisor::start_with(
+            repo.path().to_path_buf(),
+            leader_factory,
+            filesystem_acquirer(),
+            Duration::from_millis(10),
+        );
+        wait_for_state(&leader, ProjectLoopRuntimeState::LeaderRunning).await;
+        let mut standby = ProjectLoopRuntimeSupervisor::start_with(
+            repo.path().to_path_buf(),
+            Arc::clone(&standby_factory) as Arc<dyn ProjectLoopRuntimeFactory>,
+            filesystem_acquirer(),
+            Duration::from_millis(10),
+        );
+        wait_for_state(&standby, ProjectLoopRuntimeState::Standby).await;
+
+        leader.shutdown().await;
+        assert_eq!(leader.state(), ProjectLoopRuntimeState::LeaderDraining);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(standby.state(), ProjectLoopRuntimeState::Standby);
+        assert_eq!(standby_factory.starts.load(Ordering::SeqCst), 0);
+
+        tokio::time::timeout(Duration::from_secs(7), async {
+            loop {
+                if standby.state() == ProjectLoopRuntimeState::LeaderRunning {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("standby did not promote after hung handler force-abort");
+        assert_eq!(worker_server.active_count(), 0);
+        assert_eq!(leader_starts.load(Ordering::SeqCst), 1);
+        assert_eq!(standby_factory.starts.load(Ordering::SeqCst), 1);
+
+        call.abort();
+        let _ = call.await;
+        standby.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn standby_waits_for_leader_drain() {
+        let repo = TempDir::new().unwrap();
+        let drain_started = Arc::new(Notify::new());
+        let drain_release = Arc::new(Notify::new());
+        let first_starts = Arc::new(AtomicUsize::new(0));
+        let first_factory = Arc::new(ControlledDrainFactory {
+            starts: Arc::clone(&first_starts),
+            drain_started: Arc::clone(&drain_started),
+            drain_release: Arc::clone(&drain_release),
+        });
+        let second_factory = Arc::new(CountingFactory::immediate());
+        let mut first = ProjectLoopRuntimeSupervisor::start_with(
+            repo.path().to_path_buf(),
+            first_factory,
+            filesystem_acquirer(),
+            Duration::from_millis(10),
+        );
+        wait_for_state(&first, ProjectLoopRuntimeState::LeaderRunning).await;
+        let mut first_states = first.subscribe_state();
+        let mut second = ProjectLoopRuntimeSupervisor::start_with(
+            repo.path().to_path_buf(),
+            Arc::clone(&second_factory) as Arc<dyn ProjectLoopRuntimeFactory>,
+            filesystem_acquirer(),
+            Duration::from_millis(10),
+        );
+        wait_for_state(&second, ProjectLoopRuntimeState::Standby).await;
+
+        let first_shutdown = tokio::spawn(async move { first.shutdown().await });
+        tokio::time::timeout(Duration::from_secs(1), drain_started.notified())
+            .await
+            .expect("leader did not enter drain");
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if *first_states.borrow() == ProjectLoopRuntimeState::LeaderDraining {
+                    break;
+                }
+                first_states.changed().await.expect("first state channel");
+            }
+        })
+        .await
+        .expect("leader did not publish LeaderDraining");
+        tokio::time::timeout(Duration::from_secs(1), first_shutdown)
+            .await
+            .expect("public shutdown must return while drain remains")
+            .expect("leader shutdown task panicked");
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(second.state(), ProjectLoopRuntimeState::Standby);
+        assert_eq!(second_factory.starts.load(Ordering::SeqCst), 0);
+
+        drain_release.notify_one();
+        wait_for_state(&second, ProjectLoopRuntimeState::LeaderRunning).await;
+        assert_eq!(second_factory.starts.load(Ordering::SeqCst), 1);
+        assert_eq!(first_starts.load(Ordering::SeqCst), 1);
+        second.shutdown().await;
     }
 
     #[tokio::test]

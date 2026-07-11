@@ -267,7 +267,7 @@ async fn t_v0c_2_reconciler_dispatch_writes_label_and_dispatch_audit() {
         Arc::new(Notify::new()),
         Some(ReconcilerDispatchCtx {
             delegation_tx,
-            task_tracker: tokio_util::task::TaskTracker::new(),
+            task_tracker: spur_core::server::AbortableTaskTracker::new(),
             brain_session_id: BrainSessionId::new(SessionId("brain".into())),
             event_sink: None,
             materializer: test_materializer(),
@@ -748,7 +748,7 @@ async fn t_v0c_5_request_changes_stays_open_and_reconciler_redispatches() {
         Arc::new(Notify::new()),
         Some(ReconcilerDispatchCtx {
             delegation_tx,
-            task_tracker: tokio_util::task::TaskTracker::new(),
+            task_tracker: spur_core::server::AbortableTaskTracker::new(),
             brain_session_id: BrainSessionId::new(SessionId("brain".into())),
             event_sink: None,
             materializer: test_materializer(),

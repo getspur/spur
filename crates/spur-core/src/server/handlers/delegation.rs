@@ -13,7 +13,7 @@ impl McpCallbackServer {
     /// stable public API — `#[doc(hidden)]` keeps it out of rustdoc.
     #[doc(hidden)]
     pub fn spawn_result_collector(
-        tracker: &TaskTracker,
+        tracker: &crate::server::AbortableTaskTracker,
         delegation_id: DelegationId,
         rx: tokio::sync::oneshot::Receiver<DelegationResult>,
         cancel_token: CancellationToken,

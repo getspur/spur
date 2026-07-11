@@ -393,7 +393,7 @@ fn resume_plan_def() -> ToolDefinition {
 fn force_reclaim_plan_def() -> ToolDefinition {
     ToolDefinition {
         name: "force_reclaim_plan".into(),
-        description: "Operator-initiated force-takeover of plan ownership. Removes any existing `spur:plan-owner:*` labels and stamps the current brain as the owner. Intended only for stuck/dead owners or governance-driven takeover; clobbers any concurrent owner brain's in-flight state. Requires explicit `confirm: true`. See docs/multi-brain-operations.md.".into(),
+        description: "Operator-initiated force-takeover of plan ownership. Defaults to stamping the current brain. Set `target_owner: system_l3` to explicitly migrate an open, fully persisted L3 loop generation to the stable project runtime owner with fresh fencing labels. Intended only after stopping or verifying the former owner; clobbers its in-flight state. Requires explicit `confirm: true`. See docs/multi-brain-operations.md.".into(),
         input_schema: json!({
             "type": "object",
             "properties": {
@@ -404,6 +404,12 @@ fn force_reclaim_plan_def() -> ToolDefinition {
                 "confirm": {
                     "type": "boolean",
                     "description": "Must be `true` to acknowledge that this clobbers any concurrent owner brain's in-flight state. `false` or missing returns an error."
+                },
+                "target_owner": {
+                    "type": "string",
+                    "enum": ["current_brain", "system_l3"],
+                    "default": "current_brain",
+                    "description": "Ownership target. `current_brain` preserves the existing behavior. `system_l3` explicitly migrates an open L3 generation to the stable project runtime owner."
                 },
                 "reason": {
                     "type": "string",
@@ -779,6 +785,24 @@ mod tests {
         DetachedContinuationCtx {
             on_complete: Arc::new(|_, _| Box::pin(async {})),
         }
+    }
+
+    #[test]
+    fn force_reclaim_plan_schema_exposes_explicit_system_l3_target() {
+        let schema = force_reclaim_plan_def().input_schema;
+        assert_eq!(
+            schema["properties"]["target_owner"]["enum"],
+            serde_json::json!(["current_brain", "system_l3"])
+        );
+        assert_eq!(
+            schema["properties"]["target_owner"]["default"],
+            "current_brain"
+        );
+        assert!(!schema["required"]
+            .as_array()
+            .expect("required array")
+            .iter()
+            .any(|field| field == "target_owner"));
     }
 
     #[tokio::test]
