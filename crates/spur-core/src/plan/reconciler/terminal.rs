@@ -262,7 +262,7 @@ impl super::Reconciler {
         };
 
         let closed_status = self.pm.closed_status().to_string();
-        let mut labels = vec![crate::plan::labels::PLAN_COMPLETE.to_string()];
+        let mut labels = self.scoped_epic_labels();
         if let Some(plan_id) = self.plan_id.as_deref() {
             labels.push(crate::plan::labels::plan_id(plan_id));
         }

@@ -24,7 +24,7 @@ fn pro_feature_gate() -> Arc<spur_license::FeatureGate> {
 }
 
 fn test_completion_dispatch(
-    task_tracker: tokio_util::task::TaskTracker,
+    task_tracker: crate::server::AbortableTaskTracker,
     brain_session_id: impl Into<String>,
 ) -> ReconcilerDispatchCtx {
     let (delegation_tx, _delegation_rx) = tokio::sync::mpsc::channel(1);
@@ -152,7 +152,7 @@ impl Visit for CompletionCollectorVisitor {
 #[tokio::test]
 async fn completion_collector_logs_panic_with_structured_context() {
     let captured = CapturedCompletionCollectorErrors::default();
-    let tracker = tokio_util::task::TaskTracker::new();
+    let tracker = crate::server::AbortableTaskTracker::new();
     let dispatch = test_completion_dispatch(tracker.clone(), "brain-panic");
     let context = CompletionCollectorLogContext {
         plan_id: "plan-panic".into(),
@@ -350,7 +350,7 @@ async fn completion_collector_project_timeout_delivers_via_deferred_push() {
         false,
         SystemTime::UNIX_EPOCH,
     );
-    let tracker = tokio_util::task::TaskTracker::new();
+    let tracker = crate::server::AbortableTaskTracker::new();
     let dispatch = test_completion_dispatch(tracker.clone(), brain_session_id.to_string());
     let context = CompletionCollectorLogContext {
         plan_id: plan_id.to_string(),
@@ -492,7 +492,7 @@ async fn completion_collector_project_timeout_without_deferred_warns_and_returns
         on_complete: Arc::new(|_, _| Box::pin(async {})),
     });
     let outcomes = Arc::new(tokio::sync::Mutex::new(OutcomeStore::default()));
-    let tracker = tokio_util::task::TaskTracker::new();
+    let tracker = crate::server::AbortableTaskTracker::new();
     let dispatch = test_completion_dispatch(tracker.clone(), brain_session_id.to_string());
     let context = CompletionCollectorLogContext {
         plan_id: plan_id.to_string(),
@@ -579,7 +579,7 @@ fn reconciler_dispatch_ctx_can_be_cloned_for_server_startup() {
     let (tx, _rx) = tokio::sync::mpsc::channel::<crate::DelegationRequest>(1);
     let ctx = super::ReconcilerDispatchCtx {
         delegation_tx: tx,
-        task_tracker: tokio_util::task::TaskTracker::new(),
+        task_tracker: crate::server::AbortableTaskTracker::new(),
         brain_session_id: spur_acp::BrainSessionId::new(spur_acp::SessionId("brain".into())),
         event_sink: None,
         materializer: Arc::new(crate::outcome_materializer::OutcomeMaterializer::new(
@@ -1011,7 +1011,7 @@ fn test_dispatch_ctx(
 ) -> ReconcilerDispatchCtx {
     ReconcilerDispatchCtx {
         delegation_tx,
-        task_tracker: tokio_util::task::TaskTracker::new(),
+        task_tracker: crate::server::AbortableTaskTracker::new(),
         brain_session_id,
         event_sink: None,
         materializer: Arc::new(crate::outcome_materializer::OutcomeMaterializer::new(
@@ -1036,7 +1036,7 @@ fn test_dispatch_ctx_with_recording(
     (
         ReconcilerDispatchCtx {
             delegation_tx,
-            task_tracker: tokio_util::task::TaskTracker::new(),
+            task_tracker: crate::server::AbortableTaskTracker::new(),
             brain_session_id,
             event_sink,
             materializer: Arc::new(crate::outcome_materializer::OutcomeMaterializer::new(
@@ -1450,7 +1450,7 @@ async fn terminal_loop_epic_appends_one_loop_run_to_loop_issue() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn l3_loop_arms_generation_without_brain() {
+async fn system_l3_runtime_arms_generation_without_brain() {
     let pm = crate::plan::test_util::MockPm::new().arc();
     let loop_id = "loopl3arm";
     let triage_body = "Triage the stored template\nkeep this body byte-exact";
@@ -1481,14 +1481,19 @@ async fn l3_loop_arms_generation_without_brain() {
         Some(123_456),
     )
     .await;
-    let brain_session_id =
-        spur_acp::BrainSessionId::new(spur_acp::SessionId("brain-l3-arm".into()));
+    let brain_session_id = spur_acp::BrainSessionId::new(spur_acp::SessionId(
+        crate::plan::loops::LOOP_RUNTIME_OWNER_ID.into(),
+    ));
     let event_sink = Arc::new(RecordingEventSink::default());
     let (delegation_tx, _delegation_rx) = tokio::sync::mpsc::channel::<crate::DelegationRequest>(4);
     let (dispatch, continuations) =
         test_dispatch_ctx_with_recording(delegation_tx, brain_session_id, Some(event_sink.clone()));
     let mut reconciler = Reconciler::new_with_pm_like(
-        ReconcilerConfig::default(),
+        ReconcilerConfig {
+            loop_sweep_scope: crate::plan::loops::LoopSweepScope::L3Only,
+            plan_scope: PlanScope::SystemL3Only,
+            ..Default::default()
+        },
         pm.clone(),
         Arc::new(Notify::new()),
         Some(dispatch.into_dispatch()),
@@ -1523,6 +1528,7 @@ async fn l3_loop_arms_generation_without_brain() {
         crate::plan::labels::loop_generation_label(1),
         format!("{}l3", crate::plan::labels::AUTONOMY_PREFIX),
         format!("{}123456", crate::plan::labels::LOOP_BUDGET_MICROS_PREFIX),
+        crate::plan::labels::plan_owner(crate::plan::loops::LOOP_RUNTIME_OWNER_ID),
     ] {
         assert!(
             epic.labels.contains(&expected),
@@ -1571,6 +1577,1049 @@ async fn l3_loop_arms_generation_without_brain() {
         )),
         "expected LoopGenerationStarted event, got {events:?}"
     );
+}
+
+async fn seed_system_l3_awaiting_review_plan(
+    pm: &Arc<crate::plan::test_util::MockPm>,
+    plan_id: &str,
+    task_ids: &[&str],
+) -> (Vec<String>, String, String) {
+    let system_id = spur_acp::BrainSessionId::new(spur_acp::SessionId(
+        crate::plan::loops::LOOP_RUNTIME_OWNER_ID.into(),
+    ));
+    let issue_ids = seed_mock_ready_tasks_plan(pm, plan_id, task_ids, &system_id).await;
+    add_mock_epic_label(
+        pm,
+        plan_id,
+        format!("{}l3", crate::plan::labels::AUTONOMY_PREFIX),
+    )
+    .await;
+    if issue_ids.len() > 1 {
+        pm.add_dependency(&issue_ids[1], &issue_ids[0])
+            .await
+            .expect("add dependent task edge");
+    }
+
+    let maker_delegation_id = "maker-del-1".to_string();
+    let maker_branch = "spur/worker/maker-del-1".to_string();
+    crate::plan::persist_dispatch_intent(
+        pm.as_ref(),
+        &issue_ids[0],
+        pro_feature_gate().as_ref(),
+        plan_id,
+        &maker_delegation_id,
+        "codex",
+        1,
+        Duration::from_secs(60),
+    )
+    .await
+    .expect("persist maker dispatch");
+    let result = spur_acp::DelegationResult {
+        resolved_config: None,
+        status: spur_acp::DelegationStatus::Success,
+        diff: Some("diff --git a/result b/result".into()),
+        diff_summary: None,
+        summary: Some("maker completed acceptance criteria".into()),
+        estimated_cost_usd: 0.0,
+        worker_branch: Some(maker_branch.clone()),
+        artifact: None,
+    };
+    let materializer = crate::outcome_materializer::OutcomeMaterializer::new(Arc::new(
+        spur_blob_store::MemoryOutcomeStore::new(),
+    ));
+    crate::plan::persist_worker_completion_and_notify(
+        pm.as_ref(),
+        &issue_ids[0],
+        pro_feature_gate().as_ref(),
+        plan_id,
+        &maker_delegation_id,
+        &None,
+        &result,
+        &system_id,
+        1,
+        &materializer,
+        None,
+        Some(task_ids[0]),
+    )
+    .await
+    .expect("persist maker completion");
+
+    (issue_ids, maker_delegation_id, maker_branch)
+}
+
+fn system_l3_review_reconciler(
+    pm: Arc<dyn crate::plan::PmLike>,
+) -> (
+    Reconciler,
+    tokio::sync::mpsc::Receiver<crate::DelegationRequest>,
+) {
+    let system_id = spur_acp::BrainSessionId::new(spur_acp::SessionId(
+        crate::plan::loops::LOOP_RUNTIME_OWNER_ID.into(),
+    ));
+    let (delegation_tx, delegation_rx) = tokio::sync::mpsc::channel(16);
+    let reconciler = Reconciler::new_with_pm_like(
+        ReconcilerConfig {
+            loop_sweep_scope: crate::plan::loops::LoopSweepScope::L3Only,
+            plan_scope: PlanScope::SystemL3Only,
+            predispatch_preview: PreviewStrategy::AlwaysClean,
+            dispatch_lease_duration: Duration::from_secs(5),
+            ..Default::default()
+        },
+        pm,
+        Arc::new(Notify::new()),
+        Some(test_dispatch_ctx(delegation_tx, system_id).into_dispatch()),
+        None,
+        pro_feature_gate(),
+    );
+    (reconciler, delegation_rx)
+}
+
+struct FailFirstCompanionClosePm {
+    inner: Arc<crate::plan::test_util::MockPm>,
+    fail_close: std::sync::atomic::AtomicBool,
+}
+
+#[async_trait::async_trait]
+impl crate::plan::PmLike for FailFirstCompanionClosePm {
+    async fn get_issue(&self, id: &str) -> anyhow::Result<spur_pm::Issue> {
+        self.inner.get_issue(id).await
+    }
+
+    async fn list_issues(
+        &self,
+        filter: spur_pm::IssueFilter,
+    ) -> anyhow::Result<Vec<spur_pm::IssueSummary>> {
+        self.inner.list_issues(filter).await
+    }
+
+    async fn create_issue(&self, params: spur_pm::IssueCreate) -> anyhow::Result<String> {
+        self.inner.create_issue(params).await
+    }
+
+    async fn update_issue(&self, id: &str, update: spur_pm::IssueUpdate) -> anyhow::Result<()> {
+        let closes_companion = update.status.as_deref() == Some(self.closed_status())
+            && self
+                .inner
+                .get_issue(id)
+                .await?
+                .labels
+                .contains(&crate::plan::labels::SYSTEM_REVIEW.to_string());
+        if closes_companion
+            && self
+                .fail_close
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            anyhow::bail!("injected review companion close failure");
+        }
+        self.inner.update_issue(id, update).await
+    }
+
+    async fn add_dependency(&self, issue_id: &str, depends_on_id: &str) -> anyhow::Result<()> {
+        self.inner.add_dependency(issue_id, depends_on_id).await
+    }
+
+    async fn issue_labels(&self, id: &str) -> anyhow::Result<Vec<String>> {
+        self.inner.issue_labels(id).await
+    }
+
+    fn closed_status(&self) -> &str {
+        self.inner.closed_status()
+    }
+
+    fn advanced(&self) -> Option<&dyn spur_pm::BeadsAdvanced> {
+        Some(self)
+    }
+}
+
+#[async_trait::async_trait]
+impl spur_pm::BeadsAdvanced for FailFirstCompanionClosePm {
+    async fn list_ready(
+        &self,
+        filter: spur_pm::ReadyFilter,
+    ) -> anyhow::Result<Vec<spur_pm::IssueSummary>> {
+        spur_pm::BeadsAdvanced::list_ready(self.inner.as_ref(), filter).await
+    }
+
+    async fn list_comments(&self, issue_id: &str) -> anyhow::Result<Vec<spur_pm::Comment>> {
+        spur_pm::BeadsAdvanced::list_comments(self.inner.as_ref(), issue_id).await
+    }
+
+    async fn add_comment(&self, issue_id: &str, body: &str) -> anyhow::Result<String> {
+        spur_pm::BeadsAdvanced::add_comment(self.inner.as_ref(), issue_id, body).await
+    }
+
+    async fn remove_dependency(&self, issue_id: &str, depends_on_id: &str) -> anyhow::Result<()> {
+        spur_pm::BeadsAdvanced::remove_dependency(self.inner.as_ref(), issue_id, depends_on_id)
+            .await
+    }
+
+    async fn dep_cycles(&self) -> anyhow::Result<Vec<spur_pm::DependencyCycle>> {
+        spur_pm::BeadsAdvanced::dep_cycles(self.inner.as_ref()).await
+    }
+}
+
+async fn next_review_request(
+    requests: &mut tokio::sync::mpsc::Receiver<crate::DelegationRequest>,
+    context: &str,
+) -> crate::DelegationRequest {
+    tokio::time::timeout(Duration::from_secs(1), requests.recv())
+        .await
+        .unwrap_or_else(|_| panic!("timed out waiting for {context}"))
+        .unwrap_or_else(|| panic!("delegation channel closed waiting for {context}"))
+}
+
+async fn submit_test_review_verdict(
+    pm: &crate::plan::test_util::MockPm,
+    target_issue_id: &str,
+    reviewer_delegation_id: &str,
+    decision: &str,
+) {
+    crate::mcp::review_verdict::submit_review_verdict(
+        pm,
+        &crate::handlers::WorkerCallContext {
+            delegation_id: reviewer_delegation_id.into(),
+            brain_session_id: crate::plan::loops::LOOP_RUNTIME_OWNER_ID.into(),
+        },
+        serde_json::json!({
+            "target_issue_id": target_issue_id,
+            "decision": decision,
+            "feedback": format!("reviewer selected {decision} after inspecting the diff"),
+            "evidence": ["get_task_diff and acceptance criteria inspected"]
+        }),
+    )
+    .await
+    .expect("submit authenticated review verdict");
+}
+
+async fn add_review_signal(
+    pm: &crate::plan::test_util::MockPm,
+    issue_id: &str,
+    delegation_id: &str,
+    signal: &crate::plan::signals::WorkerSignal,
+) {
+    let (severity, reason) = match signal {
+        crate::plan::signals::WorkerSignal::ScopeDrift {
+            severity, reason, ..
+        } => (*severity, reason.clone()),
+        crate::plan::signals::WorkerSignal::Escalate { reason, .. }
+        | crate::plan::signals::WorkerSignal::MarkNoop { reason, .. } => (0.0, reason.clone()),
+        crate::plan::signals::WorkerSignal::RetryExhausted { .. }
+        | crate::plan::signals::WorkerSignal::PotentialClobber { .. } => (0.0, String::new()),
+    };
+    pm.advanced()
+        .expect("beads advanced")
+        .add_comment(
+            issue_id,
+            &crate::plan::audit_sentinel::encode_comment(
+                &crate::plan::audit_sentinel::AuditSentinelKind::Signal {
+                    signal_id: signal.signal_id().to_string(),
+                    delegation_id: delegation_id.to_string(),
+                    kind: signal.kind_label().to_string(),
+                    severity,
+                    reason,
+                },
+            ),
+        )
+        .await
+        .expect("add attributed signal audit");
+    pm.advanced()
+        .expect("beads advanced")
+        .add_comment(issue_id, &crate::plan::signals::encode_comment(signal))
+        .await
+        .expect("add signal comment");
+    pm.update_issue(
+        issue_id,
+        spur_pm::IssueUpdate {
+            add_labels: vec![crate::plan::labels::signal_kind(signal.kind_label())],
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("add signal label");
+}
+
+#[tokio::test]
+async fn system_l3_review_dispatch_is_distinct_durable_and_replayed_once() {
+    let pm = crate::plan::test_util::MockPm::new().arc();
+    let (issues, maker_id, maker_branch) =
+        seed_system_l3_awaiting_review_plan(&pm, "P-L3-REVIEW-DISPATCH", &["T1"]).await;
+    let (reconciler, mut requests) = system_l3_review_reconciler(pm.clone());
+
+    reconciler.tick_once().await.expect("dispatch reviewer");
+    let review = next_review_request(&mut requests, "reviewer request").await;
+
+    assert_ne!(review.id.as_str(), maker_id);
+    assert_eq!(
+        review.base,
+        Some(crate::BaseSpec::Branch { name: maker_branch })
+    );
+    assert_ne!(review.issue_id.as_deref(), Some(issues[0].as_str()));
+    let audits = crate::plan::projector::collect_sorted_audits_for_issue(
+        &issues[0],
+        pm.comments(&issues[0]).await,
+    )
+    .expect("target audits");
+    assert!(audits.iter().any(|audit| matches!(
+        audit,
+        crate::plan::audit_sentinel::AuditSentinelKind::SystemReviewDispatch {
+            maker_delegation_id,
+            reviewer_delegation_id,
+            review_issue_id,
+            ..
+        } if maker_delegation_id == "maker-del-1"
+            && reviewer_delegation_id == review.id.as_str()
+            && Some(review_issue_id.as_str()) == review.issue_id.as_deref()
+    )));
+
+    reconciler.tick_once().await.expect("replay tick");
+    assert!(
+        requests.try_recv().is_err(),
+        "replay must not duplicate review"
+    );
+}
+
+#[tokio::test]
+async fn system_l3_review_mark_noop_reaches_reviewer_but_blocking_signal_does_not() {
+    let pm = crate::plan::test_util::MockPm::new().arc();
+    let (issues, _, _) =
+        seed_system_l3_awaiting_review_plan(&pm, "P-L3-REVIEW-NOOP", &["T1"]).await;
+    add_review_signal(
+        pm.as_ref(),
+        &issues[0],
+        "maker-del-1",
+        &crate::plan::signals::WorkerSignal::MarkNoop {
+            signal_id: uuid::Uuid::new_v4(),
+            reason: "intentional no-code artifact result".into(),
+        },
+    )
+    .await;
+    let (reconciler, mut requests) = system_l3_review_reconciler(pm.clone());
+    reconciler.tick_once().await.expect("mark-noop review tick");
+    let review = next_review_request(&mut requests, "MarkNoop reviewer request").await;
+    assert!(review.task.contains("MarkNoop"));
+
+    let blocked_pm = crate::plan::test_util::MockPm::new().arc();
+    let (blocked_issues, _, _) =
+        seed_system_l3_awaiting_review_plan(&blocked_pm, "P-L3-REVIEW-BLOCK", &["T1"]).await;
+    add_review_signal(
+        blocked_pm.as_ref(),
+        &blocked_issues[0],
+        "maker-del-1",
+        &crate::plan::signals::WorkerSignal::ScopeDrift {
+            signal_id: uuid::Uuid::new_v4(),
+            severity: 0.9,
+            reason: "unresolved scope drift".into(),
+            estimated_subtasks: Some(2),
+        },
+    )
+    .await;
+    let (blocked, mut blocked_requests) = system_l3_review_reconciler(blocked_pm);
+    blocked.tick_once().await.expect("blocking signal tick");
+    assert!(blocked_requests.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn system_l3_review_processed_signal_label_does_not_block_history() {
+    let pm = crate::plan::test_util::MockPm::new().arc();
+    let (issues, _, _) =
+        seed_system_l3_awaiting_review_plan(&pm, "P-L3-REVIEW-PROCESSED", &["T1"]).await;
+    let signal_id = uuid::Uuid::new_v4();
+    add_review_signal(
+        pm.as_ref(),
+        &issues[0],
+        "maker-del-1",
+        &crate::plan::signals::WorkerSignal::ScopeDrift {
+            signal_id,
+            severity: 0.8,
+            reason: "historical drift already handled".into(),
+            estimated_subtasks: Some(1),
+        },
+    )
+    .await;
+    add_mock_issue_label(
+        &pm,
+        &issues[0],
+        crate::plan::labels::signal_processed_label(&signal_id),
+    )
+    .await;
+    let (reconciler, mut requests) = system_l3_review_reconciler(pm);
+
+    reconciler.tick_once().await.expect("processed signal tick");
+
+    next_review_request(&mut requests, "processed history reviewer").await;
+}
+
+#[tokio::test]
+async fn system_l3_review_does_not_reuse_mark_noop_from_an_older_maker_attempt() {
+    let pm = crate::plan::test_util::MockPm::new().arc();
+    let (issues, _, _) =
+        seed_system_l3_awaiting_review_plan(&pm, "P-L3-REVIEW-OLD-NOOP", &["T1"]).await;
+    add_review_signal(
+        pm.as_ref(),
+        &issues[0],
+        "maker-del-old",
+        &crate::plan::signals::WorkerSignal::MarkNoop {
+            signal_id: uuid::Uuid::new_v4(),
+            reason: "old maker supplied this no-op justification".into(),
+        },
+    )
+    .await;
+    let (reconciler, mut requests) = system_l3_review_reconciler(pm);
+
+    reconciler.tick_once().await.expect("review tick");
+
+    let review = next_review_request(&mut requests, "current maker reviewer").await;
+    assert!(
+        !review
+            .task
+            .contains("old maker supplied this no-op justification"),
+        "a reviewer must not receive MarkNoop evidence from another maker attempt"
+    );
+}
+
+#[tokio::test]
+async fn system_l3_review_blocks_unattributed_legacy_mark_noop() {
+    let pm = crate::plan::test_util::MockPm::new().arc();
+    let (issues, _, _) =
+        seed_system_l3_awaiting_review_plan(&pm, "P-L3-REVIEW-LEGACY-NOOP", &["T1"]).await;
+    let signal = crate::plan::signals::WorkerSignal::MarkNoop {
+        signal_id: uuid::Uuid::new_v4(),
+        reason: "legacy no-op without authenticated maker attribution".into(),
+    };
+    pm.advanced()
+        .expect("beads advanced")
+        .add_comment(&issues[0], &crate::plan::signals::encode_comment(&signal))
+        .await
+        .expect("add legacy signal comment");
+    add_mock_issue_label(
+        &pm,
+        &issues[0],
+        crate::plan::labels::signal_kind(signal.kind_label()),
+    )
+    .await;
+    let (reconciler, mut requests) = system_l3_review_reconciler(pm);
+
+    reconciler.tick_once().await.expect("legacy signal tick");
+
+    assert!(
+        requests.try_recv().is_err(),
+        "an unattributed legacy MarkNoop must fail closed"
+    );
+}
+
+#[tokio::test]
+async fn system_l3_review_blocks_signal_label_without_a_durable_fact() {
+    let pm = crate::plan::test_util::MockPm::new().arc();
+    let (issues, _, _) =
+        seed_system_l3_awaiting_review_plan(&pm, "P-L3-REVIEW-ORPHAN-LABEL", &["T1"]).await;
+    add_mock_issue_label(&pm, &issues[0], crate::plan::labels::signal_kind("risk")).await;
+    let (reconciler, mut requests) = system_l3_review_reconciler(pm);
+
+    reconciler
+        .tick_once()
+        .await
+        .expect("orphan signal label tick");
+
+    assert!(
+        requests.try_recv().is_err(),
+        "a signal label without a durable signal fact must fail closed"
+    );
+}
+
+#[tokio::test]
+async fn system_l3_review_approval_releases_dependent_and_request_changes_reuses_branch() {
+    let pm = crate::plan::test_util::MockPm::new().arc();
+    let (issues, _, maker_branch) =
+        seed_system_l3_awaiting_review_plan(&pm, "P-L3-REVIEW-APPROVE", &["T1", "T2"]).await;
+    let (reconciler, mut requests) = system_l3_review_reconciler(pm.clone());
+    reconciler.tick_once().await.expect("dispatch reviewer");
+    let review = next_review_request(&mut requests, "approval review request").await;
+    submit_test_review_verdict(pm.as_ref(), &issues[0], review.id.as_str(), "approve").await;
+    drop(review);
+
+    reconciler.tick_once().await.expect("consume approval");
+
+    let dependent = next_review_request(&mut requests, "dependent maker dispatch").await;
+    assert_eq!(dependent.issue_id.as_deref(), Some(issues[1].as_str()));
+    assert!(pm.issue(&issues[0]).await.status == "closed");
+
+    let retry_pm = crate::plan::test_util::MockPm::new().arc();
+    let (retry_issues, _, _) =
+        seed_system_l3_awaiting_review_plan(&retry_pm, "P-L3-REVIEW-CHANGES", &["T1"]).await;
+    let (retry_reconciler, mut retry_requests) = system_l3_review_reconciler(retry_pm.clone());
+    retry_reconciler
+        .tick_once()
+        .await
+        .expect("dispatch reviewer");
+    let retry_review = next_review_request(&mut retry_requests, "changes review request").await;
+    submit_test_review_verdict(
+        retry_pm.as_ref(),
+        &retry_issues[0],
+        retry_review.id.as_str(),
+        "request_changes",
+    )
+    .await;
+    drop(retry_review);
+
+    retry_reconciler
+        .tick_once()
+        .await
+        .expect("consume request changes");
+
+    let maker_retry = next_review_request(&mut retry_requests, "maker retry dispatch").await;
+    assert_eq!(
+        maker_retry.issue_id.as_deref(),
+        Some(retry_issues[0].as_str())
+    );
+    assert_eq!(
+        maker_retry.prior_branch_for_reuse.as_deref(),
+        Some(maker_branch.as_str())
+    );
+}
+
+#[tokio::test]
+async fn system_l3_review_completion_without_verdict_never_approves() {
+    let pm = crate::plan::test_util::MockPm::new().arc();
+    let (issues, _, _) =
+        seed_system_l3_awaiting_review_plan(&pm, "P-L3-REVIEW-NO-VERDICT", &["T1"]).await;
+    let (reconciler, mut requests) = system_l3_review_reconciler(pm.clone());
+    reconciler.tick_once().await.expect("dispatch reviewer");
+    let review = next_review_request(&mut requests, "no-verdict review request").await;
+    review
+        .respond_to
+        .send(spur_acp::DelegationResult {
+            resolved_config: None,
+            status: spur_acp::DelegationStatus::Success,
+            diff: None,
+            diff_summary: None,
+            summary: Some("reviewer exited without verdict".into()),
+            estimated_cost_usd: 0.0,
+            worker_branch: Some("spur/worker/throwaway-review".into()),
+            artifact: None,
+        })
+        .expect("return reviewer result");
+    tokio::task::yield_now().await;
+
+    reconciler.tick_once().await.expect("post-result tick");
+
+    let audits = crate::plan::projector::collect_sorted_audits_for_issue(
+        &issues[0],
+        pm.comments(&issues[0]).await,
+    )
+    .expect("target audits");
+    assert!(!audits.iter().any(|audit| matches!(
+        audit,
+        crate::plan::audit_sentinel::AuditSentinelKind::Approval { .. }
+    )));
+    assert_eq!(pm.issue(&issues[0]).await.status, "open");
+}
+
+#[tokio::test]
+async fn system_l3_review_sweeps_reopened_companion_after_target_advanced() {
+    let pm = crate::plan::test_util::MockPm::new().arc();
+    let (issues, _, _) =
+        seed_system_l3_awaiting_review_plan(&pm, "P-L3-REVIEW-CLEANUP", &["T1"]).await;
+    let (reconciler, mut requests) = system_l3_review_reconciler(pm.clone());
+    reconciler.tick_once().await.expect("dispatch reviewer");
+    let review = next_review_request(&mut requests, "cleanup reviewer").await;
+    let companion_id = review.issue_id.clone().expect("review companion");
+    submit_test_review_verdict(pm.as_ref(), &issues[0], review.id.as_str(), "approve").await;
+
+    reconciler.tick_once().await.expect("consume verdict");
+    assert_eq!(pm.issue(&issues[0]).await.status, pm.closed_status());
+    pm.update_issue(
+        &companion_id,
+        spur_pm::IssueUpdate {
+            status: Some("open".into()),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("simulate late generic completion reopening companion");
+
+    reconciler.tick_once().await.expect("cleanup sweep");
+
+    assert_eq!(
+        pm.issue(&companion_id).await.status,
+        pm.closed_status(),
+        "an open companion with a durable verdict must be swept after target advancement"
+    );
+    drop(review);
+}
+
+#[tokio::test]
+async fn system_l3_review_retries_companion_cleanup_after_close_failure() {
+    let inner = crate::plan::test_util::MockPm::new().arc();
+    let (issues, _, _) =
+        seed_system_l3_awaiting_review_plan(&inner, "P-L3-REVIEW-CLOSE-FAULT", &["T1"]).await;
+    let pm = Arc::new(FailFirstCompanionClosePm {
+        inner: Arc::clone(&inner),
+        fail_close: std::sync::atomic::AtomicBool::new(true),
+    });
+    let (reconciler, mut requests) = system_l3_review_reconciler(pm);
+    reconciler.tick_once().await.expect("dispatch reviewer");
+    let review = next_review_request(&mut requests, "faulted cleanup reviewer").await;
+    let companion_id = review.issue_id.clone().expect("review companion");
+    submit_test_review_verdict(inner.as_ref(), &issues[0], review.id.as_str(), "approve").await;
+
+    let error = reconciler
+        .tick_once()
+        .await
+        .expect_err("first companion close is injected to fail");
+    assert!(error
+        .to_string()
+        .contains("injected review companion close failure"));
+    assert_eq!(inner.issue(&issues[0]).await.status, inner.closed_status());
+    assert_eq!(inner.issue(&companion_id).await.status, "open");
+
+    reconciler.tick_once().await.expect("retry cleanup sweep");
+
+    assert_eq!(
+        inner.issue(&companion_id).await.status,
+        inner.closed_status(),
+        "cleanup must be recoverable after target advancement"
+    );
+    drop(review);
+}
+
+async fn expire_review_lease(pm: &crate::plan::test_util::MockPm, review_issue_id: &str) {
+    let issue = pm.issue(review_issue_id).await;
+    let old = issue
+        .labels
+        .iter()
+        .filter(|label| crate::plan::labels::parse_lease_expires_at(label).is_some())
+        .cloned()
+        .collect();
+    pm.update_issue(
+        review_issue_id,
+        spur_pm::IssueUpdate {
+            add_labels: vec![crate::plan::labels::lease_expires_at(0)],
+            remove_labels: old,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("expire review lease");
+}
+
+#[tokio::test]
+async fn system_l3_review_three_expired_attempts_park_instead_of_approving() {
+    let pm = crate::plan::test_util::MockPm::new().arc();
+    let (issues, _, _) =
+        seed_system_l3_awaiting_review_plan(&pm, "P-L3-REVIEW-FAILURES", &["T1"]).await;
+    let (reconciler, mut requests) = system_l3_review_reconciler(pm.clone());
+    reconciler.tick_once().await.expect("first review dispatch");
+    let first = next_review_request(&mut requests, "first reviewer").await;
+    let review_issue_id = first.issue_id.clone().expect("review issue id");
+    drop(first);
+    expire_review_lease(pm.as_ref(), &review_issue_id).await;
+
+    reconciler
+        .tick_once()
+        .await
+        .expect("second review dispatch");
+    let second = next_review_request(&mut requests, "second reviewer").await;
+    assert_eq!(second.issue_id.as_deref(), Some(review_issue_id.as_str()));
+    drop(second);
+    expire_review_lease(pm.as_ref(), &review_issue_id).await;
+
+    reconciler.tick_once().await.expect("third review dispatch");
+    let third = next_review_request(&mut requests, "third reviewer").await;
+    assert_eq!(third.issue_id.as_deref(), Some(review_issue_id.as_str()));
+    drop(third);
+    expire_review_lease(pm.as_ref(), &review_issue_id).await;
+
+    reconciler.tick_once().await.expect("park exhausted review");
+
+    assert!(requests.try_recv().is_err());
+    let target = pm.issue(&issues[0]).await;
+    assert!(target
+        .labels
+        .contains(&crate::plan::labels::signal_kind("review-failed")));
+    assert_eq!(target.status, "open");
+}
+
+#[test]
+fn loop_sweep_scopes_select_only_their_autonomy_levels() {
+    use crate::plan::loops::spec::AutonomyLevel;
+    use crate::plan::loops::LoopSweepScope;
+
+    assert!(LoopSweepScope::L3Only.allows(AutonomyLevel::L3));
+    assert!(!LoopSweepScope::L3Only.allows(AutonomyLevel::L1));
+    assert!(!LoopSweepScope::BrainArmedOnly.allows(AutonomyLevel::L3));
+    assert!(LoopSweepScope::BrainArmedOnly.allows(AutonomyLevel::L2));
+}
+
+#[tokio::test]
+async fn system_l3_reconciler_ignores_brain_owned_non_l3_plans() {
+    let pm = crate::plan::test_util::MockPm::new().arc();
+    let brain_session_id =
+        spur_acp::BrainSessionId::new(spur_acp::SessionId("brain-owned-l2".into()));
+    let ready_task_id =
+        seed_mock_ready_task_plan(&pm, "P-BRAIN-READY", "T1", &brain_session_id).await;
+    add_mock_epic_label(
+        &pm,
+        "P-BRAIN-READY",
+        format!("{}l2", crate::plan::labels::AUTONOMY_PREFIX),
+    )
+    .await;
+
+    let terminal_task_id =
+        seed_mock_ready_task_plan(&pm, "P-BRAIN-TERMINAL", "T1", &brain_session_id).await;
+    add_mock_epic_label(
+        &pm,
+        "P-BRAIN-TERMINAL",
+        format!("{}l2", crate::plan::labels::AUTONOMY_PREFIX),
+    )
+    .await;
+    close_mock_task_with_completion_cost(&pm, &terminal_task_id, 0).await;
+
+    let system_id = spur_acp::BrainSessionId::new(spur_acp::SessionId(
+        crate::plan::loops::LOOP_RUNTIME_OWNER_ID.into(),
+    ));
+    let (delegation_tx, _delegation_rx) = tokio::sync::mpsc::channel(1);
+    let reconciler = Reconciler::new_with_pm_like(
+        ReconcilerConfig {
+            loop_sweep_scope: crate::plan::loops::LoopSweepScope::L3Only,
+            plan_scope: PlanScope::SystemL3Only,
+            ..Default::default()
+        },
+        pm.clone(),
+        Arc::new(Notify::new()),
+        Some(test_dispatch_ctx(delegation_tx, system_id).into_dispatch()),
+        None,
+        pro_feature_gate(),
+    );
+
+    let ready = reconciler.observe_ready_summaries().await.unwrap();
+    assert!(
+        ready
+            .iter()
+            .all(|candidate| candidate.summary.id != ready_task_id),
+        "system reconciler discovered a brain-owned ready task"
+    );
+    reconciler.tick_once().await.unwrap();
+
+    let issues = pm.issues().await;
+    let terminal_epic = issues
+        .iter()
+        .find(|issue| {
+            issue.issue_type.as_deref() == Some("epic")
+                && issue
+                    .labels
+                    .contains(&crate::plan::labels::plan_id("P-BRAIN-TERMINAL"))
+        })
+        .expect("terminal brain-owned epic");
+    assert_eq!(terminal_epic.status, "open");
+}
+
+async fn seed_historical_l3_plan(
+    pm: &Arc<crate::plan::test_util::MockPm>,
+    plan_id: &str,
+    owner: &str,
+) -> (String, String) {
+    let owner_id = spur_acp::BrainSessionId::new(spur_acp::SessionId(owner.into()));
+    let task_id = seed_mock_ready_task_plan(pm, plan_id, "T1", &owner_id).await;
+    add_mock_epic_label(
+        pm,
+        plan_id,
+        format!("{}l3", crate::plan::labels::AUTONOMY_PREFIX),
+    )
+    .await;
+    let epic_id = pm
+        .issues()
+        .await
+        .into_iter()
+        .find(|issue| {
+            issue.issue_type.as_deref() == Some("epic")
+                && issue
+                    .labels
+                    .contains(&crate::plan::labels::plan_id(plan_id))
+        })
+        .expect("historical L3 epic")
+        .id;
+    (epic_id, task_id)
+}
+
+#[tokio::test]
+async fn system_l3_runtime_never_adopts_legacy_owner() {
+    let pm = crate::plan::test_util::MockPm::new().arc();
+    let scenarios = [
+        ("NO-LEASE", None),
+        ("EXPIRED-LEASE", Some(500)),
+        ("LIVE-LEASE", Some(20_000)),
+    ];
+    let mut expected = Vec::new();
+    for (suffix, lease) in scenarios {
+        let plan_id = format!("P-L3-{suffix}");
+        let prior_owner = format!("historical-{suffix}").to_ascii_lowercase();
+        let (epic_id, _) = seed_historical_l3_plan(&pm, &plan_id, &prior_owner).await;
+        let mut add_labels = vec![crate::plan::labels::plan_owner_token(&format!(
+            "token-{suffix}"
+        ))];
+        if let Some(expiry) = lease {
+            add_labels.push(crate::plan::labels::plan_owner_lease_expires_at(expiry));
+        }
+        pm.update_issue(
+            &epic_id,
+            spur_pm::IssueUpdate {
+                add_labels,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("seed legacy fencing labels");
+        let comment_bodies = pm
+            .comments(&epic_id)
+            .await
+            .into_iter()
+            .map(|comment| comment.body)
+            .collect::<Vec<_>>();
+        expected.push((
+            epic_id.clone(),
+            pm.issue(&epic_id).await.labels,
+            comment_bodies,
+        ));
+    }
+
+    for now in [1_000, 10_000] {
+        system_l3_reconciler(pm.clone(), now)
+            .tick_once()
+            .await
+            .expect("system L3 tick");
+    }
+
+    for (epic_id, expected_labels, expected_comments) in expected {
+        let epic = pm.issue(&epic_id).await;
+        assert_eq!(
+            epic.labels, expected_labels,
+            "system runtime must never mutate a foreign brain-owned L3 generation"
+        );
+        assert_eq!(
+            pm.comments(&epic_id)
+                .await
+                .into_iter()
+                .map(|comment| comment.body)
+                .collect::<Vec<_>>(),
+            expected_comments,
+            "ignoring a legacy generation must not fabricate an ownership audit",
+        );
+    }
+}
+
+fn system_l3_reconciler(pm: Arc<crate::plan::test_util::MockPm>, now: u64) -> Reconciler {
+    let system_id = spur_acp::BrainSessionId::new(spur_acp::SessionId(
+        crate::plan::loops::LOOP_RUNTIME_OWNER_ID.into(),
+    ));
+    let (delegation_tx, _delegation_rx) = tokio::sync::mpsc::channel(4);
+    let mut reconciler = Reconciler::new_with_pm_like(
+        ReconcilerConfig {
+            loop_sweep_scope: crate::plan::loops::LoopSweepScope::L3Only,
+            plan_scope: PlanScope::SystemL3Only,
+            ..Default::default()
+        },
+        pm,
+        Arc::new(Notify::new()),
+        Some(test_dispatch_ctx(delegation_tx, system_id).into_dispatch()),
+        None,
+        pro_feature_gate(),
+    );
+    reconciler.set_clock(Arc::new(FixedClock {
+        now: SystemTime::UNIX_EPOCH + Duration::from_secs(now),
+    }));
+    reconciler
+}
+
+fn l3_recovery_template() -> serde_json::Value {
+    serde_json::json!({
+        "epic_title": "Recovered L3 generation",
+        "tasks": [{
+            "task_id": "T1",
+            "agent": "codex",
+            "task": "Run the recovered generation"
+        }]
+    })
+}
+
+async fn seed_mock_l3_generation_epic(
+    pm: &Arc<crate::plan::test_util::MockPm>,
+    loop_id: &str,
+    generation: u32,
+) -> String {
+    let owner = spur_acp::SessionId(crate::plan::loops::LOOP_RUNTIME_OWNER_ID.into());
+    let plan_id = format!("P-{loop_id}-{generation}");
+    let epic_id = seed_mock_complete_epic_for_owner(pm, &plan_id, &owner).await;
+    for label in [
+        crate::plan::labels::loop_id_label(loop_id),
+        crate::plan::labels::loop_generation_label(generation),
+        format!("{}l3", crate::plan::labels::AUTONOMY_PREFIX),
+    ] {
+        add_mock_epic_label(pm, &plan_id, label).await;
+    }
+    epic_id
+}
+
+async fn generation_epics_for(
+    pm: &Arc<crate::plan::test_util::MockPm>,
+    loop_id: &str,
+    generation: u32,
+) -> Vec<spur_pm::Issue> {
+    pm.issues()
+        .await
+        .into_iter()
+        .filter(|issue| {
+            issue.issue_type.as_deref() == Some("epic")
+                && issue
+                    .labels
+                    .contains(&crate::plan::labels::loop_id_label(loop_id))
+                && issue
+                    .labels
+                    .contains(&crate::plan::labels::loop_generation_label(generation))
+        })
+        .collect()
+}
+
+async fn loop_has_future_next_run(
+    pm: &Arc<crate::plan::test_util::MockPm>,
+    loop_issue_id: &str,
+    now: i64,
+) -> bool {
+    pm.issues()
+        .await
+        .into_iter()
+        .find(|issue| issue.id == loop_issue_id)
+        .is_some_and(|issue| {
+            issue
+                .labels
+                .iter()
+                .filter_map(|label| crate::plan::labels::parse_loop_next_run(label))
+                .any(|next_run| next_run > now)
+        })
+}
+
+async fn loop_has_arming_label(
+    pm: &Arc<crate::plan::test_util::MockPm>,
+    loop_issue_id: &str,
+) -> bool {
+    pm.issues()
+        .await
+        .into_iter()
+        .find(|issue| issue.id == loop_issue_id)
+        .is_some_and(|issue| {
+            issue
+                .labels
+                .iter()
+                .any(|label| crate::plan::labels::parse_loop_arming(label).is_some())
+        })
+}
+
+async fn loop_run_outcomes(
+    pm: &Arc<crate::plan::test_util::MockPm>,
+    loop_issue_id: &str,
+) -> Vec<String> {
+    pm.comments(loop_issue_id)
+        .await
+        .into_iter()
+        .filter_map(|comment| crate::plan::audit_sentinel::parse_comment(&comment.body))
+        .filter_map(Result::ok)
+        .filter_map(|audit| match audit {
+            crate::plan::audit_sentinel::AuditSentinelKind::LoopRun { outcome, .. } => {
+                Some(outcome)
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn l3_claim_with_exact_generation_repairs_without_false_overlap() {
+    let pm = crate::plan::test_util::MockPm::new().arc();
+    let loop_id = "claimed-exact";
+    let loop_issue_id = create_mock_loop_issue(
+        &pm,
+        loop_id,
+        crate::plan::loops::spec::AutonomyLevel::L3,
+        l3_recovery_template(),
+        None,
+    )
+    .await;
+    pm.update_issue(
+        &loop_issue_id,
+        spur_pm::IssueUpdate {
+            add_labels: vec![crate::plan::labels::loop_arming_label(1)],
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    seed_mock_l3_generation_epic(&pm, loop_id, 1).await;
+    let reconciler = system_l3_reconciler(pm.clone(), 10);
+
+    reconciler.tick_once().await.unwrap();
+
+    assert_eq!(generation_epics_for(&pm, loop_id, 1).await.len(), 1);
+    assert!(loop_has_future_next_run(&pm, &loop_issue_id, 10).await);
+    assert!(!loop_has_arming_label(&pm, &loop_issue_id).await);
+    assert!(!loop_run_outcomes(&pm, &loop_issue_id)
+        .await
+        .contains(&"skipped_overlap".to_string()));
+}
+
+#[tokio::test]
+async fn l3_claim_without_generation_creates_exact_generation_once() {
+    let pm = crate::plan::test_util::MockPm::new().arc();
+    let loop_id = "claimed-absent";
+    let loop_issue_id = create_mock_loop_issue(
+        &pm,
+        loop_id,
+        crate::plan::loops::spec::AutonomyLevel::L3,
+        l3_recovery_template(),
+        None,
+    )
+    .await;
+    pm.update_issue(
+        &loop_issue_id,
+        spur_pm::IssueUpdate {
+            add_labels: vec![crate::plan::labels::loop_arming_label(1)],
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let reconciler = system_l3_reconciler(pm.clone(), 10);
+
+    reconciler.tick_once().await.unwrap();
+    reconciler.tick_once().await.unwrap();
+
+    assert_eq!(generation_epics_for(&pm, loop_id, 1).await.len(), 1);
+    assert!(loop_has_future_next_run(&pm, &loop_issue_id, 10).await);
+    assert!(!loop_has_arming_label(&pm, &loop_issue_id).await);
+    assert!(!loop_run_outcomes(&pm, &loop_issue_id)
+        .await
+        .contains(&"skipped_overlap".to_string()));
+}
+
+#[tokio::test]
+async fn l3_without_claim_retains_real_older_generation_overlap() {
+    let pm = crate::plan::test_util::MockPm::new().arc();
+    let loop_id = "older-live";
+    let loop_issue_id = create_mock_loop_issue(
+        &pm,
+        loop_id,
+        crate::plan::loops::spec::AutonomyLevel::L3,
+        l3_recovery_template(),
+        None,
+    )
+    .await;
+    seed_mock_l3_generation_epic(&pm, loop_id, 1).await;
+    let reconciler = system_l3_reconciler(pm.clone(), 10);
+
+    reconciler.tick_once().await.unwrap();
+
+    assert!(generation_epics_for(&pm, loop_id, 2).await.is_empty());
+    assert!(loop_run_outcomes(&pm, &loop_issue_id)
+        .await
+        .contains(&"skipped_overlap".to_string()));
 }
 
 #[tokio::test(start_paused = true)]

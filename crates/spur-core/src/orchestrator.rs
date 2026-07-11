@@ -63,6 +63,7 @@ pub mod connection;
 mod delegation;
 pub mod input;
 pub mod interactive_loop;
+pub(crate) mod loop_runtime;
 mod plan_ops;
 mod pm_bridge;
 pub mod prompt;
@@ -424,6 +425,8 @@ pub struct Orchestrator {
     /// `background_tasks` for `Drop` to abort.
     pub(crate) peer_mailbox_reconciler_abort: Option<tokio::task::AbortHandle>,
     seeded_session_ids: HashSet<SessionId>,
+    #[cfg(feature = "test-support")]
+    project_loop_runtime_delegation_capture: Option<mpsc::Sender<DelegationRequest>>,
 }
 
 impl Drop for Orchestrator {
@@ -527,6 +530,8 @@ impl Orchestrator {
             fault_injection_hooks: FaultInjectionHooks::default(),
             peer_mailbox_reconciler_abort: None,
             seeded_session_ids: HashSet::new(),
+            #[cfg(feature = "test-support")]
+            project_loop_runtime_delegation_capture: None,
         };
 
         let ttl_days: u64 = match std::env::var("SPUR_OUTCOME_TTL_DAYS") {
@@ -663,6 +668,17 @@ impl Orchestrator {
     /// Attach a PM service. Must be called before `run_adhoc` or `run_interactive`.
     pub fn with_pm_service(mut self, pm: Arc<PmService>) -> Self {
         self.pm_service = Some(pm);
+        self
+    }
+
+    /// Route project-runtime requests to a deterministic integration harness.
+    /// Production builds do not expose or compile this interception seam.
+    #[cfg(feature = "test-support")]
+    pub fn with_project_loop_runtime_delegation_capture(
+        mut self,
+        capture: mpsc::Sender<DelegationRequest>,
+    ) -> Self {
+        self.project_loop_runtime_delegation_capture = Some(capture);
         self
     }
 

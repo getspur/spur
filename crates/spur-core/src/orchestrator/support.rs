@@ -163,6 +163,10 @@ impl Orchestrator {
             info!("reconciler enabled (beads backend)");
         }
         mcp_server.set_reconciler_enabled(reconciler_enabled, None);
+        mcp_server.set_reconciler_scopes(
+            crate::plan::loops::LoopSweepScope::BrainArmedOnly,
+            crate::plan::reconciler::PlanScope::BrainOwned,
+        );
         mcp_server.set_repo_root(self.repo_root.clone());
         mcp_server.set_auto_merge_approved_plans(self.config.spur.auto_merge_approved_plans);
         mcp_server.set_loop_runtime(
