@@ -115,6 +115,79 @@ unauthenticated route does not silently fall back to source IP identity.
   revalidate URLs, cap tarball downloads/source trees, and kill `spur graph
   build` after `context_max_build_seconds`.
 
+## Optional Cognito OAuth ingress
+
+`cognito_auth_enabled` is `false` by default. In that mode Terraform creates no
+Cognito user pool, domain, resource server, app clients, JWT authorizer,
+`POST /mcp/oauth` route, or Cognito-specific access-log/metric resources. The
+existing `$default` route remains exactly as configured: `NONE` for
+`env/default.tfvars` and `AWS_IAM` by default elsewhere. The EventBridge queue
+drainer continues to invoke the Lambda directly.
+
+When enabled, the module adds a Cognito **LITE** user pool, hosted domain, the
+`external.read`, `external.index`, and `external.status` resource-server
+scopes, a public authorization-code human client, and one confidential
+client-credentials client for each enabled organization. API Gateway attaches a
+native JWT authorizer only to `POST /mcp/oauth`; `$default` never receives the
+authorizer. The authorizer's three route scopes are an any-of edge gate. Lambda
+uses the supplied non-secret issuer, client IDs, resource-server ID, denylist,
+and fixed `/mcp/oauth` path to enforce the exact body-selected tool scope.
+
+Use non-production placeholders in committed configuration. A real enabled
+environment needs exact callback and logout URLs, an environment-qualified pool
+name, and a unique Cognito domain prefix:
+
+```hcl
+cognito_auth_enabled        = true
+cognito_user_pool_name      = "spur-context-example-cognito"
+cognito_domain_prefix       = "spur-context-example-auth"
+cognito_human_callback_urls = ["https://app.example.test/oauth/callback"]
+cognito_human_logout_urls   = ["https://app.example.test/logout"]
+
+cognito_m2m_organizations = {
+  example_org = {
+    display_name       = "Example organization"
+    enabled            = true
+    allowed_scopes     = ["external.index", "external.status"]
+    access_token_hours = 6
+    risk_acceptance    = null
+  }
+}
+```
+
+Callback and logout URLs must be exact HTTPS URLs. HTTP is accepted only for
+`localhost`, `127.0.0.1`, or `[::1]` loopback POC URLs; wildcards are rejected.
+M2M scopes are limited to the three listed scope suffixes, and one human client
+plus all enabled organizations may not exceed API Gateway's 50 JWT audiences.
+The balanced M2M default is six hours. An enabled 24-hour organization must
+provide `risk_acceptance.accepted_by`, RFC3339 `accepted_at`, and `ticket`
+metadata to make its bearer-token replay risk reviewable.
+
+M2M app clients use `generate_secret = true`, so Terraform state can contain a
+generated `client_secret` even though no output exposes it. Treat remote state
+as secret-bearing: encrypt it, restrict IAM, retain access logs, and never
+publish plan/state artifacts. Do not put app-client secrets, tokens, real
+client IDs, authorization codes, PKCE values, or real subscriber emails in
+tfvars. The only Cognito Lambda environment values are non-secret validation
+metadata; client secrets are never passed to the Lambda. API Gateway access
+logs contain only route/status/latency/bounded-error fields and intentionally
+omit headers, claims, request bodies, and credentials.
+
+Set `cognito_monthly_budget_usd` plus one or more
+`cognito_budget_subscriber_emails` to create the optional Cognito forecast
+budget. The subscriber variable is marked sensitive because it contains contact
+data. Enabled Cognito also creates a plan-only-safe OAuth-route 5xx metric and
+alarm from the redacted API access log.
+
+Run the local mock-provider plan tests after Terraform changes; every run uses
+`command = plan` and never creates AWS resources:
+
+```bash
+terraform -chdir=infra/spur-context-service test \
+  -test-directory=tests \
+  -filter=tests/cognito_static.tftest.hcl
+```
+
 ## Bounded Backlog Operations
 
 The module keeps queue admission opt-in: `index_max_queued_jobs_per_owner=0`
