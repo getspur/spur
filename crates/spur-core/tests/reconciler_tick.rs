@@ -263,7 +263,7 @@ async fn tick_once_does_not_dispatch_partial_plan_after_child_create_failure() {
         Arc::new(Notify::new()),
         Some(ReconcilerDispatchCtx {
             delegation_tx,
-            task_tracker: tokio_util::task::TaskTracker::new(),
+            task_tracker: spur_core::server::AbortableTaskTracker::new(),
             brain_session_id: spur_acp::BrainSessionId::new(spur_acp::SessionId("brain".into())),
             event_sink: None,
             materializer: test_materializer(),
@@ -322,7 +322,7 @@ async fn tick_once_skips_plan_owned_by_another_brain() {
         Arc::new(Notify::new()),
         Some(ReconcilerDispatchCtx {
             delegation_tx,
-            task_tracker: tokio_util::task::TaskTracker::new(),
+            task_tracker: spur_core::server::AbortableTaskTracker::new(),
             brain_session_id: BrainSessionId::new(SessionId("brain".to_string())),
             event_sink: None,
             materializer: test_materializer(),
@@ -399,7 +399,7 @@ async fn tick_once_skips_terminal_epic_owned_by_another_brain() {
         Arc::new(Notify::new()),
         Some(ReconcilerDispatchCtx {
             delegation_tx,
-            task_tracker: tokio_util::task::TaskTracker::new(),
+            task_tracker: spur_core::server::AbortableTaskTracker::new(),
             brain_session_id: BrainSessionId::new(SessionId("brain".to_string())),
             event_sink: None,
             materializer: test_materializer(),
@@ -481,7 +481,7 @@ async fn tick_once_does_not_reclaim_expired_lease_owned_by_another_brain() {
         Arc::new(Notify::new()),
         Some(ReconcilerDispatchCtx {
             delegation_tx,
-            task_tracker: tokio_util::task::TaskTracker::new(),
+            task_tracker: spur_core::server::AbortableTaskTracker::new(),
             brain_session_id: BrainSessionId::new(SessionId("brain".to_string())),
             event_sink: Some(event_sink),
             materializer: test_materializer(),
@@ -602,7 +602,7 @@ async fn tick_once_dispatches_ready_task_with_single_approved_dep_branch_base() 
     .expect("close approved T1");
 
     let (delegation_tx, mut delegation_rx) = tokio::sync::mpsc::channel(1);
-    let task_tracker = tokio_util::task::TaskTracker::new();
+    let task_tracker = spur_core::server::AbortableTaskTracker::new();
     let reconciler = Reconciler::new(
         ReconcilerConfig {
             repo_root: dir.path().to_path_buf(),
@@ -791,7 +791,7 @@ async fn persisted_overlay_conflict_emits_plan_task_blocked_on_setup_conflict_co
             })
         }),
     };
-    let task_tracker = tokio_util::task::TaskTracker::new();
+    let task_tracker = spur_core::server::AbortableTaskTracker::new();
     let reconciler = Reconciler::new(
         ReconcilerConfig {
             repo_root: dir.path().to_path_buf(),
@@ -1491,7 +1491,7 @@ async fn epic_closes_when_scoped_children_terminal() {
         Arc::new(Notify::new()),
         Some(ReconcilerDispatchCtx {
             delegation_tx: tokio::sync::mpsc::channel(1).0,
-            task_tracker: tokio_util::task::TaskTracker::new(),
+            task_tracker: spur_core::server::AbortableTaskTracker::new(),
             brain_session_id: spur_acp::BrainSessionId::new(spur_acp::SessionId("brain".into())),
             event_sink: None,
             materializer: test_materializer(),
@@ -1620,7 +1620,7 @@ async fn all_approved_epic_emits_plan_ready_to_merge() {
         Arc::new(Notify::new()),
         Some(ReconcilerDispatchCtx {
             delegation_tx,
-            task_tracker: tokio_util::task::TaskTracker::new(),
+            task_tracker: spur_core::server::AbortableTaskTracker::new(),
             brain_session_id: spur_acp::BrainSessionId::new(spur_acp::SessionId("brain".into())),
             event_sink: Some(sink_ref),
             materializer: test_materializer(),
@@ -1691,7 +1691,7 @@ async fn tick_once_persists_dispatch_before_queue_send() {
         Arc::new(Notify::new()),
         Some(ReconcilerDispatchCtx {
             delegation_tx,
-            task_tracker: tokio_util::task::TaskTracker::new(),
+            task_tracker: spur_core::server::AbortableTaskTracker::new(),
             brain_session_id: spur_acp::BrainSessionId::new(spur_acp::SessionId("brain".into())),
             event_sink: None,
             materializer: test_materializer(),
@@ -1775,7 +1775,7 @@ async fn tick_once_persists_failed_completion_when_respond_to_drops() {
     run_br(dir.path(), &["comments", "add", &task_id, &task_spec]);
 
     let (delegation_tx, mut delegation_rx) = tokio::sync::mpsc::channel(1);
-    let task_tracker = tokio_util::task::TaskTracker::new();
+    let task_tracker = spur_core::server::AbortableTaskTracker::new();
     let fast_forward = Arc::new(Notify::new());
     let reconciler = Reconciler::new(
         ReconcilerConfig::default(),
@@ -1934,7 +1934,7 @@ async fn tick_once_reclaims_expired_lease_dispatch() {
         Arc::new(Notify::new()),
         Some(ReconcilerDispatchCtx {
             delegation_tx,
-            task_tracker: tokio_util::task::TaskTracker::new(),
+            task_tracker: spur_core::server::AbortableTaskTracker::new(),
             brain_session_id: spur_acp::BrainSessionId::new(spur_acp::SessionId("brain".into())),
             event_sink: Some(event_sink),
             materializer: test_materializer(),
@@ -2058,7 +2058,7 @@ async fn lease_sweep_does_not_report_missing_lease_without_dispatch_marker() {
         Arc::new(Notify::new()),
         Some(ReconcilerDispatchCtx {
             delegation_tx,
-            task_tracker: tokio_util::task::TaskTracker::new(),
+            task_tracker: spur_core::server::AbortableTaskTracker::new(),
             brain_session_id: spur_acp::BrainSessionId::new(spur_acp::SessionId("brain".into())),
             event_sink: None,
             materializer: test_materializer(),
@@ -2292,7 +2292,7 @@ async fn tick_once_does_not_reclaim_live_lease() {
         Arc::new(Notify::new()),
         Some(ReconcilerDispatchCtx {
             delegation_tx,
-            task_tracker: tokio_util::task::TaskTracker::new(),
+            task_tracker: spur_core::server::AbortableTaskTracker::new(),
             brain_session_id: spur_acp::BrainSessionId::new(spur_acp::SessionId("brain".into())),
             event_sink: Some(event_sink),
             materializer: test_materializer(),
@@ -2367,7 +2367,7 @@ async fn tick_once_clears_dispatch_label_when_send_fails() {
         Arc::new(Notify::new()),
         Some(ReconcilerDispatchCtx {
             delegation_tx,
-            task_tracker: tokio_util::task::TaskTracker::new(),
+            task_tracker: spur_core::server::AbortableTaskTracker::new(),
             brain_session_id: spur_acp::BrainSessionId::new(spur_acp::SessionId("brain".into())),
             event_sink: None,
             materializer: test_materializer(),
@@ -2603,7 +2603,7 @@ async fn tick_once_skips_broken_plan_and_dispatches_other_ready_work() {
         Arc::new(Notify::new()),
         Some(ReconcilerDispatchCtx {
             delegation_tx,
-            task_tracker: tokio_util::task::TaskTracker::new(),
+            task_tracker: spur_core::server::AbortableTaskTracker::new(),
             brain_session_id: spur_acp::BrainSessionId::new(spur_acp::SessionId("brain".into())),
             event_sink: None,
             materializer: test_materializer(),
@@ -2823,7 +2823,7 @@ async fn lease_sweep_prefers_audit_delegation_over_mismatched_label() {
         Arc::new(Notify::new()),
         Some(ReconcilerDispatchCtx {
             delegation_tx,
-            task_tracker: tokio_util::task::TaskTracker::new(),
+            task_tracker: spur_core::server::AbortableTaskTracker::new(),
             brain_session_id: spur_acp::BrainSessionId::new(spur_acp::SessionId("brain".into())),
             event_sink: None,
             materializer: test_materializer(),
@@ -2905,7 +2905,7 @@ async fn lease_sweep_skips_when_label_has_no_audit() {
         Arc::new(Notify::new()),
         Some(ReconcilerDispatchCtx {
             delegation_tx,
-            task_tracker: tokio_util::task::TaskTracker::new(),
+            task_tracker: spur_core::server::AbortableTaskTracker::new(),
             brain_session_id: spur_acp::BrainSessionId::new(spur_acp::SessionId("brain".into())),
             event_sink: None,
             materializer: test_materializer(),
@@ -3734,7 +3734,7 @@ async fn hybrid_fast_forward_matches_polling_projection() {
         Arc::clone(&fast_forward),
         Some(ReconcilerDispatchCtx {
             delegation_tx,
-            task_tracker: tokio_util::task::TaskTracker::new(),
+            task_tracker: spur_core::server::AbortableTaskTracker::new(),
             brain_session_id: brain_sid,
             event_sink: None,
             materializer: test_materializer(),

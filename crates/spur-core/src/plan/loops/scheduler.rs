@@ -30,6 +30,23 @@ struct RearmLoop<'a> {
     event_sink: Option<&'a Arc<dyn spur_mcp::events::McpEventSink>>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GenerationDisposition {
+    ResumeClaim { generation: u32 },
+    CreateClaim { generation: u32 },
+    SkipOlderLive { generation: u32 },
+}
+
+impl GenerationDisposition {
+    fn generation(self) -> u32 {
+        match self {
+            Self::ResumeClaim { generation }
+            | Self::CreateClaim { generation }
+            | Self::SkipOlderLive { generation } => generation,
+        }
+    }
+}
+
 impl Reconciler {
     /// One pass over open loop issues. Returns true if any loop was armed or a
     /// durable loop record/control update was written.
@@ -86,7 +103,19 @@ impl Reconciler {
                     continue;
                 }
             };
-            if next_run_after_now(&summary.labels, now) {
+            if !self.config.loop_sweep_scope.allows(spec.autonomy) {
+                continue;
+            }
+            let claimed_generation = (spec.autonomy == AutonomyLevel::L3)
+                .then(|| {
+                    summary
+                        .labels
+                        .iter()
+                        .filter_map(|label| labels::parse_loop_arming(label))
+                        .max()
+                })
+                .flatten();
+            if claimed_generation.is_none() && next_run_after_now(&summary.labels, now) {
                 continue;
             }
 
@@ -94,47 +123,94 @@ impl Reconciler {
                 &summary.id,
                 advanced.list_comments(&summary.id).await?,
             )?;
-            let next_generation = self.next_loop_generation(&spec.loop_id).await?;
+            let next_generation = match claimed_generation {
+                Some(generation) => generation,
+                None => self.next_loop_generation(&spec.loop_id).await?,
+            };
             let consecutive_failures = trailing_failed_loop_runs(&audits, &spec.loop_id);
-            if self
-                .auto_pause_failed_loop(&summary, &spec, consecutive_failures, dispatch.as_ref())
-                .await?
-            {
-                did_work = true;
-                continue;
-            }
-
             let interval_secs = effective_interval_secs(&spec, consecutive_failures);
-            if generations_in_last_day(&audits, &spec.loop_id, now)
-                >= spec.governors.max_generations_per_day.unwrap_or(u32::MAX)
-            {
-                advanced
-                    .add_comment(
-                        &summary.id,
-                        &encode_comment(&skipped_loop_run(
-                            &spec.loop_id,
-                            next_generation,
-                            Some(spec.autonomy.as_str().to_string()),
-                            "budget_exhausted",
-                            now,
-                        )),
-                    )
+
+            if claimed_generation.is_some() {
+                if !next_run_after_now(&summary.labels, now) {
+                    self.rearm_loop(RearmLoop {
+                        summary: &summary,
+                        loop_id: &spec.loop_id,
+                        generation: next_generation,
+                        now,
+                        interval_secs,
+                        add_labels: vec![labels::loop_arming_label(next_generation)],
+                        event_sink: dispatch.event_sink(),
+                    })
                     .await?;
-                self.rearm_loop(RearmLoop {
-                    summary: &summary,
-                    loop_id: &spec.loop_id,
-                    generation: next_generation,
-                    now,
-                    interval_secs,
-                    add_labels: Vec::new(),
-                    event_sink: dispatch.event_sink(),
-                })
-                .await?;
-                did_work = true;
-                continue;
+                }
+                if self
+                    .exact_generation_exists(&spec.loop_id, next_generation)
+                    .await?
+                {
+                    self.clear_loop_arming(&summary, next_generation).await?;
+                    self.fast_forward.notify_one();
+                    did_work = true;
+                    continue;
+                }
+            } else {
+                if self
+                    .auto_pause_failed_loop(
+                        &summary,
+                        &spec,
+                        consecutive_failures,
+                        dispatch.as_ref(),
+                    )
+                    .await?
+                {
+                    did_work = true;
+                    continue;
+                }
+
+                if generations_in_last_day(&audits, &spec.loop_id, now)
+                    >= spec.governors.max_generations_per_day.unwrap_or(u32::MAX)
+                {
+                    advanced
+                        .add_comment(
+                            &summary.id,
+                            &encode_comment(&skipped_loop_run(
+                                &spec.loop_id,
+                                next_generation,
+                                Some(spec.autonomy.as_str().to_string()),
+                                "budget_exhausted",
+                                now,
+                            )),
+                        )
+                        .await?;
+                    self.rearm_loop(RearmLoop {
+                        summary: &summary,
+                        loop_id: &spec.loop_id,
+                        generation: next_generation,
+                        now,
+                        interval_secs,
+                        add_labels: Vec::new(),
+                        event_sink: dispatch.event_sink(),
+                    })
+                    .await?;
+                    did_work = true;
+                    continue;
+                }
             }
 
-            if self.live_generation_exists(&spec.loop_id).await? {
+            let disposition = if claimed_generation.is_some() {
+                GenerationDisposition::ResumeClaim {
+                    generation: next_generation,
+                }
+            } else if self.live_generation_exists(&spec.loop_id).await? {
+                GenerationDisposition::SkipOlderLive {
+                    generation: next_generation,
+                }
+            } else {
+                GenerationDisposition::CreateClaim {
+                    generation: next_generation,
+                }
+            };
+
+            if matches!(disposition, GenerationDisposition::SkipOlderLive { .. }) {
                 advanced
                     .add_comment(
                         &summary.id,
@@ -162,31 +238,53 @@ impl Reconciler {
             }
 
             if spec.autonomy == AutonomyLevel::L3 {
-                let mut input =
-                    match loop_template_to_persist_input(&spec.template, &spec, next_generation) {
-                        Ok(input) => input,
-                        Err(error) => {
-                            tracing::warn!(
-                                loop_issue_id = %summary.id,
-                                loop_id = %spec.loop_id,
-                                generation = next_generation,
-                                "loop scheduler auto-pausing invalid L3 template: {error}"
-                            );
-                            self.auto_pause_invalid_template_loop(InvalidTemplatePause {
-                                summary: &summary,
-                                spec: &spec,
-                                generation: next_generation,
-                                now,
-                                validation_error: error.to_string(),
-                                advanced,
-                                dispatch: dispatch.as_ref(),
-                            })
-                            .await?;
-                            did_work = true;
-                            continue;
-                        }
+                let mut input = match loop_template_to_persist_input(
+                    &spec.template,
+                    &spec,
+                    disposition.generation(),
+                ) {
+                    Ok(input) => input,
+                    Err(error) => {
+                        tracing::warn!(
+                            loop_issue_id = %summary.id,
+                            loop_id = %spec.loop_id,
+                            generation = next_generation,
+                            "loop scheduler auto-pausing invalid L3 template: {error}"
+                        );
+                        self.auto_pause_invalid_template_loop(InvalidTemplatePause {
+                            summary: &summary,
+                            spec: &spec,
+                            generation: next_generation,
+                            now,
+                            validation_error: error.to_string(),
+                            advanced,
+                            dispatch: dispatch.as_ref(),
+                        })
+                        .await?;
+                        did_work = true;
+                        continue;
+                    }
+                };
+                if matches!(disposition, GenerationDisposition::CreateClaim { .. }) {
+                    self.rearm_loop(RearmLoop {
+                        summary: &summary,
+                        loop_id: &spec.loop_id,
+                        generation: disposition.generation(),
+                        now,
+                        interval_secs,
+                        add_labels: vec![labels::loop_arming_label(disposition.generation())],
+                        event_sink: dispatch.event_sink(),
+                    })
+                    .await?;
+                }
+                input.brain_session_id =
+                    if self.config.loop_sweep_scope == super::LoopSweepScope::L3Only {
+                        spur_acp::BrainSessionId::new(spur_acp::SessionId(
+                            super::LOOP_RUNTIME_OWNER_ID.into(),
+                        ))
+                    } else {
+                        dispatch.brain_session_id().clone()
                     };
-                input.brain_session_id = dispatch.brain_session_id().clone();
                 if input.base.is_some() {
                     input.repo_root = Some(self.config.repo_root.clone());
                 }
@@ -198,6 +296,8 @@ impl Reconciler {
                     input,
                 )
                 .await?;
+                self.clear_loop_arming(&summary, disposition.generation())
+                    .await?;
             } else {
                 crate::plan::push_loop_due_continuation(
                     dispatch.continuation_ctx().as_ref(),
@@ -205,21 +305,21 @@ impl Reconciler {
                     dispatch.brain_session_id(),
                     &spec.loop_id,
                     &spec.goal,
-                    next_generation,
+                    disposition.generation(),
                     &spec.template,
                 )
                 .await;
+                self.rearm_loop(RearmLoop {
+                    summary: &summary,
+                    loop_id: &spec.loop_id,
+                    generation: disposition.generation(),
+                    now,
+                    interval_secs,
+                    add_labels: Vec::new(),
+                    event_sink: dispatch.event_sink(),
+                })
+                .await?;
             }
-            self.rearm_loop(RearmLoop {
-                summary: &summary,
-                loop_id: &spec.loop_id,
-                generation: next_generation,
-                now,
-                interval_secs,
-                add_labels: Vec::new(),
-                event_sink: dispatch.event_sink(),
-            })
-            .await?;
             did_work = true;
         }
 
@@ -277,6 +377,54 @@ impl Reconciler {
             })
             .await?
             .is_empty())
+    }
+
+    async fn exact_generation_exists(
+        &self,
+        loop_id: &str,
+        generation: u32,
+    ) -> anyhow::Result<bool> {
+        Ok(!self
+            .pm
+            .list_issues(IssueFilter {
+                labels: vec![
+                    labels::loop_id_label(loop_id),
+                    labels::loop_generation_label(generation),
+                ],
+                issue_type: Some("epic".to_string()),
+                include_closed: true,
+                limit: Some(1),
+                ..Default::default()
+            })
+            .await?
+            .is_empty())
+    }
+
+    async fn clear_loop_arming(
+        &self,
+        summary: &IssueSummary,
+        generation: u32,
+    ) -> anyhow::Result<()> {
+        let mut remove_labels = summary
+            .labels
+            .iter()
+            .filter(|label| labels::parse_loop_arming(label).is_some())
+            .cloned()
+            .collect::<Vec<_>>();
+        let exact_label = labels::loop_arming_label(generation);
+        if !remove_labels.contains(&exact_label) {
+            remove_labels.push(exact_label);
+        }
+        self.pm
+            .update_issue(
+                &summary.id,
+                IssueUpdate {
+                    remove_labels,
+                    ..Default::default()
+                },
+            )
+            .await?;
+        Ok(())
     }
 
     async fn auto_pause_failed_loop(

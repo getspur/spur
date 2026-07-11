@@ -68,6 +68,10 @@ pub const LEASE_EXPIRES_AT_PREFIX: &str = "spur:lease-expires-at:";
 pub const PLAN_OWNER_PREFIX: &str = "spur:plan-owner:";
 pub const PLAN_OWNER_TOKEN_PREFIX: &str = "spur:plan-owner-token:";
 pub const PLAN_OWNER_LEASE_EXPIRES_AT_PREFIX: &str = "spur:plan-owner-lease-expires-at:";
+pub const SYSTEM_REVIEW: &str = "spur:system-review";
+pub const REVIEW_TARGET_PREFIX: &str = "spur:review-target:";
+pub const REVIEW_MAKER_DELEGATION_PREFIX: &str = "spur:review-maker-delegation:";
+pub const REVIEW_REVIEWER_DELEGATION_PREFIX: &str = "spur:review-reviewer-delegation:";
 
 fn assert_br_legal_compact_component(component: &str) {
     assert!(
@@ -87,6 +91,18 @@ pub fn compact_label_component(value: &str) -> String {
 
 pub fn delegation_id(delegation_id: &str) -> String {
     format!("{DELEGATION_ID_PREFIX}{delegation_id}")
+}
+
+pub fn review_target(issue_id: &str) -> String {
+    format!("{REVIEW_TARGET_PREFIX}{}", encode_label_id(issue_id))
+}
+
+pub fn review_maker_delegation(delegation_id: &str) -> String {
+    format!("{REVIEW_MAKER_DELEGATION_PREFIX}{delegation_id}")
+}
+
+pub fn review_reviewer_delegation(delegation_id: &str) -> String {
+    format!("{REVIEW_REVIEWER_DELEGATION_PREFIX}{delegation_id}")
 }
 
 pub fn dispatched_base_oid(oid: &str) -> String {
@@ -173,6 +189,10 @@ pub fn loop_generation_label(n: u32) -> String {
     format!("{LOOP_GENERATION_PREFIX}{n}")
 }
 
+pub fn loop_arming_label(generation: u32) -> String {
+    format!("{LOOP_ARMING_PREFIX}{generation}")
+}
+
 pub fn signal_kind(kind: &str) -> String {
     format!("signal:{kind}")
 }
@@ -197,6 +217,7 @@ pub const AUTONOMY_PREFIX: &str = "spur:autonomy:";
 pub const LOOP_ID_PREFIX: &str = "spur:loop-id:";
 pub const LOOP_NEXT_RUN_PREFIX: &str = "spur:loop-next-run:";
 pub const LOOP_GENERATION_PREFIX: &str = "spur:loop-generation:";
+pub const LOOP_ARMING_PREFIX: &str = "spur:loop-arming:";
 pub const LOOP_BUDGET_MICROS_PREFIX: &str = "spur:loop-budget-micros:";
 /// Marker applied to an epic while `build_epic_subgraph` is still creating
 /// children + dependency edges. The reconciler must not dispatch tasks from a
@@ -212,6 +233,25 @@ pub const SOURCE_ISSUE_PREFIX: &str = "spur:source-issue:";
 
 pub fn parse_delegation_id(label: &str) -> Option<&str> {
     label.strip_prefix(DELEGATION_ID_PREFIX)
+}
+
+pub fn parse_review_target(label: &str) -> Option<String> {
+    label
+        .strip_prefix(REVIEW_TARGET_PREFIX)
+        .filter(|value| !value.is_empty())
+        .map(decode_label_id)
+}
+
+pub fn parse_review_maker_delegation(label: &str) -> Option<&str> {
+    label
+        .strip_prefix(REVIEW_MAKER_DELEGATION_PREFIX)
+        .filter(|value| !value.is_empty())
+}
+
+pub fn parse_review_reviewer_delegation(label: &str) -> Option<&str> {
+    label
+        .strip_prefix(REVIEW_REVIEWER_DELEGATION_PREFIX)
+        .filter(|value| !value.is_empty())
 }
 
 pub fn parse_lease_expires_at(label: &str) -> Option<i64> {
@@ -232,6 +272,10 @@ pub fn parse_loop_next_run(label: &str) -> Option<i64> {
 
 pub fn parse_loop_generation(label: &str) -> Option<u32> {
     label.strip_prefix(LOOP_GENERATION_PREFIX)?.parse().ok()
+}
+
+pub fn parse_loop_arming(label: &str) -> Option<u32> {
+    label.strip_prefix(LOOP_ARMING_PREFIX)?.parse().ok()
 }
 
 pub fn parse_plan_owner(label: &str) -> Option<&str> {
@@ -698,5 +742,15 @@ mod tests {
         let label = peer_message_label(&id);
         assert_eq!(label, "spur:peer:0123456789abcdef0123456789abcdef");
         assert!(is_br_legal(&label), "label not br-legal: {label}");
+    }
+
+    #[test]
+    fn loop_arming_label_round_trips_and_is_br_legal() {
+        let label = loop_arming_label(42);
+        assert_eq!(label, "spur:loop-arming:42");
+        assert!(is_br_legal(&label));
+        assert_eq!(parse_loop_arming(&label), Some(42));
+        assert_eq!(parse_loop_arming("spur:loop-arming:not-a-number"), None);
+        assert_eq!(parse_loop_arming("other:42"), None);
     }
 }
