@@ -51,7 +51,10 @@ const SORTABLE_TIMESTAMP_WIDTH: usize = 20;
 const MAX_OWNER_ID_LEN: usize = 200;
 const MAX_NAME_LEN: usize = 100;
 const MAX_ACTIVE_KEYS_PER_OWNER: u64 = 10;
-const MAX_PAGE_LIMIT: usize = 100;
+pub(crate) const MAX_PAGE_LIMIT: usize = 100;
+pub(crate) const MAX_SWEEP_BUCKETS: usize = 8;
+pub(crate) const MAX_SWEEP_PAGES: usize = 16;
+pub(crate) const MAX_SWEEP_RECORDS: usize = 100;
 const TTL_GRACE_SECONDS: u64 = 7 * 24 * 60 * 60;
 const DEFAULT_API_KEYS_TABLE: &str = "spur-context-api-keys";
 /// Delay after an hour closes before its eventually-consistent expiry index
@@ -506,6 +509,11 @@ pub struct SweepRequest {
     pub start_hour: u64,
     /// Maximum number of completed buckets in this call.
     pub max_buckets: usize,
+    /// Maximum number of expiry-GSI query pages in this call, including
+    /// late-index overlap pages.
+    pub max_pages: usize,
+    /// Maximum number of expiry records attempted in this call.
+    pub max_records: usize,
     /// Maximum records processed from a bucket in this call.
     pub page_limit: usize,
     /// Stable identity of the sweeper holding the lease.
@@ -523,6 +531,13 @@ pub struct SweepPage {
     pub completed_hour: Option<u64>,
     /// Whether a partial bucket or another closed bucket remains.
     pub has_more: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SweepBucketPage {
+    scanned: usize,
+    processed: usize,
+    complete: bool,
 }
 
 /// Sanitized durable-store failures.
@@ -791,7 +806,7 @@ impl FakeApiKeyStore {
         hour: u64,
         now: u64,
         page_limit: usize,
-    ) -> Result<(usize, bool), ApiKeyStoreError> {
+    ) -> Result<SweepBucketPage, ApiKeyStoreError> {
         let mut state = self.lock()?;
         let mut ids = state
             .records
@@ -805,8 +820,9 @@ impl FakeApiKeyStore {
             .map(|record| (expiry_sort_key(record), record.public_id.clone()))
             .collect::<Vec<_>>();
         ids.sort();
-        let bucket_complete = ids.len() <= page_limit;
+        let complete = ids.len() <= page_limit;
         ids.truncate(page_limit);
+        let scanned = ids.len();
         let mut processed = 0;
         for (_, public_id) in ids {
             let owner = {
@@ -824,7 +840,11 @@ impl FakeApiKeyStore {
             decrement_active_count(&mut state.active_counts, &owner)?;
             processed += 1;
         }
-        Ok((processed, bucket_complete))
+        Ok(SweepBucketPage {
+            scanned,
+            processed,
+            complete,
+        })
     }
 }
 
@@ -941,11 +961,18 @@ impl ApiKeyStore for FakeApiKeyStore {
             .map_or(request.start_hour, |completed| completed.saturating_add(1));
         let mut processed = 0;
         let mut buckets = 0;
+        let mut pages = 0;
+        let mut records = 0;
         while hour <= through_hour && buckets < request.max_buckets {
-            let (bucket_processed, bucket_complete) =
-                self.process_expiry_bucket(hour, request.now_epoch_seconds, request.page_limit)?;
-            processed += bucket_processed;
-            if !bucket_complete {
+            let Some(page_limit) = sweep_page_limit(&request, pages, records) else {
+                break;
+            };
+            let bucket_page =
+                self.process_expiry_bucket(hour, request.now_epoch_seconds, page_limit)?;
+            pages += 1;
+            records += bucket_page.scanned;
+            processed += bucket_page.processed;
+            if !bucket_page.complete {
                 let page = SweepPage {
                     processed,
                     completed_hour: lease.completed_hour,
@@ -960,13 +987,21 @@ impl ApiKeyStore for FakeApiKeyStore {
         }
 
         for overlap_hour in overlap_hours(overlap_high_water, request.start_hour) {
-            let (overlap_processed, bucket_complete) = self.process_expiry_bucket(
-                overlap_hour,
-                request.now_epoch_seconds,
-                request.page_limit,
-            )?;
-            processed += overlap_processed;
-            if !bucket_complete {
+            let Some(page_limit) = sweep_page_limit(&request, pages, records) else {
+                let page = SweepPage {
+                    processed,
+                    completed_hour: lease.completed_hour,
+                    has_more: true,
+                };
+                self.release_expiry_lease(&lease)?;
+                return Ok(page);
+            };
+            let bucket_page =
+                self.process_expiry_bucket(overlap_hour, request.now_epoch_seconds, page_limit)?;
+            pages += 1;
+            records += bucket_page.scanned;
+            processed += bucket_page.processed;
+            if !bucket_page.complete {
                 let page = SweepPage {
                     processed,
                     completed_hour: lease.completed_hour,
@@ -1189,7 +1224,7 @@ impl DynamoDbApiKeyStore {
         hour: u64,
         now: u64,
         page_limit: usize,
-    ) -> Result<(usize, bool), ApiKeyStoreError> {
+    ) -> Result<SweepBucketPage, ApiKeyStoreError> {
         let query_limit = page_limit.saturating_add(1);
         let output = self
             .client
@@ -1209,7 +1244,8 @@ impl DynamoDbApiKeyStore {
             .iter()
             .map(record_from_item)
             .collect::<Result<Vec<_>, _>>()?;
-        let bucket_complete = records.len() <= page_limit;
+        let complete = records.len() <= page_limit;
+        let scanned = records.len().min(page_limit);
         let mut processed = 0;
         for record in records.into_iter().take(page_limit) {
             if record.expires_at <= now
@@ -1221,7 +1257,11 @@ impl DynamoDbApiKeyStore {
                 processed += 1;
             }
         }
-        Ok((processed, bucket_complete))
+        Ok(SweepBucketPage {
+            scanned,
+            processed,
+            complete,
+        })
     }
 }
 
@@ -1399,12 +1439,19 @@ impl ApiKeyStore for DynamoDbApiKeyStore {
             .map_or(request.start_hour, |value| value.saturating_add(1));
         let mut processed = 0;
         let mut buckets = 0;
+        let mut pages = 0;
+        let mut records = 0;
         while hour <= through_hour && buckets < request.max_buckets {
-            let (bucket_processed, bucket_complete) = self
-                .process_expiry_bucket(hour, request.now_epoch_seconds, request.page_limit)
+            let Some(page_limit) = sweep_page_limit(&request, pages, records) else {
+                break;
+            };
+            let bucket_page = self
+                .process_expiry_bucket(hour, request.now_epoch_seconds, page_limit)
                 .await?;
-            processed += bucket_processed;
-            if !bucket_complete {
+            pages += 1;
+            records += bucket_page.scanned;
+            processed += bucket_page.processed;
+            if !bucket_page.complete {
                 let page = SweepPage {
                     processed,
                     completed_hour: lease.completed_hour,
@@ -1419,11 +1466,22 @@ impl ApiKeyStore for DynamoDbApiKeyStore {
         }
 
         for overlap_hour in overlap_hours(overlap_high_water, request.start_hour) {
-            let (overlap_processed, bucket_complete) = self
-                .process_expiry_bucket(overlap_hour, request.now_epoch_seconds, request.page_limit)
+            let Some(page_limit) = sweep_page_limit(&request, pages, records) else {
+                let page = SweepPage {
+                    processed,
+                    completed_hour: lease.completed_hour,
+                    has_more: true,
+                };
+                self.release_sweep_lease(&lease).await?;
+                return Ok(page);
+            };
+            let bucket_page = self
+                .process_expiry_bucket(overlap_hour, request.now_epoch_seconds, page_limit)
                 .await?;
-            processed += overlap_processed;
-            if !bucket_complete {
+            pages += 1;
+            records += bucket_page.scanned;
+            processed += bucket_page.processed;
+            if !bucket_page.complete {
                 let page = SweepPage {
                     processed,
                     completed_hour: lease.completed_hour,
@@ -1497,7 +1555,9 @@ fn validate_sweep_request(request: &SweepRequest) -> Result<(), ApiKeyStoreError
         ApiKeyError::InvalidOwner,
     )
     .map_err(|_| ApiKeyStoreError::InvalidRequest)?;
-    if request.max_buckets == 0
+    if !(1..=MAX_SWEEP_BUCKETS).contains(&request.max_buckets)
+        || !(1..=MAX_SWEEP_PAGES).contains(&request.max_pages)
+        || !(1..=MAX_SWEEP_RECORDS).contains(&request.max_records)
         || request.page_limit == 0
         || request.page_limit > MAX_PAGE_LIMIT
         || request.lease_duration_seconds == 0
@@ -1505,6 +1565,13 @@ fn validate_sweep_request(request: &SweepRequest) -> Result<(), ApiKeyStoreError
         return Err(ApiKeyStoreError::InvalidRequest);
     }
     Ok(())
+}
+
+fn sweep_page_limit(request: &SweepRequest, pages: usize, records: usize) -> Option<usize> {
+    if pages >= request.max_pages || records >= request.max_records {
+        return None;
+    }
+    Some(request.page_limit.min(request.max_records - records))
 }
 
 fn decrement_active_count(
