@@ -848,13 +848,13 @@ mod plan_handler_mcp_tests {
         (Arc::new(server), mock_pm)
     }
 
-    struct FailAddCommentPm {
+    struct FailForceReclaimUpdatePm {
         inner: Arc<crate::plan::test_util::MockPm>,
-        add_comment_calls: std::sync::atomic::AtomicUsize,
+        update_calls: std::sync::atomic::AtomicUsize,
     }
 
     #[async_trait::async_trait]
-    impl crate::plan::PmLike for FailAddCommentPm {
+    impl crate::plan::PmLike for FailForceReclaimUpdatePm {
         async fn get_issue(&self, id: &str) -> anyhow::Result<spur_pm::Issue> {
             self.inner.get_issue(id).await
         }
@@ -870,8 +870,10 @@ mod plan_handler_mcp_tests {
             self.inner.create_issue(params).await
         }
 
-        async fn update_issue(&self, id: &str, update: spur_pm::IssueUpdate) -> anyhow::Result<()> {
-            self.inner.update_issue(id, update).await
+        async fn update_issue(&self, _id: &str, _update: spur_pm::IssueUpdate) -> anyhow::Result<()> {
+            self.update_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            anyhow::bail!("injected force-reclaim transaction failure")
         }
 
         fn closed_status(&self) -> &str {
@@ -884,7 +886,7 @@ mod plan_handler_mcp_tests {
     }
 
     #[async_trait::async_trait]
-    impl spur_pm::BeadsAdvanced for FailAddCommentPm {
+    impl spur_pm::BeadsAdvanced for FailForceReclaimUpdatePm {
         async fn list_ready(
             &self,
             filter: spur_pm::ReadyFilter,
@@ -896,10 +898,8 @@ mod plan_handler_mcp_tests {
             spur_pm::BeadsAdvanced::list_comments(self.inner.as_ref(), issue_id).await
         }
 
-        async fn add_comment(&self, _issue_id: &str, _body: &str) -> anyhow::Result<String> {
-            self.add_comment_calls
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            anyhow::bail!("injected force-reclaim audit failure")
+        async fn add_comment(&self, issue_id: &str, body: &str) -> anyhow::Result<String> {
+            spur_pm::BeadsAdvanced::add_comment(self.inner.as_ref(), issue_id, body).await
         }
 
         async fn remove_dependency(
@@ -1326,12 +1326,12 @@ mod plan_handler_mcp_tests {
     }
 
     #[tokio::test]
-    async fn force_reclaim_plan_audit_failure_cannot_commit_system_migration() {
+    async fn force_reclaim_plan_transaction_failure_persists_neither_audit_nor_fencing() {
         let session_id = BrainSessionId::new(SessionId("brain".into()));
         let inner = crate::plan::test_util::MockPm::new().arc();
-        let failing = Arc::new(FailAddCommentPm {
+        let failing = Arc::new(FailForceReclaimUpdatePm {
             inner: Arc::clone(&inner),
-            add_comment_calls: std::sync::atomic::AtomicUsize::new(0),
+            update_calls: std::sync::atomic::AtomicUsize::new(0),
         });
         let (mut server, _channel) = McpCallbackServer::new(
             Some(&session_id),
@@ -1370,20 +1370,29 @@ mod plan_handler_mcp_tests {
             )
             .await;
 
-        let error = response.error.expect("audit failure must fail migration");
-        assert!(error.message.contains("audit"), "{error:?}");
+        response
+            .error
+            .expect("transaction failure must fail migration");
         assert_eq!(
             failing
-                .add_comment_calls
+                .update_calls
                 .load(std::sync::atomic::Ordering::SeqCst),
             1,
-            "migration must attempt its required audit"
+            "migration must use one PM update"
         );
         let epic = inner.issue(&epic_id).await;
         assert!(epic.labels.contains(&old_owner));
         assert!(!epic.labels.contains(&crate::plan::labels::plan_owner(
             crate::plan::loops::LOOP_RUNTIME_OWNER_ID
         )));
+        let audits = parse_audit_comments(inner.comments(&epic_id).await);
+        assert!(
+            !audits.iter().any(|audit| matches!(
+                audit,
+                crate::plan::audit_sentinel::AuditSentinelKind::PlanForceReclaimed { .. }
+            )),
+            "failed migration must not leave a durable reclaim audit"
+        );
     }
 
     #[tokio::test]
