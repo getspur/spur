@@ -143,8 +143,18 @@ struct ToolRequest {
     reason = "route_index only consults the catalog before its first await"
 )]
 pub async fn handler(event: LambdaEvent<Value>) -> Result<Value, Error> {
+    handle_event_with_drainer(event, drain_queued_jobs()).await
+}
+
+async fn handle_event_with_drainer<F>(
+    event: LambdaEvent<Value>,
+    drain_future: F,
+) -> Result<Value, Error>
+where
+    F: Future<Output = Result<drainer::DrainSummary, Error>>,
+{
     if is_scheduled_drainer_event(&event.payload) {
-        let summary = drain_queued_jobs().await?;
+        let summary = drain_future.await?;
         return Ok(json!({
             "operation": "drain_queued_jobs",
             "dispatched": summary.dispatched,
@@ -175,6 +185,10 @@ fn is_scheduled_drainer_event(payload: &Value) -> bool {
 async fn handle_api_gateway_request(
     api_gateway_request: ApiGatewayRequest,
 ) -> Result<ApiGatewayResponse, Error> {
+    if let Err(error) = reject_jwt_auth_on_wrong_route(&api_gateway_request) {
+        return authorization_error_response(error);
+    }
+
     let request = parse_tool_request(&api_gateway_request);
     let request = match request {
         Ok(request) => request,
@@ -324,6 +338,21 @@ fn is_oauth_route(request: &ApiGatewayRequest) -> bool {
         ),
         RequestRoute::OAuth
     )
+}
+
+fn reject_jwt_auth_on_wrong_route(request: &ApiGatewayRequest) -> Result<(), AuthFailure> {
+    let has_jwt_context = request
+        .request_context
+        .as_ref()
+        .and_then(|context| context.authorizer.as_ref())
+        .and_then(|authorizer| authorizer.jwt.as_ref())
+        .is_some();
+
+    if has_jwt_context && !is_oauth_route(request) {
+        Err(AuthFailure::WrongRoute)
+    } else {
+        Ok(())
+    }
 }
 
 fn authorize_oauth_request_now(
@@ -930,6 +959,7 @@ const ALLOW_ANONYMOUS_MUTATIONS_ENV: &str = "SPUR_CONTEXT_ALLOW_ANONYMOUS_MUTATI
 /// Shared caller id used for anonymous mutations. All anonymous callers share
 /// this bucket, so the existing per-caller rate limit / active-job cap still
 /// apply (collectively) rather than being bypassed entirely.
+#[cfg(test)]
 const ANONYMOUS_CALLER_ID: &str = "anonymous-internal";
 
 fn anonymous_mutations_allowed() -> bool {
@@ -1110,6 +1140,63 @@ fn lambda_error(message: impl Into<String>) -> Error {
 mod tests {
     use super::*;
 
+    fn hybrid_auth_fixture() -> Value {
+        serde_json::from_str(include_str!("../tests/fixtures/hybrid-auth-contract.json"))
+            .expect("hybrid auth contract fixture should be valid JSON")
+    }
+
+    fn poc_external_index_fixture() -> &'static str {
+        include_str!(
+            "../../../infra/spur-context-service/poc/fixtures/external-index-validation-only.json"
+        )
+    }
+
+    fn fixture_cases<'a>(fixture: &'a Value, key: &str) -> &'a [Value] {
+        fixture[key]
+            .as_array()
+            .unwrap_or_else(|| panic!("fixture field {key:?} should be an array"))
+    }
+
+    fn fixture_str<'a>(value: &'a Value, key: &str) -> &'a str {
+        value[key]
+            .as_str()
+            .unwrap_or_else(|| panic!("fixture field {key:?} should be a string"))
+    }
+
+    #[test]
+    fn poc_external_index_fixture_parses_through_oauth_request_contract() {
+        let request = ApiGatewayRequest {
+            body: Some(poc_external_index_fixture().to_owned()),
+            is_base64_encoded: false,
+            path: None,
+            raw_path: Some("/mcp/oauth".to_owned()),
+            request_context: Some(ApiGatewayRequestContext {
+                authorizer: None,
+                http: Some(ApiGatewayHttp {
+                    method: Some("POST".to_owned()),
+                    source_ip: None,
+                }),
+                identity: None,
+            }),
+        };
+
+        assert!(is_oauth_route(&request));
+        let parsed = parse_tool_request(&request)
+            .expect("the exact committed POC body should satisfy the OAuth request contract");
+
+        assert_eq!(parsed.tool, "external_index");
+        assert_eq!(
+            parsed.args,
+            json!({
+                "package": "validation-only-fixture",
+                "revision": "offline",
+                "source_url": "https://validation-only.invalid/spur-context-poc.tar.gz",
+                "source_kind": "tarball",
+                "force": false,
+            })
+        );
+    }
+
     struct EnvVarRestore {
         name: &'static str,
         previous: Option<std::ffi::OsString>,
@@ -1143,6 +1230,193 @@ mod tests {
         });
 
         assert!(is_scheduled_drainer_event(&event));
+    }
+
+    #[test]
+    fn hybrid_auth_fixture_covers_scope_identity_denial_and_route_contracts() {
+        let fixture = hybrid_auth_fixture();
+        let config = crate::auth::AuthConfig::new(
+            "https://issuer.example/pool",
+            "human-client",
+            ["m2m-client", "rotating-m2m-client"],
+            ["blocked-client"],
+            "urn:spur:context-service",
+        );
+
+        let fixture_policy = fixture_cases(&fixture, "scope_cases")
+            .iter()
+            .map(|case| {
+                (
+                    fixture_str(case, "tool"),
+                    fixture_str(case, "required_scope"),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(fixture_policy, crate::auth::external_tool_scopes());
+        let all_scopes = fixture_policy
+            .values()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>();
+
+        for (tool, required_scope) in fixture_policy {
+            for candidate_scope in &all_scopes {
+                let claims = json!({
+                    "iss": "https://issuer.example/pool",
+                    "token_use": "access",
+                    "client_id": "human-client",
+                    "sub": "fixture-human",
+                    "exp": 2_000_000_000_u64,
+                    "scope": candidate_scope,
+                });
+                let result =
+                    crate::auth::authorize_oauth_tool(&config, tool, Some(&claims), 1_700_000_000);
+
+                if *candidate_scope == required_scope {
+                    let decision = result.unwrap_or_else(|error| {
+                        panic!("{tool} should authorize {candidate_scope}: {error:?}")
+                    });
+                    assert_eq!(decision.identity.caller_id(), "cognito:user:fixture-human");
+                } else {
+                    assert_eq!(
+                        result,
+                        Err(crate::auth::AuthFailure::MissingScope),
+                        "{tool} must reject nonmatching scope {candidate_scope}"
+                    );
+                }
+            }
+        }
+
+        for case in fixture_cases(&fixture, "identity_cases") {
+            let request = serde_json::from_value::<ApiGatewayRequest>(case["event"].clone())
+                .unwrap_or_else(|error| {
+                    panic!("{} should deserialize: {error}", fixture_str(case, "name"))
+                });
+            let caller_id = match fixture_str(case, "scheme") {
+                "oauth" => authorize_oauth_request(
+                    &request,
+                    fixture_str(case, "tool"),
+                    &config,
+                    1_700_000_000,
+                )
+                .unwrap_or_else(|error| {
+                    panic!("{} should authorize: {error:?}", fixture_str(case, "name"))
+                })
+                .identity
+                .caller_id()
+                .to_owned(),
+                "legacy" => authenticated_caller_id(
+                    &request,
+                    case["allow_anonymous"].as_bool().unwrap_or(false),
+                )
+                .unwrap_or_else(|error| {
+                    panic!("{} should authenticate: {error}", fixture_str(case, "name"))
+                }),
+                scheme => panic!("unsupported fixture auth scheme {scheme:?}"),
+            };
+            assert_eq!(caller_id, fixture_str(case, "expected_caller"));
+        }
+
+        for case in fixture_cases(&fixture, "denial_cases") {
+            let request = serde_json::from_value::<ApiGatewayRequest>(case["event"].clone())
+                .unwrap_or_else(|error| {
+                    panic!("{} should deserialize: {error}", fixture_str(case, "name"))
+                });
+            assert!(is_oauth_route(&request));
+            let failure = authorize_oauth_request(
+                &request,
+                fixture_str(case, "tool"),
+                &config,
+                1_700_000_000,
+            )
+            .expect_err("denial fixture should fail closed");
+            let reason = failure.reason();
+            let response = authorization_error_response(failure)
+                .expect("bounded authorization response should serialize");
+            let expected_status = u16::try_from(
+                case["expected_status"]
+                    .as_u64()
+                    .expect("expected_status should be numeric"),
+            )
+            .expect("expected_status should fit in an HTTP status code");
+
+            assert_eq!(
+                response.status_code,
+                expected_status,
+                "{}",
+                fixture_str(case, "name")
+            );
+            assert_eq!(reason, fixture_str(case, "expected_reason"));
+            assert!(response.body.contains(reason));
+            assert!(!response.body.contains("fallback-principal"));
+            assert!(!response.body.contains("AROAFALLBACK"));
+            assert!(!response.body.contains("203.0.113.24"));
+        }
+
+        for case in fixture_cases(&fixture, "route_cases") {
+            let request = serde_json::from_value::<ApiGatewayRequest>(case["event"].clone())
+                .unwrap_or_else(|error| {
+                    panic!("{} should deserialize: {error}", fixture_str(case, "name"))
+                });
+            assert_eq!(
+                is_oauth_route(&request),
+                case["is_oauth"].as_bool().expect("is_oauth should be bool"),
+                "{}",
+                fixture_str(case, "name")
+            );
+        }
+
+        assert!(is_scheduled_drainer_event(
+            &fixture["scheduled_drainer_event"]
+        ));
+        assert!(!is_scheduled_drainer_event(&fixture["oauth_http_event"]));
+    }
+
+    #[tokio::test]
+    async fn scheduled_drainer_fixture_bypasses_http_deserialization_and_auth() {
+        let event = LambdaEvent::new(
+            hybrid_auth_fixture()["scheduled_drainer_event"].clone(),
+            lambda_runtime::Context::default(),
+        );
+        let response = handle_event_with_drainer(event, async {
+            Ok(drainer::DrainSummary {
+                dispatched: 2,
+                skipped: 1,
+                failed: 0,
+            })
+        })
+        .await
+        .expect("scheduled event should run the injected drainer before HTTP parsing");
+
+        assert_eq!(
+            response,
+            json!({
+                "operation": "drain_queued_jobs",
+                "dispatched": 2,
+                "skipped": 1,
+                "failed": 0,
+            })
+        );
+    }
+
+    #[test]
+    fn jwt_fixture_on_wrong_route_is_rejected_without_identity_downgrade() {
+        let request = serde_json::from_value::<ApiGatewayRequest>(
+            hybrid_auth_fixture()["wrong_route_jwt_event"].clone(),
+        )
+        .expect("wrong-route JWT fixture should deserialize");
+
+        let failure = reject_jwt_auth_on_wrong_route(&request)
+            .expect_err("JWT context on the legacy route must fail closed");
+        let reason = failure.reason();
+        let response = authorization_error_response(failure)
+            .expect("bounded wrong-route response should serialize");
+
+        assert_eq!(response.status_code, 401);
+        assert_eq!(reason, "wrong_route");
+        assert!(!response.body.contains("fallback-principal"));
+        assert!(!response.body.contains("AROAFALLBACK"));
+        assert!(!response.body.contains("203.0.113.24"));
+        assert!(!response.body.contains("anonymous-internal"));
     }
 
     #[tokio::test]

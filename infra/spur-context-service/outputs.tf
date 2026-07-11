@@ -142,7 +142,7 @@ output "cognito_issuer" {
 }
 
 output "cognito_domain_url" {
-  description = "Cognito hosted-domain base URL for OIDC discovery, authorize, token, and JWKS paths, or null when Cognito is disabled."
+  description = "Cognito hosted-domain base URL for authorize, token, and logout paths, or null when Cognito is disabled. OIDC discovery and JWKS use cognito_issuer."
   value       = var.cognito_auth_enabled ? local.cognito_domain_url : null
 }
 

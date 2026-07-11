@@ -71,10 +71,12 @@ impl CallerIdentity {
         &self.caller_id
     }
 
+    #[cfg(test)]
     pub(crate) fn scheme(&self) -> AuthScheme {
         self.scheme
     }
 
+    #[cfg(test)]
     pub(crate) fn principal_kind(&self) -> PrincipalKind {
         self.principal_kind
     }
@@ -97,6 +99,7 @@ pub(crate) struct AuthDecision {
 pub(crate) enum AuthFailure {
     AuthDisabled,
     MissingContext,
+    WrongRoute,
     WrongIssuer,
     WrongTokenUse,
     MissingClient,
@@ -118,6 +121,7 @@ impl AuthFailure {
             Self::MissingScope | Self::NonExternalTool => 403,
             Self::AuthDisabled
             | Self::MissingContext
+            | Self::WrongRoute
             | Self::WrongIssuer
             | Self::WrongTokenUse
             | Self::MissingClient
@@ -136,6 +140,7 @@ impl AuthFailure {
         match self {
             Self::AuthDisabled => "auth_disabled",
             Self::MissingContext => "missing_context",
+            Self::WrongRoute => "wrong_route",
             Self::WrongIssuer => "wrong_issuer",
             Self::WrongTokenUse => "wrong_token_use",
             Self::MissingClient => "missing_client",

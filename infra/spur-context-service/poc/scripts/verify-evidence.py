@@ -69,9 +69,11 @@ def main() -> int:
     if owner_case["job_owner"] == owner_case["poll_owner"] or owner_case["expected"] != "not_found":
         fail("cross-owner status fixture must be non-enumerating")
 
-    arguments = request["params"]["arguments"]
+    if set(request) != {"tool", "args", "poc_assertions"}:
+        fail("validation fixture must use the direct OAuth body contract")
+    arguments = request["args"]
     assertions = request["poc_assertions"]
-    if request["params"]["name"] != "external_index":
+    if request["tool"] != "external_index":
         fail("validation fixture must call external_index")
     if set(arguments) != {"package", "revision", "source_url", "source_kind", "force"}:
         fail("validation fixture arguments must exactly match the external_index schema")
