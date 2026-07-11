@@ -180,7 +180,7 @@ fn core_brain_registry_preserves_compatibility_catalog() {
 fn core_brain_registry_omits_external_tools_when_context_service_url_empty() {
     let context_service = ContextServiceConfig {
         url: String::new(),
-        token: None,
+        ..ContextServiceConfig::default()
     };
     let registry = spur_core::mcp::brain_tool_registry(
         spur_core::mcp::delegation::DelegationMcpDeps::catalog_only(),
