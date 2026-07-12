@@ -66,6 +66,15 @@ run "disabled_default_keeps_legacy_iam_without_cognito" {
     condition     = aws_apigatewayv2_route.default.authorization_type == "AWS_IAM"
     error_message = "the existing default route must keep its AWS_IAM default"
   }
+
+  assert {
+    condition = (
+      output.cognito_domain_url == null &&
+      output.cognito_authorization_endpoint == null &&
+      output.cognito_token_endpoint == null
+    )
+    error_message = "disabled mode must not publish Cognito OAuth endpoints"
+  }
 }
 
 run "disabled_demo_keeps_legacy_none_route" {
@@ -274,7 +283,11 @@ run "custom_domains_disabled_preserves_cognito_prefix_domain" {
   }
 
   assert {
-    condition     = output.cognito_domain_url == "https://spur-context-test-auth.auth.ap-southeast-5.amazoncognito.com"
+    condition = (
+      output.cognito_domain_url == "https://spur-context-test-auth.auth.ap-southeast-5.amazoncognito.com" &&
+      output.cognito_authorization_endpoint == "https://spur-context-test-auth.auth.ap-southeast-5.amazoncognito.com/oauth2/authorize" &&
+      output.cognito_token_endpoint == "https://spur-context-test-auth.auth.ap-southeast-5.amazoncognito.com/oauth2/token"
+    )
     error_message = "Cognito OAuth discovery must continue using the prefix domain before activation"
   }
 
@@ -331,6 +344,8 @@ run "custom_domain_activation_builds_regional_api_and_cognito_domains" {
       output.api_url == "https://context.getspur.dev" &&
       output.oauth_api_url == "https://context.getspur.dev/mcp/oauth" &&
       output.cognito_domain_url == "https://auth.context.getspur.dev" &&
+      output.cognito_authorization_endpoint == "https://auth.context.getspur.dev/oauth2/authorize" &&
+      output.cognito_token_endpoint == "https://auth.context.getspur.dev/oauth2/token" &&
       aws_lambda_function.service.environment[0].variables["SPUR_CONTEXT_SERVICE_BASE_URL"] == "https://context.getspur.dev" &&
       aws_lambda_function.service.environment[0].variables["SPUR_COGNITO_AUTHORIZATION_ENDPOINT"] == "https://auth.context.getspur.dev/oauth2/authorize" &&
       aws_lambda_function.service.environment[0].variables["SPUR_COGNITO_TOKEN_ENDPOINT"] == "https://auth.context.getspur.dev/oauth2/token"
@@ -412,5 +427,29 @@ run "runbook_uses_regional_issuer_for_oidc_discovery" {
       strcontains(file("${path.module}/README.md"), ".token_endpoint == \"https://auth.context.getspur.dev/oauth2/token\"")
     )
     error_message = "the runbook must verify Cognito advertises custom-domain authorization and token endpoints"
+  }
+}
+
+run "runbook_keeps_client_release_between_e2e_and_endpoint_retirement" {
+  command = plan
+
+  assert {
+    condition = can(regex(
+      "(?s)### Phase 1: bootstrap the delegated zone.*### Phase 2: delegate the zone at Namecheap.*### Phase 3: activate certificates and custom domains.*### Phase 4: run OAuth, API-key, and MCP E2E; then release clients.*### Phase 5: optionally retire execute-api after migration.*### Phase 6: remove the Cognito prefix domain later",
+      file("${path.module}/README.md"),
+    ))
+    error_message = "the runbook must preserve the staged custom-domain migration and rollback order"
+  }
+}
+
+run "lambda_discovery_waits_for_custom_domain_routes_and_aliases" {
+  command = plan
+
+  assert {
+    condition = can(regex(
+      "(?s)resource \"aws_lambda_function\" \"service\" \\{.*# Do not advertise the custom API/OAuth endpoints.*aws_apigatewayv2_api_mapping.context_service,.*aws_route53_record.api_custom_domain_ipv4,.*aws_route53_record.api_custom_domain_ipv6,.*aws_route53_record.cognito_custom_domain,",
+      file("${path.module}/main.tf"),
+    ))
+    error_message = "Lambda discovery must not advertise custom-domain endpoints before API mapping and DNS aliases exist"
   }
 }

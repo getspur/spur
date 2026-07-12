@@ -782,6 +782,11 @@ mod context_service_cli_config_tests {
 
     #[test]
     fn context_service_url_precedence_is_flag_env_config_default() {
+        assert_eq!(
+            ContextServiceConfig::default().url,
+            "https://context.getspur.dev"
+        );
+
         let mut config = ContextServiceConfig {
             url: "https://config.example.test".to_owned(),
             ..ContextServiceConfig::default()
