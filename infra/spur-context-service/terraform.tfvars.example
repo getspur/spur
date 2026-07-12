@@ -37,6 +37,9 @@ allowed_source_domains                   = []
 # scripts/package-context-api-key-lambdas.sh from the repository root. No raw
 # API key belongs in tfvars or Terraform state.
 api_key_auth_enabled                  = false
+# Enabling this feature also requires Cognito configuration with
+# cognito_human_callback_urls containing the exact registered CLI callback:
+# ["http://127.0.0.1:8765/callback"]
 api_key_authorizer_zip_path           = "../../target/lambda/spur-context-api-key-authorizer.zip"
 api_key_cleanup_zip_path              = "../../target/lambda/spur-context-api-key-cleanup.zip"
 api_key_environment                   = "live"

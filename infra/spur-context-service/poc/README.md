@@ -10,6 +10,11 @@ The root contains no credentials, real resource IDs, client-secret values, or
 production identifiers. This implementation task runs offline checks only; it
 does **not** run `terraform apply`, live smoke tests, or `terraform destroy`.
 
+The disposable human client registers
+`http://127.0.0.1:8765/callback`, matching `spur context auth login` exactly.
+Keep port 8765 available before starting login; the CLI fails clearly instead
+of choosing an unregistered ephemeral callback when the port is occupied.
+
 ## Isolation contract
 
 - Use a sandbox account whenever possible and a POC-only backend bucket, lock
