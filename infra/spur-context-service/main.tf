@@ -242,6 +242,13 @@ resource "aws_lambda_function" "service" {
     aws_iam_role_policy_attachment.lambda_basic,
     aws_cloudwatch_log_group.lambda,
     aws_iam_role_policy.api_key_management,
+    # Do not advertise the custom API/OAuth endpoints until their API mapping
+    # and DNS aliases exist. This also keeps the login facade unavailable during
+    # a partial certificate/domain activation apply.
+    aws_apigatewayv2_api_mapping.context_service,
+    aws_route53_record.api_custom_domain_ipv4,
+    aws_route53_record.api_custom_domain_ipv6,
+    aws_route53_record.cognito_custom_domain,
   ]
 }
 
