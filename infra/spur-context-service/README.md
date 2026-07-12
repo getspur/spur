@@ -213,7 +213,8 @@ plans and `init -backend=false`; it never needs AWS credentials.
    plan only in the separately approved environment; enabling Cognito must add
    the exact `POST /mcp/oauth` route without replacing `$default`.
 3. After an approved apply, distribute only the nonsensitive discovery outputs:
-   `cognito_issuer`, `cognito_domain_url`, `cognito_human_client_id`,
+   `cognito_issuer`, `cognito_domain_url`, `cognito_authorization_endpoint`,
+   `cognito_token_endpoint`, `cognito_human_client_id`,
    `cognito_m2m_client_ids`, `cognito_resource_server_identifier`, and
    `oauth_api_url`. Use `cognito_issuer` for OIDC discovery and JWKS
    (`/.well-known/openid-configuration` and `/.well-known/jwks.json`). Use
@@ -338,7 +339,7 @@ key, digest, ARN, or user data.
 Use human OAuth only for management and a personal key for routine MCP traffic:
 
 ```bash
-spur context auth login --profile workstation --url https://context.example.test
+spur context auth login --profile workstation
 spur context key create --name workstation --scope external.read --profile workstation
 spur context key list --profile workstation
 spur context key use PUBLIC_KEY_ID
@@ -353,6 +354,11 @@ capture path. `auth logout` removes management credentials but preserves local
 API-key profiles. OAuth and every personal key for the user resolve to the same
 `cognito:user:<sub>` owner, so extra keys do not create extra rate, queue,
 dedupe, or status-visibility buckets.
+
+The omitted `--url` intentionally exercises the released client's stable
+`https://context.getspur.dev` default. An explicit `--url`,
+`SPUR_CONTEXT_SERVICE_URL`, or existing `[context_service].url` remains the
+supported override path for staging and legacy deployments.
 
 ### Headless credential delivery
 
@@ -499,14 +505,18 @@ and API response authorization checks. Current workers serialize catalog writes
 with DynamoDB leases, but they do not provide private data-plane isolation inside
 the shared DuckLake catalog.
 
-## Custom Domain Two-Phase Rollout
+## Staged Custom-Domain Migration
 
 The stable public endpoints are `https://context.getspur.dev` for API/MCP
 traffic and `https://auth.context.getspur.dev` for Cognito OAuth. The parent
 `getspur.dev` domain remains hosted at Namecheap; Terraform owns only a public
 Route 53 sub-zone for `context.getspur.dev`.
 
-Two independent, false-by-default controls make the migration reversible:
+Two independent, false-by-default controls make the migration reversible. The
+required order is: bootstrap the delegated zone, delegate its nameservers at
+Namecheap, activate certificates/domains, pass OAuth/API-key/MCP E2E, release
+stable-domain clients, optionally disable execute-api, and only later remove
+the Cognito prefix domain.
 
 - `custom_domains_enabled=false` creates only the delegated Route 53 zone.
   The existing execute-api URL and Cognito prefix domain remain effective, and
@@ -563,8 +573,10 @@ terraform apply context-domain-bootstrap.tfplan
 terraform output -json route53_delegation_name_servers | jq -r '.[]'
 ```
 
-The final command prints the four authoritative Route 53 nameservers. In
-Namecheap:
+### Phase 2: delegate the zone at Namecheap
+
+The final Phase 1 command prints the four authoritative Route 53 nameservers.
+In Namecheap:
 
 1. Open **Domain List**, choose **Manage** for `getspur.dev`, then open
    **Advanced DNS**.
@@ -582,7 +594,7 @@ dig +short NS context.getspur.dev @1.1.1.1 | sed 's/\.$//' | sort
 terraform output -json route53_delegation_name_servers | jq -r '.[]' | sed 's/\.$//' | sort
 ```
 
-### Phase 2: activate custom domains
+### Phase 3: activate certificates and custom domains
 
 After the public NS sets match, create a fresh saved plan. Keep execute-api
 enabled throughout the client migration.
@@ -612,15 +624,46 @@ The activation apply writes both ACM validation records into the delegated
 zone. The API apex alias is created before Terraform asks Cognito to create
 `auth.context.getspur.dev`, because Cognito requires the immediate parent to
 resolve to an A record. If Cognito reports that the parent does not resolve yet,
-wait for DNS propagation and re-run the same saved-input plan; do not invent a
-temporary validation address or commit DNS values.
+wait for DNS propagation, then generate and review a fresh saved plan with the
+same approved inputs. Do not reuse the partially applied plan, invent a
+temporary validation address, or commit DNS values.
 
-Migrate clients only after the custom API endpoint and OAuth discovery pass.
-The Terraform outputs `api_url`, `oauth_api_url`, `api_key_mcp_url`,
-`api_key_management_url`, and `cognito_domain_url` switch to custom domains
-only while activation is enabled.
+Do not release clients yet. The Terraform outputs `api_url`, `oauth_api_url`,
+`api_key_mcp_url`, `api_key_management_url`, `cognito_domain_url`,
+`cognito_authorization_endpoint`, and `cognito_token_endpoint` switch to custom
+domains only while activation is enabled.
 
-### Phase 3: retire execute-api after migration
+### Phase 4: run OAuth, API-key, and MCP E2E; then release clients
+
+Run this gate against the activated custom domains while execute-api and the
+Cognito prefix domain still provide rollback paths:
+
+1. Fetch `https://context.getspur.dev/.well-known/spur-context-service` and
+   compare its issuer, client ID, scopes, and exact route URLs with the reviewed
+   Terraform outputs. Fetch OIDC discovery from the regional `cognito_issuer`
+   and require its advertised authorization and token endpoints to equal
+   `cognito_authorization_endpoint` and `cognito_token_endpoint`.
+2. Complete human authorization-code plus PKCE through
+   `https://auth.context.getspur.dev/oauth2/authorize`, exchange the code at
+   `https://auth.context.getspur.dev/oauth2/token`, and invoke one allowed MCP
+   read/status operation over `https://context.getspur.dev/mcp/oauth`. Confirm a
+   missing, malformed, or wrong-scope bearer fails closed.
+3. Create, list, select, use, and revoke a personal key through `spur context`.
+   Invoke one allowed MCP operation over
+   `https://context.getspur.dev/mcp/api-key`, then confirm the revoked key is
+   rejected after the documented authorizer-cache bound.
+4. Run the external index/status/read smoke appropriate to the environment and
+   confirm ownership, queue/drainer health, sanitized logs, and 401/403/429/5xx
+   alarms. Keep all captured evidence secret-free.
+5. Release clients containing the `https://context.getspur.dev` built-in default
+   only after every prior check passes. Confirm released clients work without a
+   URL override while an explicit legacy/staging override still wins.
+
+Any failed check blocks the client release. Roll back the custom-domain apply or
+fix forward while both legacy endpoints remain reachable; do not disable either
+compatibility endpoint to make a failing check disappear.
+
+### Phase 5: optionally retire execute-api after migration
 
 After monitoring confirms that all clients use `context.getspur.dev`, apply the
 separate endpoint-retirement control:
@@ -642,6 +685,17 @@ still enabled and `disable_execute_api_endpoint=false`. Turning
 URLs to execute-api and the Cognito prefix domain, and plans destruction of the
 certificates, custom domains, mappings, and aliases while retaining the
 delegated Route 53 zone.
+
+### Phase 6: remove the Cognito prefix domain later
+
+The Cognito prefix is not retired with execute-api. Keep it through the client
+release and the agreed custom-domain soak window. In a separate reviewed change,
+first prove that discovery, login, token exchange, logout, API-key management,
+MCP traffic, and rollback documentation contain no prefix-domain dependency;
+then remove the prefix resource. Because the regional `cognito_issuer` remains
+the OIDC discovery and JWKS authority, removing the hosted prefix must not alter
+the issuer URL. If any dependency remains, retain the prefix—it is a harmless
+compatibility endpoint and its removal is optional.
 
 ## Deploy
 

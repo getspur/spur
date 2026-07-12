@@ -26,19 +26,19 @@
     { "method": "POST", "path": "/mcp", "expected": "legacy" }
   ],
   "discovery_config": {
-    "issuer": "https://issuer.example/pool",
+    "issuer": "https://cognito-idp.ap-southeast-5.amazonaws.com/ap-southeast-5_fixture",
     "human_client_id": "human-client",
-    "authorization_endpoint": "https://auth.example/oauth2/authorize",
-    "token_endpoint": "https://auth.example/oauth2/token",
-    "service_base_url": "https://context.example"
+    "authorization_endpoint": "https://auth.context.getspur.dev/oauth2/authorize",
+    "token_endpoint": "https://auth.context.getspur.dev/oauth2/token",
+    "service_base_url": "https://context.getspur.dev"
   },
   "discovery_document": {
     "schema_version": 1,
-    "issuer": "https://issuer.example/pool",
+    "issuer": "https://cognito-idp.ap-southeast-5.amazonaws.com/ap-southeast-5_fixture",
     "human_client_id": "human-client",
     "human_callback_url": "http://127.0.0.1:8765/callback",
-    "authorization_endpoint": "https://auth.example/oauth2/authorize",
-    "token_endpoint": "https://auth.example/oauth2/token",
+    "authorization_endpoint": "https://auth.context.getspur.dev/oauth2/authorize",
+    "token_endpoint": "https://auth.context.getspur.dev/oauth2/token",
     "supported_scopes": [
       "urn:spur:context-service/external.index",
       "urn:spur:context-service/external.read",
@@ -46,8 +46,8 @@
       "urn:spur:context-service/keys.manage"
     ],
     "api_key_auth_enabled": true,
-    "api_key_mcp_url": "https://context.example/mcp/api-key",
-    "api_key_management_url": "https://context.example/auth/api-keys"
+    "api_key_mcp_url": "https://context.getspur.dev/mcp/api-key",
+    "api_key_management_url": "https://context.getspur.dev/auth/api-keys"
   },
   "api_key_context": {
     "auth_context_version": 1,
@@ -57,7 +57,7 @@
     "scopes": "external.read external.index external.status"
   },
   "human_management_claims": {
-    "iss": "https://issuer.example/pool",
+    "iss": "https://cognito-idp.ap-southeast-5.amazonaws.com/ap-southeast-5_fixture",
     "token_use": "access",
     "client_id": "human-client",
     "sub": "fixture-human",
