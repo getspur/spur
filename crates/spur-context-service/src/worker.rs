@@ -26,7 +26,7 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::abuse;
-use crate::catalog::{connect_ducklake_with_data_path, ducklake_data_path};
+use crate::catalog::{connect_ducklake_with_data_path_serialized, ducklake_data_path};
 use crate::jobs::{DynamoDbJobStore, JobStatus, JobStore};
 use crate::medallion::{SilverManifest, SilverManifestFile, SILVER_PREFIX};
 use crate::translate::{
@@ -1372,7 +1372,7 @@ impl DuckLakeBronzeRegistry {
 
     fn connect(&self) -> Result<Connection, WorkerError> {
         let data_path = bronze_ducklake_data_path(&self.catalog_dsn)?;
-        let conn = connect_ducklake_with_data_path(&self.catalog_dsn, &data_path)
+        let conn = connect_ducklake_with_data_path_serialized(&self.catalog_dsn, &data_path)
             .map_err(|error| WorkerError::Fetch(format!("connect bronze catalog: {error:#}")))?;
         conn.execute_batch(CATALOG_TABLES_SQL).map_err(|error| {
             WorkerError::Fetch(format!("ensure bronze raw_sources schema: {error:#}"))
@@ -1564,7 +1564,7 @@ impl DuckLakeSilverRegistry {
     fn connect(&self) -> Result<Connection, WorkerError> {
         let data_path = bronze_ducklake_data_path(&self.catalog_dsn)
             .map_err(|error| WorkerError::Build(format!("silver catalog data path: {error}")))?;
-        let conn = connect_ducklake_with_data_path(&self.catalog_dsn, &data_path)
+        let conn = connect_ducklake_with_data_path_serialized(&self.catalog_dsn, &data_path)
             .map_err(|error| WorkerError::Build(format!("connect silver catalog: {error:#}")))?;
         conn.execute_batch(CATALOG_TABLES_SQL).map_err(|error| {
             WorkerError::Build(format!("ensure silver graph_artifacts schema: {error:#}"))
@@ -4164,6 +4164,24 @@ mod tests {
 
     fn lock_env() -> MutexGuard<'static, ()> {
         ENV_LOCK.lock().expect("env lock should not be poisoned")
+    }
+
+    #[test]
+    fn postgres_bronze_and_silver_registries_use_serialized_catalog_connections() {
+        let source = include_str!("worker.rs");
+        let bronze = source
+            .split("impl DuckLakeBronzeRegistry")
+            .nth(1)
+            .and_then(|body| body.split("impl BronzeRawSourceRegistry").next())
+            .expect("bronze registry implementation");
+        let silver = source
+            .split("impl DuckLakeSilverRegistry")
+            .nth(1)
+            .and_then(|body| body.split("impl SilverGraphArtifactRegistry").next())
+            .expect("silver registry implementation");
+
+        assert!(bronze.contains("connect_ducklake_with_data_path_serialized"));
+        assert!(silver.contains("connect_ducklake_with_data_path_serialized"));
     }
 
     #[test]
