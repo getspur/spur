@@ -225,6 +225,86 @@ plans and `init -backend=false`; it never needs AWS credentials.
    no Cognito token, cross-owner status is `not_found`, and queue/drainer health
    did not regress before onboarding another organization.
 
+### Google social sign-in
+
+Google is an optional human identity provider. It does not issue tokens to the
+context service directly: Google authenticates the human, then Cognito issues
+the same regional-user-pool tokens already validated by API Gateway and Lambda.
+M2M clients and existing personal API keys do not use the Google provider.
+
+Create a Google Auth Platform **Web application** client with these exact
+values:
+
+- Authorized JavaScript origin: `https://auth.context.getspur.dev`
+- Authorized redirect URI:
+  `https://auth.context.getspur.dev/oauth2/idpresponse`
+- Provider scopes: `openid email profile`
+
+Keep `google_oauth_enabled=false` until the downloaded Google client JSON is
+available on the deployment workstation. The committed default environment may
+enable the provider, but it never contains credentials. Load the owner-only JSON
+without printing either value or enabling shell tracing:
+
+```bash
+GOOGLE_OAUTH_JSON="$HOME/Downloads/client_secret_675459737622-opsl3nulrak6due1qhqa24u2eb3fs343.apps.googleusercontent.com.json"
+test -f "$GOOGLE_OAUTH_JSON"
+test "$(stat -f '%Lp' "$GOOGLE_OAUTH_JSON")" = "600"
+
+export TF_VAR_google_oauth_client_id="$(jq -er '.web.client_id' "$GOOGLE_OAUTH_JSON")"
+export TF_VAR_google_oauth_client_secret="$(jq -er '.web.client_secret' "$GOOGLE_OAUTH_JSON")"
+test -n "$TF_VAR_google_oauth_client_id"
+test -n "$TF_VAR_google_oauth_client_secret"
+```
+
+Create a saved plan with the normal reviewed artifact variables and with custom
+domains explicitly retained. Terraform marks the provider details sensitive;
+abort if a credential value appears in plan output or if the plan changes
+anything beyond one Google identity provider and the existing human app client.
+
+```bash
+terraform plan \
+  "${TF_COMMON_ARGS[@]}" \
+  -var='custom_domains_enabled=true' \
+  -var='disable_execute_api_endpoint=false' \
+  -out=context-google-oauth.tfplan
+
+terraform show context-google-oauth.tfplan
+terraform apply context-google-oauth.tfplan
+```
+
+Allow up to one minute for Cognito managed-login provider changes to propagate,
+then verify the provider and app-client assignments without reading provider
+details:
+
+```bash
+aws --region ap-southeast-5 cognito-idp list-identity-providers \
+  --user-pool-id ap-southeast-5_JbSjN77px \
+  --query 'Providers[].{Name:ProviderName,Type:ProviderType}'
+
+aws --region ap-southeast-5 cognito-idp describe-user-pool-client \
+  --user-pool-id ap-southeast-5_JbSjN77px \
+  --client-id 40n4hsdk1igsfpb5f44atnceor \
+  --query 'UserPoolClient.SupportedIdentityProviders'
+```
+
+Run `spur context auth login --profile google --url
+https://context.getspur.dev`, choose Google, and complete the local PKCE callback.
+Create a bounded personal key, call one allowed MCP read operation, revoke the
+key, and verify the revoked key receives `403` after the authorizer cache bound.
+
+To rotate the Google secret, create a replacement credential in the same Google
+web client, update the owner-only JSON, apply the new secret, and prove a fresh
+Google login before deleting the previous credential. To roll back Google only,
+apply `google_oauth_enabled=false`; require the human client to return to
+`["COGNITO"]` and the Google provider to be absent. Native Cognito login, M2M,
+existing access tokens until expiry, and personal API keys remain independent.
+
+After every operation, remove secret-bearing shell variables:
+
+```bash
+unset TF_VAR_google_oauth_client_id TF_VAR_google_oauth_client_secret
+```
+
 ### Credential delivery and rotation
 
 Generated M2M secrets can be present in Terraform state. A restricted
