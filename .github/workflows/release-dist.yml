@@ -86,8 +86,8 @@ env:
   # the artifact from the VM that actually compiled it.
   VM_NAME: spur-builder
   SPUR_BUILD_POOL_NAME: spur-builder
-  SPUR_BUILD_MAX_BUILDERS: "2"
-  SPUR_BUILD_SLOTS_PER_VM: "2"
+  SPUR_BUILD_MAX_BUILDERS: "3"
+  SPUR_BUILD_SLOTS_PER_VM: "3"
   # Optional golden AMI baked by scripts/cloud-build/bake-ami.sh. Empty
   # resolves the latest base Debian 12 arm64 AMI at spin time.
   AWS_AMI_ID: ${{ vars.SPUR_BUILDER_AMI_ID }}
