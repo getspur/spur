@@ -62,13 +62,15 @@ def test_deploy_builds_standalone_context_service_from_crate_workdir():
     assert 'run_graviton2_safe_cargo "spur CLI worker image dependency"' in script
     assert "build -p spur-cli --release" in script
     assert (
-        'fetch_remote_worktree_file '
-        'crates/spur-context-service/target/release/spur-context-service '
+        'fetch_remote_target_file release/spur-context-service '
         '"$BUILD_DIR/bootstrap"'
     ) in script
     assert (
-        '--remote-binary "$(remote_worktree_path '
-        'crates/spur-context-service/target/release/spur-context-worker)"'
+        '--remote-binary "$(remote_target_path release/spur-context-worker)"'
+    ) in script
+    assert (
+        '--remote-binary "$(remote_target_path '
+        'release/spur-context-worker-lambda)"'
     ) in script
     assert '--remote-binary "$(remote_target_path target/release/spur)"' in script
     assert "fetch_remote_target_file target/release/spur" not in script
