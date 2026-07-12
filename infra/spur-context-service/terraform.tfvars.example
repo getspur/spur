@@ -30,6 +30,38 @@ context_max_git_bytes                    = 2147483648
 context_max_build_seconds                = 1800
 allowed_source_domains                   = []
 
+# Personal API-key authentication is additive and disabled by default. Enable
+# it only alongside a fully configured Cognito human client. The authorizer and
+# cleanup zips are independent lean artifacts; neither may reuse the serving
+# Lambda zip. Build both exact paths with
+# scripts/package-context-api-key-lambdas.sh from the repository root. No raw
+# API key belongs in tfvars or Terraform state.
+api_key_auth_enabled                  = false
+# Enabling this feature also requires Cognito configuration with
+# cognito_human_callback_urls containing the exact registered CLI callback:
+# ["http://127.0.0.1:8765/callback"]
+api_key_authorizer_zip_path           = "../../target/lambda/spur-context-api-key-authorizer.zip"
+api_key_cleanup_zip_path              = "../../target/lambda/spur-context-api-key-cleanup.zip"
+api_key_environment                   = "live"
+api_key_authorizer_cache_seconds      = 30
+api_key_default_ttl_days              = 90
+api_key_max_ttl_days                  = 365
+api_key_max_active_per_user           = 10
+api_key_authorizer_memory_mb          = 256
+api_key_authorizer_timeout_sec        = 5
+api_key_authorizer_log_retention_days = 14
+api_key_cleanup_memory_mb             = 256
+api_key_cleanup_timeout_sec           = 60
+api_key_cleanup_log_retention_days    = 14
+api_key_cleanup_max_catchup_hours     = 168
+api_key_cleanup_schedule_minutes      = 5
+api_key_cleanup_max_buckets           = 4
+api_key_cleanup_max_pages             = 8
+api_key_cleanup_max_records           = 100
+api_key_cleanup_page_limit            = 100
+api_key_cleanup_cursor_lag_alarm_hours = 2
+api_key_alarm_action_arns              = []
+
 # On-demand indexing — required for v2
 # VPC where workers run in private subnets. By default this module creates
 # NAT-free VPC endpoints for AWS service egress.

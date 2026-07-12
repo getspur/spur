@@ -115,6 +115,320 @@ unauthenticated route does not silently fall back to source IP identity.
   revalidate URLs, cap tarball downloads/source trees, and kill `spur graph
   build` after `context_max_build_seconds`.
 
+## Optional Cognito OAuth ingress
+
+`cognito_auth_enabled` is `false` by default. In that mode Terraform creates no
+Cognito user pool, domain, resource server, app clients, JWT authorizer,
+`POST /mcp/oauth` route, or Cognito-specific access-log/metric resources. The
+existing `$default` route remains exactly as configured: `NONE` for
+`env/default.tfvars` and `AWS_IAM` by default elsewhere. The EventBridge queue
+drainer continues to invoke the Lambda directly.
+
+When enabled, the module adds a Cognito **LITE** user pool, hosted domain, the
+`external.read`, `external.index`, and `external.status` resource-server
+scopes, a public authorization-code human client, and one confidential
+client-credentials client for each enabled organization. API Gateway attaches a
+native JWT authorizer only to `POST /mcp/oauth`; `$default` never receives the
+authorizer. The authorizer's three route scopes are an any-of edge gate. Lambda
+uses the supplied non-secret issuer, client IDs, resource-server ID, denylist,
+and fixed `/mcp/oauth` path to enforce the exact body-selected tool scope.
+
+Use non-production placeholders in committed configuration. A real enabled
+environment needs exact callback and logout URLs, an environment-qualified pool
+name, and a unique Cognito domain prefix:
+
+```hcl
+cognito_auth_enabled        = true
+cognito_user_pool_name      = "spur-context-example-cognito"
+cognito_domain_prefix       = "spur-context-example-auth"
+cognito_human_callback_urls = [
+  "http://127.0.0.1:8765/callback", # required by `spur context auth login`
+  "https://app.example.test/oauth/callback",
+]
+cognito_human_logout_urls   = ["https://app.example.test/logout"]
+
+cognito_m2m_organizations = {
+  example_org = {
+    display_name       = "Example organization"
+    enabled            = true
+    allowed_scopes     = ["external.index", "external.status"]
+    access_token_hours = 6
+    risk_acceptance    = null
+  }
+}
+```
+
+Callback and logout URLs must be exact HTTPS URLs. HTTP is accepted only for
+`localhost`, `127.0.0.1`, or `[::1]` loopback POC URLs; wildcards are rejected.
+When personal API-key authentication is enabled, the callback set must include
+exactly `http://127.0.0.1:8765/callback` for the CLI. If port 8765 is occupied,
+the CLI fails before launching Cognito and reports that the registered port must
+be made available.
+M2M scopes are limited to the three listed scope suffixes, and one human client
+plus all enabled organizations may not exceed API Gateway's 50 JWT audiences.
+The balanced M2M default is six hours. An enabled 24-hour organization must
+provide `risk_acceptance.accepted_by`, RFC3339 `accepted_at`, and `ticket`
+metadata to make its bearer-token replay risk reviewable.
+
+M2M app clients use `generate_secret = true`, so Terraform state can contain a
+generated `client_secret` even though no output exposes it. Treat remote state
+as secret-bearing: encrypt it, restrict IAM, retain access logs, and never
+publish plan/state artifacts. Do not put app-client secrets, tokens, real
+client IDs, authorization codes, PKCE values, or real subscriber emails in
+tfvars. The only Cognito Lambda environment values are non-secret validation
+metadata; client secrets are never passed to the Lambda. API Gateway access
+logs contain only route/status/latency/bounded-error fields and intentionally
+omit headers, claims, request bodies, and credentials.
+
+Set `cognito_monthly_budget_usd` plus one or more
+`cognito_budget_subscriber_emails` to create the optional Cognito forecast
+budget. The subscriber variable is marked sensitive because it contains contact
+data. Enabled Cognito also creates a plan-only-safe OAuth-route 5xx metric and
+alarm from the redacted API access log.
+
+Run the local mock-provider plan tests after Terraform changes; every run uses
+`command = plan` and never creates AWS resources:
+
+```bash
+terraform -chdir=infra/spur-context-service test \
+  -test-directory=tests \
+  -filter=tests/cognito_static.tftest.hcl
+```
+
+## Cognito operator runbook
+
+The steps below describe an approved deployment lifecycle. They are not
+authorization to apply this module. Repository verification uses mock-provider
+plans and `init -backend=false`; it never needs AWS credentials.
+
+### Enablement and discovery
+
+1. Keep `cognito_auth_enabled=false` while configuring exact callback/logout
+   URLs, the environment-qualified pool/domain names, organization scopes and
+   TTLs, budget recipients, and the emergency denylist. Confirm the existing
+   `$default` route remains `AWS_IAM` (or the explicitly reviewed demo `NONE`),
+   and retain the EventBridge drainer configuration.
+2. Run `terraform fmt -check -recursive`, `terraform init -backend=false`,
+   `terraform validate`, and the mock-provider tests. Review a real remote-state
+   plan only in the separately approved environment; enabling Cognito must add
+   the exact `POST /mcp/oauth` route without replacing `$default`.
+3. After an approved apply, distribute only the nonsensitive discovery outputs:
+   `cognito_issuer`, `cognito_domain_url`, `cognito_human_client_id`,
+   `cognito_m2m_client_ids`, `cognito_resource_server_identifier`, and
+   `oauth_api_url`. Use `cognito_issuer` for OIDC discovery and JWKS
+   (`/.well-known/openid-configuration` and `/.well-known/jwks.json`). Use
+   `cognito_domain_url` for hosted `/oauth2/authorize`, `/oauth2/token`, and
+   logout endpoints. No output contains an M2M secret.
+4. Smoke one least-privilege human/M2M call on `/mcp/oauth`, then smoke the
+   unchanged IAM route. Verify that OAuth identities are namespaced, IAM issued
+   no Cognito token, cross-owner status is `not_found`, and queue/drainer health
+   did not regress before onboarding another organization.
+
+### Credential delivery and rotation
+
+Generated M2M secrets can be present in Terraform state. A restricted
+provisioning step must copy a new secret directly from Cognito/provider state
+into the approved secret manager without printing it, placing it in a plan
+artifact, shell history, email, chat, or issue comment. Deliver the organization
+its stable client ID, exact allowed scopes, TTL, and an audited one-time secret
+reference; revoke delivery access after acknowledgment. The human client is
+public and receives no secret.
+
+Rotate without changing ownership:
+
+1. Add a second secret to the existing app client and write it to the approved
+   secret manager.
+2. Have the customer deploy the new reference and prove it can mint a token and
+   invoke only an allowed scope.
+3. Observe a full agreed overlap with no old-secret issuance, then delete the
+   old secret. Preserve the app client ID so queued jobs and status ownership
+   remain `cognito:client:<client_id>`.
+4. Record actor, timestamps, client-ID hash, and secret descriptor ID, never the
+   secret value. If compromise is suspected, denylist the client ID as part of
+   the same incident response.
+
+### TTL and audience risk gates
+
+The balanced default is a six-hour M2M token. A 24-hour token enlarges the
+bearer replay and non-immediate-revocation window to as much as 24 hours and
+requires the committed risk-acceptance metadata. Secret deletion stops new
+issuance but does not invalidate an already issued access token; shorten the TTL
+or deploy the emergency denylist when that residual window is unacceptable.
+
+One human client plus enabled organization clients must fit API Gateway's fixed
+50-audience limit, so this route supports at most 49 enabled M2M organizations.
+Alert before that boundary and select a reviewed sharding/authorizer design
+before onboarding another organization; never truncate the audience list.
+
+### Monitoring
+
+Monitor the redacted OAuth access log and alarms for route-specific
+401/403/429 rates, JWT 401 spikes during key rotation, OAuth/Lambda 5xx, and
+sustained throttling. Correlate those with Cognito token operations and budget
+forecasts, per-owner/global queue saturation, dedupe outcomes, dispatch latency,
+scheduled-drainer invocations, retries, and stuck jobs. The module provides the
+OAuth-route 5xx alarm and optional 50/80/100% forecast budget notifications;
+the operating dashboard must retain the existing queue and Lambda signals.
+Never add Authorization headers, claims, client IDs, subjects, request bodies,
+secrets, or tokens to access-log formats or alert payloads.
+
+### Rollback
+
+For one compromised organization, add its client ID to the Lambda denylist and
+delete/rotate its secret to stop new issuance. For broader rollback, prepare a
+reviewed configuration deployment that deny-lists the human client ID and every
+enabled M2M client ID; this fails all OAuth callers closed while the unchanged
+IAM `$default` route remains the internal path. If the route itself must be
+removed, use a reviewed incident change that removes only `POST /mcp/oauth` and
+keeps the user pool/logs retained. Do not use `cognito_auth_enabled=false` as a
+fast rollback: in the current module that is a teardown request for all guarded
+Cognito resources and deletion protection will block it. The demo route, when
+intentionally enabled, retains the literal `anonymous-internal` owner. Do not
+rewrite queue records: existing namespaced jobs remain available after the same
+client is restored or through an audited IAM operator path. Preserve logs and
+the user pool through the maximum token TTL and incident-retention window.
+
+### Teardown
+
+Stop onboarding and token issuance, wait through the maximum issued-token TTL,
+and wait for active namespaced jobs to become terminal (or record an audited IAM
+operator disposition). Capture a resource inventory and a destroy plan before
+changing state. Because production defaults to deletion protection, first apply
+a separately reviewed update with
+`cognito_user_pool_deletion_protection=false` while Cognito remains enabled;
+then set `cognito_auth_enabled=false` and review that the next plan removes only
+the Cognito clients/pool/domain, JWT authorizer/route, OAuth log/alarm, and
+optional budget. It must not remove `$default`, the service Lambda, job table,
+EventBridge schedule, or drainer permissions.
+
+After an approved destroy, verify the Cognito/JWT outputs are null/empty, the
+targeted resources are absent, `$default` still has its expected authorization,
+the scheduled drainer remains configured, and no secret-bearing plan/state/log
+artifact was retained outside the state policy.
+
+## Personal API-key operator runbook
+
+Personal keys are additive to Cognito OAuth/M2M, IAM, the explicit demo path,
+and scheduled EventBridge events. The procedures below describe an approved
+deployment lifecycle; they are not authorization to apply or destroy resources.
+Repository verification is offline and uses Terraform mock plans only.
+
+### API-key enablement and discovery
+
+Keep `api_key_auth_enabled=false` until Cognito human OAuth is enabled and its
+runbook checks pass. Configure the API-key table, authorizer/cleanup artifacts,
+30-second authorizer cache, 90-day default TTL, cleanup bounds, alarms, and
+budget evidence, then run formatting, validation, and mock tests. An approved
+plan with `api_key_auth_enabled=true` must add exactly:
+
+- `GET /.well-known/spur-context-service` as public bounded discovery;
+- `POST /mcp/api-key` with the request authorizer;
+- the three JWT + `keys.manage` management routes; and
+- the dedicated table, authorizer, cleanup schedule, IAM, logs, and alarms.
+
+It must leave `POST /mcp/oauth`, `$default`, M2M clients, IAM/demo settings, and
+the queue-drainer EventBridge input unchanged. After a separately approved
+apply, publish only discovery outputs and verify that the document's issuer,
+human client ID, endpoints, scopes, feature status, and exact URLs match the
+reviewed environment. Discovery contains no account ID, client secret, token,
+key, digest, ARN, or user data.
+
+### CLI-managed personal keys
+
+Use human OAuth only for management and a personal key for routine MCP traffic:
+
+```bash
+spur context auth login --profile workstation --url https://context.example.test
+spur context key create --name workstation --scope external.read --profile workstation
+spur context key list --profile workstation
+spur context key use PUBLIC_KEY_ID
+spur context mcp --profile PUBLIC_KEY_ID
+spur context key revoke PUBLIC_KEY_ID --profile workstation
+spur context auth logout --profile workstation
+```
+
+Creation stores the one-time key without printing it. `--show-secret` is allowed
+only on an interactive terminal and should be used only with an approved secure
+capture path. `auth logout` removes management credentials but preserves local
+API-key profiles. OAuth and every personal key for the user resolve to the same
+`cognito:user:<sub>` owner, so extra keys do not create extra rate, queue,
+dedupe, or status-visibility buckets.
+
+### Headless credential delivery
+
+Never pass a personal key as an argument. Import an approved one-time value from
+stdin with `spur context key add --stdin --profile automation`, or provide it to
+one process through `SPUR_CONTEXT_SERVICE_API_KEY`. The environment value has
+precedence over the OS keyring and explicit restricted credential file. Use
+`SPUR_CONTEXT_CREDENTIALS_FILE` only for the reviewed 0600/owner-only fallback.
+Normal `.spur/config.toml` stores only URL, auth mode, profile, and optional
+public-ID hint. Do not persist environment dumps, command tracing, stdin capture,
+raw headers, or debug output.
+
+### API-key revocation and emergency route kill switch
+
+A revoke changes the key record immediately; a cache miss rejects it at once,
+and cached allow/deny decisions expire within the documented 30-second revocation SLO.
+Verify rejection after that window without logging the key.
+For route-wide compromise, first detach or disable only `POST /mcp/api-key` and
+set the serving feature flag to reject API-key context. Preserve OAuth,
+management (for revocation), IAM/demo, and both scheduled EventBridge paths.
+Do not wait for per-key revocation before applying this emergency route kill
+switch.
+
+### Cleanup capacity and cursor lag
+
+The supported model is 50,000 users × ten keys with a 90-day default TTL:
+500,000 / 2,160 hours rounds up to **232 keys/hour**. A five-minute schedule and
+100-record invocation cap provide **1,200 records/hour**. Each invocation is
+also bounded to four forward buckets, eight pages, and 100 records; a large
+hour resumes through durable `has_more` state. The 168-hour horizon selects an
+oldest starting bucket and is not an invocation work multiplier.
+
+Alarm on cleanup Lambda errors and missing/breaching cursor-lag metrics at the
+five-minute cadence. Investigate lag before it threatens the one-hour normal
+operation SLO. Manual owner revoke releases capacity immediately; DynamoDB TTL
+is delayed garbage collection, never revocation or capacity accounting.
+
+### Owner offboarding
+
+Run the audited IAM-only revoke-by-owner workflow before disabling or deleting a
+Cognito account. Query the owner GSI, process bounded idempotent batches, retain
+a resumable cursor, and record only actor, hashed owner, public key IDs, bounded
+results, and timestamps. Verify zero active keys and wait through the
+30-second cache bound before completing offboarding. Personal keys and M2M
+credentials cannot invoke this operator workflow.
+
+### API-key metrics and cost evidence
+
+Monitor bounded authorizer decisions and latency, management outcomes, API-key
+route 401/403/429/5xx, cleanup scanned/revoked/retried/failed counts, cursor lag,
+Lambda errors, queue saturation, and Cognito/budget forecasts. Access logs must
+omit both credential headers, request bodies, JWT claims, subjects, owners,
+digests, and raw keys.
+
+Calculate cost evidence per AWS price dimension: authorizer invocations,
+strongly consistent reads on cache misses, lifecycle writes, cleanup
+invocations, DynamoDB storage/PITR, logs, metrics, alarms, and optional budgets.
+Use measured request distribution and cache-hit approximation; do not multiply
+one blended estimate across unrelated dimensions.
+
+### API-key rollback and teardown
+
+Rollback disables the exact API-key route first, preserving management long
+enough to revoke keys. Wait through the cache TTL, verify OAuth/IAM/demo and
+drainer traffic, then disable the feature in a reviewed plan. Do not rewrite
+queued jobs or delete the shared owner records.
+
+For destructive teardown, revoke all owners, confirm cleanup cursor completion,
+retain audit/log evidence per policy, inventory the API-key table, authorizer and
+alias, cleanup function/rule/target, route/integration, permissions, roles,
+policies, logs, alarms, and secret-bearing Terraform state, then review the
+destroy plan. After separate approval, verify those categories are absent while
+`POST /mcp/oauth`, `$default`, Cognito M2M, IAM/demo, the service Lambda, job
+table, and index drainer remain unchanged. Delete retained state only under the
+environment's state-retention policy.
+
 ## Bounded Backlog Operations
 
 The module keeps queue admission opt-in: `index_max_queued_jobs_per_owner=0`

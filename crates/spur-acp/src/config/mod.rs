@@ -444,19 +444,56 @@ impl Default for TelegramBotConfig {
 /// Cloud context-service endpoint for external package code tools.
 /// Built-in default points to the production API Gateway endpoint.
 /// Override in `[context_service]` in `.spur/config.toml`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextServiceAuthMode {
+    /// Preserve the configured legacy unauthenticated endpoint.
+    #[default]
+    None,
+    /// Use a stored human OAuth bearer on the exact OAuth route.
+    OAuthBearer,
+    /// Use a stored personal API key on the exact API-key route.
+    ApiKey,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ContextServiceConfig {
     /// Cloud context-service API URL. Defaults to the production endpoint.
     pub url: String,
-    /// Bearer token. Empty/absent = no auth header (production has no authorizer).
+    /// Explicit non-secret authentication mode.
+    pub auth_mode: ContextServiceAuthMode,
+    /// Credential profile selected for context-service operation.
+    pub profile: String,
+    /// Optional non-secret API-key public identifier hint.
+    pub public_id_hint: Option<String>,
+    /// Legacy bearer token accepted while old configuration migrates.
+    ///
+    /// This field is deserialized for compatibility but is never serialized.
+    #[serde(skip_serializing)]
     pub token: Option<String>,
+}
+
+impl std::fmt::Debug for ContextServiceConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ContextServiceConfig")
+            .field("url", &self.url)
+            .field("auth_mode", &self.auth_mode)
+            .field("profile", &self.profile)
+            .field("public_id_hint", &self.public_id_hint)
+            .field("token", &self.token.as_ref().map(|_| "[REDACTED]"))
+            .finish()
+    }
 }
 
 impl Default for ContextServiceConfig {
     fn default() -> Self {
         Self {
             url: "https://zd3c3186v6.execute-api.ap-southeast-5.amazonaws.com".to_owned(),
+            auth_mode: ContextServiceAuthMode::None,
+            profile: "default".to_owned(),
+            public_id_hint: None,
             token: None,
         }
     }
