@@ -1,7 +1,7 @@
 # Mixed-path C/C++ sccache wrapper fix
 
 Status: approved
-Owner surfaces: `getspur/spur-notebook` cloud-build provisioning and SPUR's legacy GCP provisioning mirror
+Owner surface: `getspur/spur-notebook` AWS cloud-build provisioning
 
 ## Problem
 
@@ -35,18 +35,16 @@ keys. For crate-relative sources such as `libdbus-sys`, the wrappers stay in
 the crate directory and use it as `SCCACHE_BASEDIR`; the absolute OUT_DIR
 include remains valid.
 
-Apply the same logic to both C and C++ wrappers in:
-
-- `spur-notebook/scripts/cloud-build/startup-aws.sh`, the AWS distribution
-  builder source of truth; and
-- `spur/scripts/gcp-build/startup.sh`, the tracked legacy GCP mirror.
+Apply the same logic to both C and C++ wrappers in
+`spur-notebook/scripts/cloud-build/startup-aws.sh`, the AWS distribution
+builder source of truth. The legacy GCP wrapper is intentionally out of scope.
 
 No package feature changes are needed. Vendored D-Bus remains statically linked
 for both Linux architectures.
 
 ## Testing
 
-Use TDD in both repositories:
+Use TDD in `spur-notebook`:
 
 1. Add a wrapper regression test that invokes a crate-relative `-c` source with
    an absolute `$OUT_DIR/include` path.
@@ -64,5 +62,6 @@ its installed wrapper until reprovisioned or replaced. Verification must ensure
 the active builder has received the corrected wrapper before treating a remote
 dist result as evidence.
 
-Existing unrelated changes in both worktrees remain unstaged. Each repository
-gets commits containing only this fix's test or implementation hunks.
+Existing unrelated changes in both worktrees remain unstaged. The
+`spur-notebook` commits contain only this fix's test or implementation hunks;
+SPUR contains only the approved design and implementation plan records.
