@@ -61,9 +61,14 @@ resource "aws_iam_role_policy" "api_key_management" {
     Version = "2012-10-17"
     Statement = [
       {
-        Sid      = "KeyAndOwnerCounterTransactions"
-        Effect   = "Allow"
-        Action   = ["dynamodb:GetItem", "dynamodb:TransactWriteItems"]
+        Sid    = "KeyAndOwnerCounterTransactions"
+        Effect = "Allow"
+        Action = [
+          "dynamodb:GetItem",
+          "dynamodb:PutItem",
+          "dynamodb:UpdateItem",
+          "dynamodb:TransactWriteItems",
+        ]
         Resource = aws_dynamodb_table.api_keys[0].arn
       },
       {

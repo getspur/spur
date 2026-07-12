@@ -63,6 +63,14 @@ variable "api_key_auth_enabled" {
     condition     = !var.api_key_auth_enabled || var.cognito_auth_enabled
     error_message = "api_key_auth_enabled requires cognito_auth_enabled so only Cognito humans can manage personal keys."
   }
+
+  validation {
+    condition = (
+      !var.api_key_auth_enabled ||
+      contains(var.cognito_human_callback_urls, "http://127.0.0.1:8765/callback")
+    )
+    error_message = "api_key_auth_enabled requires the exact CLI callback http://127.0.0.1:8765/callback in cognito_human_callback_urls."
+  }
 }
 
 variable "api_key_table_name" {
@@ -1048,6 +1056,8 @@ locals {
   ]
   api_key_management_dynamodb_actions = [
     "dynamodb:GetItem",
+    "dynamodb:PutItem",
+    "dynamodb:UpdateItem",
     "dynamodb:TransactWriteItems",
   ]
   api_key_management_query_actions = [

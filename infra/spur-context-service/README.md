@@ -141,7 +141,10 @@ name, and a unique Cognito domain prefix:
 cognito_auth_enabled        = true
 cognito_user_pool_name      = "spur-context-example-cognito"
 cognito_domain_prefix       = "spur-context-example-auth"
-cognito_human_callback_urls = ["https://app.example.test/oauth/callback"]
+cognito_human_callback_urls = [
+  "http://127.0.0.1:8765/callback", # required by `spur context auth login`
+  "https://app.example.test/oauth/callback",
+]
 cognito_human_logout_urls   = ["https://app.example.test/logout"]
 
 cognito_m2m_organizations = {
@@ -157,6 +160,10 @@ cognito_m2m_organizations = {
 
 Callback and logout URLs must be exact HTTPS URLs. HTTP is accepted only for
 `localhost`, `127.0.0.1`, or `[::1]` loopback POC URLs; wildcards are rejected.
+When personal API-key authentication is enabled, the callback set must include
+exactly `http://127.0.0.1:8765/callback` for the CLI. If port 8765 is occupied,
+the CLI fails before launching Cognito and reports that the registered port must
+be made available.
 M2M scopes are limited to the three listed scope suffixes, and one human client
 plus all enabled organizations may not exceed API Gateway's 50 JWT audiences.
 The balanced M2M default is six hours. An enabled 24-hour organization must

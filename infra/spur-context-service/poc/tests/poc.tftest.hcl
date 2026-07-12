@@ -2,6 +2,14 @@
 # AWS and cannot apply resources.
 mock_provider "aws" {}
 
+override_resource {
+  target = aws_dynamodb_table.api_keys
+  values = {
+    arn = "arn:aws:dynamodb:us-east-1:111122223333:table/spur-context-auth-poc-unit-test-key-api-keys"
+  }
+  override_during = plan
+}
+
 run "disabled_default_plans_no_poc_resources" {
   command = plan
 
@@ -47,6 +55,22 @@ run "api_key_feature_is_independently_disabled" {
   }
 }
 
+run "api_key_feature_requires_the_registered_cli_callback" {
+  command = plan
+
+  variables {
+    poc_enabled           = true
+    api_key_auth_enabled  = true
+    human_callback_urls   = ["http://127.0.0.1:9999/callback"]
+    creation_confirmation = "I_UNDERSTAND_THIS_CREATES_DISPOSABLE_POC_RESOURCES"
+    poc_suffix            = "unit-test-wrong-port"
+    poc_owner             = "fixture-owner"
+    cost_center           = "fixture-cost"
+  }
+
+  expect_failures = [var.human_callback_urls]
+}
+
 run "mock_enabled_api_key_plan_is_exact_bounded_and_isolated" {
   command = plan
 
@@ -63,6 +87,7 @@ run "mock_enabled_api_key_plan_is_exact_bounded_and_isolated" {
 
   assert {
     condition = (
+      toset(aws_cognito_user_pool_client.human[0].callback_urls) == toset(["http://127.0.0.1:8765/callback"]) &&
       aws_apigatewayv2_route.api_key_discovery[0].route_key == "GET /.well-known/spur-context-service" &&
       aws_apigatewayv2_route.api_key_mcp[0].route_key == "POST /mcp/api-key" &&
       aws_apigatewayv2_route.api_key_mcp[0].authorization_type == "CUSTOM" &&
@@ -73,6 +98,16 @@ run "mock_enabled_api_key_plan_is_exact_bounded_and_isolated" {
       ])
     )
     error_message = "mock-enabled mode must add only the exact discovery, API-key MCP, and management routes"
+  }
+
+  assert {
+    condition = toset(jsondecode(aws_iam_role_policy.api_key_management[0].policy).Statement[0].Action) == toset([
+      "dynamodb:GetItem",
+      "dynamodb:PutItem",
+      "dynamodb:UpdateItem",
+      "dynamodb:TransactWriteItems",
+    ])
+    error_message = "POC API-key management transactions require their underlying PutItem and UpdateItem actions"
   }
 
   assert {
