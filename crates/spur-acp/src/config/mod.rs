@@ -451,6 +451,7 @@ pub enum ContextServiceAuthMode {
     #[default]
     None,
     /// Use a stored human OAuth bearer on the exact OAuth route.
+    #[serde(rename = "oauth_bearer", alias = "o_auth_bearer")]
     OAuthBearer,
     /// Use a stored personal API key on the exact API-key route.
     ApiKey,
@@ -1184,6 +1185,23 @@ mod delegation_descriptor_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn oauth_context_auth_mode_round_trips_canonical_spelling() {
+        let config = ContextServiceConfig {
+            url: "https://context.example.test".to_owned(),
+            auth_mode: ContextServiceAuthMode::OAuthBearer,
+            profile: "default".to_owned(),
+            public_id_hint: None,
+            token: None,
+        };
+        let encoded = toml::to_string(&config).expect("serialize OAuth context config");
+        assert!(encoded.contains("auth_mode = \"oauth_bearer\""));
+
+        let decoded: ContextServiceConfig =
+            toml::from_str(&encoded).expect("deserialize OAuth context config");
+        assert_eq!(decoded.auth_mode, ContextServiceAuthMode::OAuthBearer);
+    }
 
     #[test]
     fn effective_handle_prefers_display_handle() {
