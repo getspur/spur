@@ -18,6 +18,7 @@ Gemini excluded (shut down).
 | `open-code` (opencode 1.17.11) | `.opencode/agent/*.md` | ✅ listed as values of the `mode` config option (`build`, `plan`, `spur-probe`) | ❌ no `--agent` on the `acp` subcommand | ✅ **verified live:** `set_config_option {configId:"mode", value:"spur-probe"}` → current `build`→`spur-probe` | ✅ `model` + `effort` (category `thought_level`) |
 | `codex-acp` (adapters 1.0.2 **and** 1.1.0) | `.codex/agents/*.toml` **exists** (codex subagents, see below) | ❌ planted `.codex/agents/spur-probe.toml` NOT surfaced over ACP: no `agent` config option, no `/agent(s)` slash command in `available_commands_update`, no `_meta` | ⚠️ `-c model="gpt-5.4-mini"` accepted at spawn but advertised current value stayed `gpt-5.5` — do not rely on `-c` | ✅ **verified live:** `set_config_option {configId:"reasoning_effort", value:"low"}` → `xhigh`→`low`. No agent/profile option. | ✅ `model` + `reasoning_effort` (category `thought_level`) |
 | `kimi` (1.40.0) | none found | — | none (`acp` takes no options; requires `-y --afk` before `acp` to run) | ❌ | ❌ advertises **no** config options — prompt plane only |
+| `grok` (Grok Build CLI) | n/a (TUI agents / profiles are Grok-local) | — | spawn: `grok agent --model <id> stdio` | _re-probe_ | See `2026-07-13-grok-acp-capability-probe-results.md` + `scripts/probe_grok_acp.py` — TUI has `/model`; ACP `configOptions` not assumed until live matrix filled |
 
 Additional verified facts:
 
