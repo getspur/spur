@@ -11,6 +11,12 @@
 
 aws_region = "ap-southeast-5"
 
+# Bootstrap the delegated context.getspur.dev Route 53 zone while preserving
+# both legacy endpoints. Activate only after Namecheap serves the output NS set;
+# retire execute-api in a separate, post-migration change.
+custom_domains_enabled       = false
+disable_execute_api_endpoint = false
+
 # Keep interface VPC endpoints in a single AZ/subnet for the default demo/eval
 # stack to reduce PrivateLink endpoint-hour cost. Worker Lambda/ECS placement
 # still uses the discovered default-VPC subnets.
