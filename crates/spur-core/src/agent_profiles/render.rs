@@ -783,6 +783,31 @@ mod tests {
     }
 
     #[test]
+    fn augment_fails_closed_on_flow_map_tools() {
+        let raw = "---\nname: code-reviewer\ndescription: Reviews diffs\ntools: {Read: true, Edit: true}\n---\nYou review code.\n";
+        let original = crate::agent_profiles::AgentProfile::parse("code-reviewer", raw)
+            .expect("profile should parse");
+
+        let augmented = augment_tools_allowlist(&original, &worker_mcp_extras());
+
+        assert_eq!(augmented, original, "flow-map tools must stay untouched");
+    }
+
+    #[test]
+    fn augment_fails_closed_on_block_scalar_tools() {
+        let raw = "---\nname: code-reviewer\ndescription: Reviews diffs\ntools: |\n  Read\n  Edit\n---\nYou review code.\n";
+        let original = crate::agent_profiles::AgentProfile::parse("code-reviewer", raw)
+            .expect("profile should parse");
+
+        let augmented = augment_tools_allowlist(&original, &worker_mcp_extras());
+
+        assert_eq!(
+            augmented, original,
+            "block-scalar tools must stay untouched"
+        );
+    }
+
+    #[test]
     fn augment_leaves_profiles_without_tools_line_unchanged() {
         let original = profile();
         let augmented = augment_tools_allowlist(&original, &worker_mcp_extras());
