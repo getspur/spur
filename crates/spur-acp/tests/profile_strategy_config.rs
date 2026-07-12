@@ -33,6 +33,7 @@ fn defaults_encode_the_probe_matrix() {
         ),
         (Kimi, SelectStrategy::None, false),
         (Gemini, SelectStrategy::None, false),
+        (Grok, SelectStrategy::None, false),
         (Generic, SelectStrategy::None, false),
         (ClaudeStreamJson, SelectStrategy::None, true),
     ];

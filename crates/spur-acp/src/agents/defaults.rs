@@ -47,6 +47,7 @@ pub fn known_agents() -> &'static [&'static str] {
         "gemini-acp",
         "opencode",
         "kimi",
+        "grok",
     ]
 }
 
