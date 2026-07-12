@@ -27,6 +27,10 @@ pub const INSTALL_HINTS: &[(&str, &str)] = &[
     ("gemini", "npm install -g @google/gemini-cli"),
     ("opencode", "npm install -g opencode"),
     ("kimi", "see docs/spur/agent-onboarding-cookbook.md"),
+    (
+        "grok",
+        "curl -fsSL https://x.ai/cli/install.sh | bash   # then `grok login`",
+    ),
 ];
 
 pub fn install_hint(name: &str) -> &'static str {
