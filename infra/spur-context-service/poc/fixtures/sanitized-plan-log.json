@@ -1,0 +1,17 @@
+{
+  "terraform_plan": {
+    "resource_changes": [],
+    "output_changes": {
+      "client_ids": {
+        "sensitive": false
+      }
+    }
+  },
+  "application_log": {
+    "request_id": "fixture-request",
+    "status": 401,
+    "reason": "wrong_issuer",
+    "authorization": "[redacted]",
+    "claim_names": ["iss", "client_id", "scope", "token_use"]
+  }
+}

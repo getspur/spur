@@ -1,0 +1,20 @@
+{
+  "tool": "external_index",
+  "args": {
+    "package": "validation-only-fixture",
+    "revision": "offline",
+    "source_url": "https://validation-only.invalid/spur-context-poc.tar.gz",
+    "source_kind": "tarball",
+    "force": false
+  },
+  "poc_assertions": {
+    "queue_caps": {
+        "running": 0,
+        "queued": 0
+    },
+    "expected_reason": "source_url: source_url domain is not allow-listed",
+    "must_not_resolve_dns": true,
+    "must_not_enqueue": true,
+    "must_not_dispatch": true
+  }
+}

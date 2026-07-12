@@ -53,6 +53,35 @@ fn create_or_get_active_job_dedupes_identical_requests() -> Result<()> {
 }
 
 #[test]
+fn namespaced_auth_identities_remain_distinct_backlog_owners() {
+    let owners = [
+        "cognito:user:opaque-human",
+        "cognito:client:organization-a",
+        "cognito:client:organization-b",
+        "iam:123456789012:AROASTABLE",
+        "anonymous-internal",
+    ]
+    .map(BacklogOwner::caller);
+
+    assert_eq!(
+        owners
+            .iter()
+            .map(BacklogOwner::pk)
+            .collect::<HashSet<_>>()
+            .len(),
+        owners.len()
+    );
+    assert_eq!(
+        owners
+            .iter()
+            .map(BacklogOwner::quota_pk)
+            .collect::<HashSet<_>>()
+            .len(),
+        owners.len()
+    );
+}
+
+#[test]
 fn failed_job_releases_dedupe_for_retry() -> Result<()> {
     block_on(async {
         let store = FakeJobStore::default();

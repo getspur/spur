@@ -166,6 +166,131 @@ resource "aws_iam_role_policy" "lambda_dynamodb" {
   })
 }
 
+# Personal API-key permissions intentionally remain outside the legacy serving
+# policy above. The authorizer can only read one primary-key record, management
+# can transact key/counter records and query the owner index, and cleanup has a
+# separate execution role for cursor/expiry work.
+
+resource "aws_iam_role" "api_key_authorizer" {
+  count = var.api_key_auth_enabled ? 1 : 0
+
+  name = "spur-context-api-key-authorizer"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect    = "Allow"
+      Principal = { Service = "lambda.amazonaws.com" }
+      Action    = "sts:AssumeRole"
+    }]
+  })
+}
+
+resource "aws_iam_role_policy" "api_key_authorizer" {
+  count = var.api_key_auth_enabled ? 1 : 0
+
+  name = "ApiKeyAuthorizerAccess"
+  role = aws_iam_role.api_key_authorizer[0].id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid      = "ConsistentPrimaryKeyLookup"
+        Effect   = "Allow"
+        Action   = local.api_key_authorizer_dynamodb_actions
+        Resource = aws_dynamodb_table.api_keys[0].arn
+      },
+      {
+        Sid    = "DedicatedAuthorizerLogs"
+        Effect = "Allow"
+        Action = [
+          "logs:CreateLogStream",
+          "logs:PutLogEvents"
+        ]
+        Resource = "${aws_cloudwatch_log_group.api_key_authorizer[0].arn}:*"
+      }
+    ]
+  })
+}
+
+resource "aws_iam_role_policy" "api_key_management" {
+  count = var.api_key_auth_enabled ? 1 : 0
+
+  name = "ApiKeyManagementAccess"
+  role = aws_iam_role.lambda.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid      = "KeyAndOwnerCounterTransactions"
+        Effect   = "Allow"
+        Action   = local.api_key_management_dynamodb_actions
+        Resource = aws_dynamodb_table.api_keys[0].arn
+      },
+      {
+        Sid      = "OwnKeyListing"
+        Effect   = "Allow"
+        Action   = local.api_key_management_query_actions
+        Resource = "${aws_dynamodb_table.api_keys[0].arn}/index/${var.api_key_owner_gsi_name}"
+      }
+    ]
+  })
+}
+
+resource "aws_iam_role" "api_key_cleanup" {
+  count = var.api_key_auth_enabled ? 1 : 0
+
+  name = "spur-context-api-key-cleanup"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect    = "Allow"
+      Principal = { Service = "lambda.amazonaws.com" }
+      Action    = "sts:AssumeRole"
+    }]
+  })
+}
+
+resource "aws_iam_role_policy" "api_key_cleanup" {
+  count = var.api_key_auth_enabled ? 1 : 0
+
+  name = "ApiKeyCleanupAccess"
+  role = aws_iam_role.api_key_cleanup[0].id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid      = "PersistCursorAndRevokeExpiredKeys"
+        Effect   = "Allow"
+        Action   = local.api_key_cleanup_dynamodb_actions
+        Resource = aws_dynamodb_table.api_keys[0].arn
+      },
+      {
+        Sid    = "BoundedExpiryAndOwnerQueries"
+        Effect = "Allow"
+        Action = local.api_key_cleanup_query_actions
+        Resource = [
+          "${aws_dynamodb_table.api_keys[0].arn}/index/${var.api_key_expiry_gsi_name}",
+          "${aws_dynamodb_table.api_keys[0].arn}/index/${var.api_key_owner_gsi_name}"
+        ]
+      },
+      {
+        Sid    = "DedicatedCleanupLogs"
+        Effect = "Allow"
+        Action = [
+          "logs:CreateLogStream",
+          "logs:PutLogEvents"
+        ]
+        Resource = "${aws_cloudwatch_log_group.api_key_cleanup[0].arn}:*"
+      }
+    ]
+  })
+}
+
 # Lambda → Step Functions: StartExecution for on-demand indexing.
 resource "aws_iam_role_policy" "lambda_sfn" {
   name = "StepFunctionsStartExecution"
