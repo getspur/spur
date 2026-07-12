@@ -12,6 +12,7 @@ use std::collections::BTreeMap;
 const DEFAULT_RESOURCE_SERVER_ID: &str = "urn:spur:context-service";
 pub(crate) const OAUTH_PATH: &str = "/mcp/oauth";
 pub(crate) const DISCOVERY_PATH: &str = "/.well-known/spur-context-service";
+pub(crate) const LOGIN_PATH: &str = "/auth/login";
 pub(crate) const API_KEY_MCP_PATH: &str = "/mcp/api-key";
 pub(crate) const API_KEY_MANAGEMENT_PATH: &str = "/auth/api-keys";
 
@@ -30,6 +31,7 @@ const EXTERNAL_TOOL_SCOPE_SUFFIXES: [(&str, &str); 8] = [
 pub(crate) enum RequestRoute {
     OAuth,
     Discovery,
+    Login,
     ApiKeyMcp,
     ApiKeyCreate,
     ApiKeyList,
@@ -44,6 +46,7 @@ impl RequestRoute {
         match self {
             Self::OAuth => "oauth",
             Self::Discovery => "discovery",
+            Self::Login => "login",
             Self::ApiKeyMcp => "api_key_mcp",
             Self::ApiKeyCreate => "api_key_create",
             Self::ApiKeyList => "api_key_list",
@@ -66,7 +69,7 @@ pub(crate) fn classify_route(path: Option<&str>, method: Option<&str>) -> Reques
         return RequestRoute::Legacy;
     };
     let Some(method) = method else {
-        return if is_reserved_api_key_namespace(path) {
+        return if is_reserved_route_namespace(path) {
             RequestRoute::ReservedUnavailable
         } else {
             RequestRoute::Legacy
@@ -79,6 +82,9 @@ pub(crate) fn classify_route(path: Option<&str>, method: Option<&str>) -> Reques
         (_, path) if path.starts_with("/.well-known/spur-context-service/") => {
             RequestRoute::ReservedUnavailable
         }
+        ("GET", LOGIN_PATH) => RequestRoute::Login,
+        (_, LOGIN_PATH) => RequestRoute::ReservedUnavailable,
+        (_, path) if path.starts_with("/auth/login/") => RequestRoute::ReservedUnavailable,
         ("POST", API_KEY_MCP_PATH) => RequestRoute::ApiKeyMcp,
         (_, API_KEY_MCP_PATH) => RequestRoute::ReservedUnavailable,
         (_, path) if path.starts_with("/mcp/api-key/") => RequestRoute::ReservedUnavailable,
@@ -97,15 +103,20 @@ pub(crate) fn classify_route(path: Option<&str>, method: Option<&str>) -> Reques
     }
 }
 
-fn is_reserved_api_key_namespace(path: &str) -> bool {
-    [DISCOVERY_PATH, API_KEY_MCP_PATH, API_KEY_MANAGEMENT_PATH]
-        .into_iter()
-        .any(|prefix| {
-            path == prefix
-                || path
-                    .strip_prefix(prefix)
-                    .is_some_and(|rest| rest.starts_with('/'))
-        })
+fn is_reserved_route_namespace(path: &str) -> bool {
+    [
+        DISCOVERY_PATH,
+        LOGIN_PATH,
+        API_KEY_MCP_PATH,
+        API_KEY_MANAGEMENT_PATH,
+    ]
+    .into_iter()
+    .any(|prefix| {
+        path == prefix
+            || path
+                .strip_prefix(prefix)
+                .is_some_and(|rest| rest.starts_with('/'))
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -754,10 +765,35 @@ mod tests {
     }
 
     #[test]
-    fn reserved_api_key_namespaces_fail_closed_when_the_method_is_missing() {
+    fn login_facade_reserves_exactly_get_auth_login() {
+        assert_eq!(
+            classify_route(Some("/auth/login"), Some("GET")).as_str(),
+            "login"
+        );
+        for method in [None, Some("POST"), Some("PUT"), Some("DELETE")] {
+            assert_eq!(
+                classify_route(Some("/auth/login"), method),
+                RequestRoute::ReservedUnavailable,
+                "login facade must fail closed for method {method:?}"
+            );
+        }
+        assert_eq!(
+            classify_route(Some("/auth/login/"), Some("GET")),
+            RequestRoute::ReservedUnavailable
+        );
+        assert_eq!(
+            classify_route(Some("/auth/login-other"), Some("GET")),
+            RequestRoute::Legacy
+        );
+    }
+
+    #[test]
+    fn reserved_auth_namespaces_fail_closed_when_the_method_is_missing() {
         for path in [
             DISCOVERY_PATH,
             "/.well-known/spur-context-service/child",
+            "/auth/login",
+            "/auth/login/child",
             API_KEY_MCP_PATH,
             "/mcp/api-key/child",
             API_KEY_MANAGEMENT_PATH,
