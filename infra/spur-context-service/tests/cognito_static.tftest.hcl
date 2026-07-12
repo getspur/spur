@@ -29,6 +29,14 @@ override_resource {
   override_during = plan
 }
 
+override_resource {
+  target = aws_apigatewayv2_integration.lambda
+  values = {
+    id = "lambda-integration"
+  }
+  override_during = plan
+}
+
 variables {
   lambda_zip_path                     = "index_build_asl.json"
   worker_ecr_image                    = "111122223333.dkr.ecr.us-east-1.amazonaws.com/spur-context-worker:test"
@@ -50,8 +58,8 @@ run "disabled_default_keeps_legacy_iam_without_cognito" {
   }
 
   assert {
-    condition     = length(aws_apigatewayv2_authorizer.cognito) == 0 && length(aws_apigatewayv2_route.oauth) == 0
-    error_message = "disabled mode must not create a JWT authorizer or OAuth route"
+    condition     = length(aws_apigatewayv2_authorizer.cognito) == 0 && length(aws_apigatewayv2_route.oauth) == 0 && length(aws_apigatewayv2_route.login_redirect) == 0
+    error_message = "disabled mode must not create a JWT authorizer, OAuth route, or login facade"
   }
 
   assert {
@@ -102,6 +110,11 @@ run "enabled_staging_creates_cognito_jwt_route_and_nonsecret_lambda_config" {
   assert {
     condition     = aws_apigatewayv2_route.default.authorization_type == "AWS_IAM" && aws_apigatewayv2_route.oauth[0].route_key == "POST /mcp/oauth" && aws_apigatewayv2_route.oauth[0].authorization_type == "JWT"
     error_message = "the JWT route must be exact and additive to the IAM default route"
+  }
+
+  assert {
+    condition     = length(aws_apigatewayv2_route.login_redirect) == 0 && aws_lambda_function.service.environment[0].variables["SPUR_CONTEXT_LOGIN_REDIRECT_ENABLED"] == "0"
+    error_message = "Cognito without custom-domain activation must keep the public login facade disabled"
   }
 
   assert {
@@ -319,9 +332,20 @@ run "custom_domain_activation_builds_regional_api_and_cognito_domains" {
       output.oauth_api_url == "https://context.getspur.dev/mcp/oauth" &&
       output.cognito_domain_url == "https://auth.context.getspur.dev" &&
       aws_lambda_function.service.environment[0].variables["SPUR_CONTEXT_SERVICE_BASE_URL"] == "https://context.getspur.dev" &&
-      aws_lambda_function.service.environment[0].variables["SPUR_COGNITO_AUTHORIZATION_ENDPOINT"] == "https://auth.context.getspur.dev/oauth2/authorize"
+      aws_lambda_function.service.environment[0].variables["SPUR_COGNITO_AUTHORIZATION_ENDPOINT"] == "https://auth.context.getspur.dev/oauth2/authorize" &&
+      aws_lambda_function.service.environment[0].variables["SPUR_COGNITO_TOKEN_ENDPOINT"] == "https://auth.context.getspur.dev/oauth2/token"
     )
     error_message = "activation must switch effective API and Cognito OAuth discovery to custom domains"
+  }
+
+  assert {
+    condition = (
+      aws_apigatewayv2_route.login_redirect[0].route_key == "GET /auth/login" &&
+      aws_apigatewayv2_route.login_redirect[0].authorization_type == "NONE" &&
+      aws_apigatewayv2_route.login_redirect[0].target == "integrations/${aws_apigatewayv2_integration.lambda.id}" &&
+      aws_lambda_function.service.environment[0].variables["SPUR_CONTEXT_LOGIN_REDIRECT_ENABLED"] == "1"
+    )
+    error_message = "custom-domain activation must add exactly one public credential-free login redirect route"
   }
 
   assert {
