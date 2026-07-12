@@ -1959,8 +1959,7 @@ mod tests {
             .expect("fixture discovery configuration should be valid");
         let document = discovery_document(&config, true)
             .expect("configured Cognito discovery should be available");
-        let document =
-            serde_json::to_value(document).expect("discovery document should serialize");
+        let document = serde_json::to_value(document).expect("discovery document should serialize");
         assert_eq!(
             document["issuer"],
             "https://cognito-idp.ap-southeast-5.amazonaws.com/ap-southeast-5_fixture"
@@ -1977,10 +1976,7 @@ mod tests {
             document["api_key_mcp_url"],
             "https://context.getspur.dev/mcp/api-key"
         );
-        assert_eq!(
-            document,
-            fixture["discovery_document"]
-        );
+        assert_eq!(document, fixture["discovery_document"]);
     }
 
     #[test]
@@ -2271,8 +2267,11 @@ mod tests {
     #[test]
     fn api_key_fixture_management_is_human_client_and_keys_manage_only() {
         let fixture = api_key_auth_fixture();
+        let issuer = fixture["discovery_config"]["issuer"]
+            .as_str()
+            .expect("fixture issuer");
         let config = crate::auth::AuthConfig::new(
-            "https://issuer.example/pool",
+            issuer,
             "human-client",
             ["m2m-client"],
             std::iter::empty::<&str>(),
