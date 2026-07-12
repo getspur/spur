@@ -233,7 +233,7 @@ resource "aws_lambda_function" "service" {
       SPUR_CONTEXT_API_KEYS_TABLE         = var.api_key_auth_enabled ? aws_dynamodb_table.api_keys[0].name : ""
       SPUR_COGNITO_AUTHORIZATION_ENDPOINT = var.cognito_auth_enabled ? "${local.cognito_domain_url}/oauth2/authorize" : ""
       SPUR_COGNITO_TOKEN_ENDPOINT         = var.cognito_auth_enabled ? "${local.cognito_domain_url}/oauth2/token" : ""
-      SPUR_CONTEXT_SERVICE_BASE_URL       = var.cognito_auth_enabled ? aws_apigatewayv2_api.http.api_endpoint : ""
+      SPUR_CONTEXT_SERVICE_BASE_URL       = var.cognito_auth_enabled ? local.context_service_base_url : ""
     }
   }
 
@@ -274,8 +274,21 @@ resource "aws_lambda_provisioned_concurrency_config" "warm" {
 }
 
 resource "aws_apigatewayv2_api" "http" {
-  name          = "spur-context-service"
-  protocol_type = "HTTP"
+  name                         = "spur-context-service"
+  protocol_type                = "HTTP"
+  disable_execute_api_endpoint = var.disable_execute_api_endpoint
+
+  lifecycle {
+    precondition {
+      condition     = !var.disable_execute_api_endpoint || var.custom_domains_enabled
+      error_message = "disable_execute_api_endpoint requires custom_domains_enabled so the service remains reachable."
+    }
+
+    precondition {
+      condition     = !var.custom_domains_enabled || var.cognito_auth_enabled
+      error_message = "custom_domains_enabled requires cognito_auth_enabled so activation creates both the API and Cognito custom domains."
+    }
+  }
 }
 
 resource "aws_apigatewayv2_integration" "lambda" {
@@ -324,6 +337,129 @@ resource "aws_apigatewayv2_stage" "default" {
   }
 }
 
+# Phase 1: bootstrap only. This public sub-zone must be delegated from
+# Namecheap before activation so ACM can validate without blocking the first
+# apply. Terraform intentionally does not manage the getspur.dev parent zone.
+resource "aws_route53_zone" "context_service" {
+  name    = local.context_service_domain_name
+  comment = "Delegated public zone for the SPUR context service"
+
+  tags = {
+    Service   = "spur-context-service"
+    ManagedBy = "terraform"
+  }
+}
+
+# Phase 2: activation. The API certificate is regional and therefore uses the
+# default ap-southeast-5 provider. Cognito's CloudFront-backed certificate uses
+# the explicit us-east-1 provider.
+resource "aws_acm_certificate" "api_custom_domain" {
+  count = var.custom_domains_enabled ? 1 : 0
+
+  domain_name       = local.context_service_domain_name
+  validation_method = "DNS"
+
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+
+resource "aws_route53_record" "api_certificate_validation" {
+  count = var.custom_domains_enabled ? 1 : 0
+
+  zone_id = aws_route53_zone.context_service.zone_id
+  name    = one(aws_acm_certificate.api_custom_domain[0].domain_validation_options).resource_record_name
+  type    = one(aws_acm_certificate.api_custom_domain[0].domain_validation_options).resource_record_type
+  ttl     = 60
+  records = [one(aws_acm_certificate.api_custom_domain[0].domain_validation_options).resource_record_value]
+}
+
+resource "aws_acm_certificate_validation" "api_custom_domain" {
+  count = var.custom_domains_enabled ? 1 : 0
+
+  certificate_arn         = aws_acm_certificate.api_custom_domain[0].arn
+  validation_record_fqdns = aws_route53_record.api_certificate_validation[*].fqdn
+}
+
+resource "aws_acm_certificate" "cognito_custom_domain" {
+  provider = aws.us_east_1
+  count    = var.custom_domains_enabled ? 1 : 0
+
+  domain_name       = local.cognito_custom_domain_name
+  validation_method = "DNS"
+
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+
+resource "aws_route53_record" "cognito_certificate_validation" {
+  count = var.custom_domains_enabled ? 1 : 0
+
+  zone_id = aws_route53_zone.context_service.zone_id
+  name    = one(aws_acm_certificate.cognito_custom_domain[0].domain_validation_options).resource_record_name
+  type    = one(aws_acm_certificate.cognito_custom_domain[0].domain_validation_options).resource_record_type
+  ttl     = 60
+  records = [one(aws_acm_certificate.cognito_custom_domain[0].domain_validation_options).resource_record_value]
+}
+
+resource "aws_acm_certificate_validation" "cognito_custom_domain" {
+  provider = aws.us_east_1
+  count    = var.custom_domains_enabled ? 1 : 0
+
+  certificate_arn         = aws_acm_certificate.cognito_custom_domain[0].arn
+  validation_record_fqdns = aws_route53_record.cognito_certificate_validation[*].fqdn
+}
+
+resource "aws_apigatewayv2_domain_name" "context_service" {
+  count = var.custom_domains_enabled ? 1 : 0
+
+  domain_name = local.context_service_domain_name
+
+  domain_name_configuration {
+    certificate_arn = aws_acm_certificate_validation.api_custom_domain[0].certificate_arn
+    endpoint_type   = "REGIONAL"
+    ip_address_type = "dualstack"
+    security_policy = "TLS_1_2"
+  }
+}
+
+resource "aws_apigatewayv2_api_mapping" "context_service" {
+  count = var.custom_domains_enabled ? 1 : 0
+
+  api_id      = aws_apigatewayv2_api.http.id
+  domain_name = aws_apigatewayv2_domain_name.context_service[0].id
+  stage       = aws_apigatewayv2_stage.default.name
+}
+
+resource "aws_route53_record" "api_custom_domain_ipv4" {
+  count = var.custom_domains_enabled ? 1 : 0
+
+  zone_id = aws_route53_zone.context_service.zone_id
+  name    = local.context_service_domain_name
+  type    = "A"
+
+  alias {
+    name                   = aws_apigatewayv2_domain_name.context_service[0].domain_name_configuration[0].target_domain_name
+    zone_id                = aws_apigatewayv2_domain_name.context_service[0].domain_name_configuration[0].hosted_zone_id
+    evaluate_target_health = false
+  }
+}
+
+resource "aws_route53_record" "api_custom_domain_ipv6" {
+  count = var.custom_domains_enabled ? 1 : 0
+
+  zone_id = aws_route53_zone.context_service.zone_id
+  name    = local.context_service_domain_name
+  type    = "AAAA"
+
+  alias {
+    name                   = aws_apigatewayv2_domain_name.context_service[0].domain_name_configuration[0].target_domain_name
+    zone_id                = aws_apigatewayv2_domain_name.context_service[0].domain_name_configuration[0].hosted_zone_id
+    evaluate_target_health = false
+  }
+}
+
 # Cognito resources are deliberately all guarded by cognito_auth_enabled so a
 # disabled default configuration has no user pool, domain, resource server, app
 # client, JWT authorizer, OAuth route, or Cognito-specific observability state.
@@ -352,6 +488,36 @@ resource "aws_cognito_user_pool_domain" "context_service" {
 
   domain       = var.cognito_domain_prefix
   user_pool_id = aws_cognito_user_pool.context_service[0].id
+}
+
+resource "aws_cognito_user_pool_domain" "custom" {
+  count = var.custom_domains_enabled && var.cognito_auth_enabled ? 1 : 0
+
+  domain          = local.cognito_custom_domain_name
+  certificate_arn = aws_acm_certificate_validation.cognito_custom_domain[0].certificate_arn
+  user_pool_id    = aws_cognito_user_pool.context_service[0].id
+
+  # Cognito rejects a custom domain unless its immediate parent has a public A
+  # record. This dependency makes the API apex alias authoritative before the
+  # Cognito CreateUserPoolDomain call is attempted.
+  depends_on = [
+    aws_route53_record.api_custom_domain_ipv4,
+    aws_route53_record.api_custom_domain_ipv6,
+  ]
+}
+
+resource "aws_route53_record" "cognito_custom_domain" {
+  count = var.custom_domains_enabled && var.cognito_auth_enabled ? 1 : 0
+
+  zone_id = aws_route53_zone.context_service.zone_id
+  name    = local.cognito_custom_domain_name
+  type    = "A"
+
+  alias {
+    name                   = aws_cognito_user_pool_domain.custom[0].cloudfront_distribution
+    zone_id                = aws_cognito_user_pool_domain.custom[0].cloudfront_distribution_zone_id
+    evaluate_target_health = false
+  }
 }
 
 resource "aws_cognito_resource_server" "context_service" {

@@ -499,6 +499,150 @@ and API response authorization checks. Current workers serialize catalog writes
 with DynamoDB leases, but they do not provide private data-plane isolation inside
 the shared DuckLake catalog.
 
+## Custom Domain Two-Phase Rollout
+
+The stable public endpoints are `https://context.getspur.dev` for API/MCP
+traffic and `https://auth.context.getspur.dev` for Cognito OAuth. The parent
+`getspur.dev` domain remains hosted at Namecheap; Terraform owns only a public
+Route 53 sub-zone for `context.getspur.dev`.
+
+Two independent, false-by-default controls make the migration reversible:
+
+- `custom_domains_enabled=false` creates only the delegated Route 53 zone.
+  The existing execute-api URL and Cognito prefix domain remain effective, and
+  no certificate validation can block the apply.
+- `custom_domains_enabled=true` requests the API certificate in
+  `ap-southeast-5`, requests the Cognito certificate through the `us_east_1`
+  provider, writes their DNS validation records, and creates both custom
+  domains and DNS aliases.
+- `disable_execute_api_endpoint=false` keeps execute-api reachable during the
+  client migration. Set it to `true` only in a later apply after custom-domain
+  traffic is verified. Terraform rejects this setting unless custom domains
+  are also enabled.
+
+Terraform derives ACM validation names and values from AWS. Do not copy those
+values into tfvars, source files, tickets, or committed run logs. Generated M2M
+client secrets remain subject to the separate secret-delivery policy described
+above.
+
+### Phase 1: bootstrap the delegated zone
+
+Run from `infra/spur-context-service`. Supply the same reviewed artifact inputs
+used for an ordinary deployment; none of these values are credentials.
+
+```bash
+export ENVIRONMENT=default
+export LAMBDA_ZIP_PATH=../../target/lambda/spur-context-service.zip
+export WORKER_ECR_IMAGE='<ecs-worker-image-uri>'
+export WORKER_LAMBDA_IMAGE='<worker-lambda-image-uri>'
+export SOURCE_FETCHER_LAMBDA_IMAGE='<source-fetcher-lambda-image-uri>'
+
+terraform init \
+  -reconfigure \
+  -backend-config="backends/${ENVIRONMENT}.s3.tfbackend"
+
+TF_COMMON_ARGS=(
+  -var-file="env/${ENVIRONMENT}.tfvars"
+  -var="lambda_zip_path=${LAMBDA_ZIP_PATH}"
+  -var="worker_ecr_image=${WORKER_ECR_IMAGE}"
+  -var="worker_lambda_image=${WORKER_LAMBDA_IMAGE}"
+  -var="source_fetcher_lambda_image=${SOURCE_FETCHER_LAMBDA_IMAGE}"
+)
+
+terraform plan \
+  "${TF_COMMON_ARGS[@]}" \
+  -var='custom_domains_enabled=false' \
+  -var='disable_execute_api_endpoint=false' \
+  -out=context-domain-bootstrap.tfplan
+
+# Review the saved plan. It must contain the hosted zone but no ACM
+# certificates, custom domains, API mappings, or domain alias records.
+terraform show context-domain-bootstrap.tfplan
+terraform apply context-domain-bootstrap.tfplan
+
+terraform output -json route53_delegation_name_servers | jq -r '.[]'
+```
+
+The final command prints the four authoritative Route 53 nameservers. In
+Namecheap:
+
+1. Open **Domain List**, choose **Manage** for `getspur.dev`, then open
+   **Advanced DNS**.
+2. Under **Host Records**, remove any existing `A`, `AAAA`, `CNAME`, URL
+   redirect, or `NS` records whose host is exactly `context`. Do not change the
+   root (`@`) nameservers or unrelated records.
+3. Add one **NS Record** for each Terraform output value. Set **Host** to
+   `context`, **Value** to the Route 53 nameserver (for example,
+   `ns-123.awsdns-45.net`), and **TTL** to Automatic. Save all four records.
+4. Wait until public DNS returns the same set. Do not enable activation while
+   the command below is empty or differs from Terraform output.
+
+```bash
+dig +short NS context.getspur.dev @1.1.1.1 | sed 's/\.$//' | sort
+terraform output -json route53_delegation_name_servers | jq -r '.[]' | sed 's/\.$//' | sort
+```
+
+### Phase 2: activate custom domains
+
+After the public NS sets match, create a fresh saved plan. Keep execute-api
+enabled throughout the client migration.
+
+```bash
+terraform plan \
+  "${TF_COMMON_ARGS[@]}" \
+  -var='custom_domains_enabled=true' \
+  -var='disable_execute_api_endpoint=false' \
+  -out=context-domain-activation.tfplan
+
+terraform show context-domain-activation.tfplan
+terraform apply context-domain-activation.tfplan
+
+test "$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
+  https://context.getspur.dev)" != "000"
+cognito_issuer="$(terraform output -raw cognito_issuer)"
+curl --fail --silent --show-error \
+  "${cognito_issuer}/.well-known/openid-configuration" \
+  | jq -e '
+      .authorization_endpoint == "https://auth.context.getspur.dev/oauth2/authorize" and
+      .token_endpoint == "https://auth.context.getspur.dev/oauth2/token"
+    '
+```
+
+The activation apply writes both ACM validation records into the delegated
+zone. The API apex alias is created before Terraform asks Cognito to create
+`auth.context.getspur.dev`, because Cognito requires the immediate parent to
+resolve to an A record. If Cognito reports that the parent does not resolve yet,
+wait for DNS propagation and re-run the same saved-input plan; do not invent a
+temporary validation address or commit DNS values.
+
+Migrate clients only after the custom API endpoint and OAuth discovery pass.
+The Terraform outputs `api_url`, `oauth_api_url`, `api_key_mcp_url`,
+`api_key_management_url`, and `cognito_domain_url` switch to custom domains
+only while activation is enabled.
+
+### Phase 3: retire execute-api after migration
+
+After monitoring confirms that all clients use `context.getspur.dev`, apply the
+separate endpoint-retirement control:
+
+```bash
+terraform plan \
+  "${TF_COMMON_ARGS[@]}" \
+  -var='custom_domains_enabled=true' \
+  -var='disable_execute_api_endpoint=true' \
+  -out=context-domain-retire-execute-api.tfplan
+
+terraform show context-domain-retire-execute-api.tfplan
+terraform apply context-domain-retire-execute-api.tfplan
+```
+
+To restore the execute-api compatibility endpoint, reapply with custom domains
+still enabled and `disable_execute_api_endpoint=false`. Turning
+`custom_domains_enabled` back off is a larger rollback: it returns effective
+URLs to execute-api and the Cognito prefix domain, and plans destruction of the
+certificates, custom domains, mappings, and aliases while retaining the
+delegated Route 53 zone.
+
 ## Deploy
 
 Terraform uses a partial S3 backend declared in `versions.tf`:
