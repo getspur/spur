@@ -19,6 +19,8 @@ use tokio::io::AsyncWriteExt as _;
 
 const USER_AGENT_VALUE: &str = "spur-context-fetcher/1.0";
 const MAX_REDIRECTS: usize = 10;
+const DOWNLOAD_MAX_RETRIES: u32 = 5;
+const DOWNLOAD_RETRY_BACKOFF_BASE_MS: u64 = 100;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArchiveMetadata {
@@ -166,12 +168,7 @@ pub async fn download_https_with_redirect_validation(
     }
 
     for _ in 0..=MAX_REDIRECTS {
-        let response = client
-            .get(url.clone())
-            .header(USER_AGENT, USER_AGENT_VALUE)
-            .send()
-            .await
-            .map_err(|error| FetchError::Download(error.to_string()))?;
+        let response = send_download_request_with_retry(client, &url).await?;
 
         if is_redirect(response.status()) {
             let location = redirect_location(response.headers())?;
@@ -230,6 +227,36 @@ pub async fn download_https_with_redirect_validation(
     Err(FetchError::Validation(format!(
         "too many redirects; maximum is {MAX_REDIRECTS}"
     )))
+}
+
+async fn send_download_request_with_retry(
+    client: &Client,
+    url: &Url,
+) -> Result<reqwest::Response, FetchError> {
+    for attempt in 0..=DOWNLOAD_MAX_RETRIES {
+        let response = client
+            .get(url.clone())
+            .header(USER_AGENT, USER_AGENT_VALUE)
+            .send()
+            .await
+            .map_err(|error| FetchError::Download(error.to_string()))?;
+        if retryable_download_status(url, response.status()) && attempt < DOWNLOAD_MAX_RETRIES {
+            let delay_ms = DOWNLOAD_RETRY_BACKOFF_BASE_MS.saturating_mul(1_u64 << attempt.min(10));
+            tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+            continue;
+        }
+        return Ok(response);
+    }
+    unreachable!("bounded download retry loop always returns")
+}
+
+fn retryable_download_status(url: &Url, status: StatusCode) -> bool {
+    let crates_io = url
+        .host_str()
+        .is_some_and(|host| host == "crates.io" || host.ends_with(".crates.io"));
+    status == StatusCode::TOO_MANY_REQUESTS
+        || status.is_server_error()
+        || (status == StatusCode::FORBIDDEN && crates_io)
 }
 
 pub fn fetch_git_archive(
@@ -648,6 +675,21 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
     use tempfile::TempDir;
+
+    #[test]
+    fn download_retry_policy_handles_transient_upstream_responses() {
+        let crates_io = Url::parse("https://crates.io/api/v1/crates/demo/1.0.0/download").unwrap();
+        let github = Url::parse("https://github.com/getspur/spur/archive/main.tar.gz").unwrap();
+
+        assert!(retryable_download_status(&crates_io, StatusCode::FORBIDDEN));
+        assert!(!retryable_download_status(&github, StatusCode::FORBIDDEN));
+        assert!(retryable_download_status(
+            &github,
+            StatusCode::TOO_MANY_REQUESTS
+        ));
+        assert!(retryable_download_status(&github, StatusCode::BAD_GATEWAY));
+        assert!(!retryable_download_status(&github, StatusCode::NOT_FOUND));
+    }
 
     #[test]
     fn tar_gz_validation_reads_entry_bodies_instead_of_trusting_headers() {
