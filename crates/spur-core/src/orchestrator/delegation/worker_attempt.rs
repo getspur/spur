@@ -699,6 +699,19 @@ fn startup_profile_launch_env(
     )
 }
 
+/// Gate for worker-MCP allowlist augmentation: augment only when the session
+/// will actually reach the server — the delegation ships MCP entries, the
+/// transport is native ACP (the only adapter that forwards `mcp_servers`),
+/// and the kind renders Claude markdown whose `tools:` frontmatter Claude
+/// treats as an exhaustive allowlist.
+fn should_augment_worker_mcp_allowlist(
+    _kind: spur_acp::types::AgentKind,
+    _transport: spur_acp::types::TransportKind,
+    _has_worker_mcp: bool,
+) -> bool {
+    false
+}
+
 async fn materialize_profile(
     worktrees: &WorktreeManager,
     worktree_path: &std::path::Path,
@@ -3999,6 +4012,39 @@ mod profile_override_tests {
         assert!(second_contents.contains("updated managed persona"));
         assert!(second_contents
             .contains("<!-- SPUR-MANAGED v=1 skill=agent-profile:code-reviewer sha256="));
+    }
+
+    #[test]
+    fn worker_mcp_allowlist_gate_truth_table() {
+        use spur_acp::types::{AgentKind, TransportKind};
+        let gate = should_augment_worker_mcp_allowlist;
+
+        // Augment only when MCP entries ship over native ACP to a claude kind.
+        assert!(gate(AgentKind::ClaudeCodeAcp, TransportKind::Acp, true));
+        // Kind and transport are orthogonal: a claude-stream-json kind wired
+        // over native ACP still receives mcp_servers, so it augments too.
+        assert!(gate(AgentKind::ClaudeStreamJson, TransportKind::Acp, true));
+
+        // enable_worker_mcp=false resolves to no MCP entries.
+        assert!(!gate(AgentKind::ClaudeCodeAcp, TransportKind::Acp, false));
+        // Non-ACP transports drop mcp_servers; advertising tools the session
+        // cannot reach would be worse than the restriction.
+        assert!(!gate(
+            AgentKind::ClaudeCodeAcp,
+            TransportKind::StreamJson,
+            true
+        ));
+        assert!(!gate(AgentKind::ClaudeCodeAcp, TransportKind::Stdio, true));
+        assert!(!gate(
+            AgentKind::ClaudeCodeAcp,
+            TransportKind::CliWrap,
+            true
+        ));
+        // Non-claude kinds drop tools: frontmatter entirely.
+        assert!(!gate(AgentKind::CodexAcp, TransportKind::Acp, true));
+        assert!(!gate(AgentKind::Kiro, TransportKind::Acp, true));
+        assert!(!gate(AgentKind::OpenCode, TransportKind::Acp, true));
+        assert!(!gate(AgentKind::Generic, TransportKind::Acp, true));
     }
 
     #[tokio::test]
