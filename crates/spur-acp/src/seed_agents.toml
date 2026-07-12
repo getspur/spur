@@ -179,6 +179,19 @@ skip = true
 # ── grok ──────────────────────────────────────────────────────────
 # xAI Grok Build CLI. `--no-auto-update` (global) precedes the `agent stdio`
 # subcommand which speaks ACP over stdio. Pin auto_update=false in ~/.grok/config.toml for reproducibility.
+#
+# ACP model / effort surface (SPUR synthesizer):
+#   SPUR only synthesizes mid-session `/model` and `/effort` from
+#   session/new configOptions (category model / thought_level). Grok's
+#   interactive TUI has local `/model` and `/session-info` builtins, but
+#   those are not automatically advertised over ACP. Until a live probe
+#   shows configOptions on `grok agent stdio`, expect no SPUR `/model`
+#   picker — pin spawn-time model instead, e.g. insert `--model grok-build`
+#   before `stdio`. Probe: `python3 scripts/probe_grok_acp.py`.
+#   Spec: docs/superpowers/specs/2026-07-13-grok-acp-capability-probe-results.md
+# Do NOT add static [[commands.static]] name="model" here unless the agent
+# is confirmed to honor `/model …` as prompt text; a fake static would not
+# call session/set_config_option and misleads users.
 [[agents.entries]]
 name = "grok"
 command = "grok"
