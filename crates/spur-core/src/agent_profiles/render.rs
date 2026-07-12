@@ -99,10 +99,10 @@ pub fn render_for_kind(profile: &AgentProfile, kind: AgentKind) -> Option<Render
 /// returned unchanged.
 ///
 /// Fail-closed: only the plain inline comma-list form is rewritten. YAML
-/// block lists (empty inline value), inline comments, quoted scalars, and
-/// flow lists survive `AgentProfile::parse` but cannot be rewritten as a
-/// comma list without corrupting the file or commenting out the injected
-/// names — those profiles are returned unchanged.
+/// block lists (empty inline value), inline comments, quoted scalars, flow
+/// lists, flow maps, and block scalars survive `AgentProfile::parse` but
+/// cannot be rewritten as a comma list without corrupting the file or
+/// commenting out the injected names — those profiles are returned unchanged.
 pub(crate) fn augment_tools_allowlist(
     profile: &AgentProfile,
     extra_tools: &[String],
@@ -113,7 +113,7 @@ pub(crate) fn augment_tools_allowlist(
     let is_plain_inline_list = !existing.trim().is_empty()
         && !existing
             .chars()
-            .any(|c| matches!(c, '#' | '"' | '\'' | '[' | ']'));
+            .any(|c| matches!(c, '#' | '"' | '\'' | '[' | ']' | '{' | '}' | '|' | '>'));
     if !is_plain_inline_list {
         tracing::debug!(
             target: "spur::agent_profiles",
