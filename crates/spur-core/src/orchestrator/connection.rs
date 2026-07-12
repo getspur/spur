@@ -286,35 +286,47 @@ impl Orchestrator {
         agent_config: &spur_acp::config::AgentConfig,
     ) -> Result<Vec<SessionInfo>> {
         let kind = agent_config.kind;
-        let discovery = discovery_for_kind(kind)
-            .or_else(|| {
-                // Graceful fallback: if kind is Generic (missing from config),
-                // try to infer from the agent name so users with stale configs
-                // still get disk fallback for known agents.
-                if kind != spur_acp::AgentKind::Generic {
-                    return None;
-                }
-                let inferred = spur_acp::AgentKind::from_name(&agent_config.name);
-                if inferred != kind {
-                    tracing::info!(
-                        agent = %agent_config.name,
-                        ?kind,
-                        ?inferred,
-                        "inferred agent kind from name for disk fallback"
-                    );
-                }
-                discovery_for_kind(inferred)
-            })
-            .ok_or_else(|| {
-                anyhow!(
-                    "No filesystem fallback available for agent '{}' (kind: {:?}). \
-                     Add `kind = \"{}\"` to its .spur/config.toml entry.",
-                    agent_config.name,
-                    kind,
-                    agent_config.name
-                )
-            })?;
-        discovery.discover()
+        let discovery = discovery_for_kind(kind).or_else(|| {
+            // Graceful fallback: if kind is Generic (missing from config),
+            // try to infer from the agent name so users with stale configs
+            // still get disk fallback for known agents.
+            if kind != spur_acp::AgentKind::Generic {
+                return None;
+            }
+            let inferred = spur_acp::AgentKind::from_name(&agent_config.name);
+            if inferred != kind {
+                tracing::info!(
+                    agent = %agent_config.name,
+                    ?kind,
+                    ?inferred,
+                    "inferred agent kind from name for disk fallback"
+                );
+            }
+            discovery_for_kind(inferred)
+        });
+
+        match discovery {
+            Some(d) => Ok(d.discover()?),
+            None if kind == spur_acp::AgentKind::Generic => Err(anyhow!(
+                "No filesystem fallback available for agent '{}' (kind: Generic). \
+                 Add a `kind = \"...\"` to its .spur/config.toml entry so spur can \
+                 locate its session store on disk.",
+                agent_config.name
+            )),
+            None => {
+                // Declared kind with no disk-based session layout (e.g. Grok,
+                // Gemini) lists sessions over RPC. An absent disk store is not
+                // an error — otherwise starting such a brain surfaces a
+                // misleading `SessionsListError` even though the agent connects
+                // fine.
+                tracing::debug!(
+                    agent = %agent_config.name,
+                    ?kind,
+                    "no disk session layout for this agent kind; returning empty session list"
+                );
+                Ok(Vec::new())
+            }
+        }
     }
 
     /// Read conversation history from an agent session's JSONL file on disk.
@@ -1675,6 +1687,55 @@ not-json
                 ("user".to_string(), "opencode question".to_string()),
                 ("assistant".to_string(), "opencode answer".to_string())
             ]
+        );
+    }
+
+    fn disk_fallback_config(toml_src: &str) -> spur_acp::config::AgentConfig {
+        toml::from_str(toml_src).expect("AgentConfig fixture must parse")
+    }
+
+    #[test]
+    fn list_sessions_from_disk_returns_empty_for_declared_kind_without_disk_layout() {
+        // Grok and Gemini are declared kinds that list sessions over RPC and
+        // have no on-disk session store. The disk fallback must report an
+        // empty list rather than erroring, so starting such a brain does not
+        // surface a misleading SessionsListError.
+        let grok = disk_fallback_config(
+            r#"name = "grok"
+command = "grok"
+transport = "acp"
+kind = "grok""#,
+        );
+        let gemini = disk_fallback_config(
+            r#"name = "gemini"
+command = "gemini"
+transport = "acp"
+kind = "gemini""#,
+        );
+
+        assert!(Orchestrator::list_sessions_from_disk(&grok)
+            .expect("grok should return empty, not error")
+            .is_empty());
+        assert!(Orchestrator::list_sessions_from_disk(&gemini)
+            .expect("gemini should return empty, not error")
+            .is_empty());
+    }
+
+    #[test]
+    fn list_sessions_from_disk_errors_for_unknown_generic_kind() {
+        // A Generic kind whose name cannot be inferred is the one case that
+        // still warrants guidance: the user's config is missing a `kind`.
+        let cfg = disk_fallback_config(
+            r#"name = "totally-unknown-agent"
+command = "mystery"
+transport = "acp""#,
+        );
+
+        let err = Orchestrator::list_sessions_from_disk(&cfg)
+            .expect_err("unknown Generic agent should still error with guidance");
+        assert!(
+            err.to_string().contains("Add a `kind"),
+            "error should guide the user to declare a kind; got: {err}"
         );
     }
 }
