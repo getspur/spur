@@ -50,6 +50,23 @@ variable "cognito_auth_enabled" {
   default     = false
 }
 
+# ─── Stable public domains and migration controls ───────────────────────────
+# The hosted zone is always bootstrapped so its nameservers can be delegated
+# before ACM validation resources exist. Activation and execute-api retirement
+# are deliberately independent operator decisions.
+
+variable "custom_domains_enabled" {
+  description = "Activate DNS-validated certificates and the context.getspur.dev API plus auth.context.getspur.dev Cognito custom domains. The delegated hosted zone is created regardless."
+  type        = bool
+  default     = false
+}
+
+variable "disable_execute_api_endpoint" {
+  description = "Disable the API Gateway execute-api endpoint after clients have migrated to context.getspur.dev. Requires custom_domains_enabled."
+  type        = bool
+  default     = false
+}
+
 # ─── Additive personal API-key ingress ───────────────────────────────────────
 # API-key resources are independent of the legacy $default and OAuth routes and
 # are omitted entirely unless this feature is explicitly enabled.
@@ -1079,6 +1096,15 @@ locals {
     for key, organization in var.cognito_m2m_organizations :
     key => coalesce(organization.access_token_hours, var.cognito_m2m_default_access_token_hours)
   }
-  cognito_issuer     = var.cognito_auth_enabled ? "https://cognito-idp.${var.aws_region}.amazonaws.com/${aws_cognito_user_pool.context_service[0].id}" : ""
-  cognito_domain_url = var.cognito_auth_enabled ? "https://${aws_cognito_user_pool_domain.context_service[0].domain}.auth.${var.aws_region}.amazoncognito.com" : ""
+  context_service_domain_name = "context.getspur.dev"
+  cognito_custom_domain_name  = "auth.context.getspur.dev"
+  context_service_base_url = var.custom_domains_enabled ? (
+    "https://${local.context_service_domain_name}"
+  ) : aws_apigatewayv2_api.http.api_endpoint
+  cognito_issuer = var.cognito_auth_enabled ? "https://cognito-idp.${var.aws_region}.amazonaws.com/${aws_cognito_user_pool.context_service[0].id}" : ""
+  cognito_domain_url = var.cognito_auth_enabled ? (
+    var.custom_domains_enabled ?
+    "https://${local.cognito_custom_domain_name}" :
+    "https://${aws_cognito_user_pool_domain.context_service[0].domain}.auth.${var.aws_region}.amazoncognito.com"
+  ) : ""
 }
