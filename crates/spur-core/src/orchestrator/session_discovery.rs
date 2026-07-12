@@ -44,7 +44,7 @@ pub fn discovery_for_kind(kind: AgentKind) -> Option<SessionDiscoveryKind> {
         AgentKind::Kiro => Some(SessionDiscoveryKind::Kiro),
         AgentKind::Kimi => Some(SessionDiscoveryKind::Kimi),
         AgentKind::OpenCode => Some(SessionDiscoveryKind::OpenCode),
-        AgentKind::Gemini | AgentKind::Generic => None,
+        AgentKind::Gemini | AgentKind::Grok | AgentKind::Generic => None,
     }
 }
 
@@ -1096,6 +1096,7 @@ mod tests {
         assert!(discovery_for_kind(AgentKind::Kimi).is_some());
         assert!(discovery_for_kind(AgentKind::OpenCode).is_some());
         assert!(discovery_for_kind(AgentKind::Gemini).is_none());
+        assert!(discovery_for_kind(AgentKind::Grok).is_none());
         assert!(discovery_for_kind(AgentKind::Generic).is_none());
     }
 }
