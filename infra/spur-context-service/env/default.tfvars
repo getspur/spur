@@ -40,14 +40,21 @@ catalog_s3_uri = "s3://spur-context/data/gold/catalog-snapshot/current.json"
 # make staging/prod public too.
 api_authorization_type = "NONE"
 
-# Keep the demo/eval deployment on its legacy public $default route. Cognito,
-# the exact JWT route, and all Cognito-specific alarms remain absent unless an
-# environment explicitly enables this feature with non-secret configuration.
-cognito_auth_enabled = false
+# Keep the demo/eval deployment on its legacy public $default route while
+# adding exact Cognito and personal-key routes for end-to-end evaluation.
+cognito_auth_enabled   = true
+cognito_user_pool_name = "spur-context-default-cognito"
+cognito_domain_prefix  = "spur-context-default-auth-065285885105"
+cognito_human_callback_urls = [
+  "http://127.0.0.1:8765/callback",
+]
+cognito_human_logout_urls = [
+  "http://127.0.0.1:8765/logout",
+]
 
-# Personal API keys require Cognito human management and remain fully absent
-# from this legacy public demo/eval stack.
-api_key_auth_enabled = false
+# Personal API keys are additive; the existing public demo route remains
+# available for compatibility while the exact authenticated routes are tested.
+api_key_auth_enabled = true
 
 # This stack's API is public (NONE), and index/index_status are meant to be
 # callable without an authenticated caller. Enable the shared anonymous identity
