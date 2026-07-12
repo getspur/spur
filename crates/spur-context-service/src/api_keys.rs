@@ -56,6 +56,8 @@ pub(crate) const MAX_SWEEP_BUCKETS: usize = 8;
 pub(crate) const MAX_SWEEP_PAGES: usize = 16;
 pub(crate) const MAX_SWEEP_RECORDS: usize = 100;
 const TTL_GRACE_SECONDS: u64 = 7 * 24 * 60 * 60;
+const REVOKE_KEY_UPDATE_EXPRESSION: &str =
+    "SET #status = :revoked, revoked_at = :now, #ttl = :ttl REMOVE expiry_gsi_pk, expiry_gsi_sk";
 const DEFAULT_API_KEYS_TABLE: &str = "spur-context-api-keys";
 /// Delay after an hour closes before its eventually-consistent expiry index
 /// bucket may advance the durable high-water cursor.
@@ -1376,19 +1378,15 @@ impl ApiKeyStore for DynamoDbApiKeyStore {
         let key_update = Update::builder()
             .table_name(&self.table_name)
             .key("pk", AttributeValue::S(key_pk(public_id)))
-            .update_expression(
-                "SET #status = :revoked, revoked_at = :now, ttl = :ttl REMOVE expiry_gsi_pk, expiry_gsi_sk",
-            )
+            .update_expression(REVOKE_KEY_UPDATE_EXPRESSION)
             .condition_expression("owner_id = :owner AND #status = :active")
             .expression_attribute_names("#status", "status")
+            .expression_attribute_names("#ttl", "ttl")
             .expression_attribute_values(":revoked", AttributeValue::S("revoked".to_string()))
             .expression_attribute_values(":active", AttributeValue::S("active".to_string()))
             .expression_attribute_values(":owner", AttributeValue::S(owner_id.to_string()))
             .expression_attribute_values(":now", AttributeValue::N(now.to_string()))
-            .expression_attribute_values(
-                ":ttl",
-                AttributeValue::N(tombstone_ttl(now).to_string()),
-            )
+            .expression_attribute_values(":ttl", AttributeValue::N(tombstone_ttl(now).to_string()))
             .build()
             .map_err(|_| ApiKeyStoreError::Backend)?;
         let owner_update = Update::builder()
@@ -1909,7 +1907,8 @@ mod tests {
 
     use super::{
         classify_create_reasons, expiry_sort_key, key_item, owner_sort_key, tombstone_ttl,
-        ApiKeyRecord, ApiKeyScopes, ApiKeyStatus, ApiKeyStoreError, TTL_GRACE_SECONDS,
+        ApiKeyRecord, ApiKeyScopes, ApiKeyStatus, ApiKeyStoreError, REVOKE_KEY_UPDATE_EXPRESSION,
+        TTL_GRACE_SECONDS,
     };
 
     fn sort_key_record(created_at: u64, expires_at: u64) -> ApiKeyRecord {
@@ -1970,6 +1969,12 @@ mod tests {
             "active records must remain until cleanup decrements owner capacity"
         );
         assert_eq!(tombstone_ttl(300), 300 + TTL_GRACE_SECONDS);
+    }
+
+    #[test]
+    fn revoke_update_expression_escapes_ttl() {
+        assert!(REVOKE_KEY_UPDATE_EXPRESSION.contains("#ttl = :ttl"));
+        assert!(!REVOKE_KEY_UPDATE_EXPRESSION.contains(", ttl = :ttl"));
     }
 
     #[test]
