@@ -35,7 +35,7 @@ pub fn adapter_for_kind(kind: spur_acp::types::AgentKind) -> Option<Adapter> {
         spur_acp::types::AgentKind::Kiro => Some(Adapter::Kiro),
         spur_acp::types::AgentKind::OpenCode => Some(Adapter::OpenCode),
         spur_acp::types::AgentKind::Kimi => Some(Adapter::Kimi),
-        spur_acp::types::AgentKind::Generic => None,
+        spur_acp::types::AgentKind::Grok | spur_acp::types::AgentKind::Generic => None,
     }
 }
 
@@ -319,6 +319,7 @@ mod tests {
             adapter_for_kind(Kimi),
             Some(crate::skills::adapters::Adapter::Kimi)
         );
+        assert_eq!(adapter_for_kind(Grok), None);
         assert_eq!(adapter_for_kind(Generic), None);
     }
 

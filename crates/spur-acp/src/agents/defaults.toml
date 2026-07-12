@@ -93,3 +93,17 @@ strengths = ["large context window", "low latency"]
 limitations = ["may rate-limit on heavy sessions"]
 input_expectations = ""
 output_shape = "Unified diff + summary."
+
+[grok]
+description = "Generalist coding agent (xAI Grok Build CLI) with native ACP transport."
+tier = "generalist"
+good_for = [
+  "single and multi-file edits",
+  "code generation from spec",
+  "general-purpose coding tasks",
+]
+avoid_for = []
+strengths = ["native ACP over stdio", "streaming sessions"]
+limitations = ["tool vocabulary not yet mapped to a dedicated adapter"]
+input_expectations = ""
+output_shape = "Unified diff + summary."

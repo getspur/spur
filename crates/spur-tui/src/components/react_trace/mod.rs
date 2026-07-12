@@ -392,6 +392,14 @@ impl ReactTrace {
                     ColorDepth::Truecolor,
                 ),
             ),
+            AgentKind::Grok => (
+                " Session · grok ",
+                resolve_token(
+                    &self.theme,
+                    "react_trace.title.generic.fg",
+                    ColorDepth::Truecolor,
+                ),
+            ),
             AgentKind::Generic => (
                 " Session ",
                 resolve_token(
