@@ -1707,6 +1707,36 @@ async fn external_index_enqueues_job_without_starting_execution() -> Result<()> 
     Ok(())
 }
 
+#[tokio::test]
+async fn external_index_retries_transient_enqueue_conflicts_without_recharging_rate_limit(
+) -> Result<()> {
+    let fixture = McpFixture::new("index-enqueue-conflict-retry")?;
+    let jobs = FakeJobStore::default();
+    jobs.fail_next_enqueue_attempts(3);
+    let sfn = StubIndexExecutionStarter::default();
+
+    let response = route_index(
+        &json!({
+            "package": PACKAGE,
+            "revision": "retry",
+            "source_url": SOURCE_URL,
+            "source_kind": "git",
+        }),
+        &fixture.conn,
+        &fixture.catalog,
+        &jobs,
+        &sfn,
+        "caller-enqueue-retry",
+    )
+    .await?;
+
+    assert_eq!(response["status"], "queued");
+    assert_eq!(jobs.enqueue_attempts(), 4);
+    assert_eq!(jobs.rate_count("caller-enqueue-retry"), 1);
+    assert_eq!(sfn.started_count(), 0);
+    Ok(())
+}
+
 #[test]
 fn external_index_enqueues_second_unique_job_by_default() -> Result<()> {
     let _env = EnvVarGuard::remove("SPUR_INDEX_MAX_QUEUED_JOBS_PER_OWNER");
@@ -3421,6 +3451,8 @@ impl ExecutionStatusChecker for StubExecutionStatusChecker {
 struct FakeJobStore {
     next_id: AtomicU64,
     state: Mutex<FakeJobState>,
+    enqueue_attempts: AtomicU64,
+    enqueue_conflicts_remaining: AtomicU64,
     /// When true, `release_running_quota` returns a `Conflict` error (leaving
     /// the token and counter untouched) so the terminal-release conflict repair
     /// path can be exercised.
@@ -3626,6 +3658,17 @@ impl JobStore for FakeJobStore {
         owner: BacklogOwner,
         config: &QueueConfig,
     ) -> spur_context_service::jobs::Result<EnqueueOutcome> {
+        self.enqueue_attempts.fetch_add(1, Ordering::Relaxed);
+        if self
+            .enqueue_conflicts_remaining
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |remaining| {
+                remaining.checked_sub(1)
+            })
+            .is_ok()
+        {
+            return Err(JobsError::Conflict);
+        }
+
         let key = request.key();
         let mut state = self.state.lock().expect("fake store lock");
 
@@ -3768,6 +3811,15 @@ fn active_dedupe_in_state(state: &FakeJobState, key: &JobKey) -> Option<JobRecor
 }
 
 impl FakeJobStore {
+    fn fail_next_enqueue_attempts(&self, attempts: u64) {
+        self.enqueue_conflicts_remaining
+            .store(attempts, Ordering::Relaxed);
+    }
+
+    fn enqueue_attempts(&self) -> u64 {
+        self.enqueue_attempts.load(Ordering::Relaxed)
+    }
+
     fn set_rate_limit_per_minute(&self, max: u32) {
         self.state.lock().expect("fake store lock").rate_limit_max = Some(max);
     }
