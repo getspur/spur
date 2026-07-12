@@ -3,9 +3,9 @@
 # like release.yml (cargo-dist) does.
 #
 # Flow: OIDC → AWS credentials → spin a per-run Spot VM
-# (VM_NAME=spur-release-<run_id>) → `cargo xtask dist` (linux native aarch64,
-# macOS universal2 via zigbuild, windows x86_64 via xwin — all compiled ON the
-# VM and fetched back through the sccache S3 bucket) → upload dist/ as a
+# (VM_NAME=spur-release-<run_id>) → `cargo xtask dist` (linux aarch64 native,
+# linux x86_64 + macOS universal2 via zigbuild, windows x86_64 via xwin — all
+# compiled ON the VM and fetched back through the sccache S3 bucket) → upload dist/ as a
 # workflow artifact (optionally publish a GitHub release on
 # getspur/spur-releases) → terminate the VM.
 #
@@ -82,8 +82,8 @@ env:
   # Same Graviton4 generation → same -Ctarget-cpu → shared sccache keys.
   AWS_INSTANCE_TYPE: m8gd.8xlarge
   AWS_INSTANCE_TYPE_FALLBACK: m8gd.4xlarge
-  # cargo -j on the VM, per platform leg. The three legs run concurrently
-  # (xtask dist --parallel), so 3×16 keeps peak C/C++ compile memory (DuckDB
+  # cargo -j on the VM, per platform leg. The four legs run concurrently
+  # (xtask dist --parallel), so 4×16 keeps peak C/C++ compile memory (DuckDB
   # translation units run 1-2 GB each on a cold cache) inside the 8xlarge's
   # 128 GB while still saturating its 32 cores.
   SPUR_BUILD_JOBS: "16"
@@ -93,6 +93,20 @@ env:
   # Per-run VM identity: isolates this run from the shared dev builder
   # (spur-builder) and from any concurrent run, and makes teardown surgical.
   VM_NAME: spur-release-${{ github.run_id }}
+  # Pin build.sh's admission queue to that same VM. config-aws-my.env defaults
+  # the pool to the shared dev builders (SPUR_BUILD_POOL_NAME=spur-builder,
+  # SPUR_BUILD_MAX_BUILDERS=2) and the queue reassigns VM_NAME to whichever
+  # pool builder admits the build — while fetch.sh keeps reading the env
+  # VM_NAME. Unpinned, every xtask leg builds on a dev builder (or auto-spins
+  # a stray spur-builder-2 that teardown below never reaps) and the artifact
+  # fetch finds nothing on the release VM — the v1.12.0 failure mode
+  # (run 28874448810).
+  SPUR_BUILD_POOL_NAME: spur-release-${{ github.run_id }}
+  SPUR_BUILD_MAX_BUILDERS: "1"
+  # One queue slot per dist leg: all four platform legs are admitted onto the
+  # single release VM at once instead of the fourth waiting out a 3-slot
+  # default.
+  SPUR_BUILD_SLOTS_PER_VM: "4"
   # Optional golden AMI baked by scripts/cloud-build/bake-ami.sh. Empty
   # resolves the latest base Debian 12 arm64 AMI at spin time.
   AWS_AMI_ID: ${{ vars.SPUR_BUILDER_AMI_ID }}
