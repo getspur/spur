@@ -34,6 +34,7 @@ tempfile = "3"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+shell-words = "1"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 libproc = "0.14"
