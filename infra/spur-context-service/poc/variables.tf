@@ -105,10 +105,13 @@ variable "human_callback_urls" {
   default     = ["http://127.0.0.1:8765/callback"]
 
   validation {
-    condition = length(var.human_callback_urls) > 0 && alltrue([
-      for value in var.human_callback_urls : can(regex("^http://(127\\.0\\.0\\.1|localhost)(:[0-9]+)?/", value))
-    ])
-    error_message = "POC human callbacks must be explicit loopback HTTP URLs."
+    condition = (
+      contains(var.human_callback_urls, "http://127.0.0.1:8765/callback") &&
+      alltrue([
+        for value in var.human_callback_urls : can(regex("^http://(127\\.0\\.0\\.1|localhost)(:[0-9]+)?/", value))
+      ])
+    )
+    error_message = "POC human callbacks must include the exact CLI callback http://127.0.0.1:8765/callback and contain only explicit loopback HTTP URLs."
   }
 }
 

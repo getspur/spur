@@ -24,6 +24,9 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_RESPONSE_BYTES: usize = 64 * 1024;
 const MAX_TOKEN_LIFETIME: Duration = Duration::from_secs(24 * 60 * 60);
 
+/// Exact loopback callback registered for the public Cognito CLI client.
+pub const HUMAN_CALLBACK_URL: &str = "http://127.0.0.1:8765/callback";
+
 /// Bounded OAuth errors that never embed provider responses or credentials.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum OAuthError {
@@ -100,6 +103,7 @@ pub struct DiscoveryDocument {
     schema_version: u8,
     issuer: Url,
     human_client_id: String,
+    human_callback_url: Url,
     authorization_endpoint: Url,
     token_endpoint: Url,
     supported_scopes: Vec<String>,
@@ -151,6 +155,8 @@ impl DiscoveryDocument {
             schema_version: 1,
             issuer: Url::parse(issuer.as_ref()).map_err(|_error| OAuthError::InvalidDiscovery)?,
             human_client_id: human_client_id.into(),
+            human_callback_url: Url::parse(HUMAN_CALLBACK_URL)
+                .map_err(|_error| OAuthError::InvalidDiscovery)?,
             authorization_endpoint: Url::parse(authorization_endpoint.as_ref())
                 .map_err(|_error| OAuthError::InvalidDiscovery)?,
             token_endpoint: Url::parse(token_endpoint.as_ref())
@@ -175,6 +181,7 @@ impl DiscoveryDocument {
             || self.human_client_id.trim().is_empty()
             || self.human_client_id.len() > 256
             || self.human_client_id.chars().any(char::is_control)
+            || self.human_callback_url.as_str() != HUMAN_CALLBACK_URL
             || !fixed_endpoint(&self.issuer, allow_loopback_http)
             || !fixed_endpoint(&self.authorization_endpoint, allow_loopback_http)
             || !fixed_endpoint(&self.token_endpoint, allow_loopback_http)
@@ -202,6 +209,11 @@ impl DiscoveryDocument {
     #[must_use]
     pub fn human_client_id(&self) -> &str {
         &self.human_client_id
+    }
+    /// Exact registered loopback callback for the public CLI client.
+    #[must_use]
+    pub const fn human_callback_url(&self) -> &Url {
+        &self.human_callback_url
     }
     /// Whether personal API-key management and MCP authentication are enabled.
     ///
@@ -275,16 +287,13 @@ pub struct HumanConfig {
 
 impl HumanConfig {
     /// Builds production configuration from validated service discovery.
-    pub fn from_discovery(
-        discovery: &DiscoveryDocument,
-        redirect_uri: &Url,
-    ) -> Result<Self, OAuthError> {
+    pub fn from_discovery(discovery: &DiscoveryDocument) -> Result<Self, OAuthError> {
         Self::build(
             discovery.issuer.clone(),
             discovery.authorization_endpoint.clone(),
             discovery.token_endpoint.clone(),
             discovery.human_client_id.clone(),
-            redirect_uri.clone(),
+            discovery.human_callback_url.clone(),
             false,
         )
     }

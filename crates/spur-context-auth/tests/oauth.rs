@@ -44,6 +44,7 @@ fn discovery_validates_schema_https_endpoints_and_exact_service_origin() {
         "schema_version": 1,
         "issuer": "https://issuer.example/pool",
         "human_client_id": "human-client",
+        "human_callback_url": "http://127.0.0.1:8765/callback",
         "authorization_endpoint": "https://auth.example/oauth2/authorize",
         "token_endpoint": "https://auth.example/oauth2/token",
         "supported_scopes": ["urn:spur:context-service/keys.manage"],
@@ -68,6 +69,7 @@ fn discovery_validates_schema_https_endpoints_and_exact_service_origin() {
     let invalid = [
         ("schema_version", json!(2)),
         ("issuer", json!("http://issuer.example/pool")),
+        ("human_callback_url", json!("http://127.0.0.1:0/callback")),
         (
             "token_endpoint",
             json!("https://user@auth.example/oauth2/token"),

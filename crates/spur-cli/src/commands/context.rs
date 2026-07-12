@@ -30,6 +30,9 @@ const URL_ENV: &str = "SPUR_CONTEXT_SERVICE_URL";
 const LEGACY_TOKEN_ENV: &str = "SPUR_CONTEXT_SERVICE_TOKEN";
 const CREDENTIALS_FILE_ENV: &str = "SPUR_CONTEXT_CREDENTIALS_FILE";
 const MANAGEMENT_SCOPE: &str = "urn:spur:context-service/keys.manage";
+const OAUTH_CALLBACK_URL: &str = spur_context_auth::oauth::HUMAN_CALLBACK_URL;
+const OAUTH_CALLBACK_ADDR: &str = "127.0.0.1:8765";
+const OAUTH_CALLBACK_PORT: u16 = 8765;
 const CALLBACK_TIMEOUT: Duration = Duration::from_secs(300);
 const COMPENSATING_REVOKE_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_CALLBACK_BYTES: usize = 8 * 1024;
@@ -166,25 +169,18 @@ async fn run_auth(
         ContextAuthCommands::Login { profile, url } => {
             let profile_name = profile.clone();
             let service_url = service_url(config, url)?;
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-                .await
-                .map_err(|_error| anyhow!("could not bind the OAuth loopback callback"))?;
-            let port = listener
-                .local_addr()
-                .map_err(|_error| anyhow!("could not inspect the OAuth loopback callback"))?
-                .port();
-            let redirect = Url::parse(&format!("http://127.0.0.1:{port}/callback"))?;
             let discovery = DiscoveryDocument::fetch(&service_url)
                 .await
                 .map_err(|_error| anyhow!("could not load context-service OAuth discovery"))?;
             if !discovery.api_key_auth_enabled() {
                 bail!("context-service API-key authentication is disabled");
             }
-            let client = HumanClient::new(HumanConfig::from_discovery(&discovery, &redirect)?)?;
+            let listener = bind_oauth_callback().await?;
+            let client = HumanClient::new(HumanConfig::from_discovery(&discovery)?)?;
             let mut pending = client.begin_authorization(["openid", MANAGEMENT_SCOPE])?;
             open_browser(pending.authorization_url())?;
             eprintln!("Waiting for context-service sign-in in your browser...");
-            let callback_url = accept_callback(&listener, port).await?;
+            let callback_url = accept_callback(&listener, OAUTH_CALLBACK_PORT).await?;
             let callback = pending.parse_callback(&callback_url)?;
             let session = client.finish_authorization(&mut pending, callback).await?;
             let stored = StoredCredential::Management(credential_from_session(&session)?);
@@ -751,6 +747,16 @@ async fn accept_callback(listener: &tokio::net::TcpListener, port: u16) -> Resul
         .map_err(|_error| anyhow!("context-service login callback was invalid"))
 }
 
+async fn bind_oauth_callback() -> Result<tokio::net::TcpListener> {
+    tokio::net::TcpListener::bind(OAUTH_CALLBACK_ADDR)
+        .await
+        .map_err(|_error| {
+            anyhow!(
+                "could not bind the registered OAuth callback {OAUTH_CALLBACK_URL}; make sure port 8765 is available"
+            )
+        })
+}
+
 #[cfg(test)]
 mod context_service_cli_config_tests {
     use super::*;
@@ -848,6 +854,28 @@ mod context_service_cli_config_tests {
                 url.as_str().to_owned()
             ]
         );
+    }
+
+    #[test]
+    fn oauth_callback_matches_the_registered_cognito_url() {
+        assert_eq!(OAUTH_CALLBACK_URL, "http://127.0.0.1:8765/callback");
+        assert_eq!(OAUTH_CALLBACK_ADDR, "127.0.0.1:8765");
+    }
+
+    #[tokio::test]
+    async fn oauth_callback_reports_when_the_registered_port_is_occupied() {
+        let occupied = tokio::net::TcpListener::bind(OAUTH_CALLBACK_ADDR)
+            .await
+            .expect("test requires the registered callback port to start free");
+
+        let error = bind_oauth_callback()
+            .await
+            .expect_err("a second listener must not claim the registered callback port");
+        let message = error.to_string();
+        assert!(message.contains(OAUTH_CALLBACK_URL));
+        assert!(message.contains("port 8765 is available"));
+
+        drop(occupied);
     }
 
     #[tokio::test]
