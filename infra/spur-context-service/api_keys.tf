@@ -126,7 +126,7 @@ resource "aws_apigatewayv2_authorizer" "api_key" {
 
   api_id                            = aws_apigatewayv2_api.http.id
   authorizer_type                   = "REQUEST"
-  authorizer_uri                    = "arn:aws:apigateway:${var.aws_region}:lambda:path/2015-03-31/functions/${aws_lambda_alias.api_key_authorizer[0].invoke_arn}/invocations"
+  authorizer_uri                    = aws_lambda_alias.api_key_authorizer[0].invoke_arn
   authorizer_payload_format_version = "2.0"
   authorizer_result_ttl_in_seconds  = var.api_key_authorizer_cache_seconds
   enable_simple_responses           = true

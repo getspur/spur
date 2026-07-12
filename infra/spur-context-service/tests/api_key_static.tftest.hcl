@@ -30,6 +30,14 @@ override_resource {
   override_during = plan
 }
 
+override_resource {
+  target = aws_lambda_alias.api_key_authorizer
+  values = {
+    invoke_arn = "arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/arn:aws:lambda:us-east-1:111122223333:function:spur-context-api-key-authorizer:live/invocations"
+  }
+  override_during = plan
+}
+
 variables {
   lambda_zip_path                     = "index_build_asl.json"
   api_key_authorizer_zip_path         = "variables.tf"
@@ -355,6 +363,7 @@ run "enabled_api_keys_create_exact_isolated_contract" {
       aws_lambda_function.api_key_authorizer[0].filename == "variables.tf" &&
       aws_lambda_function.api_key_authorizer[0].function_name == "spur-context-api-key-authorizer" &&
       aws_iam_role.api_key_authorizer[0].name == "spur-context-api-key-authorizer" &&
+      aws_apigatewayv2_authorizer.api_key[0].authorizer_uri == aws_lambda_alias.api_key_authorizer[0].invoke_arn &&
       aws_lambda_function.api_key_cleanup[0].function_name == "spur-context-api-key-cleanup" &&
       aws_iam_role.api_key_cleanup[0].name == "spur-context-api-key-cleanup" &&
       aws_lambda_function.service.environment[0].variables["SPUR_API_KEY_AUTH_ENABLED"] == "1" &&
