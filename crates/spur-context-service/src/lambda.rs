@@ -69,6 +69,8 @@ pub struct ApiGatewayRequest {
     pub path: Option<String>,
     #[serde(rename = "rawPath", default)]
     pub raw_path: Option<String>,
+    #[serde(rename = "rawQueryString", default)]
+    pub raw_query_string: Option<String>,
     #[serde(rename = "queryStringParameters", default)]
     pub query_string_parameters: Option<BTreeMap<String, String>>,
     #[serde(rename = "requestContext", default)]
@@ -337,6 +339,8 @@ const API_KEY_LIST_LIMIT: usize = 100;
 const API_KEY_CREATE_MAX_ATTEMPTS: usize = 3;
 const HUMAN_CALLBACK_URL: &str = "http://127.0.0.1:8765/callback";
 const API_KEY_CURSOR_MAX_LEN: usize = 128;
+const LOGIN_REDIRECT_MAX_RAW_QUERY_LEN: usize = 8_192;
+const LOGIN_REDIRECT_ENABLED_ENV: &str = "SPUR_CONTEXT_LOGIN_REDIRECT_ENABLED";
 
 #[derive(Debug, Clone)]
 struct ApiKeyManagementConfig {
@@ -718,10 +722,11 @@ impl DiscoveryConfig {
         .all(|value| value.starts_with("https://"));
         let service_origin_is_bounded =
             https_origin(&service_base_url).is_some() && !service_base_url.contains(['?', '#']);
-        let oauth_endpoints_are_consistent = https_origin(&authorization_endpoint).is_some()
-            && https_origin(&authorization_endpoint) == https_origin(&token_endpoint)
-            && !authorization_endpoint.contains(['?', '#'])
-            && !token_endpoint.contains(['?', '#']);
+        let authorization_origin =
+            exact_https_endpoint_origin(&authorization_endpoint, "/oauth2/authorize");
+        let token_origin = exact_https_endpoint_origin(&token_endpoint, "/oauth2/token");
+        let oauth_endpoints_are_consistent =
+            authorization_origin.is_some() && authorization_origin == token_origin;
         if !bounded || !secure_urls || !service_origin_is_bounded || !oauth_endpoints_are_consistent
         {
             return None;
@@ -753,10 +758,30 @@ fn https_origin(value: &str) -> Option<&str> {
         .find(['/', '?', '#'])
         .unwrap_or(authority_and_path.len());
     let authority = &authority_and_path[..authority_len];
-    if authority.is_empty() || authority.contains('@') {
+    if !valid_dns_authority(authority) {
         return None;
     }
     Some(&value[.."https://".len() + authority_len])
+}
+
+fn valid_dns_authority(authority: &str) -> bool {
+    !authority.is_empty()
+        && authority.len() <= 253
+        && authority.split('.').all(|label| {
+            let bytes = label.as_bytes();
+            !bytes.is_empty()
+                && bytes.len() <= 63
+                && bytes.first().is_some_and(u8::is_ascii_alphanumeric)
+                && bytes.last().is_some_and(u8::is_ascii_alphanumeric)
+                && bytes
+                    .iter()
+                    .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'-')
+        })
+}
+
+fn exact_https_endpoint_origin<'a>(value: &'a str, path: &str) -> Option<&'a str> {
+    let origin = https_origin(value)?;
+    (value.strip_prefix(origin) == Some(path)).then_some(origin)
 }
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
@@ -829,9 +854,116 @@ fn handle_reserved_route_before_body(
                 None => reserved_route_disabled_response(route),
             })
         }
+        RequestRoute::Login => {
+            let Some(config) = login_redirect_config_from_environment() else {
+                return Some(reserved_route_disabled_response(route));
+            };
+            Some(
+                login_redirect_response(&config, request.raw_query_string.as_deref())
+                    .map_or_else(|| reserved_route_disabled_response(route), Ok),
+            )
+        }
         route if route.is_api_key() && !api_key_routes_configured() => {
             Some(reserved_route_disabled_response(route))
         }
+        _ => None,
+    }
+}
+
+fn login_redirect_config_from_environment() -> Option<DiscoveryConfig> {
+    if !environment_is_truthy(LOGIN_REDIRECT_ENABLED_ENV) {
+        return None;
+    }
+    DiscoveryConfig::from_environment()
+}
+
+fn login_redirect_response(
+    config: &DiscoveryConfig,
+    raw_query_string: Option<&str>,
+) -> Option<ApiGatewayResponse> {
+    let raw_query_string = raw_query_string.unwrap_or_default();
+    if !safe_raw_oauth_query(raw_query_string) {
+        return None;
+    }
+
+    let mut location = config.authorization_endpoint.clone();
+    if !raw_query_string.is_empty() {
+        location.push('?');
+        location.push_str(raw_query_string);
+    }
+    Some(ApiGatewayResponse {
+        status_code: 302,
+        headers: BTreeMap::from([
+            ("cache-control".to_owned(), "no-store".to_owned()),
+            ("content-length".to_owned(), "0".to_owned()),
+            ("location".to_owned(), location),
+            ("pragma".to_owned(), "no-cache".to_owned()),
+            ("referrer-policy".to_owned(), "no-referrer".to_owned()),
+            ("x-content-type-options".to_owned(), "nosniff".to_owned()),
+        ]),
+        body: String::new(),
+        is_base64_encoded: false,
+    })
+}
+
+fn safe_raw_oauth_query(raw_query_string: &str) -> bool {
+    if raw_query_string.len() > LOGIN_REDIRECT_MAX_RAW_QUERY_LEN {
+        return false;
+    }
+
+    let bytes = raw_query_string.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if byte == b'%' {
+            let (Some(&high), Some(&low)) = (bytes.get(index + 1), bytes.get(index + 2)) else {
+                return false;
+            };
+            let (Some(high), Some(low)) = (hex_value(high), hex_value(low)) else {
+                return false;
+            };
+            let encoded = (high << 4) | low;
+            if encoded.is_ascii_control() {
+                return false;
+            }
+            index += 3;
+            continue;
+        }
+        if !(byte.is_ascii_alphanumeric()
+            || matches!(
+                byte,
+                b'-' | b'.'
+                    | b'_'
+                    | b'~'
+                    | b'!'
+                    | b'$'
+                    | b'&'
+                    | b'\''
+                    | b'('
+                    | b')'
+                    | b'*'
+                    | b'+'
+                    | b','
+                    | b';'
+                    | b'='
+                    | b':'
+                    | b'@'
+                    | b'/'
+                    | b'?'
+            ))
+        {
+            return false;
+        }
+        index += 1;
+    }
+    true
+}
+
+const fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
         _ => None,
     }
 }
@@ -1781,6 +1913,8 @@ fn lambda_error(message: impl Into<String>) -> Error {
 mod tests {
     use super::*;
 
+    static LOGIN_ENV_LOCK: Mutex<()> = Mutex::new(());
+
     fn hybrid_auth_fixture() -> Value {
         serde_json::from_str(include_str!("../tests/fixtures/hybrid-auth-contract.json"))
             .expect("hybrid auth contract fixture should be valid JSON")
@@ -1857,6 +1991,204 @@ mod tests {
             "https://context.example".to_owned(),
         )
         .is_none());
+        assert!(DiscoveryConfig::new(
+            "https://issuer.example/pool".to_owned(),
+            "human-client".to_owned(),
+            "https://auth.example/redirector".to_owned(),
+            "https://auth.example/oauth2/token".to_owned(),
+            "https://context.example".to_owned(),
+        )
+        .is_none());
+        assert!(DiscoveryConfig::new(
+            "https://issuer.example/pool".to_owned(),
+            "human-client".to_owned(),
+            "https://auth.example/oauth2/authorize".to_owned(),
+            "https://auth.example/not-a-token-endpoint".to_owned(),
+            "https://context.example".to_owned(),
+        )
+        .is_none());
+        assert!(DiscoveryConfig::new(
+            "https://issuer.example/pool".to_owned(),
+            "human-client".to_owned(),
+            "https://auth.example\\attacker.example/oauth2/authorize".to_owned(),
+            "https://auth.example\\attacker.example/oauth2/token".to_owned(),
+            "https://context.example".to_owned(),
+        )
+        .is_none());
+    }
+
+    fn login_discovery_config() -> DiscoveryConfig {
+        DiscoveryConfig::new(
+            "https://issuer.example/pool".to_owned(),
+            "human-client".to_owned(),
+            "https://auth.context.example/oauth2/authorize".to_owned(),
+            "https://auth.context.example/oauth2/token".to_owned(),
+            "https://context.example".to_owned(),
+        )
+        .expect("login discovery configuration should be valid")
+    }
+
+    #[test]
+    fn login_redirect_preserves_the_exact_safe_raw_query_on_the_cognito_endpoint() {
+        let raw_query = concat!(
+            "response_type=code&client_id=human-client&",
+            "redirect_uri=http%3A%2F%2F127.0.0.1%3A8765%2Fcallback&",
+            "state=a%2Bb%3D&scope=openid%20external.read"
+        );
+
+        let response = login_redirect_response(&login_discovery_config(), Some(raw_query))
+            .expect("safe OAuth authorization query should redirect");
+
+        assert_eq!(response.status_code, 302);
+        assert_eq!(
+            response.headers.get("location").map(String::as_str),
+            Some(
+                "https://auth.context.example/oauth2/authorize?response_type=code&client_id=human-client&redirect_uri=http%3A%2F%2F127.0.0.1%3A8765%2Fcallback&state=a%2Bb%3D&scope=openid%20external.read"
+            )
+        );
+        assert_eq!(
+            response.headers.get("cache-control").map(String::as_str),
+            Some("no-store")
+        );
+        assert_eq!(
+            response.headers.get("pragma").map(String::as_str),
+            Some("no-cache")
+        );
+        assert_eq!(
+            response.headers.get("referrer-policy").map(String::as_str),
+            Some("no-referrer")
+        );
+        assert_eq!(
+            response.headers.get("content-length").map(String::as_str),
+            Some("0")
+        );
+        assert!(response.body.is_empty());
+        assert!(!response.is_base64_encoded);
+    }
+
+    #[test]
+    fn login_redirect_never_replaces_the_validated_cognito_authority() {
+        let response = login_redirect_response(
+            &login_discovery_config(),
+            Some("//attacker.example&redirect_uri=https%3A%2F%2Fattacker.example%2Fcallback"),
+        )
+        .expect("a query-like authority string remains data after the question mark");
+
+        assert_eq!(
+            response.headers.get("location").map(String::as_str),
+            Some(
+                "https://auth.context.example/oauth2/authorize?//attacker.example&redirect_uri=https%3A%2F%2Fattacker.example%2Fcallback"
+            )
+        );
+    }
+
+    #[test]
+    fn login_redirect_rejects_ambiguous_injected_or_oversized_raw_queries() {
+        for raw_query in [
+            "state=literal\r\ninjected:true",
+            "state=encoded%0d%0ainjected",
+            "state=fragment#https://attacker.example",
+            "state=raw space",
+            "state=bad%encoding",
+        ] {
+            assert!(
+                login_redirect_response(&login_discovery_config(), Some(raw_query)).is_none(),
+                "unsafe raw query must fail closed: {raw_query:?}"
+            );
+        }
+        let oversized = format!("state={}", "a".repeat(8_193));
+        assert!(login_redirect_response(&login_discovery_config(), Some(&oversized)).is_none());
+    }
+
+    #[test]
+    fn login_redirect_configuration_is_explicit_and_fail_closed() {
+        let _environment_guard = LOGIN_ENV_LOCK.lock().expect("login environment lock");
+        let _cognito_enabled = EnvVarRestore::set("SPUR_COGNITO_AUTH_ENABLED", "1");
+        let _issuer = EnvVarRestore::set("SPUR_COGNITO_ISSUER", "https://issuer.example/pool");
+        let _client = EnvVarRestore::set("SPUR_COGNITO_HUMAN_CLIENT_ID", "human-client");
+        let _authorization = EnvVarRestore::set(
+            "SPUR_COGNITO_AUTHORIZATION_ENDPOINT",
+            "https://auth.context.example/oauth2/authorize",
+        );
+        let _token = EnvVarRestore::set(
+            "SPUR_COGNITO_TOKEN_ENDPOINT",
+            "https://auth.context.example/oauth2/token",
+        );
+        let _service =
+            EnvVarRestore::set("SPUR_CONTEXT_SERVICE_BASE_URL", "https://context.example");
+
+        {
+            let _facade_disabled = EnvVarRestore::set("SPUR_CONTEXT_LOGIN_REDIRECT_ENABLED", "0");
+            assert!(login_redirect_config_from_environment().is_none());
+        }
+        {
+            let _facade_enabled = EnvVarRestore::set("SPUR_CONTEXT_LOGIN_REDIRECT_ENABLED", "1");
+            let _malformed_endpoint = EnvVarRestore::set(
+                "SPUR_COGNITO_AUTHORIZATION_ENDPOINT",
+                "https://attacker.example/redirector",
+            );
+            assert!(login_redirect_config_from_environment().is_none());
+        }
+    }
+
+    #[test]
+    fn login_facade_redirects_before_parsing_or_forwarding_the_request_body() {
+        let _environment_guard = LOGIN_ENV_LOCK.lock().expect("login environment lock");
+        let _cognito_enabled = EnvVarRestore::set("SPUR_COGNITO_AUTH_ENABLED", "1");
+        let _facade_enabled = EnvVarRestore::set("SPUR_CONTEXT_LOGIN_REDIRECT_ENABLED", "1");
+        let _issuer = EnvVarRestore::set("SPUR_COGNITO_ISSUER", "https://issuer.example/pool");
+        let _client = EnvVarRestore::set("SPUR_COGNITO_HUMAN_CLIENT_ID", "human-client");
+        let _authorization = EnvVarRestore::set(
+            "SPUR_COGNITO_AUTHORIZATION_ENDPOINT",
+            "https://auth.context.example/oauth2/authorize",
+        );
+        let _token = EnvVarRestore::set(
+            "SPUR_COGNITO_TOKEN_ENDPOINT",
+            "https://auth.context.example/oauth2/token",
+        );
+        let _service =
+            EnvVarRestore::set("SPUR_CONTEXT_SERVICE_BASE_URL", "https://context.example");
+        let request = serde_json::from_value::<ApiGatewayRequest>(json!({
+            "rawPath": "/auth/login",
+            "rawQueryString": "response_type=code&state=opaque",
+            "body": "not-json-and-must-not-be-read",
+            "headers": {
+                "authorization": "Bearer must-not-be-forwarded",
+                "cookie": "session=must-not-be-forwarded"
+            },
+            "requestContext": { "http": { "method": "GET" } }
+        }))
+        .expect("login request should deserialize");
+
+        let response = handle_reserved_route_before_body(&request)
+            .expect("the exact login route should return before body parsing")
+            .expect("the login redirect response should be infallible");
+
+        assert_eq!(response.status_code, 302);
+        assert_eq!(
+            response.headers.get("location").map(String::as_str),
+            Some("https://auth.context.example/oauth2/authorize?response_type=code&state=opaque")
+        );
+        assert!(response.body.is_empty());
+    }
+
+    #[test]
+    fn api_gateway_v2_raw_query_string_is_retained_without_normalization() {
+        let request = serde_json::from_value::<ApiGatewayRequest>(json!({
+            "rawPath": "/auth/login",
+            "rawQueryString": "state=a%2Bb%3D&scope=openid%20external.read",
+            "queryStringParameters": {
+                "state": "a+b=",
+                "scope": "openid external.read"
+            },
+            "requestContext": { "http": { "method": "GET" } }
+        }))
+        .expect("API Gateway v2 login request should deserialize");
+
+        assert_eq!(
+            request.raw_query_string.as_deref(),
+            Some("state=a%2Bb%3D&scope=openid%20external.read")
+        );
     }
 
     #[test]
@@ -2548,6 +2880,7 @@ mod tests {
             is_base64_encoded: false,
             path: None,
             raw_path: Some("/mcp/oauth".to_owned()),
+            raw_query_string: None,
             query_string_parameters: None,
             request_context: Some(ApiGatewayRequestContext {
                 authorizer: None,
