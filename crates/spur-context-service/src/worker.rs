@@ -62,6 +62,9 @@ const CATALOG_PASSWORD_ENV: &str = "SPUR_CATALOG_PASSWORD";
 const CATALOG_PASSWORD_SECRET_ARN_ENV: &str = "SPUR_CATALOG_PASSWORD_SECRET_ARN";
 const CATALOG_LEASE_DURATION_SECS: i64 = 10 * 60;
 const CATALOG_LEASE_RENEW_INTERVAL_SECS: u64 = 60;
+const CATALOG_LEASE_ACQUIRE_MAX_WAIT_SECS: u64 = 8 * 60;
+const CATALOG_LEASE_ACQUIRE_BACKOFF_BASE_MS: u64 = 100;
+const CATALOG_LEASE_ACQUIRE_BACKOFF_MAX_MS: u64 = 2_000;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum JobFromLayer {
     #[default]
@@ -382,18 +385,17 @@ async fn run_job_with_stage(
     ensure_catalog_password_env().await?;
     let prepared = prepare_job(&env, &stage, leases.as_ref()).await?;
 
-    let mut lease = None;
-    if env.catalog_dsn.starts_with("s3://") {
-        record_job_stage_best_effort(jobs.as_ref(), &env.job_id, "waiting_catalog_lease").await;
-        lease = Some(
-            leases
-                .acquire(&env.catalog_dsn, &env.job_id)
-                .await
-                .map_err(|error| {
-                    WorkerError::Translate(format!("acquire catalog lease: {error:#}"))
-                })?,
-        );
-    }
+    record_job_stage_best_effort(jobs.as_ref(), &env.job_id, "waiting_catalog_lease").await;
+    let mut lease = Some(
+        acquire_catalog_lease_with_retry(
+            leases.as_ref(),
+            &env.catalog_dsn,
+            &env.job_id,
+            Duration::from_secs(CATALOG_LEASE_ACQUIRE_MAX_WAIT_SECS),
+        )
+        .await
+        .map_err(|error| WorkerError::Translate(format!("acquire catalog lease: {error:#}")))?,
+    );
 
     let result = async {
         // DuckLake cannot open S3 catalog metadata for read-write, so download
@@ -515,14 +517,14 @@ async fn prepare_job_from_bronze(
 async fn prepare_job_from_silver(
     env: &JobEnv,
     stage: &StageTracker,
-    _leases: &dyn CatalogLeaseStore,
+    leases: &dyn CatalogLeaseStore,
 ) -> Result<PreparedJob, WorkerError> {
     let workspace = TempWorkspace::new(&env.job_id)?;
     let silver_store = S3SilverArtifactStore::new(silver_bucket());
 
     stage.set_async("restore_silver").await;
     let stage_started = log_stage_started("restore_silver");
-    let row = lookup_silver_artifact_with_default_services(env)
+    let row = lookup_silver_artifact_with_default_services(env, leases)
         .await?
         .ok_or_else(|| {
             WorkerError::Build(format!(
@@ -1059,14 +1061,24 @@ async fn fetch_source_with_default_bronze(
         return fetch_source_with_s3_catalog_bronze(env, dest, leases, &archive_store).await;
     }
 
+    let lease = acquire_catalog_lease_with_retry(
+        leases,
+        &env.catalog_dsn,
+        &env.job_id,
+        Duration::from_secs(CATALOG_LEASE_ACQUIRE_MAX_WAIT_SECS),
+    )
+    .await
+    .map_err(|error| WorkerError::Fetch(format!("acquire bronze catalog lease: {error:#}")))?;
     let registry = DuckLakeBronzeRegistry::new(env.catalog_dsn.clone());
-    fetch_source_with_bronze_services(env, dest, &registry, &archive_store).await
+    let result = fetch_source_with_bronze_services(env, dest, &registry, &archive_store).await;
+    release_bronze_catalog_lease_best_effort(leases, &lease, env).await;
+    result
 }
 
 async fn restore_bronze_source_with_default_services(
     env: &JobEnv,
     dest: &Path,
-    _leases: &dyn CatalogLeaseStore,
+    leases: &dyn CatalogLeaseStore,
 ) -> Result<Option<PathBuf>, WorkerError> {
     let archive_store = S3BronzeArchiveStore::new(bronze_bucket());
     if env.catalog_dsn.starts_with("s3://") {
@@ -1076,8 +1088,16 @@ async fn restore_bronze_source_with_default_services(
         return restore_registered_bronze_source(&row, dest, &archive_store).await;
     }
 
+    let lease = acquire_catalog_lease_with_retry(
+        leases,
+        &env.catalog_dsn,
+        &env.job_id,
+        Duration::from_secs(CATALOG_LEASE_ACQUIRE_MAX_WAIT_SECS),
+    )
+    .await
+    .map_err(|error| WorkerError::Fetch(format!("acquire bronze catalog lease: {error:#}")))?;
     let registry = DuckLakeBronzeRegistry::new(env.catalog_dsn.clone());
-    retrieve_bronze_source_by_coordinate(
+    let result = retrieve_bronze_source_by_coordinate(
         &env.source,
         &env.package,
         &env.revision,
@@ -1085,20 +1105,33 @@ async fn restore_bronze_source_with_default_services(
         &registry,
         &archive_store,
     )
-    .await
+    .await;
+    release_bronze_catalog_lease_best_effort(leases, &lease, env).await;
+    result
 }
 
 async fn lookup_silver_artifact_with_default_services(
     env: &JobEnv,
+    leases: &dyn CatalogLeaseStore,
 ) -> Result<Option<SilverGraphArtifact>, WorkerError> {
     if env.catalog_dsn.starts_with("s3://") {
         return lookup_silver_row_in_s3_catalog(env).await;
     }
 
+    let lease = acquire_catalog_lease_with_retry(
+        leases,
+        &env.catalog_dsn,
+        &env.job_id,
+        Duration::from_secs(CATALOG_LEASE_ACQUIRE_MAX_WAIT_SECS),
+    )
+    .await
+    .map_err(|error| WorkerError::Build(format!("acquire silver catalog lease: {error:#}")))?;
     let registry = DuckLakeSilverRegistry::new(env.catalog_dsn.clone());
-    registry
+    let result = registry
         .lookup(&env.source, &env.package, &env.revision)
-        .await
+        .await;
+    release_bronze_catalog_lease_best_effort(leases, &lease, env).await;
+    result
 }
 
 async fn fetch_source_with_s3_catalog_bronze(
@@ -1171,10 +1204,14 @@ async fn register_fetched_bronze_in_s3_catalog(
     archive_store: &dyn BronzeArchiveStore,
     fetched: &FetchedSourceArchive,
 ) -> Result<(), WorkerError> {
-    let lease = leases
-        .acquire(&env.catalog_dsn, &env.job_id)
-        .await
-        .map_err(|error| WorkerError::Fetch(format!("acquire bronze catalog lease: {error:#}")))?;
+    let lease = acquire_catalog_lease_with_retry(
+        leases,
+        &env.catalog_dsn,
+        &env.job_id,
+        Duration::from_secs(CATALOG_LEASE_ACQUIRE_MAX_WAIT_SECS),
+    )
+    .await
+    .map_err(|error| WorkerError::Fetch(format!("acquire bronze catalog lease: {error:#}")))?;
 
     let result = async {
         let catalog_dl = CatalogDownload::fetch(&env.catalog_dsn)
@@ -1243,17 +1280,18 @@ async fn persist_silver_graph_artifact_with_default_services(
     artifact_dir: &Path,
     leases: &dyn CatalogLeaseStore,
 ) -> Result<PersistedSilverArtifact, WorkerError> {
-    let bronze_content_sha256 = registered_bronze_content_sha256(env).await?;
-    let builder_version = silver_builder_version(artifact_dir)?;
-    let store = S3SilverArtifactStore::new(silver_bucket());
-
     if env.catalog_dsn.starts_with("s3://") {
-        let lease = leases
-            .acquire(&env.catalog_dsn, &env.job_id)
-            .await
-            .map_err(|error| {
-                WorkerError::Build(format!("acquire silver catalog lease: {error:#}"))
-            })?;
+        let bronze_content_sha256 = registered_bronze_content_sha256(env).await?;
+        let builder_version = silver_builder_version(artifact_dir)?;
+        let store = S3SilverArtifactStore::new(silver_bucket());
+        let lease = acquire_catalog_lease_with_retry(
+            leases,
+            &env.catalog_dsn,
+            &env.job_id,
+            Duration::from_secs(CATALOG_LEASE_ACQUIRE_MAX_WAIT_SECS),
+        )
+        .await
+        .map_err(|error| WorkerError::Build(format!("acquire silver catalog lease: {error:#}")))?;
         let result = async {
             let catalog_dl = CatalogDownload::fetch(&env.catalog_dsn)
                 .await
@@ -1286,16 +1324,32 @@ async fn persist_silver_graph_artifact_with_default_services(
         return result;
     }
 
-    let registry = DuckLakeSilverRegistry::new(env.catalog_dsn.clone());
-    persist_silver_graph_artifact_with_manifest(
-        env,
-        artifact_dir,
-        &bronze_content_sha256,
-        &builder_version,
-        &store,
-        &registry,
+    let lease = acquire_catalog_lease_with_retry(
+        leases,
+        &env.catalog_dsn,
+        &env.job_id,
+        Duration::from_secs(CATALOG_LEASE_ACQUIRE_MAX_WAIT_SECS),
     )
     .await
+    .map_err(|error| WorkerError::Build(format!("acquire silver catalog lease: {error:#}")))?;
+    let result = async {
+        let bronze_content_sha256 = registered_bronze_content_sha256(env).await?;
+        let builder_version = silver_builder_version(artifact_dir)?;
+        let store = S3SilverArtifactStore::new(silver_bucket());
+        let registry = DuckLakeSilverRegistry::new(env.catalog_dsn.clone());
+        persist_silver_graph_artifact_with_manifest(
+            env,
+            artifact_dir,
+            &bronze_content_sha256,
+            &builder_version,
+            &store,
+            &registry,
+        )
+        .await
+    }
+    .await;
+    release_bronze_catalog_lease_best_effort(leases, &lease, env).await;
+    result
 }
 
 async fn registered_bronze_content_sha256(env: &JobEnv) -> Result<String, WorkerError> {
@@ -3236,6 +3290,46 @@ impl CatalogLeaseStore for DynamoDbCatalogLeaseStore {
     }
 }
 
+pub async fn acquire_catalog_lease_with_retry(
+    leases: &dyn CatalogLeaseStore,
+    catalog_uri: &str,
+    owner_job_id: &str,
+    max_wait: Duration,
+) -> Result<CatalogLease> {
+    let started = Instant::now();
+    let mut attempt = 0_u32;
+    loop {
+        match leases.acquire(catalog_uri, owner_job_id).await {
+            Ok(lease) => return Ok(lease),
+            Err(error) if catalog_lease_is_contended(&error) && started.elapsed() < max_wait => {
+                let exponential_ms = CATALOG_LEASE_ACQUIRE_BACKOFF_BASE_MS
+                    .saturating_mul(1_u64 << attempt.min(10))
+                    .min(CATALOG_LEASE_ACQUIRE_BACKOFF_MAX_MS);
+                let jitter_ms = (Uuid::new_v4().as_u128()
+                    % CATALOG_LEASE_ACQUIRE_BACKOFF_BASE_MS as u128)
+                    as u64;
+                let delay = Duration::from_millis(exponential_ms.saturating_add(jitter_ms))
+                    .min(max_wait.saturating_sub(started.elapsed()));
+                tokio::time::sleep(delay).await;
+                attempt = attempt.saturating_add(1);
+            }
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!(
+                        "acquire catalog lease for {catalog_uri} after waiting {:?}",
+                        started.elapsed()
+                    )
+                });
+            }
+        }
+    }
+}
+
+fn catalog_lease_is_contended(error: &anyhow::Error) -> bool {
+    let message = format!("{error:#}");
+    message.contains("ConditionalCheckFailed") || message.contains("lease is held")
+}
+
 pub async fn upload_with_owned_catalog_lease<F, Fut>(
     lease_store: &dyn CatalogLeaseStore,
     lease: &CatalogLease,
@@ -4182,6 +4276,36 @@ mod tests {
 
         assert!(bronze.contains("connect_ducklake_with_data_path_serialized"));
         assert!(silver.contains("connect_ducklake_with_data_path_serialized"));
+    }
+
+    #[test]
+    fn postgres_catalog_mutation_phases_use_distributed_catalog_leases() {
+        let source = include_str!("worker.rs");
+        let bronze = source
+            .split("async fn fetch_source_with_default_bronze")
+            .nth(1)
+            .and_then(|body| {
+                body.split("async fn restore_bronze_source_with_default_services")
+                    .next()
+            })
+            .expect("default bronze fetch implementation");
+        let silver = source
+            .split("async fn persist_silver_graph_artifact_with_default_services")
+            .nth(1)
+            .and_then(|body| {
+                body.split("async fn registered_bronze_content_sha256")
+                    .next()
+            })
+            .expect("default silver persistence implementation");
+        let translate = source
+            .split("async fn run_job_with_stage")
+            .nth(1)
+            .and_then(|body| body.split("async fn prepare_job").next())
+            .expect("worker translate implementation");
+
+        assert!(bronze.contains("acquire_catalog_lease_with_retry"));
+        assert!(silver.contains("acquire_catalog_lease_with_retry"));
+        assert!(translate.contains("acquire_catalog_lease_with_retry"));
     }
 
     #[test]
