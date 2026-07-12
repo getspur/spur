@@ -145,7 +145,7 @@ pub fn worker_tools_list() -> Vec<spur_mcp::ToolDefinition> {
 /// the curated worker MCP server advertises via `list_tools`. Used to augment
 /// Claude agent-profile `tools:` allowlists so a restricted persona keeps the
 /// worker MCP surface its delegation ships.
-pub fn worker_mcp_claude_tool_names() -> Vec<String> {
+pub(crate) fn worker_mcp_claude_tool_names() -> Vec<String> {
     worker_tools_list()
         .into_iter()
         .map(|def| {
