@@ -1,0 +1,442 @@
+{
+  "scope_cases": [
+    {
+      "tool": "external_catalog",
+      "required_scope": "urn:spur:context-service/external.read"
+    },
+    {
+      "tool": "external_code_search",
+      "required_scope": "urn:spur:context-service/external.read"
+    },
+    {
+      "tool": "external_code_read",
+      "required_scope": "urn:spur:context-service/external.read"
+    },
+    {
+      "tool": "external_code_callers",
+      "required_scope": "urn:spur:context-service/external.read"
+    },
+    {
+      "tool": "external_code_callees",
+      "required_scope": "urn:spur:context-service/external.read"
+    },
+    {
+      "tool": "external_knowledge_context",
+      "required_scope": "urn:spur:context-service/external.read"
+    },
+    {
+      "tool": "external_index",
+      "required_scope": "urn:spur:context-service/external.index"
+    },
+    {
+      "tool": "external_index_status",
+      "required_scope": "urn:spur:context-service/external.status"
+    }
+  ],
+  "identity_cases": [
+    {
+      "name": "human access token",
+      "scheme": "oauth",
+      "tool": "external_catalog",
+      "expected_caller": "cognito:user:fixture-human",
+      "event": {
+        "rawPath": "/mcp/oauth",
+        "requestContext": {
+          "authorizer": {
+            "jwt": {
+              "claims": {
+                "iss": "https://issuer.example/pool",
+                "token_use": "access",
+                "client_id": "human-client",
+                "sub": "fixture-human",
+                "exp": "2000000000",
+                "scope": "urn:spur:context-service/external.read"
+              }
+            }
+          },
+          "http": {
+            "method": "POST"
+          }
+        }
+      }
+    },
+    {
+      "name": "M2M access token without user claims",
+      "scheme": "oauth",
+      "tool": "external_index",
+      "expected_caller": "cognito:client:m2m-client",
+      "event": {
+        "rawPath": "/mcp/oauth",
+        "requestContext": {
+          "authorizer": {
+            "jwt": {
+              "claims": {
+                "iss": "https://issuer.example/pool",
+                "token_use": "access",
+                "client_id": "m2m-client",
+                "exp": "2000000000",
+                "scope": "urn:spur:context-service/external.index"
+              }
+            }
+          },
+          "http": {
+            "method": "POST"
+          }
+        }
+      }
+    },
+    {
+      "name": "stable M2M identity across secret rotation",
+      "scheme": "oauth",
+      "tool": "external_index_status",
+      "expected_caller": "cognito:client:rotating-m2m-client",
+      "event": {
+        "rawPath": "/mcp/oauth",
+        "requestContext": {
+          "authorizer": {
+            "jwt": {
+              "claims": {
+                "iss": "https://issuer.example/pool",
+                "token_use": "access",
+                "client_id": "rotating-m2m-client",
+                "sub": "ignored-user-shaped-value",
+                "exp": "2000000000",
+                "scope": "urn:spur:context-service/external.status"
+              }
+            }
+          },
+          "http": {
+            "method": "POST"
+          }
+        }
+      }
+    },
+    {
+      "name": "stable IAM role identity",
+      "scheme": "legacy",
+      "tool": "external_index",
+      "expected_caller": "iam:123456789012:AROASTABLE",
+      "event": {
+        "rawPath": "/mcp",
+        "requestContext": {
+          "authorizer": {
+            "iam": {
+              "accountId": "123456789012",
+              "userId": "AROASTABLE:ephemeral-session-name",
+              "userArn": "arn:aws:sts::123456789012:assumed-role/context-indexer/ephemeral-session-name"
+            }
+          },
+          "http": {
+            "method": "POST",
+            "sourceIp": "203.0.113.24"
+          }
+        }
+      }
+    },
+    {
+      "name": "legacy anonymous demo owner",
+      "scheme": "legacy",
+      "tool": "external_index",
+      "allow_anonymous": true,
+      "expected_caller": "anonymous-internal",
+      "event": {
+        "rawPath": "/mcp",
+        "requestContext": {
+          "http": {
+            "method": "POST",
+            "sourceIp": "203.0.113.24"
+          }
+        }
+      }
+    }
+  ],
+  "denial_cases": [
+    {
+      "name": "malformed JWT cannot downgrade to IAM principal or source IP",
+      "tool": "external_catalog",
+      "expected_status": 401,
+      "expected_reason": "wrong_issuer",
+      "event": {
+        "rawPath": "/mcp/oauth",
+        "requestContext": {
+          "authorizer": {
+            "principalId": "fallback-principal",
+            "iam": {
+              "accountId": "123456789012",
+              "userId": "AROAFALLBACK:session"
+            },
+            "jwt": {
+              "claims": {
+                "iss": "https://wrong-issuer.example/pool",
+                "token_use": "access",
+                "client_id": "human-client",
+                "sub": "fixture-human",
+                "exp": "2000000000",
+                "scope": "urn:spur:context-service/external.read"
+              }
+            }
+          },
+          "http": {
+            "method": "POST",
+            "sourceIp": "203.0.113.24"
+          },
+          "identity": {
+            "userArn": "arn:aws:iam::123456789012:user/fallback",
+            "sourceIp": "203.0.113.24"
+          }
+        }
+      }
+    },
+    {
+      "name": "denylisted client",
+      "tool": "external_catalog",
+      "expected_status": 401,
+      "expected_reason": "denylisted_client",
+      "event": {
+        "rawPath": "/mcp/oauth",
+        "requestContext": {
+          "authorizer": {
+            "jwt": {
+              "claims": {
+                "iss": "https://issuer.example/pool",
+                "token_use": "access",
+                "client_id": "blocked-client",
+                "exp": "2000000000",
+                "scope": "urn:spur:context-service/external.read"
+              }
+            }
+          },
+          "http": {
+            "method": "POST"
+          }
+        }
+      }
+    },
+    {
+      "name": "ID token is not an API credential",
+      "tool": "external_catalog",
+      "expected_status": 401,
+      "expected_reason": "wrong_token_use",
+      "event": {
+        "rawPath": "/mcp/oauth",
+        "requestContext": {
+          "authorizer": {
+            "jwt": {
+              "claims": {
+                "iss": "https://issuer.example/pool",
+                "token_use": "id",
+                "client_id": "human-client",
+                "sub": "fixture-human",
+                "exp": "2000000000",
+                "scope": "urn:spur:context-service/external.read"
+              }
+            }
+          },
+          "http": {
+            "method": "POST"
+          }
+        }
+      }
+    },
+    {
+      "name": "malformed expiry",
+      "tool": "external_catalog",
+      "expected_status": 401,
+      "expected_reason": "invalid_expiry",
+      "event": {
+        "rawPath": "/mcp/oauth",
+        "requestContext": {
+          "authorizer": {
+            "jwt": {
+              "claims": {
+                "iss": "https://issuer.example/pool",
+                "token_use": "access",
+                "client_id": "human-client",
+                "sub": "fixture-human",
+                "exp": "not-a-number",
+                "scope": "urn:spur:context-service/external.read"
+              }
+            }
+          },
+          "http": {
+            "method": "POST"
+          }
+        }
+      }
+    },
+    {
+      "name": "malformed scope",
+      "tool": "external_catalog",
+      "expected_status": 401,
+      "expected_reason": "malformed_scope",
+      "event": {
+        "rawPath": "/mcp/oauth",
+        "requestContext": {
+          "authorizer": {
+            "jwt": {
+              "claims": {
+                "iss": "https://issuer.example/pool",
+                "token_use": "access",
+                "client_id": "human-client",
+                "sub": "fixture-human",
+                "exp": "2000000000",
+                "scope": "\u0000"
+              }
+            }
+          },
+          "http": {
+            "method": "POST"
+          }
+        }
+      }
+    },
+    {
+      "name": "valid identity missing exact tool scope",
+      "tool": "external_index",
+      "expected_status": 403,
+      "expected_reason": "missing_scope",
+      "event": {
+        "rawPath": "/mcp/oauth",
+        "requestContext": {
+          "authorizer": {
+            "jwt": {
+              "claims": {
+                "iss": "https://issuer.example/pool",
+                "token_use": "access",
+                "client_id": "human-client",
+                "sub": "fixture-human",
+                "exp": "2000000000",
+                "scope": "urn:spur:context-service/external.read"
+              }
+            }
+          },
+          "http": {
+            "method": "POST"
+          }
+        }
+      }
+    },
+    {
+      "name": "non-external tool on OAuth route",
+      "tool": "internal_admin",
+      "expected_status": 403,
+      "expected_reason": "non_external_tool",
+      "event": {
+        "rawPath": "/mcp/oauth",
+        "requestContext": {
+          "authorizer": {
+            "jwt": {
+              "claims": {
+                "iss": "https://issuer.example/pool",
+                "token_use": "access",
+                "client_id": "human-client",
+                "sub": "fixture-human",
+                "exp": "2000000000",
+                "scope": "urn:spur:context-service/external.read"
+              }
+            }
+          },
+          "http": {
+            "method": "POST"
+          }
+        }
+      }
+    }
+  ],
+  "route_cases": [
+    {
+      "name": "exact OAuth POST route",
+      "is_oauth": true,
+      "event": {
+        "rawPath": "/mcp/oauth",
+        "requestContext": {
+          "http": {
+            "method": "POST"
+          }
+        }
+      }
+    },
+    {
+      "name": "wrong OAuth method",
+      "is_oauth": false,
+      "event": {
+        "rawPath": "/mcp/oauth",
+        "requestContext": {
+          "http": {
+            "method": "GET"
+          }
+        }
+      }
+    },
+    {
+      "name": "wrong OAuth path with trailing slash",
+      "is_oauth": false,
+      "event": {
+        "rawPath": "/mcp/oauth/",
+        "requestContext": {
+          "http": {
+            "method": "POST"
+          }
+        }
+      }
+    },
+    {
+      "name": "legacy route",
+      "is_oauth": false,
+      "event": {
+        "rawPath": "/mcp",
+        "requestContext": {
+          "http": {
+            "method": "POST"
+          }
+        }
+      }
+    }
+  ],
+  "scheduled_drainer_event": {
+    "source": "aws.events",
+    "detail-type": "Scheduled Event",
+    "detail": {
+      "operation": "drain_queued_jobs"
+    }
+  },
+  "oauth_http_event": {
+    "rawPath": "/mcp/oauth",
+    "requestContext": {
+      "http": {
+        "method": "POST"
+      }
+    }
+  },
+  "wrong_route_jwt_event": {
+    "body": "{\"tool\":\"external_index\",\"args\":{}}",
+    "rawPath": "/mcp/oauth/",
+    "requestContext": {
+      "authorizer": {
+        "principalId": "fallback-principal",
+        "iam": {
+          "accountId": "123456789012",
+          "userId": "AROAFALLBACK:session"
+        },
+        "jwt": {
+          "claims": {
+            "iss": "https://issuer.example/pool",
+            "token_use": "access",
+            "client_id": "human-client",
+            "sub": "wrong-route-human",
+            "exp": "2000000000",
+            "scope": "urn:spur:context-service/external.index"
+          }
+        }
+      },
+      "http": {
+        "method": "POST",
+        "sourceIp": "203.0.113.24"
+      },
+      "identity": {
+        "userArn": "arn:aws:iam::123456789012:user/fallback",
+        "sourceIp": "203.0.113.24"
+      }
+    }
+  }
+}

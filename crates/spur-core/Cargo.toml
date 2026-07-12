@@ -28,6 +28,7 @@ rand = "0.8"
 rusqlite = { workspace = true }
 regex = { workspace = true }
 reqwest = { workspace = true }
+secrecy = "0.10"
 rmcp = { workspace = true }
 schemars = { workspace = true }
 sha2 = { workspace = true }
