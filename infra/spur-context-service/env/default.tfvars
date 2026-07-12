@@ -11,9 +11,12 @@
 
 aws_region = "ap-southeast-5"
 
-# Bootstrap the delegated context.getspur.dev Route 53 zone while preserving
-# both legacy endpoints. Activate only after Namecheap serves the output NS set;
-# retire execute-api in a separate, post-migration change.
+# Staged migration: bootstrap the context.getspur.dev Route 53 zone; delegate
+# its output NS set at Namecheap; activate certificates and both custom domains;
+# pass OAuth, API-key, and MCP E2E; release stable-domain clients; optionally
+# retire execute-api; then remove the Cognito prefix only in a later change.
+# This committed baseline performs bootstrap only and preserves both legacy
+# endpoints until those external gates are complete.
 custom_domains_enabled       = false
 disable_execute_api_endpoint = false
 

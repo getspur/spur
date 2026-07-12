@@ -405,9 +405,7 @@ fn init_global_writes_home_config_not_project_config() {
         "global config should include discovered agents:\n{raw}"
     );
     assert!(
-        raw.contains("[context_service]")
-            && raw
-                .contains(r#"url = "https://zd3c3186v6.execute-api.ap-southeast-5.amazonaws.com""#),
+        raw.contains("[context_service]") && raw.contains(r#"url = "https://context.getspur.dev""#),
         "global config should expose the context service endpoint:\n{raw}"
     );
 }

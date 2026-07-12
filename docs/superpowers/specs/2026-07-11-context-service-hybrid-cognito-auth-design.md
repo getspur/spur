@@ -594,6 +594,21 @@ POC that the selected provider version supports the explicit Cognito feature
 plan. If it does not, pin the minimum compatible provider version in a separate
 reviewed implementation change rather than omitting `LITE`.
 
+The production ingress is `https://context.getspur.dev`; the hosted OAuth origin
+is `https://auth.context.getspur.dev`. Terraform always bootstraps a delegated
+Route 53 zone for `context.getspur.dev`, while certificates, validation records,
+API Gateway mapping/aliases, and the Cognito custom domain remain guarded by the
+false-by-default `custom_domains_enabled` activation switch. The parent zone
+stays at Namecheap. A separate `disable_execute_api_endpoint` switch may become
+true only after activation, E2E, and released-client migration. It never controls
+the Cognito prefix domain, whose optional removal is a later reviewed change.
+
+The regional Cognito issuer remains
+`https://cognito-idp.<region>.amazonaws.com/<pool-id>` after custom-domain
+activation. OIDC discovery and JWKS use that issuer; only the advertised
+authorization and token endpoints move to
+`https://auth.context.getspur.dev/oauth2/authorize` and `/oauth2/token`.
+
 ### Variables
 
 | Variable | Type/default | Validation/meaning |
@@ -633,11 +648,15 @@ Lambda never needs a Cognito client secret.
 
 ### Outputs and secret/state handling
 
-Add nonsensitive outputs for `cognito_issuer`, `cognito_domain_url`,
-`cognito_human_client_id`, `cognito_m2m_client_ids`,
-`cognito_resource_server_identifier`, and `oauth_api_url`. Add secret ARNs only
-if provisioning writes generated customer secrets to Secrets Manager. Never
-output secret values.
+Add nonsensitive outputs for the effective `api_url`, `cognito_issuer`,
+`cognito_domain_url`, `cognito_authorization_endpoint`,
+`cognito_token_endpoint`, `cognito_human_client_id`,
+`cognito_m2m_client_ids`, `cognito_resource_server_identifier`,
+`oauth_api_url`, and API-key route URLs. Before activation the effective outputs
+retain the execute-api and Cognito prefix compatibility endpoints; after
+activation they use the two stable custom domains. Add secret ARNs only if
+provisioning writes generated customer secrets to Secrets Manager. Never output
+secret values.
 
 Terraform providers can retain generated app-client secrets in state even when
 an output is marked `sensitive`; that flag masks CLI display but does not encrypt
@@ -937,7 +956,9 @@ The standalone POC client has mock-server tests proving:
 - assertions that disabled mode creates no Cognito/JWT-route resources;
 - assertions that the login facade is absent until custom-domain activation,
   then uses exact `GET /auth/login` with explicit `NONE` authorization while
-  discovery and token endpoints remain on the Cognito domain;
+  discovery and token endpoints become exact
+  `https://auth.context.getspur.dev/oauth2/authorize` and `/oauth2/token` output
+  values while the regional issuer remains unchanged;
 - validation failure for zero callback URLs, invalid TTL/scope, secret-bearing
   tfvars, and more than 50 audiences; and
 - plan/state-output scan proving no client secret is output or logged.
@@ -982,13 +1003,38 @@ organization scope bundle. Run secret-rotation and denylist drills.
 ### Phase 4 — Production rollout
 
 1. Confirm callbacks, organization count (<50 total audiences), scopes, TTL
-   approvals, budget, alarm destinations, state protection, and support owner.
-2. Apply Cognito resources and exact OAuth route without modifying `$default`.
-3. Smoke human read/status and M2M read/index/status as applicable.
-4. Smoke IAM SigV4 and confirm no Cognito token response for that call.
-5. Watch 401/403/429, Lambda errors, queue saturation, token issuance, and budget
-   for the agreed soak period.
-6. Onboard organizations incrementally; never bulk-enable untested audiences.
+   approvals, budget, alarm destinations, state protection, support owner, and
+   that the built-in client default is `https://context.getspur.dev` without
+   removing explicit URL override compatibility.
+2. Apply only the Route 53 zone bootstrap. Copy its four authoritative NS values
+   into `context` NS records at Namecheap, leaving the root zone and unrelated
+   records untouched. Wait until public DNS returns the identical set.
+3. Activate the regional API certificate, us-east-1 Cognito certificate, API
+   Gateway custom domain/mapping, Cognito custom domain, and Route 53 aliases.
+   Keep execute-api and the Cognito prefix domain enabled.
+4. Fetch OIDC discovery from the regional `cognito_issuer` and require its
+   advertised authorization and token endpoints to equal the stable auth-domain
+   outputs. Fetch service discovery from `https://context.getspur.dev` and
+   compare every advertised route with Terraform output.
+5. Complete OAuth authorization-code plus PKCE and an allowed OAuth MCP call;
+   create/use/revoke a personal API key and exercise the API-key MCP route; then
+   run index/status/read MCP E2E. Confirm wrong-scope, missing, malformed, and
+   revoked credentials fail closed and logs contain no credentials.
+6. Smoke IAM SigV4 and confirm no Cognito token response for that call. Watch
+   401/403/429, Lambda errors, queue saturation, token issuance, and budget for
+   the agreed pre-release soak period.
+7. Release clients with the stable custom-domain default only after all E2E
+   evidence passes. Confirm a released client works without a URL override and
+   that an explicit legacy or staging URL still wins.
+8. Optionally disable execute-api in a separate saved plan after migration and
+   monitoring. Keep the Cognito prefix through a further soak window; remove it
+   only in a later reviewed change after proving no discovery, login, token,
+   logout, management, MCP, or rollback dependency remains.
+
+Any failure before step 7 blocks client release. Any failure after release
+restores execute-api first if it was retired; custom-domain rollback is broader
+because it returns effective outputs to both legacy endpoints. The regional
+Cognito issuer is never replaced by the custom OAuth domain.
 
 The demo remains explicitly `NONE` with mutations owned by the shared
 `anonymous-internal` caller until a separate decision retires it. Production
