@@ -110,7 +110,7 @@ fall through to an IAM, principal-ID, source-IP, or anonymous identity.
 | Area | Current symbol/resource | Fact the implementation must preserve or change |
 |---|---|---|
 | Lambda ingress | `lambda.rs::handler`, `handle_api_gateway_request` | Scheduled drainer and HTTP events share one Lambda; only HTTP requests enter auth. |
-| Request shape | `ApiGatewayRequest`, `ApiGatewayAuthorizer`, `JwtAuthorizer`, `IamAuthorizer` | JWT claims are a string map; IAM has `user_arn`, `caller_id`, `user_id`, and `account_id`. |
+| Request shape | `ApiGatewayRequest`, `ApiGatewayAuthorizer`, `JwtAuthorizer`, `IamAuthorizer` | JWT claims are a string map; IAM has `user_arn`, `caller_id`, `user_id`, and `account_id`; API Gateway v2 `rawQueryString` is retained only for the login redirect facade. |
 | Current auth | `authenticated_caller_id`, `jwt_caller_id`, `iam_caller_id`, `auth_error_response` | Only index/status authenticate; JWT currently prefers `sub`; auth errors are HTTP 401. |
 | Body routing | `parse_tool_request`, `routed_tool_name`, `handle_api_gateway_request` | API Gateway cannot select a scope from the request body. |
 | External tools | `external_catalog`, `external_code_search`, `external_code_read`, `external_code_callers`, `external_code_callees`, `external_knowledge_context`, `external_index`, `external_index_status` in `mcp.rs` | The scope matrix must cover all eight names exactly. |
@@ -271,6 +271,43 @@ Trust boundaries:
    bypass caller ownership, rate, dedupe, or queue limits.
 
 ## Protocol flows
+
+### Optional login redirect facade
+
+The public custom-domain deployment exposes one credential-free convenience
+route:
+
+```text
+Browser -> GET https://context.getspur.dev/auth/login?<raw authorization query>
+API Gateway -> exact NONE route -> existing Lambda integration
+Lambda -> validate facade flag + configured Cognito endpoints + bounded raw query
+Lambda -> 302 Location: https://auth.context.getspur.dev/oauth2/authorize?<same bytes>
+```
+
+This route is a redirect facade, not an OAuth proxy. It exists only when both
+`custom_domains_enabled` and `cognito_auth_enabled` are true. Every method other
+than `GET`, child path, disabled configuration, malformed endpoint, malformed
+percent escape, raw or percent-encoded control byte, fragment delimiter, raw
+space/non-URI byte, or query longer than 8,192 bytes fails closed with the
+bounded `route_unavailable` response. The successful response has an empty body
+and `Cache-Control: no-store`, `Pragma: no-cache`, `Referrer-Policy:
+no-referrer`, and `X-Content-Type-Options: nosniff` headers.
+
+The Lambda never reads or forwards request bodies, cookies, authorization
+headers, bearer credentials, authorization codes, or token requests on this
+route. It appends the validated API Gateway v2 `rawQueryString` byte-for-byte
+after `?`; it does not decode, normalize, reorder, or re-encode parameters. The
+destination origin and `/oauth2/authorize` path come only from the validated
+`SPUR_COGNITO_AUTHORIZATION_ENDPOINT`. Query text that resembles an authority
+or contains a `redirect_uri` remains query data and cannot replace the
+destination. Cognito remains responsible for enforcing its exact registered
+callback allowlist.
+
+OAuth discovery continues to advertise
+`https://auth.context.getspur.dev/oauth2/authorize`, and authorization-code or
+client-credentials token exchange continues directly at
+`https://auth.context.getspur.dev/oauth2/token`. Neither operation is advertised
+through `context.getspur.dev/auth/login`.
 
 ### Human authorization code with PKCE
 
@@ -544,6 +581,9 @@ Add, guarded by `cognito_auth_enabled`:
   `$request.header.Authorization`, and the complete audience list;
 - `aws_apigatewayv2_route.oauth` with `POST /mcp/oauth`, the existing Lambda
   integration, JWT authorization, and all three broad route scopes;
+- `aws_apigatewayv2_route.login_redirect` with exact `GET /auth/login`, the
+  existing Lambda integration, and explicit `NONE` authorization only when
+  Cognito and custom domains are enabled;
 - access-log configuration and focused CloudWatch alarms; and
 - optional `aws_budgets_budget.cognito` when a budget and subscribers are set.
 
@@ -586,6 +626,7 @@ Pass only non-secret validation data:
 - `SPUR_COGNITO_RESOURCE_SERVER_ID`
 - `SPUR_COGNITO_DENY_CLIENT_IDS`
 - `SPUR_COGNITO_OAUTH_PATH`
+- `SPUR_CONTEXT_LOGIN_REDIRECT_ENABLED`
 
 The audience cap bounds these values below Lambda's environment-size concern.
 Lambda never needs a Cognito client secret.
@@ -628,8 +669,8 @@ state rather than forcing app-client replacement.
 |---|---|
 | Create `crates/spur-context-service/src/auth.rs` | Typed `AuthScheme`, `PrincipalKind`, `CallerIdentity`, `AuthDecision`, claim parser, IAM parser, scope set, exact external-tool policy, reason enums, and unit tests. No JWT signature library or network fetch. |
 | `src/lib.rs` | Register the new private auth module. |
-| `src/lambda.rs::ApiGatewayRequest*` | Retain route/raw-path fields; extend IAM authorizer parsing only if the payload fixture proves another stable field is required. |
-| `src/lambda.rs::handle_api_gateway_request` | Parse body, classify route/auth, call `authorize_external_tool`, reject non-external tools on OAuth route, and pass the namespaced caller to index/status. Keep scheduled drainer handling before HTTP auth. |
+| `src/lambda.rs::ApiGatewayRequest*` | Retain route/raw-path fields and the API Gateway v2 raw query string; never reconstruct the login query from `queryStringParameters`. Extend IAM authorizer parsing only if the payload fixture proves another stable field is required. |
+| `src/lambda.rs::handle_api_gateway_request` | Handle the exact login redirect and discovery before body parsing; otherwise parse body, classify route/auth, call `authorize_external_tool`, reject non-external tools on OAuth route, and pass the namespaced caller to index/status. Keep scheduled drainer handling before HTTP auth. |
 | `src/lambda.rs::authenticated_caller_id`, `jwt_caller_id`, `iam_caller_id` | Replace OAuth/IAM-strict use with typed auth; retain narrowly named legacy fallback for `$default` compatibility. |
 | `src/lambda.rs::auth_error_response` | Distinguish 401 authentication from 403 authorization without echoing claim/token data. |
 | `src/mcp.rs` tool definitions | Expose or test the authoritative external-tool name set so policy-map exhaustiveness cannot drift. Routing and input schemas remain unchanged. |
@@ -651,6 +692,7 @@ state rather than forcing app-client replacement.
 | Authorization-code interception/injection | SPUR human client always sends a unique PKCE `S256` challenge, exact redirect URI, state, nonce, and single-use verifier; Cognito verifies PKCE when supplied | Cognito app-client configuration cannot enforce challenge presence on every authorize request. Client compliance is mandatory and must be tested; compromised client storage/browser remains in scope. |
 | CSRF/login swap | One-time session-bound `state`, PKCE, nonce validation | Client implementation must never continue after mismatch. |
 | Token-endpoint redirect or SSRF | Standalone Rust client uses a fixed configured Cognito domain, HTTPS, Rustls, redirect policy `none`, and bounded timeouts | Operators must not derive token endpoints, proxies, or redirect policy from request input. DNS and host policy remain part of POC review. |
+| Login-facade open redirect, CRLF, or query confusion | Exact public GET route; fixed validated Cognito authorization endpoint; byte-preserving URI-query allowlist; control/fragment/malformed-percent rejection; 8,192-byte cap; empty no-store response | Cognito still validates caller-supplied OAuth parameters and exact callback registration; the facade never handles tokens or codes. |
 | ID token used as API token | Broad route scopes plus Lambda `token_use=access` | API Gateway alone cannot universally distinguish JWT types; Lambda check is mandatory. |
 | Wrong tenant/client | API Gateway audience list, Lambda client allowlist, explicit human-client classification, namespaced ID | V1 audience quota limits one route to 49 M2M orgs. |
 | Scope confusion | Exact full-token scope comparison and exhaustive tool matrix | Any new external tool fails CI and must receive a reviewed scope. |
@@ -893,6 +935,9 @@ The standalone POC client has mock-server tests proving:
 - plans for Cognito disabled, demo NONE, staging JWT enabled, and production IAM
   plus JWT route;
 - assertions that disabled mode creates no Cognito/JWT-route resources;
+- assertions that the login facade is absent until custom-domain activation,
+  then uses exact `GET /auth/login` with explicit `NONE` authorization while
+  discovery and token endpoints remain on the Cognito domain;
 - validation failure for zero callback URLs, invalid TTL/scope, secret-bearing
   tfvars, and more than 50 audiences; and
 - plan/state-output scan proving no client secret is output or logged.

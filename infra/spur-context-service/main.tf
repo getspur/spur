@@ -234,6 +234,7 @@ resource "aws_lambda_function" "service" {
       SPUR_COGNITO_AUTHORIZATION_ENDPOINT = var.cognito_auth_enabled ? "${local.cognito_domain_url}/oauth2/authorize" : ""
       SPUR_COGNITO_TOKEN_ENDPOINT         = var.cognito_auth_enabled ? "${local.cognito_domain_url}/oauth2/token" : ""
       SPUR_CONTEXT_SERVICE_BASE_URL       = var.cognito_auth_enabled ? local.context_service_base_url : ""
+      SPUR_CONTEXT_LOGIN_REDIRECT_ENABLED = var.custom_domains_enabled && var.cognito_auth_enabled ? "1" : "0"
     }
   }
 
@@ -610,6 +611,18 @@ resource "aws_apigatewayv2_route" "oauth" {
   authorization_type   = "JWT"
   authorizer_id        = aws_apigatewayv2_authorizer.cognito[0].id
   authorization_scopes = local.cognito_custom_scopes
+}
+
+# Browsers may start human authorization from the memorable API hostname, but
+# only this credential-free GET is public. Discovery and token exchange keep
+# using the validated Cognito custom-domain endpoints directly.
+resource "aws_apigatewayv2_route" "login_redirect" {
+  count = var.custom_domains_enabled && var.cognito_auth_enabled ? 1 : 0
+
+  api_id             = aws_apigatewayv2_api.http.id
+  route_key          = "GET /auth/login"
+  target             = "integrations/${aws_apigatewayv2_integration.lambda.id}"
+  authorization_type = "NONE"
 }
 
 resource "aws_cloudwatch_log_group" "oauth_api_access" {
