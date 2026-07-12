@@ -61,6 +61,10 @@ cognito_human_logout_urls = [
   "http://127.0.0.1:8765/logout",
 ]
 
+# Google credentials are supplied only through protected TF_VAR environment
+# values loaded from the owner-only Google Auth Platform client JSON.
+google_oauth_enabled = true
+
 # Personal API keys are additive; the existing public demo route remains
 # available for compatibility while the exact authenticated routes are tested.
 api_key_auth_enabled = true
