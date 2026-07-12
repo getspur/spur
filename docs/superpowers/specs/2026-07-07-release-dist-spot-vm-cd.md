@@ -1,4 +1,4 @@
-# Release CD on an Ephemeral AWS Spot Builder (`release-dist.yml` + `cargo xtask dist`)
+# Release CD on the Shared AWS Spot Pool (`release-dist.yml` + `cargo xtask dist`)
 
 Status: implemented (workflow_dispatch-only rollout)
 Owner surface: `.github/workflows/release-dist.yml`, `scripts/spur-cargo`
@@ -18,32 +18,31 @@ PE link) live on the VM, not on runners.
 
 ## Design
 
-One ubuntu runner orchestrates; every compile happens on a **per-run AWS Spot
-VM** in `ap-southeast-5` using the exact same `cloud-build` scripts developers
-use locally:
+One ubuntu runner orchestrates; every compile happens on the persistent
+**shared AWS Spot pool** in `ap-southeast-5` using the exact same `cloud-build`
+scripts developers use locally:
 
 ```
 GitHub OIDC ──► aws-actions/configure-aws-credentials (vars.AWS_RELEASE_ROLE_ARN)
    │
    ├─ install session-manager-plugin        (SSH-over-SSM transport)
    ├─ ssh-keygen ephemeral key              (public half → VM authorized_keys)
-   ├─ scripts/cloud-build/spin.sh           SPUR_BUILD_POOL_NAME=spur-release-<run_id>
+   ├─ scripts/cloud-build/spin.sh           VM_NAME=SPUR_BUILD_POOL_NAME=spur-builder
    ├─ cargo xtask dist --platforms …        (spur-cargo → build.sh → VM; fetch --via-s3)
    ├─ upload-artifact dist/                 (spur-<ver>-<triple>[.exe] + SHA256SUMS)
    ├─ [publish=true] gh release create      (getspur/spur-releases, GH_RELEASES_TOKEN)
-   └─ always(): re-auth OIDC → scripts/cloud-build/teardown.sh --all
+   └─ leave the shared pool to its 15-minute VM-side idle shutdown
 ```
 
 Key decisions:
 
-- **Per-run `SPUR_BUILD_POOL_NAME=spur-release-<run_id>`.** The provider still
-  resolves concrete instances by Name tag, but `build.sh` can derive overflow
-  names (`spur-release-<run_id>`, `spur-release-<run_id>-2`) from the pool. A
-  unique pool isolates release boxes from the shared dev builders and concurrent
-  runs, and `teardown.sh --all` stays surgical because it only walks that pool's
-  configured names.
+- **Shared `SPUR_BUILD_POOL_NAME=spur-builder`.** Release and developer builds
+  use the same three Malaysia identities and the same 3-slot-per-builder queue
+  geometry. `build.sh` records the selected builder per remote namespace and
+  `fetch.sh` consumes that assignment, so parallel dist legs fetch from the VM
+  that actually compiled them.
 - **`SPUR_CLOUD=aws-my`, `SPUR_CLOUD_FALLBACK=""`.** Deterministic region:
-  the m8gd→c8gd same-region Spot fallback inside `provider-aws.sh` still
+  the r8gd->m8gd same-region Spot fallback inside `provider-aws.sh` still
   applies, but the cross-region Tokyo hop is disabled (cold L2, role is
   provisioned per-region).
 - **`SPUR_NO_LOCAL_FALLBACK=1`** (new `spur-cargo` guard): when every remote
@@ -58,18 +57,22 @@ Key decisions:
   through EC2 user-data, discarded with the runner. No long-lived key secret.
 - **Credential lifetime.** The job holds AWS credentials for up to 3 h
   (`role-duration-seconds: 10800` — the role's `MaxSessionDuration` must
-  allow it), and the teardown step re-exchanges OIDC first so cleanup never
-  runs on expired credentials.
+  allow it).
+- **Ephemeral caller key on a persistent root.** On resume, the provider uses
+  SSM Run Command to add the runner's fresh public key before SSH-over-SSM.
+  This keeps the runner key ephemeral without requiring a per-run instance.
 
-### VM lifecycle guarantees (termination after the release)
+### VM lifecycle guarantees (stop/resume after the release)
 
-1. `always()` teardown step → `terminate-instances` on the per-run Name tag.
-2. `spur-autoshutdown` on the VM self-terminates after 30 idle minutes — the
-   backstop when the runner is force-killed and no step runs.
-3. The instance is Spot with `InstanceInterruptionBehavior=terminate` and
-   `instance-initiated-shutdown-behavior terminate`; the EBS root has
-   `DeleteOnTermination=true`. Nothing outlives the run except the durable
-   sccache bucket (by design — it is the shared warm cache).
+1. AWS create/start refuses identities outside `spur-builder`,
+   `spur-builder-2`, and `spur-builder-3` unless an explicit POC bypass is set.
+2. `spur-autoshutdown` stops each VM after 15 minutes without build or SSH
+   activity. The workflow does not force-stop the pool because another
+   workstation may still be compiling.
+3. Persistent Spot request tags recover replacement identity if AWS relaunches
+   an interrupted instance without copying the instance Name tag.
+4. Root EBS preserves `/opt/spur-rust`; `/mnt/cargo` targets remain ephemeral
+   instance-store state and sccache S3 remains the durable compile cache.
 
 ## Required configuration
 
@@ -110,9 +113,13 @@ Permissions (least-privilege sketch; region `ap-southeast-5`):
 
 - `ec2:Describe{Instances,Images,Subnets,SecurityGroups,InstanceTypeOfferings}` — resolve AMI/subnet/SG, poll state (`*`)
 - `ec2:RunInstances` + `ec2:CreateTags` — launch the Spot box (constrainable to the region/AMI/subnet)
-- `ec2:TerminateInstances`, `ec2:StopInstances`, `ec2:StartInstances` — lifecycle; recommend a `aws:ResourceTag/Name` condition on `spur-release-*`
+- `ec2:StopInstances`, `ec2:StartInstances` — lifecycle, restricted to
+  `spur-builder`, `spur-builder-2`, and `spur-builder-3` in `ap-southeast-5`
 - `iam:PassRole` on `role/spur-builder` with `iam:PassedToService=ec2.amazonaws.com` — the instance profile grants the VM its S3 sccache access
-- `ssm:StartSession` on the instances + document `AWS-StartSSHSession`, `ssm:TerminateSession`, `ssm:DescribeInstanceInformation` — the SSH-over-SSM transport
+- `ssm:StartSession` on the instances + document `AWS-StartSSHSession`,
+  `ssm:TerminateSession`, `ssm:DescribeInstanceInformation` — SSH-over-SSM
+- `ssm:SendCommand`, `ssm:GetCommandInvocation` — install each runner's
+  ephemeral public key on a resumed shared builder
 - `s3:ListBucket` on `wiilearn-spur-sccache-apse5`; `s3:{Get,Put,Delete}Object` on its `/*` — `fetch.sh --via-s3` artifact hop (same surface the existing `AWS_SCCACHE_ROLE_ARN` grants, so that policy can be reused as a base)
 
 ## Relationship to `release.yml` (cargo-dist) — CUTOVER DONE 2026-07-07
@@ -149,16 +156,14 @@ tag pushes were **cut over to `release-dist.yml`**:
 
 ## Instance sizing
 
-The workflow pins `AWS_INSTANCE_TYPE=m8gd.8xlarge` (32 vCPU Graviton4) with
-`SPUR_BUILD_JOBS=32` for fast release builds, falling back to `m8gd.4xlarge`
-(the dev-builder shape) when Spot capacity or the regional Spot vCPU quota
-blocks the big instance. `MaxSpotInstanceCountExceeded` is treated as a
-retryable launch error in `provider-aws.sh` specifically so this fallback
-fires — an AZ cycle cannot fix a quota squeeze, but a smaller type can fit
-under the remaining headroom. Note the `ap-southeast-5` Spot quota was 32
-vCPUs as of 2026-07 (exactly one 8xlarge OR two 4xlarges): while the dev
-builder is running, the release primary only launches after a quota bump
-(request: Service Quotas → EC2 → L-34B43A08 → 64+).
+The workflow pins `AWS_INSTANCE_TYPE=r8gd.2xlarge` (8 vCPU, 64 GB RAM,
+474 GB local NVMe, Graviton4) with `SPUR_BUILD_JOBS=8`, falling back to
+`m8gd.2xlarge` (8 vCPU, 32 GB RAM, the same Graviton4 generation and local
+NVMe size) when the R-family Spot pool has no capacity. Both shapes preserve
+the `neoverse-v2` sccache key contract. Each VM admits three builds, so one VM
+handles tickets 1-3, a second starts for 4-6, and a third starts for 7-9.
+The resulting CPU oversubscription is intentional; the 64 GB primary absorbs
+three concurrent compile/link processes while avoiding another running VM.
 
 ## Fresh-VM boot hardening (learned from the first live runs)
 
@@ -181,8 +186,8 @@ scripts (see spur-notebook history around 2026-07-07):
    the pinned toolchain's components collided on the `.partial` rename.
    `build.sh` now runs a `flock`-serialized `rustc --version` before cargo.
 6. `build.sh`'s client-side FIFO admission queue now separates per-VM slots from
-   fleet width. On `aws-my`, the default pool is **2 builders × 3 slots**:
-   four-leg release matrices place the fourth leg on `spur-release-<run_id>-2`
+   fleet width. On `aws-my`, the default pool is **3 builders × 3 slots**:
+   four-leg release matrices place the fourth leg on `spur-builder-2`
    instead of overloading one VM or waiting behind the first three. An explicit
    `SPUR_BUILD_MAX_CONCURRENT` override still wins as the fleet-wide cap.
 
