@@ -267,6 +267,8 @@ trust model remains correct if the POC proves that the header is still present.
 spur context auth login
   -> GET /.well-known/spur-context-service from configured service URL
   -> validate discovery schema, origin and HTTPS policy
+  -> require the exact registered callback http://127.0.0.1:8765/callback
+  -> bind 127.0.0.1:8765 or fail before opening the browser
   -> create fresh state, nonce and S256 PKCE verifier
   -> open system browser
   -> accept exact loopback callback
@@ -278,6 +280,10 @@ spur context auth login
 The CLI never accepts an authorization code, refresh token, access token, PKCE
 verifier, or client secret as an argument. The existing isolated POC auth client
 is promoted into a workspace crate rather than imported from `infra/`.
+The discovery document publishes the fixed callback URL, the OAuth client
+rejects any other value, and Cognito `CallbackURLs` must contain that exact
+entry. An occupied port produces a bounded actionable error; the CLI never
+falls back to an ephemeral callback that Cognito has not registered.
 
 ### Create
 
@@ -292,7 +298,9 @@ The command obtains a fresh management access token when needed and posts the
 requested name, scopes, and expiry. The backend verifies `keys.manage`, human
 client ID, human principal kind, scope subset, active-key cap, and expiry bounds.
 
-The response contains the full key once. By default, the CLI writes it directly
+The response contains the full key once and carries `Cache-Control: no-store`
+and `Pragma: no-cache`; unrelated JSON responses retain their existing headers.
+By default, the CLI writes it directly
 to the selected credential profile and prints only public ID, fingerprint,
 scopes, and expiry. `--show-secret` prints the one-time secret only when stdout
 is an interactive terminal or the caller explicitly selects a secure output
@@ -398,7 +406,7 @@ status             = active | revoked
 created_at          = epoch seconds
 expires_at          = epoch seconds
 revoked_at          = optional epoch seconds
-ttl                 = delayed-GC epoch seconds
+ttl                 = optional terminal-tombstone GC epoch seconds
 owner_gsi_pk        = OWNER#<owner-id>
 owner_gsi_sk        = KEY#<created-at>#<public-id>
 expiry_gsi_pk       = EXPIRY#<UTC-hour-bucket>
@@ -408,7 +416,8 @@ expiry_gsi_sk       = <expires-at>#<public-id>
 The owner GSI is for listing and operator discovery only. The sparse expiry GSI
 is for bounded cleanup queries by UTC hour. Authentication uses a strongly
 consistent read of the primary key because DynamoDB GSIs do not support strongly
-consistent reads.
+consistent reads. Active records do not carry `ttl`; they remain in the sparse
+expiry GSI after logical expiry until cleanup successfully transitions them.
 
 ### Owner counter item
 
@@ -448,8 +457,9 @@ key and changes no counter.
 One transaction:
 
 1. conditionally changes the key from `active` to `revoked`; and
-2. removes the expiry-GSI attributes; and
-3. decrements the owner counter only when the transition occurs.
+2. sets `ttl` to seven days after the successful terminal transition;
+3. removes the expiry-GSI attributes; and
+4. decrements the owner counter only when the transition occurs.
 
 Repeated revoke returns the current revoked state without another decrement.
 Cross-owner management returns `not_found` rather than revealing the key.
@@ -458,7 +468,10 @@ Cross-owner management returns `not_found` rather than revealing the key.
 
 The authorizer rejects `expires_at <= now` immediately. Expired records remain
 counted until explicit revoke or cleanup; DynamoDB TTL is not an enforcement or
-capacity mechanism.
+capacity mechanism. TTL is assigned only by the successful revoke/expiry
+transaction, so asynchronous deletion cannot strand an owner counter. Failed
+cleanup attempts leave the active record and expiry-GSI attributes discoverable
+for retry.
 
 EventBridge invokes a lease-fenced cleanup every five minutes. The sweeper
 queries due sparse expiry-GSI hour buckets and applies the same idempotent
@@ -736,7 +749,8 @@ OAuth refresh during API-key MCP operation.
 
 ### CLI tests
 
-- login uses fresh PKCE/state/nonce and exact callback validation;
+- login uses fresh PKCE/state/nonce, the registered 127.0.0.1:8765 callback,
+  and an actionable occupied-port failure;
 - management credentials use the credential-store abstraction;
 - create stores the one-time key without printing it by default;
 - `--show-secret` is TTY/secure-output constrained;
@@ -753,6 +767,7 @@ OAuth refresh during API-key MCP operation.
 
 - disabled defaults create no API-key resources or routes;
 - enabling API keys while Cognito is disabled fails validation;
+- enabling API keys without the exact registered CLI callback fails validation;
 - Cognito-enabled discovery is an exact public route with bounded output;
 - management routes use JWT plus `keys.manage`;
 - API-key route uses CUSTOM authorization and the provider-observed
@@ -763,7 +778,8 @@ OAuth refresh during API-key MCP operation.
 - the five-minute schedule and 100-record cap provide 1,200 records/hour of
   default cleanup capacity against the 232-record/hour supported steady state;
 - cleanup cursor-lag and error alarms evaluate on the cleanup cadence;
-- authorizer, management and cleanup IAM are least privilege;
+- authorizer, management and cleanup IAM are least privilege, with management
+  granting the underlying `PutItem` and `UpdateItem` transaction actions;
 - API-key header is absent from access-log format;
 - header-removal mapping is configured as defense-in-depth;
 - `$default`, OAuth, IAM/demo and drainer resources are unchanged; and

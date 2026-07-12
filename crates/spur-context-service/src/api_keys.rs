@@ -1377,7 +1377,7 @@ impl ApiKeyStore for DynamoDbApiKeyStore {
             .table_name(&self.table_name)
             .key("pk", AttributeValue::S(key_pk(public_id)))
             .update_expression(
-                "SET #status = :revoked, revoked_at = :now REMOVE expiry_gsi_pk, expiry_gsi_sk",
+                "SET #status = :revoked, revoked_at = :now, ttl = :ttl REMOVE expiry_gsi_pk, expiry_gsi_sk",
             )
             .condition_expression("owner_id = :owner AND #status = :active")
             .expression_attribute_names("#status", "status")
@@ -1385,6 +1385,10 @@ impl ApiKeyStore for DynamoDbApiKeyStore {
             .expression_attribute_values(":active", AttributeValue::S("active".to_string()))
             .expression_attribute_values(":owner", AttributeValue::S(owner_id.to_string()))
             .expression_attribute_values(":now", AttributeValue::N(now.to_string()))
+            .expression_attribute_values(
+                ":ttl",
+                AttributeValue::N(tombstone_ttl(now).to_string()),
+            )
             .build()
             .map_err(|_| ApiKeyStoreError::Backend)?;
         let owner_update = Update::builder()
@@ -1733,15 +1737,6 @@ fn key_item(record: &ApiKeyRecord) -> HashMap<String, AttributeValue> {
             AttributeValue::N(record.expires_at.to_string()),
         ),
         (
-            "ttl".to_string(),
-            AttributeValue::N(
-                record
-                    .expires_at
-                    .saturating_add(TTL_GRACE_SECONDS)
-                    .to_string(),
-            ),
-        ),
-        (
             "owner_gsi_pk".to_string(),
             AttributeValue::S(owner_gsi_pk(&record.owner_id)),
         ),
@@ -1765,6 +1760,10 @@ fn key_item(record: &ApiKeyRecord) -> HashMap<String, AttributeValue> {
         );
     }
     item
+}
+
+fn tombstone_ttl(terminal_at: u64) -> u64 {
+    terminal_at.saturating_add(TTL_GRACE_SECONDS)
 }
 
 fn record_from_item(
@@ -1909,8 +1908,8 @@ mod tests {
     use aws_sdk_dynamodb::types::CancellationReason;
 
     use super::{
-        classify_create_reasons, expiry_sort_key, owner_sort_key, ApiKeyRecord, ApiKeyScopes,
-        ApiKeyStatus, ApiKeyStoreError,
+        classify_create_reasons, expiry_sort_key, key_item, owner_sort_key, tombstone_ttl,
+        ApiKeyRecord, ApiKeyScopes, ApiKeyStatus, ApiKeyStoreError, TTL_GRACE_SECONDS,
     };
 
     fn sort_key_record(created_at: u64, expires_at: u64) -> ApiKeyRecord {
@@ -1959,6 +1958,18 @@ mod tests {
             ]
         );
         assert!(expiry_keys.windows(2).all(|keys| keys[0] < keys[1]));
+    }
+
+    #[test]
+    fn active_items_have_no_ttl_and_terminal_retention_is_bounded() {
+        let record = sort_key_record(100, 200);
+        let item = key_item(&record);
+
+        assert!(
+            !item.contains_key("ttl"),
+            "active records must remain until cleanup decrements owner capacity"
+        );
+        assert_eq!(tombstone_ttl(300), 300 + TTL_GRACE_SECONDS);
     }
 
     #[test]
