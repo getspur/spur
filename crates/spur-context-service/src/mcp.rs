@@ -901,8 +901,9 @@ impl ExternalIndexIdentity {
                 crates_io_download_coordinates(source_url, &parsed_url.hostname)
             {
                 let package = normalize_crates_io_package(package);
-                let url_package = normalize_crates_io_package(url_package);
-                if package != url_package {
+                let fetch_package = url_package.to_ascii_lowercase();
+                let normalized_url_package = normalize_crates_io_package(url_package);
+                if package != normalized_url_package {
                     return Err("source_url_package_mismatch");
                 }
                 if revision != url_revision {
@@ -920,8 +921,9 @@ impl ExternalIndexIdentity {
                     .map(str::trim)
                     .filter(|value| is_legacy_crates_io_source_alias(value))
                     .map(str::to_owned);
-                let canonical_url =
-                    format!("https://crates.io/api/v1/crates/{package}/{revision}/download");
+                let canonical_url = format!(
+                    "https://crates.io/api/v1/crates/{fetch_package}/{revision}/download"
+                );
                 (
                     source,
                     legacy_warm_source,
