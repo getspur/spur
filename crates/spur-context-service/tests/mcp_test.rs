@@ -1558,6 +1558,38 @@ async fn external_index_cold_crates_io_request_stores_canonical_identity() -> Re
 }
 
 #[tokio::test]
+async fn external_index_preserves_crates_io_separator_spelling_for_fetch() -> Result<()> {
+    let fixture = McpFixture::new("index-crates-fetch-spelling")?;
+    let jobs = FakeJobStore::default();
+    let sfn = StubIndexExecutionStarter::default();
+
+    let response = route_index(
+        &json!({
+            "package": "serde_json",
+            "revision": "1.0.150",
+            "source_url": "https://crates.io/api/v1/crates/serde_json/1.0.150/download"
+        }),
+        &fixture.conn,
+        &fixture.catalog,
+        &jobs,
+        &sfn,
+        "caller-crates-fetch-spelling",
+    )
+    .await?;
+
+    assert_eq!(response["status"], "queued");
+    let stored = jobs
+        .lookup_job_sync(response["job_id"].as_str().context("job_id")?)
+        .context("stored job")?;
+    assert_eq!(stored.package, "serde-json");
+    assert_eq!(
+        stored.source_url,
+        "https://crates.io/api/v1/crates/serde_json/1.0.150/download"
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn external_index_equivalent_crates_io_requests_share_one_active_job() -> Result<()> {
     let fixture = McpFixture::new("index-active-crates-canonical")?;
     let jobs = FakeJobStore::default();
