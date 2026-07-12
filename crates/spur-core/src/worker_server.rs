@@ -70,6 +70,12 @@ use crate::handlers::{McpHandlerError, WorkerCallContext};
 use spur_mcp::events::McpEventSink;
 use spur_mcp::token::validate_token;
 
+/// MCP server name advertised to workers. Claude Code derives its tool names
+/// from this as `mcp__spur-worker-mcp__<tool>`; the dispatch entry in
+/// `orchestrator::worker_mcp` and profile-allowlist augmentation in
+/// `crate::mcp::worker_mcp_claude_tool_names` must all agree on it.
+pub const WORKER_MCP_SERVER_NAME: &str = "spur-worker-mcp";
+
 #[async_trait]
 pub trait WorkerSignalSink: Send + Sync {
     async fn report_signal(
@@ -1734,7 +1740,7 @@ impl ServerHandler for WorkerToolHandler {
         info.capabilities = ServerCapabilities::builder().enable_tools().build();
 
         let mut implementation = Implementation::default();
-        implementation.name = "spur-worker-mcp".into();
+        implementation.name = WORKER_MCP_SERVER_NAME.into();
         implementation.version = env!("CARGO_PKG_VERSION").into();
         info.server_info = implementation;
         info
