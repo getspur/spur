@@ -104,6 +104,9 @@ good_for = [
 ]
 avoid_for = []
 strengths = ["native ACP over stdio", "streaming sessions"]
-limitations = ["tool vocabulary not yet mapped to a dedicated adapter"]
+limitations = [
+  "tool vocabulary not yet mapped to a dedicated adapter",
+  "mid-session /model and /effort require ACP configOptions on session/new — TUI builtins are not advertised to SPUR; pin --model at spawn or re-probe with scripts/probe_grok_acp.py",
+]
 input_expectations = ""
 output_shape = "Unified diff + summary."
