@@ -1,6 +1,11 @@
 output "api_url" {
-  description = "HTTP API endpoint for the context service"
-  value       = aws_apigatewayv2_api.http.api_endpoint
+  description = "Effective context-service base URL. Uses execute-api until custom-domain activation."
+  value       = local.context_service_base_url
+}
+
+output "route53_delegation_name_servers" {
+  description = "Authoritative Route 53 nameservers to add as context NS records in Namecheap."
+  value       = aws_route53_zone.context_service.name_servers
 }
 
 output "api_invoke_policy_arn" {
@@ -165,7 +170,7 @@ output "cognito_resource_server_identifier" {
 
 output "oauth_api_url" {
   description = "Exact JWT-protected OAuth API URL, or null when Cognito is disabled."
-  value       = var.cognito_auth_enabled ? "${aws_apigatewayv2_api.http.api_endpoint}/mcp/oauth" : null
+  value       = var.cognito_auth_enabled ? "${local.context_service_base_url}/mcp/oauth" : null
 }
 
 # API-key outputs deliberately expose discovery metadata only. Raw keys,
@@ -182,12 +187,12 @@ output "api_key_table_name" {
 
 output "api_key_mcp_url" {
   description = "Exact CUSTOM-authorized personal API-key MCP URL, or null when API-key auth is disabled."
-  value       = var.api_key_auth_enabled ? "${aws_apigatewayv2_api.http.api_endpoint}/mcp/api-key" : null
+  value       = var.api_key_auth_enabled ? "${local.context_service_base_url}/mcp/api-key" : null
 }
 
 output "api_key_management_url" {
   description = "Exact Cognito JWT-protected personal API-key management collection URL, or null when API-key auth is disabled."
-  value       = var.api_key_auth_enabled ? "${aws_apigatewayv2_api.http.api_endpoint}/auth/api-keys" : null
+  value       = var.api_key_auth_enabled ? "${local.context_service_base_url}/auth/api-keys" : null
 }
 
 output "api_key_authorizer_function_name" {
