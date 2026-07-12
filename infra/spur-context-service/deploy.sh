@@ -326,7 +326,7 @@ build_binary() {
     # with duckdb 1.5.4). Build from the crate directory directly.
     run_graviton2_safe_cargo "serving Lambda bootstrap" \
         --workdir crates/spur-context-service build --features lambda --release
-    fetch_remote_worktree_file crates/spur-context-service/target/release/spur-context-service "$BUILD_DIR/bootstrap"
+    fetch_remote_target_file release/spur-context-service "$BUILD_DIR/bootstrap"
 }
 
 build_spur_cli() {
@@ -577,7 +577,7 @@ build_and_push_worker_image() {
     # standalone worker and the workspace spur CLI used by `spur graph build`.
     cd "$REPO_ROOT"
     scripts/cloud-build/docker-build.sh \
-        --remote-binary "$(remote_worktree_path crates/spur-context-service/target/release/spur-context-worker)" \
+        --remote-binary "$(remote_target_path release/spur-context-worker)" \
         --remote-binary "$(remote_target_path target/release/spur)" \
         --context-dir "$worker_context" \
         --dockerfile Dockerfile \
@@ -606,7 +606,7 @@ build_and_push_worker_lambda_image() {
 
     cd "$REPO_ROOT"
     scripts/cloud-build/docker-build.sh \
-        --remote-binary "$(remote_worktree_path crates/spur-context-service/target/release/spur-context-worker-lambda)" \
+        --remote-binary "$(remote_target_path release/spur-context-worker-lambda)" \
         --remote-binary "$(remote_target_path target/release/spur)" \
         --context-dir "$worker_lambda_context" \
         --dockerfile Dockerfile \
