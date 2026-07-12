@@ -4088,6 +4088,110 @@ mod profile_override_tests {
     }
 
     #[tokio::test]
+    async fn worker_attempt_wires_worker_mcp_presence_into_claude_allowlist_materialization() {
+        for worker_mcp_enabled in [true, false] {
+            let repo = setup_repo_with_committed_agent();
+            let mut worktrees =
+                spur_worktree::manager::WorktreeManager::new(repo.path().to_path_buf());
+            let (funnel, _events_rx) = crate::event_funnel::test_channel();
+            let brain_session_id = spur_acp::BrainSessionId::new(SessionId::new());
+            let worker_session = SessionId::new();
+            let mut agent_config = spur_acp::AgentConfig::with_defaults("claude-code");
+            agent_config.kind = spur_acp::types::AgentKind::ClaudeCodeAcp;
+            agent_config.transport = spur_acp::types::TransportKind::Acp;
+            let profile = crate::agent_profiles::AgentProfile::parse(
+                "worker-mcp-reviewer",
+                "---\nname: worker-mcp-reviewer\ndescription: Reviews diffs\ntools: Read, Edit\n---\nYou review code.\n",
+            )
+            .unwrap();
+            let fault_hooks = FaultInjectionHooks::default();
+            let feature_gate = spur_license::FeatureGate::new_with_install_id(
+                spur_license::policy::PolicyResolver::embedded(),
+                spur_license::InstallId::from_uuid(uuid::Uuid::nil()),
+            );
+            let calls = Arc::new(Mutex::new(Vec::new()));
+            let calls_for_factory = Arc::clone(&calls);
+            let session = session_response(vec![]);
+            let worker_mcp_servers = worker_mcp_enabled
+                .then(|| {
+                    McpServer::Http(spur_acp::McpServerHttp::new(
+                        "spur-worker-mcp",
+                        "http://127.0.0.1:12345/mcp",
+                    ))
+                })
+                .into_iter()
+                .collect::<Vec<_>>();
+
+            let outcome = run_one_worker_attempt(
+                worker_session,
+                WorkerAttemptCtx {
+                    brain_session_id: &brain_session_id,
+                    agent: "claude-code",
+                    profile: Some("worker-mcp-reviewer"),
+                    profile_def: Some(&profile),
+                    skills: None,
+                    model: None,
+                    effort: None,
+                    config_overrides: None,
+                    task: "do the task",
+                    request_id: if worker_mcp_enabled {
+                        "delegation-worker-mcp-enabled"
+                    } else {
+                        "delegation-worker-mcp-disabled"
+                    },
+                    attempt: 1,
+                    agent_config: &agent_config,
+                    delegation_plan: None,
+                    issue_id: None,
+                    prior_branch_for_reuse: None,
+                    peer_mailbox: None,
+                    ack_tx: None,
+                    base: None,
+                    dispatched_base_oid_tx: None,
+                    fault_injection_hooks: &fault_hooks,
+                    worker_mcp_servers: &worker_mcp_servers,
+                    worker_mcp_server: None,
+                    pm_service: None,
+                    feature_gate: &feature_gate,
+                    connection_factory: Some(&move |_cfg, _spawn_args, _launch_env, _repo_root| {
+                        Box::new(ProfileRecordingConnection {
+                            calls: Arc::clone(&calls_for_factory),
+                            initialize_error: None,
+                            rejected_config_id: None,
+                            reject_mode: false,
+                            session_response: session.clone(),
+                        })
+                    }),
+                },
+                &mut worktrees,
+                &funnel,
+            )
+            .await
+            .expect("worker attempt succeeds");
+
+            let contents = std::fs::read_to_string(
+                outcome
+                    .worktree_path
+                    .join(".claude/agents/worker-mcp-reviewer.md"),
+            )
+            .expect("materialized profile");
+            let tools_line = contents
+                .lines()
+                .find(|line| line.starts_with("tools:"))
+                .expect("explicit tools allowlist");
+            assert_eq!(
+                tools_line.contains("mcp__spur-worker-mcp__"),
+                worker_mcp_enabled,
+                "worker MCP allowlist wiring mismatch: {tools_line:?}"
+            );
+            if worker_mcp_enabled {
+                assert!(tools_line.contains("mcp__spur-worker-mcp__report_progress"));
+                assert!(tools_line.contains("mcp__spur-worker-mcp__report_signal"));
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn attempt_materializes_pool_skills_before_session() {
         let repo = setup_repo_with_committed_agent();
         write_pool_skill(repo.path(), "clean-a", "clean");
