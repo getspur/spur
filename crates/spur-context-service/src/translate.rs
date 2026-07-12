@@ -13,7 +13,7 @@ use serde::Deserialize;
 
 use crate::catalog::{
     catalog_dsn_with_env_password, ducklake_data_path, export_frozen_snapshot, gold_table,
-    load_duckdb_extension, postgres_metadata_dsn,
+    load_duckdb_extension, postgres_ducklake_write_lock_sql, postgres_metadata_dsn,
 };
 use crate::medallion::SilverManifest;
 
@@ -1376,9 +1376,7 @@ struct PostgresGoldPublishLockSql {
 
 fn postgres_gold_publish_lock_sql(alias: &str) -> PostgresGoldPublishLockSql {
     PostgresGoldPublishLockSql {
-        acquire_lock: format!(
-            "SELECT locked FROM postgres_query('{alias}', 'SELECT TRUE AS locked FROM pg_advisory_lock(7830668896113191951)')"
-        ),
+        acquire_lock: postgres_ducklake_write_lock_sql(alias),
     }
 }
 
