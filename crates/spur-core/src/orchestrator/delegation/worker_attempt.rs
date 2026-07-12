@@ -705,11 +705,17 @@ fn startup_profile_launch_env(
 /// and the kind renders Claude markdown whose `tools:` frontmatter Claude
 /// treats as an exhaustive allowlist.
 fn should_augment_worker_mcp_allowlist(
-    _kind: spur_acp::types::AgentKind,
-    _transport: spur_acp::types::TransportKind,
-    _has_worker_mcp: bool,
+    kind: spur_acp::types::AgentKind,
+    transport: spur_acp::types::TransportKind,
+    has_worker_mcp: bool,
 ) -> bool {
-    false
+    has_worker_mcp
+        && transport == spur_acp::types::TransportKind::Acp
+        && matches!(
+            kind,
+            spur_acp::types::AgentKind::ClaudeCodeAcp
+                | spur_acp::types::AgentKind::ClaudeStreamJson
+        )
 }
 
 async fn materialize_profile(
@@ -994,13 +1000,12 @@ pub(crate) async fn run_one_worker_attempt(
         ctx.agent_config.profile.as_ref(),
     );
     if let Some(profile_def) = ctx.profile_def {
-        // Only native-ACP transports actually deliver the worker MCP server
-        // (the stream-json/stdio/cli-wrap adapters drop `mcp_servers`), so
-        // only they get the allowlist augmentation — advertising tools a
-        // session cannot reach would be worse than the restriction.
-        let worker_mcp_tools = (!ctx.worker_mcp_servers.is_empty()
-            && ctx.agent_config.transport == spur_acp::types::TransportKind::Acp)
-            .then(crate::mcp::worker_mcp_claude_tool_names);
+        let worker_mcp_tools = should_augment_worker_mcp_allowlist(
+            ctx.agent_config.kind,
+            ctx.agent_config.transport,
+            !ctx.worker_mcp_servers.is_empty(),
+        )
+        .then(crate::mcp::worker_mcp_claude_tool_names);
         materialize_profile(
             worktrees,
             &worktree_info.path,

@@ -74,7 +74,7 @@ use spur_mcp::token::validate_token;
 /// from this as `mcp__spur-worker-mcp__<tool>`; the dispatch entry in
 /// `orchestrator::worker_mcp` and profile-allowlist augmentation in
 /// `crate::mcp::worker_mcp_claude_tool_names` must all agree on it.
-pub const WORKER_MCP_SERVER_NAME: &str = "spur-worker-mcp";
+pub(crate) const WORKER_MCP_SERVER_NAME: &str = "spur-worker-mcp";
 
 #[async_trait]
 pub trait WorkerSignalSink: Send + Sync {
