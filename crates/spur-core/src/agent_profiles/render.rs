@@ -97,10 +97,32 @@ pub fn render_for_kind(profile: &AgentProfile, kind: AgentKind) -> Option<Render
 /// to an existing allowlist so restricted personas keep the worker MCP
 /// surface. Profiles without a `tools:` line inherit all tools and are
 /// returned unchanged.
-pub fn augment_tools_allowlist(profile: &AgentProfile, extra_tools: &[String]) -> AgentProfile {
+///
+/// Fail-closed: only the plain inline comma-list form is rewritten. YAML
+/// block lists (empty inline value), inline comments, quoted scalars, and
+/// flow lists survive `AgentProfile::parse` but cannot be rewritten as a
+/// comma list without corrupting the file or commenting out the injected
+/// names — those profiles are returned unchanged.
+pub(crate) fn augment_tools_allowlist(
+    profile: &AgentProfile,
+    extra_tools: &[String],
+) -> AgentProfile {
     let Some(existing) = profile.tools.as_deref() else {
         return profile.clone();
     };
+    let is_plain_inline_list = !existing.trim().is_empty()
+        && !existing
+            .chars()
+            .any(|c| matches!(c, '#' | '"' | '\'' | '[' | ']'));
+    if !is_plain_inline_list {
+        tracing::debug!(
+            target: "spur::agent_profiles",
+            profile = %profile.name,
+            tools = %existing,
+            "tools frontmatter is not a plain inline list; skipping worker-mcp augmentation"
+        );
+        return profile.clone();
+    }
     let mut entries: Vec<String> = existing
         .split(',')
         .map(str::trim)
