@@ -133,7 +133,7 @@ where
     let (url, token) = fetch().await?;
     let url_with_token = format!("{}?token={}", url, token);
     Ok(vec![McpServer::Http(McpServerHttp::new(
-        "spur-worker-mcp",
+        crate::worker_server::WORKER_MCP_SERVER_NAME,
         &url_with_token,
     ))])
 }

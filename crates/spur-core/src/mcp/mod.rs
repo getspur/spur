@@ -146,7 +146,16 @@ pub fn worker_tools_list() -> Vec<spur_mcp::ToolDefinition> {
 /// Claude agent-profile `tools:` allowlists so a restricted persona keeps the
 /// worker MCP surface its delegation ships.
 pub fn worker_mcp_claude_tool_names() -> Vec<String> {
-    Vec::new()
+    worker_tools_list()
+        .into_iter()
+        .map(|def| {
+            format!(
+                "mcp__{}__{}",
+                crate::worker_server::WORKER_MCP_SERVER_NAME,
+                def.name
+            )
+        })
+        .collect()
 }
 
 #[cfg(test)]

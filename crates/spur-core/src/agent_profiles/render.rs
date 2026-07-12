@@ -97,8 +97,56 @@ pub fn render_for_kind(profile: &AgentProfile, kind: AgentKind) -> Option<Render
 /// to an existing allowlist so restricted personas keep the worker MCP
 /// surface. Profiles without a `tools:` line inherit all tools and are
 /// returned unchanged.
-pub fn augment_tools_allowlist(profile: &AgentProfile, _extra_tools: &[String]) -> AgentProfile {
-    profile.clone()
+pub fn augment_tools_allowlist(profile: &AgentProfile, extra_tools: &[String]) -> AgentProfile {
+    let Some(existing) = profile.tools.as_deref() else {
+        return profile.clone();
+    };
+    let mut entries: Vec<String> = existing
+        .split(',')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .map(str::to_string)
+        .collect();
+    for extra in extra_tools {
+        if !entries.iter().any(|entry| entry == extra) {
+            entries.push(extra.clone());
+        }
+    }
+    let merged = entries.join(", ");
+
+    // Rewrite the first `tools:` line inside the frontmatter fence. The
+    // profile already round-tripped through `AgentProfile::parse`, so the
+    // fence bounds and the `tools:` line are known to exist (modulo the same
+    // CRLF normalization parse applies).
+    let source = profile.raw.replace("\r\n", "\n");
+    let mut rewritten = String::with_capacity(source.len() + merged.len());
+    let mut fences_seen = 0usize;
+    let mut replaced = false;
+    for line in source.split_inclusive('\n') {
+        let bare = line.strip_suffix('\n').unwrap_or(line);
+        if bare == "---" && fences_seen < 2 {
+            fences_seen += 1;
+            rewritten.push_str(line);
+            continue;
+        }
+        if fences_seen == 1 && !replaced && bare.starts_with("tools:") {
+            rewritten.push_str("tools: ");
+            rewritten.push_str(&merged);
+            rewritten.push('\n');
+            replaced = true;
+            continue;
+        }
+        rewritten.push_str(line);
+    }
+    if !replaced {
+        return profile.clone();
+    }
+
+    AgentProfile {
+        tools: Some(merged),
+        raw: rewritten,
+        ..profile.clone()
+    }
 }
 
 fn log_tools_drop(profile: &AgentProfile) {
