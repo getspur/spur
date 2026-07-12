@@ -705,10 +705,31 @@ async fn materialize_profile(
     kind: spur_acp::types::AgentKind,
     strategy: &spur_acp::ProfileStrategy,
     profile: &crate::agent_profiles::AgentProfile,
+    worker_mcp_tools: Option<&[String]>,
 ) {
     if !strategy.materialize {
         return;
     }
+
+    // Claude renders the profile source verbatim, so a `tools:` allowlist
+    // would hide the worker MCP tools the delegation ships. Augment the
+    // allowlist with the curated tool names; other kinds drop `tools:`
+    // frontmatter entirely and stay byte-identical.
+    let augmented;
+    let profile = match worker_mcp_tools {
+        Some(extra_tools)
+            if matches!(
+                kind,
+                spur_acp::types::AgentKind::ClaudeCodeAcp
+                    | spur_acp::types::AgentKind::ClaudeStreamJson
+            ) =>
+        {
+            augmented =
+                crate::agent_profiles::render::augment_tools_allowlist(profile, extra_tools);
+            &augmented
+        }
+        _ => profile,
+    };
 
     let Some(rendered) = crate::agent_profiles::render::render_for_kind(profile, kind) else {
         return;
@@ -960,12 +981,20 @@ pub(crate) async fn run_one_worker_attempt(
         ctx.agent_config.profile.as_ref(),
     );
     if let Some(profile_def) = ctx.profile_def {
+        // Only native-ACP transports actually deliver the worker MCP server
+        // (the stream-json/stdio/cli-wrap adapters drop `mcp_servers`), so
+        // only they get the allowlist augmentation — advertising tools a
+        // session cannot reach would be worse than the restriction.
+        let worker_mcp_tools = (!ctx.worker_mcp_servers.is_empty()
+            && ctx.agent_config.transport == spur_acp::types::TransportKind::Acp)
+            .then(crate::mcp::worker_mcp_claude_tool_names);
         materialize_profile(
             worktrees,
             &worktree_info.path,
             ctx.agent_config.kind,
             &profile_strategy,
             profile_def,
+            worker_mcp_tools.as_deref(),
         )
         .await;
     }
@@ -3950,6 +3979,7 @@ mod profile_override_tests {
             spur_acp::types::AgentKind::ClaudeCodeAcp,
             &strategy,
             &first,
+            None,
         )
         .await;
         let first_contents = std::fs::read_to_string(&target).expect("first managed profile");
@@ -3960,6 +3990,7 @@ mod profile_override_tests {
             spur_acp::types::AgentKind::ClaudeCodeAcp,
             &strategy,
             &second,
+            None,
         )
         .await;
 
@@ -3968,6 +3999,41 @@ mod profile_override_tests {
         assert!(second_contents.contains("updated managed persona"));
         assert!(second_contents
             .contains("<!-- SPUR-MANAGED v=1 skill=agent-profile:code-reviewer sha256="));
+    }
+
+    #[tokio::test]
+    async fn materialization_injects_worker_mcp_tools_into_claude_allowlist() {
+        let repo = setup_repo_with_committed_agent();
+        let worktrees = spur_worktree::manager::WorktreeManager::new(repo.path().to_path_buf());
+        let worktree = repo.path();
+        let strategy =
+            spur_acp::ProfileStrategy::for_kind(spur_acp::types::AgentKind::ClaudeCodeAcp);
+        let profile = crate::agent_profiles::AgentProfile::parse(
+            "code-reviewer",
+            "---\nname: code-reviewer\ndescription: Reviews diffs\ntools: Read, Edit\n---\nYou review code.\n",
+        )
+        .unwrap();
+        let target = worktree.join(".claude/agents/code-reviewer.md");
+        std::fs::remove_file(&target).expect("remove committed fixture");
+
+        let tools = crate::mcp::worker_mcp_claude_tool_names();
+        materialize_profile(
+            &worktrees,
+            worktree,
+            spur_acp::types::AgentKind::ClaudeCodeAcp,
+            &strategy,
+            &profile,
+            Some(&tools),
+        )
+        .await;
+
+        let contents = std::fs::read_to_string(&target).expect("managed profile");
+        assert!(
+            contents.contains("tools: Read, Edit, mcp__spur-worker-mcp__"),
+            "allowlist must keep user entries and gain worker MCP tools; got {contents:?}"
+        );
+        assert!(contents.contains("mcp__spur-worker-mcp__report_progress"));
+        assert!(contents.contains("mcp__spur-worker-mcp__report_signal"));
     }
 
     #[tokio::test]
