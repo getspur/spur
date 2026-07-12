@@ -30,6 +30,9 @@ const DEFAULT_GIT_SIZE_CAP_BYTES: u64 = 2_u64 * 1024 * 1024 * 1024;
 const DEFAULT_MAX_BUILD_SECONDS: u64 = 30 * 60;
 const DEFAULT_MAX_CONCURRENT_JOBS_PER_CALLER: u32 = 2;
 const DEFAULT_CALLS_PER_MINUTE: u32 = 10;
+const ENQUEUE_CONFLICT_MAX_RETRIES: u32 = 10;
+const ENQUEUE_CONFLICT_BACKOFF_BASE_MS: u64 = 25;
+const ENQUEUE_CONFLICT_BACKOFF_MAX_MS: u64 = 500;
 const DESCRIBE_EXECUTION_TIMEOUT: Duration = Duration::from_secs(2);
 const STALE_JOB_REPAIR_AFTER: Duration = Duration::from_secs(60);
 
@@ -602,7 +605,21 @@ async fn route_index_inner(
         caller_id: caller_id.to_owned(),
     };
 
-    match jobs.enqueue_job(request, owner, &config).await {
+    let mut enqueue_attempt = 0;
+    let enqueue_result = loop {
+        match jobs
+            .enqueue_job(request.clone(), owner.clone(), &config)
+            .await
+        {
+            Err(JobsError::Conflict) if enqueue_attempt < ENQUEUE_CONFLICT_MAX_RETRIES => {
+                tokio::time::sleep(enqueue_conflict_backoff(enqueue_attempt)).await;
+                enqueue_attempt += 1;
+            }
+            result => break result,
+        }
+    };
+
+    match enqueue_result {
         Ok(EnqueueOutcome::Enqueued(record)) | Ok(EnqueueOutcome::Existing(record)) => {
             Ok(queued_job_response(&record))
         }
@@ -627,6 +644,17 @@ async fn route_index_inner(
         })),
         Err(error) => Err(jobs_error("external_index enqueue failed")(error)),
     }
+}
+
+fn enqueue_conflict_backoff(attempt: u32) -> Duration {
+    let exponential_ms = ENQUEUE_CONFLICT_BACKOFF_BASE_MS
+        .saturating_mul(1_u64 << attempt.min(10))
+        .min(ENQUEUE_CONFLICT_BACKOFF_MAX_MS);
+    let jitter_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| u64::from(duration.subsec_nanos()) % ENQUEUE_CONFLICT_BACKOFF_BASE_MS)
+        .unwrap_or_default();
+    Duration::from_millis(exponential_ms.saturating_add(jitter_ms))
 }
 
 pub async fn route_index_status(
