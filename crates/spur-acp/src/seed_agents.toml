@@ -175,3 +175,21 @@ dispatch = "prompt_text"
 
 [agents.entries.permissions]
 skip = true
+
+# ── grok ──────────────────────────────────────────────────────────
+# xAI Grok Build CLI. `--no-auto-update` (global) precedes the `agent stdio`
+# subcommand which speaks ACP over stdio. Pin auto_update=false in ~/.grok/config.toml for reproducibility.
+[[agents.entries]]
+name = "grok"
+command = "grok"
+args = ["--no-auto-update", "agent", "stdio"]
+transport = "acp"
+kind = "grok"
+role = "both"
+cost_tier = "medium"
+
+[agents.entries.display]
+handle = "grok"
+
+[agents.entries.commands]
+dispatch = "prompt_text"

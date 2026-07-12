@@ -51,7 +51,7 @@ impl ProfileStrategy {
                 select: SelectStrategy::None,
                 materialize: true,
             },
-            AgentKind::Kimi | AgentKind::Gemini | AgentKind::Generic => Self {
+            AgentKind::Kimi | AgentKind::Gemini | AgentKind::Grok | AgentKind::Generic => Self {
                 select: SelectStrategy::None,
                 materialize: false,
             },

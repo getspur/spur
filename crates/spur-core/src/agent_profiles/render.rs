@@ -87,7 +87,7 @@ pub fn render_for_kind(profile: &AgentProfile, kind: AgentKind) -> Option<Render
                 marker_sha256: marker.sha256,
             })
         }
-        AgentKind::Kimi | AgentKind::Gemini | AgentKind::Generic => None,
+        AgentKind::Kimi | AgentKind::Gemini | AgentKind::Grok | AgentKind::Generic => None,
     }
 }
 
@@ -684,7 +684,12 @@ mod tests {
 
     #[test]
     fn kinds_without_convention_render_nothing() {
-        for kind in [AgentKind::Kimi, AgentKind::Gemini, AgentKind::Generic] {
+        for kind in [
+            AgentKind::Kimi,
+            AgentKind::Gemini,
+            AgentKind::Grok,
+            AgentKind::Generic,
+        ] {
             assert!(render_for_kind(&profile(), kind).is_none());
         }
     }

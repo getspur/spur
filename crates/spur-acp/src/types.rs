@@ -177,6 +177,8 @@ pub enum AgentKind {
     Gemini,
     /// `OpenCode` CLI via `opencode acp`.
     OpenCode,
+    /// xAI Grok Build CLI via `grok agent stdio`.
+    Grok,
     /// Any ACP-speaking agent not otherwise recognized.
     #[default]
     Generic,
@@ -199,6 +201,7 @@ impl AgentKind {
             "kimi" | "kimi-code" | "kimi code" => Self::Kimi,
             "gemini" | "gemini-acp" | "gemini-cli" | "gemini cli" => Self::Gemini,
             "opencode" | "open-code" => Self::OpenCode,
+            "grok" | "grok-code" | "grok build" | "grok-build" => Self::Grok,
             _ => Self::Generic,
         }
     }
@@ -257,6 +260,13 @@ mod cancel_mode_tests {
 #[cfg(test)]
 mod agent_kind_tests {
     use super::AgentKind;
+
+    #[test]
+    fn from_name_recognizes_grok_as_first_class_kind() {
+        let kind = AgentKind::from_name("grok");
+        assert_eq!(kind, AgentKind::Grok);
+        assert_eq!(serde_json::to_string(&kind).unwrap(), "\"grok\"");
+    }
 
     #[test]
     fn from_name_matches_kebab_case_serde_repr() {
