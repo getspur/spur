@@ -335,6 +335,7 @@ const DEFAULT_API_KEY_TTL_DAYS: u64 = 90;
 const MAX_API_KEY_TTL_DAYS: u64 = 365;
 const API_KEY_LIST_LIMIT: usize = 100;
 const API_KEY_CREATE_MAX_ATTEMPTS: usize = 3;
+const HUMAN_CALLBACK_URL: &str = "http://127.0.0.1:8765/callback";
 const API_KEY_CURSOR_MAX_LEN: usize = 128;
 
 #[derive(Debug, Clone)]
@@ -524,7 +525,7 @@ where
             Ok(()) => {
                 let plaintext = generated.plaintext.expose_secret().to_owned();
                 let record = generated.record;
-                return json_response(
+                return one_time_secret_response(
                     201,
                     &json!({
                         "key": plaintext,
@@ -763,6 +764,7 @@ struct DiscoveryDocument {
     schema_version: u8,
     issuer: String,
     human_client_id: String,
+    human_callback_url: String,
     authorization_endpoint: String,
     token_endpoint: String,
     supported_scopes: Vec<String>,
@@ -787,6 +789,7 @@ fn discovery_document(
         schema_version: 1,
         issuer: config.issuer.clone(),
         human_client_id: config.human_client_id.clone(),
+        human_callback_url: HUMAN_CALLBACK_URL.to_owned(),
         authorization_endpoint: config.authorization_endpoint.clone(),
         token_endpoint: config.token_endpoint.clone(),
         supported_scopes: [
@@ -1755,6 +1758,17 @@ fn json_response(status_code: u16, value: &Value) -> Result<ApiGatewayResponse, 
     })
 }
 
+fn one_time_secret_response(status_code: u16, value: &Value) -> Result<ApiGatewayResponse, Error> {
+    let mut response = json_response(status_code, value)?;
+    response
+        .headers
+        .insert("cache-control".to_owned(), "no-store".to_owned());
+    response
+        .headers
+        .insert("pragma".to_owned(), "no-cache".to_owned());
+    Ok(response)
+}
+
 fn json_headers() -> BTreeMap<String, String> {
     BTreeMap::from([("content-type".to_owned(), "application/json".to_owned())])
 }
@@ -2025,6 +2039,14 @@ mod tests {
         .expect("create response should serialize");
         let created_body = response_body(&created);
         assert_eq!(created.status_code, 201);
+        assert_eq!(
+            created.headers.get("cache-control").map(String::as_str),
+            Some("no-store")
+        );
+        assert_eq!(
+            created.headers.get("pragma").map(String::as_str),
+            Some("no-cache")
+        );
         assert!(created_body["key"]
             .as_str()
             .is_some_and(|key| key.starts_with("spur_live_")));
@@ -2043,6 +2065,8 @@ mod tests {
         .expect("list response should serialize");
         let listed_body = response_body(&listed);
         assert_eq!(listed.status_code, 200);
+        assert!(!listed.headers.contains_key("cache-control"));
+        assert!(!listed.headers.contains_key("pragma"));
         assert_eq!(listed_body["keys"][0]["key_id"], key_id);
         assert!(listed.body.find("spur_live_").is_none());
         assert!(listed.body.find("secret_hash").is_none());

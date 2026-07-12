@@ -117,6 +117,21 @@ run "api_keys_require_cognito" {
   expect_failures = [var.api_key_auth_enabled]
 }
 
+run "api_keys_require_the_registered_cli_callback" {
+  command = plan
+
+  variables {
+    api_key_auth_enabled        = true
+    cognito_auth_enabled        = true
+    cognito_user_pool_name      = "spur-context-callback-test"
+    cognito_domain_prefix       = "spur-context-callback-test"
+    cognito_human_callback_urls = ["https://context.example.test/oauth/callback"]
+    cognito_human_logout_urls   = ["https://context.example.test/logout"]
+  }
+
+  expect_failures = [var.api_key_auth_enabled]
+}
+
 run "cleanup_page_limit_cannot_exceed_backend_bound" {
   command = plan
 
@@ -172,7 +187,7 @@ run "enabled_api_keys_create_exact_isolated_contract" {
     cognito_auth_enabled        = true
     cognito_user_pool_name      = "spur-context-api-key-test"
     cognito_domain_prefix       = "spur-context-api-key-test"
-    cognito_human_callback_urls = ["https://context.example.test/oauth/callback"]
+    cognito_human_callback_urls = ["http://127.0.0.1:8765/callback"]
     cognito_human_logout_urls   = ["https://context.example.test/logout"]
     cognito_m2m_organizations = {
       compatibility = {
@@ -285,6 +300,8 @@ run "enabled_api_keys_create_exact_isolated_contract" {
       local.api_key_authorizer_dynamodb_actions == ["dynamodb:GetItem"] &&
       toset(local.api_key_management_dynamodb_actions) == toset([
         "dynamodb:GetItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
         "dynamodb:TransactWriteItems",
       ]) &&
       local.api_key_management_query_actions == ["dynamodb:Query"] &&
