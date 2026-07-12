@@ -22,8 +22,10 @@ token-validation or API-key authorization contracts.
 Terraform owns an optional `aws_cognito_identity_provider` named `Google`.
 The provider is enabled only when both Cognito auth and the new Google feature
 flag are enabled. It requests only `openid email profile` and maps the standard
-Google claims `email`, `email_verified`, `name`, and `picture` into mutable
-Cognito standard attributes.
+Google claims `email`, `email_verified`, `name`, and `picture` into Cognito
+standard attributes. Cognito also returns the required `username = sub`
+mapping. Terraform codifies that mapping and Cognito's returned Google endpoint
+defaults to prevent perpetual drift without ignoring client-secret rotation.
 
 The existing human app client continues supporting native Cognito users and
 adds `Google` when enabled. Its authorization-code, PKCE, callback, token
@@ -96,4 +98,3 @@ Live verification requires:
 - `spur context auth login` completes through the local PKCE callback.
 - A Google-authenticated user can create, use, and revoke a personal API key.
 - A final Terraform plan reports no changes.
-

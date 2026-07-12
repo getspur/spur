@@ -27,8 +27,9 @@ aws_cognito_user_pool_client.human[0].supported_identity_providers == toset(["CO
 - [ ] **Step 2: Add an enabled-state assertion**
 
 Use dummy non-secret test credentials and assert one Google provider, exact
-`openid email profile` scopes, exact standard-attribute mappings, and human
-providers `COGNITO` plus `Google`.
+`openid email profile` scopes, Cognito's returned endpoint defaults, exact
+standard-attribute mappings including `username = sub`, and human providers
+`COGNITO` plus `Google`.
 
 - [ ] **Step 3: Add invalid-credential tests**
 
@@ -69,7 +70,9 @@ Cognito auth, a Google client-ID suffix, and a nonblank secret when enabled.
 
 Add `aws_cognito_identity_provider.google` with provider type/name `Google`,
 `authorize_scopes = "openid email profile"`, and mappings for `email`,
-`email_verified`, `name`, and `picture`.
+`email_verified`, `name`, `picture`, and `username`. Codify the Google endpoint
+defaults returned by Cognito so plans remain stable while client-secret changes
+remain managed.
 
 - [ ] **Step 3: Update only the human app client**
 
@@ -173,4 +176,3 @@ Run the exact Terraform plan again and require `No changes`. Remove saved local
 plans and temporary secret-bearing environment variables. Preserve the original
 owner-only Google credential JSON for controlled rotation unless the operator
 chooses to move it into an approved secret store.
-

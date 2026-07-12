@@ -177,7 +177,13 @@ run "google_enabled_adds_exact_human_provider_contract" {
       length(aws_cognito_identity_provider.google) == 1 &&
       aws_cognito_identity_provider.google[0].provider_name == "Google" &&
       aws_cognito_identity_provider.google[0].provider_type == "Google" &&
-      aws_cognito_identity_provider.google[0].provider_details["authorize_scopes"] == "openid email profile"
+      aws_cognito_identity_provider.google[0].provider_details["authorize_scopes"] == "openid email profile" &&
+      aws_cognito_identity_provider.google[0].provider_details["attributes_url"] == "https://people.googleapis.com/v1/people/me?personFields=" &&
+      aws_cognito_identity_provider.google[0].provider_details["attributes_url_add_attributes"] == "true" &&
+      aws_cognito_identity_provider.google[0].provider_details["authorize_url"] == "https://accounts.google.com/o/oauth2/v2/auth" &&
+      aws_cognito_identity_provider.google[0].provider_details["oidc_issuer"] == "https://accounts.google.com" &&
+      aws_cognito_identity_provider.google[0].provider_details["token_request_method"] == "POST" &&
+      aws_cognito_identity_provider.google[0].provider_details["token_url"] == "https://www.googleapis.com/oauth2/v4/token"
     )
     error_message = "Google-enabled mode must create the exact social identity provider"
   }
@@ -188,8 +194,9 @@ run "google_enabled_adds_exact_human_provider_contract" {
       email_verified = "email_verified"
       name           = "name"
       picture        = "picture"
+      username       = "sub"
     })
-    error_message = "Google must map only the approved mutable standard attributes"
+    error_message = "Google must codify the standard mappings returned by Cognito"
   }
 
   assert {
