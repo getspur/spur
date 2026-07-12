@@ -13,7 +13,7 @@ use std::sync::{
     Arc, Mutex,
 };
 use std::thread;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result};
 use async_trait::async_trait;
@@ -25,12 +25,13 @@ use spur_context_service::jobs::{
 };
 use spur_context_service::mcp::{IndexExecutionRequest, IndexExecutionStarter, McpHandlerError};
 use spur_context_service::worker::{
-    build_graph, fetch_source, fetch_source_with_bronze_services, handle_spot_interruption,
-    persist_silver_graph_artifact, prepare_job_with_services, retrieve_bronze_source_by_coordinate,
-    run_job_and_record_with_services, upload_with_owned_catalog_lease, BronzeArchiveStore,
-    BronzeRawSource, BronzeRawSourceRegistry, CatalogDownload, CatalogLease, CatalogLeaseStore,
-    GraphArtifactBuilder, JobEnv, JobFromLayer, SilverArtifactStore, SilverGraphArtifact,
-    SilverGraphArtifactRegistry, SilverUploadedFile, StageTracker, WorkerError,
+    acquire_catalog_lease_with_retry, build_graph, fetch_source, fetch_source_with_bronze_services,
+    handle_spot_interruption, persist_silver_graph_artifact, prepare_job_with_services,
+    retrieve_bronze_source_by_coordinate, run_job_and_record_with_services,
+    upload_with_owned_catalog_lease, BronzeArchiveStore, BronzeRawSource, BronzeRawSourceRegistry,
+    CatalogDownload, CatalogLease, CatalogLeaseStore, GraphArtifactBuilder, JobEnv, JobFromLayer,
+    SilverArtifactStore, SilverGraphArtifact, SilverGraphArtifactRegistry, SilverUploadedFile,
+    StageTracker, WorkerError,
 };
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -619,6 +620,23 @@ async fn catalog_lease_blocks_upload_when_token_is_lost() -> Result<()> {
 
     assert!(err.to_string().contains("lease lost"));
     assert_eq!(upload_calls.load(Ordering::SeqCst), 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn catalog_lease_acquisition_retries_contention_until_available() -> Result<()> {
+    let leases = FakeCatalogLeaseStore::contended(3);
+
+    let lease = acquire_catalog_lease_with_retry(
+        &leases,
+        "postgres:catalog",
+        "job-contended",
+        Duration::from_secs(1),
+    )
+    .await?;
+
+    assert_eq!(lease.owner_job_id, "job-contended");
+    assert_eq!(leases.acquire_attempts(), 4);
     Ok(())
 }
 
@@ -1627,19 +1645,45 @@ impl FakeJobStore {
 
 struct FakeCatalogLeaseStore {
     lost: AtomicBool,
+    acquire_failures_remaining: AtomicUsize,
+    acquire_attempts: AtomicUsize,
 }
 
 impl FakeCatalogLeaseStore {
     fn lost() -> Self {
         Self {
             lost: AtomicBool::new(true),
+            acquire_failures_remaining: AtomicUsize::new(0),
+            acquire_attempts: AtomicUsize::new(0),
         }
+    }
+
+    fn contended(failures: usize) -> Self {
+        Self {
+            lost: AtomicBool::new(false),
+            acquire_failures_remaining: AtomicUsize::new(failures),
+            acquire_attempts: AtomicUsize::new(0),
+        }
+    }
+
+    fn acquire_attempts(&self) -> usize {
+        self.acquire_attempts.load(Ordering::SeqCst)
     }
 }
 
 #[async_trait]
 impl CatalogLeaseStore for FakeCatalogLeaseStore {
     async fn acquire(&self, catalog_uri: &str, owner_job_id: &str) -> Result<CatalogLease> {
+        self.acquire_attempts.fetch_add(1, Ordering::SeqCst);
+        if self
+            .acquire_failures_remaining
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                remaining.checked_sub(1)
+            })
+            .is_ok()
+        {
+            anyhow::bail!("ConditionalCheckFailedException: catalog lease is held");
+        }
         Ok(CatalogLease {
             catalog_uri: catalog_uri.to_owned(),
             owner_job_id: owner_job_id.to_owned(),
