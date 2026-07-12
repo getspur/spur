@@ -5,7 +5,7 @@ use std::{
     env,
     error::Error as StdError,
     fmt,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use async_trait::async_trait;
@@ -33,6 +33,8 @@ const CALLER_RATE_PK_PREFIX: &str = "CALLER_RATE#";
 const ACTIVE_JOB_PK_PREFIX: &str = "ACTIVE_JOB#";
 const ACTIVE_JOB_TTL_SECS: u64 = 7 * 24 * 60 * 60;
 const RATE_WINDOW_TTL_SECS: u64 = 10 * 60;
+const RATE_LIMIT_CONFLICT_MAX_RETRIES: u32 = 5;
+const RATE_LIMIT_CONFLICT_BACKOFF_BASE_MS: u64 = 10;
 
 // ─── Bounded queueing primitives ───────────────────────────────────────────
 //
@@ -748,24 +750,49 @@ impl JobStore for DynamoDbJobStore {
             return Err(JobsError::RateLimited);
         }
         let now = now_unix_secs();
-        let update = caller_rate_acquire_update(
-            &self.table_name,
-            caller_id,
-            now / 60,
-            now,
-            max_requests_per_minute,
-        )?;
-        let result = self
-            .client
-            .transact_write_items()
-            .transact_items(TransactWriteItem::builder().update(update).build())
-            .send()
-            .await;
-        match result {
-            Ok(_) => Ok(()),
-            Err(error) if is_transaction_conflict(&error) => Err(JobsError::RateLimited),
-            Err(error) => Err(dynamodb_error(error)),
+        for attempt in 0..=RATE_LIMIT_CONFLICT_MAX_RETRIES {
+            let update = caller_rate_acquire_update(
+                &self.table_name,
+                caller_id,
+                now / 60,
+                now,
+                max_requests_per_minute,
+            )?;
+            let result = self
+                .client
+                .transact_write_items()
+                .transact_items(TransactWriteItem::builder().update(update).build())
+                .send()
+                .await;
+            match result {
+                Ok(_) => return Ok(()),
+                Err(error) if is_transaction_conflict(&error) => {
+                    match classify_rate_limit_cancellation(&error) {
+                        RateLimitCancellation::LimitReached => {
+                            return Err(JobsError::RateLimited);
+                        }
+                        RateLimitCancellation::TransientConflict
+                            if attempt < RATE_LIMIT_CONFLICT_MAX_RETRIES =>
+                        {
+                            let exponential_ms = RATE_LIMIT_CONFLICT_BACKOFF_BASE_MS
+                                .saturating_mul(1_u64 << attempt.min(10));
+                            let jitter_ms = (Uuid::new_v4().as_u128()
+                                % RATE_LIMIT_CONFLICT_BACKOFF_BASE_MS as u128)
+                                as u64;
+                            tokio::time::sleep(Duration::from_millis(
+                                exponential_ms.saturating_add(jitter_ms),
+                            ))
+                            .await;
+                        }
+                        RateLimitCancellation::TransientConflict => {
+                            return Err(JobsError::Conflict);
+                        }
+                    }
+                }
+                Err(error) => return Err(dynamodb_error(error)),
+            }
         }
+        unreachable!("rate-limit conflict retry loop always returns")
     }
 
     async fn create_or_get_active_job(
@@ -2561,6 +2588,42 @@ enum ItemCancellation {
     TransactionConflict,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RateLimitCancellation {
+    LimitReached,
+    TransientConflict,
+}
+
+fn classify_rate_limit_cancellation(
+    error: &SdkError<TransactWriteItemsError>,
+) -> RateLimitCancellation {
+    classify_rate_limit_cancellation_from(
+        cancellation_reasons(error),
+        enqueue_unknown_is_retryable_conflict(error),
+    )
+}
+
+fn classify_rate_limit_cancellation_from(
+    reasons: Option<&[CancellationReason]>,
+    no_reasons_is_retryable_conflict: bool,
+) -> RateLimitCancellation {
+    if let Some(kind) = reasons
+        .unwrap_or_default()
+        .iter()
+        .find_map(|reason| item_cancellation_kind(reason.code()))
+    {
+        return match kind {
+            ItemCancellation::ConditionalCheckFailed => RateLimitCancellation::LimitReached,
+            ItemCancellation::TransactionConflict => RateLimitCancellation::TransientConflict,
+        };
+    }
+    if no_reasons_is_retryable_conflict {
+        RateLimitCancellation::TransientConflict
+    } else {
+        RateLimitCancellation::LimitReached
+    }
+}
+
 /// Classify a single `CancellationReason` code into a typed cancellation kind.
 /// Returns `None` for `"None"` (success) and unrecognized codes.
 fn item_cancellation_kind(code: Option<&str>) -> Option<ItemCancellation> {
@@ -3497,6 +3560,30 @@ mod tests {
         assert_eq!(
             classify_enqueue_reasons(&reasons, false),
             EnqueueCancellation::TransientConflict
+        );
+    }
+
+    #[test]
+    fn rate_limit_transaction_conflict_is_retryable_not_rate_limited() {
+        let reasons = vec![CancellationReason::builder()
+            .code("TransactionConflict")
+            .build()];
+
+        assert_eq!(
+            classify_rate_limit_cancellation_from(Some(&reasons), false),
+            RateLimitCancellation::TransientConflict
+        );
+    }
+
+    #[test]
+    fn rate_limit_conditional_failure_remains_rate_limited() {
+        let reasons = vec![CancellationReason::builder()
+            .code("ConditionalCheckFailed")
+            .build()];
+
+        assert_eq!(
+            classify_rate_limit_cancellation_from(Some(&reasons), false),
+            RateLimitCancellation::LimitReached
         );
     }
 
