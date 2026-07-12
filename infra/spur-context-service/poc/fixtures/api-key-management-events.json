@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "evidence_state": "offline-synthetic",
+  "events": [
+    {
+      "name": "create_personal_key",
+      "method": "POST",
+      "path": "/auth/api-keys",
+      "claims": {
+        "iss": "https://issuer.example.test/poc",
+        "token_use": "access",
+        "client_id": "fixture-human-client",
+        "sub": "fixture-human",
+        "scope": "urn:spur:context-service/keys.manage",
+        "exp": "2000000000"
+      },
+      "body": {
+        "name": "offline-fixture",
+        "scopes": ["external.read"],
+        "expires_in_days": 30
+      },
+      "expected_owner": "cognito:user:fixture-human"
+    },
+    {
+      "name": "list_personal_keys",
+      "method": "GET",
+      "path": "/auth/api-keys",
+      "claims_fixture": "same-human-management-claims",
+      "expected_owner": "cognito:user:fixture-human"
+    },
+    {
+      "name": "revoke_personal_key",
+      "method": "DELETE",
+      "path": "/auth/api-keys/aaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "claims_fixture": "same-human-management-claims",
+      "expected_owner": "cognito:user:fixture-human"
+    }
+  ]
+}

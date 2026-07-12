@@ -16,8 +16,19 @@ path = "src/main.rs"
 required-features = ["lambda"]
 
 [[bin]]
+name = "spur-context-api-key-authorizer"
+path = "src/bin/api_key_authorizer.rs"
+required-features = ["api-key-authorizer"]
+
+[[bin]]
+name = "spur-context-api-key-cleanup"
+path = "src/bin/api_key_cleanup.rs"
+required-features = ["api-key-cleanup"]
+
+[[bin]]
 name = "spur-context-indexer"
 path = "src/bin/index.rs"
+required-features = ["service"]
 
 [[bin]]
 name = "spur-context-worker"
@@ -30,29 +41,44 @@ path = "src/bin/worker_lambda.rs"
 required-features = ["worker-lambda"]
 
 [features]
-default = []
-analyst = []
-lambda = ["dep:lambda_runtime"]
-worker = []
+default = ["service"]
+service = [
+    "dep:anyhow",
+    "dep:aws-config",
+    "dep:aws-sdk-s3",
+    "dep:aws-sdk-secretsmanager",
+    "dep:aws-sdk-sfn",
+    "dep:clap",
+    "dep:duckdb",
+    "dep:spur-context-source",
+]
+analyst = ["service"]
+lambda = ["service", "api-key-authorizer"]
+api-key-authorizer = ["dep:lambda_runtime"]
+api-key-cleanup = ["dep:lambda_runtime"]
+worker = ["service"]
 worker-lambda = ["worker", "dep:lambda_runtime"]
 
 [dependencies]
-anyhow = "1"
+anyhow = { version = "1", optional = true }
 async-trait = "0.1"
-aws-config = "1"
+aws-config = { version = "1", optional = true }
 aws-sdk-dynamodb = "1"
-aws-sdk-s3 = "1"
-aws-sdk-secretsmanager = "1"
-aws-sdk-sfn = "1"
-clap = { version = "4", features = ["derive", "env"] }
+aws-sdk-s3 = { version = "1", optional = true }
+aws-sdk-secretsmanager = { version = "1", optional = true }
+aws-sdk-sfn = { version = "1", optional = true }
+clap = { version = "4", features = ["derive", "env"], optional = true }
 # DuckDB v1.5.4 (crate 1.10504.0) — DuckLake 1.0 with S3 write support.
 # Isolated from the workspace's duckdb v1.4.4 (needed by spur-analyst for DuckPGQ).
-duckdb = { version = "=1.10504.0", features = ["bundled"] }
+duckdb = { version = "=1.10504.0", features = ["bundled"], optional = true }
 lambda_runtime = { version = "1.2.1", optional = true, features = ["concurrency-tokio"] }
+rand = "0.8"
+secrecy = "0.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
-spur-context-source = { path = "../spur-context-source" }
+spur-context-source = { path = "../spur-context-source", optional = true }
+subtle = "2"
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
 uuid = { version = "1", features = ["v4", "serde"] }

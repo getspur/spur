@@ -132,3 +132,65 @@ output "aws_region" {
   description = "AWS region for deployed resources"
   value       = var.aws_region
 }
+
+# Cognito discovery values are intentionally nonsensitive. Do not add
+# aws_cognito_user_pool_client.*.client_secret to this file: generated M2M
+# secrets can remain in Terraform state and must be delivered out of band.
+output "cognito_issuer" {
+  description = "Exact Cognito issuer used by the API Gateway JWT authorizer and Lambda semantic validation, or null when Cognito is disabled."
+  value       = var.cognito_auth_enabled ? local.cognito_issuer : null
+}
+
+output "cognito_domain_url" {
+  description = "Cognito hosted-domain base URL for authorize, token, and logout paths, or null when Cognito is disabled. OIDC discovery and JWKS use cognito_issuer."
+  value       = var.cognito_auth_enabled ? local.cognito_domain_url : null
+}
+
+output "cognito_human_client_id" {
+  description = "Public human authorization-code app-client ID, never a secret value. Null when Cognito is disabled."
+  value       = var.cognito_auth_enabled ? aws_cognito_user_pool_client.human[0].id : null
+}
+
+output "cognito_m2m_client_ids" {
+  description = "Enabled M2M organization app-client IDs keyed by opaque organization key. Generated client secrets are intentionally absent."
+  value = {
+    for key, client in aws_cognito_user_pool_client.m2m : key => client.id
+  }
+}
+
+output "cognito_resource_server_identifier" {
+  description = "Cognito resource-server identifier that prefixes the three custom OAuth scopes, or null when Cognito is disabled."
+  value       = var.cognito_auth_enabled ? var.cognito_resource_server_identifier : null
+}
+
+output "oauth_api_url" {
+  description = "Exact JWT-protected OAuth API URL, or null when Cognito is disabled."
+  value       = var.cognito_auth_enabled ? "${aws_apigatewayv2_api.http.api_endpoint}/mcp/oauth" : null
+}
+
+# API-key outputs deliberately expose discovery metadata only. Raw keys,
+# digests, authorizer context, and Cognito credentials are never outputs.
+output "api_key_auth_enabled" {
+  description = "Whether the additive personal API-key infrastructure is enabled."
+  value       = var.api_key_auth_enabled
+}
+
+output "api_key_table_name" {
+  description = "Dedicated personal API-key DynamoDB table name, or null when API-key auth is disabled."
+  value       = var.api_key_auth_enabled ? aws_dynamodb_table.api_keys[0].name : null
+}
+
+output "api_key_mcp_url" {
+  description = "Exact CUSTOM-authorized personal API-key MCP URL, or null when API-key auth is disabled."
+  value       = var.api_key_auth_enabled ? "${aws_apigatewayv2_api.http.api_endpoint}/mcp/api-key" : null
+}
+
+output "api_key_management_url" {
+  description = "Exact Cognito JWT-protected personal API-key management collection URL, or null when API-key auth is disabled."
+  value       = var.api_key_auth_enabled ? "${aws_apigatewayv2_api.http.api_endpoint}/auth/api-keys" : null
+}
+
+output "api_key_authorizer_function_name" {
+  description = "Lean personal API-key authorizer Lambda function name, or null when API-key auth is disabled."
+  value       = var.api_key_auth_enabled ? aws_lambda_function.api_key_authorizer[0].function_name : null
+}

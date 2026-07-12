@@ -2113,6 +2113,89 @@ async fn external_index_enqueue_dedupe_returns_existing_running_job() -> Result<
 }
 
 #[tokio::test]
+async fn namespaced_cross_owner_dedupe_preserves_owner_and_hides_status() -> Result<()> {
+    let fixture = McpFixture::new("index-auth-owner-dedupe")?;
+    let jobs = FakeJobStore::default();
+    let sfn = StubIndexExecutionStarter::default();
+    let args = json!({
+        "package": PACKAGE,
+        "revision": "main",
+        "source_url": SOURCE_URL,
+        "source_kind": "git",
+    });
+    let human = "cognito:user:opaque-human";
+    let m2m = "cognito:client:organization-a";
+
+    let first = route_index(&args, &fixture.conn, &fixture.catalog, &jobs, &sfn, human).await?;
+    let duplicate = route_index(&args, &fixture.conn, &fixture.catalog, &jobs, &sfn, m2m).await?;
+
+    assert_eq!(duplicate["job_id"], first["job_id"]);
+    assert_eq!(duplicate["status"], "queued");
+    assert!(duplicate.get("caller_id").is_none());
+    assert!(duplicate.get("owner_id").is_none());
+
+    let job_id = first["job_id"].as_str().context("job_id")?;
+    let stored = jobs.lookup_job_sync(job_id).context("stored job")?;
+    assert_eq!(stored.caller_id, human);
+    assert_eq!(stored.owner_id.as_deref(), Some(human));
+    assert_eq!(jobs.owner_queued(&BacklogOwner::caller(human)), 1);
+    assert_eq!(jobs.owner_queued(&BacklogOwner::caller(m2m)), 0);
+
+    let hidden =
+        route_index_status_for_caller(&json!({ "job_id": job_id }), &jobs, None, m2m).await?;
+    let visible =
+        route_index_status_for_caller(&json!({ "job_id": job_id }), &jobs, None, human).await?;
+
+    assert_eq!(hidden, json!({ "status": "not_found" }));
+    assert_eq!(visible["status"], "queued");
+    Ok(())
+}
+
+#[tokio::test]
+async fn personal_api_keys_reuse_one_human_owner_for_rate_dedupe_queue_and_status() -> Result<()> {
+    let fixture = McpFixture::new("index-api-key-owner-reuse")?;
+    let jobs = FakeJobStore::default();
+    let sfn = StubIndexExecutionStarter::default();
+    let owner = "cognito:user:api-key-human";
+    let args = json!({
+        "package": PACKAGE,
+        "revision": "main",
+        "source_url": SOURCE_URL,
+        "source_kind": "git",
+    });
+
+    // The serving Lambda maps every valid personal-key context for this user
+    // to the same owner before entering this existing admission path.
+    let first = route_index(&args, &fixture.conn, &fixture.catalog, &jobs, &sfn, owner).await?;
+    let second = route_index(&args, &fixture.conn, &fixture.catalog, &jobs, &sfn, owner).await?;
+
+    assert_eq!(second["job_id"], first["job_id"]);
+    assert_eq!(jobs.rate_count(owner), 2);
+    assert_eq!(jobs.owner_queued(&BacklogOwner::caller(owner)), 1);
+
+    let job_id = first["job_id"].as_str().context("job_id")?;
+    let stored = jobs.lookup_job_sync(job_id).context("stored job")?;
+    assert_eq!(stored.caller_id, owner);
+    assert_eq!(stored.owner_id.as_deref(), Some(owner));
+    assert_eq!(
+        route_index_status_for_caller(&json!({ "job_id": job_id }), &jobs, None, owner).await?
+            ["status"],
+        "queued"
+    );
+    assert_eq!(
+        route_index_status_for_caller(
+            &json!({ "job_id": job_id }),
+            &jobs,
+            None,
+            "cognito:user:different-human",
+        )
+        .await?,
+        json!({ "status": "not_found" })
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn external_index_rejects_when_caller_rate_limit_is_full() -> Result<()> {
     let fixture = McpFixture::new("index-rate-limit")?;
     let jobs = FakeJobStore::default();

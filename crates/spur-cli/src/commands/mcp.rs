@@ -33,7 +33,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 
 use spur_analyst::mcp::AnalystMcpModule;
-use spur_core::mcp::ContextServiceClient;
+use spur_core::mcp::{ContextServiceAuth, ContextServiceClient};
 use spur_graph::mcp::{GraphMcpDeps, GraphMcpModule};
 use spur_mcp::{serve_stdio_server, RegistryServerHandler, ToolRegistry};
 
@@ -113,9 +113,15 @@ pub async fn run_analyst_server(root: Option<PathBuf>) -> Result<()> {
     Box::pin(with_mcp_worktree_scope(root, serve_stdio_server(handler))).await?
 }
 
-fn context_server_registry(url: String, token: Option<String>) -> Result<ToolRegistry> {
+fn context_server_registry(url: String, auth: ContextServiceAuth) -> Result<ToolRegistry> {
     Ok(ToolRegistry::builder()
-        .with(ContextServiceClient::with_optional_token(url, token))?
+        .with(ContextServiceClient::new(url, auth)?)?
+        .build())
+}
+
+fn legacy_context_server_registry(url: String, token: String) -> Result<ToolRegistry> {
+    Ok(ToolRegistry::builder()
+        .with(ContextServiceClient::with_optional_token(url, Some(token))?)?
         .build())
 }
 
@@ -125,8 +131,15 @@ fn context_server_registry(url: String, token: Option<String>) -> Result<ToolReg
 /// external_code_callers, external_code_callees, external_knowledge_context,
 /// external_index, external_index_status) as a spec-compliant MCP stdio server.
 /// Tools proxy to the cloud spur-context-service Lambda.
-pub async fn run_context_server(url: String, token: Option<String>) -> Result<()> {
-    let registry = context_server_registry(url, token)?;
+pub async fn run_context_server(url: String, auth: ContextServiceAuth) -> Result<()> {
+    let registry = context_server_registry(url, auth)?;
+    let handler = RegistryServerHandler::new(registry, "spur-context-mcp", CONTEXT_INSTRUCTIONS);
+    serve_stdio_server(handler).await
+}
+
+/// Runs the context MCP proxy while preserving the configured legacy route.
+pub async fn run_legacy_context_server(url: String, token: String) -> Result<()> {
+    let registry = legacy_context_server_registry(url, token)?;
     let handler = RegistryServerHandler::new(registry, "spur-context-mcp", CONTEXT_INSTRUCTIONS);
     serve_stdio_server(handler).await
 }
@@ -197,9 +210,11 @@ mod tests {
 
     #[test]
     fn context_server_registry_exposes_external_tools() {
-        let registry =
-            super::context_server_registry("https://context.example.test".to_owned(), None)
-                .expect("context registry should build");
+        let registry = super::context_server_registry(
+            "https://context.example.test".to_owned(),
+            super::ContextServiceAuth::None,
+        )
+        .expect("context registry should build");
         let tools = registry.list_tools();
         let names: std::collections::BTreeSet<_> =
             tools.iter().map(|tool| tool.name.as_str()).collect();
