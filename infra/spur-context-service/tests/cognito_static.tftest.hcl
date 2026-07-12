@@ -138,6 +138,100 @@ run "enabled_staging_creates_cognito_jwt_route_and_nonsecret_lambda_config" {
 
 }
 
+run "google_disabled_keeps_native_human_provider" {
+  command = plan
+
+  variables {
+    cognito_auth_enabled        = true
+    cognito_user_pool_name      = "spur-context-google-disabled"
+    cognito_domain_prefix       = "spur-context-google-disabled"
+    cognito_human_callback_urls = ["http://127.0.0.1:8765/callback"]
+    cognito_human_logout_urls   = ["http://127.0.0.1:8765/logout"]
+  }
+
+  assert {
+    condition = (
+      length(aws_cognito_identity_provider.google) == 0 &&
+      toset(aws_cognito_user_pool_client.human[0].supported_identity_providers) == toset(["COGNITO"])
+    )
+    error_message = "Google-disabled mode must preserve the native-only human provider"
+  }
+}
+
+run "google_enabled_adds_exact_human_provider_contract" {
+  command = plan
+
+  variables {
+    cognito_auth_enabled         = true
+    cognito_user_pool_name       = "spur-context-google-enabled"
+    cognito_domain_prefix        = "spur-context-google-enabled"
+    cognito_human_callback_urls  = ["http://127.0.0.1:8765/callback"]
+    cognito_human_logout_urls    = ["http://127.0.0.1:8765/logout"]
+    google_oauth_enabled         = true
+    google_oauth_client_id       = "675459737622-test.apps.googleusercontent.com"
+    google_oauth_client_secret   = "test-secret-never-used-outside-mock-provider"
+  }
+
+  assert {
+    condition = (
+      length(aws_cognito_identity_provider.google) == 1 &&
+      aws_cognito_identity_provider.google[0].provider_name == "Google" &&
+      aws_cognito_identity_provider.google[0].provider_type == "Google" &&
+      aws_cognito_identity_provider.google[0].provider_details["authorize_scopes"] == "openid email profile"
+    )
+    error_message = "Google-enabled mode must create the exact social identity provider"
+  }
+
+  assert {
+    condition = aws_cognito_identity_provider.google[0].attribute_mapping == {
+      email          = "email"
+      email_verified = "email_verified"
+      name           = "name"
+      picture        = "picture"
+    }
+    error_message = "Google must map only the approved mutable standard attributes"
+  }
+
+  assert {
+    condition     = toset(aws_cognito_user_pool_client.human[0].supported_identity_providers) == toset(["COGNITO", "Google"])
+    error_message = "the human client must offer native Cognito and Google sign-in"
+  }
+}
+
+run "google_enabled_rejects_non_google_client_id" {
+  command = plan
+
+  variables {
+    cognito_auth_enabled        = true
+    cognito_user_pool_name      = "spur-context-google-invalid-id"
+    cognito_domain_prefix       = "spur-context-google-invalid-id"
+    cognito_human_callback_urls = ["http://127.0.0.1:8765/callback"]
+    cognito_human_logout_urls   = ["http://127.0.0.1:8765/logout"]
+    google_oauth_enabled        = true
+    google_oauth_client_id      = "not-a-google-client"
+    google_oauth_client_secret  = "test-secret"
+  }
+
+  expect_failures = [var.google_oauth_client_id]
+}
+
+run "google_enabled_rejects_blank_client_secret" {
+  command = plan
+
+  variables {
+    cognito_auth_enabled        = true
+    cognito_user_pool_name      = "spur-context-google-invalid-secret"
+    cognito_domain_prefix       = "spur-context-google-invalid-secret"
+    cognito_human_callback_urls = ["http://127.0.0.1:8765/callback"]
+    cognito_human_logout_urls   = ["http://127.0.0.1:8765/logout"]
+    google_oauth_enabled        = true
+    google_oauth_client_id      = "675459737622-test.apps.googleusercontent.com"
+    google_oauth_client_secret  = "   "
+  }
+
+  expect_failures = [var.google_oauth_client_secret]
+}
+
 run "enabled_production_keeps_iam_default_alongside_jwt_route" {
   command = plan
 
