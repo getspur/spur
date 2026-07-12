@@ -10,6 +10,7 @@ use sha2::{Digest, Sha256};
 
 pub(crate) const DUCKLAKE_DATA_PATH_ENV: &str = "SPUR_CONTEXT_DUCKLAKE_DATA_PATH";
 pub(crate) const DUCKDB_EXTENSION_DIR_ENV: &str = "SPUR_CONTEXT_DUCKDB_EXTENSION_DIR";
+const POSTGRES_DUCKLAKE_WRITE_LOCK_KEY: i64 = 7_830_668_896_113_191_951;
 const CATALOG_PASSWORD_ENV: &str = "SPUR_CATALOG_PASSWORD";
 const SNAPSHOT_POINTER_RELATIVE_PATH: &str = "gold/catalog-snapshot/current.json";
 const SNAPSHOT_GENERATIONS_RELATIVE_DIR: &str = "gold/catalog-snapshot/generations";
@@ -359,6 +360,21 @@ pub fn connect_frozen_snapshot(snapshot_path: &Path, data_path: &str) -> Result<
 }
 
 pub fn connect_ducklake_with_data_path(catalog_dsn: &str, data_path: &str) -> Result<Connection> {
+    connect_ducklake_with_data_path_inner(catalog_dsn, data_path, false)
+}
+
+pub(crate) fn connect_ducklake_with_data_path_serialized(
+    catalog_dsn: &str,
+    data_path: &str,
+) -> Result<Connection> {
+    connect_ducklake_with_data_path_inner(catalog_dsn, data_path, true)
+}
+
+fn connect_ducklake_with_data_path_inner(
+    catalog_dsn: &str,
+    data_path: &str,
+    serialize_postgres_writes: bool,
+) -> Result<Connection> {
     let catalog_dsn = catalog_dsn_with_env_password(catalog_dsn);
     let conn = Connection::open_in_memory().context("failed to open in-memory DuckDB")?;
     load_ducklake_extensions(&conn, &catalog_dsn)?;
@@ -377,9 +393,31 @@ pub fn connect_ducklake_with_data_path(catalog_dsn: &str, data_path: &str) -> Re
             .context("failed to disable etag checks for remote catalog")?;
     }
 
+    if serialize_postgres_writes && is_postgres_catalog(&catalog_dsn) {
+        acquire_postgres_ducklake_write_lock(&conn, &catalog_dsn)?;
+    }
+
     attach_ducklake(&conn, &catalog_dsn, data_path)?;
 
     Ok(conn)
+}
+
+fn acquire_postgres_ducklake_write_lock(conn: &Connection, catalog_dsn: &str) -> Result<()> {
+    let alias = format!("spur_catalog_lock_{}", uuid::Uuid::new_v4().simple());
+    let dsn = postgres_metadata_dsn(catalog_dsn);
+    conn.execute_batch(&format!(
+        "ATTACH '{}' AS {alias} (TYPE postgres);",
+        escape_sql_literal(&dsn)
+    ))
+    .context("failed to attach Postgres catalog for DuckLake write lock")?;
+    conn.query_row(&postgres_ducklake_write_lock_sql(&alias), [], |_| Ok(()))
+        .context("failed to acquire Postgres DuckLake write lock")
+}
+
+pub(crate) fn postgres_ducklake_write_lock_sql(alias: &str) -> String {
+    format!(
+        "SELECT locked FROM postgres_query('{alias}', 'SELECT TRUE AS locked FROM pg_advisory_lock({POSTGRES_DUCKLAKE_WRITE_LOCK_KEY})')"
+    )
 }
 
 pub fn compact_gold_and_export_snapshot(
@@ -1415,6 +1453,14 @@ mod tests {
 
     fn lock_env() -> MutexGuard<'static, ()> {
         ENV_LOCK.lock().expect("env lock should not be poisoned")
+    }
+
+    #[test]
+    fn postgres_ducklake_write_lock_uses_session_advisory_lock() {
+        let sql = postgres_ducklake_write_lock_sql("metadata");
+
+        assert!(sql.contains("pg_advisory_lock"));
+        assert!(sql.contains("7830668896113191951"));
     }
 
     #[test]
