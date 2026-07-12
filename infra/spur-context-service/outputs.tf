@@ -1,5 +1,5 @@
 output "api_url" {
-  description = "Effective context-service base URL. Uses execute-api until custom-domain activation."
+  description = "Effective context-service base URL. Becomes the stable https://context.getspur.dev client origin after custom-domain activation; uses execute-api only during bootstrap."
   value       = local.context_service_base_url
 }
 
@@ -147,8 +147,18 @@ output "cognito_issuer" {
 }
 
 output "cognito_domain_url" {
-  description = "Cognito hosted-domain base URL for authorize, token, and logout paths, or null when Cognito is disabled. OIDC discovery and JWKS use cognito_issuer."
+  description = "Effective Cognito OAuth-domain base URL. Becomes https://auth.context.getspur.dev after custom-domain activation; OIDC discovery and JWKS continue to use cognito_issuer."
   value       = var.cognito_auth_enabled ? local.cognito_domain_url : null
+}
+
+output "cognito_authorization_endpoint" {
+  description = "Effective Cognito authorization endpoint. Becomes https://auth.context.getspur.dev/oauth2/authorize after custom-domain activation, or null when Cognito is disabled."
+  value       = var.cognito_auth_enabled ? "${local.cognito_domain_url}/oauth2/authorize" : null
+}
+
+output "cognito_token_endpoint" {
+  description = "Effective Cognito token endpoint. Becomes https://auth.context.getspur.dev/oauth2/token after custom-domain activation, or null when Cognito is disabled."
+  value       = var.cognito_auth_enabled ? "${local.cognito_domain_url}/oauth2/token" : null
 }
 
 output "cognito_human_client_id" {

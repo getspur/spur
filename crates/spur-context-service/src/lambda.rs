@@ -1959,8 +1959,26 @@ mod tests {
             .expect("fixture discovery configuration should be valid");
         let document = discovery_document(&config, true)
             .expect("configured Cognito discovery should be available");
+        let document =
+            serde_json::to_value(document).expect("discovery document should serialize");
         assert_eq!(
-            serde_json::to_value(document).expect("discovery document should serialize"),
+            document["issuer"],
+            "https://cognito-idp.ap-southeast-5.amazonaws.com/ap-southeast-5_fixture"
+        );
+        assert_eq!(
+            document["authorization_endpoint"],
+            "https://auth.context.getspur.dev/oauth2/authorize"
+        );
+        assert_eq!(
+            document["token_endpoint"],
+            "https://auth.context.getspur.dev/oauth2/token"
+        );
+        assert_eq!(
+            document["api_key_mcp_url"],
+            "https://context.getspur.dev/mcp/api-key"
+        );
+        assert_eq!(
+            document,
             fixture["discovery_document"]
         );
     }

@@ -442,7 +442,7 @@ impl Default for TelegramBotConfig {
 }
 
 /// Cloud context-service endpoint for external package code tools.
-/// Built-in default points to the production API Gateway endpoint.
+/// Built-in default points to the stable production custom domain.
 /// Override in `[context_service]` in `.spur/config.toml`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -491,7 +491,7 @@ impl std::fmt::Debug for ContextServiceConfig {
 impl Default for ContextServiceConfig {
     fn default() -> Self {
         Self {
-            url: "https://zd3c3186v6.execute-api.ap-southeast-5.amazonaws.com".to_owned(),
+            url: "https://context.getspur.dev".to_owned(),
             auth_mode: ContextServiceAuthMode::None,
             profile: "default".to_owned(),
             public_id_hint: None,
@@ -1505,10 +1505,7 @@ level = "warn,spur_core::orchestrator=info"
     #[test]
     fn context_service_defaults_to_production_endpoint() {
         let cfg = SpurConfig::default();
-        assert_eq!(
-            cfg.context_service.url,
-            "https://zd3c3186v6.execute-api.ap-southeast-5.amazonaws.com"
-        );
+        assert_eq!(cfg.context_service.url, "https://context.getspur.dev");
         assert_eq!(cfg.context_service.token, None);
 
         let parsed: SpurConfig = toml::from_str("").expect("empty config valid");
