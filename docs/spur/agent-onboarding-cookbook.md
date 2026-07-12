@@ -124,6 +124,42 @@ description = "Compact conversation history"
 
 Zero Rust. `/compact` appears in the popup immediately — submitting it sends `"/compact"` as a plain text prompt to codex.
 
+## Worked example: Grok Build CLI
+
+```toml
+[[agents.entries]]
+name = "grok"
+command = "grok"
+args = ["--no-auto-update", "agent", "stdio"]
+# Optional spawn-time model pin (insert before `stdio`):
+# args = ["--no-auto-update", "agent", "--model", "grok-build", "stdio"]
+transport = "acp"
+kind = "grok"
+role = "both"
+cost_tier = "medium"
+
+[agents.entries.display]
+handle = "grok"
+
+[agents.entries.commands]
+dispatch = "prompt_text"
+```
+
+**Important — `/model` is not automatic.** SPUR synthesizes mid-session `/model`
+and `/effort` only when the agent returns matching `configOptions` on
+`session/new`. Grok’s own TUI has local `/model` / `/session-info` commands;
+those are **not** the ACP surface. Before assuming model switching works under
+SPUR, run:
+
+```bash
+python3 scripts/probe_grok_acp.py --always-approve
+```
+
+See `docs/superpowers/specs/2026-07-13-grok-acp-capability-probe-results.md`.
+Do not add a static `[[commands.static]] name = "model"` unless you have
+verified Grok honors `/model …` as prompt text — a static entry does not call
+`session/set_config_option`.
+
 ## Worked example: a hypothetical `my-agent`
 
 Suppose `my-agent` is a Python CLI that accepts a prompt on stdin and emits text on stdout. It has no slash-command machinery, no ACP support.
@@ -168,6 +204,7 @@ Once your config works, contribute it back so other spur users get it via `spur 
 | `/command` does nothing | `dispatch` mismatch — check your agent expects prompt_text or vendor_exec. |
 | Agent errors "unknown flag: `--acp`" | Wrong `args` for your installed version — check `--help` and update. |
 | `--trust-all-tools` (or similar bypass flag) seems to be ignored | You probably forgot to set `skip = true` under `[permissions]`. Declaring bypass args isn't enough — spur requires explicit opt-in. |
+| No `/model` or `/effort` on a Grok (or other) ACP session | Agent did not advertise select `configOptions` for model / thought_level on `session/new`. Probe with `scripts/probe_grok_acp.py` (or the agent-specific probe); pin model at spawn until the agent advertises options. |
 
 ## Further reading
 
