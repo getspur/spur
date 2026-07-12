@@ -736,6 +736,31 @@ mod tests {
     }
 
     #[test]
+    fn augment_fails_closed_on_yaml_forms_the_line_rewrite_cannot_preserve() {
+        // Block lists, inline comments, quoted scalars, and flow lists all
+        // survive AgentProfile::parse but cannot be rewritten as a plain
+        // comma list without corrupting the YAML (or commenting out the
+        // injected names). Augmentation must leave them byte-identical.
+        for frontmatter_tools in [
+            "tools:\n  - Read\n  - Edit",
+            "tools: Read, Edit # keep",
+            "tools: \"Read, Edit\"",
+            "tools: [Read, Edit]",
+        ] {
+            let raw = format!(
+                "---\nname: code-reviewer\ndescription: Reviews diffs\n{frontmatter_tools}\n---\nYou review code.\n"
+            );
+            let original = crate::agent_profiles::AgentProfile::parse("code-reviewer", &raw)
+                .expect("profile should parse");
+            let augmented = augment_tools_allowlist(&original, &worker_mcp_extras());
+            assert_eq!(
+                augmented, original,
+                "unsupported tools form must stay untouched: {frontmatter_tools:?}"
+            );
+        }
+    }
+
+    #[test]
     fn augment_leaves_profiles_without_tools_line_unchanged() {
         let original = profile();
         let augmented = augment_tools_allowlist(&original, &worker_mcp_extras());
