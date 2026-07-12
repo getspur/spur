@@ -1,42 +1,147 @@
 use async_trait::async_trait;
 use rmcp::model::{ErrorCode, ErrorData as McpError};
+use secrecy::{ExposeSecret as _, SecretString};
 use serde_json::{json, Value};
 use spur_mcp::{ToolCallContext, ToolDefinition, ToolModule, ToolResponse};
+use std::fmt;
+use std::net::IpAddr;
 use std::time::Duration;
 
 const DEFAULT_SOURCE: &str = "registry:crates-io";
 const DEFAULT_INDEX_SOURCE: &str = "git:custom";
 const KNOWLEDGE_QUERY_VECTOR_DIMENSIONS: usize = 768;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const MAX_REMOTE_ERROR_CHARS: usize = 512;
+
+/// Runtime authentication for one context-service proxy.
+///
+/// Secret-bearing variants intentionally redact their debug representation.
+pub enum ContextServiceAuth {
+    /// Send no authentication header and preserve the configured legacy URL.
+    None,
+    /// Send a bearer token to the exact OAuth MCP route.
+    OAuthBearer(SecretString),
+    /// Send a personal key to the exact API-key MCP route.
+    ApiKey(SecretString),
+}
+
+impl fmt::Debug for ContextServiceAuth {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::None => formatter.write_str("ContextServiceAuth::None"),
+            Self::OAuthBearer(_) => {
+                formatter.write_str("ContextServiceAuth::OAuthBearer([REDACTED])")
+            }
+            Self::ApiKey(_) => formatter.write_str("ContextServiceAuth::ApiKey([REDACTED])"),
+        }
+    }
+}
+
+/// A validated origin suitable for requests carrying context-service credentials.
+///
+/// Production origins must use HTTPS. Numeric loopback hosts may use HTTP for
+/// isolated development and tests. User information, query strings, fragments,
+/// and non-root paths are rejected so authenticated route selection stays exact.
+#[derive(Clone, Debug)]
+pub struct AuthenticatedServiceOrigin(reqwest::Url);
+
+impl AuthenticatedServiceOrigin {
+    /// Validates an authenticated context-service origin.
+    pub fn parse(value: &str) -> Result<Self, ContextServiceClientError> {
+        let url = parse_authenticated_endpoint(value)?;
+        if url.query().is_some() || url.fragment().is_some() || !matches!(url.path(), "" | "/") {
+            return Err(ContextServiceClientError::InvalidAuthenticatedOrigin);
+        }
+        Ok(Self(url))
+    }
+
+    fn endpoint(&self, route: &str) -> Result<String, ContextServiceClientError> {
+        self.0
+            .join(route.trim_start_matches('/'))
+            .map(|url| url.to_string())
+            .map_err(|_error| ContextServiceClientError::InvalidAuthenticatedOrigin)
+    }
+}
+
+/// Construction failure for an authenticated context-service proxy.
+#[derive(Debug, thiserror::Error)]
+pub enum ContextServiceClientError {
+    /// The supplied authenticated URL was not a safe service origin.
+    #[error("invalid authenticated context-service origin")]
+    InvalidAuthenticatedOrigin,
+    /// The hardened HTTP client could not be built.
+    #[error("could not build authenticated context-service client")]
+    HttpClient(#[source] reqwest::Error),
+}
 
 pub struct ContextServiceClient {
     client: reqwest::Client,
-    base_url: String,
-    bearer_token: Option<String>,
+    endpoint: String,
+    auth: ContextServiceAuth,
+}
+
+impl fmt::Debug for ContextServiceClient {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ContextServiceClient")
+            .field("endpoint", &"[REDACTED URL]")
+            .field("auth", &self.auth)
+            .finish_non_exhaustive()
+    }
 }
 
 impl ContextServiceClient {
-    pub fn new(base_url: impl Into<String>, bearer_token: impl Into<String>) -> Self {
-        Self::with_optional_token(base_url, Some(bearer_token.into()))
+    /// Creates a proxy with one explicit, mutually exclusive auth mode.
+    pub fn new(
+        base_url: impl Into<String>,
+        auth: ContextServiceAuth,
+    ) -> Result<Self, ContextServiceClientError> {
+        let base_url = base_url.into();
+        match auth {
+            ContextServiceAuth::None => Ok(Self::legacy(base_url, ContextServiceAuth::None)),
+            auth @ (ContextServiceAuth::OAuthBearer(_) | ContextServiceAuth::ApiKey(_)) => {
+                let origin = AuthenticatedServiceOrigin::parse(&base_url)?;
+                let route = match auth {
+                    ContextServiceAuth::OAuthBearer(_) => "mcp/oauth",
+                    ContextServiceAuth::ApiKey(_) => "mcp/api-key",
+                    ContextServiceAuth::None => unreachable!("authenticated variants matched"),
+                };
+                let client = hardened_http_client()?;
+                Ok(Self {
+                    client,
+                    endpoint: origin.endpoint(route)?,
+                    auth,
+                })
+            }
+        }
     }
 
-    pub fn with_optional_token(base_url: impl Into<String>, bearer_token: Option<String>) -> Self {
+    /// Compatibility constructor for legacy optional bearer configuration.
+    pub fn with_optional_token(
+        base_url: impl Into<String>,
+        bearer_token: Option<String>,
+    ) -> Result<Self, ContextServiceClientError> {
+        let base_url = base_url.into();
+        let Some(token) = normalize_secret(bearer_token) else {
+            return Ok(Self::legacy(base_url, ContextServiceAuth::None));
+        };
+        let endpoint = parse_authenticated_endpoint(&base_url)?.to_string();
+        Ok(Self {
+            client: hardened_http_client()?,
+            endpoint,
+            auth: ContextServiceAuth::OAuthBearer(token),
+        })
+    }
+
+    fn legacy(base_url: String, auth: ContextServiceAuth) -> Self {
         let client = reqwest::Client::builder()
             .timeout(REQUEST_TIMEOUT)
             .build()
             .expect("reqwest client with static timeout configuration should build");
-        Self::with_client(client, base_url, bearer_token)
-    }
-
-    fn with_client(
-        client: reqwest::Client,
-        base_url: impl Into<String>,
-        bearer_token: Option<String>,
-    ) -> Self {
         Self {
             client,
-            base_url: base_url.into(),
-            bearer_token: normalize_bearer_token(bearer_token),
+            endpoint: base_url,
+            auth,
         }
     }
 
@@ -47,14 +152,43 @@ impl ContextServiceClient {
         let bearer_token = std::env::var("SPUR_CONTEXT_SERVICE_TOKEN")
             .ok()
             .filter(|value| !value.trim().is_empty());
-        Some(Self::with_optional_token(base_url, bearer_token))
+        Self::with_optional_token(base_url, bearer_token).ok()
     }
 }
 
-fn normalize_bearer_token(bearer_token: Option<String>) -> Option<String> {
-    bearer_token
+fn parse_authenticated_endpoint(value: &str) -> Result<reqwest::Url, ContextServiceClientError> {
+    let url = reqwest::Url::parse(value)
+        .map_err(|_error| ContextServiceClientError::InvalidAuthenticatedOrigin)?;
+    let loopback_http = url.scheme() == "http"
+        && url
+            .host_str()
+            .and_then(|host| host.parse::<IpAddr>().ok())
+            .is_some_and(|host| host.is_loopback());
+    if (url.scheme() != "https" && !loopback_http)
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(ContextServiceClientError::InvalidAuthenticatedOrigin);
+    }
+    Ok(url)
+}
+
+fn hardened_http_client() -> Result<reqwest::Client, ContextServiceClientError> {
+    reqwest::Client::builder()
+        .timeout(REQUEST_TIMEOUT)
+        .redirect(reqwest::redirect::Policy::none())
+        .no_proxy()
+        .build()
+        .map_err(ContextServiceClientError::HttpClient)
+}
+
+fn normalize_secret(value: Option<String>) -> Option<SecretString> {
+    value
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty())
+        .map(SecretString::from)
 }
 
 #[async_trait]
@@ -71,24 +205,26 @@ impl ToolModule for ContextServiceClient {
     ) -> Result<ToolResponse, McpError> {
         let mut request = self
             .client
-            .post(&self.base_url)
+            .post(&self.endpoint)
             .json(&json!({ "tool": name, "args": args }));
-        if let Some(bearer_token) = &self.bearer_token {
-            request = request.bearer_auth(bearer_token);
+        match &self.auth {
+            ContextServiceAuth::None => {}
+            ContextServiceAuth::OAuthBearer(token) => {
+                request = request.bearer_auth(token.expose_secret());
+            }
+            ContextServiceAuth::ApiKey(key) => {
+                request = request.header("X-SPUR-API-Key", key.expose_secret());
+            }
         }
 
-        let response = request.send().await.map_err(|error| {
-            McpError::internal_error(format!("context service request failed: {error}"), None)
+        let response = request.send().await.map_err(|_error| {
+            McpError::internal_error("context service request failed".to_owned(), None)
         })?;
 
         let status = response.status();
         if !status.is_success() {
-            let body = response
-                .text()
-                .await
-                .unwrap_or_else(|error| format!("<failed to read response body: {error}>"));
             return Err(McpError::internal_error(
-                format!("context service HTTP {status}: {body}"),
+                format!("context service HTTP {status}"),
                 None,
             ));
         }
@@ -100,7 +236,7 @@ impl ToolModule for ContextServiceClient {
             )
         })?;
 
-        if let Some(error) = lambda_error_envelope(&value) {
+        if let Some(error) = lambda_error_envelope(&value, &self.auth) {
             return Err(error);
         }
 
@@ -108,11 +244,21 @@ impl ToolModule for ContextServiceClient {
     }
 }
 
-fn lambda_error_envelope(value: &Value) -> Option<McpError> {
+fn lambda_error_envelope(value: &Value, auth: &ContextServiceAuth) -> Option<McpError> {
     let error = value.get("error")?;
     let code = i32::try_from(error.get("code")?.as_i64()?).ok()?;
-    let message = error.get("message")?.as_str()?.to_owned();
+    let message = redact_and_bound(error.get("message")?.as_str()?, auth);
     Some(McpError::new(ErrorCode(code), message, None))
+}
+
+fn redact_and_bound(message: &str, auth: &ContextServiceAuth) -> String {
+    let redacted = match auth {
+        ContextServiceAuth::None => message.to_owned(),
+        ContextServiceAuth::OAuthBearer(secret) | ContextServiceAuth::ApiKey(secret) => {
+            message.replace(secret.expose_secret(), "[REDACTED]")
+        }
+    };
+    redacted.chars().take(MAX_REMOTE_ERROR_CHARS).collect()
 }
 
 pub(crate) fn tool_definitions() -> Vec<ToolDefinition> {
@@ -424,10 +570,10 @@ fn external_index_status_def() -> ToolDefinition {
 #[allow(unsafe_code)] // Env mutation is process-global and requires an unsafe block on current Rust.
 mod tests {
     use super::*;
-    use axum::extract::State;
+    use axum::extract::{OriginalUri, State};
     use axum::http::header::AUTHORIZATION;
-    use axum::http::HeaderMap;
-    use axum::routing::post;
+    use axum::http::{HeaderMap, StatusCode};
+    use axum::routing::{any, post};
     use axum::{Json, Router};
     use serde_json::json;
     use std::sync::{Arc, Mutex};
@@ -444,7 +590,197 @@ mod tests {
     #[derive(Debug)]
     struct ObservedRequest {
         authorization: Option<String>,
+        api_key: Option<String>,
+        path: String,
         body: Value,
+    }
+
+    #[test]
+    fn authenticated_origin_rejects_insecure_or_non_root_urls() {
+        for invalid in [
+            "http://context.example.test",
+            "https://user@example.test",
+            "https://example.test/service",
+            "https://example.test/?region=test",
+            "https://example.test/#fragment",
+        ] {
+            assert!(
+                ContextServiceClient::new(
+                    invalid,
+                    ContextServiceAuth::ApiKey("secret".to_owned().into()),
+                )
+                .is_err(),
+                "authenticated origin should reject {invalid}"
+            );
+        }
+        assert!(
+            ContextServiceClient::with_optional_token(
+                "http://context.example.test/custom-route",
+                Some("legacy-secret".to_owned()),
+            )
+            .is_err(),
+            "legacy bearer endpoints must also reject non-loopback HTTP"
+        );
+    }
+
+    #[tokio::test]
+    async fn authenticated_client_does_not_follow_redirects() {
+        let (target_tx, target_rx) = oneshot::channel();
+        let target_sender = Arc::new(Mutex::new(Some(target_tx)));
+        let target_app = Router::new().fallback(any({
+            let target_sender = Arc::clone(&target_sender);
+            move || {
+                let target_sender = Arc::clone(&target_sender);
+                async move {
+                    if let Some(sender) = target_sender
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .take()
+                    {
+                        let _ = sender.send(());
+                    }
+                    StatusCode::OK
+                }
+            }
+        }));
+        let target_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind redirect target");
+        let target_addr = target_listener.local_addr().expect("redirect target addr");
+        tokio::spawn(async move {
+            axum::serve(target_listener, target_app)
+                .await
+                .expect("serve redirect target");
+        });
+
+        let redirect_app = Router::new().route(
+            "/mcp/api-key",
+            post(move || async move {
+                (
+                    StatusCode::TEMPORARY_REDIRECT,
+                    [("location", format!("http://{target_addr}/captured"))],
+                )
+            }),
+        );
+        let redirect_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind redirect service");
+        let redirect_addr = redirect_listener.local_addr().expect("redirect addr");
+        tokio::spawn(async move {
+            axum::serve(redirect_listener, redirect_app)
+                .await
+                .expect("serve redirect service");
+        });
+
+        let client = ContextServiceClient::new(
+            format!("http://{redirect_addr}"),
+            ContextServiceAuth::ApiKey("api-key-secret".to_owned().into()),
+        )
+        .expect("loopback HTTP is allowed for isolated tests");
+        let ctx = ToolCallContext::new(
+            spur_mcp::ServerKind::Brain,
+            spur_mcp::ToolAuthority::Brain,
+            None,
+            None,
+        );
+
+        let error = match client
+            .call(ctx, "external_code_search", json!({ "query": "serde" }))
+            .await
+        {
+            Ok(_) => panic!("redirect response should not be followed"),
+            Err(error) => error,
+        };
+
+        assert!(error.message.contains("HTTP 307"));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), target_rx)
+                .await
+                .is_err(),
+            "redirect target must not receive an authenticated request"
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_bearer_does_not_follow_redirects_and_keeps_configured_path() {
+        let (target_tx, target_rx) = oneshot::channel();
+        let target_sender = Arc::new(Mutex::new(Some(target_tx)));
+        let target_app = Router::new().fallback(any({
+            let target_sender = Arc::clone(&target_sender);
+            move || {
+                let target_sender = Arc::clone(&target_sender);
+                async move {
+                    if let Some(sender) = target_sender
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .take()
+                    {
+                        let _ = sender.send(());
+                    }
+                    StatusCode::OK
+                }
+            }
+        }));
+        let target_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind legacy redirect target");
+        let target_addr = target_listener
+            .local_addr()
+            .expect("legacy redirect target addr");
+        tokio::spawn(async move {
+            axum::serve(target_listener, target_app)
+                .await
+                .expect("serve legacy redirect target");
+        });
+
+        let redirect_app = Router::new().route(
+            "/custom-route",
+            post(move || async move {
+                (
+                    StatusCode::TEMPORARY_REDIRECT,
+                    [("location", format!("http://{target_addr}/captured"))],
+                )
+            }),
+        );
+        let redirect_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind legacy redirect service");
+        let redirect_addr = redirect_listener
+            .local_addr()
+            .expect("legacy redirect addr");
+        tokio::spawn(async move {
+            axum::serve(redirect_listener, redirect_app)
+                .await
+                .expect("serve legacy redirect service");
+        });
+
+        let client = ContextServiceClient::with_optional_token(
+            format!("http://{redirect_addr}/custom-route"),
+            Some("legacy-secret".to_owned()),
+        )
+        .expect("loopback legacy bearer endpoint");
+        let ctx = ToolCallContext::new(
+            spur_mcp::ServerKind::Brain,
+            spur_mcp::ToolAuthority::Brain,
+            None,
+            None,
+        );
+
+        let error = match client
+            .call(ctx, "external_code_search", json!({ "query": "serde" }))
+            .await
+        {
+            Ok(_) => panic!("legacy bearer redirect should not be followed"),
+            Err(error) => error,
+        };
+
+        assert!(error.message.contains("HTTP 307"));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), target_rx)
+                .await
+                .is_err(),
+            "legacy redirect target must not receive a bearer request"
+        );
     }
 
     #[tokio::test]
@@ -455,7 +791,11 @@ mod tests {
             ]
         }))
         .await;
-        let client = ContextServiceClient::new(base_url, "secret-token");
+        let client = ContextServiceClient::new(
+            base_url,
+            ContextServiceAuth::OAuthBearer("secret-token".to_owned().into()),
+        )
+        .expect("loopback authenticated origin");
         let request_id = json!("req-1");
         let ctx = ToolCallContext::new(
             spur_mcp::ServerKind::Brain,
@@ -481,6 +821,8 @@ mod tests {
             observed.authorization.as_deref(),
             Some("Bearer secret-token")
         );
+        assert_eq!(observed.api_key, None);
+        assert_eq!(observed.path, "/mcp/oauth");
         assert_eq!(
             observed.body,
             json!({
@@ -491,12 +833,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn api_key_uses_exact_route_and_header_without_bearer() {
+        let (base_url, observed) = spawn_mock_service(json!({ "matches": [] })).await;
+        let client = ContextServiceClient::new(
+            base_url,
+            ContextServiceAuth::ApiKey("spur_test_public_secret".to_owned().into()),
+        )
+        .expect("loopback authenticated origin");
+        let ctx = ToolCallContext::new(
+            spur_mcp::ServerKind::Brain,
+            spur_mcp::ToolAuthority::Brain,
+            None,
+            None,
+        );
+
+        client
+            .call(
+                ctx,
+                "external_code_search",
+                json!({ "query": "Deserialize" }),
+            )
+            .await
+            .expect("API-key request should succeed");
+
+        let observed = observed.await.expect("mock service should receive request");
+        assert_eq!(observed.authorization, None);
+        assert_eq!(observed.api_key.as_deref(), Some("spur_test_public_secret"));
+        assert_eq!(observed.path, "/mcp/api-key");
+    }
+
+    #[tokio::test]
     async fn omits_authorization_header_when_token_is_not_configured() {
         let (base_url, observed) = spawn_mock_service(json!({
             "matches": []
         }))
         .await;
-        let client = ContextServiceClient::with_optional_token(base_url, None);
+        let client = ContextServiceClient::new(base_url, ContextServiceAuth::None)
+            .expect("legacy anonymous client");
         let ctx = ToolCallContext::new(
             spur_mcp::ServerKind::Brain,
             spur_mcp::ToolAuthority::Brain,
@@ -515,6 +888,8 @@ mod tests {
 
         let observed = observed.await.expect("mock service should receive request");
         assert_eq!(observed.authorization, None);
+        assert_eq!(observed.api_key, None);
+        assert_eq!(observed.path, "/");
     }
 
     #[tokio::test]
@@ -526,7 +901,11 @@ mod tests {
             }
         }))
         .await;
-        let client = ContextServiceClient::new(base_url, "secret-token");
+        let client = ContextServiceClient::new(
+            base_url,
+            ContextServiceAuth::OAuthBearer("secret-token".to_owned().into()),
+        )
+        .expect("loopback authenticated origin");
         let ctx = ToolCallContext::new(
             spur_mcp::ServerKind::Brain,
             spur_mcp::ToolAuthority::Brain,
@@ -550,6 +929,76 @@ mod tests {
         assert_eq!(err.message, "field 'package' is required");
     }
 
+    #[tokio::test]
+    async fn legacy_optional_bearer_preserves_configured_route() {
+        let (base_url, observed) = spawn_mock_service(json!({ "matches": [] })).await;
+        let client =
+            ContextServiceClient::with_optional_token(base_url, Some("legacy-secret".to_owned()))
+                .expect("loopback legacy bearer endpoint");
+        let ctx = ToolCallContext::new(
+            spur_mcp::ServerKind::Brain,
+            spur_mcp::ToolAuthority::Brain,
+            None,
+            None,
+        );
+
+        client
+            .call(ctx, "external_code_search", json!({ "query": "serde" }))
+            .await
+            .expect("legacy request should succeed");
+
+        let observed = observed.await.expect("mock service should receive request");
+        assert_eq!(observed.path, "/");
+        assert_eq!(
+            observed.authorization.as_deref(),
+            Some("Bearer legacy-secret")
+        );
+    }
+
+    #[tokio::test]
+    async fn remote_errors_and_debug_output_redact_credentials() {
+        let secret = "oauth-secret-value";
+        let (base_url, _observed) = spawn_mock_service(json!({
+            "error": {
+                "code": -32603,
+                "message": format!("{secret} {}", "x".repeat(700))
+            }
+        }))
+        .await;
+        let client = ContextServiceClient::new(
+            base_url,
+            ContextServiceAuth::OAuthBearer(secret.to_owned().into()),
+        )
+        .expect("loopback authenticated origin");
+        assert!(!format!("{client:?}").contains(secret));
+        let ctx = ToolCallContext::new(
+            spur_mcp::ServerKind::Brain,
+            spur_mcp::ToolAuthority::Brain,
+            None,
+            None,
+        );
+
+        let error = match client
+            .call(ctx, "external_code_search", json!({ "query": "serde" }))
+            .await
+        {
+            Ok(_) => panic!("remote error envelope should fail"),
+            Err(error) => error,
+        };
+        assert!(!error.message.contains(secret));
+        assert!(error.message.chars().count() <= MAX_REMOTE_ERROR_CHARS);
+    }
+
+    #[test]
+    fn debug_output_does_not_expose_url_userinfo() {
+        let client = ContextServiceClient::new(
+            "https://user:url-secret@example.test",
+            ContextServiceAuth::None,
+        )
+        .expect("legacy anonymous client");
+        assert!(!format!("{client:?}").contains("url-secret"));
+    }
+
     #[test]
     fn from_env_returns_none_when_unconfigured() {
         let _guard = ENV_LOCK
@@ -558,6 +1007,8 @@ mod tests {
         let prev_url = std::env::var_os("SPUR_CONTEXT_SERVICE_URL");
         let prev_token = std::env::var_os("SPUR_CONTEXT_SERVICE_TOKEN");
 
+        // SAFETY: `ENV_LOCK` serializes these process-global mutations with all
+        // environment-mutating tests in this module.
         unsafe {
             std::env::remove_var("SPUR_CONTEXT_SERVICE_URL");
             std::env::remove_var("SPUR_CONTEXT_SERVICE_TOKEN");
@@ -577,6 +1028,8 @@ mod tests {
         let prev_url = std::env::var_os("SPUR_CONTEXT_SERVICE_URL");
         let prev_token = std::env::var_os("SPUR_CONTEXT_SERVICE_TOKEN");
 
+        // SAFETY: `ENV_LOCK` serializes these process-global mutations with all
+        // environment-mutating tests in this module.
         unsafe {
             std::env::set_var("SPUR_CONTEXT_SERVICE_URL", "https://context.example.test");
             std::env::remove_var("SPUR_CONTEXT_SERVICE_TOKEN");
@@ -596,6 +1049,8 @@ mod tests {
         };
         let app = Router::new()
             .route("/", post(mock_handler))
+            .route("/mcp/oauth", post(mock_handler))
+            .route("/mcp/api-key", post(mock_handler))
             .with_state(state);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -611,11 +1066,16 @@ mod tests {
 
     async fn mock_handler(
         State(state): State<MockService>,
+        OriginalUri(uri): OriginalUri,
         headers: HeaderMap,
         Json(body): Json<Value>,
     ) -> Json<Value> {
         let authorization = headers
             .get(AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
+        let api_key = headers
+            .get("x-spur-api-key")
             .and_then(|value| value.to_str().ok())
             .map(str::to_owned);
         if let Some(sender) = state
@@ -626,6 +1086,8 @@ mod tests {
         {
             let _ = sender.send(ObservedRequest {
                 authorization,
+                api_key,
+                path: uri.path().to_owned(),
                 body,
             });
         }
@@ -634,7 +1096,9 @@ mod tests {
 
     fn restore_env(name: &str, value: Option<std::ffi::OsString>) {
         match value {
+            // SAFETY: callers hold `ENV_LOCK` until restoration completes.
             Some(value) => unsafe { std::env::set_var(name, value) },
+            // SAFETY: callers hold `ENV_LOCK` until restoration completes.
             None => unsafe { std::env::remove_var(name) },
         }
     }

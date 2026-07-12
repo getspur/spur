@@ -1,0 +1,67 @@
+{
+  "route_cases": [
+    { "method": "GET", "path": "/.well-known/spur-context-service", "expected": "discovery" },
+    { "method": "POST", "path": "/mcp/api-key", "expected": "api_key_mcp" },
+    { "method": "POST", "path": "/auth/api-keys", "expected": "api_key_create" },
+    { "method": "GET", "path": "/auth/api-keys", "expected": "api_key_list" },
+    { "method": "DELETE", "path": "/auth/api-keys/aaaaaaaaaaaaaaaaaaaaaaaaaa", "expected": "api_key_revoke" },
+    { "method": "POST", "path": "/mcp/oauth", "expected": "oauth" },
+    { "method": "GET", "path": "/mcp/api-key", "expected": "reserved_unavailable" },
+    { "method": "POST", "path": "/mcp/api-key/", "expected": "reserved_unavailable" },
+    { "method": "POST", "path": "/mcp/api-key/child", "expected": "reserved_unavailable" },
+    { "method": null, "path": "/mcp/api-key", "expected": "reserved_unavailable" },
+    { "method": null, "path": "/mcp/api-key/child", "expected": "reserved_unavailable" },
+    { "method": "POST", "path": "/mcp/api-key-legacy", "expected": "legacy" },
+    { "method": "POST", "path": "/.well-known/spur-context-service", "expected": "reserved_unavailable" },
+    { "method": "GET", "path": "/.well-known/spur-context-service/", "expected": "reserved_unavailable" },
+    { "method": "GET", "path": "/.well-known/spur-context-service/child", "expected": "reserved_unavailable" },
+    { "method": null, "path": "/.well-known/spur-context-service", "expected": "reserved_unavailable" },
+    { "method": "GET", "path": "/.well-known/spur-context-service-v2", "expected": "legacy" },
+    { "method": "DELETE", "path": "/auth/api-keys", "expected": "reserved_unavailable" },
+    { "method": "GET", "path": "/auth/api-keys/aaaaaaaaaaaaaaaaaaaaaaaaaa", "expected": "reserved_unavailable" },
+    { "method": "DELETE", "path": "/auth/api-keys/", "expected": "reserved_unavailable" },
+    { "method": "DELETE", "path": "/auth/api-keys/aaaaaaaaaaaaaaaaaaaaaaaaaa/more", "expected": "reserved_unavailable" },
+    { "method": null, "path": "/auth/api-keys", "expected": "reserved_unavailable" },
+    { "method": "POST", "path": "/auth/api-keys-legacy", "expected": "legacy" },
+    { "method": "POST", "path": "/mcp", "expected": "legacy" }
+  ],
+  "discovery_config": {
+    "issuer": "https://issuer.example/pool",
+    "human_client_id": "human-client",
+    "authorization_endpoint": "https://auth.example/oauth2/authorize",
+    "token_endpoint": "https://auth.example/oauth2/token",
+    "service_base_url": "https://context.example"
+  },
+  "discovery_document": {
+    "schema_version": 1,
+    "issuer": "https://issuer.example/pool",
+    "human_client_id": "human-client",
+    "human_callback_url": "http://127.0.0.1:8765/callback",
+    "authorization_endpoint": "https://auth.example/oauth2/authorize",
+    "token_endpoint": "https://auth.example/oauth2/token",
+    "supported_scopes": [
+      "urn:spur:context-service/external.index",
+      "urn:spur:context-service/external.read",
+      "urn:spur:context-service/external.status",
+      "urn:spur:context-service/keys.manage"
+    ],
+    "api_key_auth_enabled": true,
+    "api_key_mcp_url": "https://context.example/mcp/api-key",
+    "api_key_management_url": "https://context.example/auth/api-keys"
+  },
+  "api_key_context": {
+    "auth_context_version": 1,
+    "auth_kind": "api_key",
+    "owner_id": "cognito:user:fixture-human",
+    "key_id": "aaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "scopes": "external.read external.index external.status"
+  },
+  "human_management_claims": {
+    "iss": "https://issuer.example/pool",
+    "token_use": "access",
+    "client_id": "human-client",
+    "sub": "fixture-human",
+    "exp": "2000000000",
+    "scope": "urn:spur:context-service/keys.manage"
+  }
+}
