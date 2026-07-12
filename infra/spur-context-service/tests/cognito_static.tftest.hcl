@@ -162,14 +162,14 @@ run "google_enabled_adds_exact_human_provider_contract" {
   command = plan
 
   variables {
-    cognito_auth_enabled         = true
-    cognito_user_pool_name       = "spur-context-google-enabled"
-    cognito_domain_prefix        = "spur-context-google-enabled"
-    cognito_human_callback_urls  = ["http://127.0.0.1:8765/callback"]
-    cognito_human_logout_urls    = ["http://127.0.0.1:8765/logout"]
-    google_oauth_enabled         = true
-    google_oauth_client_id       = "675459737622-test.apps.googleusercontent.com"
-    google_oauth_client_secret   = "test-secret-never-used-outside-mock-provider"
+    cognito_auth_enabled        = true
+    cognito_user_pool_name      = "spur-context-google-enabled"
+    cognito_domain_prefix       = "spur-context-google-enabled"
+    cognito_human_callback_urls = ["http://127.0.0.1:8765/callback"]
+    cognito_human_logout_urls   = ["http://127.0.0.1:8765/logout"]
+    google_oauth_enabled        = true
+    google_oauth_client_id      = "675459737622-test.apps.googleusercontent.com"
+    google_oauth_client_secret  = "test-secret-never-used-outside-mock-provider"
   }
 
   assert {
@@ -183,12 +183,12 @@ run "google_enabled_adds_exact_human_provider_contract" {
   }
 
   assert {
-    condition = aws_cognito_identity_provider.google[0].attribute_mapping == {
+    condition = aws_cognito_identity_provider.google[0].attribute_mapping == tomap({
       email          = "email"
       email_verified = "email_verified"
       name           = "name"
       picture        = "picture"
-    }
+    })
     error_message = "Google must map only the approved mutable standard attributes"
   }
 

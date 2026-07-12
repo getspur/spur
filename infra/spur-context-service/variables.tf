@@ -441,6 +441,44 @@ variable "cognito_human_oidc_scopes" {
   }
 }
 
+variable "google_oauth_enabled" {
+  description = "Enable Google as a social identity provider for the Cognito human app client. Google remains disabled by default and requires Cognito auth plus protected client credentials."
+  type        = bool
+  default     = false
+
+  validation {
+    condition     = !var.google_oauth_enabled || var.cognito_auth_enabled
+    error_message = "google_oauth_enabled requires cognito_auth_enabled."
+  }
+}
+
+variable "google_oauth_client_id" {
+  description = "Google Auth Platform web client ID. Supply through a protected TF_VAR value; never commit it to tfvars."
+  type        = string
+  default     = ""
+  sensitive   = true
+
+  validation {
+    condition = !var.google_oauth_enabled || can(regex(
+      "^[0-9]+-[A-Za-z0-9_-]+\\.apps\\.googleusercontent\\.com$",
+      trimspace(var.google_oauth_client_id),
+    ))
+    error_message = "google_oauth_client_id must be a Google web client ID ending in .apps.googleusercontent.com when Google OAuth is enabled."
+  }
+}
+
+variable "google_oauth_client_secret" {
+  description = "Google Auth Platform web client secret. Supply through a protected TF_VAR value; Terraform state contains this sensitive value."
+  type        = string
+  default     = ""
+  sensitive   = true
+
+  validation {
+    condition     = !var.google_oauth_enabled || (length(trimspace(var.google_oauth_client_secret)) > 0 && length(var.google_oauth_client_secret) <= 2048)
+    error_message = "google_oauth_client_secret must be nonblank and at most 2048 characters when Google OAuth is enabled."
+  }
+}
+
 variable "cognito_human_custom_scopes" {
   description = "Least-privilege custom-scope suffixes for the human public client."
   type        = set(string)
