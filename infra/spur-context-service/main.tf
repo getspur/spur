@@ -545,21 +545,48 @@ resource "aws_cognito_resource_server" "context_service" {
   }
 }
 
+resource "aws_cognito_identity_provider" "google" {
+  count = var.cognito_auth_enabled && var.google_oauth_enabled ? 1 : 0
+
+  user_pool_id  = aws_cognito_user_pool.context_service[0].id
+  provider_name = "Google"
+  provider_type = "Google"
+
+  provider_details = {
+    authorize_scopes = "openid email profile"
+    client_id        = trimspace(var.google_oauth_client_id)
+    client_secret    = var.google_oauth_client_secret
+  }
+
+  attribute_mapping = {
+    email          = "email"
+    email_verified = "email_verified"
+    name           = "name"
+    picture        = "picture"
+  }
+}
+
 resource "aws_cognito_user_pool_client" "human" {
   count = var.cognito_auth_enabled ? 1 : 0
 
-  name                                 = "spur-context-human"
-  user_pool_id                         = aws_cognito_user_pool.context_service[0].id
-  depends_on                           = [aws_cognito_resource_server.context_service]
+  name         = "spur-context-human"
+  user_pool_id = aws_cognito_user_pool.context_service[0].id
+  depends_on = [
+    aws_cognito_resource_server.context_service,
+    aws_cognito_identity_provider.google,
+  ]
   generate_secret                      = false
   allowed_oauth_flows_user_pool_client = true
   allowed_oauth_flows                  = ["code"]
   allowed_oauth_scopes                 = local.cognito_human_allowed_oauth_scopes
   callback_urls                        = tolist(var.cognito_human_callback_urls)
   logout_urls                          = tolist(var.cognito_human_logout_urls)
-  supported_identity_providers         = ["COGNITO"]
-  enable_token_revocation              = true
-  prevent_user_existence_errors        = "ENABLED"
+  supported_identity_providers = concat(
+    ["COGNITO"],
+    var.google_oauth_enabled ? [aws_cognito_identity_provider.google[0].provider_name] : [],
+  )
+  enable_token_revocation       = true
+  prevent_user_existence_errors = "ENABLED"
 
   access_token_validity  = var.cognito_human_access_token_minutes
   id_token_validity      = var.cognito_human_access_token_minutes
