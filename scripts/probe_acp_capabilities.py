@@ -41,6 +41,7 @@ JsonObject = dict[str, Any]
 JsonRpcId = str | int
 MODEL_FALLBACK_IDS = ("model",)
 THOUGHT_FALLBACK_IDS = ("thought_level", "reasoning_effort", "effort")
+KNOWN_GROK_EFFORT_IDS = {"high", "medium", "low"}
 STANDARD_NOTIFICATION_METHODS = {"session/update"}
 DEFAULT_LOG_DIR = Path(".spur/logs")
 
@@ -131,6 +132,211 @@ def predict_spur_synthesis(config_options: list[JsonObject]) -> JsonObject:
         "model_config_option_id": model.get("id") if slash_model else None,
         "effort_config_option_id": effort.get("id") if slash_effort else None,
     }
+
+
+def _meta_object(value: Optional[JsonObject]) -> JsonObject:
+    if not isinstance(value, dict):
+        return {}
+    meta = value.get("_meta")
+    return meta if isinstance(meta, dict) else {}
+
+
+def _proprietary_session_config(session_new: Optional[JsonObject]) -> JsonObject:
+    config = _meta_object(session_new).get("x.ai/sessionConfig")
+    return config if isinstance(config, dict) else {}
+
+
+def _model_state(initialize: Optional[JsonObject]) -> JsonObject:
+    state = _meta_object(initialize).get("modelState")
+    return state if isinstance(state, dict) else {}
+
+
+def _model_ids_from_plane(models: Any) -> list[str]:
+    if not isinstance(models, dict):
+        return []
+    available = models.get("availableModels", models.get("available_models", []))
+    if not isinstance(available, list):
+        return []
+    ids: list[str] = []
+    for item in available:
+        if isinstance(item, dict):
+            model_id = item.get("modelId", item.get("id"))
+            if isinstance(model_id, str) and model_id:
+                ids.append(model_id)
+        elif isinstance(item, str) and item:
+            ids.append(item)
+    return ids
+
+
+def _catalog_model_ids(models: Any) -> list[str]:
+    """Return object-backed availableModels ids eligible for slash synthesis."""
+    if not isinstance(models, dict):
+        return []
+    available = models.get("availableModels", models.get("available_models", []))
+    if not isinstance(available, list):
+        return []
+    ids: list[str] = []
+    for item in available:
+        if not isinstance(item, dict):
+            continue
+        model_id = item.get("modelId", item.get("id"))
+        if isinstance(model_id, str) and model_id:
+            ids.append(model_id)
+    return ids
+
+
+def _models_plane_uses_direct_ids(models: Any) -> bool:
+    if not isinstance(models, dict):
+        return False
+    available = models.get("availableModels", models.get("available_models", []))
+    return isinstance(available, list) and any(
+        isinstance(item, dict)
+        and isinstance(item.get("modelId"), str)
+        and bool(item.get("modelId"))
+        for item in available
+    )
+
+
+def _session_config_options(session_config: JsonObject) -> list[JsonObject]:
+    options = session_config.get("options")
+    if not isinstance(options, list):
+        return []
+    return [option for option in options if isinstance(option, dict)]
+
+
+def _session_config_ids(options: list[JsonObject], category: str) -> list[str]:
+    ids: list[str] = []
+    for option in options:
+        if option.get("category") != category:
+            continue
+        option_id = option.get("id")
+        if isinstance(option_id, str) and option_id:
+            ids.append(option_id)
+    return ids
+
+
+def _set_model_succeeded(*result_sets: Optional[list[JsonObject]]) -> bool:
+    return any(
+        result.get("method") == "session/set_model"
+        and result.get("status") == "ok"
+        for results in result_sets
+        for result in (results or [])
+        if isinstance(result, dict)
+    )
+
+
+def _current_model_id(
+    session_new: JsonObject,
+    session_options: list[JsonObject],
+    model_state: JsonObject,
+) -> Optional[str]:
+    selected = next(
+        (
+            option.get("id")
+            for option in session_options
+            if option.get("category") == "model" and option.get("selected") is True
+        ),
+        None,
+    )
+    if isinstance(selected, str) and selected:
+        return selected
+    for plane in (session_new.get("models"), model_state):
+        if not isinstance(plane, dict):
+            continue
+        current = plane.get("currentModelId", plane.get("current_model_id"))
+        if isinstance(current, str) and current:
+            return current
+    return None
+
+
+def _model_state_has_effort(
+    model_state: JsonObject, current_model_id: Optional[str]
+) -> bool:
+    if not current_model_id:
+        return False
+    available = model_state.get("availableModels")
+    if not isinstance(available, list):
+        return False
+    for model in available:
+        if not isinstance(model, dict):
+            continue
+        model_id = model.get("modelId", model.get("id"))
+        if model_id != current_model_id:
+            continue
+        meta = model.get("_meta")
+        efforts = meta.get("reasoningEfforts") if isinstance(meta, dict) else None
+        return isinstance(efforts, list) and bool(efforts)
+    return False
+
+
+def predict_spur_slash_surfaces(
+    *,
+    config_options: list[JsonObject],
+    session_new: Optional[JsonObject] = None,
+    initialize: Optional[JsonObject] = None,
+    set_results: Optional[list[JsonObject]] = None,
+    vendor_rpc_results: Optional[list[JsonObject]] = None,
+) -> JsonObject:
+    """Predict config and proven proprietary slash-command synthesis paths."""
+    prediction = predict_spur_synthesis(config_options)
+    session = session_new or {}
+    session_config = _proprietary_session_config(session_new)
+    session_options = _session_config_options(session_config)
+    model_state = _model_state(initialize)
+
+    models_plane_ids = _catalog_model_ids(session.get("models"))
+    session_config_model_ids = _session_config_ids(session_options, "model")
+    model_state_ids = _catalog_model_ids(model_state)
+    proprietary_model_ids = list(
+        dict.fromkeys([*models_plane_ids, *model_state_ids])
+    )
+    has_direct_set_evidence = bool(
+        session_config_model_ids
+        or model_state_ids
+        or _models_plane_uses_direct_ids(session.get("models"))
+    )
+    direct_set_model = bool(proprietary_model_ids) and (
+        has_direct_set_evidence
+        or _set_model_succeeded(set_results, vendor_rpc_results)
+    )
+
+    model_source = "config_option" if prediction["slash_model"] else "none"
+    if not prediction["slash_model"] and direct_set_model:
+        prediction["slash_model"] = True
+        model_source = "proprietary_models_plane"
+
+    effort_source = "config_option" if prediction["slash_effort"] else "none"
+    if not prediction["slash_effort"]:
+        grok_effort_ids = {
+            effort_id
+            for effort_id in _session_config_ids(session_options, "mode")
+            if effort_id in KNOWN_GROK_EFFORT_IDS
+        }
+        if grok_effort_ids:
+            prediction["slash_effort"] = True
+            effort_source = "proprietary_session_config"
+        elif _model_state_has_effort(
+            model_state,
+            _current_model_id(session, session_options, model_state),
+        ):
+            prediction["slash_effort"] = True
+            effort_source = "proprietary_model_state"
+
+    would_synthesize = []
+    if prediction["slash_model"]:
+        would_synthesize.append("/model")
+    if prediction["slash_effort"]:
+        would_synthesize.append("/effort")
+    prediction.update(
+        {
+            "would_synthesize": would_synthesize,
+            "model_source": model_source,
+            "effort_source": effort_source,
+            "proprietary_direct_set_model": direct_set_model,
+            "proprietary_model_ids_sample": proprietary_model_ids[:8],
+        }
+    )
+    return prediction
 
 
 def summarize_config_options(config_options: list[JsonObject]) -> JsonObject:
@@ -281,21 +487,7 @@ def _available_mode_ids(modes: Any) -> list[str]:
 
 
 def _available_model_ids(session: JsonObject) -> list[str]:
-    models = session.get("models")
-    if not isinstance(models, dict):
-        return []
-    available = models.get("availableModels", models.get("available_models", []))
-    if not isinstance(available, list):
-        return []
-    ids: list[str] = []
-    for item in available:
-        if isinstance(item, dict):
-            model_id = item.get("modelId", item.get("id"))
-            if isinstance(model_id, str) and model_id:
-                ids.append(model_id)
-        elif isinstance(item, str) and item:
-            ids.append(item)
-    return ids
+    return _model_ids_from_plane(session.get("models"))
 
 
 def build_vendor_rpc_targets(
@@ -402,9 +594,14 @@ def build_matrix(
     vendor_harvest: Optional[JsonObject] = None,
     vendor_rpc_results: Optional[list[JsonObject]] = None,
 ) -> JsonObject:
-    """Build the compact matrix shared with the Grok capability report."""
+    """Build wire advertisement facts and SPUR product synthesis separately.
+
+    ``*_select_advertised`` describes configOptions selects on the ACP wire;
+    ``spur_slash_*`` also includes proven proprietary Grok/Kiro product paths.
+    """
     harvest = vendor_harvest or harvest_vendor_notifications([])
     rpc_results = vendor_rpc_results or []
+    config_prediction = predict_spur_synthesis(config_options)
     rpc_ok = [
         str(item.get("method"))
         for item in rpc_results
@@ -425,8 +622,8 @@ def build_matrix(
     ]
     return {
         "config_options_advertised": bool(config_options),
-        "model_select_advertised": bool(spur_prediction["slash_model"]),
-        "effort_select_advertised": bool(spur_prediction["slash_effort"]),
+        "model_select_advertised": bool(config_prediction["slash_model"]),
+        "effort_select_advertised": bool(config_prediction["slash_effort"]),
         "available_commands_advertised": bool(available_commands),
         "modes_advertised": _modes_advertised(modes),
         "supports_set_config_option": bool(
@@ -566,7 +763,13 @@ def build_report(
         else []
     )
     modes = session.get("modes")
-    prediction = predict_spur_synthesis(config_options)
+    prediction = predict_spur_slash_surfaces(
+        config_options=config_options,
+        session_new=session_new,
+        initialize=initialize,
+        set_results=set_results,
+        vendor_rpc_results=vendor_rpc_results,
+    )
     available_commands = _available_commands(notifications)
     variants = _session_update_variants(notifications)
     extensions = _extension_methods(notifications)
