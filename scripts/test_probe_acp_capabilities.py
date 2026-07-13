@@ -119,6 +119,168 @@ class CliTests(unittest.TestCase):
         self.assertIsNone(probe.process_close_failure(return_code=-15, forced=True))
 
 
+class VendorHarvestTests(unittest.TestCase):
+    def test_vendor_method_detection(self) -> None:
+        self.assertTrue(probe.is_vendor_extension_method("_kiro.dev/commands/available"))
+        self.assertTrue(probe.is_vendor_extension_method("_x.ai/sessionConfig/update"))
+        self.assertFalse(probe.is_vendor_extension_method("session/update"))
+        self.assertFalse(probe.is_vendor_extension_method("session/new"))
+        self.assertFalse(probe.is_vendor_extension_method(""))
+
+    def test_harvest_keeps_full_vendor_payloads_and_command_meta(self) -> None:
+        notifications = [
+            {
+                "method": "_kiro.dev/commands/available",
+                "params": {
+                    "commands": [
+                        {
+                            "name": "/model",
+                            "description": "Select model",
+                            "meta": {
+                                "optionsMethod": "_kiro.dev/commands/model/options",
+                                "inputType": "selection",
+                            },
+                        },
+                        {
+                            "name": "/agent",
+                            "description": "Select agent",
+                            "meta": {
+                                "optionsMethod": "_kiro.dev/commands/agent/options",
+                            },
+                        },
+                    ]
+                },
+            },
+            {
+                "method": "_kiro.dev/commands/available",
+                "params": {
+                    "commands": [
+                        {"name": "/model", "description": "Select model"},
+                        {"name": "/compact", "description": "Compact"},
+                    ]
+                },
+            },
+            {
+                "method": "_kiro.dev/metadata",
+                "params": {"sessionId": "s1", "contextUsagePercentage": 8.9},
+            },
+            {
+                "method": "session/update",
+                "params": {
+                    "update": {
+                        "sessionUpdate": "available_commands_update",
+                        "availableCommands": [{"name": "compact"}],
+                    }
+                },
+            },
+        ]
+
+        harvest = probe.harvest_vendor_notifications(notifications)
+
+        self.assertEqual(
+            harvest["methods_seen"],
+            ["_kiro.dev/commands/available", "_kiro.dev/metadata"],
+        )
+        self.assertEqual(harvest["counts"]["_kiro.dev/commands/available"], 2)
+        self.assertEqual(len(harvest["payloads"]["_kiro.dev/metadata"]), 1)
+        self.assertEqual(
+            harvest["payloads"]["_kiro.dev/metadata"][0]["contextUsagePercentage"], 8.9
+        )
+        # Union of command names across frames; keep richest meta when present.
+        names = [item["name"] for item in harvest["commands_catalog"]]
+        self.assertEqual(names, ["/agent", "/compact", "/model"])
+        model = next(item for item in harvest["commands_catalog"] if item["name"] == "/model")
+        self.assertEqual(
+            model["meta"]["optionsMethod"], "_kiro.dev/commands/model/options"
+        )
+        self.assertEqual(
+            harvest["options_methods"],
+            [
+                "_kiro.dev/commands/agent/options",
+                "_kiro.dev/commands/model/options",
+            ],
+        )
+
+    def test_vendor_rpc_targets_include_options_modes_and_models(self) -> None:
+        session_new = {
+            "sessionId": "sid-1",
+            "modes": {
+                "currentModeId": "kiro_default",
+                "availableModes": [
+                    {"id": "kiro_default"},
+                    {"id": "kiro_planner"},
+                ],
+            },
+            "models": {
+                "currentModelId": "claude-sonnet-4.5",
+                "availableModels": [
+                    {"modelId": "claude-sonnet-4.5"},
+                    {"modelId": "claude-haiku-4.5"},
+                ],
+            },
+        }
+        harvest = {
+            "options_methods": ["_kiro.dev/commands/model/options"],
+            "commands_catalog": [],
+            "methods_seen": ["_kiro.dev/metadata"],
+        }
+
+        targets = probe.build_vendor_rpc_targets(
+            session_id="sid-1",
+            session_new=session_new,
+            vendor_harvest=harvest,
+            extra_methods=["_x.ai/sessionConfig/update"],
+        )
+
+        methods = [item["method"] for item in targets]
+        self.assertIn("_kiro.dev/commands/model/options", methods)
+        self.assertIn("session/set_mode", methods)
+        self.assertIn("session/set_model", methods)
+        self.assertIn("_x.ai/sessionConfig/update", methods)
+        set_mode = next(item for item in targets if item["method"] == "session/set_mode")
+        self.assertEqual(set_mode["params"]["modeId"], "kiro_planner")
+        set_model = next(item for item in targets if item["method"] == "session/set_model")
+        self.assertEqual(set_model["params"]["modelId"], "claude-haiku-4.5")
+
+    def test_matrix_includes_vendor_harvest_fields(self) -> None:
+        matrix = probe.build_matrix(
+            config_options=[],
+            modes={"availableModes": [{"id": "a"}]},
+            spur_prediction=probe.predict_spur_synthesis([]),
+            available_commands=[],
+            extension_methods=["_kiro.dev/metadata"],
+            session_update_variants=[],
+            vendor_harvest={
+                "methods_seen": ["_kiro.dev/commands/available", "_kiro.dev/metadata"],
+                "commands_catalog": [{"name": "/model"}],
+                "options_methods": ["_kiro.dev/commands/model/options"],
+            },
+            vendor_rpc_results=[
+                {"method": "session/set_mode", "status": "ok"},
+                {
+                    "method": "_kiro.dev/commands/model/options",
+                    "status": "error",
+                    "error": {"code": -32601, "message": "Method not found"},
+                },
+            ],
+        )
+
+        self.assertEqual(
+            matrix["vendor_notification_methods_seen"],
+            ["_kiro.dev/commands/available", "_kiro.dev/metadata"],
+        )
+        self.assertEqual(matrix["vendor_commands_count"], 1)
+        self.assertEqual(
+            matrix["options_methods_discovered"],
+            ["_kiro.dev/commands/model/options"],
+        )
+        self.assertEqual(matrix["vendor_rpc_ok"], ["session/set_mode"])
+        self.assertEqual(
+            matrix["vendor_rpc_errors"][0][0],
+            "_kiro.dev/commands/model/options",
+        )
+
+
 class ReportTests(unittest.TestCase):
     def setUp(self) -> None:
         self.config_options = [
@@ -153,6 +315,11 @@ class ReportTests(unittest.TestCase):
                     "available_commands_update",
                     "usage_update",
                 ],
+                "vendor_notification_methods_seen": [],
+                "vendor_commands_count": 0,
+                "options_methods_discovered": [],
+                "vendor_rpc_ok": [],
+                "vendor_rpc_errors": [],
             },
         )
 
@@ -178,9 +345,33 @@ class ReportTests(unittest.TestCase):
                         }
                     },
                 },
-                {"method": "_vendor/settings/update", "params": {}},
+                {
+                    "method": "_vendor/settings/update",
+                    "params": {"theme": "dark"},
+                },
+                {
+                    "method": "_kiro.dev/commands/available",
+                    "params": {
+                        "commands": [
+                            {
+                                "name": "/model",
+                                "meta": {
+                                    "optionsMethod": "_kiro.dev/commands/model/options"
+                                },
+                            }
+                        ]
+                    },
+                },
             ],
             set_results=[],
+            vendor_rpc_results=[
+                {
+                    "method": "session/set_mode",
+                    "params": {"sessionId": "session-1", "modeId": "plan"},
+                    "status": "ok",
+                    "response": {"result": {}},
+                }
+            ],
         )
 
         for key in (
@@ -198,13 +389,29 @@ class ReportTests(unittest.TestCase):
             "set_results",
             "session_update_variants",
             "extension_methods",
+            "vendor_notifications",
+            "vendor_rpc_results",
+            "proprietary_planes",
             "matrix",
         ):
             self.assertIn(key, report)
         self.assertEqual(report["available_commands"], [{"name": "compact"}])
-        self.assertEqual(report["extension_methods"], ["_vendor/settings/update"])
+        self.assertEqual(
+            report["extension_methods"],
+            ["_kiro.dev/commands/available", "_vendor/settings/update"],
+        )
         self.assertTrue(report["meta_planes"])
         self.assertTrue(report["matrix"]["spur_slash_model"])
+        self.assertEqual(
+            report["vendor_notifications"]["payloads"]["_vendor/settings/update"],
+            [{"theme": "dark"}],
+        )
+        self.assertEqual(report["matrix"]["vendor_commands_count"], 1)
+        self.assertEqual(report["matrix"]["vendor_rpc_ok"], ["session/set_mode"])
+        self.assertEqual(
+            report["proprietary_planes"]["has_models_plane"],
+            False,
+        )
 
     def test_grouped_select_choices_are_counted(self) -> None:
         option = {
@@ -222,6 +429,24 @@ class ReportTests(unittest.TestCase):
 
         self.assertEqual(summary["options"][0]["choice_count"], 1)
         self.assertEqual(summary["options"][0]["choices"][0]["value"], "fast")
+
+    def test_cli_exposes_probe_vendor_rpc_flag(self) -> None:
+        args = probe.parse_cli(
+            [
+                "--command",
+                "agent",
+                "--probe-vendor-rpc",
+                "--vendor-method",
+                "_x.ai/sessionConfig/update",
+                "--vendor-method",
+                "_kiro.dev/metadata",
+            ]
+        )
+        self.assertTrue(args.probe_vendor_rpc)
+        self.assertEqual(
+            args.vendor_method,
+            ["_x.ai/sessionConfig/update", "_kiro.dev/metadata"],
+        )
 
 
 if __name__ == "__main__":
