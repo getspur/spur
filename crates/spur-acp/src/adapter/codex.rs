@@ -136,9 +136,15 @@ pub fn mode_badge(mode_id: &str) -> Option<ModeBadge> {
 }
 
 /// Codex `_meta` extractor stub.
-/// TODO(vendor-onboarding): replace with real extractor when codex emits
-/// recognizable `_meta.codex.*` fields. See
-/// docs/spur/acp-meta-conventions.md.
+///
+/// Live ACP re-probe (2026-07-13, codex-acp 1.1.2) and in-tree tool-call
+/// fixtures (`tool_call_exec`, apply_patch) carry no `_meta.codex` plane on
+/// tool_call updates. Only Claude emits a real vendor tool meta today
+/// (`_meta.claudeCode`). Leave this as a no-op until a billed tool-turn
+/// capture proves a codex-specific meta shape — do not invent keys.
+///
+/// See docs/spur/acp-meta-conventions.md and
+/// `.spur/logs/reprobe-20260713/schema-inventory-20260713T023432.md`.
 pub fn extract_tool_meta(_tc: &ToolCall) -> super::SpurToolMeta {
     super::SpurToolMeta::default()
 }
