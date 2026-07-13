@@ -189,6 +189,9 @@ dispatch = "prompt_text"
 **Important — verify the ACP planes.** SPUR synthesizes mid-session `/model`
 from a matching configOptions select or Grok's non-empty proprietary model
 catalog, and `/effort` from configOptions or Grok's proven effort metadata.
+Codex also gets `/fast` only when it advertises a non-empty select with
+`id = "fast-mode"`; selections use `configId = "fast-mode"` with
+`session/set_config_option`.
 Grok's own TUI also has local commands that are not ACP evidence. Before
 assuming model switching works under SPUR, run:
 
