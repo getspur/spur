@@ -35,7 +35,7 @@ use agent_client_protocol::schema::v1::{
     AuthenticateRequest, AuthenticateResponse, CloseSessionRequest, CloseSessionResponse,
     DeleteSessionRequest, DeleteSessionResponse, InitializeRequest, InitializeResponse,
     ListSessionsRequest, ListSessionsResponse, LoadSessionRequest, LoadSessionResponse, McpServer,
-    NewSessionResponse, PromptRequest, ResumeSessionRequest, ResumeSessionResponse,
+    NewSessionResponse, PromptRequest, PromptResponse, ResumeSessionRequest, ResumeSessionResponse,
     SessionConfigOption, SessionId, SessionModeId, SessionModeState, SessionNotification,
     SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, SetSessionModeRequest,
     SetSessionModeResponse, Usage,
@@ -137,17 +137,30 @@ pub trait AgentConnection: Send + Sync {
     /// [`AgentConnection::subscribe_session_notifications`] (currently
     /// `NativeAcpConnection`) publish notifications through a
     /// connection-scoped `broadcast` channel instead and return an **empty**
-    /// stream here. The stream still closes when the prompt turn completes,
-    /// so it remains useful as a turn-completion signal, but it carries no
-    /// notification payload. New callers SHOULD prefer the subscriber:
-    /// subscribe *before* issuing the prompt to avoid missing early
-    /// notifications. Existing stream-based callers keep working for
-    /// transports that do not publish via broadcast (stdio, cli_wrap,
-    /// stream_json). See `docs/superpowers/specs/2026-04-14-acp-notification-bus-design.md`.
+    /// stream here. The stream closes when the prompt RPC reaches a terminal
+    /// state, but closure alone does not distinguish success from failure;
+    /// callers must then await [`AgentConnection::wait_for_prompt_response`].
+    /// New callers SHOULD prefer the subscriber for content: subscribe
+    /// *before* issuing the prompt to avoid missing early notifications.
+    /// Existing stream-based callers keep working for transports that do not
+    /// publish via broadcast (stdio, cli_wrap, stream_json). See
+    /// `docs/superpowers/specs/2026-04-14-acp-notification-bus-design.md`.
     async fn prompt(
         &mut self,
         request: PromptRequest,
     ) -> anyhow::Result<Pin<Box<dyn Stream<Item = SessionNotification> + Send>>>;
+
+    /// Await the terminal response for the most recently started prompt.
+    ///
+    /// Native ACP returns its notification stream before the underlying
+    /// `session/prompt` RPC resolves so cancellation can remain concurrent.
+    /// Its implementation returns `Some(PromptResponse)` on success and the
+    /// RPC error on failure. Transports whose prompt stream already owns the
+    /// complete turn use this default: stream exhaustion is their terminal
+    /// success signal and no separate response is available.
+    async fn wait_for_prompt_response(&mut self) -> anyhow::Result<Option<PromptResponse>> {
+        Ok(None)
+    }
 
     /// Return and clear the usage reported by the most recently completed
     /// prompt turn, when the transport exposes `PromptResponse.usage`.

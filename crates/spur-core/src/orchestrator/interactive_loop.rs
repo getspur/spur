@@ -1814,12 +1814,16 @@ impl Orchestrator {
             // ── Stream output + check for interrupts ─────────────────────
             let mut cancel_deadline: Option<tokio::time::Instant> = None;
             let mut cancel_resolved = false;
+            let mut stream_loop_shutdown = false;
             {
                 let b = brain.as_mut().unwrap();
 
                 loop {
                     tokio::select! {
-                        _ = shutdown_token.cancelled() => break,
+                        _ = shutdown_token.cancelled() => {
+                            stream_loop_shutdown = true;
+                            break;
+                        },
                         item = stream.next() => {
                             match item {
                                 Some(notification) => {
@@ -1864,6 +1868,7 @@ impl Orchestrator {
                         }
                         maybe = user_input_rx.recv() => {
                             let Some(queued) = maybe else {
+                                stream_loop_shutdown = true;
                                 break;
                             };
                             match queued {
@@ -1935,6 +1940,101 @@ impl Orchestrator {
             // pause briefly per G5.
             if cancel_resolved || cancel_deadline.is_some() {
                 scheduler.note_cancel_resolved(std::time::Instant::now());
+            }
+
+            // Shutdown must be able to reach `connection.shutdown()`, which
+            // resolves any native prompt terminal waiter. Awaiting that waiter
+            // here would deadlock when the agent is still in `session/prompt`.
+            if stream_loop_shutdown {
+                break;
+            }
+
+            let terminal_result = if cancel_resolved {
+                Err(anyhow::anyhow!(
+                    "Brain prompt did not terminate before cancel timeout"
+                ))
+            } else {
+                brain
+                    .as_mut()
+                    .expect("brain remains active after prompt stream")
+                    .connection
+                    .wait_for_prompt_response()
+                    .await
+            };
+            if let Err(e) = terminal_result {
+                let error_message = format_error_chain(&e);
+                error!(error = %error_message, "Brain prompt terminal failed");
+                if Self::is_auth_required_error(&e) {
+                    self.emit(SpurEvent::now(SpurEventBody::AuthRequired {
+                        session: spur_sid_for_log,
+                        message: Self::auth_required_banner(),
+                    }));
+                    let mut dead = brain.take().expect("brain was active after prompt stream");
+                    dead.delegation_handle.abort();
+                    if let Some(h) = dead.notification_pump_handle.take() {
+                        h.abort();
+                    }
+                    self.self_held.remove(&spur_acp::BrainSessionId::from(
+                        dead.spur_session_id.clone(),
+                    ));
+                    retire_brain_session(
+                        &self.funnel,
+                        &dead.spur_session_id,
+                        &mut dead.mcp_server,
+                        Some(&mut dead.mcp_guard),
+                        &self.worker_mcp_servers,
+                        &mut scheduler,
+                        &overflow_continuations,
+                        None,
+                    )
+                    .await;
+                    let _ = dead.connection.shutdown().await;
+                    continue;
+                }
+                if is_connection_death(&e) {
+                    let dead = brain.take().expect("brain was active after prompt stream");
+                    let reason = format!("prompt died: {e}");
+                    if let Some(new_brain) = self
+                        .reconnect_with_events(
+                            dead,
+                            permission_tx.clone(),
+                            brain_override.as_deref(),
+                            reason,
+                            &mut reconnect_failures,
+                            RECONNECT_CIRCUIT_LIMIT,
+                            RECONNECT_CIRCUIT_WINDOW,
+                        )
+                        .await
+                    {
+                        brain = Some(new_brain);
+                    }
+                    continue;
+                }
+                self.emit(SpurEvent::now(SpurEventBody::BrainError {
+                    session: spur_sid_for_log,
+                    message: error_message,
+                }));
+                let mut dead = brain.take().expect("brain was active after prompt stream");
+                dead.delegation_handle.abort();
+                if let Some(h) = dead.notification_pump_handle.take() {
+                    h.abort();
+                }
+                self.self_held.remove(&spur_acp::BrainSessionId::from(
+                    dead.spur_session_id.clone(),
+                ));
+                retire_brain_session(
+                    &self.funnel,
+                    &dead.spur_session_id,
+                    &mut dead.mcp_server,
+                    Some(&mut dead.mcp_guard),
+                    &self.worker_mcp_servers,
+                    &mut scheduler,
+                    &overflow_continuations,
+                    None,
+                )
+                .await;
+                let _ = dead.connection.shutdown().await;
+                continue;
             }
 
             // Emit turn complete
