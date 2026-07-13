@@ -277,6 +277,7 @@ struct ProjectLoopRuntimeDeps {
     worker_mcp_servers:
         Arc<dashmap::DashMap<spur_acp::BrainSessionId, Arc<crate::worker_server::WorkerMcpServer>>>,
     outcome_store: Arc<dyn spur_blob_store::OutcomeStore>,
+    context_service_config: spur_acp::config::ContextServiceConfig,
     inline_wait: Duration,
     loops_enabled: bool,
     pause_all_loops: bool,
@@ -338,6 +339,7 @@ impl ProjectLoopRuntimeDeps {
             ),
             worker_mcp_servers: Arc::clone(&orchestrator.worker_mcp_servers),
             outcome_store: Arc::clone(&orchestrator.outcome_store),
+            context_service_config: orchestrator.config.context_service.clone(),
             inline_wait: Duration::from_millis(orchestrator.config.delegation.inline_wait_ms),
             loops_enabled: orchestrator.config.spur.loops_enabled,
             pause_all_loops: orchestrator.config.spur.pause_all_loops,
@@ -554,6 +556,7 @@ impl ProjectLoopRuntimeFactory for ProjectLoopRuntimeDeps {
             mcp_server: Arc::clone(&server),
             outcome_store: Arc::clone(&self.outcome_store),
             repo_root: Some(self.repo_root.clone()),
+            context_service_config: self.context_service_config.clone(),
         };
         let delegation_shutdown = CancellationToken::new();
         let delegation_handle = self.spawn_delegation_handler(
@@ -854,6 +857,7 @@ mod tests {
             mcp_server: Arc::clone(&runtime.server),
             outcome_store: Arc::clone(&deps.outcome_store),
             repo_root: Some(deps.repo_root.clone()),
+            context_service_config: deps.context_service_config.clone(),
         }
     }
 
