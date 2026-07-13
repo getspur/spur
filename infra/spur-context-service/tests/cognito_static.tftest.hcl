@@ -58,6 +58,11 @@ run "disabled_default_keeps_legacy_iam_without_cognito" {
   }
 
   assert {
+    condition     = length(aws_cognito_user_pool_ui_customization.context_service) == 0
+    error_message = "disabled mode must not create Hosted UI branding customization"
+  }
+
+  assert {
     condition     = length(aws_apigatewayv2_authorizer.cognito) == 0 && length(aws_apigatewayv2_route.oauth) == 0 && length(aws_apigatewayv2_route.login_redirect) == 0
     error_message = "disabled mode must not create a JWT authorizer, OAuth route, or login facade"
   }
@@ -114,6 +119,16 @@ run "enabled_staging_creates_cognito_jwt_route_and_nonsecret_lambda_config" {
   assert {
     condition     = aws_cognito_user_pool.context_service[0].user_pool_tier == "LITE" && aws_cognito_user_pool_client.human[0].generate_secret == false && aws_cognito_user_pool_client.m2m["acme"].generate_secret == true
     error_message = "enabled mode must create the Lite pool with public human and confidential M2M clients"
+  }
+
+  assert {
+    # Plan-time only: pool id is unknown until apply under the mock provider, so
+    # we assert resource presence + non-empty CSS (file() is known at plan).
+    condition = (
+      length(aws_cognito_user_pool_ui_customization.context_service) == 1 &&
+      length(aws_cognito_user_pool_ui_customization.context_service[0].css) > 0
+    )
+    error_message = "enabled mode must brand the Hosted UI with SPUR CSS (and logo) assets"
   }
 
   assert {
