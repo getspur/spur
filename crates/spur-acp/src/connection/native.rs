@@ -30,6 +30,7 @@
 //! | `initialize()` | Spawn the agent subprocess, build the SDK connection, send `initialize` |
 //! | `new_session()` | Send `NewSessionRequest` with cwd + MCP servers to the agent |
 //! | `prompt()` | Send `PromptRequest`; `SessionNotification`s flow out via the connection-scoped broadcast |
+//! | `wait_for_prompt_response()` | Await the terminal `PromptResponse` or RPC error for that prompt |
 //! | `cancel()` | Send `CancelNotification` via the connection |
 //! | `shutdown()` | Close stdin (drop the SDK connection), SIGTERM the process group, then SIGKILL if needed |
 //! | `health()` | Return cached `AgentHealth` |
@@ -55,7 +56,7 @@ use agent_client_protocol::schema::v1::{
     DeleteSessionResponse, ExtRequest, ExtResponse, FileSystemCapabilities, InitializeRequest,
     InitializeResponse, KillTerminalRequest, KillTerminalResponse, ListSessionsRequest,
     ListSessionsResponse, LoadSessionRequest, LoadSessionResponse, McpServer, NewSessionRequest,
-    NewSessionResponse, PermissionOptionId, PermissionOptionKind, PromptRequest,
+    NewSessionResponse, PermissionOptionId, PermissionOptionKind, PromptRequest, PromptResponse,
     ReadTextFileRequest, ReadTextFileResponse, ReleaseTerminalRequest, ReleaseTerminalResponse,
     RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
     ResumeSessionRequest, ResumeSessionResponse, SelectedPermissionOutcome, SessionCapabilities,
@@ -175,9 +176,10 @@ enum AcpCommand {
     },
     Prompt {
         request: PromptRequest,
-        /// We send back a receiver that will yield SessionNotifications as
-        /// they arrive via the Client callback, plus the final PromptResponse.
+        /// Setup reply carrying the compatibility notification stream.
         reply: oneshot::Sender<anyhow::Result<mpsc::UnboundedReceiver<SessionNotification>>>,
+        /// Terminal result of the underlying `session/prompt` RPC.
+        terminal_reply: oneshot::Sender<anyhow::Result<PromptResponse>>,
     },
     Cancel {
         session_id: String,
@@ -295,6 +297,10 @@ pub struct NativeAcpConnection {
     /// Cleared when a new prompt starts and consumed by the orchestrator after
     /// `drive_prompt_notifications` observes turn completion.
     last_prompt_usage: Arc<Mutex<Option<Usage>>>,
+    /// Terminal response receiver for the most recently started prompt.
+    /// Kept separate from the compatibility notification stream so native
+    /// callers can distinguish RPC failure from successful stream closure.
+    prompt_response_rx: Option<oneshot::Receiver<anyhow::Result<PromptResponse>>>,
     /// Process-group id of the spawned child (equal to its pid because we spawn
     /// with `process_group(0)`). Populated by the ACP thread after spawn, read
     /// by the graceful shutdown path and the `Drop` safety net to kill the
@@ -652,6 +658,7 @@ impl NativeAcpConnection {
             grok_session_models: Arc::new(Mutex::new(HashMap::new())),
             session_capabilities: Arc::new(Mutex::new(None)),
             last_prompt_usage: Arc::new(Mutex::new(None)),
+            prompt_response_rx: None,
             child_pgid: Arc::new(Mutex::new(None)),
             repo_root: PathBuf::from("."),
             log_config: LogConfig::default(),
@@ -946,10 +953,12 @@ impl AgentConnection for NativeAcpConnection {
         );
 
         let (reply_tx, reply_rx) = oneshot::channel();
+        let (terminal_tx, terminal_rx) = oneshot::channel();
         cmd_tx
             .send(AcpCommand::Prompt {
                 request,
                 reply: reply_tx,
+                terminal_reply: terminal_tx,
             })
             .map_err(|_| {
                 anyhow::anyhow!("NativeAcpConnection '{}': ACP thread died", self.agent_name)
@@ -961,6 +970,7 @@ impl AgentConnection for NativeAcpConnection {
                 self.agent_name
             )
         })??;
+        self.prompt_response_rx = Some(terminal_rx);
 
         // Wrap the unbounded receiver as a Stream.
         let stream = unfold(notification_rx, |mut rx| async move {
@@ -968,6 +978,22 @@ impl AgentConnection for NativeAcpConnection {
         });
 
         Ok(Box::pin(stream))
+    }
+
+    async fn wait_for_prompt_response(&mut self) -> anyhow::Result<Option<PromptResponse>> {
+        let response_rx = self.prompt_response_rx.take().ok_or_else(|| {
+            anyhow::anyhow!(
+                "NativeAcpConnection '{}': no prompt response is pending",
+                self.agent_name
+            )
+        })?;
+        let response = response_rx.await.map_err(|_| {
+            anyhow::anyhow!(
+                "NativeAcpConnection '{}': ACP thread died before prompt completed",
+                self.agent_name
+            )
+        })??;
+        Ok(Some(response))
     }
 
     fn take_last_prompt_usage(&mut self) -> Option<Usage> {
@@ -2278,16 +2304,21 @@ fn acp_thread_main(
                                     )
                                 }));
                             }
-                            AcpCommand::Prompt { request, reply } => {
+                            AcpCommand::Prompt {
+                                request,
+                                reply,
+                                terminal_reply,
+                            } => {
                                 // Notifications flow out-of-band via the
                                 // `session_notif_tx` broadcast. The `Stream`
                                 // returned by `prompt()` is a live but-empty
-                                // `UnboundedReceiver`; closing it (drop of
-                                // `tx_empty`) signals turn completion to the
-                                // caller.
+                                // `UnboundedReceiver`. Its close remains a
+                                // compatibility completion signal, while the
+                                // terminal oneshot preserves RPC success/error.
                                 let (tx_empty, rx_empty) =
                                     mpsc::unbounded_channel::<SessionNotification>();
                                 let _ = reply.send(Ok(rx_empty));
+                                let mut terminal_reply = Some(terminal_reply);
                                 let session_id_for_probe = request.session_id.clone();
                                 // Multiplex command intake against the in-flight prompt
                                 // future so `Cancel` and `Shutdown` can be serviced while
@@ -2312,6 +2343,12 @@ fn acp_thread_main(
                                                         "NativeAcpConnection: ACP thread received shutdown during in-flight prompt"
                                                     );
                                                     *shutdown_reply_slot_loop.borrow_mut() = Some(reply);
+                                                    if let Some(terminal_reply) = terminal_reply.take() {
+                                                        let _ = terminal_reply.send(Err(anyhow::anyhow!(
+                                                            "NativeAcpConnection '{}': shutdown before prompt completed",
+                                                            agent_name_loop
+                                                        )));
+                                                    }
                                                     drop(tx_empty);
                                                     return Ok(());
                                                 }
@@ -2325,23 +2362,34 @@ fn acp_thread_main(
                                         }
                                         prompt_result = &mut prompt_fut => {
                                             emit_acp_request_result(request_started_at, &prompt_result);
-                                            match prompt_result {
+                                            let terminal_result = match prompt_result {
                                                 Ok(response) => {
                                                     if let Ok(mut usage) = last_prompt_usage_loop.lock() {
-                                                        *usage = response.usage;
+                                                        *usage = response.usage.clone();
                                                     }
                                                     tracing::debug!(
                                                         agent = %agent_name_loop,
                                                         session = %session_id_for_probe,
                                                         "NativeAcpConnection: prompt completed"
                                                     );
+                                                    Ok(response)
                                                 }
-                                                Err(e) => tracing::warn!(
+                                                Err(e) => {
+                                                    tracing::warn!(
                                                         agent = %agent_name_loop,
                                                         session = %session_id_for_probe,
                                                         "NativeAcpConnection: prompt failed: {e}"
-                                                    ),
-                                            }
+                                                    );
+                                                    Err(anyhow::anyhow!(
+                                                        "NativeAcpConnection '{}': prompt failed: {e}",
+                                                        agent_name_loop
+                                                    ))
+                                                }
+                                            };
+                                            let terminal_reply = terminal_reply
+                                                .take()
+                                                .expect("Prompt terminal reply consumed only once");
+                                            let _ = terminal_reply.send(terminal_result);
                                             drop(tx_empty);
                                             break;
                                         }
@@ -3129,6 +3177,7 @@ mod native_helper_tests {
         );
 
         let (reply, rx) = oneshot::channel();
+        let (terminal_reply, _terminal_rx) = oneshot::channel();
         assert_busy!(
             AcpCommand::Prompt {
                 request: PromptRequest::new(
@@ -3136,6 +3185,7 @@ mod native_helper_tests {
                     vec![ContentBlock::Text(TextContent::new("hello"))],
                 ),
                 reply,
+                terminal_reply,
             },
             rx
         );
