@@ -351,7 +351,7 @@ fn handle_code_read(
     let args: CodeReadArgs = parse_args(args)?;
     let selector = normalize_selector(&args.selector, args.source(), catalog)?;
     let source = query::read_symbol(db, &selector, args.context_lines.unwrap_or(0))
-        .map_err(internal_error("external_code_read failed"))?
+        .map_err(selector_query_error("external_code_read failed"))?
         .ok_or_else(|| McpHandlerError::NotFound(format!("symbol not found: {}", args.selector)))?;
     json_value(source)
 }
@@ -369,7 +369,7 @@ fn handle_code_callers(
     let args: CodeCallersArgs = parse_args(args)?;
     let selector = normalize_selector(&args.selector, args.source(), catalog)?;
     let result = query::find_callers(db, &selector, args.include_unresolved.unwrap_or(false))
-        .map_err(internal_error("external_code_callers failed"))?;
+        .map_err(selector_query_error("external_code_callers failed"))?;
     json_value(result)
 }
 
@@ -390,7 +390,7 @@ fn handle_code_callees(
     let args: CodeCalleesArgs = parse_args(args)?;
     let selector = normalize_selector(&args.selector, args.source(), catalog)?;
     let result = query::find_callees(db, &selector, args.include_unresolved.unwrap_or(false))
-        .map_err(internal_error("external_code_callees failed"))?;
+        .map_err(selector_query_error("external_code_callees failed"))?;
     json_value(result)
 }
 
@@ -921,9 +921,8 @@ impl ExternalIndexIdentity {
                     .map(str::trim)
                     .filter(|value| is_legacy_crates_io_source_alias(value))
                     .map(str::to_owned);
-                let canonical_url = format!(
-                    "https://crates.io/api/v1/crates/{fetch_package}/{revision}/download"
-                );
+                let canonical_url =
+                    format!("https://crates.io/api/v1/crates/{fetch_package}/{revision}/download");
                 (
                     source,
                     legacy_warm_source,
@@ -1216,6 +1215,24 @@ fn catalog_error(target: String) -> impl FnOnce(anyhow::Error) -> McpHandlerErro
 
 fn internal_error(context: &'static str) -> impl FnOnce(anyhow::Error) -> McpHandlerError {
     move |error| McpHandlerError::Internal(format!("{context}: {error:#}"))
+}
+
+fn selector_query_error(context: &'static str) -> impl FnOnce(anyhow::Error) -> McpHandlerError {
+    move |error| {
+        if let Some(ambiguity) = error.downcast_ref::<query::AmbiguousSelectorError>() {
+            let candidates = ambiguity
+                .candidates
+                .iter()
+                .map(|candidate| candidate.uri.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            McpHandlerError::InvalidParams(format!(
+                "{context}: {ambiguity}; candidates: {candidates}"
+            ))
+        } else {
+            McpHandlerError::Internal(format!("{context}: {error:#}"))
+        }
+    }
 }
 
 fn jobs_error(context: &'static str) -> impl FnOnce(JobsError) -> McpHandlerError {
