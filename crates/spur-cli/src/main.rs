@@ -2021,6 +2021,10 @@ fn tui_input_to_interactive(input: spur_tui::UserInput) -> spur_core::Interactiv
             session_id: _,
             value,
         } => spur_core::InteractiveInput::SetSessionModel { value },
+        spur_tui::UserInput::SetSessionEffort {
+            session_id: _,
+            value,
+        } => spur_core::InteractiveInput::SetSessionEffort { value },
         spur_tui::UserInput::CancelStream { session } => {
             spur_core::InteractiveInput::CancelStream { session }
         }

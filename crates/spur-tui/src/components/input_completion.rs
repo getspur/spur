@@ -158,6 +158,28 @@ impl InputCompletionPort {
                                 );
                                 PickerShell::open_with_query(Box::new(src), &trigger.query)
                             }
+                            Some(
+                                spur_acp::adapter::arg_picker_hint::ArgPickerHint::StaticChoices {
+                                    choices,
+                                },
+                            ) => {
+                                let choices = choices
+                                    .into_iter()
+                                    .map(|choice| {
+                                        spur_acp::adapter::config_options::AdvertisedChoice {
+                                            value: choice.value,
+                                            label: choice.label,
+                                            description: choice.description,
+                                        }
+                                    })
+                                    .collect();
+                                let src = crate::components::config_option_query_source::ConfigOptionQuerySource::new(
+                                    command_name.clone(),
+                                    command_name.clone(),
+                                    choices,
+                                );
+                                PickerShell::open_with_query(Box::new(src), &trigger.query)
+                            }
                             None => {
                                 // PR-3: agent advertised Unstructured input
                                 // (e.g. codex's /review, /review-branch). Free-

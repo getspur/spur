@@ -215,7 +215,9 @@ impl CommandRegistry {
             .filter(|e| match &e.dispatch {
                 Dispatch::SpurLocal(_)
                 | Dispatch::PromptText { .. }
-                | Dispatch::VendorExec { .. } => true,
+                | Dispatch::VendorExec { .. }
+                | Dispatch::SetSessionModel
+                | Dispatch::SetSessionEffort => true,
                 Dispatch::SetSessionConfigOption { config_id } => {
                     if config_id == "model" {
                         caps.supports_set_model() || caps.supports_set_config_option()
@@ -547,7 +549,7 @@ mod tests {
     fn available_commands_for_session_with_codex_caps_keeps_all_entries() {
         use spur_acp::{
             InitializeResponse, NewSessionResponse, ProtocolVersion, SessionConfigId,
-            SessionConfigOption, SessionConfigSelectOption, SessionId,
+            SessionConfigOption, SessionConfigSelectOption,
         };
 
         let init = InitializeResponse::new(ProtocolVersion::LATEST);
@@ -590,7 +592,7 @@ mod tests {
     /// ⇒ /model and /effort are filtered out of the popup.
     #[test]
     fn available_commands_for_session_with_gemini_style_caps_hides_config_option_pickers() {
-        use spur_acp::{InitializeResponse, NewSessionResponse, ProtocolVersion, SessionId};
+        use spur_acp::{InitializeResponse, NewSessionResponse, ProtocolVersion};
 
         let init = InitializeResponse::new(ProtocolVersion::LATEST);
         // Gemini-style: no models, no config_options. set_model & set_config_option both false.
@@ -649,7 +651,7 @@ mod tests {
     fn available_commands_for_session_with_model_config_keeps_model_picker() {
         use spur_acp::{
             InitializeResponse, NewSessionResponse, ProtocolVersion, SessionConfigId,
-            SessionConfigOption, SessionConfigSelectOption, SessionId,
+            SessionConfigOption, SessionConfigSelectOption,
         };
 
         let init = InitializeResponse::new(ProtocolVersion::LATEST);
@@ -698,7 +700,7 @@ mod tests {
     /// the filter regardless of caps state.
     #[test]
     fn available_commands_for_session_keeps_prompt_text_and_spur_local() {
-        use spur_acp::{InitializeResponse, NewSessionResponse, ProtocolVersion, SessionId};
+        use spur_acp::{InitializeResponse, NewSessionResponse, ProtocolVersion};
 
         let init = InitializeResponse::new(ProtocolVersion::LATEST);
         let caps = spur_acp::SpurAgentCaps::new(

@@ -2033,7 +2033,7 @@ mod tests {
     fn pending_model_override_overrides_frozen_caps_label_until_config_option_arrives() {
         use spur_acp::{
             InitializeResponse, NewSessionResponse, ProtocolVersion, SessionConfigId,
-            SessionConfigOption, SessionConfigSelectOption, SessionId,
+            SessionConfigOption, SessionConfigSelectOption,
         };
 
         let mut view = make_view();
@@ -2069,6 +2069,71 @@ mod tests {
             Some("Opus"),
             "live config option label should become authoritative once available"
         );
+    }
+
+    #[test]
+    fn grok_model_changed_refreshes_labels_and_effort_command() {
+        use spur_acp::{InitializeResponse, NewSessionResponse, ProtocolVersion};
+
+        let mut init = InitializeResponse::new(ProtocolVersion::LATEST);
+        init.meta = Some(
+            serde_json::json!({
+                "modelState": {
+                    "currentModelId": "grok-4.5",
+                    "availableModels": [
+                        {
+                            "modelId": "grok-4.5",
+                            "name": "Grok 4.5",
+                            "_meta": {
+                                "reasoningEffort": "high",
+                                "reasoningEfforts": [{"id": "high", "label": "High Effort"}]
+                            }
+                        },
+                        {
+                            "modelId": "grok-composer-2.5-fast",
+                            "name": "Grok Composer 2.5 Fast",
+                            "_meta": {"reasoningEfforts": []}
+                        }
+                    ]
+                }
+            })
+            .as_object()
+            .expect("meta fixture must be an object")
+            .clone(),
+        );
+        let caps = spur_acp::SpurAgentCaps::new(
+            &init,
+            &NewSessionResponse::new(spur_acp::AcpSessionId::new("sid")),
+            spur_acp::AgentKind::Grok,
+        );
+        let mut view = make_view();
+        view.set_spur_agent_caps(Some(std::sync::Arc::new(caps)));
+        let caps = view.spur_agent_caps_cloned();
+        view.apply_advertised_commands(caps.as_deref(), &[]);
+        assert!(view
+            .available_slash_commands()
+            .iter()
+            .any(|entry| entry.name == "effort"));
+
+        assert!(view.apply_grok_model_changed_notification(
+            "_x.ai/session_notification",
+            &serde_json::json!({
+                "sessionId": "sid",
+                "update": {
+                    "sessionUpdate": "model_changed",
+                    "model_id": "grok-composer-2.5-fast"
+                }
+            }),
+        ));
+        assert_eq!(
+            view.resolved_model_label().as_deref(),
+            Some("Grok Composer 2.5 Fast")
+        );
+        assert_eq!(view.resolved_effort_label(), None);
+        assert!(view
+            .available_slash_commands()
+            .iter()
+            .all(|entry| entry.name != "effort"));
     }
 
     fn delegation_completed_event(

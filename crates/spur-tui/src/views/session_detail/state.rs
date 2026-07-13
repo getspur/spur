@@ -659,6 +659,30 @@ impl SessionDetailView {
         self.spur_agent_caps = caps;
     }
 
+    /// Apply Grok's proven `model_changed` extension notification and rebuild
+    /// status labels plus model-specific slash choices from the updated caps.
+    pub fn apply_grok_model_changed_notification(
+        &mut self,
+        method: &str,
+        params: &serde_json::Value,
+    ) -> bool {
+        if method != "_x.ai/session_notification" {
+            return false;
+        }
+        let Some(caps) = self.spur_agent_caps.as_mut() else {
+            return false;
+        };
+        if !std::sync::Arc::make_mut(caps).apply_grok_model_changed(params) {
+            return false;
+        }
+        self.pending_model_override = None;
+        self.pending_effort_override = None;
+        let caps = self.spur_agent_caps.clone();
+        let options = self.session_config_options.clone();
+        self.apply_advertised_commands(caps.as_deref(), &options);
+        true
+    }
+
     pub(crate) fn spur_agent_caps_cloned(&self) -> Option<std::sync::Arc<spur_acp::SpurAgentCaps>> {
         self.spur_agent_caps.clone()
     }

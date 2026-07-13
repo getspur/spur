@@ -386,6 +386,7 @@ impl SessionDetailView {
                 if session.0 != self.session_id.0 {
                     return;
                 }
+                self.apply_grok_model_changed_notification(method, params);
                 let cfg = self.agent_cfg.clone();
 
                 // Ingest bindings: decode params -> delegate to apply_available_commands.
