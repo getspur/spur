@@ -198,16 +198,31 @@ impl ExploreBrowserView {
                 .collect()
         };
         let report = self.cached_status();
-        let footer = if report.missing.is_empty() && report.sha_mismatch.is_empty() {
-            Row::new(vec!["status: all pool bodies present"]).style(Style::new().fg(Color::Green))
-        } else {
-            Row::new(vec![format!(
-                "{} missing, {} sha mismatch",
-                report.missing.len(),
-                report.sha_mismatch.len()
-            )])
-            .style(Style::new().fg(Color::Yellow))
-        };
+        // Status is rendered as a full-width line (not a Table footer). Table
+        // footers inherit multi-column constraints, which truncates long status
+        // strings to the name column (e.g. "status: all pool bodies pre").
+        let (status_text, status_style) =
+            if report.missing.is_empty() && report.sha_mismatch.is_empty() {
+                (
+                    "status: all pool bodies present".to_string(),
+                    Style::new().fg(Color::Green),
+                )
+            } else {
+                (
+                    format!(
+                        "{} missing, {} sha mismatch",
+                        report.missing.len(),
+                        report.sha_mismatch.len()
+                    ),
+                    Style::new().fg(Color::Yellow),
+                )
+            };
+
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(3), Constraint::Length(1)])
+            .split(area);
+
         let table = Table::new(
             rows,
             [
@@ -223,7 +238,6 @@ impl ExploreBrowserView {
             Row::new(vec!["name", "layer", "kind", "sha", "verdict", "license"])
                 .style(Style::new().bold()),
         )
-        .footer(footer)
         .row_highlight_style(Style::new().reversed())
         .highlight_symbol(">>")
         .highlight_spacing(HighlightSpacing::Always)
@@ -236,7 +250,11 @@ impl ExploreBrowserView {
                 .title_bottom("j/k navigate · l lens · x remove · r reload · Esc back")
                 .borders(Borders::ALL),
         );
-        frame.render_stateful_widget(table, area, &mut self.manage_table_state);
+        frame.render_stateful_widget(table, chunks[0], &mut self.manage_table_state);
+        frame.render_widget(
+            Paragraph::new(Span::styled(status_text, status_style)),
+            chunks[1],
+        );
     }
 
     fn render_last_materialization(&mut self, frame: &mut Frame, area: Rect) {
@@ -552,7 +570,10 @@ mod tests {
 
         assert!(view.handle_key(key(KeyCode::Char('r'))).is_none());
         let after_reload = render_manage_to_string(&mut view);
-        assert!(after_reload.contains("status: all pool bodies present"));
+        assert!(
+            after_reload.contains("status: all pool bodies present"),
+            "after_reload missing clean status; rendered:\n{after_reload}"
+        );
         assert!(!after_reload.contains("1 missing, 0 sha mismatch"));
 
         assert!(view.handle_key(key(KeyCode::Char('x'))).is_none());
@@ -655,8 +676,11 @@ mod tests {
         let mut view = ExploreBrowserView::new(repo.path().to_path_buf());
         enter_manage(&mut view);
         let rendered = render_manage_to_string(&mut view);
-        assert!(rendered.contains("pool is empty"));
-        assert!(rendered.contains("status: all pool bodies present"));
+        assert!(rendered.contains("pool is empty"), "rendered:\n{rendered}");
+        assert!(
+            rendered.contains("status: all pool bodies present"),
+            "missing clean status footer; rendered:\n{rendered}"
+        );
         assert!(rendered.contains("name"));
         assert!(rendered.contains("kind"));
         assert!(rendered.contains("sha"));
