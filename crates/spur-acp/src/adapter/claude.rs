@@ -1,9 +1,9 @@
-use std::fmt::Write as _;
-
 use agent_client_protocol::schema::v1::ToolCall;
 use serde_json::Value;
 
-use super::{BadgeColor, ModeBadge, ObservePayload, ToolFamily, ToolInputDisplay};
+use super::{
+    unified_edit_diff, BadgeColor, ModeBadge, ObservePayload, ToolFamily, ToolInputDisplay,
+};
 
 /// Refine the base `ToolFamily` for Claude-family agents.
 ///
@@ -24,40 +24,6 @@ pub fn refine(title: &str, base: ToolFamily) -> ToolFamily {
     base
 }
 
-/// Synthesise a minimal unified diff from an old/new string pair.
-///
-/// Produces an `--- a/<path>` / `+++ b/<path>` header followed by one hunk
-/// that removes every line of `old` and adds every line of `new`.  This is a
-/// "delete-all + add-all" diff — not line-level LCS, but sufficient for TUI
-/// preview purposes without pulling in an external diff library.
-fn make_unified(path: &str, old: &str, new: &str) -> String {
-    let mut out = String::new();
-    let _ = writeln!(out, "--- a/{path}");
-    let _ = writeln!(out, "+++ b/{path}");
-
-    let old_lines: Vec<&str> = old.lines().collect();
-    let new_lines: Vec<&str> = new.lines().collect();
-    let hunk_header = format!(
-        "@@ -{},{} +{},{} @@\n",
-        i32::from(!old_lines.is_empty()),
-        old_lines.len(),
-        i32::from(!new_lines.is_empty()),
-        new_lines.len()
-    );
-    out.push_str(&hunk_header);
-    for l in &old_lines {
-        out.push('-');
-        out.push_str(l);
-        out.push('\n');
-    }
-    for l in &new_lines {
-        out.push('+');
-        out.push_str(l);
-        out.push('\n');
-    }
-    out
-}
-
 /// Try to parse Claude's tool input shapes into a `ToolInputDisplay`.
 ///
 /// Recognised shapes:
@@ -74,7 +40,7 @@ pub fn try_format_input(raw: &Value) -> Option<ToolInputDisplay> {
         obj.get("old_string").and_then(|v| v.as_str()),
         obj.get("new_string").and_then(|v| v.as_str()),
     ) {
-        let diff = make_unified(fp, old, new);
+        let diff = unified_edit_diff(fp, old, new, 3);
         return Some(ToolInputDisplay::Diff {
             path: fp.to_owned(),
             diff,
