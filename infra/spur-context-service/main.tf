@@ -491,6 +491,17 @@ resource "aws_cognito_user_pool" "context_service" {
   }
 }
 
+# Classic Hosted UI branding (logo + CSS). Applies pool-wide when client_id is
+# omitted. Assets live under hosted-ui/ and must stay under Cognito's 100 KiB
+# limits for both CSS and image. See hosted-ui/README.md and preview.html.
+resource "aws_cognito_user_pool_ui_customization" "context_service" {
+  count = var.cognito_auth_enabled ? 1 : 0
+
+  user_pool_id = aws_cognito_user_pool.context_service[0].id
+  css          = file("${path.module}/hosted-ui/cognito-login.css")
+  image_file   = filebase64("${path.module}/hosted-ui/logo.png")
+}
+
 resource "aws_cognito_user_pool_domain" "context_service" {
   count = var.cognito_auth_enabled ? 1 : 0
 
