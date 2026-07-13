@@ -1,6 +1,6 @@
 //! Knowledge-context retrieval for external packages.
 
-use crate::catalog::readable_table;
+use crate::{catalog::readable_table, query::pkg_symbol_uri};
 use anyhow::{anyhow, Context as _, Result};
 use duckdb::{params, Connection, Row};
 use serde::{Deserialize, Serialize};
@@ -104,6 +104,10 @@ pub struct KnowledgeEvidence {
     pub title: String,
     pub file: String,
     pub stable_symbol_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selector: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub uri: Option<String>,
     pub symbol_kind: Option<String>,
     pub score: f64,
     pub signal: Option<String>,
@@ -644,21 +648,33 @@ fn evidence_from_candidate(
     candidate: &KnowledgeCandidate,
     opts: &KnowledgeContextOptions,
 ) -> KnowledgeEvidence {
-    let stable_symbol_id = if is_code(candidate) {
+    let code = is_code(candidate);
+    let selector = if code {
         candidate.qualified_name.as_ref().map(|qualified_name| {
             format!("pkg:{}@{}::{}", opts.package, opts.revision, qualified_name)
         })
     } else {
-        candidate.stable_symbol_id.clone()
+        None
     };
-    let next = if is_code(candidate) {
-        stable_symbol_id
-            .as_ref()
-            .map(|selector| {
+    let uri = if code {
+        candidate.stable_symbol_id.as_ref().map(|stable_symbol_id| {
+            pkg_symbol_uri(
+                &opts.source,
+                &opts.package,
+                &opts.revision,
+                stable_symbol_id,
+            )
+        })
+    } else {
+        None
+    };
+    let next = if code {
+        uri.as_ref()
+            .map(|uri| {
                 vec![
-                    json!({ "tool": "external_code_read", "selector": selector }),
-                    json!({ "tool": "external_code_callers", "selector": selector }),
-                    json!({ "tool": "external_code_callees", "selector": selector }),
+                    json!({ "tool": "external_code_read", "selector": uri }),
+                    json!({ "tool": "external_code_callers", "selector": uri }),
+                    json!({ "tool": "external_code_callees", "selector": uri }),
                 ]
             })
             .unwrap_or_default()
@@ -674,7 +690,9 @@ fn evidence_from_candidate(
         },
         title: candidate.title.clone(),
         file: candidate.file_path.clone(),
-        stable_symbol_id,
+        stable_symbol_id: candidate.stable_symbol_id.clone(),
+        selector,
+        uri,
         symbol_kind: candidate.symbol_kind.clone(),
         score: candidate.score,
         signal: candidate.signal.clone(),

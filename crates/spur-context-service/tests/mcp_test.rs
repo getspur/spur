@@ -700,9 +700,7 @@ async fn external_knowledge_context_resolves_ref_and_returns_evidence_pack() -> 
         .as_array()
         .context("primary_evidence array")?
         .iter()
-        .any(|evidence| {
-            evidence["stable_symbol_id"] == "pkg:demo@1.0.0::demo::parse_config_loader"
-        }));
+        .any(|evidence| evidence["stable_symbol_id"] == "cccccccccccccccc"));
     assert!(response["supporting_docs"]
         .as_array()
         .context("supporting_docs array")?
@@ -756,9 +754,7 @@ async fn external_knowledge_context_preserves_identity_for_duplicate_qualified_n
             evidence["selector"],
             "pkg:demo@1.0.0::demo::parse_config_loader"
         );
-        let uri = evidence["uri"]
-            .as_str()
-            .context("canonical evidence URI")?;
+        let uri = evidence["uri"].as_str().context("canonical evidence URI")?;
         assert!(uri.starts_with("pkg-symbol://registry:crates-io/demo/1.0.0/"));
 
         let next = evidence["next"].as_array().context("next actions")?;
@@ -837,10 +833,7 @@ async fn external_knowledge_context_uses_precomputed_query_vector_for_hybrid_hit
     let top = response["primary_evidence"][0]
         .as_object()
         .context("expected vector primary evidence")?;
-    assert_eq!(
-        top["stable_symbol_id"],
-        "pkg:demo@1.0.0::demo::runtime::task_spawner"
-    );
+    assert_eq!(top["stable_symbol_id"], "9999999999999999");
     assert_eq!(top["grounding"], "hybrid-code");
     assert!(response["supporting_docs"]
         .as_array()
@@ -871,11 +864,10 @@ async fn external_tools_support_multi_round_agent_eval_flow() -> Result<()> {
         .as_array()
         .context("primary_evidence array")?
         .iter()
-        .find(|evidence| evidence["stable_symbol_id"] == "pkg:demo@1.0.0::demo::alpha")
+        .find(|evidence| evidence["stable_symbol_id"] == "aaaaaaaaaaaaaaaa")
         .context("alpha evidence")?;
-    let alpha_selector = alpha["stable_symbol_id"]
-        .as_str()
-        .context("alpha selector")?;
+    assert_eq!(alpha["selector"], "pkg:demo@1.0.0::demo::alpha");
+    let alpha_selector = alpha["uri"].as_str().context("alpha stable URI")?;
     assert_next_tools(
         alpha,
         alpha_selector,

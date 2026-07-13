@@ -6,6 +6,7 @@ use duckdb::{params, Connection, Row, ToSql};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
+use thiserror::Error;
 
 const DEFAULT_SOURCE: &str = "registry:crates-io";
 const PKG_SYMBOL_URI_PREFIX: &str = "pkg-symbol://";
@@ -270,6 +271,14 @@ pub enum SelectorResolution {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ResolvedSymbol {
     pub stable_symbol_id: String,
+}
+
+#[derive(Debug, Error)]
+#[error("ambiguous selector `{selector}` matched {candidate_count} symbols")]
+pub struct AmbiguousSelectorError {
+    pub selector: String,
+    pub candidate_count: usize,
+    pub candidates: Vec<CodeCandidate>,
 }
 
 pub fn search_symbols(db: &Connection, opts: &SearchOptions) -> Result<CodeSearchResult> {
@@ -1376,10 +1385,12 @@ fn resolve_required(db: &Connection, selector: &str) -> Result<Option<ResolvedNo
     match candidates.as_slice() {
         [] => Ok(None),
         [candidate] => Ok(Some(ResolvedNode::from(candidate))),
-        _ => bail!(
-            "ambiguous selector `{selector}` matched {} symbols",
-            candidates.len()
-        ),
+        _ => Err(AmbiguousSelectorError {
+            selector: selector.to_owned(),
+            candidate_count: candidates.len(),
+            candidates,
+        }
+        .into()),
     }
 }
 
@@ -1504,6 +1515,21 @@ fn parse_pkg_selector(selector: &str) -> Option<ParsedSelector> {
 /// `%` first, then `/`, so `decode_uri_component` is an exact inverse.
 fn encode_uri_component(value: &str) -> String {
     value.replace('%', "%25").replace('/', "%2F")
+}
+
+pub(crate) fn pkg_symbol_uri(
+    source: &str,
+    package: &str,
+    revision: &str,
+    stable_symbol_id: &str,
+) -> String {
+    format!(
+        "{PKG_SYMBOL_URI_PREFIX}{}/{}/{}/{}",
+        encode_uri_component(source),
+        encode_uri_component(package),
+        encode_uri_component(revision),
+        encode_uri_component(stable_symbol_id),
+    )
 }
 
 /// Inverse of [`encode_uri_component`]. Decode `/` before `%`. A plain
@@ -1635,13 +1661,7 @@ fn code_candidate_from_row(row: &Row<'_>, offset: usize) -> duckdb::Result<CodeC
         qualified_name.as_str()
     };
     let selector = format!("pkg:{package}@{revision}::{selector_name}");
-    let uri = format!(
-        "pkg-symbol://{}/{}/{}/{}",
-        encode_uri_component(&source),
-        encode_uri_component(&package),
-        encode_uri_component(&revision),
-        encode_uri_component(&stable_symbol_id),
-    );
+    let uri = pkg_symbol_uri(&source, &package, &revision, &stable_symbol_id);
 
     Ok(CodeCandidate {
         selector,
