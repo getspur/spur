@@ -1341,6 +1341,89 @@ mod session_attach_guard_transfer_tests {
         assert_eq!(dirty_options, config_options);
     }
 
+    #[tokio::test]
+    async fn loaded_kiro_direct_model_with_empty_config_options_emits_command_registry_dirty() {
+        use spur_acp::{AgentKind, InitializeResponse, LoadSessionResponse, ProtocolVersion};
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut config = SpurConfig::default();
+        config.cost.db_path = tmp.path().join("cost.db").display().to_string();
+        let mut kiro = spur_acp::AgentConfig::with_defaults("kiro");
+        kiro.kind = AgentKind::Kiro;
+        config.agents.entries = vec![kiro];
+        let mut orchestrator = Orchestrator::new(tmp.path().to_path_buf(), config, None).unwrap();
+        let mut event_rx = orchestrator.subscribe();
+
+        let mut load_response = LoadSessionResponse::new();
+        load_response.meta = serde_json::from_value(serde_json::json!({
+            "spur.recoveredModels": {
+                "availableModels": [
+                    {"modelId": "auto", "name": "auto"},
+                    {"modelId": "glm-5", "name": "GLM-5"}
+                ],
+                "currentModelId": "glm-5"
+            }
+        }))
+        .expect("kiro recovered models meta must deserialize");
+        let init = InitializeResponse::new(ProtocolVersion::LATEST);
+
+        let (brain, _history_stream, _outcome) = orchestrator
+            .load_brain_session(
+                Box::new(LoadSessionConnection {
+                    response: Some(load_response),
+                }),
+                "kiro".to_string(),
+                None,
+                "acp-loaded-kiro-caps".to_string(),
+                false,
+                false,
+                None,
+                false,
+                init,
+            )
+            .await
+            .expect("load_brain_session should restore the Kiro session");
+
+        let session_id = brain.spur_session_id.clone();
+        assert!(brain.config_options.is_empty());
+        let cached_caps = brain
+            .spur_agent_caps
+            .as_ref()
+            .expect("BrainSession must cache loaded Kiro caps");
+        assert!(cached_caps.supports_direct_set_model());
+        assert!(!cached_caps.supports_set_model());
+
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        let mut dirty = None;
+        while tokio::time::Instant::now() < deadline && dirty.is_none() {
+            let remaining = deadline - tokio::time::Instant::now();
+            match tokio::time::timeout(remaining, event_rx.recv()).await {
+                Ok(Ok(ev)) => {
+                    if let SpurEventBody::CommandRegistryDirty {
+                        session,
+                        caps,
+                        config_options,
+                    } = ev.body
+                    {
+                        if session == session_id {
+                            dirty = Some((caps, config_options));
+                        }
+                    }
+                }
+                _ => break,
+            }
+        }
+
+        brain.delegation_handle.abort();
+
+        let (dirty_caps, dirty_options) = dirty
+            .expect("Kiro direct model support must emit CommandRegistryDirty without options");
+        let dirty_caps = dirty_caps.expect("CommandRegistryDirty must carry loaded Kiro caps");
+        assert!(dirty_caps.supports_direct_set_model());
+        assert!(!dirty_caps.supports_set_model());
+        assert!(dirty_options.is_empty());
+    }
+
     /// bd-3rvt: smoke-test that `apply_mcp_server_settings` runs cleanly and
     /// leaves the server in a startable state. The three init paths
     /// (`run_adhoc`, `create_brain_session`, `load_brain_session`) all rely
@@ -1755,17 +1838,9 @@ impl Orchestrator {
 
         // 3. Drain the notification pump with a bounded grace so the
         //    last batch of notifications reaches the projection. On
-        //    timeout, abort explicitly — dropping a `JoinHandle` does NOT
-        //    cancel the task. `abort_handle` gives us a side-channel that
-        //    survives moving the handle into `timeout`.
+        //    timeout, abort explicitly.
         if let Some(h) = b.notification_pump_handle.take() {
-            let abort = h.abort_handle();
-            if tokio::time::timeout(std::time::Duration::from_millis(100), h)
-                .await
-                .is_err()
-            {
-                abort.abort();
-            }
+            h.retire_with_grace().await;
         }
 
         // 4. Abort remaining handles and stash connection for reuse.
@@ -2131,7 +2206,7 @@ impl Orchestrator {
         // `presub_notif_rx` was subscribed before new_session so we don't
         // miss notifications emitted during session setup.
         let notification_pump_handle = presub_notif_rx.map(|notif_rx| {
-            crate::notification_pump::spawn_session_notification_pump(
+            crate::notification_pump::spawn_observed_session_notification_pump(
                 notif_rx,
                 session_id.clone(),
                 self.funnel.clone(),
@@ -2164,7 +2239,7 @@ impl Orchestrator {
         if !config_options.is_empty()
             || spur_agent_caps
                 .as_ref()
-                .is_some_and(|caps| caps.supports_set_model() || caps.supports_grok_set_model())
+                .is_some_and(|caps| caps.supports_set_model() || caps.supports_direct_set_model())
         {
             // Surface the initial cache so spur-tui can synthesize
             // advertised slash commands (e.g. /model, /effort) from
@@ -2518,7 +2593,7 @@ impl Orchestrator {
         // `presub_notif_rx` was subscribed before load_session so history
         // replay items aren't missed.
         let notification_pump_handle = presub_notif_rx.map(|notif_rx| {
-            crate::notification_pump::spawn_session_notification_pump(
+            crate::notification_pump::spawn_observed_session_notification_pump(
                 notif_rx,
                 session_id.clone(),
                 self.funnel.clone(),
@@ -2560,7 +2635,7 @@ impl Orchestrator {
         if !config_options.is_empty()
             || spur_agent_caps
                 .as_ref()
-                .is_some_and(|caps| caps.supports_set_model() || caps.supports_grok_set_model())
+                .is_some_and(|caps| caps.supports_set_model() || caps.supports_direct_set_model())
         {
             self.emit(SpurEvent::now(SpurEventBody::CommandRegistryDirty {
                 session: session_id.clone(),
@@ -2681,11 +2756,15 @@ impl Orchestrator {
             }
         };
 
-        // Drain the history stream to keep the pump contract (same
-        // pattern as the ResumeSession arm). We do NOT re-emit
-        // AgentNotification events here — the TUI already rendered the
-        // pre-death transcript.
-        while let Some(_notification) = history_stream.next().await {}
+        // Keep reconnect milestones behind the active history owner. Native
+        // replay is already emitted by the pump; compatibility transports are
+        // drained inline without re-emitting because the TUI retained the
+        // pre-death transcript. The two branches are deliberately exclusive.
+        if let Some(pump) = new_session.notification_pump_handle.as_ref() {
+            pump.settle_after_terminal().await;
+        } else {
+            while let Some(_notification) = history_stream.next().await {}
+        }
 
         Ok((new_session, outcome))
     }
