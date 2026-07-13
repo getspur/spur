@@ -25,6 +25,9 @@ signal `#FFB454`, mono type).
 - CSS ≤ 100 KiB
 - Image ≤ 100 KiB (PNG or JPG)
 - Only Hosted UI hooks can be restyled — HTML structure is owned by Cognito
+- `SetUICustomization` allowlists selectors: `body` plus the
+  `*-customizable` classes (and a few `:hover`/`:focus` variants). No
+  `:root`, pseudo-elements, Bootstrap structural classes, or `@media`.
 
 ## Local preview
 
