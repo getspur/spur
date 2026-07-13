@@ -375,6 +375,103 @@ mod worker_mcp_cache_tests {
 }
 
 #[cfg(test)]
+mod worker_mcp_context_service_tests {
+    use super::WorkerMcpFetcher;
+    use crate::event_funnel::spawn_funnel;
+    use crate::server::{DetachedContinuationCtx, McpCallbackServer};
+    use dashmap::DashMap;
+    use spur_acp::config::ContextServiceConfig;
+    use spur_acp::{BrainSessionId, SessionId};
+    use spur_blob_store::{MemoryOutcomeStore, OutcomeStore};
+    use spur_pm::{test_workspace::TestBeadsWorkspace, PmService};
+    use std::sync::atomic::AtomicU64;
+    use std::sync::Arc;
+    use std::time::Duration;
+    use tempfile::TempDir;
+    use tokio::sync::broadcast;
+
+    const CONTEXT_SERVICE_TEST_CHILD: &str =
+        "orchestrator::worker_mcp::worker_mcp_context_service_tests::configured_fetcher_advertises_external_tools_in_subprocess";
+    const CONTEXT_SERVICE_TEST_MARKER: &str = "SPUR_CONTEXT_SERVICE_TEST_CHILD";
+
+    #[test]
+    fn ensure_starts_configured_server_that_advertises_external_tools() {
+        let status =
+            std::process::Command::new(std::env::current_exe().expect("current test binary"))
+                .args(["--exact", CONTEXT_SERVICE_TEST_CHILD, "--nocapture"])
+                .env(CONTEXT_SERVICE_TEST_MARKER, "1")
+                .env_remove("SPUR_CONTEXT_SERVICE_URL")
+                .env_remove("SPUR_CONTEXT_SERVICE_TOKEN")
+                .status()
+                .expect("run isolated context-service test");
+
+        assert!(status.success(), "isolated test failed with {status}");
+    }
+
+    #[tokio::test]
+    async fn configured_fetcher_advertises_external_tools_in_subprocess() {
+        if std::env::var_os(CONTEXT_SERVICE_TEST_MARKER).is_none() {
+            return;
+        }
+
+        let repo = TempDir::new().expect("temp repo");
+        let beads = TestBeadsWorkspace::init();
+        let beads_dir = repo.path().join(".beads");
+        std::fs::create_dir_all(&beads_dir).expect("create .beads directory");
+        beads.copy_db_to(&beads_dir);
+        let pm_service = Arc::new(
+            PmService::try_new(None, true, false, repo.path(), None)
+                .await
+                .expect("PmService::try_new failed")
+                .expect("expected beads PM service"),
+        );
+
+        let feature_gate = crate::server::community_feature_gate();
+        let outcome_store: Arc<dyn OutcomeStore> = Arc::new(MemoryOutcomeStore::new());
+        let continuation_ctx = DetachedContinuationCtx {
+            on_complete: Arc::new(|_continuation, _worker| Box::pin(async {})),
+        };
+        let (funnel_tx, _funnel_rx) = broadcast::channel(8);
+        let funnel = spawn_funnel(funnel_tx, Arc::new(AtomicU64::new(0)));
+        let event_sink: Arc<dyn spur_mcp::McpEventSink> = Arc::new(funnel.clone());
+        let (mcp_server, _channel) = McpCallbackServer::new(
+            None,
+            Some(Arc::clone(&pm_service)),
+            Some(event_sink),
+            continuation_ctx,
+            Arc::clone(&outcome_store),
+            Arc::clone(&feature_gate),
+        );
+        let fetcher = WorkerMcpFetcher {
+            cache: Arc::new(DashMap::new()),
+            pm_service: Some(pm_service),
+            feature_gate: Some(feature_gate),
+            funnel,
+            mcp_server: Arc::new(mcp_server),
+            outcome_store,
+            repo_root: Some(repo.path().to_path_buf()),
+            context_service_config: ContextServiceConfig {
+                url: "http://127.0.0.1:9/context".to_owned(),
+                ..ContextServiceConfig::default()
+            },
+        };
+
+        let server = fetcher
+            .ensure(&BrainSessionId::new(SessionId::new()))
+            .await
+            .expect("configured worker MCP server should start");
+        let external_tool_count = server
+            .claude_tool_names()
+            .iter()
+            .filter(|name| name.starts_with("mcp__spur-worker-mcp__external_"))
+            .count();
+
+        assert_eq!(external_tool_count, 8);
+        server.shutdown(Duration::from_secs(5)).await;
+    }
+}
+
+#[cfg(test)]
 mod worker_mcp_dispatch_tests {
     //! Phase 5 / Task 26 — dispatch-site gating for worker `mcp_servers`
     //! injection. Locks the contract that drives `execute_delegation`'s
