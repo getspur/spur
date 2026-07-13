@@ -12,12 +12,11 @@
 //! - Once the compat stream closes it starts a 100 ms grace window to flush
 //!   any in-flight broadcast messages before returning.
 
-use std::time::Duration;
-
 use futures::StreamExt;
 use spur_acp::{PromptRequest, SessionNotification, Usage};
 use tokio::sync::broadcast::error::RecvError;
 
+use crate::notification_pump::TRAILING_NOTIFICATION_GRACE;
 use spur_acp::connection::AgentConnection;
 
 pub(crate) struct PromptDrainResult {
@@ -95,7 +94,7 @@ where
                             // for any LocalSet-scheduled stragglers on the broadcast.
                             prompt_stream = None;
                             grace_deadline = Some(
-                                tokio::time::Instant::now() + Duration::from_millis(100),
+                                tokio::time::Instant::now() + TRAILING_NOTIFICATION_GRACE,
                             );
                         }
                     }

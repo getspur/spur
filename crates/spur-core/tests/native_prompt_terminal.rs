@@ -33,11 +33,11 @@ async fn prompt_rpc_error_emits_brain_error_without_turn_complete() {
     assert!(fixture.exists(), "fixture missing at {}", fixture.display());
 
     let mut config = SpurConfig::default();
-    config.brain.default = "prompt-error-agent".to_string();
+    config.brain.default = "prompt-error-agent".to_owned();
     config.cost.db_path = repo.path().join("cost.db").display().to_string();
 
     let mut agent = AgentConfig::with_defaults("prompt-error-agent");
-    agent.command = "bash".to_string();
+    agent.command = "bash".to_owned();
     agent.args = vec![fixture.display().to_string()];
     config.agents.entries.push(agent);
 
@@ -47,15 +47,13 @@ async fn prompt_rpc_error_emits_brain_error_without_turn_complete() {
     let (input_tx, input_rx) = mpsc::channel(4);
 
     let mut run = tokio::spawn(async move {
-        orchestrator
-            .run_interactive(input_rx, None, None, new_overflow_buf())
-            .await
+        Box::pin(orchestrator.run_interactive(input_rx, None, None, new_overflow_buf())).await
     });
 
     input_tx
         .send(InteractiveInput::Message {
             blocks: vec![ContentBlock::Text(TextContent::new(
-                "trigger prompt error".to_string(),
+                "trigger prompt error".to_owned(),
             ))],
             interrupt: false,
         })
