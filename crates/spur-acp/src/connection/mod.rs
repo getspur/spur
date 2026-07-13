@@ -307,6 +307,18 @@ pub trait AgentConnection: Send + Sync {
         Err(AcpError::CapabilityMissing("set_model"))
     }
 
+    /// Set Grok's reasoning effort through the proven `session/set_model`
+    /// request shape. Other transports do not advertise this vendor path.
+    async fn set_session_effort(
+        &mut self,
+        sid: SessionId,
+        effort_id: String,
+        caps: &SpurAgentCaps,
+    ) -> Result<(), AcpError> {
+        let _ = (sid, effort_id, caps);
+        Err(AcpError::CapabilityMissing("set_effort"))
+    }
+
     /// Authenticate with the agent using a previously-advertised auth method.
     ///
     /// Not all transports support this; the default implementation returns an error.

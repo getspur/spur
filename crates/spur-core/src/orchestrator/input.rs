@@ -60,6 +60,10 @@ pub enum InteractiveInput {
     SetSessionModel {
         value: String,
     },
+    /// Grok reasoning effort sent via `session/set_model` metadata.
+    SetSessionEffort {
+        value: String,
+    },
     /// Invoke an agent vendor-extension RPC on the active brain session.
     /// No-op if there is no active brain session. The method name and params
     /// are chosen by the TUI's config-driven dispatch path — the

@@ -139,6 +139,11 @@ pub enum Action {
         session_id: SessionId,
         value: String,
     },
+    /// Grok reasoning-effort selection through its model adapter.
+    SetSessionEffort {
+        session_id: SessionId,
+        value: String,
+    },
     /// Move tree selection down by N rows.
     SelectNextBy(usize),
     /// Move tree selection up by N rows.

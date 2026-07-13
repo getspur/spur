@@ -1826,6 +1826,16 @@ impl DashboardView {
                                     None
                                 }
                             }
+                            SubmitDecision::SetSessionEffort { value } => {
+                                if self.session_attached {
+                                    Some(Action::SetSessionEffort {
+                                        session_id: spur_acp::SessionId(String::new()),
+                                        value,
+                                    })
+                                } else {
+                                    None
+                                }
+                            }
                         }
                     }
                     HandleOutcome::Key(intent) => {
