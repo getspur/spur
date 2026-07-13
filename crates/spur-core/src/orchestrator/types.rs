@@ -65,7 +65,7 @@ pub struct BrainSession {
     /// session is retired — otherwise a pump subscribed against the
     /// reused connection keeps emitting events tagged with this
     /// (now-stale) `spur_session_id`.
-    pub notification_pump_handle: Option<JoinHandle<()>>,
+    pub notification_pump_handle: Option<crate::notification_pump::SessionNotificationPump>,
     /// Holds the attach lock while the transport lives on this active session.
     /// Moves back to `ActiveConnection` when the transport is cached.
     pub(crate) attach_guard: Option<SessionAttachGuard>,
