@@ -114,11 +114,12 @@ python3 scripts/probe_acp_capabilities.py \
 The command writes full NDJSON frames plus a structured report under
 `.spur/logs/probe-my-agent-<timestamp>.*`. In `matrix`, check
 `config_options_advertised`, `modes_advertised`, command discovery, and observed
-update/extension variants. `spur_prediction.would_synthesize` is the seed
-onboarding verdict: `/model` requires a non-empty model select and `/effort`
-requires a non-empty `thought_level`/effort select. An empty `configOptions`
-list means neither slash command is synthesized, even if proprietary `_meta`
-contains a model catalog.
+update/extension variants. Matrix `model_select_advertised` and
+`effort_select_advertised` report configOptions selects exactly as advertised on
+the wire. `spur_slash_model` and `spur_slash_effort` instead predict SPUR's
+product surface, including proven proprietary DirectSetModel catalogs for Grok
+and Kiro (and Grok's proprietary effort metadata) without fabricating
+configOptions.
 
 Vendor extension notifications (e.g. Kiro `_kiro.dev/commands/available`, Grok
 `_x.ai/*`) are always harvested into `vendor_notifications` with **full
@@ -185,11 +186,11 @@ handle = "grok"
 dispatch = "prompt_text"
 ```
 
-**Important — `/model` is not automatic.** SPUR synthesizes mid-session `/model`
-and `/effort` only when the agent returns matching `configOptions` on
-`session/new`. Grok’s own TUI has local `/model` / `/session-info` commands;
-those are **not** the ACP surface. Before assuming model switching works under
-SPUR, run:
+**Important — verify the ACP planes.** SPUR synthesizes mid-session `/model`
+from a matching configOptions select or Grok's non-empty proprietary model
+catalog, and `/effort` from configOptions or Grok's proven effort metadata.
+Grok's own TUI also has local commands that are not ACP evidence. Before
+assuming model switching works under SPUR, run:
 
 ```bash
 python3 scripts/probe_acp_capabilities.py \
