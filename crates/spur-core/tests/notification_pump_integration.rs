@@ -1,4 +1,4 @@
-//! Integration tests for the broadcast → SpurEvent notification pump.
+//! Integration tests for the broadcast → `SpurEvent` notification pump.
 //!
 //! These tests verify `spawn_session_notification_pump` in isolation:
 //!
@@ -10,6 +10,10 @@
 //! 2. `pump_abort_stops_emission_for_retired_session` — regression for
 //!    commit 408dc23: aborts pump 1, starts pump 2 on the same broadcast
 //!    with a different session id, and asserts only pump 2 emits.
+//!
+//! 3. `pump_lag_is_visible_on_the_host_event_bus` — overruns a tiny
+//!    notification broadcast and asserts the host receives an explicit
+//!    degraded/error event instead of relying on logs alone.
 
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
@@ -65,7 +69,7 @@ async fn pump_emits_agent_notification_with_correct_session_id() {
     let (notif_tx, notif_rx) = broadcast::channel::<SessionNotification>(16);
 
     // ── Spawn pump with spur_session_id = "sess-A" ──────────────────────────
-    let spur_session_id = SessionId("sess-A".to_string());
+    let spur_session_id = SessionId("sess-A".to_owned());
     let _pump_handle = spawn_session_notification_pump(notif_rx, spur_session_id.clone(), funnel);
 
     // ── Exercise: send one notification ─────────────────────────────────────
@@ -116,11 +120,8 @@ async fn pump_abort_stops_emission_for_retired_session() {
     let (notif_tx, notif_rx_1) = broadcast::channel::<SessionNotification>(16);
 
     // ── Spawn pump 1 with "sess-A", then immediately abort it ────────────────
-    let pump_handle_1 = spawn_session_notification_pump(
-        notif_rx_1,
-        SessionId("sess-A".to_string()),
-        funnel.clone(),
-    );
+    let pump_handle_1 =
+        spawn_session_notification_pump(notif_rx_1, SessionId("sess-A".to_owned()), funnel.clone());
     pump_handle_1.abort();
     // Give the runtime a moment to process the abort.
     tokio::task::yield_now().await;
@@ -128,7 +129,7 @@ async fn pump_abort_stops_emission_for_retired_session() {
     // ── Spawn pump 2 with "sess-B" on the same broadcast ────────────────────
     let notif_rx_2 = notif_tx.subscribe();
     let _pump_handle_2 =
-        spawn_session_notification_pump(notif_rx_2, SessionId("sess-B".to_string()), funnel);
+        spawn_session_notification_pump(notif_rx_2, SessionId("sess-B".to_owned()), funnel);
 
     // ── Exercise: send a notification ────────────────────────────────────────
     let acp_session_id = spur_acp::AcpSessionId::new("acp-sess-2");
@@ -165,4 +166,53 @@ async fn pump_abort_stops_emission_for_retired_session() {
     );
 
     drop(notif_tx);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pump_lag_is_visible_on_the_host_event_bus() {
+    let (event_tx, mut events) = broadcast::channel::<SpurEvent>(256);
+    let funnel = spawn_funnel(event_tx, Arc::new(AtomicU64::new(0)));
+
+    // Capacity one makes the first item unrecoverable before the pump starts.
+    let (notif_tx, notif_rx) = broadcast::channel::<SessionNotification>(1);
+    let session = SessionId("lagged-session".to_owned());
+    for command in ["lost", "survivor"] {
+        notif_tx
+            .send(SessionNotification::new(
+                spur_acp::AcpSessionId::new("lagged-acp-session"),
+                SessionUpdate::AvailableCommandsUpdate(AvailableCommandsUpdate::new(vec![
+                    AvailableCommand::new(command, command),
+                ])),
+            ))
+            .expect("the subscribed receiver should keep the broadcast open");
+    }
+
+    let _pump = spawn_session_notification_pump(notif_rx, session.clone(), funnel);
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(500);
+    let mut lag_message = None;
+    let mut survivor_seen = false;
+
+    while tokio::time::Instant::now() < deadline && !(survivor_seen && lag_message.is_some()) {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        match tokio::time::timeout(remaining, events.recv()).await {
+            Ok(Ok(event)) => match event.body {
+                SpurEventBody::BrainError {
+                    session: event_session,
+                    message,
+                } if event_session == session => lag_message = Some(message),
+                SpurEventBody::AgentNotification { notification, .. } => {
+                    survivor_seen = format!("{notification:?}").contains("survivor");
+                }
+                _ => {}
+            },
+            Ok(Err(_)) | Err(_) => break,
+        }
+    }
+
+    assert!(survivor_seen, "the pump must continue after reporting lag");
+    let lag_message = lag_message.expect("broadcast lag must be visible to the host event stream");
+    assert!(
+        lag_message.contains("lost 1") && lag_message.contains("incomplete"),
+        "lag signal should quantify loss and explain degradation: {lag_message}"
+    );
 }
