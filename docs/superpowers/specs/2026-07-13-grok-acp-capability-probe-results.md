@@ -163,6 +163,9 @@ current synthesizer.
    synthesizer changes.
 5. **Probe is the regression gate** when Grok CLI versions ship — re-run
    `scripts/probe_grok_acp.py` and refresh §4.
+6. **SPUR read-only status:** model and effort may display from Grok `_meta`
+   at session freeze; mid-session switching remains unsupported without standard
+   `configOptions`.
 
 ---
 
