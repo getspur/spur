@@ -36,10 +36,17 @@ item_schema = "acp_available_command"
 args = ["--trust-all-tools"]
 
 # ── claude-code ───────────────────────────────────────────────────
+# Pin deliberately — @latest silently pulls breaking adapter changes.
+# Bumped 0.33.1 → 0.54.1 after live probe 2026-07-13 (configOptions model +
+# effort/thought_level, agent profile option, set_mode; session/set_model
+# unsupported — use set_config_option). Re-probe on every pin bump:
+#   python3 scripts/probe_acp_capabilities.py \
+#     --command npx --args "--yes @agentclientprotocol/claude-agent-acp@<ver>" \
+#     --label claude-code --probe-vendor-rpc --always-approve --try-set-model
 [[agents.entries]]
 name = "claude-code"
 command = "npx"
-args = ["--yes", "@agentclientprotocol/claude-agent-acp@0.33.1"]
+args = ["--yes", "@agentclientprotocol/claude-agent-acp@0.54.1"]
 transport = "acp"
 kind = "claude-code-acp"
 role = "both"
