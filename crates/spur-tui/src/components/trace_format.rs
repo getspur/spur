@@ -203,6 +203,8 @@ pub(crate) fn observe_compact(
 
 // ─── Line builders ──────────────────────────────────────────────────
 
+const DIFF_PREVIEW_LINES: usize = 16;
+
 /// Build display lines for a `ToolInputDisplay` value (3-space indented).
 pub(crate) fn input_display_lines(theme: &Theme, input: &ToolInputDisplay) -> Vec<Line<'static>> {
     let subtle = token(theme, "react_trace.diff.context.fg");
@@ -226,24 +228,8 @@ pub(crate) fn input_display_lines(theme: &Theme, input: &ToolInputDisplay) -> Ve
                     Style::default().fg(subtle).add_modifier(Modifier::BOLD),
                 ),
             ]));
-            let mut count = 0usize;
-            let mut total = 0usize;
-            for dl in diff.lines() {
-                total += 1;
-                let _ = dl;
-            }
-            for dl in diff.lines() {
-                if count >= 6 {
-                    let remaining = total.saturating_sub(6);
-                    lines.push(Line::from(vec![
-                        Span::raw("   "),
-                        Span::styled(
-                            format!("[… {} more]", remaining),
-                            Style::default().fg(subtle),
-                        ),
-                    ]));
-                    break;
-                }
+            let total = diff.lines().count();
+            for dl in diff.lines().take(DIFF_PREVIEW_LINES) {
                 let color = if dl.starts_with('+') {
                     diff_add
                 } else if dl.starts_with('-') {
@@ -255,7 +241,15 @@ pub(crate) fn input_display_lines(theme: &Theme, input: &ToolInputDisplay) -> Ve
                     Span::raw("   "),
                     Span::styled(terminal_safe_text(dl), Style::default().fg(color)),
                 ]));
-                count += 1;
+            }
+            if total > DIFF_PREVIEW_LINES {
+                lines.push(Line::from(vec![
+                    Span::raw("   "),
+                    Span::styled(
+                        format!("[… {} more]", total - DIFF_PREVIEW_LINES),
+                        Style::default().fg(subtle),
+                    ),
+                ]));
             }
         }
         ToolInputDisplay::Command { cmd, cwd } => {
@@ -420,7 +414,11 @@ pub(crate) fn observe_payload_lines(
                     Span::styled(msg, Style::default().fg(edit_color)),
                 ]));
             } else if let Some(d) = diff {
-                let limit = if collapsed { 6 } else { usize::MAX };
+                let limit = if collapsed {
+                    DIFF_PREVIEW_LINES
+                } else {
+                    usize::MAX
+                };
                 let total = d.lines().count();
                 for dl in d.lines().take(limit) {
                     let color = if dl.starts_with('+') {
@@ -439,7 +437,7 @@ pub(crate) fn observe_payload_lines(
                     lines.push(Line::from(vec![
                         Span::raw("   "),
                         Span::styled(
-                            format!("[… {} more lines]", total - limit),
+                            format!("[… {} more lines · Ctrl+O expand]", total - limit),
                             Style::default().fg(subtle),
                         ),
                     ]));
@@ -521,6 +519,13 @@ pub(crate) fn derive_delegate_status(
 mod tests {
     use super::*;
 
+    fn line_text(line: &Line<'_>) -> String {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect()
+    }
+
     #[test]
     fn rendered_external_text_does_not_emit_terminal_controls() {
         assert_eq!(
@@ -529,5 +534,41 @@ mod tests {
         );
         assert_eq!(terminal_safe_text("red\x1b[31m"), "red^[[31m");
         assert_eq!(terminal_safe_text("left\rright"), "left^Mright");
+    }
+
+    #[test]
+    fn diff_input_preview_keeps_sixteen_lines_before_truncating() {
+        let diff = (0..20).map(|n| format!("+line {n}\n")).collect::<String>();
+        let input = ToolInputDisplay::Diff {
+            path: "src/lib.rs".to_string(),
+            diff,
+        };
+
+        let lines = input_display_lines(crate::theme::fallback_theme(), &input);
+        let rendered = lines.iter().map(line_text).collect::<Vec<_>>();
+
+        assert_eq!(rendered.len(), 18, "path + 16 diff lines + truncation");
+        assert!(rendered.iter().any(|line| line.contains("+line 15")));
+        assert_eq!(rendered.last().expect("truncation line"), "   [… 4 more]");
+    }
+
+    #[test]
+    fn collapsed_edit_result_uses_sixteen_line_preview_and_expand_affordance() {
+        let diff = (0..20).map(|n| format!("-line {n}\n")).collect::<String>();
+        let payload = ObservePayload::EditResult {
+            path: Some("src/lib.rs".to_string()),
+            replacements: None,
+            diff: Some(diff),
+        };
+
+        let lines = observe_payload_lines(crate::theme::fallback_theme(), &payload, true);
+        let rendered = lines.iter().map(line_text).collect::<Vec<_>>();
+
+        assert_eq!(rendered.len(), 17, "16 diff lines + truncation");
+        assert!(rendered.iter().any(|line| line.contains("-line 15")));
+        assert_eq!(
+            rendered.last().expect("truncation line"),
+            "   [… 4 more lines · Ctrl+O expand]"
+        );
     }
 }
