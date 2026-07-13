@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="72" viewBox="0 0 320 72" role="img" aria-label="SPUR">
+  <title>SPUR</title>
+  <!-- Terminal wordmark: flat, monospaced, amber signal pip. -->
+  <rect width="320" height="72" fill="#0E1116"/>
+  <text
+    x="28"
+    y="48"
+    fill="#E6EDF3"
+    font-family="ui-monospace, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace"
+    font-size="36"
+    font-weight="700"
+    letter-spacing="0.28em"
+  >SPUR</text>
+  <!-- Live ledger signal pip -->
+  <circle cx="268" cy="36" r="5" fill="#FFB454"/>
+  <circle cx="268" cy="36" r="9" fill="none" stroke="#FFB454" stroke-opacity="0.35" stroke-width="1.5"/>
+</svg>

@@ -1,0 +1,381 @@
+/*
+ * SPUR Context Service — Cognito Hosted UI branding
+ *
+ * Applied via aws_cognito_user_pool_ui_customization. Targets only Cognito's
+ * documented *-customizable hooks (plus a few structural overrides required to
+ * defeat the default gray Hosted UI shell). Palette from marketing/brand-visual.md:
+ * terminal-dark base, amber signal accent, calm industrial control-tower tone.
+ *
+ * Keep under 100 KiB (Cognito hard limit). Prefer self-contained rules —
+ * no external @import (Hosted UI CSP can drop remote fonts).
+ */
+
+:root {
+  --spur-bg: #0e1116;
+  --spur-panel: #1a1f26;
+  --spur-panel-elevated: #222831;
+  --spur-border: #2d333b;
+  --spur-text: #e6edf3;
+  --spur-muted: #8b949e;
+  --spur-accent: #ffb454;
+  --spur-accent-hover: #ffc57a;
+  --spur-link: #79c0ff;
+  --spur-error: #ff7b72;
+  --spur-success: #7ee787;
+  --spur-mono: ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  --spur-radius: 10px;
+  --spur-shadow: 0 24px 64px rgba(0, 0, 0, 0.45), 0 0 0 1px rgba(255, 180, 84, 0.08);
+}
+
+/* ── Shell ─────────────────────────────────────────────────────────────── */
+
+html {
+  background: var(--spur-bg) !important;
+}
+
+body {
+  font-family: var(--spur-mono) !important;
+  color: var(--spur-text) !important;
+  background:
+    radial-gradient(ellipse 80% 50% at 50% -10%, rgba(255, 180, 84, 0.09), transparent 55%),
+    radial-gradient(ellipse 60% 40% at 100% 100%, rgba(121, 192, 255, 0.05), transparent 50%),
+    linear-gradient(180deg, #0e1116 0%, #0b0e12 100%) !important;
+  background-attachment: fixed !important;
+  min-height: 100vh !important;
+  letter-spacing: 0.01em;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* subtle terminal grid without competing with the form */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  background-image:
+    linear-gradient(rgba(230, 237, 243, 0.02) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(230, 237, 243, 0.02) 1px, transparent 1px);
+  background-size: 48px 48px;
+  mask-image: radial-gradient(ellipse 70% 60% at 50% 40%, #000 20%, transparent 75%);
+}
+
+.container,
+.modal-dialog {
+  position: relative;
+  z-index: 1;
+}
+
+.modal-dialog {
+  margin-top: 8vh !important;
+}
+
+.modal-content,
+.background-customizable {
+  background-color: var(--spur-panel) !important;
+  color: var(--spur-text) !important;
+  border: 1px solid var(--spur-border) !important;
+  border-radius: var(--spur-radius) !important;
+  box-shadow: var(--spur-shadow) !important;
+  overflow: hidden !important;
+}
+
+.modal-content-mobile {
+  max-width: 380px !important;
+}
+
+.modal-body {
+  padding: 8px 28px 28px !important;
+}
+
+/* ── Banner / logo ─────────────────────────────────────────────────────── */
+
+.banner-customizable {
+  padding: 28px 24px 18px !important;
+  background:
+    linear-gradient(180deg, rgba(255, 180, 84, 0.06) 0%, transparent 100%),
+    var(--spur-panel) !important;
+  border-bottom: 1px solid var(--spur-border) !important;
+}
+
+.logo-customizable {
+  max-width: 180px !important;
+  max-height: 48px !important;
+  height: auto !important;
+  filter: none !important;
+}
+
+/* ── Typography ────────────────────────────────────────────────────────── */
+
+.label-customizable {
+  display: block !important;
+  font-family: var(--spur-mono) !important;
+  font-weight: 500 !important;
+  font-size: 11px !important;
+  letter-spacing: 0.12em !important;
+  text-transform: uppercase !important;
+  color: var(--spur-muted) !important;
+  margin-top: 14px !important;
+  margin-bottom: 6px !important;
+}
+
+.textDescription-customizable,
+.idpDescription-customizable {
+  font-family: var(--spur-mono) !important;
+  font-size: 13px !important;
+  font-weight: 500 !important;
+  color: var(--spur-text) !important;
+  letter-spacing: 0.04em !important;
+  padding-top: 4px !important;
+  padding-bottom: 14px !important;
+}
+
+.legalText-customizable {
+  color: var(--spur-muted) !important;
+  font-size: 11px !important;
+  line-height: 1.45 !important;
+  font-family: var(--spur-mono) !important;
+}
+
+.redirect-customizable,
+.redirect-customizable a,
+a.redirect-customizable {
+  color: var(--spur-link) !important;
+  font-family: var(--spur-mono) !important;
+  font-size: 12px !important;
+  text-decoration: none !important;
+}
+
+.redirect-customizable:hover,
+.redirect-customizable a:hover,
+a.redirect-customizable:hover {
+  color: var(--spur-accent) !important;
+  text-decoration: underline !important;
+  text-underline-offset: 3px;
+}
+
+p.redirect-customizable {
+  margin-top: 18px !important;
+  color: var(--spur-muted) !important;
+  text-align: center !important;
+}
+
+p.redirect-customizable span {
+  color: var(--spur-muted) !important;
+}
+
+/* ── Form controls ─────────────────────────────────────────────────────── */
+
+.inputField-customizable,
+.form-control.inputField-customizable {
+  width: 100% !important;
+  height: 44px !important;
+  padding: 10px 14px !important;
+  font-family: var(--spur-mono) !important;
+  font-size: 14px !important;
+  color: var(--spur-text) !important;
+  background-color: var(--spur-bg) !important;
+  border: 1px solid var(--spur-border) !important;
+  border-radius: 6px !important;
+  box-shadow: none !important;
+  transition: border-color 120ms ease, box-shadow 120ms ease;
+}
+
+.inputField-customizable::placeholder {
+  color: #5c6570 !important;
+  opacity: 1 !important;
+}
+
+.inputField-customizable:focus,
+.form-control.inputField-customizable:focus {
+  border-color: var(--spur-accent) !important;
+  outline: none !important;
+  box-shadow: 0 0 0 3px rgba(255, 180, 84, 0.18) !important;
+  background-color: var(--spur-bg) !important;
+  color: var(--spur-text) !important;
+}
+
+/* Autofill: keep dark theme */
+.inputField-customizable:-webkit-autofill,
+.inputField-customizable:-webkit-autofill:hover,
+.inputField-customizable:-webkit-autofill:focus {
+  -webkit-text-fill-color: var(--spur-text) !important;
+  -webkit-box-shadow: 0 0 0 1000px var(--spur-bg) inset !important;
+  transition: background-color 9999s ease-in-out 0s;
+}
+
+/* ── Primary CTA ───────────────────────────────────────────────────────── */
+
+.submitButton-customizable,
+.btn.btn-primary.submitButton-customizable {
+  font-family: var(--spur-mono) !important;
+  font-size: 13px !important;
+  font-weight: 700 !important;
+  letter-spacing: 0.1em !important;
+  text-transform: uppercase !important;
+  margin: 22px 0 8px !important;
+  height: 46px !important;
+  width: 100% !important;
+  color: var(--spur-bg) !important;
+  background-color: var(--spur-accent) !important;
+  border: 1px solid var(--spur-accent) !important;
+  border-radius: 6px !important;
+  box-shadow: 0 0 0 0 rgba(255, 180, 84, 0) !important;
+  transition: background-color 120ms ease, border-color 120ms ease, box-shadow 120ms ease, transform 80ms ease;
+}
+
+.submitButton-customizable:hover,
+.btn.btn-primary.submitButton-customizable:hover {
+  color: var(--spur-bg) !important;
+  background-color: var(--spur-accent-hover) !important;
+  border-color: var(--spur-accent-hover) !important;
+  box-shadow: 0 8px 24px rgba(255, 180, 84, 0.22) !important;
+}
+
+.submitButton-customizable:active,
+.btn.btn-primary.submitButton-customizable:active {
+  transform: translateY(1px);
+}
+
+.submitButton-customizable:focus,
+.btn.btn-primary.submitButton-customizable:focus {
+  outline: none !important;
+  box-shadow: 0 0 0 3px rgba(255, 180, 84, 0.28) !important;
+}
+
+.submitButton-customizable:disabled,
+.btn.btn-primary.submitButton-customizable:disabled {
+  opacity: 0.55 !important;
+  cursor: not-allowed !important;
+  box-shadow: none !important;
+}
+
+/* ── Social / IdP ──────────────────────────────────────────────────────── */
+
+.idpButton-customizable {
+  font-family: var(--spur-mono) !important;
+  height: 44px !important;
+  border-radius: 6px !important;
+}
+
+.socialButton-customizable {
+  font-family: var(--spur-mono) !important;
+  font-size: 13px !important;
+  font-weight: 600 !important;
+  letter-spacing: 0.02em !important;
+  border-radius: 6px !important;
+  height: 44px !important;
+  margin-bottom: 12px !important;
+  border: 1px solid var(--spur-border) !important;
+  box-shadow: none !important;
+  transition: border-color 120ms ease, background-color 120ms ease, box-shadow 120ms ease;
+}
+
+/* Keep Google brand mark; re-skin chrome for dark panel cohesion */
+.socialButton-customizable.google-button {
+  color: var(--spur-text) !important;
+  background: var(--spur-panel-elevated) !important;
+  border-color: var(--spur-border) !important;
+}
+
+.socialButton-customizable.google-button:hover {
+  color: var(--spur-text) !important;
+  background: #2a313a !important;
+  border-color: #3d4652 !important;
+  box-shadow: 0 0 0 3px rgba(121, 192, 255, 0.12) !important;
+}
+
+.socialButton-customizable.google-button .social-logo {
+  background: #fff !important;
+  border-radius: 3px;
+}
+
+.socialButton-customizable.facebook-button,
+.socialButton-customizable.amazon-button,
+.socialButton-customizable.apple-button {
+  border-radius: 6px !important;
+}
+
+/* ── Dividers ──────────────────────────────────────────────────────────── */
+
+.login-or {
+  padding-top: 10px !important;
+  padding-bottom: 10px !important;
+  margin-top: 4px !important;
+}
+
+.hr-or {
+  color: var(--spur-border) !important;
+  background-color: var(--spur-border) !important;
+  border: none !important;
+  height: 1px !important;
+}
+
+.span-or,
+.span-or-verical {
+  background-color: var(--spur-panel) !important;
+  color: var(--spur-muted) !important;
+  font-family: var(--spur-mono) !important;
+  font-size: 11px !important;
+  letter-spacing: 0.14em !important;
+  text-transform: uppercase !important;
+}
+
+.panel-left-border,
+.panel-right-border {
+  border-color: var(--spur-border) !important;
+}
+
+/* ── Errors / password strength ────────────────────────────────────────── */
+
+.errorMessage-customizable {
+  padding: 10px 12px !important;
+  font-size: 12px !important;
+  font-family: var(--spur-mono) !important;
+  width: 100% !important;
+  background: rgba(255, 123, 114, 0.08) !important;
+  border: 1px solid var(--spur-error) !important;
+  border-radius: 6px !important;
+  color: var(--spur-error) !important;
+}
+
+.passwordCheck-valid-customizable {
+  color: var(--spur-success) !important;
+}
+
+.passwordCheck-notValid-customizable {
+  color: var(--spur-error) !important;
+}
+
+/* ── MFA / misc panels ─────────────────────────────────────────────────── */
+
+.mfa-container,
+.success-message {
+  color: var(--spur-text) !important;
+  font-family: var(--spur-mono) !important;
+}
+
+/* Bootstrap overrides that leak light chrome into the dark shell */
+.panel {
+  background: transparent !important;
+  box-shadow: none !important;
+  border: none !important;
+}
+
+.btn:focus,
+.btn:active:focus {
+  outline: none !important;
+}
+
+/* Prefer reduced motion */
+@media (prefers-reduced-motion: reduce) {
+  .submitButton-customizable,
+  .socialButton-customizable,
+  .inputField-customizable {
+    transition: none !important;
+  }
+
+  .submitButton-customizable:active {
+    transform: none;
+  }
+}
