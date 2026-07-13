@@ -254,6 +254,7 @@ pub async fn run_worker_attempt_with_connection_for_test<'a>(
             fault_injection_hooks: &fault_hooks,
             worker_mcp_servers: &[],
             worker_mcp_server: None,
+            worker_mcp_tool_names: None,
             pm_service: None,
             feature_gate: &feature_gate,
             connection_factory: Some(connection_factory),

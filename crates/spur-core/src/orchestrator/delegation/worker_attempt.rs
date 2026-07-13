@@ -160,6 +160,9 @@ pub(crate) struct WorkerAttemptCtx<'a> {
     /// `execute_delegation` so retries reuse the same token URL.
     pub(crate) worker_mcp_servers: &'a [McpServer],
     pub(crate) worker_mcp_server: Option<Arc<WorkerMcpServer>>,
+    /// Claude-format names from the exact registry owned by
+    /// `worker_mcp_server`; absent for tests and legacy callers.
+    pub(crate) worker_mcp_tool_names: Option<&'a [String]>,
     pub(crate) pm_service: Option<&'a PmService>,
     pub(crate) feature_gate: &'a spur_license::FeatureGate,
     #[cfg(any(test, feature = "test-support"))]
@@ -1005,7 +1008,10 @@ pub(crate) async fn run_one_worker_attempt(
             ctx.agent_config.transport,
             !ctx.worker_mcp_servers.is_empty(),
         )
-        .then(crate::mcp::worker_mcp_claude_tool_names);
+        .then(|| {
+            ctx.worker_mcp_tool_names
+                .map_or_else(crate::mcp::worker_mcp_claude_tool_names, <[String]>::to_vec)
+        });
         materialize_profile(
             worktrees,
             &worktree_info.path,
@@ -2456,6 +2462,7 @@ mod model_effort_override_tests {
                 fault_injection_hooks: &fault_hooks,
                 worker_mcp_servers: &[],
                 worker_mcp_server: None,
+                worker_mcp_tool_names: None,
                 pm_service: None,
                 feature_gate: &feature_gate,
                 connection_factory: Some(&move |_cfg, _spawn_args, _launch_env, _repo_root| {
@@ -3093,6 +3100,7 @@ mod profile_override_tests {
                         fault_injection_hooks: &fault_hooks,
                         worker_mcp_servers: &[],
                         worker_mcp_server: None,
+                        worker_mcp_tool_names: None,
                         pm_service: None,
                         feature_gate: &feature_gate,
                         connection_factory: Some(&move |_cfg, _args, env, _repo_root| {
@@ -3448,6 +3456,7 @@ mod profile_override_tests {
                 fault_injection_hooks: &fault_hooks,
                 worker_mcp_servers: &[],
                 worker_mcp_server: None,
+                worker_mcp_tool_names: None,
                 pm_service: None,
                 feature_gate: &feature_gate,
                 connection_factory: Some(&move |_cfg, args, env, _repo_root| {
@@ -3550,6 +3559,7 @@ mod profile_override_tests {
                 fault_injection_hooks: &fault_hooks,
                 worker_mcp_servers: &[],
                 worker_mcp_server: None,
+                worker_mcp_tool_names: None,
                 pm_service: None,
                 feature_gate: &feature_gate,
                 connection_factory: Some(&move |_cfg, _args, env, _repo_root| {
@@ -3649,6 +3659,7 @@ mod profile_override_tests {
                 fault_injection_hooks: &fault_hooks,
                 worker_mcp_servers: &[],
                 worker_mcp_server: None,
+                worker_mcp_tool_names: None,
                 pm_service: None,
                 feature_gate: &feature_gate,
                 connection_factory: Some(&move |_cfg, _args, env, _repo_root| {
@@ -3935,6 +3946,7 @@ mod profile_override_tests {
                 fault_injection_hooks: &fault_hooks,
                 worker_mcp_servers: &[],
                 worker_mcp_server: None,
+                worker_mcp_tool_names: None,
                 pm_service: None,
                 feature_gate: &feature_gate,
                 connection_factory: Some(&move |_cfg, _spawn_args, _launch_env, _repo_root| {
@@ -4089,6 +4101,11 @@ mod profile_override_tests {
 
     #[tokio::test]
     async fn worker_attempt_wires_worker_mcp_presence_into_claude_allowlist_materialization() {
+        let configured_worker_mcp_tools = vec![
+            "mcp__spur-worker-mcp__report_progress".to_owned(),
+            "mcp__spur-worker-mcp__report_signal".to_owned(),
+            "mcp__spur-worker-mcp__external_code_read".to_owned(),
+        ];
         for worker_mcp_enabled in [true, false] {
             let repo = setup_repo_with_committed_agent();
             let mut worktrees =
@@ -4151,6 +4168,8 @@ mod profile_override_tests {
                     fault_injection_hooks: &fault_hooks,
                     worker_mcp_servers: &worker_mcp_servers,
                     worker_mcp_server: None,
+                    worker_mcp_tool_names: worker_mcp_enabled
+                        .then_some(configured_worker_mcp_tools.as_slice()),
                     pm_service: None,
                     feature_gate: &feature_gate,
                     connection_factory: Some(&move |_cfg, _spawn_args, _launch_env, _repo_root| {
@@ -4187,6 +4206,7 @@ mod profile_override_tests {
             if worker_mcp_enabled {
                 assert!(tools_line.contains("mcp__spur-worker-mcp__report_progress"));
                 assert!(tools_line.contains("mcp__spur-worker-mcp__report_signal"));
+                assert!(tools_line.contains("mcp__spur-worker-mcp__external_code_read"));
             }
         }
     }
@@ -4235,6 +4255,7 @@ mod profile_override_tests {
                 fault_injection_hooks: &fault_hooks,
                 worker_mcp_servers: &[],
                 worker_mcp_server: None,
+                worker_mcp_tool_names: None,
                 pm_service: None,
                 feature_gate: &feature_gate,
                 connection_factory: Some(&move |_cfg, _spawn_args, _launch_env, _repo_root| {
