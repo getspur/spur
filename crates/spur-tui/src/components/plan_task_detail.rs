@@ -80,9 +80,24 @@ pub fn render_task_detail(
         lines.push(kv(theme, "status", status));
     }
     if let Some(issue) = issue_detail {
+        // Essentials + Description first so the body is visible at scroll 0
+        // in the narrow side-by-side detail pane (metadata alone can exceed
+        // the viewport and push the description off-screen).
         lines.extend(section_header("Issue", theme));
         lines.push(kv(theme, "id", &issue.id));
         lines.push(kv(theme, "title", &issue.title));
+        lines.push(kv(theme, "status", &issue.status));
+
+        lines.extend(section_header("Description", theme));
+        if issue.body.is_empty() {
+            lines.push(kv(theme, "body", "(empty)"));
+        } else {
+            for line in issue.body.lines() {
+                lines.push(Line::from(vec![Span::raw(line.to_string())]));
+            }
+        }
+
+        lines.extend(section_header("Metadata", theme));
         lines.push(kv(
             theme,
             "source",
@@ -93,7 +108,6 @@ pub fn render_task_detail(
                 _ => "beads",
             },
         ));
-        lines.push(kv(theme, "status", &issue.status));
         if let Some(priority) = issue.priority {
             lines.push(kv(theme, "priority", &format!("P{priority}")));
         }
@@ -124,15 +138,6 @@ pub fn render_task_detail(
         }
         if !issue.url.is_empty() {
             lines.push(kv(theme, "url", &issue.url));
-        }
-
-        lines.extend(section_header("Description", theme));
-        if issue.body.is_empty() {
-            lines.push(kv(theme, "body", "(empty)"));
-        } else {
-            for line in issue.body.lines() {
-                lines.push(Line::from(vec![Span::raw(line.to_string())]));
-            }
         }
     }
 
