@@ -713,6 +713,109 @@ async fn external_knowledge_context_resolves_ref_and_returns_evidence_pack() -> 
 }
 
 #[tokio::test]
+async fn external_knowledge_context_preserves_identity_for_duplicate_qualified_names() -> Result<()>
+{
+    let fixture = McpFixture::new("knowledge-duplicate-qualified-name")?;
+    duplicate_parse_config_loader(&fixture.conn)?;
+
+    let response = handle_tool(
+        "external_knowledge_context",
+        &json!({
+            "query": "parse config loader",
+            "package": PACKAGE,
+            "revision": REVISION,
+            "scope": "code",
+            "limit": 8
+        }),
+        &fixture.conn,
+        &fixture.catalog,
+    )
+    .await?;
+
+    let evidence = response["primary_evidence"]
+        .as_array()
+        .context("primary_evidence array")?
+        .iter()
+        .filter(|evidence| evidence["title"] == "parse_config_loader")
+        .collect::<Vec<_>>();
+    assert_eq!(evidence.len(), 2);
+
+    let mut ids = evidence
+        .iter()
+        .map(|evidence| {
+            evidence["stable_symbol_id"]
+                .as_str()
+                .context("raw stable symbol ID")
+        })
+        .collect::<Result<Vec<_>>>()?;
+    ids.sort_unstable();
+    assert_eq!(ids, ["cccccccccccccccc", "cccccccccccccccd"]);
+
+    for evidence in evidence {
+        assert_eq!(
+            evidence["selector"],
+            "pkg:demo@1.0.0::demo::parse_config_loader"
+        );
+        let uri = evidence["uri"]
+            .as_str()
+            .context("canonical evidence URI")?;
+        assert!(uri.starts_with("pkg-symbol://registry:crates-io/demo/1.0.0/"));
+
+        let next = evidence["next"].as_array().context("next actions")?;
+        assert_eq!(next.len(), 3);
+        assert!(next.iter().all(|action| action["selector"] == uri));
+
+        let read = handle_tool(
+            "external_code_read",
+            &json!({ "selector": uri }),
+            &fixture.conn,
+            &fixture.catalog,
+        )
+        .await?;
+        assert_eq!(read["stable_symbol_id"], evidence["stable_symbol_id"]);
+
+        for tool in ["external_code_callers", "external_code_callees"] {
+            handle_tool(
+                tool,
+                &json!({ "selector": uri }),
+                &fixture.conn,
+                &fixture.catalog,
+            )
+            .await?;
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn external_code_tools_classify_ambiguous_qualified_selectors_as_invalid_params() -> Result<()>
+{
+    let fixture = McpFixture::new("ambiguous-qualified-selector")?;
+    duplicate_parse_config_loader(&fixture.conn)?;
+
+    for tool in [
+        "external_code_read",
+        "external_code_callers",
+        "external_code_callees",
+    ] {
+        let error = handle_tool(
+            tool,
+            &json!({
+                "selector": "pkg:demo@1.0.0::demo::parse_config_loader"
+            }),
+            &fixture.conn,
+            &fixture.catalog,
+        )
+        .await
+        .expect_err("ambiguous qualified selector should be rejected");
+
+        assert!(matches!(error, McpHandlerError::InvalidParams(_)));
+        assert!(error.to_string().contains("matched 2 symbols"));
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn external_knowledge_context_uses_precomputed_query_vector_for_hybrid_hits() -> Result<()> {
     let fixture = McpFixture::new("knowledge-vector")?;
 
@@ -3171,6 +3274,24 @@ fn seed_query_fixture(conn: &Connection) -> Result<()> {
         "demo::parse_config_loader",
         unit_vector(1),
     )?;
+    Ok(())
+}
+
+fn duplicate_parse_config_loader(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        r"
+        INSERT INTO nodes
+        SELECT
+            'cccccccccccccccd', package, source, revision, revision_kind,
+            semver_major, semver_minor, semver_patch, file_path,
+            byte_range_start, byte_range_end, line_start, line_end,
+            entity_name, qualified_name, symbol_kind,
+            'anchor-cccccccccccccccd', enclosing_scope
+        FROM nodes
+        WHERE stable_symbol_id = 'cccccccccccccccc';
+        ",
+    )
+    .context("duplicate parse_config_loader node")?;
     Ok(())
 }
 
