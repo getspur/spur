@@ -113,6 +113,7 @@ directories = "5"
 regex = "1"
 semver = "1"
 sha2 = "0.10"
+similar = "2.7"
 proptest = "1"
 insta = "=1.41.1"
 petgraph = { version = "0.6", default-features = false, features = ["stable_graph"] }

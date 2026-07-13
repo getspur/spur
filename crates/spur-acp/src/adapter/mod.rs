@@ -2,6 +2,7 @@ pub mod arg_picker_hint;
 pub mod claude;
 pub mod codex;
 pub mod config_options;
+pub mod diff;
 pub mod gemini;
 pub mod generic;
 pub mod grok_session_display;
@@ -9,6 +10,8 @@ pub mod kimi;
 pub mod kiro;
 pub mod kiro_session_display;
 pub mod mcp;
+
+pub use diff::unified_edit_diff;
 
 use crate::types::AgentKind;
 use agent_client_protocol::schema::v1::{SessionNotification, ToolCall, ToolKind};
@@ -242,5 +245,73 @@ impl SessionEventStandardizer {
             Self::Gemini(standardizer) => standardizer.standardize(notification),
             Self::Passthrough => notification,
         }
+    }
+}
+
+#[cfg(test)]
+mod unified_edit_diff_tests {
+    use super::unified_edit_diff;
+
+    #[test]
+    fn single_line_replace_omits_unchanged_regions_outside_the_hunk() {
+        let old = "one\ntwo\nthree\nfour\nfive\nsix\nseven\n";
+        let new = "one\ntwo\nthree\nFOUR\nfive\nsix\nseven\n";
+
+        let diff = unified_edit_diff("src/lib.rs", old, new, 1);
+
+        assert_eq!(
+            diff,
+            "--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -3,3 +3,3 @@\n three\n-four\n+FOUR\n five\n"
+        );
+        assert!(!diff.contains(" one\n"));
+        assert!(!diff.contains(" seven\n"));
+    }
+
+    #[test]
+    fn insert_only_emits_an_addition_hunk() {
+        let diff = unified_edit_diff("notes.txt", "alpha\ngamma\n", "alpha\nbeta\ngamma\n", 1);
+
+        assert_eq!(
+            diff,
+            "--- a/notes.txt\n+++ b/notes.txt\n@@ -1,2 +1,3 @@\n alpha\n+beta\n gamma\n"
+        );
+    }
+
+    #[test]
+    fn delete_only_emits_a_deletion_hunk() {
+        let diff = unified_edit_diff("notes.txt", "alpha\nbeta\ngamma\n", "alpha\ngamma\n", 1);
+
+        assert_eq!(
+            diff,
+            "--- a/notes.txt\n+++ b/notes.txt\n@@ -1,3 +1,2 @@\n alpha\n-beta\n gamma\n"
+        );
+    }
+
+    #[test]
+    fn identical_text_has_no_diff() {
+        assert_eq!(
+            unified_edit_diff("same.txt", "unchanged\n", "unchanged\n", 3),
+            ""
+        );
+    }
+
+    #[test]
+    fn empty_old_text_emits_a_file_creation_hunk() {
+        let diff = unified_edit_diff("new.txt", "", "alpha\nbeta\n", 3);
+
+        assert_eq!(
+            diff,
+            "--- a/new.txt\n+++ b/new.txt\n@@ -0,0 +1,2 @@\n+alpha\n+beta\n"
+        );
+    }
+
+    #[test]
+    fn empty_new_text_emits_a_file_deletion_hunk() {
+        let diff = unified_edit_diff("old.txt", "alpha\nbeta\n", "", 3);
+
+        assert_eq!(
+            diff,
+            "--- a/old.txt\n+++ b/old.txt\n@@ -1,2 +0,0 @@\n-alpha\n-beta\n"
+        );
     }
 }
