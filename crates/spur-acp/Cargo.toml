@@ -28,6 +28,7 @@ directories = { workspace = true }
 agent-client-protocol = { workspace = true }
 spur-telemetry = { path = "../spur-telemetry" }
 tracing-appender = { workspace = true }
+similar = { workspace = true }
 file-rotate = "0.8"
 fs4 = "0.13"
 tempfile = "3"
