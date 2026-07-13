@@ -20,6 +20,7 @@ use agent_client_protocol::schema::v1::{
 use serde::{Deserialize, Serialize};
 
 use crate::adapter::grok_session_display::{extract_grok_session_display, GrokSessionDisplay};
+use crate::adapter::kiro_session_display::{extract_kiro_session_display, KiroSessionDisplay};
 use crate::types::AgentKind;
 
 /// What the agent told spur during `initialize` + `session/new` or `session/load`.
@@ -44,6 +45,11 @@ pub struct SpurAgentCaps {
     /// from the standard `config_options` capability gates.
     #[serde(default)]
     pub grok_display: Option<GrokSessionDisplay>,
+    /// Kiro-only model catalog recovered from the top-level `models` plane
+    /// (injected under session meta by the native connection). Always `None`
+    /// for other agent kinds; never implies `session/set_config_option`.
+    #[serde(default)]
+    pub kiro_display: Option<KiroSessionDisplay>,
 }
 
 impl SpurAgentCaps {
@@ -59,12 +65,14 @@ impl SpurAgentCaps {
             initialize.meta.as_ref(),
             new_session.meta.as_ref(),
         );
+        let kiro_display = extract_kiro_session_display(agent_kind, new_session.meta.as_ref());
         Self {
             agent: initialize.agent_capabilities.clone(),
             modes: new_session.modes.clone(),
             config_options: new_session.config_options.clone().unwrap_or_default(),
             agent_kind,
             grok_display,
+            kiro_display,
         }
     }
 
@@ -81,12 +89,14 @@ impl SpurAgentCaps {
             initialize.meta.as_ref(),
             load_session.meta.as_ref(),
         );
+        let kiro_display = extract_kiro_session_display(agent_kind, load_session.meta.as_ref());
         Self {
             agent: initialize.agent_capabilities.clone(),
             modes: load_session.modes.clone(),
             config_options: load_session.config_options.clone().unwrap_or_default(),
             agent_kind,
             grok_display,
+            kiro_display,
         }
     }
 
@@ -117,6 +127,24 @@ impl SpurAgentCaps {
                 .is_some_and(|display| !display.models().is_empty())
     }
 
+    /// Kiro advertises real model ids on the recovered top-level `models`
+    /// plane while leaving standard `config_options` empty. Live probe:
+    /// `session/set_model` accepts `{sessionId, modelId}`.
+    #[must_use]
+    pub fn supports_kiro_set_model(&self) -> bool {
+        self.agent_kind == AgentKind::Kiro
+            && self
+                .kiro_display
+                .as_ref()
+                .is_some_and(|display| !display.models().is_empty())
+    }
+
+    /// Either proprietary DirectSetModel path (Grok or Kiro) is available.
+    #[must_use]
+    pub fn supports_direct_set_model(&self) -> bool {
+        self.supports_grok_set_model() || self.supports_kiro_set_model()
+    }
+
     /// Apply a proven Grok `model_changed` extension notification.
     ///
     /// Standard ACP capability fields and `config_options` remain untouched.
@@ -127,6 +155,18 @@ impl SpurAgentCaps {
         self.grok_display
             .as_mut()
             .is_some_and(|display| display.apply_model_changed(params))
+    }
+
+    /// Apply a successful Kiro `session/set_model` selection to the frozen
+    /// display catalog so status labels track the new model without inventing
+    /// config options.
+    pub fn apply_kiro_model_selected(&mut self, model_id: &str) -> bool {
+        if self.agent_kind != AgentKind::Kiro {
+            return false;
+        }
+        self.kiro_display
+            .as_mut()
+            .is_some_and(|display| display.apply_selected_model(model_id))
     }
 
     /// The config option that represents model selection, when advertised.
@@ -183,6 +223,11 @@ impl SpurAgentCaps {
             .map(str::to_owned)
             .or_else(|| {
                 self.grok_display
+                    .as_ref()
+                    .and_then(|display| display.model_label.clone())
+            })
+            .or_else(|| {
+                self.kiro_display
                     .as_ref()
                     .and_then(|display| display.model_label.clone())
             })
@@ -634,6 +679,50 @@ mod tests {
         assert_eq!(caps.current_model_label(), None);
         assert_eq!(caps.current_effort_label(), None);
         assert_eq!(caps.grok_display, None);
+    }
+
+    #[test]
+    fn kiro_recovered_models_meta_drives_label_and_direct_set_gate() {
+        let init = empty_init_response();
+        let mut new = empty_new_session_response();
+        new.meta = serde_json::from_value(serde_json::json!({
+            "spur.recoveredModels": {
+                "availableModels": [
+                    {"modelId": "auto", "name": "auto"},
+                    {"modelId": "glm-5", "name": "GLM-5"}
+                ],
+                "currentModelId": "glm-5"
+            }
+        }))
+        .expect("kiro recovered models meta must deserialize");
+
+        let mut caps = SpurAgentCaps::new(&init, &new, AgentKind::Kiro);
+
+        assert_eq!(caps.current_model_label().as_deref(), Some("GLM-5"));
+        assert!(caps.supports_kiro_set_model());
+        assert!(caps.supports_direct_set_model());
+        assert!(!caps.supports_set_model());
+        assert!(!caps.supports_set_config_option());
+        assert!(caps.apply_kiro_model_selected("auto"));
+        assert_eq!(caps.current_model_label().as_deref(), Some("auto"));
+    }
+
+    #[test]
+    fn non_kiro_agents_ignore_recovered_models_meta() {
+        let init = empty_init_response();
+        let mut new = empty_new_session_response();
+        new.meta = serde_json::from_value(serde_json::json!({
+            "spur.recoveredModels": {
+                "availableModels": [{"modelId": "x", "name": "X"}],
+                "currentModelId": "x"
+            }
+        }))
+        .expect("meta fixture must deserialize");
+
+        let caps = SpurAgentCaps::new(&init, &new, AgentKind::CodexAcp);
+        assert_eq!(caps.current_model_label(), None);
+        assert!(!caps.supports_kiro_set_model());
+        assert_eq!(caps.kiro_display, None);
     }
 
     #[test]
