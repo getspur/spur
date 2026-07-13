@@ -7,6 +7,7 @@ pub mod generic;
 pub mod grok_session_display;
 pub mod kimi;
 pub mod kiro;
+pub mod kiro_session_display;
 pub mod mcp;
 
 use crate::types::AgentKind;

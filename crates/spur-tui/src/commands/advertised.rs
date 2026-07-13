@@ -28,6 +28,7 @@ impl AdvertisedSource {
             })
             .collect::<Vec<_>>();
         entries.extend(grok_entries(handle, caps));
+        entries.extend(kiro_entries(handle, caps));
         entries
     }
 
@@ -112,6 +113,44 @@ fn grok_entries(handle: &str, caps: &SpurAgentCaps) -> Vec<CommandEntry> {
         });
     }
     entries
+}
+
+/// Kiro `/model` from the recovered models plane (no effort surface).
+fn kiro_entries(handle: &str, caps: &SpurAgentCaps) -> Vec<CommandEntry> {
+    if !caps.supports_kiro_set_model() {
+        return Vec::new();
+    }
+    let Some(display) = caps.kiro_display.as_ref() else {
+        return Vec::new();
+    };
+    // Avoid double-emitting /model when configOptions already synthesized one
+    // (future Kiro builds that advertise a model select).
+    if caps.supports_set_model() {
+        return Vec::new();
+    }
+    vec![CommandEntry {
+        name: "model".to_string(),
+        description: "Switch model for this session".to_string(),
+        hint: display.model_label.clone(),
+        source: CommandSource::Advertised {
+            handle: handle.to_string(),
+        },
+        dispatch: Dispatch::SetSessionModel,
+        arg_picker_spec: Some(ArgPickerSpec {
+            free_text_hint: String::new(),
+            typed_hint: Some(ArgPickerHint::StaticChoices {
+                choices: display
+                    .models()
+                    .iter()
+                    .map(|model| ArgPickerChoice {
+                        value: model.id.clone(),
+                        label: model.label.clone(),
+                        description: model.description.clone(),
+                    })
+                    .collect(),
+            }),
+        }),
+    }]
 }
 
 #[cfg(test)]
@@ -260,5 +299,61 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["model"]
         );
+    }
+
+    fn kiro_caps() -> SpurAgentCaps {
+        let init = InitializeResponse::new(ProtocolVersion::LATEST);
+        let mut new = NewSessionResponse::new(spur_acp::AcpSessionId::new("sid"));
+        new.meta = Some(
+            serde_json::json!({
+                "spur.recoveredModels": {
+                    "availableModels": [
+                        {"modelId": "auto", "name": "auto", "description": "task-picked"},
+                        {
+                            "modelId": "claude-sonnet-4.5",
+                            "name": "claude-sonnet-4.5",
+                            "description": "Claude Sonnet 4.5 model"
+                        }
+                    ],
+                    "currentModelId": "claude-sonnet-4.5"
+                }
+            })
+            .as_object()
+            .expect("meta fixture must be an object")
+            .clone(),
+        );
+        SpurAgentCaps::new(&init, &new, AgentKind::Kiro)
+    }
+
+    #[test]
+    fn kiro_recovered_catalog_yields_dedicated_model_entry() {
+        let caps = kiro_caps();
+        assert!(!caps.supports_set_config_option());
+        assert!(caps.supports_kiro_set_model());
+
+        let entries = AdvertisedSource::entries_from_caps("kiro", &caps);
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["model"]
+        );
+        assert!(matches!(entries[0].dispatch, Dispatch::SetSessionModel));
+        let model_spec = entries[0]
+            .arg_picker_spec
+            .as_ref()
+            .expect("model command must have a picker");
+        assert!(matches!(
+            model_spec.typed_hint.as_ref(),
+            Some(spur_acp::adapter::arg_picker_hint::ArgPickerHint::StaticChoices { choices })
+                if choices.iter().map(|c| c.value.as_str()).collect::<Vec<_>>()
+                    == vec!["auto", "claude-sonnet-4.5"]
+        ));
+
+        let mut registry = crate::commands::CommandRegistry::new();
+        registry.set_advertised_commands("kiro", entries);
+        let visible = registry.available_commands_for_session(Some(&caps));
+        assert!(visible.iter().any(|entry| entry.name == "model"));
     }
 }

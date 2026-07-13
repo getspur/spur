@@ -331,20 +331,22 @@ fn build_acp_log_path(repo_root: &std::path::Path, agent_name: &str) -> std::pat
 
 /// State-gated dispatch decision for `set_session_model`. Spec §6.3.
 ///
-/// ACP 1.0 removed the dedicated `session/set_model` request, so the surviving
-/// dispatch surface is the existing config-option fallback.
+/// ACP 1.0 removed the dedicated `session/set_model` request from the typed
+/// schema, but Grok and Kiro still implement the wire method. Proprietary
+/// catalogs route to DirectSetModel; standard config-option agents use the
+/// fallback.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SetSessionModelDispatch {
-    /// Send Grok's proven `session/set_model` request directly.
+    /// Send the proven `session/set_model` request directly (Grok / Kiro).
     DirectSetModel,
     /// Fall back to `set_session_config_option` with `config_id = "model"`.
     FallbackConfigOption,
-    /// No config-option surface is advertised → `AcpError::CapabilityMissing`.
+    /// No model surface is advertised → `AcpError::CapabilityMissing`.
     Unsupported,
 }
 
 pub(crate) fn decide_set_session_model_dispatch(caps: &SpurAgentCaps) -> SetSessionModelDispatch {
-    if caps.supports_grok_set_model() {
+    if caps.supports_direct_set_model() {
         SetSessionModelDispatch::DirectSetModel
     } else if caps.supports_set_model() {
         SetSessionModelDispatch::FallbackConfigOption
@@ -353,7 +355,7 @@ pub(crate) fn decide_set_session_model_dispatch(caps: &SpurAgentCaps) -> SetSess
     }
 }
 
-fn grok_set_model_params(
+fn direct_set_model_params(
     session_id: &SessionId,
     model_id: &str,
     effort_id: Option<&str>,
@@ -366,6 +368,34 @@ fn grok_set_model_params(
         params["_meta"] = serde_json::json!({"reasoningEffort": effort_id});
     }
     params
+}
+
+/// Recover the top-level `models` plane dropped by ACP schema 1.1 typed
+/// deserialize, and stash it under session meta for Kiro freeze-time extract.
+fn inject_recovered_models_into_meta(
+    meta: &mut Option<agent_client_protocol::schema::v1::Meta>,
+    raw: &serde_json::Value,
+) {
+    let Some(models) = raw.get("models").cloned() else {
+        return;
+    };
+    let mut map = meta.take().unwrap_or_default();
+    crate::adapter::kiro_session_display::inject_recovered_models_meta(&mut map, models);
+    *meta = Some(map);
+}
+
+fn new_session_from_raw_value(raw: serde_json::Value) -> anyhow::Result<NewSessionResponse> {
+    let mut typed: NewSessionResponse = serde_json::from_value(raw.clone())
+        .map_err(|e| anyhow::anyhow!("failed to deserialize session/new response: {e}"))?;
+    inject_recovered_models_into_meta(&mut typed.meta, &raw);
+    Ok(typed)
+}
+
+fn load_session_from_raw_value(raw: serde_json::Value) -> anyhow::Result<LoadSessionResponse> {
+    let mut typed: LoadSessionResponse = serde_json::from_value(raw.clone())
+        .map_err(|e| anyhow::anyhow!("failed to deserialize session/load response: {e}"))?;
+    inject_recovered_models_into_meta(&mut typed.meta, &raw);
+    Ok(typed)
 }
 
 fn cache_grok_model_changed(
@@ -1279,7 +1309,8 @@ impl AgentConnection for NativeAcpConnection {
     // ─── set_session_model ───────────────────────────────────────────────
 
     /// Issue standard model selection through `session/set_config_option`, or
-    /// Grok model selection through its proven `session/set_model` method.
+    /// proprietary model selection through the proven `session/set_model`
+    /// method (Grok / Kiro).
     async fn set_session_model(
         &mut self,
         sid: SessionId,
@@ -1290,15 +1321,17 @@ impl AgentConnection for NativeAcpConnection {
             SetSessionModelDispatch::DirectSetModel => {
                 let is_known_model = caps.grok_display.as_ref().is_some_and(|display| {
                     display.models().iter().any(|model| model.id == model_id)
+                }) || caps.kiro_display.as_ref().is_some_and(|display| {
+                    display.models().iter().any(|model| model.id == model_id)
                 });
                 if !is_known_model {
                     return Err(AcpError::Transport(anyhow::anyhow!(
-                        "Grok model id is not present in the advertised catalog: {model_id}"
+                        "model id is not present in the advertised catalog: {model_id}"
                     )));
                 }
                 self.call_ext(
                     "session/set_model",
-                    grok_set_model_params(&sid, &model_id, None),
+                    direct_set_model_params(&sid, &model_id, None),
                 )
                 .await
                 .map_err(AcpError::Transport)?;
@@ -1355,7 +1388,7 @@ impl AgentConnection for NativeAcpConnection {
         }
         self.call_ext(
             "session/set_model",
-            grok_set_model_params(&sid, &model_id, Some(&effort_id)),
+            direct_set_model_params(&sid, &model_id, Some(&effort_id)),
         )
         .await
         .map(|_| ())
@@ -2188,7 +2221,48 @@ fn acp_thread_main(
                             AcpCommand::NewSession { request, reply } => {
                                 *cwd_loop.lock().unwrap() = request.cwd.clone();
                                 let request_started_at = Instant::now();
-                                let result = cx.send_request(request).block_task().await;
+                                // Kiro (and Grok) still emit a top-level `models`
+                                // plane on session/new, but ACP schema 1.1 drops
+                                // it on typed deserialize. Re-issue as ExtMethod
+                                // for Kiro so we can recover the catalog into meta.
+                                let result = if agent_kind == AgentKind::Kiro {
+                                    match serde_json::to_value(&request) {
+                                        Ok(params) => {
+                                            match serde_json::value::to_raw_value(&params) {
+                                                Ok(raw) => {
+                                                    let client_req = ClientRequest::ExtMethodRequest(
+                                                        ExtRequest::new(
+                                                            "session/new",
+                                                            std::sync::Arc::from(raw),
+                                                        ),
+                                                    );
+                                                    match cx
+                                                        .send_request(client_req)
+                                                        .block_task()
+                                                        .await
+                                                    {
+                                                        Ok(json) => new_session_from_raw_value(json)
+                                                            .map_err(|e| {
+                                                                agent_client_protocol::Error::internal_error()
+                                                                    .data(e.to_string())
+                                                            }),
+                                                        Err(e) => Err(e),
+                                                    }
+                                                }
+                                                Err(e) => Err(agent_client_protocol::Error::internal_error()
+                                                    .data(format!(
+                                                        "session/new params not serializable: {e}"
+                                                    ))),
+                                            }
+                                        }
+                                        Err(e) => Err(agent_client_protocol::Error::internal_error()
+                                            .data(format!(
+                                                "session/new params not serializable: {e}"
+                                            ))),
+                                    }
+                                } else {
+                                    cx.send_request(request).block_task().await
+                                };
                                 emit_acp_request_result(request_started_at, &result);
                                 if let Ok(response) = &result {
                                     cache_session_modes(
@@ -2302,7 +2376,54 @@ fn acp_thread_main(
                                 // contract is reply-with-result, unlike Prompt which
                                 // hands the empty stream out up front).
                                 let request_started_at = Instant::now();
-                                let load_session_fut = cx.send_request(request).block_task();
+                                // See NewSession: recover Kiro models plane via ExtMethod.
+                                let load_session_fut = async {
+                                    if agent_kind == AgentKind::Kiro {
+                                        match serde_json::to_value(&request) {
+                                            Ok(params) => {
+                                                match serde_json::value::to_raw_value(&params) {
+                                                    Ok(raw) => {
+                                                        let client_req =
+                                                            ClientRequest::ExtMethodRequest(
+                                                                ExtRequest::new(
+                                                                    "session/load",
+                                                                    std::sync::Arc::from(raw),
+                                                                ),
+                                                            );
+                                                        match cx
+                                                            .send_request(client_req)
+                                                            .block_task()
+                                                            .await
+                                                        {
+                                                            Ok(json) => {
+                                                                load_session_from_raw_value(json)
+                                                                    .map_err(|e| {
+                                                                        agent_client_protocol::Error::internal_error()
+                                                                            .data(e.to_string())
+                                                                    })
+                                                            }
+                                                            Err(e) => Err(e),
+                                                        }
+                                                    }
+                                                    Err(e) => Err(
+                                                        agent_client_protocol::Error::internal_error()
+                                                            .data(format!(
+                                                                "session/load params not serializable: {e}"
+                                                            )),
+                                                    ),
+                                                }
+                                            }
+                                            Err(e) => Err(
+                                                agent_client_protocol::Error::internal_error()
+                                                    .data(format!(
+                                                        "session/load params not serializable: {e}"
+                                                    )),
+                                            ),
+                                        }
+                                    } else {
+                                        cx.send_request(request).block_task().await
+                                    }
+                                };
                                 tokio::pin!(load_session_fut);
                                 let mut reply_holder = Some(reply);
                                 let mut cmd_rx_closed = false;
@@ -3757,7 +3878,7 @@ mod session_mode_cache_tests {
 #[cfg(test)]
 mod set_session_model_dispatch_tests {
     use super::{
-        cache_grok_model_changed, decide_set_session_model_dispatch, grok_set_model_params,
+        cache_grok_model_changed, decide_set_session_model_dispatch, direct_set_model_params,
         ClientRequest, ExtRequest, SetSessionModelDispatch,
     };
     use crate::connection::AgentConnection;
@@ -3923,8 +4044,70 @@ mod set_session_model_dispatch_tests {
     }
 
     #[test]
+    fn kiro_recovered_models_catalog_routes_direct_set_model() {
+        let init = InitializeResponse::new(ProtocolVersion::LATEST);
+        let mut new = NewSessionResponse::new(SessionId::new("test"));
+        new.meta = Some(
+            serde_json::json!({
+                "spur.recoveredModels": {
+                    "availableModels": [
+                        {"modelId": "auto", "name": "auto"},
+                        {"modelId": "claude-sonnet-4.5", "name": "claude-sonnet-4.5"}
+                    ],
+                    "currentModelId": "claude-sonnet-4.5"
+                }
+            })
+            .as_object()
+            .expect("meta fixture must be an object")
+            .clone(),
+        );
+        let caps = SpurAgentCaps::new(&init, &new, crate::AgentKind::Kiro);
+
+        assert!(!caps.supports_set_model());
+        assert!(!caps.supports_set_config_option());
+        assert!(caps.supports_kiro_set_model());
+        assert!(caps.supports_direct_set_model());
+        assert_eq!(
+            caps.current_model_label().as_deref(),
+            Some("claude-sonnet-4.5")
+        );
+        assert!(matches!(
+            decide_set_session_model_dispatch(&caps),
+            SetSessionModelDispatch::DirectSetModel
+        ));
+    }
+
+    #[test]
+    fn new_session_from_raw_value_recovers_models_plane() {
+        let raw = serde_json::json!({
+            "sessionId": "sid-kiro",
+            "modes": {
+                "currentModeId": "kiro_default",
+                "availableModes": [{"id": "kiro_default", "name": "kiro_default"}]
+            },
+            "models": {
+                "availableModels": [
+                    {"modelId": "auto", "name": "auto", "description": "task-picked"}
+                ],
+                "currentModelId": "auto"
+            }
+        });
+        let response = super::new_session_from_raw_value(raw).expect("typed response");
+        assert_eq!(response.session_id.0.as_ref(), "sid-kiro");
+        let models = response
+            .meta
+            .as_ref()
+            .and_then(|m| m.get("spur.recoveredModels"))
+            .expect("recovered models meta");
+        assert_eq!(
+            models.get("currentModelId").and_then(|v| v.as_str()),
+            Some("auto")
+        );
+    }
+
+    #[test]
     fn grok_effort_params_use_only_meta_reasoning_effort() {
-        let params = grok_set_model_params(&SessionId::new("sid"), "grok-4.5", Some("low"));
+        let params = direct_set_model_params(&SessionId::new("sid"), "grok-4.5", Some("low"));
 
         assert_eq!(
             params,
