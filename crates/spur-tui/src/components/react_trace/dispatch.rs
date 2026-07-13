@@ -83,10 +83,12 @@ pub fn dispatch_session_update<F: Fn() -> String>(
             let indent = "  ".repeat(depth as usize);
             let tool = format!("{}{}", indent, display_name);
             let family = adapter::classify_tool(tc, ctx.agent_kind);
-            let input = tc
-                .raw_input
-                .as_ref()
-                .map(|v| adapter::format_input(v, ctx.agent_kind))
+            let input = protocol_diff_input(&tc.content)
+                .or_else(|| {
+                    tc.raw_input
+                        .as_ref()
+                        .map(|v| adapter::format_input(v, ctx.agent_kind))
+                })
                 .unwrap_or(adapter::ToolInputDisplay::Empty);
             let fallback_text = extract_tool_call_text(&tc.content)
                 .or_else(|| tc.raw_input.as_ref().map(format_tool_args))
@@ -143,7 +145,11 @@ pub fn dispatch_session_update<F: Fn() -> String>(
                     if let Some(title) = tcu.fields.title.as_deref() {
                         *tool = replace_tool_title_preserving_indent(tool, title);
                     }
-                    if let Some(raw_input) = tcu.fields.raw_input.as_ref() {
+                    if let Some(diff_input) =
+                        tcu.fields.content.as_deref().and_then(protocol_diff_input)
+                    {
+                        *input = diff_input;
+                    } else if let Some(raw_input) = tcu.fields.raw_input.as_ref() {
                         *input = adapter::format_input(raw_input, ctx.agent_kind);
                     }
                     *status = new_status;
@@ -167,9 +173,15 @@ pub fn dispatch_session_update<F: Fn() -> String>(
                 };
                 let input = tcu
                     .fields
-                    .raw_input
-                    .as_ref()
-                    .map(|raw_input| adapter::format_input(raw_input, ctx.agent_kind))
+                    .content
+                    .as_deref()
+                    .and_then(protocol_diff_input)
+                    .or_else(|| {
+                        tcu.fields
+                            .raw_input
+                            .as_ref()
+                            .map(|raw_input| adapter::format_input(raw_input, ctx.agent_kind))
+                    })
                     .unwrap_or(adapter::ToolInputDisplay::Empty);
                 let status = map_initial_status(
                     tcu.fields.status.unwrap_or(ToolCallStatus::Pending),
@@ -250,7 +262,7 @@ fn extract_text(chunk: &ContentChunk) -> Option<&str> {
 ///
 /// Handles all known variants:
 /// - `Content` — returns the inner text (non-text blocks silently skipped).
-/// - `Diff`    — formats as a truncated unified-style diff (max `DIFF_MAX_LINES` body lines).
+/// - `Diff`    — uses the same protocol-diff normalizer as structured input.
 /// - `Terminal` — returns a placeholder `[terminal: <id>]`.
 /// - Unknown future variants — silently ignored (`ToolCallContent` is `#[non_exhaustive]`).
 ///
@@ -270,13 +282,11 @@ fn extract_tool_call_text(content: &[spur_acp::ToolCallContent]) -> Option<Strin
                 }
                 _ => {}
             },
-            ToolCallContent::Diff(diff) => {
-                out.push_str(&format_diff_truncated(
-                    &diff.path.display().to_string(),
-                    diff.old_text.as_deref(),
-                    &diff.new_text,
-                ));
-            }
+            ToolCallContent::Diff(diff) => match protocol_diff_to_input(diff) {
+                adapter::ToolInputDisplay::Diff { diff, .. } => out.push_str(&diff),
+                adapter::ToolInputDisplay::Path(path) => out.push_str(&path),
+                _ => {}
+            },
             ToolCallContent::Terminal(term) => {
                 out.push_str(&format!("[terminal: {}]", term.terminal_id));
             }
@@ -289,6 +299,27 @@ fn extract_tool_call_text(content: &[spur_acp::ToolCallContent]) -> Option<Strin
         None
     } else {
         Some(out)
+    }
+}
+
+fn protocol_diff_input(content: &[spur_acp::ToolCallContent]) -> Option<adapter::ToolInputDisplay> {
+    content.iter().find_map(|item| match item {
+        spur_acp::ToolCallContent::Diff(diff) => Some(protocol_diff_to_input(diff)),
+        _ => None,
+    })
+}
+
+fn protocol_diff_to_input(diff: &spur_acp::Diff) -> adapter::ToolInputDisplay {
+    let path = diff.path.display().to_string();
+    let Some(old_text) = diff.old_text.as_deref() else {
+        // With only path + full contents, a Write is indistinguishable from a
+        // create. Avoid painting the whole file as a synthetic all-added diff.
+        return adapter::ToolInputDisplay::Path(path);
+    };
+    let unified = adapter::unified_edit_diff(&path, old_text, &diff.new_text, 3);
+    adapter::ToolInputDisplay::Diff {
+        path,
+        diff: unified,
     }
 }
 
@@ -384,41 +415,6 @@ fn sha256_hex(bytes: &[u8]) -> String {
     format!("{digest:x}")
 }
 
-const DIFF_MAX_LINES: usize = 40;
-
-/// Format a diff as a simplified unified-diff string, capped at `DIFF_MAX_LINES` body lines.
-fn format_diff_truncated(path: &str, old: Option<&str>, new_: &str) -> String {
-    let mut out = String::new();
-    out.push_str(&format!("--- a/{}\n", path));
-    out.push_str(&format!("+++ b/{}\n", path));
-
-    let mut body_lines: usize = 0;
-    let mut truncated_count: usize = 0;
-
-    if let Some(old_text) = old {
-        for line in old_text.lines() {
-            if body_lines >= DIFF_MAX_LINES {
-                truncated_count += 1;
-                continue;
-            }
-            out.push_str(&format!("-{}\n", line));
-            body_lines += 1;
-        }
-    }
-    for line in new_.lines() {
-        if body_lines >= DIFF_MAX_LINES {
-            truncated_count += 1;
-            continue;
-        }
-        out.push_str(&format!("+{}\n", line));
-        body_lines += 1;
-    }
-    if truncated_count > 0 {
-        out.push_str(&format!("... ({} more lines)\n", truncated_count));
-    }
-    out
-}
-
 /// Format tool call args for display. Extracts purpose or key args,
 /// falls back to truncated JSON.
 fn format_tool_args(input: &serde_json::Value) -> String {
@@ -461,13 +457,21 @@ fn truncate_str(s: &str, max_len: usize) -> String {
 mod tests {
     use super::*;
     use spur_acp::{
-        Content, ImageContent, ToolCall, ToolCallUpdate, ToolCallUpdateFields, ToolKind,
+        Content, Diff, ImageContent, ToolCall, ToolCallUpdate, ToolCallUpdateFields, ToolKind,
     };
     use spur_acp::{
         ContentBlock, SessionNotification, SessionUpdate, TextContent, ToolCallContent, ToolCallId,
         ToolCallStatus,
     };
     use std::collections::HashMap;
+
+    fn protocol_diff(path: &str, old: Option<&str>, new: &str) -> ToolCallContent {
+        let mut diff = Diff::new(path, new);
+        if let Some(old) = old {
+            diff = diff.old_text(old.to_string());
+        }
+        ToolCallContent::Diff(diff)
+    }
 
     fn ctx_for<'a>(
         tool_depth: &'a mut HashMap<String, u8>,
@@ -496,6 +500,98 @@ mod tests {
             image = image.uri(uri.to_string());
         }
         ToolCallContent::Content(Content::new(ContentBlock::Image(image)))
+    }
+
+    #[test]
+    fn tool_call_prefers_protocol_diff_over_path_only_input() {
+        let old = "one\ntwo\nthree\nfour\nfive\nsix\nseven\neight\nnine\nten\neleven\n";
+        let new = "one\ntwo\nthree\nfour\nfive\nSIX\nseven\neight\nnine\nten\neleven\n";
+        let call = ToolCall::new("edit-1", "Edit")
+            .kind(ToolKind::Edit)
+            .content(vec![protocol_diff("src/lib.rs", Some(old), new)])
+            .raw_input(serde_json::json!({"path": "src/lib.rs"}));
+        let mut trace = ReactTrace::new();
+        let mut tool_depth = HashMap::new();
+        let mut ctx = ctx(&mut tool_depth);
+
+        dispatch_session_update(&mut trace, &SessionUpdate::ToolCall(call), &mut ctx);
+
+        let entries = trace.entries_for_test();
+        let TraceKind::Act { input, .. } = &entries[0].kind else {
+            panic!("expected Act entry");
+        };
+        let adapter::ToolInputDisplay::Diff { path, diff } = input else {
+            panic!("protocol Diff must replace weak path input, got {input:?}");
+        };
+        assert_eq!(path, "src/lib.rs");
+        assert_eq!(diff, &adapter::unified_edit_diff("src/lib.rs", old, new, 3));
+        assert_eq!(&entries[0].text, diff);
+        assert!(!diff.contains(" one\n"));
+        assert!(!diff.contains(" eleven\n"));
+    }
+
+    #[test]
+    fn tool_call_update_prefers_protocol_diff_over_path_only_input() {
+        let id = ToolCallId::new("edit-update");
+        let mut trace = ReactTrace::new();
+        let mut tool_depth = HashMap::new();
+        let mut ctx = ctx(&mut tool_depth);
+        let call = ToolCall::new(id.clone(), "Edit")
+            .kind(ToolKind::Edit)
+            .raw_input(serde_json::json!({"path": "src/lib.rs"}));
+        dispatch_session_update(&mut trace, &SessionUpdate::ToolCall(call), &mut ctx);
+
+        let update = ToolCallUpdate::new(
+            id,
+            ToolCallUpdateFields::new()
+                .content(vec![protocol_diff(
+                    "src/lib.rs",
+                    Some("alpha\nbeta\ngamma\n"),
+                    "alpha\nBETA\ngamma\n",
+                )])
+                .raw_input(serde_json::json!({"path": "src/lib.rs"})),
+        );
+        dispatch_session_update(&mut trace, &SessionUpdate::ToolCallUpdate(update), &mut ctx);
+
+        let entries = trace.entries_for_test();
+        assert!(matches!(
+            &entries[0].kind,
+            TraceKind::Act {
+                input: adapter::ToolInputDisplay::Diff { diff, .. },
+                ..
+            } if diff.contains("-beta\n+BETA\n")
+        ));
+    }
+
+    #[test]
+    fn write_without_old_text_stays_a_path_instead_of_a_fake_full_file_diff() {
+        let call = ToolCall::new("write-1", "Write")
+            .kind(ToolKind::Edit)
+            .content(vec![protocol_diff(
+                "src/new.rs",
+                None,
+                "fn one() {}\nfn two() {}\n",
+            )])
+            .raw_input(serde_json::json!({
+                "path": "src/new.rs",
+                "contents": "fn one() {}\nfn two() {}\n"
+            }));
+        let mut trace = ReactTrace::new();
+        let mut tool_depth = HashMap::new();
+        let mut ctx = ctx(&mut tool_depth);
+
+        dispatch_session_update(&mut trace, &SessionUpdate::ToolCall(call), &mut ctx);
+
+        let entries = trace.entries_for_test();
+        assert!(matches!(
+            &entries[0].kind,
+            TraceKind::Act {
+                input: adapter::ToolInputDisplay::Path(path),
+                ..
+            } if path == "src/new.rs"
+        ));
+        assert_eq!(entries[0].text, "src/new.rs");
+        assert!(!entries[0].text.contains("+fn one"));
     }
 
     #[test]
