@@ -225,6 +225,18 @@ plans and `init -backend=false`; it never needs AWS credentials.
    no Cognito token, cross-owner status is `not_found`, and queue/drainer health
    did not regress before onboarding another organization.
 
+### Hosted UI branding
+
+Human login is Cognito's classic Hosted UI at `cognito_domain_url` (for example
+`https://auth.context.getspur.dev`). There is no first-party login HTML in the
+Lambda — `GET /auth/login` is only a 302 redirect facade. SPUR brands the
+Hosted UI via `aws_cognito_user_pool_ui_customization.context_service` using
+assets under `hosted-ui/` (CSS + logo, both under Cognito's 100 KiB limits).
+
+Preview locally with `hosted-ui/preview.html`. After an approved apply that
+enables Cognito, hard-refresh the authorize URL; CloudFront may cache Hosted UI
+assets briefly. See `hosted-ui/README.md` for regeneration and limits.
+
 ### Google social sign-in
 
 Google is an optional human identity provider. It does not issue tokens to the
