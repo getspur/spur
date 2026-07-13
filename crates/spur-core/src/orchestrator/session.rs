@@ -1755,17 +1755,9 @@ impl Orchestrator {
 
         // 3. Drain the notification pump with a bounded grace so the
         //    last batch of notifications reaches the projection. On
-        //    timeout, abort explicitly — dropping a `JoinHandle` does NOT
-        //    cancel the task. `abort_handle` gives us a side-channel that
-        //    survives moving the handle into `timeout`.
+        //    timeout, abort explicitly.
         if let Some(h) = b.notification_pump_handle.take() {
-            let abort = h.abort_handle();
-            if tokio::time::timeout(std::time::Duration::from_millis(100), h)
-                .await
-                .is_err()
-            {
-                abort.abort();
-            }
+            h.retire_with_grace().await;
         }
 
         // 4. Abort remaining handles and stash connection for reuse.
@@ -2131,7 +2123,7 @@ impl Orchestrator {
         // `presub_notif_rx` was subscribed before new_session so we don't
         // miss notifications emitted during session setup.
         let notification_pump_handle = presub_notif_rx.map(|notif_rx| {
-            crate::notification_pump::spawn_session_notification_pump(
+            crate::notification_pump::spawn_observed_session_notification_pump(
                 notif_rx,
                 session_id.clone(),
                 self.funnel.clone(),
@@ -2518,7 +2510,7 @@ impl Orchestrator {
         // `presub_notif_rx` was subscribed before load_session so history
         // replay items aren't missed.
         let notification_pump_handle = presub_notif_rx.map(|notif_rx| {
-            crate::notification_pump::spawn_session_notification_pump(
+            crate::notification_pump::spawn_observed_session_notification_pump(
                 notif_rx,
                 session_id.clone(),
                 self.funnel.clone(),
@@ -2681,11 +2673,15 @@ impl Orchestrator {
             }
         };
 
-        // Drain the history stream to keep the pump contract (same
-        // pattern as the ResumeSession arm). We do NOT re-emit
-        // AgentNotification events here — the TUI already rendered the
-        // pre-death transcript.
-        while let Some(_notification) = history_stream.next().await {}
+        // Keep reconnect milestones behind the active history owner. Native
+        // replay is already emitted by the pump; compatibility transports are
+        // drained inline without re-emitting because the TUI retained the
+        // pre-death transcript. The two branches are deliberately exclusive.
+        if let Some(pump) = new_session.notification_pump_handle.as_ref() {
+            pump.settle_after_terminal().await;
+        } else {
+            while let Some(_notification) = history_stream.next().await {}
+        }
 
         Ok((new_session, outcome))
     }
