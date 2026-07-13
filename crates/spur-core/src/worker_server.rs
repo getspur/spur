@@ -1705,6 +1705,8 @@ impl ServerHandler for WorkerToolHandler {
     ) -> Result<CallToolResult, McpError> {
         let canonical_name = worker_registry()?.canonical_name_for_call(&request.name)?;
         request.name = Cow::Owned(canonical_name.to_string());
+        // TODO(wmcp-ext-2-dispatch): route registry-backed external_* calls through the
+        // attached ContextServiceClient; the generated RMCP router has no handlers for them.
         let tcc = RmcpToolCallContext::new(self, request, context);
         self.tool_router.call(tcc).await
     }
