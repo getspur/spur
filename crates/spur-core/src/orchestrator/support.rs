@@ -49,6 +49,7 @@ impl Orchestrator {
             mcp_server,
             outcome_store: self.outcome_store.clone(),
             repo_root: Some(self.repo_root.clone()),
+            context_service_config: self.config.context_service.clone(),
         }
     }
 

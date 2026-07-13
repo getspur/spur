@@ -4,6 +4,7 @@ use std::sync::Arc;
 use crate::server::McpCallbackServer;
 use crate::worker_server::{WorkerMcpDeps, WorkerMcpServer};
 use dashmap::DashMap;
+use spur_acp::config::ContextServiceConfig;
 use spur_acp::DelegationDispatchError;
 use spur_acp::{McpServer, McpServerHttp};
 use spur_blob_store::OutcomeStore;
@@ -26,6 +27,7 @@ pub(crate) struct WorkerMcpFetcher {
     pub(super) mcp_server: Arc<McpCallbackServer>,
     pub(super) outcome_store: Arc<dyn OutcomeStore>,
     pub(super) repo_root: Option<PathBuf>,
+    pub(super) context_service_config: ContextServiceConfig,
 }
 
 impl WorkerMcpFetcher {
@@ -80,11 +82,15 @@ impl WorkerMcpFetcher {
                     worker_read_sink,
                     repo_root: self.repo_root.clone(),
                 };
-                let server = WorkerMcpServer::start(brain.to_string(), deps)
-                    .await
-                    .map_err(|e| DelegationDispatchError::WorkerMcpUnavailable {
-                        reason: format!("listener bind failed: {e}"),
-                    })?;
+                let server = WorkerMcpServer::start_with_context_service_config(
+                    brain.to_string(),
+                    deps,
+                    self.context_service_config.clone(),
+                )
+                .await
+                .map_err(|e| DelegationDispatchError::WorkerMcpUnavailable {
+                    reason: format!("listener bind failed: {e}"),
+                })?;
                 tracing::info!(
                     brain_session_id = %brain,
                     url = %server.url(),
