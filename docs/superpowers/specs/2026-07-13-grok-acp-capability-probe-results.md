@@ -136,12 +136,56 @@ necessarily identical to `grok agent stdio`, but informative):
 | Model also on user chunks as `_meta.modelId` | Not `config_option_update` |
 | Official Grok agent-mode docs list stream variants + `x.ai/*` extensions; do **not** document `configOptions` / `available_commands_update` for model | ACP model plane likely thin |
 
-**Live probe confirmed:** Grok sessions under SPUR will **not** show
-synthesized `/model` or `/effort`; status bar model label stays empty unless
-another path populates it. Model selection remains spawn-time
-(`grok agent --model …`) or Grok TUI-local. Proprietary model/effort surfaces
-(`session/new.models`, `_meta.x.ai/sessionConfig`) are invisible to the
-current synthesizer.
+**Live probe confirmed (0.2.93):** Grok sessions under SPUR will **not** show
+synthesized `/model` or `/effort` from the standard synthesizer. Proprietary
+model/effort surfaces (`session/new.models`, `_meta.x.ai/sessionConfig`) are
+invisible to `config_options::synthesize`. Read-only status labels may still
+populate from `_meta` (see design `2026-07-13-grok-readonly-model-effort-status-design.md`).
+
+### 4.1 Re-probe — Grok 0.2.99 set-path evaluation (2026-07-13)
+
+- **Probed:** 2026-07-13T00:35:23Z · binary **`grok 0.2.99 (b1b49ccb71a7) [stable]`**
+- **Artifacts:** `.spur/logs/probe-grok-20260713T003523.{jsonl,report.json}` ·
+  stdout `.spur/logs/probe-grok-0.2.99-reprobe2.stdout.txt`
+- **Probe enhancements:** `scripts/probe_grok_acp.py` now extracts meta planes
+  and probes real `session/set_model` ids + effort `_meta` shapes + vendor methods
+
+| Capability | 0.2.99 result | Notes |
+|---|---|---|
+| `configOptions` | still **0** | SPUR synthesizer still emits no `/model`/`/effort` |
+| `_meta["x.ai/sessionConfig"]` | **present** | 2 models + 3 modes (`high`/`medium`/`low`); selected = Grok 4.5 + High Effort |
+| `session/new.models` | **present** | `currentModelId=grok-4.5`; composer has no reasoning efforts |
+| `initialize._meta.modelState` | **present** | same catalog |
+| `session/set_config_option` | **`-32601`** | still missing |
+| `x.ai/sessionConfig/update` (vendor) | **`-32601`** unknown extension | **sessionConfig is not a set API** |
+| `session/set_model` `modelId=grok-build` | **`-32602`** unknown model id | probe default is wrong |
+| `session/set_model` `modelId=grok-4.5` | **ok** | result `_meta.model.Ok`; notif `model_changed` + `reasoning_effort` |
+| `session/set_model` `modelId=grok-composer-2.5-fast` | **ok** | `model_changed` (no effort field — model lacks efforts) |
+| `set_model` + top-level `reasoningEffort` | accepted but **effort unchanged** | notif still `high` |
+| `set_model` + top-level `effort` | accepted but **effort unchanged** | notif still `high` |
+| `set_model` + `_meta.reasoningEffort` | **ok, effort applied** | notif `reasoning_effort: "low"` after request for `low` |
+| `session/set_mode` `modeId=low` | empty `result: {}` | **no** `model_changed`; not an effort switch |
+| ACP `available_commands` `/model` `/effort` | **absent** | Grok TUI builtins only |
+
+**Confirmed write path (not sessionConfig update):**
+
+```json
+// model switch
+{"method":"session/set_model","params":{"sessionId":"…","modelId":"grok-4.5"}}
+
+// effort switch (must re-send current modelId)
+{"method":"session/set_model","params":{
+  "sessionId":"…",
+  "modelId":"grok-4.5",
+  "_meta":{"reasoningEffort":"low"}
+}}
+
+// confirmation (agent → client)
+{"method":"_x.ai/session_notification","params":{
+  "sessionId":"…",
+  "update":{"sessionUpdate":"model_changed","model_id":"grok-4.5","reasoning_effort":"low"}
+}}
+```
 
 ---
 
@@ -149,23 +193,43 @@ current synthesizer.
 
 1. **No SPUR synthesizer bug** when `/model` is missing on Grok — empty
    `configOptions` correctly yields zero advertised model commands.
-2. **Do not add fake static `/model`** to `seed_agents.toml` unless a live
-   probe shows Grok’s agent interprets `/model …` as prompt text **and**
-   that is desirable UX. A static entry without `set_config_option` would
-   only send prompt text and confuse users who expect Codex-like switching.
-3. **Spawn-time model** remains the reliable lever:
-   `args = ["--no-auto-update", "agent", "--model", "<id>", "stdio"]` or
-   `grok agent --model <id> stdio`.
-4. **Upstream fix (Grok Build):** advertise `configOptions` with
-   `category: "model"` / `thought_level` on `session/new`, implement
-   `session/set_config_option`, optionally emit `config_option_update` and
-   `available_commands_update`. SPUR’s existing path lights up with no
-   synthesizer changes.
-5. **Probe is the regression gate** when Grok CLI versions ship — re-run
-   `scripts/probe_grok_acp.py` and refresh §4.
-6. **SPUR read-only status:** model and effort may display from Grok `_meta`
-   at session freeze; mid-session switching remains unsupported without standard
-   `configOptions`.
+2. **Do not invent `x.ai/sessionConfig/update`.** Live probe: method not found.
+   Treat `x.ai/sessionConfig` as a **read-only catalog / selected-state display**,
+   same role as today for status labels.
+3. **Do not stuff Grok meta into fake `configOptions` for slash synthesis alone.**
+   That would flip `supports_set_config_option` and route pickers into
+   `session/set_config_option` → `-32601`.
+4. **If mid-session `/model` / `/effort` are required**, implement a **Grok vendor
+   adapter** with three pieces:
+   - **Catalog (read):** `session/new.models` and/or `_meta["x.ai/sessionConfig"]`
+     (already proven; status labels ship via `grok_session_display`).
+   - **Set (write):** native `session/set_model` with real catalog `modelId`;
+     effort only via `_meta.reasoningEffort` on the same method (proven 0.2.99).
+   - **Confirm (notify):** handle `_x.ai/session_notification` /
+     `sessionUpdate: model_changed` to refresh status (frozen labels alone will
+     go stale after a switch).
+5. **SPUR gap today:** `NativeAcpConnection::set_session_model` only maps to
+   `session/set_config_option` when `caps.supports_set_model()` (config option
+   present). Grok has empty config options → `CapabilityMissing` even though the
+   wire method works.
+6. **Spawn-time model** remains valid: `grok agent --model <id> stdio` /
+   `--effort` CLI flags.
+7. **Upstream ideal (Grok Build):** advertise standard `configOptions` +
+   `session/set_config_option`. Until then, vendor adapter is the only honest
+   interactive path.
+8. **Probe is the regression gate** — re-run
+   `python3 scripts/probe_grok_acp.py --always-approve --try-set-model` on each
+   Grok CLI bump and refresh §4 / §4.1.
+
+### SPUR implementation follow-up (2026-07-13)
+
+SPUR's Grok adapter now retains the proprietary model catalog separately from
+standard `configOptions`, synthesizes dedicated `/model` and `/effort` picker
+dispatches, and sends the proven `session/set_model` shapes above. The
+`_x.ai/session_notification` `model_changed` confirmation refreshes status
+labels and model-specific effort choices; composer therefore removes
+`/effort`. Standard Codex/Claude `session/set_config_option` routing is
+unchanged, and the Grok catalog never flips `supports_set_config_option`.
 
 ---
 

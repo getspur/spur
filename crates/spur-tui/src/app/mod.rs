@@ -155,6 +155,11 @@ pub enum UserInput {
         session_id: SessionId,
         value: String,
     },
+    /// Grok reasoning-effort selection through its model adapter.
+    SetSessionEffort {
+        session_id: SessionId,
+        value: String,
+    },
     /// Halt the in-flight agent stream on the given session. Maps 1:1 to
     /// `spur_core::InteractiveInput::CancelStream` via `spur-cli`.
     CancelStream {

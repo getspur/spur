@@ -235,6 +235,17 @@ impl SessionDetailView {
                                         })
                                     }
                                 }
+                                SubmitDecision::SetSessionEffort { value } => {
+                                    if self.is_cleared() {
+                                        None
+                                    } else {
+                                        self.pending_effort_override = Some(value.clone());
+                                        Some(Action::SetSessionEffort {
+                                            session_id: self.session_id.clone(),
+                                            value,
+                                        })
+                                    }
+                                }
                             };
                         }
                         None

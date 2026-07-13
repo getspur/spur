@@ -64,6 +64,10 @@ pub enum SubmitDecision {
     SetSessionModel {
         value: String,
     },
+    /// Grok-only reasoning effort selected from its proprietary catalog.
+    SetSessionEffort {
+        value: String,
+    },
     Empty,
 }
 
@@ -202,6 +206,22 @@ pub fn route_with_caps(
                             config_id,
                             value,
                         }
+                    }
+                }
+                Dispatch::SetSessionModel => {
+                    let value = rest_after_first_token(text).trim().to_string();
+                    if value.is_empty() {
+                        SubmitDecision::Empty
+                    } else {
+                        SubmitDecision::SetSessionModel { value }
+                    }
+                }
+                Dispatch::SetSessionEffort => {
+                    let value = rest_after_first_token(text).trim().to_string();
+                    if value.is_empty() {
+                        SubmitDecision::Empty
+                    } else {
+                        SubmitDecision::SetSessionEffort { value }
                     }
                 }
                 Dispatch::VendorExec {
@@ -666,6 +686,32 @@ mod sessions_slash_tests {
         }
     }
 
+    #[test]
+    fn grok_effort_dispatch_routes_to_set_session_effort() {
+        use crate::commands::entry::{CommandEntry, CommandSource, Dispatch};
+
+        let mut registry = CommandRegistry::new();
+        registry.set_advertised_commands(
+            "grok",
+            vec![CommandEntry {
+                name: "effort".into(),
+                description: "Switch effort".into(),
+                hint: None,
+                source: CommandSource::Advertised {
+                    handle: "grok".into(),
+                },
+                dispatch: Dispatch::SetSessionEffort,
+                arg_picker_spec: None,
+            }],
+        );
+
+        let decision = route("/effort low", &[], &[], &registry, false);
+        assert!(matches!(
+            decision,
+            SubmitDecision::SetSessionEffort { value } if value == "low"
+        ));
+    }
+
     /// Wave B.8: an agent-advertised command with Unstructured input (e.g.
     /// codex's /review-branch) routes free-text submits as PromptText so the
     /// agent receives the full canonical "/<cmd> <arg>" string.
@@ -739,7 +785,7 @@ mod sessions_slash_tests {
         use crate::commands::entry::{CommandEntry, CommandSource, Dispatch};
         use spur_acp::{
             InitializeResponse, NewSessionResponse, ProtocolVersion, SessionConfigId,
-            SessionConfigOption, SessionConfigSelectOption, SessionId,
+            SessionConfigOption, SessionConfigSelectOption,
         };
 
         let mut registry = CommandRegistry::new();
@@ -792,7 +838,7 @@ mod sessions_slash_tests {
         use spur_acp::{
             InitializeResponse, NewSessionResponse, ProtocolVersion, SessionConfigId,
             SessionConfigKind, SessionConfigOption, SessionConfigSelect,
-            SessionConfigSelectOptions, SessionConfigValueId, SessionId,
+            SessionConfigSelectOptions, SessionConfigValueId,
         };
 
         let mut registry = CommandRegistry::new();

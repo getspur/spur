@@ -1,6 +1,8 @@
 # Grok read-only model / effort status — design
 
-**Status:** draft (awaiting review)
+**Status:** shipped baseline; interactive write follow-up implemented after the
+0.2.99 re-probe proved `session/set_model` (see the probe results §4.1 and
+`docs/superpowers/plans/2026-07-13-grok-interactive-model-effort.md`)
 **Date:** 2026-07-13
 **Owner:** Kevin Truong
 **Predecessors:**
