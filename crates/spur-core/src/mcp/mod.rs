@@ -118,7 +118,17 @@ pub fn tools_list() -> Vec<spur_mcp::ToolDefinition> {
 }
 
 pub fn worker_tool_registry() -> Result<spur_mcp::ToolRegistry, spur_mcp::ToolRegistryError> {
-    let builder = spur_mcp::ToolRegistry::builder()
+    let context_service_config = ContextServiceConfig {
+        url: String::new(),
+        ..ContextServiceConfig::default()
+    };
+    worker_tool_registry_with_context_service(&context_service_config)
+}
+
+pub fn worker_tool_registry_with_context_service(
+    context_service_config: &ContextServiceConfig,
+) -> Result<spur_mcp::ToolRegistry, spur_mcp::ToolRegistryError> {
+    let mut builder = spur_mcp::ToolRegistry::builder()
         .with(catalog::WorkerCatalogMcpModule::prelude())?
         .with(worker::WorkerReadMcpModule::plan(
             worker::WorkerReadMcpDeps::catalog_only(),
@@ -133,9 +143,13 @@ pub fn worker_tool_registry() -> Result<spur_mcp::ToolRegistry, spur_mcp::ToolRe
             feature_gate: crate::server::community_feature_gate(),
         }))?
         .with(review_verdict::ReviewVerdictMcpModule)?
-        .with_alias("code_search", "code_symbol_search")?
-        .with_denied_tool_calls(WORKER_DENIED_TOOL_CALLS.iter().copied());
-    Ok(builder.build())
+        .with_alias("code_search", "code_symbol_search")?;
+    if let Some(context_service_client) = context_service_client(context_service_config) {
+        builder = builder.with(context_service_client)?;
+    }
+    Ok(builder
+        .with_denied_tool_calls(WORKER_DENIED_TOOL_CALLS.iter().copied())
+        .build())
 }
 
 pub fn worker_tools_list() -> Vec<spur_mcp::ToolDefinition> {
