@@ -676,16 +676,28 @@ impl Orchestrator {
                         {
                             Ok((session, mut history_stream, _load_outcome)) => {
                                 let spur_id = session.spur_session_id.clone();
-                                let mut history_count = 0usize;
-                                while let Some(notification) = history_stream.next().await {
-                                    history_count += 1;
-                                    self.emit(SpurEvent::now(SpurEventBody::AgentNotification {
-                                        session: spur_id.clone(),
-                                        notification: Box::new(notification),
-                                    }));
-                                }
+                                // Exactly one wire-history owner is active. Native
+                                // transports settle the pre-subscribed pump and never
+                                // poll the intentionally-empty compat stream. Other
+                                // transports have no pump and retain inline streaming.
+                                let wire_history_delivered =
+                                    if let Some(pump) = session.notification_pump_handle.as_ref() {
+                                        pump.settle_after_terminal().await.emitted > 0
+                                    } else {
+                                        let mut delivered = false;
+                                        while let Some(notification) = history_stream.next().await {
+                                            delivered = true;
+                                            self.emit(SpurEvent::now(
+                                                SpurEventBody::AgentNotification {
+                                                    session: spur_id.clone(),
+                                                    notification: Box::new(notification),
+                                                },
+                                            ));
+                                        }
+                                        delivered
+                                    };
 
-                                if history_count == 0 {
+                                if !wire_history_delivered {
                                     let entries =
                                         Self::read_session_history_from_disk(&original_session_id);
                                     if !entries.is_empty() {
@@ -2035,6 +2047,17 @@ impl Orchestrator {
                 .await;
                 let _ = dead.connection.shutdown().await;
                 continue;
+            }
+
+            // The observed pump waits the same bounded grace as the non-
+            // interactive drain, then acknowledges only after every queued
+            // notification has been enqueued onto this funnel. TurnComplete
+            // therefore cannot overtake trailing native notifications.
+            if let Some(pump) = brain
+                .as_ref()
+                .and_then(|session| session.notification_pump_handle.as_ref())
+            {
+                pump.settle_after_terminal().await;
             }
 
             // Emit turn complete
