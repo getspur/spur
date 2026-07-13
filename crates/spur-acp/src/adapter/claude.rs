@@ -143,12 +143,18 @@ pub fn try_extract_observe(raw: &Value) -> Option<ObservePayload> {
 
 /// Map Claude mode IDs to short badges.
 ///
-/// | mode_id            | badge  | color   |
-/// |--------------------|--------|---------|
-/// | `"plan"`           | PLAN   | Amber   |
-/// | `"acceptEdits"`    | AUTO   | Green   |
-/// | `"bypassPermissions"` | BYPASS | Red  |
-/// | anything else      | —      | (none)  |
+/// Live ACP modes (claude-agent-acp 0.54.1 probe): `auto`, `default`,
+/// `acceptEdits`, `plan`, `dontAsk`, `bypassPermissions`.
+///
+/// | mode_id               | badge  | color   |
+/// |-----------------------|--------|---------|
+/// | `"plan"`              | PLAN   | Amber   |
+/// | `"acceptEdits"`       | AUTO   | Green   |
+/// | `"auto"`              | FULL   | Green   |
+/// | `"default"`           | DEF    | Neutral |
+/// | `"dontAsk"`           | NOASK  | Amber   |
+/// | `"bypassPermissions"` | BYPASS | Red     |
+/// | anything else         | —      | (none)  |
 pub fn mode_badge(mode_id: &str) -> Option<ModeBadge> {
     match mode_id {
         "plan" => Some(ModeBadge {
@@ -159,11 +165,52 @@ pub fn mode_badge(mode_id: &str) -> Option<ModeBadge> {
             short: "AUTO",
             color: BadgeColor::Green,
         }),
+        "auto" => Some(ModeBadge {
+            short: "FULL",
+            color: BadgeColor::Green,
+        }),
+        "default" => Some(ModeBadge {
+            short: "DEF",
+            color: BadgeColor::Neutral,
+        }),
+        "dontAsk" => Some(ModeBadge {
+            short: "NOASK",
+            color: BadgeColor::Amber,
+        }),
         "bypassPermissions" => Some(ModeBadge {
             short: "BYPASS",
             color: BadgeColor::Red,
         }),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod mode_badge_tests {
+    use super::*;
+    use crate::adapter::BadgeColor;
+
+    #[test]
+    fn maps_live_claude_modes() {
+        let cases = [
+            ("plan", "PLAN", BadgeColor::Amber),
+            ("acceptEdits", "AUTO", BadgeColor::Green),
+            ("auto", "FULL", BadgeColor::Green),
+            ("default", "DEF", BadgeColor::Neutral),
+            ("dontAsk", "NOASK", BadgeColor::Amber),
+            ("bypassPermissions", "BYPASS", BadgeColor::Red),
+        ];
+        for (id, short, color) in cases {
+            let badge = mode_badge(id).unwrap_or_else(|| panic!("expected badge for {id}"));
+            assert_eq!(badge.short, short, "mode_id={id}");
+            assert_eq!(badge.color, color, "mode_id={id}");
+        }
+    }
+
+    #[test]
+    fn unknown_mode_returns_none() {
+        assert!(mode_badge("unknown-mode").is_none());
+        assert!(mode_badge("").is_none());
     }
 }
 
