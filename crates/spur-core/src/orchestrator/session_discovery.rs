@@ -16,6 +16,7 @@ use spur_acp::SessionInfo;
 pub enum SessionDiscoveryKind {
     Claude,
     Codex,
+    Grok,
     Kiro,
     Kimi,
     OpenCode,
@@ -27,6 +28,7 @@ impl SessionDiscoveryKind {
         match self {
             Self::Claude => claude::discover(),
             Self::Codex => codex::discover(),
+            Self::Grok => grok::discover(),
             Self::Kiro => kiro::discover(),
             Self::Kimi => kimi::discover(),
             Self::OpenCode => opencode::discover(),
@@ -41,10 +43,11 @@ pub fn discovery_for_kind(kind: AgentKind) -> Option<SessionDiscoveryKind> {
             Some(SessionDiscoveryKind::Claude)
         }
         AgentKind::CodexAcp => Some(SessionDiscoveryKind::Codex),
+        AgentKind::Grok => Some(SessionDiscoveryKind::Grok),
         AgentKind::Kiro => Some(SessionDiscoveryKind::Kiro),
         AgentKind::Kimi => Some(SessionDiscoveryKind::Kimi),
         AgentKind::OpenCode => Some(SessionDiscoveryKind::OpenCode),
-        AgentKind::Gemini | AgentKind::Grok | AgentKind::Generic => None,
+        AgentKind::Gemini | AgentKind::Generic => None,
     }
 }
 
@@ -350,6 +353,132 @@ mod claude {
         let mtime = meta.modified().ok()?;
         let dt = chrono::DateTime::<chrono::Utc>::from(mtime);
         Some(dt.to_rfc3339())
+    }
+}
+
+// ── Grok backend ────────────────────────────────────────────────────────
+
+mod grok {
+    use super::*;
+    use tracing::debug;
+
+    pub(super) fn discover() -> Result<Vec<SessionInfo>> {
+        let home = std::env::var("HOME").map(PathBuf::from).unwrap_or_default();
+        let sessions_root = home.join(".grok/sessions");
+        discover_from_root(&sessions_root)
+    }
+
+    pub(crate) fn discover_from_root(sessions_root: &Path) -> Result<Vec<SessionInfo>> {
+        if !sessions_root.exists() {
+            return Ok(Vec::new());
+        }
+
+        let mut sessions = Vec::new();
+        for cwd_entry in std::fs::read_dir(sessions_root)? {
+            let cwd_entry = match cwd_entry {
+                Ok(entry) => entry,
+                Err(_) => continue,
+            };
+            if !cwd_entry
+                .file_type()
+                .is_ok_and(|file_type| file_type.is_dir())
+            {
+                continue;
+            }
+
+            let Some(encoded_cwd) = cwd_entry.file_name().to_str().map(str::to_owned) else {
+                continue;
+            };
+            let Some(decoded_cwd) = decode_percent_encoded_path(&encoded_cwd) else {
+                continue;
+            };
+            let cwd = PathBuf::from(decoded_cwd);
+            if !cwd.is_absolute() {
+                continue;
+            }
+
+            let session_entries = match std::fs::read_dir(cwd_entry.path()) {
+                Ok(entries) => entries,
+                Err(_) => continue,
+            };
+            for session_entry in session_entries {
+                let session_entry = match session_entry {
+                    Ok(entry) => entry,
+                    Err(_) => continue,
+                };
+                if !session_entry
+                    .file_type()
+                    .is_ok_and(|file_type| file_type.is_dir())
+                {
+                    continue;
+                }
+
+                let Some(session_id) = session_entry.file_name().to_str().map(str::to_owned) else {
+                    continue;
+                };
+                let summary_path = session_entry.path().join("summary.json");
+                if !summary_path.is_file() {
+                    continue;
+                }
+                let summary = match std::fs::read_to_string(&summary_path)
+                    .ok()
+                    .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok())
+                {
+                    Some(summary) => summary,
+                    None => continue,
+                };
+
+                let title = json_string_field(&summary, "session_summary")
+                    .or_else(|| json_string_field(&summary, "generated_title"))
+                    .map(str::to_owned);
+                let updated_at = json_string_field(&summary, "updated_at").map(str::to_owned);
+                let mut info = SessionInfo::new(session_id, cwd.clone());
+                info = info.title(title);
+                info = info.updated_at(updated_at);
+                sessions.push(info);
+            }
+        }
+
+        sessions.sort_by(|a, b| {
+            let a_time = a.updated_at.as_deref().unwrap_or("");
+            let b_time = b.updated_at.as_deref().unwrap_or("");
+            b_time.cmp(a_time)
+        });
+
+        debug!(
+            count = sessions.len(),
+            "Loaded sessions from grok disk storage"
+        );
+        Ok(sessions)
+    }
+
+    fn decode_percent_encoded_path(encoded: &str) -> Option<String> {
+        let bytes = encoded.as_bytes();
+        let mut decoded = Vec::with_capacity(bytes.len());
+        let mut index = 0;
+
+        while index < bytes.len() {
+            if bytes[index] == b'%' {
+                let high = decode_hex_digit(*bytes.get(index + 1)?)?;
+                let low = decode_hex_digit(*bytes.get(index + 2)?)?;
+                decoded.push((high << 4) | low);
+                index += 3;
+            } else {
+                decoded.push(bytes[index]);
+                index += 1;
+            }
+        }
+
+        String::from_utf8(decoded).ok()
+    }
+
+    fn decode_hex_digit(digit: u8) -> Option<u8> {
+        match digit {
+            b'0'..=b'9' => Some(digit - b'0'),
+            b'a'..=b'f' => Some(digit - b'a' + 10),
+            b'A'..=b'F' => Some(digit - b'A' + 10),
+            _ => None,
+        }
     }
 }
 
@@ -840,6 +969,76 @@ mod tests {
     }
 
     #[test]
+    fn grok_discovery_decodes_cwd_and_reads_summary_metadata() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let sessions_root = temp.path().join("sessions");
+        let older = sessions_root
+            .join("%2Frepo%2Fspur%20project")
+            .join("session-older");
+        let newer = sessions_root
+            .join("%2Frepo%2Fspur%20project")
+            .join("session-newer");
+        std::fs::create_dir_all(&older).expect("older session dir");
+        std::fs::create_dir_all(&newer).expect("newer session dir");
+        std::fs::write(
+            older.join("summary.json"),
+            r#"{"info":{"id":"metadata-id","cwd":"/wrong/path"},"generated_title":"Generated title","updated_at":"2026-05-08T10:00:00Z"}"#,
+        )
+        .expect("older summary");
+        std::fs::write(
+            newer.join("summary.json"),
+            r#"{"info":{"id":"other-metadata-id","cwd":"/also/wrong"},"session_summary":"Session summary","generated_title":"Ignored fallback","updated_at":"2026-05-09T10:00:00Z"}"#,
+        )
+        .expect("newer summary");
+
+        let sessions = grok::discover_from_root(&sessions_root).expect("grok discovery");
+
+        assert_eq!(sessions.len(), 2);
+        assert_eq!(sessions[0].session_id.0.as_ref(), "session-newer");
+        assert_eq!(sessions[0].cwd, PathBuf::from("/repo/spur project"));
+        assert_eq!(sessions[0].title.as_deref(), Some("Session summary"));
+        assert_eq!(
+            sessions[0].updated_at.as_deref(),
+            Some("2026-05-09T10:00:00Z")
+        );
+        assert_eq!(sessions[1].session_id.0.as_ref(), "session-older");
+        assert_eq!(sessions[1].title.as_deref(), Some("Generated title"));
+    }
+
+    #[test]
+    fn grok_discovery_skips_corrupt_and_incomplete_entries() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let sessions_root = temp.path().join("sessions");
+        let cwd_root = sessions_root.join("%2Frepo%2Fspur");
+        let corrupt = cwd_root.join("corrupt");
+        let incomplete = cwd_root.join("incomplete");
+        let invalid_cwd = sessions_root.join("%ZZrepo").join("invalid-cwd");
+        std::fs::create_dir_all(&corrupt).expect("corrupt session dir");
+        std::fs::create_dir_all(&incomplete).expect("incomplete session dir");
+        std::fs::create_dir_all(&invalid_cwd).expect("invalid cwd session dir");
+        std::fs::write(corrupt.join("summary.json"), "not json").expect("corrupt summary");
+        std::fs::write(
+            invalid_cwd.join("summary.json"),
+            r#"{"session_summary":"must be skipped"}"#,
+        )
+        .expect("invalid cwd summary");
+
+        let sessions = grok::discover_from_root(&sessions_root).expect("grok discovery");
+
+        assert!(sessions.is_empty());
+    }
+
+    #[test]
+    fn grok_discovery_returns_empty_for_missing_root() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let missing_root = temp.path().join("missing");
+
+        let sessions = grok::discover_from_root(&missing_root).expect("missing root");
+
+        assert!(sessions.is_empty());
+    }
+
+    #[test]
     fn kiro_discovery_reads_json_sessions() {
         let temp = tempfile::tempdir().expect("tempdir");
         let sessions_dir = temp.path().join(".kiro/sessions/cli");
@@ -1095,8 +1294,8 @@ mod tests {
         assert!(discovery_for_kind(AgentKind::Kiro).is_some());
         assert!(discovery_for_kind(AgentKind::Kimi).is_some());
         assert!(discovery_for_kind(AgentKind::OpenCode).is_some());
+        assert!(discovery_for_kind(AgentKind::Grok).is_some());
         assert!(discovery_for_kind(AgentKind::Gemini).is_none());
-        assert!(discovery_for_kind(AgentKind::Grok).is_none());
         assert!(discovery_for_kind(AgentKind::Generic).is_none());
     }
 }
