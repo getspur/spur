@@ -478,6 +478,30 @@ async fn tools_list_returns_curated_worker_tools_including_code_graph_reads() {
     server.shutdown(Duration::from_secs(5)).await;
 }
 
+#[tokio::test]
+async fn external_call_without_context_service_returns_clear_configuration_error() {
+    let (_dir, server) = test_server_with_real_pm().await;
+    let token = server.issue_token("d-external-unconfigured", Duration::from_secs(60));
+    let body = call_jsonrpc(
+        &server,
+        &token,
+        "tools/call",
+        json!({
+            "name": "external_code_read",
+            "arguments": { "selector": "pkg:serde@1.0.0::serde::Deserialize" }
+        }),
+    )
+    .await;
+
+    assert_eq!(body["error"]["code"], -32603);
+    assert_eq!(
+        body["error"]["message"],
+        "context service is not configured for worker MCP"
+    );
+
+    server.shutdown(Duration::from_secs(5)).await;
+}
+
 #[test]
 fn worker_registry_lists_all_external_tools_when_context_service_configured() {
     let context_service = ContextServiceConfig {

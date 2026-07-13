@@ -12,10 +12,29 @@ const DEFAULT_INDEX_SOURCE: &str = "git:custom";
 const KNOWLEDGE_QUERY_VECTOR_DIMENSIONS: usize = 768;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_REMOTE_ERROR_CHARS: usize = 512;
+const EXTERNAL_CATALOG: &str = "external_catalog";
+const EXTERNAL_CODE_SEARCH: &str = "external_code_search";
+const EXTERNAL_CODE_READ: &str = "external_code_read";
+const EXTERNAL_CODE_CALLERS: &str = "external_code_callers";
+const EXTERNAL_CODE_CALLEES: &str = "external_code_callees";
+const EXTERNAL_KNOWLEDGE_CONTEXT: &str = "external_knowledge_context";
+const EXTERNAL_INDEX: &str = "external_index";
+const EXTERNAL_INDEX_STATUS: &str = "external_index_status";
+const TOOL_NAMES: [&str; 8] = [
+    EXTERNAL_CATALOG,
+    EXTERNAL_CODE_SEARCH,
+    EXTERNAL_CODE_READ,
+    EXTERNAL_CODE_CALLERS,
+    EXTERNAL_CODE_CALLEES,
+    EXTERNAL_KNOWLEDGE_CONTEXT,
+    EXTERNAL_INDEX,
+    EXTERNAL_INDEX_STATUS,
+];
 
 /// Runtime authentication for one context-service proxy.
 ///
 /// Secret-bearing variants intentionally redact their debug representation.
+#[derive(Clone)]
 pub enum ContextServiceAuth {
     /// Send no authentication header and preserve the configured legacy URL.
     None,
@@ -74,6 +93,7 @@ pub enum ContextServiceClientError {
     HttpClient(#[source] reqwest::Error),
 }
 
+#[derive(Clone)]
 pub struct ContextServiceClient {
     client: reqwest::Client,
     endpoint: String,
@@ -154,6 +174,48 @@ impl ContextServiceClient {
             .filter(|value| !value.trim().is_empty());
         Self::with_optional_token(base_url, bearer_token).ok()
     }
+
+    /// Calls one context-service tool and returns its decoded JSON payload.
+    pub(crate) async fn call_value(&self, name: &str, args: Value) -> Result<Value, McpError> {
+        let mut request = self
+            .client
+            .post(&self.endpoint)
+            .json(&json!({ "tool": name, "args": args }));
+        match &self.auth {
+            ContextServiceAuth::None => {}
+            ContextServiceAuth::OAuthBearer(token) => {
+                request = request.bearer_auth(token.expose_secret());
+            }
+            ContextServiceAuth::ApiKey(key) => {
+                request = request.header("X-SPUR-API-Key", key.expose_secret());
+            }
+        }
+
+        let response = request.send().await.map_err(|_error| {
+            McpError::internal_error("context service request failed".to_owned(), None)
+        })?;
+
+        let status = response.status();
+        if !status.is_success() {
+            return Err(McpError::internal_error(
+                format!("context service HTTP {status}"),
+                None,
+            ));
+        }
+
+        let value = response.json::<Value>().await.map_err(|error| {
+            McpError::internal_error(
+                format!("context service response was not valid JSON: {error}"),
+                None,
+            )
+        })?;
+
+        if let Some(error) = lambda_error_envelope(&value, &self.auth) {
+            return Err(error);
+        }
+
+        Ok(value)
+    }
 }
 
 fn parse_authenticated_endpoint(value: &str) -> Result<reqwest::Url, ContextServiceClientError> {
@@ -203,43 +265,7 @@ impl ToolModule for ContextServiceClient {
         name: &str,
         args: Value,
     ) -> Result<ToolResponse, McpError> {
-        let mut request = self
-            .client
-            .post(&self.endpoint)
-            .json(&json!({ "tool": name, "args": args }));
-        match &self.auth {
-            ContextServiceAuth::None => {}
-            ContextServiceAuth::OAuthBearer(token) => {
-                request = request.bearer_auth(token.expose_secret());
-            }
-            ContextServiceAuth::ApiKey(key) => {
-                request = request.header("X-SPUR-API-Key", key.expose_secret());
-            }
-        }
-
-        let response = request.send().await.map_err(|_error| {
-            McpError::internal_error("context service request failed".to_owned(), None)
-        })?;
-
-        let status = response.status();
-        if !status.is_success() {
-            return Err(McpError::internal_error(
-                format!("context service HTTP {status}"),
-                None,
-            ));
-        }
-
-        let value = response.json::<Value>().await.map_err(|error| {
-            McpError::internal_error(
-                format!("context service response was not valid JSON: {error}"),
-                None,
-            )
-        })?;
-
-        if let Some(error) = lambda_error_envelope(&value, &self.auth) {
-            return Err(error);
-        }
-
+        let value = self.call_value(name, args).await?;
         Ok(ToolResponse::json_text(ctx.request_id_value(), value))
     }
 }
@@ -274,9 +300,13 @@ pub(crate) fn tool_definitions() -> Vec<ToolDefinition> {
     ]
 }
 
+pub(crate) fn is_tool_name(name: &str) -> bool {
+    TOOL_NAMES.contains(&name)
+}
+
 fn external_catalog_def() -> ToolDefinition {
     ToolDefinition {
-        name: "external_catalog".to_owned(),
+        name: EXTERNAL_CATALOG.to_owned(),
         description:
             "Browse indexed external packages, revisions, file tree entries, and file symbols."
                 .to_owned(),
@@ -326,7 +356,7 @@ fn external_catalog_def() -> ToolDefinition {
 
 fn external_code_search_def() -> ToolDefinition {
     ToolDefinition {
-        name: "external_code_search".to_owned(),
+        name: EXTERNAL_CODE_SEARCH.to_owned(),
         description: "Search symbols in an indexed external package revision.".to_owned(),
         input_schema: json!({
             "type": "object",
@@ -371,7 +401,7 @@ fn external_code_search_def() -> ToolDefinition {
 
 fn external_code_read_def() -> ToolDefinition {
     ToolDefinition {
-        name: "external_code_read".to_owned(),
+        name: EXTERNAL_CODE_READ.to_owned(),
         description: "Read source for one external package symbol selector.".to_owned(),
         input_schema: json!({
             "type": "object",
@@ -400,7 +430,7 @@ fn external_code_read_def() -> ToolDefinition {
 
 fn external_code_callers_def() -> ToolDefinition {
     ToolDefinition {
-        name: "external_code_callers".to_owned(),
+        name: EXTERNAL_CODE_CALLERS.to_owned(),
         description: "List symbols that call the requested external package symbol.".to_owned(),
         input_schema: json!({
             "type": "object",
@@ -428,7 +458,7 @@ fn external_code_callers_def() -> ToolDefinition {
 
 fn external_code_callees_def() -> ToolDefinition {
     ToolDefinition {
-        name: "external_code_callees".to_owned(),
+        name: EXTERNAL_CODE_CALLEES.to_owned(),
         description: "List symbols called by the requested external package symbol.".to_owned(),
         input_schema: json!({
             "type": "object",
@@ -456,7 +486,7 @@ fn external_code_callees_def() -> ToolDefinition {
 
 fn external_knowledge_context_def() -> ToolDefinition {
     ToolDefinition {
-        name: "external_knowledge_context".to_owned(),
+        name: EXTERNAL_KNOWLEDGE_CONTEXT.to_owned(),
         description: "Retrieve a structured evidence pack for a natural-language question about an indexed external package.".to_owned(),
         input_schema: json!({
             "type": "object",
@@ -509,7 +539,7 @@ fn external_knowledge_context_def() -> ToolDefinition {
 
 fn external_index_def() -> ToolDefinition {
     ToolDefinition {
-        name: "external_index".to_owned(),
+        name: EXTERNAL_INDEX.to_owned(),
         description: "Queue on-demand indexing for a fetchable external package source.".to_owned(),
         input_schema: json!({
             "type": "object",
@@ -550,7 +580,7 @@ fn external_index_def() -> ToolDefinition {
 
 fn external_index_status_def() -> ToolDefinition {
     ToolDefinition {
-        name: "external_index_status".to_owned(),
+        name: EXTERNAL_INDEX_STATUS.to_owned(),
         description: "Return the queued indexing job status for a job_id.".to_owned(),
         input_schema: json!({
             "type": "object",

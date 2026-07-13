@@ -10,7 +10,7 @@ use std::borrow::Cow;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
@@ -67,6 +67,7 @@ use axum::{
 };
 
 use crate::handlers::{McpHandlerError, WorkerCallContext};
+use spur_acp::config::ContextServiceConfig;
 use spur_mcp::events::McpEventSink;
 use spur_mcp::token::validate_token;
 
@@ -266,6 +267,9 @@ pub struct WorkerMcpServer {
     /// report true max concurrency without lossy time-sampling. Same `Arc`
     /// instance as in [`DispatcherDeps`].
     peak_active_delegations: Arc<AtomicU32>,
+    /// Claude allowlist names derived from the exact registry advertised by
+    /// this server instance.
+    worker_mcp_tool_names: Vec<String>,
 }
 
 /// RAII guard that increments [`WorkerMcpServer::active_delegations`] on
@@ -1070,17 +1074,43 @@ enum SubmitReviewDecisionParam {
 struct WorkerToolHandler {
     deps: Arc<DispatcherDeps>,
     brain_session_id: String,
+    tool_registry: Result<spur_mcp::registry::ToolRegistry, spur_mcp::ToolRegistryError>,
+    context_service_client: Option<crate::mcp::ContextServiceClient>,
     tool_router: ToolRouter<Self>,
 }
 
 #[tool_router(router = tool_router)]
 impl WorkerToolHandler {
-    fn new(deps: Arc<DispatcherDeps>, brain_session_id: String) -> Self {
-        Self {
-            deps,
-            brain_session_id,
-            tool_router: Self::tool_router(),
-        }
+    fn new(
+        deps: Arc<DispatcherDeps>,
+        brain_session_id: String,
+        context_service_config: &ContextServiceConfig,
+    ) -> (Self, Vec<String>) {
+        let (tool_registry, context_service_client) =
+            crate::mcp::worker_tool_dispatch(context_service_config);
+        let worker_mcp_tool_names = tool_registry
+            .as_ref()
+            .map(crate::mcp::worker_mcp_claude_tool_names_for_registry)
+            .unwrap_or_default();
+        (
+            Self {
+                deps,
+                brain_session_id,
+                tool_registry,
+                context_service_client,
+                tool_router: Self::tool_router(),
+            },
+            worker_mcp_tool_names,
+        )
+    }
+
+    fn worker_registry(&self) -> Result<&spur_mcp::registry::ToolRegistry, McpError> {
+        self.tool_registry.as_ref().map_err(|error| {
+            McpError::internal_error(
+                format!("core worker MCP tool registry is invalid: {error}"),
+                None,
+            )
+        })
     }
 
     fn context_from_request(
@@ -1673,19 +1703,11 @@ fn structured_only_result(value: Value) -> CallToolResult {
     result
 }
 
-fn worker_registry() -> Result<&'static spur_mcp::registry::ToolRegistry, McpError> {
-    static REGISTRY: OnceLock<
-        Result<spur_mcp::registry::ToolRegistry, spur_mcp::ToolRegistryError>,
-    > = OnceLock::new();
-    REGISTRY
-        .get_or_init(crate::mcp::worker_tool_registry)
-        .as_ref()
-        .map_err(|error| {
-            McpError::internal_error(
-                format!("core worker MCP tool registry is invalid: {error}"),
-                None,
-            )
-        })
+fn unconfigured_context_service() -> ContextServiceConfig {
+    ContextServiceConfig {
+        url: String::new(),
+        ..ContextServiceConfig::default()
+    }
 }
 
 fn worker_rmcp_tool(definition: spur_mcp::tools::ToolDefinition) -> Tool {
@@ -1703,10 +1725,30 @@ impl ServerHandler for WorkerToolHandler {
         mut request: CallToolRequestParams,
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
-        let canonical_name = worker_registry()?.canonical_name_for_call(&request.name)?;
-        request.name = Cow::Owned(canonical_name.to_string());
-        // TODO(wmcp-ext-2-dispatch): route registry-backed external_* calls through the
-        // attached ContextServiceClient; the generated RMCP router has no handlers for them.
+        if self.context_service_client.is_none()
+            && crate::mcp::is_context_service_tool_name(&request.name)
+        {
+            return Err(McpError::internal_error(
+                "context service is not configured for worker MCP".to_owned(),
+                None,
+            ));
+        }
+        let canonical_name = self
+            .worker_registry()?
+            .canonical_name_for_call(&request.name)?
+            .to_owned();
+        request.name = Cow::Owned(canonical_name.clone());
+        if canonical_name.starts_with("external_") {
+            let client = self.context_service_client.as_ref().ok_or_else(|| {
+                McpError::internal_error(
+                    "context service is not configured for worker MCP".to_owned(),
+                    None,
+                )
+            })?;
+            let args = Value::Object(request.arguments.take().unwrap_or_default());
+            let value = client.call_value(&canonical_name, args).await?;
+            return Ok(structured_only_result(value));
+        }
         let tcc = RmcpToolCallContext::new(self, request, context);
         self.tool_router.call(tcc).await
     }
@@ -1717,7 +1759,8 @@ impl ServerHandler for WorkerToolHandler {
         _context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
         Ok(ListToolsResult {
-            tools: worker_registry()?
+            tools: self
+                .worker_registry()?
                 .list_tools()
                 .into_iter()
                 .map(worker_rmcp_tool)
@@ -1728,7 +1771,7 @@ impl ServerHandler for WorkerToolHandler {
     }
 
     fn get_tool(&self, name: &str) -> Option<Tool> {
-        worker_registry()
+        self.worker_registry()
             .ok()?
             .tool_definition_for_call(name)
             .map(worker_rmcp_tool)
@@ -1941,7 +1984,29 @@ impl WorkerMcpServer {
         brain_session_id: String,
         deps: WorkerMcpDeps,
     ) -> Result<Arc<Self>, BindError> {
-        Self::start_with_config(brain_session_id, deps, WorkerMcpServerConfig::default()).await
+        Self::start_with_configs(
+            brain_session_id,
+            deps,
+            WorkerMcpServerConfig::default(),
+            unconfigured_context_service(),
+        )
+        .await
+    }
+
+    /// Start a worker MCP server that advertises and proxies context-service
+    /// tools using the supplied configuration.
+    pub async fn start_with_context_service_config(
+        brain_session_id: String,
+        deps: WorkerMcpDeps,
+        context_service_config: ContextServiceConfig,
+    ) -> Result<Arc<Self>, BindError> {
+        Self::start_with_configs(
+            brain_session_id,
+            deps,
+            WorkerMcpServerConfig::default(),
+            context_service_config,
+        )
+        .await
     }
 
     /// Bind a fresh TCP listener on `127.0.0.1:0`, generate an in-process HMAC
@@ -1952,6 +2017,21 @@ impl WorkerMcpServer {
         brain_session_id: String,
         deps: WorkerMcpDeps,
         config: WorkerMcpServerConfig,
+    ) -> Result<Arc<Self>, BindError> {
+        Self::start_with_configs(
+            brain_session_id,
+            deps,
+            config,
+            unconfigured_context_service(),
+        )
+        .await
+    }
+
+    async fn start_with_configs(
+        brain_session_id: String,
+        deps: WorkerMcpDeps,
+        config: WorkerMcpServerConfig,
+        context_service_config: ContextServiceConfig,
     ) -> Result<Arc<Self>, BindError> {
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let addr = listener.local_addr()?;
@@ -1991,6 +2071,12 @@ impl WorkerMcpServer {
         let shutdown = CancellationToken::new();
         let session_manager = Arc::new(LocalSessionManager::default());
         let session_contexts = Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new()));
+        let (handler, worker_mcp_tool_names) = WorkerToolHandler::new(
+            Arc::clone(&dispatcher_deps),
+            brain_session_id.clone(),
+            &context_service_config,
+        );
+        let handler = Arc::new(handler);
         let server = Arc::new(Self {
             addr,
             hmac_key,
@@ -2004,12 +2090,8 @@ impl WorkerMcpServer {
             flush_rx: Mutex::new(Some(flush_rx)),
             active_delegations,
             peak_active_delegations,
+            worker_mcp_tool_names,
         });
-
-        let handler = Arc::new(WorkerToolHandler::new(
-            Arc::clone(&dispatcher_deps),
-            brain_session_id.clone(),
-        ));
         let service = {
             let handler = Arc::clone(&handler);
             let mut streamable_config = StreamableHttpServerConfig::default();
@@ -2060,6 +2142,11 @@ impl WorkerMcpServer {
         *server.flusher_handle.lock() = Some(flusher_handle);
 
         Ok(server)
+    }
+
+    /// Returns Claude-format names for this server's advertised tools.
+    pub(crate) fn claude_tool_names(&self) -> &[String] {
+        &self.worker_mcp_tool_names
     }
 
     /// The canonical `http://127.0.0.1:<port>/mcp` URL workers POST JSON-RPC
