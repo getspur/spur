@@ -118,7 +118,23 @@ pub fn tools_list() -> Vec<spur_mcp::ToolDefinition> {
 }
 
 pub fn worker_tool_registry() -> Result<spur_mcp::ToolRegistry, spur_mcp::ToolRegistryError> {
-    let builder = spur_mcp::ToolRegistry::builder()
+    let context_service_config = ContextServiceConfig {
+        url: String::new(),
+        ..ContextServiceConfig::default()
+    };
+    worker_tool_registry_with_context_service(&context_service_config)
+}
+
+pub fn worker_tool_registry_with_context_service(
+    context_service_config: &ContextServiceConfig,
+) -> Result<spur_mcp::ToolRegistry, spur_mcp::ToolRegistryError> {
+    worker_tool_registry_with_client(context_service_client(context_service_config))
+}
+
+fn worker_tool_registry_with_client(
+    context_service_client: Option<context_service::ContextServiceClient>,
+) -> Result<spur_mcp::ToolRegistry, spur_mcp::ToolRegistryError> {
+    let mut builder = spur_mcp::ToolRegistry::builder()
         .with(catalog::WorkerCatalogMcpModule::prelude())?
         .with(worker::WorkerReadMcpModule::plan(
             worker::WorkerReadMcpDeps::catalog_only(),
@@ -133,9 +149,28 @@ pub fn worker_tool_registry() -> Result<spur_mcp::ToolRegistry, spur_mcp::ToolRe
             feature_gate: crate::server::community_feature_gate(),
         }))?
         .with(review_verdict::ReviewVerdictMcpModule)?
-        .with_alias("code_search", "code_symbol_search")?
-        .with_denied_tool_calls(WORKER_DENIED_TOOL_CALLS.iter().copied());
-    Ok(builder.build())
+        .with_alias("code_search", "code_symbol_search")?;
+    if let Some(context_service_client) = context_service_client {
+        builder = builder.with(context_service_client)?;
+    }
+    Ok(builder
+        .with_denied_tool_calls(WORKER_DENIED_TOOL_CALLS.iter().copied())
+        .build())
+}
+
+pub(crate) fn worker_tool_dispatch(
+    context_service_config: &ContextServiceConfig,
+) -> (
+    Result<spur_mcp::ToolRegistry, spur_mcp::ToolRegistryError>,
+    Option<context_service::ContextServiceClient>,
+) {
+    let context_service_client = context_service_client(context_service_config);
+    let registry = worker_tool_registry_with_client(context_service_client.clone());
+    (registry, context_service_client)
+}
+
+pub(crate) fn is_context_service_tool_name(name: &str) -> bool {
+    context_service::is_tool_name(name)
 }
 
 pub fn worker_tools_list() -> Vec<spur_mcp::ToolDefinition> {
@@ -149,7 +184,15 @@ pub fn worker_tools_list() -> Vec<spur_mcp::ToolDefinition> {
 /// Claude agent-profile `tools:` allowlists so a restricted persona keeps the
 /// worker MCP surface its delegation ships.
 pub(crate) fn worker_mcp_claude_tool_names() -> Vec<String> {
-    worker_tools_list()
+    let registry = worker_tool_registry().expect("core worker MCP tool registry must be valid");
+    worker_mcp_claude_tool_names_for_registry(&registry)
+}
+
+pub(crate) fn worker_mcp_claude_tool_names_for_registry(
+    registry: &spur_mcp::ToolRegistry,
+) -> Vec<String> {
+    registry
+        .list_tools()
         .into_iter()
         .map(|def| {
             format!(
@@ -222,6 +265,20 @@ mod tests {
         }
         // …and brain-only tools must not leak in.
         assert!(!names.iter().any(|name| name.contains("delegate_to_worker")));
+    }
+
+    #[test]
+    fn configured_worker_mcp_claude_tool_names_include_external_tools() {
+        let registry = worker_tool_registry_with_client(Some(
+            ContextServiceClient::with_optional_token("http://127.0.0.1:9/context", None)
+                .expect("loopback context-service client"),
+        ))
+        .expect("configured worker registry");
+
+        let names = worker_mcp_claude_tool_names_for_registry(&registry);
+
+        assert!(names.contains(&"mcp__spur-worker-mcp__external_code_read".to_owned()));
+        assert!(names.contains(&"mcp__spur-worker-mcp__external_index".to_owned()));
     }
 
     #[tokio::test]
