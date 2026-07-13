@@ -1,4 +1,4 @@
-//! `SpurAgentCaps` — frozen-per-session capability cache.
+//! `SpurAgentCaps` — per-session capability snapshot.
 //!
 //! See `docs/superpowers/specs/2026-04-27-acp-capability-aware-spur-design.md` §6.1.
 //!
@@ -23,9 +23,9 @@ use crate::adapter::grok_session_display::{extract_grok_session_display, GrokSes
 use crate::types::AgentKind;
 
 /// What the agent told spur during `initialize` + `session/new` or `session/load`.
-/// Captured ONCE per session at create/load time and frozen for the
-/// session lifetime — ACP 0.12 has no protocol affordance for
-/// mid-session capability renegotiation.
+/// Captured at create/load time. ACP 0.12 has no protocol affordance for
+/// mid-session capability renegotiation, but consumers may update the Grok
+/// display snapshot from its proprietary `model_changed` notification.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SpurAgentCaps {
     /// Verbatim `AgentCapabilities` from `InitializeResponse`. Read its
@@ -39,8 +39,9 @@ pub struct SpurAgentCaps {
     pub config_options: Vec<SessionConfigOption>,
     /// Agent identity captured from config at session creation.
     pub agent_kind: AgentKind,
-    /// Grok-only read-only labels derived from proprietary response meta.
-    /// Always `None` for other agent kinds and never used for `set_*` support.
+    /// Grok-only model catalog and selected labels derived from proprietary
+    /// response meta. Always `None` for other agent kinds and kept separate
+    /// from the standard `config_options` capability gates.
     #[serde(default)]
     pub grok_display: Option<GrokSessionDisplay>,
 }
@@ -103,6 +104,29 @@ impl SpurAgentCaps {
     #[must_use]
     pub fn supports_set_model(&self) -> bool {
         self.model_option().is_some_and(has_select_choices)
+    }
+
+    /// Grok advertises real model ids in proprietary metadata while leaving
+    /// standard `config_options` empty.
+    #[must_use]
+    pub fn supports_grok_set_model(&self) -> bool {
+        self.agent_kind == AgentKind::Grok
+            && self
+                .grok_display
+                .as_ref()
+                .is_some_and(|display| !display.models().is_empty())
+    }
+
+    /// Apply a proven Grok `model_changed` extension notification.
+    ///
+    /// Standard ACP capability fields and `config_options` remain untouched.
+    pub fn apply_grok_model_changed(&mut self, params: &serde_json::Value) -> bool {
+        if self.agent_kind != AgentKind::Grok {
+            return false;
+        }
+        self.grok_display
+            .as_mut()
+            .is_some_and(|display| display.apply_model_changed(params))
     }
 
     /// The config option that represents model selection, when advertised.

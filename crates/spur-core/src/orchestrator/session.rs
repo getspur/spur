@@ -2164,7 +2164,7 @@ impl Orchestrator {
         if !config_options.is_empty()
             || spur_agent_caps
                 .as_ref()
-                .is_some_and(|caps| caps.supports_set_model())
+                .is_some_and(|caps| caps.supports_set_model() || caps.supports_grok_set_model())
         {
             // Surface the initial cache so spur-tui can synthesize
             // advertised slash commands (e.g. /model, /effort) from
@@ -2560,7 +2560,7 @@ impl Orchestrator {
         if !config_options.is_empty()
             || spur_agent_caps
                 .as_ref()
-                .is_some_and(|caps| caps.supports_set_model())
+                .is_some_and(|caps| caps.supports_set_model() || caps.supports_grok_set_model())
         {
             self.emit(SpurEvent::now(SpurEventBody::CommandRegistryDirty {
                 session: session_id.clone(),
@@ -2822,5 +2822,19 @@ impl Orchestrator {
             .ok_or(spur_acp::AcpError::CapabilityMissing("set_model"))?;
         let sid = spur_acp::AcpSessionId::new(brain.acp_session_id.clone());
         brain.connection.set_session_model(sid, value, &caps).await
+    }
+
+    /// Dispatch Grok reasoning-effort selection through its proven model RPC.
+    pub async fn dispatch_set_session_effort(
+        brain: &mut BrainSession,
+        value: String,
+    ) -> Result<(), spur_acp::AcpError> {
+        let caps = brain
+            .spur_agent_caps
+            .as_ref()
+            .cloned()
+            .ok_or(spur_acp::AcpError::CapabilityMissing("set_effort"))?;
+        let sid = spur_acp::AcpSessionId::new(brain.acp_session_id.clone());
+        brain.connection.set_session_effort(sid, value, &caps).await
     }
 }

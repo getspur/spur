@@ -929,6 +929,28 @@ impl Orchestrator {
                         }
                     }
 
+                    // ── SetSessionEffort (Grok vendor adapter) ───────────
+                    InteractiveInput::SetSessionEffort { value } => {
+                        if let Some(b) = brain.as_mut() {
+                            if let Err(e) =
+                                Orchestrator::dispatch_set_session_effort(b, value.clone()).await
+                            {
+                                warn!(
+                                    brain = %b.brain_name,
+                                    session_id = %b.spur_session_id,
+                                    value = %value,
+                                    error = %e,
+                                    "set_session_effort failed"
+                                );
+                            }
+                        } else {
+                            warn!(
+                                value = %value,
+                                "SetSessionEffort received but no active brain session"
+                            );
+                        }
+                    }
+
                     // ── CancelStream (outside active turn) ────────────────
                     InteractiveInput::CancelStream { session } => {
                         tracing::debug!(

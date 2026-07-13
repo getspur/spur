@@ -37,11 +37,22 @@ pub struct ArgPickerSpec {
     pub typed_hint: Option<ArgPickerHint>,
 }
 
+/// One immutable picker choice carried directly by an advertised command.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArgPickerChoice {
+    pub value: String,
+    pub label: String,
+    pub description: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ArgPickerHint {
     /// v1: picker reads choices from the agent's cached `SessionConfigOption`
     /// select for the given `config_id`.
     ConfigOption { config_id: String },
+    /// Picker choices supplied by a vendor catalog that intentionally remains
+    /// separate from standard ACP `config_options`.
+    StaticChoices { choices: Vec<ArgPickerChoice> },
     // v2 will add: GitRef { kind: GitRefKind }, etc.
 }
 
