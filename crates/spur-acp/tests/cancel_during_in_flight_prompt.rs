@@ -147,7 +147,29 @@ async fn cancel_during_in_flight_prompt_returns_within_250ms() {
     }
     assert!(saw_cancel, "mock agent never observed session/cancel");
 
-    // Let the release task fire so the prompt completes, then shut down.
+    // Let the release task fire, then verify that the explicit terminal
+    // response and its usage survive the native side-channel.
     release_task.await.expect("release task should join");
+    let response = tokio::time::timeout(Duration::from_secs(2), conn.wait_for_prompt_response())
+        .await
+        .expect("terminal response should arrive after prompt release")
+        .expect("terminal response should be successful")
+        .expect("native prompt should expose its PromptResponse");
+    let response_usage = response.usage.expect("PromptResponse should carry usage");
+    assert_eq!(response_usage.total_tokens, 33);
+    assert_eq!(response_usage.input_tokens, 22);
+    assert_eq!(response_usage.output_tokens, 11);
+    assert_eq!(response_usage.cached_read_tokens, Some(7));
+    assert_eq!(response_usage.cached_write_tokens, Some(5));
+
+    let stored_usage = conn
+        .take_last_prompt_usage()
+        .expect("native connection should retain PromptResponse usage");
+    assert_eq!(stored_usage, response_usage);
+    assert!(
+        conn.take_last_prompt_usage().is_none(),
+        "prompt usage should be consumed exactly once"
+    );
+
     conn.shutdown().await.expect("shutdown should complete");
 }

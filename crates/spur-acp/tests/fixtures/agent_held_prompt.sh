@@ -46,7 +46,7 @@ while IFS= read -r line; do
                     fi
                     sleep 0.1
                 done
-                printf '%s\n' '{"jsonrpc":"2.0","id":'"$id_json"',"result":{"stopReason":"end_turn"}}'
+                printf '%s\n' '{"jsonrpc":"2.0","id":'"$id_json"',"result":{"stopReason":"end_turn","usage":{"totalTokens":33,"inputTokens":22,"outputTokens":11,"cachedReadTokens":7,"cachedWriteTokens":5}}}'
             ) &
             ;;
         session/cancel)

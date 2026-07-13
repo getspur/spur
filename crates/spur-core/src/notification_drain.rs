@@ -36,8 +36,8 @@ enum BcastOutcome {
 /// connection-scoped broadcast), and invoke `on_notification` for each one.
 ///
 /// Returns `Ok(PromptDrainResult)` when the prompt turn is complete (stream
-/// closed + 100 ms grace window drained), or `Err(…)` if `prompt()` itself
-/// returns an error.
+/// closed + 100 ms grace window drained + terminal response succeeded), or
+/// `Err(…)` if setup or the terminal prompt RPC fails.
 ///
 /// # Broadcast handling
 ///
@@ -128,6 +128,8 @@ where
         }
     }
 
+    connection.wait_for_prompt_response().await?;
+
     Ok(PromptDrainResult {
         usage: connection.take_last_prompt_usage(),
     })
@@ -167,13 +169,14 @@ mod tests {
     use spur_acp::types::AgentHealth;
     use spur_acp::{
         InitializeRequest, InitializeResponse, McpServer, NewSessionResponse, PromptRequest,
-        SessionNotification, Usage,
+        PromptResponse, SessionNotification, Usage,
     };
     use std::path::PathBuf;
     use std::pin::Pin;
 
     struct UsagePromptConnection {
         usage: Option<Usage>,
+        terminal_error: Option<&'static str>,
     }
 
     #[async_trait]
@@ -204,6 +207,13 @@ mod tests {
             Ok(())
         }
 
+        async fn wait_for_prompt_response(&mut self) -> anyhow::Result<Option<PromptResponse>> {
+            match self.terminal_error.take() {
+                Some(message) => Err(anyhow::anyhow!(message)),
+                None => Ok(None),
+            }
+        }
+
         async fn shutdown(&mut self) -> anyhow::Result<()> {
             Ok(())
         }
@@ -222,7 +232,10 @@ mod tests {
         let usage = Usage::new(118, 72, 46)
             .cached_write_tokens(11)
             .cached_read_tokens(13);
-        let mut connection = UsagePromptConnection { usage: Some(usage) };
+        let mut connection = UsagePromptConnection {
+            usage: Some(usage),
+            terminal_error: None,
+        };
 
         let result = drive_prompt_notifications(
             &mut connection,
@@ -237,5 +250,26 @@ mod tests {
         assert_eq!(usage.output_tokens, 46);
         assert_eq!(usage.cached_write_tokens, Some(11));
         assert_eq!(usage.cached_read_tokens, Some(13));
+    }
+
+    #[tokio::test]
+    async fn returns_terminal_prompt_error_after_stream_closes() {
+        let mut connection = UsagePromptConnection {
+            usage: None,
+            terminal_error: Some("prompt exploded"),
+        };
+
+        let result = drive_prompt_notifications(
+            &mut connection,
+            PromptRequest::new(spur_acp::AcpSessionId::new("s"), vec![]),
+            |_| {},
+        )
+        .await;
+        let error = match result {
+            Ok(_) => panic!("terminal prompt failure should fail the drain"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.to_string(), "prompt exploded");
     }
 }
