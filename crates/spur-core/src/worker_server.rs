@@ -1995,6 +1995,18 @@ impl WorkerMcpServer {
 
     /// Start a worker MCP server that advertises and proxies context-service
     /// tools using the supplied configuration.
+    ///
+    /// The worker MCP and its context-service client stay in the orchestrator
+    /// process. The supplied configuration is retained there and is not added
+    /// to the delegated agent's launch environment. `SPUR_CONTEXT_SERVICE_URL`
+    /// and `SPUR_CONTEXT_SERVICE_TOKEN` on the orchestrator process take
+    /// precedence over `context_service_config`. Those process-wide variables
+    /// follow normal OS environment inheritance, so operators requiring token
+    /// isolation from delegated subprocesses should use `[context_service]`
+    /// configuration instead. For context-service access, the agent receives
+    /// this server's loopback URL and a delegation-scoped HMAC token. A missing
+    /// URL or locally rejected client configuration is fail-soft: the server
+    /// still starts, but does not advertise the `external_*` tools.
     pub async fn start_with_context_service_config(
         brain_session_id: String,
         deps: WorkerMcpDeps,
