@@ -19,6 +19,7 @@ use agent_client_protocol::schema::v1::{
 };
 use serde::{Deserialize, Serialize};
 
+use crate::adapter::grok_session_display::{extract_grok_session_display, GrokSessionDisplay};
 use crate::types::AgentKind;
 
 /// What the agent told spur during `initialize` + `session/new` or `session/load`.
@@ -38,6 +39,10 @@ pub struct SpurAgentCaps {
     pub config_options: Vec<SessionConfigOption>,
     /// Agent identity captured from config at session creation.
     pub agent_kind: AgentKind,
+    /// Grok-only read-only labels derived from proprietary response meta.
+    /// Always `None` for other agent kinds and never used for `set_*` support.
+    #[serde(default)]
+    pub grok_display: Option<GrokSessionDisplay>,
 }
 
 impl SpurAgentCaps {
@@ -48,11 +53,17 @@ impl SpurAgentCaps {
         new_session: &NewSessionResponse,
         agent_kind: AgentKind,
     ) -> Self {
+        let grok_display = extract_grok_session_display(
+            agent_kind,
+            initialize.meta.as_ref(),
+            new_session.meta.as_ref(),
+        );
         Self {
             agent: initialize.agent_capabilities.clone(),
             modes: new_session.modes.clone(),
             config_options: new_session.config_options.clone().unwrap_or_default(),
             agent_kind,
+            grok_display,
         }
     }
 
@@ -64,11 +75,17 @@ impl SpurAgentCaps {
         load_session: &LoadSessionResponse,
         agent_kind: AgentKind,
     ) -> Self {
+        let grok_display = extract_grok_session_display(
+            agent_kind,
+            initialize.meta.as_ref(),
+            load_session.meta.as_ref(),
+        );
         Self {
             agent: initialize.agent_capabilities.clone(),
             modes: load_session.modes.clone(),
             config_options: load_session.config_options.clone().unwrap_or_default(),
             agent_kind,
+            grok_display,
         }
     }
 
@@ -138,7 +155,13 @@ impl SpurAgentCaps {
     /// Display label for the active model.
     #[must_use]
     pub fn current_model_label(&self) -> Option<String> {
-        Self::model_label_from_config_options(&self.config_options).map(str::to_owned)
+        Self::model_label_from_config_options(&self.config_options)
+            .map(str::to_owned)
+            .or_else(|| {
+                self.grok_display
+                    .as_ref()
+                    .and_then(|display| display.model_label.clone())
+            })
     }
 
     /// Display label for the active model from a config-options snapshot.
@@ -200,7 +223,11 @@ impl SpurAgentCaps {
     /// prefer live `BrainSession.config_options` snapshots when available.
     #[must_use]
     pub fn current_effort_label(&self) -> Option<String> {
-        Self::effort_label_from(&self.config_options)
+        Self::effort_label_from(&self.config_options).or_else(|| {
+            self.grok_display
+                .as_ref()
+                .and_then(|display| display.effort_label.clone())
+        })
     }
 
     /// Whether this agent is expected to emit usage updates.
@@ -443,6 +470,146 @@ mod tests {
         let caps = SpurAgentCaps::new(&init, &new, AgentKind::CodexAcp);
 
         assert_eq!(caps.current_effort_label().as_deref(), Some("High"));
+    }
+
+    #[test]
+    fn grok_empty_config_options_use_frozen_meta_display_labels() {
+        let mut init = empty_init_response();
+        init.meta = serde_json::from_value(serde_json::json!({
+            "modelState": {
+                "currentModelId": "grok-composer-2.5-fast",
+                "availableModels": [{
+                    "modelId": "grok-composer-2.5-fast",
+                    "name": "Grok Composer 2.5 Fast"
+                }]
+            }
+        }))
+        .expect("initialize meta fixture must deserialize");
+        let mut new = empty_new_session_response();
+        new.meta = serde_json::from_value(serde_json::json!({
+            "x.ai/sessionConfig": {
+                "options": [{
+                    "id": "high",
+                    "category": "mode",
+                    "label": "High Effort",
+                    "selected": true
+                }]
+            }
+        }))
+        .expect("session meta fixture must deserialize");
+
+        let caps = SpurAgentCaps::new(&init, &new, AgentKind::Grok);
+
+        assert_eq!(
+            caps.current_model_label().as_deref(),
+            Some("Grok Composer 2.5 Fast")
+        );
+        assert_eq!(caps.current_effort_label().as_deref(), Some("High Effort"));
+        assert!(caps.grok_display.is_some());
+        assert!(!caps.supports_set_model());
+        assert!(!caps.supports_set_config_option());
+    }
+
+    #[test]
+    fn config_options_win_over_grok_meta_display_labels() {
+        let init = empty_init_response();
+        let mut new = empty_new_session_response();
+        new.meta = serde_json::from_value(serde_json::json!({
+            "x.ai/sessionConfig": {
+                "options": [
+                    {
+                        "id": "grok-4.5",
+                        "category": "model",
+                        "label": "Grok 4.5",
+                        "selected": true
+                    },
+                    {
+                        "id": "low",
+                        "category": "mode",
+                        "label": "Low Effort",
+                        "selected": true
+                    }
+                ]
+            }
+        }))
+        .expect("session meta fixture must deserialize");
+        new.config_options = Some(vec![
+            SessionConfigOption::select(
+                SessionConfigId::new("model"),
+                "Model",
+                "future-grok",
+                vec![SessionConfigSelectOption::new("future-grok", "Future Grok")],
+            ),
+            SessionConfigOption::select(
+                SessionConfigId::new("reasoning_effort"),
+                "Reasoning effort",
+                "high",
+                vec![SessionConfigSelectOption::new("high", "Very High")],
+            ),
+        ]);
+
+        let caps = SpurAgentCaps::new(&init, &new, AgentKind::Grok);
+
+        assert_eq!(caps.current_model_label().as_deref(), Some("Future Grok"));
+        assert_eq!(caps.current_effort_label().as_deref(), Some("Very High"));
+        assert!(caps.supports_set_model());
+        assert!(caps.supports_set_config_option());
+    }
+
+    #[test]
+    fn loaded_grok_session_freezes_display_from_meta() {
+        let init = empty_init_response();
+        let mut loaded = agent_client_protocol::schema::v1::LoadSessionResponse::new();
+        loaded.meta = serde_json::from_value(serde_json::json!({
+            "x.ai/sessionConfig": {
+                "options": [
+                    {
+                        "id": "grok-4.5",
+                        "category": "model",
+                        "label": "Grok 4.5",
+                        "selected": true
+                    },
+                    {
+                        "id": "medium",
+                        "category": "mode",
+                        "label": "Medium Effort",
+                        "selected": true
+                    }
+                ]
+            }
+        }))
+        .expect("load meta fixture must deserialize");
+
+        let caps = SpurAgentCaps::from_loaded(&init, &loaded, AgentKind::Grok);
+
+        assert_eq!(caps.current_model_label().as_deref(), Some("Grok 4.5"));
+        assert_eq!(
+            caps.current_effort_label().as_deref(),
+            Some("Medium Effort")
+        );
+    }
+
+    #[test]
+    fn non_grok_agents_ignore_grok_shaped_meta() {
+        let init = empty_init_response();
+        let mut new = empty_new_session_response();
+        new.meta = serde_json::from_value(serde_json::json!({
+            "x.ai/sessionConfig": {
+                "options": [{
+                    "id": "grok-4.5",
+                    "category": "model",
+                    "label": "Grok 4.5",
+                    "selected": true
+                }]
+            }
+        }))
+        .expect("session meta fixture must deserialize");
+
+        let caps = SpurAgentCaps::new(&init, &new, AgentKind::Generic);
+
+        assert_eq!(caps.current_model_label(), None);
+        assert_eq!(caps.current_effort_label(), None);
+        assert_eq!(caps.grok_display, None);
     }
 
     #[test]
