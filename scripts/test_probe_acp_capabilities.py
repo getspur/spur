@@ -84,6 +84,223 @@ class SynthesizerPredictionTests(unittest.TestCase):
         self.assertEqual(prediction["would_synthesize"], [])
 
 
+class SlashSurfacePredictionTests(unittest.TestCase):
+    def test_grok_models_and_session_config_predict_model_and_effort(self) -> None:
+        prediction = probe.predict_spur_slash_surfaces(
+            config_options=[],
+            initialize={
+                "_meta": {
+                    "modelState": {
+                        "currentModelId": "grok-4.5",
+                        "availableModels": [
+                            {
+                                "modelId": "grok-4.5",
+                                "name": "Grok 4.5",
+                                "_meta": {
+                                    "reasoningEfforts": [
+                                        {"id": "low", "label": "Low Effort"},
+                                        {"id": "high", "label": "High Effort"},
+                                    ]
+                                },
+                            }
+                        ],
+                    }
+                }
+            },
+            session_new={
+                "sessionId": "grok-session",
+                "configOptions": [],
+                "models": {
+                    "currentModelId": "grok-4.5",
+                    "availableModels": [{"modelId": "grok-4.5"}],
+                },
+                "_meta": {
+                    "x.ai/sessionConfig": {
+                        "options": [
+                            {
+                                "id": "grok-4.5",
+                                "category": "model",
+                                "selected": True,
+                            },
+                            {"id": "high", "category": "mode", "selected": True},
+                            {"id": "medium", "category": "mode"},
+                            {"id": "low", "category": "mode"},
+                        ]
+                    }
+                },
+            },
+            set_results=[{"method": "session/set_model", "status": "ok"}],
+        )
+
+        self.assertTrue(prediction["slash_model"])
+        self.assertTrue(prediction["slash_effort"])
+        self.assertFalse(prediction["supports_set_config_option"])
+        self.assertEqual(prediction["model_source"], "proprietary_models_plane")
+        self.assertEqual(prediction["effort_source"], "proprietary_session_config")
+        self.assertTrue(prediction["proprietary_direct_set_model"])
+        self.assertEqual(prediction["proprietary_model_ids_sample"], ["grok-4.5"])
+
+    def test_kiro_models_predict_model_without_effort(self) -> None:
+        prediction = probe.predict_spur_slash_surfaces(
+            config_options=[],
+            session_new={
+                "sessionId": "kiro-session",
+                "configOptions": [],
+                "models": {
+                    "currentModelId": "auto",
+                    "availableModels": [
+                        {"modelId": "auto", "name": "auto"},
+                        {
+                            "modelId": "claude-sonnet-4.5",
+                            "name": "Claude Sonnet 4.5",
+                        },
+                    ],
+                },
+            },
+        )
+
+        self.assertTrue(prediction["slash_model"])
+        self.assertFalse(prediction["slash_effort"])
+        self.assertFalse(prediction["supports_set_config_option"])
+        self.assertEqual(prediction["model_source"], "proprietary_models_plane")
+        self.assertEqual(prediction["effort_source"], "none")
+        self.assertTrue(prediction["proprietary_direct_set_model"])
+        self.assertEqual(
+            prediction["proprietary_model_ids_sample"],
+            ["auto", "claude-sonnet-4.5"],
+        )
+
+    def test_grok_current_model_state_predicts_effort_without_session_mode(self) -> None:
+        prediction = probe.predict_spur_slash_surfaces(
+            config_options=[],
+            initialize={
+                "_meta": {
+                    "modelState": {
+                        "currentModelId": "grok-4.5",
+                        "availableModels": [
+                            {
+                                "modelId": "grok-4.5",
+                                "_meta": {
+                                    "reasoningEfforts": [
+                                        {"id": "medium", "label": "Medium"}
+                                    ]
+                                },
+                            }
+                        ],
+                    }
+                }
+            },
+            session_new={},
+        )
+
+        self.assertTrue(prediction["slash_model"])
+        self.assertTrue(prediction["slash_effort"])
+        self.assertEqual(prediction["effort_source"], "proprietary_model_state")
+
+    def test_session_config_model_ids_do_not_replace_available_models(self) -> None:
+        prediction = probe.predict_spur_slash_surfaces(
+            config_options=[],
+            session_new={
+                "_meta": {
+                    "x.ai/sessionConfig": {
+                        "options": [{"id": "grok-4.5", "category": "model"}]
+                    }
+                }
+            },
+            set_results=[{"method": "session/set_model", "status": "ok"}],
+        )
+
+        self.assertFalse(prediction["slash_model"])
+        self.assertEqual(prediction["model_source"], "none")
+        self.assertEqual(prediction["proprietary_model_ids_sample"], [])
+
+    def test_available_models_requires_model_id_or_id_fields(self) -> None:
+        prediction = probe.predict_spur_slash_surfaces(
+            config_options=[],
+            session_new={"models": {"availableModels": ["grok-4.5"]}},
+            set_results=[{"method": "session/set_model", "status": "ok"}],
+        )
+
+        self.assertFalse(prediction["slash_model"])
+        self.assertEqual(prediction["proprietary_model_ids_sample"], [])
+
+    def test_grok_session_config_effort_does_not_require_model_catalog(self) -> None:
+        prediction = probe.predict_spur_slash_surfaces(
+            config_options=[],
+            session_new={
+                "_meta": {
+                    "x.ai/sessionConfig": {
+                        "options": [{"id": "high", "category": "mode"}]
+                    }
+                }
+            },
+        )
+
+        self.assertFalse(prediction["slash_model"])
+        self.assertTrue(prediction["slash_effort"])
+        self.assertEqual(prediction["effort_source"], "proprietary_session_config")
+
+    def test_config_options_win_over_proprietary_planes(self) -> None:
+        config_options = [
+            select_option("model", category="model"),
+            select_option("reasoning_effort", category="thought_level"),
+        ]
+
+        prediction = probe.predict_spur_slash_surfaces(
+            config_options=config_options,
+            initialize={
+                "_meta": {
+                    "modelState": {
+                        "currentModelId": "grok-4.5",
+                        "availableModels": [
+                            {
+                                "modelId": "grok-4.5",
+                                "_meta": {
+                                    "reasoningEfforts": [{"id": "high"}]
+                                },
+                            }
+                        ],
+                    }
+                }
+            },
+            session_new={
+                "models": {
+                    "currentModelId": "grok-4.5",
+                    "availableModels": [{"modelId": "grok-4.5"}],
+                },
+                "_meta": {
+                    "x.ai/sessionConfig": {
+                        "options": [{"id": "high", "category": "mode"}]
+                    }
+                },
+            },
+            set_results=[{"method": "session/set_model", "status": "ok"}],
+        )
+
+        self.assertEqual(prediction["model_source"], "config_option")
+        self.assertEqual(prediction["effort_source"], "config_option")
+        self.assertEqual(prediction["model_config_option_id"], "model")
+        self.assertEqual(
+            prediction["effort_config_option_id"], "reasoning_effort"
+        )
+        self.assertTrue(prediction["supports_set_config_option"])
+
+    def test_empty_session_predicts_no_slash_surfaces(self) -> None:
+        prediction = probe.predict_spur_slash_surfaces(
+            config_options=[],
+            session_new={},
+            initialize={},
+        )
+
+        self.assertEqual(prediction["would_synthesize"], [])
+        self.assertFalse(prediction["slash_model"])
+        self.assertFalse(prediction["slash_effort"])
+        self.assertEqual(prediction["model_source"], "none")
+        self.assertEqual(prediction["effort_source"], "none")
+        self.assertFalse(prediction["proprietary_direct_set_model"])
+        self.assertEqual(prediction["proprietary_model_ids_sample"], [])
+
+
 class CliTests(unittest.TestCase):
     def test_args_string_is_split_with_shell_quoting(self) -> None:
         args = probe.parse_cli(
@@ -412,6 +629,65 @@ class ReportTests(unittest.TestCase):
             report["proprietary_planes"]["has_models_plane"],
             False,
         )
+
+    def test_matrix_separates_proprietary_slash_from_config_advertisement(self) -> None:
+        fixtures = (
+            (
+                "grok",
+                {
+                    "sessionId": "grok-session",
+                    "configOptions": [],
+                    "models": {
+                        "currentModelId": "grok-4.5",
+                        "availableModels": [{"modelId": "grok-4.5"}],
+                    },
+                    "_meta": {
+                        "x.ai/sessionConfig": {
+                            "options": [
+                                {"id": "grok-4.5", "category": "model"},
+                                {"id": "high", "category": "mode"},
+                            ]
+                        }
+                    },
+                },
+                True,
+            ),
+            (
+                "kiro",
+                {
+                    "sessionId": "kiro-session",
+                    "configOptions": [],
+                    "models": {
+                        "currentModelId": "auto",
+                        "availableModels": [{"modelId": "auto"}],
+                    },
+                },
+                False,
+            ),
+        )
+
+        for label, session_new, slash_effort in fixtures:
+            with self.subTest(label=label):
+                report = probe.build_report(
+                    probed_at="2026-07-13T01:02:03+00:00",
+                    cmd=[label, "acp"],
+                    cwd="/tmp/worktree",
+                    version=f"{label} 1.0",
+                    initialize={"protocolVersion": 1},
+                    session_new=session_new,
+                    notifications=[],
+                    set_results=[
+                        {"method": "session/set_model", "status": "ok"}
+                    ],
+                )
+
+                self.assertFalse(report["matrix"]["config_options_advertised"])
+                self.assertFalse(report["matrix"]["model_select_advertised"])
+                self.assertFalse(report["matrix"]["effort_select_advertised"])
+                self.assertTrue(report["matrix"]["spur_slash_model"])
+                self.assertEqual(
+                    report["matrix"]["spur_slash_effort"], slash_effort
+                )
 
     def test_grouped_select_choices_are_counted(self) -> None:
         option = {
