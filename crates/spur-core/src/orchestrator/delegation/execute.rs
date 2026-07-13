@@ -170,6 +170,9 @@ pub(crate) async fn execute_delegation(
             .get(&brain_session_id)
             .map(|server| Arc::clone(server.value()))
     };
+    let worker_mcp_tool_names = worker_mcp_server
+        .as_deref()
+        .map(WorkerMcpServer::claude_tool_names);
 
     let mut current_task = original_task.clone();
     // Retry-history accumulator. Each retry attempt pushes its
@@ -230,6 +233,7 @@ pub(crate) async fn execute_delegation(
                 fault_injection_hooks: &fault_injection_hooks,
                 worker_mcp_servers: &worker_mcp_dispatch_vec,
                 worker_mcp_server: worker_mcp_server.as_ref().map(Arc::clone),
+                worker_mcp_tool_names,
                 pm_service: pm_service.as_deref(),
                 feature_gate: feature_gate.as_ref(),
                 #[cfg(any(test, feature = "test-support"))]

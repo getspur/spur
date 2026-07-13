@@ -626,6 +626,10 @@ mod tests {
             mcp_server: Arc::new(mcp_server),
             outcome_store,
             repo_root: Some(repo_root),
+            context_service_config: spur_acp::config::ContextServiceConfig {
+                url: String::new(),
+                ..spur_acp::config::ContextServiceConfig::default()
+            },
         }
     }
 
