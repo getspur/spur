@@ -82,6 +82,7 @@ impl App {
             | Action::SetSessionConfigOption { .. }
             | Action::AgentConfigSaveRequested { .. }
             | Action::SetSessionModel { .. }
+            | Action::SetSessionEffort { .. }
             | Action::TogglePlanMode
             | Action::ToggleVimMode
             | Action::ToggleVerbose) => self.process_session_config(action),

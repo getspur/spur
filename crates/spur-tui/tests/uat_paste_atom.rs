@@ -59,6 +59,7 @@ fn action_kind(action: &UserInput) -> &'static str {
         UserInput::SetSessionConfigOption { .. } => "SetSessionConfigOption",
         UserInput::UpdateAgentConfig { .. } => "UpdateAgentConfig",
         UserInput::SetSessionModel { .. } => "SetSessionModel",
+        UserInput::SetSessionEffort { .. } => "SetSessionEffort",
         UserInput::AddIssueComment { .. } => "AddIssueComment",
         UserInput::NewSession => "NewSession",
     }

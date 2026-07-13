@@ -83,6 +83,13 @@ impl App {
                 None
             }
 
+            Action::SetSessionEffort { session_id, value } => {
+                if let Some(tx) = self.user_input_tx.as_ref() {
+                    let _ = tx.try_send(UserInput::SetSessionEffort { session_id, value });
+                }
+                None
+            }
+
             Action::TogglePlanMode => {
                 // Cycle between "plan" and "default". If mode is unknown, assume
                 // we're in "default" and jump to "plan".

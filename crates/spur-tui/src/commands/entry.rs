@@ -59,4 +59,11 @@ pub enum Dispatch {
     /// arg-picker selection (or by the user's typed arg) at submit time —
     /// see InteractiveInput::SetSessionConfigOption (Task 2.14).
     SetSessionConfigOption { config_id: String },
+    /// Invoke the capability-aware model setter. Grok catalog entries use
+    /// this directly; standard model config options may be promoted to it by
+    /// the submit router when their caps support a dedicated path.
+    SetSessionModel,
+    /// Invoke Grok's effort adapter, which re-sends the current model via
+    /// `session/set_model` plus `_meta.reasoningEffort`.
+    SetSessionEffort,
 }

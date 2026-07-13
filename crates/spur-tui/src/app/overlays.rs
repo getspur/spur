@@ -277,6 +277,10 @@ impl App {
                 let session_id = self.current_acp_session_id()?;
                 Some(Action::SetSessionModel { session_id, value })
             }
+            SubmitDecision::SetSessionEffort { value } => {
+                let session_id = self.current_acp_session_id()?;
+                Some(Action::SetSessionEffort { session_id, value })
+            }
             SubmitDecision::Empty => None,
         }
     }

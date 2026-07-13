@@ -283,6 +283,9 @@ pub struct NativeAcpConnection {
     /// `session/set_mode` without probing unsupported modes and diagnostics
     /// can report the current ACP mode when known.
     session_modes: Arc<Mutex<HashMap<String, AcpSessionModeSnapshot>>>,
+    /// Last Grok model confirmed by a successful set call or a
+    /// `model_changed` extension notification.
+    grok_session_models: Arc<Mutex<HashMap<String, String>>>,
     /// Session lifecycle capabilities from this connection's
     /// `InitializeResponse`. `None` means initialize has not completed yet;
     /// `Some(default)` means the agent initialized but did not advertise
@@ -332,6 +335,8 @@ fn build_acp_log_path(repo_root: &std::path::Path, agent_name: &str) -> std::pat
 /// dispatch surface is the existing config-option fallback.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SetSessionModelDispatch {
+    /// Send Grok's proven `session/set_model` request directly.
+    DirectSetModel,
     /// Fall back to `set_session_config_option` with `config_id = "model"`.
     FallbackConfigOption,
     /// No config-option surface is advertised → `AcpError::CapabilityMissing`.
@@ -339,10 +344,52 @@ pub(crate) enum SetSessionModelDispatch {
 }
 
 pub(crate) fn decide_set_session_model_dispatch(caps: &SpurAgentCaps) -> SetSessionModelDispatch {
-    if caps.supports_set_model() {
+    if caps.supports_grok_set_model() {
+        SetSessionModelDispatch::DirectSetModel
+    } else if caps.supports_set_model() {
         SetSessionModelDispatch::FallbackConfigOption
     } else {
         SetSessionModelDispatch::Unsupported
+    }
+}
+
+fn grok_set_model_params(
+    session_id: &SessionId,
+    model_id: &str,
+    effort_id: Option<&str>,
+) -> serde_json::Value {
+    let mut params = serde_json::json!({
+        "sessionId": session_id.to_string(),
+        "modelId": model_id,
+    });
+    if let Some(effort_id) = effort_id {
+        params["_meta"] = serde_json::json!({"reasoningEffort": effort_id});
+    }
+    params
+}
+
+fn cache_grok_model_changed(
+    cache: &Arc<Mutex<HashMap<String, String>>>,
+    params: &serde_json::Value,
+) {
+    let Some(session_id) = params.get("sessionId").and_then(serde_json::Value::as_str) else {
+        return;
+    };
+    let Some(update) = params.get("update") else {
+        return;
+    };
+    if update
+        .get("sessionUpdate")
+        .and_then(serde_json::Value::as_str)
+        != Some("model_changed")
+    {
+        return;
+    }
+    let Some(model_id) = update.get("model_id").and_then(serde_json::Value::as_str) else {
+        return;
+    };
+    if let Ok(mut guard) = cache.lock() {
+        guard.insert(session_id.to_owned(), model_id.to_owned());
     }
 }
 
@@ -572,6 +619,7 @@ impl NativeAcpConnection {
             agent_client_request_tx,
             session_notif_tx,
             session_modes: Arc::new(Mutex::new(HashMap::new())),
+            grok_session_models: Arc::new(Mutex::new(HashMap::new())),
             session_capabilities: Arc::new(Mutex::new(None)),
             last_prompt_usage: Arc::new(Mutex::new(None)),
             child_pgid: Arc::new(Mutex::new(None)),
@@ -734,6 +782,7 @@ impl AgentConnection for NativeAcpConnection {
         let agent_client_request_tx = self.agent_client_request_tx.clone();
         let session_notif_tx_for_thread = self.session_notif_tx.clone();
         let session_modes = self.session_modes.clone();
+        let grok_session_models = self.grok_session_models.clone();
         let last_prompt_usage = self.last_prompt_usage.clone();
         let child_pgid = self.child_pgid.clone();
         let repo_root = self.repo_root.clone();
@@ -753,6 +802,7 @@ impl AgentConnection for NativeAcpConnection {
                     agent_client_request_tx,
                     session_notif_tx_for_thread,
                     session_modes,
+                    grok_session_models,
                     last_prompt_usage,
                     child_pgid,
                     repo_root,
@@ -1228,11 +1278,8 @@ impl AgentConnection for NativeAcpConnection {
 
     // ─── set_session_model ───────────────────────────────────────────────
 
-    /// Issue ACP model selection through `session/set_config_option`. Spec §6.3.
-    ///
-    /// ACP 1.0 removed `session/set_model`; the orchestrator still calls this
-    /// trait method with the user-supplied model id and the native transport
-    /// maps it onto the existing `model` config option.
+    /// Issue standard model selection through `session/set_config_option`, or
+    /// Grok model selection through its proven `session/set_model` method.
     async fn set_session_model(
         &mut self,
         sid: SessionId,
@@ -1240,6 +1287,26 @@ impl AgentConnection for NativeAcpConnection {
         caps: &SpurAgentCaps,
     ) -> Result<Vec<SessionConfigOption>, AcpError> {
         match decide_set_session_model_dispatch(caps) {
+            SetSessionModelDispatch::DirectSetModel => {
+                let is_known_model = caps.grok_display.as_ref().is_some_and(|display| {
+                    display.models().iter().any(|model| model.id == model_id)
+                });
+                if !is_known_model {
+                    return Err(AcpError::Transport(anyhow::anyhow!(
+                        "Grok model id is not present in the advertised catalog: {model_id}"
+                    )));
+                }
+                self.call_ext(
+                    "session/set_model",
+                    grok_set_model_params(&sid, &model_id, None),
+                )
+                .await
+                .map_err(AcpError::Transport)?;
+                if let Ok(mut guard) = self.grok_session_models.lock() {
+                    guard.insert(sid.to_string(), model_id);
+                }
+                Ok(Vec::new())
+            }
             SetSessionModelDispatch::FallbackConfigOption => {
                 let request = SetSessionConfigOptionRequest::new(
                     sid,
@@ -1253,6 +1320,46 @@ impl AgentConnection for NativeAcpConnection {
             }
             SetSessionModelDispatch::Unsupported => Err(AcpError::CapabilityMissing("set_model")),
         }
+    }
+
+    async fn set_session_effort(
+        &mut self,
+        sid: SessionId,
+        effort_id: String,
+        caps: &SpurAgentCaps,
+    ) -> Result<(), AcpError> {
+        if !caps.supports_grok_set_model() {
+            return Err(AcpError::CapabilityMissing("set_effort"));
+        }
+        let model_id = self
+            .grok_session_models
+            .lock()
+            .ok()
+            .and_then(|guard| guard.get(&sid.to_string()).cloned())
+            .or_else(|| {
+                caps.grok_display
+                    .as_ref()
+                    .and_then(|display| display.model_id.clone())
+            })
+            .ok_or(AcpError::CapabilityMissing("set_effort"))?;
+        let effort_is_supported = caps.grok_display.as_ref().is_some_and(|display| {
+            display
+                .efforts_for_model(&model_id)
+                .iter()
+                .any(|effort| effort.id == effort_id)
+        });
+        if !effort_is_supported {
+            return Err(AcpError::Transport(anyhow::anyhow!(
+                "Grok effort id is not available for model {model_id}: {effort_id}"
+            )));
+        }
+        self.call_ext(
+            "session/set_model",
+            grok_set_model_params(&sid, &model_id, Some(&effort_id)),
+        )
+        .await
+        .map(|_| ())
+        .map_err(AcpError::Transport)
     }
 
     // ─── authenticate ────────────────────────────────────────────────────
@@ -1365,6 +1472,7 @@ fn acp_thread_main(
     agent_client_request_tx: mpsc::UnboundedSender<AgentClientRequestPayload>,
     session_notif_tx: tokio::sync::broadcast::Sender<SessionNotification>,
     session_modes: Arc<Mutex<HashMap<String, AcpSessionModeSnapshot>>>,
+    grok_session_models: Arc<Mutex<HashMap<String, String>>>,
     last_prompt_usage: Arc<Mutex<Option<Usage>>>,
     child_pgid: Arc<Mutex<Option<i32>>>,
     repo_root: PathBuf,
@@ -1611,6 +1719,7 @@ fn acp_thread_main(
             let agent_name_request_h = agent_name.clone();
             let session_event_standardizer_h = session_event_standardizer.clone();
             let session_modes_h = session_modes.clone();
+            let grok_session_models_h = grok_session_models.clone();
 
             let cwd_read = cwd.clone();
             let cwd_write = cwd.clone();
@@ -2015,6 +2124,9 @@ fn acp_thread_main(
                                 let params: serde_json::Value =
                                     serde_json::from_str(args.params.get())
                                         .unwrap_or(serde_json::Value::Null);
+                                if method == "_x.ai/session_notification" {
+                                    cache_grok_model_changed(&grok_session_models_h, &params);
+                                }
                                 tracing::debug!(
                                     method = %method,
                                     "NativeAcpConnection: ext_notification"
@@ -3644,7 +3756,10 @@ mod session_mode_cache_tests {
 
 #[cfg(test)]
 mod set_session_model_dispatch_tests {
-    use super::{decide_set_session_model_dispatch, SetSessionModelDispatch};
+    use super::{
+        cache_grok_model_changed, decide_set_session_model_dispatch, grok_set_model_params,
+        ClientRequest, ExtRequest, SetSessionModelDispatch,
+    };
     use crate::connection::AgentConnection;
     use crate::SpurAgentCaps;
     use agent_client_protocol::schema::v1::{
@@ -3774,6 +3889,95 @@ mod set_session_model_dispatch_tests {
             decide_set_session_model_dispatch(&caps),
             SetSessionModelDispatch::FallbackConfigOption
         ));
+    }
+
+    #[test]
+    fn grok_meta_catalog_routes_direct_set_model_without_config_options() {
+        let mut init = InitializeResponse::new(ProtocolVersion::LATEST);
+        init.meta = Some(
+            serde_json::json!({
+                "modelState": {
+                    "currentModelId": "grok-4.5",
+                    "availableModels": [{
+                        "modelId": "grok-4.5",
+                        "name": "Grok 4.5",
+                        "_meta": {
+                            "reasoningEfforts": [{"id": "low", "label": "Low Effort"}]
+                        }
+                    }]
+                }
+            })
+            .as_object()
+            .expect("meta fixture must be an object")
+            .clone(),
+        );
+        let new = NewSessionResponse::new(SessionId::new("test"));
+        let caps = SpurAgentCaps::new(&init, &new, crate::AgentKind::Grok);
+
+        assert!(!caps.supports_set_model());
+        assert!(!caps.supports_set_config_option());
+        assert!(matches!(
+            decide_set_session_model_dispatch(&caps),
+            SetSessionModelDispatch::DirectSetModel
+        ));
+    }
+
+    #[test]
+    fn grok_effort_params_use_only_meta_reasoning_effort() {
+        let params = grok_set_model_params(&SessionId::new("sid"), "grok-4.5", Some("low"));
+
+        assert_eq!(
+            params,
+            serde_json::json!({
+                "sessionId": "sid",
+                "modelId": "grok-4.5",
+                "_meta": {"reasoningEffort": "low"}
+            })
+        );
+        assert!(params.get("reasoningEffort").is_none());
+        assert!(params.get("effort").is_none());
+    }
+
+    #[test]
+    fn grok_direct_request_keeps_exact_standard_method_name() {
+        let raw = serde_json::value::to_raw_value(&serde_json::json!({
+            "sessionId": "sid",
+            "modelId": "grok-4.5"
+        }))
+        .expect("params must serialize");
+        let request = ClientRequest::ExtMethodRequest(ExtRequest::new(
+            "session/set_model",
+            std::sync::Arc::from(raw),
+        ));
+
+        assert_eq!(
+            agent_client_protocol::JsonRpcMessage::method(&request),
+            "session/set_model"
+        );
+    }
+
+    #[test]
+    fn model_changed_notification_updates_native_effort_model_cache() {
+        let cache = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+        cache_grok_model_changed(
+            &cache,
+            &serde_json::json!({
+                "sessionId": "sid",
+                "update": {
+                    "sessionUpdate": "model_changed",
+                    "model_id": "grok-composer-2.5-fast"
+                }
+            }),
+        );
+
+        assert_eq!(
+            cache
+                .lock()
+                .expect("cache lock must remain healthy")
+                .get("sid")
+                .map(String::as_str),
+            Some("grok-composer-2.5-fast")
+        );
     }
 
     #[tokio::test]

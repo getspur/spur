@@ -1,6 +1,7 @@
 //! Synthesizes CommandEntry rows from an agent's cached config_options.
 //! Vendor-neutral; calls into spur-acp's config-option synthesizers.
 
+use spur_acp::adapter::arg_picker_hint::{ArgPickerChoice, ArgPickerHint, ArgPickerSpec};
 use spur_acp::adapter::config_options::{synthesize, synthesize_advertised, AdvertisedCommand};
 use spur_acp::{SessionConfigOption, SpurAgentCaps};
 
@@ -9,9 +10,9 @@ use super::entry::{CommandEntry, CommandSource, Dispatch};
 pub struct AdvertisedSource;
 
 impl AdvertisedSource {
-    /// Build CommandEntry rows from frozen per-session capabilities.
+    /// Build `CommandEntry` rows from a per-session capability snapshot.
     pub fn entries_from_caps(handle: &str, caps: &SpurAgentCaps) -> Vec<CommandEntry> {
-        synthesize_advertised(caps)
+        let mut entries = synthesize_advertised(caps)
             .into_iter()
             .map(|adv: AdvertisedCommand| CommandEntry {
                 name: adv.name,
@@ -25,7 +26,9 @@ impl AdvertisedSource {
                 },
                 arg_picker_spec: Some(adv.arg_picker_spec),
             })
-            .collect()
+            .collect::<Vec<_>>();
+        entries.extend(grok_entries(handle, caps));
+        entries
     }
 
     /// Build CommandEntry rows from cached config_options. Each entry's
@@ -49,12 +52,74 @@ impl AdvertisedSource {
     }
 }
 
+fn grok_entries(handle: &str, caps: &SpurAgentCaps) -> Vec<CommandEntry> {
+    if !caps.supports_grok_set_model() {
+        return Vec::new();
+    }
+    let Some(display) = caps.grok_display.as_ref() else {
+        return Vec::new();
+    };
+    let source = || CommandSource::Advertised {
+        handle: handle.to_string(),
+    };
+    let picker = |choices: Vec<ArgPickerChoice>| {
+        Some(ArgPickerSpec {
+            free_text_hint: String::new(),
+            typed_hint: Some(ArgPickerHint::StaticChoices { choices }),
+        })
+    };
+    let mut entries = vec![CommandEntry {
+        name: "model".to_string(),
+        description: "Switch model for this session".to_string(),
+        hint: display.model_label.clone(),
+        source: source(),
+        dispatch: Dispatch::SetSessionModel,
+        arg_picker_spec: picker(
+            display
+                .models()
+                .iter()
+                .map(|model| ArgPickerChoice {
+                    value: model.id.clone(),
+                    label: model.label.clone(),
+                    description: None,
+                })
+                .collect(),
+        ),
+    }];
+
+    let effort_choices = display
+        .model_id
+        .as_deref()
+        .map(|model_id| display.efforts_for_model(model_id))
+        .unwrap_or_default();
+    if !effort_choices.is_empty() {
+        entries.push(CommandEntry {
+            name: "effort".to_string(),
+            description: "Switch reasoning / thinking effort".to_string(),
+            hint: display.effort_label.clone(),
+            source: source(),
+            dispatch: Dispatch::SetSessionEffort,
+            arg_picker_spec: picker(
+                effort_choices
+                    .iter()
+                    .map(|effort| ArgPickerChoice {
+                        value: effort.id.clone(),
+                        label: effort.label.clone(),
+                        description: None,
+                    })
+                    .collect(),
+            ),
+        });
+    }
+    entries
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use spur_acp::{
         AgentKind, InitializeResponse, NewSessionResponse, ProtocolVersion, SessionConfigId,
-        SessionConfigOption, SessionConfigSelectOption, SessionId, SpurAgentCaps,
+        SessionConfigOption, SessionConfigSelectOption, SpurAgentCaps,
     };
 
     #[test]
@@ -104,5 +169,96 @@ mod tests {
         let entries = AdvertisedSource::entries_from_caps("gemini", &caps);
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].name, "model");
+    }
+
+    fn grok_caps() -> SpurAgentCaps {
+        let mut init = InitializeResponse::new(ProtocolVersion::LATEST);
+        init.meta = Some(
+            serde_json::json!({
+                "modelState": {
+                    "currentModelId": "grok-4.5",
+                    "availableModels": [
+                        {
+                            "modelId": "grok-4.5",
+                            "name": "Grok 4.5",
+                            "_meta": {
+                                "reasoningEffort": "high",
+                                "reasoningEfforts": [
+                                    {"id": "high", "label": "High Effort"},
+                                    {"id": "low", "label": "Low Effort"}
+                                ]
+                            }
+                        },
+                        {
+                            "modelId": "grok-composer-2.5-fast",
+                            "name": "Grok Composer 2.5 Fast",
+                            "_meta": {"reasoningEfforts": []}
+                        }
+                    ]
+                }
+            })
+            .as_object()
+            .expect("meta fixture must be an object")
+            .clone(),
+        );
+        SpurAgentCaps::new(
+            &init,
+            &NewSessionResponse::new(spur_acp::AcpSessionId::new("sid")),
+            AgentKind::Grok,
+        )
+    }
+
+    #[test]
+    fn grok_catalog_yields_dedicated_model_and_effort_entries() {
+        let caps = grok_caps();
+        assert!(!caps.supports_set_config_option());
+
+        let entries = AdvertisedSource::entries_from_caps("grok", &caps);
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["model", "effort"]
+        );
+        assert!(matches!(entries[0].dispatch, Dispatch::SetSessionModel));
+        assert!(matches!(entries[1].dispatch, Dispatch::SetSessionEffort));
+        let effort_spec = entries[1]
+            .arg_picker_spec
+            .as_ref()
+            .expect("effort command must have a picker");
+        assert!(matches!(
+            effort_spec.typed_hint.as_ref(),
+            Some(spur_acp::adapter::arg_picker_hint::ArgPickerHint::StaticChoices { choices })
+                if choices.iter().map(|choice| choice.value.as_str()).collect::<Vec<_>>()
+                    == vec!["high", "low"]
+        ));
+
+        let mut registry = crate::commands::CommandRegistry::new();
+        registry.set_advertised_commands("grok", entries);
+        let visible = registry.available_commands_for_session(Some(&caps));
+        assert!(visible.iter().any(|entry| entry.name == "model"));
+        assert!(visible.iter().any(|entry| entry.name == "effort"));
+    }
+
+    #[test]
+    fn grok_composer_model_hides_effort_entry_after_notification() {
+        let mut caps = grok_caps();
+        assert!(caps.apply_grok_model_changed(&serde_json::json!({
+            "sessionId": "sid",
+            "update": {
+                "sessionUpdate": "model_changed",
+                "model_id": "grok-composer-2.5-fast"
+            }
+        })));
+
+        let entries = AdvertisedSource::entries_from_caps("grok", &caps);
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["model"]
+        );
     }
 }
