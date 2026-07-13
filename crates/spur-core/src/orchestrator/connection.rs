@@ -314,7 +314,7 @@ impl Orchestrator {
                 agent_config.name
             )),
             None => {
-                // Declared kind with no disk-based session layout (e.g. Grok,
+                // A declared kind with no disk-based session layout (e.g.
                 // Gemini) lists sessions over RPC. An absent disk store is not
                 // an error — otherwise starting such a brain surfaces a
                 // misleading `SessionsListError` even though the agent connects
@@ -1695,17 +1695,37 @@ not-json
     }
 
     #[test]
-    fn list_sessions_from_disk_returns_empty_for_declared_kind_without_disk_layout() {
-        // Grok and Gemini are declared kinds that list sessions over RPC and
-        // have no on-disk session store. The disk fallback must report an
-        // empty list rather than erroring, so starting such a brain does not
-        // surface a misleading SessionsListError.
+    fn list_sessions_from_disk_discovers_grok_layout() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let session_dir = temp
+            .path()
+            .join(".grok/sessions/%2Frepo%2Fspur%20project/session-id");
+        std::fs::create_dir_all(&session_dir).expect("session dir");
+        std::fs::write(
+            session_dir.join("summary.json"),
+            r#"{"session_summary":"Grok session","updated_at":"2026-05-09T10:00:00Z"}"#,
+        )
+        .expect("summary");
         let grok = disk_fallback_config(
             r#"name = "grok"
 command = "grok"
 transport = "acp"
 kind = "grok""#,
         );
+
+        let sessions = with_home(temp.path(), || Orchestrator::list_sessions_from_disk(&grok))
+            .expect("grok disk discovery");
+
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].session_id.0.as_ref(), "session-id");
+        assert_eq!(sessions[0].cwd, PathBuf::from("/repo/spur project"));
+        assert_eq!(sessions[0].title.as_deref(), Some("Grok session"));
+    }
+
+    #[test]
+    fn list_sessions_from_disk_returns_empty_for_gemini_without_disk_layout() {
+        // Gemini is a declared kind with no known on-disk session store. The
+        // disk fallback must report an empty list rather than erroring.
         let gemini = disk_fallback_config(
             r#"name = "gemini"
 command = "gemini"
@@ -1713,9 +1733,6 @@ transport = "acp"
 kind = "gemini""#,
         );
 
-        assert!(Orchestrator::list_sessions_from_disk(&grok)
-            .expect("grok should return empty, not error")
-            .is_empty());
         assert!(Orchestrator::list_sessions_from_disk(&gemini)
             .expect("gemini should return empty, not error")
             .is_empty());
