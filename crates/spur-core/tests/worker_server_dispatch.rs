@@ -22,6 +22,7 @@ use rmcp::{
     ServiceExt,
 };
 use serde_json::{json, Value};
+use spur_acp::config::ContextServiceConfig;
 use spur_acp::SpurEventBody;
 use spur_core::handlers::{McpHandlerError, PlanResolver, WorkerCallContext};
 use spur_core::plan::PlanState;
@@ -455,6 +456,7 @@ async fn tools_list_returns_curated_worker_tools_including_code_graph_reads() {
         "query",
         "report_signal",
         "report_progress",
+        "submit_review_verdict",
     ];
     assert_eq!(
         tools.len(),
@@ -463,6 +465,10 @@ async fn tools_list_returns_curated_worker_tools_including_code_graph_reads() {
         expected.len()
     );
     let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
+    assert!(
+        names.iter().all(|name| !name.starts_with("external_")),
+        "unconfigured worker registry must omit external tools: {names:?}"
+    );
     for expected in expected {
         assert!(
             names.contains(&expected),
@@ -470,6 +476,61 @@ async fn tools_list_returns_curated_worker_tools_including_code_graph_reads() {
         );
     }
     server.shutdown(Duration::from_secs(5)).await;
+}
+
+#[tokio::test]
+async fn external_call_without_context_service_returns_clear_configuration_error() {
+    let (_dir, server) = test_server_with_real_pm().await;
+    let token = server.issue_token("d-external-unconfigured", Duration::from_secs(60));
+    let body = call_jsonrpc(
+        &server,
+        &token,
+        "tools/call",
+        json!({
+            "name": "external_code_read",
+            "arguments": { "selector": "pkg:serde@1.0.0::serde::Deserialize" }
+        }),
+    )
+    .await;
+
+    assert_eq!(body["error"]["code"], -32603);
+    assert_eq!(
+        body["error"]["message"],
+        "context service is not configured for worker MCP"
+    );
+
+    server.shutdown(Duration::from_secs(5)).await;
+}
+
+#[test]
+fn worker_registry_lists_all_external_tools_when_context_service_configured() {
+    let context_service = ContextServiceConfig {
+        url: "https://context.example.test".to_owned(),
+        ..ContextServiceConfig::default()
+    };
+    let registry = spur_core::mcp::worker_tool_registry_with_context_service(&context_service)
+        .expect("configured worker registry should build");
+    let external_names: std::collections::BTreeSet<_> = registry
+        .list_tools()
+        .into_iter()
+        .map(|tool| tool.name)
+        .filter(|name| name.starts_with("external_"))
+        .collect();
+    let expected = [
+        "external_catalog",
+        "external_code_search",
+        "external_code_read",
+        "external_code_callers",
+        "external_code_callees",
+        "external_knowledge_context",
+        "external_index",
+        "external_index_status",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect();
+
+    assert_eq!(external_names, expected);
 }
 
 #[tokio::test]
