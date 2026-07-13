@@ -100,6 +100,28 @@ $ spur chat my-agent "say hello"
 
 This launches the agent, opens a session, and sends one prompt. If it hangs or errors, the most likely causes are (a) wrong `command` / `args` — the binary can't be found or doesn't accept those flags; (b) wrong `transport` — the binary speaks a different dialect. Check the terminal for error output; spur logs to `.spur/logs/` for post-mortem.
 
+### Step 7 — Probe native ACP capabilities
+
+Before adding an ACP agent to the seed template, capture the handshake that
+SPUR will see. Pass the agent's complete argv as one shell-quoted `--args`
+string; the default does not send a billed prompt:
+
+```bash
+python3 scripts/probe_acp_capabilities.py \
+  --command my-agent --args "acp --stdio" --label my-agent
+```
+
+The command writes full NDJSON frames plus a structured report under
+`.spur/logs/probe-my-agent-<timestamp>.*`. In `matrix`, check
+`config_options_advertised`, `modes_advertised`, command discovery, and observed
+update/extension variants. `spur_prediction.would_synthesize` is the seed
+onboarding verdict: `/model` requires a non-empty model select and `/effort`
+requires a non-empty `thought_level`/effort select. An empty `configOptions`
+list means neither slash command is synthesized, even if proprietary `_meta`
+contains a model catalog. Add `--prompt "Reply with exactly: pong"` only when
+you need billed `session/update` evidence; use `--try-set-model` to check the
+legacy model RPC as a separate opt-in.
+
 ## Worked example: codex
 
 ```toml
@@ -152,10 +174,14 @@ those are **not** the ACP surface. Before assuming model switching works under
 SPUR, run:
 
 ```bash
-python3 scripts/probe_grok_acp.py --always-approve
+python3 scripts/probe_acp_capabilities.py \
+  --command grok --args "--no-auto-update agent --always-approve stdio" \
+  --label grok --always-approve
 ```
 
 See `docs/superpowers/specs/2026-07-13-grok-acp-capability-probe-results.md`.
+That report retains Grok-specific `_meta` interpretation; the generic harness
+records vendor-neutral meta planes and the same compact SPUR capability matrix.
 Do not add a static `[[commands.static]] name = "model"` unless you have
 verified Grok honors `/model …` as prompt text — a static entry does not call
 `session/set_config_option`.
@@ -204,7 +230,7 @@ Once your config works, contribute it back so other spur users get it via `spur 
 | `/command` does nothing | `dispatch` mismatch — check your agent expects prompt_text or vendor_exec. |
 | Agent errors "unknown flag: `--acp`" | Wrong `args` for your installed version — check `--help` and update. |
 | `--trust-all-tools` (or similar bypass flag) seems to be ignored | You probably forgot to set `skip = true` under `[permissions]`. Declaring bypass args isn't enough — spur requires explicit opt-in. |
-| No `/model` or `/effort` on a Grok (or other) ACP session | Agent did not advertise select `configOptions` for model / thought_level on `session/new`. Probe with `scripts/probe_grok_acp.py` (or the agent-specific probe); pin model at spawn until the agent advertises options. |
+| No `/model` or `/effort` on an ACP session | Agent did not advertise matching non-empty select `configOptions` on `session/new`. Probe with `scripts/probe_acp_capabilities.py`; pin the model at spawn until the agent advertises options. |
 
 ## Further reading
 
