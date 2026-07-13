@@ -4,6 +4,7 @@ pub mod codex;
 pub mod config_options;
 pub mod gemini;
 pub mod generic;
+pub mod grok_session_display;
 pub mod kimi;
 pub mod kiro;
 pub mod mcp;

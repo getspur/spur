@@ -503,6 +503,36 @@ mod tests {
     }
 
     #[test]
+    fn synthesize_advertised_ignores_grok_read_only_meta_display() {
+        let init = InitializeResponse::new(ProtocolVersion::LATEST);
+        let mut new = NewSessionResponse::new(SessionId::new("grok-read-only-display"));
+        new.meta = serde_json::from_value(serde_json::json!({
+            "x.ai/sessionConfig": {
+                "options": [
+                    {
+                        "id": "grok-4.5",
+                        "category": "model",
+                        "label": "Grok 4.5",
+                        "selected": true
+                    },
+                    {
+                        "id": "high",
+                        "category": "mode",
+                        "label": "High Effort",
+                        "selected": true
+                    }
+                ]
+            }
+        }))
+        .expect("Grok session meta fixture must deserialize");
+        let caps = SpurAgentCaps::new(&init, &new, AgentKind::Grok);
+
+        assert_eq!(caps.current_model_label().as_deref(), Some("Grok 4.5"));
+        assert_eq!(caps.current_effort_label().as_deref(), Some("High Effort"));
+        assert!(synthesize_advertised(&caps).is_empty());
+    }
+
+    #[test]
     fn synthesize_advertised_with_empty_model_choices_falls_through() {
         let caps = make_caps(vec![make_select("model", "gpt-5", &[])]);
         let out = synthesize_advertised(&caps);
