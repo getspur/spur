@@ -805,9 +805,11 @@ fn translated_artifact_vector_search_returns_ranked_symbol() -> Result<()> {
         .primary_evidence
         .first()
         .context("expected vector evidence from translated artifact")?;
+    assert_eq!(top.stable_symbol_id.as_deref(), Some("sym-alpha"));
+    assert_eq!(top.selector.as_deref(), Some("pkg:demo@1.2.3::demo::alpha"));
     assert_eq!(
-        top.stable_symbol_id.as_deref(),
-        Some("pkg:demo@1.2.3::demo::alpha")
+        top.uri.as_deref(),
+        Some("pkg-symbol://registry:crates-io/demo/1.2.3/sym-alpha")
     );
     assert_eq!(top.grounding, "hybrid-code");
     assert!(top.score > 0.99, "expected near-identical vector score");

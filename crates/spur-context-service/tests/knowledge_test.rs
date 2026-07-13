@@ -27,9 +27,12 @@ fn bm25_only_search_returns_ranked_code_and_docs() -> Result<()> {
     assert!(result
         .primary_evidence
         .iter()
-        .any(|evidence| evidence.stable_symbol_id.as_deref()
-            == Some("pkg:demo@1.0.0::demo::parse_config_loader")
-            && evidence.grounding == "bm25-code"));
+        .any(
+            |evidence| evidence.stable_symbol_id.as_deref() == Some("sym-parse")
+                && evidence.selector.as_deref()
+                    == Some("pkg:demo@1.0.0::demo::parse_config_loader")
+                && evidence.grounding == "bm25-code"
+        ));
     assert!(result.supporting_docs.iter().any(|evidence| {
         evidence.stable_symbol_id.as_deref() == Some("doc-parse")
             && evidence.grounding == "bm25-doc"
@@ -57,9 +60,7 @@ fn bm25_tokenizes_camel_case_identifiers_and_preserves_exact_match_score() -> Re
     let split_hit = split_query
         .primary_evidence
         .iter()
-        .find(|evidence| {
-            evidence.stable_symbol_id.as_deref() == Some("pkg:demo@1.0.0::demo::handleSubmitPlan")
-        })
+        .find(|evidence| evidence.stable_symbol_id.as_deref() == Some("sym-handle-submit-plan"))
         .context("expected split-token query to find camelCase identifier")?;
 
     let exact_query = query_knowledge_context(
@@ -69,9 +70,7 @@ fn bm25_tokenizes_camel_case_identifiers_and_preserves_exact_match_score() -> Re
     let exact_hit = exact_query
         .primary_evidence
         .iter()
-        .find(|evidence| {
-            evidence.stable_symbol_id.as_deref() == Some("pkg:demo@1.0.0::demo::handleSubmitPlan")
-        })
+        .find(|evidence| evidence.stable_symbol_id.as_deref() == Some("sym-handle-submit-plan"))
         .context("expected exact query to find camelCase identifier")?;
 
     assert!(
@@ -101,10 +100,7 @@ fn vector_only_search_surfaces_semantic_code_without_bm25_hits() -> Result<()> {
         .primary_evidence
         .first()
         .context("expected vector evidence")?;
-    assert_eq!(
-        top.stable_symbol_id.as_deref(),
-        Some("pkg:demo@1.0.0::demo::runtime::task_spawner")
-    );
+    assert_eq!(top.stable_symbol_id.as_deref(), Some("sym-semantic"));
     assert_eq!(top.grounding, "hybrid-code");
     assert!(top.score > 0.99, "expected near-identical vector score");
     assert!(result.supporting_docs.is_empty());
@@ -139,14 +135,8 @@ fn vector_search_ignores_embeddings_from_other_models() -> Result<()> {
         .primary_evidence
         .first()
         .context("expected Gemma vector evidence")?;
-    assert_eq!(
-        top.stable_symbol_id.as_deref(),
-        Some("pkg:demo@1.0.0::demo::runtime::task_spawner")
-    );
-    assert_ne!(
-        top.stable_symbol_id.as_deref(),
-        Some("pkg:demo@1.0.0::demo::legacy_task_spawner")
-    );
+    assert_eq!(top.stable_symbol_id.as_deref(), Some("sym-semantic"));
+    assert_ne!(top.stable_symbol_id.as_deref(), Some("sym-legacy"));
     Ok(())
 }
 
@@ -167,10 +157,7 @@ fn hybrid_search_deduplicates_bm25_and_vector_symbol_hits() -> Result<()> {
     let parse_hits = result
         .primary_evidence
         .iter()
-        .filter(|evidence| {
-            evidence.stable_symbol_id.as_deref()
-                == Some("pkg:demo@1.0.0::demo::parse_config_loader")
-        })
+        .filter(|evidence| evidence.stable_symbol_id.as_deref() == Some("sym-parse"))
         .collect::<Vec<_>>();
     assert_eq!(parse_hits.len(), 1);
     assert_eq!(parse_hits[0].grounding, "hybrid-code");
@@ -272,9 +259,10 @@ fn hybrid_merge_does_not_collapse_doc_and_code_stable_id_collision() -> Result<(
         &knowledge_options("parse config", KnowledgeScope::All, Some(unit_vector(1)), 8),
     )?;
 
-    assert!(result.primary_evidence.iter().any(|evidence| {
-        evidence.stable_symbol_id.as_deref() == Some("pkg:demo@1.0.0::demo::parse_config_loader")
-    }));
+    assert!(result
+        .primary_evidence
+        .iter()
+        .any(|evidence| evidence.stable_symbol_id.as_deref() == Some("sym-parse")));
     assert!(result
         .supporting_docs
         .iter()
