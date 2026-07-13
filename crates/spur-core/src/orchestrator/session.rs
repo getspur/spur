@@ -1341,6 +1341,89 @@ mod session_attach_guard_transfer_tests {
         assert_eq!(dirty_options, config_options);
     }
 
+    #[tokio::test]
+    async fn loaded_kiro_direct_model_with_empty_config_options_emits_command_registry_dirty() {
+        use spur_acp::{AgentKind, InitializeResponse, LoadSessionResponse, ProtocolVersion};
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut config = SpurConfig::default();
+        config.cost.db_path = tmp.path().join("cost.db").display().to_string();
+        let mut kiro = spur_acp::AgentConfig::with_defaults("kiro");
+        kiro.kind = AgentKind::Kiro;
+        config.agents.entries = vec![kiro];
+        let mut orchestrator = Orchestrator::new(tmp.path().to_path_buf(), config, None).unwrap();
+        let mut event_rx = orchestrator.subscribe();
+
+        let mut load_response = LoadSessionResponse::new();
+        load_response.meta = serde_json::from_value(serde_json::json!({
+            "spur.recoveredModels": {
+                "availableModels": [
+                    {"modelId": "auto", "name": "auto"},
+                    {"modelId": "glm-5", "name": "GLM-5"}
+                ],
+                "currentModelId": "glm-5"
+            }
+        }))
+        .expect("kiro recovered models meta must deserialize");
+        let init = InitializeResponse::new(ProtocolVersion::LATEST);
+
+        let (brain, _history_stream, _outcome) = orchestrator
+            .load_brain_session(
+                Box::new(LoadSessionConnection {
+                    response: Some(load_response),
+                }),
+                "kiro".to_string(),
+                None,
+                "acp-loaded-kiro-caps".to_string(),
+                false,
+                false,
+                None,
+                false,
+                init,
+            )
+            .await
+            .expect("load_brain_session should restore the Kiro session");
+
+        let session_id = brain.spur_session_id.clone();
+        assert!(brain.config_options.is_empty());
+        let cached_caps = brain
+            .spur_agent_caps
+            .as_ref()
+            .expect("BrainSession must cache loaded Kiro caps");
+        assert!(cached_caps.supports_direct_set_model());
+        assert!(!cached_caps.supports_set_model());
+
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        let mut dirty = None;
+        while tokio::time::Instant::now() < deadline && dirty.is_none() {
+            let remaining = deadline - tokio::time::Instant::now();
+            match tokio::time::timeout(remaining, event_rx.recv()).await {
+                Ok(Ok(ev)) => {
+                    if let SpurEventBody::CommandRegistryDirty {
+                        session,
+                        caps,
+                        config_options,
+                    } = ev.body
+                    {
+                        if session == session_id {
+                            dirty = Some((caps, config_options));
+                        }
+                    }
+                }
+                _ => break,
+            }
+        }
+
+        brain.delegation_handle.abort();
+
+        let (dirty_caps, dirty_options) = dirty
+            .expect("Kiro direct model support must emit CommandRegistryDirty without options");
+        let dirty_caps = dirty_caps.expect("CommandRegistryDirty must carry loaded Kiro caps");
+        assert!(dirty_caps.supports_direct_set_model());
+        assert!(!dirty_caps.supports_set_model());
+        assert!(dirty_options.is_empty());
+    }
+
     /// bd-3rvt: smoke-test that `apply_mcp_server_settings` runs cleanly and
     /// leaves the server in a startable state. The three init paths
     /// (`run_adhoc`, `create_brain_session`, `load_brain_session`) all rely
@@ -2156,7 +2239,7 @@ impl Orchestrator {
         if !config_options.is_empty()
             || spur_agent_caps
                 .as_ref()
-                .is_some_and(|caps| caps.supports_set_model() || caps.supports_grok_set_model())
+                .is_some_and(|caps| caps.supports_set_model() || caps.supports_direct_set_model())
         {
             // Surface the initial cache so spur-tui can synthesize
             // advertised slash commands (e.g. /model, /effort) from
@@ -2552,7 +2635,7 @@ impl Orchestrator {
         if !config_options.is_empty()
             || spur_agent_caps
                 .as_ref()
-                .is_some_and(|caps| caps.supports_set_model() || caps.supports_grok_set_model())
+                .is_some_and(|caps| caps.supports_set_model() || caps.supports_direct_set_model())
         {
             self.emit(SpurEvent::now(SpurEventBody::CommandRegistryDirty {
                 session: session_id.clone(),
