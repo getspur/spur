@@ -118,9 +118,27 @@ update/extension variants. `spur_prediction.would_synthesize` is the seed
 onboarding verdict: `/model` requires a non-empty model select and `/effort`
 requires a non-empty `thought_level`/effort select. An empty `configOptions`
 list means neither slash command is synthesized, even if proprietary `_meta`
-contains a model catalog. Add `--prompt "Reply with exactly: pong"` only when
-you need billed `session/update` evidence; use `--try-set-model` to check the
-legacy model RPC as a separate opt-in.
+contains a model catalog.
+
+Vendor extension notifications (e.g. Kiro `_kiro.dev/commands/available`, Grok
+`_x.ai/*`) are always harvested into `vendor_notifications` with **full
+payloads**, a de-duplicated `commands_catalog`, and any
+`meta.optionsMethod` targets. To actively probe those methods plus
+`session/set_mode` / `session/set_model` when proprietary planes advertise
+values:
+
+```bash
+python3 scripts/probe_acp_capabilities.py \
+  --command kiro-cli --args acp --label kiro \
+  --probe-vendor-rpc --always-approve
+```
+
+RPC failures are soft (recorded under `vendor_rpc_results` / matrix
+`vendor_rpc_errors`); the probe still exits 0 when the handshake succeeded.
+Add extra methods with repeatable `--vendor-method '_x.ai/sessionConfig/update'`.
+Add `--prompt "Reply with exactly: pong"` only when you need billed
+`session/update` evidence; use `--try-set-model` to check the legacy model RPC
+as a separate opt-in.
 
 ## Worked example: codex
 
