@@ -8,6 +8,17 @@ supplied as one shell-like string so flags can be copied from configuration:
     python3 scripts/probe_acp_capabilities.py \\
       --command goose --args "acp --stdio" --label goose
 
+    # Kiro-style vendor notifications + optional active RPC probes
+    python3 scripts/probe_acp_capabilities.py \\
+      --command kiro-cli --args acp --label kiro \\
+      --probe-vendor-rpc --always-approve
+
+Vendor extension notifications (methods outside ``session/update``, typically
+``_vendor/...``) are always harvested into ``vendor_notifications`` with full
+payloads. Pass ``--probe-vendor-rpc`` to also invoke discovered
+``optionsMethod`` targets, ``session/set_mode`` / ``session/set_model`` when
+proprietary planes advertise values, and any ``--vendor-method`` extras.
+
 Use ``--prompt`` only when session/update evidence is worth a billed turn.
 """
 
@@ -156,6 +167,230 @@ def _modes_advertised(modes: Any) -> bool:
     return bool(available)
 
 
+def is_vendor_extension_method(method: Any) -> bool:
+    """True for agent-originated vendor ext notifications (not core ACP updates)."""
+    if not isinstance(method, str) or not method:
+        return False
+    if method in STANDARD_NOTIFICATION_METHODS:
+        return False
+    if method.startswith("session/") or method.startswith("fs/") or method.startswith(
+        "terminal/"
+    ):
+        return False
+    # ACP vendor extensions are conventionally underscore-prefixed on the wire
+    # (``_kiro.dev/...``, ``_x.ai/...``). Also accept dotted vendor forms without
+    # underscore when agents emit them as notifications.
+    return method.startswith("_") or "." in method or "/" in method
+
+
+def harvest_vendor_notifications(notifications: list[JsonObject]) -> JsonObject:
+    """Group vendor extension notifications with full payloads and command meta.
+
+    Keeps every payload for each vendor method (not just method names). When
+    ``_*/commands/available`` frames carry a ``commands`` list, builds a
+    de-duplicated catalog and extracts ``meta.optionsMethod`` targets for
+    optional ``--probe-vendor-rpc`` active probes.
+    """
+    payloads: dict[str, list[Any]] = {}
+    counts: dict[str, int] = {}
+    commands_by_name: dict[str, JsonObject] = {}
+
+    for notification in notifications:
+        method = notification.get("method")
+        if not is_vendor_extension_method(method):
+            continue
+        assert isinstance(method, str)
+        params = notification.get("params")
+        payload: Any = params if params is not None else {}
+        payloads.setdefault(method, []).append(payload)
+        counts[method] = counts.get(method, 0) + 1
+
+        if not isinstance(params, dict):
+            continue
+        raw_commands = params.get("commands")
+        if not isinstance(raw_commands, list):
+            continue
+        for command in raw_commands:
+            if not isinstance(command, dict):
+                continue
+            name = command.get("name")
+            if not isinstance(name, str) or not name:
+                continue
+            existing = commands_by_name.get(name)
+            if existing is None:
+                commands_by_name[name] = dict(command)
+                continue
+            # Prefer the entry with richer meta / description.
+            existing_meta = existing.get("meta") or existing.get("_meta")
+            new_meta = command.get("meta") or command.get("_meta")
+            if not existing_meta and new_meta:
+                commands_by_name[name] = dict(command)
+            elif not existing.get("description") and command.get("description"):
+                merged = dict(existing)
+                merged["description"] = command.get("description")
+                if new_meta and not existing_meta:
+                    merged["meta"] = new_meta
+                commands_by_name[name] = merged
+
+    commands_catalog: list[JsonObject] = []
+    options_methods: set[str] = set()
+    for name in sorted(commands_by_name):
+        command = commands_by_name[name]
+        meta = command.get("meta")
+        if meta is None:
+            meta = command.get("_meta")
+        entry: JsonObject = {
+            "name": command.get("name"),
+            "description": command.get("description"),
+            "meta": meta if isinstance(meta, dict) else meta,
+        }
+        commands_catalog.append(entry)
+        if isinstance(meta, dict):
+            options_method = meta.get("optionsMethod", meta.get("options_method"))
+            if isinstance(options_method, str) and options_method:
+                options_methods.add(options_method)
+
+    methods_seen = sorted(payloads)
+    return {
+        "methods_seen": methods_seen,
+        "counts": {method: counts[method] for method in methods_seen},
+        "payloads": {method: payloads[method] for method in methods_seen},
+        "commands_catalog": commands_catalog,
+        "options_methods": sorted(options_methods),
+    }
+
+
+def _available_mode_ids(modes: Any) -> list[str]:
+    if isinstance(modes, list):
+        raw = modes
+    elif isinstance(modes, dict):
+        raw = modes.get("availableModes", modes.get("available_modes", []))
+    else:
+        return []
+    if not isinstance(raw, list):
+        return []
+    ids: list[str] = []
+    for item in raw:
+        if isinstance(item, str) and item:
+            ids.append(item)
+        elif isinstance(item, dict):
+            mode_id = item.get("id", item.get("modeId"))
+            if isinstance(mode_id, str) and mode_id:
+                ids.append(mode_id)
+    return ids
+
+
+def _available_model_ids(session: JsonObject) -> list[str]:
+    models = session.get("models")
+    if not isinstance(models, dict):
+        return []
+    available = models.get("availableModels", models.get("available_models", []))
+    if not isinstance(available, list):
+        return []
+    ids: list[str] = []
+    for item in available:
+        if isinstance(item, dict):
+            model_id = item.get("modelId", item.get("id"))
+            if isinstance(model_id, str) and model_id:
+                ids.append(model_id)
+        elif isinstance(item, str) and item:
+            ids.append(item)
+    return ids
+
+
+def build_vendor_rpc_targets(
+    *,
+    session_id: str,
+    session_new: JsonObject,
+    vendor_harvest: JsonObject,
+    extra_methods: Optional[list[str]] = None,
+) -> list[JsonObject]:
+    """Build soft-fail vendor RPC probes from harvest + proprietary planes."""
+    targets: list[JsonObject] = []
+    seen: set[tuple[str, str]] = set()
+
+    def add(method: str, params: JsonObject, reason: str) -> None:
+        key = (method, json.dumps(params, sort_keys=True, separators=(",", ":")))
+        if key in seen:
+            return
+        seen.add(key)
+        targets.append({"method": method, "params": params, "reason": reason})
+
+    for options_method in vendor_harvest.get("options_methods") or []:
+        if isinstance(options_method, str) and options_method:
+            add(
+                options_method,
+                {"sessionId": session_id},
+                "command_meta.optionsMethod",
+            )
+
+    modes = session_new.get("modes")
+    mode_ids = _available_mode_ids(modes)
+    current_mode = None
+    if isinstance(modes, dict):
+        current_mode = modes.get("currentModeId", modes.get("current_mode_id"))
+    alternate = next((mode_id for mode_id in mode_ids if mode_id != current_mode), None)
+    if alternate:
+        add(
+            "session/set_mode",
+            {"sessionId": session_id, "modeId": alternate},
+            "session_new.modes",
+        )
+        if isinstance(current_mode, str) and current_mode:
+            add(
+                "session/set_mode",
+                {"sessionId": session_id, "modeId": current_mode},
+                "restore_current_mode",
+            )
+
+    model_ids = _available_model_ids(session_new)
+    models = session_new.get("models")
+    current_model = None
+    if isinstance(models, dict):
+        current_model = models.get("currentModelId", models.get("current_model_id"))
+    alternate_model = next(
+        (model_id for model_id in model_ids if model_id != current_model), None
+    )
+    if alternate_model:
+        add(
+            "session/set_model",
+            {"sessionId": session_id, "modelId": alternate_model},
+            "session_new.models",
+        )
+
+    for method in extra_methods or []:
+        if isinstance(method, str) and method.strip():
+            add(method.strip(), {"sessionId": session_id}, "cli --vendor-method")
+
+    return targets
+
+
+def summarize_proprietary_planes(session_new: Optional[JsonObject]) -> JsonObject:
+    session = session_new or {}
+    modes = session.get("modes")
+    models = session.get("models")
+    config_options = session.get("configOptions", session.get("config_options", []))
+    return {
+        "has_config_options": bool(config_options),
+        "has_modes_plane": isinstance(modes, (dict, list)) and bool(modes),
+        "has_models_plane": isinstance(models, dict) and bool(models),
+        "current_mode_id": (
+            modes.get("currentModeId", modes.get("current_mode_id"))
+            if isinstance(modes, dict)
+            else None
+        ),
+        "current_model_id": (
+            models.get("currentModelId", models.get("current_model_id"))
+            if isinstance(models, dict)
+            else None
+        ),
+        "mode_ids": _available_mode_ids(modes),
+        "model_ids": _available_model_ids(session),
+        "modes": modes,
+        "models": models,
+    }
+
+
 def build_matrix(
     *,
     config_options: list[JsonObject],
@@ -164,8 +399,30 @@ def build_matrix(
     available_commands: list[JsonObject],
     extension_methods: list[str],
     session_update_variants: list[str],
+    vendor_harvest: Optional[JsonObject] = None,
+    vendor_rpc_results: Optional[list[JsonObject]] = None,
 ) -> JsonObject:
     """Build the compact matrix shared with the Grok capability report."""
+    harvest = vendor_harvest or harvest_vendor_notifications([])
+    rpc_results = vendor_rpc_results or []
+    rpc_ok = [
+        str(item.get("method"))
+        for item in rpc_results
+        if item.get("status") == "ok" and item.get("method") is not None
+    ]
+    rpc_errors = [
+        (
+            item.get("method"),
+            (item.get("error") or {}).get("code")
+            if isinstance(item.get("error"), dict)
+            else None,
+            (item.get("error") or {}).get("message")
+            if isinstance(item.get("error"), dict)
+            else item.get("status"),
+        )
+        for item in rpc_results
+        if item.get("status") not in (None, "ok")
+    ]
     return {
         "config_options_advertised": bool(config_options),
         "model_select_advertised": bool(spur_prediction["slash_model"]),
@@ -179,6 +436,11 @@ def build_matrix(
         "spur_slash_effort": bool(spur_prediction["slash_effort"]),
         "extension_methods_seen": sorted(set(extension_methods)),
         "session_update_variants_seen": sorted(set(session_update_variants)),
+        "vendor_notification_methods_seen": list(harvest.get("methods_seen") or []),
+        "vendor_commands_count": len(harvest.get("commands_catalog") or []),
+        "options_methods_discovered": list(harvest.get("options_methods") or []),
+        "vendor_rpc_ok": rpc_ok,
+        "vendor_rpc_errors": rpc_errors,
     }
 
 
@@ -294,6 +556,7 @@ def build_report(
     authentication: Optional[JsonObject] = None,
     prompt_result: Optional[JsonObject] = None,
     hard_failure: Optional[str] = None,
+    vendor_rpc_results: Optional[list[JsonObject]] = None,
 ) -> JsonObject:
     session = session_new or {}
     raw_options = session.get("configOptions", session.get("config_options", []))
@@ -307,11 +570,14 @@ def build_report(
     available_commands = _available_commands(notifications)
     variants = _session_update_variants(notifications)
     extensions = _extension_methods(notifications)
+    vendor_harvest = harvest_vendor_notifications(notifications)
+    rpc_results = vendor_rpc_results or []
     meta_sources: list[tuple[str, Any]] = [
         ("initialize", initialize),
         ("session_new", session_new),
         ("notifications", notifications),
         ("set_results", set_results),
+        ("vendor_rpc_results", rpc_results),
     ]
     matrix = build_matrix(
         config_options=config_options,
@@ -320,6 +586,8 @@ def build_report(
         available_commands=available_commands,
         extension_methods=extensions,
         session_update_variants=variants,
+        vendor_harvest=vendor_harvest,
+        vendor_rpc_results=rpc_results,
     )
     return {
         "probed_at": probed_at,
@@ -338,6 +606,9 @@ def build_report(
         "prompt_result": prompt_result,
         "session_update_variants": variants,
         "extension_methods": extensions,
+        "vendor_notifications": vendor_harvest,
+        "vendor_rpc_results": rpc_results,
+        "proprietary_planes": summarize_proprietary_planes(session_new),
         "matrix": matrix,
         "hard_failure": hard_failure,
     }
@@ -657,6 +928,65 @@ def _legacy_model_id(session: JsonObject, config_options: list[JsonObject]) -> s
     return "spur-probe"
 
 
+def _probe_vendor_rpcs(
+    client: AcpClient,
+    *,
+    session_id: str,
+    session_new: JsonObject,
+    notifications: list[JsonObject],
+    extra_methods: list[str],
+    timeout: float,
+    handler: Callable[[JsonObject], None],
+) -> tuple[list[JsonObject], list[JsonObject], Optional[str]]:
+    """Actively probe vendor RPCs; soft-fail so handshake evidence is preserved.
+
+    Returns ``(results, extra_notifications, stop_reason)``. ``stop_reason`` is
+    set when the agent dies mid-probe; callers should not treat that as a hard
+    handshake failure if initialize/session-new already succeeded.
+    """
+    harvest = harvest_vendor_notifications(notifications)
+    targets = build_vendor_rpc_targets(
+        session_id=session_id,
+        session_new=session_new,
+        vendor_harvest=harvest,
+        extra_methods=extra_methods,
+    )
+    results: list[JsonObject] = []
+    extra_notifications: list[JsonObject] = []
+    stop_reason: Optional[str] = None
+
+    for target in targets:
+        method = str(target["method"])
+        params = target.get("params") if isinstance(target.get("params"), dict) else {}
+        assert isinstance(params, dict)
+        try:
+            response = client.request(method, params, timeout, handler)
+        except ProbeHardFailure as exc:
+            stop_reason = str(exc)
+            results.append(
+                {
+                    "method": method,
+                    "params": params,
+                    "reason": target.get("reason"),
+                    "status": "agent_exited",
+                    "error": {"code": -32000, "message": stop_reason},
+                    "response": None,
+                }
+            )
+            break
+        record = _record_result(method, params, response)
+        record["reason"] = target.get("reason")
+        if isinstance(response, dict) and isinstance(response.get("error"), dict):
+            record["error"] = response["error"]
+        results.append(record)
+        time.sleep(0.05)
+        extra_notifications.extend(client.drain_notifications())
+        if stop_reason:
+            break
+
+    return results, extra_notifications, stop_reason
+
+
 def _write_report(path: Path, report: JsonObject) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
@@ -687,7 +1017,9 @@ def run_probe(args: argparse.Namespace) -> int:
     prompt_result: Optional[JsonObject] = None
     notifications: list[JsonObject] = []
     set_results: list[JsonObject] = []
+    vendor_rpc_results: list[JsonObject] = []
     hard_failure: Optional[str] = None
+    handshake_complete = False
     client: Optional[AcpClient] = None
 
     try:
@@ -763,6 +1095,7 @@ def run_probe(args: argparse.Namespace) -> int:
         session_result = session_response.get("result")
         session_new = session_result if isinstance(session_result, dict) else {}
         session_id = str(session_new.get("sessionId", requested_session_id))
+        handshake_complete = True
 
         time.sleep(args.preamble_timeout)
         notifications.extend(client.drain_notifications())
@@ -794,6 +1127,24 @@ def run_probe(args: argparse.Namespace) -> int:
             set_results.append(_record_result("session/set_model", params, response))
             notifications.extend(client.drain_notifications())
 
+        if args.probe_vendor_rpc:
+            rpc_results, extra_notifs, vendor_stop = _probe_vendor_rpcs(
+                client,
+                session_id=session_id,
+                session_new=session_new,
+                notifications=notifications,
+                extra_methods=list(args.vendor_method or []),
+                timeout=args.session_timeout,
+                handler=handler,
+            )
+            vendor_rpc_results.extend(rpc_results)
+            notifications.extend(extra_notifs)
+            if vendor_stop and not args.quiet:
+                print(
+                    f"[vendor-rpc] stopped early: {vendor_stop}",
+                    file=sys.stderr,
+                )
+
         if args.prompt is not None:
             params = {
                 "sessionId": session_id,
@@ -804,15 +1155,18 @@ def run_probe(args: argparse.Namespace) -> int:
             time.sleep(0.2)
             notifications.extend(client.drain_notifications())
         if return_code := client.proc.poll():
-            raise ProbeHardFailure(
-                f"agent exited with status {return_code} before probe cleanup"
-            )
+            # After a successful handshake, a later agent exit (e.g. unstable
+            # vendor RPC) is recorded on the report but is not a hard fail.
+            if not handshake_complete:
+                raise ProbeHardFailure(
+                    f"agent exited with status {return_code} before probe cleanup"
+                )
     except (OSError, ValueError, ProbeHardFailure) as exc:
         hard_failure = str(exc)
     finally:
         if client is not None:
             return_code, forced = client.close()
-            if hard_failure is None:
+            if hard_failure is None and not handshake_complete:
                 hard_failure = process_close_failure(
                     return_code=return_code, forced=forced
                 )
@@ -829,6 +1183,7 @@ def run_probe(args: argparse.Namespace) -> int:
         authentication=authentication,
         prompt_result=prompt_result,
         hard_failure=hard_failure,
+        vendor_rpc_results=vendor_rpc_results,
     )
     if client is None:
         out_path.write_text(
@@ -850,6 +1205,30 @@ def run_probe(args: argparse.Namespace) -> int:
         print(f"[FAIL] {hard_failure}", file=sys.stderr)
         return 1
     print(json.dumps(report["matrix"], indent=2, sort_keys=True))
+    vendor = report.get("vendor_notifications") or {}
+    if vendor.get("methods_seen"):
+        print(
+            "vendor_notifications="
+            + json.dumps(
+                {
+                    "methods": vendor.get("methods_seen"),
+                    "commands": len(vendor.get("commands_catalog") or []),
+                    "options_methods": vendor.get("options_methods"),
+                },
+                sort_keys=True,
+            )
+        )
+    if vendor_rpc_results:
+        print(
+            "vendor_rpc="
+            + json.dumps(
+                {
+                    "ok": report["matrix"].get("vendor_rpc_ok"),
+                    "errors": report["matrix"].get("vendor_rpc_errors"),
+                },
+                sort_keys=True,
+            )
+        )
     return 0
 
 
@@ -888,6 +1267,25 @@ def parse_cli(argv: Optional[list[str]] = None) -> argparse.Namespace:
         "--try-set-model",
         action="store_true",
         help="Also probe legacy session/set_model using an advertised model id.",
+    )
+    parser.add_argument(
+        "--probe-vendor-rpc",
+        action="store_true",
+        help=(
+            "After handshake, actively probe vendor RPCs discovered from "
+            "command meta.optionsMethod plus session/set_mode and "
+            "session/set_model when proprietary planes advertise values. "
+            "Failures are soft (recorded, not hard exit)."
+        ),
+    )
+    parser.add_argument(
+        "--vendor-method",
+        action="append",
+        default=[],
+        help=(
+            "Extra vendor JSON-RPC method to probe when --probe-vendor-rpc is set "
+            "(repeatable). Params are {sessionId}."
+        ),
     )
     parser.add_argument(
         "--prompt",
