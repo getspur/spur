@@ -42,31 +42,57 @@ pub struct AdvertisedChoice {
 /// Vendor-neutral allow-list for config options SPUR exposes as slash commands.
 /// `slash_name` may differ from the fallback ACP config id (e.g.
 /// `reasoning_effort` -> `effort` at the slash surface).
+///
+/// Entry order defines the stable slash-command order.
 const ALLOW_LIST: &[AllowedConfigOption] = &[
     AllowedConfigOption {
-        category: KnownConfigCategory::Model,
-        fallback_config_id: "model",
+        matcher: ConfigOptionMatcher::CategoryOrAbsentId {
+            category: KnownConfigCategory::Model,
+            fallback_config_id: "model",
+        },
         slash_name: "model",
         slash_desc: "Switch model for this session",
     },
     AllowedConfigOption {
-        category: KnownConfigCategory::ThoughtLevel,
-        fallback_config_id: "reasoning_effort",
+        matcher: ConfigOptionMatcher::CategoryOrAbsentId {
+            category: KnownConfigCategory::ThoughtLevel,
+            fallback_config_id: "reasoning_effort",
+        },
         slash_name: "effort",
         slash_desc: "Switch reasoning / thinking effort",
+    },
+    AllowedConfigOption {
+        matcher: ConfigOptionMatcher::ExactIdWithCategoryOrUnmapped {
+            category: KnownConfigCategory::ModelConfig,
+            config_id: "fast-mode",
+        },
+        slash_name: "fast",
+        slash_desc: "Toggle Codex fast mode",
     },
 ];
 
 struct AllowedConfigOption {
-    category: KnownConfigCategory,
-    fallback_config_id: &'static str,
+    matcher: ConfigOptionMatcher,
     slash_name: &'static str,
     slash_desc: &'static str,
 }
 
 #[derive(Clone, Copy)]
+enum ConfigOptionMatcher {
+    CategoryOrAbsentId {
+        category: KnownConfigCategory,
+        fallback_config_id: &'static str,
+    },
+    ExactIdWithCategoryOrUnmapped {
+        category: KnownConfigCategory,
+        config_id: &'static str,
+    },
+}
+
+#[derive(Clone, Copy)]
 enum KnownConfigCategory {
     Model,
+    ModelConfig,
     ThoughtLevel,
 }
 
@@ -100,9 +126,7 @@ pub fn extract_choices(opt: &SessionConfigOption) -> Vec<AdvertisedChoice> {
 pub fn synthesize(options: &[SessionConfigOption]) -> Vec<AdvertisedCommand> {
     let mut out = Vec::new();
     for allowed in ALLOW_LIST {
-        let Some(opt) =
-            option_by_category_or_absent_id(options, allowed.category, allowed.fallback_config_id)
-        else {
+        let Some(opt) = option_for_match(options, allowed.matcher) else {
             continue;
         };
 
@@ -177,6 +201,26 @@ fn grouped_description(
     }
 }
 
+fn option_for_match(
+    options: &[SessionConfigOption],
+    matcher: ConfigOptionMatcher,
+) -> Option<&SessionConfigOption> {
+    match matcher {
+        ConfigOptionMatcher::CategoryOrAbsentId {
+            category,
+            fallback_config_id,
+        } => option_by_category_or_absent_id(options, category, fallback_config_id),
+        ConfigOptionMatcher::ExactIdWithCategoryOrUnmapped {
+            category,
+            config_id,
+        } => options.iter().find(|option| {
+            option.id.0.as_ref() == config_id
+                && (category_matches(option.category.as_ref(), category)
+                    || category_is_absent_or_unmapped(option.category.as_ref()))
+        }),
+    }
+}
+
 fn option_by_category_or_absent_id<'a>(
     options: &'a [SessionConfigOption],
     category: KnownConfigCategory,
@@ -202,10 +246,17 @@ fn category_matches(
             KnownConfigCategory::Model,
             Some(SessionConfigOptionCategory::Model)
         ) | (
+            KnownConfigCategory::ModelConfig,
+            Some(SessionConfigOptionCategory::ModelConfig)
+        ) | (
             KnownConfigCategory::ThoughtLevel,
             Some(SessionConfigOptionCategory::ThoughtLevel)
         )
     )
+}
+
+fn category_is_absent_or_unmapped(category: Option<&SessionConfigOptionCategory>) -> bool {
+    category.is_none() || matches!(category, Some(SessionConfigOptionCategory::Other(_)))
 }
 
 #[cfg(test)]
@@ -285,17 +336,74 @@ mod tests {
     }
 
     #[test]
+    fn fast_mode_id_fallback_emits_fast_command() {
+        let fast = make_select("fast-mode", "on", &[("off", "Off"), ("on", "On")]);
+        let caps = make_caps(vec![fast]);
+
+        let out = synthesize_advertised(&caps);
+
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].name, "fast");
+        assert_eq!(out[0].description, "Toggle Codex fast mode");
+        assert_eq!(out[0].config_id, "fast-mode");
+        assert_eq!(out[0].current_value.as_deref(), Some("on"));
+        assert_eq!(out[0].choices.len(), 2);
+        assert_eq!(
+            out[0].arg_picker_spec.typed_hint,
+            Some(ArgPickerHint::ConfigOption {
+                config_id: "fast-mode".into()
+            })
+        );
+    }
+
+    #[test]
+    fn fast_mode_id_fallback_accepts_unmapped_category() {
+        let fast = make_select("fast-mode", "off", &[("off", "Off"), ("on", "On")]).category(
+            SessionConfigOptionCategory::Other("future_model_config".to_string()),
+        );
+
+        let out = synthesize(&[fast]);
+
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].name, "fast");
+        assert_eq!(out[0].config_id, "fast-mode");
+    }
+
+    #[test]
+    fn empty_fast_mode_choices_omit_command() {
+        let fast =
+            make_select("fast-mode", "", &[]).category(SessionConfigOptionCategory::ModelConfig);
+
+        assert!(synthesize(&[fast]).is_empty());
+    }
+
+    #[test]
+    fn unrelated_model_config_id_is_omitted() {
+        let unrelated = make_select("temperature", "high", &[("high", "High")])
+            .category(SessionConfigOptionCategory::ModelConfig);
+
+        assert!(synthesize(&[unrelated]).is_empty());
+    }
+
+    #[test]
     fn multiple_allowlisted_returned_in_allowlist_order() {
         let effort = make_select(
             "reasoning_effort",
             "high",
             &[("low", "Low"), ("medium", "Medium"), ("high", "High")],
-        );
-        let model = make_select("model", "gpt-5", &[("gpt-5", "GPT-5")]);
-        let out = synthesize(&[effort, model]);
-        assert_eq!(out.len(), 2);
+        )
+        .category(SessionConfigOptionCategory::ThoughtLevel);
+        let model = make_select("model", "gpt-5", &[("gpt-5", "GPT-5")])
+            .category(SessionConfigOptionCategory::Model);
+        let fast = make_select("fast-mode", "on", &[("off", "Off"), ("on", "On")])
+            .category(SessionConfigOptionCategory::ModelConfig);
+
+        let out = synthesize(&[fast, effort, model]);
+
+        assert_eq!(out.len(), 3);
         assert_eq!(out[0].name, "model");
         assert_eq!(out[1].name, "effort");
+        assert_eq!(out[2].name, "fast");
     }
 
     #[test]
