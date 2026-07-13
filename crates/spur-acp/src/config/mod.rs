@@ -1275,6 +1275,28 @@ mod tests {
     }
 
     #[test]
+    fn seed_template_claude_code_uses_claude_agent_acp_0_54_1() {
+        // Live probe 2026-07-13: adapter 0.54.1 advertises model + effort
+        // (thought_level) configOptions and agent profile selection. Bump
+        // deliberately with probe_acp_capabilities -- not via @latest.
+        let seeds = load_seed_template();
+        let claude = seeds
+            .entries
+            .iter()
+            .find(|agent| agent.name == "claude-code")
+            .expect("claude-code should be in seed template");
+
+        assert_eq!(claude.kind, crate::types::AgentKind::ClaudeCodeAcp);
+        assert_eq!(
+            claude.effective_args(),
+            vec![
+                "--yes".to_owned(),
+                "@agentclientprotocol/claude-agent-acp@0.54.1".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
     fn seed_template_kimi_uses_yolo_via_l2_auto_approve() {
         // kimi requires `-y` BEFORE the `acp` subcommand and relies on the
         // L2 auto-approve path (orchestrator drops `permission_tx` when
