@@ -113,7 +113,7 @@ pub fn control_socket_path(socket_nonce: &str) -> PathBuf {
 ///
 /// All `spur` processes launched against the same `repo_root` resolve to the
 /// same socket path, so a second process *attaches* to the first's notebook
-/// daemon (one Jute window) instead of spawning a rival window that would
+/// daemon (one SpurLab window) instead of spawning a rival window that would
 /// fork the open `.ipynb`. Distinct workspaces stay isolated. The value is
 /// opaque; only stability and per-workspace uniqueness matter.
 pub fn stable_notebook_nonce(repo_root: &Path) -> String {
@@ -149,7 +149,17 @@ fn notebook_launch_selection_with_context(
     let requested_channel = requested_notebook_channel(context)?;
     match requested_channel {
         NotebookChannel::Green => resolve_green_notebook(context),
-        NotebookChannel::Auto | NotebookChannel::Blue => Ok(resolve_blue_or_auto_notebook(context)),
+        // After the standalone notebook cutover, Auto prefers SpurLab / green
+        // installs. Legacy blue (Jute.app, in-tree sibling) is only a fallback
+        // when green is not installed — mirrors xtask's "auto aliases green".
+        NotebookChannel::Auto => match resolve_green_notebook(context) {
+            Ok(selection) => Ok(selection),
+            Err(NotebookResolverError::GreenUnavailable { .. }) => {
+                Ok(resolve_legacy_blue_notebook(context))
+            }
+            Err(other) => Err(other),
+        },
+        NotebookChannel::Blue => Ok(resolve_legacy_blue_notebook(context)),
     }
 }
 
@@ -175,7 +185,10 @@ fn requested_notebook_channel(
         .map(|channel| channel.unwrap_or(NotebookChannel::Auto))
 }
 
-fn resolve_blue_or_auto_notebook(context: &NotebookResolverContext) -> NotebookLaunchSelection {
+/// Legacy blue-channel resolution: pre-cutover installs (sibling binary,
+/// `Jute.app`, cargo/`PATH` `spur-notebook`). Used when the channel is
+/// explicitly `blue`, or when `auto` finds no green/SpurLab install.
+fn resolve_legacy_blue_notebook(context: &NotebookResolverContext) -> NotebookLaunchSelection {
     if let Some(current_exe) = &context.current_exe {
         if let Some(dir) = current_exe.parent() {
             let sibling = dir.join(NOTEBOOK_BINARY_NAME);
@@ -307,7 +320,7 @@ fn should_use_sibling_notebook_binary(
 ) -> bool {
     // A cargo-installed `spur` lives in $CARGO_HOME/bin. Treat that sibling
     // `spur-notebook` as the legacy fallback so old raw installs do not
-    // preempt the bundled Jute.app path.
+    // preempt the bundled SpurLab.app (green) or Jute.app (blue) path.
     cargo_home_bin(context)
         .map(|bin| sibling != bin.join("spur-notebook"))
         .unwrap_or(true)
@@ -521,7 +534,9 @@ mod tests {
     }
 
     #[test]
-    fn notebook_binary_path_auto_reports_cargo_home_install_as_blue() {
+    fn notebook_binary_path_auto_prefers_cargo_home_install_as_green() {
+        // Auto aliases green after the standalone cutover: a cargo-installed
+        // spur-notebook is a green external install, not legacy blue.
         let install_root = tempfile::tempdir().expect("install root");
         let installed = install_root.path().join("bin").join("spur-notebook");
         std::fs::create_dir_all(installed.parent().unwrap()).expect("install bin dir");
@@ -533,9 +548,9 @@ mod tests {
         let selection =
             notebook_launch_selection_with_context(&context).expect("auto cargo selection");
 
-        assert_eq!(selection.channel, NotebookChannel::Blue);
+        assert_eq!(selection.channel, NotebookChannel::Green);
         assert_eq!(selection.path, installed);
-        assert!(selection.reason.contains("cargo-installed"));
+        assert!(selection.reason.contains("external"));
     }
 
     #[test]
@@ -597,7 +612,9 @@ mod tests {
     }
 
     #[test]
-    fn notebook_binary_path_auto_keeps_sibling_blue_before_external_green() {
+    fn notebook_binary_path_auto_prefers_external_green_over_sibling_blue() {
+        // Auto prefers standalone/green installs over a local sibling binary
+        // left over from pre-cutover workspace builds.
         let temp = tempfile::tempdir().expect("tempdir");
         let current_exe = temp.path().join("bin").join("spur");
         let sibling = temp.path().join("bin").join("spur-notebook");
@@ -614,7 +631,30 @@ mod tests {
         context.cargo_home = Some(cargo_home);
 
         let selection =
-            notebook_launch_selection_with_context(&context).expect("auto sibling selection");
+            notebook_launch_selection_with_context(&context).expect("auto green selection");
+
+        assert_eq!(selection.channel, NotebookChannel::Green);
+        assert_eq!(selection.path, external);
+        assert!(selection.reason.contains("external"));
+    }
+
+    #[test]
+    fn notebook_binary_path_auto_falls_back_to_sibling_blue_when_green_missing() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let current_exe = temp.path().join("bin").join("spur");
+        let sibling = temp.path().join("bin").join("spur-notebook");
+        std::fs::create_dir_all(current_exe.parent().unwrap()).expect("bin dir");
+        std::fs::write(&current_exe, "").expect("spur binary");
+        std::fs::write(&sibling, "").expect("sibling notebook binary");
+
+        let mut context = test_context();
+        context.current_exe = Some(current_exe);
+        // No cargo_home / PATH green candidates.
+        context.cargo_home = Some(temp.path().join("missing-cargo-home"));
+        context.path = Some(OsString::new());
+
+        let selection =
+            notebook_launch_selection_with_context(&context).expect("auto blue fallback");
 
         assert_eq!(selection.channel, NotebookChannel::Blue);
         assert_eq!(selection.path, sibling);
@@ -669,7 +709,33 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn notebook_binary_path_auto_reports_user_app_bundle_as_blue_on_macos() {
+    fn notebook_binary_path_auto_prefers_spurlab_over_legacy_jute_on_macos() {
+        let home = tempfile::tempdir().expect("temp home");
+        let spurlab = home
+            .path()
+            .join("Applications/SpurLab.app/Contents/MacOS/SpurLab");
+        let jute = home
+            .path()
+            .join("Applications/Jute.app/Contents/MacOS/Jute");
+        std::fs::create_dir_all(spurlab.parent().unwrap()).expect("SpurLab bundle dir");
+        std::fs::create_dir_all(jute.parent().unwrap()).expect("Jute bundle dir");
+        std::fs::write(&spurlab, "").expect("SpurLab binary");
+        std::fs::write(&jute, "").expect("Jute binary");
+
+        let mut context = test_context();
+        context.home = Some(home.path().to_path_buf());
+
+        let selection =
+            notebook_launch_selection_with_context(&context).expect("auto SpurLab selection");
+
+        assert_eq!(selection.channel, NotebookChannel::Green);
+        assert_eq!(selection.path, spurlab);
+        assert!(selection.reason.contains("SpurLab"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn notebook_binary_path_auto_falls_back_to_jute_when_spurlab_missing_on_macos() {
         let home = tempfile::tempdir().expect("temp home");
         let bundle_binary = home
             .path()
@@ -679,13 +745,37 @@ mod tests {
 
         let mut context = test_context();
         context.home = Some(home.path().to_path_buf());
+        // Ensure green cargo/PATH candidates are absent so auto falls through.
+        context.cargo_home = Some(home.path().join("missing-cargo-home"));
+        context.path = Some(OsString::new());
 
         let selection =
-            notebook_launch_selection_with_context(&context).expect("user app bundle selection");
+            notebook_launch_selection_with_context(&context).expect("auto Jute fallback");
 
         assert_eq!(selection.channel, NotebookChannel::Blue);
         assert_eq!(selection.path, bundle_binary);
-        assert!(selection.reason.contains("app bundle"));
+        assert!(selection.reason.contains("Jute.app"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn notebook_binary_path_auto_reports_spurlab_app_bundle_as_green_on_macos() {
+        let home = tempfile::tempdir().expect("temp home");
+        let bundle_binary = home
+            .path()
+            .join("Applications/SpurLab.app/Contents/MacOS/SpurLab");
+        std::fs::create_dir_all(bundle_binary.parent().unwrap()).expect("app bundle dir");
+        std::fs::write(&bundle_binary, "").expect("bundle binary");
+
+        let mut context = test_context();
+        context.home = Some(home.path().to_path_buf());
+
+        let selection =
+            notebook_launch_selection_with_context(&context).expect("auto SpurLab selection");
+
+        assert_eq!(selection.channel, NotebookChannel::Green);
+        assert_eq!(selection.path, bundle_binary);
+        assert!(selection.reason.contains("SpurLab"));
     }
 
     #[test]
