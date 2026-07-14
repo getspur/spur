@@ -31,7 +31,11 @@ SPUR_DEMO_ALLOW_PLAN_LOOP=1 \
 SPUR_DEMO_PLAN_LOOP_WAIT_S=240 \
 bash journeys/problem-plan-loop-drive.sh
 
-# Film (observe path; seed is UAT-oriented)
+# Self-run + capture cast/gif/mp4 (recommended for live seed)
+./capture-live-seed.sh
+# → out/14-live-plan-loop-seed.{cast,gif,mp4,log}
+
+# Film (observe path without live seed)
 vhs -q tapes/13-problem-plan-loop-drive.tape
 ```
 
