@@ -10,11 +10,16 @@ journey_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091
 source "$journey_dir/../lib.sh"
 
+# Used dynamically by wait_text/quit_live functions sourced above.
+# shellcheck disable=SC2034
 timeout_ms="${SHELL_USE_TIMEOUT_MS:-30000}"
 
 start_live_tui "problem-backlog-triage"
-wait_text "Lineage"
-printf '== beat: land, then triage open P0 issues ==\n'
+story_beat "HOOK" "A backlog firehose hides the one issue that needs action now."
+story_dashboard_land "The operator starts from the live control plane" 2.5
+story_beat "ORIENTATION" "Open Issues to replace the firehose with priority and status."
+story_beat "ACTION" "Find open P0 work, then open its decision context without leaving the TUI."
 story_backlog_triage
-printf '== problem-backlog-triage complete ==\n'
+story_beat "PROOF" "P0/open/ID and status/priority prove urgency when present; an empty P0 queue is explicit."
+story_resolution "Urgent work is isolated when present; otherwise the operator has a trustworthy empty queue."
 quit_live

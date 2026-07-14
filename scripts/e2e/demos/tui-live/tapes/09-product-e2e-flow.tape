@@ -17,15 +17,15 @@ Set Theme "Catppuccin Mocha"
 Set Framerate 24
 Set PlaybackSpeed 1.0
 
-# === beat 1: land — "I need a specialist without losing context" ===
+# STORY: HOOK — I need a specialist without losing the context already in flight.
 Hide
 Type "./bin/run-spur-tui-live.sh"
 Enter
 Show
-Wait+Screen@30s /Lineage/
+Wait+Screen@30s /Lineage|Type a task below/
 Sleep 3s
 
-# === beat 2: sessions picker (context continuity) ===
+# STORY: ORIENTATION — session history is the continuity layer, not disposable chrome.
 Hide
 Ctrl+K
 Show
@@ -35,6 +35,7 @@ Type "Sessions"
 Enter
 Show
 Wait+Screen@15s /Sessions/
+Wait+Screen@10s /TODAY/
 Sleep 2.5s
 # show list motion
 Hide
@@ -42,15 +43,15 @@ Down
 Down
 Show
 Sleep 2s
-# new session is the reliable attach path on busy machines
+# resume the highlighted prior session — this is the context-continuity proof
 Hide
-Type "n"
+Enter
 Show
 Sleep 2.5s
-Wait+Screen@25s /INSERT|Session|Lineage/
+Wait+Screen@25s /Session ·/
 Sleep 2.5s
 
-# === beat 3: explore adopt skill + agent (specialist supply) ===
+# STORY: ACTION — source a specialist, pass the trust gate, and apply it locally.
 Hide
 Escape
 Escape
@@ -106,7 +107,7 @@ Escape
 Show
 Sleep 2s
 
-# === beat 4: worker cascade proof (agent= model= effort=) ===
+# STORY: PROOF — the dispatch atom must expose agent=, model=, and effort= together.
 Hide
 Ctrl+K
 Show
@@ -147,4 +148,5 @@ Show
 Wait+Screen@20s /agent=/
 Wait+Screen@10s /model=/
 Wait+Screen@10s /effort=/
+# STORY: RESOLUTION — the right specialist is ready, and no send/spend occurred.
 Sleep 4.5s
