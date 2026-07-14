@@ -16,12 +16,15 @@ Set Theme "Catppuccin Mocha"
 Set Framerate 24
 Set PlaybackSpeed 1.0
 
+# STORY: HOOK — the backlog firehose hides the issue that needs action now.
 Hide
 Type "./bin/run-spur-tui-live.sh"
 Enter
 Show
-Wait+Screen@30s /Lineage/
+Wait+Screen@30s /Lineage|Type a task below/
 Sleep 2.5s
+
+# STORY: ORIENTATION — Issues replaces noise with a priority/status surface.
 Hide
 Ctrl+K
 Show
@@ -32,10 +35,16 @@ Enter
 Show
 Wait+Screen@20s /Issues/
 Sleep 2s
+
+# STORY: ACTION — isolate open P0 work, then open the issue decision context.
 Wait+Screen@10s /P0/
+Wait+Screen@10s /open/
 Sleep 3s
 Hide
 Enter
 Show
-Wait+Screen@12s /status:|priority:|bd-/
+# STORY: PROOF — identity, status, and priority explain why this item is urgent.
+Wait+Screen@12s /status: open/
+Wait+Screen@12s /priority: P0/
+# STORY: RESOLUTION — the fire is isolated without leaving the control plane.
 Sleep 4s

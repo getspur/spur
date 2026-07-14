@@ -9,13 +9,30 @@ See **[PROBLEM_STORIES.md](./PROBLEM_STORIES.md)** for the catalog.
 
 | ID | User problem | Features that solve it | Film |
 |----|--------------|------------------------|------|
+| **`problem-plan-loop-drive`** | “submit_plan loop is a black box — drive brain↔worker.” | Plan browser + lineage Agents tree + detail tabs + activity | `13-…` |
+| `product-e2e-flow` | “I need the right specialist + model/effort without losing context.” | Sessions, Explore adopt/gate/pool, `@worker` cascade | `09-…` |
 | `problem-ops-visibility` | “What’s running? How do I drive this?” | Lineage, Activity, Help, Palette | `10-…` |
 | `problem-plan-progress` | “Where is my multi-task campaign?” | Plan browser, Progress, summary | `11-…` |
 | `problem-backlog-triage` | “What’s P0 open in the backlog?” | Issues list, P0, issue detail | `12-…` |
-| `product-e2e-flow` | “I need the right specialist + model/effort.” | Sessions, Explore adopt/gate/pool, `@worker` cascade | `09-…` |
-| **`problem-plan-loop-drive`** | “submit_plan loop is a black box — drive brain↔worker.” | Plan browser + lineage Agents tree + detail tabs + activity | `13-…` |
 
 Each story is a continuous shell-use UAT path + optional VHS media.
+
+### What a viewer should learn
+
+Every value film follows **HOOK → ORIENTATION → ACTION → PROOF → RESOLUTION**.
+Shell-use prints those beats; tapes mirror them in comments and hold the same
+proof screens. Invariant anchors fail loudly. Project-dependent evidence such
+as existing BRAIN/EXEC history, campaign rows, or open P0 issues becomes a
+labeled soft beat when absent—never silent “success.”
+
+The five rows above are ordered by marketing value. Surface probes remain
+short regression harvests and do not inherit the longer story treatment.
+
+The shell-use journeys branch safely on empty projects and print labeled soft
+proof. VHS cannot branch: tape `09` requires a recent saved session, tapes `10`
+and `13` require seeded lineage, and tape `12` requires an open P0 to reach
+issue detail. Those tapes stop before a dangerous key action when their seed is
+missing; capture value films against a project with the matching history.
 
 ### Plan loop control plane (`problem-plan-loop-drive`)
 
@@ -61,10 +78,14 @@ cd scripts/e2e/demos/tui-live
 ./uat.sh --list
 
 # Problem-story UAT only (fast value check)
+bash journeys/problem-plan-loop-drive.sh
+bash journeys/product-e2e-flow.sh
 bash journeys/problem-ops-visibility.sh
 bash journeys/problem-plan-progress.sh
 bash journeys/problem-backlog-triage.sh
-bash journeys/product-e2e-flow.sh
+
+# Static narrative/safety/navigation contract
+bash story-contract.test.sh
 
 # Full UAT + VHS (all rows in journeys.conf)
 ./uat.sh --mode uat
@@ -102,7 +123,8 @@ SPUR_VHS_WIDTH=2560 SPUR_VHS_HEIGHT=1664 SPUR_VHS_FONT_SIZE=20 \
 
 ## Story pacing (slower, value-first film)
 
-Shell-use UAT stays **fast** by default. Marketing film adds dwell via:
+Shell-use UAT stays **fast** by default. Narrative labels and proof checks run
+in both modes; only the marketing dwell is gated:
 
 | Env | Effect |
 |-----|--------|
@@ -127,9 +149,10 @@ Full critique + storyboard: **[JOURNEY_STORY_REVIEW.md](./JOURNEY_STORY_REVIEW.m
 ## Safety
 
 1. Default landing: `tui --dashboard`.
-2. Problem stories are navigation / read-only unless agent-send is enabled.
-3. Agent spend only with `SPUR_DEMO_ALLOW_AGENT_SEND=1`.
-4. Never deletes project files; not wired into CI `run-all.sh`.
+2. Ops, plan, and backlog stories are observe-only. `product-e2e-flow` applies the selected Explore skill/agent to the local pool, but never sends by default.
+3. Model/worker spend requires `SPUR_DEMO_ALLOW_AGENT_SEND=1` or `SPUR_DEMO_ALLOW_PLAN_LOOP=1`.
+4. Plan mutation requires `SPUR_DEMO_ALLOW_PLAN_START=1` or the live loop gate.
+5. Never deletes project files; not wired into CI `run-all.sh`.
 
 ## Authoring a new problem story
 
@@ -137,7 +160,7 @@ Full critique + storyboard: **[JOURNEY_STORY_REVIEW.md](./JOURNEY_STORY_REVIEW.m
 2. List **features that answer it** (bond, don’t bolt-on).
 3. Implement `journeys/problem-*.sh` using lib helpers; wait on **proof** strings.
 4. Add a media tape + `journeys.conf` row + `PROBLEM_STORIES.md` + `JOURNEYS.md`.
-5. Run UAT on a real project before claiming the film.
+5. Run `bash story-contract.test.sh`, then UAT on both an empty and seeded project before claiming the film.
 
 ## Related
 

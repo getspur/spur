@@ -23,22 +23,21 @@ source "$journey_dir/../lib.sh"
 timeout_ms="${SHELL_USE_TIMEOUT_MS:-45000}"
 
 start_live_tui "product-e2e-flow"
-wait_text "Lineage"
+story_beat "HOOK" "A specialist should be configurable in seconds without throwing away session context."
+story_dashboard_land "The current work remains anchored in the live dashboard" 2.5
 expect_text "INSERT"
-printf '\n== problem: specialist dispatch without context loss ==\n'
-printf '== beat 1: land (ops surface) ==\n'
 
-printf '\n== beat 2: recover/switch sessions (context continuity) ==\n'
-switch_between_sessions
+story_beat "ORIENTATION" "Session history preserves context while the operator chooses where to work."
+resume_prior_session_context
 
-printf '\n== beat 3: explore adopt skill+agent → pool (specialist supply) ==\n'
+story_beat "ACTION" "Adopt a trusted skill and agent from Explore into the local specialist pool."
 explore_adopt_skill_and_agent
 
-printf '\n== beat 4: @worker cascade profile/model/effort (dispatch precision) ==\n'
+story_beat "PROOF" "Compose one @worker atom that names persona, model, and effort explicitly."
 compose_live_worker_cascade
 
 if [[ "${SPUR_DEMO_ALLOW_AGENT_SEND:-0}" == "1" ]]; then
-  printf '\n== beat 5: send delegated turn (opt-in spend) ==\n'
+  story_beat "ACTION" "Opt-in only: send the configured delegated turn."
   type_text " reply with only the word ok"
   expect_text "reply with only the word ok"
   sleep_ms 0.5
@@ -49,8 +48,8 @@ if [[ "${SPUR_DEMO_ALLOW_AGENT_SEND:-0}" == "1" ]]; then
   run_su wait text "ok" --timeout "$timeout_ms"
   set -e
 else
-  printf '\n== beat 5: skip send (SPUR_DEMO_ALLOW_AGENT_SEND=1 to enable) ==\n'
+  printf '+ safe default: configured specialist remains a draft; no model spend\n'
 fi
 
-printf '\n== problem resolved: specialist ready to dispatch ==\n'
+story_resolution "Context is preserved and the right specialist is ready to dispatch with explicit model/effort."
 quit_live
