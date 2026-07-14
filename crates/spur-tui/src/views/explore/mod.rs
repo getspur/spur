@@ -554,10 +554,8 @@ impl ExploreBrowserView {
                         Style::default().fg(Color::DarkGray),
                     ));
                 }
-                if self
-                    .cached_bundled_ids
-                    .iter()
-                    .any(|bundled_id| bundled_id == &entry.name)
+                if spur_core::explore::gate::check_conflict(&entry.name, &self.cached_bundled_ids)
+                    .is_some()
                 {
                     spans.push(Span::styled(
                         "  conflict",
@@ -1900,6 +1898,18 @@ mod tests {
         let repo = tempfile::tempdir().unwrap();
         configure_bundled_skill(repo.path(), "bundled-match");
         let conflict = write_skill(repo.path(), "bundled-match", "Normal skill body.");
+        save_catalog(repo.path(), vec![conflict]);
+        let view = ExploreBrowserView::new(repo.path().to_path_buf());
+
+        let text = render_catalog_to_string(&view, 80, 8);
+        assert!(text.contains("conflict"), "catalog text:\n{text}");
+    }
+
+    #[test]
+    fn render_catalog_shows_conflict_badge_for_prefix_normalized_bundled_id_match() {
+        let repo = tempfile::tempdir().unwrap();
+        configure_bundled_skill(repo.path(), "spur-way");
+        let conflict = write_skill(repo.path(), "spurpower-spur-way", "Normal skill body.");
         save_catalog(repo.path(), vec![conflict]);
         let view = ExploreBrowserView::new(repo.path().to_path_buf());
 
