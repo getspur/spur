@@ -7,6 +7,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 E2E_ROOT="$(cd "$ROOT/../.." && pwd)"
 # shellcheck disable=SC1091
 source "$E2E_ROOT/lib/spur-bin.sh"
+# shellcheck disable=SC1091
+source "$ROOT/../geometry.env"
 
 OUT="$ROOT/out"
 mkdir -p "$OUT"
@@ -27,6 +29,7 @@ allow_send="${SPUR_DEMO_ALLOW_AGENT_SEND:-0}"
 echo "SPUR_BIN:                  $SPUR_BIN"
 echo "SPUR_DEMO_PROJECT:         $SPUR_DEMO_PROJECT"
 echo "SPUR_DEMO_ALLOW_AGENT_SEND:$allow_send"
+echo "geometry:                  ${SPUR_VHS_WIDTH}x${SPUR_VHS_HEIGHT} font=${SPUR_VHS_FONT_SIZE} pty=${SPUR_DEMO_COLS}x${SPUR_DEMO_ROWS}"
 echo
 
 cd "$ROOT"
