@@ -188,3 +188,17 @@ Recommended `geometry.env` / capture defaults for story film:
 **Implement P0 only** (story pace helper + tape dwell floors on `09–13` + agg speed for story + stricter product-e2e proofs). Re-capture **problem stories + live seed** at high-res with `SPUR_DEMO_STORY_PACE=1`. Leave surface probes and UAT-fast path unchanged.
 
 Do **not** re-run full high-res “all tapes” until P0 pacing lands — otherwise you re-film the rushed story.
+
+---
+
+## 9. Implementation status (P0 landed)
+
+| Item | Status |
+|------|--------|
+| `story_dwell` / `story_hop` + `SPUR_DEMO_STORY_PACE` in `lib.sh` | Done |
+| Proof dwells wired into story helpers + lineage BRAIN/EXEC beats | Done |
+| Stricter cascade proof (`wait_text` agent=/model=/effort=) | Done |
+| Value tapes `09`–`13` proof Sleep floors | Done |
+| `SPUR_AGG_SPEED` default **1.15**; seed/render enable story pace | Done |
+| `SPUR_DEMO_STORIES_ONLY=1` on `render.sh` | Done |
+| Re-capture high-res film | **Pending** (run when ready) |
