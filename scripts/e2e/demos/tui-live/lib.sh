@@ -502,25 +502,125 @@ story_plan_loop_control_plane() {
   printf '+ loop roles: BRAIN/EXEC states visible when present\n'
 }
 
+require_plan_loop_opt_in() {
+  if [[ "${SPUR_DEMO_ALLOW_PLAN_LOOP:-0}" != "1" && "${SPUR_DEMO_ALLOW_AGENT_SEND:-0}" != "1" ]]; then
+    cat >&2 <<'EOF'
+error: live plan-loop seed is opt-in (real model + possible worker spend).
+
+  SPUR_DEMO_ALLOW_PLAN_LOOP=1 bash journeys/problem-plan-loop-drive.sh
+
+Also accepted: SPUR_DEMO_ALLOW_AGENT_SEND=1
+Optional: SPUR_DEMO_PLAN_LOOP_WAIT_S=180  (lineage EXEC wait seconds)
+EOF
+    return 2
+  fi
+}
+
+# Poll lineage for auto-loop signals (BRAIN Running / EXEC child).
+# Soft-success: never hard-fail the demo if workers are slow or brain declines.
+wait_for_lineage_loop_activity() {
+  local timeout_s="${SPUR_DEMO_PLAN_LOOP_WAIT_S:-180}"
+  local elapsed=0
+  local step=5
+
+  return_to_dashboard
+  sleep_ms 0.4
+  wait_text "Lineage"
+  enter_navigate_mode
+  printf '+ waiting up to %ss for lineage EXEC/Running (auto-loop)\n' "$timeout_s"
+
+  while [[ "$elapsed" -lt "$timeout_s" ]]; do
+    if soft_has_text "EXEC" 2500 || soft_has_text "Running" 2000; then
+      printf '+ lineage loop activity detected at t=%ss\n' "$elapsed"
+      return 0
+    fi
+    # Light activity refresh: focus log briefly
+    if soft_has_text "Activity" 800; then
+      soft_has_text "brain" 800 || true
+    fi
+    sleep "$step"
+    elapsed=$((elapsed + step))
+    printf '+ … still waiting (%ss/%ss)\n' "$elapsed" "$timeout_s"
+  done
+  printf '+ warn: no EXEC/Running within %ss — continue with history walk\n' "$timeout_s"
+  return 0
+}
+
 # Opt-in: kick brain so auto-loop may dispatch workers (real model spend).
-# Message steers brain toward a tiny plan/delegate; timeouts are long.
+# Light kick — not a full submit_plan seed.
 trigger_brain_for_loop_observation() {
   require_agent_send_opt_in
   attach_session_for_send
   sleep_ms 0.6
-  # Keep the prompt short; brain may submit_plan or delegate_to_worker.
   type_text "Demo capture: reply briefly after checking lineage — say ready"
   sleep_ms 0.4
   press_key Enter
-  # Wait for turn machinery / activity
   set +e
   run_su wait text "YOU" --timeout "${SHELL_USE_TIMEOUT_MS:-90000}"
   run_su wait text "THINK" --timeout 60000
   set -e
   printf '+ triggered brain turn for loop observation\n'
-  # Return to dashboard lineage to watch
   return_to_dashboard
   sleep_ms 0.5
+  wait_text "Lineage"
+}
+
+# Opt-in: seed a ONE-task submit_plan via brain (real model + possible worker).
+# Then wait for lineage EXEC/Running and walk brain↔worker outputs.
+#
+# Prompt is intentionally tiny and no-repo-write when possible so demos stay safe.
+trigger_submit_plan_one_task_and_observe() {
+  require_plan_loop_opt_in
+  local wait_ms="${SHELL_USE_TIMEOUT_MS:-180000}"
+
+  attach_session_for_send
+  sleep_ms 0.8
+  printf '+ seed: ask brain for single-task submit_plan (demo capture)\n'
+
+  # Keep ASCII-only; avoid paste-burst by slow-typing the critical prefix.
+  type_slow "DEMO CAPTURE ONLY. "
+  type_text "Call submit_plan with exactly ONE task. "
+  type_text "Task id: demo-echo. Worker: codex. "
+  type_text "Prompt: reply with only the word ok and make no file changes. "
+  type_text "deps: none. After submit_plan succeeds, reply with plan_id only."
+  sleep_ms 0.5
+  press_key Enter
+
+  # Brain turn begins
+  set +e
+  run_su wait text "YOU" --timeout "$wait_ms"
+  local you_rc=$?
+  run_su wait text "THINK" --timeout 90000
+  set -e
+  if [[ "$you_rc" -ne 0 ]]; then
+    printf '+ warn: YOU turn not observed — still polling lineage\n'
+  else
+    printf '+ brain turn visible (YOU) — waiting for auto-loop dispatch\n'
+  fi
+
+  # Soft: plan_id / submit language in transcript before leaving session
+  soft_has_text "plan" 8000 || true
+  soft_has_text "submit" 3000 || true
+
+  # Back to dashboard — watch lineage for worker EXEC
+  return_to_dashboard
+  sleep_ms 0.6
+  wait_for_lineage_loop_activity
+
+  # Drive tree + capture outputs (brain vs worker if present)
+  navigate_lineage_brain_and_workers
+
+  # Re-open plan browser: new campaign should appear near top when submit landed
+  open_palette_view "Plan"
+  wait_text "Plan"
+  expect_text "Progress"
+  soft_has_text "demo" 3000 || true
+  soft_has_text "awaiting" 2000 || true
+  soft_has_text "running" 2000 || true
+  soft_has_text "complete" 2000 || true
+  printf '+ plan browser re-check after seed\n'
+  press_key Escape
+  sleep_ms 0.4
   wait_text "Lineage"
 }
 
