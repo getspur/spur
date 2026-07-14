@@ -37,7 +37,18 @@ Opt-in mutation:
 | Env | Effect |
 |-----|--------|
 | `SPUR_DEMO_ALLOW_PLAN_START=1` | Press `s` Start/Resume on selected plan |
-| `SPUR_DEMO_ALLOW_AGENT_SEND=1` | Kick a brain turn then re-walk lineage |
+| `SPUR_DEMO_ALLOW_AGENT_SEND=1` | Light brain kick then re-walk lineage |
+| **`SPUR_DEMO_ALLOW_PLAN_LOOP=1`** | **Seed 1-task `submit_plan` via brain, wait for lineage EXEC/Running, re-walk brain↔worker + re-check plan browser** |
+| `SPUR_DEMO_PLAN_LOOP_WAIT_S=180` | Max seconds to wait for EXEC/Running (default 180) |
+| `SHELL_USE_TIMEOUT_MS=180000` | Brain-turn wait budget for the seed prompt |
+
+Full live seed:
+
+```bash
+SPUR_DEMO_ALLOW_PLAN_LOOP=1 \
+SPUR_DEMO_PLAN_LOOP_WAIT_S=240 \
+bash journeys/problem-plan-loop-drive.sh
+```
 
 ## Mapping from short surface probes
 

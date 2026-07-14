@@ -20,21 +20,27 @@ Each story is a continuous shell-use UAT path + optional VHS media.
 ### Plan loop control plane (`problem-plan-loop-drive`)
 
 ```bash
-# Observe plan campaigns + navigate lineage brain/worker outputs
+# Observe plan campaigns + navigate lineage brain/worker outputs (safe)
 bash journeys/problem-plan-loop-drive.sh
 
-# Also Start/Resume a plan (mutates live work)
+# Start/Resume selected plan (mutates live work)
 SPUR_DEMO_ALLOW_PLAN_START=1 bash journeys/problem-plan-loop-drive.sh
 
-# Kick brain then re-walk lineage (model spend)
-SPUR_DEMO_ALLOW_AGENT_SEND=1 bash journeys/problem-plan-loop-drive.sh
+# LIVE seed: brain 1-task submit_plan → wait EXEC → re-walk lineage (costs tokens)
+SPUR_DEMO_ALLOW_PLAN_LOOP=1 \
+SPUR_DEMO_PLAN_LOOP_WAIT_S=240 \
+bash journeys/problem-plan-loop-drive.sh
 
-# Film
+# Film (observe path; seed is UAT-oriented)
 vhs -q tapes/13-problem-plan-loop-drive.tape
 ```
 
 **Navigate-mode tip:** `Esc` leaves INSERT so `j`/`k` hit the Agents tree.
 `Tab` focuses Agents (digit `1` would re-enter Compose).
+
+**Seed prompt** (when `SPUR_DEMO_ALLOW_PLAN_LOOP=1`): asks the brain to
+`submit_plan` with exactly one `codex` task (`demo-echo`, reply `ok`, no file
+writes), then polls lineage for `EXEC`/`Running` and re-inspects plan browser.
 
 ## Surface probes (regression)
 
