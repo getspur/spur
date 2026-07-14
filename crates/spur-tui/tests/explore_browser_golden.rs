@@ -336,5 +336,9 @@ fn explore_browser_gate_renders_golden() {
     assert!(actual.contains("clean-skill"));
     assert!(actual.contains("unknown-license"));
     assert!(actual.contains("Clean"));
+    assert!(
+        actual.contains("2 cards · clean 2 · flagged 0 · conflict 0 · unresolved 0 · resolved 0/2")
+    );
+    assert!(actual.contains("Enter apply"));
     check_or_update(&actual, "explore_browser_gate.txt");
 }
