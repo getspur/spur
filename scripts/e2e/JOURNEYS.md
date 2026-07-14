@@ -1,5 +1,25 @@
 # TUI E2E Journeys
 
+Journey rows are the single story catalog for TUI e2e. Consumers:
+
+| Consumer | Path | Role |
+|---|---|---|
+| Behavioral UAT | `scripts/e2e/shell-use/journeys/` | shell-use asserts (feature acceptance) |
+| Visual goldens | `scripts/e2e/vhs/tapes/` | text golden regression |
+| Demo + Arc A UAT package | `scripts/e2e/demos/tui-journeys/` | shell-use UAT + VHS mp4/gif for demos |
+
+Arc A dual runner (first-run / `no-agents`):
+
+```bash
+cd scripts/e2e/demos/tui-journeys
+./uat.sh --list
+./uat.sh --mode uat       # shell-use only
+./uat.sh --mode capture   # VHS media → out/
+./uat.sh                  # UAT then capture
+```
+
+Do not invent demo beats outside this table — add a journey row first.
+
 | Journey | User story | Side | Fixture | Wait strings | Owning file |
 |---|---|---|---|---|---|
 | `cold-launch` | As a new user without configured agents, I see the no-agents landing state and setup hint. | behavioral | `no-agents` | `No agents configured`; `SPUR`; `spur init`; `Quit spur?` | `scripts/e2e/shell-use/journeys/cold-launch.sh` |
@@ -25,3 +45,8 @@
 | `session-picker-populated` | As a user with session history, I can open the session picker and see a seeded session from today. | behavioral | `worker-mentions` | `Type a task below`; `Go to`; `Sessions`; `TODAY`; `e2e picker seeded prompt`; `Quit spur?` | `scripts/e2e/shell-use/journeys/session-picker-populated.sh` |
 | `explore-browser-open` | As a user, I can open the explore browser from the no-agents dashboard and see the never-synced catalog banner. | behavioral | `no-agents` | `No agents configured`; `Go to`; `never synced`; `Quit spur?` | `scripts/e2e/shell-use/journeys/explore-browser-open.sh` |
 | `explore-browser-open` | As a user, opening the explore browser via the palette visually matches the never-synced browse-stage golden. | visual | `no-agents` | `No agents configured`; `Go to`; `never synced` | `scripts/e2e/vhs/tapes/explore-browser-open.tape` |
+| `cold-launch` | Arc A demo media: no-agents landing (marketing mp4/gif). | demo | `no-agents` | `No agents configured` | `scripts/e2e/demos/tui-journeys/tapes/01-cold-launch.tape` |
+| `help-overlay` | Arc A demo media: dashboard help overlay. | demo | `no-agents` | `No agents configured`; `Dashboard — Modes` | `scripts/e2e/demos/tui-journeys/tapes/02-help-overlay.tape` |
+| `palette-open` | Arc A demo media: command palette open. | demo | `no-agents` | `No agents configured`; `esc dismiss` | `scripts/e2e/demos/tui-journeys/tapes/03-palette-open.tape` |
+| `explore-browser-open` | Arc A demo media: explore browser never-synced. | demo | `no-agents` | `No agents configured`; `Go to`; `never synced` | `scripts/e2e/demos/tui-journeys/tapes/04-explore-browser-open.tape` |
+| `clean-quit` | Arc A demo media: quit confirm and clean exit. | demo | `no-agents` | `No agents configured`; `Quit spur\?`; `VHS_SPUR_EXITED status=0` | `scripts/e2e/demos/tui-journeys/tapes/05-clean-quit.tape` |
