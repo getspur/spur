@@ -1,6 +1,7 @@
 # PROBLEM: submit_plan multi-agent loop is opaque — drive it from TUI
 # Features: help, plan browser, lineage Agents j/k/Enter/detail tabs, activity
 #
+# Story arc: land → drive keys → plan campaigns → BRAIN/EXEC tree → stream → tabs → Activity
 # Navigate mode: Esc first so j/k hit Agents tree (not INSERT composer).
 # Tab focuses Agents panel ('1' would re-enter Compose).
 
@@ -18,24 +19,24 @@ Set Theme "Catppuccin Mocha"
 Set Framerate 24
 Set PlaybackSpeed 1.0
 
-# --- land ---
+# --- land: control plane, not a button ---
 Hide
 Type "./bin/run-spur-tui-live.sh"
 Enter
 Show
 Wait+Screen@30s /Lineage/
-Sleep 1.2s
+Sleep 3s
 
 # --- how do I drive this? ---
 Hide
 Type "?"
 Show
 Wait+Screen@12s /Dashboard/
-Sleep 1.5s
+Sleep 3s
 Hide
 Escape
 Show
-Sleep 600ms
+Sleep 1.5s
 
 # --- plan browser (submit_plan campaigns) ---
 Hide
@@ -47,57 +48,70 @@ Type "Plan"
 Enter
 Show
 Wait+Screen@20s /Plan/
-Sleep 800ms
+Sleep 2s
 Wait+Screen@10s /Progress/
-Sleep 1.2s
+Sleep 3.5s
 Hide
 Down
 Down
 Show
-Sleep 1.5s
+Sleep 3s
 Hide
 Escape
 Show
 Wait+Screen@15s /Lineage/
-Sleep 800ms
+Sleep 2s
 
-# --- lineage: Esc Navigate → Tab Agents → j/k → Enter → detail tabs ---
+# --- lineage: Esc Navigate → Tab Agents ---
 Hide
 Escape
-Sleep 400ms
+Sleep 600ms
 Tab
 Show
-Sleep 700ms
+Sleep 2.5s
+
+# --- hop tree (prefer BRAIN then EXEC rows when present) ---
 Hide
 Type "j"
+Show
+Sleep 2s
+Hide
 Type "j"
 Show
-Sleep 600ms
+Sleep 2s
+
+# --- open node detail: stream is the aha ---
 Hide
 Enter
 Show
 Wait+Screen@15s /stream/
-Sleep 1s
+Sleep 3.5s
+
+# --- cycle detail tabs: attempts → task/review ---
 Hide
 Type "l"
 Show
-Sleep 800ms
+Sleep 2s
 Hide
 Type "l"
 Show
-Sleep 800ms
+Sleep 2s
+
+# --- second node (brain ↔ worker hop) ---
 Hide
 Escape
-Sleep 400ms
+Sleep 800ms
 Type "k"
 Enter
 Show
-Sleep 1.2s
+Sleep 3s
+
+# --- Activity log: auto-loop visibility ---
 Hide
 Escape
-Sleep 400ms
+Sleep 600ms
 Tab
 Show
-Sleep 1.2s
+Sleep 2.5s
 Wait+Screen@10s /Activity|Lineage/
-Sleep 2s
+Sleep 3s

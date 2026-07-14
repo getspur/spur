@@ -23,13 +23,18 @@ if ! SPUR_BIN="$(spur_e2e_resolve_spur_bin)"; then
 fi
 export SPUR_BIN
 export SPUR_DEMO_PROJECT="${SPUR_DEMO_PROJECT:-$(git -C "$E2E_ROOT/../.." rev-parse --show-toplevel)}"
+# VHS films use baked-in tape Sleep; still mark story pace for any shell helpers
+export SPUR_DEMO_STORY_PACE="${SPUR_DEMO_STORY_PACE:-1}"
 
 allow_send="${SPUR_DEMO_ALLOW_AGENT_SEND:-0}"
+stories_only="${SPUR_DEMO_STORIES_ONLY:-0}"
 
 echo "SPUR_BIN:                  $SPUR_BIN"
 echo "SPUR_DEMO_PROJECT:         $SPUR_DEMO_PROJECT"
 echo "SPUR_DEMO_ALLOW_AGENT_SEND:$allow_send"
+echo "SPUR_DEMO_STORIES_ONLY:    $stories_only"
 echo "geometry:                  ${SPUR_VHS_WIDTH}x${SPUR_VHS_HEIGHT} font=${SPUR_VHS_FONT_SIZE} pty=${SPUR_DEMO_COLS}x${SPUR_DEMO_ROWS}"
+echo "story_pace:                ${SPUR_DEMO_STORY_PACE}"
 echo
 
 cd "$ROOT"
@@ -56,6 +61,17 @@ for row in "${rows[@]}"; do
     echo "SKIP ${stem} (set SPUR_DEMO_ALLOW_AGENT_SEND=1 to capture agent-send)"
     skipped=$((skipped + 1))
     continue
+  fi
+  # Marketing: value stories only (skip surface probes)
+  if [[ "$stories_only" == "1" ]]; then
+    case "$stem" in
+      09-product-e2e-flow|10-problem-ops-visibility|11-problem-plan-progress|12-problem-backlog-triage|13-problem-plan-loop-drive) ;;
+      *)
+        echo "SKIP ${stem} (SPUR_DEMO_STORIES_ONLY=1 — value stories only)"
+        skipped=$((skipped + 1))
+        continue
+        ;;
+    esac
   fi
 
   tape="tapes/${stem}.tape"
