@@ -28,9 +28,25 @@ cd scripts/e2e/demos/context-service
 # 1–2) Capture terminal media + stills
 ./render.sh
 
-# 3) Marketing film (requires higgsfield auth login)
+# 3a) Single 12s cut (one prompt, all beats compressed)
 ./generate-higgsfield.sh
+
+# 3b) Multi-shot master — 4 × 12s Seedance beats, then ffmpeg assemble (~48s)
+./generate-multibeat.sh
 ```
+
+### Multi-shot mental model (preferred for product films)
+
+Seedance hard-caps **15s per job**. For a longer storyboard, generate **one beat per clip** and assemble:
+
+| Beat | File | Story |
+|------|------|--------|
+| 1 | `out/beats/1.mp4` | PROBLEM — weak dependency context |
+| 2 | `out/beats/2.mp4` | SETUP + INDEX — package → code graph |
+| 3 | `out/beats/3.mp4` | TOOLS — `external_knowledge_context` → `external_code_read` |
+| 4 | `out/beats/4.mp4` | TWO PLANES + CTA |
+
+Master: `out/marketing-4beat-48s.mp4` (4 × 12s). Override per-beat length with `SPUR_DEMO_BEAT_DURATION=15` (max).
 
 ### Live external_* (optional)
 
