@@ -6,9 +6,10 @@ Features are not demos of chrome — they answer a concrete pain.
 | ID | Persona pain | Features exercised | Proof anchors |
 |----|--------------|--------------------|---------------|
 | `product-e2e-flow` | “I need a specialist persona + model + effort without reinventing agents.” | sessions, explore adopt/gate/pool, `@worker` cascade | `applied`, `agent=`, `model=`, `effort=` |
-| `problem-ops-visibility` | “I can’t see what’s running or how to drive multi-agent work.” | lineage, activity, help overlay, palette | `Lineage`, `Activity`, `Dashboard —`, `Go to` |
+| `problem-ops-visibility` | “I can’t see what’s running or how to drive multi-agent work.” | lineage, activity, help, palette, **Agents tree focus + detail tabs** | `Lineage`, `Activity`, `[Agents]`, `stream`/`artifacts` |
 | `problem-plan-progress` | “Where is my multi-task campaign? What’s awaiting review?” | plan browser, summary pane, navigate plans | `Plans`, `Progress`, `awaiting`/`complete`, `Work item` |
 | `problem-backlog-triage` | “What’s on fire in the backlog?” | issue browser, P0 list, issue detail | `Issues`, `P0`, `open`, `bd-` |
+| **`problem-plan-loop-drive`** | “submit_plan auto-loop is a black box — brain↔worker outputs, how do I drive it?” | plan browser (campaigns), lineage Agents j/k/Enter, detail tabs (stream/attempts/task/review), activity log; optional brain kick / plan start | `Plan`/`Progress`, `[Agents]`, `stream`, `attempts`, `Activity`, `BRAIN`/`EXEC` |
 
 ## Contract
 
@@ -17,6 +18,26 @@ Features are not demos of chrome — they answer a concrete pain.
 3. **Prove with wait strings** that the user saw the answer (not just that a view opened).
 4. **Safe by default** — no agent spend unless `SPUR_DEMO_ALLOW_AGENT_SEND=1`.
 5. **Reuse lib helpers** — no fork of isolation/fixtures.
+
+### submit_plan / auto-loop note
+
+`submit_plan` is invoked by the **brain** (MCP tool), not a TUI button. The
+operator journey is the **control plane** over the auto loop:
+
+```text
+Brain submit_plan → orchestrator dispatches workers → EXEC rows on lineage
+  → worker results / review → brain continuation (auto loop)
+```
+
+TUI proof points: Plan browser progress · lineage BRAIN/EXEC tree · detail
+tabs (stream/artifacts/attempts/task/review) · Activity events.
+
+Opt-in mutation:
+
+| Env | Effect |
+|-----|--------|
+| `SPUR_DEMO_ALLOW_PLAN_START=1` | Press `s` Start/Resume on selected plan |
+| `SPUR_DEMO_ALLOW_AGENT_SEND=1` | Kick a brain turn then re-walk lineage |
 
 ## Mapping from short surface probes
 
