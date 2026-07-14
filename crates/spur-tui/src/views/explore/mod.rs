@@ -342,7 +342,11 @@ impl ExploreBrowserView {
     }
 
     fn handle_gate_key(&mut self, key: KeyEvent) -> Option<Action> {
-        match self.gate.handle_key(key) {
+        let action = self.gate.handle_key(key);
+        if !matches!(action, gate::GateAction::Error(_)) {
+            self.load_error = None;
+        }
+        match action {
             gate::GateAction::None => {}
             gate::GateAction::Back => {
                 self.stage = ExploreStage::Browse;
@@ -370,12 +374,13 @@ impl ExploreBrowserView {
             &self.cached_bundled_ids,
         ) {
             Ok(outcome) => {
-                self.apply_summary = Some(format!(
+                let summary = format!(
                     "applied {} of {} cards / {} unresolved skipped",
                     selections.len(),
                     total_cards,
                     unresolved_skipped
-                ));
+                );
+                self.apply_summary = Some(summary.clone());
                 self.apply_log = Some(outcome);
                 let loaded = load_state(&self.repo_root);
                 self.manifest = loaded.manifest;
@@ -384,7 +389,7 @@ impl ExploreBrowserView {
                 self.stage = ExploreStage::Browse;
                 self.gate = gate::GateState::default();
                 self.starred.clear();
-                self.load_error = None;
+                self.load_error = Some(summary);
             }
             Err(error) => {
                 self.load_error = Some(format!("apply failed: {error:#}"));
@@ -740,9 +745,7 @@ impl ExploreBrowserView {
 
     fn render_footer(&self, frame: &mut Frame, area: Rect) {
         let text = match self.stage {
-            ExploreStage::Gate => {
-                "j/k cards  a accept  o override  b replace  s skip  c all-clean  Shift+A apply  Esc browse"
-            }
+            ExploreStage::Gate => self.gate.footer_hint(),
             ExploreStage::Manage => "j/k move  l lens  x remove  m browse  r reload  Esc browse",
             ExploreStage::Browse if self.filter_input_active => {
                 "type filter  Backspace edit  Enter keep  Esc clear"
@@ -1461,7 +1464,15 @@ mod tests {
 
         star_selected(&mut view);
         open_gate(&mut view);
+        let text = render_to_string(&mut view);
+        assert!(text.contains("o override"), "footer text:\n{text}");
+        assert!(!text.contains("a accept"), "footer text:\n{text}");
+
         assert!(view.handle_key(key(KeyCode::Char('o'))).is_none());
+        let text = render_to_string(&mut view);
+        assert!(text.contains("Enter save override"), "footer text:\n{text}");
+        assert!(text.contains("Esc cancel"), "footer text:\n{text}");
+
         assert!(view.handle_key(key(KeyCode::Enter)).is_none());
 
         assert_eq!(view.stage, ExploreStage::Gate);
@@ -1469,7 +1480,19 @@ mod tests {
         assert!(view
             .load_error
             .as_deref()
-            .is_some_and(|message| message.contains("justification")));
+            .is_some_and(|message| message.contains("type a reason, then press Enter")));
+
+        for ch in "reviewed locally".chars() {
+            assert!(view.handle_key(key(KeyCode::Char(ch))).is_none());
+        }
+        assert!(view.handle_key(key(KeyCode::Enter)).is_none());
+        assert_eq!(
+            view.gate.cards[0].resolution,
+            Some(Resolution::Override {
+                justification: "reviewed locally".to_string()
+            })
+        );
+        assert!(view.load_error.is_none());
     }
 
     #[test]
@@ -1544,6 +1567,28 @@ mod tests {
             .items
             .iter()
             .any(|item| item.name == "clean-skill"));
+    }
+
+    #[test]
+    fn enter_applies_resolved_cards_and_surfaces_header_notice() {
+        let repo = tempfile::tempdir().unwrap();
+        let clean = write_skill(repo.path(), "clean-skill", "Normal skill body.");
+        save_catalog(repo.path(), vec![clean]);
+        let mut view = ExploreBrowserView::new(repo.path().to_path_buf());
+
+        star_selected(&mut view);
+        open_gate(&mut view);
+        assert!(view.handle_key(key(KeyCode::Char('a'))).is_none());
+        assert!(view.handle_key(key(KeyCode::Enter)).is_none());
+
+        assert_eq!(view.stage, ExploreStage::Browse);
+        assert!(view.apply_log.is_some());
+        let text = render_to_string(&mut view);
+        let header = text.lines().take(3).collect::<Vec<_>>().join("\n");
+        assert!(
+            header.contains("notice: applied 1 of 1 cards / 0 unresolved skipped"),
+            "header text:\n{header}"
+        );
     }
 
     #[test]
@@ -1903,6 +1948,24 @@ mod tests {
     }
 
     #[test]
+    fn enter_with_nothing_resolved_sets_load_error() {
+        let repo = tempfile::tempdir().unwrap();
+        let skill = write_skill(repo.path(), "skill-a", "body");
+        save_catalog(repo.path(), vec![skill]);
+        let mut view = ExploreBrowserView::new(repo.path().to_path_buf());
+        star_selected(&mut view);
+        open_gate(&mut view);
+
+        assert!(view.handle_key(key(KeyCode::Enter)).is_none());
+
+        assert_eq!(view.stage, ExploreStage::Gate);
+        assert_eq!(
+            view.load_error.as_deref(),
+            Some("no resolved gate cards to apply")
+        );
+    }
+
+    #[test]
     fn preview_body_lines_reads_cache_body_when_not_vendored() {
         let repo = tempfile::tempdir().unwrap();
         let entry = write_skill(repo.path(), "skill-a", "cached skill body");
@@ -2218,6 +2281,7 @@ mod tests {
         assert!(text.contains("Gate Cards"));
         assert!(text.contains("a accept"), "footer text:\n{text}");
         assert!(text.contains("c all-clean"), "footer text:\n{text}");
+        assert!(text.contains("Enter apply"), "footer text:\n{text}");
         assert!(text.contains("Shift+A apply"), "footer text:\n{text}");
 
         assert!(view.handle_key(key(KeyCode::Esc)).is_none());

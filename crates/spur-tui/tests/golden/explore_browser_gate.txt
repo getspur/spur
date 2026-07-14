@@ -1,6 +1,8 @@
 Explore  [Skills]  Agents   Gate  ★ 2 selected
 never synced
 ┌Gate Cards────────────────────────────────────────────────────────────────────────────────────────┐
+│2 cards · clean 2 · flagged 0 · conflict 0 · unresolved 0 · resolved 0/2                          │
+│                                                                                                  │
 │> clean-skill                                                                                     │
 │pin abcdef1  license MIT                                                                          │
 │verdict Clean                                                                                     │
@@ -24,7 +26,5 @@ never synced
 │                                                                                                  │
 │                                                                                                  │
 │                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
 └──────────────────────────────────────────────────────────────────────────────────────────────────┘
-j/k cards  a accept  o override  b replace  s skip  c all-clean  Shift+A apply  Esc browse
+j/k cards  a accept  s skip  c all-clean  Enter apply  Shift+A apply  Esc browse
