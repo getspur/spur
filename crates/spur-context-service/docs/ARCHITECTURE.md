@@ -11,7 +11,8 @@ split between an **ingest plane** (write path, Postgres-backed) and a
 as implemented across `crates/spur-context-service` and
 `infra/spur-context-service`.
 
-> Companion specs:
+> Companion docs:
+> - Product & usage (business value, login, `external_*` tools): [PRODUCT_AND_USAGE.md](./PRODUCT_AND_USAGE.md)
 > - Design: `docs/superpowers/specs/2026-06-28-spur-context-medallion-design.md`
 > - Infra/runtime details: `infra/spur-context-service/README.md`
 
