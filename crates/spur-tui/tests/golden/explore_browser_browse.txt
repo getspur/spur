@@ -2,18 +2,18 @@ Explore  [Skills]  Agents   Browse
 never synced
 ┌Sources───────────────┐┌Catalog · Skills────────────────────┐┌Preview─────────────────────────────┐
 │catalog: 2 items      ││> review-helper  in pool  local     ││review-helper                       │
-│pool: 1 items         ││Tightens code review with focused   ││Tightens code review with focused   │
-│                      ││risk checks.                        ││risk checks.                        │
-│getspur/ecosystem     ││                                    ││                                    │
+│pool: 1 items         ││scan clean                          ││Tightens code review with focused   │
+│                      ││Tightens code review with focused   ││risk checks.                        │
+│getspur/ecosystem     ││risk checks.                        ││                                    │
 │[local]  2            ││                                    ││source: getspur/ecosystem           │
 │                      ││                                    ││pin: 0123456                        │
 │                      ││                                    ││license: MIT                        │
+│                      ││                                    ││scan clean                          │
 │                      ││                                    ││path: skills/review-helper          │
 │                      ││                                    ││                                    │
 │                      ││                                    ││# Review Helper                     │
 │                      ││                                    ││Use focused risk checks before      │
 │                      ││                                    ││approving code.                     │
-│                      ││                                    ││                                    │
 │                      ││                                    ││                                    │
 │                      ││                                    ││                                    │
 │                      ││                                    ││                                    │
