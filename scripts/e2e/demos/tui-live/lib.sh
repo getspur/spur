@@ -7,9 +7,12 @@ e2e_root="$(cd "$demo_dir/../.." && pwd)"
 shell_use_dir="$e2e_root/shell-use"
 # shellcheck disable=SC1091
 source "$e2e_root/lib/spur-bin.sh"
+# Capture geometry: Mac Air M2 / wide iTerm defaults (overridable via env).
+# shellcheck disable=SC1091
+source "$demo_dir/../geometry.env"
 
-cols="${SPUR_DEMO_COLS:-120}"
-rows="${SPUR_DEMO_ROWS:-36}"
+cols="${SPUR_DEMO_COLS}"
+rows="${SPUR_DEMO_ROWS}"
 timeout_ms="${SHELL_USE_TIMEOUT_MS:-15000}"
 shell_use_bin="${SHELL_USE_BIN:-"$("$shell_use_dir/install.sh")"}"
 

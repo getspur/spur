@@ -5,10 +5,10 @@ Output out/04-explore-browser-open.mp4
 Output out/04-explore-browser-open.gif
 
 Set Shell bash
-Set FontSize 16
-Set Width 1280
-Set Height 720
-Set Padding 12
+Set FontSize 18
+Set Width 2560
+Set Height 1600
+Set Padding 10
 Set Margin 0
 Set TypingSpeed 30ms
 Set Theme "Catppuccin Mocha"
