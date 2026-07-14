@@ -1,5 +1,6 @@
 # PROBLEM: backlog firehose — what is P0 open work?
 # Features: issues list + detail
+# Story pacing: list → P0 → detail hold
 
 Output out/12-problem-backlog-triage.mp4
 Output out/12-problem-backlog-triage.gif
@@ -20,7 +21,7 @@ Type "./bin/run-spur-tui-live.sh"
 Enter
 Show
 Wait+Screen@30s /Lineage/
-Sleep 1s
+Sleep 2.5s
 Hide
 Ctrl+K
 Show
@@ -30,11 +31,11 @@ Type "Issues"
 Enter
 Show
 Wait+Screen@20s /Issues/
-Sleep 1s
+Sleep 2s
 Wait+Screen@10s /P0/
-Sleep 1.5s
+Sleep 3s
 Hide
 Enter
 Show
 Wait+Screen@12s /status:|priority:|bd-/
-Sleep 2.5s
+Sleep 4s

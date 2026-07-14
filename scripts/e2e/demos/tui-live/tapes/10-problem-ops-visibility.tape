@@ -1,5 +1,6 @@
 # PROBLEM: multi-agent work is opaque / keybindings unknown
 # Features: lineage, help, palette, Agents tree + detail tabs
+# Story pacing: land → help → palette → Agents → stream (proof dwells ≥2–3.5s)
 
 Output out/10-problem-ops-visibility.mp4
 Output out/10-problem-ops-visibility.gif
@@ -15,55 +16,59 @@ Set Theme "Catppuccin Mocha"
 Set Framerate 24
 Set PlaybackSpeed 1.0
 
+# === land: what's running? ===
 Hide
 Type "./bin/run-spur-tui-live.sh"
 Enter
 Show
 Wait+Screen@30s /Lineage/
-Sleep 1.2s
-# Help
+Sleep 3s
+
+# === help: how do I drive this? ===
 Hide
 Type "?"
 Show
 Wait+Screen@15s /Dashboard/
-Sleep 1.5s
+Sleep 3s
 Hide
 Escape
 Show
-Sleep 600ms
-# Palette
+Sleep 1.5s
+
+# === palette: one hub ===
 Hide
 Ctrl+K
 Show
 Wait+Screen@12s /Go to/
-Sleep 1.2s
+Sleep 2.5s
 Hide
 Escape
 Show
 Wait+Screen@12s /Lineage/
-Sleep 600ms
-# Navigate mode → Agents → focus node → detail
+Sleep 2s
+
+# === Navigate → Agents → tree hop → stream detail ===
 Hide
 Escape
-Sleep 350ms
+Sleep 600ms
 Tab
 Show
-Sleep 700ms
+Sleep 2s
 Hide
 Type "j"
 Type "j"
 Show
-Sleep 500ms
+Sleep 2s
 Hide
 Enter
 Show
 Wait+Screen@12s /stream/
-Sleep 1s
+Sleep 3.5s
 Hide
 Type "l"
 Show
-Sleep 800ms
+Sleep 2s
 Hide
 Type "l"
 Show
-Sleep 1.2s
+Sleep 2.5s
