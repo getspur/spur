@@ -96,6 +96,126 @@ type_text() {
   run_su type -- "$1"
 }
 
+sleep_ms() {
+  # Portable fractional sleep (seconds as float string ok for sleep).
+  sleep "${1:-0.5}"
+}
+
+require_agent_send_opt_in() {
+  if [[ "${SPUR_DEMO_ALLOW_AGENT_SEND:-0}" != "1" ]]; then
+    cat >&2 <<'EOF'
+error: agent-send journey is opt-in (real model spend).
+
+  SPUR_DEMO_ALLOW_AGENT_SEND=1 ./uat.sh --mode uat
+  # or only the send journey:
+  SPUR_DEMO_ALLOW_AGENT_SEND=1 bash journeys/agent-send.sh
+EOF
+    return 2
+  fi
+}
+
+# Open sessions picker and move to a later TODAY row.
+# First rows are often "held" by other TUI windows (attach conflict dialog).
+open_sessions_picker() {
+  press_key s
+  wait_text "Sessions"
+}
+
+# Returns 0 if screen shows attached session detail.
+_live_wait_session_detail() {
+  local ms="${1:-6000}"
+  set +e
+  run_su wait text "Session ·" --timeout "$ms"
+  local rc=$?
+  set -e
+  return "$rc"
+}
+
+_live_on_attach_conflict() {
+  set +e
+  run_su expect text "another window" --no-strict --timeout 1500
+  local rc=$?
+  set -e
+  return "$rc"
+}
+
+resume_session_skip_held() {
+  # Walk the sessions list until attach succeeds. Top rows are often held by
+  # other TUI windows ("Session attached in another window").
+  open_sessions_picker
+  sleep_ms 0.6
+  # Start from the 3rd TODAY row (skip the two most-recent, often held/busy).
+  press_key Down
+  sleep_ms 0.25
+  press_key Down
+  sleep_ms 0.25
+
+  local attempt=0
+  while [[ "$attempt" -lt 8 ]]; do
+    attempt=$((attempt + 1))
+    printf '+ resume attempt %s\n' "$attempt"
+    press_key Enter
+    sleep_ms 0.8
+    if _live_wait_session_detail 6000; then
+      expect_text "INSERT"
+      return 0
+    fi
+
+    if _live_on_attach_conflict; then
+      printf '+ attach conflict — back to picker (p)\n'
+      # Dialog accepts lowercase or uppercase; use type for reliability.
+      type_text "p"
+      sleep_ms 0.55
+      set +e
+      run_su wait text "Sessions" --timeout 5000
+      set -e
+    fi
+    press_key Down
+    sleep_ms 0.35
+  done
+
+  printf 'error: could not attach a free session after several attempts\n' >&2
+  return 1
+}
+
+# For agent-send: attach any free session, or fall back to [N] new session
+# so a real model turn can still be captured when the list is fully held.
+attach_session_for_send() {
+  if resume_session_skip_held; then
+    return 0
+  fi
+  printf '+ resume exhausted — open new session for send (N)\n'
+  # May still be on conflict dialog or picker
+  set +e
+  run_su expect text "another window" --no-strict --timeout 800
+  local on_conflict=$?
+  set -e
+  if [[ "$on_conflict" -eq 0 ]]; then
+    type_text "n"
+  else
+    open_sessions_picker
+    sleep_ms 0.4
+    # First row under Search is often "+ Start new session"
+    press_key Enter
+  fi
+  sleep_ms 1
+  if ! _live_wait_session_detail 15000; then
+    wait_text "INSERT"
+  fi
+  expect_text "INSERT"
+}
+
+open_explore_browser() {
+  press_key Ctrl+K
+  wait_text "Go to"
+  type_text "Explore"
+  sleep_ms 0.4
+  press_key Enter
+  wait_text "Explore"
+  expect_text "synced"
+  expect_text "catalog"
+}
+
 quit_live() {
   # Live projects with attached brains use a stronger quit dialog than empty fixtures.
   press_key Ctrl+C
