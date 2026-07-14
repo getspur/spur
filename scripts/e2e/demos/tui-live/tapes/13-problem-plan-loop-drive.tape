@@ -8,10 +8,10 @@ Output out/13-problem-plan-loop-drive.mp4
 Output out/13-problem-plan-loop-drive.gif
 
 Set Shell bash
-Set FontSize 14
-Set Width 1440
-Set Height 860
-Set Padding 8
+Set FontSize 18
+Set Width 2560
+Set Height 1600
+Set Padding 10
 Set Margin 0
 Set TypingSpeed 40ms
 Set Theme "Catppuccin Mocha"

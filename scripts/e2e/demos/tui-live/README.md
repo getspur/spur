@@ -76,6 +76,29 @@ SPUR_DEMO_ALLOW_AGENT_SEND=1 bash journeys/product-e2e-flow.sh
 
 Media: `out/*.mp4` + `out/*.gif` (gitignored).
 
+## Capture geometry (Mac Air M2 / wide iTerm)
+
+Defaults live in `scripts/e2e/demos/geometry.env` and match a **Liquid Retina
+2560×1664** Air with a wide terminal (~200×50), not 720p:
+
+| Setting | Default | Override |
+|---------|---------|----------|
+| VHS canvas | **2560×1600** | `SPUR_VHS_WIDTH` / `SPUR_VHS_HEIGHT` |
+| VHS font | **18** | `SPUR_VHS_FONT_SIZE` |
+| shell-use PTY | **200×50** | `SPUR_DEMO_COLS` / `SPUR_DEMO_ROWS` |
+| agg cast size | same as PTY | `SPUR_AGG_COLS` / `SPUR_AGG_ROWS` |
+| mp4 preview width | 1920 | `SPUR_CAPTURE_PREVIEW_WIDTH` |
+
+```bash
+# Re-stamp all demo tapes after editing geometry.env
+scripts/e2e/demos/apply-geometry.sh
+
+# One-off taller/sharper capture
+SPUR_VHS_WIDTH=2560 SPUR_VHS_HEIGHT=1664 SPUR_VHS_FONT_SIZE=20 \
+  SPUR_DEMO_COLS=210 SPUR_DEMO_ROWS=52 \
+  ./render.sh
+```
+
 ## Safety
 
 1. Default landing: `tui --dashboard`.

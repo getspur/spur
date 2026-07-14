@@ -68,8 +68,11 @@ cd scripts/e2e/demos/tui-journeys
 - **Not** wired into `scripts/e2e/run-all.sh` / CI visual goldens by default.
   Media is heavy and intentionally opt-in.
 - Golden text snapshots stay in `scripts/e2e/vhs/` (`run-vhs-suite.sh`).
-- Demo tapes may use marketing geometry/theme (1280×720, Catppuccin) while
-  keeping the same wait strings as the journey owners.
+- Demo tapes share capture geometry with `tui-live` via
+  `scripts/e2e/demos/geometry.env` (Mac Air M2 / wide iTerm defaults:
+  **2560×1600**, FontSize **18**, shell-use PTY **200×50** — not 720p).
+  Re-stamp with `../apply-geometry.sh` after editing geometry.env.
+  Theme may still be Catppuccin while wait strings match the journey owners.
 - When a golden tape exists, treat it as the key-sequence source of truth;
   when only shell-use exists (`palette-open`), the journey script is the source.
 

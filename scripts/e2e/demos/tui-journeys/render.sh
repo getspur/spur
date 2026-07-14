@@ -8,6 +8,8 @@ E2E_ROOT="$(cd "$ROOT/../.." && pwd)"
 REPO_ROOT="$(cd "$E2E_ROOT/../.." && pwd)"
 # shellcheck disable=SC1091
 source "$E2E_ROOT/lib/spur-bin.sh"
+# shellcheck disable=SC1091
+source "$ROOT/../geometry.env"
 
 OUT="$ROOT/out"
 mkdir -p "$OUT"
@@ -26,6 +28,8 @@ if ! SPUR_BIN="$(spur_e2e_resolve_spur_bin)"; then
   exit 1
 fi
 export SPUR_BIN
+
+echo "geometry: ${SPUR_VHS_WIDTH}x${SPUR_VHS_HEIGHT} font=${SPUR_VHS_FONT_SIZE} pty=${SPUR_DEMO_COLS}x${SPUR_DEMO_ROWS}"
 
 cd "$ROOT"
 
