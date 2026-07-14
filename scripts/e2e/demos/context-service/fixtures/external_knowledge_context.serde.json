@@ -1,0 +1,88 @@
+{
+  "answerable": true,
+  "confidence": "high",
+  "graph_content_hash": "demo-serde-1.0.197",
+  "candidates": {
+    "total": 12,
+    "returned_primary": 3,
+    "returned_supporting_docs": 1,
+    "total_code": 9,
+    "total_docs": 3
+  },
+  "primary_evidence": [
+    {
+      "kind": "symbol",
+      "title": "Deserialize",
+      "file": "serde_core/src/de/mod.rs",
+      "stable_symbol_id": "demo-deserialize-trait",
+      "selector": "pkg:serde@1.0.197::Deserialize",
+      "uri": "pkg-symbol://registry:crates-io/serde/1.0.197/demo-deserialize-trait",
+      "symbol_kind": "trait",
+      "score": 0.94,
+      "signal": "bm25+vector",
+      "neighbor_kind": null,
+      "edge_bind_method": null,
+      "grounding": "hybrid",
+      "why_relevant": "Core trait for turning data into Rust values; entry point for package orientation.",
+      "next": [
+        { "tool": "external_code_read", "selector": "pkg:serde@1.0.197::Deserialize" },
+        { "tool": "external_code_callers", "selector": "pkg:serde@1.0.197::Deserialize" },
+        { "tool": "external_code_callees", "selector": "pkg:serde@1.0.197::Deserialize" }
+      ]
+    },
+    {
+      "kind": "symbol",
+      "title": "deserialize",
+      "file": "serde_core/src/de/mod.rs",
+      "stable_symbol_id": "demo-deserialize-fn",
+      "selector": "pkg:serde@1.0.197::Deserialize::deserialize",
+      "uri": "pkg-symbol://registry:crates-io/serde/1.0.197/demo-deserialize-fn",
+      "symbol_kind": "method",
+      "score": 0.89,
+      "signal": "bm25",
+      "neighbor_kind": null,
+      "edge_bind_method": null,
+      "grounding": "lexical",
+      "why_relevant": "Trait method that drives visitor-based decoding for a concrete type.",
+      "next": [
+        { "tool": "external_code_read", "selector": "pkg:serde@1.0.197::Deserialize::deserialize" }
+      ]
+    },
+    {
+      "kind": "symbol",
+      "title": "Deserializer",
+      "file": "serde_core/src/de/mod.rs",
+      "stable_symbol_id": "demo-deserializer-trait",
+      "selector": "pkg:serde@1.0.197::Deserializer",
+      "uri": "pkg-symbol://registry:crates-io/serde/1.0.197/demo-deserializer-trait",
+      "symbol_kind": "trait",
+      "score": 0.81,
+      "signal": "bm25",
+      "neighbor_kind": null,
+      "edge_bind_method": null,
+      "grounding": "lexical",
+      "why_relevant": "Format-facing trait implemented by JSON, TOML, and other data formats.",
+      "next": [
+        { "tool": "external_code_read", "selector": "pkg:serde@1.0.197::Deserializer" }
+      ]
+    }
+  ],
+  "supporting_docs": [
+    {
+      "kind": "doc",
+      "title": "Deserializing data",
+      "file": "README.md",
+      "stable_symbol_id": "demo-readme-de",
+      "selector": null,
+      "uri": "pkg-doc://registry:crates-io/serde/1.0.197/README.md#deserializing",
+      "symbol_kind": null,
+      "score": 0.72,
+      "signal": "docs",
+      "neighbor_kind": null,
+      "edge_bind_method": null,
+      "grounding": "docs",
+      "why_relevant": "Package overview of how Deserialize maps external data into Rust types.",
+      "next": []
+    }
+  ]
+}
