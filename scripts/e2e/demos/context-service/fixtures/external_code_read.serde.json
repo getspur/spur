@@ -1,0 +1,9 @@
+{
+  "selector": "pkg:serde@1.0.197::Deserialize",
+  "qualified_name": "serde::Deserialize",
+  "symbol_kind": "trait",
+  "file": "serde_core/src/de/mod.rs",
+  "start_line": 540,
+  "end_line": 568,
+  "source": "/// A data structure that can be deserialized from any data format supported\n/// by Serde.\n///\n/// Serde provides `Deserialize` implementations for many Rust primitive and\n/// standard library types. The only other thing you might need is a format\n/// that can deserialize from your data source.\n///\n/// # Implementing Deserialize\n///\n/// Types that own their data can implement `Deserialize` by hand or via\n/// `#[derive(Deserialize)]`.\npub trait Deserialize<'de>: Sized {\n    /// Deserialize this value from the given Serde deserializer.\n    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>\n    where\n        D: Deserializer<'de>;\n\n    /// Deserializes a value into `self` from the given Deserializer.\n    ///\n    /// The default implementation just calls [`Deserialize::deserialize`] and\n    /// then assigns to `self`.\n    #[inline]\n    fn deserialize_in_place<D>(\n        deserializer: D,\n        place: &mut Self,\n    ) -> Result<(), D::Error>\n    where\n        D: Deserializer<'de>,\n    {\n        *place = Deserialize::deserialize(deserializer)?;\n        Ok(())\n    }\n}\n"
+}
