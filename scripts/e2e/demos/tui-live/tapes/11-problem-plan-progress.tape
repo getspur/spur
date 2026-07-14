@@ -16,12 +16,15 @@ Set Theme "Catppuccin Mocha"
 Set Framerate 24
 Set PlaybackSpeed 1.0
 
+# STORY: HOOK — a multi-task campaign is unmanageable when its state is scattered.
 Hide
 Type "./bin/run-spur-tui-live.sh"
 Enter
 Show
-Wait+Screen@30s /Lineage/
+Wait+Screen@30s /Lineage|Type a task below/
 Sleep 2.5s
+
+# STORY: ORIENTATION — Plans gathers campaign history into one control surface.
 Hide
 Ctrl+K
 Show
@@ -31,11 +34,16 @@ Type "Plan"
 Enter
 Show
 Wait+Screen@20s /Plan/
-Sleep 2s
-Wait+Screen@10s /Progress/
-Sleep 4s
-# Nudge selection for summary
+Sleep 2.5s
+
+# STORY: ACTION — move selection to connect a campaign row to its summary.
 Hide
 Down
 Show
-Sleep 3.5s
+Sleep 2.5s
+
+# STORY: PROOF — Progress plus Work item/empty state makes the next decision legible.
+Wait+Screen@10s /Progress|No plans found/
+Wait+Screen@10s /Work [Ii]tem|No plans found|No plans match/
+# STORY: RESOLUTION — campaign state is now one readable decision surface.
+Sleep 4s

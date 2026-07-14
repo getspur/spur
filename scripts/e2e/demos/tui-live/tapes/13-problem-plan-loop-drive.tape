@@ -19,7 +19,7 @@ Set Theme "Catppuccin Mocha"
 Set Framerate 24
 Set PlaybackSpeed 1.0
 
-# --- land: control plane, not a button ---
+# STORY: HOOK — submit_plan should not become an invisible brain↔worker black box.
 Hide
 Type "./bin/run-spur-tui-live.sh"
 Enter
@@ -27,7 +27,7 @@ Show
 Wait+Screen@30s /Lineage/
 Sleep 3s
 
-# --- how do I drive this? ---
+# STORY: ORIENTATION — learn the controls, then find campaigns created by the brain.
 Hide
 Type "?"
 Show
@@ -38,7 +38,7 @@ Escape
 Show
 Sleep 1.5s
 
-# --- plan browser (submit_plan campaigns) ---
+# STORY: ACTION — inspect plan state, then trace BRAIN → EXEC through lineage.
 Hide
 Ctrl+K
 Show
@@ -49,8 +49,9 @@ Enter
 Show
 Wait+Screen@20s /Plan/
 Sleep 2s
-Wait+Screen@10s /Progress/
+Wait+Screen@10s /Progress|No plans found/
 Sleep 3.5s
+Wait+Screen@10s /Work [Ii]tem|No plans found|No plans match/
 Hide
 Down
 Down
@@ -70,7 +71,8 @@ Tab
 Show
 Sleep 2.5s
 
-# --- hop tree (prefer BRAIN then EXEC rows when present) ---
+# STORY: PROOF — BRAIN owns the loop; EXEC/Running exposes delegated work.
+Wait+Screen@10s /BRAIN|brain/
 Hide
 Type "j"
 Show
@@ -78,6 +80,7 @@ Sleep 2s
 Hide
 Type "j"
 Show
+Wait+Screen@10s /EXEC|Running|Succeeded|Cancelled/
 Sleep 2s
 
 # --- open node detail: stream is the aha ---
@@ -91,10 +94,12 @@ Sleep 3.5s
 Hide
 Type "l"
 Show
+Wait+Screen@10s /attempts|artifacts/
 Sleep 2s
 Hide
 Type "l"
 Show
+Wait+Screen@10s /task|review/
 Sleep 2s
 
 # --- second node (brain ↔ worker hop) ---
@@ -106,12 +111,12 @@ Enter
 Show
 Sleep 3s
 
-# --- Activity log: auto-loop visibility ---
+# STORY: RESOLUTION — Activity closes the trace: campaign, roles, output, review, timeline.
 Hide
 Escape
 Sleep 600ms
 Tab
 Show
 Sleep 2.5s
-Wait+Screen@10s /Activity|Lineage/
+Wait+Screen@10s /Activity/
 Sleep 3s
