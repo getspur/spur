@@ -1,5 +1,6 @@
 # PROBLEM: multi-task campaign progress is opaque
 # Features: plan browser + progress/summary
+# Story pacing: hold Progress / Work item as the aha
 
 Output out/11-problem-plan-progress.mp4
 Output out/11-problem-plan-progress.gif
@@ -20,7 +21,7 @@ Type "./bin/run-spur-tui-live.sh"
 Enter
 Show
 Wait+Screen@30s /Lineage/
-Sleep 1s
+Sleep 2.5s
 Hide
 Ctrl+K
 Show
@@ -30,11 +31,11 @@ Type "Plan"
 Enter
 Show
 Wait+Screen@20s /Plan/
-Sleep 1s
+Sleep 2s
 Wait+Screen@10s /Progress/
-Sleep 2.5s
+Sleep 4s
 # Nudge selection for summary
 Hide
 Down
 Show
-Sleep 1.5s
+Sleep 3.5s

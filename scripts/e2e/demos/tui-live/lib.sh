@@ -104,6 +104,35 @@ sleep_ms() {
   sleep "${1:-0.5}"
 }
 
+# Marketing film dwell — OFF by default so shell-use UAT stays fast.
+# Enable for capture: SPUR_DEMO_STORY_PACE=1 (render.sh / capture-live-seed set this).
+# Optional scale: SPUR_DEMO_DWELL_SCALE=1.2
+story_pace_on() {
+  [[ "${SPUR_DEMO_STORY_PACE:-0}" == "1" ]]
+}
+
+story_dwell() {
+  # Args: seconds (float, default 2.5). No-op unless SPUR_DEMO_STORY_PACE=1.
+  if ! story_pace_on; then
+    return 0
+  fi
+  local base="${1:-2.5}"
+  local scale="${SPUR_DEMO_DWELL_SCALE:-1}"
+  local secs
+  secs="$(awk -v b="$base" -v s="$scale" 'BEGIN { printf "%.2f", (b + 0) * (s + 0) }')"
+  printf '+ story_dwell %ss\n' "$secs"
+  sleep "$secs"
+}
+
+# Hop delay: short for UAT, readable for film.
+story_hop() {
+  if story_pace_on; then
+    sleep_ms "${1:-1.2}"
+  else
+    sleep_ms "${2:-0.35}"
+  fi
+}
+
 require_agent_send_opt_in() {
   if [[ "${SPUR_DEMO_ALLOW_AGENT_SEND:-0}" != "1" ]]; then
     cat >&2 <<'EOF'
@@ -323,22 +352,23 @@ focus_agents_panel() {
   enter_navigate_mode
   # Default focus may be Log; Tab toggles Agents ↔ Log.
   press_key Tab
-  sleep_ms 0.4
+  story_hop 1.0 0.4
   if ! soft_has_text "[Agents]" 1200; then
     press_key Tab
-    sleep_ms 0.4
+    story_hop 1.0 0.4
   fi
   soft_has_text "[Agents]" 2000 || soft_has_text "Lineage" 1000 || true
+  story_dwell 2.0
 }
 
 # Focus Activity log panel.
 focus_log_panel() {
   enter_navigate_mode
   press_key Tab
-  sleep_ms 0.35
+  story_hop 0.9 0.35
   if ! soft_has_text "[Log]" 1000; then
     press_key Tab
-    sleep_ms 0.35
+    story_hop 0.9 0.35
   fi
 }
 
@@ -347,62 +377,87 @@ focus_log_panel() {
 # Try to open lineage node detail; soft if tree/layout differs mid-loop.
 _lineage_focus_selected_node() {
   press_key Enter
-  sleep_ms 1.0
+  story_hop 1.5 1.0
   if soft_has_text "stream" 6000; then
+    story_dwell 3.5
     return 0
   fi
   # Retry: leave any overlay, re-focus Agents, select first, Enter
   press_key Escape
-  sleep_ms 0.35
+  story_hop 0.8 0.35
   focus_agents_panel
   # 'g' = first node (view-action in Navigate)
   type_text "g"
-  sleep_ms 0.35
+  story_hop 0.8 0.35
   press_key Enter
-  sleep_ms 1.0
-  soft_has_text "stream" 8000
+  story_hop 1.5 1.0
+  if soft_has_text "stream" 8000; then
+    story_dwell 3.5
+    return 0
+  fi
+  return 1
 }
 
+# Explicit story beats: Agents → prefer BRAIN row → EXEC/worker → stream → tabs.
+# Soft when roles absent (empty project); still navigates tree for film continuity.
 navigate_lineage_brain_and_workers() {
   focus_agents_panel
   printf '+ lineage: Agents panel focused — drive multi-agent tree\n'
+
+  # Beat: surface BRAIN role when present (control plane owner)
+  if soft_has_text "BRAIN" 2500; then
+    printf '+ lineage beat: BRAIN row visible\n'
+    story_dwell 2.5
+  fi
+
   # Move selection through tree (brain rows / worker children)
   press_key j
-  sleep_ms 0.3
+  story_hop 1.2 0.3
   press_key j
-  sleep_ms 0.3
+  story_hop 1.2 0.3
+
+  # Beat: EXEC / Running when live loop has workers
+  if soft_has_text "EXEC" 2000 || soft_has_text "Running" 1500; then
+    printf '+ lineage beat: EXEC/Running worker row\n'
+    story_dwell 2.5
+  fi
+
   if _lineage_focus_selected_node; then
     soft_has_text "artifacts" 4000 || true
     soft_has_text "attempts" 3000 || true
-    printf '+ lineage: focused node detail (stream/artifacts/attempts)\n'
+    printf '+ lineage beat: node detail stream (worker/brain outputs)\n'
     # Cycle detail tabs with l (view-owned when node focused)
     press_key l
-    sleep_ms 0.55
-    press_key l
-    sleep_ms 0.55
+    story_hop 1.8 0.55
     soft_has_text "attempts" 2000 || true
+    story_dwell 1.5
+    press_key l
+    story_hop 1.8 0.55
     soft_has_text "task" 1500 || true
     soft_has_text "review" 1500 || true
-    printf '+ lineage: cycled detail tabs (worker/brain outputs)\n'
+    story_dwell 1.5
+    printf '+ lineage: cycled detail tabs (stream → attempts → task/review)\n'
   else
     printf '+ warn: could not open node detail pane — continue tree walk\n'
   fi
-  # Unfocus, move to another node (brain ↔ worker hop)
+  # Unfocus, hop to another node (brain ↔ worker)
   press_key Escape
-  sleep_ms 0.45
+  story_hop 1.0 0.45
   press_key k
-  sleep_ms 0.3
+  story_hop 1.2 0.3
   if _lineage_focus_selected_node; then
     printf '+ lineage: navigated to another agent node\n'
+    story_dwell 2.0
   else
     printf '+ warn: second node focus skipped\n'
   fi
   press_key Escape
-  sleep_ms 0.35
+  story_hop 0.8 0.35
   # Activity log: live events from brain/worker loop
   focus_log_panel
   soft_has_text "Activity" 3000 || true
   soft_has_text "brain" 2000 || true
+  story_dwell 2.5
   printf '+ activity: event stream for auto loop visibility\n'
 }
 
@@ -413,10 +468,11 @@ story_ops_visibility() {
   expect_text "Activity"
   expect_text "INSERT"
   printf '+ problem: multi-agent opacity → lineage/activity visible\n'
+  story_dwell 3.0
 
   # Help: how do I drive this?
   type_text "?"
-  sleep_ms 0.6
+  story_hop 1.0 0.6
   wait_text "Dashboard"
   # Soft: modes/navigation sections from help overlay
   set +e
@@ -424,16 +480,18 @@ story_ops_visibility() {
   run_su expect text "Navigation" --no-strict --timeout 2000
   set -e
   printf '+ problem: unknown keybindings → help overlay\n'
+  story_dwell 3.0
   press_key Escape
-  sleep_ms 0.4
+  story_hop 0.8 0.4
 
   # Palette: one hub for all problem surfaces
   press_key Ctrl+K
   wait_text "Go to"
   expect_text "esc dismiss"
   printf '+ problem: where is X? → command palette\n'
+  story_dwell 2.5
   press_key Escape
-  sleep_ms 0.3
+  story_hop 0.8 0.3
   wait_text "Lineage"
 
   # Lineage drive (Navigate mode)
@@ -447,6 +505,7 @@ story_plan_progress() {
   wait_text "Plan"
   # Real projects show plan table; empty filter still has chrome
   expect_text "Progress"
+  story_dwell 3.5
   # Prefer proof of real work: awaiting review or complete rows
   set +e
   run_su expect text "awaiting" --no-strict --timeout 3000
@@ -463,17 +522,20 @@ story_plan_progress() {
   run_su expect text "bd-" --no-strict --timeout 2000
   set -e
   printf '+ problem: campaign opacity → plan browser progress/summary\n'
+  story_dwell 3.0
   # Cycle filter once (f cycles: all → mine → …) then restore if empty
   type_text "f"
-  sleep_ms 0.5
+  story_hop 1.0 0.5
   if soft_has_text "No plans match" 1500; then
+    printf '+ plan browser: no campaigns match filter — labeled empty beat\n'
+    story_dwell 2.0
     type_text "f"
-    sleep_ms 0.4
+    story_hop 0.8 0.4
     type_text "f"
-    sleep_ms 0.4
+    story_hop 0.8 0.4
   fi
   press_key Escape
-  sleep_ms 0.4
+  story_hop 0.8 0.4
 }
 
 # Full control-plane loop story helpers:
@@ -493,36 +555,41 @@ story_plan_loop_control_plane() {
   soft_has_text "awaiting" 2000 || true
   soft_has_text "complete" 1500 || true
   printf '+ plan browser: submit_plan campaigns (progress/state)\n'
+  story_dwell 3.5
   # Move selection to surface different plan rows (campaign history)
   press_key j
-  sleep_ms 0.35
+  story_hop 1.2 0.35
   press_key j
-  sleep_ms 0.35
+  story_hop 1.2 0.35
   # Summary pane: Work item always; Progress counters live in table ("N/M done")
   expect_text "Work item"
   soft_has_text "done" 1500 || true
   soft_has_text "bd-" 1500 || true
   printf '+ plan summary: work item + progress counters\n'
+  story_dwell 3.0
   # Optional: Start/Resume selected plan (mutates live work — opt-in)
   if [[ "${SPUR_DEMO_ALLOW_PLAN_START:-0}" == "1" ]]; then
     printf '+ opt-in: Start/Resume plan (s)\n'
     type_text "s"
-    sleep_ms 2.0
+    story_dwell 3.0
   fi
   press_key Escape
-  sleep_ms 0.5
+  story_hop 1.0 0.5
   wait_text "Lineage"
+  story_dwell 2.0
 
   # --- Lineage: brain ↔ worker navigation + output capture ---
+  # Explicit arc: BRAIN → EXEC → stream → tabs → Activity (inside helper)
   navigate_lineage_brain_and_workers
 
-  # Soft proof of loop roles if live/history has them
+  # Soft proof of loop roles if live/history has them (post-walk hold)
   soft_has_text "BRAIN" 2000 || true
   soft_has_text "EXEC" 1500 || true
   soft_has_text "Running" 1000 || true
   soft_has_text "Succeeded" 1000 || true
   soft_has_text "Cancelled" 1000 || true
   printf '+ loop roles: BRAIN/EXEC states visible when present\n'
+  story_dwell 2.0
 }
 
 require_plan_loop_opt_in() {
@@ -632,6 +699,7 @@ trigger_submit_plan_one_task_and_observe() {
 
   # Drive tree + capture outputs (brain vs worker if present)
   navigate_lineage_brain_and_workers
+  story_dwell 2.5
 
   # Re-open plan browser: new campaign should appear near top when submit landed
   open_palette_view "Plan"
@@ -642,8 +710,9 @@ trigger_submit_plan_one_task_and_observe() {
   soft_has_text "running" 2000 || true
   soft_has_text "complete" 2000 || true
   printf '+ plan browser re-check after seed\n'
+  story_dwell 3.5
   press_key Escape
-  sleep_ms 0.4
+  story_hop 0.8 0.4
   wait_text "Lineage"
 }
 
@@ -657,8 +726,9 @@ story_backlog_triage() {
   expect_text "open"
   expect_text "bd-"
   printf '+ problem: backlog firehose → P0 open list\n'
+  story_dwell 3.0
   press_key Enter
-  sleep_ms 1.0
+  story_hop 1.5 1.0
   # Detail pane
   expect_text "bd-"
   set +e
@@ -666,8 +736,9 @@ story_backlog_triage() {
   run_su expect text "priority:" --no-strict --timeout 2000
   set -e
   printf '+ problem: what is this issue? → detail (status/priority)\n'
+  story_dwell 3.5
   press_key Escape
-  sleep_ms 0.4
+  story_hop 0.8 0.4
 }
 
 # Machine-speed `type` is coalesced into a paste on live TUI (paste-burst
@@ -688,31 +759,33 @@ type_slow() {
 switch_between_sessions() {
   open_sessions_picker
   expect_text "TODAY"
-  sleep_ms 0.4
+  story_dwell 2.0
   press_key Down
-  sleep_ms 0.3
+  story_hop 0.9 0.3
   press_key Down
-  sleep_ms 0.3
+  story_hop 0.9 0.3
   press_key Enter
   if ! _live_complete_session_attach 8000; then
     resume_session_skip_held
   fi
   printf '+ switched to session A\n'
+  story_dwell 2.5
 
   # Second hop: picker → next free row
   open_sessions_picker
-  sleep_ms 0.4
+  story_hop 1.0 0.4
   press_key Down
-  sleep_ms 0.25
+  story_hop 0.8 0.25
   press_key Down
-  sleep_ms 0.25
+  story_hop 0.8 0.25
   press_key Down
-  sleep_ms 0.25
+  story_hop 0.8 0.25
   press_key Enter
   if ! _live_complete_session_attach 8000; then
     resume_session_skip_held
   fi
   printf '+ switched to session B\n'
+  story_dwell 2.5
 }
 
 # Explore: filter → star skill → Agents tab → star agent → gate accept → apply.
@@ -722,48 +795,52 @@ explore_adopt_skill_and_agent() {
   open_explore_browser
   # Skills tab is default
   expect_text "Skills"
+  story_dwell 2.0
   # Filter
   type_text "/"
-  sleep_ms 0.25
+  story_hop 0.6 0.25
   type_text "$filter"
-  sleep_ms 0.5
+  story_hop 1.0 0.5
   press_key Enter
-  sleep_ms 0.4
+  story_hop 0.9 0.4
   # Space toggles ★ selection into pool candidate set
   press_key Space
-  sleep_ms 0.35
+  story_hop 0.9 0.35
   # Agents tab
   press_key Tab
-  sleep_ms 0.45
+  story_hop 1.0 0.45
   expect_text "Agents"
   press_key Space
-  sleep_ms 0.35
+  story_hop 0.9 0.35
   # Enter opens gate for starred items
   press_key Enter
-  sleep_ms 1.0
+  story_hop 1.5 1.0
   wait_text "Gate"
   expect_text "cards"
+  story_dwell 2.5
   # c = resolve all clean cards to Accept
   type_text "c"
-  sleep_ms 0.5
+  story_hop 1.0 0.5
   expect_text "Accept"
   # Enter applies resolved cards into pool
   press_key Enter
-  sleep_ms 1.5
+  story_hop 2.0 1.5
   wait_text "applied"
   expect_text "pool"
   printf '+ explore applied skill+agent to pool\n'
+  story_dwell 4.0
   # Optional Manage lens
   type_text "m"
-  sleep_ms 0.6
+  story_hop 1.2 0.6
   set +e
   run_su expect text "Pool" --no-strict --timeout 3000
   set -e
+  story_dwell 2.0
   # Back to browse then dashboard
   press_key Escape
-  sleep_ms 0.4
+  story_hop 0.8 0.4
   press_key Escape
-  sleep_ms 0.5
+  story_hop 1.0 0.5
   # Esc from explore → dashboard lineage
   set +e
   run_su wait text "Lineage" --timeout 5000
@@ -772,28 +849,32 @@ explore_adopt_skill_and_agent() {
 
 # Cascading worker → agent profile → model → effort mention atom.
 # Live projects list real personas (incl. explore-adopted agents).
+# Proof requires all three of agent= / model= / effort= on screen (not partial).
 compose_live_worker_cascade() {
   local worker="${SPUR_DEMO_WORKER:-codex}"
   # Prefer a clean composer surface
   attach_session_for_send
-  sleep_ms 0.6
+  story_hop 1.0 0.6
   type_slow "@worker:${worker}"
-  sleep_ms 1.2
+  story_hop 1.5 1.2
   wait_text "Mentions"
+  story_dwell 2.0
   # Slot 1: agent persona (e.g. accessibility-expert after explore adopt)
   press_key Tab
-  sleep_ms 1.0
+  story_hop 1.5 1.0
   # Slot 2: model
   press_key Tab
-  sleep_ms 1.0
+  story_hop 1.5 1.0
   # Slot 3: effort → commits final atom
   press_key Tab
-  sleep_ms 1.0
+  story_hop 1.5 1.0
+  # Strict cascade proof — all three must appear (marketing + UAT)
   wait_text "agent="
-  expect_text "model="
-  expect_text "effort="
+  wait_text "model="
+  wait_text "effort="
   expect_text "@worker:${worker}"
-  printf '+ composed worker cascade atom\n'
+  printf '+ composed worker cascade atom (agent= model= effort= proven)\n'
+  story_dwell 4.0
 }
 
 quit_live() {

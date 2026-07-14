@@ -26,6 +26,10 @@ export SPUR_BIN
 export SPUR_DEMO_ALLOW_PLAN_LOOP=1
 export SPUR_DEMO_PLAN_LOOP_WAIT_S="${SPUR_DEMO_PLAN_LOOP_WAIT_S:-240}"
 export SHELL_USE_TIMEOUT_MS="${SHELL_USE_TIMEOUT_MS:-180000}"
+# Film pacing for seed (readable high-res story; UAT leaves this unset/0)
+export SPUR_DEMO_STORY_PACE="${SPUR_DEMO_STORY_PACE:-1}"
+# Story-friendly cast speed unless caller overrides
+export SPUR_AGG_SPEED="${SPUR_AGG_SPEED:-1.15}"
 
 stamp="$(date -u +%Y%m%dT%H%M%SZ)"
 stem="14-live-plan-loop-seed-${stamp}"
@@ -46,6 +50,7 @@ echo "SPUR_DEMO_ALLOW_PLAN_LOOP: $SPUR_DEMO_ALLOW_PLAN_LOOP"
 echo "SPUR_DEMO_PLAN_LOOP_WAIT_S:$SPUR_DEMO_PLAN_LOOP_WAIT_S"
 echo "SHELL_USE_TIMEOUT_MS:      $SHELL_USE_TIMEOUT_MS"
 echo "geometry:                  ${SPUR_VHS_WIDTH}x${SPUR_VHS_HEIGHT} font=${SPUR_VHS_FONT_SIZE} pty=${SPUR_DEMO_COLS}x${SPUR_DEMO_ROWS}"
+echo "story_pace:                ${SPUR_DEMO_STORY_PACE} agg_speed=${SPUR_AGG_SPEED}"
 echo "log:                       $log"
 echo
 
