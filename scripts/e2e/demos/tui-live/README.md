@@ -87,6 +87,7 @@ Defaults live in `scripts/e2e/demos/geometry.env` and match a **Liquid Retina
 | VHS font | **18** | `SPUR_VHS_FONT_SIZE` |
 | shell-use PTY | **200×50** | `SPUR_DEMO_COLS` / `SPUR_DEMO_ROWS` |
 | agg cast size | same as PTY | `SPUR_AGG_COLS` / `SPUR_AGG_ROWS` |
+| agg speed | **1.15** (story) | `SPUR_AGG_SPEED` (use `2.5` for fast UAT cast review) |
 | mp4 preview width | 1920 | `SPUR_CAPTURE_PREVIEW_WIDTH` |
 
 ```bash
@@ -98,6 +99,30 @@ SPUR_VHS_WIDTH=2560 SPUR_VHS_HEIGHT=1664 SPUR_VHS_FONT_SIZE=20 \
   SPUR_DEMO_COLS=210 SPUR_DEMO_ROWS=52 \
   ./render.sh
 ```
+
+## Story pacing (slower, value-first film)
+
+Shell-use UAT stays **fast** by default. Marketing film adds dwell via:
+
+| Env | Effect |
+|-----|--------|
+| `SPUR_DEMO_STORY_PACE=1` | Enables `story_dwell` / longer hops in `lib.sh` (default **on** for `./capture-live-seed.sh` and `./render.sh`) |
+| `SPUR_DEMO_DWELL_SCALE=1.2` | Multiplies dwell seconds |
+| `SPUR_DEMO_STORIES_ONLY=1` | VHS only the five problem stories (`09`–`13`), skip surface probes |
+| `SPUR_AGG_SPEED=1.15` | Cast→gif story speed (was 2.5; flattened narrative) |
+
+```bash
+# Value-story film only (recommended marketing path)
+SPUR_DEMO_STORIES_ONLY=1 ./render.sh
+
+# Live seed with readable high-res pacing
+./capture-live-seed.sh
+
+# Fast functional UAT (no film dwell)
+SPUR_DEMO_STORY_PACE=0 bash journeys/problem-ops-visibility.sh
+```
+
+Full critique + storyboard: **[JOURNEY_STORY_REVIEW.md](./JOURNEY_STORY_REVIEW.md)**.
 
 ## Safety
 
