@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 use std::path::Path;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use ratatui::layout::Rect;
+use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
@@ -29,6 +29,15 @@ pub(crate) struct GateCard {
 enum GateVerdict {
     Ready(Verdict),
     Unresolved(String),
+}
+
+#[derive(Default)]
+struct GateProgress {
+    clean: usize,
+    flagged: usize,
+    conflict: usize,
+    unresolved: usize,
+    resolution_set: usize,
 }
 
 pub(crate) enum GateAction {
@@ -86,6 +95,27 @@ impl GateState {
             .count()
     }
 
+    pub(crate) fn footer_hint(&self) -> &'static str {
+        if self.override_input.is_some() {
+            return "type justification  Enter save override  Esc cancel";
+        }
+
+        match self.selected_card().map(|card| &card.verdict) {
+            Some(GateVerdict::Ready(Verdict::Clean)) => {
+                "j/k cards  a accept  s skip  c all-clean  Enter apply  Shift+A apply  Esc browse"
+            }
+            Some(GateVerdict::Ready(Verdict::Flagged { .. })) => {
+                "j/k cards  o override  s skip  c all-clean  Enter apply  Shift+A apply  Esc browse"
+            }
+            Some(GateVerdict::Ready(Verdict::Conflict { .. })) => {
+                "j/k cards  b replace  s skip  c all-clean  Enter apply  Shift+A apply  Esc browse"
+            }
+            Some(GateVerdict::Unresolved(_)) | None => {
+                "j/k cards  s skip  c all-clean  Enter apply  Shift+A apply  Esc browse"
+            }
+        }
+    }
+
     pub(crate) fn handle_key(&mut self, key: KeyEvent) -> GateAction {
         if self.override_input.is_some() {
             return self.handle_override_input(key);
@@ -93,6 +123,13 @@ impl GateState {
 
         match key.code {
             KeyCode::Char('A') => GateAction::Apply,
+            KeyCode::Enter if key.modifiers.is_empty() => {
+                if self.has_resolved_selection() {
+                    GateAction::Apply
+                } else {
+                    GateAction::Error("no resolved gate cards to apply".to_string())
+                }
+            }
             KeyCode::Char('j') | KeyCode::Down if key.modifiers.is_empty() => {
                 self.move_selection(1);
                 GateAction::None
@@ -112,6 +149,27 @@ impl GateState {
     }
 
     pub(crate) fn render(&self, frame: &mut Frame, area: Rect) {
+        let block = Block::default().title("Gate Cards").borders(Borders::ALL);
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+        let chunks = Layout::vertical([Constraint::Length(2), Constraint::Min(0)]).split(inner);
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                self.progress_summary(),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ))),
+            chunks[0],
+        );
+        let (cards_area, override_area) = if self.override_input.is_some() {
+            let content_chunks =
+                Layout::vertical([Constraint::Min(0), Constraint::Length(2)]).split(chunks[1]);
+            (content_chunks[0], Some(content_chunks[1]))
+        } else {
+            (chunks[1], None)
+        };
+
         let mut lines = Vec::new();
         if self.cards.is_empty() {
             lines.push(Line::from(Span::styled(
@@ -127,30 +185,33 @@ impl GateState {
             }
         }
 
-        if let Some(input) = self.override_input.as_deref() {
-            lines.push(Line::from(""));
-            lines.push(Line::from(vec![
-                Span::styled(
-                    "override justification: ",
-                    Style::default().fg(Color::Yellow),
-                ),
-                Span::raw(input.to_string()),
-            ]));
+        if let (Some(input), Some(input_area)) = (self.override_input.as_deref(), override_area) {
+            frame.render_widget(
+                Paragraph::new(vec![
+                    Line::from(""),
+                    Line::from(vec![
+                        Span::styled(
+                            "override justification: ",
+                            Style::default().fg(Color::Yellow),
+                        ),
+                        Span::raw(input.to_string()),
+                    ]),
+                ]),
+                input_area,
+            );
         }
 
-        let block = Block::default().title("Gate Cards").borders(Borders::ALL);
         let scroll = scroll_offset_for_selected_line(
             &lines,
             selected_marker_line(&lines),
-            block.inner(area).width,
-            block.inner(area).height,
+            cards_area.width,
+            cards_area.height,
         );
         frame.render_widget(
             Paragraph::new(lines)
-                .block(block)
                 .wrap(Wrap { trim: true })
                 .scroll((scroll, 0)),
-            area,
+            cards_area,
         );
     }
 
@@ -161,7 +222,10 @@ impl GateState {
                 let justification = input.trim().to_string();
                 if justification.is_empty() {
                     self.override_input = Some(input);
-                    return GateAction::Error("override justification is required".to_string());
+                    return GateAction::Error(
+                        "override justification is required; type a reason, then press Enter, or Esc to cancel"
+                            .to_string(),
+                    );
                 }
                 if let Some(card) = self.selected_card_mut() {
                     card.resolution = Some(Resolution::Override { justification });
@@ -197,12 +261,7 @@ impl GateState {
                 card.resolution = Some(Resolution::Accept);
                 GateAction::None
             }
-            GateVerdict::Ready(_) => {
-                GateAction::Error("accept is available only for clean cards".to_string())
-            }
-            GateVerdict::Unresolved(_) => {
-                GateAction::Error("unresolved gate card cannot be accepted".to_string())
-            }
+            _ => wrong_resolution_key("accept", &card.verdict),
         }
     }
 
@@ -221,17 +280,12 @@ impl GateState {
         let Some(card) = self.selected_card() else {
             return GateAction::None;
         };
-        match card.verdict {
+        match &card.verdict {
             GateVerdict::Ready(Verdict::Flagged { .. }) => {
                 self.override_input = Some(String::new());
                 GateAction::None
             }
-            GateVerdict::Ready(_) => {
-                GateAction::Error("override is available only for flagged cards".to_string())
-            }
-            GateVerdict::Unresolved(_) => {
-                GateAction::Error("unresolved gate card cannot be overridden".to_string())
-            }
+            _ => wrong_resolution_key("override", &card.verdict),
         }
     }
 
@@ -239,17 +293,12 @@ impl GateState {
         let Some(card) = self.selected_card_mut() else {
             return GateAction::None;
         };
-        match card.verdict {
+        match &card.verdict {
             GateVerdict::Ready(Verdict::Conflict { .. }) => {
                 card.resolution = Some(Resolution::ReplaceBundled);
                 GateAction::None
             }
-            GateVerdict::Ready(_) => {
-                GateAction::Error("replace bundled is available only for conflicts".to_string())
-            }
-            GateVerdict::Unresolved(_) => {
-                GateAction::Error("unresolved gate card cannot replace bundled".to_string())
-            }
+            _ => wrong_resolution_key("replace bundled", &card.verdict),
         }
     }
 
@@ -282,6 +331,38 @@ impl GateState {
 
     fn selected_card_mut(&mut self) -> Option<&mut GateCard> {
         self.cards.get_mut(self.selected)
+    }
+
+    fn has_resolved_selection(&self) -> bool {
+        self.cards
+            .iter()
+            .any(|card| card.is_evaluable() && card.resolution.is_some())
+    }
+
+    fn progress_summary(&self) -> String {
+        let progress = self
+            .cards
+            .iter()
+            .fold(GateProgress::default(), |mut progress, card| {
+                match card.verdict {
+                    GateVerdict::Ready(Verdict::Clean) => progress.clean += 1,
+                    GateVerdict::Ready(Verdict::Flagged { .. }) => progress.flagged += 1,
+                    GateVerdict::Ready(Verdict::Conflict { .. }) => progress.conflict += 1,
+                    GateVerdict::Unresolved(_) => progress.unresolved += 1,
+                }
+                progress.resolution_set += usize::from(card.resolution.is_some());
+                progress
+            });
+        format!(
+            "{} cards · clean {} · flagged {} · conflict {} · unresolved {} · resolved {}/{}",
+            self.cards.len(),
+            progress.clean,
+            progress.flagged,
+            progress.conflict,
+            progress.unresolved,
+            progress.resolution_set,
+            self.cards.len()
+        )
     }
 }
 
@@ -385,6 +466,22 @@ fn resolution_label(resolution: Option<&Resolution>) -> String {
     }
 }
 
+fn resolution_key_hint(verdict: &GateVerdict) -> &'static str {
+    match verdict {
+        GateVerdict::Ready(Verdict::Clean) => "press a to accept or s to skip",
+        GateVerdict::Ready(Verdict::Flagged { .. }) => "press o to override or s to skip",
+        GateVerdict::Ready(Verdict::Conflict { .. }) => "press b to replace bundled or s to skip",
+        GateVerdict::Unresolved(_) => "run `spur explore sync`, or press s to skip",
+    }
+}
+
+fn wrong_resolution_key(action: &str, verdict: &GateVerdict) -> GateAction {
+    GateAction::Error(format!(
+        "{action} is unavailable for this card; {}",
+        resolution_key_hint(verdict)
+    ))
+}
+
 fn sha7(value: &str) -> &str {
     value.get(..7).unwrap_or(value)
 }
@@ -393,6 +490,7 @@ fn sha7(value: &str) -> &str {
 mod tests {
     use super::*;
     use crossterm::event::KeyModifiers;
+    use ratatui::{backend::TestBackend, Terminal};
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
@@ -400,6 +498,26 @@ mod tests {
 
     fn shift_key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::SHIFT)
+    }
+
+    fn render_to_string(state: &GateState) -> String {
+        render_to_string_with_size(state, 100, 30)
+    }
+
+    fn render_to_string_with_size(state: &GateState, width: u16, height: u16) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|frame| state.render(frame, frame.area()))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let mut output = String::new();
+        for y in 0..buffer.area.height {
+            for x in 0..buffer.area.width {
+                output.push_str(buffer[(x, y)].symbol());
+            }
+            output.push('\n');
+        }
+        output
     }
 
     fn entry(name: &str, license: Option<&str>) -> CatalogEntry {
@@ -454,15 +572,27 @@ mod tests {
 
     #[test]
     fn accept_rejects_non_clean_verdicts() {
-        for mut state in [
-            GateState::new(vec![flagged_card("a")]),
-            GateState::new(vec![conflict_card("a")]),
-            GateState::new(vec![unresolved_card("a")]),
-        ] {
-            let action = state.handle_key(key(KeyCode::Char('a')));
-            assert!(matches!(action, GateAction::Error(_)));
-            assert!(state.cards[0].resolution.is_none());
-        }
+        let mut flagged = GateState::new(vec![flagged_card("a")]);
+        let GateAction::Error(error) = flagged.handle_key(key(KeyCode::Char('a'))) else {
+            panic!("flagged card should reject accept");
+        };
+        assert!(error.contains("press o to override or s to skip"));
+
+        let mut conflict = GateState::new(vec![conflict_card("a")]);
+        let GateAction::Error(error) = conflict.handle_key(key(KeyCode::Char('a'))) else {
+            panic!("conflict card should reject accept");
+        };
+        assert!(error.contains("press b to replace bundled or s to skip"));
+
+        let mut unresolved = GateState::new(vec![unresolved_card("a")]);
+        let GateAction::Error(error) = unresolved.handle_key(key(KeyCode::Char('a'))) else {
+            panic!("unresolved card should reject accept");
+        };
+        assert!(error.contains("press s to skip"));
+
+        assert!(flagged.cards[0].resolution.is_none());
+        assert!(conflict.cards[0].resolution.is_none());
+        assert!(unresolved.cards[0].resolution.is_none());
     }
 
     #[test]
@@ -533,6 +663,25 @@ mod tests {
     }
 
     #[test]
+    fn enter_applies_only_after_at_least_one_resolution() {
+        let mut state = GateState::new(vec![clean_card("a")]);
+
+        let GateAction::Error(error) = state.handle_key(key(KeyCode::Enter)) else {
+            panic!("Enter without a resolution should report an error");
+        };
+        assert_eq!(error, "no resolved gate cards to apply");
+
+        assert!(matches!(
+            state.handle_key(key(KeyCode::Char('a'))),
+            GateAction::None
+        ));
+        assert!(matches!(
+            state.handle_key(key(KeyCode::Enter)),
+            GateAction::Apply
+        ));
+    }
+
+    #[test]
     fn navigation_clamps_at_boundaries() {
         let mut state = GateState::new(vec![clean_card("a"), clean_card("b"), clean_card("c")]);
         assert!(matches!(
@@ -566,6 +715,28 @@ mod tests {
     }
 
     #[test]
+    fn override_input_remains_visible_in_a_scrolled_multi_card_gate() {
+        let mut state = GateState::new(vec![
+            clean_card("clean-a"),
+            flagged_card("flagged-a"),
+            clean_card("clean-b"),
+            clean_card("clean-c"),
+        ]);
+        state.selected = 1;
+        state.handle_key(key(KeyCode::Char('o')));
+        let GateAction::Error(_) = state.handle_key(key(KeyCode::Enter)) else {
+            panic!("empty override should remain in input mode with an error");
+        };
+
+        let text = render_to_string_with_size(&state, 80, 12);
+
+        assert!(
+            text.contains("override justification:"),
+            "override editor should remain visible after the actionable error:\n{text}"
+        );
+    }
+
+    #[test]
     fn render_lines_cover_all_verdict_branches() {
         for c in [
             clean_card("clean-a"),
@@ -581,6 +752,50 @@ mod tests {
                 .collect();
             assert!(text.contains(&c.entry.name));
         }
+    }
+
+    #[test]
+    fn render_shows_verdict_and_resolution_progress() {
+        let mut state = GateState::new(vec![
+            clean_card("clean-a"),
+            flagged_card("flagged-a"),
+            conflict_card("conflict-a"),
+            unresolved_card("unresolved-a"),
+        ]);
+        state.cards[0].resolution = Some(Resolution::Accept);
+        state.cards[1].resolution = Some(Resolution::Skip);
+
+        let text = render_to_string(&state);
+
+        assert!(
+            text.contains(
+                "4 cards · clean 1 · flagged 1 · conflict 1 · unresolved 1 · resolved 2/4"
+            ),
+            "render text:\n{text}"
+        );
+    }
+
+    #[test]
+    fn render_keeps_progress_visible_when_cards_scroll() {
+        let mut state = GateState::new(
+            (0..8)
+                .map(|index| clean_card(&format!("clean-{index}")))
+                .collect(),
+        );
+        state.selected = 7;
+
+        let text = render_to_string(&state);
+
+        assert!(
+            text.contains(
+                "8 cards · clean 8 · flagged 0 · conflict 0 · unresolved 0 · resolved 0/8"
+            ),
+            "progress should remain above the scrolling card list:\n{text}"
+        );
+        assert!(
+            text.contains("> clean-7"),
+            "selected card should remain visible:\n{text}"
+        );
     }
 
     #[test]
