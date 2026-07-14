@@ -5,10 +5,10 @@ Output out/02-external-tools.mp4
 Output out/02-external-tools.gif
 
 Set Shell bash
-Set FontSize 15
-Set Width 1280
-Set Height 720
-Set Padding 12
+Set FontSize 18
+Set Width 2560
+Set Height 1600
+Set Padding 10
 Set Margin 0
 Set TypingSpeed 10ms
 Set Theme "Catppuccin Mocha"
