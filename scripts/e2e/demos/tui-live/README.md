@@ -13,8 +13,28 @@ See **[PROBLEM_STORIES.md](./PROBLEM_STORIES.md)** for the catalog.
 | `problem-plan-progress` | “Where is my multi-task campaign?” | Plan browser, Progress, summary | `11-…` |
 | `problem-backlog-triage` | “What’s P0 open in the backlog?” | Issues list, P0, issue detail | `12-…` |
 | `product-e2e-flow` | “I need the right specialist + model/effort.” | Sessions, Explore adopt/gate/pool, `@worker` cascade | `09-…` |
+| **`problem-plan-loop-drive`** | “submit_plan loop is a black box — drive brain↔worker.” | Plan browser + lineage Agents tree + detail tabs + activity | `13-…` |
 
 Each story is a continuous shell-use UAT path + optional VHS media.
+
+### Plan loop control plane (`problem-plan-loop-drive`)
+
+```bash
+# Observe plan campaigns + navigate lineage brain/worker outputs
+bash journeys/problem-plan-loop-drive.sh
+
+# Also Start/Resume a plan (mutates live work)
+SPUR_DEMO_ALLOW_PLAN_START=1 bash journeys/problem-plan-loop-drive.sh
+
+# Kick brain then re-walk lineage (model spend)
+SPUR_DEMO_ALLOW_AGENT_SEND=1 bash journeys/problem-plan-loop-drive.sh
+
+# Film
+vhs -q tapes/13-problem-plan-loop-drive.tape
+```
+
+**Navigate-mode tip:** `Esc` leaves INSERT so `j`/`k` hit the Agents tree.
+`Tab` focuses Agents (digit `1` would re-enter Compose).
 
 ## Surface probes (regression)
 

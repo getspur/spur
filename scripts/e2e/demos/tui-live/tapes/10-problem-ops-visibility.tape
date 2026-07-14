@@ -1,5 +1,5 @@
 # PROBLEM: multi-agent work is opaque / keybindings unknown
-# Features: lineage, activity, help, palette
+# Features: lineage, help, palette, Agents tree + detail tabs
 
 Output out/10-problem-ops-visibility.mp4
 Output out/10-problem-ops-visibility.gif
@@ -20,25 +20,50 @@ Type "./bin/run-spur-tui-live.sh"
 Enter
 Show
 Wait+Screen@30s /Lineage/
-Sleep 1.5s
-# Help — how do I drive this?
+Sleep 1.2s
+# Help
 Hide
 Type "?"
 Show
 Wait+Screen@15s /Dashboard/
-Sleep 2s
+Sleep 1.5s
 Hide
 Escape
 Show
-Sleep 800ms
-# Palette hub
+Sleep 600ms
+# Palette
 Hide
 Ctrl+K
 Show
 Wait+Screen@12s /Go to/
-Sleep 2s
+Sleep 1.2s
 Hide
 Escape
 Show
 Wait+Screen@12s /Lineage/
-Sleep 1.5s
+Sleep 600ms
+# Navigate mode → Agents → focus node → detail
+Hide
+Escape
+Sleep 350ms
+Tab
+Show
+Sleep 700ms
+Hide
+Type "j"
+Type "j"
+Show
+Sleep 500ms
+Hide
+Enter
+Show
+Wait+Screen@12s /stream/
+Sleep 1s
+Hide
+Type "l"
+Show
+Sleep 800ms
+Hide
+Type "l"
+Show
+Sleep 1.2s
