@@ -1,4 +1,4 @@
-Explore  [Skills]  Agents   Gate
+Explore  [Skills]  Agents   Gate  ★ 2 selected
 never synced
 ┌Gate Cards────────────────────────────────────────────────────────────────────────────────────────┐
 │> clean-skill                                                                                     │
