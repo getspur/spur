@@ -13,6 +13,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 E2E_ROOT="$(cd "$ROOT/../.." && pwd)"
 # shellcheck disable=SC1091
 source "$E2E_ROOT/lib/spur-bin.sh"
+# shellcheck disable=SC1091
+source "$ROOT/../geometry.env"
 
 OUT="$ROOT/out"
 mkdir -p "$OUT"
@@ -43,6 +45,7 @@ echo "SPUR_BIN:                  $SPUR_BIN"
 echo "SPUR_DEMO_ALLOW_PLAN_LOOP: $SPUR_DEMO_ALLOW_PLAN_LOOP"
 echo "SPUR_DEMO_PLAN_LOOP_WAIT_S:$SPUR_DEMO_PLAN_LOOP_WAIT_S"
 echo "SHELL_USE_TIMEOUT_MS:      $SHELL_USE_TIMEOUT_MS"
+echo "geometry:                  ${SPUR_VHS_WIDTH}x${SPUR_VHS_HEIGHT} font=${SPUR_VHS_FONT_SIZE} pty=${SPUR_DEMO_COLS}x${SPUR_DEMO_ROWS}"
 echo "log:                       $log"
 echo
 
@@ -90,16 +93,25 @@ convert_cast() {
     return 1
   fi
 
+  local agg_cols="${SPUR_AGG_COLS:-200}"
+  local agg_rows="${SPUR_AGG_ROWS:-50}"
+  local agg_speed="${SPUR_AGG_SPEED:-2.5}"
+  local agg_idle="${SPUR_AGG_IDLE_LIMIT:-1.5}"
+  # Preview encode width (full Air-native gifs are huge; mp4 samples to 1920)
+  local preview_w="${SPUR_CAPTURE_PREVIEW_WIDTH:-1920}"
+
   if command -v agg >/dev/null 2>&1; then
-    echo "==> agg gif (speed 2.5, idle-limit 1.5s)"
-    agg --cols 120 --rows 36 --idle-time-limit 1.5 --speed 2.5 \
+    echo "==> agg gif (cols=${agg_cols} rows=${agg_rows} speed=${agg_speed})"
+    agg --cols "$agg_cols" --rows "$agg_rows" \
+      --idle-time-limit "$agg_idle" --speed "$agg_speed" \
       "$src" "$gif_out" || return 1
     echo "gif: $gif_out"
   elif command -v docker >/dev/null 2>&1; then
     echo "==> docker agg (asciinema/agg)"
     docker run --rm -v "$OUT:/data" -v "$(dirname "$src"):/casts:ro" \
       ghcr.io/asciinema/agg:latest \
-      --cols 120 --rows 36 --idle-time-limit 1.5 --speed 2.5 \
+      --cols "$agg_cols" --rows "$agg_rows" \
+      --idle-time-limit "$agg_idle" --speed "$agg_speed" \
       "/casts/$(basename "$src")" "/data/$(basename "$gif_out")" \
       && echo "gif: $gif_out" || true
   else
@@ -107,32 +119,39 @@ convert_cast() {
   fi
 
   if [[ -f "$gif_out" ]] && command -v ffmpeg >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1; then
-    echo "==> ffmpeg mp4 via sampled frames (reliable vs raw gif demux)"
+    echo "==> ffmpeg mp4 via sampled frames (preview width ${preview_w})"
     frames="$(mktemp -d "${TMPDIR:-/tmp}/seed-frames.XXXXXX")"
-    if python3 - "$gif_out" "$frames" <<'PY'
+    if python3 - "$gif_out" "$frames" "$preview_w" <<'PY'
 from PIL import Image
 from pathlib import Path
 import sys
 
 gif, fd = Path(sys.argv[1]), Path(sys.argv[2])
+target_w = int(sys.argv[3])
 im = Image.open(gif)
 n = getattr(im, "n_frames", 1)
-step = max(1, n // 90)
+step = max(1, n // 120)
 i = idx = 0
-while i < 100:
+while i < 140:
     try:
         im.seek(idx)
     except EOFError:
         break
-    im.convert("RGB").resize((960, 540)).save(fd / f"f{i:04d}.jpg", quality=80)
+    frame = im.convert("RGB")
+    w, h = frame.size
+    if w > target_w:
+        nh = max(2, int(h * (target_w / w)))
+        nh -= nh % 2
+        frame = frame.resize((target_w, nh))
+    frame.save(fd / f"f{i:04d}.jpg", quality=85)
     i += 1
     idx += step
-print(f"sampled {i}/{n}")
+print(f"sampled {i}/{n} preview_w={target_w}")
 PY
     then
-      if ffmpeg -hide_banner -loglevel error -y -framerate 8 -pattern_type glob \
-        -i "$frames/f*.jpg" -c:v libx264 -pix_fmt yuv420p -preset ultrafast -crf 28 \
-        "$mp4_out"; then
+      if ffmpeg -hide_banner -loglevel error -y -framerate 10 -pattern_type glob \
+        -i "$frames/f*.jpg" -c:v libx264 -pix_fmt yuv420p -preset ultrafast -crf 26 \
+        -movflags +faststart "$mp4_out"; then
         echo "mp4: $mp4_out"
       else
         echo "warn: ffmpeg encode failed" >&2
