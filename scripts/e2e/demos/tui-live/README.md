@@ -1,73 +1,63 @@
-# TUI live project — UAT + demo capture
+# TUI live project — full harvest (UAT + demo capture)
 
-Capture **SPUR TUI on a real project** (this monorepo by default, or any path
-with `.spur/`). Unlike Arc A fixture demos (`demos/tui-journeys/`), this pack:
+Capture **SPUR TUI on a real project** (this monorepo by default). Unlike Arc A
+fixture demos (`demos/tui-journeys/`), this pack uses your real `.spur/`:
 
-| | Fixture Arc A | Live project (this pack) |
-|--|---------------|---------------------------|
-| Workspace | empty temp + `no-agents` | real repo + real `.spur/` |
-| Agents | none / fake stub | your configured brains/workers |
-| Sessions | empty or seeded fixture | real session history / lineage |
-| Safety | fully isolated | **navigation-only** by default |
-| Cleanup | temp dir wiped | **never** deletes project files |
+| Surface | What you see |
+|---------|----------------|
+| Lineage | Live brains / execs / activity |
+| Sessions | Real TODAY history + resume → transcript |
+| Palette | Views / sessions / workers |
+| Explore | Synced ecosystem catalog (skills + agents) |
+| Composer | Draft text (safe) |
+| Agent send | **Opt-in** minimal brain turn (real model spend) |
 
-## What you will see
+## Storyboard
 
-Storyboard is **navigation-only** (no typed prompts, no dispatches):
+| # | Journey | Keys | Anchors | Gate |
+|---|---------|------|---------|------|
+| 1 | `lineage-dashboard` | launch `--dashboard` | `Lineage`, `Activity`, `INSERT` | safe |
+| 2 | `sessions-picker` | `s` | `Sessions`, `TODAY` | safe |
+| 3 | `palette-open` | `Ctrl+K` | `Go to`, `esc dismiss` | safe |
+| 4 | `session-resume` | `s` → `Down` → Enter | `Session ·`, `INSERT` | safe |
+| 5 | `explore-browser` | Ctrl+K → Explore | `synced`, `catalog`, `Skills` | safe |
+| 6 | `explore-agents-tab` | explore → Tab | `Agents` | safe |
+| 7 | `composer-draft` | type draft | `draft only` | safe (no send) |
+| 8 | `agent-send` | type + Enter | `YOU`, `THINK`/`ok` | **`SPUR_DEMO_ALLOW_AGENT_SEND=1`** |
 
-| # | Journey | Keys | Wait anchors |
-|---|---------|------|----------------|
-| 1 | `lineage-dashboard` | launch `--dashboard` | `Lineage`, `Activity`, `INSERT` |
-| 2 | `sessions-picker` | `s` | `Sessions`, `TODAY` |
-| 3 | `palette-open` | `Ctrl+K` | `Go to`, `esc dismiss` |
-
-On a busy SPUR monorepo this shows live **Lineage** (running brains/execs),
-**Activity** log, real **session titles**, and a palette filled with workers /
-sessions — i.e. practical TUI use, not the empty first-run landing.
+Session resume skips the most-recent row (`Down`) to avoid “Session attached
+in another window” when the top session is held by another TUI.
 
 ## Quick start
 
 ```bash
-# Optional: pin binary
 export SPUR_BIN="$(command -v spur)"
-# Optional: another checkout
-# export SPUR_DEMO_PROJECT=/path/to/your/repo
+# optional: SPUR_DEMO_PROJECT=/path/to/other/repo
 
 cd scripts/e2e/demos/tui-live
 
 ./uat.sh --list
-./uat.sh --mode uat        # shell-use behavioral checks on live project
-./uat.sh --mode capture    # VHS → out/*.mp4 *.gif
-./uat.sh                   # UAT then capture
+
+# Safe harvest (no model spend)
+./uat.sh --mode uat
+./uat.sh --mode capture
+
+# Full harvest including a real brain ping (costs tokens)
+SPUR_DEMO_ALLOW_AGENT_SEND=1 ./uat.sh
 ```
 
-## Safety / policy
+Media lands in `out/*.mp4` + `out/*.gif` (gitignored).
 
-1. **Default landing is `tui --dashboard`** — avoids auto-resuming a prior chat
-   that might immediately reconnect a brain turn. Live lineage may still show
-   already-running project sessions (that is intentional for realism).
-2. **Tapes and UAT never type a user prompt** and never press Enter on the
-   composer. Adding “send a message” beats requires an explicit new journey and
-   cost awareness.
-3. **No fixture isolation, no `rm -rf` of the project.** The live launcher only
-   `cd`s into `SPUR_DEMO_PROJECT` and runs `spur`.
-4. **Not CI-default.** Media and live UAT are opt-in (machine + secrets +
-   running agents vary).
-5. Quit dialogs differ from empty fixtures when brains are attached (“agent
-   subprocess will be terminated”). Live UAT accepts either quit chrome.
+## Safety
 
-## Override TUI args
-
-```bash
-# Attach sessions picker on launch
-SPUR_DEMO_TUI_ARGS='tui --sessions' ./bin/run-spur-tui-live.sh
-
-# Force brand-new dashboard decision
-SPUR_DEMO_TUI_ARGS='tui --new' ./bin/run-spur-tui-live.sh
-```
+1. Default landing: `tui --dashboard` (no auto-resume of last chat).
+2. Journeys 1–7 never submit a brain/worker turn.
+3. Journey 8 is gated; it sends only:
+   `demo capture ping — reply with only the word ok`
+4. No temp isolation, no `rm -rf` of the project.
+5. Opt-in only — not wired into CI `run-all.sh`.
 
 ## Related
 
-- Fixture / first-run demos: `scripts/e2e/demos/tui-journeys/`
+- Fixture / first-run: `scripts/e2e/demos/tui-journeys/`
 - Journey catalog: `scripts/e2e/JOURNEYS.md`
-- Shared e2e launcher (fixtures only): `scripts/e2e/vhs/bin/run-spur-tui.sh`
