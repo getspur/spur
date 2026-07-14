@@ -18,6 +18,15 @@ cd scripts/e2e/demos/tui-journeys
 ./uat.sh                  # UAT then capture
 ```
 
+Live-project dual runner (real `.spur/`, navigation-only):
+
+```bash
+cd scripts/e2e/demos/tui-live
+# optional: SPUR_DEMO_PROJECT=/path/to/repo
+./uat.sh --mode uat       # shell-use on real project
+./uat.sh --mode capture   # VHS media of lineage / sessions / palette
+```
+
 Do not invent demo beats outside this table — add a journey row first.
 
 | Journey | User story | Side | Fixture | Wait strings | Owning file |
@@ -50,3 +59,6 @@ Do not invent demo beats outside this table — add a journey row first.
 | `palette-open` | Arc A demo media: command palette open. | demo | `no-agents` | `No agents configured`; `esc dismiss` | `scripts/e2e/demos/tui-journeys/tapes/03-palette-open.tape` |
 | `explore-browser-open` | Arc A demo media: explore browser never-synced. | demo | `no-agents` | `No agents configured`; `Go to`; `never synced` | `scripts/e2e/demos/tui-journeys/tapes/04-explore-browser-open.tape` |
 | `clean-quit` | Arc A demo media: quit confirm and clean exit. | demo | `no-agents` | `No agents configured`; `Quit spur\?`; `VHS_SPUR_EXITED status=0` | `scripts/e2e/demos/tui-journeys/tapes/05-clean-quit.tape` |
+| `lineage-dashboard` | Live project: open TUI and show lineage/activity surface. | demo-live | real project | `Lineage`; `Activity`; `INSERT` | `scripts/e2e/demos/tui-live/tapes/01-lineage-dashboard.tape` |
+| `sessions-picker` | Live project: open sessions picker with real history. | demo-live | real project | `Lineage`; `Sessions`; `TODAY` | `scripts/e2e/demos/tui-live/tapes/02-sessions-picker.tape` |
+| `palette-open` | Live project: command palette with real sessions/workers. | demo-live | real project | `Lineage`; `Go to`; `esc dismiss` | `scripts/e2e/demos/tui-live/tapes/03-palette-open.tape` |

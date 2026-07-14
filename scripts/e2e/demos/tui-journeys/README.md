@@ -85,3 +85,14 @@ export SPUR_E2E_SEED_CATALOG=1
 ```
 
 Add rows to `journeys.conf` and tapes; do not fork a second fixture tree.
+
+## Real project (practical demos)
+
+For TUI against a real `.spur/` (lineage, session history, live workers), use:
+
+```bash
+cd scripts/e2e/demos/tui-live
+./uat.sh --mode capture
+```
+
+See that pack’s README — navigation-only, no fixture isolation.
