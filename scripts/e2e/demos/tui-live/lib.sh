@@ -304,6 +304,85 @@ open_explore_browser() {
   expect_text "catalog"
 }
 
+# Enter Dashboard Navigate mode (Esc exits Compose so j/k hit the view).
+enter_navigate_mode() {
+  press_key Escape
+  sleep_ms 0.35
+  # Soft proof: footer often shows [NAV] when a panel owns keys
+  set +e
+  "$shell_use_bin" --session "$session_name" expect text "[NAV]" --no-strict --timeout 1500 >/dev/null 2>&1
+  set -e
+}
+
+# Focus Agents (lineage tree) panel. Prefer Tab cycle (view-owned always);
+# digit '1' is NOT a view-action char and would re-enter Compose.
+focus_agents_panel() {
+  enter_navigate_mode
+  # Default focus may be Log; Tab toggles Agents ↔ Log.
+  press_key Tab
+  sleep_ms 0.4
+  if ! soft_has_text "[Agents]" 1200; then
+    press_key Tab
+    sleep_ms 0.4
+  fi
+  soft_has_text "[Agents]" 2000 || soft_has_text "Lineage" 1000 || true
+}
+
+# Focus Activity log panel.
+focus_log_panel() {
+  enter_navigate_mode
+  press_key Tab
+  sleep_ms 0.35
+  if ! soft_has_text "[Log]" 1000; then
+    press_key Tab
+    sleep_ms 0.35
+  fi
+}
+
+# Walk lineage: select nodes, open detail (stream/artifacts/attempts/task/review).
+# Proves brain↔worker tree is navigable and outputs are inspectable.
+navigate_lineage_brain_and_workers() {
+  focus_agents_panel
+  printf '+ lineage: Agents panel focused — drive multi-agent tree\n'
+  # Move selection through tree (brain rows / worker children)
+  press_key j
+  sleep_ms 0.3
+  press_key j
+  sleep_ms 0.3
+  press_key Enter
+  sleep_ms 1.0
+  # Detail chrome (lowercase labels in UI)
+  wait_text "stream"
+  expect_text "artifacts"
+  expect_text "attempts"
+  printf '+ lineage: focused node detail (stream/artifacts/attempts)\n'
+  # Cycle detail tabs with l (view-owned when node focused)
+  press_key l
+  sleep_ms 0.55
+  press_key l
+  sleep_ms 0.55
+  soft_has_text "attempts" 2000 || true
+  soft_has_text "task" 1500 || true
+  soft_has_text "review" 1500 || true
+  printf '+ lineage: cycled detail tabs (worker/brain outputs)\n'
+  # Unfocus, move to another node (brain ↔ worker hop)
+  press_key Escape
+  sleep_ms 0.45
+  press_key k
+  sleep_ms 0.3
+  press_key Enter
+  sleep_ms 0.9
+  soft_has_text "stream" 3000 || true
+  printf '+ lineage: navigated to another agent node\n'
+  press_key Escape
+  sleep_ms 0.35
+  # Activity log: live events from brain/worker loop
+  focus_log_panel
+  soft_has_text "Activity" 3000 || true
+  soft_has_text "brain" 2000 || true
+  printf '+ activity: event stream for auto loop visibility\n'
+}
+
 # Problem: can't see multi-agent work or how to drive the dashboard.
 # Features: lineage + activity + help + palette navigation.
 story_ops_visibility() {
@@ -333,6 +412,9 @@ story_ops_visibility() {
   press_key Escape
   sleep_ms 0.3
   wait_text "Lineage"
+
+  # Lineage drive (Navigate mode)
+  navigate_lineage_brain_and_workers
 }
 
 # Problem: multi-task campaign progress is opaque.
@@ -369,6 +451,77 @@ story_plan_progress() {
   fi
   press_key Escape
   sleep_ms 0.4
+}
+
+# Full control-plane loop story helpers:
+# Plan surface (submit_plan results) → optional start/resume → lineage drive.
+#
+# submit_plan itself is issued by the *brain* (MCP tool), not the TUI.
+# The TUI operator path is: inspect plan browser → watch auto-dispatch on
+# lineage (BRAIN / EXEC) → inspect worker/brain outputs → activity stream.
+story_plan_loop_control_plane() {
+  # --- Plan campaign surface (where submit_plan lands) ---
+  open_palette_view "Plan"
+  wait_text "Plan"
+  expect_text "Progress"
+  # Soft proofs — use soft_has_text (run_su re-enables set -e on failure)
+  soft_has_text "Start/Resume" 3000 || true
+  soft_has_text "Claim" 1500 || true
+  soft_has_text "awaiting" 2000 || true
+  soft_has_text "complete" 1500 || true
+  printf '+ plan browser: submit_plan campaigns (progress/state)\n'
+  # Move selection to surface different plan rows (campaign history)
+  press_key j
+  sleep_ms 0.35
+  press_key j
+  sleep_ms 0.35
+  # Summary pane: Work item always; Progress counters live in table ("N/M done")
+  expect_text "Work item"
+  soft_has_text "done" 1500 || true
+  soft_has_text "bd-" 1500 || true
+  printf '+ plan summary: work item + progress counters\n'
+  # Optional: Start/Resume selected plan (mutates live work — opt-in)
+  if [[ "${SPUR_DEMO_ALLOW_PLAN_START:-0}" == "1" ]]; then
+    printf '+ opt-in: Start/Resume plan (s)\n'
+    type_text "s"
+    sleep_ms 2.0
+  fi
+  press_key Escape
+  sleep_ms 0.5
+  wait_text "Lineage"
+
+  # --- Lineage: brain ↔ worker navigation + output capture ---
+  navigate_lineage_brain_and_workers
+
+  # Soft proof of loop roles if live/history has them
+  soft_has_text "BRAIN" 2000 || true
+  soft_has_text "EXEC" 1500 || true
+  soft_has_text "Running" 1000 || true
+  soft_has_text "Succeeded" 1000 || true
+  soft_has_text "Cancelled" 1000 || true
+  printf '+ loop roles: BRAIN/EXEC states visible when present\n'
+}
+
+# Opt-in: kick brain so auto-loop may dispatch workers (real model spend).
+# Message steers brain toward a tiny plan/delegate; timeouts are long.
+trigger_brain_for_loop_observation() {
+  require_agent_send_opt_in
+  attach_session_for_send
+  sleep_ms 0.6
+  # Keep the prompt short; brain may submit_plan or delegate_to_worker.
+  type_text "Demo capture: reply briefly after checking lineage — say ready"
+  sleep_ms 0.4
+  press_key Enter
+  # Wait for turn machinery / activity
+  set +e
+  run_su wait text "YOU" --timeout "${SHELL_USE_TIMEOUT_MS:-90000}"
+  run_su wait text "THINK" --timeout 60000
+  set -e
+  printf '+ triggered brain turn for loop observation\n'
+  # Return to dashboard lineage to watch
+  return_to_dashboard
+  sleep_ms 0.5
+  wait_text "Lineage"
 }
 
 # Problem: backlog firehose — what is P0 open work?
