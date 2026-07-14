@@ -62,3 +62,8 @@ Do not invent demo beats outside this table — add a journey row first.
 | `lineage-dashboard` | Live project: open TUI and show lineage/activity surface. | demo-live | real project | `Lineage`; `Activity`; `INSERT` | `scripts/e2e/demos/tui-live/tapes/01-lineage-dashboard.tape` |
 | `sessions-picker` | Live project: open sessions picker with real history. | demo-live | real project | `Lineage`; `Sessions`; `TODAY` | `scripts/e2e/demos/tui-live/tapes/02-sessions-picker.tape` |
 | `palette-open` | Live project: command palette with real sessions/workers. | demo-live | real project | `Lineage`; `Go to`; `esc dismiss` | `scripts/e2e/demos/tui-live/tapes/03-palette-open.tape` |
+| `session-resume` | Live project: resume a session and load transcript history. | demo-live | real project | `Sessions`; `Session ·`; `INSERT` | `scripts/e2e/demos/tui-live/tapes/04-session-resume.tape` |
+| `explore-browser` | Live project: explore synced ecosystem catalog (skills). | demo-live | real project | `synced`; `catalog`; `Skills`; `Sources` | `scripts/e2e/demos/tui-live/tapes/05-explore-browser.tape` |
+| `explore-agents-tab` | Live project: explore Agents tab after skills. | demo-live | real project | `synced`; `Agents` | `scripts/e2e/demos/tui-live/tapes/06-explore-agents-tab.tape` |
+| `composer-draft` | Live project: type composer draft without sending. | demo-live | real project | `INSERT`; `draft only` | `scripts/e2e/demos/tui-live/tapes/07-composer-draft.tape` |
+| `agent-send` | Live project: opt-in minimal brain turn (real spend). | demo-live | real project | `YOU`; `THINK`/`ok`; `Session ·` | `scripts/e2e/demos/tui-live/tapes/08-agent-send.tape` |

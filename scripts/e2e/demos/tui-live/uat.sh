@@ -2,9 +2,10 @@
 # Live-project dual runner: shell-use UAT + VHS demo capture.
 #
 # Usage:
-#   ./uat.sh                      # UAT then capture
+#   ./uat.sh                              # safe journeys UAT + capture
 #   ./uat.sh --mode uat
 #   ./uat.sh --mode capture
+#   SPUR_DEMO_ALLOW_AGENT_SEND=1 ./uat.sh # include real agent send (costs tokens)
 #   SPUR_DEMO_PROJECT=/path/to/repo ./uat.sh --mode capture
 set -euo pipefail
 
@@ -14,19 +15,22 @@ E2E_ROOT="$(cd "$ROOT/../.." && pwd)"
 source "$E2E_ROOT/lib/spur-bin.sh"
 
 mode="all"
+list_only=false
 
 usage() {
   cat <<'USAGE'
 Usage: uat.sh [--mode uat|capture|all] [--list]
 
-Live project demos — navigation only (no agent prompts).
+Live project demos on a real .spur/ workspace.
 
-  SPUR_DEMO_PROJECT   project root with .spur/ (default: this monorepo)
-  SPUR_BIN            spur binary
+Env:
+  SPUR_DEMO_PROJECT              project root (default: this monorepo)
+  SPUR_BIN                       spur binary
+  SPUR_DEMO_ALLOW_AGENT_SEND=1   include agent-send journey (REAL model spend)
+  SHELL_USE_TIMEOUT_MS           wait timeout (agent-send defaults higher internally)
 USAGE
 }
 
-list_only=false
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --mode)
@@ -60,14 +64,17 @@ esac
 read_journeys() {
   awk -F'|' '
     /^[[:space:]]*#/ || /^[[:space:]]*$/ { next }
-    NF >= 2 { print $1 "|" $2 "|" (NF >= 3 ? $3 : "") }
+    NF >= 2 {
+      flags = (NF >= 4 ? $4 : "")
+      print $1 "|" $2 "|" (NF >= 3 ? $3 : "") "|" flags
+    }
   ' "$ROOT/journeys.conf"
 }
 
 if [[ "$list_only" == true ]]; then
-  printf '%-22s %-28s %s\n' "JOURNEY" "SHELL-USE" "VHS_TAPE"
-  while IFS='|' read -r name script tape; do
-    printf '%-22s %-28s %s\n' "$name" "$script" "${tape:-(none)}"
+  printf '%-22s %-28s %-24s %s\n' "JOURNEY" "SHELL-USE" "VHS_TAPE" "FLAGS"
+  while IFS='|' read -r name script tape flags; do
+    printf '%-22s %-28s %-24s %s\n' "$name" "$script" "${tape:-(none)}" "${flags:-(safe)}"
   done < <(read_journeys)
   exit 0
 fi
@@ -77,18 +84,26 @@ if ! SPUR_BIN="$(spur_e2e_resolve_spur_bin)"; then
 fi
 export SPUR_BIN
 export SPUR_DEMO_PROJECT="${SPUR_DEMO_PROJECT:-$(git -C "$E2E_ROOT/../.." rev-parse --show-toplevel)}"
+allow_send="${SPUR_DEMO_ALLOW_AGENT_SEND:-0}"
 
 echo "=== tui-live (real project) ==="
-echo "mode:             $mode"
-echo "SPUR_BIN:         $SPUR_BIN"
-echo "SPUR_DEMO_PROJECT:$SPUR_DEMO_PROJECT"
+echo "mode:                      $mode"
+echo "SPUR_BIN:                  $SPUR_BIN"
+echo "SPUR_DEMO_PROJECT:         $SPUR_DEMO_PROJECT"
+echo "SPUR_DEMO_ALLOW_AGENT_SEND:$allow_send"
 echo
 
 failures=0
+skipped=0
 
 run_uat() {
   echo "--- shell-use UAT (live) ---"
-  while IFS='|' read -r name script _tape; do
+  while IFS='|' read -r name script _tape flags; do
+    if [[ "$flags" == *agent-send* && "$allow_send" != "1" ]]; then
+      echo "SKIP uat ${name} (set SPUR_DEMO_ALLOW_AGENT_SEND=1)"
+      skipped=$((skipped + 1))
+      continue
+    fi
     path="$ROOT/journeys/$script"
     if [[ ! -f "$path" ]]; then
       echo "FAIL uat ${name} missing=${path}" >&2
@@ -97,7 +112,10 @@ run_uat() {
     fi
     echo
     echo "=== UAT: ${name} ==="
-    if SPUR_BIN="$SPUR_BIN" SPUR_DEMO_PROJECT="$SPUR_DEMO_PROJECT" bash "$path"; then
+    if SPUR_BIN="$SPUR_BIN" \
+      SPUR_DEMO_PROJECT="$SPUR_DEMO_PROJECT" \
+      SPUR_DEMO_ALLOW_AGENT_SEND="$allow_send" \
+      bash "$path"; then
       echo "PASS uat ${name}"
     else
       echo "FAIL uat ${name}" >&2
@@ -108,7 +126,7 @@ run_uat() {
 
 run_capture() {
   echo "--- VHS capture (live) ---"
-  if ! "$ROOT/render.sh"; then
+  if ! SPUR_DEMO_ALLOW_AGENT_SEND="$allow_send" "$ROOT/render.sh"; then
     failures=$((failures + 1))
   fi
 }
@@ -129,6 +147,7 @@ esac
 echo
 echo "=== summary ==="
 echo "failures: $failures"
+echo "skipped:  $skipped (agent-send gated)"
 if [[ "$failures" -ne 0 ]]; then
   exit 1
 fi
