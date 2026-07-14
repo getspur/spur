@@ -280,16 +280,118 @@ attach_session_for_send() {
   expect_text "INSERT"
 }
 
-open_explore_browser() {
-  blur_composer
+# Open a palette view by title substring (Plan, Issues, Explore, Sessions, …).
+open_palette_view() {
+  local title="$1"
+  return_to_dashboard
+  sleep_ms 0.2
   press_key Ctrl+K
-  wait_text "Go to"
-  type_text "Explore"
-  sleep_ms 0.4
+  if ! soft_has_text "Go to" 4000; then
+    press_key Escape
+    sleep_ms 0.3
+    press_key Ctrl+K
+    wait_text "Go to"
+  fi
+  type_text "$title"
+  sleep_ms 0.35
   press_key Enter
+}
+
+open_explore_browser() {
+  open_palette_view "Explore"
   wait_text "Explore"
   expect_text "synced"
   expect_text "catalog"
+}
+
+# Problem: can't see multi-agent work or how to drive the dashboard.
+# Features: lineage + activity + help + palette navigation.
+story_ops_visibility() {
+  wait_text "Lineage"
+  expect_text "Activity"
+  expect_text "INSERT"
+  printf '+ problem: multi-agent opacity → lineage/activity visible\n'
+
+  # Help: how do I drive this?
+  type_text "?"
+  sleep_ms 0.6
+  wait_text "Dashboard"
+  # Soft: modes/navigation sections from help overlay
+  set +e
+  run_su expect text "Modes" --no-strict --timeout 4000
+  run_su expect text "Navigation" --no-strict --timeout 2000
+  set -e
+  printf '+ problem: unknown keybindings → help overlay\n'
+  press_key Escape
+  sleep_ms 0.4
+
+  # Palette: one hub for all problem surfaces
+  press_key Ctrl+K
+  wait_text "Go to"
+  expect_text "esc dismiss"
+  printf '+ problem: where is X? → command palette\n'
+  press_key Escape
+  sleep_ms 0.3
+  wait_text "Lineage"
+}
+
+# Problem: multi-task campaign progress is opaque.
+# Features: plan browser list + summary (progress / awaiting review).
+story_plan_progress() {
+  open_palette_view "Plan"
+  wait_text "Plan"
+  # Real projects show plan table; empty filter still has chrome
+  expect_text "Progress"
+  # Prefer proof of real work: awaiting review or complete rows
+  set +e
+  run_su expect text "awaiting" --no-strict --timeout 3000
+  local has_await=$?
+  run_su expect text "complete" --no-strict --timeout 2000
+  local has_complete=$?
+  set -e
+  if [[ "$has_await" -ne 0 && "$has_complete" -ne 0 ]]; then
+    expect_text "Work item"
+  fi
+  # Summary pane for selected plan
+  set +e
+  run_su expect text "Tasks" --no-strict --timeout 3000
+  run_su expect text "bd-" --no-strict --timeout 2000
+  set -e
+  printf '+ problem: campaign opacity → plan browser progress/summary\n'
+  # Cycle filter once (f cycles: all → mine → …) then restore if empty
+  type_text "f"
+  sleep_ms 0.5
+  if soft_has_text "No plans match" 1500; then
+    type_text "f"
+    sleep_ms 0.4
+    type_text "f"
+    sleep_ms 0.4
+  fi
+  press_key Escape
+  sleep_ms 0.4
+}
+
+# Problem: backlog firehose — what is P0 open work?
+# Features: issue browser list + detail.
+story_backlog_triage() {
+  open_palette_view "Issues"
+  # Live monorepo uses beads issues list
+  wait_text "Issues"
+  expect_text "P0"
+  expect_text "open"
+  expect_text "bd-"
+  printf '+ problem: backlog firehose → P0 open list\n'
+  press_key Enter
+  sleep_ms 1.0
+  # Detail pane
+  expect_text "bd-"
+  set +e
+  run_su expect text "status:" --no-strict --timeout 4000
+  run_su expect text "priority:" --no-strict --timeout 2000
+  set -e
+  printf '+ problem: what is this issue? → detail (status/priority)\n'
+  press_key Escape
+  sleep_ms 0.4
 }
 
 # Machine-speed `type` is coalesced into a paste on live TUI (paste-burst
