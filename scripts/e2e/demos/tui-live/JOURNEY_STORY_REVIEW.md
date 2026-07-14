@@ -1,9 +1,36 @@
 # Live TUI journey story review
 
-**Source:** Codex `content-marketer` / `gpt-5.6-sol` / `xhigh`  
-**Delegation:** `ec9249c9-f72c-48fd-9839-59ac25a59c3d`  
-**Branch (ephemeral worktree cleaned):** `spur/worker/v2/codex/4be0670bb4346207/eabdcf4c-…`  
-**Status:** Success, review-only (no tracked code changes). Worker wrote under gitignored `out/`; this file is the durable reconstruction + grounded evidence from current journeys/tapes/`lib.sh`.
+## Changelog for film — 2026-07-15
+
+This pass keeps the landed P0 pacing work and upgrades the five value films to
+one explicit **HOOK → ORIENTATION → ACTION → PROOF → RESOLUTION** contract.
+The scorecard below is the pre-upgrade baseline.
+
+| Film | Before | After / why it reads as value |
+|------|--------|-------------------------------|
+| `problem-plan-loop-drive` | Plan and lineage surfaces appeared adjacent | Campaign state now flows into BRAIN→EXEC, output/review tabs, Activity, then an optional cause→effect seed; missing history is labeled |
+| `product-e2e-flow` | Session/explore/cascade could feel like three tours | Context continuity now supplies a trusted specialist, ending on strict `agent=` + `model=` + `effort=` dispatch proof |
+| `problem-ops-visibility` | Help, palette, and lineage were useful but loosely connected | “What is running?” now distinguishes an empty system from hidden work, then advances through guidance to worker output and Activity when present |
+| `problem-plan-progress` | Progress chrome was the main event | Lifecycle, objective, and task summary now answer the next campaign decision; empty state is labeled |
+| `problem-backlog-triage` | P0 list and detail flashed as separate surfaces | P0/open/ID isolates the fire, then status/priority explains the response; an empty P0 queue is honest |
+
+Shared helpers now distinguish hard invariant proof from labeled soft
+project-dependent proof, preserve non-empty session drafts while finding a
+clean composer or safely reuse a completed configured draft, and bind backlog
+urgency to one selected detail pane. Tapes
+`09`–`13` mirror the same beat order and dwell on the resolution screen. Spend
+gates, fast-UAT pacing, Esc→Tab Agents navigation, and slow `@worker` typing are
+unchanged. Re-capture remains pending.
+
+---
+
+**Prior review source:** Codex `content-marketer` / `gpt-5.6-sol` / `xhigh`
+
+**Delegation:** `ec9249c9-f72c-48fd-9839-59ac25a59c3d`
+
+**Branch (ephemeral worktree cleaned):** `spur/worker/v2/codex/4be0670bb4346207/eabdcf4c-…`
+
+**Baseline status:** Review-only critique reconstructed from the prior worker; the changelog above records the implementation that followed.
 
 Audience: multi-agent operators evaluating SPUR as a **control plane**. Capture canvas: Air/iTerm **2560×1600**, PTY **200×50** (`geometry.env`).
 
@@ -191,7 +218,7 @@ Do **not** re-run full high-res “all tapes” until P0 pacing lands — otherw
 
 ---
 
-## 9. Implementation status (P0 landed)
+## 9. Implementation status (P0 + storytelling upgrade landed)
 
 | Item | Status |
 |------|--------|
@@ -201,4 +228,8 @@ Do **not** re-run full high-res “all tapes” until P0 pacing lands — otherw
 | Value tapes `09`–`13` proof Sleep floors | Done |
 | `SPUR_AGG_SPEED` default **1.15**; seed/render enable story pace | Done |
 | `SPUR_DEMO_STORIES_ONLY=1` on `render.sh` | Done |
+| Five-stage narrative markers in all value journeys | Done |
+| Hard proof vs labeled soft-project proof helpers | Done |
+| Tapes `09`–`13` aligned to journey beat order and resolution hold | Done |
+| Static story/safety/navigation contract (`story-contract.test.sh`) | Done |
 | Re-capture high-res film | **Pending** (run when ready) |

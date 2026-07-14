@@ -5,19 +5,38 @@ Features are not demos of chrome — they answer a concrete pain.
 
 | ID | Persona pain | Features exercised | Proof anchors |
 |----|--------------|--------------------|---------------|
-| `product-e2e-flow` | “I need a specialist persona + model + effort without reinventing agents.” | sessions, explore adopt/gate/pool, `@worker` cascade | `applied`, `agent=`, `model=`, `effort=` |
-| `problem-ops-visibility` | “I can’t see what’s running or how to drive multi-agent work.” | lineage, activity, help, palette, **Agents tree focus + detail tabs** | `Lineage`, `Activity`, `[Agents]`, `stream`/`artifacts` |
-| `problem-plan-progress` | “Where is my multi-task campaign? What’s awaiting review?” | plan browser, summary pane, navigate plans | `Plans`, `Progress`, `awaiting`/`complete`, `Work item` |
-| `problem-backlog-triage` | “What’s on fire in the backlog?” | issue browser, P0 list, issue detail | `Issues`, `P0`, `open`, `bd-` |
-| **`problem-plan-loop-drive`** | “submit_plan auto-loop is a black box — brain↔worker outputs, how do I drive it?” | plan browser (campaigns), lineage Agents j/k/Enter, detail tabs (stream/attempts/task/review), activity log; optional brain kick / plan start | `Plan`/`Progress`, `[Agents]`, `stream`, `attempts`, `Activity`, `BRAIN`/`EXEC` |
+| **`problem-plan-loop-drive`** | “submit_plan auto-loop is a black box — brain↔worker outputs, how do I drive it?” | plan browser (campaigns), lineage Agents j/k/Enter, detail tabs (stream/attempts/task/review), activity log; optional brain kick / plan start | `Progress`, `[Agents]`, `stream`, `Activity`; `BRAIN`/`EXEC` when history exists |
+| `product-e2e-flow` | “I need a specialist persona + model + effort without reinventing agents or losing context.” | sessions, Explore adopt/gate/pool, `@worker` cascade | `TODAY`, `applied`, `agent=`, `model=`, `effort=` |
+| `problem-ops-visibility` | “I can’t see what’s running or how to drive multi-agent work.” | lineage, activity, help, palette, **Agents tree focus + detail tabs** | `Lineage`, `Dashboard`, `Go to`, `stream`, `Activity` |
+| `problem-plan-progress` | “Where is my multi-task campaign? What’s awaiting review?” | plan browser, summary pane, navigate plans | `Progress`; running/awaiting/complete and `Work item`/`Tasks` when present |
+| `problem-backlog-triage` | “What’s on fire in the backlog?” | issue browser, P0 list, issue detail | `Issues`; `P0` + `open` + `bd-`, then `status:`/`priority:` when present |
 
 ## Contract
 
 1. **Lead with problem** in journey header comments and README.
 2. **Bond features to the problem** — every beat must move the user toward resolution.
 3. **Prove with wait strings** that the user saw the answer (not just that a view opened).
-4. **Safe by default** — no agent spend unless `SPUR_DEMO_ALLOW_AGENT_SEND=1`.
+4. **Safe by default** — no model/worker spend or plan mutation unless the
+   matching `SPUR_DEMO_ALLOW_AGENT_SEND`, `SPUR_DEMO_ALLOW_PLAN_LOOP`, or
+   `SPUR_DEMO_ALLOW_PLAN_START` gate is `1`.
 5. **Reuse lib helpers** — no fork of isolation/fixtures.
+
+### Beat and proof contract
+
+Every value journey follows the same readable spine in both shell-use logs and
+its matching tape:
+
+1. **HOOK** — name the operator pain.
+2. **ORIENTATION** — establish where the answer lives.
+3. **ACTION** — exercise the feature that changes the situation.
+4. **PROOF** — stop on a visible anchor long enough to read it in story pace.
+5. **RESOLUTION** — restate the solved operator outcome, not merely “complete.”
+
+`story_hard_proof` owns invariant UI anchors and fails UAT when they disappear.
+`story_soft_proof` owns project-dependent history/state; it prints either a
+labeled proof or a labeled soft beat. Optional evidence must never pass
+silently. `story_dwell` remains film-only, so this narrative contract adds no
+sleep when `SPUR_DEMO_STORY_PACE` is unset or `0`.
 
 ### submit_plan / auto-loop note
 
@@ -60,3 +79,5 @@ bash journeys/problem-plan-loop-drive.sh
 | plan/issue (shell-use e2e only) | `problem-plan-progress`, `problem-backlog-triage` |
 
 Short probes remain for regression; problem stories are the **value demos**.
+Their order in `journeys.conf` follows marketing value: plan loop, specialist
+dispatch, operations visibility, campaign progress, then backlog triage.
