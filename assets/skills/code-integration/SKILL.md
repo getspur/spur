@@ -1,6 +1,6 @@
 ---
 name: code-integration
-description: Use when reviewing or explaining an integration seam between a current-worktree symbol and a dependency or upstream package symbol, especially adapters, wrappers, trait implementations, SDK calls, serialization boundaries, FFI, or version-sensitive external APIs.
+description: Use when reviewing or explaining an integration seam between a current-worktree symbol and a third-party dependency or upstream package outside the current workspace, especially adapters, wrappers, trait implementations, SDK calls, serialization boundaries, FFI, or version-sensitive external APIs.
 ---
 
 # Code Integration — Paired Graph Review
@@ -14,6 +14,10 @@ directions.
 
 **REQUIRED BACKGROUND:** Use `code-explore` for graph-first discovery,
 counts-first edge inspection, selector handling, and staleness rules.
+
+Do not use this skill for two internal workspace packages, general dependency
+selection, or external package exploration without a local integration seam;
+route those questions through `code-explore`.
 
 <HARD-GATE>
 Resolve the dependency's exact version, tag, ref, or commit from the manifest
@@ -52,7 +56,7 @@ Before reporting, capture this compact ledger:
 | Evidence | Required content |
 |---|---|
 | Local | Worktree selector and current source body |
-| External | Package selector, exact revision, and source body |
+| External | Package source identity, selector, exact revision, and source body |
 | Bridge | Source-level proof connecting the two symbols |
 | Translation | Arguments, returns, errors, ownership, lifecycle, config |
 | Unknowns | Dynamic, generated, runtime, or unresolved behavior |
