@@ -105,6 +105,8 @@ fn add_project_to_suggestion_array(value: Option<&mut Value>, project: &str) {
     let Some(entries) = value.and_then(Value::as_array_mut) else {
         return;
     };
+    entries
+        .retain(|entry| entry.get("tool").and_then(Value::as_str) != Some("code_semantic_search"));
     for entry in entries {
         if let Some(entry) = entry.as_object_mut() {
             entry.insert("project".to_owned(), Value::String(project.to_owned()));
