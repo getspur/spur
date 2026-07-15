@@ -406,6 +406,54 @@ async fn selected_project_scopes_doc_navigation_and_both_knowledge_pack_names() 
     }
 }
 
+#[tokio::test]
+async fn empty_project_pack_suppresses_uncallable_project_followups() {
+    let _embed_mode = EnvGuard::set(EMBED_MODE_ENV, "off");
+    let fixture = ProjectAnalystFixture::new("alpha_unique");
+    let catalog = tempfile::tempdir().expect("catalog tempdir");
+    let store = LocalProjectCatalogStore::new(catalog.path().join("projects.toml"));
+    store
+        .add("alpha", &fixture.root, false)
+        .expect("register project");
+    let module = AnalystMcpModule::with_local_projects(LocalProjectResolver::new(
+        store,
+        Arc::new(FixtureValidator),
+    ));
+
+    let pack = module
+        .dispatch(
+            "knowledge_context_pack_2",
+            json!({
+                "query": "definitely_missing_project_symbol_xyz",
+                "intent": "explain",
+                "scope": "code",
+                "limit": 5,
+                "max_symbol_bodies": 0,
+                "project": "alpha"
+            }),
+        )
+        .await
+        .expect("empty project knowledge pack");
+
+    assert_eq!(pack["project"]["name"], "alpha");
+    assert_eq!(pack["answerable"], false, "{pack:#}");
+    let recommendations = pack["recommended_next_tools"]
+        .as_array()
+        .expect("recommended next tools");
+    assert!(
+        recommendations
+            .iter()
+            .all(|suggestion| suggestion["tool"] != "code_semantic_search"),
+        "uncallable fallback leaked into project response: {pack:#}"
+    );
+    assert!(
+        recommendations
+            .iter()
+            .all(|suggestion| suggestion["project"] == "alpha"),
+        "project-aware fallback lost scope: {pack:#}"
+    );
+}
+
 fn assert_project_on_pack_suggestions(pack: &Value, expected: &str) {
     let recommended = pack["recommended_next_tools"]
         .as_array()

@@ -300,7 +300,7 @@ async fn routing_errors_precede_graph_dispatch_and_blind_modules_reject_project(
     assert!(blind.message.contains("not available on this MCP server"));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn concurrent_named_project_queries_do_not_leak_task_local_roots() {
     let alpha = indexed_repo("alpha_symbol");
     let beta = indexed_repo("beta_symbol");
@@ -312,10 +312,13 @@ async fn concurrent_named_project_queries_do_not_leak_task_local_roots() {
             &[("alpha", alpha.path()), ("beta", beta.path())],
         ),
     );
+    let start = Arc::new(tokio::sync::Barrier::new(2));
 
     let alpha_task = {
         let module = module.clone();
+        let start = Arc::clone(&start);
         tokio::spawn(async move {
+            start.wait().await;
             module
                 .dispatch(
                     "code_symbol_search",
@@ -326,7 +329,9 @@ async fn concurrent_named_project_queries_do_not_leak_task_local_roots() {
     };
     let beta_task = {
         let module = module.clone();
+        let start = Arc::clone(&start);
         tokio::spawn(async move {
+            start.wait().await;
             module
                 .dispatch(
                     "code_symbol_search",
