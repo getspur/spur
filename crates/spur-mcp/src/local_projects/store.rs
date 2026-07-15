@@ -326,12 +326,7 @@ fn write_document_atomically_with_hooks(
     before_rename: impl FnOnce() -> std::io::Result<()>,
     sync_parent: impl FnOnce(&Path) -> std::io::Result<()>,
 ) -> Result<(), LocalProjectError> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| LocalProjectError::CatalogWrite {
-            path: path.to_path_buf(),
-            reason: "catalog path has no parent directory".to_owned(),
-        })?;
+    let parent = catalog_parent_directory(path)?;
     let sequence = TEMP_FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let file_name = path
         .file_name()
@@ -375,13 +370,22 @@ fn write_document_atomically_with_hooks(
 }
 
 fn ensure_private_directory(path: &Path) -> Result<(), LocalProjectError> {
+    let parent = catalog_parent_directory(path)?;
+    ensure_directory_exists(parent, path)
+}
+
+fn catalog_parent_directory(path: &Path) -> Result<&Path, LocalProjectError> {
     let parent = path
         .parent()
         .ok_or_else(|| LocalProjectError::CatalogWrite {
             path: path.to_path_buf(),
             reason: "catalog path has no parent directory".to_owned(),
         })?;
-    ensure_directory_exists(parent, path)
+    if parent.as_os_str().is_empty() {
+        Ok(Path::new("."))
+    } else {
+        Ok(parent)
+    }
 }
 
 fn ensure_directory_exists(directory: &Path, catalog_path: &Path) -> Result<(), LocalProjectError> {
@@ -619,6 +623,14 @@ fn catalog_write_error(path: &Path, error: impl std::fmt::Display) -> LocalProje
 mod tests {
     use super::*;
 
+    struct RemoveFileOnDrop(PathBuf);
+
+    impl Drop for RemoveFileOnDrop {
+        fn drop(&mut self) {
+            let _ = fs::remove_file(&self.0);
+        }
+    }
+
     #[test]
     fn catalog_read_uses_the_same_nofollow_descriptor_after_open() {
         let temp = tempfile::tempdir().expect("tempdir");
@@ -685,6 +697,45 @@ mod tests {
             toml::from_str(&fs::read_to_string(&path).expect("read atomically replaced catalog"))
                 .expect("parse replaced catalog");
         assert_eq!(visible.generation, 2);
+    }
+
+    #[test]
+    fn bare_relative_catalog_mutation_syncs_the_current_directory() {
+        let reserved = tempfile::Builder::new()
+            .prefix(".spur-bare-relative-catalog-")
+            .tempfile_in(".")
+            .expect("reserve unique catalog name");
+        let path = PathBuf::from(
+            reserved
+                .path()
+                .file_name()
+                .expect("reserved catalog file name"),
+        );
+        reserved.close().expect("release reserved catalog name");
+        let _cleanup = RemoveFileOnDrop(path.clone());
+        let document = CatalogDocument {
+            version: 1,
+            generation: 1,
+            projects: Vec::new(),
+        };
+        let mut synced_parent = None;
+
+        write_document_atomically_with_hooks(
+            &path,
+            &document,
+            || Ok(()),
+            |parent| {
+                synced_parent = Some(parent.to_path_buf());
+                sync_parent_directory(parent)
+            },
+        )
+        .expect("bare relative catalog mutation");
+
+        assert_eq!(synced_parent.as_deref(), Some(Path::new(".")));
+        let visible: CatalogDocument =
+            toml::from_str(&fs::read_to_string(&path).expect("read bare relative catalog"))
+                .expect("parse bare relative catalog");
+        assert_eq!(visible.generation, 1);
     }
 
     #[test]
