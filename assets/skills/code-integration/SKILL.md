@@ -70,7 +70,10 @@ Give a concise ordered flow naming both selectors and the exact revision.
 
 List severity-ordered defects. Each finding includes local evidence, external
 evidence, impact, and a concrete recommendation. Insufficiently proven concerns
-belong under uncertainties, not findings.
+belong under uncertainties, not findings. A narrower supported capability is a
+defect only when local callers, tests, or a public contract prove the broader
+capability is required; otherwise report it as a verified constraint or
+uncertainty without severity.
 
 ### Verified compatibility
 
