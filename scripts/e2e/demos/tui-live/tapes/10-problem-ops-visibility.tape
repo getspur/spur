@@ -71,19 +71,24 @@ Escape
 Show
 Sleep 2s
 
-# STORY: ACTION — optional lineage: select EXEC worker (not BRAIN), stream + task
+# STORY: ACTION — open Dashboard lineage (palette). Do NOT Esc after —
+# Esc from Dashboard pops back to Session Detail.
 Hide
-Escape
-Sleep 600ms
+Ctrl+K
 Show
-Sleep 1s
+Wait+Screen@12s /Go to/
 Hide
-Escape
-Sleep 400ms
+Type "Dashboard"
+Enter
+Show
+Wait+Screen@20s /Lineage/
+Sleep 2.5s
+# Agents panel focus (Tab). Stay on Dashboard.
+Hide
 Tab
 Show
 Sleep 2s
-# skip BRAIN root → first worker child
+# skip BRAIN root → EXEC worker children
 Hide
 Type "j"
 Show
@@ -95,10 +100,10 @@ Sleep 1.5s
 Hide
 Enter
 Show
-Wait+Screen@15s /stream/
-# hold stream panel while content streams / loads (VHS: no Ctrl+digit)
-Sleep 4s
-# cycle tabs: stream → artifacts → attempts → task (three l presses)
+Wait+Screen@20s /stream/
+# hold stream while content loads
+Sleep 4.5s
+# cycle tabs: stream → artifacts → attempts → task
 Hide
 Type "l"
 Show
@@ -110,13 +115,10 @@ Sleep 1.2s
 Hide
 Type "l"
 Show
-Wait+Screen@12s /task/
+Wait+Screen@15s /task/
 Sleep 4.5s
 
-# STORY: PROOF — worker detail held
+# STORY: PROOF — worker stream+task held
 Sleep 2s
 # STORY: RESOLUTION
-Hide
-Escape
-Show
 Sleep 2s
