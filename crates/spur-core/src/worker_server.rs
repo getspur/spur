@@ -684,6 +684,31 @@ fn reject_worker_project_selector(args: &Value) -> Result<(), McpHandlerError> {
     Ok(())
 }
 
+async fn invoke_query_for_worker(
+    deps: Arc<DispatcherDeps>,
+    worker_ctx: WorkerCallContext,
+    args: Value,
+) -> Result<Value, McpHandlerError> {
+    reject_worker_project_selector(&args)?;
+    let worktree_root = {
+        deps.delegation_worktree_roots
+            .lock()
+            .get(&worker_ctx.delegation_id)
+            .cloned()
+    }
+    .ok_or_else(|| {
+        McpHandlerError::Unauthorized(
+            "worker query requires an assigned delegation worktree".to_owned(),
+        )
+    })?;
+    let future = async move {
+        spur_analyst::mcp::query(&args)
+            .await
+            .map_err(analyst_mcp_error)
+    };
+    spur_graph::mcp::with_worktree_root_for_request(worktree_root, future).await
+}
+
 async fn invoke_knowledge_context_for_worker(
     deps: Arc<DispatcherDeps>,
     worker_ctx: WorkerCallContext,
@@ -847,6 +872,15 @@ struct DocNavigateParams {
     /// Include the first body_text characters as lede. Defaults true.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     include_lede: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema, Serialize)]
+struct WorkerQueryParams {
+    /// DuckDB SQL to execute read-only.
+    query: String,
+    /// Execute against a stale analyst index and return its warning. Defaults false.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    allow_stale: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema, Serialize)]
@@ -1591,6 +1625,24 @@ impl WorkerToolHandler {
                 invoke_knowledge_context_for_worker(deps, worker_ctx, args).await
             },
         )
+        .await
+    }
+
+    #[tool(
+        name = "query",
+        description = "Execute read-only DuckDB SQL against the assigned worktree's .spur/analyst.duckdb and return columns, rows, row_count, and truncation metadata.",
+        input_schema = crate::tool_schemas::schema_object::<WorkerQueryParams>()
+    )]
+    async fn query_tool(
+        &self,
+        arguments: JsonObject,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let args = Value::Object(arguments);
+        let deps = Arc::clone(&self.deps);
+        self.invoke_with_lifecycle("query", context, Some(None), move |worker_ctx| async move {
+            invoke_query_for_worker(deps, worker_ctx, args).await
+        })
         .await
     }
 
