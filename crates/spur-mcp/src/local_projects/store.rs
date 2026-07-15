@@ -73,11 +73,8 @@ impl LocalProjectCatalogStore {
         let path = self.catalog_path()?;
         let lock = open_lock_file(&path)?;
         FileExt::lock_shared(&lock).map_err(|error| catalog_read_error(&path, error))?;
-        let result = if catalog_file_exists(&path, CatalogAccess::Read)? {
-            read_document(&path).map(snapshot_from_document)
-        } else {
-            Ok(snapshot_from_document(CatalogDocument::default()))
-        };
+        let document = read_document(&path, CatalogAccess::Read)?.unwrap_or_default();
+        let result = Ok(snapshot_from_document(document));
         let _ = FileExt::unlock(&lock);
         result
     }
@@ -154,15 +151,20 @@ impl LocalProjectCatalogStore {
         &self,
         mutation: impl FnOnce(&mut CatalogDocument) -> Result<T, LocalProjectError>,
     ) -> Result<T, LocalProjectError> {
+        self.mutate_with_lock_hook(|| {}, mutation)
+    }
+
+    fn mutate_with_lock_hook<T>(
+        &self,
+        after_lock: impl FnOnce(),
+        mutation: impl FnOnce(&mut CatalogDocument) -> Result<T, LocalProjectError>,
+    ) -> Result<T, LocalProjectError> {
         let path = self.catalog_path()?;
         ensure_private_directory(&path)?;
         let lock = open_lock_file(&path)?;
         FileExt::lock_exclusive(&lock).map_err(|error| catalog_write_error(&path, error))?;
-        let mut document = if catalog_file_exists(&path, CatalogAccess::Write)? {
-            read_document(&path)?
-        } else {
-            CatalogDocument::default()
-        };
+        after_lock();
+        let mut document = read_document(&path, CatalogAccess::Write)?.unwrap_or_default();
         let previous_generation = document.generation;
         let result = mutation(&mut document)?;
         if document.generation != previous_generation {
@@ -249,8 +251,24 @@ fn snapshot_from_document(document: CatalogDocument) -> LocalProjectCatalogSnaps
     }
 }
 
-fn read_document(path: &Path) -> Result<CatalogDocument, LocalProjectError> {
-    let text = fs::read_to_string(path).map_err(|error| catalog_read_error(path, error))?;
+fn read_document(
+    path: &Path,
+    access: CatalogAccess,
+) -> Result<Option<CatalogDocument>, LocalProjectError> {
+    read_document_with_hook(path, access, || Ok(()))
+}
+
+fn read_document_with_hook(
+    path: &Path,
+    access: CatalogAccess,
+    after_open: impl FnOnce() -> std::io::Result<()>,
+) -> Result<Option<CatalogDocument>, LocalProjectError> {
+    let Some(file) = open_catalog_file(path, access)? else {
+        return Ok(None);
+    };
+    after_open().map_err(|error| catalog_access_error(access, path, error))?;
+    let text =
+        std::io::read_to_string(file).map_err(|error| catalog_access_error(access, path, error))?;
     let document: CatalogDocument =
         toml::from_str(&text).map_err(|error| LocalProjectError::CatalogParse {
             path: path.to_path_buf(),
@@ -284,7 +302,7 @@ fn read_document(path: &Path) -> Result<CatalogDocument, LocalProjectError> {
             });
         }
     }
-    Ok(document)
+    Ok(Some(document))
 }
 
 fn write_document_atomically(
@@ -298,6 +316,15 @@ fn write_document_atomically_with_hook(
     path: &Path,
     document: &CatalogDocument,
     before_rename: impl FnOnce() -> std::io::Result<()>,
+) -> Result<(), LocalProjectError> {
+    write_document_atomically_with_hooks(path, document, before_rename, sync_parent_directory)
+}
+
+fn write_document_atomically_with_hooks(
+    path: &Path,
+    document: &CatalogDocument,
+    before_rename: impl FnOnce() -> std::io::Result<()>,
+    sync_parent: impl FnOnce(&Path) -> std::io::Result<()>,
 ) -> Result<(), LocalProjectError> {
     let parent = path
         .parent()
@@ -332,7 +359,12 @@ fn write_document_atomically_with_hook(
         let _ = fs::remove_file(&temp_path);
         return Err(catalog_write_error(path, error));
     }
-    if let Err(error) = sync_parent_directory(parent) {
+    if let Err(error) = sync_parent(parent) {
+        if !is_unsupported_directory_sync_error(&error) {
+            // The rename is already visible, but without a successful parent
+            // sync its durability cannot be promised to the caller.
+            return Err(catalog_write_error(path, error));
+        }
         tracing::warn!(
             catalog_path = %path.display(),
             error = %error,
@@ -446,7 +478,7 @@ fn ensure_regular_file(file: &File) -> std::io::Result<()> {
     if file.metadata()?.file_type().is_file() {
         Ok(())
     } else {
-        Err(std::io::Error::other("lock path is not a regular file"))
+        Err(std::io::Error::other("path is not a regular file"))
     }
 }
 
@@ -477,17 +509,6 @@ fn private_create_new(path: &Path) -> std::io::Result<File> {
 }
 
 #[cfg(unix)]
-fn set_private_file_permissions(path: &Path) -> std::io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
-}
-
-#[cfg(not(unix))]
-fn set_private_file_permissions(_path: &Path) -> std::io::Result<()> {
-    Ok(())
-}
-
-#[cfg(unix)]
 fn set_private_directory_permissions(path: &Path) -> std::io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(path, fs::Permissions::from_mode(0o700))
@@ -504,22 +525,46 @@ enum CatalogAccess {
     Write,
 }
 
-fn catalog_file_exists(path: &Path, access: CatalogAccess) -> Result<bool, LocalProjectError> {
-    let metadata = match fs::symlink_metadata(path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+fn open_catalog_file(
+    path: &Path,
+    access: CatalogAccess,
+) -> Result<Option<File>, LocalProjectError> {
+    let result = open_catalog_file_nofollow(path);
+    let file = match result {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(catalog_access_error(access, path, error)),
     };
-    if !metadata.file_type().is_file() {
-        return Err(catalog_access_error(
-            access,
-            path,
-            "catalog path is not a regular file or is a symbolic link",
-        ));
-    }
-    set_private_file_permissions(path)
+    ensure_regular_file(&file).map_err(|error| catalog_access_error(access, path, error))?;
+    set_private_file_permissions_on_handle(&file)
         .map_err(|error| catalog_access_error(access, path, error))?;
-    Ok(true)
+    Ok(Some(file))
+}
+
+#[cfg(unix)]
+fn open_catalog_file_nofollow(path: &Path) -> std::io::Result<File> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+}
+
+#[cfg(windows)]
+fn open_catalog_file_nofollow(path: &Path) -> std::io::Result<File> {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn open_catalog_file_nofollow(path: &Path) -> std::io::Result<File> {
+    OpenOptions::new().read(true).open(path)
 }
 
 fn catalog_access_error(
@@ -541,6 +586,19 @@ fn sync_parent_directory(parent: &Path) -> std::io::Result<()> {
 #[cfg(not(unix))]
 fn sync_parent_directory(_parent: &Path) -> std::io::Result<()> {
     Ok(())
+}
+
+#[cfg(unix)]
+fn is_unsupported_directory_sync_error(error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::Unsupported
+        || error
+            .raw_os_error()
+            .is_some_and(|code| code == libc::EINVAL || code == libc::ENOTSUP)
+}
+
+#[cfg(not(unix))]
+fn is_unsupported_directory_sync_error(error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::Unsupported
 }
 
 fn catalog_read_error(path: &Path, error: impl std::fmt::Display) -> LocalProjectError {
