@@ -26,6 +26,17 @@ assert_has() {
   fi
 }
 
+assert_matches() {
+  local file="$1"
+  local pattern="$2"
+  local label="$3"
+  if rg -q --regexp "$pattern" -- "$file"; then
+    pass "$label"
+  else
+    fail "$label (missing regex: $pattern)"
+  fi
+}
+
 assert_lacks() {
   local file="$1"
   local needle="$2"
@@ -89,6 +100,40 @@ for story in "${stories[@]}"; do
   assert_has "$file" 'Session Detail' "$story names Session Detail in narrative"
 done
 
+probes=(
+  lineage-dashboard
+  sessions-picker
+  palette-open
+  session-resume
+  explore-browser
+  explore-agents-tab
+  composer-draft
+  agent-send
+)
+
+for probe in "${probes[@]}"; do
+  file="$root/journeys/$probe.sh"
+  assert_lacks "$file" 'wait_text "Lineage"' "$probe does not assume dashboard startup"
+  assert_lacks "$file" 'press_key s' "$probe avoids the obsolete dashboard sessions shortcut"
+done
+
+assert_has "$root/journeys/lineage-dashboard.sh" 'return_to_dashboard' 'lineage probe explicitly opens dashboard'
+assert_has "$root/journeys/lineage-dashboard.sh" 'story_dashboard_land' 'lineage probe proves dashboard landing'
+assert_has "$root/journeys/sessions-picker.sh" 'story_session_land' 'sessions probe proves session-first startup'
+assert_has "$root/journeys/sessions-picker.sh" 'open_sessions_picker' 'sessions probe uses palette navigation helper'
+assert_has "$root/journeys/palette-open.sh" 'story_session_land' 'palette probe starts from Session Detail'
+assert_has "$root/journeys/palette-open.sh" 'return_to_session_detail' 'palette probe returns to Session Detail'
+assert_has "$root/journeys/session-resume.sh" 'story_session_land' 'resume probe starts from Session Detail'
+assert_has "$root/journeys/explore-browser.sh" 'story_session_land' 'explore probe starts from Session Detail'
+assert_has "$root/journeys/explore-browser.sh" 'return_to_session_detail' 'explore probe returns to Session Detail'
+assert_has "$root/journeys/explore-agents-tab.sh" 'story_session_land' 'explore Agents probe starts from Session Detail'
+assert_has "$root/journeys/explore-agents-tab.sh" 'return_to_session_detail' 'explore Agents probe returns to Session Detail'
+assert_has "$root/journeys/composer-draft.sh" 'story_session_land' 'draft probe starts from Session Detail'
+assert_has "$root/journeys/composer-draft.sh" 'open_sessions_picker' 'draft probe exercises session switching'
+assert_has "$root/journeys/composer-draft.sh" 'wait_text "has an unsent draft"' 'draft probe proves the switch-safety confirmation'
+assert_count_at_least "$root/journeys/composer-draft.sh" 'press_key n' 2 'draft probe opens a new-session target then cancels'
+assert_has "$root/journeys/agent-send.sh" 'story_session_land' 'agent-send canary proves session-first startup'
+
 tapes=(
   09-product-e2e-flow.tape
   10-problem-ops-visibility.tape
@@ -110,9 +155,9 @@ done
 assert_has "$root/journeys/product-e2e-flow.sh" 'SPUR_DEMO_ALLOW_AGENT_SEND' 'product send remains opt-in'
 assert_has "$root/journeys/problem-plan-loop-drive.sh" 'SPUR_DEMO_ALLOW_PLAN_LOOP' 'plan-loop seed remains opt-in'
 assert_has "$root/../geometry.env" ": \"\${SPUR_DEMO_STORY_PACE:=0}\"" 'story dwell stays off by default'
-assert_has "$root/tapes/09-product-e2e-flow.tape" 'Wait+Screen@20s /agent=/' 'product tape proves cascade agent='
-assert_has "$root/tapes/09-product-e2e-flow.tape" 'Wait+Screen@10s /model=/' 'product tape proves cascade model='
-assert_has "$root/tapes/09-product-e2e-flow.tape" 'Wait+Screen@10s /effort=/' 'product tape proves cascade effort='
+assert_matches "$root/tapes/09-product-e2e-flow.tape" 'Wait\+Screen@[0-9]+s /agent=/' 'product tape proves cascade agent='
+assert_matches "$root/tapes/09-product-e2e-flow.tape" 'Wait\+Screen@[0-9]+s /model=/' 'product tape proves cascade model='
+assert_matches "$root/tapes/09-product-e2e-flow.tape" 'Wait\+Screen@[0-9]+s /effort=/' 'product tape proves cascade effort='
 assert_has "$root/tapes/11-problem-plan-progress.tape" '/Progress|No plans found/' 'plan-progress tape accepts campaign rows or honest empty state'
 assert_has "$root/tapes/12-problem-backlog-triage.tape" 'Wait+Screen@12s /status: open|priority: P0|bd-|No issues/' 'backlog tape binds detail or empty'
 assert_has "$root/tapes/13-problem-plan-loop-drive.tape" 'Alt+p' 'plan-loop tape tries session plan inspector'
@@ -123,10 +168,10 @@ assert_has "$lib" '_lineage_wait_task_tab' 'lineage opens task tab for assigned 
 assert_has "$lib" 'press_key Ctrl+1' 'stream tab via Ctrl+1'
 assert_has "$lib" 'press_key Ctrl+4' 'task tab via Ctrl+4'
 # VHS has no Ctrl+digit — tapes cycle with `l` to task; shell-use uses Ctrl+1/4.
-assert_has "$root/tapes/10-problem-ops-visibility.tape" 'Wait+Screen@15s /stream/' 'ops tape waits stream panel'
-assert_has "$root/tapes/10-problem-ops-visibility.tape" 'Wait+Screen@12s /task/' 'ops tape opens task tab'
-assert_has "$root/tapes/13-problem-plan-loop-drive.tape" 'Wait+Screen@15s /stream/' 'plan-loop tape waits stream panel'
-assert_has "$root/tapes/13-problem-plan-loop-drive.tape" 'Wait+Screen@12s /task/' 'plan-loop tape opens task tab'
+assert_matches "$root/tapes/10-problem-ops-visibility.tape" 'Wait\+Screen@[0-9]+s /stream/' 'ops tape waits stream panel'
+assert_matches "$root/tapes/10-problem-ops-visibility.tape" 'Wait\+Screen@[0-9]+s /task/' 'ops tape opens task tab'
+assert_matches "$root/tapes/13-problem-plan-loop-drive.tape" 'Wait\+Screen@[0-9]+s /stream/' 'plan-loop tape waits stream panel'
+assert_matches "$root/tapes/13-problem-plan-loop-drive.tape" 'Wait\+Screen@[0-9]+s /task/' 'plan-loop tape opens task tab'
 assert_has "$root/tapes/10-problem-ops-visibility.tape" 'Type "l"' 'ops tape cycles detail tabs with l'
 assert_has "$root/tapes/13-problem-plan-loop-drive.tape" 'Type "l"' 'plan-loop tape cycles detail tabs with l'
 

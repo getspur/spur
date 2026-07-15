@@ -1,5 +1,19 @@
 # Live TUI journey story review
 
+## Changelog for regression — 2026-07-15 (surface contracts)
+
+The eight short probes now follow the session-first launcher contract instead
+of waiting for Dashboard `Lineage` after startup. Dashboard, Sessions, palette,
+and Explore probes explicitly navigate to and reassert their intended surfaces.
+The composer probe now exercises the unsent-draft switch confirmation and
+cancels without sending; `agent-send` remains opt-in.
+
+The static story contract now guards every probe against the stale Dashboard
+landing assumption and matches VHS proof anchors independently of their timeout
+durations. Reliability-only timeout increases therefore remain contract-safe.
+
+---
+
 ## Changelog for film — 2026-07-15 (session-first)
 
 **Operator home revised to Session Detail** (`session_detail`), not dashboard:
