@@ -86,12 +86,19 @@ Escape
 Show
 Sleep 2s
 
-# STORY: ACTION — lineage EXEC worker: stream then task assignment
+# STORY: ACTION — Dashboard lineage EXEC worker: stream then task
+# Do NOT Esc after Dashboard — that returns to Session Detail.
 Hide
-Escape
-Sleep 600ms
-Escape
-Sleep 400ms
+Ctrl+K
+Show
+Wait+Screen@12s /Go to/
+Hide
+Type "Dashboard"
+Enter
+Show
+Wait+Screen@20s /Lineage/
+Sleep 2.5s
+Hide
 Tab
 Show
 Sleep 2s
@@ -106,10 +113,8 @@ Sleep 1.5s
 Hide
 Enter
 Show
-Wait+Screen@15s /stream/
-# hold stream panel for streaming content
+Wait+Screen@20s /stream/
 Sleep 4.5s
-# cycle to task tab (stream → artifacts → attempts → task)
 Hide
 Type "l"
 Show
@@ -121,11 +126,8 @@ Sleep 1.2s
 Hide
 Type "l"
 Show
-Wait+Screen@12s /task/
+Wait+Screen@15s /task/
 Sleep 4.5s
-Hide
-Escape
-Show
 Sleep 1.5s
 
 # STORY: PROOF — back home Session Detail when possible
