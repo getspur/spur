@@ -11,8 +11,8 @@ mod value {
 
 use serde_json::{json, Value};
 use spur_mcp::local_projects::{
-    decorate_project_response, extract_project, with_optional_project_schema, LocalProjectAccess,
-    LocalProjectResolver,
+    decorate_project_response_for_surface, extract_project, with_optional_project_schema,
+    LocalProjectAccess, LocalProjectFollowupSurface, LocalProjectResolver,
 };
 
 use crate::{MAX_CONTEXT_PATHS, MAX_CONTEXT_PATH_HOPS};
@@ -33,6 +33,7 @@ type AnalystDispatchFuture<'a> = std::pin::Pin<
 #[derive(Clone)]
 pub struct AnalystMcpModule {
     local_projects: LocalProjectAccess,
+    followup_surface: LocalProjectFollowupSurface,
 }
 
 impl Default for AnalystMcpModule {
@@ -45,6 +46,7 @@ impl AnalystMcpModule {
     pub fn new() -> Self {
         Self {
             local_projects: LocalProjectAccess::CurrentWorktreeOnly,
+            followup_surface: LocalProjectFollowupSurface::GraphAndAnalyst,
         }
     }
 
@@ -55,6 +57,16 @@ impl AnalystMcpModule {
     pub fn with_local_projects(resolver: LocalProjectResolver) -> Self {
         Self {
             local_projects: LocalProjectAccess::Catalog(resolver),
+            followup_surface: LocalProjectFollowupSurface::GraphAndAnalyst,
+        }
+    }
+
+    /// Compose analyst tools without graph tools on the same MCP server.
+    #[must_use]
+    pub fn with_local_projects_for_analyst_server(resolver: LocalProjectResolver) -> Self {
+        Self {
+            local_projects: LocalProjectAccess::Catalog(resolver),
+            followup_surface: LocalProjectFollowupSurface::AnalystOnly,
         }
     }
 
@@ -77,7 +89,11 @@ impl AnalystMcpModule {
         } else {
             dispatch.await?
         };
-        Ok(decorate_project_response(response, project.as_ref()))
+        Ok(decorate_project_response_for_surface(
+            response,
+            project.as_ref(),
+            self.followup_surface,
+        ))
     }
 
     async fn dispatch_current_project(

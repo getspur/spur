@@ -46,6 +46,7 @@ pub struct DelegationMcpDeps {
     retiring: Arc<AtomicBool>,
     cancel_token: CancellationToken,
     event_sink: Option<Arc<dyn spur_mcp::McpEventSink>>,
+    local_projects: super::LocalProjectMcpComposition,
 }
 
 impl DelegationMcpDeps {
@@ -66,6 +67,7 @@ impl DelegationMcpDeps {
             retiring: server.retiring_flag(),
             cancel_token: server.cancel_token(),
             event_sink: server.event_sink_handle(),
+            local_projects: server.local_projects.clone(),
         }
     }
 
@@ -94,7 +96,12 @@ impl DelegationMcpDeps {
             retiring: Arc::new(AtomicBool::new(false)),
             cancel_token: CancellationToken::new(),
             event_sink: None,
+            local_projects: super::LocalProjectMcpComposition::from_environment(),
         }
+    }
+
+    pub(crate) fn local_projects(&self) -> &super::LocalProjectMcpComposition {
+        &self.local_projects
     }
 }
 

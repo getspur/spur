@@ -11452,6 +11452,7 @@ dependencies = [
  "axum",
  "base64ct",
  "hmac 0.12.1",
+ "libc",
  "rmcp",
  "schemars 0.8.22",
  "serde",
