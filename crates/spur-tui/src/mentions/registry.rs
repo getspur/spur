@@ -1085,22 +1085,10 @@ fn query_tokens(query: &str) -> Vec<QueryToken<'_>> {
 }
 
 fn agent_slot_candidates(cwd: &Path, kind: spur_acp::AgentKind) -> Vec<SlotCandidate> {
-    let dir = cwd.join(".spur/agents");
-    let mut names: Vec<String> = match fs::read_dir(&dir) {
-        Ok(read_dir) => read_dir
-            .filter_map(Result::ok)
-            .filter_map(|entry| {
-                let path = entry.path();
-                (path.extension().and_then(|ext| ext.to_str()) == Some("md"))
-                    .then(|| path.file_stem()?.to_str().map(str::to_string))
-                    .flatten()
-            })
-            .collect(),
-        Err(_) => return Vec::new(),
-    };
-    names.sort();
-
-    names
+    // Committed `.spur/agents/*.md` ∪ accepted explore-pool agents. Load is
+    // the single resolution path so picker candidates stay consistent with
+    // delegation (`AgentProfile::load` pool fallback).
+    spur_core::agent_profiles::AgentProfile::candidate_names(cwd)
         .into_iter()
         .filter_map(
             |name| match spur_core::agent_profiles::AgentProfile::load(cwd, &name) {
@@ -1688,6 +1676,41 @@ mod tests {
         .unwrap();
     }
 
+    /// Vendor a clean explore-pool agent only — no `.spur/agents/` Apply step.
+    fn write_pool_agent_only(root: &Path, name: &str) {
+        use spur_core::explore::catalog::ItemKind;
+        use spur_core::explore::pool::{GateRecord, Manifest, ManifestItem};
+
+        let pin = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let source = "acme/agents";
+        let pool_dir = spur_core::explore::store::local_pool_dir(root, source, name, pin);
+        fs::create_dir_all(&pool_dir).unwrap();
+        fs::write(
+            pool_dir.join(format!("{name}.md")),
+            format!("---\nname: {name}\ndescription: {name} from pool\n---\npool body\n"),
+        )
+        .unwrap();
+        Manifest {
+            sources: vec![],
+            items: vec![ManifestItem {
+                name: name.to_string(),
+                kind: ItemKind::Agent,
+                source: source.to_string(),
+                rel_path: format!("agents/{name}.md"),
+                pinned_commit: pin.to_string(),
+                content_sha256: "0".repeat(64),
+                license: None,
+                gate: GateRecord {
+                    verdict: "clean".to_string(),
+                    justification: None,
+                    decided_at_epoch: None,
+                },
+            }],
+        }
+        .save(root)
+        .unwrap();
+    }
+
     fn choice(value: &str, name: &str) -> ConfigOptionChoice {
         ConfigOptionChoice {
             value: value.to_string(),
@@ -1777,6 +1800,47 @@ mod tests {
             .candidates
             .iter()
             .any(|c| c.value == "spur-narrow-implementer"));
+    }
+
+    #[test]
+    fn worker_query_exposes_explore_pool_agents_without_spur_agents_apply() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Pool-only: mirrors spur-notebook where /explore shows agents but
+        // `.spur/agents/` was never written by Apply.
+        // Unique name avoids false-greens from a machine-global explore pool.
+        write_pool_agent_only(tmp.path(), "pool-only-mention-agent");
+        assert!(
+            !tmp.path().join(".spur/agents").exists(),
+            "fixture must not create .spur/agents"
+        );
+        let catalog_path = write_catalog(
+            tmp.path(),
+            "codex",
+            vec![choice("gpt-5", "GPT-5")],
+            vec![choice("high", "High")],
+        );
+        let mut registry =
+            MentionRegistry::for_brain_session(vec![worker("codex", AgentKind::CodexAcp)]);
+        registry.set_agent_model_catalog_path_for_test(catalog_path);
+
+        let _hits = registry.query(CompletionScope::PreSession, tmp.path(), "codex", 10);
+        let open_slot = registry
+            .take_worker_open_slot()
+            .expect("agent slot should open from pool agents alone");
+
+        assert_eq!(open_slot.kind, WorkerSlotKind::Agent);
+        assert!(
+            open_slot
+                .candidates
+                .iter()
+                .any(|c| c.value == "pool-only-mention-agent"),
+            "pool agent must appear without Apply; candidates={:?}",
+            open_slot
+                .candidates
+                .iter()
+                .map(|c| &c.value)
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]
