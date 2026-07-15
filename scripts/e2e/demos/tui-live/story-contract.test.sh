@@ -122,10 +122,13 @@ assert_has "$lib" '_lineage_wait_stream_panel' 'lineage waits for stream panel'
 assert_has "$lib" '_lineage_wait_task_tab' 'lineage opens task tab for assigned work'
 assert_has "$lib" 'press_key Ctrl+1' 'stream tab via Ctrl+1'
 assert_has "$lib" 'press_key Ctrl+4' 'task tab via Ctrl+4'
-assert_has "$root/tapes/10-problem-ops-visibility.tape" 'Ctrl+1' 'ops tape waits stream tab'
-assert_has "$root/tapes/10-problem-ops-visibility.tape" 'Ctrl+4' 'ops tape opens task tab'
-assert_has "$root/tapes/13-problem-plan-loop-drive.tape" 'Ctrl+1' 'plan-loop tape waits stream tab'
-assert_has "$root/tapes/13-problem-plan-loop-drive.tape" 'Ctrl+4' 'plan-loop tape opens task tab'
+# VHS has no Ctrl+digit — tapes cycle with `l` to task; shell-use uses Ctrl+1/4.
+assert_has "$root/tapes/10-problem-ops-visibility.tape" 'Wait+Screen@15s /stream/' 'ops tape waits stream panel'
+assert_has "$root/tapes/10-problem-ops-visibility.tape" 'Wait+Screen@12s /task/' 'ops tape opens task tab'
+assert_has "$root/tapes/13-problem-plan-loop-drive.tape" 'Wait+Screen@15s /stream/' 'plan-loop tape waits stream panel'
+assert_has "$root/tapes/13-problem-plan-loop-drive.tape" 'Wait+Screen@12s /task/' 'plan-loop tape opens task tab'
+assert_has "$root/tapes/10-problem-ops-visibility.tape" 'Type "l"' 'ops tape cycles detail tabs with l'
+assert_has "$root/tapes/13-problem-plan-loop-drive.tape" 'Type "l"' 'plan-loop tape cycles detail tabs with l'
 
 if [[ "$failures" -ne 0 ]]; then
   printf '\n%d story-contract check(s) failed\n' "$failures" >&2
