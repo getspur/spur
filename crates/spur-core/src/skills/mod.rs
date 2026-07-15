@@ -1231,6 +1231,49 @@ mod tests {
     }
 
     #[test]
+    fn code_integration_skill_documents_paired_graph_review() {
+        let fake = PathBuf::from("/nonexistent");
+        let body = load_skill("code-integration", &fake).unwrap();
+
+        for keyword in [
+            "code-explore",
+            "knowledge_context_pack_2",
+            "code_read_symbol",
+            "code_callers",
+            "code_callees",
+            "external_knowledge_context",
+            "external_code_search",
+            "external_code_read",
+            "external_code_callers",
+            "external_code_callees",
+            "external_index",
+            "external_index_status",
+            "graph://symbol/<id>",
+            "pkg:<package>@<revision>::<symbol>",
+            "counts_by_kind",
+            "Integration trace",
+            "Findings",
+            "Verified compatibility",
+            "Uncertainties",
+        ] {
+            assert!(
+                body.contains(keyword),
+                "code-integration must document paired graph review via `{keyword}`"
+            );
+        }
+
+        let raw = all_bundled_raw().get("code-integration").unwrap();
+        let parsed = frontmatter::parse_source(raw);
+        let desc = parsed.description.as_deref().unwrap_or("");
+        for keyword in ["integration seam", "dependency", "upstream package"] {
+            assert!(
+                desc.contains(keyword),
+                "code-integration description must trigger on `{keyword}`"
+            );
+        }
+    }
+
+    #[test]
     fn code_explore_description_names_all_three_layers() {
         let raw = all_bundled_raw().get("code-explore").unwrap();
         let parsed = frontmatter::parse_source(raw);
