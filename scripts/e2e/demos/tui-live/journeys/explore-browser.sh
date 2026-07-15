@@ -6,11 +6,12 @@ journey_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$journey_dir/../lib.sh"
 
 start_live_tui "explore-browser"
-wait_text "Lineage"
+story_session_land "Session Detail is ready before opening Explore"
 open_explore_browser
 expect_text "Skills"
 expect_text "Sources"
 expect_text "pool"
 press_key Escape
-wait_text "Lineage"
+return_to_session_detail
+story_session_land "Leaving Explore returns to Session Detail"
 quit_live

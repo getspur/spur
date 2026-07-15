@@ -6,10 +6,10 @@ journey_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$journey_dir/../lib.sh"
 
 start_live_tui "session-resume"
-wait_text "Lineage"
+story_session_land "Session Detail is ready before choosing history"
 resume_session_skip_held
 # History-loaded session detail
-expect_text "Session ·"
+story_session_land "Resuming history returns to Session Detail"
 # Soft: transcript chrome varies by session content
 set +e
 run_su expect text "following" --no-strict --timeout 3000
