@@ -562,6 +562,138 @@ mod tests {
     use super::*;
 
     #[test]
+    fn catalog_read_uses_the_same_nofollow_descriptor_after_open() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("projects.toml");
+        let replacement = temp.path().join("replacement.toml");
+        let original = CatalogDocument {
+            version: 1,
+            generation: 1,
+            projects: Vec::new(),
+        };
+        let swapped = CatalogDocument {
+            version: 1,
+            generation: 9,
+            projects: Vec::new(),
+        };
+        fs::write(
+            &path,
+            toml::to_string(&original).expect("serialize original"),
+        )
+        .expect("write original");
+        fs::write(
+            &replacement,
+            toml::to_string(&swapped).expect("serialize replacement"),
+        )
+        .expect("write replacement");
+
+        let observed = read_document_with_hook(&path, CatalogAccess::Read, || {
+            fs::rename(&replacement, &path)
+        })
+        .expect("read opened catalog")
+        .expect("catalog exists");
+
+        assert_eq!(observed.generation, 1);
+        let pathname: CatalogDocument =
+            toml::from_str(&fs::read_to_string(&path).expect("read swapped catalog from pathname"))
+                .expect("parse swapped catalog");
+        assert_eq!(pathname.generation, 9);
+    }
+
+    #[test]
+    fn parent_directory_sync_io_error_is_reported_after_atomic_replace() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("projects.toml");
+        let previous = "version = 1\ngeneration = 1\nprojects = []\n";
+        fs::write(&path, previous).expect("seed prior catalog");
+        let document = CatalogDocument {
+            version: 1,
+            generation: 2,
+            projects: Vec::new(),
+        };
+
+        let result = write_document_atomically_with_hooks(
+            &path,
+            &document,
+            || Ok(()),
+            |_| Err(std::io::Error::from_raw_os_error(libc::EIO)),
+        );
+
+        assert!(matches!(
+            result,
+            Err(LocalProjectError::CatalogWrite { .. })
+        ));
+        let visible: CatalogDocument =
+            toml::from_str(&fs::read_to_string(&path).expect("read atomically replaced catalog"))
+                .expect("parse replaced catalog");
+        assert_eq!(visible.generation, 2);
+    }
+
+    #[test]
+    fn competing_mutation_blocks_inside_the_real_catalog_lock() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store_a = LocalProjectCatalogStore::new(temp.path().join("projects.toml"));
+        let store_b = store_a.clone();
+        let alpha = temp.path().join("alpha");
+        let beta = temp.path().join("beta");
+        fs::create_dir_all(&alpha).expect("create alpha");
+        fs::create_dir_all(&beta).expect("create beta");
+        let alpha = alpha.canonicalize().expect("canonical alpha");
+        let (locked_tx, locked_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let first = std::thread::spawn(move || {
+            store_a
+                .mutate_with_lock_hook(
+                    || {
+                        locked_tx.send(()).expect("announce held lock");
+                        release_rx.recv().expect("wait for release");
+                    },
+                    |document| {
+                        document.projects.push(LocalProjectEntry {
+                            name: "alpha".to_owned(),
+                            root: alpha,
+                        });
+                        document.generation = next_generation(document.generation)?;
+                        Ok(())
+                    },
+                )
+                .expect("first mutation");
+        });
+        locked_rx.recv().expect("first mutation acquired lock");
+
+        let (started_tx, started_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        let second = std::thread::spawn(move || {
+            started_tx.send(()).expect("announce second mutation");
+            let result = store_b.add("beta", &beta, false);
+            done_tx.send(result).expect("report second mutation");
+        });
+        started_rx.recv().expect("second mutation started");
+        assert!(
+            matches!(
+                done_rx.recv_timeout(Duration::from_millis(250)),
+                Err(mpsc::RecvTimeoutError::Timeout)
+            ),
+            "second mutation completed while the first held the catalog lock"
+        );
+
+        release_tx.send(()).expect("release first mutation");
+        first.join().expect("first thread");
+        let second_result = done_rx.recv().expect("second mutation result");
+        second_result.expect("second mutation");
+        second.join().expect("second thread");
+
+        let snapshot = LocalProjectCatalogStore::new(temp.path().join("projects.toml"))
+            .snapshot()
+            .expect("final snapshot");
+        assert_eq!(snapshot.generation, 2);
+        assert_eq!(snapshot.projects.len(), 2);
+    }
+
+    #[test]
     fn pre_rename_atomic_failure_preserves_previous_catalog_bytes() {
         let temp = tempfile::tempdir().expect("tempdir");
         let path = temp.path().join("projects.toml");

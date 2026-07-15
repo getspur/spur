@@ -549,6 +549,62 @@ fn resolver_reports_live_health_without_pruning_entries() {
     assert_eq!(store.snapshot().expect("snapshot").projects.len(), 1);
 }
 
+#[cfg(unix)]
+#[test]
+fn resolver_rejects_a_registered_path_that_now_resolves_to_another_root() {
+    use std::os::unix::fs::symlink;
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let registered = make_root(&temp, "registered");
+    let replacement = make_root(&temp, "replacement");
+    let moved = temp.path().join("registered-moved");
+    let store = store(&temp);
+    store
+        .add("alpha", &registered, false)
+        .expect("register original root");
+    std::fs::rename(&registered, &moved).expect("move original root");
+    symlink(&replacement, &registered).expect("replace old path with symlink");
+    let replacement = replacement.canonicalize().expect("replacement root");
+    let resolver = LocalProjectResolver::new(store.clone(), validator());
+
+    let error = resolver
+        .resolve("alpha")
+        .expect_err("routing must not silently retarget a durable project identity");
+    match error {
+        LocalProjectError::ProjectUnavailable { reason, .. } => {
+            assert!(
+                reason.contains(&registered.display().to_string()),
+                "{reason}"
+            );
+            assert!(
+                reason.contains(&replacement.display().to_string()),
+                "{reason}"
+            );
+        }
+        other => panic!("expected unavailable identity mismatch, got {other}"),
+    }
+
+    let listed = resolver.list().expect("list projects");
+    assert_eq!(listed.catalog_generation, 1);
+    assert_eq!(listed.projects[0].status, LocalProjectStatus::Unavailable);
+    let reason = listed.projects[0]
+        .reason
+        .as_deref()
+        .expect("identity mismatch reason");
+    assert!(
+        reason.contains(&registered.display().to_string()),
+        "{reason}"
+    );
+    assert!(
+        reason.contains(&replacement.display().to_string()),
+        "{reason}"
+    );
+
+    let snapshot = store.snapshot().expect("durable catalog");
+    assert_eq!(snapshot.generation, 1);
+    assert_eq!(snapshot.projects[0].root, registered);
+}
+
 #[test]
 fn live_list_is_sorted_even_when_valid_catalog_file_is_not() {
     let temp = tempfile::tempdir().expect("tempdir");
