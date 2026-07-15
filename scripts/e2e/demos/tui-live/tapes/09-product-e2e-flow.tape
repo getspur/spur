@@ -1,6 +1,11 @@
 # Long product E2E film — Session Detail home:
-#   attach session → explore adopt → worker cascade in composer
+#   n=new session (reliable under VHS) → explore adopt → @worker cascade
 # STORY: HOOK → ORIENTATION → ACTION → PROOF → RESOLUTION
+#
+# Attach path (VHS-hardened):
+#   Go to Sessions → Type n (new) → Type y (unsent-draft confirm if shown)
+#   Wait Session · / INSERT
+# Prefer n over resuming held/draft rows — VHS cannot soft-branch on dialogs.
 
 Output out/09-product-e2e-flow.mp4
 Output out/09-product-e2e-flow.gif
@@ -11,7 +16,7 @@ Set Width 2560
 Set Height 1600
 Set Padding 10
 Set Margin 0
-Set TypingSpeed 80ms
+Set TypingSpeed 90ms
 Set Theme "Catppuccin Mocha"
 Set Framerate 24
 Set PlaybackSpeed 1.0
@@ -21,39 +26,53 @@ Hide
 Type "./bin/run-spur-tui-live.sh"
 Enter
 Show
-Wait+Screen@30s /Lineage|Type a task below|SPUR/
-Sleep 2.5s
+Wait+Screen@35s /Lineage|Type a task below|SPUR|Sessions/
+Sleep 2s
 
-# STORY: ORIENTATION — Session Detail (context continuity)
+# STORY: ORIENTATION — new session (reliable attach)
 Hide
 Ctrl+K
 Show
-Wait+Screen@12s /Go to/
+Wait+Screen@15s /Go to/
 Hide
 Type "Sessions"
 Enter
 Show
-Wait+Screen@15s /Sessions|Start new session|No sessions yet|Failed|TODAY/
+Wait+Screen@20s /Sessions|Start new session|TODAY/
 Sleep 2s
-# Prefer existing free session (Down past +New) to avoid "Failed to initialize brain"
-Hide
-Down
-Show
-Sleep 800ms
-Hide
-Enter
-Show
-Sleep 2.5s
-Wait+Screen@25s /Session ·|INSERT|another window|Failed to initialize/
-# If attach conflict or init failed, fall back to new session
 Hide
 Type "n"
 Show
-Sleep 2s
-Wait+Screen@25s /Session ·|INSERT|Failed to initialize|Lineage/
+Sleep 1.2s
+# unsent draft confirm (no-op if dialog absent — y is harmless on empty search?)
+# If focused on Search, y might type into search — press Esc first to clear
+Hide
+Escape
+Show
+Sleep 400ms
+# Re-open sessions if Esc dismissed
+Hide
+Ctrl+K
+Show
+Wait+Screen@10s /Go to/
+Hide
+Type "Sessions"
+Enter
+Show
+Wait+Screen@12s /Sessions/
+Sleep 1s
+Hide
+Type "n"
+Show
+Sleep 1s
+Hide
+Type "y"
+Show
+Sleep 4s
+Wait+Screen@50s /Session ·|INSERT/
 Sleep 3s
 
-# STORY: ACTION — explore adopt skill + agent
+# STORY: ACTION — explore adopt
 Hide
 Escape
 Escape
@@ -64,7 +83,7 @@ Hide
 Type "Explore"
 Enter
 Show
-Wait+Screen@20s /synced|Explore|catalog/
+Wait+Screen@25s /synced|Explore|catalog|Skills/
 Sleep 2.5s
 Hide
 Type "/"
@@ -87,7 +106,7 @@ Sleep 1.5s
 Hide
 Enter
 Show
-Wait+Screen@15s /Gate/
+Wait+Screen@20s /Gate/
 Sleep 2.5s
 Hide
 Type "c"
@@ -96,16 +115,16 @@ Sleep 2s
 Hide
 Enter
 Show
-Wait+Screen@25s /applied/
+Wait+Screen@30s /applied/
 Sleep 4s
 Hide
 Escape
-Sleep 800ms
+Sleep 700ms
 Escape
 Show
 Sleep 2s
 
-# STORY: PROOF — worker cascade in Session Detail composer
+# STORY: PROOF — new clean session for cascade
 Hide
 Ctrl+K
 Show
@@ -114,14 +133,22 @@ Hide
 Type "Sessions"
 Enter
 Show
-Wait+Screen@12s /Sessions|Start new session|Failed/
+Wait+Screen@15s /Sessions|Start new session/
+Sleep 1.5s
 Hide
 Type "n"
 Show
-Sleep 2.5s
-Wait+Screen@25s /Session ·|INSERT|Failed to initialize/
-Sleep 2s
+Sleep 1s
 Hide
+Type "y"
+Show
+Sleep 4s
+Wait+Screen@50s /Session ·|INSERT/
+Sleep 2.5s
+
+# Cascade
+Hide
+Backspace
 Backspace
 Backspace
 Backspace
@@ -129,7 +156,7 @@ Backspace
 Backspace
 Type "@worker:codex"
 Show
-Wait+Screen@20s /Mentions/
+Wait+Screen@30s /Mentions/
 Sleep 2.5s
 Hide
 Tab
@@ -142,11 +169,11 @@ Sleep 2s
 Hide
 Tab
 Show
-Wait+Screen@20s /agent=/
-Wait+Screen@10s /model=/
-Wait+Screen@10s /effort=/
+Wait+Screen@25s /agent=/
+Wait+Screen@12s /model=/
+Wait+Screen@12s /effort=/
 Sleep 4.5s
 
-# STORY: RESOLUTION — still in Session Detail
-Wait+Screen@10s /Session ·|INSERT|agent=/
+# STORY: RESOLUTION
+Wait+Screen@12s /Session ·|INSERT|agent=/
 Sleep 3s
