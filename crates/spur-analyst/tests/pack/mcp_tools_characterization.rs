@@ -454,6 +454,75 @@ async fn empty_project_pack_suppresses_uncallable_project_followups() {
     );
 }
 
+#[tokio::test]
+async fn analyst_only_project_packs_emit_only_same_surface_followups() {
+    let _embed_mode = EnvGuard::set(EMBED_MODE_ENV, "off");
+    let fixture = ProjectAnalystFixture::new("alpha_unique");
+    let catalog = tempfile::tempdir().expect("catalog tempdir");
+    let store = LocalProjectCatalogStore::new(catalog.path().join("projects.toml"));
+    store
+        .add("alpha", &fixture.root, false)
+        .expect("register project");
+    let resolver = LocalProjectResolver::new(store, Arc::new(FixtureValidator));
+    let analyst_only = AnalystMcpModule::with_local_projects_for_analyst_server(resolver.clone());
+    let graph_enabled = AnalystMcpModule::with_local_projects(resolver);
+    let args = json!({
+        "query": "dispatch approval evidence",
+        "intent": "review",
+        "scope": "all",
+        "limit": 5,
+        "max_symbol_bodies": 0,
+        "project": "alpha"
+    });
+
+    let analyst_pack = analyst_only
+        .dispatch("knowledge_context_pack_2", args.clone())
+        .await
+        .expect("analyst-only project pack");
+    for suggestion in project_pack_suggestions(&analyst_pack) {
+        let tool = suggestion["tool"].as_str().expect("suggested tool name");
+        assert!(
+            EXPECTED_TOOL_NAMES.contains(&tool),
+            "analyst-only server emitted unsupported follow-up `{tool}`: {analyst_pack:#}"
+        );
+        assert_eq!(suggestion["project"], "alpha", "{analyst_pack:#}");
+    }
+
+    let graph_enabled_pack = graph_enabled
+        .dispatch("knowledge_context_pack_2", args)
+        .await
+        .expect("graph-enabled project pack");
+    assert!(
+        project_pack_suggestions(&graph_enabled_pack)
+            .iter()
+            .any(|suggestion| suggestion["tool"]
+                .as_str()
+                .is_some_and(|tool| tool.starts_with("code_"))),
+        "bundled/brain policy must preserve callable graph follow-ups: {graph_enabled_pack:#}"
+    );
+}
+
+fn project_pack_suggestions(pack: &Value) -> Vec<&Value> {
+    let mut suggestions = ["next", "recommended_next_tools"]
+        .into_iter()
+        .filter_map(|key| pack[key].as_array())
+        .flatten()
+        .collect::<Vec<_>>();
+    suggestions.extend(
+        ["primary_evidence", "supporting_docs"]
+            .into_iter()
+            .filter_map(|key| pack[key].as_array())
+            .flatten()
+            .flat_map(|evidence| {
+                ["next", "recommended_next_tools"]
+                    .into_iter()
+                    .filter_map(|key| evidence[key].as_array())
+                    .flatten()
+            }),
+    );
+    suggestions
+}
+
 fn assert_project_on_pack_suggestions(pack: &Value, expected: &str) {
     let recommended = pack["recommended_next_tools"]
         .as_array()

@@ -342,6 +342,68 @@ fn catalog_symlinks_fail_closed_without_replacing_directory_entries() {
 
 #[cfg(unix)]
 #[test]
+fn lock_file_symlinks_fail_closed_without_touching_targets() {
+    use std::os::unix::fs::{symlink, PermissionsExt as _};
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let parent = temp.path().join("config");
+    std::fs::create_dir(&parent).expect("create catalog parent");
+    let root = make_root(&temp, "root");
+
+    for operation in ["snapshot", "add", "remove"] {
+        let path = parent.join(format!("{operation}.toml"));
+        let lock_path = path.with_extension("toml.lock");
+        let target = parent.join(format!("lock-target-{operation}"));
+        let target_bytes = format!("sentinel-{operation}").into_bytes();
+        std::fs::write(&target, &target_bytes).expect("write lock target");
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644))
+            .expect("set lock target mode");
+        symlink(&target, &lock_path).expect("create lock symlink");
+        let store = LocalProjectCatalogStore::new(path.clone());
+
+        let error = match operation {
+            "snapshot" => store.snapshot().map(|_| ()),
+            "add" => store.add("alpha", &root, false).map(|_| ()),
+            "remove" => store.remove("alpha").map(|_| ()),
+            _ => unreachable!(),
+        }
+        .expect_err("lock symlink must fail closed");
+
+        assert!(matches!(error, LocalProjectError::CatalogWrite { .. }));
+        assert!(
+            std::fs::symlink_metadata(&lock_path)
+                .expect("lock symlink metadata")
+                .file_type()
+                .is_symlink(),
+            "lock path was replaced during {operation}"
+        );
+        assert_eq!(
+            std::fs::read_link(&lock_path).expect("read lock link"),
+            target
+        );
+        assert_eq!(
+            std::fs::read(&target).expect("read lock target"),
+            target_bytes,
+            "lock target bytes changed during {operation}"
+        );
+        assert_eq!(
+            std::fs::metadata(&target)
+                .expect("lock target metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o644,
+            "lock target mode changed during {operation}"
+        );
+        assert!(
+            !path.exists(),
+            "catalog mutation proceeded after unsafe lock during {operation}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
 fn existing_explicit_parent_permissions_are_preserved() {
     use std::os::unix::fs::PermissionsExt as _;
 
