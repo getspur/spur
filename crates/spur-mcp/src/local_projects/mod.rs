@@ -238,6 +238,12 @@ impl LocalProjectResolver {
                 reason: error.to_string(),
             }
         })?;
+        if validated.canonical_root != entry.root {
+            return Err(LocalProjectError::ProjectUnavailable {
+                name: name.to_owned(),
+                reason: root_identity_mismatch_reason(&entry.root, &validated.canonical_root),
+            });
+        }
         if !validated.health.is_ready() {
             return Err(LocalProjectError::ProjectUnavailable {
                 name: name.to_owned(),
@@ -249,7 +255,7 @@ impl LocalProjectResolver {
         }
         Ok(ResolvedLocalProject {
             name: name.to_owned(),
-            root: validated.canonical_root,
+            root: entry.root.clone(),
             catalog_generation: snapshot.generation,
         })
     }
@@ -260,6 +266,15 @@ impl LocalProjectResolver {
             .projects
             .into_iter()
             .map(|entry| match self.validator.validate(&entry.root) {
+                Ok(validated) if validated.canonical_root != entry.root => LocalProjectListEntry {
+                    name: entry.name,
+                    reason: Some(root_identity_mismatch_reason(
+                        &entry.root,
+                        &validated.canonical_root,
+                    )),
+                    root: entry.root,
+                    status: LocalProjectStatus::Unavailable,
+                },
                 Ok(validated) => LocalProjectListEntry {
                     name: entry.name,
                     root: entry.root,
@@ -280,4 +295,12 @@ impl LocalProjectResolver {
             projects,
         })
     }
+}
+
+fn root_identity_mismatch_reason(stored_root: &Path, resolved_root: &Path) -> String {
+    format!(
+        "registered root `{}` now resolves to `{}`; remove and re-add the project to accept the new identity",
+        stored_root.display(),
+        resolved_root.display()
+    )
 }
