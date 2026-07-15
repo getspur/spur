@@ -649,95 +649,188 @@ focus_log_panel() {
   fi
 }
 
-# Walk lineage: select nodes, open detail (stream/artifacts/attempts/task/review).
-# Proves brain↔worker tree is navigable and outputs are inspectable.
-# Try to open lineage node detail; soft if tree/layout differs mid-loop.
-_lineage_focus_selected_node() {
+# Open detail for the currently selected Agents-tree node.
+# Returns 0 when the detail pane shows stream tabs (node is focused).
+_lineage_open_detail() {
   press_key Enter
-  story_hop 1.5 1.0
-  if soft_has_text "stream" 6000; then
-    return 0
-  fi
-  # Retry: leave any overlay, re-focus Agents, select first, Enter
-  press_key Escape
-  story_hop 0.8 0.35
-  focus_agents_panel
-  # 'g' = first node (view-action in Navigate)
-  type_text "g"
-  story_hop 0.8 0.35
-  press_key Enter
-  story_hop 1.5 1.0
+  story_hop 1.2 0.8
+  # Prefer hard wait when story pace on; soft otherwise
   if soft_has_text "stream" 8000; then
     return 0
   fi
   return 1
 }
 
-# Explicit story beats: Agents → prefer BRAIN row → EXEC/worker → stream → tabs.
-# Soft when roles absent (empty project); still navigates tree for film continuity.
+# Wait until stream tab is active and content is streaming / has output.
+# Dashboard: Ctrl+1 jumps to stream. Content may be live or historical.
+_lineage_wait_stream_panel() {
+  local wait_ms="${1:-12000}"
+  # Ensure stream tab (not artifacts/attempts/task)
+  press_key Ctrl+1
+  story_hop 0.8 0.4
+  if ! soft_has_text "stream" "$wait_ms"; then
+    printf '+ soft beat: stream tab — label not confirmed after Ctrl+1\n'
+    return 1
+  fi
+  printf '+ proof: detail panel stream tab is active [anchor=stream]\n'
+  story_dwell 2.0
+
+  # Wait for streaming / transcript content (any of these = pane is live or loaded)
+  local anchor
+  for anchor in "following" "THINK" "YOU" "DELEGATE" "ACT" "codex" "ok" "●" "Ready"; do
+    if soft_has_text "$anchor" 2500; then
+      printf '+ proof: stream panel is streaming/has output [anchor=%s]\n' "$anchor"
+      story_dwell 4.0
+      return 0
+    fi
+  done
+  # Longer hold even on quiet stream so film can read the empty/loading pane
+  printf '+ soft beat: stream panel open but no token content yet — holding for film\n'
+  story_dwell 3.5
+  return 0
+}
+
+# Jump to Task tab (Ctrl+4) and prove the assigned task_spec for the worker.
+_lineage_wait_task_tab() {
+  press_key Ctrl+4
+  story_hop 1.0 0.5
+  if ! soft_has_text "task" 4000; then
+    printf '+ soft beat: task tab — label not confirmed after Ctrl+4\n'
+    return 1
+  fi
+  printf '+ proof: detail panel task tab is active [anchor=task]\n'
+  story_dwell 2.0
+
+  # Prefer real task body over the empty placeholder
+  if soft_has_text "(no task spec captured)" 800; then
+    printf '+ soft beat: task tab — worker has no captured task_spec yet\n'
+    story_dwell 2.5
+    return 0
+  fi
+  # task_spec / prompt body often includes action words from demos or real work
+  local anchor
+  for anchor in "reply" "submit_plan" "demo" "ok" "task" "Prompt" "worker" "codex" "file" "implement"; do
+    if soft_has_text "$anchor" 1500; then
+      printf '+ proof: task tab shows assigned work for the agentic worker [anchor=%s]\n' "$anchor"
+      story_dwell 4.5
+      return 0
+    fi
+  done
+  printf '+ soft beat: task tab open — body text not matched; holding pane for film\n'
+  story_dwell 3.5
+  return 0
+}
+
+# Walk the Agents tree and open the first EXEC (agentic worker) node.
+# Skips BRAIN roots: after open, if stream opens we still verify EXEC was on screen
+# and prefer nodes reached after at least one j from the top (children are workers).
+# Prefer Running workers when present; otherwise any EXEC/SUB.
+_lineage_select_worker_node() {
+  local prefer="${SPUR_DEMO_LINEAGE_WORKER:-}"
+  local hop max_hops=14
+  local opened=0
+
+  focus_agents_panel
+  # Start at first node, then walk down looking for EXEC workers
+  type_text "g"
+  story_hop 0.8 0.35
+
+  if ! soft_has_text "EXEC" 2000 && ! soft_has_text "SUB" 1000 \
+    && ! soft_has_text "Running" 1000 && ! soft_has_text "Succeeded" 1000; then
+    printf '+ soft beat: no EXEC/SUB worker rows in lineage tree\n'
+    return 1
+  fi
+  printf '+ proof: lineage tree lists agentic worker rows (EXEC/SUB)\n'
+  story_dwell 2.0
+
+  for ((hop = 0; hop < max_hops; hop++)); do
+    if [[ "$hop" -gt 0 ]]; then
+      press_key j
+      story_hop 0.9 0.35
+    fi
+
+    # Prefer selecting a row while EXEC is visible (workers are children of BRAIN).
+    # Skip hop 0 when BRAIN is also present — first row is usually the brain root.
+    if [[ "$hop" -eq 0 ]] && soft_has_text "BRAIN" 600; then
+      printf '+ lineage: skip BRAIN root; walk to worker child\n'
+      continue
+    fi
+
+    # Optional: prefer a named worker agent (e.g. codex)
+    if [[ -n "$prefer" ]] && ! soft_has_text "$prefer" 400; then
+      continue
+    fi
+
+    if ! soft_has_text "EXEC" 400 && ! soft_has_text "SUB" 400 \
+      && ! soft_has_text "Running" 400; then
+      continue
+    fi
+
+    if _lineage_open_detail; then
+      opened=1
+      printf '+ proof: opened detail for selected agentic worker (hop=%s)\n' "$hop"
+      story_dwell 2.5
+      return 0
+    fi
+    press_key Escape
+    story_hop 0.6 0.3
+    focus_agents_panel
+  done
+
+  if [[ "$opened" -eq 0 ]]; then
+    # Last resort: open whatever is selected after walking to mid-tree
+    type_text "g"
+    story_hop 0.5 0.3
+    press_key j
+    story_hop 0.5 0.3
+    press_key j
+    story_hop 0.5 0.3
+    if _lineage_open_detail; then
+      printf '+ soft beat: opened a lineage node without confirmed EXEC selection\n'
+      return 0
+    fi
+  fi
+  return 1
+}
+
+# Full lineage story: Agents → select EXEC worker → wait stream → task tab → Activity.
+# Soft when lineage empty. Prefer correct worker (EXEC), not the BRAIN root.
 navigate_lineage_brain_and_workers() {
   if ! soft_has_text "Lineage" 800; then
     printf '+ soft beat: BRAIN→EXEC lineage — no active or historical lineage exists on this project\n'
-    printf '+ soft beat: worker output/review — seed a plan loop to make these panes provable\n'
+    printf '+ soft beat: worker stream/task — seed a plan loop to make these panes provable\n'
     printf '+ soft beat: Activity timeline — no agent events exist yet\n'
     story_dwell 2.5
     return 0
   fi
 
   focus_agents_panel
-  printf '+ lineage: Agents panel focused — drive multi-agent tree\n'
+  printf '+ lineage: Agents panel focused — select agentic worker (not BRAIN root)\n'
 
-  # Beat: surface BRAIN role when present (control plane owner)
   story_soft_proof \
     "BRAIN row identifies the control-plane owner" \
-    "BRAIN" 2500 2.5 \
+    "BRAIN" 2500 2.0 \
     "no brain history is present; the Agents tree remains the orientation proof"
 
-  # Move selection through tree (brain rows / worker children)
-  press_key j
-  story_hop 1.2 0.3
-  press_key j
-  story_hop 1.2 0.3
+  if _lineage_select_worker_node; then
+    # 1) Stream must load / be streaming before we leave the pane
+    _lineage_wait_stream_panel 15000 || true
 
-  # Beat: EXEC / Running when live loop has workers
-  if soft_has_text "EXEC" 2000 || soft_has_text "Running" 1500; then
-    printf '+ proof: EXEC/Running row identifies delegated work [anchor=EXEC|Running]\n'
-    story_dwell 2.5
+    # 2) Task tab: what was assigned to this agentic worker
+    _lineage_wait_task_tab || true
+
+    # 3) Brief attempts tab for completeness (Ctrl+3)
+    press_key Ctrl+3
+    story_hop 0.9 0.4
+    story_soft_proof \
+      "Attempts tab shows worker attempt history" \
+      "attempts" 2000 2.0 \
+      "attempts tab not confirmed"
+    printf '+ lineage: worker detail walk complete (stream → task → attempts)\n'
   else
-    printf '+ soft beat: delegated worker row — no EXEC/Running history on this project\n'
+    printf '+ soft beat: could not open an EXEC worker detail pane on this project\n'
   fi
 
-  if _lineage_focus_selected_node; then
-    printf '+ proof: selected agent exposes live output [anchor=stream]\n'
-    story_dwell 3.5
-    # Cycle detail tabs with l (view-owned when node focused)
-    press_key l
-    story_hop 1.8 0.55
-    story_soft_proof \
-      "Attempts/artifacts make worker history inspectable" \
-      "attempts" 2000 1.8 \
-      "this node has no attempt history; stream proof remains visible"
-    press_key l
-    story_hop 1.8 0.55
-    story_soft_proof \
-      "Task/review context closes the worker-to-brain loop" \
-      "task" 1500 1.8 \
-      "this node has no task payload; the tab walk is still labeled"
-    printf '+ lineage: cycled detail tabs (stream → attempts/artifacts → task/review)\n'
-  else
-    printf '+ soft beat: agent output detail — no selectable lineage node on this project\n'
-  fi
-  # Unfocus, hop to another node (brain ↔ worker)
-  press_key Escape
-  story_hop 1.0 0.45
-  press_key k
-  story_hop 1.2 0.3
-  if _lineage_focus_selected_node; then
-    printf '+ proof: brain↔worker selection changes without losing the control-plane view\n'
-    story_dwell 2.0
-  else
-    printf '+ soft beat: brain↔worker hop — only one selectable lineage node is present\n'
-  fi
   press_key Escape
   story_hop 0.8 0.35
   # Activity log: live events from brain/worker loop
@@ -898,8 +991,22 @@ story_plan_loop_control_plane() {
   fi
   press_key Escape
   story_hop 1.0 0.5
+
+  # Ops overview: lineage worker stream + assigned task (not BRAIN root)
+  if soft_has_text "Lineage" 1200 || soft_has_text "Session ·" 800; then
+    # Escape to dashboard if still in session/plans chrome
+    if session_detail_is_visible; then
+      press_key Escape
+      story_hop 0.8 0.4
+    fi
+    if soft_has_text "Lineage" 1500; then
+      story_beat "ACTION" "Lineage: select EXEC worker, wait for stream, open task assignment."
+      navigate_lineage_brain_and_workers
+    fi
+  fi
+
   return_to_session_detail
-  story_session_land "Back home in Session Detail after Plans" 2.5
+  story_session_land "Back home in Session Detail after Plans/lineage" 2.5
 }
 
 require_plan_loop_opt_in() {

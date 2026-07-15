@@ -71,8 +71,48 @@ Escape
 Show
 Sleep 2s
 
-# STORY: PROOF — stay on session home
-Wait+Screen@12s /Session ·|INSERT|Lineage/
+# STORY: ACTION — optional lineage: select EXEC worker (not BRAIN), stream + task
+Hide
+Escape
+Sleep 600ms
+Show
+Sleep 1s
+Hide
+Escape
+Sleep 400ms
+Tab
+Show
+Sleep 2s
+# skip BRAIN root → first worker child
+Hide
+Type "j"
+Show
+Sleep 1.2s
+Hide
+Type "j"
+Show
+Sleep 1.5s
+Hide
+Enter
+Show
+Wait+Screen@15s /stream/
+Sleep 2s
+# force stream tab and wait for content
+Hide
+Ctrl+1
+Show
+Sleep 3.5s
+# task tab: what was assigned to this agentic worker
+Hide
+Ctrl+4
+Show
+Wait+Screen@12s /task/
+Sleep 4s
+
+# STORY: PROOF — worker detail held
 Sleep 2s
 # STORY: RESOLUTION
+Hide
+Escape
+Show
 Sleep 2s
