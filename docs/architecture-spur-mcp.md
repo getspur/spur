@@ -199,7 +199,7 @@ both its graph artifact and `.spur/analyst.duckdb` already built:
 3. Call `query`:
 
    ```json
-   {"query":"SELECT file_path, symbol_name FROM symbols LIMIT 20","project":"notebook"}
+   {"query":"SELECT file_path, entity_name FROM nodes LIMIT 20","project":"notebook"}
    ```
 
 `project` is optional on every `code_*` and analyst retrieval tool. When it is
@@ -214,6 +214,12 @@ Catalog location precedence is:
 2. `$XDG_CONFIG_HOME/spur/projects.toml`;
 3. `$HOME/.config/spur/projects.toml`.
 
+On Unix, SPUR creates missing catalog-owned directories with mode `0700` and
+catalog, temporary, and lock files with mode `0600`. It preserves permissions
+on a pre-existing explicit catalog parent, repairs an existing catalog file to
+`0600` while holding the catalog lock, and rejects catalog symlinks rather than
+following or replacing them.
+
 Names map to canonical Git worktree roots. Re-adding the same name and root is
 idempotent and leaves the generation unchanged. Mapping a name to a different
 root requires `replace: true`. `local_project_remove` is also idempotent and
@@ -227,6 +233,9 @@ join data across projects. The `external_*` tools are a different surface for
 hosted package/revision indexes. Delegated worker MCP servers deliberately do
 not advertise the catalog tools or the `project` selector, keeping each worker
 confined to its assigned worktree.
+
+Repository and index query operations remain read-only. `local_project_add`
+and `local_project_remove` mutate only the user catalog configuration.
 
 ---
 

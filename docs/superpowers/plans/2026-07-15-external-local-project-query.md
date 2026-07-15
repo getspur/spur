@@ -115,11 +115,17 @@ In `crates/spur-mcp/tests/local_projects.rs`, cover at least:
 8. Malformed names, relative/non-UTF-8 paths, missing roots, and validator failures return actionable typed errors.
 9. A moved/missing entry remains visible from list as `unavailable` with a reason.
 10. Two store instances mutating the same file do not lose updates.
-11. Unix catalog directory/files have `0700`/`0600` permissions.
+11. Unix catalog-owned directories created by SPUR use `0700`; pre-existing
+    explicit parents retain their permissions; catalog, temporary, and lock
+    files use `0600`, with existing catalog modes repaired under lock.
 12. Schema decoration adds optional `project` even when `additionalProperties` is false, without changing required fields.
 13. Request extraction removes `project` before domain parsing and rejects non-string/invalid names.
 14. Response decoration adds top-level scope only for explicit projects.
-15. Knowledge-pack `next` and `recommended_next_tools` arguments inherit the same project.
+15. Knowledge-pack `next` and `recommended_next_tools` arguments inherit the
+    same project, and suggestions unavailable on the serving surface are
+    omitted.
+16. Catalog metadata errors and regular or dangling catalog symlinks fail
+    closed without replacing or modifying the symlink target.
 
 Use a fake validator implementing a dependency-neutral contract such as:
 
@@ -570,7 +576,7 @@ Document the three-call flow:
 ```json
 {"name":"notebook","path":"/Volumes/Projects/spur-notebook"}
 {"query":"NotebookCell","project":"notebook"}
-{"query":"SELECT file_path, symbol_name FROM symbols LIMIT 20","project":"notebook"}
+{"query":"SELECT file_path, entity_name FROM nodes LIMIT 20","project":"notebook"}
 ```
 
 Name the actual tools around each payload. Explain path precedence, `replace`, idempotent remove, live health, and that registration requires pre-existing graph and analyst indexes.

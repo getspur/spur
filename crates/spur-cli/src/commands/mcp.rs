@@ -20,8 +20,9 @@
 //! `SPUR_WORKTREE` is used as a fallback; if neither is set, tools keep the
 //! existing behavior of resolving from the MCP client launch directory.
 //!
-//! The bundled `spur mcp` server is a read-only query surface (code graph +
-//! analyst); orchestration tools (delegation, plan, review) stay bound to the
+//! The bundled `spur mcp` server keeps repository and index queries read-only.
+//! Its local-project add/remove tools mutate only user catalog configuration;
+//! orchestration tools (delegation, plan, review) stay bound to the
 //! TUI/orchestrator because they need an active brain session and PM service.
 //!
 //! Logging: these commands run in non-TUI mode, so `init_tracing` directs all
@@ -59,10 +60,11 @@ const CONTEXT_INSTRUCTIONS: &str =
 
 const BUNDLED_INSTRUCTIONS: &str =
     "SPUR standalone query surface: code-graph tools (code_*) plus DuckDB analyst tools \
-     (knowledge_context_pack*, doc_navigate). Read-only. For orchestration (delegation, plans, \
-     review) run the SPUR TUI. Register an already-indexed local Git project once and pass its name \
-     as project; registration validates but does not index. external_* tools remain the separate \
-     hosted package/revision surface.";
+     (knowledge_context_pack*, doc_navigate). Repository and index query operations are read-only; \
+     local_project_add and local_project_remove mutate only user catalog configuration. For \
+     orchestration (delegation, plans, review) run the SPUR TUI. Register an already-indexed local \
+     Git project once and pass its name as project; registration validates but does not index. \
+     external_* tools remain the separate hosted package/revision surface.";
 
 fn resolve_mcp_worktree_root(root: Option<PathBuf>) -> Result<Option<PathBuf>> {
     let root = root.or_else(|| {
@@ -185,7 +187,8 @@ pub async fn run_legacy_context_server(url: String, token: String) -> Result<()>
     serve_stdio_server(handler).await
 }
 
-/// `spur mcp` — bundled read-only MCP server (graph + analyst).
+/// `spur mcp` — bundled MCP server with read-only repository/index queries and
+/// user catalog configuration tools.
 ///
 /// `root` is the optional `--root <path>` override. When absent, `SPUR_WORKTREE`
 /// is honored before falling back to the MCP client launch directory.
