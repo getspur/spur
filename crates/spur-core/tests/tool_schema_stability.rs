@@ -1,6 +1,6 @@
 use schemars::schema_for;
 use serde_json::json;
-use spur_core::mcp::tools_list;
+use spur_core::mcp::{tools_list, worker_tools_list};
 use spur_core::tool_schemas::{
     schema_value, DelegateParallelInput, DelegateParallelTaskInput, DelegateToWorkerInput,
 };
@@ -43,6 +43,32 @@ fn test_delegate_parallel_task_schema_stability() {
 fn published_tool_schemas_are_ref_free() {
     for def in tools_list() {
         assert_no_refs(&def.input_schema, &def.name);
+    }
+}
+
+#[test]
+fn project_schema_is_opt_in_for_brain_catalog_only() {
+    for tools in [tools_list(), worker_tools_list()] {
+        for def in tools {
+            assert_no_refs(&def.input_schema, &def.name);
+        }
+    }
+
+    let brain = tools_list();
+    let worker = worker_tools_list();
+    for name in ["code_symbol_search", "query", "knowledge_context_pack_2"] {
+        let brain_schema = &brain
+            .iter()
+            .find(|tool| tool.name == name)
+            .unwrap_or_else(|| panic!("brain missing {name}"))
+            .input_schema;
+        assert_eq!(brain_schema["properties"]["project"]["type"], "string");
+        let worker_schema = &worker
+            .iter()
+            .find(|tool| tool.name == name)
+            .unwrap_or_else(|| panic!("worker missing {name}"))
+            .input_schema;
+        assert!(worker_schema["properties"].get("project").is_none());
     }
 }
 
