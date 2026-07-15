@@ -11,7 +11,8 @@ use thiserror::Error;
 
 pub use module::LocalProjectCatalogMcpModule;
 pub use routing::{
-    decorate_project_response, extract_project, with_optional_project_schema, LocalProjectAccess,
+    decorate_project_response, decorate_project_response_for_surface, extract_project,
+    with_optional_project_schema, LocalProjectAccess, LocalProjectFollowupSurface,
 };
 pub use store::LocalProjectCatalogStore;
 
