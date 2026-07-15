@@ -1,9 +1,19 @@
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use serde_json::{json, Value};
-use spur_analyst::mcp::{AnalystMcpModule, McpHandlerError};
+use spur_analyst::mcp::{
+    local_project_tool_definitions, tool_definitions, AnalystMcpModule, McpHandlerError,
+};
+use spur_graph::store::lance_sections::write_sections_dataset_skipping_embeddings;
+use spur_graph::{
+    artifact_from_facts, build_facts, write_artifact_parquet, write_current_pointer, WriteOptions,
+};
+use spur_mcp::local_projects::{
+    LocalProjectCatalogStore, LocalProjectError, LocalProjectHealth, LocalProjectResolver,
+    LocalProjectValidator, ValidatedLocalProject,
+};
 
 const INIT_SEARCH_SQL: &str = include_str!("../../../spur-context/analyst/init_search.sql");
 const EMBED_MODE_ENV: &str = "SPUR_ANALYST_EMBED_MODE";
@@ -19,6 +29,59 @@ struct AnalystFixture {
     _dir: tempfile::TempDir,
     root: PathBuf,
     db_path: PathBuf,
+}
+
+struct ProjectAnalystFixture {
+    _dir: tempfile::TempDir,
+    root: PathBuf,
+}
+
+impl ProjectAnalystFixture {
+    fn new(label: &str) -> Self {
+        let dir = tempfile::tempdir().expect("project tempdir");
+        let root = dir.path().join("repo");
+        fs::create_dir_all(root.join(".spur")).expect("create .spur");
+        fs::create_dir_all(root.join("docs")).expect("create docs");
+        fs::write(
+            root.join("docs/project.md"),
+            format!("# {label} Guide\n\n{label} navigation evidence.\n"),
+        )
+        .expect("write project doc");
+        let db_path = root.join(".spur/analyst.duckdb");
+        seed_analyst_db(&db_path);
+        let (facts, _) = build_facts(&root, None).expect("build graph facts");
+        let artifact = artifact_from_facts(&facts, &root).expect("build graph artifact");
+        let artifact_dir = write_artifact_parquet(
+            &artifact,
+            &root.join(".spur/graph"),
+            WriteOptions::default(),
+            Vec::new(),
+        )
+        .expect("write graph artifact");
+        write_sections_dataset_skipping_embeddings(&artifact, &root, &artifact_dir)
+            .expect("write sections dataset");
+        write_current_pointer(&root, &artifact_dir).expect("write graph pointer");
+        Self { _dir: dir, root }
+    }
+}
+
+#[derive(Clone, Default)]
+struct FixtureValidator;
+
+impl LocalProjectValidator for FixtureValidator {
+    fn validate(&self, requested_path: &Path) -> Result<ValidatedLocalProject, LocalProjectError> {
+        let canonical_root =
+            requested_path
+                .canonicalize()
+                .map_err(|error| LocalProjectError::InvalidPath {
+                    path: requested_path.to_path_buf(),
+                    reason: error.to_string(),
+                })?;
+        Ok(ValidatedLocalProject {
+            canonical_root,
+            health: LocalProjectHealth::ready(),
+        })
+    }
 }
 
 impl AnalystFixture {
@@ -77,6 +140,35 @@ fn analyst_mcp_module_advertises_exact_public_tool_names() {
         .collect::<Vec<_>>();
 
     assert_eq!(names, EXPECTED_TOOL_NAMES);
+}
+
+#[test]
+fn analyst_project_routing_is_opt_in_for_all_four_schemas() {
+    for module in [AnalystMcpModule::new(), AnalystMcpModule::read_only()] {
+        assert_eq!(
+            serde_json::to_value(module.tools()).expect("serialize module tools"),
+            serde_json::to_value(tool_definitions()).expect("serialize default tools")
+        );
+        assert!(module
+            .tools()
+            .iter()
+            .all(|tool| tool.input_schema.pointer("/properties/project").is_none()));
+    }
+
+    let catalog = tempfile::tempdir().expect("catalog tempdir");
+    let resolver = LocalProjectResolver::new(
+        LocalProjectCatalogStore::new(catalog.path().join("projects.toml")),
+        Arc::new(FixtureValidator),
+    );
+    let tools = AnalystMcpModule::with_local_projects(resolver).tools();
+    assert_eq!(
+        serde_json::to_value(&tools).expect("serialize routed tools"),
+        serde_json::to_value(local_project_tool_definitions()).expect("serialize routed defs")
+    );
+    assert_eq!(tools.len(), 4);
+    assert!(tools.iter().all(|tool| {
+        tool.input_schema.pointer("/properties/project/type") == Some(&json!("string"))
+    }));
 }
 
 #[test]
@@ -267,6 +359,81 @@ async fn knowledge_context_pack_v2_response_shape_matches_snapshot() {
     );
 }
 
+#[tokio::test]
+async fn selected_project_scopes_doc_navigation_and_both_knowledge_pack_names() {
+    let _embed_mode = EnvGuard::set(EMBED_MODE_ENV, "off");
+    let fixture = ProjectAnalystFixture::new("alpha_unique");
+    let catalog = tempfile::tempdir().expect("catalog tempdir");
+    let store = LocalProjectCatalogStore::new(catalog.path().join("projects.toml"));
+    store
+        .add("alpha", &fixture.root, false)
+        .expect("register project");
+    let module = AnalystMcpModule::with_local_projects(LocalProjectResolver::new(
+        store,
+        Arc::new(FixtureValidator),
+    ));
+
+    let docs = module
+        .dispatch(
+            "doc_navigate",
+            json!({"query": "alpha_unique", "project": "alpha"}),
+        )
+        .await
+        .expect("project doc navigation");
+    assert_eq!(docs["project"]["name"], "alpha");
+    assert!(
+        docs["hits"].as_array().is_some_and(|hits| !hits.is_empty()),
+        "{docs:#}"
+    );
+
+    for tool_name in ["knowledge_context_pack", "knowledge_context_pack_2"] {
+        let pack = module
+            .dispatch(
+                tool_name,
+                json!({
+                    "query": "dispatch approval evidence",
+                    "intent": "review",
+                    "scope": "all",
+                    "limit": 5,
+                    "max_symbol_bodies": 0,
+                    "project": "alpha"
+                }),
+            )
+            .await
+            .expect("project knowledge pack");
+        assert_eq!(pack["project"]["name"], "alpha");
+        assert_project_on_pack_suggestions(&pack, "alpha");
+    }
+}
+
+fn assert_project_on_pack_suggestions(pack: &Value, expected: &str) {
+    let recommended = pack["recommended_next_tools"]
+        .as_array()
+        .expect("recommended next tools");
+    assert!(!recommended.is_empty(), "{pack:#}");
+    assert!(
+        recommended
+            .iter()
+            .all(|suggestion| suggestion["project"] == expected),
+        "{pack:#}"
+    );
+
+    let nested = ["primary_evidence", "supporting_docs"]
+        .into_iter()
+        .filter_map(|key| pack[key].as_array())
+        .flatten()
+        .filter_map(|evidence| evidence["next"].as_array())
+        .flatten()
+        .collect::<Vec<_>>();
+    assert!(!nested.is_empty(), "{pack:#}");
+    assert!(
+        nested
+            .iter()
+            .all(|suggestion| suggestion["project"] == expected),
+        "{pack:#}"
+    );
+}
+
 async fn dispatch_in_fixture(
     fixture: &AnalystFixture,
     tool_name: &'static str,
@@ -372,7 +539,7 @@ fn seed_analyst_db(db_path: &Path) {
     conn.execute_batch("INSTALL fts; LOAD fts; INSTALL icu; LOAD icu; INSTALL lance; LOAD lance;")
         .expect("load fixture extensions");
     conn.execute_batch(
-        r#"
+        r"
         CREATE TABLE _meta (graph_content_hash VARCHAR);
         INSERT INTO _meta VALUES ('kcp-fixture-hash');
 
@@ -486,14 +653,14 @@ fn seed_analyst_db(db_path: &Path) {
             density DOUBLE
         );
         INSERT INTO v_graph_metrics VALUES (1, 2, 1, 2, 1, 0.5);
-        "#,
+        ",
     )
     .expect("create fixture schema");
     conn.execute_batch(
-        r#"
+        r"
         PRAGMA create_fts_index('main.sections_search', 'stable_symbol_id', 'body_text', overwrite=1, stemmer='porter');
         PRAGMA create_fts_index('main.symbol_text', 'stable_symbol_id', 'doc_text', overwrite=1);
-        "#,
+        ",
     )
     .expect("create fixture fts indexes");
     conn.execute_batch(&context_candidate_macro_sql())

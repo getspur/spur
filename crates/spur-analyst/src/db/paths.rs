@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 
 use spur_graph::resolve_worktree_root_from;
 
+use crate::db::connection::open_analyst_connection_read_only;
 use crate::mcp::McpHandlerError;
 
 pub(crate) fn analyst_db_path() -> Result<PathBuf, McpHandlerError> {
@@ -25,6 +26,21 @@ pub(crate) fn select_analyst_db_path(root: &Path) -> PathBuf {
         return local_db;
     }
     parent_spur_worktree_analyst_db(root).unwrap_or(local_db)
+}
+
+/// Resolves and opens the selected analyst database without creating it.
+pub fn ensure_analyst_db_ready(root: &Path) -> anyhow::Result<PathBuf> {
+    let db_path = select_analyst_db_path(root);
+    if !db_path.is_file() {
+        anyhow::bail!(
+            "analyst database is unavailable for `{}` at `{}`",
+            root.display(),
+            db_path.display()
+        );
+    }
+    let connection = open_analyst_connection_read_only(&db_path)?;
+    drop(connection);
+    Ok(db_path)
 }
 
 fn parent_spur_worktree_analyst_db(root: &Path) -> Option<PathBuf> {

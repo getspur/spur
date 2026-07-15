@@ -1,12 +1,14 @@
 pub(crate) mod catalog;
 pub mod context_service;
 pub mod delegation;
+pub mod local_projects;
 pub mod plan;
 pub mod review_verdict;
 pub mod signals;
 pub mod worker;
 
 pub use context_service::{ContextServiceAuth, ContextServiceClient};
+pub use local_projects::{IndexedLocalProjectValidator, LocalProjectMcpComposition};
 use spur_acp::config::ContextServiceConfig;
 
 const WORKER_DENIED_TOOL_CALLS: &[&str] = &[
@@ -50,9 +52,27 @@ pub fn brain_tool_registry(
     signal_deps: signals::SignalMcpDeps,
     context_service_config: &ContextServiceConfig,
 ) -> Result<spur_mcp::ToolRegistry, spur_mcp::ToolRegistryError> {
+    let local_projects = LocalProjectMcpComposition::from_environment();
+    brain_tool_registry_with_local_projects(
+        delegation_deps,
+        plan_deps,
+        signal_deps,
+        context_service_config,
+        &local_projects,
+    )
+}
+
+pub(crate) fn brain_tool_registry_with_local_projects(
+    delegation_deps: delegation::DelegationMcpDeps,
+    plan_deps: plan::PlanMcpDeps,
+    signal_deps: signals::SignalMcpDeps,
+    context_service_config: &ContextServiceConfig,
+    local_projects: &LocalProjectMcpComposition,
+) -> Result<spur_mcp::ToolRegistry, spur_mcp::ToolRegistryError> {
     let mut builder = spur_mcp::ToolRegistry::builder()
         .with(delegation::DelegationMcpModule::new(delegation_deps))?
         .with(catalog::ServerCatalogMcpModule::prelude())?
+        .with(local_projects.catalog_module())?
         .with(plan::PlanMcpModule::management(plan_deps.clone()))?
         .with(catalog::ServerCatalogMcpModule::remainder())?
         .with(plan::PlanMcpModule::remainder(plan_deps))?
@@ -90,11 +110,13 @@ fn non_empty_trimmed(value: String) -> Option<String> {
 }
 
 pub fn catalog_tool_registry() -> Result<spur_mcp::ToolRegistry, spur_mcp::ToolRegistryError> {
+    let local_projects = LocalProjectMcpComposition::from_environment();
     spur_mcp::ToolRegistry::builder()
         .with(delegation::DelegationMcpModule::new(
             delegation::DelegationMcpDeps::catalog_only(),
         ))?
         .with(catalog::ServerCatalogMcpModule::prelude())?
+        .with(local_projects.catalog_module())?
         .with(plan::PlanMcpModule::management(
             plan::PlanMcpDeps::catalog_only(),
         ))?
