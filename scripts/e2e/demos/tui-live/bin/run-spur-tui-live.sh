@@ -44,6 +44,12 @@ spur_bin="$(spur_e2e_resolve_spur_bin)"
 export SPUR_NO_UPGRADE_CHECK="${SPUR_NO_UPGRADE_CHECK:-1}"
 export SPUR_TUI_MOUSE_CAPTURE="${SPUR_TUI_MOUSE_CAPTURE:-0}"
 
+# VHS/ttyd often runs a non-login bash without ~/.local/bin or ~/.cargo/bin.
+# Brain agents (e.g. `grok`) live there — without them, "n" new-session fails with
+# "Failed to initialize brain agent". shell-use inherits a fuller agent PATH, so
+# UAT can pass while VHS fails. Always prepend the common user agent dirs.
+export PATH="${HOME}/.local/bin:${HOME}/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:${PATH}"
+
 # Keep mouse off for VHS; leave HOME/XDG alone so license + agent CLIs work.
 cd "$project"
 
