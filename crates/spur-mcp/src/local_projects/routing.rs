@@ -12,6 +12,16 @@ pub enum LocalProjectAccess {
     Catalog(LocalProjectResolver),
 }
 
+/// Tool surface available for project-aware follow-up suggestions.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum LocalProjectFollowupSurface {
+    /// Graph and analyst tools are composed into the same server.
+    #[default]
+    GraphAndAnalyst,
+    /// Only analyst query tools are available alongside catalog management.
+    AnalystOnly,
+}
+
 /// Adds the optional catalog selector to one object input schema.
 #[must_use]
 pub fn with_optional_project_schema(schema: &Value) -> Value {
@@ -62,11 +72,25 @@ pub fn extract_project(
 /// Adds explicit scope metadata and project-aware follow-up suggestions.
 #[must_use]
 pub fn decorate_project_response(response: Value, project: Option<&ResolvedLocalProject>) -> Value {
+    decorate_project_response_for_surface(
+        response,
+        project,
+        LocalProjectFollowupSurface::GraphAndAnalyst,
+    )
+}
+
+/// Adds project scope while retaining only follow-ups callable on `surface`.
+#[must_use]
+pub fn decorate_project_response_for_surface(
+    response: Value,
+    project: Option<&ResolvedLocalProject>,
+    surface: LocalProjectFollowupSurface,
+) -> Value {
     let Some(project) = project else {
         return response;
     };
     let mut response = response;
-    propagate_project_to_suggestions(&mut response, &project.name);
+    propagate_project_to_suggestions(&mut response, &project.name, surface);
     let scope = json!({
         "name": project.name,
         "root": project.root,
@@ -81,19 +105,23 @@ pub fn decorate_project_response(response: Value, project: Option<&ResolvedLocal
     }
 }
 
-fn propagate_project_to_suggestions(value: &mut Value, project: &str) {
+fn propagate_project_to_suggestions(
+    value: &mut Value,
+    project: &str,
+    surface: LocalProjectFollowupSurface,
+) {
     let Some(object) = value.as_object_mut() else {
         return;
     };
     for key in ["next", "recommended_next_tools"] {
-        add_project_to_suggestion_array(object.get_mut(key), project);
+        add_project_to_suggestion_array(object.get_mut(key), project, surface);
     }
     for evidence_key in ["primary_evidence", "supporting_docs"] {
         if let Some(evidence) = object.get_mut(evidence_key).and_then(Value::as_array_mut) {
             for item in evidence {
                 if let Some(item) = item.as_object_mut() {
                     for key in ["next", "recommended_next_tools"] {
-                        add_project_to_suggestion_array(item.get_mut(key), project);
+                        add_project_to_suggestion_array(item.get_mut(key), project, surface);
                     }
                 }
             }
@@ -101,16 +129,30 @@ fn propagate_project_to_suggestions(value: &mut Value, project: &str) {
     }
 }
 
-fn add_project_to_suggestion_array(value: Option<&mut Value>, project: &str) {
+fn add_project_to_suggestion_array(
+    value: Option<&mut Value>,
+    project: &str,
+    surface: LocalProjectFollowupSurface,
+) {
     let Some(entries) = value.and_then(Value::as_array_mut) else {
         return;
     };
-    entries
-        .retain(|entry| entry.get("tool").and_then(Value::as_str) != Some("code_semantic_search"));
+    entries.retain(|entry| suggestion_is_callable(entry, surface));
     for entry in entries {
         if let Some(entry) = entry.as_object_mut() {
             entry.insert("project".to_owned(), Value::String(project.to_owned()));
         }
+    }
+}
+
+fn suggestion_is_callable(entry: &Value, surface: LocalProjectFollowupSurface) -> bool {
+    let tool = entry.get("tool").and_then(Value::as_str);
+    match surface {
+        LocalProjectFollowupSurface::GraphAndAnalyst => tool != Some("code_semantic_search"),
+        LocalProjectFollowupSurface::AnalystOnly => matches!(
+            tool,
+            Some("doc_navigate" | "knowledge_context_pack" | "knowledge_context_pack_2" | "query")
+        ),
     }
 }
 

@@ -13,6 +13,7 @@ axum = { workspace = true }
 base64ct = { version = "1", features = ["alloc"] }
 fs2 = "0.4"
 hmac = "0.12"
+libc = "0.2"
 rmcp = { workspace = true }
 schemars = { workspace = true }
 serde = { workspace = true }

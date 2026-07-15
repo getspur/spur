@@ -410,30 +410,55 @@ fn open_lock_file(path: &Path) -> Result<File, LocalProjectError> {
     ensure_private_directory(path)?;
     let lock_path = lock_path(path);
     let file = private_open(&lock_path).map_err(|error| catalog_write_error(path, error))?;
-    set_private_file_permissions(&lock_path).map_err(|error| catalog_write_error(path, error))?;
+    set_private_file_permissions_on_handle(&file)
+        .map_err(|error| catalog_write_error(path, error))?;
     Ok(file)
 }
 
 #[cfg(unix)]
 fn private_open(path: &Path) -> std::io::Result<File> {
     use std::os::unix::fs::OpenOptionsExt;
-    OpenOptions::new()
+    let file = OpenOptions::new()
         .read(true)
         .write(true)
         .create(true)
         .truncate(false)
         .mode(0o600)
-        .open(path)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)?;
+    ensure_regular_file(&file)?;
+    Ok(file)
 }
 
 #[cfg(not(unix))]
 fn private_open(path: &Path) -> std::io::Result<File> {
-    OpenOptions::new()
+    let file = OpenOptions::new()
         .read(true)
         .write(true)
         .create(true)
         .truncate(false)
-        .open(path)
+        .open(path)?;
+    ensure_regular_file(&file)?;
+    Ok(file)
+}
+
+fn ensure_regular_file(file: &File) -> std::io::Result<()> {
+    if file.metadata()?.file_type().is_file() {
+        Ok(())
+    } else {
+        Err(std::io::Error::other("lock path is not a regular file"))
+    }
+}
+
+#[cfg(unix)]
+fn set_private_file_permissions_on_handle(file: &File) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    file.set_permissions(fs::Permissions::from_mode(0o600))
+}
+
+#[cfg(not(unix))]
+fn set_private_file_permissions_on_handle(_file: &File) -> std::io::Result<()> {
+    Ok(())
 }
 
 #[cfg(unix)]
