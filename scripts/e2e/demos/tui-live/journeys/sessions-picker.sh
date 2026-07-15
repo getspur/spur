@@ -6,10 +6,12 @@ journey_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$journey_dir/../lib.sh"
 
 start_live_tui "sessions-picker"
-wait_text "Lineage"
-press_key s
-wait_text "Sessions"
-expect_text "TODAY"
+story_session_land "Session Detail is ready before session navigation"
+open_sessions_picker
+story_soft_proof \
+  "Existing session history is visible" \
+  "TODAY" 1500 1.5 \
+  "the empty picker remains a valid first-run state"
 # Escape or leave picker then quit
 press_key Escape
 sleep 0.5

@@ -67,7 +67,14 @@ writes), then polls lineage for `EXEC`/`Running` and re-inspects plan browser.
 
 Short component captures (`01`–`08`) still exist for lineage, sessions, palette,
 explore tabs, composer draft, and gated agent-send. Prefer problem stories for
-marketing and product demos.
+marketing and product demos. The probes share the Session Detail launcher, then
+explicitly navigate to the surface they own; none assumes startup remains on
+Dashboard. `composer-draft` also proves that starting a session switch presents
+the unsent-draft confirmation and that cancelling it does not send the draft.
+
+`story-contract.test.sh` enforces those surface declarations. VHS proof checks
+bind to their visible anchors rather than exact wait durations, so reliability
+timeout tuning does not invalidate the narrative contract.
 
 ## Quick start
 

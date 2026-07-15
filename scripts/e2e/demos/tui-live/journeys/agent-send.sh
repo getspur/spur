@@ -12,7 +12,7 @@ require_agent_send_opt_in
 timeout_ms="${SHELL_USE_TIMEOUT_MS:-60000}"
 
 start_live_tui "agent-send"
-wait_text "Lineage"
+story_session_land "Session Detail is ready for the opt-in provider canary"
 
 # Attach a free session (or N=new) — submit is more reliable in session detail.
 attach_session_for_send
