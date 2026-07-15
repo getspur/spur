@@ -86,8 +86,44 @@ Escape
 Show
 Sleep 2s
 
-# STORY: PROOF — back home Session Detail
-Wait+Screen@15s /Session ·|INSERT|Lineage/
+# STORY: ACTION — lineage EXEC worker: stream then task assignment
+Hide
+Escape
+Sleep 600ms
+Escape
+Sleep 400ms
+Tab
+Show
+Sleep 2s
+Hide
+Type "j"
+Show
+Sleep 1.2s
+Hide
+Type "j"
+Show
+Sleep 1.5s
+Hide
+Enter
+Show
+Wait+Screen@15s /stream/
+Sleep 2s
+Hide
+Ctrl+1
+Show
+Sleep 4s
+Hide
+Ctrl+4
+Show
+Wait+Screen@12s /task/
+Sleep 4.5s
+Hide
+Escape
+Show
+Sleep 1.5s
+
+# STORY: PROOF — back home Session Detail when possible
+Wait+Screen@15s /Session ·|INSERT|Lineage|Activity/
 Sleep 2s
 # STORY: RESOLUTION
 Sleep 2s
