@@ -71,12 +71,13 @@ impl LocalProjectCatalogStore {
 
     pub fn snapshot(&self) -> Result<LocalProjectCatalogSnapshot, LocalProjectError> {
         let path = self.catalog_path()?;
-        if !path.exists() {
-            return Ok(snapshot_from_document(CatalogDocument::default()));
-        }
         let lock = open_lock_file(&path)?;
         FileExt::lock_shared(&lock).map_err(|error| catalog_read_error(&path, error))?;
-        let result = read_document(&path).map(snapshot_from_document);
+        let result = if catalog_file_exists(&path, CatalogAccess::Read)? {
+            read_document(&path).map(snapshot_from_document)
+        } else {
+            Ok(snapshot_from_document(CatalogDocument::default()))
+        };
         let _ = FileExt::unlock(&lock);
         result
     }
@@ -157,7 +158,7 @@ impl LocalProjectCatalogStore {
         ensure_private_directory(&path)?;
         let lock = open_lock_file(&path)?;
         FileExt::lock_exclusive(&lock).map_err(|error| catalog_write_error(&path, error))?;
-        let mut document = if path.exists() {
+        let mut document = if catalog_file_exists(&path, CatalogAccess::Write)? {
             read_document(&path)?
         } else {
             CatalogDocument::default()
@@ -348,14 +349,53 @@ fn ensure_private_directory(path: &Path) -> Result<(), LocalProjectError> {
             path: path.to_path_buf(),
             reason: "catalog path has no parent directory".to_owned(),
         })?;
-    fs::create_dir_all(parent).map_err(|error| catalog_write_error(path, error))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(parent, fs::Permissions::from_mode(0o700))
-            .map_err(|error| catalog_write_error(path, error))?;
+    ensure_directory_exists(parent, path)
+}
+
+fn ensure_directory_exists(directory: &Path, catalog_path: &Path) -> Result<(), LocalProjectError> {
+    // A relative catalog in the current directory has an empty parent. This
+    // mirrors `create_dir_all("")`, which is a successful no-op.
+    if directory.as_os_str().is_empty() {
+        return Ok(());
     }
-    Ok(())
+    match fs::symlink_metadata(directory) {
+        Ok(metadata) if metadata.file_type().is_dir() => return Ok(()),
+        Ok(_) => {
+            return Err(catalog_write_error(
+                catalog_path,
+                format!(
+                    "catalog parent `{}` is not a directory or is a symbolic link",
+                    directory.display()
+                ),
+            ));
+        }
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+            return Err(catalog_write_error(catalog_path, error));
+        }
+        Err(_) => {}
+    }
+
+    if let Some(parent) = directory.parent() {
+        ensure_directory_exists(parent, catalog_path)?;
+    }
+    match fs::create_dir(directory) {
+        Ok(()) => set_private_directory_permissions(directory)
+            .map_err(|error| catalog_write_error(catalog_path, error)),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            match fs::symlink_metadata(directory) {
+                Ok(metadata) if metadata.file_type().is_dir() => Ok(()),
+                Ok(_) => Err(catalog_write_error(
+                    catalog_path,
+                    format!(
+                        "catalog parent `{}` is not a directory or is a symbolic link",
+                        directory.display()
+                    ),
+                )),
+                Err(error) => Err(catalog_write_error(catalog_path, error)),
+            }
+        }
+        Err(error) => Err(catalog_write_error(catalog_path, error)),
+    }
 }
 
 fn lock_path(path: &Path) -> PathBuf {
@@ -420,6 +460,52 @@ fn set_private_file_permissions(path: &Path) -> std::io::Result<()> {
 #[cfg(not(unix))]
 fn set_private_file_permissions(_path: &Path) -> std::io::Result<()> {
     Ok(())
+}
+
+#[cfg(unix)]
+fn set_private_directory_permissions(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+}
+
+#[cfg(not(unix))]
+fn set_private_directory_permissions(_path: &Path) -> std::io::Result<()> {
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum CatalogAccess {
+    Read,
+    Write,
+}
+
+fn catalog_file_exists(path: &Path, access: CatalogAccess) -> Result<bool, LocalProjectError> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(catalog_access_error(access, path, error)),
+    };
+    if !metadata.file_type().is_file() {
+        return Err(catalog_access_error(
+            access,
+            path,
+            "catalog path is not a regular file or is a symbolic link",
+        ));
+    }
+    set_private_file_permissions(path)
+        .map_err(|error| catalog_access_error(access, path, error))?;
+    Ok(true)
+}
+
+fn catalog_access_error(
+    access: CatalogAccess,
+    path: &Path,
+    error: impl std::fmt::Display,
+) -> LocalProjectError {
+    match access {
+        CatalogAccess::Read => catalog_read_error(path, error),
+        CatalogAccess::Write => catalog_write_error(path, error),
+    }
 }
 
 #[cfg(unix)]

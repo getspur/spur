@@ -592,6 +592,7 @@ async fn invoke_code_graph_for_worker(
     tool_name: &'static str,
     args: Value,
 ) -> Result<Value, McpHandlerError> {
+    reject_worker_project_selector(&args)?;
     let worktree_root = {
         deps.delegation_worktree_roots
             .lock()
@@ -671,11 +672,24 @@ fn select_knowledge_context_root(
     worker_root.or(repo_root)
 }
 
+fn reject_worker_project_selector(args: &Value) -> Result<(), McpHandlerError> {
+    if args
+        .as_object()
+        .is_some_and(|object| object.contains_key("project"))
+    {
+        return Err(McpHandlerError::InvalidParams(
+            "field `project` is not available on this MCP server".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 async fn invoke_knowledge_context_for_worker(
     deps: Arc<DispatcherDeps>,
     worker_ctx: WorkerCallContext,
     args: Value,
 ) -> Result<Value, McpHandlerError> {
+    reject_worker_project_selector(&args)?;
     let worker_root = {
         deps.delegation_worktree_roots
             .lock()
@@ -703,6 +717,7 @@ async fn invoke_doc_navigate_for_worker(
     worker_ctx: WorkerCallContext,
     args: Value,
 ) -> Result<Value, McpHandlerError> {
+    reject_worker_project_selector(&args)?;
     let worker_root = {
         deps.delegation_worktree_roots
             .lock()

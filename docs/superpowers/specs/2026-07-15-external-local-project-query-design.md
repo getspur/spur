@@ -216,8 +216,13 @@ Unknown format versions fail closed.
 - Mutations reload the file while holding the exclusive lock, increment
   `generation`, serialize to a temporary file in the same directory, sync the
   file, atomically rename it, and sync the parent directory where supported.
-- The directory, catalog, temporary file, and lock file use user-only
-  permissions on Unix (`0700` for the directory and `0600` for files).
+- Catalog-owned directories created by SPUR use `0700` on Unix. A pre-existing
+  explicit or override parent keeps its existing permissions.
+- Catalog, temporary, and lock files use `0600` on Unix. An existing regular
+  catalog file with broader permissions is repaired to `0600` while locked.
+- Catalog presence checks use symlink-aware metadata. Only `NotFound` means an
+  absent catalog; metadata failures and non-regular paths, including dangling
+  or valid symlinks, fail closed without replacing the directory entry.
 - Readers parse one immutable snapshot under a shared lock and release the lock
   before project queries begin.
 - An in-flight request keeps its resolved canonical root even if the entry is
@@ -286,7 +291,8 @@ path, and all existing read-only and freshness gates remain in force.
 
 Analyst validation exposes a narrow check that uses the same database-path
 selection logic as a real query. Knowledge-pack suggestion builders propagate
-the selected project name into follow-up tool arguments.
+the selected project name into follow-up tool arguments after filtering out
+suggestions that are not callable on the same local-project server surface.
 
 ### `spur-core` and `spur-cli`
 
@@ -381,7 +387,8 @@ are committed before production changes.
 - Conflicting add and explicit replacement.
 - Shared/exclusive locking and concurrent mutation without lost updates.
 - Atomic-write failure preserves the old catalog.
-- Unix directory/file permissions.
+- Unix directory/file permissions, existing-parent preservation, catalog mode
+  repair, and fail-closed catalog symlink handling.
 - Corrupt catalog and unavailable-root error envelopes.
 - Schema decoration and access-policy behavior.
 
@@ -445,7 +452,7 @@ documentation, and the user guide with this flow:
 ```
 
 ```json
-{"project":"notebook","query":"SELECT count(*) FROM nodes"}
+{"query":"SELECT file_path, entity_name FROM nodes LIMIT 20","project":"notebook"}
 ```
 
 Documentation must distinguish named local projects from external packages:
