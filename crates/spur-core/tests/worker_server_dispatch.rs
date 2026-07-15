@@ -586,6 +586,48 @@ async fn code_graph_worker_tools_do_not_duplicate_structured_payload_as_text_con
 }
 
 #[tokio::test]
+async fn worker_query_tools_reject_injected_named_project_selectors() {
+    let (_dir, server) = test_server_with_real_pm().await;
+    let token = server.issue_token("d-project-isolation", Duration::from_secs(60));
+
+    for (tool_name, arguments) in [
+        (
+            "code_symbol_search",
+            json!({"query": "anything", "project": "alpha"}),
+        ),
+        (
+            "knowledge_context_pack",
+            json!({"query": "anything", "project": "alpha"}),
+        ),
+        (
+            "knowledge_context_pack_2",
+            json!({"query": "anything", "project": "alpha"}),
+        ),
+        (
+            "doc_navigate",
+            json!({"query": "anything", "project": "alpha"}),
+        ),
+    ] {
+        let body = call_jsonrpc(
+            &server,
+            &token,
+            "tools/call",
+            json!({"name": tool_name, "arguments": arguments}),
+        )
+        .await;
+        assert_eq!(body["error"]["code"], -32602, "{tool_name}: {body:#}");
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("not available on this MCP server")),
+            "{tool_name}: {body:#}"
+        );
+    }
+
+    server.shutdown(Duration::from_secs(5)).await;
+}
+
+#[tokio::test]
 async fn code_symbol_search_refreshes_dirty_worker_worktree_for_new_symbol() {
     let _cwd_lock = CWD_LOCK.lock().expect("cwd lock");
     let (dir, server) = test_server_with_real_pm().await;
