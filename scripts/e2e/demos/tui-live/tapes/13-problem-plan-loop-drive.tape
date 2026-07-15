@@ -107,13 +107,19 @@ Hide
 Enter
 Show
 Wait+Screen@15s /stream/
-Sleep 2s
+# hold stream panel for streaming content
+Sleep 4.5s
+# cycle to task tab (stream → artifacts → attempts → task)
 Hide
-Ctrl+1
+Type "l"
 Show
-Sleep 4s
+Sleep 1.2s
 Hide
-Ctrl+4
+Type "l"
+Show
+Sleep 1.2s
+Hide
+Type "l"
 Show
 Wait+Screen@12s /task/
 Sleep 4.5s
