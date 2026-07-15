@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 
+use anyhow::Context as _;
 use spur_graph::resolve_worktree_root_from;
 
 use crate::db::connection::open_analyst_connection_read_only;
@@ -28,7 +29,8 @@ pub(crate) fn select_analyst_db_path(root: &Path) -> PathBuf {
     parent_spur_worktree_analyst_db(root).unwrap_or(local_db)
 }
 
-/// Resolves and opens the selected analyst database without creating it.
+/// Resolves the selected analyst database and verifies its required node
+/// columns through a read-only connection, without creating or rebuilding it.
 pub fn ensure_analyst_db_ready(root: &Path) -> anyhow::Result<PathBuf> {
     let db_path = select_analyst_db_path(root);
     if !db_path.is_file() {
@@ -39,6 +41,14 @@ pub fn ensure_analyst_db_ready(root: &Path) -> anyhow::Result<PathBuf> {
         );
     }
     let connection = open_analyst_connection_read_only(&db_path)?;
+    connection
+        .prepare("SELECT file_path, entity_name FROM nodes LIMIT 0")
+        .with_context(|| {
+            format!(
+                "analyst database `{}` is missing the required `nodes.file_path` and `nodes.entity_name` schema",
+                db_path.display()
+            )
+        })?;
     drop(connection);
     Ok(db_path)
 }
