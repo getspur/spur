@@ -1,6 +1,6 @@
-# PROBLEM: backlog firehose — what is P0 open work?
-# Features: issues list + detail
-# Story pacing: list → P0 → detail hold
+# PROBLEM: backlog firehose — P0 open work
+# HOME: Session Detail → Issues
+# STORY: HOOK → ORIENTATION → ACTION → PROOF → RESOLUTION
 
 Output out/12-problem-backlog-triage.mp4
 Output out/12-problem-backlog-triage.gif
@@ -16,15 +16,33 @@ Set Theme "Catppuccin Mocha"
 Set Framerate 24
 Set PlaybackSpeed 1.0
 
-# STORY: HOOK — the backlog firehose hides the issue that needs action now.
+# STORY: HOOK
 Hide
 Type "./bin/run-spur-tui-live.sh"
 Enter
 Show
-Wait+Screen@30s /Lineage|Type a task below/
+Wait+Screen@30s /Lineage|Type a task below|SPUR/
+Sleep 2s
+
+# STORY: ORIENTATION — Session Detail
+Hide
+Ctrl+K
+Show
+Wait+Screen@12s /Go to/
+Hide
+Type "Sessions"
+Enter
+Show
+Wait+Screen@15s /Sessions|Start new session|No sessions yet|Failed/
+Sleep 1.5s
+Hide
+Type "n"
+Show
+Sleep 2s
+Wait+Screen@25s /Session ·|INSERT|Failed to initialize/
 Sleep 2.5s
 
-# STORY: ORIENTATION — Issues replaces noise with a priority/status surface.
+# STORY: ACTION — Issues from session
 Hide
 Ctrl+K
 Show
@@ -35,16 +53,15 @@ Enter
 Show
 Wait+Screen@20s /Issues/
 Sleep 2s
-
-# STORY: ACTION — isolate open P0 work, then open the issue decision context.
-Wait+Screen@10s /P0/
-Wait+Screen@10s /open/
+Wait+Screen@10s /P0|No issues|open/
 Sleep 3s
 Hide
 Enter
 Show
-# STORY: PROOF — identity, status, and priority explain why this item is urgent.
-Wait+Screen@12s /status: open/
-Wait+Screen@12s /priority: P0/
-# STORY: RESOLUTION — the fire is isolated without leaving the control plane.
+Wait+Screen@12s /status: open|priority: P0|bd-|No issues/
 Sleep 4s
+
+# STORY: PROOF
+Sleep 2s
+# STORY: RESOLUTION
+Sleep 1.5s

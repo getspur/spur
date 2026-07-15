@@ -1,6 +1,24 @@
 # Live TUI journey story review
 
-## Changelog for film — 2026-07-15
+## Changelog for film — 2026-07-15 (session-first)
+
+**Operator home revised to Session Detail** (`session_detail`), not dashboard:
+
+| Surface | Role in film |
+|---------|----------------|
+| Session · / INSERT / ReAct | Primary work home |
+| Workers Alt+d | Session-scoped delegated work |
+| Alt+p | Plan inspector from session |
+| Go to hubs | Plans / Issues / Explore |
+| Dashboard Lineage | Optional ops overview only |
+
+Journeys call `story_session_land` / `land_session_detail` after cold-start.
+Plan-loop seed observes YOU/DELEGATE/workers in session, not dashboard first.
+Value tapes open Sessions → `n` then prove `Session ·|INSERT`.
+
+---
+
+## Changelog for film — 2026-07-15 (story arcs)
 
 This pass keeps the landed P0 pacing work and upgrades the five value films to
 one explicit **HOOK → ORIENTATION → ACTION → PROOF → RESOLUTION** contract.
