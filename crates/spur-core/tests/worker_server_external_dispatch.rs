@@ -195,10 +195,13 @@ async fn configured_worker_proxies_external_tools_with_structured_results_and_er
 
     let mut read = CallToolRequestParams::new("external_code_read");
     read.arguments = Some(
-        json!({ "selector": "pkg:serde@1.0.0::serde::Deserialize" })
-            .as_object()
-            .expect("object")
-            .clone(),
+        json!({
+            "selector": "pkg:serde@1.0.0::serde::Deserialize",
+            "project": "serde"
+        })
+        .as_object()
+        .expect("object")
+        .clone(),
     );
     let read_result = client
         .call_tool(read)
@@ -271,7 +274,10 @@ async fn configured_worker_proxies_external_tools_with_structured_results_and_er
         vec![
             json!({
                 "tool": "external_code_read",
-                "args": { "selector": "pkg:serde@1.0.0::serde::Deserialize" }
+                "args": {
+                    "selector": "pkg:serde@1.0.0::serde::Deserialize",
+                    "project": "serde"
+                }
             }),
             json!({
                 "tool": "external_index",
