@@ -279,7 +279,17 @@ async fn project_blind_analyst_module_rejects_injected_selector() {
 
 #[test]
 fn analyst_readiness_probe_is_read_only_and_requires_an_existing_database() {
-    let ready = QueryFixture::new("CREATE TABLE ready (value INTEGER);");
+    let arbitrary = QueryFixture::new("CREATE TABLE ready (value INTEGER);");
+    let error = ensure_analyst_db_ready(&arbitrary.root)
+        .expect_err("an arbitrary DuckDB file is not an analyst index");
+    let message = error.to_string();
+    assert!(message.contains("nodes"), "{error:#}");
+    assert!(message.contains("file_path"), "{error:#}");
+    assert!(message.contains("entity_name"), "{error:#}");
+
+    let ready = QueryFixture::new(
+        "CREATE TABLE nodes (file_path VARCHAR NOT NULL, entity_name VARCHAR NOT NULL);",
+    );
     assert_eq!(
         ensure_analyst_db_ready(&ready.root).expect("ready analyst DB"),
         ready.db_path
