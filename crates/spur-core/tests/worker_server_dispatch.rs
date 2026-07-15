@@ -607,6 +607,7 @@ async fn worker_query_tools_reject_injected_named_project_selectors() {
             "doc_navigate",
             json!({"query": "anything", "project": "alpha"}),
         ),
+        ("query", json!({"query": "SELECT 1", "project": "alpha"})),
     ] {
         let body = call_jsonrpc(
             &server,

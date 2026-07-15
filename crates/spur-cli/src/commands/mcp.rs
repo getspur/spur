@@ -383,6 +383,23 @@ mod tests {
     }
 
     #[test]
+    fn analyst_only_registry_selects_same_surface_followup_policy() {
+        let source = include_str!("mcp.rs");
+        let analyst_start = source
+            .find("fn analyst_server_registry")
+            .expect("analyst registry function");
+        let bundled_start = source
+            .find("fn bundled_server_registry")
+            .expect("bundled registry function");
+        let analyst_body = &source[analyst_start..bundled_start];
+
+        assert!(
+            analyst_body.contains("with_local_projects_for_analyst_server"),
+            "standalone analyst composition must suppress graph-only follow-ups"
+        );
+    }
+
+    #[test]
     fn standalone_instructions_explain_local_registration_boundary() {
         for (name, instructions) in [
             ("graph", super::GRAPH_INSTRUCTIONS),
@@ -392,12 +409,17 @@ mod tests {
             assert!(instructions.contains("already-indexed"), "{name}");
             assert!(instructions.contains("does not index"), "{name}");
             assert!(instructions.contains("external_*"), "{name}");
+            assert!(
+                instructions.contains("Repository and index query operations are read-only"),
+                "{name}"
+            );
+            assert!(instructions.contains("local_project_add"), "{name}");
+            assert!(instructions.contains("local_project_remove"), "{name}");
+            assert!(
+                instructions.contains("user catalog configuration"),
+                "{name}"
+            );
         }
-        assert!(super::BUNDLED_INSTRUCTIONS
-            .contains("Repository and index query operations are read-only"));
-        assert!(super::BUNDLED_INSTRUCTIONS.contains("local_project_add"));
-        assert!(super::BUNDLED_INSTRUCTIONS.contains("local_project_remove"));
-        assert!(super::BUNDLED_INSTRUCTIONS.contains("user catalog configuration"));
     }
 
     fn assert_project_schema(registry: &spur_mcp::ToolRegistry, tool_name: &str) {
