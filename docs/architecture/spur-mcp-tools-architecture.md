@@ -20,6 +20,7 @@ flowchart TB
         Transport["Streamable HTTP helpers<br/>bind / serve / shutdown"]
         Token["Worker token<br/>HMAC encode / validate"]
         EmptyCatalog["default tools_list()<br/>infrastructure-only empty catalog"]
+        LocalCatalog["LocalProjectCatalogStore<br/>resolver + management module"]
     end
 
     subgraph Core["crates/spur-core"]
@@ -38,6 +39,7 @@ flowchart TB
     end
 
     CoreMcp --> Registry
+    CoreMcp --> LocalCatalog
     BrainServer --> Transport
     WorkerServer --> Token
     WorkerServer --> Registry
@@ -86,11 +88,12 @@ order:
 
 1. `DelegationMcpModule`
 2. `ServerCatalogMcpModule::prelude()`
-3. `PlanMcpModule::management(...)`
-4. `ServerCatalogMcpModule::remainder()`
-5. `PlanMcpModule::remainder(...)`
-6. `SignalMcpModule`
-7. alias `code_search -> code_symbol_search`
+3. `LocalProjectCatalogMcpModule`
+4. `PlanMcpModule::management(...)`
+5. `ServerCatalogMcpModule::remainder()`
+6. `PlanMcpModule::remainder(...)`
+7. `SignalMcpModule`
+8. alias `code_search -> code_symbol_search`
 
 The brain server is `McpCallbackServer`. Its streamable HTTP listener is built
 with `spur_mcp::server::bind_streamable_http_server`, but the service instance
@@ -143,11 +146,53 @@ Delegation and signal tools are module-owned:
   and worker listing route through `DelegationMcpModule`.
 - `report_signal` and `report_progress` route through `SignalMcpModule`.
 
+Local-project management is also module-owned. The brain registry installs the
+real `LocalProjectCatalogMcpModule`; `local_project_add`,
+`local_project_list`, and `local_project_remove` therefore dispatch through the
+registry rather than the legacy server-owned handler match.
+
 Construction rule: when the orchestrator mutates server state after
 `McpCallbackServer::new` with workers, cancellation control, inline wait, or
 feature-backed settings, it rebuilds and installs the brain registry with
 `set_tool_registry`. This matters because module dependency structs capture
 some values from the server at composition time.
+
+## Local Project Routing
+
+The user-level catalog stores stable names and canonical roots only. `spur-core`
+provides the production validator, which proves the requested directory belongs
+to a real Git worktree and checks that both the graph artifact and analyst
+database already exist and can be opened. Health is evaluated on every add,
+list, or named query; it is never persisted.
+
+```text
+project name -> immutable user catalog snapshot -> canonical Git root
+             -> Tokio request-local worktree scope
+             -> existing graph / analyst implementation
+```
+
+Project-enabled graph and analyst modules first remove the optional `project`
+argument, resolve it from one catalog snapshot, then install the selected root
+around the existing handler future. They do not mutate process current
+directory or `SPUR_WORKTREE`. The active worktree remains the outer/default
+scope, so omitting `project` is backward compatible while an explicit project
+wins only inside that request. Successful explicit responses carry the name,
+root, and catalog generation; knowledge-pack follow-up suggestions repeat the
+project name.
+
+The brain server and all standalone user query servers (`spur graph mcp`,
+`spur analyst mcp`, and bundled `spur mcp`) install this composition. The
+catalog module, graph module, and analyst module in a server share the same
+store and resolver. Registration accepts only an already-indexed local Git
+worktree: it never clones, builds either index, or enables cross-project SQL or
+graph traversal.
+
+Delegated workers are intentionally project-blind. Their registry contains no
+catalog-management tools, their graph and analyst schemas omit `project`, and
+directly injecting the selector is rejected. This prevents the user catalog
+from becoming an escape path out of the assigned worker worktree. Hosted
+package/revision lookup remains the separate `external_*` surface and does not
+read this local catalog.
 
 ## Worker Tool Surface
 

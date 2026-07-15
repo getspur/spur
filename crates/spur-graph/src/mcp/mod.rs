@@ -11,6 +11,10 @@ use std::time::Duration;
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use spur_mcp::local_projects::{
+    decorate_project_response, extract_project, with_optional_project_schema, LocalProjectAccess,
+    LocalProjectResolver,
+};
 
 use crate::git_blob_oid;
 use crate::store::cache::{emit_base_seed_stats, load_base_seed_for_worktree, BaseArtifactSeed};
@@ -28,6 +32,9 @@ use crate::{
 };
 
 pub use spur_mcp::tools::McpHandlerError;
+
+type GraphDispatchFuture<'a> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = CodeGraphResult> + Send + 'a>>;
 
 /// Metadata for a single graph-owned MCP tool.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -51,24 +58,55 @@ impl Default for GraphMcpDeps {
     }
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct GraphMcpModule {
     deps: GraphMcpDeps,
+    local_projects: LocalProjectAccess,
+}
+
+impl Default for GraphMcpModule {
+    fn default() -> Self {
+        Self::new(GraphMcpDeps::default())
+    }
 }
 
 impl GraphMcpModule {
     pub fn new(deps: GraphMcpDeps) -> Self {
-        Self { deps }
+        Self {
+            deps,
+            local_projects: LocalProjectAccess::CurrentWorktreeOnly,
+        }
+    }
+
+    pub fn with_local_projects(deps: GraphMcpDeps, resolver: LocalProjectResolver) -> Self {
+        Self {
+            deps,
+            local_projects: LocalProjectAccess::Catalog(resolver),
+        }
     }
 
     pub fn tools(&self) -> Vec<ToolDefinition> {
-        tool_definitions()
+        match &self.local_projects {
+            LocalProjectAccess::CurrentWorktreeOnly => tool_definitions(),
+            LocalProjectAccess::Catalog(_) => local_project_tool_definitions(),
+        }
     }
 
     /// Dispatch a tool call by name. This is the inherent entry point used by
     /// the legacy spur-core dispatcher; the `spur_mcp::ToolModule` impl below
     /// delegates here.
-    pub async fn dispatch(&self, name: &str, args: Value) -> CodeGraphResult {
+    pub async fn dispatch(&self, name: &str, mut args: Value) -> CodeGraphResult {
+        let project = extract_project(&mut args, &self.local_projects)?;
+        let dispatch: GraphDispatchFuture<'_> = Box::pin(self.dispatch_current_project(name, args));
+        let response = if let Some(project) = project.as_ref() {
+            with_worktree_root_for_request(project.root.clone(), dispatch).await?
+        } else {
+            dispatch.await?
+        };
+        Ok(decorate_project_response(response, project.as_ref()))
+    }
+
+    async fn dispatch_current_project(&self, name: &str, args: Value) -> CodeGraphResult {
         match name {
             "code_resolve" => {
                 code_resolve_response(&args, Arc::clone(&self.deps.rebuild_coordinator)).await
@@ -118,7 +156,7 @@ impl GraphMcpModule {
 #[async_trait::async_trait]
 impl spur_mcp::ToolModule for GraphMcpModule {
     fn tools(&self) -> Vec<spur_mcp::ToolDefinition> {
-        tool_definitions()
+        GraphMcpModule::tools(self)
             .into_iter()
             .map(|definition| spur_mcp::ToolDefinition {
                 name: definition.name,
@@ -529,6 +567,18 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
         code_subgraph_def(),
         code_symbol_history_def(),
     ]
+}
+
+/// Returns the graph MCP schemas with an optional named local-project selector.
+#[must_use]
+pub fn local_project_tool_definitions() -> Vec<ToolDefinition> {
+    tool_definitions()
+        .into_iter()
+        .map(|mut definition| {
+            definition.input_schema = with_optional_project_schema(&definition.input_schema);
+            definition
+        })
+        .collect()
 }
 
 fn code_resolve_def() -> ToolDefinition {
@@ -3451,6 +3501,25 @@ where
     SCOPED_CODE_GRAPH_WORKTREE_ROOT
         .scope(worktree_root, future)
         .await
+}
+
+/// Checks that `worktree_root` has a resolvable, readable graph artifact.
+///
+/// This probe never creates or rebuilds an artifact.
+pub fn ensure_graph_artifact_ready(worktree_root: &Path) -> anyhow::Result<()> {
+    let resolved = resolve_artifact_location(worktree_root, None).map_err(|error| {
+        anyhow::anyhow!(
+            "graph artifact is unavailable for `{}`: {error}",
+            worktree_root.display()
+        )
+    })?;
+    ParquetClient::open(&resolved.path).map_err(|error| {
+        anyhow::anyhow!(
+            "graph artifact `{}` is unreadable: {error}",
+            resolved.path.display()
+        )
+    })?;
+    Ok(())
 }
 
 #[allow(clippy::result_large_err)]

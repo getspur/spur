@@ -17,6 +17,7 @@
 
 pub mod events;
 pub mod git;
+pub mod local_projects;
 pub mod registry;
 pub mod response;
 pub mod server;
@@ -25,6 +26,10 @@ pub mod tool_schemas;
 pub mod tools;
 
 pub use events::McpEventSink;
+pub use local_projects::{
+    LocalProjectAccess, LocalProjectCatalogMcpModule, LocalProjectCatalogStore,
+    LocalProjectResolver,
+};
 pub use registry::{
     ServerKind, ToolAuthority, ToolCallContext, ToolModule, ToolRegistry, ToolRegistryBuilder,
     ToolRegistryError, ToolResponse,

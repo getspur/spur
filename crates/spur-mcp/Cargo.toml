@@ -11,6 +11,7 @@ anyhow = { workspace = true }
 async-trait = { workspace = true }
 axum = { workspace = true }
 base64ct = { version = "1", features = ["alloc"] }
+fs2 = "0.4"
 hmac = "0.12"
 rmcp = { workspace = true }
 schemars = { workspace = true }
@@ -20,6 +21,7 @@ sha2 = { workspace = true }
 spur-acp = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
+toml = { workspace = true }
 tracing = { workspace = true }
 
 [features]
@@ -29,6 +31,7 @@ default = []
 # start_paused = true on #[tokio::test] requires test-util feature.
 tokio = { version = "1", features = ["full", "test-util"] }
 toml = { workspace = true }
+tempfile = "3"
 
 [lints]
 workspace = true
