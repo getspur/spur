@@ -117,6 +117,15 @@ assert_has "$root/tapes/11-problem-plan-progress.tape" '/Progress|No plans found
 assert_has "$root/tapes/12-problem-backlog-triage.tape" 'Wait+Screen@12s /status: open|priority: P0|bd-|No issues/' 'backlog tape binds detail or empty'
 assert_has "$root/tapes/13-problem-plan-loop-drive.tape" 'Alt+p' 'plan-loop tape tries session plan inspector'
 assert_has "$root/tapes/10-problem-ops-visibility.tape" 'Alt+d' 'ops tape opens workers panel'
+assert_has "$lib" '_lineage_select_worker_node' 'lineage selects EXEC worker not BRAIN root'
+assert_has "$lib" '_lineage_wait_stream_panel' 'lineage waits for stream panel'
+assert_has "$lib" '_lineage_wait_task_tab' 'lineage opens task tab for assigned work'
+assert_has "$lib" 'press_key Ctrl+1' 'stream tab via Ctrl+1'
+assert_has "$lib" 'press_key Ctrl+4' 'task tab via Ctrl+4'
+assert_has "$root/tapes/10-problem-ops-visibility.tape" 'Ctrl+1' 'ops tape waits stream tab'
+assert_has "$root/tapes/10-problem-ops-visibility.tape" 'Ctrl+4' 'ops tape opens task tab'
+assert_has "$root/tapes/13-problem-plan-loop-drive.tape" 'Ctrl+1' 'plan-loop tape waits stream tab'
+assert_has "$root/tapes/13-problem-plan-loop-drive.tape" 'Ctrl+4' 'plan-loop tape opens task tab'
 
 if [[ "$failures" -ne 0 ]]; then
   printf '\n%d story-contract check(s) failed\n' "$failures" >&2
