@@ -278,6 +278,141 @@ fn catalog_rejects_non_utf8_paths_and_uses_private_permissions() {
     }
 }
 
+#[cfg(unix)]
+#[test]
+fn catalog_symlinks_fail_closed_without_replacing_directory_entries() {
+    use std::os::unix::fs::symlink;
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let parent = temp.path().join("config");
+    std::fs::create_dir(&parent).expect("create catalog parent");
+    let root = make_root(&temp, "root");
+
+    for operation in ["snapshot", "add", "remove"] {
+        let path = parent.join(format!("{operation}.toml"));
+        let target = parent.join(format!("missing-{operation}.toml"));
+        symlink(&target, &path).expect("create dangling catalog symlink");
+        let store = LocalProjectCatalogStore::new(path.clone());
+
+        let error = match operation {
+            "snapshot" => store.snapshot().map(|_| ()),
+            "add" => store.add("alpha", &root, false).map(|_| ()),
+            "remove" => store.remove("alpha").map(|_| ()),
+            _ => unreachable!(),
+        }
+        .expect_err("catalog symlink must fail closed");
+
+        assert!(
+            matches!(
+                error,
+                LocalProjectError::CatalogRead { .. } | LocalProjectError::CatalogWrite { .. }
+            ),
+            "unexpected error: {error}"
+        );
+        assert!(
+            std::fs::symlink_metadata(&path)
+                .expect("symlink metadata")
+                .file_type()
+                .is_symlink(),
+            "catalog path was replaced during {operation}"
+        );
+        assert_eq!(std::fs::read_link(&path).expect("read symlink"), target);
+        assert!(
+            !target.exists(),
+            "dangling target was created by {operation}"
+        );
+    }
+
+    let target = parent.join("real-catalog.toml");
+    std::fs::write(&target, "version = 1\ngeneration = 0\nprojects = []\n")
+        .expect("write target catalog");
+    let target_contents = std::fs::read(&target).expect("read target bytes");
+    let path = parent.join("linked-catalog.toml");
+    symlink(&target, &path).expect("create catalog symlink");
+    let error = LocalProjectCatalogStore::new(path.clone())
+        .snapshot()
+        .expect_err("catalog symlink to a regular file must be rejected");
+    assert!(matches!(error, LocalProjectError::CatalogRead { .. }));
+    assert_eq!(std::fs::read_link(&path).expect("read symlink"), target);
+    assert_eq!(
+        std::fs::read(&target).expect("read unchanged target"),
+        target_contents
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn existing_explicit_parent_permissions_are_preserved() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let parent = temp.path().join("explicit-parent");
+    std::fs::create_dir(&parent).expect("create explicit parent");
+    std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o755))
+        .expect("set explicit parent permissions");
+    let store = LocalProjectCatalogStore::new(parent.join("projects.toml"));
+
+    store.snapshot().expect("snapshot fresh catalog");
+    assert_eq!(
+        std::fs::metadata(&parent)
+            .expect("parent metadata after snapshot")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o755
+    );
+
+    let root = make_root(&temp, "root");
+    store.add("root", &root, false).expect("add root");
+    assert_eq!(
+        std::fs::metadata(&parent)
+            .expect("parent metadata after add")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o755
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn existing_catalog_permissions_are_repaired_on_reads_and_noop_mutations() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    fn mode(path: &Path) -> u32 {
+        std::fs::metadata(path)
+            .expect("file metadata")
+            .permissions()
+            .mode()
+            & 0o777
+    }
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let root = make_root(&temp, "root");
+    let store = store(&temp);
+    store.add("root", &root, false).expect("seed catalog");
+    let path = store.catalog_path().expect("catalog path");
+    let lock = path.with_extension("toml.lock");
+
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))
+        .expect("loosen catalog before read");
+    store.snapshot().expect("read repairs catalog mode");
+    assert_eq!(mode(&path), 0o600);
+
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))
+        .expect("loosen catalog before idempotent add");
+    let add = store.add("root", &root, false).expect("idempotent add");
+    assert!(!add.changed);
+    assert_eq!(mode(&path), 0o600);
+
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))
+        .expect("loosen catalog before idempotent remove");
+    let remove = store.remove("missing").expect("idempotent remove");
+    assert!(!remove.removed);
+    assert_eq!(mode(&path), 0o600);
+    assert_eq!(mode(&lock), 0o600);
+}
+
 #[test]
 fn concurrent_store_instances_do_not_lose_updates() {
     let temp = tempfile::tempdir().expect("tempdir");
@@ -409,7 +544,10 @@ fn routing_helpers_preserve_default_contract_and_propagate_explicit_scope() {
 
     let body = json!({
         "answerable": true,
-        "next": [{"tool": "code_read_symbol", "selector": "graph://symbol/1"}],
+        "next": [
+            {"tool": "code_read_symbol", "selector": "graph://symbol/1"},
+            {"tool": "code_semantic_search", "query": "Thing"}
+        ],
         "primary_evidence": [{"next": [{"tool": "code_callers"}]}],
         "recommended_next_tools": [{"tool": "code_callees"}],
         "user_content": {"next": "leave this scalar alone"}
@@ -417,6 +555,7 @@ fn routing_helpers_preserve_default_contract_and_propagate_explicit_scope() {
     let scoped = decorate_project_response(body, Some(&resolved));
     assert_eq!(scoped["project"]["name"], "alpha");
     assert_eq!(scoped["project"]["catalog_generation"], 1);
+    assert_eq!(scoped["next"].as_array().expect("next array").len(), 1);
     assert_eq!(scoped["next"][0]["project"], "alpha");
     assert_eq!(scoped["primary_evidence"][0]["next"][0]["project"], "alpha");
     assert_eq!(scoped["recommended_next_tools"][0]["project"], "alpha");

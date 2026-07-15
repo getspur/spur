@@ -390,6 +390,11 @@ mod tests {
             assert!(instructions.contains("does not index"), "{name}");
             assert!(instructions.contains("external_*"), "{name}");
         }
+        assert!(super::BUNDLED_INSTRUCTIONS
+            .contains("Repository and index query operations are read-only"));
+        assert!(super::BUNDLED_INSTRUCTIONS.contains("local_project_add"));
+        assert!(super::BUNDLED_INSTRUCTIONS.contains("local_project_remove"));
+        assert!(super::BUNDLED_INSTRUCTIONS.contains("user catalog configuration"));
     }
 
     fn assert_project_schema(registry: &spur_mcp::ToolRegistry, tool_name: &str) {
