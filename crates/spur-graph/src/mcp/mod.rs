@@ -107,6 +107,8 @@ impl GraphMcpModule {
     }
 
     async fn dispatch_current_project(&self, name: &str, args: Value) -> CodeGraphResult {
+        #[cfg(test)]
+        wait_for_project_scope_overlap_for_test().await;
         match name {
             "code_resolve" => {
                 code_resolve_response(&args, Arc::clone(&self.deps.rebuild_coordinator)).await
@@ -538,6 +540,18 @@ const MARKDOWN_OVERLAY_EXTENSIONS: &[&str] = &["md", "markdown"];
 
 tokio::task_local! {
     static SCOPED_CODE_GRAPH_WORKTREE_ROOT: PathBuf;
+}
+
+#[cfg(test)]
+tokio::task_local! {
+    static PROJECT_SCOPE_BARRIER_FOR_TEST: Arc<tokio::sync::Barrier>;
+}
+
+#[cfg(test)]
+async fn wait_for_project_scope_overlap_for_test() {
+    if let Ok(barrier) = PROJECT_SCOPE_BARRIER_FOR_TEST.try_with(Arc::clone) {
+        barrier.wait().await;
+    }
 }
 
 #[cfg(any(test, feature = "test-support"))]
