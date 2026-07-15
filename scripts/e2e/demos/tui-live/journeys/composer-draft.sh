@@ -6,13 +6,18 @@ journey_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$journey_dir/../lib.sh"
 
 start_live_tui "composer-draft"
-wait_text "Lineage"
-wait_text "INSERT"
+story_session_land "Session Detail exposes the spend-free draft surface"
 press_key Enter
 sleep_ms 0.25
 type_text "draft only - do not send (demo capture)"
 expect_text "draft only"
-# Esc / clear path: leave draft and quit without Enter-send
-press_key Escape
-sleep_ms 0.3
+
+# Prove session switching protects an unsent draft. `n` targets a new session;
+# the second `n` cancels the confirmation without sending or mutating metadata.
+open_sessions_picker
+press_key n
+wait_text "has an unsent draft"
+expect_text "save and start a new session"
+press_key n
+wait_text "Sessions"
 quit_live

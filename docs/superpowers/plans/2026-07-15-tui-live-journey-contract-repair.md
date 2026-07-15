@@ -61,9 +61,10 @@ all direct assumptions that startup leaves the TUI on Dashboard.
 
 - [ ] **Step 2: Strengthen composer draft safety**
 
-After typing the draft, open Sessions, press Enter on the new-session target,
-wait for `has an unsent draft`, press `n`, and verify the Sessions picker remains
-visible. Never submit the draft.
+After typing the draft, open Sessions, press `n` to target a new session, wait
+for `has an unsent draft`, press `n` again to cancel, and verify the Sessions
+picker remains visible. Never submit the draft. Using the explicit new-session
+action avoids depending on which row the picker preselects.
 
 - [ ] **Step 3: Verify probe patterns**
 
