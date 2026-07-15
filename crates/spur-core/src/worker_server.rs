@@ -1753,6 +1753,17 @@ impl ServerHandler for WorkerToolHandler {
             .canonical_name_for_call(&request.name)?
             .to_owned();
         request.name = Cow::Owned(canonical_name.clone());
+        if !canonical_name.starts_with("external_")
+            && request
+                .arguments
+                .as_ref()
+                .is_some_and(|arguments| arguments.contains_key("project"))
+        {
+            return Err(McpError::invalid_params(
+                "field `project` is not available on this MCP server".to_owned(),
+                None,
+            ));
+        }
         if canonical_name.starts_with("external_") {
             let client = self.context_service_client.as_ref().ok_or_else(|| {
                 McpError::internal_error(

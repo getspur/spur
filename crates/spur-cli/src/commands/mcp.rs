@@ -43,16 +43,18 @@ const SPUR_WORKTREE_ENV: &str = "SPUR_WORKTREE";
 const GRAPH_INSTRUCTIONS: &str =
     "Tree-sitter code-graph query tools over the current worktree: resolve/search/read symbols, \
      list callers/callees, map neighborhoods, and trace symbol history. Graph-first code \
-     navigation — prefer these over grep/glob. Register an already-indexed local Git project once \
-     and pass its name as project; registration validates but does not index. external_* tools are \
-     the separate hosted package/revision surface.";
+     navigation — prefer these over grep/glob. Repository and index query operations are read-only; \
+     local_project_add and local_project_remove mutate only user catalog configuration. Register an \
+     already-indexed local Git project once and pass its name as project; registration validates but \
+     does not index. external_* tools are the separate hosted package/revision surface.";
 
 const ANALYST_INSTRUCTIONS: &str =
     "DuckDB-backed analytics over the .spur/analyst.duckdb index: knowledge_context_pack for \
      one-shot oriented evidence, and doc_navigate for documentation section search. Use these for \
-     ranked/aggregated/path-shaped answers over code and docs. Register an already-indexed local \
-     Git project once and pass its name as project; registration validates but does not index. \
-     external_* tools are the separate hosted package/revision surface.";
+     ranked/aggregated/path-shaped answers over code and docs. Repository and index query operations \
+     are read-only; local_project_add and local_project_remove mutate only user catalog configuration. \
+     Register an already-indexed local Git project once and pass its name as project; registration \
+     validates but does not index. external_* tools are the separate hosted package/revision surface.";
 
 const CONTEXT_INSTRUCTIONS: &str =
     "Cloud-backed external code-context tools (external_*): search/read indexed packages, inspect \
@@ -111,7 +113,7 @@ fn graph_server_registry(local_projects: &LocalProjectMcpComposition) -> Result<
 fn analyst_server_registry(local_projects: &LocalProjectMcpComposition) -> Result<ToolRegistry> {
     Ok(ToolRegistry::builder()
         .with(local_projects.catalog_module())?
-        .with(AnalystMcpModule::with_local_projects(
+        .with(AnalystMcpModule::with_local_projects_for_analyst_server(
             local_projects.resolver(),
         ))?
         .build())

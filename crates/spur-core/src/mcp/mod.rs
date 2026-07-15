@@ -52,7 +52,7 @@ pub fn brain_tool_registry(
     signal_deps: signals::SignalMcpDeps,
     context_service_config: &ContextServiceConfig,
 ) -> Result<spur_mcp::ToolRegistry, spur_mcp::ToolRegistryError> {
-    let local_projects = LocalProjectMcpComposition::from_environment();
+    let local_projects = delegation_deps.local_projects().clone();
     brain_tool_registry_with_local_projects(
         delegation_deps,
         plan_deps,
