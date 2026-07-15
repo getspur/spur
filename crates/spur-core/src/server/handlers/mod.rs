@@ -174,7 +174,9 @@ impl McpCallbackServer {
         tool_name: &str,
         args: Value,
     ) -> JsonRpcResponse {
-        let module = spur_analyst::mcp::AnalystMcpModule::new();
+        let module = spur_analyst::mcp::AnalystMcpModule::with_local_projects(
+            self.local_projects.resolver(),
+        );
         let dispatch = async move { module.dispatch(tool_name, args).await };
         let result = match self.repo_root.clone() {
             Some(root) => spur_graph::mcp::with_worktree_root_for_request(root, dispatch).await,

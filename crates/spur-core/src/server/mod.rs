@@ -311,6 +311,9 @@ pub struct McpCallbackServer {
     /// Explicit code-graph MCP dependencies, including rebuild singleflight
     /// policy owned by `spur-graph`.
     pub(crate) graph_mcp_deps: spur_graph::mcp::GraphMcpDeps,
+    /// User-level project catalog shared by brain management and retrieval
+    /// handlers. Worker servers deliberately do not receive this composition.
+    pub(crate) local_projects: crate::mcp::LocalProjectMcpComposition,
     /// Per-server brain tool registry. Core-owned orchestration modules are
     /// composed by the orchestrator at construction time.
     pub(crate) tool_registry: Arc<spur_mcp::registry::ToolRegistry>,
@@ -341,7 +344,7 @@ impl McpCallbackServer {
             outcome_store,
             feature_gate,
         );
-        let tool_registry = crate::mcp::brain_tool_registry(
+        let tool_registry = crate::mcp::brain_tool_registry_with_local_projects(
             crate::mcp::delegation::DelegationMcpDeps::from_server(&server),
             crate::mcp::plan::PlanMcpDeps::from_server(&server),
             crate::mcp::signals::SignalMcpDeps {
@@ -350,6 +353,7 @@ impl McpCallbackServer {
                 feature_gate: Arc::clone(&server.feature_gate),
             },
             &spur_acp::config::ContextServiceConfig::default(),
+            &server.local_projects,
         )
         .expect("core MCP tool registry must be valid");
         server.tool_registry = Arc::new(tool_registry);
@@ -435,6 +439,7 @@ impl McpCallbackServer {
             nonadvisory_review_writes: false,
             dispatch_lease_duration: std::time::Duration::from_secs(600),
             graph_mcp_deps: spur_graph::mcp::GraphMcpDeps::default(),
+            local_projects: crate::mcp::LocalProjectMcpComposition::from_environment(),
             tool_registry: Arc::new(spur_mcp::registry::ToolRegistry::new()),
             dispatch_orphan_resume_hook: None,
             brain_model: Arc::new(RwLock::new(None)),

@@ -174,6 +174,60 @@ PM and internal operations reuse the `DelegationRequest` channel with magic agen
 
 **Design rationale**: One channel, one message type. The orchestrator pattern-matches on the `__` prefix in `execute_delegation`. Avoids N separate channel types at the cost of slightly magical strings.
 
+### Named local project queries
+
+Brain-facing MCP and the standalone `spur graph mcp`, `spur analyst mcp`, and
+bundled `spur mcp` servers can register an already-indexed local Git worktree
+once and query it by name. Registration is local catalog management, not an
+indexing operation.
+
+For example, given an existing `/Volumes/Projects/spur-notebook` checkout with
+both its graph artifact and `.spur/analyst.duckdb` already built:
+
+1. Call `local_project_add`:
+
+   ```json
+   {"name":"notebook","path":"/Volumes/Projects/spur-notebook"}
+   ```
+
+2. Call `code_symbol_search`:
+
+   ```json
+   {"query":"NotebookCell","project":"notebook"}
+   ```
+
+3. Call `query`:
+
+   ```json
+   {"query":"SELECT file_path, symbol_name FROM symbols LIMIT 20","project":"notebook"}
+   ```
+
+`project` is optional on every `code_*` and analyst retrieval tool. When it is
+omitted, the server keeps its active worktree behavior: `--root` wins for a
+standalone server, then `SPUR_WORKTREE`, then the launch directory. An explicit
+`project` wins only for that request and the response includes the resolved
+name, canonical root, and catalog generation.
+
+Catalog location precedence is:
+
+1. `SPUR_PROJECT_CATALOG` as the exact catalog file path;
+2. `$XDG_CONFIG_HOME/spur/projects.toml`;
+3. `$HOME/.config/spur/projects.toml`.
+
+Names map to canonical Git worktree roots. Re-adding the same name and root is
+idempotent and leaves the generation unchanged. Mapping a name to a different
+root requires `replace: true`. `local_project_remove` is also idempotent and
+only removes the registration; it never deletes the repository or index data.
+`local_project_list` derives health live, so a moved root or missing/corrupt
+graph or analyst index is reported as unavailable rather than persisted as
+stale health metadata.
+
+Registration never clones a repository, builds an index, or enables a query to
+join data across projects. The `external_*` tools are a different surface for
+hosted package/revision indexes. Delegated worker MCP servers deliberately do
+not advertise the catalog tools or the `project` selector, keeping each worker
+confined to its assigned worktree.
+
 ---
 
 ## 4. Request Lifecycle — Blocking Delegation

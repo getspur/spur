@@ -10,9 +10,14 @@ mod value {
 }
 
 use serde_json::{json, Value};
+use spur_mcp::local_projects::{
+    decorate_project_response, extract_project, with_optional_project_schema, LocalProjectAccess,
+    LocalProjectResolver,
+};
 
 use crate::{MAX_CONTEXT_PATHS, MAX_CONTEXT_PATH_HOPS};
 
+pub use crate::db::paths::ensure_analyst_db_ready;
 pub use crate::embedding::warm_embed_model;
 pub use crate::overlay::open_worktree_overlay;
 pub use spur_mcp::tools::McpHandlerError;
@@ -21,26 +26,65 @@ pub use tools::doc_navigate::doc_navigate;
 pub use tools::knowledge_context::{knowledge_context_pack, knowledge_context_pack_2};
 pub use tools::query::query;
 
-#[derive(Clone, Default)]
-pub struct AnalystMcpModule;
+type AnalystDispatchFuture<'a> = std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<Value, McpHandlerError>> + Send + 'a>,
+>;
+
+#[derive(Clone)]
+pub struct AnalystMcpModule {
+    local_projects: LocalProjectAccess,
+}
+
+impl Default for AnalystMcpModule {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl AnalystMcpModule {
     pub fn new() -> Self {
-        Self
+        Self {
+            local_projects: LocalProjectAccess::CurrentWorktreeOnly,
+        }
     }
 
     pub fn read_only() -> Self {
-        Self
+        Self::new()
+    }
+
+    pub fn with_local_projects(resolver: LocalProjectResolver) -> Self {
+        Self {
+            local_projects: LocalProjectAccess::Catalog(resolver),
+        }
     }
 
     pub fn tools(&self) -> Vec<ToolDefinition> {
-        tool_definitions()
+        match &self.local_projects {
+            LocalProjectAccess::CurrentWorktreeOnly => tool_definitions(),
+            LocalProjectAccess::Catalog(_) => local_project_tool_definitions(),
+        }
     }
 
     /// Dispatch a tool call by name. This is the inherent entry point used by
     /// the legacy spur-core dispatcher; the `spur_mcp::ToolModule` impl below
     /// delegates here.
-    pub async fn dispatch(&self, name: &str, args: Value) -> Result<Value, McpHandlerError> {
+    pub async fn dispatch(&self, name: &str, mut args: Value) -> Result<Value, McpHandlerError> {
+        let project = extract_project(&mut args, &self.local_projects)?;
+        let dispatch: AnalystDispatchFuture<'_> =
+            Box::pin(self.dispatch_current_project(name, args));
+        let response = if let Some(project) = project.as_ref() {
+            spur_graph::mcp::with_worktree_root_for_request(project.root.clone(), dispatch).await?
+        } else {
+            dispatch.await?
+        };
+        Ok(decorate_project_response(response, project.as_ref()))
+    }
+
+    async fn dispatch_current_project(
+        &self,
+        name: &str,
+        args: Value,
+    ) -> Result<Value, McpHandlerError> {
         match name {
             "doc_navigate" => doc_navigate(&args).await,
             "knowledge_context_pack" => knowledge_context_pack(&args).await,
@@ -66,7 +110,7 @@ impl AnalystMcpModule {
 #[async_trait::async_trait]
 impl spur_mcp::ToolModule for AnalystMcpModule {
     fn tools(&self) -> Vec<spur_mcp::ToolDefinition> {
-        tool_definitions()
+        Self::tools(self)
     }
 
     async fn call(
@@ -96,6 +140,18 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
         knowledge_context_pack_2_def(),
         query_def(),
     ]
+}
+
+/// Returns the analyst MCP schemas with an optional named local-project selector.
+#[must_use]
+pub fn local_project_tool_definitions() -> Vec<ToolDefinition> {
+    tool_definitions()
+        .into_iter()
+        .map(|mut definition| {
+            definition.input_schema = with_optional_project_schema(&definition.input_schema);
+            definition
+        })
+        .collect()
 }
 
 fn doc_navigate_def() -> ToolDefinition {

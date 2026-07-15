@@ -54,8 +54,16 @@ impl McpCallbackServer {
     }
 
     async fn handle_graph_tool(&self, id: Value, name: &str, args: Value) -> JsonRpcResponse {
-        let module = spur_graph::mcp::GraphMcpModule::new(self.graph_mcp_deps.clone());
-        code_graph_response(id, module.dispatch(name, args).await).await
+        let module = spur_graph::mcp::GraphMcpModule::with_local_projects(
+            self.graph_mcp_deps.clone(),
+            self.local_projects.resolver(),
+        );
+        let dispatch = async move { module.dispatch(name, args).await };
+        let result = match self.repo_root.clone() {
+            Some(root) => with_worktree_root_for_request(root, dispatch).await,
+            None => dispatch.await,
+        };
+        code_graph_response(id, result).await
     }
 }
 

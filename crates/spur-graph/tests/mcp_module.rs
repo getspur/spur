@@ -1,4 +1,4 @@
-use spur_graph::mcp::tool_definitions;
+use spur_graph::mcp::{tool_definitions, GraphMcpDeps, GraphMcpModule};
 
 #[test]
 fn graph_mcp_module_owns_code_tool_definitions() {
@@ -25,4 +25,14 @@ fn graph_mcp_module_owns_code_tool_definitions() {
         !names.iter().any(|name| name == "code_search"),
         "code_search is a registry alias and must not be advertised"
     );
+
+    let module_definitions = GraphMcpModule::new(GraphMcpDeps::default()).tools();
+    assert_eq!(
+        serde_json::to_value(&module_definitions).expect("serialize module definitions"),
+        serde_json::to_value(tool_definitions()).expect("serialize default definitions")
+    );
+    assert!(module_definitions.iter().all(|definition| definition
+        .input_schema
+        .pointer("/properties/project")
+        .is_none()));
 }

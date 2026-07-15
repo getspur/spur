@@ -21,6 +21,9 @@ const EXPECTED: &[&str] = &[
     "create_issue",
     "add_dependency",
     "create_pr",
+    "local_project_add",
+    "local_project_list",
+    "local_project_remove",
     "merge_plan",
     "resume_plan",
     "force_reclaim_plan",
@@ -85,6 +88,64 @@ fn tool_catalog_matches_expected() {
         actual, expected,
         "tool_catalog drift detected; update EXPECTED in tests/tool_catalog.rs if intentional",
     );
+}
+
+#[test]
+fn local_projects_are_brain_only_and_worker_schemas_remain_project_blind() {
+    let brain = tools_list();
+    let worker = worker_tools_list();
+
+    for name in [
+        "local_project_add",
+        "local_project_list",
+        "local_project_remove",
+    ] {
+        assert!(
+            brain.iter().any(|tool| tool.name == name),
+            "brain missing {name}"
+        );
+        assert!(
+            worker.iter().all(|tool| tool.name != name),
+            "worker must not advertise {name}"
+        );
+    }
+
+    for name in [
+        "code_resolve",
+        "code_symbol_search",
+        "code_file_symbols",
+        "code_symbol_info",
+        "code_read_symbol",
+        "code_callers",
+        "code_callees",
+        "code_subgraph",
+        "code_symbol_history",
+        "query",
+        "doc_navigate",
+        "knowledge_context_pack",
+        "knowledge_context_pack_2",
+    ] {
+        let brain_tool = brain
+            .iter()
+            .find(|tool| tool.name == name)
+            .unwrap_or_else(|| panic!("brain missing {name}"));
+        assert!(
+            brain_tool.input_schema["properties"]
+                .get("project")
+                .is_some(),
+            "brain {name} must accept an optional project"
+        );
+        let worker_tool = worker
+            .iter()
+            .find(|tool| tool.name == name)
+            .unwrap_or_else(|| panic!("worker missing {name}"));
+        assert!(
+            worker_tool.input_schema["properties"]
+                .get("project")
+                .is_none(),
+            "worker {name} must remain project-blind"
+        );
+    }
 }
 
 #[test]
