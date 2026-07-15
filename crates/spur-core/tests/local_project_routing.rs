@@ -81,7 +81,9 @@ impl ProjectFixture {
             let conn =
                 Connection::open(root.join(".spur/analyst.duckdb")).expect("open analyst fixture");
             conn.execute_batch(&format!(
-                "CREATE TABLE identity (name VARCHAR, answer BIGINT); INSERT INTO identity VALUES ('{name}', {answer});"
+                "CREATE TABLE nodes (file_path VARCHAR, entity_name VARCHAR); \
+                 CREATE TABLE identity (name VARCHAR, answer BIGINT); \
+                 INSERT INTO identity VALUES ('{name}', {answer});"
             ))
             .expect("seed analyst fixture");
         }
@@ -217,12 +219,19 @@ async fn brain_registration_rejects_non_git_or_incompletely_indexed_roots() {
     let current = ProjectFixture::new("current", 11, true, true);
     let graph_only = ProjectFixture::new("graph_only", 1, true, false);
     let analyst_only = ProjectFixture::new("analyst_only", 2, false, true);
+    let arbitrary_duckdb = ProjectFixture::new("arbitrary_duckdb", 3, true, false);
+    let conn = Connection::open(arbitrary_duckdb.root.join(".spur/analyst.duckdb"))
+        .expect("open arbitrary DuckDB fixture");
+    conn.execute_batch("CREATE TABLE identity (value VARCHAR);")
+        .expect("seed arbitrary DuckDB fixture");
+    drop(conn);
     let non_git = tempfile::tempdir().expect("non-git tempdir");
     let server = server(&current.root);
 
     for (name, path, expected) in [
         ("graph-only", graph_only.root.as_path(), "analyst"),
         ("analyst-only", analyst_only.root.as_path(), "graph"),
+        ("arbitrary-duckdb", arbitrary_duckdb.root.as_path(), "nodes"),
         ("non-git", non_git.path(), "Git"),
     ] {
         let response = server

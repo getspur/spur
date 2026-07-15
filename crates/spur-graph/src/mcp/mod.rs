@@ -6236,6 +6236,7 @@ fn escape_mermaid_label(label: &str) -> String {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    use std::path::Path;
     use std::sync::{Arc, OnceLock};
     use std::time::Duration;
 
@@ -6243,11 +6244,97 @@ mod tests {
         ChangeKind, CommitArtifact, Confidence, EdgeEndpoint, RelationKind, RenamePrev,
         SymbolSnapshotArtifact, TemporalEdgeArtifact, WalkStrategy,
     };
+    use spur_mcp::local_projects::{
+        LocalProjectCatalogStore, LocalProjectError, LocalProjectHealth, LocalProjectResolver,
+        LocalProjectValidator, ValidatedLocalProject,
+    };
 
     use super::*;
 
     const ESCALATION_THRESHOLD: usize = 3;
     static REBUILD_TEST_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+
+    #[derive(Clone)]
+    struct ReadyLocalProjectValidator;
+
+    impl LocalProjectValidator for ReadyLocalProjectValidator {
+        fn validate(
+            &self,
+            requested_path: &Path,
+        ) -> Result<ValidatedLocalProject, LocalProjectError> {
+            let canonical_root =
+                requested_path
+                    .canonicalize()
+                    .map_err(|error| LocalProjectError::InvalidPath {
+                        path: requested_path.to_path_buf(),
+                        reason: error.to_string(),
+                    })?;
+            Ok(ValidatedLocalProject {
+                canonical_root,
+                health: LocalProjectHealth::ready(),
+            })
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_named_dispatches_overlap_inside_distinct_scoped_roots() {
+        let alpha_dir = tempfile::tempdir().expect("alpha tempdir");
+        let beta_dir = tempfile::tempdir().expect("beta tempdir");
+        for (root, source) in [
+            (alpha_dir.path(), "pub fn alpha_only() {}\n"),
+            (beta_dir.path(), "pub fn beta_only() {}\n"),
+        ] {
+            init_git_repo(root);
+            let artifact = artifact_from_source(root, source);
+            run_git_test(root, &["add", "src/lib.rs"]);
+            run_git_test(root, &["commit", "-q", "-m", "index symbol"]);
+            write_current_artifact(root, &artifact);
+        }
+        let catalog_dir = tempfile::tempdir().expect("catalog tempdir");
+        let store = LocalProjectCatalogStore::new(catalog_dir.path().join("projects.toml"));
+        store
+            .add("alpha", alpha_dir.path(), false)
+            .expect("register alpha");
+        store
+            .add("beta", beta_dir.path(), false)
+            .expect("register beta");
+        let resolver = LocalProjectResolver::new(store, Arc::new(ReadyLocalProjectValidator));
+        let module = GraphMcpModule::with_local_projects(GraphMcpDeps::default(), resolver);
+        let overlap = Arc::new(tokio::sync::Barrier::new(2));
+
+        let alpha_task = {
+            let module = module.clone();
+            let overlap = Arc::clone(&overlap);
+            tokio::spawn(PROJECT_SCOPE_BARRIER_FOR_TEST.scope(overlap, async move {
+                module
+                    .dispatch(
+                        "code_symbol_search",
+                        json!({"query": "alpha_only", "mode": "exact", "project": "alpha"}),
+                    )
+                    .await
+            }))
+        };
+        let beta_task = {
+            let module = module.clone();
+            let overlap = Arc::clone(&overlap);
+            tokio::spawn(PROJECT_SCOPE_BARRIER_FOR_TEST.scope(overlap, async move {
+                module
+                    .dispatch(
+                        "code_symbol_search",
+                        json!({"query": "beta_only", "mode": "exact", "project": "beta"}),
+                    )
+                    .await
+            }))
+        };
+        let (alpha, beta) = tokio::join!(alpha_task, beta_task);
+        let alpha = alpha.expect("alpha task").expect("alpha dispatch");
+        let beta = beta.expect("beta task").expect("beta dispatch");
+
+        assert_eq!(alpha["candidates"][0]["entity_name"], "alpha_only");
+        assert_eq!(alpha["project"]["name"], "alpha");
+        assert_eq!(beta["candidates"][0]["entity_name"], "beta_only");
+        assert_eq!(beta["project"]["name"], "beta");
+    }
 
     #[tokio::test]
     async fn code_search_response_adds_full_metadata_and_clamps_limit() {
