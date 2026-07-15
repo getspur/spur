@@ -151,12 +151,12 @@ fn server_remainder_tool_definitions() -> Vec<ToolDefinition> {
     let mut definitions = Vec::new();
     definitions.extend(pm_tool_definitions_by_names(PM_ISSUE_GRAPH_TOOL_NAMES));
     definitions.extend(
-        spur_graph::mcp::tool_definitions()
+        spur_graph::mcp::local_project_tool_definitions()
             .into_iter()
             .map(graph_tool_definition),
     );
     definitions.extend(
-        spur_analyst::mcp::tool_definitions()
+        spur_analyst::mcp::local_project_tool_definitions()
             .into_iter()
             .map(analyst_tool_definition),
     );

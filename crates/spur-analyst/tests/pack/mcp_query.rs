@@ -1,8 +1,32 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use serde_json::{json, Value};
-use spur_analyst::mcp::{AnalystMcpModule, McpHandlerError};
+use spur_analyst::mcp::{ensure_analyst_db_ready, AnalystMcpModule, McpHandlerError};
+use spur_mcp::local_projects::{
+    LocalProjectCatalogStore, LocalProjectError, LocalProjectHealth, LocalProjectResolver,
+    LocalProjectValidator, ValidatedLocalProject,
+};
+
+#[derive(Clone, Default)]
+struct FixtureValidator;
+
+impl LocalProjectValidator for FixtureValidator {
+    fn validate(&self, requested_path: &Path) -> Result<ValidatedLocalProject, LocalProjectError> {
+        let canonical_root =
+            requested_path
+                .canonicalize()
+                .map_err(|error| LocalProjectError::InvalidPath {
+                    path: requested_path.to_path_buf(),
+                    reason: error.to_string(),
+                })?;
+        Ok(ValidatedLocalProject {
+            canonical_root,
+            health: LocalProjectHealth::ready(),
+        })
+    }
+}
 
 struct QueryFixture {
     _dir: tempfile::TempDir,
@@ -87,10 +111,10 @@ async fn query_rejects_write_statement_with_clear_invalid_params() {
 #[tokio::test]
 async fn query_caps_rows_at_1000_without_injecting_limit() {
     let fixture = QueryFixture::new(
-        r#"
+        r"
         CREATE TABLE many AS
         SELECT range AS value FROM range(1005);
-        "#,
+        ",
     );
 
     let result = query_fixture(&fixture, "SELECT value FROM many ORDER BY value").await;
@@ -107,9 +131,9 @@ async fn query_caps_rows_at_1000_without_injecting_limit() {
 #[tokio::test]
 async fn query_show_tables_returns_expected_columns() {
     let fixture = QueryFixture::new(
-        r#"
+        r"
         CREATE TABLE expected_table (id INTEGER);
-        "#,
+        ",
     );
 
     let result = query_fixture(&fixture, "SHOW TABLES").await;
@@ -123,12 +147,12 @@ async fn query_show_tables_returns_expected_columns() {
 #[tokio::test]
 async fn query_blocks_stale_analyst_db_unless_allow_stale_is_explicit() {
     let fixture = QueryFixture::new(
-        r#"
+        r"
         CREATE TABLE _meta (graph_content_hash VARCHAR, complete BOOLEAN);
         INSERT INTO _meta VALUES ('old', TRUE);
         CREATE TABLE facts (value INTEGER);
         INSERT INTO facts VALUES (42);
-        "#,
+        ",
     );
     fixture.write_live_pointer("new");
 
@@ -160,6 +184,115 @@ async fn query_blocks_stale_analyst_db_unless_allow_stale_is_explicit() {
     assert_eq!(allowed["rows"], json!([[42]]));
     assert_eq!(allowed["row_count"], json!(1));
     assert_eq!(allowed["staleness_warning"], json!("allow_stale"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn named_project_queries_route_and_keep_concurrent_connection_pools_isolated() {
+    let alpha = QueryFixture::new(
+        "CREATE TABLE identity (value VARCHAR); INSERT INTO identity VALUES ('alpha');",
+    );
+    let beta = QueryFixture::new(
+        "CREATE TABLE identity (value VARCHAR); INSERT INTO identity VALUES ('beta');",
+    );
+    let catalog = tempfile::tempdir().expect("catalog tempdir");
+    let store = LocalProjectCatalogStore::new(catalog.path().join("projects.toml"));
+    store
+        .add("alpha", &alpha.root, false)
+        .expect("register alpha");
+    store.add("beta", &beta.root, false).expect("register beta");
+    let resolver = LocalProjectResolver::new(store, Arc::new(FixtureValidator));
+    let module = AnalystMcpModule::with_local_projects(resolver);
+    let start = Arc::new(tokio::sync::Barrier::new(2));
+
+    let alpha_task = {
+        let module = module.clone();
+        let start = Arc::clone(&start);
+        tokio::spawn(async move {
+            start.wait().await;
+            module
+                .dispatch(
+                    "query",
+                    json!({
+                        "query": "SELECT value, sum(i) FROM identity, range(20000000) AS r(i) GROUP BY value",
+                        "project": "alpha"
+                    }),
+                )
+                .await
+        })
+    };
+    let beta_task = {
+        let module = module.clone();
+        let start = Arc::clone(&start);
+        tokio::spawn(async move {
+            start.wait().await;
+            module
+                .dispatch(
+                    "query",
+                    json!({
+                        "query": "SELECT value, sum(i) FROM identity, range(20000000) AS r(i) GROUP BY value",
+                        "project": "beta"
+                    }),
+                )
+                .await
+        })
+    };
+    let (alpha_result, beta_result) = tokio::join!(alpha_task, beta_task);
+    let alpha_result = alpha_result.expect("alpha task").expect("alpha query");
+    let beta_result = beta_result.expect("beta task").expect("beta query");
+    assert_eq!(alpha_result["rows"][0][0], "alpha");
+    assert_eq!(alpha_result["project"]["name"], "alpha");
+    assert_eq!(
+        alpha_result["db_path"],
+        json!(alpha.db_path.display().to_string())
+    );
+    assert_eq!(beta_result["rows"][0][0], "beta");
+    assert_eq!(beta_result["project"]["name"], "beta");
+    assert_eq!(
+        beta_result["db_path"],
+        json!(beta.db_path.display().to_string())
+    );
+
+    let current = spur_graph::mcp::with_worktree_root_for_request(
+        alpha.root.clone(),
+        module.dispatch("query", json!({"query": "SELECT value FROM identity"})),
+    )
+    .await
+    .expect("default-scope query");
+    assert_eq!(current["rows"], json!([["alpha"]]));
+    assert!(current.get("project").is_none());
+}
+
+#[tokio::test]
+async fn project_blind_analyst_module_rejects_injected_selector() {
+    for module in [AnalystMcpModule::new(), AnalystMcpModule::read_only()] {
+        let error = module
+            .dispatch("query", json!({"query": "SELECT 1", "project": "alpha"}))
+            .await
+            .expect_err("project-blind module must reject project");
+        assert!(matches!(
+            error,
+            McpHandlerError::InvalidParams(message)
+                if message.contains("not available on this MCP server")
+        ));
+    }
+}
+
+#[test]
+fn analyst_readiness_probe_is_read_only_and_requires_an_existing_database() {
+    let ready = QueryFixture::new("CREATE TABLE ready (value INTEGER);");
+    assert_eq!(
+        ensure_analyst_db_ready(&ready.root).expect("ready analyst DB"),
+        ready.db_path
+    );
+
+    let missing = tempfile::tempdir().expect("missing root");
+    let expected_path = missing.path().join(".spur/analyst.duckdb");
+    let error = ensure_analyst_db_ready(missing.path()).expect_err("missing analyst DB");
+    assert!(error.to_string().contains("analyst database"), "{error:#}");
+    assert!(
+        !expected_path.exists(),
+        "readiness must not create a database"
+    );
 }
 
 async fn query_fixture(fixture: &QueryFixture, sql: &str) -> Value {

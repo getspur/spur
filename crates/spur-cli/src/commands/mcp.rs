@@ -33,7 +33,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 
 use spur_analyst::mcp::AnalystMcpModule;
-use spur_core::mcp::{ContextServiceAuth, ContextServiceClient};
+use spur_core::mcp::{ContextServiceAuth, ContextServiceClient, LocalProjectMcpComposition};
 use spur_graph::mcp::{GraphMcpDeps, GraphMcpModule};
 use spur_mcp::{serve_stdio_server, RegistryServerHandler, ToolRegistry};
 
@@ -42,12 +42,16 @@ const SPUR_WORKTREE_ENV: &str = "SPUR_WORKTREE";
 const GRAPH_INSTRUCTIONS: &str =
     "Tree-sitter code-graph query tools over the current worktree: resolve/search/read symbols, \
      list callers/callees, map neighborhoods, and trace symbol history. Graph-first code \
-     navigation — prefer these over grep/glob.";
+     navigation — prefer these over grep/glob. Register an already-indexed local Git project once \
+     and pass its name as project; registration validates but does not index. external_* tools are \
+     the separate hosted package/revision surface.";
 
 const ANALYST_INSTRUCTIONS: &str =
     "DuckDB-backed analytics over the .spur/analyst.duckdb index: knowledge_context_pack for \
      one-shot oriented evidence, and doc_navigate for documentation section search. Use these for \
-     ranked/aggregated/path-shaped answers over code and docs.";
+     ranked/aggregated/path-shaped answers over code and docs. Register an already-indexed local \
+     Git project once and pass its name as project; registration validates but does not index. \
+     external_* tools are the separate hosted package/revision surface.";
 
 const CONTEXT_INSTRUCTIONS: &str =
     "Cloud-backed external code-context tools (external_*): search/read indexed packages, inspect \
@@ -56,7 +60,9 @@ const CONTEXT_INSTRUCTIONS: &str =
 const BUNDLED_INSTRUCTIONS: &str =
     "SPUR standalone query surface: code-graph tools (code_*) plus DuckDB analyst tools \
      (knowledge_context_pack*, doc_navigate). Read-only. For orchestration (delegation, plans, \
-     review) run the SPUR TUI.";
+     review) run the SPUR TUI. Register an already-indexed local Git project once and pass its name \
+     as project; registration validates but does not index. external_* tools remain the separate \
+     hosted package/revision surface.";
 
 fn resolve_mcp_worktree_root(root: Option<PathBuf>) -> Result<Option<PathBuf>> {
     let root = root.or_else(|| {
@@ -85,15 +91,51 @@ where
     }
 }
 
+fn local_project_composition() -> LocalProjectMcpComposition {
+    LocalProjectMcpComposition::from_environment()
+}
+
+fn graph_server_registry(local_projects: &LocalProjectMcpComposition) -> Result<ToolRegistry> {
+    Ok(ToolRegistry::builder()
+        .with(local_projects.catalog_module())?
+        .with(GraphMcpModule::with_local_projects(
+            GraphMcpDeps::default(),
+            local_projects.resolver(),
+        ))?
+        .with_alias("code_search", "code_symbol_search")?
+        .build())
+}
+
+fn analyst_server_registry(local_projects: &LocalProjectMcpComposition) -> Result<ToolRegistry> {
+    Ok(ToolRegistry::builder()
+        .with(local_projects.catalog_module())?
+        .with(AnalystMcpModule::with_local_projects(
+            local_projects.resolver(),
+        ))?
+        .build())
+}
+
+fn bundled_server_registry(local_projects: &LocalProjectMcpComposition) -> Result<ToolRegistry> {
+    Ok(ToolRegistry::builder()
+        .with(local_projects.catalog_module())?
+        .with(GraphMcpModule::with_local_projects(
+            GraphMcpDeps::default(),
+            local_projects.resolver(),
+        ))?
+        .with(AnalystMcpModule::with_local_projects(
+            local_projects.resolver(),
+        ))?
+        .with_alias("code_search", "code_symbol_search")?
+        .build())
+}
+
 /// `spur graph mcp` — standalone code-graph MCP server (the 9 `code_*` tools).
 ///
 /// `root` is the optional `--root <path>` override. When absent, `SPUR_WORKTREE`
 /// is honored before falling back to the MCP client launch directory.
 pub async fn run_graph_server(root: Option<PathBuf>) -> Result<()> {
-    let registry = ToolRegistry::builder()
-        .with(GraphMcpModule::new(GraphMcpDeps::default()))?
-        .with_alias("code_search", "code_symbol_search")?
-        .build();
+    let local_projects = local_project_composition();
+    let registry = graph_server_registry(&local_projects)?;
     let handler = RegistryServerHandler::new(registry, "spur-graph-mcp", GRAPH_INSTRUCTIONS);
     Box::pin(with_mcp_worktree_scope(root, serve_stdio_server(handler))).await?
 }
@@ -106,9 +148,8 @@ pub async fn run_graph_server(root: Option<PathBuf>) -> Result<()> {
 pub async fn run_analyst_server(root: Option<PathBuf>) -> Result<()> {
     spur_analyst::mcp::warm_embed_model();
 
-    let registry = ToolRegistry::builder()
-        .with(AnalystMcpModule::new())?
-        .build();
+    let local_projects = local_project_composition();
+    let registry = analyst_server_registry(&local_projects)?;
     let handler = RegistryServerHandler::new(registry, "spur-analyst-mcp", ANALYST_INSTRUCTIONS);
     Box::pin(with_mcp_worktree_scope(root, serve_stdio_server(handler))).await?
 }
@@ -151,17 +192,23 @@ pub async fn run_legacy_context_server(url: String, token: String) -> Result<()>
 pub async fn run_bundled_server(root: Option<PathBuf>) -> Result<()> {
     spur_analyst::mcp::warm_embed_model();
 
-    let registry = ToolRegistry::builder()
-        .with(GraphMcpModule::new(GraphMcpDeps::default()))?
-        .with(AnalystMcpModule::new())?
-        .with_alias("code_search", "code_symbol_search")?
-        .build();
+    let local_projects = local_project_composition();
+    let registry = bundled_server_registry(&local_projects)?;
     let handler = RegistryServerHandler::new(registry, "spur-mcp", BUNDLED_INSTRUCTIONS);
     Box::pin(with_mcp_worktree_scope(root, serve_stdio_server(handler))).await?
 }
 
 #[cfg(test)]
 mod tests {
+    use serde_json::{json, Value};
+    use spur_core::mcp::LocalProjectMcpComposition;
+    use spur_graph::{
+        artifact_from_facts, build_facts, write_artifact_parquet, write_current_pointer,
+        WriteOptions,
+    };
+    use spur_mcp::local_projects::LocalProjectCatalogStore;
+    use spur_mcp::{ServerKind, ToolAuthority, ToolCallContext};
+
     fn function_body<'a>(source: &'a str, signature: &str) -> &'a str {
         let start = source
             .find(signature)
@@ -208,6 +255,68 @@ mod tests {
         assert_eq!(scoped, Some(expected));
     }
 
+    #[tokio::test]
+    async fn omitted_project_dispatches_registry_call_against_outer_root() {
+        let repo = tempfile::tempdir().expect("repository tempdir");
+        std::fs::create_dir_all(repo.path().join("src")).expect("create source directory");
+        std::fs::write(
+            repo.path().join("src/lib.rs"),
+            "pub fn selected_by_outer_root() {}\n",
+        )
+        .expect("write source");
+        for args in [
+            &["init", "-q"][..],
+            &["config", "user.email", "test@example.com"][..],
+            &["config", "user.name", "SPUR Test"][..],
+            &["add", "src/lib.rs"][..],
+            &["commit", "-q", "-m", "fixture"][..],
+        ] {
+            let status = std::process::Command::new("git")
+                .args(args)
+                .current_dir(repo.path())
+                .status()
+                .expect("run git");
+            assert!(status.success(), "git {args:?} failed");
+        }
+        let (facts, _) = build_facts(repo.path(), None).expect("build graph facts");
+        let artifact = artifact_from_facts(&facts, repo.path()).expect("build graph artifact");
+        let artifact_dir = write_artifact_parquet(
+            &artifact,
+            &repo.path().join(".spur/graph"),
+            WriteOptions::default(),
+            Vec::new(),
+        )
+        .expect("write graph artifact");
+        write_current_pointer(repo.path(), &artifact_dir).expect("write graph pointer");
+
+        let catalog = tempfile::tempdir().expect("catalog tempdir");
+        let local_projects = LocalProjectMcpComposition::new(LocalProjectCatalogStore::new(
+            catalog.path().join("projects.toml"),
+        ));
+        let registry = super::graph_server_registry(&local_projects).expect("graph registry");
+        let response = super::with_mcp_worktree_scope(Some(repo.path().to_path_buf()), async {
+            registry
+                .call_json_tool(
+                    ToolCallContext::new(ServerKind::Brain, ToolAuthority::Brain, None, None),
+                    "code_symbol_search",
+                    json!({"query": "selected_by_outer_root", "mode": "exact"}),
+                )
+                .await
+        })
+        .await
+        .expect("outer worktree scope");
+        let response = serde_json::to_value(response).expect("serialize response");
+        let body = response["result"]["content"][0]["text"]
+            .as_str()
+            .and_then(|text| serde_json::from_str::<Value>(text).ok())
+            .unwrap_or_else(|| panic!("unexpected registry response: {response:#?}"));
+        assert_eq!(
+            body["candidates"][0]["entity_name"],
+            "selected_by_outer_root"
+        );
+        assert!(body.get("project").is_none());
+    }
+
     #[test]
     fn context_server_registry_exposes_external_tools() {
         let registry = super::context_server_registry(
@@ -228,5 +337,67 @@ mod tests {
         assert!(names.contains("external_knowledge_context"));
         assert!(names.contains("external_index"));
         assert!(names.contains("external_index_status"));
+    }
+
+    #[test]
+    fn standalone_query_registries_expose_named_local_projects() {
+        let catalog = tempfile::tempdir().expect("catalog tempdir");
+        let local_projects = LocalProjectMcpComposition::new(LocalProjectCatalogStore::new(
+            catalog.path().join("projects.toml"),
+        ));
+        let graph = super::graph_server_registry(&local_projects).expect("graph registry");
+        let analyst = super::analyst_server_registry(&local_projects).expect("analyst registry");
+        let bundled = super::bundled_server_registry(&local_projects).expect("bundled registry");
+
+        for (name, registry) in [
+            ("graph", &graph),
+            ("analyst", &analyst),
+            ("bundled", &bundled),
+        ] {
+            let tools = registry.list_tools();
+            for management in [
+                "local_project_add",
+                "local_project_list",
+                "local_project_remove",
+            ] {
+                assert!(
+                    tools.iter().any(|tool| tool.name == management),
+                    "{name} registry missing {management}"
+                );
+            }
+        }
+
+        assert_project_schema(&graph, "code_symbol_search");
+        assert_project_schema(&analyst, "query");
+        assert_project_schema(&bundled, "code_symbol_search");
+        assert_project_schema(&bundled, "knowledge_context_pack_2");
+        assert_eq!(
+            bundled
+                .canonical_name_for_call("code_search")
+                .expect("bundled alias"),
+            "code_symbol_search"
+        );
+    }
+
+    #[test]
+    fn standalone_instructions_explain_local_registration_boundary() {
+        for (name, instructions) in [
+            ("graph", super::GRAPH_INSTRUCTIONS),
+            ("analyst", super::ANALYST_INSTRUCTIONS),
+            ("bundled", super::BUNDLED_INSTRUCTIONS),
+        ] {
+            assert!(instructions.contains("already-indexed"), "{name}");
+            assert!(instructions.contains("does not index"), "{name}");
+            assert!(instructions.contains("external_*"), "{name}");
+        }
+    }
+
+    fn assert_project_schema(registry: &spur_mcp::ToolRegistry, tool_name: &str) {
+        let tool = registry
+            .list_tools()
+            .into_iter()
+            .find(|tool| tool.name == tool_name)
+            .unwrap_or_else(|| panic!("missing {tool_name}"));
+        assert_eq!(tool.input_schema["properties"]["project"]["type"], "string");
     }
 }
