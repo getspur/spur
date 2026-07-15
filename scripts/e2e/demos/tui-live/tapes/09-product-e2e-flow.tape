@@ -35,12 +35,22 @@ Enter
 Show
 Wait+Screen@15s /Sessions|Start new session|No sessions yet|Failed|TODAY/
 Sleep 2s
-# resume the highlighted prior session when list is healthy; else new session
+# Prefer existing free session (Down past +New) to avoid "Failed to initialize brain"
+Hide
+Down
+Show
+Sleep 800ms
+Hide
+Enter
+Show
+Sleep 2.5s
+Wait+Screen@25s /Session ·|INSERT|another window|Failed to initialize/
+# If attach conflict or init failed, fall back to new session
 Hide
 Type "n"
 Show
-Sleep 2.5s
-Wait+Screen@25s /Session ·|INSERT|Failed to initialize/
+Sleep 2s
+Wait+Screen@25s /Session ·|INSERT|Failed to initialize|Lineage/
 Sleep 3s
 
 # STORY: ACTION — explore adopt skill + agent

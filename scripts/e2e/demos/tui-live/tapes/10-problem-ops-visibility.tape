@@ -96,18 +96,22 @@ Hide
 Enter
 Show
 Wait+Screen@15s /stream/
-Sleep 2s
-# force stream tab and wait for content
+# hold stream panel while content streams / loads (VHS: no Ctrl+digit)
+Sleep 4s
+# cycle tabs: stream → artifacts → attempts → task (three l presses)
 Hide
-Ctrl+1
+Type "l"
 Show
-Sleep 3.5s
-# task tab: what was assigned to this agentic worker
+Sleep 1.2s
 Hide
-Ctrl+4
+Type "l"
+Show
+Sleep 1.2s
+Hide
+Type "l"
 Show
 Wait+Screen@12s /task/
-Sleep 4s
+Sleep 4.5s
 
 # STORY: PROOF — worker detail held
 Sleep 2s
