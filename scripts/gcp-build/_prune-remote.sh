@@ -21,6 +21,22 @@
 # for a worktree there is no prior manifest, so nothing is pruned — we simply
 # seed the baseline.
 #
+# Hardening (2026-07-15)
+# ----------------------
+# Manifests are file/symlink leaves only (`git ls-files`). A path can still land
+# as a *directory* on the VM when a prior leaf (commonly a symlink such as
+# `scripts/gcp-build` → dir, or a file that became a dir) was replaced by a
+# directory whose children are still in the current manifest. `rm -f` on a
+# directory fails with "Is a directory" and, under `set -e`, used to abort the
+# entire remote build before cargo ever ran — observed with 2000+ stale
+# notebook paths in a polluted `spur/main` stored manifest, dying on
+# `scripts/gcp-build`. Rules:
+#   - never abort the build over a single path
+#   - only `rm -f` files/symlinks
+#   - for directories: `rmdir` if empty (non-empty means children still live);
+#     never `rm -rf` a directory that may still hold current-manifest files
+#   - always persist the current manifest so a partial prune still converges
+#
 # Note: manifests are git ls-files -z output (NUL-separated). We compare via
 # newline-delimited sort/comm; paths containing literal newlines (which git
 # permits but this repo never uses) are out of scope.
@@ -35,6 +51,50 @@ stored="${3:?stored manifest path required}"
 
 workdir="$HOME/$remote_dir"
 
+# Remove one gone path. Never exits non-zero for path-level problems.
+prune_one() {
+    local rel="$1"
+    local target
+
+    [ -n "$rel" ] || return 0
+
+    # Refuse path traversal / absolute paths / the target symlink tree.
+    case "$rel" in
+        /* | *..* | target | target/*)
+            echo "[prune] skip unsafe path: $rel" >&2
+            return 0
+            ;;
+    esac
+
+    target="$workdir/$rel"
+
+    if [ -L "$target" ]; then
+        # Symlink leaf (may point at a directory). rm -f removes the link only.
+        rm -f -- "$target" 2>/dev/null || true
+        return 0
+    fi
+
+    if [ -f "$target" ]; then
+        rm -f -- "$target" 2>/dev/null || true
+        return 0
+    fi
+
+    if [ -d "$target" ]; then
+        # Prior manifest listed this as a leaf that is now a directory on the
+        # VM (symlink→dir or file→dir transition), or a polluted dir entry.
+        # Only remove if empty; non-empty means current-manifest children still
+        # live underneath (must not recursive-delete).
+        if rmdir -- "$target" 2>/dev/null; then
+            return 0
+        fi
+        echo "[prune] skip non-empty directory (children may still be live): $rel" >&2
+        return 0
+    fi
+
+    # Already gone — fine.
+    return 0
+}
+
 if [ -f "$stored" ]; then
     cur_sorted="$(mktemp)"
     prev_sorted="$(mktemp)"
@@ -48,15 +108,17 @@ if [ -f "$stored" ]; then
     comm -23 "$prev_sorted" "$cur_sorted" >"$gone"
 
     if [ -s "$gone" ]; then
-        echo "[prune] removing $(wc -l <"$gone" | tr -d ' ') file(s) deleted locally since last sync:"
-        sed 's/^/  - /' "$gone"
+        gone_count=$(wc -l <"$gone" | tr -d ' ')
+        echo "[prune] removing $gone_count file(s) deleted locally since last sync:"
+        # Cap log spam on huge pollutions (e.g. monorepo→split leftover manifests).
+        if [ "$gone_count" -gt 50 ]; then
+            sed -n '1,40p' "$gone" | sed 's/^/  - /'
+            echo "  ... ($((gone_count - 40)) more)"
+        else
+            sed 's/^/  - /' "$gone"
+        fi
         while IFS= read -r rel; do
-            [ -n "$rel" ] || continue
-            # Defensive: never touch the target/ build-output symlink tree.
-            case "$rel" in
-                target | target/*) continue ;;
-            esac
-            rm -f -- "$workdir/$rel"
+            prune_one "$rel"
         done <"$gone"
         # Drop directories left empty by the prune (never descend into target/).
         ( cd "$workdir" && find . -path ./target -prune -o -type d -empty -delete 2>/dev/null || true )
@@ -67,6 +129,7 @@ else
     echo "[prune] no prior manifest for this worktree; seeding baseline (no prune on first run)"
 fi
 
-# Persist the current manifest as the baseline for the next sync.
+# Persist the current manifest as the baseline for the next sync — always,
+# even when individual path removals were skipped, so the next run converges.
 mkdir -p "$(dirname "$stored")"
 cp -f "$current" "$stored"
