@@ -13,6 +13,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use duckdb::Connection;
 use rmcp::{
     model::{CallToolRequestParams, CallToolResult},
     service::ServiceError,
@@ -624,6 +625,78 @@ async fn worker_query_tools_reject_injected_named_project_selectors() {
             "{tool_name}: {body:#}"
         );
     }
+
+    server.shutdown(Duration::from_secs(5)).await;
+}
+
+#[tokio::test]
+async fn ordinary_worker_query_reads_the_assigned_worktree_analyst_database() {
+    let (_server_dir, server) = test_server_with_real_pm().await;
+    let worker_dir = TempDir::new().expect("worker tempdir");
+    std::fs::create_dir_all(worker_dir.path().join(".spur"))
+        .expect("create worker analyst directory");
+    let db_path = worker_dir.path().join(".spur/analyst.duckdb");
+    let conn = Connection::open(&db_path).expect("open worker analyst database");
+    conn.execute_batch(
+        "CREATE TABLE worker_identity (assigned_root VARCHAR); \
+         INSERT INTO worker_identity VALUES ('assigned-worker-root');",
+    )
+    .expect("seed worker analyst database");
+    drop(conn);
+
+    server.register_delegation_worktree_root(
+        "d-worker-query".into(),
+        worker_dir.path().to_path_buf(),
+    );
+    let token = server.issue_token("d-worker-query", Duration::from_secs(60));
+    let body = call_jsonrpc(
+        &server,
+        &token,
+        "tools/call",
+        json!({
+            "name": "query",
+            "arguments": {
+                "query": "SELECT assigned_root FROM worker_identity"
+            }
+        }),
+    )
+    .await;
+
+    assert!(
+        body.get("error").is_none(),
+        "ordinary worker query should be routed: {body:#}"
+    );
+    assert_eq!(body["result"]["columns"], json!(["assigned_root"]));
+    assert_eq!(body["result"]["rows"], json!([["assigned-worker-root"]]));
+    assert_eq!(body["result"]["row_count"], 1);
+    assert_eq!(body["result"]["db_path"], db_path.display().to_string());
+
+    server.shutdown(Duration::from_secs(5)).await;
+}
+
+#[tokio::test]
+async fn ordinary_worker_query_fails_closed_without_an_assigned_worktree() {
+    let (_server_dir, server) = test_server_with_real_pm().await;
+    let token = server.issue_token("d-worker-query-no-root", Duration::from_secs(60));
+
+    let body = call_jsonrpc(
+        &server,
+        &token,
+        "tools/call",
+        json!({
+            "name": "query",
+            "arguments": { "query": "SELECT 1" }
+        }),
+    )
+    .await;
+
+    assert_eq!(body["error"]["code"], -32001, "{body:#}");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("assigned delegation worktree")),
+        "{body:#}"
+    );
 
     server.shutdown(Duration::from_secs(5)).await;
 }
