@@ -1473,6 +1473,69 @@ mod session_attach_guard_transfer_tests {
         drop(handle);
     }
 
+    #[tokio::test]
+    async fn rebuilt_brain_registry_reuses_server_local_project_composition() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut config = SpurConfig::default();
+        config.cost.db_path = tmp.path().join("cost.db").display().to_string();
+        let orchestrator = Orchestrator::new(tmp.path().to_path_buf(), config, None).unwrap();
+        let spur_session_id = SessionId("shared-local-project-composition-test".to_owned());
+        let brain_session_id: spur_acp::BrainSessionId = spur_session_id.clone().into();
+        let brain_session_id_cell = Arc::new(std::sync::OnceLock::new());
+        brain_session_id_cell
+            .set(spur_session_id)
+            .expect("test brain session id set once");
+        let (mut server, _channel) = McpCallbackServer::new(
+            Some(&brain_session_id),
+            orchestrator.pm_service.clone(),
+            None,
+            orchestrator.build_continuation_ctx(brain_session_id_cell),
+            orchestrator.outcome_store.clone(),
+            orchestrator.mcp_feature_gate(),
+        );
+        let store = spur_mcp::local_projects::LocalProjectCatalogStore::new(
+            tmp.path().join("injected-projects.toml"),
+        );
+        store
+            .add("injected-rebuild-project", tmp.path(), false)
+            .expect("seed injected catalog");
+        server.local_projects = crate::mcp::LocalProjectMcpComposition::new(store);
+
+        let registry = orchestrator
+            .brain_tool_registry(
+                crate::mcp::delegation::DelegationMcpDeps::from_server(&server),
+                crate::mcp::plan::PlanMcpDeps::from_server(&server),
+                None,
+            )
+            .expect("rebuild brain registry");
+        let response = registry
+            .call_json_tool(
+                spur_mcp::ToolCallContext::new(
+                    spur_mcp::ServerKind::Brain,
+                    spur_mcp::ToolAuthority::Brain,
+                    None,
+                    None,
+                ),
+                "local_project_list",
+                serde_json::json!({}),
+            )
+            .await;
+        let response = serde_json::to_value(response).expect("serialize list response");
+        let body: serde_json::Value = serde_json::from_str(
+            response["result"]["content"][0]["text"]
+                .as_str()
+                .expect("list response JSON text"),
+        )
+        .expect("parse list response");
+
+        assert!(
+            body["projects"].as_array().is_some_and(|projects| projects
+                .iter()
+                .any(|project| project["name"] == "injected-rebuild-project")),
+            "registry rebuild replaced the server's injected catalog: {body:#}"
+        );
+    }
+
     /// bd-3rvt: full integration coverage — load a persisted brain session
     /// whose plan has ≥1 ready task, drive one reconciler tick, and assert
     /// `dispatched > 0`. Ignored because it needs a beads DB fixture with a
