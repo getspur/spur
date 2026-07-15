@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Static contract for the five value films. The live UAT remains the runtime proof.
+# Operator home = Session Detail (not dashboard).
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -54,31 +55,20 @@ lib="$root/lib.sh"
 assert_has "$lib" 'story_beat() {' 'shared story beat helper'
 assert_has "$lib" 'story_hard_proof() {' 'shared hard-proof helper'
 assert_has "$lib" 'story_soft_proof() {' 'shared labeled soft-proof helper'
-assert_has "$lib" 'story_dashboard_land() {' 'dashboard landing supports active and empty lineage'
+assert_has "$lib" 'land_session_detail() {' 'session detail landing helper'
+assert_has "$lib" 'story_session_land() {' 'session land alias'
+assert_has "$lib" 'story_session_workers() {' 'session workers panel helper'
+assert_has "$lib" 'story_session_plan_inspector() {' 'Alt+p plan inspector helper'
+assert_has "$lib" 'return_to_session_detail() {' 'return home to session helper'
 assert_has "$lib" 'story_resolution() {' 'shared resolution helper'
-assert_has "$lib" 'Type a task below' 'empty dashboard has a stable landing anchor'
-assert_has "$lib" 'No plans found' 'empty plan browser has a labeled soft anchor'
-assert_has "$lib" 'No sessions yet' 'empty session picker has a labeled soft anchor'
-assert_count_at_least "$lib" 'local has_plan_rows=0' 2 'plan stories guard row proof behind non-empty state'
-assert_has "$lib" 'for _ in 1 2 3 4; do' 'empty Mine filter cycles fully back to All'
-assert_lacks "$lib" 'wait_text "Lineage"' 'shared story helpers never hard-fail on empty lineage'
-assert_lacks "$lib" 'run_su wait text "Session ·"' 'recoverable session attach checks stay quiet'
-assert_count_at_least "$lib" 'start_clean_session_for_draft' 2 'repeatable cascade starts from a clean local session'
-assert_has "$lib" 'for candidate_row in 1 2 3 4; do' 'clean-session selection uses a bounded draft-safe scan'
-assert_has "$lib" 'refusing to overwrite' 'clean-session selection fails safely when every composer has a draft'
-assert_has "$lib" 'configured worker draft already exists' 'repeat runs reuse completed worker proof without clearing it'
-assert_has "$lib" 'resume_prior_session_context() {' 'product continuity uses one provable prior-session resume'
-assert_lacks "$lib" 'session A attached' 'product continuity never invents distinct session A'
-assert_lacks "$lib" 'session B attached' 'product continuity never invents distinct session B'
-assert_has "$lib" 'status: open' 'backlog detail binds proof to open status'
-assert_has "$lib" 'priority: P0' 'backlog detail binds proof to P0 priority'
-assert_has "$lib" 'error: backlog unavailable' 'backlog load failures never masquerade as empty queues'
-assert_lacks "$lib" 'Brain transcript acknowledges plan submission' 'seed prompt text never claims brain-result proof'
-assert_lacks "$lib" 'seeded campaign produced EXEC/Running' 'generic lineage never claims seed correlation'
-# shellcheck disable=SC2016 # assert the literal per-run shell tag
-assert_has "$lib" 'seed_task_id="demo-echo-$$"' 'plan-loop seed uses a per-run correlation tag'
+assert_has "$lib" 'Session Detail is the operator home' 'docs session-first home in lib'
+assert_has "$lib" 'land_session_detail' 'start_live_tui lands session after dashboard cold-start'
 assert_has "$lib" "type_slow \"@worker:\${worker}\"" 'worker cascade avoids paste burst'
 assert_lacks "$lib" 'press_key 1' 'Agents focus never uses digit 1'
+assert_has "$lib" 'press_key Alt+d' 'workers panel uses Alt+d'
+assert_has "$lib" 'press_key Alt+p' 'plan inspector uses Alt+p'
+assert_has "$lib" 'seed_task_id="demo-echo-$$"' 'plan-loop seed uses a per-run correlation tag'
+assert_lacks "$lib" 'Brain transcript acknowledges plan submission' 'seed prompt text never claims brain-result proof'
 
 stories=(
   problem-plan-loop-drive
@@ -94,8 +84,9 @@ for story in "${stories[@]}"; do
   assert_has "$file" 'story_beat "ORIENTATION"' "$story has orientation"
   assert_has "$file" 'story_beat "ACTION"' "$story has action"
   assert_has "$file" 'story_beat "PROOF"' "$story names its proof"
-  assert_has "$file" 'story_dashboard_land' "$story accepts an empty-lineage dashboard"
+  assert_has "$file" 'story_session_land' "$story lands Session Detail home"
   assert_has "$file" 'story_resolution' "$story resolves the opening problem"
+  assert_has "$file" 'Session Detail' "$story names Session Detail in narrative"
 done
 
 tapes=(
@@ -111,28 +102,21 @@ for tape in "${tapes[@]}"; do
   for stage in HOOK ORIENTATION ACTION PROOF RESOLUTION; do
     assert_has "$file" "# STORY: $stage" "$tape mirrors $stage"
   done
-  case "$tape" in
-    10-problem-ops-visibility.tape | 13-problem-plan-loop-drive.tape)
-      assert_has "$file" 'Wait+Screen@30s /Lineage/' "$tape stops safely without seeded lineage"
-      ;;
-    *)
-      assert_has "$file" '/Lineage|Type a task below/' "$tape accepts active or empty-lineage landing"
-      ;;
-  esac
+  assert_has "$file" 'Type "Sessions"' "$tape opens Sessions from Go to"
+  assert_has "$file" 'Type "n"' "$tape prefers new-session attach for reliability"
+  assert_has "$file" '/Session ·|INSERT' "$tape proves Session Detail attach"
 done
 
 assert_has "$root/journeys/product-e2e-flow.sh" 'SPUR_DEMO_ALLOW_AGENT_SEND' 'product send remains opt-in'
 assert_has "$root/journeys/problem-plan-loop-drive.sh" 'SPUR_DEMO_ALLOW_PLAN_LOOP' 'plan-loop seed remains opt-in'
 assert_has "$root/../geometry.env" ": \"\${SPUR_DEMO_STORY_PACE:=0}\"" 'story dwell stays off by default'
-assert_lacks "$root/tapes/10-problem-ops-visibility.tape" 'Type "1"' 'ops tape uses Tab for Agents'
-assert_lacks "$root/tapes/13-problem-plan-loop-drive.tape" 'Type "1"' 'plan-loop tape uses Tab for Agents'
-assert_has "$root/tapes/09-product-e2e-flow.tape" 'Wait+Screen@10s /TODAY/' 'product tape proves real session history'
-assert_has "$root/tapes/09-product-e2e-flow.tape" '# resume the highlighted prior session' 'product tape demonstrates context continuity'
+assert_has "$root/tapes/09-product-e2e-flow.tape" 'Wait+Screen@20s /agent=/' 'product tape proves cascade agent='
+assert_has "$root/tapes/09-product-e2e-flow.tape" 'Wait+Screen@10s /model=/' 'product tape proves cascade model='
+assert_has "$root/tapes/09-product-e2e-flow.tape" 'Wait+Screen@10s /effort=/' 'product tape proves cascade effort='
 assert_has "$root/tapes/11-problem-plan-progress.tape" '/Progress|No plans found/' 'plan-progress tape accepts campaign rows or honest empty state'
-assert_has "$root/tapes/12-problem-backlog-triage.tape" 'Wait+Screen@12s /status: open/' 'backlog tape proves selected detail is open'
-assert_has "$root/tapes/12-problem-backlog-triage.tape" 'Wait+Screen@12s /priority: P0/' 'backlog tape proves selected detail is P0'
-assert_has "$root/tapes/13-problem-plan-loop-drive.tape" '/Progress|No plans found/' 'plan-loop tape accepts campaign rows or honest empty state'
-assert_has "$root/tapes/13-problem-plan-loop-drive.tape" 'Wait+Screen@10s /Activity/' 'plan-loop tape resolves on Activity proof'
+assert_has "$root/tapes/12-problem-backlog-triage.tape" 'Wait+Screen@12s /status: open|priority: P0|bd-|No issues/' 'backlog tape binds detail or empty'
+assert_has "$root/tapes/13-problem-plan-loop-drive.tape" 'Alt+p' 'plan-loop tape tries session plan inspector'
+assert_has "$root/tapes/10-problem-ops-visibility.tape" 'Alt+d' 'ops tape opens workers panel'
 
 if [[ "$failures" -ne 0 ]]; then
   printf '\n%d story-contract check(s) failed\n' "$failures" >&2

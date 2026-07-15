@@ -78,9 +78,14 @@ start_live_tui() {
     --env "SPUR_NO_UPGRADE_CHECK=1" \
     --env "SPUR_TUI_MOUSE_CAPTURE=0"
 
-  # Default: dashboard landing (still shows live lineage when project has active work).
+  # Cold-start with dashboard (safe: no auto-resume), then immediately enter the
+  # operator home: Session Detail (composer + ReAct + workers). Dashboard remains
+  # an optional ops overview, not the primary work surface.
   command="$(printf '%q' "$spur_bin") tui --dashboard"
   run_su submit "$command"
+  # Give the TUI a moment to paint before session attach.
+  sleep_ms 0.8
+  land_session_detail
 }
 
 wait_text() {
@@ -206,6 +211,132 @@ story_resolution() {
   local dwell="${2:-2.5}"
   story_beat "RESOLUTION" "$message"
   story_dwell "$dwell"
+}
+
+# ── Session Detail is the operator home ─────────────────────────────────────
+# Primary surface: crates/spur-tui/src/views/session_detail
+#   Session · header · ReAct transcript · INSERT composer · inline workers
+#   Alt+s sessions · Alt+p plan inspector · Alt+d workers · ? help · Ctrl+K hub
+# Dashboard / Lineage is a secondary ops overview, not the default film home.
+
+session_detail_is_visible() {
+  soft_has_text "Session ·" 400 \
+    || soft_has_text "● INSERT" 400 \
+    || soft_has_text "[Enter]send" 400
+}
+
+# Attach a free (or new) session and prove Session Detail is the work surface.
+land_session_detail() {
+  local claim="${1:-Session Detail is the operator home}"
+  local dwell="${2:-3.0}"
+
+  if session_detail_is_visible; then
+    printf '+ proof: %s [anchor=Session · already open]\n' "$claim"
+    story_dwell "$dwell"
+    return 0
+  fi
+
+  # Prefer resume of free history; fall back to new session (N / first row).
+  if ! attach_session_for_send; then
+    printf '+ soft beat: %s — could not attach a session; remaining on dashboard\n' "$claim"
+    story_dashboard_land "Dashboard remains available when no session attaches" 2.0
+    return 1
+  fi
+
+  if soft_has_text "Session ·" 4000; then
+    printf '+ proof: %s [anchor=Session ·]\n' "$claim"
+  elif soft_has_text "INSERT" 3000; then
+    printf '+ proof: %s [anchor=INSERT composer]\n' "$claim"
+  else
+    wait_text "INSERT"
+    printf '+ proof: %s [anchor=INSERT]\n' "$claim"
+  fi
+  story_dwell "$dwell"
+  story_soft_proof \
+    "Composer is ready for brain turns" \
+    "INSERT" 1500 2.0 \
+    "composer chrome is present under an alternate load banner"
+  return 0
+}
+
+# Alias used by journeys/tapes contract — always re-asserts session home.
+story_session_land() {
+  land_session_detail "$@"
+}
+
+# From Session Detail: Help (empty-bar ?) then dismiss. Session help, not dashboard.
+story_session_help() {
+  # Esc once in case focus is weird; empty composer for ? → ShowHelp
+  press_key Escape
+  story_hop 0.6 0.3
+  type_text "?"
+  story_hop 1.0 0.5
+  # Help overlay copy varies; any of these prove guidance opened from session.
+  if soft_has_text "help" 2500 || soft_has_text "Help" 800 \
+    || soft_has_text "Keys" 800 || soft_has_text "Session" 800 \
+    || soft_has_text "send" 800; then
+    printf '+ proof: session help teaches how to drive Session Detail\n'
+    story_dwell 3.0
+  else
+    printf '+ soft beat: session help — overlay copy not matched; continue\n'
+  fi
+  press_key Escape
+  story_hop 0.8 0.35
+}
+
+# Inline workers panel (Alt+d expand/collapse; Tab focuses when visible).
+story_session_workers() {
+  # Expand if collapsed
+  press_key Alt+d
+  story_hop 1.0 0.4
+  if soft_has_text "Workers" 2000 || soft_has_text "worker" 1500 \
+    || soft_has_text "EXEC" 1200 || soft_has_text "codex" 1200; then
+    printf '+ proof: inline workers panel shows delegated work from this session\n'
+    story_dwell 3.0
+    press_key Tab
+    story_hop 1.0 0.4
+    story_dwell 2.0
+  else
+    printf '+ soft beat: workers panel — no active workers yet; Alt+d remains the path when they appear\n'
+    story_dwell 2.0
+  fi
+}
+
+# Alt+p → PlanInspector when this session has a tracked plan; else soft status.
+story_session_plan_inspector() {
+  press_key Alt+p
+  story_hop 1.2 0.5
+  if soft_has_text "Plan" 3000 && { soft_has_text "Progress" 800 || soft_has_text "task" 800 \
+    || soft_has_text "Work" 800 || soft_has_text "No tracked plan" 800; }; then
+    if soft_has_text "No tracked plan" 600; then
+      printf '+ soft beat: plan inspector — no tracked plan for this session yet\n'
+      story_dwell 2.0
+    else
+      printf '+ proof: plan inspector opens from Session Detail (Alt+p)\n'
+      story_dwell 3.5
+      press_key Escape
+      story_hop 0.8 0.4
+      # Back to session
+      soft_has_text "Session ·" 2000 || soft_has_text "INSERT" 1500 || true
+    fi
+  else
+    printf '+ soft beat: plan inspector — surface did not open; use Plans via Go to if needed\n'
+    story_dwell 2.0
+  fi
+}
+
+# Return to Session Detail from overlays / plan browser / dashboard.
+return_to_session_detail() {
+  local i
+  for i in 1 2 3 4 5; do
+    if session_detail_is_visible; then
+      return 0
+    fi
+    press_key Escape
+    sleep_ms 0.35
+  done
+  # Last resort: re-attach
+  land_session_detail "Re-enter Session Detail after navigation" 2.0 || true
 }
 
 require_agent_send_opt_in() {
@@ -614,42 +745,54 @@ navigate_lineage_brain_and_workers() {
   story_hard_proof "Activity is the operator timeline for the loop" "Activity" 3.0
 }
 
-# Problem: can't see multi-agent work or how to drive the dashboard.
-# Features: lineage + activity + help + palette navigation.
+# Problem: multi-agent work is opaque from the session the operator lives in.
+# Features (Session Detail first): ReAct proof, help, workers panel, Go to hub.
+# Optional: brief dashboard lineage as ops overview (not the home).
 story_ops_visibility() {
-  story_soft_proof \
-    "Activity answers what has happened" \
-    "Activity" 1200 2.5 \
-    "no agent events exist yet; the empty dashboard is labeled instead"
-  expect_text "INSERT"
+  story_session_land "Session Detail is where the operator drives work" 3.0
 
-  # Help: how do I drive this?
-  type_text "?"
-  story_hop 1.0 0.6
-  story_hard_proof "Dashboard help turns unknown keys into an operating guide" "Dashboard" 3.0
   story_soft_proof \
-    "Navigation guidance explains how to drive the view" \
-    "Navigation" 2000 2.0 \
-    "compact help layout omits the section heading"
-  press_key Escape
-  story_hop 0.8 0.4
+    "ReAct transcript shows recent brain activity" \
+    "YOU" 1500 2.5 \
+    "no turns yet — empty transcript is still a valid honest home"
+  story_soft_proof \
+    "THINK/ACT chrome proves the session stream is live-ready" \
+    "THINK" 1200 2.0 \
+    "no thinking turns yet; INSERT remains the ready state"
 
-  # Palette: one hub for all problem surfaces
+  story_session_help
+  story_session_workers
+
+  # Palette from session: hub to Plans / Issues / Explore without abandoning home
   press_key Ctrl+K
-  story_hard_proof "Go to is the hub for every control surface" "Go to" 2.5
+  story_hard_proof "Go to remains the hub from Session Detail" "Go to" 2.5
   expect_text "esc dismiss"
   press_key Escape
   story_hop 0.8 0.3
-  story_dashboard_land "Return from Go to without losing dashboard context" 2.0
+  return_to_session_detail
 
-  # Lineage drive (Navigate mode)
-  navigate_lineage_brain_and_workers
+  # Optional ops overview: dashboard lineage (secondary, labeled)
+  if soft_has_text "Session ·" 800; then
+    press_key Escape
+    story_hop 0.8 0.4
+  fi
+  if soft_has_text "Lineage" 1500; then
+    printf '+ soft beat: dashboard lineage is an ops overview, not the primary work surface\n'
+    story_dwell 2.0
+    navigate_lineage_brain_and_workers
+    # Prefer returning home for resolution
+    land_session_detail "Return home to Session Detail after ops overview" 2.0 || true
+  else
+    printf '+ soft beat: ops overview — no lineage yet; Session Detail remains home\n'
+  fi
 }
 
 # Problem: multi-task campaign progress is opaque.
-# Features: plan browser list + summary (progress / awaiting review).
+# Features: from Session Detail → Plans (or Alt+p) + summary.
 story_plan_progress() {
   local has_plan_rows=0
+  story_session_land "Campaign triage starts from the operator's session" 2.5
+  story_session_plan_inspector
   open_palette_view "Plan"
   story_hard_proof "Plans is the campaign control surface" "Plans" 2.5
   if soft_has_text "Progress" 1500; then
@@ -698,17 +841,25 @@ story_plan_progress() {
   fi
 }
 
-# Full control-plane loop story helpers:
-# Plan surface (submit_plan results) → optional start/resume → lineage drive.
+# Full control-plane loop story helpers — Session Detail first:
+# Session home → workers / ReAct → Alt+p plan inspector or Plans hub →
+# optional start/resume → (seed path watches session stream, not dashboard).
 #
-# submit_plan itself is issued by the *brain* (MCP tool), not the TUI.
-# The TUI operator path is: inspect plan browser → watch auto-dispatch on
-# lineage (BRAIN / EXEC) → inspect worker/brain outputs → activity stream.
+# submit_plan is brain MCP; the operator *lives* in Session Detail while it runs.
 story_plan_loop_control_plane() {
   local has_plan_rows=0
-  # --- Plan campaign surface (where submit_plan lands) ---
+
+  story_session_land "Session Detail is the loop's operating surface" 3.0
+  story_soft_proof \
+    "ReAct shows prior brain↔worker turns when present" \
+    "YOU" 1500 2.5 \
+    "no prior turns; empty session is the honest starting state"
+  story_session_workers
+  story_session_plan_inspector
+
+  # Plans hub (project-wide campaigns) still available via Go to
   open_palette_view "Plan"
-  story_hard_proof "submit_plan campaigns land in the Plans surface" "Plans" 2.5
+  story_hard_proof "submit_plan campaigns also land in the Plans surface" "Plans" 2.5
   if soft_has_text "Progress" 1500; then
     has_plan_rows=1
     printf '+ proof: plan table exposes campaign progress [anchor=Progress]\n'
@@ -731,22 +882,12 @@ story_plan_loop_control_plane() {
     else
       printf '+ soft beat: campaign lifecycle — selected plan has no visible lifecycle word\n'
     fi
-
-    # Move selection to surface different plan rows (campaign history).
-    press_key j
-    story_hop 1.2 0.35
     press_key j
     story_hop 1.2 0.35
     story_soft_proof \
       "Work Item and counters connect campaign state to operator intent" \
       "Work Item" 2500 3.0 \
       "the selected campaign has no visible summary"
-    story_soft_proof \
-      "Done counters quantify progress across tasks" \
-      "done" 1500 2.0 \
-      "this project has no completed plan counters yet"
-
-    # Optional: Start/Resume selected plan (mutates live work — opt-in).
     if [[ "${SPUR_DEMO_ALLOW_PLAN_START:-0}" == "1" ]]; then
       printf '+ opt-in: Start/Resume plan (s)\n'
       type_text "s"
@@ -754,17 +895,11 @@ story_plan_loop_control_plane() {
     fi
   else
     printf '+ soft beat: campaign lifecycle/summary — no plan rows exist to inspect\n'
-    if [[ "${SPUR_DEMO_ALLOW_PLAN_START:-0}" == "1" ]]; then
-      printf '+ soft beat: Start/Resume skipped — no selected plan\n'
-    fi
   fi
   press_key Escape
   story_hop 1.0 0.5
-  story_dashboard_land "Return from Plans to the loop dashboard" 2.0
-
-  # --- Lineage: brain ↔ worker navigation + output capture ---
-  # Explicit arc: BRAIN → EXEC → stream → tabs → Activity (inside helper)
-  navigate_lineage_brain_and_workers
+  return_to_session_detail
+  story_session_land "Back home in Session Detail after Plans" 2.5
 }
 
 require_plan_loop_opt_in() {
@@ -781,8 +916,8 @@ EOF
   fi
 }
 
-# Poll lineage for auto-loop signals (BRAIN Running / EXEC child).
-# Soft-success: never hard-fail the demo if workers are slow or brain declines.
+# Poll Session Detail for auto-loop signals after a seed (YOU / DELEGATE / EXEC / task id).
+# Soft-success: never hard-fail if workers are slow. Prefer session over dashboard lineage.
 wait_for_lineage_loop_activity() {
   local seed_task_id="${1:-}"
   local timeout_s="${SPUR_DEMO_PLAN_LOOP_WAIT_S:-180}"
@@ -790,64 +925,67 @@ wait_for_lineage_loop_activity() {
   local step=5
   local generic_seen=0
 
-  return_to_dashboard
+  return_to_session_detail
   sleep_ms 0.4
-  story_dashboard_land "Dashboard is ready for post-seed observation" 2.0
-  printf '+ waiting up to %ss for lineage correlated to task %s\n' "$timeout_s" "$seed_task_id"
+  story_session_land "Session Detail is ready for post-seed observation" 2.0
+  printf '+ waiting up to %ss in Session Detail for loop proof (task %s)\n' "$timeout_s" "$seed_task_id"
 
   while [[ "$elapsed" -lt "$timeout_s" ]]; do
     if [[ -n "$seed_task_id" ]] && soft_has_text "$seed_task_id" 2500; then
-      printf '+ proof: lineage exposes the per-run seed task %s at t=%ss\n' "$seed_task_id" "$elapsed"
+      printf '+ proof: session stream exposes per-run seed task %s at t=%ss\n' "$seed_task_id" "$elapsed"
       story_dwell 3.5
       return 0
     fi
+    if soft_has_text "DELEGATE" 1200 || soft_has_text "Done ·" 1000; then
+      printf '+ proof: session shows delegated work completing at t=%ss\n' "$elapsed"
+      story_dwell 3.0
+      return 0
+    fi
     if [[ "$generic_seen" -eq 0 ]] \
-      && { soft_has_text "EXEC" 1200 || soft_has_text "Running" 1000; }; then
-      printf '+ soft beat: EXEC/Running is visible but may be pre-existing; keep waiting for %s\n' "$seed_task_id"
+      && { soft_has_text "EXEC" 1200 || soft_has_text "Running" 1000 || soft_has_text "codex" 1000; }; then
+      printf '+ soft beat: worker activity is visible; keep waiting for %s correlation\n' "$seed_task_id"
       generic_seen=1
+      story_session_workers
     fi
     sleep "$step"
     elapsed=$((elapsed + step))
     printf '+ … still waiting (%ss/%ss)\n' "$elapsed" "$timeout_s"
   done
-  printf '+ soft beat: seed correlation — task %s was not visible in lineage within %ss; generic history is not attributed to this run\n' "$seed_task_id" "$timeout_s"
+  printf '+ soft beat: seed correlation — task %s was not visible in Session Detail within %ss\n' "$seed_task_id" "$timeout_s"
   return 0
 }
 
 # Opt-in: kick brain so auto-loop may dispatch workers (real model spend).
-# Light kick — not a full submit_plan seed.
+# Light kick — not a full submit_plan seed. Stay on Session Detail.
 trigger_brain_for_loop_observation() {
   require_agent_send_opt_in
-  attach_session_for_send
+  land_session_detail "Attach session for light brain kick" 2.0
   sleep_ms 0.6
-  type_text "Demo capture: reply briefly after checking lineage — say ready"
+  type_text "Demo capture: reply briefly after checking workers — say ready"
   sleep_ms 0.4
   press_key Enter
   set +e
   run_su wait text "YOU" --timeout "${SHELL_USE_TIMEOUT_MS:-90000}"
   run_su wait text "THINK" --timeout 60000
   set -e
-  printf '+ triggered brain turn for loop observation\n'
-  return_to_dashboard
-  sleep_ms 0.5
-  story_dashboard_land "Return to the dashboard after the brain kick" 2.0
+  printf '+ triggered brain turn for loop observation (Session Detail)\n'
+  story_session_workers
+  story_session_land "Stay on Session Detail after the brain kick" 2.0
 }
 
 # Opt-in: seed a ONE-task submit_plan via brain (real model + possible worker).
-# Then wait for lineage EXEC/Running and walk brain↔worker outputs.
-#
-# Prompt is intentionally tiny and no-repo-write when possible so demos stay safe.
+# Observe entirely from Session Detail (YOU / DELEGATE / workers / Alt+p), then
+# optionally re-check Plans. Prompt stays tiny and no-repo-write when possible.
 trigger_submit_plan_one_task_and_observe() {
   require_plan_loop_opt_in
   local wait_ms="${SHELL_USE_TIMEOUT_MS:-180000}"
   local seed_task_id="demo-echo-$$"
   local plan_correlated=0
 
-  attach_session_for_send
+  land_session_detail "Attach Session Detail for submit_plan seed" 2.5
   sleep_ms 0.8
-  printf '+ seed: ask brain for single-task submit_plan (demo capture)\n'
+  printf '+ seed: ask brain for single-task submit_plan from Session Detail\n'
 
-  # Keep ASCII-only; avoid paste-burst by slow-typing the critical prefix.
   type_slow "DEMO CAPTURE ONLY. "
   type_text "Call submit_plan with exactly ONE task. "
   type_text "Task id: ${seed_task_id}. Worker: codex. "
@@ -856,37 +994,27 @@ trigger_submit_plan_one_task_and_observe() {
   sleep_ms 0.5
   press_key Enter
 
-  # Brain turn begins
   set +e
   run_su wait text "YOU" --timeout "$wait_ms"
   local you_rc=$?
   run_su wait text "THINK" --timeout 90000
   set -e
   if [[ "$you_rc" -ne 0 ]]; then
-    printf '+ soft beat: brain accepted seed — YOU was not observed; still poll lineage\n'
+    printf '+ soft beat: brain accepted seed — YOU was not observed; still poll session\n'
   else
-    printf '+ proof: brain accepted the seed turn [anchor=YOU]\n'
+    printf '+ proof: brain accepted the seed turn in Session Detail [anchor=YOU]\n'
     story_dwell 2.5
   fi
 
-  # This anchor is deliberately action proof only: the visible user prompt
-  # contains plan language, so it cannot prove that the brain submitted one.
   story_soft_proof \
     "Seed prompt records the requested submit_plan action" \
     "plan" 8000 2.5 \
-    "the submitted seed prompt was not visible before the lineage poll"
+    "the submitted seed prompt was not visible before the session poll"
 
-  # Back to dashboard — watch lineage for worker EXEC
-  return_to_dashboard
-  sleep_ms 0.6
   wait_for_lineage_loop_activity "$seed_task_id"
+  story_session_workers
+  story_session_plan_inspector
 
-  # Drive tree + capture outputs (brain vs worker if present)
-  navigate_lineage_brain_and_workers
-  story_dwell 2.5
-
-  # Re-open Plan browser and attribute results only when the per-run task tag
-  # is visible. Generic progress/history may predate this seed.
   open_palette_view "Plan"
   story_hard_proof "Plans is ready for post-seed inspection" "Plans" 2.5
   if soft_has_text "$seed_task_id" 5000; then
@@ -906,24 +1034,16 @@ trigger_submit_plan_one_task_and_observe() {
   else
     printf '+ soft beat: post-seed campaign progress — no Progress anchor is visible\n'
   fi
-  if soft_has_text "awaiting" 2000 || soft_has_text "running" 2000 || soft_has_text "complete" 2000; then
-    if [[ "$plan_correlated" -eq 1 ]]; then
-      printf '+ proof: the correlated seeded plan exposes a current lifecycle state\n'
-      story_dwell 3.0
-    else
-      printf '+ soft beat: lifecycle state is visible but may belong to existing history\n'
-    fi
-  else
-    printf '+ soft beat: post-seed lifecycle state — state text has not materialized yet\n'
-  fi
   press_key Escape
   story_hop 0.8 0.4
-  story_dashboard_land "Return from Plans to the loop dashboard" 2.0
+  return_to_session_detail
+  story_session_land "Loop observation ends at Session Detail home" 3.0
 }
 
 # Problem: backlog firehose — what is P0 open work?
-# Features: issue browser list + detail.
+# Features: from Session Detail → Issues list + detail.
 story_backlog_triage() {
+  story_session_land "Triage starts without leaving the operator's workspace" 2.5
   open_palette_view "Issues"
   # Live monorepo uses beads issues list
   story_hard_proof "Issues is the dedicated backlog decision surface" "Issues" 2.5

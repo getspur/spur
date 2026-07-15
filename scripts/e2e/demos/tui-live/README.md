@@ -146,9 +146,24 @@ SPUR_DEMO_STORY_PACE=0 bash journeys/problem-ops-visibility.sh
 
 Full critique + storyboard: **[JOURNEY_STORY_REVIEW.md](./JOURNEY_STORY_REVIEW.md)**.
 
+## Operator home: Session Detail
+
+Value films center on **Session Detail** (`crates/spur-tui/src/views/session_detail`):
+
+| Surface | Role |
+|---------|------|
+| Session · + INSERT + ReAct | Primary work (compose, watch brain, cascade) |
+| Workers (Alt+d) | Delegated work for this session |
+| Alt+p | Plan inspector when a plan is tracked |
+| Ctrl+K Go to | Plans / Issues / Explore / Sessions hubs |
+| Dashboard / Lineage | Optional ops overview only |
+
+Shell-use: `start_live_tui` cold-starts `--dashboard` then `land_session_detail`.  
+VHS tapes open Sessions → `n` after launch for a reliable attach.
+
 ## Safety
 
-1. Default landing: `tui --dashboard`.
+1. Cold start: `tui --dashboard`, then enter **Session Detail** as home.
 2. Ops, plan, and backlog stories are observe-only. `product-e2e-flow` applies the selected Explore skill/agent to the local pool, but never sends by default.
 3. Model/worker spend requires `SPUR_DEMO_ALLOW_AGENT_SEND=1` or `SPUR_DEMO_ALLOW_PLAN_LOOP=1`.
 4. Plan mutation requires `SPUR_DEMO_ALLOW_PLAN_START=1` or the live loop gate.
@@ -157,9 +172,9 @@ Full critique + storyboard: **[JOURNEY_STORY_REVIEW.md](./JOURNEY_STORY_REVIEW.m
 ## Authoring a new problem story
 
 1. Write the **problem sentence** (persona pain from RCA/journey docs).
-2. List **features that answer it** (bond, don’t bolt-on).
-3. Implement `journeys/problem-*.sh` using lib helpers; wait on **proof** strings.
-4. Add a media tape + `journeys.conf` row + `PROBLEM_STORIES.md` + `JOURNEYS.md`.
+2. List **Session Detail features that answer it** (bond, don’t bolt-on).
+3. Implement `journeys/problem-*.sh` using `story_session_land` + lib helpers; wait on **proof** strings.
+4. Add a media tape that attaches Session Detail + `journeys.conf` row + `PROBLEM_STORIES.md`.
 5. Run `bash story-contract.test.sh`, then UAT on both an empty and seeded project before claiming the film.
 
 ## Related

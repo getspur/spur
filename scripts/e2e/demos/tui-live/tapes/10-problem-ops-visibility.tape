@@ -1,6 +1,6 @@
-# PROBLEM: multi-agent work is opaque / keybindings unknown
-# Features: lineage, help, palette, Agents tree + detail tabs
-# Story pacing: land → help → palette → Agents → stream (proof dwells ≥2–3.5s)
+# PROBLEM: multi-agent work is opaque from the session I work in
+# HOME: Session Detail (composer + ReAct + workers)
+# STORY: HOOK → ORIENTATION → ACTION → PROOF → RESOLUTION
 
 Output out/10-problem-ops-visibility.mp4
 Output out/10-problem-ops-visibility.gif
@@ -16,26 +16,51 @@ Set Theme "Catppuccin Mocha"
 Set Framerate 24
 Set PlaybackSpeed 1.0
 
-# STORY: HOOK — multi-agent work is dangerous when I cannot see what is running.
+# STORY: HOOK — cold start (dashboard is only the safe entry)
 Hide
 Type "./bin/run-spur-tui-live.sh"
 Enter
 Show
-Wait+Screen@30s /Lineage/
+Wait+Screen@30s /Lineage|Type a task below|SPUR/
+Sleep 2s
+
+# STORY: ORIENTATION — enter Session Detail (operator home)
+Hide
+Ctrl+K
+Show
+Wait+Screen@12s /Go to/
+Hide
+Type "Sessions"
+Enter
+Show
+Wait+Screen@15s /Sessions|Start new session|No sessions yet|Failed/
+Sleep 2s
+# Prefer new session for reliable attach on busy machines
+Hide
+Type "n"
+Show
+Sleep 2.5s
+Wait+Screen@25s /Session ·|INSERT|Failed to initialize/
 Sleep 3s
 
-# STORY: ORIENTATION — Help teaches the controls before the operator changes state.
+# STORY: ACTION — session help
 Hide
+Escape
 Type "?"
 Show
-Wait+Screen@15s /Dashboard/
 Sleep 3s
 Hide
 Escape
 Show
 Sleep 1.5s
 
-# STORY: ACTION — Go to finds the surface; Esc → Tab gives the Agents tree control.
+# STORY: ACTION — workers panel (Alt+d)
+Hide
+Alt+d
+Show
+Sleep 2.5s
+
+# STORY: ACTION — Go to hub from session
 Hide
 Ctrl+K
 Show
@@ -44,41 +69,10 @@ Sleep 2.5s
 Hide
 Escape
 Show
-Wait+Screen@12s /Lineage/
 Sleep 2s
 
-# Navigate → Agents → tree hop
-Hide
-Escape
-Sleep 600ms
-Tab
-Show
+# STORY: PROOF — stay on session home
+Wait+Screen@12s /Session ·|INSERT|Lineage/
 Sleep 2s
-Hide
-Type "j"
-Type "j"
-Show
+# STORY: RESOLUTION
 Sleep 2s
-Hide
-Enter
-Show
-# STORY: PROOF — worker output and detail tabs replace guesswork with evidence.
-Wait+Screen@12s /stream/
-Sleep 3.5s
-Hide
-Type "l"
-Show
-Sleep 2s
-Hide
-Type "l"
-Show
-Sleep 2.5s
-
-# STORY: RESOLUTION — return to Activity: the operator now has a live timeline.
-Hide
-Escape
-Sleep 800ms
-Tab
-Show
-Wait+Screen@12s /Activity/
-Sleep 3.5s

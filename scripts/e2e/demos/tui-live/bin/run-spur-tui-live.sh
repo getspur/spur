@@ -2,14 +2,18 @@
 # Launch SPUR TUI against a *real* project workspace (no e2e fixture isolation).
 #
 # Safety defaults:
-#   - lands with `tui --dashboard` (no auto-resume of last session)
+#   - cold-starts with `tui --dashboard` (no auto-resume of last session)
+#   - VHS tapes / shell-use lib then enter **Session Detail** (operator home)
 #   - does NOT create a temp workspace and does NOT rm -rf anything
-#   - does NOT send prompts / dispatch workers (tapes should stay navigation-only)
+#   - does NOT send prompts / dispatch workers (tapes stay navigation-only unless gated)
 #
 # Env:
 #   SPUR_DEMO_PROJECT   absolute path to project root (default: monorepo root)
 #   SPUR_DEMO_TUI_ARGS  override argv after spur bin (default: "tui --dashboard")
 #   SPUR_BIN            spur binary (default: resolve via e2e lib)
+#
+# Operator home for stories: Session Detail (composer + ReAct + workers),
+# not the dashboard. See PROBLEM_STORIES.md.
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
