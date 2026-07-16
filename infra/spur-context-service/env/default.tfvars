@@ -15,13 +15,11 @@ aws_region = "ap-southeast-5"
 # Independent of provisioned concurrency / warm instances.
 lambda_max_concurrency = 4
 
-# Staged migration: bootstrap the context.getspur.dev Route 53 zone; delegate
-# its output NS set at Namecheap; activate certificates and both custom domains;
-# pass OAuth, API-key, and MCP E2E; release stable-domain clients; optionally
-# retire execute-api; then remove the Cognito prefix only in a later change.
-# This committed baseline performs bootstrap only and preserves both legacy
-# endpoints until those external gates are complete.
-custom_domains_enabled       = false
+# Live default stack has DNS-validated custom domains activated for
+# context.getspur.dev + auth.context.getspur.dev. Keep this true so routine
+# terraform applies do not destroy API mappings / ACM / Route53 records.
+# execute-api remains enabled until clients fully migrate.
+custom_domains_enabled       = true
 disable_execute_api_endpoint = false
 
 # Keep interface VPC endpoints in a single AZ/subnet for the default demo/eval
