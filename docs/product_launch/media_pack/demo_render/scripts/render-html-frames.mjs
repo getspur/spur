@@ -65,6 +65,8 @@ async function renderHeroFrames() {
     { html: 'html/cap-session.html', out: 'frames/cap-session.png' },
     { html: 'html/cap-workers.html', out: 'frames/cap-workers.png' },
     { html: 'html/cap-plans.html', out: 'frames/cap-plans.png' },
+    { html: 'html/cap-specialists.html', out: 'frames/cap-specialists.png' },
+    { html: 'html/cap-resume.html', out: 'frames/cap-resume.png' },
   ];
   const browser = await launch({ width: 1920, height: 1080 });
   const page = await browser.newPage();

@@ -81,6 +81,52 @@
   ],
   "hero": {
     "output": "hero-video-ph-ready.mp4",
-    "segments": []
+    "segments": [
+      {
+        "id": "session",
+        "asset_id": "session-detail-home",
+        "start_sec": 8,
+        "duration_sec": 4,
+        "caption": "Session Detail is the operator home.",
+        "caption_frame": "cap-session.png",
+        "proof_terms": ["INSERT", "following"]
+      },
+      {
+        "id": "workers",
+        "asset_id": "worker-visibility",
+        "start_sec": 18.5,
+        "duration_sec": 3,
+        "caption": "Worker state stays visible.",
+        "caption_frame": "cap-workers.png",
+        "proof_terms": ["WORKERS", "worker"]
+      },
+      {
+        "id": "plans",
+        "asset_id": "plan-state",
+        "start_sec": 12.5,
+        "duration_sec": 4,
+        "caption": "Empty plan state is explicit.",
+        "caption_frame": "cap-plans.png",
+        "proof_terms": ["Plans", "No plans found"]
+      },
+      {
+        "id": "specialist",
+        "asset_id": "specialist-routing",
+        "start_sec": 52.5,
+        "duration_sec": 5,
+        "caption": "Route agent, model, and effort explicitly.",
+        "caption_frame": "cap-specialists.png",
+        "proof_terms": ["agent=", "model=", "effort="]
+      },
+      {
+        "id": "resume",
+        "asset_id": "session-resume",
+        "start_sec": 5.8,
+        "duration_sec": 3.2,
+        "caption": "Resume the prior conversation.",
+        "caption_frame": "cap-resume.png",
+        "proof_terms": ["Session", "Resumed from prior conversation"]
+      }
+    ]
   }
 }
