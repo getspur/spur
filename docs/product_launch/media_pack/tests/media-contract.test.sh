@@ -52,9 +52,10 @@ if [[ -f "$MANIFEST" ]]; then
   else
     fail "hero declares five evidence segments"
   fi
-  if jq -e 'all(.hero.segments[] as $segment;
+  if jq -e '. as $root | all(.hero.segments[];
+      . as $segment |
       (($segment.proof_terms | length) > 0) and
-      any(.assets[]; .id == $segment.asset_id))' "$MANIFEST" >/dev/null; then
+      any($root.assets[]; .id == $segment.asset_id))' "$MANIFEST" >/dev/null; then
     pass "every hero caption resolves to approved proof"
   else
     fail "every hero caption resolves to approved proof"
