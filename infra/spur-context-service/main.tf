@@ -189,6 +189,7 @@ resource "aws_lambda_function" "service" {
 
   environment {
     variables = {
+      AWS_LAMBDA_MAX_CONCURRENCY                = tostring(var.lambda_max_concurrency)
       SPUR_CATALOG_S3_URI                       = var.catalog_s3_uri
       SPUR_INDEX_STATE_MACHINE_ARN              = aws_sfn_state_machine.index_build.arn
       SPUR_INDEX_JOBS_TABLE                     = aws_dynamodb_table.index_jobs.name
