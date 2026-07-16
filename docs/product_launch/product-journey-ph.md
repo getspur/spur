@@ -1,6 +1,6 @@
 # Product Hunt product journey — crosswalk to live TUI demos
 
-**Status:** Canonical narrative for PH film + gallery  
+**Status:** Canonical narrative for PH film + gallery — **approved 2026-07-16**  
 **Date:** 2026-07-16  
 **Cross-checked against:** [`scripts/e2e/demos/tui-live/`](../../scripts/e2e/demos/tui-live/) (`journeys/`, `journeys.conf`, `PROBLEM_STORIES.md`, `README.md`, `JOURNEY_STORY_REVIEW.md`)  
 **PRD:** [`SPUR_PRD.md`](../../SPUR_PRD.md) v2.3  
