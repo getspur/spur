@@ -62,7 +62,9 @@ fn print_help() {
     eprintln!("      build release spur binaries for every supported platform on the");
     eprintln!("      build VM (linux native, macOS universal2 via zigbuild, windows");
     eprintln!("      x86_64 via xwin), fetch them into <dir> (default dist/) with");
-    eprintln!("      triple-suffixed names, and write SHA256SUMS");
+    eprintln!("      triple-suffixed names, package assets/skills as");
+    eprintln!("      spur-skills-<version>.tar.gz (share/spur/skills layout for the");
+    eprintln!("      runtime SkillCatalog resolver), and write SHA256SUMS");
     eprintln!("      --parallel: run the platform legs concurrently, each in its own");
     eprintln!("        remote namespace (cargo's exclusive target-dir lock would");
     eprintln!("        serialize a shared dir; sccache still dedupes host compiles");
@@ -582,7 +584,7 @@ fn run_dist(workspace_root: &Path, options: &DistOptions) -> Result<(), String> 
         .map_err(|err| format!("failed to create {}: {err}", out_dir.display()))?;
 
     let parallel = options.parallel && options.platforms.len() > 1;
-    let artifacts = if parallel {
+    let mut artifacts = if parallel {
         run_dist_platforms_parallel(workspace_root, &options.platforms, &version, &out_dir)?
     } else {
         let mut artifacts = Vec::new();
@@ -598,6 +600,13 @@ fn run_dist(workspace_root: &Path, options: &DistOptions) -> Result<(), String> 
         artifacts
     };
 
+    // Skills are filesystem assets (not embedded). Ship them with the same
+    // share/spur/skills layout install_bundled_skill_assets uses so a release
+    // consumer can extract next to the binary prefix and `spur skills init`
+    // resolves via package_asset_candidates.
+    let skills_archive = package_dist_skill_assets(workspace_root, &out_dir, &version)?;
+    artifacts.push(skills_archive);
+
     let sums_path = out_dir.join("SHA256SUMS");
     write_sha256sums(&dist_artifacts_in(&out_dir)?, &sums_path)?;
 
@@ -607,6 +616,68 @@ fn run_dist(workspace_root: &Path, options: &DistOptions) -> Result<(), String> 
     }
     eprintln!("    {}", sums_path.display());
     Ok(())
+}
+
+/// Archive name for the platform-independent skill asset bundle.
+fn dist_skills_archive_name(version: &str) -> String {
+    format!("spur-skills-{version}.tar.gz")
+}
+
+/// Package `assets/skills` into `dist/spur-skills-<version>.tar.gz` with
+/// archive-internal paths `share/spur/skills/<id>/...`.
+///
+/// That layout matches:
+/// - local `cargo xtask install` → `$CARGO_HOME/../share/spur/skills`
+/// - `package_asset_candidates()` → `<prefix>/share/spur/skills`
+/// - npm postinstall extraction next to `bin/spur`
+fn package_dist_skill_assets(
+    workspace_root: &Path,
+    out_dir: &Path,
+    version: &str,
+) -> Result<PathBuf, String> {
+    let source = workspace_root.join("assets/skills");
+    if !source.is_dir() {
+        return Err(format!(
+            "expected bundled skill assets at {}",
+            source.display()
+        ));
+    }
+
+    let archive_name = dist_skills_archive_name(version);
+    let archive_path = out_dir.join(&archive_name);
+    let stage = out_dir.join(".skills-stage");
+    remove_existing_path(&stage)?;
+    let staged_skills = stage.join("share/spur/skills");
+    copy_dir_all(&source, &staged_skills)?;
+
+    // Prefer GNU/BSD tar -czf; both accept -C and a single path operand.
+    let stage_str = stage
+        .to_str()
+        .ok_or_else(|| format!("non-UTF8 stage path: {}", stage.display()))?;
+    let archive_str = archive_path
+        .to_str()
+        .ok_or_else(|| format!("non-UTF8 archive path: {}", archive_path.display()))?;
+    let status = Command::new("tar")
+        .args(["-czf", archive_str, "-C", stage_str, "share"])
+        .status()
+        .map_err(|err| format!("failed to spawn tar for skill assets: {err}"))?;
+    if !status.success() {
+        let _ = remove_existing_path(&stage);
+        return Err(format!(
+            "tar failed packaging skill assets into {} (status {status})",
+            archive_path.display()
+        ));
+    }
+    remove_existing_path(&stage)?;
+
+    if !archive_path.is_file() {
+        return Err(format!(
+            "skill asset archive missing after tar: {}",
+            archive_path.display()
+        ));
+    }
+    eprintln!("packaged skill assets: {}", archive_path.display());
+    Ok(archive_path)
 }
 
 /// Build + fetch one platform leg. In parallel mode the build and fetch run
@@ -1579,6 +1650,98 @@ mod tests {
         assert!(
             raw.contains("include = [") && raw.contains("\"assets\""),
             "dist-workspace.toml must include the asset tree so cargo-dist archives/installers ship assets/skills"
+        );
+    }
+
+    #[test]
+    fn dist_skills_archive_name_is_versioned_and_platform_independent() {
+        assert_eq!(
+            dist_skills_archive_name("1.15.0"),
+            "spur-skills-1.15.0.tar.gz"
+        );
+    }
+
+    #[test]
+    fn package_dist_skill_assets_ships_share_spur_skills_layout() {
+        let workspace = temp_test_dir("dist-skills-workspace");
+        let out_dir = temp_test_dir("dist-skills-out");
+        let asset = workspace.join("assets/skills/package-skill/SKILL.md");
+        fs::create_dir_all(asset.parent().unwrap()).unwrap();
+        fs::write(
+            &asset,
+            "---\nname: package-skill\ndescription: packaged\n---\nbody\n",
+        )
+        .unwrap();
+
+        let archive =
+            package_dist_skill_assets(&workspace, &out_dir, "9.9.9").expect("package skills");
+        assert_eq!(
+            archive.file_name().and_then(|n| n.to_str()),
+            Some("spur-skills-9.9.9.tar.gz")
+        );
+        assert!(
+            archive.is_file(),
+            "archive should exist at {}",
+            archive.display()
+        );
+        // Staging dir must not leak into dist/.
+        assert!(
+            !out_dir.join(".skills-stage").exists(),
+            "stage dir should be removed after packaging"
+        );
+
+        let listing = Command::new("tar")
+            .args(["-tzf"])
+            .arg(&archive)
+            .output()
+            .expect("tar -tzf");
+        assert!(
+            listing.status.success(),
+            "tar -tzf failed: {}",
+            String::from_utf8_lossy(&listing.stderr)
+        );
+        let listing = String::from_utf8_lossy(&listing.stdout);
+        assert!(
+            listing.contains("share/spur/skills/package-skill/SKILL.md"),
+            "archive must use share/spur/skills layout for SkillCatalog package candidates; got:\n{listing}"
+        );
+
+        // Extract into a fake install prefix and confirm package-relative path.
+        let prefix = temp_test_dir("dist-skills-prefix");
+        let status = Command::new("tar")
+            .args(["-xzf"])
+            .arg(&archive)
+            .arg("-C")
+            .arg(&prefix)
+            .status()
+            .expect("tar -xzf");
+        assert!(status.success());
+        let extracted = prefix.join("share/spur/skills/package-skill/SKILL.md");
+        assert_eq!(
+            fs::read_to_string(extracted).unwrap(),
+            "---\nname: package-skill\ndescription: packaged\n---\nbody\n"
+        );
+    }
+
+    #[test]
+    fn dist_artifacts_in_includes_skills_tarball() {
+        let out_dir = temp_test_dir("dist-artifacts-skills");
+        fs::write(out_dir.join("spur-1.0.0-aarch64-unknown-linux-gnu"), b"bin").unwrap();
+        fs::write(out_dir.join("spur-skills-1.0.0.tar.gz"), b"skills").unwrap();
+        fs::write(out_dir.join("SHA256SUMS"), b"ignore").unwrap();
+        fs::write(out_dir.join("notes.txt"), b"ignore").unwrap();
+
+        let names: Vec<String> = dist_artifacts_in(&out_dir)
+            .unwrap()
+            .into_iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                "spur-1.0.0-aarch64-unknown-linux-gnu".to_owned(),
+                "spur-skills-1.0.0.tar.gz".to_owned(),
+            ]
         );
     }
 
