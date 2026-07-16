@@ -326,6 +326,26 @@ pub fn notebook_launch_report(selection: &spur_core::notebook::NotebookLaunchSel
 }
 
 #[cfg(unix)]
+#[expect(
+    unsafe_code,
+    reason = "pre_exec is required to detach the notebook child from the TUI's controlling session"
+)]
+fn detach_command_session(command: &mut std::process::Command) {
+    use std::os::unix::process::CommandExt;
+
+    // SAFETY: the child callback only invokes the async-signal-safe `setsid`
+    // syscall and reports its errno. No allocation or lock is used after fork.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+}
+
+#[cfg(unix)]
 fn launch_notebook_app(socket_path: &Path) -> io::Result<()> {
     if let Some(parent) = socket_path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -359,11 +379,7 @@ fn launch_notebook_app(socket_path: &Path) -> io::Result<()> {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(stderr);
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        command.process_group(0);
-    }
+    detach_command_session(&mut command);
     command.spawn().map(|_| ())
 }
 
@@ -428,16 +444,128 @@ async fn read_frame(stream: &mut UnixStream) -> std::io::Result<Vec<u8>> {
 }
 
 #[cfg(all(test, unix))]
+#[expect(
+    unsafe_code,
+    reason = "process-global environment mutation and Unix session inspection are serialized test operations"
+)]
 mod tests {
-    use std::sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
+    use std::{
+        ffi::{OsStr, OsString},
+        fs,
+        os::unix::fs::PermissionsExt,
+        path::{Path, PathBuf},
+        sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc, Mutex,
+        },
+        thread,
+        time::{Duration, Instant},
     };
 
     use serde_json::json;
     use tokio::net::UnixListener;
 
     use super::*;
+
+    static NOTEBOOK_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct EnvVarGuard {
+        name: &'static str,
+        previous: Option<OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set(name: &'static str, value: impl AsRef<OsStr>) -> Self {
+            let previous = std::env::var_os(name);
+            // SAFETY: `NOTEBOOK_ENV_LOCK` serializes this process-global mutation.
+            unsafe { std::env::set_var(name, value) };
+            Self { name, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                // SAFETY: the guard remains protected by `NOTEBOOK_ENV_LOCK` until drop.
+                Some(value) => unsafe { std::env::set_var(self.name, value) },
+                // SAFETY: the guard remains protected by `NOTEBOOK_ENV_LOCK` until drop.
+                None => unsafe { std::env::remove_var(self.name) },
+            }
+        }
+    }
+
+    fn path_with_suffix(path: &Path, suffix: &str) -> PathBuf {
+        let mut suffixed = path.as_os_str().to_os_string();
+        suffixed.push(suffix);
+        PathBuf::from(suffixed)
+    }
+
+    fn session_id(pid: libc::pid_t) -> libc::pid_t {
+        // SAFETY: `getsid` only reads kernel process metadata for the supplied PID.
+        let session_id = unsafe { libc::getsid(pid) };
+        assert_ne!(
+            session_id,
+            -1,
+            "getsid({pid}) failed: {}",
+            io::Error::last_os_error()
+        );
+        session_id
+    }
+
+    #[test]
+    fn launch_notebook_app_starts_child_in_new_session() {
+        let _env_lock = NOTEBOOK_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let temp = tempfile::tempdir().expect("tempdir");
+        let fake_notebook = temp.path().join("fake-notebook");
+        fs::write(
+            &fake_notebook,
+            "#!/bin/sh\nprintf '%s\\n' \"$$\" > \"${2}.pid\"\nwhile [ -e \"${2}.hold\" ]; do\n  sleep 0.05\ndone\n",
+        )
+        .expect("write fake notebook");
+        let mut permissions = fs::metadata(&fake_notebook)
+            .expect("fake notebook metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&fake_notebook, permissions).expect("make fake notebook executable");
+
+        let socket_path = temp.path().join("notebook.sock");
+        let pid_path = path_with_suffix(&socket_path, ".pid");
+        let hold_path = path_with_suffix(&socket_path, ".hold");
+        fs::write(&hold_path, b"").expect("create child hold file");
+        let _bin_override = EnvVarGuard::set("SPUR_NOTEBOOK_BIN", &fake_notebook);
+
+        launch_notebook_app(&socket_path).expect("launch fake notebook");
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let child_pid = loop {
+            match fs::read_to_string(&pid_path) {
+                Ok(pid) => {
+                    break pid
+                        .trim()
+                        .parse::<libc::pid_t>()
+                        .expect("numeric child pid")
+                }
+                Err(error)
+                    if error.kind() == io::ErrorKind::NotFound && Instant::now() < deadline =>
+                {
+                    thread::sleep(Duration::from_millis(20));
+                }
+                Err(error) => panic!("read child pid {}: {error}", pid_path.display()),
+            }
+        };
+
+        let parent_pid = libc::pid_t::try_from(std::process::id()).expect("parent pid fits pid_t");
+        let parent_session = session_id(parent_pid);
+        let child_session = session_id(child_pid);
+        fs::remove_file(&hold_path).expect("release fake notebook child");
+
+        assert_ne!(
+            child_session, parent_session,
+            "notebook child must not share the TUI process session"
+        );
+    }
 
     #[tokio::test]
     async fn connect_or_launch_control_socket_launches_when_socket_is_missing() {
