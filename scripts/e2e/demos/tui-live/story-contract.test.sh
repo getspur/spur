@@ -169,6 +169,12 @@ assert_matches "$root/tapes/13-problem-plan-loop-drive.tape" \
   'plan-loop returns to Session Detail before resolution proof'
 assert_has "$root/tapes/04-session-resume.tape" '/Session ·|INSERT/' \
   'resume tape requires Session Detail rather than matching Sessions picker text'
+assert_has "$root/tapes/04-session-resume.tape" 'Ctrl+K' \
+  'resume tape opens Go to from Session Detail'
+assert_has "$root/tapes/04-session-resume.tape" 'Type "Sessions"' \
+  'resume tape opens Sessions through Go to'
+assert_not_matches "$root/tapes/04-session-resume.tape" 'Wait\+Screen[^\n]*/Lineage/' \
+  'resume tape does not assume Dashboard startup'
 
 assert_has "$root/journeys/product-e2e-flow.sh" 'SPUR_DEMO_ALLOW_AGENT_SEND' 'product send remains opt-in'
 assert_has "$root/journeys/problem-plan-loop-drive.sh" 'SPUR_DEMO_ALLOW_PLAN_LOOP' 'plan-loop seed remains opt-in'
