@@ -8,7 +8,9 @@ async fn main() -> Result<(), Error> {
         std::env::set_var("HOME", "/tmp");
     }
 
-    lambda_runtime::run(lambda_runtime::service_fn(lambda::handler)).await
+    // AWS_LAMBDA_MAX_CONCURRENCY > 1 enables concurrent in-process invocations;
+    // unset or <= 1 retains the runtime's sequential behavior.
+    lambda_runtime::run_concurrent(lambda_runtime::service_fn(lambda::handler)).await
 }
 
 fn copy_bundled_extensions() {
