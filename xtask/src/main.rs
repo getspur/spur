@@ -40,6 +40,10 @@ fn print_help() {
     eprintln!();
     eprintln!("options:");
     eprintln!("  --debug    build/install debug artifacts for local installs");
+    eprintln!("  --disable-notebook-mcp");
+    eprintln!("             compile spur without brain-session notebook MCP injection");
+    eprintln!("             (recovery for macOS SIGTTIN / suspended spur tui with codex).");
+    eprintln!("             Equivalent: cargo xtask install -- --features disable-notebook-mcp");
     eprintln!("  --notebook-channel <auto|green>");
     eprintln!("             auto aliases green after the standalone notebook cutover");
     eprintln!("             green installs spur only and expects standalone getspur/spur-notebook");
@@ -114,6 +118,8 @@ struct InstallOptions {
     /// remote zigbuild + fetch flow (macOS hosts only; Linux always
     /// builds locally).
     local: bool,
+    /// Compile out brain-session notebook MCP (`spur-core/disable-notebook-mcp`).
+    disable_notebook_mcp: bool,
     notebook_channel: NotebookInstallChannel,
     cargo_args: Vec<String>,
 }
@@ -124,6 +130,7 @@ fn parse_install_options(extra: Vec<String>) -> Result<InstallOptions, String> {
         remote: false,
         force: false,
         local: false,
+        disable_notebook_mcp: false,
         notebook_channel: NotebookInstallChannel::Green,
         cargo_args: Vec::new(),
     };
@@ -137,6 +144,8 @@ fn parse_install_options(extra: Vec<String>) -> Result<InstallOptions, String> {
             options.force = true;
         } else if arg == "--local" {
             options.local = true;
+        } else if arg == "--disable-notebook-mcp" {
+            options.disable_notebook_mcp = true;
         } else if arg == "--notebook-channel" {
             let value = args
                 .next()
@@ -151,7 +160,30 @@ fn parse_install_options(extra: Vec<String>) -> Result<InstallOptions, String> {
             options.cargo_args.push(arg);
         }
     }
+    if options.disable_notebook_mcp {
+        ensure_cargo_feature(&mut options.cargo_args, "disable-notebook-mcp");
+    }
     Ok(options)
+}
+
+/// Append `--features <name>` unless the feature is already requested in
+/// `cargo_args` (either as `--features name` or `--features=name,...`).
+fn ensure_cargo_feature(cargo_args: &mut Vec<String>, feature: &str) {
+    let already = cargo_args.iter().enumerate().any(|(i, arg)| {
+        if let Some(list) = arg.strip_prefix("--features=") {
+            return list.split(',').any(|f| f.trim() == feature);
+        }
+        if arg == "--features" {
+            return cargo_args
+                .get(i + 1)
+                .is_some_and(|list| list.split(',').any(|f| f.trim() == feature));
+        }
+        false
+    });
+    if !already {
+        cargo_args.push("--features".to_owned());
+        cargo_args.push(feature.to_owned());
+    }
 }
 
 fn install(extra: Vec<String>) -> ExitCode {
@@ -1148,8 +1180,10 @@ fn cargo_build_command(
 }
 
 fn is_xtask_install_flag(arg: &str) -> bool {
-    matches!(arg, "--debug" | "--remote" | "--force" | "--local")
-        || arg == "--notebook-channel"
+    matches!(
+        arg,
+        "--debug" | "--remote" | "--force" | "--local" | "--disable-notebook-mcp"
+    ) || arg == "--notebook-channel"
         || arg.starts_with("--notebook-channel=")
 }
 
@@ -1797,6 +1831,31 @@ mod tests {
 
         let parsed = parse_install_options(vec![]).expect("default options should parse");
         assert!(!parsed.local);
+        assert!(!parsed.disable_notebook_mcp);
+    }
+
+    #[test]
+    fn install_options_parser_accepts_disable_notebook_mcp_flag() {
+        let parsed = parse_install_options(vec!["--disable-notebook-mcp".to_owned()])
+            .expect("--disable-notebook-mcp should parse");
+
+        assert!(parsed.disable_notebook_mcp);
+        assert_eq!(
+            parsed.cargo_args,
+            vec!["--features".to_owned(), "disable-notebook-mcp".to_owned()]
+        );
+
+        // Already requested via cargo args — do not double-append.
+        let parsed = parse_install_options(vec![
+            "--disable-notebook-mcp".to_owned(),
+            "--features".to_owned(),
+            "disable-notebook-mcp".to_owned(),
+        ])
+        .expect("dedupe features");
+        assert_eq!(
+            parsed.cargo_args,
+            vec!["--features".to_owned(), "disable-notebook-mcp".to_owned()]
+        );
     }
 
     #[test]
