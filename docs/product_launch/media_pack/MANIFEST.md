@@ -89,17 +89,31 @@ All under `gallery_stills/` and PH-sized under `ph_ready/gallery-0N-*-1270x760.p
 
 ---
 
-## C. What is explicitly **not** in this pack
+## C. Marketing layer (Higgsfield, conditioned on this pack)
 
-- AI-generated “marketing terminal” mockups that invent UI chrome  
-- Higgsfield GPT Image gallery replacements of Session Detail  
-- Cost-ledger hero stills not present in the problem-story films  
+Product truth stays in `ph_ready/` / `live_demos/` / `gallery_stills/`.
 
-If you need social OG art later, generate it **separately** and never substitute it for gallery product screenshots.
+Marketing creatives live under **`marketing/out/`** — generated with Higgsfield using those stills as `--image` / `--start-image` / `--end-image`. See [`marketing/MARKETING.md`](./marketing/MARKETING.md).
+
+| Marketing file | Use |
+|---|---|
+| `marketing/out/01-og-social.png` | Site OG / social preview |
+| `marketing/out/02-social-square.png` | Square social post |
+| `marketing/out/03-plan-story.png` | Thread: plan loop |
+| `marketing/out/04-explore-story.png` | Thread: specialist cascade |
+| `marketing/out/05-resume-story.png` | Thread: resume |
+| `marketing/out/06-trailer.mp4` | Social trailer only |
+
+**Never** upload marketing outputs as PH gallery product screenshots.
+
+## D. What is explicitly **not** product truth
+
+- AI-invented terminal chrome used as PH gallery  
+- Cost-ledger hero stills not present in the problem-story films
 
 ---
 
-## D. Extract recipe (reproducible)
+## E. Extract recipe (reproducible)
 
 ```bash
 OUT=scripts/e2e/demos/tui-live/out
