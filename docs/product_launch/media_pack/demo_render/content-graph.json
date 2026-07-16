@@ -1,0 +1,37 @@
+{
+  "title": "SPUR Product Hunt hero demo",
+  "audience": "Orchestrator ICP / Product Hunt",
+  "duration_sec": 41,
+  "fps": 30,
+  "canvas": { "width": 1920, "height": 1080, "aspect": "16:9" },
+  "palette": {
+    "bg": "#0B0E14",
+    "text": "#E6E1CF",
+    "accent": "#7FB4CA",
+    "violet": "#957FB8",
+    "muted": "#8B8680"
+  },
+  "product_source": {
+    "path": "../ph_ready/hero-video-plan-loop-drive.mp4",
+    "trim_start_sec": 5,
+    "trim_end_sec": 40,
+    "note": "Real VHS 13-problem-plan-loop-drive; skip cold open 0-4s"
+  },
+  "frames": [
+    { "id": "title", "duration_sec": 3, "template": "title-card", "html": "html/01-title.html" },
+    { "id": "demo", "duration_sec": 35, "template": "product-vhs", "source": "product_source", "captions": [
+      { "at": 0, "for": 5, "text": "Session Detail — operator home" },
+      { "at": 8, "for": 6, "text": "Drive brain ↔ worker loops" },
+      { "at": 16, "for": 6, "text": "Plans and progress in one surface" },
+      { "at": 24, "for": 6, "text": "Specialists without losing context" },
+      { "at": 30, "for": 5, "text": "Resume after you close the laptop" }
+    ]},
+    { "id": "end", "duration_sec": 3, "template": "end-card", "html": "html/03-end.html" }
+  ],
+  "copy": {
+    "tagline": "Control tower for CLI coding agents.",
+    "one_liner": "One brain, many workers, zero lost context.",
+    "cta": "curl -sSL getspur.dev/install.sh | sh",
+    "product": "SPUR"
+  }
+}
