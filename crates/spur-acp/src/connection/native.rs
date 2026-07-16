@@ -1933,9 +1933,8 @@ fn acp_thread_main(
                         let mut cmd = tokio::process::Command::new(program);
                         cmd.args(command_args)
                             .current_dir(&cwd_now)
-                            .stdout(std::process::Stdio::piped())
-                            .stderr(std::process::Stdio::piped())
                             .kill_on_drop(true);
+                        configure_terminal_create_stdio(&mut cmd);
                         #[cfg(unix)]
                         cmd.process_group(0);
                         for env_var in &req.env {
@@ -2962,6 +2961,16 @@ fn normalize_grok_terminal_command(
     }
 }
 
+/// Prevents ACP terminal tools from inheriting Spur's terminal through fd 0.
+///
+/// This closes the inherited-stdin route only; a child can still open `/dev/tty`.
+fn configure_terminal_create_stdio(command: &mut tokio::process::Command) {
+    command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+}
+
 fn append_terminal_output(
     output: &Arc<Mutex<String>>,
     truncated: &Arc<AtomicBool>,
@@ -3653,6 +3662,44 @@ mod native_helper_tests {
             assert!(normalize("/bin/sh -lc 'wrong shell'", &[]).is_none());
             assert!(normalize("/bin/bash -x 'wrong flag'", &[]).is_none());
         }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn terminal_create_stdio_nulls_stdin_and_read_reaches_eof() {
+        let tty_stdin = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("/dev/ptmx")
+            .expect("PTY master should provide a TTY stdin sentinel");
+        let mut command = tokio::process::Command::new("/bin/sh");
+        command
+            .arg("-c")
+            .arg("if test -t 0; then exit 97; fi; if read x; then exit 98; fi")
+            .stdin(std::process::Stdio::from(tty_stdin))
+            .kill_on_drop(true);
+        configure_terminal_create_stdio(&mut command);
+        command.process_group(0);
+
+        let mut child = command.spawn().expect("test child should spawn");
+        let status = match tokio::time::timeout(Duration::from_secs(2), child.wait()).await {
+            Ok(status) => status.expect("test child should be waitable"),
+            Err(_) => {
+                let _ = child.kill().await;
+                panic!("terminal/create child did not exit after stdin should have reached EOF");
+            }
+        };
+
+        assert_ne!(status.code(), Some(97), "child fd0 remained a TTY");
+        assert_ne!(
+            status.code(),
+            Some(98),
+            "read unexpectedly consumed stdin instead of observing EOF"
+        );
+        assert!(
+            status.success(),
+            "child should exit cleanly after read observes EOF: {status}"
+        );
     }
 
     #[cfg(unix)]
