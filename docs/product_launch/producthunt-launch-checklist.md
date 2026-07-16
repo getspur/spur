@@ -3,7 +3,7 @@
 **Status:** Draft for ownership — **not execution-ready** until P0 fixes below are closed (content-marketer review 2026-07-16)  
 **Date:** 2026-07-16 · **Rev:** 1.2 (journey-aligned demo + gallery vs live TUI problem stories)  
 **Grounded in:** [`SPUR_PRD.md`](../../SPUR_PRD.md) v2.3 · official [Product Hunt Launch Guide](https://www.producthunt.com/launch) · [Featuring Guidelines](https://help.producthunt.com/en/articles/9883485-product-hunt-featuring-guidelines) · [Points](https://help.producthunt.com/en/articles/10275873-what-are-points) · live demos [`scripts/e2e/demos/tui-live/`](../../scripts/e2e/demos/tui-live/)  
-**Product journey:** [`product-journey-ph.md`](./product-journey-ph.md)  
+**Product journey:** [`product-journey-ph.md`](./product-journey-ph.md) (**approved 2026-07-16**)  
 **Review:** [`producthunt-checklist-content-review.md`](./producthunt-checklist-content-review.md)  
 **Related assets:** [`marketing/launch/playbook.md`](../../marketing/launch/playbook.md) (cross-channel ops) · [`marketing/messaging/positioning.md`](../../marketing/messaging/positioning.md) (persona language)  
 **Superseded for PH copy/execution:** [`marketing/launch/product-hunt.md`](../../marketing/launch/product-hunt.md) (2026-05 package — cost-ledger lead, unverified UI claims, unsupported pricing; salvage brand-visual direction only after audit)
