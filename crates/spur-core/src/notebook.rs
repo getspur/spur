@@ -394,14 +394,34 @@ pub fn notebook_mcp_server(socket_nonce: &str) -> Result<McpServer, NotebookReso
     ))
 }
 
+/// MCP servers injected into every brain session.
+///
+/// Always includes HTTP `spur-mcp`. Unless built with
+/// `--features disable-notebook-mcp`, also includes the notebook stdio proxy
+/// (`SpurLab` / `spur-notebook --mcp-proxy`).
 pub fn brain_mcp_servers(
     spur_mcp_url: &str,
     socket_nonce: &str,
 ) -> Result<Vec<McpServer>, NotebookResolverError> {
-    Ok(vec![
-        McpServer::Http(McpServerHttp::new("spur-mcp", spur_mcp_url)),
-        notebook_mcp_server(socket_nonce)?,
-    ])
+    let spur_mcp = McpServer::Http(McpServerHttp::new("spur-mcp", spur_mcp_url));
+
+    // Feature `disable-notebook-mcp`: compile out notebook stdio MCP so the
+    // brain never spawns SpurLab/spur-notebook --mcp-proxy (macOS SIGTTIN
+    // isolation / recovery builds).
+    #[cfg(feature = "disable-notebook-mcp")]
+    {
+        let _ = socket_nonce;
+        tracing::warn!(
+            "notebook MCP disabled at compile time (feature disable-notebook-mcp); \
+             brain sessions will not inject SpurLab/spur-notebook --mcp-proxy"
+        );
+        return Ok(vec![spur_mcp]);
+    }
+
+    #[cfg(not(feature = "disable-notebook-mcp"))]
+    {
+        Ok(vec![spur_mcp, notebook_mcp_server(socket_nonce)?])
+    }
 }
 
 #[cfg(test)]
