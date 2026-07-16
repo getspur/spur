@@ -197,6 +197,17 @@ mod tests {
     }
 
     #[test]
+    fn required_tier_for_plan_durable_returns_community() {
+        // Durable plan control plane (submit_plan persist / reconciler path)
+        // is Community as of policy_version 2026-07-16. Key name still says
+        // mcp_pro_* for registry taxonomy; policy grant is authoritative.
+        assert_eq!(
+            required_tier_for(FeatureKey::MCP_PRO_PLAN_DURABLE),
+            Some(Plan::Community),
+        );
+    }
+
+    #[test]
     fn feature_gate_error_is_clone() {
         // Tier 2 TUI App owns a `FeatureGateError` inside
         // `App::upgrade_modal: Option<UpgradeModalState>`, so the

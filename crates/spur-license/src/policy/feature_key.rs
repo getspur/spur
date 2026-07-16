@@ -73,6 +73,8 @@ impl FeatureKey {
 
     // --- spur-mcp (10) — Wave 8: merged outcome_materializer into delegate, reconciler_journal_notify into plan_durable, mutation_executor into signal_watcher; deferred custom_tools to v1.1.
     //     Wave 9: tier-shifted graph_tools Pro→Free per "viral acquisition surface" rationale (raw JSON / Mermaid text output via `bv` graph passthrough).
+    //     2026-07-16: tier-shifted plan_durable Pro→Community (daily-driver durable plan control plane).
+    //     Key name still says mcp_pro_* for registry taxonomy; signed policy grants it on Community.
     pub const MCP_CORE_SERVER_DISPATCH: Self = Self("mcp_core_server_dispatch");
     pub const MCP_CORE_DELEGATE: Self = Self("mcp_core_delegate");
     pub const MCP_CORE_OUTCOME_FETCH: Self = Self("mcp_core_outcome_fetch");
