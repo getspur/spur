@@ -20,14 +20,15 @@ done
 
 gallery=(
   "$ROOT/ph_ready/gallery-01-session-detail-1270x760.png"
-  "$ROOT/ph_ready/gallery-02-workers-plan-loop-1270x760.png"
-  "$ROOT/ph_ready/gallery-03-plan-progress-1270x760.png"
+  "$ROOT/ph_ready/gallery-02-worker-visibility-1270x760.png"
+  "$ROOT/ph_ready/gallery-03-plan-state-1270x760.png"
   "$ROOT/ph_ready/gallery-04-specialist-routing-1270x760.png"
   "$ROOT/ph_ready/gallery-05-session-resume-1270x760.png"
 )
-if [[ -f "${gallery[0]}" && -f "${gallery[1]}" && -f "${gallery[2]}" && -f "${gallery[3]}" && -f "${gallery[4]}" ]]; then
-  ffmpeg -y -v error \
-    -i "${gallery[0]}" -i "${gallery[1]}" -i "${gallery[2]}" -i "${gallery[3]}" -i "${gallery[4]}" \
-    -filter_complex '[0:v]scale=508:304[a];[1:v]scale=508:304[b];[2:v]scale=508:304[c];[3:v]scale=508:304[d];[4:v]scale=508:304[e];[a][b][c][d][e]xstack=inputs=5:layout=0_0|508_0|1016_0|0_304|508_304[out]' \
-    -map '[out]' -frames:v 1 "$DEST/gallery-contact.png"
-fi
+for image in "${gallery[@]}"; do
+  [[ -f "$image" ]] || { printf 'missing gallery image: %s\n' "$image" >&2; exit 1; }
+done
+ffmpeg -y -v error \
+  -i "${gallery[0]}" -i "${gallery[1]}" -i "${gallery[2]}" -i "${gallery[3]}" -i "${gallery[4]}" \
+  -filter_complex '[0:v]scale=508:304[a];[1:v]scale=508:304[b];[2:v]scale=508:304[c];[3:v]scale=508:304[d];[4:v]scale=508:304[e];[a][b][c][d][e]xstack=inputs=5:layout=0_0|508_0|1016_0|0_304|508_304[out]' \
+  -map '[out]' -frames:v 1 "$DEST/gallery-contact.png"

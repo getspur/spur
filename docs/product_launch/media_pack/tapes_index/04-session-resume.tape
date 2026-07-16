@@ -18,13 +18,18 @@ Hide
 Type "./bin/run-spur-tui-live.sh"
 Enter
 Show
-Wait+Screen@25s /Lineage/
-Sleep 800ms
+Wait+Screen@35s /Session ·|INSERT/
+Sleep 2s
 Hide
-Type "s"
+Ctrl+K
 Show
-Wait+Screen@15s /Sessions/
-Sleep 600ms
+Wait+Screen@15s /Go to/
+Hide
+Type "Sessions"
+Enter
+Show
+Wait+Screen@20s /Sessions|TODAY|Start new session/
+Sleep 1s
 # Prefer mid-list rows (top sessions often attach-held by other TUIs)
 Hide
 Down
@@ -36,5 +41,5 @@ Sleep 400ms
 Hide
 Enter
 Show
-Wait+Screen@25s /Session/
+Wait+Screen@25s /Session ·|INSERT/
 Sleep 3s
