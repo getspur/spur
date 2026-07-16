@@ -480,7 +480,10 @@ pub async fn route_index(
     sfn_client: &impl IndexExecutionStarter,
     caller_id: &str,
 ) -> Result<Value, McpHandlerError> {
-    route_index_inner(args, Some(catalog), jobs, sfn_client, caller_id).await
+    if let Some(response) = route_index_warm_lookup(args, catalog)? {
+        return Ok(response);
+    }
+    route_index_inner(args, jobs, sfn_client, caller_id).await
 }
 
 pub async fn route_index_without_catalog(
@@ -489,16 +492,76 @@ pub async fn route_index_without_catalog(
     sfn_client: &impl IndexExecutionStarter,
     caller_id: &str,
 ) -> Result<Value, McpHandlerError> {
-    route_index_inner(args, None, jobs, sfn_client, caller_id).await
+    route_index_inner(args, jobs, sfn_client, caller_id).await
 }
 
-#[expect(
-    clippy::future_not_send,
-    reason = "warm-path dedup borrows a DuckDB-backed catalog resolver across async job-store calls"
-)]
+/// Performs the synchronous catalog portion of `external_index` routing.
+///
+/// `Some` contains a terminal validation rejection or warm catalog hit. `None`
+/// means routing must continue through [`route_index_without_catalog`], which
+/// performs DNS, rate-limit, and enqueue I/O without borrowing DuckDB.
+pub fn route_index_warm_lookup(
+    args: &Value,
+    catalog: &CatalogResolver,
+) -> Result<Option<Value>, McpHandlerError> {
+    let args: ExternalIndexArgs = parse_args(args)?;
+    args.validate()?;
+
+    let validate_options = index_validate_options();
+    let parsed_url = match abuse::validate(args.source_url.trim(), &validate_options) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            return Ok(Some(json!({
+                "status": "rejected",
+                "reason": format!("source_url: {error}")
+            })));
+        }
+    };
+
+    let identity = match ExternalIndexIdentity::canonicalize(&args, &parsed_url) {
+        Ok(identity) => identity,
+        Err(reason) => {
+            return Ok(Some(json!({
+                "status": "rejected",
+                "reason": reason
+            })));
+        }
+    };
+
+    if args.force.unwrap_or(false) {
+        return Ok(None);
+    }
+    if let Some(resolved) = lookup_complete_catalog_revision(
+        catalog,
+        &identity.source,
+        &identity.package,
+        &identity.revision,
+    )? {
+        return Ok(Some(json!({
+            "status": "complete",
+            "snapshot_id": resolved.snapshot_id,
+            "revision": resolved.revision
+        })));
+    }
+    if let Some(legacy_source) = identity.legacy_warm_source.as_deref() {
+        if let Some(resolved) = lookup_complete_catalog_revision(
+            catalog,
+            legacy_source,
+            &identity.package,
+            &identity.revision,
+        )? {
+            return Ok(Some(json!({
+                "status": "complete",
+                "snapshot_id": resolved.snapshot_id,
+                "revision": resolved.revision
+            })));
+        }
+    }
+    Ok(None)
+}
+
 async fn route_index_inner(
     args: &Value,
-    catalog: Option<&CatalogResolver>,
     jobs: &dyn JobStore,
     _sfn_client: &impl IndexExecutionStarter,
     caller_id: &str,
@@ -526,40 +589,6 @@ async fn route_index_inner(
             }));
         }
     };
-
-    // A successful warm lookup is a read-only catalog operation. Keep it ahead
-    // of DNS and mutable rate accounting so repeated discovery calls remain
-    // cheap. force=true bypasses only this lookup.
-    if !args.force.unwrap_or(false) {
-        if let Some(catalog) = catalog {
-            if let Some(resolved) = lookup_complete_catalog_revision(
-                catalog,
-                &identity.source,
-                &identity.package,
-                &identity.revision,
-            )? {
-                return Ok(json!({
-                    "status": "complete",
-                    "snapshot_id": resolved.snapshot_id,
-                    "revision": resolved.revision
-                }));
-            }
-            if let Some(legacy_source) = identity.legacy_warm_source.as_deref() {
-                if let Some(resolved) = lookup_complete_catalog_revision(
-                    catalog,
-                    legacy_source,
-                    &identity.package,
-                    &identity.revision,
-                )? {
-                    return Ok(json!({
-                        "status": "complete",
-                        "snapshot_id": resolved.snapshot_id,
-                        "revision": resolved.revision
-                    }));
-                }
-            }
-        }
-    }
 
     if let Err(error) = abuse::resolve_and_check_dns(&parsed_url) {
         return Ok(json!({
