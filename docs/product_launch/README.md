@@ -4,12 +4,13 @@ Operational checklists and launch-facing plans for public SPUR releases.
 
 | Doc | Purpose |
 |---|---|
-| [producthunt-launch-checklist.md](./producthunt-launch-checklist.md) | End-to-end Product Hunt success checklist (PRD-grounded + platform best practices) |
+| [producthunt-launch-checklist.md](./producthunt-launch-checklist.md) | **Canonical** Product Hunt success checklist (PRD v2.3 + current PH policy; rev 1.1) |
+| [producthunt-checklist-content-review.md](./producthunt-checklist-content-review.md) | Codex `content-marketer` audit (2026-07-16) — P0/P1 findings and copy patches |
 
 ## Related (marketing tree)
 
 | Path | Purpose |
 |---|---|
-| [`marketing/launch/product-hunt.md`](../../marketing/launch/product-hunt.md) | Submission package: taglines, maker comment, gallery prompts, hunter notes |
-| [`marketing/launch/playbook.md`](../../marketing/launch/playbook.md) | Full multi-channel T−14 → T+7 launch playbook |
+| [`marketing/launch/product-hunt.md`](../../marketing/launch/product-hunt.md) | **Superseded for execution** (2026-05 package) — audit before any reuse |
+| [`marketing/launch/playbook.md`](../../marketing/launch/playbook.md) | Multi-channel T−14 → T+7 ops (import PH timestamp/copy from the checklist) |
 | [`SPUR_PRD.md`](../../SPUR_PRD.md) | Product truth for claims, tiers, and positioning |
