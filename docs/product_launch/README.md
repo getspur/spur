@@ -4,7 +4,8 @@ Operational checklists and launch-facing plans for public SPUR releases.
 
 | Doc | Purpose |
 |---|---|
-| [producthunt-launch-checklist.md](./producthunt-launch-checklist.md) | **Canonical** Product Hunt success checklist (PRD v2.3 + current PH policy; rev 1.1) |
+| [producthunt-launch-checklist.md](./producthunt-launch-checklist.md) | **Canonical** Product Hunt success checklist (PRD v2.3 + current PH policy; rev 1.1+) |
+| [product-journey-ph.md](./product-journey-ph.md) | **PH product journey** crosswalked to live TUI problem stories (`scripts/e2e/demos/tui-live`) |
 | [producthunt-checklist-content-review.md](./producthunt-checklist-content-review.md) | Codex `content-marketer` audit (2026-07-16) — P0/P1 findings and copy patches |
 
 ## Related (marketing tree)
