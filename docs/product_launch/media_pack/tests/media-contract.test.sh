@@ -22,6 +22,11 @@ done
 
 [[ -f "$MANIFEST" ]] && pass "proof manifest exists" || fail "proof manifest exists"
 [[ -f "$HTML" ]] && pass "HTML artifact exists" || fail "HTML artifact exists"
+if rg -q 'ffmpeg -nostdin -y -v error -ss' "$ROOT/refresh.sh"; then
+  pass "publisher protects manifest input from ffmpeg"
+else
+  fail "publisher protects manifest input from ffmpeg"
+fi
 
 if [[ -f "$MANIFEST" ]]; then
   if jq -e '.version == 1 and (.assets | length == 5)' "$MANIFEST" >/dev/null; then
