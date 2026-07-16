@@ -3,3 +3,7 @@ live_demos/
 ph_ready/hero-video-plan-loop-drive.mp4
 ph_ready/hero-gif-plan-loop-drive.gif
 ph_ready/_thumb_crop.png
+
+# Higgsfield marketing outputs (large); regenerate via marketing/MARKETING.md
+marketing/out/
+marketing/jobs/*.done.json
