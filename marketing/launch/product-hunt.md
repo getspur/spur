@@ -1,5 +1,12 @@
 # SPUR — Product Hunt Submission Package
 
+> **SUPERSEDED for execution (2026-07-16).** Do **not** ship taglines, gallery captions, pricing, Windows/WSL claims, hunter lists, or maker-comment copy from this file until a line-by-line audit against [`SPUR_PRD.md`](../../SPUR_PRD.md) v2.3.
+>
+> **Canonical PH checklist:** [`docs/product_launch/producthunt-launch-checklist.md`](../../docs/product_launch/producthunt-launch-checklist.md)  
+> **Content-marketer review:** [`docs/product_launch/producthunt-checklist-content-review.md`](../../docs/product_launch/producthunt-checklist-content-review.md)
+>
+> Known conflicts with PRD v2.3 / current PH policy: cost-ledger-first hero; unsupported `$19` / `$290` / `$49` pricing; Team RBAC/audit claims; invented UI (`spur cost --today`, space-collapse); “no auto-merge ever” vs Pro auto-approve; AI mock terminals; vote-quality hunter framing. **Salvage only** brand-visual direction after audit.
+
 *2026-05-20. Phase-4 launch deliverable. Grounded in `marketing/product-marketing.md` V1.3 (Product Hunt is on the channel list at line 215; Show HN is explicitly NOT, per line 216 — no public repo), `marketing/messaging/positioning.md` (Hero A/B/C candidates), `marketing/messaging/levers.md` (Pratfall + cost-ledger anchors), and `marketing/site/og/PLAN.md` (brand-visual constraints). Every copy element fits PH character limits exactly. No emoji. No "AI-powered" / "platform" framing.*
 
 ---
