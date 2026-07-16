@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MANIFEST="$ROOT/proof-manifest.json"
 HTML="$ROOT/html/index.html"
+GRAPH="$ROOT/demo_render/content-graph.json"
 failures=0
 
 pass() { printf 'PASS %s\n' "$1"; }
@@ -45,6 +46,26 @@ if [[ -f "$MANIFEST" ]]; then
     [[ "$actual" == "$checksum" ]] && pass "$id checksum" || fail "$id checksum"
   done < <(jq -r '.assets[] | select(.status == "approved" and .kind == "still") |
     [.id,.source,(.timestamp_sec|tostring),.approved_source_sha256] | @tsv' "$MANIFEST")
+
+  if jq -e '([.hero.segments[].id] | sort) == ["plans","resume","session","specialist","workers"]' "$MANIFEST" >/dev/null; then
+    pass "hero declares five evidence segments"
+  else
+    fail "hero declares five evidence segments"
+  fi
+  if jq -e 'all(.hero.segments[] as $segment;
+      (($segment.proof_terms | length) > 0) and
+      any(.assets[]; .id == $segment.asset_id))' "$MANIFEST" >/dev/null; then
+    pass "every hero caption resolves to approved proof"
+  else
+    fail "every hero caption resolves to approved proof"
+  fi
+  if [[ -f "$GRAPH" ]] && jq -e --slurpfile manifest "$MANIFEST" \
+      '([.segments[] | select(.kind == "video") | .id] | sort) ==
+       ([$manifest[0].hero.segments[].id] | sort)' "$GRAPH" >/dev/null; then
+    pass "hero graph matches proof manifest"
+  else
+    fail "hero graph matches proof manifest"
+  fi
 fi
 
 if [[ -f "$HTML" ]]; then
