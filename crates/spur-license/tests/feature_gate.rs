@@ -11,6 +11,7 @@ fn community_has_core_features() {
     assert!(gate.has(FeatureKey::CORE_CORE_BRAIN_SESSION));
     assert!(gate.has(FeatureKey::CORE_CORE_PARALLEL_WORKERS));
     assert!(gate.has(FeatureKey::PM_PRO_BEADS_ADVANCED));
+    assert!(gate.has(FeatureKey::MCP_PRO_PLAN_DURABLE));
     assert_eq!(gate.tier(), Tier::Community);
 }
 

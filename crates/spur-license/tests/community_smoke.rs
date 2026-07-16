@@ -42,6 +42,7 @@ fn community_default_has_expected_features() {
     assert!(gate.has(FeatureKey::WORKTREE_CORE_ISOLATION));
     assert!(gate.has(FeatureKey::PM_CORE_BROWSE));
     assert!(gate.has(FeatureKey::PM_PRO_BEADS_ADVANCED));
+    assert!(gate.has(FeatureKey::MCP_PRO_PLAN_DURABLE));
 }
 
 #[test]
