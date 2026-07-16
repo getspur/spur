@@ -1,11 +1,13 @@
 # SPUR — Product Requirements Document
 
-**Version:** 2.2  
+**Version:** 2.3  
 **Date:** July 16, 2026  
 **Author:** Product Owner, SPUR TUI  
-**Status:** Grounded (v2.0 base + v2.1 TUI surfaces; **v2.2 FeatureGate / Community-first policy** reconciled against `crates/spur-license` `FeatureGate`, `FeatureKey` registry (63 keys), and signed `resources/default_policy.json` policy_version `2026-07-03`)
+**Status:** Grounded (v2.0–v2.2 base; **v2.3** durable plan control plane on Community — signed `default_policy.json` policy_version `2026-07-16`)
 
-**v2.2 changelog:** Replaced legacy tier marketing language (`single_worker`, `tui_session_detail` as Pro-only, old policy feature names) with the live Community-first entitlement model. Cross-mapped every product surface to `FeatureKey` + signed policy. Documented that **quotas** (not missing feature keys) limit Community concurrency.
+**v2.3 changelog:** Moved `mcp_pro_plan_durable` into Community (policy grant; key name unchanged). Pro exclusive list is now 13 keys. Durable plan reconciler / control plane is part of the free daily driver.
+
+**v2.2 changelog:** Community-first FeatureGate crosswalk; quotas vs feature keys; TUI view mapping.
 
 **v2.1 changelog:** Documented post–April 2026 TUI surfaces — Plan Browser, Loop Browser, Explore Browser, Agent Config Browser, Insights.
 
@@ -31,7 +33,7 @@ The workspace is ~500k lines of Rust across 22 crates under `crates/` (plus `xta
 - **Session attach lock**: `fs4` advisory locks prevent split-brain multi-window attachment to the same brain session
 - **Continuation bridge**: Delegation outcomes are clipped to a bounded envelope and fed back to the brain scheduler as ordered turns
 - **Peer mailbox**: Structured worker-to-worker messaging with ledgered delivery and stranded-message reconciliation (Stage-1, opt-in)
-- **Tiered license gating**: `FeatureGate` + signed Ed25519 policy (`default_policy.json`). **Community is the daily-driver baseline** (48 feature keys); Pro adds ~14 upsell keys via `@inherit:community`
+- **Tiered license gating**: `FeatureGate` + signed Ed25519 policy (`default_policy.json`, policy_version `2026-07-16`). **Community is the daily-driver baseline** (49 feature keys, including durable plan control plane); Pro adds ~13 upsell keys via `@inherit:community`
 - **Event-sourced lineage**: Pure projections from an NDJSON event stream; session resume is replay
 - **Outcome materialization**: Content-addressed blob storage (memory, FS, git) with measured instrumentation
 - **Paste-as-atom**: Multi-line paste safety in the TUI composer (`tui_core_input_paste_as_atom` — Community)
@@ -79,7 +81,7 @@ This section maps **existing technical capability** (what the code does) to **pr
 | `spur-license` `FeatureGate` + Ed25519 policy | Wait-free `has(FeatureKey)` / `quota(QuotaKey)` over `ArcSwap` snapshot | Community offline-by-default; Pro/Team via signed policy + JWT | Production |
 | `spur-bot` Telegram runtime | Mobile review (`bot_pro_telegram_solo`, `bot_pro_inline_review`) | Step away from the terminal without losing the loop | Production (**Pro** feature keys) |
 | WorktreeManager (`spur-worktree`) | True filesystem isolation per worker | Parallel workers cannot clobber each other's files | Production (Community) |
-| PlanProjectionStore + Plan Browser (`spur-core`, `spur-tui`) | Browse, claim, start/resume sprint plans | Durable plans are inventory, not only drill-down | Production (TUI view unregistered; plan durability Pro = `mcp_pro_plan_durable`) |
+| PlanProjectionStore + Plan Browser (`spur-core`, `spur-tui`) | Browse, claim, start/resume sprint plans | Durable plans are inventory, not only drill-down | Production (TUI view unregistered; plan durability Community = `mcp_pro_plan_durable`) |
 | Loop runtime + Loop Browser (`spur-core`, `spur-tui`) | Pause/resume/retire recurring loops | Ongoing agent ops beyond one-shot plans | Production (TUI view unregistered) |
 | Explore pool (`spur-core` explore + `spur-tui` ExploreBrowser) | Browse/adopt skills and agent personas | Extensibility without leaving the TUI | Production (Community `skills_core_registry`; custom skills Pro) |
 | Agent config browser (`spur-tui`) | Inspect/edit registered agent settings | Multi-agent setup without hand-editing TOML only | Production (TUI view unregistered) |
@@ -141,12 +143,12 @@ SPUR's commercial model is **feature-gated tiers** enforced by a signed policy d
 | Layer | Path | Role |
 |---|---|---|
 | **Feature registry** | `crates/spur-license/src/policy/feature_key.rs` | 63 typed `FeatureKey` consts (`<crate>_<tier>_<capability>` naming). Parse via `FeatureKey::from_known`; unknown strings are dropped. |
-| **Signed policy** | `crates/spur-license/resources/default_policy.json` | Canonical grant lists + quotas per tier. `policy_version: 2026-07-03`. Pro/Team/Enterprise use `@inherit:community`. |
+| **Signed policy** | `crates/spur-license/resources/default_policy.json` | Canonical grant lists + quotas per tier. `policy_version: 2026-07-16`. Pro/Team/Enterprise use `@inherit:community`. |
 | **Runtime gate** | `crates/spur-license/src/gate.rs` → `FeatureGate` | `has(FeatureKey)`, `quota(QuotaKey)`, `tier()`, `update_state`. Default construction = **Community offline snapshot**. |
 | **Default install** | `CommunityProvider` + `FeatureGate::new(PolicyResolver::embedded())` | No license key required for Community. |
 | **Upgrade CTA** | `required_tier_for(FeatureKey)` | Walks Community → Pro → Team → Enterprise until the key appears in policy. |
 
-**Product rule (Wave 9 / Community-friendly):** Give away the **complete solo daily driver** on Community. Monetize **remote control, multi-agent depth, durable plan control-plane extras, DuckDB insights, custom skills** on Pro. Do **not** gate Session Detail, Plan Inspector, Issue Browser, session resume, or basic MCP/PM behind Pro.
+**Product rule (Wave 9 + 2026-07-16 Community-friendly):** Give away the **complete solo daily driver** on Community — including **durable plan control plane** (`mcp_pro_plan_durable`). Monetize **remote control (Telegram), multi-agent depth (peer mailbox), auto-approve, DuckDB insights, custom skills, concurrency quota** on Pro. Do **not** gate Session Detail, Plan Inspector, Issue Browser, session resume, durable plans, or basic MCP/PM behind Pro.
 
 **Naming caveat:** Some keys still contain `_pro_` in the string (e.g. `pm_pro_beads_advanced`) but are **granted on Community** by policy. The **policy list is authoritative**; key name is historical registry taxonomy, not the paywall.
 
@@ -156,7 +158,7 @@ SPUR's commercial model is **feature-gated tiers** enforced by a signed policy d
 
 **Policy metadata:** `label: Free` · *“Daily-driver baseline; covers solo-dev complete workflow.”*
 
-**48 feature keys** in signed policy (all Community-granted):
+**49 feature keys** in signed policy (all Community-granted):
 
 #### Product map (what users get free)
 
@@ -166,7 +168,8 @@ SPUR's commercial model is **feature-gated tiers** enforced by a signed policy d
 | Event pipeline / lineage | `core_core_event_pipeline` | Funnel + sink + lineage umbrella |
 | Review gate (manual A/D/M/R + retry config) | `core_core_review`, `core_core_review_retry_config` | Auto-approve is Pro |
 | Session resume (attach) | `core_core_session_resume` | Event-replay depth is Pro/v1.1 |
-| Plan persistence | `core_core_plan_persistence` | Ephemeral MCP plan tools free; durable plan MCP is Pro |
+| Plan persistence | `core_core_plan_persistence` | Local plan durability baseline |
+| **Durable plan control plane** | **`mcp_pro_plan_durable`** | Reconciler / persist-as-epic / multi-session plans — **Community** (name still `mcp_pro_*`) |
 | Parallel workers **capability** | `core_core_parallel_workers` | **Quota: 1 concurrent worker** |
 | Permission prompts | `core_core_permission_request_detection` | |
 | ACP transports + adapters | `acp_core_transport_*`, `acp_core_adapter_{claude_code,codex,kiro}`, `acp_core_session_attach_advisory_lock` | |
@@ -192,11 +195,11 @@ These ship in `spur-tui` and are **not** listed in the 63-key registry. They are
 
 - Session Picker, Plan Browser (`/sprints`), Loop Browser, Explore Browser (`/explore`), Agent Config Browser (`/configure`), Mermaid overlay (`markdown` feature), Insights placeholder when `analytics` off
 
-**Second-order product insight:** Community is intentionally **product-complete for solo use**. Revenue should not depend on hiding the TUI. Upsell is depth (Telegram, durable plan control plane, DuckDB, auto-review, peer mailbox, concurrency quota), not “you can open Session Detail.”
+**Second-order product insight:** Community is intentionally **product-complete for solo use** — including durable plans and the full core TUI. Revenue should not depend on hiding the control tower. Upsell is depth (Telegram, DuckDB, auto-review, peer mailbox, concurrency quota, custom skills), not “you can open Session Detail or submit a durable plan.”
 
 ### 4.2 Pro — upsell on Community inherit
 
-**Policy:** `@inherit:community` + **14 Pro-only keys**. Metadata: *“Adds remote control, multi-agent coordination, review control plane, cost insights, extensibility.”*
+**Policy:** `@inherit:community` + **13 Pro-only keys**. Metadata: *“Adds remote control, multi-agent coordination, review control plane, cost insights, extensibility.”* (Durable plan control plane is no longer Pro-exclusive as of `2026-07-16`.)
 
 | Upsell | `FeatureKey` | Product story |
 |---|---|---|
@@ -204,8 +207,7 @@ These ship in `spur-tui` and are **not** listed in the 63-key registry. They are
 | Peer mailbox | `core_pro_peer_mailbox_router` | Worker↔worker (Stage-1) |
 | Auto-approve review | `core_pro_review_auto_approve` | Less manual gate friction |
 | Worker heartbeat watchdog | `core_pro_worker_heartbeat_watchdog` | Hang detection |
-| Durable plan MCP | `mcp_pro_plan_durable` | Reconciler / journal path |
-| MCP review + scope-drift signals | `mcp_pro_review`, `mcp_pro_signal_watcher_scope_drift` | Control-plane recovery |
+| MCP review + scope-drift signals | `mcp_pro_review`, `mcp_pro_signal_watcher_scope_drift` | Signal recovery extras |
 | Per-project cost tracking | `cost_pro_per_project_tracking` | Team Lead spend lens |
 | DuckDB analytics engine | `ctx_pro_duckdb_engine` | Insights TUI + SQL reports |
 | Custom skills | `skills_pro_custom` | Beyond bundled registry |
@@ -224,7 +226,7 @@ These ship in `spur-tui` and are **not** listed in the 63-key registry. They are
 
 - `core_pro_session_resume_event_replay` — listed under `v1_1_q3_roadmap.pro` in policy JSON; deeper resume fidelity remains a Pro story.
 
-**Second-order product insight:** Pro sells **scale + remote + analytics + control-plane depth**, not the basic TUI. Concurrent workers 1→10 is the clearest quantitative upsell next to Telegram and DuckDB.
+**Second-order product insight:** Pro sells **scale + remote + analytics + auto-review depth**, not the basic TUI or durable plans (those are Community). Concurrent workers 1→10 is the clearest quantitative upsell next to Telegram and DuckDB.
 
 ### 4.3 Team
 
@@ -261,7 +263,7 @@ These ship in `spur-tui` and are **not** listed in the 63-key registry. They are
 | 1 concurrent worker | **Yes** | **Quota = 1** (feature key present) |
 | 10 concurrent workers | Pro | Quota |
 | Telegram review | **Pro** | `bot_pro_*` |
-| Durable plan reconciler MCP | **Pro** | `mcp_pro_plan_durable` |
+| Durable plan reconciler MCP | **Community** | `mcp_pro_plan_durable` (name historical; policy grants free) |
 | Auto-approve | **Pro** | `core_pro_review_auto_approve` |
 | DuckDB / Insights analytics | **Pro** | `ctx_pro_duckdb_engine` + build feature |
 | Peer mailbox | **Pro** | `core_pro_peer_mailbox_router` (opt-in runtime) |
@@ -324,7 +326,7 @@ Navigation is driven by `ViewId` in `crates/spur-tui`:
 | Stage board | Kanban-style columns per stage. Tasks show status badge, worker link, blocked indicator, dependency hints, retry count. |
 | Task detail | Identity, execution (agent, attempt, branch), dependencies, output (summary, diff, mutation ID, superseded-by). |
 | Responsive layout | Side-by-side when width ≥ 90, stacked when narrower. |
-| Gate note | Durable plan **MCP** (`mcp_pro_plan_durable`) is Pro; the inspector view key is Community. |
+| Gate note | Durable plan **MCP** (`mcp_pro_plan_durable`) and inspector view are both Community. |
 
 #### Plan Browser (`/sprints` — ungated view)
 
@@ -529,8 +531,8 @@ Second-order analysis:
 
 **Decision: Tier boundaries follow the signed policy (Community-first), not legacy marketing tables.**
 
-- **Community:** Complete solo daily driver — full core TUI views, session resume, review, MCP core, PM browse, graph tools. Concurrency **quota = 1**. Explore / plan / loop browsers unregistered → free in practice.
-- **Pro:** Telegram, durable plan MCP, auto-approve, peer mailbox, DuckDB/Insights, custom skills, higher worker quota (10), retention/failover depth.
+- **Community:** Complete solo daily driver — full core TUI views, session resume, review, durable plan control plane, MCP core, PM browse, graph tools. Concurrency **quota = 1**. Explore / plan / loop browsers unregistered → free in practice.
+- **Pro:** Telegram, auto-approve, peer mailbox, DuckDB/Insights, custom skills, higher worker quota (10), retention/failover depth.
 - **Team:** Today ≈ Pro feature set + higher retention; distinct Team keys still placeholder. Do not sell “Issue Browser” as Team-only.
 - **Enterprise:** Unlimited quotas + future compliance keys. Sells trust when keys exist.
 
@@ -637,8 +639,9 @@ spur version                       Show version info
 - [x] Loop Browser (list / pause / resume / retire) — ungated view
 - [x] Explore Browser + `spur explore` CLI
 - [x] Agent Config Browser (`/configure`)
-- [x] Community-first signed policy (`2026-07-03`): Session Detail / Plan Inspector / Issue Browser / resume / graph tools free
+- [x] Community-first signed policy (`2026-07-16`): Session Detail / Plan Inspector / Issue Browser / resume / graph tools / durable plan free
 - [x] Community concurrency as **quota = 1** (not missing parallel-workers key)
+- [x] `mcp_pro_plan_durable` Community-granted (policy_version `2026-07-16`)
 - [x] Insights skeleton (`ctx_pro_duckdb_engine` Pro + `analytics` build)
 - [ ] Register FeatureKeys for Plan Browser / Loop Browser / Explore if product wants explicit tier control
 - [ ] Insights GA polish under Pro analytics entitlement
