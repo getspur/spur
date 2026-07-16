@@ -37,6 +37,9 @@ tui-default = ["spur-tui/default"]
 # out unless this feature is enabled. Re-enable with
 # `cargo build --features telegram-bot`.
 telegram-bot = ["dep:spur-bot"]
+# Compile out brain-session notebook MCP injection (see spur-core).
+# `scripts/spur-cargo build -p spur-cli --features disable-notebook-mcp`
+disable-notebook-mcp = ["spur-core/disable-notebook-mcp"]
 
 [dependencies]
 spur-acp = { workspace = true }

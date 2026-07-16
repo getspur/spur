@@ -15,6 +15,12 @@ fault-injection = []
 # Enables cfg(madsim)-only reconciler simulation tests. Normal builds and
 # default cargo test runs do not compile the madsim harness.
 madsim-sim = ["test-support"]
+# Opt-in kill switch: brain sessions do not inject the notebook stdio MCP
+# (`SpurLab` / `spur-notebook --mcp-proxy`). Use when the notebook GUI spawn
+# path breaks job control (SIGTTIN / `suspended (tty input) spur tui`).
+# Build: `cargo build -p spur-cli --features disable-notebook-mcp`
+# (or `scripts/spur-cargo build -p spur-cli --features disable-notebook-mcp`).
+disable-notebook-mcp = []
 
 [dependencies]
 axum = { workspace = true }

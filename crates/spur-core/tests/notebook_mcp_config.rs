@@ -82,6 +82,7 @@ fn stable_notebook_nonce_differs_across_repos() {
 }
 
 #[test]
+#[cfg(not(feature = "disable-notebook-mcp"))]
 fn brain_mcp_servers_preinclude_notebook_stdio_proxy_on_nonce_socket() {
     let servers =
         spur_core::notebook::brain_mcp_servers("http://127.0.0.1:3939/mcp", "fixture-nonce")
@@ -102,6 +103,26 @@ fn brain_mcp_servers_preinclude_notebook_stdio_proxy_on_nonce_socket() {
 
     assert_eq!(notebook.args[0], "--mcp-proxy");
     assert!(notebook.args[1].ends_with("/.spur/notebooks/sessions/fixture-nonce.sock"));
+}
+
+#[test]
+#[cfg(feature = "disable-notebook-mcp")]
+fn brain_mcp_servers_omits_notebook_when_feature_disabled() {
+    let servers =
+        spur_core::notebook::brain_mcp_servers("http://127.0.0.1:3939/mcp", "fixture-nonce")
+            .expect("brain MCP servers");
+
+    assert!(servers.iter().any(|server| match server {
+        McpServer::Http(http) => http.name == "spur-mcp",
+        _ => false,
+    }));
+    assert!(
+        !servers.iter().any(|server| matches!(
+            server,
+            McpServer::Stdio(stdio) if stdio.name == "notebook"
+        )),
+        "notebook stdio MCP must be absent with disable-notebook-mcp"
+    );
 }
 
 #[tokio::test]
