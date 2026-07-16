@@ -1,9 +1,11 @@
 # SPUR — Product Requirements Document
 
-**Version:** 2.0  
-**Date:** April 26, 2026  
+**Version:** 2.1  
+**Date:** July 16, 2026  
 **Author:** Product Owner, SPUR TUI  
-**Status:** Grounded (reconciled against `bd-arch.21`, `bd-arch.23`, and `c75e4586`)
+**Status:** Grounded (v2.0 base reconciled against `bd-arch.21`, `bd-arch.23`, and `c75e4586`; v2.1 TUI surface reconciled against `crates/spur-tui` `ViewId` + views as of 2026-07-16)
+
+**v2.1 changelog:** Documented post–April 2026 TUI surfaces that shipped in code but were missing from §5.1 — Plan Browser, Loop Browser, Explore Browser, Agent Config Browser, Insights. Refreshed codebase stats, architecture diagram, slash-command list, Team cost UI maturity, glossary, and success criteria.
 
 ---
 
@@ -15,9 +17,11 @@ SPUR is a Rust-native orchestration layer for AI coding agents. It sits between 
 
 **One-liner:** *"One brain, many workers, zero lost context."*
 
+**Conversion one-liner (marketing):** *"Issue in, PR out — across every agent, in parallel, with one review surface."*
+
 ### What Exists Today (Grounded)
 
-The codebase is ~100 k lines of Rust across 13 crates. The following are **production-hardened** (not aspirational):
+The workspace is ~500k lines of Rust across 22 crates under `crates/` (plus `xtask/`). The following are **production-hardened** (not aspirational):
 
 - **Dual-channel protocol architecture**: ACP (SPUR → Agent, JSON-RPC/stdio) and MCP (Agent → SPUR, tool calls)
 - **Durable plan reconciler**: Plans survive process restarts in a local SQLite beads store; GitHub is used only for PR creation
@@ -29,6 +33,8 @@ The codebase is ~100 k lines of Rust across 13 crates. The following are **produ
 - **Event-sourced lineage**: Pure projections from an NDJSON event stream; session resume is replay
 - **Outcome materialization**: Content-addressed blob storage (memory, FS, git) with measured instrumentation
 - **Paste-as-atom**: Multi-line paste safety in the TUI composer
+- **Multi-view TUI control tower**: Dashboard, Session Detail/Picker, Plan Inspector/Browser, Issue Browser, Loop Browser, Explore Browser, Agent Config Browser, optional Insights (`analytics` feature), Mermaid overlay (`markdown` feature)
+- **Explore pool**: Ecosystem skills and agent personas browsable/adoptable from the TUI (`/explore`) and CLI (`spur explore …`)
 
 ### Problem Statement (Still Valid)
 
@@ -53,7 +59,7 @@ PM Tool (beads/GitHub) ←→ SPUR Orchestrator ←→ Brain Agent (Claude/Kiro/
 
 ## 2. Product–Architecture Mapping
 
-This section maps **existing technical capability** (what the code does) to **product-facing value** (what the user experiences). This is the core of the v2.0 revamp: no aspirational features, no forward-dating.
+This section maps **existing technical capability** (what the code does) to **product-facing value** (what the user experiences). This is the core of the v2.x revamp: no aspirational features, no forward-dating.
 
 | Technical Capability | Product Feature | User Value | Maturity |
 |---|---|---|---|
@@ -67,10 +73,14 @@ This section maps **existing technical capability** (what the code does) to **pr
 | `spur-pm` beads adapter (`br` CLI boundary) | Local-first plan persistence | Plans survive crashes; no cloud dependency for core workflow | Production |
 | `spur-pm` GitHub adapter (`gh` CLI) | PR creation from delegation outcomes | One-key "create PR" after review approval | Production |
 | `spur-cost` SQLite + PricingRegistry | Per-executor, per-session, per-project cost display | See spend as it happens, not on next month's bill | Production |
-| `spur-context` DuckDB analytics | Daily / weekly cost reports via SQL | Aggregated spend analysis without ETL | Production |
+| `spur-context` DuckDB analytics | Daily / weekly cost reports via SQL + optional Insights TUI | Aggregated spend analysis without ETL | Production (SQL); Insights UI maturing |
 | `spur-license` Ed25519 policy + `arc_swap` gates | Community / Pro / Team / Enterprise tiers | Free forever for individuals; pay for team features | Production |
 | `spur-bot` Telegram runtime | Mobile/tablet push notifications and review | Step away from the terminal without losing the loop | Production |
 | WorktreeManager (`spur-worktree`) | True filesystem isolation per worker | Parallel workers cannot clobber each other's files | Production |
+| PlanProjectionStore + Plan Browser (`spur-core`, `spur-tui`) | Browse, claim, start/resume sprint plans | Durable plans are inventory, not only drill-down | Production |
+| Loop runtime + Loop Browser (`spur-core`, `spur-tui`) | Pause/resume/retire recurring loops | Ongoing agent ops beyond one-shot plans | Production |
+| Explore pool (`spur-core` explore + `spur-tui` ExploreBrowser) | Browse/adopt skills and agent personas | Extensibility without leaving the TUI | Production |
+| Agent config browser (`spur-tui`) | Inspect/edit registered agent settings | Multi-agent setup without hand-editing TOML only | Production |
 
 ### Second-Order Insight: What This Mapping Reveals
 
@@ -82,6 +92,7 @@ This section maps **existing technical capability** (what the code does) to **pr
 2. **Review gate as durable state** — Most tools treat human review as a UI convenience. SPUR treats it as a first-class state machine with timeout, retry, and merge gating. This turns "human-in-the-loop" from a slogan into an execution guarantee.
 3. **Local-first plan durability** — Beads (SQLite via `br` CLI) means plans survive SPUR crashes, OS updates, and network outages. This is resilience that cloud-only competitors cannot match without offline sync.
 4. **Dual-channel autonomy** — ACP gives the brain freedom to stream; MCP gives SPUR control over delegation and PM ops. Neither channel is a workaround for the other. This architectural choice is why SPUR can support any ACP-speaking agent without per-agent hacks.
+5. **Control-tower density (v2.1)** — Plan Browser, Loop Browser, and Explore Browser turn the TUI from “chat + tree” into ops surfaces for inventory, recurrence, and ecosystem adoption. Market the kernel first; demo these screens as proof of operational depth.
 
 ---
 
@@ -139,8 +150,10 @@ SPUR's commercial model is **feature-gated tiers** enforced by signed policy doc
 | Event persistence | NDJSON event log, 128 MB rotation | `spur-core` EventSink |
 | Session metadata | Draft persistence, input history (100 entries) | `spur-tui` SessionMetadataStore |
 | MCP standard tools | `delegate_to_worker`, `create_pr`, `get_issue`, `submit_plan` | `spur-mcp` tool catalog |
+| Explore (browse/adopt) | Browse ecosystem skills & agent personas from TUI | `spur-tui` ExploreBrowserView + `spur explore` CLI |
+| Agent config browser | Inspect registered agent settings | `spur-tui` AgentConfigBrowserView (`/configure`) |
 
-**Second-order product insight:** Community tier is intentionally generous. The goal is to make SPUR the default terminal companion for any developer using Claude Code or Kiro. Revenue comes from teams that outgrow single-worker, single-brain limits.
+**Second-order product insight:** Community tier is intentionally generous. The goal is to make SPUR the default terminal companion for any developer using Claude Code or Kiro. Revenue comes from teams that outgrow single-worker, single-brain limits. Explore and agent config stay in Community so setup friction stays low.
 
 ### 4.2 Pro
 
@@ -155,8 +168,11 @@ SPUR's commercial model is **feature-gated tiers** enforced by signed policy doc
 | Advanced cost analytics | Per-attempt cost breakdown in Attempts tab | `spur-cost` per-executor ingestion |
 | Auto-review policies | Hints for auto-approve conditions (partial) | `spur-core` review scoring placeholders |
 | Collision modal | Handle `SessionAttachRejected` with holder PID info | `spur-acp` `fs4` lock + `spur-tui` CollisionModal |
+| Plan inspector | Stage board + task detail for a live plan | `spur-tui` PlanInspectorView |
+| Plan browser | List / filter / claim / start-resume sprint plans | `spur-tui` PlanBrowserView (`/sprints`) |
+| Loop browser | List / filter / pause / resume / retire loops | `spur-tui` LoopBrowserView |
 
-**Second-order product insight:** Pro tier sells **resilience and parallelism**. Session resume is the killer feature for Claude Code Max users who hit rate limits — they can switch to Kiro as brain, then resume the original Claude session later. Parallel workers turn SPUR from a sequential tool into a true orchestrator.
+**Second-order product insight:** Pro tier sells **resilience and parallelism**. Session resume is the killer feature for Claude Code Max users who hit rate limits — they can switch to Kiro as brain, then resume the original Claude session later. Parallel workers turn SPUR from a sequential tool into a true orchestrator. Plan Browser and Loop Browser sell **ops continuity** (inventory + recurrence), not just one-session chat.
 
 ### 4.3 Team
 
@@ -166,11 +182,11 @@ SPUR's commercial model is **feature-gated tiers** enforced by signed policy doc
 |---|---|---|
 | PM integration | Issue browser with status updates | `spur-pm` BeadsAdapter + IssueBrowserView |
 | Shared review queue | Status-bar badge for pending reviews across team | `spur-core` ReviewSink (lineage is already shared via broadcast) |
-| Team cost dashboard | *(Planned)* Aggregated team spend view | `spur-context` DuckDB analytics engine is ready; UI pending |
+| Team cost dashboard | *(Partial)* Insights TUI when built with `analytics` feature; full team-wide GA still pending | `spur-context` DuckDB + `spur-tui` InsightsView (Overview / Timeline / Breakdown / Live) |
 | RBAC | *(Planned)* Role-based access control | Policy entitlement exists; enforcement pending |
 | PM webhooks | *(Planned)* Real-time issue sync via webhooks | Policy entitlement exists; implementation pending |
 
-**Second-order product insight:** Team tier is currently **entitlement-heavy, UI-light**. The DuckDB analytics engine (`spur-context`) can already produce daily/weekly reports. The product gap is visualization, not data. This is a deliberate choice: we ship data infrastructure first, then UI, so that early Team customers get SQL-level access immediately.
+**Second-order product insight:** Team tier remains **entitlement-ahead of polish**. DuckDB analytics (`spur-context`) already produces daily/weekly reports via SQL. InsightsView is the first visualization path (compile-time `analytics` feature; non-analytics builds show “Analytics unavailable”). Do not market “full team cost dashboard GA” until Insights is default-on and role/project scoping is productized. Early Team customers still get SQL-level access immediately.
 
 ### 4.4 Enterprise
 
@@ -192,6 +208,10 @@ SPUR's commercial model is **feature-gated tiers** enforced by signed policy doc
 
 ### 5.1 Views (What the User Sees)
 
+Navigation is driven by `ViewId` in `crates/spur-tui`:
+
+`Dashboard` · `SessionDetail` · `SessionPicker` · `PlanInspector` · `PlanBrowser` · `LoopBrowser` · `IssueBrowser` · `ExploreBrowser` · `AgentConfigBrowser` · `Insights` · `MermaidOverlay` (feature-gated)
+
 #### Dashboard (`tui_dashboard` — Community)
 
 | Element | Description |
@@ -202,6 +222,7 @@ SPUR's commercial model is **feature-gated tiers** enforced by signed policy doc
 | Input bar / Composer | Multi-line chat with Emacs/Vim modes, `@`-mentions, `/` slash commands, protected ranges, paste-as-atom. |
 | Status bar | Context hints, issue count, running count, pending review count, total cost, elapsed time, license badge, flag summary. |
 | Workers panel | *(Pro)* Collapsible inline panel showing active worker delegations. `Alt+D` toggles. |
+| Empty state | Setup nudge when no agents are configured; rotating example prompts when agents exist. |
 
 #### Session Detail (`brain_session` + `tui_session_detail` — Pro)
 
@@ -213,6 +234,9 @@ SPUR's commercial model is **feature-gated tiers** enforced by signed policy doc
 | Input integrations | `@`-mention picker (files, dirs, workers), `/` slash-command picker, `Ctrl+R` history picker. |
 | Permission prompts | Inline `[y] allow [n] deny [a] always allow` with countdown timers. |
 | Draft persistence | 500 ms debounced save to `SessionMetadataStore`. Force flush at intent boundaries. |
+| Workers panel | Inline active workers; `Alt+D` collapse. |
+| Load / cancel UX | `LoadState` pipeline for resume attach; Esc cancel-with-confirm while stream is in flight; `fs_unsafe` banner when lock is unenforceable. |
+| Cost / context | SPUR estimate + optional agent-reported session cost; context used/size from usage updates. |
 
 #### Session Picker (`session_resume` — Pro)
 
@@ -234,6 +258,26 @@ SPUR's commercial model is **feature-gated tiers** enforced by signed policy doc
 | Task detail | Identity, execution (agent, attempt, branch), dependencies, output (summary, diff, mutation ID, superseded-by). |
 | Responsive layout | Side-by-side when width ≥ 90, stacked when narrower. |
 
+#### Plan Browser (`/sprints` — Pro)
+
+| Element | Description |
+|---|---|
+| Plan list | Active and historical sprint plans with sort (`S`) and filter (`f`). |
+| Detail peek | Summary / plan body / work-item peeks (`p` / `o`). |
+| Claim / start | `c` claim (with force-reclaim confirm when needed); `s` start or resume owned plans. |
+| Cross-nav | `L` jumps toward loops; refresh via `r`. |
+| Technical basis | `spur-tui` PlanBrowserView + plan projection events from `spur-core`. |
+
+#### Loop Browser (Pro)
+
+| Element | Description |
+|---|---|
+| Loop list | Recurring loop rows with sort (`S`) and filter (`f`). |
+| Inspect | Enter opens detail; `o` opens related issue when present. |
+| Lifecycle | `p` pause/resume; `x` retire; `r` refresh. |
+| Product value | Surfaces **ongoing agent ops** beyond one-shot plan execution. |
+| Technical basis | `spur-tui` LoopBrowserView + loop events from the orchestrator. |
+
 #### Issue Browser (`pm_integration` — Team)
 
 | Element | Description |
@@ -243,6 +287,40 @@ SPUR's commercial model is **feature-gated tiers** enforced by signed policy doc
 | Status updates | `o/w/b/d` — open/in_progress/blocked/closed. |
 | Work on issue | `W` constructs prompt from issue and sends to brain. |
 
+#### Explore Browser (`/explore` — Community)
+
+| Element | Description |
+|---|---|
+| Tabs | Skills · Agents. |
+| Stages | Browse → Gate (confirm) → Manage (status / materializations). |
+| Catalog | Bundled + layered store catalog; filter, star, adopt/apply. |
+| CLI parity | `spur explore sync\|list\|add\|remove\|status` manages the same pool. |
+| Product value | Ecosystem extensibility without leaving the control tower. |
+| Technical basis | `spur-tui` ExploreBrowserView + `spur-core::explore`. |
+
+#### Agent Config Browser (`/configure` — Community)
+
+| Element | Description |
+|---|---|
+| Agent list | Registered agents with field navigation and optional preselect by name. |
+| Edit draft | In-TUI draft edit + validation errors before apply. |
+| Product value | Multi-agent setup without only hand-editing config files. |
+| Technical basis | `spur-tui` AgentConfigBrowserView. |
+
+#### Insights (`analytics` feature — Team / Pro+ analytics builds)
+
+| Element | Description |
+|---|---|
+| Tabs | Overview · Timeline · Breakdown · Live. |
+| Dimensions | Granularity (daily/weekly/monthly) and dimension (agent/model/project). |
+| Backend | Async DuckDB engine from `spur-context`. |
+| Build gate | When `analytics` is off, view renders “Analytics unavailable in this build.” |
+| Maturity | **Maturing** — first UI over data that already exists via SQL; not yet full Team GA dashboard. |
+
+#### Mermaid Overlay (`markdown` feature)
+
+Full-screen diagram viewer opened from Session Detail (`Alt+V`). Cycles diagrams with `[`/`]`. Requires `markdown` compile-time feature.
+
 ### 5.2 Composer & Input System
 
 | Feature | Description |
@@ -250,8 +328,8 @@ SPUR's commercial model is **feature-gated tiers** enforced by signed policy doc
 | Multi-line editing | Emacs (default) and Vim (Normal/Insert/Visual/Operator) modes. |
 | Protected ranges | Atomic `@mention` and paste-reference tokens. Cursor-skipped, deleted as units. |
 | Paste-as-atom | Multi-line pastes become placeholder tokens (`[Paste #N · M lines]`). Side table capped at 50 entries (LRU). Expands on submit. |
-| `@`-mentions | Fuzzy picker for files, directories, workers. `MentionRegistry` with 60 s TTL, nucleo scoring, +25 % worker score boost. |
-| `/` slash commands | Spur-local (`/clear`, `/mode`, `/sessions`, `/cost`, `/quit`, `/vim`, `/issues`) merged with agent-advertised commands. |
+| `@`-mentions | Fuzzy picker for files, directories, workers. `MentionRegistry` with 60 s TTL, nucleo scoring, +25 % worker score boost. Explore-pool agents surface in worker queries when available. |
+| `/` slash commands | Spur-local (`/clear`, `/mode`, `/sessions`, `/cost`, `/quit`, `/vim`, `/issues`, `/sprints`, `/explore`, `/configure`, `/theme`, `/notebook`, …) merged with agent-advertised commands. |
 | History picker | `Ctrl+R` fuzzy search over global input history (cap 100). |
 | Activity spinner | Per-frame spinner driven by `ActivityKind`. |
 | Soft wrap | Unicode-width aware word-boundary wrapping. `TAB_WIDTH = 4`. |
@@ -270,9 +348,10 @@ SPUR's commercial model is **feature-gated tiers** enforced by signed policy doc
 | Feature | Tier | Description |
 |---|---|---|
 | Basic cost badge | Community | Total cost and elapsed time in status bar. Per-executor cost in lineage tree. |
-| Per-session cost | Pro | Cost tracking per attempt in DetailPane Attempts tab. |
-| Team cost aggregates | Team | *(Planned)* Team-wide cost dashboard. |
-| Daily/weekly reports | Pro/Team | `spur-context` DuckDB analytics produces reports via SQL. |
+| Per-session cost | Pro | Cost tracking per attempt in DetailPane Attempts tab; optional agent-reported session cost on Session Detail. |
+| Insights TUI | Pro/Team (feature-gated build) | Overview / Timeline / Breakdown / Live over DuckDB. |
+| Team cost aggregates | Team | *(Partial → GA pending)* Role/project team dashboard productization still open. |
+| Daily/weekly reports | Pro/Team | `spur-context` DuckDB analytics produces reports via SQL regardless of Insights UI. |
 
 **Honest product note:** `spur-cost` is currently **observational, not enforceable**. It records start/end events and computes cost, but the orchestrator spawns sessions without any budget check. This is a known gap (Architecture Risk #17). The product positioning must be "cost visibility," not "cost governance," until enforcement lands.
 
@@ -283,11 +362,15 @@ SPUR's commercial model is **feature-gated tiers** enforced by signed policy doc
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │  Frontends                                                                  │
-│  ┌─────────────────────────────┐  ┌─────────────────────────────────────┐   │
-│  │ TUI (ratatui + crossterm)   │  │ Telegram Bot (spur-bot)             │   │
-│  │ Dashboard · SessionDetail   │  │ Forum-topic sessions                │   │
-│  │ PlanInspector · Palette     │  │ Inline review buttons               │   │
-│  └─────────────────────────────┘  └─────────────────────────────────────┘   │
+│  ┌─────────────────────────────────────┐  ┌─────────────────────────────┐  │
+│  │ TUI (ratatui + crossterm)           │  │ Telegram Bot (spur-bot)     │  │
+│  │ Dashboard · SessionDetail/Picker    │  │ Forum-topic sessions        │  │
+│  │ PlanInspector · PlanBrowser         │  │ Inline review buttons       │  │
+│  │ LoopBrowser · IssueBrowser          │  │                             │  │
+│  │ ExploreBrowser · AgentConfig        │  │                             │  │
+│  │ Insights* · Mermaid* · Palette      │  │                             │  │
+│  └─────────────────────────────────────┘  └─────────────────────────────┘  │
+│  * feature-gated (analytics / markdown)                                     │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │  Shared Host (spur-interactive)                                             │
 │  ┌───────────────────────────────────────────────────────────────────────┐  │
@@ -299,6 +382,7 @@ SPUR's commercial model is **feature-gated tiers** enforced by signed policy doc
 │  │ Orchestrator │ BrainSched   │ EventFunnel  │ ExecutorLine │ PeerMailbox│ │
 │  │              │ Continuation │ ReviewSink   │ age          │ Router/Led │ │
 │  │              │ Bridge       │              │              │ ger        │ │
+│  │ PlanProjection · Loops · Explore pool · Agent profiles                │ │
 │  └──────────────┴──────────────┴──────────────┴──────────────┴────────────┘ │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │  MCP Server (spur-mcp)                                                      │
@@ -371,12 +455,13 @@ Second-order analysis:
 1. **Session immortality** — Close your laptop, restart SPUR, resume exactly where you left off. No other agent tool does this.
 2. **Worker isolation + review** — Every worker runs in a git worktree. Every output hits a human review gate before merge. This is safety that autonomous agent tools skip.
 3. **Terminal-native, zero web UI** — No browser tabs, no cloud login, no SaaS downtime. Everything is local SQLite, local git, local TUI.
+4. **Ops surfaces (v2.1, secondary in demos)** — Plan inventory, recurring loops, and Explore adoption prove the control tower is deeper than a chat pane. Lead with resilience; close with these screens.
 
 **Decision: Tier boundaries should reflect operational scale, not feature whims.**
 
-- **Community:** Individual developer, one worker, manual review. Enough to fall in love with the workflow.
-- **Pro:** Individual power user or small team. Parallel workers, session resume, cost analytics. Sells resilience.
-- **Team:** Engineering team with shared project state. PM integration, shared review queue, team cost aggregation. Sells coordination.
+- **Community:** Individual developer, one worker, manual review, Explore + agent config. Enough to fall in love with the workflow.
+- **Pro:** Individual power user or small team. Parallel workers, session resume, plan/loop browsers, cost analytics. Sells resilience + ops continuity.
+- **Team:** Engineering team with shared project state. PM integration, shared review queue, Insights/team cost aggregation. Sells coordination.
 - **Enterprise:** Compliance and custom policy. SSO, audit logs, SLA. Sells trust.
 
 **Decision: Be honest about gaps.**
@@ -384,6 +469,7 @@ Second-order analysis:
 - Cost enforcement is not built. Say so. Do not promise "budget alerts" as a shipping feature.
 - Event loss under burst is possible. Document the drain cap.
 - Peer mailbox is experimental. Gate it behind config, not marketing.
+- Insights is feature-gated and maturing — not full Team cost dashboard GA.
 
 Transparency builds trust with the "Orchestrator" persona, who can read Rust and will verify claims against the repo.
 
@@ -406,6 +492,8 @@ spur cost                          Show cost summary (observational)
 spur cost --week                   Weekly breakdown
 spur cost --by agent               Per-agent breakdown
 spur cost --by project             Per-project breakdown
+spur explore sync|list|add|remove|status
+                                   Manage ecosystem skills/agents pool
 spur workflow run <file>           Execute a workflow definition
 spur workflow validate <file>      Validate a TOML workflow
 spur version                       Show version info
@@ -438,13 +526,14 @@ spur version                       Show version info
 
 ### SPUR's Unique Position (Grounded)
 
-1. **Rust single binary** — `cargo install spur-cli` or `curl | sh`. No Node.js, no Python, no Docker.
+1. **Rust single binary** — Signed install via `curl | sh` (proprietary distribution). No Node.js, no Python, no Docker required for the control plane.
 2. **Native ACP + MCP dual channel** — Structured protocol support, not PTY scraping or prompt injection.
 3. **Local-first durability** — Plans in SQLite (beads), events in NDJSON, outcomes in git blobs. Survives crashes and outages.
 4. **Human review as execution gate** — Not a UI afterthought; a state machine that blocks merge until approved.
 5. **Session resume via event replay** — Close the terminal, restart SPUR, resume the exact same brain session.
 6. **Cross-vendor agent orchestration** — Claude, Kiro, Codex, Gemini, custom ACP agents.
 7. **Telegram bot sharing the TUI correctness path** — Same review lane, same event bus, same state machine.
+8. **Control-tower ops surfaces (v2.1)** — Plan Browser, Loop Browser, and Explore pool: inventory, recurrence, and ecosystem adoption in one TUI.
 
 ---
 
@@ -471,13 +560,22 @@ spur version                       Show version info
 - [ ] Worktree orphan cleanup on startup (Risk #4)
 - [ ] Orchestrator decomposition: BrainSessionManager, DelegationDispatcher actors
 
+### v0.6.x — TUI surface expansion (largely landed; track polish)
+
+- [x] Plan Browser (list / claim / start)
+- [x] Loop Browser (list / pause / resume / retire)
+- [x] Explore Browser + `spur explore` CLI
+- [x] Agent Config Browser (`/configure`)
+- [x] Insights skeleton (`analytics` feature; GA polish still open)
+- [ ] Insights default-on + Team cost dashboard GA
+- [ ] `TraceSource` wired into command palette
+
 ### v0.7 — Scale
 
-- [ ] Team cost dashboard UI (Team tier entitlement → implementation)
+- [ ] Team cost dashboard UI GA (Insights productized; Team entitlement complete)
 - [ ] RBAC enforcement (Team tier)
 - [ ] PM webhook real-time sync (Team tier)
 - [ ] Peer mailbox default-on with ledger pruning (Risk #22)
-- [ ] `TraceSource` wired into command palette
 
 ### v1.0 — Commercial Hardening
 
@@ -493,10 +591,10 @@ spur version                       Show version info
 
 | Old PRD Phase | What Was Promised | What Exists | Honest Assessment |
 |---|---|---|---|
-| Phase 1: Foundation | Agent discovery, basic TUI, ad-hoc tasks | TUI, sessions, composer, review gate, attach lock | **Over-delivered on TUI; under-delivered on agent discovery.** Discovery is less important than session management. |
-| Phase 2: Workflow Engine | TOML workflows, rate limit failover, cost tracking | Durable plan reconciler (MCP-based, not TOML), cost tracking (observational), brain failover | **Workflow engine is MCP-native, not TOML-native.** TOML workflows are a legacy concept; real users submit plans via MCP. Cost tracking lacks enforcement. |
-| Phase 3: PM Integration | Linear, Plane, GitHub | Beads-primary, GitHub-satellite. Linear/Plane not implemented. | **Correct call.** Local-first beads is more resilient than SaaS PM APIs. GitHub PR creation is sufficient. |
-| Phase 4: Commercial | Team dashboard, smart router, unified billing | Tier system exists, feature gates exist, DuckDB analytics exists. Smart router and unified billing do not. | **Smart router was speculative.** Unified billing requires vendor partnerships. Tier gating is the real commercial foundation. |
+| Phase 1: Foundation | Agent discovery, basic TUI, ad-hoc tasks | TUI multi-view control tower, sessions, composer, review gate, attach lock, Explore + agent config | **Over-delivered on TUI.** Agent discovery via Explore/config browsers closes much of the old gap. |
+| Phase 2: Workflow Engine | TOML workflows, rate limit failover, cost tracking | Durable plan reconciler (MCP-based, not TOML), Plan/Loop browsers, cost tracking (observational), brain failover | **Workflow engine is MCP-native, not TOML-native.** TOML workflows are a legacy concept; real users submit plans via MCP. Cost tracking lacks enforcement. |
+| Phase 3: PM Integration | Linear, Plane, GitHub | Beads-primary, GitHub-satellite. Linear/Plane not implemented. Issue Browser ships for Team. | **Correct call.** Local-first beads is more resilient than SaaS PM APIs. GitHub PR creation is sufficient. |
+| Phase 4: Commercial | Team dashboard, smart router, unified billing | Tier system exists, feature gates exist, DuckDB + Insights (partial). Smart router and unified billing do not. | **Smart router was speculative.** Unified billing requires vendor partnerships. Tier gating is the real commercial foundation. Insights is the first UI path, not GA team dashboard. |
 
 ---
 
@@ -505,11 +603,12 @@ spur version                       Show version info
 | Question | Decision | Rationale |
 |---|---|---|
 | **Brain default:** Claude or Kiro? | **User-configured, no default.** `spur init` detects installed agents and lists them. The user picks. Kiro has native ACP; Claude has deeper reasoning. Both are valid. | Removing default avoids privileging one vendor and respects user existing habits. |
-| **Workflow sharing registry?** | **Defer.** The real workflow system is plan submission via MCP. Community plan templates can be git repos, not a registry. | Registry adds operational cost without proven demand. Git-based sharing is sufficient for v1. |
+| **Workflow sharing registry?** | **Defer.** The real workflow system is plan submission via MCP. Explore pool + git-based community content replace a central registry for v1. | Registry adds operational cost without proven demand. Git-based sharing + Explore is sufficient for v1. |
 | **MCP server exposing SPUR tools?** | **Already exists.** `spur-mcp` is the MCP server. Brain agents already call `delegate_to_worker`, `submit_plan`, etc. | This was an open question in v1.0; it is answered in v2.0. |
 | **Local model support (Ollama)?** | **Defer.** No ACP-compatible local model CLI exists at quality threshold. When one does, `spur-acp` will support it automatically via the adapter pattern. | Supporting Ollama via raw stdio would require a non-ACP adapter, violating protocol-first principle. |
 | **Notification channels beyond Telegram?** | **Telegram only for v1.** Slack/Discord can be added via the same `spur-interactive` host pattern. Telegram was chosen for its forum-topic threading, which maps cleanly to session isolation. | Adding more channels is easy; maintaining them is not. Prove Telegram usage first. |
 | **Cost tracking: visibility or governance?** | **Visibility today, governance in v0.6.** Be honest that enforcement is not built. Do not market budget caps until Risk #17 is closed. | Premature governance promises create liability. Observational tracking is still valuable. |
+| **Should Explore / Loops lead homepage copy?** | **No — secondary demo beat.** Lead with session resume, isolation, and review. Use Explore/Loops as depth proof after the core story lands. | Orchestrator persona buys durability first; ecosystem and recurrence convert power users. |
 
 ---
 
@@ -530,6 +629,12 @@ spur version                       Show version info
 | **Session attach lock** | `fs4` advisory lock preventing split-brain attachment to the same ACP session from multiple processes |
 | **EventFunnel** | Singleton guaranteeing monotonic sequence numbers for all SpurEvents |
 | **Lineage projection** | Pure function of event stream producing the executor tree shown in the TUI |
+| **Plan Browser** | TUI inventory of sprint plans: list, filter, claim, start/resume (`PlanBrowserView`, `/sprints`) |
+| **Plan Inspector** | TUI drill-down for one plan: stage board + task detail (`PlanInspectorView`) |
+| **Loop** | Recurring orchestrated work unit with pause/resume/retire lifecycle, browsable in Loop Browser |
+| **Explore pool** | Layered catalog of ecosystem skills and agent personas adoptable into a project (`ExploreBrowserView`, `spur explore`) |
+| **Insights** | Feature-gated analytics TUI over DuckDB (`InsightsView`; Overview / Timeline / Breakdown / Live) |
+| **ViewId** | Enum of navigable TUI surfaces in `crates/spur-tui` |
 
 ---
 
