@@ -159,7 +159,23 @@
     </section>
 
     <section>
-      <h2>4. PH upload checklist</h2>
+      <h2>4. Marketing layer (Higgsfield × real stills)</h2>
+      <p style="color:var(--muted);font-size:.9rem;max-width:70ch">
+        Conditioned on <code>gallery_stills/</code>. Social/OG only — not PH product gallery.
+      </p>
+      <div class="grid" id="mkt"></div>
+      <div class="card" style="margin-top:1rem">
+        <header class="cap">
+          <strong>Social trailer (Seedance 2.0)</strong>
+          <span>start/end = real VHS stills · marketing/out/06-trailer.mp4</span>
+        </header>
+        <video controls preload="none" src="../marketing/out/06-trailer.mp4"></video>
+        <div class="meta">Do not use as PH product video — use hero-video-plan-loop-drive.mp4</div>
+      </div>
+    </section>
+
+    <section>
+      <h2>5. PH upload checklist</h2>
       <table>
         <thead>
           <tr><th>PH field</th><th>File</th><th>Source</th></tr>
@@ -190,7 +206,7 @@
     </section>
 
     <section>
-      <h2>5. Tape → out mapping</h2>
+      <h2>6. Tape → out mapping</h2>
       <table>
         <thead><tr><th>Tape</th><th>Out media</th><th>PH priority</th></tr></thead>
         <tbody>
@@ -250,6 +266,24 @@
         <video controls preload="none" src="../live_demos/${file}"></video>
         <div class="meta">live_demos/${file}</div>`;
       f.appendChild(card);
+    }
+
+    const mkt = [
+      ["OG social 16:9", "01-og-social.png", "ref: 00-hero-frame"],
+      ["Social square 1:1", "02-social-square.png", "ref: 01-session-plan-loop"],
+      ["Plan story", "03-plan-story.png", "ref: 03-plan-progress"],
+      ["Explore story", "04-explore-story.png", "ref: 04-explore-cascade"],
+      ["Resume story", "05-resume-story.png", "ref: 05-session-resume"],
+    ];
+    const m = document.getElementById("mkt");
+    for (const [title, file, ref] of mkt) {
+      const card = document.createElement("div");
+      card.className = "card";
+      card.innerHTML = `
+        <header class="cap"><strong>${title}</strong><span>${ref}</span></header>
+        <img src="../marketing/out/${file}" alt="${title}" loading="lazy" />
+        <div class="meta">marketing/out/${file}</div>`;
+      m.appendChild(card);
     }
   </script>
 </body>
