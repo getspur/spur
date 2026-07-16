@@ -11,6 +11,10 @@
 
 aws_region = "ap-southeast-5"
 
+# In-process concurrent invocations for the serving Lambda (run_concurrent).
+# Independent of provisioned concurrency / warm instances.
+lambda_max_concurrency = 4
+
 # Staged migration: bootstrap the context.getspur.dev Route 53 zone; delegate
 # its output NS set at Namecheap; activate certificates and both custom domains;
 # pass OAuth, API-key, and MCP E2E; release stable-domain clients; optionally
