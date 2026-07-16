@@ -141,6 +141,16 @@ tag pushes were **cut over to `release-dist.yml`**:
   against SHA256SUMS, and a node bin shim execs it (lazy-installs under
   `--ignore-scripts`). Published by the workflow after the GitHub release
   exists; needs `secrets.NPM_TOKEN`.
+- **Skills bundle shipped with dist (skills-init alignment).** Skills are
+  filesystem assets under `assets/skills/` (not embedded in the binary).
+  `cargo xtask dist` packages them as platform-independent
+  `spur-skills-<version>.tar.gz` with archive-internal layout
+  `share/spur/skills/<id>/…` — the same layout `cargo xtask install` writes
+  and `SkillCatalog::package_asset_candidates` searches next to the binary
+  prefix. `release-dist.yml` smoke-tests the archive layout + a real
+  `spur skills init` against the linux-x64 binary with the skills extracted
+  beside it. npm `postinstall` downloads and extracts the same tarball next
+  to the package so `@getspur/spur-cli` installs work out of the box.
 - **The platform matrix is now four legs** — npm parity forced a linux
   x86_64 artifact back into existence. That leg compiles with Debian's real
   cross GCC (`g++-x86-64-linux-gnu`), NOT zig: pyke's prebuilt GCC
