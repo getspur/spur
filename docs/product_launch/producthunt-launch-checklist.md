@@ -374,9 +374,14 @@ Hi Product Hunt — [Name] here, maker of SPUR.
 I built SPUR after [one true, specific incident]. The problem wasn’t getting an agent
 to write code; it was keeping multiple agents’ work visible, isolated, and recoverable.
 
-SPUR is a local-first control tower for Claude Code, Codex, Kiro, and Gemini. Workers
-run in git worktrees; plans and sessions resume after restarts; every result reaches
-one review surface: approve, deny, modify, or retry.
+SPUR is a local-first control tower for Claude Code, Codex, Kiro, and Gemini. You work
+in Session Detail — compose, watch ReAct (YOU / THINK / DELEGATE), drive workers and
+plan progress from the same surface. Plans and sessions resume after restart. Every
+result still hits a human review surface: approve, deny, modify, or retry.
+
+What you’ll see in the demo: Session Detail (not a dashboard tour) → plan/worker loop
+→ optional specialist @worker cascade when you need a persona + model/effort without
+losing the session.
 
 It’s for senior/staff engineers and tech leads already juggling CLI coding agents.
 It isn’t an agent replacement or set-and-forget autonomy.
@@ -384,12 +389,13 @@ It isn’t an agent replacement or set-and-forget autonomy.
 Community is a free solo daily driver with one concurrent worker. Pro adds up to
 10 workers, Telegram review, and Insights.
 
-I’d value blunt feedback on the install-to-first-review path. Where did you get stuck?
+I’d value blunt feedback on install → first session → first worker/review. Where did
+you get stuck?
 [optional PH promo]
 ```
 
 - [ ] Saved in PH draft
-- [ ] Accuracy pass vs PRD (tiers, quotas, cost visibility, platform support honesty)
+- [ ] Accuracy pass vs PRD + journey catalog (Session Detail home; plan-loop as hero)
 
 ---
 
