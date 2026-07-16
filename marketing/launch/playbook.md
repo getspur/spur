@@ -56,7 +56,7 @@ Goal: line up the co-marketing surface area without leaking. **No public pre-ann
 | Cursor team courtesy heads-up: short email to Cursor DevRel pointing at `marketing/site/vs-cursor.md` framing ("peers-not-competitors, most SPUR users keep Cursor open") — pre-empts any "they're swiping at us" read | [founder] | Email sent, acknowledged (no endorsement asked) | No response is fine — the goal is to prevent a hostile interpretation, not to secure amplification |
 | Recruit 8–12 friendly beta installers from existing network for soft-validation install (separate from public Community launch) | [founder] | ≥8 successful installs, ≥3 willing to be on-the-record per launch-block #2 | <3 named quotes by T-2 → ship with empty testimonial space (do not fake; `levers.md:195`) |
 | Final cost-ledger reconciliation pass (second sample user) | [founder] | Holds within ±10% bound | Swap homepage default to Hero B at T-1 |
-| Pre-stage Product Hunt draft (assets, tagline, first comment, maker bio) in PH dashboard — scheduled, not published | [founder] | Draft saved, scheduled for 06:00 UTC T-0 | Slip PH to T+1; HN + X still go on T-0 |
+| Pre-stage Product Hunt draft (assets, tagline, first comment, maker bio) in PH dashboard — scheduled, not published | [founder] | Draft saved, scheduled for **canonical PH day start** (12:01 AM PT = 07:01 UTC under PDT / 08:01 UTC under PST). Do **not** use 06:00 UTC — that is still the previous PH day in summer. Source of truth: `docs/product_launch/producthunt-launch-checklist.md` | Slip PH to T+1; HN + X still go on T-0 |
 | Pre-stage X thread + LinkedIn post drafts in scheduler | [founder] | Both drafts saved, reviewed against `levers.md` voice constraints | Manual post at T-0 — not a launch-blocker |
 | Pre-stage cold-email batch 1 (warm-list opener, not cold-cold) per `marketing-cold-email` skill | [DevRel] | List segmented, copy reviewed, sender domain warmed | Defer batch 1 by 24h; not critical |
 
@@ -82,7 +82,7 @@ Single launch day. No Show HN at any point.
 
 | UTC | Step | Owner | Success metric | Kill criterion |
 |---|---|---|---|---|
-| **06:00** | Publish Product Hunt listing (scheduled from T-7) | [founder] | Listing live; first comment from founder posted within 2 min | If PH ranking <#5 by 12:00 UTC, redirect engagement budget to HN comments; do not double-down on PH |
+| **07:01 UTC (PDT) / 08:01 UTC (PST)** | Publish Product Hunt listing at PH day rollover (scheduled from T-7). See `docs/product_launch/producthunt-launch-checklist.md` | [founder] | Listing live; first comment from founder posted within 2 min | If PH ranking weak by US morning, keep honest engagement but do not panic-spend; HN/X remain independent |
 | **07:00** | Publish X thread (Hero A cost-ledger lead, links to blog post + PH) | [DevRel] | Thread live, pinned on `@getspur` profile | If <50 impressions in first 30 min, re-post at 11:00 UTC with different hook (Hero B framing) |
 | **08:00** | Publish LinkedIn post (Team-Lead persona angle: cost visibility across vendors) | [founder] | Post live; tagged Anthropic DevRel + 3 beads/ACP authors per T-7 warm-up | None — LinkedIn is owned and recoverable |
 | **10:00** | Submit launch blog post to Hacker News as a **regular submission** (NOT Show HN — proprietary, no public repo per `product-marketing.md:216`). Title: factual; no "Show HN", no "Launch" prefix | [founder] | Submission live; founder ready to answer comments within 5 min of any reply | If flagged within 1 hour, do not resubmit same URL — wait 7 days minimum |
