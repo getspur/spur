@@ -87,7 +87,7 @@ if [[ -f "$MANIFEST" ]]; then
       fail "$id published output exists"
       continue
     fi
-    ocr="$(tesseract "$image" stdout --psm 6 2>/dev/null | tr '[:lower:]' '[:upper:]')"
+    ocr="$(tesseract "$image" stdout --psm 11 2>/dev/null | tr '[:lower:]' '[:upper:]')"
     needle="$(printf '%s' "$term" | tr '[:lower:]' '[:upper:]')"
     [[ "$ocr" == *"$needle"* ]] && pass "$id visibly proves $term" \
       || fail "$id visibly proves $term"
@@ -112,6 +112,14 @@ if [[ -f "$hero" ]]; then
 else
   fail "hero exists"
 fi
+
+contact_dest="$(mktemp -d "${TMPDIR:-/tmp}/spur-media-contract.XXXXXX")"
+if bash "$ROOT/tests/contact-sheet.sh" "$contact_dest" >/dev/null && [[ -f "$contact_dest/gallery-contact.png" ]]; then
+  pass "gallery contact sheet"
+else
+  fail "gallery contact sheet"
+fi
+rm -rf "$contact_dest"
 
 [[ "$failures" -eq 0 ]] || {
   printf '\n%d media-pack contract check(s) failed\n' "$failures" >&2
