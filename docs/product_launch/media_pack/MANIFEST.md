@@ -64,9 +64,10 @@ docs/product_launch/media_pack/
 
 | Field | File |
 |---|---|
-| **Video (YouTube)** | `ph_ready/hero-video-plan-loop-drive.mp4` (= `13-…mp4`) |
-| **Hero GIF** | `ph_ready/hero-gif-plan-loop-drive.gif` |
+| **Video (YouTube / PH)** | `ph_ready/hero-video-ph-ready.mp4` — **revised** 16:9 (title + trim 5–40s + captions + end card). Source raw: `hero-video-plan-loop-drive.mp4` |
+| **Hero GIF (raw)** | `ph_ready/hero-gif-plan-loop-drive.gif` |
 | Optional secondary GIF | `live_demos/09-product-e2e-flow.gif` |
+| Demo rebuild | `demo_render/build.sh` · IR `demo_render/content-graph.json` |
 
 ---
 
