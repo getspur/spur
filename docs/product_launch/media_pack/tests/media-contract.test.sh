@@ -134,6 +134,11 @@ else
   fail "hero exists"
 fi
 
+for id in session workers plans specialist resume; do
+  [[ -f "$ROOT/demo_render/out/seg-$id.mp4" ]] \
+    && pass "hero segment keeps id: $id" || fail "hero segment keeps id: $id"
+done
+
 contact_dest="$(mktemp -d "${TMPDIR:-/tmp}/spur-media-contract.XXXXXX")"
 if bash "$ROOT/tests/contact-sheet.sh" "$contact_dest" >/dev/null && [[ -f "$contact_dest/gallery-contact.png" ]]; then
   pass "gallery contact sheet"
