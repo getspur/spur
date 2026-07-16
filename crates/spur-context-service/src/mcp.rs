@@ -58,7 +58,7 @@ pub struct IndexResourceLimits {
     pub max_build_seconds: u64,
 }
 
-pub trait IndexExecutionStarter {
+pub trait IndexExecutionStarter: Send + Sync {
     fn start_execution<'a>(
         &'a self,
         request: IndexExecutionRequest,
@@ -79,7 +79,7 @@ pub struct ExecutionOutcome {
     pub error: Option<String>,
 }
 
-pub trait ExecutionStatusChecker {
+pub trait ExecutionStatusChecker: Send + Sync {
     fn describe_execution(&self, arn: &str) -> Result<Option<ExecutionOutcome>, McpHandlerError>;
 }
 
