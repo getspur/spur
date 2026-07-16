@@ -1,47 +1,49 @@
-# PH hero demo render (html-video style)
+# Product Hunt hero renderer
 
-Implements the **approved** video-review backlog for V1 product hero:
+Builds the approved 25.2-second SPUR product demo from five reviewed TUI captures. It does not treat a single source film as proof for unrelated claims.
 
-1. Trim cold open (start at **5s** of real VHS)
-2. Keep proof segment **5–40s** (~35s product truth)
-3. HTML title + end cards (html-video frames)
-4. Burned-in caption strips (HTML → PNG overlay)
-5. Export **1920×1080 16:9** for Product Hunt / YouTube
+## Inputs and output
 
-## Source of truth
-
-| Input | Path |
+| Input | Role |
 |---|---|
-| Real VHS film | `../ph_ready/hero-video-plan-loop-drive.mp4` (= `tui-live/out/13-problem-plan-loop-drive.mp4`) |
-| IR / plan | `content-graph.json` |
-| HTML frames | `html/01-title.html`, `html/03-end.html`, caption strips |
-| Output | `out/spur-ph-hero-demo.mp4` → published as `../ph_ready/hero-video-ph-ready.mp4` |
+| `../proof-manifest.json` | Approved source, timing, caption, and proof binding |
+| `content-graph.json` | Ordered title, five video segments, and end card |
+| `html/01-title.html` | Opening frame |
+| `html/03-end.html` | Install frame |
+| `../live_demos/*.mp4` | Fresh observe-only product captures |
+| `../ph_ready/hero-video-ph-ready.mp4` | Published H.264, 1920 by 1080 output |
 
-## Rebuild
+## Timeline
+
+| Time | Segment | Source proof |
+|---:|---|---|
+| 0.0 to 3.0s | Title | Control tower for CLI coding agents. |
+| 3.0 to 7.0s | Session | Session Detail, INSERT, following |
+| 7.0 to 10.0s | Workers | WORKERS and worker state |
+| 10.0 to 14.0s | Plans | Explicit empty plan state |
+| 14.0 to 19.0s | Specialist | agent, model, effort |
+| 19.0 to 22.2s | Resume | Resumed prior conversation |
+| 22.2 to 25.2s | End | Install command |
+
+The plan segment is intentionally captioned `Empty plan state is explicit.` The observe-only source does not contain a seeded campaign. The worker segment proves visible state, not a live delegation loop.
+
+## Build
 
 ```bash
 cd docs/product_launch/media_pack/demo_render
 ./build.sh
 ```
 
-Requires: `ffmpeg`, Node 18+, Google Chrome (for puppeteer-core screenshots).
+Requirements: `ffmpeg`, `ffprobe`, `jq`, Node 18 or later, and Google Chrome for `puppeteer-core` frame rendering.
 
-## Timeline (41s)
+The build validates the hero graph against the proof manifest, renders the title and caption frames, cuts each source segment by approved ID, normalizes every clip to 1920 by 1080 at 30 fps, concatenates them in graph order, and publishes the final MP4. `-nostdin` keeps sequential ffmpeg calls from consuming the build script's manifest stream.
 
-| t | Segment |
-|---|---|
-| 0–3s | Title card — *Control tower for CLI coding agents.* |
-| 3–38s | Real plan-loop demo (VHS trim 5→40) + captions |
-| 38–41s | End card — install one-liner |
+## Verify
 
-Captions (relative to demo segment):
+```bash
+bash docs/product_launch/media_pack/tests/media-contract.test.sh
+```
 
-- 0–5s Session Detail — operator home  
-- 8–14s Drive brain ↔ worker loops  
-- 16–22s Plans and progress in one surface  
-- 24–30s Specialists without losing context  
-- 30–35s Resume after you close the laptop  
+The contract checks graph-to-manifest bindings, caption-to-proof bindings, retained segment IDs, H.264 codec, 1920 by 1080 dimensions, 25.2-second duration, and the gallery evidence checks.
 
-## Product Hunt upload
-
-Use **`ph_ready/hero-video-ph-ready.mp4`** (this render), not the raw untrimmed VHS and not the Seedance social trailer.
+Use `../ph_ready/hero-video-ph-ready.mp4` for the Product Hunt video. Keep generated social trailers in `../marketing/out/` and off the product-proof gallery.
