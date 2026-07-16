@@ -1,129 +1,79 @@
-# SPUR Product Hunt — Media Pack (real VHS captures only)
+# SPUR Product Hunt media pack
 
-**Date:** 2026-07-16  
-**Rule:** Product Hunt media is **real SPUR TUI film** from `scripts/e2e/demos/tui-live/`. No AI-invented terminal UIs.  
-**Sources:**
+**Reviewed:** 2026-07-16
+**Capture mode:** observe-only
+**Rule:** Product Hunt product proof comes from fresh SPUR TUI captures in `scripts/e2e/demos/tui-live/`. Generated marketing material is not product proof.
 
-| Source | Role |
-|---|---|
-| `scripts/e2e/demos/tui-live/out/*.mp4|gif` | Rendered VHS captures (upload truth) |
-| `scripts/e2e/demos/tui-live/tapes/*.tape` | Storyboard scripts that produced the films |
-| `docs/product_launch/product-journey-ph.md` | Journey order / Session Detail home |
-| `SPUR_PRD.md` v2.3 | Claims, tiers, positioning |
+## What to upload
 
-**Re-film command (when stills go stale):**
+| Product Hunt slot | Approved file | Specification | Visible proof |
+|---|---|---|---|
+| Thumbnail | `ph_ready/thumbnail-240.png` | 240 by 240 PNG | SPUR identity |
+| Gallery 1 | `ph_ready/gallery-01-session-detail-1270x760.png` | 1270 by 760 PNG | Session Detail, INSERT, following |
+| Gallery 2 | `ph_ready/gallery-02-worker-visibility-1270x760.png` | 1270 by 760 PNG | WORKERS, running and cancelled state |
+| Gallery 3 | `ph_ready/gallery-03-plan-state-1270x760.png` | 1270 by 760 PNG | Plans, No plans found |
+| Gallery 4 | `ph_ready/gallery-04-specialist-routing-1270x760.png` | 1270 by 760 PNG | agent, model, effort |
+| Gallery 5 | `ph_ready/gallery-05-session-resume-1270x760.png` | 1270 by 760 PNG | Session, Resumed from prior conversation |
+| Video | `ph_ready/hero-video-ph-ready.mp4` | 25.2 seconds, H.264, 1920 by 1080 | Five reviewed source segments |
+
+Open `html/index.html` for the scripts-off launch handoff. It includes the upload inventory, captions, product-proof frames, and provenance links without remote resources.
+
+## Evidence map
+
+`proof-manifest.json` is the canonical approval record. It binds each asset to a source file, journey, timestamp, crop, approved SHA-256, visible proof terms, caption, output name, and channel.
+
+| ID | Source | Time | Approved claim |
+|---|---|---:|---|
+| `session-detail-home` | `live_demos/13-problem-plan-loop-drive.mp4` | 10.0s | Session Detail keeps the operator in one working context. |
+| `worker-visibility` | `live_demos/10-problem-ops-visibility.mp4` | 20.0s | Go to exposes running and cancelled worker state. |
+| `plan-state` | `live_demos/11-problem-plan-progress.mp4` | 14.0s | The plan hub makes an empty execution slot explicit. |
+| `specialist-routing` | `live_demos/09-product-e2e-flow.mp4` | 54.0s | Agent, model, and effort remain explicit before dispatch. |
+| `session-resume` | `live_demos/04-session-resume.mp4` | 8.0s | A saved conversation returns to the same operator surface. |
+
+The observe-only capture has no seeded campaign and no active EXEC worker. Gallery 3 therefore proves an explicit empty plan state, not campaign progress. Gallery 2 proves worker-state visibility through the Go to surface, not a live brain-to-worker loop. Do not strengthen either claim without a new approved capture.
+
+## Rebuild and verify
+
+Prerequisites: `ffmpeg`, `ffprobe`, `jq`, Node 18 or later, Google Chrome, `tesseract`, and VHS for recapture.
 
 ```bash
+# Optional: recapture the reviewed journeys without sending agents.
 cd scripts/e2e/demos/tui-live
 export SPUR_BIN="$(command -v spur)"
 SPUR_DEMO_STORIES_ONLY=1 SPUR_DEMO_STORY_PACE=1 ./render.sh
-# then re-run scripts/product_launch/refresh-media-pack.sh (or this pack’s extract recipe below)
+
+# Publish checksum-bound stills and thumbnail.
+cd ../../../../
+docs/product_launch/media_pack/refresh.sh
+
+# Build the multi-source hero.
+docs/product_launch/media_pack/demo_render/build.sh
+
+# Verify journey and media contracts.
+bash scripts/e2e/demos/tui-live/story-contract.test.sh
+bash docs/product_launch/media_pack/tests/media-contract.test.sh
 ```
 
----
+`refresh.sh` fails closed before publishing. It checks source existence, approved checksum, timestamp, crop bounds, output dimensions, and OCR proof terms in a staging directory, then swaps the validated outputs into place.
 
-## Positioning lock
+The live-seed path is intentionally outside the default capture. It can send agents and spend credits. Run it only with explicit approval and the repository's spend gate enabled.
 
-| Element | Value |
-|---|---|
-| Tagline | Control tower for CLI coding agents. |
-| Operator home | **Session Detail** (not Dashboard-first) |
-| Hero journey | `problem-plan-loop-drive` → `out/13-problem-plan-loop-drive.{mp4,gif}` |
-| Secondary | `product-e2e-flow` → `09-…` |
-| Durability cut | `session-resume` → `04-…` |
-
----
-
-## Layout
+## Repository layout
 
 ```text
 docs/product_launch/media_pack/
-├── MANIFEST.md
-├── html/index.html              # local visualizer (real paths only)
-├── live_demos/                  # copies of VHS out/ mp4+gif
-├── gallery_stills/              # mid-film PNG frames (ffmpeg)
-├── ph_ready/                    # PH-sized derivatives + hero copies
-└── tapes_index/                 # source .tape storyboards
+├── proof-manifest.json          # canonical evidence and approval map
+├── refresh.sh                  # fail-closed derivative publisher
+├── html/index.html             # static launch handoff
+├── live_demos/                 # reviewed source MP4 files
+├── gallery_stills/             # timestamp and crop extracts
+├── ph_ready/                   # approved upload derivatives
+├── demo_render/                # deterministic hero renderer
+├── tapes_index/                # reviewed journey tapes
+├── marketing/                  # separate generated marketing layer
+└── tests/media-contract.test.sh
 ```
 
----
+## Channel boundary
 
-## A. Live demos (PH video / GIF truth)
-
-| Pack path | Tape | Journey problem |
-|---|---|---|
-| `live_demos/13-problem-plan-loop-drive.{mp4,gif}` | `tapes/13-problem-plan-loop-drive.tape` | submit_plan loop black box → drive brain↔worker |
-| `live_demos/09-product-e2e-flow.{mp4,gif}` | `tapes/09-product-e2e-flow.tape` | specialist + model/effort without losing context |
-| `live_demos/10-problem-ops-visibility.{mp4,gif}` | `tapes/10-…` | what’s running where I work |
-| `live_demos/11-problem-plan-progress.{mp4,gif}` | `tapes/11-…` | multi-task campaign progress |
-| `live_demos/12-problem-backlog-triage.{mp4,gif}` | `tapes/12-…` | P0 backlog triage |
-| `live_demos/04-session-resume.{mp4,gif}` | `tapes/04-…` | re-attach / resume |
-| `live_demos/14-live-plan-loop-seed.{mp4,gif}` | live seed capture | optional real spend seed |
-
-**PH upload:**
-
-| Field | File |
-|---|---|
-| **Video (YouTube / PH)** | `ph_ready/hero-video-ph-ready.mp4` — **revised** 16:9 (title + trim 5–40s + captions + end card). Source raw: `hero-video-plan-loop-drive.mp4` |
-| **Hero GIF (raw)** | `ph_ready/hero-gif-plan-loop-drive.gif` |
-| Optional secondary GIF | `live_demos/09-product-e2e-flow.gif` |
-| Demo rebuild | `demo_render/build.sh` · IR `demo_render/content-graph.json` |
-
----
-
-## B. Gallery stills (ffmpeg from real mp4)
-
-All under `gallery_stills/` and PH-sized under `ph_ready/gallery-0N-*-1270x760.png`.
-
-| # | Still | Source film | Caption |
-|---:|---|---|---|
-| 1 | `01-session-plan-loop` | 13 plan-loop | Session Detail home |
-| 2 | `02-workers-delegate` | 13 plan-loop | Workers / DELEGATE in session |
-| 3 | `03-plan-progress` | 11 plan-progress | Campaign Progress |
-| 4 | `04-explore-cascade` | 09 product-e2e | Explore + specialist cascade |
-| 5 | `05-session-resume` | 04 resume | Session resume |
-| 6 | `06-backlog-triage` | 12 backlog | P0 backlog triage |
-| 7 | `07-ops-visibility` | 10 ops | Ops visibility (optional #7) |
-
-**Thumbnail:** crop of real hero frame → `ph_ready/thumbnail-240.png` / `thumbnail-512.png`  
-(Real TUI crop — not a synthetic logo.)
-
----
-
-## C. Marketing layer (Higgsfield, conditioned on this pack)
-
-Product truth stays in `ph_ready/` / `live_demos/` / `gallery_stills/`.
-
-Marketing creatives live under **`marketing/out/`** — generated with Higgsfield using those stills as `--image` / `--start-image` / `--end-image`. See [`marketing/MARKETING.md`](./marketing/MARKETING.md).
-
-| Marketing file | Use |
-|---|---|
-| `marketing/out/01-og-social.png` | Site OG / social preview |
-| `marketing/out/02-social-square.png` | Square social post |
-| `marketing/out/03-plan-story.png` | Thread: plan loop |
-| `marketing/out/04-explore-story.png` | Thread: specialist cascade |
-| `marketing/out/05-resume-story.png` | Thread: resume |
-| `marketing/out/06-trailer.mp4` | Social trailer only |
-
-**Never** upload marketing outputs as PH gallery product screenshots.
-
-## D. What is explicitly **not** product truth
-
-- AI-invented terminal chrome used as PH gallery  
-- Cost-ledger hero stills not present in the problem-story films
-
----
-
-## E. Extract recipe (reproducible)
-
-```bash
-OUT=scripts/e2e/demos/tui-live/out
-PACK=docs/product_launch/media_pack
-# densest frame among candidates:
-ffmpeg -ss <t> -i $OUT/13-problem-plan-loop-drive.mp4 -frames:v 1 $PACK/gallery_stills/01-session-plan-loop.png
-ffmpeg -i $PACK/gallery_stills/01-session-plan-loop.png \
-  -vf "scale=1270:760:force_original_aspect_ratio=increase,crop=1270:760" \
-  $PACK/ph_ready/gallery-01-01-session-plan-loop-1270x760.png
-```
-
-Open visualizer: `docs/product_launch/media_pack/html/index.html`
+Use `ph_ready/` assets for Product Hunt product proof. Content under `marketing/out/` may be used for social posts, ads, or brand motion only. Generated motion can invent intermediate UI and must never replace the real gallery images or the product demo.
