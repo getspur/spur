@@ -39,7 +39,7 @@ Hide
 Type "n"
 Show
 Sleep 2s
-Wait+Screen@25s /Session ·|INSERT|Failed to initialize/
+Wait+Screen@50s /Session ·|INSERT/
 Sleep 2.5s
 
 # STORY: ACTION — Issues from session

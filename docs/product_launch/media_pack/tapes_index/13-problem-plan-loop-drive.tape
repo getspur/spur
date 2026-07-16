@@ -40,7 +40,7 @@ Hide
 Type "n"
 Show
 Sleep 2.5s
-Wait+Screen@25s /Session ·|INSERT|Failed to initialize/
+Wait+Screen@50s /Session ·|INSERT/
 Sleep 3s
 
 # STORY: ACTION — session help
@@ -130,8 +130,13 @@ Wait+Screen@15s /task/
 Sleep 4.5s
 Sleep 1.5s
 
-# STORY: PROOF — back home Session Detail when possible
-Wait+Screen@15s /Session ·|INSERT|Lineage|Activity/
-Sleep 2s
+# STORY: PROOF - return home to Session Detail
+Hide
+Escape
+Show
+Wait+Screen@15s /Session ·|INSERT/
+Sleep 3s
+
 # STORY: RESOLUTION
-Sleep 2s
+Wait+Screen@15s /Session ·|INSERT/
+Sleep 3s
