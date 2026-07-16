@@ -66,16 +66,18 @@
 
 | | |
 |---|---|
-| **Ship for PH video?** | **Yes, with cuts** |
-| **Grade** | **B** product authenticity · **C+** narrative packaging |
+| **Ship for PH video?** | **Yes — revised package shipped** |
+| **Grade** | **B** product authenticity · **B** packaging (post-revision) |
 
-**Must-fix before PH upload**
+**Implemented (2026-07-16)** in `media_pack/demo_render/`:
 
-1. **Trim cold open** — start at first readable Session Detail frame (~8–12s into current file, verify with stills). Target **25–40s** final.  
-2. **Add end card (2–3s)** — programmatic overlay (Hyperframes/Remotion/ffmpeg drawtext): tagline *Control tower for CLI coding agents.* + install one-liner. Do **not** burn AI-generated fake UI.  
-3. **Optional captions** — 3–5 title cards: *Session Detail home* · *Workers / DELEGATE* · *Plan progress* · *Resume later*.  
-4. **Audio** — either silent with captions (honest) or light music bed + SFX (no fake VO claiming features not shown).  
-5. **YouTube export** — 1920×1080 16:9 letterbox/crop from 2560×1600 for PH embed reliability.
+1. Trim cold open → start at **5s** of raw VHS through **40s** (~35s product).  
+2. HTML title + end cards (html-video frames → PNG → 3s each).  
+3. Caption overlays (HTML strips): Session Detail · workers · plans · specialists · resume.  
+4. Export **1920×1080 16:9** → `ph_ready/hero-video-ph-ready.mp4` (**41s** total).  
+5. Rebuild: `demo_render/build.sh`.
+
+**Still optional:** light music bed; 9:16 social crop; re-film denser mid-proof with `SPUR_DEMO_STORY_PACE=1`.
 
 **Do not** replace this film with V2 trailer on the PH listing.
 

@@ -7,3 +7,10 @@ ph_ready/_thumb_crop.png
 # Higgsfield marketing outputs (large); regenerate via marketing/MARKETING.md
 marketing/out/
 marketing/jobs/*.done.json
+
+# Demo render intermediates / output (rebuild with demo_render/build.sh)
+demo_render/out/
+demo_render/frames/
+demo_render/scripts/node_modules/
+demo_render/scripts/package-lock.json
+ph_ready/hero-video-ph-ready.mp4
