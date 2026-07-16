@@ -970,7 +970,7 @@ bash infra/spur-context-service/test-graviton2-baseline.sh
 
 ## Serving Lambda Concurrency
 
-`lambda_max_concurrency` defaults to `2` and sets
+`lambda_max_concurrency` defaults to `4` and sets
 `AWS_LAMBDA_MAX_CONCURRENCY` on the serving Lambda. Values greater than `1`
 enable concurrent in-process request handling. Set it to `1`, or leave the
 environment variable unset outside Terraform, to use the sequential fallback.
@@ -1000,7 +1000,7 @@ terraform apply -var concurrent_warm_instances=1
 | `catalog_leases_table_name` | `spur-context-catalog-leases` | DynamoDB table for catalog leases |
 | `lambda_memory_mb` | `1024` | Lambda memory |
 | `lambda_timeout_sec` | `30` | Lambda timeout |
-| `lambda_max_concurrency` | `2` | Maximum in-process request concurrency per serving Lambda environment; `1` is sequential |
+| `lambda_max_concurrency` | `4` | Maximum in-process request concurrency per serving Lambda environment; `1` is sequential |
 | `concurrent_warm_instances` | `0` | Provisioned concurrency |
 | `api_throttle_rate_limit` | `20` | API Gateway route throttle rate per second |
 | `api_throttle_burst_limit` | `40` | API Gateway route throttle burst |
