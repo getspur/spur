@@ -1,8 +1,9 @@
 # SPUR × Product Hunt — Success Launch Checklist
 
 **Status:** Draft for ownership — **not execution-ready** until P0 fixes below are closed (content-marketer review 2026-07-16)  
-**Date:** 2026-07-16 · **Rev:** 1.1 (post content-marketer audit)  
-**Grounded in:** [`SPUR_PRD.md`](../../SPUR_PRD.md) v2.3 · official [Product Hunt Launch Guide](https://www.producthunt.com/launch) · [Featuring Guidelines](https://help.producthunt.com/en/articles/9883485-product-hunt-featuring-guidelines) · [Points](https://help.producthunt.com/en/articles/10275873-what-are-points)  
+**Date:** 2026-07-16 · **Rev:** 1.2 (journey-aligned demo + gallery vs live TUI problem stories)  
+**Grounded in:** [`SPUR_PRD.md`](../../SPUR_PRD.md) v2.3 · official [Product Hunt Launch Guide](https://www.producthunt.com/launch) · [Featuring Guidelines](https://help.producthunt.com/en/articles/9883485-product-hunt-featuring-guidelines) · [Points](https://help.producthunt.com/en/articles/10275873-what-are-points) · live demos [`scripts/e2e/demos/tui-live/`](../../scripts/e2e/demos/tui-live/)  
+**Product journey:** [`product-journey-ph.md`](./product-journey-ph.md)  
 **Review:** [`producthunt-checklist-content-review.md`](./producthunt-checklist-content-review.md)  
 **Related assets:** [`marketing/launch/playbook.md`](../../marketing/launch/playbook.md) (cross-channel ops) · [`marketing/messaging/positioning.md`](../../marketing/messaging/positioning.md) (persona language)  
 **Superseded for PH copy/execution:** [`marketing/launch/product-hunt.md`](../../marketing/launch/product-hunt.md) (2026-05 package — cost-ledger lead, unverified UI claims, unsupported pricing; salvage brand-visual direction only after audit)
@@ -162,35 +163,87 @@ PH traffic is unforgiving. Ship a **loveable** Community path, not a half-setup 
 
 ### 3.1 Launch-blocker product checks
 
-| # | Check | Owner | Status |
-|---|---|---|---|
-| 1 | Cold install: `install.sh` works macOS + Linux; signature/checksums documented | | [ ] |
-| 2 | `spur init` → configure ≥1 brain agent → first session in &lt;15 minutes for a motivated user | | [ ] |
-| 3 | Demo path: issue/plan → worker in worktree → **review card** A/D/M/R | | [ ] |
-| 4 | Session resume / re-attach works after process kill (**show in video**) | | [ ] |
-| 5 | Community **1 concurrent worker** quota is visible and understandable in UI/docs | | [ ] |
-| 6 | Status page or known-issue note if flaky agents | | [ ] |
-| 7 | `/privacy` (and ideally `/security`) live if telemetry or email capture exists | | [ ] |
-| 8 | Pricing / Community vs Pro page matches **signed policy** (PRD §4) | | [ ] |
-| 9 | PH landing URL stable (`/` or `/product-hunt`); **no bit.ly / UTM on PH product URL field** | | [ ] |
-| 10 | Capacity: install + docs can absorb spike | | [ ] |
-| 11 | Support channel staffed launch day | | [ ] |
-| 12 | v2.3 claim matrix signed for every PH-facing sentence | | [ ] |
+| # | Check | Owner | Status | Grounding journey |
+|---|---|---|---|---|
+| 1 | Cold install: `install.sh` works macOS + Linux; signature/checksums documented | | [ ] | (install path, not TUI film) |
+| 2 | `spur init` → configure ≥1 brain → land **Session Detail** in &lt;15 min | | [ ] | all live journeys (`story_session_land`) |
+| 3 | **Hero path:** session → plan/workers → DELEGATE visible in Session Detail | | [ ] | `problem-plan-loop-drive` (+ optional `SPUR_DEMO_ALLOW_PLAN_LOOP=1`) |
+| 4 | Specialist path: Explore adopt + `@worker` cascade without losing session | | [ ] | `product-e2e-flow` |
+| 5 | Session resume / re-attach after quit (**show in video**) | | [ ] | `session-resume` (probe) + product-e2e attach |
+| 6 | Ops visibility from session home (workers / Go to); lineage is secondary | | [ ] | `problem-ops-visibility` |
+| 7 | Plan progress / campaign inventory reachable from session | | [ ] | `problem-plan-progress` |
+| 8 | Backlog triage (Issues) reachable from session when seed present | | [ ] | `problem-backlog-triage` |
+| 9 | Community **1 concurrent worker** quota visible/understandable | | [ ] | PRD + UI |
+| 10 | `/privacy` (and ideally `/security`) if telemetry or email capture exists | | [ ] | legal |
+| 11 | Pricing / Community vs Pro matches **signed policy** (PRD §4) | | [ ] | PRD |
+| 12 | PH landing URL stable; **no UTM** on PH product URL field | | [ ] | web |
+| 13 | Capacity + support staffed launch day | | [ ] | ops |
+| 14 | v2.3 claim matrix signed for every PH-facing sentence | | [ ] | docs |
 
-### 3.2 Demo script (60–90 seconds)
+**Do not** make Dashboard lineage the hero proof. Live demos treat **Session Detail as operator home**; Dashboard / Lineage is optional overview (`PROBLEM_STORIES.md`).
 
-1. **Pain** (5s): multi-agent tabs / rate limit / lost context  
-2. **Control tower** (20s): Dashboard lineage tree + workers  
-3. **Review gate** (20s): Approve a real diff  
-4. **Durability** (15s): kill/restart → resume (this is the differentiator screenshots cannot prove)  
-5. **Close** (10s): Community free install + clear Pro optional  
+### 3.2 Canonical product journey (cross-checked vs live TUI demos)
 
-- [ ] Real capture (not AI-generated terminal mockups)
-- [ ] YouTube public or unlisted (**not private**); full URL
+Source of truth for *what the product does on film*:
+
+- Catalog: [`scripts/e2e/demos/tui-live/PROBLEM_STORIES.md`](../../scripts/e2e/demos/tui-live/PROBLEM_STORIES.md)
+- Order: [`scripts/e2e/demos/tui-live/journeys.conf`](../../scripts/e2e/demos/tui-live/journeys.conf) (marketing value order)
+- Full map: [`product-journey-ph.md`](./product-journey-ph.md)
+
+```text
+Session Detail (home)
+  ├── ReAct (YOU / THINK / ACT / DELEGATE)
+  ├── INSERT composer (@worker cascade)
+  ├── Workers panel (Alt+d)
+  ├── Alt+p plan inspector
+  └── Ctrl+K Go to → Plans / Issues / Explore / Sessions
+
+Dashboard / Lineage = optional ops overview (secondary)
+```
+
+**PH narrative = problem stories (value demos), not surface probes.**
+
+| PH priority | Journey ID | User problem (exact catalog voice) | Proof the audience should see |
+|---:|---|---|---|
+| **1 — hero film** | `problem-plan-loop-drive` | submit_plan loop is a black box — drive brain↔worker | Session ·, INSERT, workers, DELEGATE/YOU; plan Progress when opened |
+| **2** | `product-e2e-flow` | specialist + model/effort without losing context | Session attach, Explore adopt, `agent=` / `model=` / `effort=` cascade |
+| **3** | `problem-ops-visibility` | what’s running where I work? | Session help, workers, Go to |
+| **4** | `problem-plan-progress` | where is my multi-task campaign? | Plans / Progress from session |
+| **5** | `problem-backlog-triage` | what’s P0 open in the backlog? | Issues list / open P0 when seeded |
+| Support (not hero) | `session-resume` | closed laptop / re-attach | Session Detail history land |
+| Regression only | `01`–`08` probes | chrome components | **Do not** lead PH gallery with these alone |
+
+Beat spine (every value film): **HOOK → ORIENTATION → ACTION → PROOF → RESOLUTION**.
+
+### 3.3 PH demo video script (60–90s) — journey-aligned
+
+Use **real capture** from the live project demos (prefer re-film with `SPUR_DEMO_STORY_PACE=1`, not AI mock terminals).
+
+| Time | Beat | What to show | Journey ground |
+|---:|---|---|---|
+| 0–8s | HOOK | Multi-agent chaos / “black box campaign” pain | plan-loop problem sentence |
+| 8–25s | ORIENTATION | Land **Session Detail** (composer + ReAct chrome) — say this is home | all stories `story_session_land` |
+| 25–50s | ACTION | Workers panel + plan surface from session; optional live 1-task seed | `problem-plan-loop-drive` |
+| 50–65s | PROOF | DELEGATE / worker activity visible in-session (not only Dashboard) | plan-loop proof anchors |
+| 65–80s | PROOF+ | Quick cut: Explore adopt → `@worker` cascade (specialist ready) **or** quit/re-open session | `product-e2e-flow` / `session-resume` |
+| 80–90s | RESOLUTION | Community free install; Pro = Telegram / more workers / Insights | PRD tiers |
+
+Optional second short (15–20s) for gallery GIF only: `problem-ops-visibility` or backlog triage.
+
+**Safety (match demo gates — do not claim live seed by default):**
+
+- Observe-only is the honest default for most film.
+- `SPUR_DEMO_ALLOW_PLAN_LOOP=1` / `SPUR_DEMO_ALLOW_AGENT_SEND=1` for real spend.
+- `submit_plan` is **brain MCP**, not a TUI button — operator *lives* in Session Detail while the loop runs.
+
+- [ ] Hero video storyboard signed against `problem-plan-loop-drive` (not Dashboard-first)
+- [ ] Real capture (prefer `SPUR_DEMO_STORIES_ONLY=1 ./render.sh` or `./capture-live-seed.sh`)
+- [ ] YouTube public or unlisted; full URL
 - [ ] Captions/subtitles
-- [ ] Optional interactive demo only if faithful to the TUI
+- [ ] Interactive demo only if it mirrors Session Detail home
 
 ---
+
 
 ## 4. Pre-launch timeline checklist
 
@@ -212,26 +265,39 @@ Prep time scales with product readiness, not a magic 8–12 week rule. **Engaged
 - [ ] Gallery: **≥2 required**, recommend **5–8** real screenshots
 - [ ] Thumbnail (square; PH recommends **240×240**; &lt;3MB; GIF first frame must read static)
 - [ ] Gallery images (recommend **1270×760**)
-- [ ] Demo video with **restart → resume** proof
+- [ ] Hero demo film from **`problem-plan-loop-drive`** (§3.3)
+- [ ] Optional GIF cuts from `product-e2e-flow` / `session-resume`
 - [ ] Interactive demo optional
 - [ ] Promo offer if any (offer + code + expiry all required in PH form)
 - [ ] Shoutouts: pick tools that mattered; **do not hardcode max 3** — verify live UI (docs conflict)
 - [ ] Website PH-ready: clear CTA, real social proof only, mobile OK
 
-**Suggested gallery sequence for SPUR**
+**Suggested gallery sequence (journey-aligned)**
 
-| # | Frame | PRD proof |
-|---|---|---|
-| 1 | Hero: Dashboard / lineage tree | Control tower |
-| 2 | Review card A/D/M/R | Human gate as state machine |
-| 3 | Worktree isolation | Isolation; **honest** Community = 1 concurrent worker |
-| 4 | Session resume / “close laptop” | Event-sourced durability |
-| 5 | Plan Browser / Loop Browser | Ops depth (secondary) |
-| 6 | Install one-liner | Time-to-value |
-| 7 | Optional: Telegram review | **Label as Pro** |
-| 8 | Optional: Cost badge / Insights | Visibility not governance; **Pro** for Insights |
+| # | Frame (real capture) | Journey / proof | Caption intent |
+|---:|---|---|---|
+| 1 | **Session Detail home** — composer + ReAct | all stories land here | Operator home for multi-agent work |
+| 2 | Workers panel / DELEGATE in session | `problem-plan-loop-drive` | Drive brain↔worker without leaving the session |
+| 3 | Plan Progress / campaign from session (Alt+p / Plans) | `problem-plan-progress` + plan-loop | Multi-task campaign is inventory, not a black box |
+| 4 | Explore adopt + `@worker` cascade draft | `product-e2e-flow` | Specialist + model/effort without losing context |
+| 5 | Session resume / re-attach | `session-resume` | Close laptop; session survives |
+| 6 | Issues backlog triage (if seed) | `problem-backlog-triage` | P0 open work from the same control surface |
+| 7 | Optional: Dashboard lineage overview | `problem-ops-visibility` (secondary) | System map — **not** the hero |
+| 8 | Install one-liner | install path | Time-to-value |
+| 9 | Optional: Telegram review | Pro only | **Label as Pro** |
+| 10 | Optional: cost badge / Insights | Pro / observational | Visibility not governance |
 
-Do **not** use AI mock terminals or invented keybindings (`space` collapse, `r` retry from tree, `spur cost --today`, etc.). Capture the real binary.
+Do **not** lead with Dashboard chrome tours or AI mock terminals. Do not invent keybindings (`space` collapse, `r` retry from tree, `spur cost --today`). Prefer frames already produced under `scripts/e2e/demos/tui-live/out/` (`09`–`13`, live seed `14`) after a story-pace re-capture.
+
+**Marketing render recipe (from demo README):**
+
+```bash
+cd scripts/e2e/demos/tui-live
+export SPUR_BIN="$(command -v spur)"
+SPUR_DEMO_STORIES_ONLY=1 SPUR_DEMO_STORY_PACE=1 ./render.sh
+# optional live seed film:
+# ./capture-live-seed.sh   # → out/14-live-plan-loop-seed.{mp4,gif}
+```
 
 ### 4.3 T−3 to T−2 weeks — community & hunter decision
 
@@ -437,7 +503,7 @@ Policy-safe language:
 | Risk | Why it hits on PH | Mitigation |
 |---|---|---|
 | “Just another AI wrapper” editorial skip | Crowded AI category | Lead with orchestration + review gate + local-first resume |
-| TUI hard to demo | Gallery noise | Real terminal captures + resume video |
+| TUI hard to demo | Gallery noise | Film **Session Detail** problem stories (`09`–`13` / live seed `14`), not chrome probes |
 | Complex install | High bounce | Prerequisites + 5-minute path docs |
 | Proprietary / no public GitHub | Dev skepticism | Honest maker comment; signed binary; local-first privacy |
 | Cost claims overreach | Trust burn | Visibility not governance |
@@ -459,9 +525,10 @@ Policy-safe language:
 
 ### Product
 
-- [ ] Install + 15-minute happy path green
-- [ ] Review gate demo reliable
-- [ ] Resume demo reliable (video)
+- [ ] Install + 15-minute happy path green (lands Session Detail)
+- [ ] Hero path: `problem-plan-loop-drive` UAT green
+- [ ] Specialist path: `product-e2e-flow` UAT green
+- [ ] Resume proof available (`session-resume` or film cut)
 - [ ] Pricing/tier claims match signed policy
 - [ ] Privacy/security pages if needed
 - [ ] Claim matrix signed
@@ -470,8 +537,8 @@ Policy-safe language:
 
 - [ ] Tagline ≤60 (default C)
 - [ ] Description ≤260
-- [ ] Thumbnail + ≥2 real gallery images
-- [ ] Video with resume proof
+- [ ] Thumbnail + ≥2 real gallery images (**Session Detail–first**)
+- [ ] Hero video = plan-loop journey (not Dashboard-first)
 - [ ] First maker comment
 - [ ] Pricing field set
 - [ ] Shoutouts verified live
