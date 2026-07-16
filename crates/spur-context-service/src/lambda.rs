@@ -37,6 +37,7 @@ use crate::mcp::{self, McpHandlerError};
 
 pub static CATALOG_RESOLVER: OnceLock<Mutex<Option<CatalogCacheEntry>>> = OnceLock::new();
 static AWS_CLIENTS: OnceLock<AwsClients> = OnceLock::new();
+static SNAPSHOT_CACHE_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
 
 pub struct CatalogCacheEntry {
     catalog_dsn: String,
@@ -150,10 +151,6 @@ struct ToolRequest {
     args: Value,
 }
 
-#[allow(
-    clippy::await_holding_lock,
-    reason = "route_index only consults the catalog before its first await"
-)]
 pub async fn handler(event: LambdaEvent<Value>) -> Result<Value, Error> {
     handle_event_with_drainer(event, drain_queued_jobs()).await
 }
@@ -190,10 +187,6 @@ fn is_scheduled_drainer_event(payload: &Value) -> bool {
         && payload.pointer("/detail/operation").and_then(Value::as_str) == Some("drain_queued_jobs")
 }
 
-#[allow(
-    clippy::await_holding_lock,
-    reason = "route_index only consults the catalog before its first await"
-)]
 async fn handle_api_gateway_request(
     api_gateway_request: ApiGatewayRequest,
 ) -> Result<ApiGatewayResponse, Error> {
@@ -283,13 +276,20 @@ async fn handle_api_gateway_request(
             let caller_id = authenticated_caller
                 .as_deref()
                 .expect("external_index authenticated caller should be available");
-            let result = if let Some(prepared_catalog) = prepared_catalog {
-                let mut catalog_guard = catalog_resolver()?;
-                let catalog = initialized_catalog(&mut catalog_guard, &prepared_catalog)?;
-                let db = catalog.connection();
-                mcp::route_index(&request.args, db, catalog, &jobs, &sfn_client, caller_id).await
+            let warm_result = if let Some(prepared_catalog) = &prepared_catalog {
+                with_initialized_catalog(prepared_catalog, |catalog| {
+                    mcp::route_index_warm_lookup(&request.args, catalog)
+                })?
             } else {
-                mcp::route_index_without_catalog(&request.args, &jobs, &sfn_client, caller_id).await
+                Ok(None)
+            };
+            let result = match warm_result {
+                Ok(Some(response)) => Ok(response),
+                Ok(None) => {
+                    mcp::route_index_without_catalog(&request.args, &jobs, &sfn_client, caller_id)
+                        .await
+                }
+                Err(error) => Err(error),
             };
             // Best-effort drainer kick: if the job was accepted into the queue,
             // try to dispatch queued work immediately for lower latency. The
@@ -310,10 +310,10 @@ async fn handle_api_gateway_request(
                     Err(error) => tool_error_response(error),
                 };
             };
-            let mut catalog_guard = catalog_resolver()?;
-            let catalog = initialized_catalog(&mut catalog_guard, &prepared_catalog)?;
-            let db = catalog.connection();
-            mcp::handle_tool_sync(&request.tool, &request.args, db, catalog)
+            with_initialized_catalog(&prepared_catalog, |catalog| {
+                let db = catalog.connection();
+                mcp::handle_tool_sync(&request.tool, &request.args, db, catalog)
+            })?
         }
     };
 
@@ -1187,6 +1187,18 @@ fn initialized_catalog<'a>(
         .ok_or_else(|| lambda_error("catalog resolver cache did not initialize"))
 }
 
+/// Runs one synchronous DuckDB operation while holding the process catalog
+/// mutex. The closure must return owned data, so no catalog borrow or mutex
+/// guard can cross an I/O await in the caller.
+fn with_initialized_catalog<T: 'static>(
+    prepared_catalog: &PreparedCatalog,
+    operation: impl FnOnce(&CatalogResolver) -> T,
+) -> Result<T, Error> {
+    let mut catalog_guard = catalog_resolver()?;
+    let catalog = initialized_catalog(&mut catalog_guard, prepared_catalog)?;
+    Ok(operation(catalog))
+}
+
 async fn prepare_catalog() -> Result<Option<PreparedCatalog>, Error> {
     let catalog_dsn = catalog_dsn()?;
     prepare_catalog_source(catalog_dsn).await
@@ -1208,10 +1220,10 @@ async fn prepare_catalog_source(catalog_dsn: String) -> Result<Option<PreparedCa
                 snapshot_pointer_cache_token(pointer.pointer_etag.as_deref(), &pointer.manifest);
             let local_path =
                 local_snapshot_path(&pointer.manifest.snapshot_uri, Some(&cache_token))?;
-            if !local_path.is_file() {
-                download_catalog_snapshot(&snapshot_uri, &local_path).await?;
-            }
-            verify_local_snapshot_hash(&local_path, &pointer.manifest.sha256)?;
+            ensure_local_snapshot(&local_path, &pointer.manifest.sha256, || {
+                download_catalog_snapshot(&snapshot_uri, &local_path)
+            })
+            .await?;
             return Ok(Some(PreparedCatalog {
                 cache_key: snapshot_pointer_cache_key(
                     &catalog_dsn,
@@ -1376,6 +1388,47 @@ fn snapshot_pointer_cache_token(
         manifest.generation,
         manifest.sha256
     )
+}
+
+async fn ensure_local_snapshot<Download, DownloadFuture>(
+    local_path: &Path,
+    expected_sha256: &str,
+    download: Download,
+) -> Result<(), Error>
+where
+    Download: FnOnce() -> DownloadFuture,
+    DownloadFuture: Future<Output = Result<(), Error>>,
+{
+    // Snapshot preparation happens before the DuckDB catalog mutex is taken.
+    // Serialize cache repair separately so concurrent cold invokes cannot race
+    // while replacing the same local snapshot path.
+    let _cache_guard = SNAPSHOT_CACHE_LOCK
+        .get_or_init(|| tokio::sync::Mutex::new(()))
+        .lock()
+        .await;
+
+    if local_path.is_file() && verify_local_snapshot_hash(local_path, expected_sha256).is_ok() {
+        return Ok(());
+    }
+
+    evict_local_snapshot(local_path).await?;
+    download().await?;
+    if let Err(error) = verify_local_snapshot_hash(local_path, expected_sha256) {
+        evict_local_snapshot(local_path).await?;
+        return Err(error);
+    }
+    Ok(())
+}
+
+async fn evict_local_snapshot(local_path: &Path) -> Result<(), Error> {
+    match tokio::fs::remove_file(local_path).await {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(lambda_error(format!(
+            "failed to evict invalid catalog snapshot `{}`: {error}",
+            local_path.display()
+        ))),
+    }
 }
 
 fn verify_local_snapshot_hash(local_path: &Path, expected_sha256: &str) -> Result<(), Error> {
@@ -3526,5 +3579,51 @@ mod tests {
         assert_ne!(current_key, rollback_key);
         assert!(rollback_key.contains("generation=10"));
         assert!(rollback_key.contains(&rollback.snapshot_uri));
+    }
+
+    #[tokio::test]
+    async fn corrupt_cached_snapshot_is_not_sticky_across_repair_attempts() {
+        let local_path = env::temp_dir().join(format!(
+            "spur-context-service-corrupt-snapshot-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::write(&local_path, b"corrupt cache").expect("corrupt cache fixture should be written");
+
+        let valid_snapshot = b"valid frozen catalog snapshot";
+        let mut hasher = Sha256::new();
+        hasher.update(valid_snapshot);
+        let expected_sha256 = hasher
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+
+        let first_error = ensure_local_snapshot(&local_path, &expected_sha256, || async {
+            tokio::fs::write(&local_path, b"corrupt replacement")
+                .await
+                .map_err(Error::from)
+        })
+        .await
+        .expect_err("a corrupt replacement should fail integrity verification");
+
+        assert!(first_error.to_string().contains("sha256 mismatch"));
+        assert!(
+            !local_path.exists(),
+            "failed integrity verification must not leave a poisoned cache entry"
+        );
+
+        ensure_local_snapshot(&local_path, &expected_sha256, || async {
+            tokio::fs::write(&local_path, valid_snapshot)
+                .await
+                .map_err(Error::from)
+        })
+        .await
+        .expect("the next repair attempt should install a valid snapshot");
+
+        assert_eq!(
+            fs::read(&local_path).expect("repaired snapshot should be readable"),
+            valid_snapshot
+        );
+        fs::remove_file(&local_path).expect("snapshot fixture should be removed");
     }
 }

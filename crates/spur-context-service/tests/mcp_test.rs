@@ -23,9 +23,9 @@ use spur_context_service::jobs::{
 };
 use spur_context_service::mcp::{
     handle_tool, handle_tool_without_catalog, index_drainer_limits, index_queue_config,
-    route_index, route_index_status, route_index_status_for_caller, route_index_without_catalog,
-    tool_definitions, ExecutionOutcome, ExecutionOutcomeStatus, ExecutionStatusChecker,
-    IndexExecutionRequest, IndexExecutionStarter, McpHandlerError,
+    route_index, route_index_status, route_index_status_for_caller, route_index_warm_lookup,
+    route_index_without_catalog, tool_definitions, ExecutionOutcome, ExecutionOutcomeStatus,
+    ExecutionStatusChecker, IndexExecutionRequest, IndexExecutionStarter, McpHandlerError,
 };
 
 const PACKAGE: &str = "demo";
@@ -1534,6 +1534,38 @@ async fn external_index_returns_complete_for_warm_catalog_hit() -> Result<()> {
     assert_eq!(sfn.started_count(), 0);
     assert_eq!(jobs.job_count(), 0);
     assert_eq!(jobs.rate_count("caller-warm"), 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn external_index_warm_lookup_releases_catalog_lock_before_await() -> Result<()> {
+    let fixture = McpFixture::new("index-warm-lock-boundary")?;
+    let catalog_lock = Mutex::new(&fixture.catalog);
+    let args = json!({
+        "package": "not-yet-indexed",
+        "revision": "main",
+        "source_url": SOURCE_URL,
+        "source_kind": "git"
+    });
+
+    let warm_response = {
+        let catalog = catalog_lock
+            .lock()
+            .expect("catalog lock should not be poisoned");
+        route_index_warm_lookup(&args, *catalog)?
+    };
+    assert_eq!(warm_response, None);
+
+    let lock_available_during_external_await = async {
+        tokio::task::yield_now().await;
+        catalog_lock.try_lock().is_ok()
+    }
+    .await;
+
+    assert!(
+        lock_available_during_external_await,
+        "catalog mutex must be released before external_index performs I/O"
+    );
     Ok(())
 }
 
