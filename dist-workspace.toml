@@ -33,6 +33,9 @@ ci = "github"
 installers = ["shell", "powershell", "npm"]
 # Ship bundled skill assets in cargo-dist archives/installers. The runtime
 # resolver checks package-relative assets/skills as well as share/spur/skills.
+# Note: tag releases use release-dist.yml + `cargo xtask dist`, which packages
+# skills as spur-skills-<ver>.tar.gz (share/spur/skills layout) separately —
+# keep both paths aligned with SkillCatalog package_asset_candidates.
 include = ["assets"]
 # Generate and dist a source tarball
 source-tarball = false
