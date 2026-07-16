@@ -160,7 +160,15 @@ for tape in "${tapes[@]}"; do
   assert_has "$file" 'Type "Sessions"' "$tape opens Sessions from Go to"
   assert_has "$file" 'Type "n"' "$tape prefers new-session attach for reliability"
   assert_has "$file" '/Session ·|INSERT' "$tape proves Session Detail attach"
+  assert_not_matches "$file" 'Wait\+Screen[^\n]*Failed to initialize' \
+    "$tape does not accept failed initialization as Session Detail proof"
 done
+
+assert_matches "$root/tapes/13-problem-plan-loop-drive.tape" \
+  '# STORY: PROOF - return home to Session Detail\nHide\nEscape\nShow\nWait\+Screen@[1-9][0-9]*s /Session ·\|INSERT/' \
+  'plan-loop returns to Session Detail before resolution proof'
+assert_has "$root/tapes/04-session-resume.tape" '/Session ·|INSERT/' \
+  'resume tape requires Session Detail rather than matching Sessions picker text'
 
 assert_has "$root/journeys/product-e2e-flow.sh" 'SPUR_DEMO_ALLOW_AGENT_SEND' 'product send remains opt-in'
 assert_has "$root/journeys/problem-plan-loop-drive.sh" 'SPUR_DEMO_ALLOW_PLAN_LOOP' 'plan-loop seed remains opt-in'
