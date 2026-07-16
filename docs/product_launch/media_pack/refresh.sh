@@ -50,7 +50,7 @@ while IFS=$'\t' read -r id source timestamp output checksum x y width height; do
     exit 1
   }
 
-  ffmpeg -y -v error -ss "$timestamp" -i "$src" -frames:v 1 \
+  ffmpeg -nostdin -y -v error -ss "$timestamp" -i "$src" -frames:v 1 \
     -vf "crop=$width:$height:$x:$y" "$frame"
   printf 'staged %s at %ss from %s\n' "$id" "$timestamp" "$source"
 done < <(jq -r '.assets[] | select(.status == "approved" and .kind == "still") |
