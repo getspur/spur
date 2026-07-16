@@ -2,3 +2,4 @@
 *.tfstate
 *.tfstate.*
 crash.log
+local-live-sync.tfvars

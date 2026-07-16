@@ -102,3 +102,4 @@ crates/spur-context-service/Cargo.lock
 
 # downloaded binary in local npm wrapper test runs
 npm/spur-cli/bin/
+infra/spur-context-service/local-live-sync.tfvars
