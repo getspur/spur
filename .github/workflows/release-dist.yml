@@ -5,8 +5,9 @@
 # Flow: OIDC → AWS credentials → resume the shared Spot pool
 # (`spur-builder` through `spur-builder-3`) → `cargo xtask dist` (linux aarch64 native,
 # linux x86_64 + macOS universal2 via zigbuild, windows x86_64 via xwin — all
-# compiled ON the VM and fetched back through the sccache S3 bucket) → upload dist/ as a
-# workflow artifact (optionally publish a GitHub release on
+# compiled ON the VM and fetched back through the sccache S3 bucket; also packages
+# assets/skills as spur-skills-<ver>.tar.gz for SkillCatalog package discovery)
+# → upload dist/ as a workflow artifact (optionally publish a GitHub release on
 # getspur/spur-releases) → VM-side idle shutdown after 15 minutes.
 #
 # VM lifecycle guarantees:
@@ -157,19 +158,63 @@ jobs:
         # concurrent --auto-spin dispatches cannot race a create.
         run: cargo xtask dist --parallel --platforms "$PLATFORMS"
 
-      - name: Smoke-test linux x86_64 binary
+      - name: Smoke-test linux x86_64 binary + skills bundle
         # The runner itself is linux x86_64 — the one dist platform we can
         # actually execute here. The zigbuild cross leg is the least battle-
         # tested, so refuse to publish a binary that cannot even --version.
+        # Also require spur-skills-*.tar.gz and verify the share/spur/skills
+        # layout resolves for `spur skills init` (release-dist cutover gap).
         run: |
+          set -euo pipefail
           shopt -s nullglob
           bins=(dist/spur-*-x86_64-unknown-linux-gnu)
-          if [[ ${#bins[@]} -gt 0 ]]; then
+          skills=(dist/spur-skills-*.tar.gz)
+          if [[ ${#bins[@]} -eq 0 ]]; then
+            echo "no linux-x64 artifact in dist/; skipping binary smoke test"
+          else
             chmod +x "${bins[0]}"
             "${bins[0]}" --version
-          else
-            echo "no linux-x64 artifact in dist/; skipping smoke test"
           fi
+          if [[ ${#skills[@]} -eq 0 ]]; then
+            echo "missing dist/spur-skills-*.tar.gz — xtask dist must package assets/skills" >&2
+            ls -la dist/ >&2 || true
+            exit 1
+          fi
+          # Layout contract: archive root is share/spur/skills (matches
+          # package_asset_candidates + cargo xtask install).
+          tar -tzf "${skills[0]}" | grep -q 'share/spur/skills/.*/SKILL.md' \
+            || { echo "skills archive missing share/spur/skills/*/SKILL.md" >&2; tar -tzf "${skills[0]}" | head >&2; exit 1; }
+          if [[ ${#bins[@]} -eq 0 ]]; then
+            echo "skills archive present; binary smoke skipped (no linux-x64)"
+            exit 0
+          fi
+          smoke="$(mktemp -d)"
+          mkdir -p "$smoke/prefix/bin" "$smoke/home" "$smoke/repo"
+          cp "${bins[0]}" "$smoke/prefix/bin/spur"
+          chmod +x "$smoke/prefix/bin/spur"
+          tar -xzf "${skills[0]}" -C "$smoke/prefix"
+          test -f "$smoke/prefix/share/spur/skills/spur-way/SKILL.md"
+          # Isolated HOME avoids host config breaking catalog discovery.
+          (
+            cd "$smoke/repo"
+            HOME="$smoke/home" XDG_CONFIG_HOME="$smoke/home/xdg" \
+              "$smoke/prefix/bin/spur" skills init
+          )
+          # At least one adapter dir should materialize after a full init.
+          found=0
+          for d in "$smoke/repo"/.claude/skills "$smoke/repo"/.codex/skills \
+                   "$smoke/repo"/.spur/skills; do
+            if [[ -d "$d" ]] && [[ -n "$(ls -A "$d" 2>/dev/null || true)" ]]; then
+              found=1
+              break
+            fi
+          done
+          if [[ "$found" -ne 1 ]]; then
+            echo "skills init produced no adapter skill dirs under $smoke/repo" >&2
+            find "$smoke/repo" -maxdepth 3 -type d >&2 || true
+            exit 1
+          fi
+          echo "skills smoke ok: ${skills[0]} + ${bins[0]}"
 
       - name: Upload dist artifacts
         uses: actions/upload-artifact@v6
