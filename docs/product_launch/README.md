@@ -7,6 +7,7 @@ Operational checklists and launch-facing plans for public SPUR releases.
 | [producthunt-launch-checklist.md](./producthunt-launch-checklist.md) | **Canonical** Product Hunt success checklist (PRD v2.3 + current PH policy; rev 1.1+) |
 | [product-journey-ph.md](./product-journey-ph.md) | **PH product journey** crosswalked to live TUI problem stories (`scripts/e2e/demos/tui-live`) |
 | [media_pack/MANIFEST.md](./media_pack/MANIFEST.md) | **PH media pack** — real VHS captures only (`out/` + `tapes/`) |
+| [media_pack/marketing/MARKETING.md](./media_pack/marketing/MARKETING.md) | Higgsfield marketing layer conditioned on real stills (social/OG/trailer) |
 | [media_pack/html/index.html](./media_pack/html/index.html) | Offline visualizer of the media pack |
 | [media_pack/refresh.sh](./media_pack/refresh.sh) | Re-copy films + re-extract gallery stills from `tui-live/out` |
 | [producthunt-checklist-content-review.md](./producthunt-checklist-content-review.md) | Codex `content-marketer` audit (2026-07-16) — P0/P1 findings and copy patches |
