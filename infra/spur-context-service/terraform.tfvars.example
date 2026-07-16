@@ -7,7 +7,7 @@ lambda_memory_mb          = 2048
 lambda_timeout_sec        = 30
 # In-process request concurrency per serving Lambda environment. Set to 1 for
 # sequential processing; this is independent of provisioned warm instances.
-lambda_max_concurrency    = 2
+lambda_max_concurrency    = 4
 concurrent_warm_instances = 1
 
 # Public API abuse controls

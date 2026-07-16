@@ -6,6 +6,7 @@ aws_region = "ap-southeast-5"
 
 lambda_memory_mb          = 2048
 lambda_timeout_sec        = 30
+lambda_max_concurrency    = 4
 concurrent_warm_instances = 0
 
 api_throttle_rate_limit              = 20

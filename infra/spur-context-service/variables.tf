@@ -707,7 +707,7 @@ variable "lambda_timeout_sec" {
 variable "lambda_max_concurrency" {
   description = "Maximum in-process request concurrency per serving Lambda environment (1 = sequential)"
   type        = number
-  default     = 2
+  default     = 4
 }
 
 variable "concurrent_warm_instances" {
