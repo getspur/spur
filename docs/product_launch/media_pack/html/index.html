@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>SPUR Product Hunt — Media Pack (real VHS)</title>
+  <style>
+    :root {
+      --bg: #0b0e14;
+      --panel: #11141c;
+      --text: #e6e1cf;
+      --muted: #8b8680;
+      --accent: #7fb4ca;
+      --violet: #957fb8;
+      --green: #76946a;
+      --border: #2a2e38;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.45;
+    }
+    header {
+      padding: 2rem 1.5rem 1rem;
+      border-bottom: 1px solid var(--border);
+      max-width: 1200px;
+      margin: 0 auto;
+    }
+    header h1 { margin: 0 0 .35rem; font-size: 1.6rem; letter-spacing: -.02em; }
+    header p { margin: .25rem 0; color: var(--muted); max-width: 70ch; }
+    .tag {
+      display: inline-block;
+      font-size: .75rem;
+      padding: .15rem .5rem;
+      border: 1px solid var(--accent);
+      color: var(--accent);
+      border-radius: 999px;
+      margin-right: .4rem;
+    }
+    .tag.warn { border-color: var(--violet); color: var(--violet); }
+    main { max-width: 1200px; margin: 0 auto; padding: 1.25rem 1.5rem 3rem; }
+    section { margin: 2rem 0; }
+    h2 { font-size: 1.15rem; margin: 0 0 .75rem; color: var(--accent); }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+      gap: 1rem;
+    }
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      overflow: hidden;
+    }
+    .card header.cap {
+      padding: .65rem .85rem;
+      border-bottom: 1px solid var(--border);
+      font-size: .85rem;
+    }
+    .card header.cap strong { display: block; color: var(--text); }
+    .card header.cap span { color: var(--muted); font-size: .75rem; }
+    .card img, .card video {
+      display: block;
+      width: 100%;
+      background: #000;
+      aspect-ratio: 16 / 9;
+      object-fit: contain;
+    }
+    .card.square img { aspect-ratio: 1; }
+    .meta {
+      padding: .55rem .85rem .75rem;
+      font-size: .75rem;
+      color: var(--muted);
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: .85rem;
+    }
+    th, td {
+      text-align: left;
+      padding: .5rem .6rem;
+      border-bottom: 1px solid var(--border);
+      vertical-align: top;
+    }
+    th { color: var(--muted); font-weight: 600; }
+    code { color: var(--violet); font-size: .8rem; }
+    .hero-row {
+      display: grid;
+      grid-template-columns: 2fr 1fr;
+      gap: 1rem;
+    }
+    @media (max-width: 800px) {
+      .hero-row { grid-template-columns: 1fr; }
+    }
+    footer {
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 1rem 1.5rem 2rem;
+      color: var(--muted);
+      font-size: .8rem;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <span class="tag">real VHS only</span>
+      <span class="tag warn">no AI mock TUI</span>
+    </div>
+    <h1>SPUR × Product Hunt media pack</h1>
+    <p>
+      Material source: <code>scripts/e2e/demos/tui-live/out/</code> (rendered) and
+      <code>tapes/</code> (storyboards). Journey order from
+      <code>docs/product_launch/product-journey-ph.md</code> · claims from
+      <code>SPUR_PRD.md</code> v2.3.
+    </p>
+    <p><strong>Tagline:</strong> Control tower for CLI coding agents. ·
+      <strong>Home:</strong> Session Detail ·
+      <strong>Hero film:</strong> problem-plan-loop-drive
+    </p>
+  </header>
+
+  <main>
+    <section>
+      <h2>1. Hero film (upload as PH video)</h2>
+      <div class="hero-row">
+        <div class="card">
+          <header class="cap">
+            <strong>13 — problem-plan-loop-drive</strong>
+            <span>tape: 13-problem-plan-loop-drive.tape · live_demos + ph_ready</span>
+          </header>
+          <video controls preload="metadata" src="../ph_ready/hero-video-plan-loop-drive.mp4"></video>
+          <div class="meta">ph_ready/hero-video-plan-loop-drive.mp4</div>
+        </div>
+        <div class="card square">
+          <header class="cap">
+            <strong>Thumbnail (real crop)</strong>
+            <span>from 13 mid-film frame → 240²</span>
+          </header>
+          <img src="../ph_ready/thumbnail-512.png" alt="PH thumbnail from real TUI frame" />
+          <div class="meta">ph_ready/thumbnail-240.png · thumbnail-512.png</div>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <h2>2. Gallery stills (real mid-film frames → 1270×760)</h2>
+      <div class="grid" id="gallery"></div>
+    </section>
+
+    <section>
+      <h2>3. All problem-story films</h2>
+      <div class="grid" id="films"></div>
+    </section>
+
+    <section>
+      <h2>4. PH upload checklist</h2>
+      <table>
+        <thead>
+          <tr><th>PH field</th><th>File</th><th>Source</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Thumbnail</td>
+            <td><code>ph_ready/thumbnail-240.png</code></td>
+            <td>crop of real 13 frame</td>
+          </tr>
+          <tr>
+            <td>Gallery 1–7</td>
+            <td><code>ph_ready/gallery-0N-*-1270x760.png</code></td>
+            <td>ffmpeg from out/*.mp4</td>
+          </tr>
+          <tr>
+            <td>Video</td>
+            <td><code>ph_ready/hero-video-plan-loop-drive.mp4</code></td>
+            <td>out/13-problem-plan-loop-drive.mp4</td>
+          </tr>
+          <tr>
+            <td>Optional GIF</td>
+            <td><code>ph_ready/hero-gif-plan-loop-drive.gif</code></td>
+            <td>out/13-….gif</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section>
+      <h2>5. Tape → out mapping</h2>
+      <table>
+        <thead><tr><th>Tape</th><th>Out media</th><th>PH priority</th></tr></thead>
+        <tbody>
+          <tr><td><code>13-problem-plan-loop-drive.tape</code></td><td>13-…</td><td>Hero</td></tr>
+          <tr><td><code>09-product-e2e-flow.tape</code></td><td>09-…</td><td>2</td></tr>
+          <tr><td><code>10-problem-ops-visibility.tape</code></td><td>10-…</td><td>3</td></tr>
+          <tr><td><code>11-problem-plan-progress.tape</code></td><td>11-…</td><td>4</td></tr>
+          <tr><td><code>12-problem-backlog-triage.tape</code></td><td>12-…</td><td>5</td></tr>
+          <tr><td><code>04-session-resume.tape</code></td><td>04-…</td><td>Support</td></tr>
+        </tbody>
+      </table>
+    </section>
+  </main>
+
+  <footer>
+    Open this file via a local path under <code>docs/product_launch/media_pack/html/</code>.
+    Relative media paths resolve next to this HTML. Re-render films with
+    <code>SPUR_DEMO_STORIES_ONLY=1 SPUR_DEMO_STORY_PACE=1 ./render.sh</code> then re-extract stills.
+  </footer>
+
+  <script>
+    const gallery = [
+      ["01", "Session Detail home", "01-session-plan-loop", "13 plan-loop"],
+      ["02", "Workers / DELEGATE", "02-workers-delegate", "13 plan-loop"],
+      ["03", "Plan Progress", "03-plan-progress", "11 plan-progress"],
+      ["04", "Explore + cascade", "04-explore-cascade", "09 product-e2e"],
+      ["05", "Session resume", "05-session-resume", "04 session-resume"],
+      ["06", "Backlog triage", "06-backlog-triage", "12 backlog"],
+      ["07", "Ops visibility", "07-ops-visibility", "10 ops"],
+    ];
+    const g = document.getElementById("gallery");
+    for (const [n, title, stem, src] of gallery) {
+      const card = document.createElement("div");
+      card.className = "card";
+      card.innerHTML = `
+        <header class="cap"><strong>#${n} ${title}</strong><span>${src}</span></header>
+        <img src="../ph_ready/gallery-${n}-${stem}-1270x760.png" alt="${title}" loading="lazy" />
+        <div class="meta">ph_ready/gallery-${n}-${stem}-1270x760.png</div>`;
+      g.appendChild(card);
+    }
+
+    const films = [
+      ["13 plan-loop (hero)", "13-problem-plan-loop-drive.mp4"],
+      ["09 product-e2e", "09-product-e2e-flow.mp4"],
+      ["10 ops", "10-problem-ops-visibility.mp4"],
+      ["11 plan-progress", "11-problem-plan-progress.mp4"],
+      ["12 backlog", "12-problem-backlog-triage.mp4"],
+      ["04 resume", "04-session-resume.mp4"],
+      ["14 live seed", "14-live-plan-loop-seed.mp4"],
+    ];
+    const f = document.getElementById("films");
+    for (const [title, file] of films) {
+      const card = document.createElement("div");
+      card.className = "card";
+      card.innerHTML = `
+        <header class="cap"><strong>${title}</strong><span>live_demos/${file}</span></header>
+        <video controls preload="none" src="../live_demos/${file}"></video>
+        <div class="meta">live_demos/${file}</div>`;
+      f.appendChild(card);
+    }
+  </script>
+</body>
+</html>

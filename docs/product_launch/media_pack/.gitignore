@@ -1,0 +1,5 @@
+# Heavy VHS copies — regenerate with ./refresh.sh from scripts/e2e/demos/tui-live/out
+live_demos/
+ph_ready/hero-video-plan-loop-drive.mp4
+ph_ready/hero-gif-plan-loop-drive.gif
+ph_ready/_thumb_crop.png
