@@ -23,7 +23,11 @@ if ! SPUR_BIN="$(spur_e2e_resolve_spur_bin)"; then
   exit 1
 fi
 export SPUR_BIN
-export SPUR_DEMO_ALLOW_PLAN_LOOP=1
+if [[ "${SPUR_DEMO_ALLOW_HITL_LOOP:-0}" != "1" ]]; then
+  export SPUR_DEMO_ALLOW_PLAN_LOOP=1
+fi
+export SPUR_DEMO_ALLOW_HITL_LOOP="${SPUR_DEMO_ALLOW_HITL_LOOP:-0}"
+export SPUR_DEMO_CAPTURE_STEM_PREFIX="${SPUR_DEMO_CAPTURE_STEM_PREFIX:-14-live-plan-loop-seed}"
 export SPUR_DEMO_PLAN_LOOP_WAIT_S="${SPUR_DEMO_PLAN_LOOP_WAIT_S:-240}"
 export SHELL_USE_TIMEOUT_MS="${SHELL_USE_TIMEOUT_MS:-180000}"
 # Film pacing for seed (readable high-res story; UAT leaves this unset/0)
@@ -32,7 +36,8 @@ export SPUR_DEMO_STORY_PACE="${SPUR_DEMO_STORY_PACE:-1}"
 export SPUR_AGG_SPEED="${SPUR_AGG_SPEED:-1.15}"
 
 stamp="$(date -u +%Y%m%dT%H%M%SZ)"
-stem="14-live-plan-loop-seed-${stamp}"
+stem_prefix="$SPUR_DEMO_CAPTURE_STEM_PREFIX"
+stem="${stem_prefix}-${stamp}"
 log="$OUT/${stem}.log"
 cast_dest="$OUT/${stem}.cast"
 
@@ -47,7 +52,9 @@ fi
 echo "=== live seed capture ==="
 echo "SPUR_BIN:                  $SPUR_BIN"
 echo "SPUR_DEMO_ALLOW_PLAN_LOOP: $SPUR_DEMO_ALLOW_PLAN_LOOP"
+echo "SPUR_DEMO_ALLOW_HITL_LOOP: $SPUR_DEMO_ALLOW_HITL_LOOP"
 echo "SPUR_DEMO_PLAN_LOOP_WAIT_S:$SPUR_DEMO_PLAN_LOOP_WAIT_S"
+echo "stable output stem:         $stem_prefix"
 echo "SHELL_USE_TIMEOUT_MS:      $SHELL_USE_TIMEOUT_MS"
 echo "geometry:                  ${SPUR_VHS_WIDTH}x${SPUR_VHS_HEIGHT} font=${SPUR_VHS_FONT_SIZE} pty=${SPUR_DEMO_COLS}x${SPUR_DEMO_ROWS}"
 echo "story_pace:                ${SPUR_DEMO_STORY_PACE} agg_speed=${SPUR_AGG_SPEED}"
@@ -64,6 +71,7 @@ set -e
 
 echo
 echo "journey exit: $rc"
+cp -p "$log" "$OUT/${stem_prefix}.log"
 
 # Newest cast not in before_list
 cast_src=""
@@ -174,17 +182,17 @@ fi
 
 # Stable symlink-style copies for latest
 if [[ -f "$cast_dest" ]]; then
-  cp -p "$cast_dest" "$OUT/14-live-plan-loop-seed.cast"
+  cp -p "$cast_dest" "$OUT/${stem_prefix}.cast"
 fi
 if [[ -f "$gif_out" ]]; then
-  cp -p "$gif_out" "$OUT/14-live-plan-loop-seed.gif"
+  cp -p "$gif_out" "$OUT/${stem_prefix}.gif"
 fi
 if [[ -f "$mp4_out" ]]; then
-  cp -p "$mp4_out" "$OUT/14-live-plan-loop-seed.mp4"
+  cp -p "$mp4_out" "$OUT/${stem_prefix}.mp4"
 fi
 
 echo
 echo "=== capture summary ==="
-ls -la "$OUT"/14-live-plan-loop-seed* "$OUT"/${stem}* 2>/dev/null || ls -la "$OUT" | tail -20
+ls -la "$OUT"/${stem_prefix}* "$OUT"/${stem}* 2>/dev/null || ls -la "$OUT" | tail -20
 echo "log: $log"
 exit "$rc"
