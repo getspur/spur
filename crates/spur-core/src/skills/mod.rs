@@ -443,7 +443,8 @@ pub enum SkillSource {
 /// Which agent role a skill targets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SkillRole {
-    /// Injected into brain prompts; not rendered to worker agent adapters.
+    /// Brain-oriented metadata. Bundled skills remain installable for every
+    /// selected adapter; repository overrides render only to SpurHermetic.
     Brain,
     /// Rendered to worker agent adapters; not injected into brain prompts.
     Worker,
