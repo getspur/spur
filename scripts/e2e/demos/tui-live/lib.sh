@@ -1023,6 +1023,20 @@ EOF
   fi
 }
 
+require_hitl_loop_opt_in() {
+  if [[ "${SPUR_DEMO_ALLOW_HITL_LOOP:-0}" != "1" ]]; then
+    cat >&2 <<'EOF'
+error: live D4 HITL loop is opt-in (real brain + up to two worker attempts).
+
+  SPUR_DEMO_ALLOW_HITL_LOOP=1 bash journeys/problem-plan-loop-drive.sh
+
+Recommended capture wrapper: ./capture-live-hitl.sh
+Optional: SPUR_DEMO_PLAN_LOOP_WAIT_S=300
+EOF
+    return 2
+  fi
+}
+
 # Poll Session Detail for auto-loop signals after a seed (YOU / DELEGATE / EXEC / task id).
 # Soft-success: never hard-fail if workers are slow. Prefer session over dashboard lineage.
 wait_for_lineage_loop_activity() {
@@ -1145,6 +1159,81 @@ trigger_submit_plan_one_task_and_observe() {
   story_hop 0.8 0.4
   return_to_session_detail
   story_session_land "Loop observation ends at Session Detail home" 3.0
+}
+
+trigger_submit_plan_hitl_review_and_synthesize() {
+  require_hitl_loop_opt_in
+  local seed_task_id="demo-hitl-$$"
+
+  land_session_detail "Attach Session Detail for the D4 HITL loop" 2.5
+  sleep_ms 0.8
+  printf '+ D4 seed: ask brain for one read-only deep-dive task %s\n' "$seed_task_id"
+
+  type_slow "D4 LIVE CAPTURE. "
+  type_text "Call submit_plan with exactly ONE task. "
+  type_text "Task id: ${seed_task_id}. Worker: codex. deps: none. "
+  type_text "Prompt: Read scripts/e2e/demos/tui-live/PROBLEM_STORIES.md and "
+  type_text "identify one evidence gap in problem-plan-loop-drive. "
+  type_text "Return exactly one line beginning D4 FINDING:. Make no file changes. "
+  type_text "After submit_plan succeeds, reply with plan_id only."
+  sleep_ms 0.5
+  press_key Enter
+
+  story_hard_proof \
+    "The human prompt is correlated to this D4 run" \
+    "$seed_task_id" 2.5
+  story_hard_proof \
+    "The brain accepts the D4 turn in Session Detail" \
+    "THINK" 2.5
+
+  press_key Alt+p
+  story_hard_proof \
+    "The correlated worker result reaches human review" \
+    "awaiting_review" 4.0
+
+  press_key d
+  story_hard_proof \
+    "The human rejects the incomplete first result" \
+    "Decision: Reject" 3.5
+  press_key Enter
+  story_hard_proof \
+    "The rejected task becomes eligible for another attempt" \
+    "rejected" 3.0
+
+  press_key R
+  story_hard_proof \
+    "The human opens the retry instruction surface" \
+    "Retry Task" 3.0
+  type_slow "READ ONLY. Add exactly two lines: SOURCE: <exact path> and "
+  type_text "RECOMMENDATION: <one sentence>. Make no file changes."
+  story_hard_proof \
+    "The retry visibly carries stronger evidence requirements" \
+    "SOURCE:" 2.5
+  press_key Enter
+
+  story_hard_proof \
+    "The improved second attempt returns to human review" \
+    "awaiting_review" 4.0
+  press_key a
+  story_hard_proof \
+    "The human approves the improved evidence" \
+    "Decision: Approve" 3.5
+  press_key Enter
+  story_hard_proof \
+    "The correlated task records the approval" \
+    "approved" 3.0
+
+  return_to_session_detail
+  story_session_land "The same brain session remains the operator home" 2.5
+  type_slow "D4 HITL COMPLETE. Synthesize the approved worker evidence. "
+  type_text "Begin with a marker made from D4, one space, SYNTHESIS, then a colon. "
+  type_text "Follow the marker with one sentence. "
+  type_text "Do not call tools or delegate."
+  sleep_ms 0.5
+  press_key Enter
+  story_hard_proof \
+    "The brain synthesizes approved evidence in the same session" \
+    "D4 SYNTHESIS:" 4.0
 }
 
 # Problem: backlog firehose — what is P0 open work?
