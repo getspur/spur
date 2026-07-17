@@ -67,6 +67,12 @@ entry is `./capture-live-hitl.sh`; it drives real Plan Inspector **Reject**,
 **Retry**, and **Approve** decisions in one session before asking the brain to
 synthesize the approved evidence.
 
+A normal main checkout with an initialized `.beads/` works as-is. From an
+isolated Git worktree without `.beads/`, set
+`SPUR_DEMO_PROJECT=/path/to/beads-project` to the initialized beads-backed
+project. The wrapper fails before TUI/model spend rather than creating or
+linking a `.beads` backend.
+
 D4 proof is hard: missing correlated task identity, `awaiting_review` state,
 selected-task worker-summary evidence, any **Reject**, **Retry Task**, or
 **Approve** decision, or the final `D4 SYNTHESIS:` causes the journey to fail

@@ -36,6 +36,24 @@ export SPUR_DEMO_STORY_PACE="${SPUR_DEMO_STORY_PACE:-1}"
 # Story-friendly cast speed unless caller overrides
 export SPUR_AGG_SPEED="${SPUR_AGG_SPEED:-1.15}"
 
+if [[ -n "${SPUR_DEMO_PROJECT:-}" ]]; then
+  capture_project="$SPUR_DEMO_PROJECT"
+else
+  capture_project="$(git -C "$E2E_ROOT/../.." rev-parse --show-toplevel)"
+fi
+
+if [[ "$SPUR_DEMO_ALLOW_HITL_LOOP" == "1" && ! -d "$capture_project/.beads" ]]; then
+  cat >&2 <<EOF
+D4 requires a beads-backed project before TUI startup; capture aborted.
+missing: $capture_project/.beads
+
+SPUR_DEMO_PROJECT=/path/to/beads-project selects an initialized beads-backed project.
+Alternatively, initialize beads in the effective project.
+No D4 TUI, brain, or worker spend was started.
+EOF
+  exit 2
+fi
+
 stamp="$(date -u +%Y%m%dT%H%M%SZ)"
 stem_prefix="$SPUR_DEMO_CAPTURE_STEM_PREFIX"
 stem="${stem_prefix}-${stamp}"
@@ -54,6 +72,7 @@ echo "=== live seed capture ==="
 echo "SPUR_BIN:                  $SPUR_BIN"
 echo "SPUR_DEMO_ALLOW_PLAN_LOOP: $SPUR_DEMO_ALLOW_PLAN_LOOP"
 echo "SPUR_DEMO_ALLOW_HITL_LOOP: $SPUR_DEMO_ALLOW_HITL_LOOP"
+echo "effective project:          $capture_project"
 echo "SPUR_DEMO_PLAN_LOOP_WAIT_S:$SPUR_DEMO_PLAN_LOOP_WAIT_S"
 echo "stable output stem:         $stem_prefix"
 echo "SHELL_USE_TIMEOUT_MS:      $SHELL_USE_TIMEOUT_MS"

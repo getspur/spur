@@ -1025,14 +1025,24 @@ EOF
 
 require_hitl_loop_opt_in() {
   if [[ "${SPUR_DEMO_ALLOW_HITL_LOOP:-0}" != "1" ]]; then
-    cat >&2 <<'EOF'
-error: live D4 HITL loop is opt-in (real brain + up to two worker attempts).
+    printf '%s\n' \
+      'error: live D4 HITL loop is opt-in (real brain + up to two worker attempts).' \
+      '' \
+      '  SPUR_DEMO_ALLOW_HITL_LOOP=1 bash journeys/problem-plan-loop-drive.sh' \
+      '' \
+      'Recommended capture wrapper: ./capture-live-hitl.sh' \
+      'Optional: SPUR_DEMO_PLAN_LOOP_WAIT_S=300' >&2
+    return 2
+  fi
 
-  SPUR_DEMO_ALLOW_HITL_LOOP=1 bash journeys/problem-plan-loop-drive.sh
+  if [[ ! -d "$project/.beads" ]]; then
+    cat >&2 <<-EOF
+beads-backed project required: live D4 HITL loop stopped before the D4 brain prompt.
+	missing: $project/.beads
 
-Recommended capture wrapper: ./capture-live-hitl.sh
-Optional: SPUR_DEMO_PLAN_LOOP_WAIT_S=300
-EOF
+	Set SPUR_DEMO_PROJECT=/path/to/beads-project before starting the journey,
+	or initialize beads in the effective project. No D4 brain or worker spend was started.
+	EOF
     return 2
   fi
 }
@@ -1187,6 +1197,9 @@ trigger_submit_plan_hitl_review_and_synthesize() {
     "THINK" 2.5
 
   press_key Alt+p
+  story_hard_proof \
+    "Plan Inspector is open on the selected task detail" \
+    "Task detail" 2.5
   story_hard_proof \
     "Plan Inspector selects the correlated D4 task" \
     "$seed_task_id" 2.5
