@@ -259,10 +259,11 @@ pub(crate) fn decide(rf: &RenderedFile) -> Result<Decision, InstallError> {
 /// `repo_root`. Returns a structured Summary of what was written, what
 /// was unchanged, and what was skipped.
 ///
-/// Role-gated rendering:
-/// - `Brain` skills render only to `SpurHermetic` (`.spur/skills/`) for
-///   brain prompt injection. They are NOT sent to worker agent adapters.
-/// - `Worker` and `Both` skills render to all adapters.
+/// Source-aware role rendering:
+/// - Bundled skills render to all adapters regardless of role metadata.
+/// - Repository overrides with role `Brain` render only to `SpurHermetic`
+///   (`.spur/skills/`) for brain prompt injection.
+/// - Repository overrides with role `Worker` or `Both` render to all adapters.
 pub fn run(repo_root: &Path) -> Result<Summary, InstallError> {
     run_filtered(repo_root, Adapter::all())
 }
@@ -274,18 +275,23 @@ pub fn run(repo_root: &Path) -> Result<Summary, InstallError> {
 /// Used by `spur init`'s default-on flow to skip dotfile dirs for agents
 /// that aren't on `$PATH`. The Kiro steering pointer is still emitted only
 /// when `Adapter::Kiro` is in the filter — otherwise the pointer would
-/// dangle to a directory that holds no rendered skills.
+/// dangle to a directory that holds no rendered skills. Bundled skills are
+/// installable for every selected adapter; role `Brain` restricts only
+/// repository overrides to `Adapter::SpurHermetic`.
 pub fn run_filtered(repo_root: &Path, adapters: &[Adapter]) -> Result<Summary, InstallError> {
-    use super::SkillRole;
+    use super::{SkillRole, SkillSource};
 
     let skills = list_active_skills(repo_root)?;
     let mut summary = Summary::default();
 
     for skill in &skills {
         for adapter in adapters {
-            if skill.role == SkillRole::Brain && *adapter != Adapter::SpurHermetic {
-                let rf = adapter.render(skill, repo_root);
-                remove_stale_managed_file(&rf, &mut summary)?;
+            let hermetic_only = skill.source == SkillSource::Override
+                && skill.role == SkillRole::Brain
+                && *adapter != Adapter::SpurHermetic;
+            if hermetic_only {
+                let rendered = adapter.render(skill, repo_root);
+                remove_stale_managed_file(&rendered, &mut summary)?;
                 continue;
             }
             let rf = adapter.render(skill, repo_root);
@@ -570,28 +576,22 @@ mod tests {
     }
 
     #[test]
-    fn run_cleans_up_empty_dir_left_by_brain_role_transition() {
+    fn run_projects_bundled_brain_skill_into_existing_empty_dir() {
         let dir = tempfile::tempdir().unwrap();
-        // Simulate orphan empty dir left behind by an older install where
-        // a now-brain-only skill was previously rendered to a worker adapter
-        // but the SKILL.md was later removed manually (e.g. git clean).
-        let orphan = dir.path().join(".claude/skills/spurpower-brainstorming");
-        std::fs::create_dir_all(&orphan).unwrap();
+        let skill_dir = dir.path().join(".claude/skills/spurpower-brainstorming");
+        std::fs::create_dir_all(&skill_dir).unwrap();
 
         run(dir.path()).unwrap();
 
         assert!(
-            !orphan.exists(),
-            "empty adapter dir should be removed when skill is brain-only"
+            skill_dir.join("SKILL.md").exists(),
+            "bundled brain skill should be installed into the existing adapter directory"
         );
     }
 
     #[test]
-    fn run_cleans_up_dir_after_removing_stale_managed_file() {
+    fn run_retains_managed_worker_adapter_file_for_bundled_brain_skill() {
         let dir = tempfile::tempdir().unwrap();
-        // Use a real bundled brain-only skill (brainstorming).
-        // Its body comes from list_active_skills + adapter rendering.
-        // Pre-seed a stale managed file at the worker adapter location.
         use crate::skills::list_active_skills;
         let payload = list_active_skills(dir.path())
             .unwrap()
@@ -605,10 +605,13 @@ mod tests {
 
         run(dir.path()).unwrap();
 
-        assert!(!rf.path.exists(), "stale managed file should be removed");
         assert!(
-            !dir_path.exists(),
-            "parent dir should be cleaned up after removal"
+            rf.path.exists(),
+            "managed bundled brain skill should remain"
+        );
+        assert!(
+            dir_path.exists(),
+            "adapter directory should remain for the bundled brain skill"
         );
     }
 
@@ -624,6 +627,10 @@ mod tests {
         run(dir.path()).unwrap();
 
         assert!(
+            user_dir.join("SKILL.md").exists(),
+            "bundled brain skill should be installed beside user files"
+        );
+        assert!(
             user_dir.exists(),
             "non-empty dir must not be removed (user content present)"
         );
@@ -631,7 +638,29 @@ mod tests {
     }
 
     #[test]
-    fn run_skips_worker_adapters_for_brain_only_skill() {
+    fn run_projects_bundled_brain_skill_to_worker_adapters() {
+        let dir = tempfile::tempdir().unwrap();
+        let skills = crate::skills::list_active_skills(dir.path()).unwrap();
+        let bundled = skills
+            .iter()
+            .find(|skill| {
+                skill.role == crate::skills::SkillRole::Brain
+                    && skill.source == crate::skills::SkillSource::Bundled
+            })
+            .expect("bundled brain skill");
+
+        run(dir.path()).unwrap();
+
+        let codex = dir
+            .path()
+            .join(".codex/skills")
+            .join(format!("spurpower-{}", bundled.id))
+            .join("SKILL.md");
+        assert!(codex.exists(), "{} was not installed", codex.display());
+    }
+
+    #[test]
+    fn run_keeps_brain_only_override_hermetic() {
         let dir = tempfile::tempdir().unwrap();
         let override_dir = dir.path().join(".spur/skills/brain-only");
         std::fs::create_dir_all(&override_dir).unwrap();
