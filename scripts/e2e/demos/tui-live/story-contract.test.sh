@@ -199,6 +199,44 @@ assert_matches "$root/tapes/13-problem-plan-loop-drive.tape" 'Wait\+Screen@[1-9]
 assert_has "$root/tapes/10-problem-ops-visibility.tape" 'Type "l"' 'ops tape cycles detail tabs with l'
 assert_has "$root/tapes/13-problem-plan-loop-drive.tape" 'Type "l"' 'plan-loop tape cycles detail tabs with l'
 
+hitl_capture="$root/capture-live-hitl.sh"
+plan_loop="$root/journeys/problem-plan-loop-drive.sh"
+
+assert_matches "$lib" '(?m)^require_hitl_loop_opt_in\(\) \{$' \
+  'D4 defines its dedicated spend guard at top level'
+assert_matches "$lib" '(?m)^trigger_submit_plan_hitl_review_and_synthesize\(\) \{[[:blank:]]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+require_hitl_loop_opt_in[[:blank:]]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+local seed_task_id="demo-hitl-\$\$"[[:blank:]]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+type_text "Task id: \$\{seed_task_id\}[^"\n]*"[[:blank:]]*$' \
+  'D4 helper invokes its guard before declaring and typing the correlation tag'
+assert_matches "$lib" '(?m)^trigger_submit_plan_hitl_review_and_synthesize\(\) \{[[:blank:]]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+type_text "[^"\n]*D4 FINDING:[^"\n]*Make no file changes\.[^"\n]*"[[:blank:]]*$' \
+  'D4 initial FINDING prompt is read-only inside the HITL helper'
+assert_matches "$lib" '(?m)^trigger_submit_plan_hitl_review_and_synthesize\(\) \{[[:blank:]]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+"Retry Task"[^\n]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+type_text "[^"\n]*Make no file changes\.[^"\n]*"[[:blank:]]*$' \
+  'D4 post-Retry Task prompt is read-only inside the HITL helper'
+assert_matches "$lib" '(?m)^trigger_submit_plan_hitl_review_and_synthesize\(\) \{[[:blank:]]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+story_hard_proof[^\n]*\n[[:blank:]]+"[^"\n]*"[^\n]*\n[[:blank:]]+"Decision: Reject"[^\n]*$' \
+  'D4 captures Reject as a hard proof'
+assert_matches "$lib" '(?m)^trigger_submit_plan_hitl_review_and_synthesize\(\) \{[[:blank:]]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+story_hard_proof[^\n]*\n[[:blank:]]+"[^"\n]*"[^\n]*\n[[:blank:]]+"Retry Task"[^\n]*$' \
+  'D4 captures Retry Task as a hard proof'
+assert_matches "$lib" '(?m)^trigger_submit_plan_hitl_review_and_synthesize\(\) \{[[:blank:]]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+type_slow "[^"\n]*SOURCE: <exact path>[^"\n]*"[[:blank:]]*$' \
+  'D4 retry types an exact SOURCE path requirement'
+assert_matches "$lib" '(?m)^trigger_submit_plan_hitl_review_and_synthesize\(\) \{[[:blank:]]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+type_text "RECOMMENDATION: <one sentence>[^"\n]*"[[:blank:]]*$' \
+  'D4 retry types a RECOMMENDATION requirement'
+assert_matches "$lib" '(?m)^trigger_submit_plan_hitl_review_and_synthesize\(\) \{[[:blank:]]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+story_hard_proof[^\n]*\n[[:blank:]]+"[^"\n]*"[^\n]*\n[[:blank:]]+"Decision: Approve"[^\n]*$' \
+  'D4 captures Approve as a hard proof'
+assert_matches "$lib" '(?m)^trigger_submit_plan_hitl_review_and_synthesize\(\) \{[[:blank:]]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+"Decision: Approve"[^\n]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+return_to_session_detail[[:blank:]]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+type_slow "D4 HITL COMPLETE\. Synthesize[^"\n]*"[[:blank:]]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+type_text "Do not call tools or delegate\."[[:blank:]]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+story_hard_proof[^\n]*\n[[:blank:]]+"[^"\n]*"[^\n]*\n[[:blank:]]+"D4 SYNTHESIS:"[^\n]*$' \
+  'D4 synthesis follows approval and session return without redelegating'
+assert_matches "$lib" '(?m)^trigger_submit_plan_hitl_review_and_synthesize\(\) \{[[:blank:]]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+type_text "Do not call tools or delegate\."[[:blank:]]*$' \
+  'D4 synthesis types its explicit no-tools instruction inside the helper'
+assert_matches "$lib" '(?m)^trigger_submit_plan_hitl_review_and_synthesize\(\) \{[[:blank:]]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+press_key d[[:blank:]]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+"Decision: Reject"[^\n]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+press_key R[[:blank:]]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+"Retry Task"[^\n]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+press_key a[[:blank:]]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+"Decision: Approve"[^\n]*$' \
+  'D4 HITL helper performs Reject then Retry then Approve in order'
+assert_matches "$plan_loop" '(?m)^if \[\[ "\$\{SPUR_DEMO_ALLOW_HITL_LOOP:-0\}" == "1" \]\]; then[[:blank:]]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+trigger_submit_plan_hitl_review_and_synthesize[[:blank:]]*\n(?:^[[:blank:]]+.*\n|^\n)*?^elif \[\[ "\$\{SPUR_DEMO_ALLOW_PLAN_LOOP:-0\}" == "1" \]\]; then[[:blank:]]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+trigger_submit_plan_one_task_and_observe[[:blank:]]*$' \
+  'D4 executable branch precedes the existing minimal plan-loop branch'
+assert_matches "$hitl_capture" '(?m)^export SPUR_DEMO_ALLOW_HITL_LOOP=1[[:blank:]]*\n(?:^.*\n)*?^export SPUR_DEMO_ALLOW_PLAN_LOOP=0[[:blank:]]*\n(?:^.*\n)*?^exec "\$ROOT/capture-live-seed\.sh"[[:blank:]]*$' \
+  'D4 wrapper enables HITL, disables the minimal loop, then executes capture'
+assert_matches "$hitl_capture" '(?m)^export SPUR_DEMO_CAPTURE_STEM_PREFIX=15-live-hitl-agent-loop[[:space:]]*$' \
+  'D4 capture wrapper exports a distinct stable output stem'
+assert_matches "$root/capture-live-seed.sh" '(?m)^export SPUR_DEMO_CAPTURE_STEM_PREFIX="\$\{SPUR_DEMO_CAPTURE_STEM_PREFIX:-14-live-plan-loop-seed\}"[[:blank:]]*\n(?:^.*\n)*?^stem_prefix="\$SPUR_DEMO_CAPTURE_STEM_PREFIX"[[:blank:]]*$' \
+  'D4 shared capture derives its output stem from the explicit override'
+assert_matches "$root/capture-live-seed.sh" '(?m)^[[:space:]]*cp -p "\$log" "\$OUT/\$\{stem_prefix\}\.log"[[:space:]]*$' \
+  'D4 shared capture executes the full stable audit-log copy command'
+
 if [[ "$failures" -ne 0 ]]; then
   printf '\n%d story-contract check(s) failed\n' "$failures" >&2
   exit 1
