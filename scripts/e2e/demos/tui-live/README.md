@@ -52,9 +52,35 @@ bash journeys/problem-plan-loop-drive.sh
 ./capture-live-seed.sh
 # → out/14-live-plan-loop-seed.{cast,gif,mp4,log}
 
+# LIVE D4: deep dive → reject → retry with evidence → approve → brain synthesis
+# Two real brain turns (initial plan submission and post-approval synthesis) + up to two worker attempts.
+./capture-live-hitl.sh
+# → targets out/15-live-hitl-agent-loop.{cast,gif,mp4,log}; availability below
+
 # Film (observe path without live seed)
 vhs -q tapes/13-problem-plan-loop-drive.tape
 ```
+
+`SPUR_DEMO_ALLOW_HITL_LOOP=1` is a separate, higher-spend opt-in gate from
+the minimal one-task `SPUR_DEMO_ALLOW_PLAN_LOOP=1` seed. The recommended D4
+entry is `./capture-live-hitl.sh`; it drives real Plan Inspector **Reject**,
+**Retry**, and **Approve** decisions in one session before asking the brain to
+synthesize the approved evidence.
+
+D4 proof is hard: missing correlated task identity, `awaiting_review` state,
+selected-task worker-summary evidence, any **Reject**, **Retry Task**, or
+**Approve** decision, or the final `D4 SYNTHESIS:` causes the journey to fail
+rather than report a soft pass. The worker prompts are read-only and prohibit
+file changes, but the capture still incurs two real brain turns (initial plan
+submission and post-approval synthesis) and up to two worker attempts.
+
+The wrapper targets the stable names
+`out/15-live-hitl-agent-loop.{cast,gif,mp4,log}`. The stable `.log` is always
+copied after the journey, including failure. The `.cast` exists only when
+shell-use emits a cast; `.gif`/`.mp4` additionally depend on conversion tooling
+(`agg`/`ffmpeg`, with the supported Docker/frame-sampling fallbacks). Media-pack
+acceptance and promotion require both the stable log and cast: a run without a
+cast is not promotable even if the journey itself completes.
 
 **Navigate-mode tip:** `Esc` leaves INSERT so `j`/`k` hit the Agents tree.
 `Tab` focuses Agents (digit `1` would re-enter Compose).
@@ -172,8 +198,8 @@ VHS tapes open Sessions → `n` after launch for a reliable attach.
 
 1. Cold start: `tui --dashboard`, then enter **Session Detail** as home.
 2. Ops, plan, and backlog stories are observe-only. `product-e2e-flow` applies the selected Explore skill/agent to the local pool, but never sends by default.
-3. Model/worker spend requires `SPUR_DEMO_ALLOW_AGENT_SEND=1` or `SPUR_DEMO_ALLOW_PLAN_LOOP=1`.
-4. Plan mutation requires `SPUR_DEMO_ALLOW_PLAN_START=1` or the live loop gate.
+3. Model/worker spend requires `SPUR_DEMO_ALLOW_AGENT_SEND=1`, `SPUR_DEMO_ALLOW_PLAN_LOOP=1`, or the separate higher-spend `SPUR_DEMO_ALLOW_HITL_LOOP=1` gate.
+4. Plan mutation requires `SPUR_DEMO_ALLOW_PLAN_START=1` or one of the live loop gates.
 5. Never deletes project files; not wired into CI `run-all.sh`.
 
 ## Authoring a new problem story

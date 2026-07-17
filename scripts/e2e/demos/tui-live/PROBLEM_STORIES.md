@@ -50,8 +50,17 @@ Session Detail compose → brain turn (YOU/THINK)
 | Env | Effect |
 |-----|--------|
 | `SPUR_DEMO_ALLOW_PLAN_LOOP=1` | Seed 1-task submit_plan in session; wait DELEGATE/Done |
+| `SPUR_DEMO_ALLOW_HITL_LOOP=1` | Run the higher-spend D4 reject/retry/approve proof |
 | `SPUR_DEMO_ALLOW_AGENT_SEND=1` | Light brain kick in session |
 | `SPUR_DEMO_ALLOW_PLAN_START=1` | Start/Resume on Plans |
+
+The higher-spend D4 branch is separate from the minimal one-task seed and
+remains opt-in. It adds a correlated `demo-hitl-*` task and treats the full
+review sequence as hard proof: `awaiting_review`; a selected-task summary
+beginning `D4 FINDING:`; `Decision: Reject`; `Retry Task`; a retried
+selected-task summary beginning `SOURCE:` and including `RECOMMENDATION:`;
+`Decision: Approve`; then `D4 SYNTHESIS:` in the originating session. Missing
+any anchor fails the D4 journey rather than softening the proof.
 
 ## Mapping
 
