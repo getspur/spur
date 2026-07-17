@@ -79,6 +79,7 @@ cp -n -p "$SOURCE_PACK/live_demos/04-session-resume.mp4" "$WORKTREE_PACK/live_de
 cp -n -p "$SOURCE_PACK/live_demos/09-product-e2e-flow.mp4" "$WORKTREE_PACK/live_demos/"
 cp -n -p "$SOURCE_PACK/live_demos/10-problem-ops-visibility.mp4" "$WORKTREE_PACK/live_demos/"
 cp -n -p "$SOURCE_PACK/live_demos/11-problem-plan-progress.mp4" "$WORKTREE_PACK/live_demos/"
+cp -n -p "$SOURCE_PACK/live_demos/12-problem-backlog-triage.mp4" "$WORKTREE_PACK/live_demos/"
 cp -n -p "$SOURCE_PACK/live_demos/13-problem-plan-loop-drive.mp4" "$WORKTREE_PACK/live_demos/"
 cp -n -p "$SOURCE_PACK/demo_render/out/seg-session.mp4" "$WORKTREE_PACK/demo_render/out/"
 cp -n -p "$SOURCE_PACK/demo_render/out/seg-workers.mp4" "$WORKTREE_PACK/demo_render/out/"
