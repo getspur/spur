@@ -1,6 +1,14 @@
 #[cfg(test)]
 mod test_support;
 
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the generation builder becomes production-reachable in Task 4"
+    )
+)]
+mod generation;
 pub mod resolver;
 
 /// Policy used to choose the effective runtime skill set.
