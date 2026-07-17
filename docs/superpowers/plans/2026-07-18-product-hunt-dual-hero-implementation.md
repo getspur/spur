@@ -187,7 +187,7 @@ ffmpeg -nostdin -y -v error -i "$AUDIO_ROOT/narration-45s.source" \
 ffmpeg -nostdin -y -v error -i "$AUDIO_ROOT/narration-90s.source" \
   -af 'loudnorm=I=-16:TP=-1.5:LRA=7' -ar 48000 -ac 2 "$AUDIO_ROOT/narration-90s.wav"
 ffmpeg -nostdin -y -v error -i "$AUDIO_ROOT/music-90s.source" \
-  -af 'loudnorm=I=-24:TP=-2:LRA=11,apad=whole_dur=90,atrim=0:90' \
+  -af 'loudnorm=I=-24:TP=-2:LRA=11,asetpts=N/SR/TB,apad=whole_dur=90,atrim=0:90' \
   -ar 48000 -ac 2 "$AUDIO_ROOT/music-90s.wav"
 ```
 
@@ -215,7 +215,7 @@ Gate:
 
 - `narration-45s.wav` must be no longer than 43.0 seconds.
 - `narration-90s.wav` must end between 84.0 and 88.0 seconds.
-- `music-45s.wav` must be exactly 45.0 seconds; `music-90s.wav` must be exactly 90.0 seconds.
+- `music-45s.wav` must be exactly 45.0 seconds with 2,160,000 samples at 48 kHz; `music-90s.wav` must be exactly 90.0 seconds with 4,320,000 samples at 48 kHz.
 - If either narration misses its window, stop and present its measured duration plus a copy-revision proposal for approval. Do not silently change words, splice in artificial silence, or use `atempo` beyond ±5%.
 
 No git commit: all files in this task are generated and ignored.
