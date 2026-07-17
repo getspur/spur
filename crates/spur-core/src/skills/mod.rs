@@ -12,6 +12,7 @@ pub(crate) mod frontmatter;
 
 pub mod adapters;
 pub mod installer;
+pub mod projection;
 
 const SPUR_SKILLS_DIR_ENV: &str = "SPUR_SKILLS_DIR";
 const CLAUDE_CODE_ACP_SKILL: &str = "brain-delegation-claude-code-acp";
@@ -434,9 +435,11 @@ pub fn validate_id(id: &str) -> Result<(), InvalidSkillId> {
 }
 
 /// Where a skill's body came from.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SkillSource {
     Bundled,
+    Pool,
     Override,
 }
 
@@ -476,6 +479,81 @@ pub struct SkillPayload {
     pub role: SkillRole,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct SkillSourceCandidate {
+    pub payload: SkillPayload,
+    pub source_dir: PathBuf,
+}
+
+pub(crate) fn bundled_skill_candidates(
+    repo_root: &Path,
+) -> Result<Vec<SkillSourceCandidate>, SkillCatalogError> {
+    let catalog = SkillCatalog::discover(repo_root)?;
+    catalog
+        .list_raw(repo_root)?
+        .into_iter()
+        .map(|(id, raw)| {
+            validate_id(&id)?;
+            let source_dir = catalog.bundled_root().join(canonical_bundled_id(&id));
+            let parsed = frontmatter::parse_source(&raw);
+            Ok(SkillSourceCandidate {
+                payload: SkillPayload {
+                    id,
+                    description: parsed.description.as_deref().unwrap_or("").to_string(),
+                    body: parsed.body.to_string(),
+                    source: SkillSource::Bundled,
+                    role: parsed.role.unwrap_or(SkillRole::Both),
+                },
+                source_dir,
+            })
+        })
+        .collect()
+}
+
+pub(crate) fn repository_override_candidates(
+    repo_root: &Path,
+) -> Result<Vec<SkillSourceCandidate>, SkillCatalogError> {
+    let override_dir = repo_root.join(".spur/skills");
+    if !override_dir.is_dir() {
+        return Ok(Vec::new());
+    }
+    let entries = match std::fs::read_dir(&override_dir) {
+        Ok(entries) => entries,
+        Err(_) => return Ok(Vec::new()),
+    };
+    let mut candidates = Vec::new();
+    for entry in entries.flatten() {
+        if !entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false) {
+            continue;
+        }
+        let id = entry.file_name().to_string_lossy().into_owned();
+        validate_id(&id)?;
+        let source_dir = entry.path();
+        let raw = match std::fs::read_to_string(source_dir.join("SKILL.md")) {
+            Ok(raw) => raw,
+            Err(_) => continue,
+        };
+        let parsed = frontmatter::parse_source(&raw);
+        if is_unedited_spur_managed_source(&raw, parsed.body)
+            || is_legacy_generated_spur_source(&raw)
+        {
+            continue;
+        }
+        candidates.push(SkillSourceCandidate {
+            payload: SkillPayload {
+                id,
+                description: parsed.description.as_deref().unwrap_or("").to_string(),
+                body: parsed.body.to_string(),
+                source: SkillSource::Override,
+                role: parsed.role.unwrap_or(SkillRole::Both),
+            },
+            source_dir,
+        });
+    }
+    candidates.sort_by(|left, right| left.payload.id.cmp(&right.payload.id));
+    Ok(candidates)
+}
+
 /// Resolve the active skill set: bundled corpus merged with
 /// `.spur/skills/<id>/SKILL.md` overrides (override wins per id).
 ///
@@ -487,58 +565,12 @@ pub fn list_active_skills(repo_root: &Path) -> Result<Vec<SkillPayload>, SkillCa
     let mut by_id: std::collections::BTreeMap<String, SkillPayload> =
         std::collections::BTreeMap::new();
 
-    // Bundled first.
-    let catalog = SkillCatalog::discover(repo_root)?;
-    for (id, raw) in catalog.list_raw(repo_root)? {
-        validate_id(&id)?;
-        let parsed = frontmatter::parse_source(&raw);
-        by_id.insert(
-            id.clone(),
-            SkillPayload {
-                id,
-                description: parsed.description.as_deref().unwrap_or("").to_string(),
-                body: parsed.body.to_string(),
-                source: SkillSource::Bundled,
-                role: parsed.role.unwrap_or(SkillRole::Both),
-            },
-        );
+    for candidate in bundled_skill_candidates(repo_root)? {
+        by_id.insert(candidate.payload.id.clone(), candidate.payload);
     }
 
-    // Overrides.
-    let override_dir = repo_root.join(".spur/skills");
-    if override_dir.is_dir() {
-        let entries = match std::fs::read_dir(&override_dir) {
-            Ok(e) => e,
-            Err(_) => return Ok(by_id.into_values().collect()),
-        };
-        for entry in entries.flatten() {
-            if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-                continue;
-            }
-            let id = entry.file_name().to_string_lossy().into_owned();
-            validate_id(&id)?;
-            let skill_md = entry.path().join("SKILL.md");
-            let raw = match std::fs::read_to_string(&skill_md) {
-                Ok(r) => r,
-                Err(_) => continue, // no SKILL.md in that dir
-            };
-            let parsed = frontmatter::parse_source(&raw);
-            if is_unedited_spur_managed_source(&raw, parsed.body)
-                || is_legacy_generated_spur_source(&raw)
-            {
-                continue;
-            }
-            by_id.insert(
-                id.clone(),
-                SkillPayload {
-                    id,
-                    description: parsed.description.as_deref().unwrap_or("").to_string(),
-                    body: parsed.body.to_string(),
-                    source: SkillSource::Override,
-                    role: parsed.role.unwrap_or(SkillRole::Both),
-                },
-            );
-        }
+    for candidate in repository_override_candidates(repo_root)? {
+        by_id.insert(candidate.payload.id.clone(), candidate.payload);
     }
 
     Ok(by_id.into_values().collect())
