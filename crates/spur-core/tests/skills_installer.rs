@@ -1,7 +1,7 @@
 //! End-to-end installer tests using tempdir roots.
 
 use spur_core::skills::installer::{run, SkipReason};
-use spur_core::skills::{adapters::Adapter, SkillRole, SkillSource};
+use spur_core::skills::{adapters::Adapter, SkillSource};
 use std::path::Path;
 
 fn count_files_under(dir: &Path) -> usize {
@@ -44,16 +44,9 @@ fn fresh_install_creates_all_expected_files() {
 
     let summary = run(tmp.path()).unwrap();
 
-    // Brain-only bundled skills render only to `.spur/skills`; worker/both
-    // skills render to every adapter. The Kiro pointer is once per run.
-    let expected = bundled_skills
-        .iter()
-        .map(|skill| match skill.role {
-            SkillRole::Brain => 1,
-            SkillRole::Worker | SkillRole::Both => Adapter::all().len(),
-        })
-        .sum::<usize>()
-        + 1;
+    // Every bundled skill renders to every adapter regardless of role
+    // metadata. The Kiro pointer is once per run.
+    let expected = bundled_skills.len() * Adapter::all().len() + 1;
     assert_eq!(
         summary.written.len(),
         expected,
@@ -209,7 +202,7 @@ fn folded_override_description_renders_valid_codex_frontmatter() {
 }
 
 #[test]
-fn stale_managed_worker_adapter_file_for_brain_skill_is_removed() {
+fn managed_worker_adapter_file_for_bundled_brain_skill_is_retained() {
     let tmp = tempfile::tempdir().unwrap();
     let stale_path = tmp
         .path()
@@ -238,15 +231,11 @@ fn stale_managed_worker_adapter_file_for_brain_skill_is_removed() {
     )
     .unwrap();
 
-    let summary = run(tmp.path()).unwrap();
+    run(tmp.path()).unwrap();
 
     assert!(
-        !stale_path.exists(),
-        "stale brain-only worker adapter file should be removed"
-    );
-    assert!(
-        summary.removed.contains(&stale_path),
-        "removed file should be reported in summary"
+        stale_path.exists(),
+        "managed bundled brain skill should be retained"
     );
 }
 
