@@ -1188,8 +1188,14 @@ trigger_submit_plan_hitl_review_and_synthesize() {
 
   press_key Alt+p
   story_hard_proof \
+    "Plan Inspector selects the correlated D4 task" \
+    "$seed_task_id" 2.5
+  story_hard_proof \
     "The correlated worker result reaches human review" \
     "awaiting_review" 4.0
+  story_hard_proof \
+    "The selected task exposes the first worker finding" \
+    "summary: D4 FINDING:" 3.5
 
   press_key d
   story_hard_proof \
@@ -1214,6 +1220,15 @@ trigger_submit_plan_hitl_review_and_synthesize() {
   story_hard_proof \
     "The improved second attempt returns to human review" \
     "awaiting_review" 4.0
+  story_hard_proof \
+    "The improved result stays on the correlated D4 task" \
+    "$seed_task_id" 2.5
+  story_hard_proof \
+    "The selected retry exposes source evidence" \
+    "summary: SOURCE:" 3.5
+  story_hard_proof \
+    "The selected retry exposes a recommendation" \
+    "RECOMMENDATION:" 3.5
   press_key a
   story_hard_proof \
     "The human approves the improved evidence" \
