@@ -30,7 +30,7 @@ Current real controls used by the story:
 - Session-scoped workers panel and plan inspector.
 - Plan task status `awaiting_review`.
 - Plan Inspector review keys:
-  - `c` opens `Review Task` with `Decision: Request changes`.
+  - `d` opens `Review Task` with `Decision: Reject`.
   - `R` opens `Retry Task` with an appended human instruction.
   - `a` opens `Review Task` with `Decision: Approve`.
 - Review confirmations require `Enter` and can be cancelled with `Esc`.
@@ -79,7 +79,7 @@ worker stream/task tabs, and plan progress while the attempt runs.
 When the correlated task reaches `awaiting_review`:
 
 1. The human opens Plan Inspector.
-2. The human presses `c` and confirms `Decision: Request changes`.
+2. The human presses `d` and confirms `Decision: Reject`.
 3. After the task becomes retryable, the human presses `R`.
 4. The human appends a concrete correction: include an exact source path and one
    recommendation, still with no file changes.
@@ -87,7 +87,9 @@ When the correlated task reaches `awaiting_review`:
 6. The human presses `a` and confirms `Decision: Approve`.
 
 These are hard proof beats. Missing review state or confirmation text fails the
-D4 journey; it must not silently become a soft beat.
+D4 journey; it must not silently become a soft beat. The `c`/Modify path is not
+used because the orchestrator treats Modify as approved-with-note rather than a
+request for another worker attempt.
 
 ### Resolution: brain synthesis
 
@@ -157,7 +159,7 @@ Extend `story-contract.test.sh` before implementation so it requires:
 - a unique per-run D4 task ID;
 - read-only first and retry prompts;
 - hard waits for `awaiting_review`;
-- request-changes -> retry -> approve ordering;
+- reject -> retry -> approve ordering;
 - explicit final brain synthesis with no further delegation;
 - return to Session Detail before resolution;
 - a dedicated capture wrapper/output stem.
