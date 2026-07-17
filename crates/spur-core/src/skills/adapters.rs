@@ -40,6 +40,39 @@ impl Adapter {
         ]
     }
 
+    /// Stable filesystem and summary key for this adapter.
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::SpurHermetic => "spur-hermetic",
+            Self::ClaudeCode => "claude-code",
+            Self::Codex => "codex",
+            Self::Gemini => "gemini",
+            Self::Kiro => "kiro",
+            Self::OpenCode => "opencode",
+            Self::Cursor => "cursor",
+            Self::Kimi => "kimi",
+        }
+    }
+
+    /// Adapter selected by a supported external ACP agent kind.
+    pub fn for_agent_kind(kind: spur_acp::types::AgentKind) -> Option<Self> {
+        match kind {
+            spur_acp::types::AgentKind::ClaudeCodeAcp
+            | spur_acp::types::AgentKind::ClaudeStreamJson => Some(Self::ClaudeCode),
+            spur_acp::types::AgentKind::CodexAcp => Some(Self::Codex),
+            spur_acp::types::AgentKind::Gemini => Some(Self::Gemini),
+            spur_acp::types::AgentKind::Kiro => Some(Self::Kiro),
+            spur_acp::types::AgentKind::OpenCode => Some(Self::OpenCode),
+            spur_acp::types::AgentKind::Kimi => Some(Self::Kimi),
+            spur_acp::types::AgentKind::Grok | spur_acp::types::AgentKind::Generic => None,
+        }
+    }
+
+    /// Whether one skill occupies a directory at this adapter's target.
+    pub fn target_is_directory(self) -> bool {
+        self != Self::Cursor
+    }
+
     /// Render a single skill into this adapter's target path.
     pub fn render(&self, skill: &SkillPayload, repo_root: &Path) -> RenderedFile {
         self.render_with_prefix(skill, repo_root, "spurpower-")
