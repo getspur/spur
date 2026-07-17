@@ -2,11 +2,11 @@ use crate::explore::catalog::ItemKind;
 use crate::explore::pool::{Manifest, ManifestItem};
 use crate::skills::adapters::Adapter;
 use crate::skills::{SkillPayload, SkillRole, SkillSource};
-use anyhow::Context;
+use anyhow::{bail, Context};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::io::Write as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const WARN_TARGET: &str = "spur::worker::explore";
@@ -26,17 +26,10 @@ pub struct MaterializeMeta<'a> {
     pub agent: &'a str,
 }
 
-pub fn adapter_for_kind(kind: spur_acp::types::AgentKind) -> Option<Adapter> {
-    match kind {
-        spur_acp::types::AgentKind::ClaudeCodeAcp
-        | spur_acp::types::AgentKind::ClaudeStreamJson => Some(Adapter::ClaudeCode),
-        spur_acp::types::AgentKind::CodexAcp => Some(Adapter::Codex),
-        spur_acp::types::AgentKind::Gemini => Some(Adapter::Gemini),
-        spur_acp::types::AgentKind::Kiro => Some(Adapter::Kiro),
-        spur_acp::types::AgentKind::OpenCode => Some(Adapter::OpenCode),
-        spur_acp::types::AgentKind::Kimi => Some(Adapter::Kimi),
-        spur_acp::types::AgentKind::Grok | spur_acp::types::AgentKind::Generic => None,
-    }
+#[derive(Debug, Clone)]
+pub(crate) struct LoadedPoolSkill {
+    pub payload: SkillPayload,
+    pub source_dir: PathBuf,
 }
 
 /// Render the gated pool subset into a worker worktree.
@@ -52,7 +45,7 @@ pub async fn materialize_pool_skills(
     requested: Option<&[String]>,
     meta: Option<MaterializeMeta<'_>>,
 ) {
-    let Some(adapter) = adapter_for_kind(kind) else {
+    let Some(adapter) = Adapter::for_agent_kind(kind) else {
         return;
     };
     let manifest = match Manifest::load_layered(repo_root) {
@@ -77,8 +70,8 @@ pub async fn materialize_pool_skills(
             continue;
         }
 
-        let payload = match load_pool_skill(repo_root, item) {
-            Ok(payload) => payload,
+        let loaded = match load_pool_skill(repo_root, item) {
+            Ok(loaded) => loaded,
             Err(error) => {
                 tracing::warn!(
                     target: WARN_TARGET,
@@ -89,7 +82,7 @@ pub async fn materialize_pool_skills(
                 continue;
             }
         };
-        let rendered = adapter.render_with_prefix(&payload, worktree_path, "");
+        let rendered = adapter.render_with_prefix(&loaded.payload, worktree_path, "");
         let rel_path = match rendered.path.strip_prefix(worktree_path) {
             Ok(path) => path.to_string_lossy().replace('\\', "/"),
             Err(error) => {
@@ -211,23 +204,72 @@ fn should_materialize(item: &ManifestItem, requested_names: Option<&HashSet<&str
     }
 }
 
-fn load_pool_skill(repo_root: &Path, item: &ManifestItem) -> anyhow::Result<SkillPayload> {
-    let path = crate::explore::store::layered_pool_dir(
+pub(crate) fn load_pool_skill(
+    repo_root: &Path,
+    item: &ManifestItem,
+) -> anyhow::Result<LoadedPoolSkill> {
+    let source_dir = checked_pool_source_dir(repo_root, item)?;
+    let path = source_dir.join("SKILL.md");
+    let raw = std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+    let parsed = crate::skills::frontmatter::parse_source(&raw);
+    Ok(LoadedPoolSkill {
+        payload: SkillPayload {
+            id: item.name.clone(),
+            description: parsed.description.as_deref().unwrap_or("").to_string(),
+            body: parsed.body.to_string(),
+            source: SkillSource::Pool,
+            role: parsed.role.unwrap_or(SkillRole::Both),
+        },
+        source_dir,
+    })
+}
+
+fn checked_pool_source_dir(repo_root: &Path, item: &ManifestItem) -> anyhow::Result<PathBuf> {
+    if item.source.split('/').any(|part| !safe_path_part(part))
+        || !safe_path_part(&item.pinned_commit)
+    {
+        bail!(
+            "unsafe pool source path for {}: source `{}` at `{}`",
+            item.name,
+            item.source,
+            item.pinned_commit
+        );
+    }
+
+    let source_dir = crate::explore::store::layered_pool_dir(
         repo_root,
         &item.source,
         &item.name,
         &item.pinned_commit,
+    );
+    let canonical_source = std::fs::canonicalize(&source_dir)
+        .with_context(|| format!("resolve pool source {}", source_dir.display()))?;
+    let mut pool_roots = vec![crate::explore::store::local_root(repo_root).join("pool")];
+    if let Some(global_root) = crate::explore::store::global_root() {
+        pool_roots.push(global_root.join("pool"));
+    }
+    if pool_roots.into_iter().any(|root| {
+        std::fs::canonicalize(root)
+            .map(|root| canonical_source.starts_with(root))
+            .unwrap_or(false)
+    }) {
+        return Ok(canonical_source);
+    }
+
+    bail!(
+        "unsafe pool source path for {}: {} is outside configured pool roots",
+        item.name,
+        source_dir.display()
     )
-    .join("SKILL.md");
-    let raw = std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
-    let parsed = crate::skills::frontmatter::parse_source(&raw);
-    Ok(SkillPayload {
-        id: item.name.clone(),
-        description: parsed.description.as_deref().unwrap_or("").to_string(),
-        body: parsed.body.to_string(),
-        source: SkillSource::Override,
-        role: parsed.role.unwrap_or(SkillRole::Both),
-    })
+}
+
+fn safe_path_part(part: &str) -> bool {
+    !part.is_empty()
+        && part != "."
+        && part != ".."
+        && !part.contains('/')
+        && !part.contains('\\')
+        && !part.contains('\0')
 }
 
 fn target_is_owned_or_absent(target: &Path, rel_path: &str) -> bool {
@@ -278,8 +320,8 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        adapter_for_kind, append_materialization_record, materialize_pool_skills,
-        read_recent_materializations, MaterializationRecord, MaterializeMeta,
+        append_materialization_record, materialize_pool_skills, read_recent_materializations,
+        MaterializationRecord, MaterializeMeta,
     };
     use crate::explore::catalog::ItemKind;
     use crate::explore::pool::{pool_dir, GateRecord, Manifest, ManifestItem};
@@ -292,35 +334,38 @@ mod tests {
         use spur_acp::types::AgentKind::*;
 
         assert_eq!(
-            adapter_for_kind(ClaudeStreamJson),
+            crate::skills::adapters::Adapter::for_agent_kind(ClaudeStreamJson),
             Some(crate::skills::adapters::Adapter::ClaudeCode)
         );
         assert_eq!(
-            adapter_for_kind(ClaudeCodeAcp),
+            crate::skills::adapters::Adapter::for_agent_kind(ClaudeCodeAcp),
             Some(crate::skills::adapters::Adapter::ClaudeCode)
         );
         assert_eq!(
-            adapter_for_kind(CodexAcp),
+            crate::skills::adapters::Adapter::for_agent_kind(CodexAcp),
             Some(crate::skills::adapters::Adapter::Codex)
         );
         assert_eq!(
-            adapter_for_kind(Gemini),
+            crate::skills::adapters::Adapter::for_agent_kind(Gemini),
             Some(crate::skills::adapters::Adapter::Gemini)
         );
         assert_eq!(
-            adapter_for_kind(Kiro),
+            crate::skills::adapters::Adapter::for_agent_kind(Kiro),
             Some(crate::skills::adapters::Adapter::Kiro)
         );
         assert_eq!(
-            adapter_for_kind(OpenCode),
+            crate::skills::adapters::Adapter::for_agent_kind(OpenCode),
             Some(crate::skills::adapters::Adapter::OpenCode)
         );
         assert_eq!(
-            adapter_for_kind(Kimi),
+            crate::skills::adapters::Adapter::for_agent_kind(Kimi),
             Some(crate::skills::adapters::Adapter::Kimi)
         );
-        assert_eq!(adapter_for_kind(Grok), None);
-        assert_eq!(adapter_for_kind(Generic), None);
+        assert_eq!(crate::skills::adapters::Adapter::for_agent_kind(Grok), None);
+        assert_eq!(
+            crate::skills::adapters::Adapter::for_agent_kind(Generic),
+            None
+        );
     }
 
     #[tokio::test]
