@@ -19,10 +19,6 @@ source "$ROOT/../geometry.env"
 OUT="$ROOT/out"
 mkdir -p "$OUT"
 
-if ! SPUR_BIN="$(spur_e2e_resolve_spur_bin)"; then
-  exit 1
-fi
-export SPUR_BIN
 if [[ "${SPUR_DEMO_ALLOW_HITL_LOOP:-0}" != "1" ]]; then
   export SPUR_DEMO_ALLOW_PLAN_LOOP=1
 fi
@@ -53,6 +49,11 @@ No D4 TUI, brain, or worker spend was started.
 EOF
   exit 2
 fi
+
+if ! SPUR_BIN="$(spur_e2e_resolve_spur_bin)"; then
+  exit 1
+fi
+export SPUR_BIN
 
 stamp="$(date -u +%Y%m%dT%H%M%SZ)"
 stem_prefix="$SPUR_DEMO_CAPTURE_STEM_PREFIX"
