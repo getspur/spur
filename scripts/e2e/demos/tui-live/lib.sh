@@ -161,9 +161,18 @@ story_hard_proof() {
 # The top and bottom titles are rendered by workers_panel::render_focused.
 workers_panel_text() {
   "$shell_use_bin" --session "$session_name" text | awk '
-    index($0, "Workers (") > 0 { in_workers = 1 }
-    in_workers { print }
-    in_workers && index($0, "Alt+D collapse") > 0 { exit }
+    index($0, "Workers (") > 0 {
+      buffer = $0 ORS
+      in_workers = 1
+      next
+    }
+    in_workers {
+      buffer = buffer $0 ORS
+      if (index($0, "Alt+D collapse") > 0) {
+        printf "%s", buffer
+        exit
+      }
+    }
   '
 }
 
@@ -1273,7 +1282,6 @@ trigger_submit_plan_hitl_review_and_synthesize() {
   story_hard_proof "The prompt names the launch readiness task" "$readiness_task_id" 2.5
   story_hard_proof "The brain accepts the Product Hunt audit turn" "THINK" 2.5
 
-  press_key Alt+d
   story_workers_panel_hard_proof "The session exposes exactly three campaign workers" "Workers (3)" 2.5
   story_workers_panel_hard_proof "The positioning task is routed to Claude Code" "claude-code" 2.5
   story_workers_panel_hard_proof "The proof task is routed to Gemini" "gemini" 2.5
