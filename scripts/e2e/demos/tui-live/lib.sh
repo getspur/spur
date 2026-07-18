@@ -383,6 +383,24 @@ return_to_session_detail() {
   land_session_detail "Re-enter Session Detail after navigation" 2.0 || true
 }
 
+# The Product Hunt campaign must synthesize in the exact fresh session that
+# opened its Plan Inspector. Never attach or resume a different session here.
+return_to_campaign_session_detail() {
+  if session_detail_is_visible; then
+    return 0
+  fi
+
+  press_key Escape
+  if "$shell_use_bin" --session "$session_name" wait text "Session ·|INSERT" --regex --timeout "$timeout_ms" >/dev/null 2>&1; then
+    expect_text "INSERT"
+    return 0
+  fi
+
+  "$shell_use_bin" --session "$session_name" text --full >&2 || true
+  printf 'fatal: could not return directly to the campaign Session Detail\n' >&2
+  return 1
+}
+
 require_agent_send_opt_in() {
   if [[ "${SPUR_DEMO_ALLOW_AGENT_SEND:-0}" != "1" ]]; then
     cat >&2 <<'EOF'
@@ -1334,7 +1352,7 @@ trigger_submit_plan_hitl_review_and_synthesize() {
   press_key Enter
   story_hard_proof "The readiness task records approval" "approved" 3.0
 
-  return_to_session_detail
+  return_to_campaign_session_detail
   story_session_land "The originating Session Detail remains the operator home" 2.5
   type_text "Synthesize approved evidence from ${positioning_task_id}, ${proof_task_id}, and ${readiness_task_id} in one concise launch-audit paragraph. "
   type_text "Begin the response with the words PH AUDIT SYNTHESIS, then a colon, one space, and the proof task id ${proof_task_id}. "
