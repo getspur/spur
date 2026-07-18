@@ -50,6 +50,17 @@ EOF
   exit 2
 fi
 
+if [[ "${SPUR_CAPTURE_FULL_FIDELITY:-0}" == "1" ]]; then
+  if ! command -v ffmpeg >/dev/null 2>&1; then
+    printf 'full-fidelity capture requires ffmpeg before paid journey launch\n' >&2
+    exit 2
+  fi
+  if ! command -v agg >/dev/null 2>&1 && ! command -v docker >/dev/null 2>&1; then
+    printf 'full-fidelity capture requires agg or Docker before paid journey launch\n' >&2
+    exit 2
+  fi
+fi
+
 if ! SPUR_BIN="$(spur_e2e_resolve_spur_bin)"; then
   exit 1
 fi
@@ -143,14 +154,20 @@ convert_cast() {
     echo "gif: $gif_out"
   elif command -v docker >/dev/null 2>&1; then
     echo "==> docker agg (asciinema/agg)"
-    docker run --rm -v "$OUT:/data" -v "$(dirname "$src"):/casts:ro" \
-      ghcr.io/asciinema/agg:latest \
-      --cols "$agg_cols" --rows "$agg_rows" \
-      --idle-time-limit "$agg_idle" --speed "$agg_speed" \
-      "/casts/$(basename "$src")" "/data/$(basename "$gif_out")" \
-      && echo "gif: $gif_out" || true
+    if docker run --rm -v "$OUT:/data" -v "$(dirname "$src"):/casts:ro" ghcr.io/asciinema/agg:latest --cols "$agg_cols" --rows "$agg_rows" --idle-time-limit "$agg_idle" --speed "$agg_speed" "/casts/$(basename "$src")" "/data/$(basename "$gif_out")"; then
+      echo "gif: $gif_out"
+    elif [[ "$full_fidelity" == "1" ]]; then
+      return 1
+    fi
   else
     echo "warn: agg not installed — cast saved; install with: brew install agg" >&2
+    if [[ "$full_fidelity" == "1" ]]; then
+      return 1
+    fi
+  fi
+
+  if [[ "$full_fidelity" == "1" && ! -s "$gif_out" ]]; then
+    return 1
   fi
 
   if [[ -f "$gif_out" && "$full_fidelity" == "1" ]]; then
@@ -206,8 +223,15 @@ PY
   fi
 }
 
+conversion_rc=0
 if [[ -f "$cast_dest" ]]; then
-  convert_cast "$cast_dest" || true
+  if [[ "${SPUR_CAPTURE_FULL_FIDELITY:-0}" == "1" ]]; then
+    convert_cast "$cast_dest" || conversion_rc=$?
+  else
+    convert_cast "$cast_dest" || true
+  fi
+elif [[ "${SPUR_CAPTURE_FULL_FIDELITY:-0}" == "1" ]]; then
+  conversion_rc=1
 fi
 
 # Stable symlink-style copies for latest
@@ -219,6 +243,21 @@ if [[ -f "$gif_out" ]]; then
 fi
 if [[ -f "$mp4_out" ]]; then
   cp -p "$mp4_out" "$OUT/${stem_prefix}.mp4"
+fi
+
+if [[ "${SPUR_CAPTURE_FULL_FIDELITY:-0}" == "1" ]]; then
+  if [[ "$conversion_rc" -ne 0 ]]; then
+    printf 'fatal: full-fidelity capture conversion failed\n' >&2
+    rc=1
+  fi
+  for artifact in \
+    "$cast_dest" "$gif_out" "$mp4_out" \
+    "$OUT/${stem_prefix}.cast" "$OUT/${stem_prefix}.gif" "$OUT/${stem_prefix}.mp4"; do
+    if [[ ! -s "$artifact" ]]; then
+      printf 'fatal: full-fidelity capture artifact missing or empty: %s\n' "$artifact" >&2
+      rc=1
+    fi
+  done
 fi
 
 echo
