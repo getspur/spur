@@ -92,7 +92,7 @@ handoff finding → Approve
 return to the originating Session Detail → correlated synthesis
 ```
 
-The handoff result must use `story_plan_inspector_result_hard_proof` with `PH HANDOFF FINDING:`. The synthesis prompt and proof must contain `${handoff_task_id}` in addition to the other three IDs.
+The handoff result must use `story_plan_inspector_result_hard_proof` with `PH HANDOFF FINDING:`. The synthesis request must list `${handoff_task_id}` in addition to the other three IDs, while the marker instruction and final hard proof must preserve the existing run-correlation anchor: `PH AUDIT SYNTHESIS: ${proof_task_id}`.
 
 - [ ] **Step 4: run RED verification**
 
