@@ -1270,6 +1270,50 @@ land_plan_inspector_for_task() {
   return 1
 }
 
+# Extract only the selected task's complete result from the current Plan
+# Inspector frame. Issue description text follows this bounded Output section.
+plan_inspector_output_text() {
+  "$shell_use_bin" --session "$session_name" text --full | awk '
+    $0 ~ /^[[:space:]|│]*Output[[:space:]|│]*$/ {
+      buffer = $0 ORS
+      in_output = 1
+      next
+    }
+    in_output {
+      buffer = buffer $0 ORS
+      if (index($0, "next: review") > 0) {
+        printf "%s", buffer
+        exit
+      }
+    }
+  '
+}
+
+# Worker-result markers are proof only inside a complete Plan Inspector Output
+# block. Requiring the summary label allows normalized prefixes before markers.
+story_plan_inspector_result_hard_proof() {
+  local claim="$1"
+  local marker="$2"
+  local dwell="${3:-3.0}"
+  local wait_ms="${4:-$timeout_ms}"
+  local deadline=$((SECONDS + (wait_ms + 999) / 1000))
+  local output=""
+
+  while (( SECONDS < deadline )); do
+    output="$(plan_inspector_output_text || true)"
+    if [[ "$output" == *"summary:"* && "$output" == *"$marker"* ]]; then
+      printf '+ proof: %s [Plan Inspector Output marker=%s]\n' "$claim" "$marker"
+      story_dwell "$dwell"
+      return 0
+    fi
+    sleep_ms 0.2
+  done
+
+  printf 'fatal: Plan Inspector Output never exposed summary plus marker %s within %sms\n' "$marker" "$wait_ms" >&2
+  "$shell_use_bin" --session "$session_name" text --full >&2 || true
+  return 1
+}
+
 trigger_submit_plan_hitl_review_and_synthesize() {
   require_hitl_loop_opt_in
   local positioning_task_id="ph-acp-positioning-$$"
@@ -1309,7 +1353,7 @@ trigger_submit_plan_hitl_review_and_synthesize() {
 
   land_plan_inspector_for_task "$positioning_task_id"
   story_hard_proof "The positioning result reaches operator review" "awaiting_review" 4.0
-  story_hard_proof "The positioning result exposes its finding" "summary: PH POSITIONING FINDING:" 3.5
+  story_plan_inspector_result_hard_proof "The positioning result exposes its finding" "PH POSITIONING FINDING:" 3.5
   press_key a
   story_hard_proof "The operator selects approval for positioning" "Decision: Approve" 3.5
   press_key Enter
@@ -1318,7 +1362,7 @@ trigger_submit_plan_hitl_review_and_synthesize() {
   press_key j
   story_hard_proof "The inspector advances to the proof task" "$proof_task_id" 2.5
   story_hard_proof "The proof result reaches operator review" "awaiting_review" 4.0
-  story_hard_proof "The proof result exposes its finding" "summary: PH PROOF FINDING:" 3.5
+  story_plan_inspector_result_hard_proof "The proof result exposes its finding" "PH PROOF FINDING:" 3.5
   press_key d
   story_hard_proof "The operator rejects proof without a source window" "Decision: Reject" 3.5
   press_key Enter
@@ -1335,9 +1379,9 @@ trigger_submit_plan_hitl_review_and_synthesize() {
 
   story_hard_proof "The retried proof returns to operator review" "awaiting_review" 4.0
   story_hard_proof "The retry stays correlated to the proof task" "$proof_task_id" 2.5
-  story_hard_proof "The retry exposes source evidence" "summary: SOURCE:" 3.5
-  story_hard_proof "The retry exposes its evidence window" "WINDOW:" 3.5
-  story_hard_proof "The retry exposes a recommendation" "RECOMMENDATION:" 3.5
+  story_plan_inspector_result_hard_proof "The retry exposes source evidence" "SOURCE:" 3.5
+  story_plan_inspector_result_hard_proof "The retry exposes its evidence window" "WINDOW:" 3.5
+  story_plan_inspector_result_hard_proof "The retry exposes a recommendation" "RECOMMENDATION:" 3.5
   press_key a
   story_hard_proof "The operator selects approval for proof" "Decision: Approve" 3.5
   press_key Enter
@@ -1346,7 +1390,7 @@ trigger_submit_plan_hitl_review_and_synthesize() {
   press_key j
   story_hard_proof "The inspector advances to the readiness task" "$readiness_task_id" 2.5
   story_hard_proof "The readiness result reaches operator review" "awaiting_review" 4.0
-  story_hard_proof "The readiness result exposes its finding" "summary: PH READINESS FINDING:" 3.5
+  story_plan_inspector_result_hard_proof "The readiness result exposes its finding" "PH READINESS FINDING:" 3.5
   press_key a
   story_hard_proof "The operator selects approval for readiness" "Decision: Approve" 3.5
   press_key Enter
