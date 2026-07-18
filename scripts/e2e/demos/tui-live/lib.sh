@@ -1276,10 +1276,12 @@ trigger_submit_plan_hitl_review_and_synthesize() {
 
   return_to_session_detail
   story_session_land "The originating Session Detail remains the operator home" 2.5
-  type_text "PH AUDIT SYNTHESIS: Synthesize approved evidence from ${positioning_task_id}, ${proof_task_id}, and ${readiness_task_id} in one concise launch-audit paragraph. Do not call tools or delegate."
+  type_text "Synthesize approved evidence from ${positioning_task_id}, ${proof_task_id}, and ${readiness_task_id} in one concise launch-audit paragraph. "
+  type_text "Begin the response with the words PH AUDIT SYNTHESIS, then a colon, one space, and the proof task id ${proof_task_id}. "
+  type_text "Do not call tools or delegate."
   sleep_ms 0.5
   press_key Enter
-  story_hard_proof "The brain synthesis is visible in the originating session" "PH AUDIT SYNTHESIS:" 4.0
+  story_hard_proof "The brain synthesis is visible in the originating session" "PH AUDIT SYNTHESIS: ${proof_task_id}" 4.0
 }
 
 # Problem: backlog firehose — what is P0 open work?
