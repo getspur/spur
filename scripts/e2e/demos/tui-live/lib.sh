@@ -525,7 +525,7 @@ start_fresh_session_detail() {
   open_sessions_picker
   wait_text "Start new session"
   press_key n
-  sleep_ms 0.8
+  _live_confirm_draft_if_needed || true
   if ! _live_wait_session_detail 15000; then
     "$shell_use_bin" --session "$session_name" text --full >&2 || true
     printf 'fatal: fresh Session Detail attach failed after Start new session\n' >&2
