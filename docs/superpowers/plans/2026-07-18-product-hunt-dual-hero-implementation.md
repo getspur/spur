@@ -42,7 +42,7 @@
 - Palette: ink `#0B0E14`, ivory `#E6E1CF`, cyan `#7FB4CA`, violet `#957FB8`, border `#2A2E38`.
 - Typography: SF Mono, uppercase cues, direct cuts, no ornamental transitions.
 - Captions: ivory SF Mono, 34 px, dark 82%-opaque background, centered at `centerY=0.84`, maximum seven words, no animation.
-- Proof cues: upper-left at `centerX=0.25`, `centerY=0.14`, `width=0.42`, `height=0.16`; 42 px bold ivory, with the cyan progress rail carrying the signal color.
+- Proof cues: upper-left at `centerX=0.25`, `centerY=0.14`, `width=0.42`, `height=0.16`; 42 px bold ivory, with the cyan progress rail carrying the signal color. The Resume cue alone uses the symmetric upper-right position at `centerX=0.75` with right alignment so the real recording's upper-left resumed-from-prior-conversation marker stays visible.
 - Progress rail: x=200…1720, y=982…988, six pixels high; border track with cyan fill at 20/40/60/80/100%.
 - Product-picture grade: `reset=true`, `contrast=1.04`, `saturation=0.92`, `shadows=0.03`, `highlights=-0.03`, `temperature=6400`.
 - Motion: establish the frame for 30 frames, then push from normalized scale 1.00×1.00 to at most 1.08×1.08. Use smooth interpolation and paired position keyframes so evidence stays visible.
@@ -410,7 +410,7 @@ Add one top text track with these exact entries and no animation:
 | 990–1200 | `05 / RESUME\nCONTEXT SURVIVES` |
 | 1200–1350 | `SPUR\nVISIBLE · ISOLATED · RECOVERABLE\nINSTALL COMMUNITY FREE` |
 
-Title and CTA use centered 76 px bold ivory text with 0.06 tracking and `centerX=0.5`, `centerY=0.5`, `width=0.78`, `height=0.38`. Proof cues use the locked upper-left cue style.
+Title and CTA use centered 76 px bold ivory text with 0.06 tracking and `centerX=0.5`, `centerY=0.5`, `width=0.78`, `height=0.38`. Proof cues use the locked upper-left cue style except `05 / RESUME`, which uses `centerX=0.75` and right alignment to preserve the captured resume marker.
 
 - [ ] **Step 7: apply the restrained shared grade and keyframed pushes**
 
