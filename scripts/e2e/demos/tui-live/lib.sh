@@ -1173,7 +1173,7 @@ trigger_submit_plan_one_task_and_observe() {
 
 land_plan_inspector_for_task() {
   local task_id="$1"
-  local timeout_s="${2:-180}"
+  local timeout_s="${2:-${SPUR_DEMO_PLAN_LOOP_WAIT_S:-180}}"
   local deadline=$((SECONDS + timeout_s))
 
   while (( SECONDS < deadline )); do
@@ -1222,7 +1222,7 @@ trigger_submit_plan_hitl_review_and_synthesize() {
   story_hard_proof "The brain accepts the Product Hunt audit turn" "THINK" 2.5
 
   press_key Alt+d
-  story_hard_proof "The session exposes the campaign worker panel" "Workers" 2.5
+  story_hard_proof "The session exposes exactly three campaign workers" "Workers (3)" 2.5
   story_hard_proof "The positioning task is routed to Claude Code" "claude-code" 2.5
   story_hard_proof "The proof task is routed to Gemini" "gemini" 2.5
   story_hard_proof "The readiness task is routed to Codex" "codex" 2.5
