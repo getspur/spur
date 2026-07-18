@@ -210,8 +210,8 @@ assert_matches "$lib" '(?m)^require_hitl_loop_opt_in\(\) \{[[:blank:]]*\n(?:^[[:
   'PH audit missing-beads preflight emits its error and returns 2'
 assert_matches "$lib" '(?m)^trigger_submit_plan_hitl_review_and_synthesize\(\) \{[[:blank:]]*\n^[[:blank:]]+require_hitl_loop_opt_in[[:blank:]]*\n^[[:blank:]]+local positioning_task_id="ph-acp-positioning-\$\$"[[:blank:]]*\n^[[:blank:]]+local proof_task_id="ph-tui-proof-\$\$"[[:blank:]]*\n^[[:blank:]]+local readiness_task_id="ph-launch-readiness-\$\$"[[:blank:]]*$' \
   'PH audit campaign guard is the first action before exact task ids'
-assert_matches "$lib" '(?m)^land_plan_inspector_for_task\(\) \{[[:blank:]]*\n^[[:blank:]]+local task_id="\$1"[[:blank:]]*\n^[[:blank:]]+local timeout_s="\$\{2:-180\}"[[:blank:]]*\n^[[:blank:]]+local deadline=\$\(\(SECONDS \+ timeout_s\)\)[[:blank:]]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+while \(\( SECONDS < deadline \)\); do[[:blank:]]*$' \
-  'PH audit Plan Inspector landing loop has a caller-bounded deadline'
+assert_matches "$lib" '(?m)^land_plan_inspector_for_task\(\) \{[[:blank:]]*\n^[[:blank:]]+local task_id="\$1"[[:blank:]]*\n^[[:blank:]]+local timeout_s="\$\{2:-\$\{SPUR_DEMO_PLAN_LOOP_WAIT_S:-180\}\}"[[:blank:]]*\n^[[:blank:]]+local deadline=\$\(\(SECONDS \+ timeout_s\)\)[[:blank:]]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+while \(\( SECONDS < deadline \)\); do[[:blank:]]*$' \
+  'PH audit Plan Inspector inherits the campaign budget with a 180s fallback'
 assert_matches "$lib" '(?m)^land_plan_inspector_for_task\(\) \{[[:blank:]]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+while \(\( SECONDS < deadline \)\); do[[:blank:]]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+press_key Alt\+p[[:blank:]]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+if soft_has_text "Task detail"[^\n]*&& soft_has_text "\$task_id"[^\n]*; then[[:blank:]]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+return 0[[:blank:]]*$' \
   'PH audit Plan Inspector loop pins both task detail and requested task id'
 assert_matches "$lib" '(?m)^land_plan_inspector_for_task\(\) \{[[:blank:]]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+done[[:blank:]]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+printf [^\n]*fatal: Plan Inspector never pinned[^\n]*\n^[[:blank:]]+return [1-9][0-9]*[[:blank:]]*\n^\}[[:blank:]]*$' \
@@ -228,6 +228,10 @@ assert_matches "$lib" '(?m)^trigger_submit_plan_hitl_review_and_synthesize\(\) \
   'PH audit readiness prompt is read-only with explicit routing and effort'
 assert_matches "$lib" '(?m)^trigger_submit_plan_hitl_review_and_synthesize\(\) \{[[:blank:]]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+type_text "Leave every completed task awaiting_review for the operator\."[[:blank:]]*\n(?:^[[:blank:]]+sleep_ms[^\n]*\n)?^[[:blank:]]+press_key Enter[[:blank:]]*$' \
   'PH audit submits the operator review hold with the campaign prompt'
+assert_not_matches <(awk '/^trigger_submit_plan_hitl_review_and_synthesize\(\) \{/ { in_hitl=1 } in_hitl { print } in_hitl && /^}/ { exit }' "$lib") '(?m)^[[:blank:]]+story_hard_proof[^\n]*"Workers"[[:blank:]]+[0-9]' \
+  'PH audit worker proof rejects the generic Workers anchor'
+assert_matches "$lib" '(?m)^trigger_submit_plan_hitl_review_and_synthesize\(\) \{[[:blank:]]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+story_hard_proof[^\n]*"THINK"[^\n]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+press_key Alt\+d[[:blank:]]*\n^[[:blank:]]+story_hard_proof[^\n]*"Workers \(3\)"[^\n]*\n^[[:blank:]]+story_hard_proof[^\n]*"claude-code"[^\n]*\n^[[:blank:]]+story_hard_proof[^\n]*"gemini"[^\n]*\n^[[:blank:]]+story_hard_proof[^\n]*"codex"[^\n]*\n^[[:blank:]]+story_dwell[^\n]*\n^[[:blank:]]+press_key Alt\+d[[:blank:]]*$' \
+  'PH audit worker beat requires the expanded three-worker panel before agent rows'
 assert_matches "$lib" '(?m)^trigger_submit_plan_hitl_review_and_synthesize\(\) \{[[:blank:]]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+land_plan_inspector_for_task "\$positioning_task_id"[^\n]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+story_hard_proof[^\n]*"awaiting_review"[^\n]*\n^[[:blank:]]+story_hard_proof[^\n]*"summary: PH POSITIONING FINDING:"[^\n]*\n^[[:blank:]]+press_key a[[:blank:]]*\n^[[:blank:]]+story_hard_proof[^\n]*"Decision: Approve"[^\n]*\n^[[:blank:]]+press_key Enter[[:blank:]]*\n^[[:blank:]]+story_hard_proof[^\n]*"approved"[^\n]*$' \
   'PH audit correlates positioning review through confirmed approval'
 assert_matches "$lib" '(?m)^trigger_submit_plan_hitl_review_and_synthesize\(\) \{[[:blank:]]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+press_key j[[:blank:]]*\n^[[:blank:]]+story_hard_proof[^\n]*"\$proof_task_id"[^\n]*\n^[[:blank:]]+story_hard_proof[^\n]*"awaiting_review"[^\n]*\n^[[:blank:]]+story_hard_proof[^\n]*"summary: PH PROOF FINDING:"[^\n]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+press_key d[[:blank:]]*\n^[[:blank:]]+story_hard_proof[^\n]*"Decision: Reject"[^\n]*\n^[[:blank:]]+press_key Enter[[:blank:]]*\n^[[:blank:]]+story_hard_proof[^\n]*"rejected"[^\n]*$' \
@@ -248,6 +252,8 @@ assert_matches "$lib" '(?m)^trigger_submit_plan_hitl_review_and_synthesize\(\) \
   'PH audit campaign order is positioning approve, proof retry, readiness approve, then synthesis'
 assert_has "$hitl_capture" 'SPUR_DEMO_CAPTURE_STEM_PREFIX=16-live-product-hunt-audit-loop' \
   'PH capture wrapper preserves the D4 stem by using a new versioned stem'
+assert_matches "$hitl_capture" '(?m)^export SPUR_DEMO_PLAN_LOOP_WAIT_S="\$\{SPUR_DEMO_PLAN_LOOP_WAIT_S:-420\}"[[:blank:]]*\n^export SHELL_USE_TIMEOUT_MS="\$\{SHELL_USE_TIMEOUT_MS:-\$\(\(SPUR_DEMO_PLAN_LOOP_WAIT_S \* 1000\)\)\}"[[:blank:]]*\n(?:^export [^\n]*\n)*?^exec "\$ROOT/capture-live-seed\.sh"[[:blank:]]*$' \
+  'PH capture derives hard-proof milliseconds from the 420s campaign budget before exec'
 assert_has "$hitl_capture" 'SPUR_CAPTURE_FULL_FIDELITY=1' \
   'PH capture requests the full-duration 2560x1600 encode path'
 assert_has "$hitl_capture" 'SPUR_AGG_IDLE_LIMIT="${SPUR_AGG_IDLE_LIMIT:-6.0}"' \
@@ -260,12 +266,20 @@ assert_matches "$capture_seed" '(?m)^[[:blank:]]*if \[\[ -f "\$gif_out" && "\$fu
   'full-fidelity branch directly encodes complete GIF at 30 fps and 2560x1600'
 assert_matches "$capture_seed" '(?m)^[[:blank:]]*if \[\[ -f "\$gif_out" && "\$full_fidelity" == "1" \]\]; then[[:blank:]]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]*elif \[\[ -f "\$gif_out" \]\] && command -v ffmpeg[^\n]*&& command -v python3[^\n]*; then[[:blank:]]*$' \
   'full-fidelity branch falls through to sampled preview only via elif'
+assert_matches "$capture_seed" '(?m)^if \[\[ "\$\{SPUR_CAPTURE_FULL_FIDELITY:-0\}" == "1" \]\]; then[[:blank:]]*\n^[[:blank:]]+if ! command -v ffmpeg[^\n]*; then[[:blank:]]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+exit [1-9][0-9]*[[:blank:]]*\n^[[:blank:]]+fi[[:blank:]]*\n^[[:blank:]]+if ! command -v agg[^\n]*&& ! command -v docker[^\n]*; then[[:blank:]]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+exit [1-9][0-9]*[[:blank:]]*\n^[[:blank:]]+fi[[:blank:]]*\n^fi[[:blank:]]*\n(?:^.*\n)*?^if ! SPUR_BIN=' \
+  'full-fidelity capture preflights ffmpeg and agg-or-Docker before resolving the journey binary'
+assert_matches "$capture_seed" '(?m)^[[:blank:]]+if docker run[^\n]*; then[[:blank:]]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+elif \[\[ "\$full_fidelity" == "1" \]\]; then[[:blank:]]*\n^[[:blank:]]+return [1-9][0-9]*[[:blank:]]*\n^[[:blank:]]+fi[[:blank:]]*$' \
+  'full-fidelity Docker conversion failure is not masked'
 assert_lacks <(awk '/if \[\[ -f "\$gif_out" && "\$full_fidelity" == "1" \]\]; then/ { in_full=1 } in_full && /elif \[\[ -f "\$gif_out" \]\]/ { exit } in_full { print }' "$capture_seed") 'python3' \
   'full-fidelity branch never invokes the Python sampler'
 assert_lacks <(awk '/if \[\[ -f "\$gif_out" && "\$full_fidelity" == "1" \]\]; then/ { in_full=1 } in_full && /elif \[\[ -f "\$gif_out" \]\]/ { exit } in_full { print }' "$capture_seed") 'n // 120' \
   'full-fidelity branch never uses n // 120 frame sampling'
 assert_matches "$capture_seed" '(?m)^[[:blank:]]*elif \[\[ -f "\$gif_out" \]\] && command -v ffmpeg[^\n]*&& command -v python3[^\n]*; then[[:blank:]]*\n^[[:blank:]]+echo "==> ffmpeg mp4 via sampled frames[^\n]*\n(?:^.*\n)*?^step = max\(1, n // 120\)[[:blank:]]*$' \
   'default path preserves the existing sampled-preview encoder'
+assert_matches "$capture_seed" '(?m)^conversion_rc=0[[:blank:]]*\n^if \[\[ -f "\$cast_dest" \]\]; then[[:blank:]]*\n^[[:blank:]]+if \[\[ "\$\{SPUR_CAPTURE_FULL_FIDELITY:-0\}" == "1" \]\]; then[[:blank:]]*\n^[[:blank:]]+convert_cast "\$cast_dest" \|\| conversion_rc=\$\?[[:blank:]]*\n^[[:blank:]]+else[[:blank:]]*\n^[[:blank:]]+convert_cast "\$cast_dest" \|\| true[[:blank:]]*\n^[[:blank:]]+fi[[:blank:]]*\n^elif \[\[ "\$\{SPUR_CAPTURE_FULL_FIDELITY:-0\}" == "1" \]\]; then[[:blank:]]*\n^[[:blank:]]+conversion_rc=1[[:blank:]]*\n^fi[[:blank:]]*$' \
+  'full-fidelity conversion propagates failure while preview conversion stays tolerant'
+assert_matches "$capture_seed" '(?m)^if \[\[ -f "\$mp4_out" \]\]; then[[:blank:]]*\n^[[:blank:]]+cp -p "\$mp4_out" "\$OUT/\$\{stem_prefix\}\.mp4"[[:blank:]]*\n^fi[[:blank:]]*\n(?:^\n)*^if \[\[ "\$\{SPUR_CAPTURE_FULL_FIDELITY:-0\}" == "1" \]\]; then[[:blank:]]*\n^[[:blank:]]+if \[\[ "\$conversion_rc" -ne 0 \]\]; then[[:blank:]]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+rc=1[[:blank:]]*\n^[[:blank:]]+fi[[:blank:]]*\n^[[:blank:]]+for artifact in \\[[:blank:]]*\n^[[:blank:]]+"\$cast_dest" "\$gif_out" "\$mp4_out" \\[[:blank:]]*\n^[[:blank:]]+"\$OUT/\$\{stem_prefix\}\.cast" "\$OUT/\$\{stem_prefix\}\.gif" "\$OUT/\$\{stem_prefix\}\.mp4"; do[[:blank:]]*\n^[[:blank:]]+if \[\[ ! -s "\$artifact" \]\]; then[[:blank:]]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+rc=1[[:blank:]]*\n^[[:blank:]]+fi[[:blank:]]*\n^[[:blank:]]+done[[:blank:]]*\n^fi[[:blank:]]*$' \
+  'full-fidelity capture requires nonempty run and stable cast gif and mp4 after copies'
 assert_has "$plan_loop" 'trigger_submit_plan_hitl_review_and_synthesize' \
   'PH journey still invokes the guarded campaign helper'
 assert_matches "$root/capture-live-seed.sh" '(?m)^export SPUR_DEMO_CAPTURE_STEM_PREFIX="\$\{SPUR_DEMO_CAPTURE_STEM_PREFIX:-14-live-plan-loop-seed\}"[[:blank:]]*\n(?:^.*\n)*?^stem_prefix="\$SPUR_DEMO_CAPTURE_STEM_PREFIX"[[:blank:]]*$' \
