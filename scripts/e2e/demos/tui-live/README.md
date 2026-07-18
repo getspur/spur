@@ -52,10 +52,10 @@ bash journeys/problem-plan-loop-drive.sh
 ./capture-live-seed.sh
 # → out/14-live-plan-loop-seed.{cast,gif,mp4,log}
 
-# LIVE Product Hunt audit: three deep dives → proof retry → approvals → brain synthesis
-# Three independent read-only workers + one evidence retry, with two real brain turns.
+# LIVE Product Hunt audit: four deep dives → proof retry → approvals → brain synthesis
+# Four independent read-only workers + one evidence retry, with two real brain turns.
 ./capture-live-hitl.sh
-# → targets out/16-live-product-hunt-audit-loop.{cast,gif,mp4,log}; availability below
+# → targets out/17-live-product-hunt-four-agent-loop.{cast,gif,mp4,log}; availability below
 
 # Film (observe path without live seed)
 vhs -q tapes/13-problem-plan-loop-drive.tape
@@ -63,12 +63,13 @@ vhs -q tapes/13-problem-plan-loop-drive.tape
 
 `SPUR_DEMO_ALLOW_HITL_LOOP=1` is a separate, higher-spend opt-in gate from
 the minimal one-task `SPUR_DEMO_ALLOW_PLAN_LOOP=1` seed. The recommended D4
-entry is `./capture-live-hitl.sh`. It submits three independent read-only
-tasks: ACP positioning to Claude Code, real TUI proof to Gemini, and launch
-readiness to Codex. The operator approves positioning, rejects the proof task
-for a missing source window, retries it with exact `SOURCE:`, `WINDOW:`, and
-`RECOMMENDATION:` evidence, approves the retry, then approves readiness. The
-brain writes `PH AUDIT SYNTHESIS:` in the originating Session Detail.
+entry is `./capture-live-hitl.sh`. It submits four independent read-only tasks
+in the real `spur` project: ACP positioning to Claude Code, TUI proof to Grok,
+launch readiness to Codex, and media handoff to OpenCode. The operator approves
+positioning, rejects the Grok proof once for a missing exact source window,
+retries it with `SOURCE:`, `WINDOW:`, and `RECOMMENDATION:`, then approves the
+proof, readiness, and handoff. All four tasks are approved before the correlated
+`PH AUDIT SYNTHESIS:` appears in the originating Session Detail.
 
 A normal main checkout with an initialized `.beads/` works as-is. From an
 isolated Git worktree without `.beads/`, set
@@ -76,16 +77,16 @@ isolated Git worktree without `.beads/`, set
 project. The wrapper fails before TUI/model spend rather than creating or
 linking a `.beads` backend.
 
-D4 proof fails closed: missing any of the three correlated task identities,
+D4 proof fails closed: missing any of the four correlated task identities,
 `awaiting_review` states, worker-summary markers, the proof **Reject** and
 **Retry Task**, its `SOURCE:`/`WINDOW:`/`RECOMMENDATION:` retry evidence, any
 required **Approve**, or the final `PH AUDIT SYNTHESIS:` aborts the journey.
 Every worker prompt is read-only and prohibits file changes, but the capture
-still incurs two real brain turns, three initial worker attempts, and one proof
+still incurs two real brain turns, four initial worker attempts, and one proof
 retry.
 
 The wrapper targets the stable names
-`out/16-live-product-hunt-audit-loop.{cast,gif,mp4,log}`. This explicit opt-in
+`out/17-live-product-hunt-four-agent-loop.{cast,gif,mp4,log}`. This explicit opt-in
 wrapper requests a full-duration 2560x1600 MP4 at 30 fps and preserves longer
 proof dwells. The shared `capture-live-seed.sh` default remains the existing
 sampled preview encoder when full fidelity is not requested. The stable `.log`
@@ -94,6 +95,7 @@ when shell-use emits a cast; `.gif`/`.mp4` additionally depend on conversion
 tooling (`agg`/`ffmpeg`, with the supported Docker/frame-sampling fallbacks).
 Media-pack acceptance and promotion require both the stable log and cast: a
 run without a cast is not promotable even if the journey itself completes.
+Any worker transport fallback also makes the capture non-promotable.
 
 **Navigate-mode tip:** `Esc` leaves INSERT so `j`/`k` hit the Agents tree.
 `Tab` focuses Agents (digit `1` would re-enter Compose).
