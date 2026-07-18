@@ -63,13 +63,15 @@ vhs -q tapes/13-problem-plan-loop-drive.tape
 
 `SPUR_DEMO_ALLOW_HITL_LOOP=1` is a separate, higher-spend opt-in gate from
 the minimal one-task `SPUR_DEMO_ALLOW_PLAN_LOOP=1` seed. The recommended D4
-entry is `./capture-live-hitl.sh`. It submits four independent read-only tasks
-in the real `spur` project: ACP positioning to Claude Code, TUI proof to Grok,
-launch readiness to Codex, and media handoff to OpenCode. The operator approves
-positioning, rejects the Grok proof once for a missing exact source window,
-retries it with `SOURCE:`, `WINDOW:`, and `RECOMMENDATION:`, then approves the
-proof, readiness, and handoff. All four tasks are approved before the correlated
-`PH AUDIT SYNTHESIS:` appears in the originating Session Detail.
+entry is `./capture-live-hitl.sh`.
+
+The opt-in Product Hunt capture submits four independent read-only tasks in the
+real spur project: ACP positioning (Claude Code), TUI proof (Grok), launch
+readiness (Codex), and media handoff (OpenCode). The Grok proof task is rejected
+once for a missing exact source window, retried with
+SOURCE/WINDOW/RECOMMENDATION requirements, and approved. All four findings must
+be approved before the correlated PH AUDIT SYNTHESIS appears in the originating
+Session Detail. Any worker transport fallback makes the capture non-promotable.
 
 A normal main checkout with an initialized `.beads/` works as-is. From an
 isolated Git worktree without `.beads/`, set
