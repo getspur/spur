@@ -430,9 +430,9 @@ Position rows are:
 | Workers | `[-0.040,-0.034]` |
 | Plan | `[-0.040,-0.038]` |
 | Routing | `[-0.044,-0.050]` |
-| Resume | `[-0.040,-0.036]` |
+| Resume | `[0,0]` |
 
-Use rows `[[0,0,0,"hold"],[30,0,0,"smooth"],[LAST,x,y,"smooth"]]`, where `LAST` is clip duration minus one: 209, 239, 209, 239, 209 respectively. Inspect after keyframing; if proof text becomes clipped, reduce the final scale to 1.06 rather than moving beyond the safe canvas.
+Use rows `[[0,0,0,"hold"],[30,0,0,"smooth"],[LAST,x,y,"smooth"]]`, where `LAST` is clip duration minus one: 209, 239, 209, 239, 209 respectively. The Resume push ends at 1.06× with its `[0,0]` top-left anchor so the captured resume marker remains fully visible; the other clips end at 1.08×. Inspect after keyframing; if any other proof text becomes clipped, reduce that clip's final scale to 1.06 rather than moving beyond the safe canvas.
 
 - [ ] **Step 8: add audio, captions, and music ducking**
 
