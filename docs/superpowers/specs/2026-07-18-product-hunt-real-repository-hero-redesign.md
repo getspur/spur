@@ -1,6 +1,6 @@
 # Product Hunt real-repository hero redesign
 
-**Status:** Approved
+**Status:** Approved; four-agent amendment approved 2026-07-18
 
 **Date:** 2026-07-18
 
@@ -25,7 +25,7 @@ The 45-second Product Hunt hero shows a readable approval path. The 90-second ex
 
 Primary line:
 
-> SPUR gives any ACP-compatible coding agent—from Claude Code and Codex to Kiro, Gemini, and beyond—one durable outer harness.
+> SPUR gives any ACP-compatible coding agent—from Claude Code and Codex to Grok, OpenCode, and beyond—one durable outer harness.
 
 The first expanded onscreen reference defines `ACP` as `Agent Client Protocol`. The videos do not claim that every named product has identical native transport behavior; they claim that SPUR supplies a common outer harness for ACP-compatible coding-agent operation.
 
@@ -41,19 +41,20 @@ Run the capture in an isolated checkout under `.spur/worktrees/` while pointing 
 
 ### Visible user prompt
 
-> Audit this Product Hunt media pack against the real `spur` repository. Submit a plan and delegate read-only deep dives on ACP positioning, TUI proof, and launch readiness. Return findings for my approval before any edits.
+> Audit this Product Hunt media pack against the real `spur` repository. Submit a plan and delegate four read-only deep dives on ACP positioning, TUI proof, launch readiness, and media handoff. Route them to Claude Code, Grok, Codex, and OpenCode. Return findings for my approval before any edits.
 
 ### Required plan
 
-The brain creates one populated plan with three independently visible tasks:
+The brain creates one populated plan with four independently visible tasks:
 
-| Task | Question | Scope |
-|---|---|---|
-| ACP positioning | Is the category line accurate and understandable given SPUR's real ACP integration boundaries? | Read-only documentation and source inspection |
-| TUI proof | Is each launch claim supported by a real captured TUI state and an identifiable source window? | Read-only media, manifest, and journey inspection |
-| Launch readiness | Are the story, pacing, accessibility, and Product Hunt handoff complete and internally consistent? | Read-only launch-pack review |
+| Task | Worker | Question | Scope |
+|---|---|---|---|
+| ACP positioning | Claude Code | Is the category line accurate and understandable given SPUR's real ACP integration boundaries? | Read-only documentation and source inspection |
+| TUI proof | Grok | Is each launch claim supported by a real captured TUI state and an identifiable source window? | Read-only media, manifest, and journey inspection |
+| Launch readiness | Codex | Are the story, pacing, and accessibility complete and internally consistent? | Read-only launch-pack review |
+| Media handoff | OpenCode | Do the manifest, source locks, filenames, and Product Hunt delivery notes form a truthful handoff? | Read-only manifest and delivery inspection |
 
-The plan must expose the plan ID, all three task IDs, worker identity, model, effort, attempt, state, and result evidence.
+The plan must expose the plan ID, all four task IDs, worker identity, model, effort, attempt, state, and result evidence. The Workers panel must show exactly four current-run workers and visibly attribute Claude Code, Grok, Codex, and OpenCode before review begins.
 
 ### Human review path
 
@@ -62,7 +63,7 @@ The operator inspects worker evidence in Session Detail and the plan/review surf
 - The 45-second derivation uses a task that reaches approval without showing a rejection detour.
 - The 90-second derivation includes one real result that is insufficient for a specific, visible evidence requirement. The operator states the missing proof, rejects the attempt, retries the same task, inspects the new evidence, and approves it.
 - If every initial result fully meets its evidence contract, the production must not fabricate failure. Stop and refine the audit question or capture another legitimate evidence-review case.
-- Only approved findings feed the final brain synthesis.
+- All four findings must be approved before they feed the final brain synthesis.
 
 ## 45-second Product Hunt hero
 
@@ -72,15 +73,15 @@ The operator inspects worker evidence in Session Detail and the plan/review surf
 |---:|---|---|
 | 0–4 s | ACP category hook | Stable title plate: `ANY ACP-COMPATIBLE CODING AGENT` / `ONE DURABLE OUTER HARNESS` |
 | 4–11 s | User prompts the brain | Real Session Detail, visible prompt, real `spur` repository context |
-| 11–19 s | Brain submits a populated plan | Named plan and three task identities; never an empty-plan substitute |
-| 19–27 s | Workers perform deep dives | Worker identity, model/effort, current state, and evidence remain legible |
+| 11–19 s | Brain submits a populated plan | Named plan and four task identities; never an empty-plan substitute |
+| 19–27 s | Workers perform deep dives | Four worker identities, model/effort, current state, and evidence remain legible |
 | 27–34 s | Operator approves a grounded result | Selected task and approval action correlate |
 | 34–40 s | Brain synthesizes | Final answer appears in the same durable session and references approved findings |
 | 40–45 s | CTA | Stable SPUR plate with `beta.otobank.com` and `COMMUNITY FREE` |
 
 ### Narration
 
-> More coding agents create more hidden work. SPUR keeps it visible, reviewable, and recoverable. SPUR gives any ACP-compatible coding agent—from Claude Code and Codex to Kiro, Gemini, and beyond—one durable outer harness. Inside the real SPUR repository, the operator asks the brain to audit this Product Hunt launch. The brain submits a populated plan and delegates three read-only deep dives. Worker state and evidence stay visible. The operator approves the result. The brain synthesizes the findings in the same durable session. Try SPUR Community free.
+> More coding agents create more hidden work. SPUR keeps it visible, reviewable, and recoverable. SPUR gives any ACP-compatible coding agent—from Claude Code and Codex to Grok, OpenCode, and beyond—one durable outer harness. Inside the real SPUR repository, the operator asks the brain to audit this Product Hunt launch. The brain submits a populated plan and delegates four read-only deep dives. Worker state and evidence stay visible. The operator approves the result. The brain synthesizes the findings in the same durable session. Try SPUR Community free.
 
 The script is 85 words. Narration should land in approximately 39–41 seconds, leaving a four-to-six-second visual/audio tail. Do not speed the voice to resolve an overrun.
 
@@ -92,8 +93,8 @@ The script is 85 words. Narration should land in approximately 39–41 seconds, 
 |---:|---|---|
 | 0–7 s | Problem and ACP positioning | Stable category plate and expanded `Agent Client Protocol` definition |
 | 7–17 s | User prompts the brain | Same real Session Detail prompt and repository identity |
-| 17–28 s | Brain submits the plan | Same populated three-task plan |
-| 28–41 s | Workers deep-dive | Same campaign, real worker identities, states, attempts, and evidence |
+| 17–28 s | Brain submits the plan | Same populated four-task plan |
+| 28–41 s | Workers deep-dive | Same campaign, all four real worker identities, states, attempts, and evidence |
 | 41–53 s | Inspect and reject | Specific missing source proof is visible; rejection targets the correlated task/attempt |
 | 53–65 s | Retry with evidence request | Same task produces a new attempt with the requested evidence |
 | 65–75 s | Approve | Operator approves the grounded retry |
@@ -102,11 +103,11 @@ The script is 85 words. Narration should land in approximately 39–41 seconds, 
 
 ### Narration
 
-> More coding agents create more hidden work. The hard part is knowing what is running, where the evidence lives, and whether the operator can recover the context. SPUR gives any ACP-compatible coding agent—from Claude Code and Codex to Kiro, Gemini, and beyond—one durable outer harness.
+> More coding agents create more hidden work. The hard part is knowing what is running, where the evidence lives, and whether the operator can recover the context. SPUR gives any ACP-compatible coding agent—from Claude Code and Codex to Grok, OpenCode, and beyond—one durable outer harness.
 >
-> Inside the real SPUR repository, the operator asks the brain to audit this Product Hunt launch. The brain submits a populated plan with three read-only deep dives: ACP positioning, TUI proof, and launch readiness.
+> Inside the SPUR repository, the operator asks the brain to audit this Product Hunt launch. The brain submits a populated plan with four read-only deep dives: ACP positioning, TUI proof, launch readiness, and media handoff.
 >
-> Each worker keeps its agent, model, effort, attempt, and current state visible. The operator can inspect the plan and the evidence without leaving the durable session.
+> Each worker keeps its agent, model, effort, attempt, and current state visible. The operator can clearly inspect plan and evidence without leaving the durable session.
 >
 > One finding arrives without enough source proof. The operator rejects it and explains what is missing. SPUR retries the same task instead of hiding the failure. The new attempt returns with the requested evidence, and the operator approves it.
 >
@@ -158,14 +159,15 @@ The domain remains onscreen; the narration ends with `Try SPUR Community free.`
 
 ## Production flow
 
-1. Capture one real full HITL campaign at 2560×1600 with stable `.cast`, `.mp4`, and `.log` outputs.
-2. Promote the capture only after repository, plan, task, worker, review, and synthesis identities correlate.
-3. Lock the promoted source by SHA-256 and record exact proof windows in the media manifest and notebook.
-4. Use the notebook as the review source of truth for scripts, frame windows, title/CTA plates, and contact sheets.
-5. Create new Palmier timelines named `Real Repository Loop — 45s v2` and `Real Repository Loop — 90s v2`.
-6. Export versioned files to `ph_ready/hero-video-real-repo-45s-v2.mp4` and `ph_ready/hero-video-real-repo-90s-v2.mp4`.
-7. Decode and sample the actual exports externally; Palmier preview samples are advisory only.
-8. Promote filenames in the media manifest only after both automated checks and human review pass.
+1. Run a bounded authenticated worker preflight for Claude Code, Grok, Codex, and OpenCode; advertised availability alone is insufficient.
+2. Capture one real full HITL campaign at 2560×1600 with stable `.cast`, `.mp4`, and `.log` outputs.
+3. Promote the capture only after repository, plan, all four tasks, workers, reviews, and synthesis identities correlate.
+4. Lock the promoted source by SHA-256 and record exact proof windows in the media manifest and notebook.
+5. Use the notebook as the review source of truth for scripts, frame windows, title/CTA plates, and contact sheets.
+6. Create new Palmier timelines named `Real Repository Loop — 45s v2` and `Real Repository Loop — 90s v2`.
+7. Export versioned files to `ph_ready/hero-video-real-repo-45s-v2.mp4` and `ph_ready/hero-video-real-repo-90s-v2.mp4`.
+8. Decode and sample the actual exports externally; Palmier preview samples are advisory only.
+9. Promote filenames in the media manifest only after both automated checks and human review pass.
 
 ## Capture pacing
 
@@ -182,8 +184,8 @@ The domain remains onscreen; the narration ends with `Try SPUR Community free.`
 | Gate | Pass condition |
 |---|---|
 | Capture identity | Stable cast, video, and log exist and correlate to the real `spur` checkout |
-| Plan truth | A named populated plan and all three task identities are visible |
-| Worker truth | Agent, model, effort, attempt, state, and evidence are visible at claim time |
+| Plan truth | A named populated plan and all four task identities are visible |
+| Worker truth | Claude Code, Grok, Codex, and OpenCode plus model, effort, attempt, state, and evidence are visible at claim time |
 | HITL truth | Reject rationale, retry, approval, and final synthesis correlate to the same task/session |
 | Source lock | SHA-256 and proof windows match the exact promoted source bytes |
 | Copy lock | Corrected caption words equal the approved 85/179-word scripts |
@@ -195,6 +197,7 @@ The domain remains onscreen; the narration ends with `Try SPUR Community free.`
 ## Failure handling
 
 - Empty or unidentified plan: stop promotion and recapture; never substitute the old empty-plan footage.
+- Unauthenticated or unhealthy requested worker: stop before the campaign prompt; do not rely on retry exhaustion or fallback as launch proof.
 - Missing source evidence: use a specific real review request and retry the correlated task.
 - No final synthesis: preserve diagnostics but do not promote the capture.
 - Unreliable Palmier preview: inspect the exported file externally; replace unstable text with notebook-authored constant-frame plates.
@@ -206,6 +209,7 @@ The domain remains onscreen; the narration ends with `Try SPUR Community free.`
 - Story anchor: launch-readiness audit inside the real `spur` repository.
 - HITL depth: concise approval in 45 seconds; full Reject → Retry → Approve in 90 seconds.
 - Worker scope: read-only.
+- Worker roster: Claude Code for ACP positioning, Grok for TUI proof, Codex for launch readiness, and OpenCode for media handoff.
 - Positioning: category-first ACP-compatible agent line.
 - CTA: `beta.otobank.com` plus `COMMUNITY FREE`.
 - Source strategy: one full real campaign feeds both cuts.
