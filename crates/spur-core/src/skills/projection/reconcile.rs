@@ -22,6 +22,21 @@ pub(super) async fn run(
     reconcile_with_linker(worktrees, request, &NativeLinker).await
 }
 
+pub(super) async fn run_deferred(
+    worktrees: &spur_worktree::manager::WorktreeManager,
+    request: ProjectionRequest<'_>,
+    legacy_hints: &[crate::explore::materialize::LegacyMaterializationHint],
+) -> Result<ReconciliationOutcome, ProjectionError> {
+    reconcile_with_linker_deferred_with_hints(worktrees, request, &NativeLinker, legacy_hints).await
+}
+
+pub(super) fn snapshot_legacy_materialization_hints(
+    source_repo_root: &Path,
+    launch_root: &Path,
+) -> Vec<crate::explore::materialize::LegacyMaterializationHint> {
+    crate::explore::materialize::legacy_materialization_hints(source_repo_root, launch_root)
+}
+
 trait Linker: Sync {
     fn symlink(&self, source: &Path, target: &Path, kind: TargetKind) -> std::io::Result<()>;
 }
@@ -85,13 +100,19 @@ struct ReconciliationPlan {
     manifest: ProjectionManifest,
     operations: Vec<PlannedOperation>,
     preserved_generations: BTreeSet<String>,
-    legacy_skill_ids: Vec<String>,
+    legacy_hints: Vec<crate::explore::materialize::LegacyMaterializationHint>,
 }
 
 #[derive(Debug)]
 struct ReconcileFailure {
     skill_id: Option<String>,
     source: anyhow::Error,
+}
+
+#[derive(Debug)]
+pub(super) struct ReconciliationOutcome {
+    pub(super) summary: ProjectionSummary,
+    pub(super) legacy_hints: Vec<crate::explore::materialize::LegacyMaterializationHint>,
 }
 
 impl ReconcileFailure {
@@ -108,6 +129,34 @@ async fn reconcile_with_linker<L: Linker>(
     request: ProjectionRequest<'_>,
     linker: &L,
 ) -> Result<ProjectionSummary, ProjectionError> {
+    let retirement_request = request.clone();
+    let adapter = request.adapter;
+    let legacy_hints =
+        snapshot_legacy_materialization_hints(request.source_repo_root, request.launch_root);
+    let outcome =
+        reconcile_with_linker_deferred_with_hints(worktrees, request, linker, &legacy_hints)
+            .await?;
+    retire_examined_legacy_materializations(retirement_request, &[adapter], &outcome.legacy_hints)?;
+    Ok(outcome.summary)
+}
+
+#[cfg(test)]
+async fn reconcile_with_linker_deferred<L: Linker>(
+    worktrees: &spur_worktree::manager::WorktreeManager,
+    request: ProjectionRequest<'_>,
+    linker: &L,
+) -> Result<ReconciliationOutcome, ProjectionError> {
+    let legacy_hints =
+        snapshot_legacy_materialization_hints(request.source_repo_root, request.launch_root);
+    reconcile_with_linker_deferred_with_hints(worktrees, request, linker, &legacy_hints).await
+}
+
+async fn reconcile_with_linker_deferred_with_hints<L: Linker>(
+    worktrees: &spur_worktree::manager::WorktreeManager,
+    request: ProjectionRequest<'_>,
+    linker: &L,
+    legacy_hints: &[crate::explore::materialize::LegacyMaterializationHint],
+) -> Result<ReconciliationOutcome, ProjectionError> {
     let adapter = request.adapter.key().to_string();
     let projection_root = projection_root(request.launch_root, &adapter);
     prepare_projection_root(request.launch_root, &projection_root).map_err(|error| {
@@ -183,12 +232,13 @@ async fn reconcile_with_linker<L: Linker>(
         manifest: mut next,
         mut operations,
         mut preserved_generations,
-        legacy_skill_ids,
+        legacy_hints,
     } = plan_reconciliation(
         request.clone(),
         &projection_root,
         prior.as_ref(),
         &generation,
+        legacy_hints,
         &mut summary,
     )
     .map_err(|failure| {
@@ -276,13 +326,6 @@ async fn reconcile_with_linker<L: Linker>(
             })?;
     }
 
-    crate::explore::materialize::retire_legacy_materializations(
-        request.source_repo_root,
-        request.launch_root,
-        &legacy_skill_ids,
-    )
-    .map_err(|error| projection_error(request.clone(), ProjectionPhase::Reconcile, None, error))?;
-
     let excluded = worktrees.worktree_excluded_paths(request.launch_root).await;
     preserved_generations.extend(
         preserved_generation_references(request.launch_root, &projection_root, &excluded, &next)
@@ -306,7 +349,71 @@ async fn reconcile_with_linker<L: Linker>(
         },
     )?;
 
-    Ok(summary)
+    Ok(ReconciliationOutcome {
+        summary,
+        legacy_hints,
+    })
+}
+
+pub(super) fn retire_examined_legacy_materializations(
+    request: ProjectionRequest<'_>,
+    examined: &[crate::skills::adapters::Adapter],
+    hints: &[crate::explore::materialize::LegacyMaterializationHint],
+) -> Result<(), ProjectionError> {
+    let ready =
+        legacy_hints_ready_to_retire(request.launch_root, examined, hints).map_err(|error| {
+            projection_error(request.clone(), ProjectionPhase::Reconcile, None, error)
+        })?;
+    crate::explore::materialize::retire_legacy_materializations(request.source_repo_root, &ready)
+        .map_err(|error| projection_error(request, ProjectionPhase::Reconcile, None, error))
+}
+
+fn legacy_hints_ready_to_retire(
+    launch_root: &Path,
+    examined: &[crate::skills::adapters::Adapter],
+    hints: &[crate::explore::materialize::LegacyMaterializationHint],
+) -> anyhow::Result<Vec<crate::explore::materialize::LegacyMaterializationHint>> {
+    let examined = examined.iter().copied().collect::<HashSet<_>>();
+    let mut ready = Vec::new();
+    'hint: for hint in hints {
+        for adapter in crate::skills::adapters::Adapter::all() {
+            if examined.contains(adapter) {
+                continue;
+            }
+            let target = legacy_target(*adapter, launch_root, &hint.skill_id)?;
+            if path_exists_no_follow(&target)? {
+                continue 'hint;
+            }
+        }
+        ready.push(hint.clone());
+    }
+    Ok(ready)
+}
+
+fn legacy_target(
+    adapter: crate::skills::adapters::Adapter,
+    launch_root: &Path,
+    skill_id: &str,
+) -> anyhow::Result<PathBuf> {
+    let rendered = adapter.render_with_prefix(
+        &crate::skills::SkillPayload {
+            id: skill_id.to_string(),
+            description: String::new(),
+            body: String::new(),
+            source: crate::skills::SkillSource::Pool,
+            role: crate::skills::SkillRole::Both,
+        },
+        launch_root,
+        "",
+    );
+    if adapter.target_is_directory() {
+        return rendered
+            .path
+            .parent()
+            .context("legacy rendered target has no parent")
+            .map(Path::to_path_buf);
+    }
+    Ok(rendered.path)
 }
 
 fn plan_reconciliation(
@@ -314,6 +421,7 @@ fn plan_reconciliation(
     projection_root: &Path,
     prior: Option<&ProjectionManifest>,
     generation: &PublishedGeneration,
+    legacy_hints: &[crate::explore::materialize::LegacyMaterializationHint],
     summary: &mut ProjectionSummary,
 ) -> Result<ReconciliationPlan, ReconcileFailure> {
     let prior_by_target = prior
@@ -329,6 +437,11 @@ fn plan_reconciliation(
     let mut operations = Vec::new();
     let mut processed = HashSet::new();
     let mut preserved_generations = BTreeSet::new();
+    let tracked_paths =
+        git_tracked_paths(request.launch_root).map_err(|source| ReconcileFailure {
+            skill_id: None,
+            source,
+        })?;
 
     for desired in &generation.targets {
         processed.insert(desired.target_rel.clone());
@@ -339,6 +452,7 @@ fn plan_reconciliation(
             &prior_by_target,
             generation,
             desired,
+            &tracked_paths,
             &mut next_targets,
             &mut operations,
             &mut preserved_generations,
@@ -366,10 +480,12 @@ fn plan_reconciliation(
         }
     }
 
-    let legacy_skill_ids = crate::explore::materialize::legacy_materialization_skill_ids(
-        request.source_repo_root,
-        request.launch_root,
-    );
+    let legacy_skill_ids = legacy_hints
+        .iter()
+        .map(|hint| hint.skill_id.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
     plan_legacy_pool_removals(
         request.clone(),
         &legacy_skill_ids,
@@ -391,7 +507,7 @@ fn plan_reconciliation(
         },
         operations,
         preserved_generations,
-        legacy_skill_ids,
+        legacy_hints: legacy_hints.to_vec(),
     })
 }
 
@@ -403,6 +519,7 @@ fn plan_desired_target(
     prior_by_target: &BTreeMap<&str, &TargetRecord>,
     generation: &PublishedGeneration,
     desired: &DesiredTarget,
+    tracked_paths: &[String],
     next_targets: &mut Vec<TargetRecord>,
     operations: &mut Vec<PlannedOperation>,
     preserved_generations: &mut BTreeSet<String>,
@@ -469,8 +586,12 @@ fn plan_desired_target(
             next_targets.push(next_record);
         }
         None if path_exists_no_follow(&target)? => {
-            let desired_marker =
-                expected_marker_id(&generation.root.join(&desired.generation_rel))?;
+            let generated_target = generation.root.join(&desired.generation_rel);
+            let generated_entry = match desired.target_kind {
+                TargetKind::Directory => generated_target.join("SKILL.md"),
+                TargetKind::File => generated_target,
+            };
+            let desired_marker = expected_marker_id(&generated_entry)?;
             match crate::skills::installer::legacy_marker_ownership(&target)? {
                 crate::skills::installer::LegacyMarkerOwnership::Managed(marker)
                     if Some(marker.skill_id.as_str()) == desired_marker.as_deref() =>
@@ -487,6 +608,11 @@ fn plan_desired_target(
                     next_targets.push(next_record);
                 }
                 crate::skills::installer::LegacyMarkerOwnership::UserEdited => {
+                    retain_generation_reference_for_target(
+                        projection_root,
+                        &target,
+                        preserved_generations,
+                    )?;
                     summary.skipped.push(ProjectionSkip {
                         skill_id: desired.skill_id.clone(),
                         path: target,
@@ -494,6 +620,11 @@ fn plan_desired_target(
                     });
                 }
                 _ => {
+                    retain_generation_reference_for_target(
+                        projection_root,
+                        &target,
+                        preserved_generations,
+                    )?;
                     summary.skipped.push(ProjectionSkip {
                         skill_id: desired.skill_id.clone(),
                         path: target,
@@ -501,6 +632,13 @@ fn plan_desired_target(
                     });
                 }
             }
+        }
+        None if target_is_tracked(&desired.target_rel, tracked_paths) => {
+            summary.skipped.push(ProjectionSkip {
+                skill_id: desired.skill_id.clone(),
+                path: target,
+                reason: ProjectionSkipReason::UserOwned,
+            });
         }
         None => {
             operations.push(install_operation(
@@ -516,6 +654,34 @@ fn plan_desired_target(
         }
     }
     Ok(())
+}
+
+fn git_tracked_paths(launch_root: &Path) -> anyhow::Result<Vec<String>> {
+    let output = std::process::Command::new("git")
+        .args(["ls-files", "-z", "--cached"])
+        .current_dir(launch_root)
+        .output()
+        .context("list tracked projection targets")?;
+    anyhow::ensure!(
+        output.status.success(),
+        "git ls-files failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|path| !path.is_empty())
+        .map(|path| String::from_utf8_lossy(path).replace('\\', "/"))
+        .collect())
+}
+
+fn target_is_tracked(target_rel: &str, tracked: &[String]) -> bool {
+    tracked.iter().any(|path| {
+        path == target_rel
+            || path
+                .strip_prefix(target_rel)
+                .is_some_and(|suffix| suffix.starts_with('/'))
+    })
 }
 
 fn plan_stale_target(
@@ -571,27 +737,8 @@ fn plan_legacy_pool_removals(
     summary: &mut ProjectionSummary,
 ) -> Result<(), ReconcileFailure> {
     for skill_id in legacy_skill_ids {
-        let rendered = request.adapter.render_with_prefix(
-            &crate::skills::SkillPayload {
-                id: skill_id.clone(),
-                description: String::new(),
-                body: String::new(),
-                source: crate::skills::SkillSource::Pool,
-                role: crate::skills::SkillRole::Both,
-            },
-            request.launch_root,
-            "",
-        );
-        let target = if request.adapter.target_is_directory() {
-            rendered
-                .path
-                .parent()
-                .context("legacy rendered target has no parent")
-                .map_err(|source| ReconcileFailure::for_skill(skill_id, source))?
-                .to_path_buf()
-        } else {
-            rendered.path
-        };
+        let target = legacy_target(request.adapter, request.launch_root, skill_id)
+            .map_err(|source| ReconcileFailure::for_skill(skill_id, source))?;
         let relative = normalized_relative(request.launch_root, &target)
             .map_err(|source| ReconcileFailure::for_skill(skill_id, source))?;
         validate_target_parent(request.launch_root, &relative)
@@ -1316,12 +1463,12 @@ fn matches_recorded_state(path: &Path, expected: &RecordedTargetState) -> anyhow
 }
 
 fn expected_marker_id(source: &Path) -> anyhow::Result<Option<String>> {
-    match crate::skills::installer::legacy_marker_ownership(source)? {
-        crate::skills::installer::LegacyMarkerOwnership::Managed(marker) => {
-            Ok(Some(marker.skill_id))
-        }
-        _ => Ok(None),
-    }
+    let bytes = fs::read_to_string(source)
+        .with_context(|| format!("read generated marker source {}", source.display()))?;
+    Ok(bytes
+        .lines()
+        .find_map(crate::skills::installer::parse_marker)
+        .map(|marker| marker.skill_id))
 }
 
 fn exclusion_patterns(manifest: &ProjectionManifest) -> Vec<String> {
@@ -1379,6 +1526,17 @@ fn preserved_generation_references(
         }
     }
     Ok(retained)
+}
+
+fn retain_generation_reference_for_target(
+    projection_root: &Path,
+    target: &Path,
+    preserved: &mut BTreeSet<String>,
+) -> anyhow::Result<()> {
+    if let Some(generation) = generation_reference_for_target(projection_root, target)? {
+        preserved.insert(generation);
+    }
+    Ok(())
 }
 
 fn generation_reference_for_target(
@@ -1771,6 +1929,11 @@ fn combine_transaction_errors(
 
 fn resolve_error_skill_id(error: &resolver::ResolveError) -> Option<String> {
     match error {
+        resolver::ResolveError::InvalidId(error) => Some(error.id.clone()),
+        resolver::ResolveError::Catalog(
+            crate::skills::SkillCatalogError::ReadSkill { id, .. }
+            | crate::skills::SkillCatalogError::InvalidSkillId { id, .. },
+        ) => Some(id.clone()),
         resolver::ResolveError::PoolDigestMismatch { id, .. }
         | resolver::ResolveError::PoolReplacementNotAuthorized { id } => Some(id.clone()),
         _ => None,
@@ -1779,7 +1942,8 @@ fn resolve_error_skill_id(error: &resolver::ResolveError) -> Option<String> {
 
 fn generation_error_skill_id(error: &generation::GenerationError) -> Option<String> {
     match error {
-        generation::GenerationError::UnsafeSourcePath { skill_id, .. } => Some(skill_id.clone()),
+        generation::GenerationError::Skill { skill_id, .. }
+        | generation::GenerationError::UnsafeSourcePath { skill_id, .. } => Some(skill_id.clone()),
         _ => None,
     }
 }
@@ -2070,6 +2234,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn marker_only_legacy_target_with_supporting_assets_is_migrated() {
+        let fixture = ProjectionFixture::new(Adapter::Codex);
+        fixture.write_bundled_skill("legacy-assets", "both", "LEGACY BODY");
+        fixture.write_support("legacy-assets", "scripts/check.sh", b"ASSET\n");
+        let selected = fixture.resolve().unwrap();
+        let rendered = Adapter::Codex.render(&selected[0].payload, fixture.launch_root());
+        let target = rendered.path.parent().unwrap().to_path_buf();
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(&rendered.path, rendered.bytes).unwrap();
+
+        let summary = reconcile_with_linker(fixture.worktrees(), fixture.request(), &NativeLinker)
+            .await
+            .unwrap();
+
+        assert_eq!(summary.migrated, vec![target.clone()]);
+        assert_eq!(
+            std::fs::read(target.join("scripts/check.sh")).unwrap(),
+            b"ASSET\n"
+        );
+    }
+
+    #[tokio::test]
     async fn valid_legacy_marker_with_an_extra_sibling_is_preserved() {
         let fixture = ProjectionFixture::new(Adapter::Codex);
         fixture.write_bundled_skill("legacy-extra", "both", "LEGACY BODY");
@@ -2173,6 +2359,254 @@ mod tests {
         assert!(read_recent_materializations(fixture.repo_root(), 10)
             .iter()
             .all(|record| !record.items.iter().any(|item| item == "retired-pool")));
+    }
+
+    #[tokio::test]
+    async fn reconcile_many_keeps_legacy_hint_until_owning_adapter_runs() {
+        let fixture = ProjectionFixture::new(Adapter::Codex);
+        fixture.write_pool_skill("cross-adapter", "clean", "POOL BODY");
+        let skill = fixture
+            .resolve()
+            .unwrap()
+            .into_iter()
+            .find(|skill| skill.payload.id == "cross-adapter")
+            .unwrap();
+        let rendered = Adapter::Codex.render_with_prefix(&skill.payload, fixture.launch_root(), "");
+        let legacy_target = rendered.path.parent().unwrap().to_path_buf();
+        std::fs::create_dir_all(&legacy_target).unwrap();
+        std::fs::write(&rendered.path, rendered.bytes).unwrap();
+        append_materialization_record(
+            fixture.repo_root(),
+            &MaterializationRecord {
+                recorded_at_epoch: 1,
+                delegation_id: "cross-adapter".into(),
+                agent: "codex".into(),
+                worktree: fixture.launch_root().display().to_string(),
+                items: vec!["cross-adapter".into()],
+            },
+        )
+        .unwrap();
+
+        let summaries = reconcile_many(
+            fixture.repo_root(),
+            fixture.launch_root(),
+            &[Adapter::Cursor, Adapter::Codex],
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(summaries.len(), 2);
+        assert!(!legacy_target.exists());
+        assert!(codex_target(&fixture, "cross-adapter").exists());
+        assert!(read_recent_materializations(fixture.repo_root(), 10)
+            .iter()
+            .all(|record| !record.items.iter().any(|item| item == "cross-adapter")));
+    }
+
+    #[tokio::test]
+    async fn late_distinct_hint_between_adapter_passes_is_not_retired() {
+        let fixture = ProjectionFixture::new(Adapter::Codex);
+        fixture.write_bundled_skill("baseline", "both", "BASELINE");
+        let cursor_root = super::projection_root(fixture.launch_root(), Adapter::Cursor.key());
+        prepare_projection_root(fixture.launch_root(), &cursor_root).unwrap();
+        let cursor_guard = acquire_lock(cursor_root.join("reconcile.lock"))
+            .await
+            .unwrap();
+        let repo_root = fixture.repo_root().to_path_buf();
+        let launch_root = fixture.launch_root().to_path_buf();
+        let reconcile = tokio::spawn(async move {
+            reconcile_many(&repo_root, &launch_root, &[Adapter::Codex, Adapter::Cursor]).await
+        });
+        let codex_manifest = super::projection_root(fixture.launch_root(), Adapter::Codex.key())
+            .join("manifest.json");
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !codex_manifest.is_file() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        fixture.write_pool_skill("late-codex", "clean", "LATE BODY");
+        let late = fixture
+            .resolve()
+            .unwrap()
+            .into_iter()
+            .find(|skill| skill.payload.id == "late-codex")
+            .unwrap();
+        let rendered = Adapter::Codex.render_with_prefix(&late.payload, fixture.launch_root(), "");
+        let late_target = rendered.path.parent().unwrap().to_path_buf();
+        std::fs::create_dir_all(&late_target).unwrap();
+        std::fs::write(&rendered.path, rendered.bytes).unwrap();
+        append_materialization_record(
+            fixture.repo_root(),
+            &MaterializationRecord {
+                recorded_at_epoch: 2,
+                delegation_id: "late-codex".into(),
+                agent: "codex".into(),
+                worktree: fixture.launch_root().display().to_string(),
+                items: vec!["late-codex".into()],
+            },
+        )
+        .unwrap();
+        drop(cursor_guard);
+
+        assert_eq!(reconcile.await.unwrap().unwrap().len(), 2);
+        assert!(late_target.exists());
+        assert!(read_recent_materializations(fixture.repo_root(), 10)
+            .iter()
+            .any(|record| record.items.iter().any(|item| item == "late-codex")));
+    }
+
+    #[tokio::test]
+    async fn late_same_skill_materialization_hint_survives_retirement() {
+        let fixture = ProjectionFixture::new(Adapter::Codex);
+        fixture.write_pool_skill("late-materialization", "clean", "POOL BODY");
+        let skill = fixture
+            .resolve()
+            .unwrap()
+            .into_iter()
+            .find(|skill| skill.payload.id == "late-materialization")
+            .unwrap();
+        let rendered = Adapter::Codex.render_with_prefix(&skill.payload, fixture.launch_root(), "");
+        let legacy_entry = rendered.path;
+        let legacy_bytes = rendered.bytes;
+        let legacy_target = legacy_entry.parent().unwrap().to_path_buf();
+        std::fs::create_dir_all(&legacy_target).unwrap();
+        std::fs::write(&legacy_entry, &legacy_bytes).unwrap();
+        append_materialization_record(
+            fixture.repo_root(),
+            &MaterializationRecord {
+                recorded_at_epoch: 1,
+                delegation_id: "observed".into(),
+                agent: "codex".into(),
+                worktree: fixture.launch_root().display().to_string(),
+                items: vec!["late-materialization".into()],
+            },
+        )
+        .unwrap();
+
+        let outcome =
+            reconcile_with_linker_deferred(fixture.worktrees(), fixture.request(), &NativeLinker)
+                .await
+                .unwrap();
+        assert!(!legacy_target.exists());
+        std::fs::create_dir_all(&legacy_target).unwrap();
+        std::fs::write(&legacy_entry, legacy_bytes).unwrap();
+        append_materialization_record(
+            fixture.repo_root(),
+            &MaterializationRecord {
+                recorded_at_epoch: 2,
+                delegation_id: "late".into(),
+                agent: "codex".into(),
+                worktree: fixture.launch_root().display().to_string(),
+                items: vec!["late-materialization".into()],
+            },
+        )
+        .unwrap();
+        retire_examined_legacy_materializations(
+            fixture.request(),
+            &[Adapter::Codex],
+            &outcome.legacy_hints,
+        )
+        .unwrap();
+
+        assert!(legacy_target.exists());
+        let records = read_recent_materializations(fixture.repo_root(), 10);
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].delegation_id, "late");
+        assert_eq!(records[0].items, vec!["late-materialization"]);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn fresh_user_symlink_keeps_its_referenced_generation_alive() {
+        let fixture = ProjectionFixture::new(Adapter::Codex);
+        fixture.write_bundled_skill("collision", "both", "COLLISION");
+        fixture.write_bundled_skill("source", "both", "OLD");
+        let first = publish_generation(fixture.request(), &fixture.resolve().unwrap()).unwrap();
+        let target = codex_target(&fixture, "collision");
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        let source = first.root.join("skills/source");
+        NativeLinker
+            .symlink(
+                &relative_symlink_source(&source, &target).unwrap(),
+                &target,
+                TargetKind::Directory,
+            )
+            .unwrap();
+        fixture.write_bundled_skill("source", "both", "NEW");
+
+        let summary = reconcile_with_linker(fixture.worktrees(), fixture.request(), &NativeLinker)
+            .await
+            .unwrap();
+
+        assert_eq!(summary.skipped[0].reason, ProjectionSkipReason::UserOwned);
+        assert!(target.exists());
+        assert!(first.root.exists());
+        assert!(std::fs::canonicalize(&target)
+            .unwrap()
+            .starts_with(&first.root));
+    }
+
+    #[tokio::test]
+    async fn tracked_but_absent_target_is_preserved_as_user_owned() {
+        let fixture = ProjectionFixture::new(Adapter::Codex);
+        fixture.write_bundled_skill("tracked-absent", "both", "GENERATED");
+        let target = codex_target(&fixture, "tracked-absent");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("SKILL.md"), b"USER TRACKED\n").unwrap();
+        run_git(
+            fixture.launch_root(),
+            &["add", ".codex/skills/spurpower-tracked-absent/SKILL.md"],
+        );
+        run_git(
+            fixture.launch_root(),
+            &["commit", "--quiet", "-m", "track collision"],
+        );
+        std::fs::remove_dir_all(&target).unwrap();
+
+        let summary = reconcile_with_linker(fixture.worktrees(), fixture.request(), &NativeLinker)
+            .await
+            .unwrap();
+
+        assert!(!path_exists_no_follow(&target).unwrap());
+        assert_eq!(summary.skipped.len(), 1);
+        assert_eq!(summary.skipped[0].skill_id, "tracked-absent");
+        assert_eq!(summary.skipped[0].reason, ProjectionSkipReason::UserOwned);
+        assert!(read_manifest(&fixture).targets.is_empty());
+    }
+
+    #[test]
+    fn typed_projection_errors_keep_available_skill_ids() {
+        let invalid = resolver::ResolveError::InvalidId(crate::skills::InvalidSkillId {
+            id: "Bad-Id".into(),
+            reason: "uppercase",
+        });
+        assert_eq!(resolve_error_skill_id(&invalid).as_deref(), Some("Bad-Id"));
+
+        let catalog =
+            resolver::ResolveError::Catalog(crate::skills::SkillCatalogError::ReadSkill {
+                id: "catalog-skill".into(),
+                path: PathBuf::from("assets/skills/catalog-skill/SKILL.md"),
+                source: std::io::Error::new(std::io::ErrorKind::NotFound, "missing"),
+            });
+        assert_eq!(
+            resolve_error_skill_id(&catalog).as_deref(),
+            Some("catalog-skill")
+        );
+
+        let generated = generation::GenerationError::Skill {
+            skill_id: "stage-skill".into(),
+            source: Box::new(generation::GenerationError::Io {
+                path: PathBuf::from("asset.bin"),
+                source: std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied"),
+            }),
+        };
+        assert_eq!(
+            generation_error_skill_id(&generated).as_deref(),
+            Some("stage-skill")
+        );
     }
 
     #[tokio::test]
@@ -2670,6 +3104,20 @@ mod tests {
             .unwrap();
         assert!(output.status.success());
         String::from_utf8(output.stdout).unwrap()
+    }
+
+    fn run_git(root: &Path, args: &[&str]) {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     fn manifest_for_generation(
