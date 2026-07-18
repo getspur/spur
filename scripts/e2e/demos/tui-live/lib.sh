@@ -1026,22 +1026,22 @@ EOF
 require_hitl_loop_opt_in() {
   if [[ "${SPUR_DEMO_ALLOW_HITL_LOOP:-0}" != "1" ]]; then
     printf '%s\n' \
-      'error: live D4 HITL loop is opt-in (real brain + up to two worker attempts).' \
+      'error: live Product Hunt audit loop is opt-in (real brain + three workers + one retry).' \
       '' \
       '  SPUR_DEMO_ALLOW_HITL_LOOP=1 bash journeys/problem-plan-loop-drive.sh' \
       '' \
       'Recommended capture wrapper: ./capture-live-hitl.sh' \
-      'Optional: SPUR_DEMO_PLAN_LOOP_WAIT_S=300' >&2
+      'Optional: SPUR_DEMO_PLAN_LOOP_WAIT_S=420' >&2
     return 2
   fi
 
   if [[ ! -d "$project/.beads" ]]; then
     cat >&2 <<-EOF
-beads-backed project required: live D4 HITL loop stopped before the D4 brain prompt.
+beads-backed project required: live Product Hunt audit stopped before the brain prompt.
 	missing: $project/.beads
 
 	Set SPUR_DEMO_PROJECT=/path/to/beads-project before starting the journey,
-	or initialize beads in the effective project. No D4 brain or worker spend was started.
+	or initialize beads in the effective project. No Product Hunt brain or worker spend was started.
 	EOF
     return 2
   fi
@@ -1171,97 +1171,115 @@ trigger_submit_plan_one_task_and_observe() {
   story_session_land "Loop observation ends at Session Detail home" 3.0
 }
 
+land_plan_inspector_for_task() {
+  local task_id="$1"
+  local timeout_s="${2:-180}"
+  local deadline=$((SECONDS + timeout_s))
+
+  while (( SECONDS < deadline )); do
+    press_key Alt+p
+    sleep 0.6
+    if soft_has_text "Task detail" 1200 && soft_has_text "$task_id" 1200; then
+      printf '+ proof: Plan Inspector pinned task %s\n' "$task_id"
+      story_dwell 3.5
+      return 0
+    fi
+    sleep 0.4
+  done
+
+  printf 'fatal: Plan Inspector never pinned task %s within %ss\n' "$task_id" "$timeout_s" >&2
+  return 1
+}
+
 trigger_submit_plan_hitl_review_and_synthesize() {
   require_hitl_loop_opt_in
-  local seed_task_id="demo-hitl-$$"
+  local positioning_task_id="ph-acp-positioning-$$"
+  local proof_task_id="ph-tui-proof-$$"
+  local readiness_task_id="ph-launch-readiness-$$"
 
-  land_session_detail "Attach Session Detail for the D4 HITL loop" 2.5
+  land_session_detail "Attach Session Detail for the Product Hunt audit" 2.5
   sleep_ms 0.8
-  printf '+ D4 seed: ask brain for one read-only deep-dive task %s\n' "$seed_task_id"
+  printf '+ Product Hunt audit: ask brain for three independent read-only tasks\n'
 
-  type_slow "D4 LIVE CAPTURE. "
-  type_text "Call submit_plan with exactly ONE task. "
-  type_text "Task id: ${seed_task_id}. Worker: codex. deps: none. "
-  type_text "Prompt: Read scripts/e2e/demos/tui-live/PROBLEM_STORIES.md and "
-  type_text "identify one evidence gap in problem-plan-loop-drive. "
-  type_text "Return exactly one line beginning D4 FINDING:. Make no file changes. "
-  type_text "After submit_plan succeeds, reply with plan_id only."
+  type_slow "PRODUCT HUNT LIVE CAPTURE. "
+  type_text "Audit docs/product_launch/media_pack in real spur. "
+  type_text "Call submit_plan with exactly THREE independent read-only tasks. "
+  type_text "Task 1 id: ${positioning_task_id}. Worker: claude-code. effort: medium. deps: none. "
+  type_text "Inspect the approved ACP category line vs docs/integration. Return exactly one line beginning PH POSITIONING FINDING:. Make no file changes. "
+  type_text "Task 2 id: ${proof_task_id}. Worker: gemini. effort: medium. deps: none. "
+  type_text "Inspect real TUI captures for one launch claim needing stronger proof. Return exactly one line beginning PH PROOF FINDING:. Make no file changes. "
+  type_text "Task 3 id: ${readiness_task_id}. Worker: codex. effort: medium. deps: none. "
+  type_text "Inspect pacing, accessibility, and handoff. Return exactly one line beginning PH READINESS FINDING:. Make no file changes. "
+  type_text "After submit_plan succeeds, reply with plan_id only. "
+  type_text "When workers finish, do not call review_task, retry_plan_task, or merge_plan. "
+  type_text "Leave every completed task awaiting_review for the operator."
   sleep_ms 0.5
   press_key Enter
 
-  story_hard_proof \
-    "The human prompt is correlated to this D4 run" \
-    "$seed_task_id" 2.5
-  story_hard_proof \
-    "The brain accepts the D4 turn in Session Detail" \
-    "THINK" 2.5
+  story_hard_proof "The prompt names the ACP positioning task" "$positioning_task_id" 2.5
+  story_hard_proof "The prompt names the TUI proof task" "$proof_task_id" 2.5
+  story_hard_proof "The prompt names the launch readiness task" "$readiness_task_id" 2.5
+  story_hard_proof "The brain accepts the Product Hunt audit turn" "THINK" 2.5
 
-  press_key Alt+p
-  story_hard_proof \
-    "Plan Inspector is open on the selected task detail" \
-    "Task detail" 2.5
-  story_hard_proof \
-    "Plan Inspector selects the correlated D4 task" \
-    "$seed_task_id" 2.5
-  story_hard_proof \
-    "The correlated worker result reaches human review" \
-    "awaiting_review" 4.0
-  story_hard_proof \
-    "The selected task exposes the first worker finding" \
-    "summary: D4 FINDING:" 3.5
+  press_key Alt+d
+  story_hard_proof "The session exposes the campaign worker panel" "Workers" 2.5
+  story_hard_proof "The positioning task is routed to Claude Code" "claude-code" 2.5
+  story_hard_proof "The proof task is routed to Gemini" "gemini" 2.5
+  story_hard_proof "The readiness task is routed to Codex" "codex" 2.5
+  story_dwell 3.5
+  press_key Alt+d
 
-  press_key d
-  story_hard_proof \
-    "The human rejects the incomplete first result" \
-    "Decision: Reject" 3.5
+  land_plan_inspector_for_task "$positioning_task_id"
+  story_hard_proof "The positioning result reaches operator review" "awaiting_review" 4.0
+  story_hard_proof "The positioning result exposes its finding" "summary: PH POSITIONING FINDING:" 3.5
+  press_key a
+  story_hard_proof "The operator selects approval for positioning" "Decision: Approve" 3.5
   press_key Enter
-  story_hard_proof \
-    "The rejected task becomes eligible for another attempt" \
-    "rejected" 3.0
+  story_hard_proof "The positioning task records approval" "approved" 3.0
+
+  press_key j
+  story_hard_proof "The inspector advances to the proof task" "$proof_task_id" 2.5
+  story_hard_proof "The proof result reaches operator review" "awaiting_review" 4.0
+  story_hard_proof "The proof result exposes its finding" "summary: PH PROOF FINDING:" 3.5
+  press_key d
+  story_hard_proof "The operator rejects proof without a source window" "Decision: Reject" 3.5
+  press_key Enter
+  story_hard_proof "The proof task records rejection" "rejected" 3.0
 
   press_key R
-  story_hard_proof \
-    "The human opens the retry instruction surface" \
-    "Retry Task" 3.0
-  type_slow "READ ONLY. Add exactly two lines: SOURCE: <exact path> and "
+  story_hard_proof "The operator opens the proof retry surface" "Retry Task" 3.0
+  type_slow "READ ONLY. Re-run the same check and return exactly three lines: "
+  type_text "SOURCE: <exact path>; WINDOW: <exact seconds or line range>; "
   type_text "RECOMMENDATION: <one sentence>. Make no file changes."
-  story_hard_proof \
-    "The retry visibly carries stronger evidence requirements" \
-    "SOURCE:" 2.5
+  story_hard_proof "The retry requires an exact source" "SOURCE:" 2.5
+  story_hard_proof "The retry requires an exact evidence window" "WINDOW:" 2.5
   press_key Enter
 
-  story_hard_proof \
-    "The improved second attempt returns to human review" \
-    "awaiting_review" 4.0
-  story_hard_proof \
-    "The improved result stays on the correlated D4 task" \
-    "$seed_task_id" 2.5
-  story_hard_proof \
-    "The selected retry exposes source evidence" \
-    "summary: SOURCE:" 3.5
-  story_hard_proof \
-    "The selected retry exposes a recommendation" \
-    "RECOMMENDATION:" 3.5
+  story_hard_proof "The retried proof returns to operator review" "awaiting_review" 4.0
+  story_hard_proof "The retry stays correlated to the proof task" "$proof_task_id" 2.5
+  story_hard_proof "The retry exposes source evidence" "summary: SOURCE:" 3.5
+  story_hard_proof "The retry exposes its evidence window" "WINDOW:" 3.5
+  story_hard_proof "The retry exposes a recommendation" "RECOMMENDATION:" 3.5
   press_key a
-  story_hard_proof \
-    "The human approves the improved evidence" \
-    "Decision: Approve" 3.5
+  story_hard_proof "The operator selects approval for proof" "Decision: Approve" 3.5
   press_key Enter
-  story_hard_proof \
-    "The correlated task records the approval" \
-    "approved" 3.0
+  story_hard_proof "The retried proof task records approval" "approved" 3.0
+
+  press_key j
+  story_hard_proof "The inspector advances to the readiness task" "$readiness_task_id" 2.5
+  story_hard_proof "The readiness result reaches operator review" "awaiting_review" 4.0
+  story_hard_proof "The readiness result exposes its finding" "summary: PH READINESS FINDING:" 3.5
+  press_key a
+  story_hard_proof "The operator selects approval for readiness" "Decision: Approve" 3.5
+  press_key Enter
+  story_hard_proof "The readiness task records approval" "approved" 3.0
 
   return_to_session_detail
-  story_session_land "The same brain session remains the operator home" 2.5
-  type_slow "D4 HITL COMPLETE. Synthesize the approved worker evidence. "
-  type_text "Begin with a marker made from D4, one space, SYNTHESIS, then a colon. "
-  type_text "Follow the marker with one sentence. "
-  type_text "Do not call tools or delegate."
+  story_session_land "The originating Session Detail remains the operator home" 2.5
+  type_text "PH AUDIT SYNTHESIS: Synthesize approved evidence from ${positioning_task_id}, ${proof_task_id}, and ${readiness_task_id} in one concise launch-audit paragraph. Do not call tools or delegate."
   sleep_ms 0.5
   press_key Enter
-  story_hard_proof \
-    "The brain synthesizes approved evidence in the same session" \
-    "D4 SYNTHESIS:" 4.0
+  story_hard_proof "The brain synthesis is visible in the originating session" "PH AUDIT SYNTHESIS:" 4.0
 }
 
 # Problem: backlog firehose — what is P0 open work?

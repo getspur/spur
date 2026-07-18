@@ -52,10 +52,10 @@ bash journeys/problem-plan-loop-drive.sh
 ./capture-live-seed.sh
 # → out/14-live-plan-loop-seed.{cast,gif,mp4,log}
 
-# LIVE D4: deep dive → reject → retry with evidence → approve → brain synthesis
-# Two real brain turns (initial plan submission and post-approval synthesis) + up to two worker attempts.
+# LIVE Product Hunt audit: three deep dives → proof retry → approvals → brain synthesis
+# Three independent read-only workers + one evidence retry, with two real brain turns.
 ./capture-live-hitl.sh
-# → targets out/15-live-hitl-agent-loop.{cast,gif,mp4,log}; availability below
+# → targets out/16-live-product-hunt-audit-loop.{cast,gif,mp4,log}; availability below
 
 # Film (observe path without live seed)
 vhs -q tapes/13-problem-plan-loop-drive.tape
@@ -63,9 +63,12 @@ vhs -q tapes/13-problem-plan-loop-drive.tape
 
 `SPUR_DEMO_ALLOW_HITL_LOOP=1` is a separate, higher-spend opt-in gate from
 the minimal one-task `SPUR_DEMO_ALLOW_PLAN_LOOP=1` seed. The recommended D4
-entry is `./capture-live-hitl.sh`; it drives real Plan Inspector **Reject**,
-**Retry**, and **Approve** decisions in one session before asking the brain to
-synthesize the approved evidence.
+entry is `./capture-live-hitl.sh`. It submits three independent read-only
+tasks: ACP positioning to Claude Code, real TUI proof to Gemini, and launch
+readiness to Codex. The operator approves positioning, rejects the proof task
+for a missing source window, retries it with exact `SOURCE:`, `WINDOW:`, and
+`RECOMMENDATION:` evidence, approves the retry, then approves readiness. The
+brain writes `PH AUDIT SYNTHESIS:` in the originating Session Detail.
 
 A normal main checkout with an initialized `.beads/` works as-is. From an
 isolated Git worktree without `.beads/`, set
@@ -73,20 +76,24 @@ isolated Git worktree without `.beads/`, set
 project. The wrapper fails before TUI/model spend rather than creating or
 linking a `.beads` backend.
 
-D4 proof is hard: missing correlated task identity, `awaiting_review` state,
-selected-task worker-summary evidence, any **Reject**, **Retry Task**, or
-**Approve** decision, or the final `D4 SYNTHESIS:` causes the journey to fail
-rather than report a soft pass. The worker prompts are read-only and prohibit
-file changes, but the capture still incurs two real brain turns (initial plan
-submission and post-approval synthesis) and up to two worker attempts.
+D4 proof fails closed: missing any of the three correlated task identities,
+`awaiting_review` states, worker-summary markers, the proof **Reject** and
+**Retry Task**, its `SOURCE:`/`WINDOW:`/`RECOMMENDATION:` retry evidence, any
+required **Approve**, or the final `PH AUDIT SYNTHESIS:` aborts the journey.
+Every worker prompt is read-only and prohibits file changes, but the capture
+still incurs two real brain turns, three initial worker attempts, and one proof
+retry.
 
 The wrapper targets the stable names
-`out/15-live-hitl-agent-loop.{cast,gif,mp4,log}`. The stable `.log` is always
-copied after the journey, including failure. The `.cast` exists only when
-shell-use emits a cast; `.gif`/`.mp4` additionally depend on conversion tooling
-(`agg`/`ffmpeg`, with the supported Docker/frame-sampling fallbacks). Media-pack
-acceptance and promotion require both the stable log and cast: a run without a
-cast is not promotable even if the journey itself completes.
+`out/16-live-product-hunt-audit-loop.{cast,gif,mp4,log}`. This explicit opt-in
+wrapper requests a full-duration 2560x1600 MP4 at 30 fps and preserves longer
+proof dwells. The shared `capture-live-seed.sh` default remains the existing
+sampled preview encoder when full fidelity is not requested. The stable `.log`
+is always copied after the journey, including failure. The `.cast` exists only
+when shell-use emits a cast; `.gif`/`.mp4` additionally depend on conversion
+tooling (`agg`/`ffmpeg`, with the supported Docker/frame-sampling fallbacks).
+Media-pack acceptance and promotion require both the stable log and cast: a
+run without a cast is not promotable even if the journey itself completes.
 
 **Navigate-mode tip:** `Esc` leaves INSERT so `j`/`k` hit the Agents tree.
 `Tab` focuses Agents (digit `1` would re-enter Compose).
