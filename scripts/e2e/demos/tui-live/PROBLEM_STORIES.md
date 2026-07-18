@@ -50,22 +50,24 @@ Session Detail compose → brain turn (YOU/THINK)
 | Env | Effect |
 |-----|--------|
 | `SPUR_DEMO_ALLOW_PLAN_LOOP=1` | Seed 1-task submit_plan in session; wait DELEGATE/Done |
-| `SPUR_DEMO_ALLOW_HITL_LOOP=1` | Run the higher-spend three-worker Product Hunt audit |
+| `SPUR_DEMO_ALLOW_HITL_LOOP=1` | Run the higher-spend four-worker Product Hunt audit |
 | `SPUR_DEMO_ALLOW_AGENT_SEND=1` | Light brain kick in session |
 | `SPUR_DEMO_ALLOW_PLAN_START=1` | Start/Resume on Plans |
 
 The higher-spend D4 branch is separate from the minimal one-task seed and
-remains opt-in. It submits three independent read-only tasks: ACP positioning
-to Claude Code, real TUI proof to Gemini, and launch readiness to Codex. In Plan
-Inspector the operator approves positioning, rejects proof for a missing source
-window, retries proof with exact `SOURCE:`, `WINDOW:`, and `RECOMMENDATION:`
-evidence, approves that retry, and then approves readiness. The brain produces
-`PH AUDIT SYNTHESIS:` in the originating Session Detail. Missing any task,
-state, summary, decision, retry-evidence, or synthesis marker fails the journey
-rather than softening the proof.
+remains opt-in. It submits four independent read-only tasks in the real `spur`
+project: ACP positioning to Claude Code, TUI proof to Grok, launch readiness to
+Codex, and media handoff to OpenCode. In Plan Inspector the operator approves
+positioning, rejects the Grok proof once for a missing exact source window,
+retries it with `SOURCE:`, `WINDOW:`, and `RECOMMENDATION:`, then approves the
+proof, readiness, and handoff. All four are approved before the correlated
+`PH AUDIT SYNTHESIS:` appears in the originating Session Detail. Missing any
+task, state, summary, decision, retry evidence, or synthesis marker fails the
+journey rather than softening the proof. Any worker transport fallback makes
+the capture non-promotable.
 
 The capture wrapper writes the new stable stem
-`16-live-product-hunt-audit-loop`, requires the same explicit spend opt-in and
+`17-live-product-hunt-four-agent-loop`, requires the same explicit spend opt-in and
 initialized `.beads/` backend, and requests a full-duration 2560x1600 encode
 with preserved proof dwells. The shared capture path keeps its sampled-preview
 encoder by default when full fidelity is not requested.
