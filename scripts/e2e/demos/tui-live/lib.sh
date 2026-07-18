@@ -1105,7 +1105,7 @@ EOF
 require_hitl_loop_opt_in() {
   if [[ "${SPUR_DEMO_ALLOW_HITL_LOOP:-0}" != "1" ]]; then
     printf '%s\n' \
-      'error: live Product Hunt audit loop is opt-in (real brain + three workers + one retry).' \
+      'error: live Product Hunt audit loop is opt-in (real brain + four workers + one retry).' \
       '' \
       '  SPUR_DEMO_ALLOW_HITL_LOOP=1 bash journeys/problem-plan-loop-drive.sh' \
       '' \
@@ -1289,6 +1289,53 @@ plan_inspector_output_text() {
   '
 }
 
+# Extract only the selected task's right-hand Task detail pane. The pane heading
+# is on the split top border; subsequent content rows begin after the ││ seam.
+plan_inspector_task_detail_text() {
+  "$shell_use_bin" --session "$session_name" text --full | awk '
+    {
+      if (!in_detail) {
+        if (index($0, "Task detail") > 0) {
+          in_detail = 1
+        }
+        next
+      }
+      boundary = index($0, "││")
+      if (boundary == 0) {
+        exit
+      }
+      right = substr($0, boundary + length("││"))
+      print right
+    }
+  '
+}
+
+# Approval status is proof only when the same bounded Task detail pane exposes
+# both the selected task id and its task-specific execution status.
+story_plan_inspector_task_status_hard_proof() {
+  local claim="$1"
+  local task_id="$2"
+  local status="$3"
+  local dwell="${4:-3.0}"
+  local timeout_s="${5:-${SPUR_DEMO_PLAN_LOOP_WAIT_S:-180}}"
+  local deadline=$((SECONDS + timeout_s))
+  local detail=""
+
+  while (( SECONDS < deadline )); do
+    detail="$(plan_inspector_task_detail_text || true)"
+    if [[ "$detail" == *"task: ${task_id}"* && "$detail" == *"status ${status}"* ]]; then
+      printf '+ proof: %s [Plan Inspector Task detail task=%s status=%s]\n' "$claim" "$task_id" "$status"
+      story_dwell "$dwell"
+      return 0
+    fi
+    sleep_ms 0.2
+  done
+
+  printf 'fatal: Plan Inspector Task detail never exposed task %s with status %s within %ss\n' "$task_id" "$status" "$timeout_s" >&2
+  "$shell_use_bin" --session "$session_name" text --full >&2 || true
+  return 1
+}
+
 # Worker-result markers are proof only inside a complete Plan Inspector Output
 # block. Requiring the summary label allows normalized prefixes before markers.
 story_plan_inspector_result_hard_proof() {
@@ -1362,7 +1409,7 @@ trigger_submit_plan_hitl_review_and_synthesize() {
   press_key a
   story_hard_proof "The operator selects approval for positioning" "Decision: Approve" 3.5
   press_key Enter
-  story_hard_proof "The positioning task records approval" "approved" 3.0
+  story_plan_inspector_task_status_hard_proof "The positioning task records approval" "$positioning_task_id" "approved" 3.0
 
   press_key j
   story_hard_proof "The inspector advances to the proof task" "$proof_task_id" 2.5
@@ -1390,7 +1437,7 @@ trigger_submit_plan_hitl_review_and_synthesize() {
   press_key a
   story_hard_proof "The operator selects approval for proof" "Decision: Approve" 3.5
   press_key Enter
-  story_hard_proof "The retried proof task records approval" "approved" 3.0
+  story_plan_inspector_task_status_hard_proof "The retried proof task records approval" "$proof_task_id" "approved" 3.0
 
   press_key j
   story_hard_proof "The inspector advances to the readiness task" "$readiness_task_id" 2.5
@@ -1399,7 +1446,7 @@ trigger_submit_plan_hitl_review_and_synthesize() {
   press_key a
   story_hard_proof "The operator selects approval for readiness" "Decision: Approve" 3.5
   press_key Enter
-  story_hard_proof "The readiness task records approval" "approved" 3.0
+  story_plan_inspector_task_status_hard_proof "The readiness task records approval" "$readiness_task_id" "approved" 3.0
 
   press_key j
   story_hard_proof "The inspector advances to the handoff task" "$handoff_task_id" 2.5
@@ -1408,7 +1455,7 @@ trigger_submit_plan_hitl_review_and_synthesize() {
   press_key a
   story_hard_proof "The operator selects approval for handoff" "Decision: Approve" 3.5
   press_key Enter
-  story_hard_proof "The handoff task records approval" "approved" 3.0
+  story_plan_inspector_task_status_hard_proof "The handoff task records approval" "$handoff_task_id" "approved" 3.0
 
   return_to_campaign_session_detail
   story_session_land "The originating Session Detail remains the operator home" 2.5
