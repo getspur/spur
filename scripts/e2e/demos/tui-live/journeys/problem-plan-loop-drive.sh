@@ -37,7 +37,7 @@ story_beat "ACTION" "Inspect workers and plan state without abandoning Session D
 story_plan_loop_control_plane
 
 if [[ "${SPUR_DEMO_ALLOW_HITL_LOOP:-0}" == "1" ]]; then
-  story_beat "ACTION" "D4 live loop: deep dive, reject, retry, approve, then synthesize."
+  story_beat "ACTION" "Real Product Hunt audit: three deep dives, evidence retry, approvals, then brain synthesis."
   trigger_submit_plan_hitl_review_and_synthesize
 elif [[ "${SPUR_DEMO_ALLOW_PLAN_LOOP:-0}" == "1" ]]; then
   story_beat "ACTION" "Opt-in seed: submit one safe task and watch DELEGATE/Done in this session."
@@ -47,7 +47,7 @@ elif [[ "${SPUR_DEMO_ALLOW_AGENT_SEND:-0}" == "1" ]]; then
   trigger_brain_for_loop_observation
 else
   printf '+ safe default: observe only; no brain turn or worker spend\n'
-  printf '  SPUR_DEMO_ALLOW_HITL_LOOP=1 → D4 reject/retry/approve loop\n'
+  printf '  SPUR_DEMO_ALLOW_HITL_LOOP=1 → three-worker Product Hunt audit + evidence retry\n'
   printf '  SPUR_DEMO_ALLOW_PLAN_LOOP=1 → 1-task submit_plan + session wait\n'
   printf '  SPUR_DEMO_ALLOW_AGENT_SEND=1 → light brain kick only\n'
   printf '  SPUR_DEMO_ALLOW_PLAN_START=1 → Start/Resume selected plan\n'
