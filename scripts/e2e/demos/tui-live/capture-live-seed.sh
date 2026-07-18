@@ -114,7 +114,7 @@ if [[ -d "$cast_cache" ]]; then
     fi
   done < <(find "$cast_cache" -name 'spur-live-problem-plan-loop-drive-*.cast' -type f 2>/dev/null | sort)
   # Fallback: newest matching cast by mtime
-  if [[ -z "$cast_src" ]]; then
+  if [[ -z "$cast_src" && "${SPUR_CAPTURE_FULL_FIDELITY:-0}" != "1" ]]; then
     cast_src="$(find "$cast_cache" -name 'spur-live-problem-plan-loop-drive-*.cast' -type f -print0 2>/dev/null \
       | xargs -0 ls -t 2>/dev/null | head -1 || true)"
   fi
