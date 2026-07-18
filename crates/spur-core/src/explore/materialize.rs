@@ -3,14 +3,17 @@ use crate::explore::pool::{Manifest, ManifestItem};
 use crate::skills::adapters::Adapter;
 use crate::skills::{SkillPayload, SkillRole, SkillSource};
 use anyhow::{bail, Context};
+use fs4::fs_std::FileExt as _;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
+use uuid::Uuid;
 
 const WARN_TARGET: &str = "spur::worker::explore";
 const MANAGED_MARKER: &str = "SPUR-MANAGED";
+const MATERIALIZATION_ITEM_IDS: &str = "spur_item_ids";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MaterializationRecord {
@@ -19,6 +22,31 @@ pub struct MaterializationRecord {
     pub agent: String,
     pub worktree: String,
     pub items: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct LegacyMaterializationHint {
+    item_id: Uuid,
+    pub(crate) skill_id: String,
+}
+
+impl LegacyMaterializationHint {
+    fn new(item_id: Uuid, skill_id: String) -> Self {
+        Self { item_id, skill_id }
+    }
+}
+
+#[derive(Debug)]
+enum MaterializationLine {
+    Record {
+        original: String,
+        ending: String,
+        value: serde_json::Value,
+        record: Box<MaterializationRecord>,
+        item_ids: Option<Vec<Uuid>>,
+        changed: bool,
+    },
+    Raw(String),
 }
 
 pub struct MaterializeMeta<'a> {
@@ -164,14 +192,39 @@ pub fn append_materialization_record(
     record: &MaterializationRecord,
 ) -> anyhow::Result<()> {
     let dir = repo_root.join(".spur/explore/cache");
-    std::fs::create_dir_all(&dir)?;
-    let line = serde_json::to_string(record)?;
+    let _lock = lock_materialization_records(&dir)?;
+    let path = dir.join("materializations.jsonl");
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(error).with_context(|| format!("read {}", path.display())),
+    };
+    let mut reserved = materialization_item_ids(&parse_materialization_lines(&raw));
+    let item_ids = fresh_item_ids(record.items.len(), &mut reserved);
+    let mut value = serde_json::to_value(record)?;
+    set_item_ids(&mut value, &item_ids)?;
+    let line = serde_json::to_string(&value)?;
     let mut file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(dir.join("materializations.jsonl"))?;
+        .open(path)?;
     writeln!(file, "{line}")?;
     Ok(())
+}
+
+fn lock_materialization_records(cache_dir: &Path) -> anyhow::Result<std::fs::File> {
+    std::fs::create_dir_all(cache_dir)?;
+    let lock_path = cache_dir.join("materializations.lock");
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .with_context(|| format!("open {}", lock_path.display()))?;
+    lock.lock_exclusive()
+        .with_context(|| format!("lock {}", lock_path.display()))?;
+    Ok(lock)
 }
 
 pub fn read_recent_materializations(repo_root: &Path, limit: usize) -> Vec<MaterializationRecord> {
@@ -188,82 +241,330 @@ pub fn read_recent_materializations(repo_root: &Path, limit: usize) -> Vec<Mater
     records
 }
 
-/// Skill IDs mentioned by legacy pool materialization metadata for one worktree.
+/// Exact legacy pool materialization items observed for one worktree.
 ///
-/// These IDs are migration hints only. Callers must independently prove the
-/// exact on-disk target before adopting or removing it.
-pub(crate) fn legacy_materialization_skill_ids(repo_root: &Path, worktree: &Path) -> Vec<String> {
-    let path = repo_root.join(".spur/explore/cache/materializations.jsonl");
-    let Ok(raw) = std::fs::read_to_string(path) else {
-        return Vec::new();
+/// These records are migration hints only. Callers must independently prove
+/// the exact on-disk target before adopting or removing it.
+pub(crate) fn legacy_materialization_hints(
+    repo_root: &Path,
+    worktree: &Path,
+) -> Vec<LegacyMaterializationHint> {
+    let cache_dir = repo_root.join(".spur/explore/cache");
+    let _lock = match lock_materialization_records(&cache_dir) {
+        Ok(lock) => lock,
+        Err(error) => {
+            tracing::warn!(
+                target: WARN_TARGET,
+                error = %error,
+                "materialization hint lock failed; preserving legacy records"
+            );
+            return Vec::new();
+        }
     };
-    let mut skill_ids = raw
-        .lines()
-        .filter_map(|line| serde_json::from_str::<MaterializationRecord>(line).ok())
-        .filter(|record| Path::new(&record.worktree) == worktree)
-        .flat_map(|record| record.items)
-        .collect::<Vec<_>>();
-    skill_ids.sort();
-    skill_ids.dedup();
-    skill_ids
+    let path = cache_dir.join("materializations.jsonl");
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+        Err(error) => {
+            tracing::warn!(
+                target: WARN_TARGET,
+                path = %path.display(),
+                error = %error,
+                "materialization hint read failed; preserving legacy records"
+            );
+            return Vec::new();
+        }
+    };
+    let mut lines = parse_materialization_lines(&raw);
+    let counts = item_id_counts(&lines);
+    let mut reserved = counts.keys().copied().collect::<HashSet<_>>();
+    let mut upgraded = false;
+    for line in &mut lines {
+        let MaterializationLine::Record {
+            value,
+            record,
+            item_ids,
+            changed,
+            ..
+        } = line
+        else {
+            continue;
+        };
+        let needs_fresh_ids = item_ids.as_ref().is_none_or(|ids| {
+            ids.iter()
+                .any(|item_id| counts.get(item_id).copied() != Some(1))
+        });
+        if needs_fresh_ids {
+            let ids = fresh_item_ids(record.items.len(), &mut reserved);
+            if let Err(error) = set_item_ids(value, &ids) {
+                tracing::warn!(
+                    target: WARN_TARGET,
+                    path = %path.display(),
+                    error = %error,
+                    "materialization hint upgrade failed; preserving legacy records"
+                );
+                return Vec::new();
+            }
+            *item_ids = Some(ids);
+            *changed = true;
+            upgraded = true;
+        }
+    }
+    if upgraded {
+        let output = render_materialization_lines(&lines);
+        if let Err(error) = atomic_rewrite_materializations(&path, output.as_bytes()) {
+            tracing::warn!(
+                target: WARN_TARGET,
+                path = %path.display(),
+                error = %error,
+                "materialization hint upgrade write failed; preserving legacy records"
+            );
+            return Vec::new();
+        }
+    }
+    lines
+        .into_iter()
+        .filter_map(|line| match line {
+            MaterializationLine::Record {
+                record,
+                item_ids: Some(item_ids),
+                ..
+            } if Path::new(&record.worktree) == worktree => Some(
+                record
+                    .items
+                    .into_iter()
+                    .zip(item_ids)
+                    .map(|(skill_id, item_id)| LegacyMaterializationHint::new(item_id, skill_id))
+                    .collect::<Vec<_>>(),
+            ),
+            _ => None,
+        })
+        .flatten()
+        .collect()
 }
 
 /// Consume legacy materialization hints after one successful reconciliation.
 pub(crate) fn retire_legacy_materializations(
     repo_root: &Path,
-    worktree: &Path,
-    skill_ids: &[String],
+    hints: &[LegacyMaterializationHint],
 ) -> anyhow::Result<()> {
-    if skill_ids.is_empty() {
+    if hints.is_empty() {
         return Ok(());
     }
-    let path = repo_root.join(".spur/explore/cache/materializations.jsonl");
+    let cache_dir = repo_root.join(".spur/explore/cache");
+    let _lock = lock_materialization_records(&cache_dir)?;
+    let path = cache_dir.join("materializations.jsonl");
     let raw = match std::fs::read_to_string(&path) {
         Ok(raw) => raw,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(error).with_context(|| format!("read {}", path.display())),
     };
-    let retired = skill_ids.iter().map(String::as_str).collect::<HashSet<_>>();
-    let mut output = Vec::new();
-    for line in raw.lines() {
-        let Ok(mut record) = serde_json::from_str::<MaterializationRecord>(line) else {
-            output.push(line.to_string());
+    let retired = hints.iter().cloned().collect::<HashSet<_>>();
+    let mut lines = parse_materialization_lines(&raw);
+    let counts = item_id_counts(&lines);
+    let mut changed_any = false;
+    for line in &mut lines {
+        let MaterializationLine::Record {
+            value,
+            record,
+            item_ids: Some(item_ids),
+            changed,
+            ..
+        } = line
+        else {
             continue;
         };
-        if Path::new(&record.worktree) != worktree {
-            output.push(line.to_string());
-            continue;
+        let mut kept_items = Vec::with_capacity(record.items.len());
+        let mut kept_ids = Vec::with_capacity(item_ids.len());
+        for (skill_id, item_id) in record.items.iter().zip(item_ids.iter().copied()) {
+            let hint = LegacyMaterializationHint::new(item_id, skill_id.clone());
+            if counts.get(&item_id).copied() == Some(1) && retired.contains(&hint) {
+                *changed = true;
+                changed_any = true;
+            } else {
+                kept_items.push(skill_id.clone());
+                kept_ids.push(item_id);
+            }
         }
-        record.items.retain(|item| !retired.contains(item.as_str()));
-        if !record.items.is_empty() {
-            output.push(
-                serde_json::to_string(&record)
-                    .context("serialize retired materialization record")?,
-            );
+        if *changed {
+            record.items = kept_items;
+            *item_ids = kept_ids;
+            set_record_items(value, &record.items)?;
+            set_item_ids(value, item_ids)?;
         }
     }
+    if changed_any {
+        let output = render_materialization_lines(&lines);
+        atomic_rewrite_materializations(&path, output.as_bytes())?;
+    }
+    Ok(())
+}
 
+fn parse_materialization_lines(raw: &str) -> Vec<MaterializationLine> {
+    raw.split_inclusive('\n')
+        .map(|original| {
+            let (body, ending) = split_line_ending(original);
+            let parsed = serde_json::from_str::<serde_json::Value>(body)
+                .ok()
+                .and_then(|value| {
+                    serde_json::from_value::<MaterializationRecord>(value.clone())
+                        .ok()
+                        .map(|record| (value, record))
+                });
+            match parsed {
+                Some((value, record)) => {
+                    let item_ids = parse_item_ids(&value, record.items.len());
+                    MaterializationLine::Record {
+                        original: original.to_string(),
+                        ending: ending.to_string(),
+                        value,
+                        record: Box::new(record),
+                        item_ids,
+                        changed: false,
+                    }
+                }
+                None => MaterializationLine::Raw(original.to_string()),
+            }
+        })
+        .collect()
+}
+
+fn split_line_ending(line: &str) -> (&str, &str) {
+    if let Some(body) = line.strip_suffix("\r\n") {
+        (body, "\r\n")
+    } else if let Some(body) = line.strip_suffix('\n') {
+        (body, "\n")
+    } else {
+        (line, "")
+    }
+}
+
+fn parse_item_ids(value: &serde_json::Value, expected: usize) -> Option<Vec<Uuid>> {
+    let values = value.get(MATERIALIZATION_ITEM_IDS)?.as_array()?;
+    if values.len() != expected {
+        return None;
+    }
+    values
+        .iter()
+        .map(|value| Uuid::parse_str(value.as_str()?).ok())
+        .collect()
+}
+
+fn materialization_item_ids(lines: &[MaterializationLine]) -> HashSet<Uuid> {
+    lines
+        .iter()
+        .filter_map(|line| match line {
+            MaterializationLine::Record {
+                item_ids: Some(item_ids),
+                ..
+            } => Some(item_ids.iter().copied()),
+            _ => None,
+        })
+        .flatten()
+        .collect()
+}
+
+fn item_id_counts(lines: &[MaterializationLine]) -> HashMap<Uuid, usize> {
+    let mut counts = HashMap::new();
+    for item_id in materialization_item_ids(lines) {
+        counts.insert(item_id, 0);
+    }
+    for line in lines {
+        if let MaterializationLine::Record {
+            item_ids: Some(item_ids),
+            ..
+        } = line
+        {
+            for item_id in item_ids {
+                *counts.entry(*item_id).or_default() += 1;
+            }
+        }
+    }
+    counts
+}
+
+fn fresh_item_ids(count: usize, reserved: &mut HashSet<Uuid>) -> Vec<Uuid> {
+    (0..count)
+        .map(|_| loop {
+            let candidate = Uuid::new_v4();
+            if reserved.insert(candidate) {
+                break candidate;
+            }
+        })
+        .collect()
+}
+
+fn set_record_items(value: &mut serde_json::Value, items: &[String]) -> anyhow::Result<()> {
+    let object = value
+        .as_object_mut()
+        .context("materialization record is not a JSON object")?;
+    object.insert("items".to_string(), serde_json::to_value(items)?);
+    Ok(())
+}
+
+fn set_item_ids(value: &mut serde_json::Value, item_ids: &[Uuid]) -> anyhow::Result<()> {
+    let object = value
+        .as_object_mut()
+        .context("materialization record is not a JSON object")?;
+    object.insert(
+        MATERIALIZATION_ITEM_IDS.to_string(),
+        serde_json::Value::Array(
+            item_ids
+                .iter()
+                .map(|item_id| serde_json::Value::String(item_id.to_string()))
+                .collect(),
+        ),
+    );
+    Ok(())
+}
+
+fn render_materialization_lines(lines: &[MaterializationLine]) -> String {
+    let mut output = String::new();
+    for line in lines {
+        match line {
+            MaterializationLine::Record {
+                original,
+                ending,
+                value,
+                record,
+                changed,
+                ..
+            } if *changed => {
+                if !record.items.is_empty() {
+                    output.push_str(
+                        &serde_json::to_string(value)
+                            .expect("materialization JSON value serialization is infallible"),
+                    );
+                    output.push_str(ending);
+                }
+            }
+            MaterializationLine::Record { original, .. } | MaterializationLine::Raw(original) => {
+                output.push_str(original);
+            }
+        }
+    }
+    output
+}
+
+fn atomic_rewrite_materializations(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
     let parent = path
         .parent()
         .with_context(|| format!("{} has no parent", path.display()))?;
-    std::fs::create_dir_all(parent)
-        .with_context(|| format!("create materialization cache {}", parent.display()))?;
     let mut temporary = tempfile::NamedTempFile::new_in(parent).with_context(|| {
         format!(
             "create temporary materialization cache in {}",
             parent.display()
         )
     })?;
-    for line in output {
-        writeln!(temporary, "{line}")
-            .with_context(|| format!("write temporary materialization cache {}", path.display()))?;
-    }
+    temporary
+        .write_all(bytes)
+        .with_context(|| format!("write temporary materialization cache {}", path.display()))?;
     temporary
         .as_file()
         .sync_all()
         .with_context(|| format!("sync temporary materialization cache {}", path.display()))?;
     temporary
-        .persist(&path)
+        .persist(path)
         .map_err(|error| error.error)
         .with_context(|| format!("persist {}", path.display()))?;
     Ok(())
@@ -401,7 +702,8 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        append_materialization_record, materialize_pool_skills, read_recent_materializations,
+        append_materialization_record, legacy_materialization_hints, lock_materialization_records,
+        materialize_pool_skills, read_recent_materializations, retire_legacy_materializations,
         MaterializationRecord, MaterializeMeta,
     };
     use crate::explore::catalog::ItemKind;
@@ -633,6 +935,138 @@ mod tests {
             ]
         );
         assert!(records[0].recorded_at_epoch > 0);
+    }
+
+    #[test]
+    fn append_and_retire_share_the_materialization_record_lock() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let repo = tempfile::tempdir().unwrap();
+        let worktree = repo.path().join("worker");
+        let record = |delegation: &str, item: &str| MaterializationRecord {
+            recorded_at_epoch: 1,
+            delegation_id: delegation.into(),
+            agent: "codex".into(),
+            worktree: worktree.display().to_string(),
+            items: vec![item.into()],
+        };
+        append_materialization_record(repo.path(), &record("old", "shared-skill")).unwrap();
+        let observed = legacy_materialization_hints(repo.path(), &worktree);
+
+        let cache = repo.path().join(".spur/explore/cache");
+        let guard = lock_materialization_records(&cache).unwrap();
+        let (started_tx, started_rx) = mpsc::channel();
+        let (result_tx, result_rx) = mpsc::channel();
+        let repo_path = repo.path().to_path_buf();
+        let appended = record("new", "shared-skill");
+        std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            result_tx
+                .send(append_materialization_record(&repo_path, &appended))
+                .unwrap();
+        });
+        started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(result_rx.recv_timeout(Duration::from_millis(100)).is_err());
+        drop(guard);
+        result_rx
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap()
+            .unwrap();
+
+        let guard = lock_materialization_records(&cache).unwrap();
+        let (started_tx, started_rx) = mpsc::channel();
+        let (result_tx, result_rx) = mpsc::channel();
+        let repo_path = repo.path().to_path_buf();
+        std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            result_tx
+                .send(retire_legacy_materializations(&repo_path, &observed))
+                .unwrap();
+        });
+        started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(result_rx.recv_timeout(Duration::from_millis(100)).is_err());
+        drop(guard);
+        result_rx
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap()
+            .unwrap();
+
+        let records = read_recent_materializations(repo.path(), 10);
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].delegation_id, "new");
+        assert_eq!(records[0].items, vec!["shared-skill"]);
+    }
+
+    #[test]
+    fn retirement_preserves_a_later_byte_identical_record_occurrence() {
+        let repo = tempfile::tempdir().unwrap();
+        let worktree = repo.path().join("worker");
+        let record = MaterializationRecord {
+            recorded_at_epoch: 1,
+            delegation_id: "duplicate".into(),
+            agent: "codex".into(),
+            worktree: worktree.display().to_string(),
+            items: vec!["shared-skill".into()],
+        };
+        let cache = repo.path().join(".spur/explore/cache");
+        std::fs::create_dir_all(&cache).unwrap();
+        let line = serde_json::to_string(&record).unwrap();
+        std::fs::write(
+            cache.join("materializations.jsonl"),
+            format!("{line}\n{line}\n"),
+        )
+        .unwrap();
+        let observed = legacy_materialization_hints(repo.path(), &worktree);
+
+        assert_eq!(observed.len(), 2);
+        retire_legacy_materializations(repo.path(), &observed[..1]).unwrap();
+
+        let records = read_recent_materializations(repo.path(), 10);
+        assert_eq!(records, vec![record]);
+    }
+
+    #[test]
+    fn retirement_distinguishes_same_metadata_records_by_full_occurrence() {
+        let repo = tempfile::tempdir().unwrap();
+        let worktree = repo.path().join("worker");
+        let record = |items: &[&str]| MaterializationRecord {
+            recorded_at_epoch: 1,
+            delegation_id: "same-metadata".into(),
+            agent: "codex".into(),
+            worktree: worktree.display().to_string(),
+            items: items.iter().map(|item| (*item).to_string()).collect(),
+        };
+        let first = record(&["shared-skill", "first-only"]);
+        let second = record(&["shared-skill", "second-only"]);
+        let cache = repo.path().join(".spur/explore/cache");
+        std::fs::create_dir_all(&cache).unwrap();
+        std::fs::write(
+            cache.join("materializations.jsonl"),
+            format!(
+                "{}\n{}\n",
+                serde_json::to_string(&first).unwrap(),
+                serde_json::to_string(&second).unwrap()
+            ),
+        )
+        .unwrap();
+        let observed = legacy_materialization_hints(repo.path(), &worktree);
+        let first_shared = observed
+            .iter()
+            .find(|hint| hint.skill_id == "shared-skill")
+            .unwrap()
+            .clone();
+
+        retire_legacy_materializations(repo.path(), &[first_shared]).unwrap();
+
+        let records = read_recent_materializations(repo.path(), 10);
+        assert_eq!(
+            records,
+            vec![
+                record(&["shared-skill", "second-only"]),
+                record(&["first-only"]),
+            ]
+        );
     }
 
     #[tokio::test]

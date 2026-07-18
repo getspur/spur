@@ -173,20 +173,35 @@ pub async fn reconcile_many(
 ) -> Result<Vec<ProjectionSummary>, ProjectionError> {
     let worktrees = spur_worktree::manager::WorktreeManager::new(source_repo_root.to_path_buf());
     let mut summaries = Vec::with_capacity(adapters.len());
+    let legacy_hints =
+        reconcile::snapshot_legacy_materialization_hints(source_repo_root, launch_root);
     for adapter in adapters {
-        summaries.push(
-            reconcile_with_worktrees(
-                &worktrees,
-                ProjectionRequest {
-                    source_repo_root,
-                    launch_root,
-                    adapter: *adapter,
-                    role: RuntimeRole::Init,
-                    policy: SelectionPolicy::AllActive,
-                },
-            )
-            .await?,
-        );
+        let outcome = reconcile::run_deferred(
+            &worktrees,
+            ProjectionRequest {
+                source_repo_root,
+                launch_root,
+                adapter: *adapter,
+                role: RuntimeRole::Init,
+                policy: SelectionPolicy::AllActive,
+            },
+            &legacy_hints,
+        )
+        .await?;
+        summaries.push(outcome.summary);
+    }
+    if let Some(adapter) = adapters.first().copied() {
+        reconcile::retire_examined_legacy_materializations(
+            ProjectionRequest {
+                source_repo_root,
+                launch_root,
+                adapter,
+                role: RuntimeRole::Init,
+                policy: SelectionPolicy::AllActive,
+            },
+            adapters,
+            &legacy_hints,
+        )?;
     }
     Ok(summaries)
 }
