@@ -225,7 +225,7 @@ No git commit: all files in this task are generated and ignored.
 **Files:**
 
 - Modify: `docs/product_launch/media_pack/product-hunt-media-pack.ipynb`
-- Generate (ignored): `docs/product_launch/media_pack/ph_ready/overlays/progress-1.png` through `progress-5.png`
+- Generate (ignored): `docs/product_launch/media_pack/ph_ready/overlays/progress-1.png` through `progress-5.png`, plus `title-45s.png`, `cta-45s.png`, `title-45s.mp4`, and `cta-45s.mp4`
 
 - [ ] **Step 1: reload the notebook from disk before editing**
 
@@ -358,6 +358,8 @@ Fail closed if the required evidence is not visible throughout the candidate win
 
 - [ ] **Step 3: import and inspect the generated assets**
 
+Use Notebook MCP to add and run the audited static-plate cell after the progress-rail cell. It writes `title-45s.png` and `cta-45s.png` as opaque 1920×1080 RGB plates with ink `#0B0E14`, ivory `#E6E1CF`, SF Mono at 76 px, and the exact locked title/CTA copy. The notebook output must display both plates for review. Encode them as constant-frame H.264 with FFmpeg: exactly 234 frames for `title-45s.mp4` and 400 frames for `cta-45s.mp4`, both 1920×1080, yuv420p, and 30 fps. This deterministic fallback is required because Palmier timeline inspection reproduced periodic disappearing frames on long text clips even with `animation="off"`, then also dropped sampled still-image frames; the video derivatives carry a physical frame for every title/CTA timeline frame.
+
 Call `import_media` once for the audio directory with `folder="Product Hunt Dual Hero/Audio"`, and once for the overlay directory with `folder="Product Hunt Dual Hero/Overlays"`. Import the approved resume still separately as `Resume approved hold`. Call `get_media`, then `inspect_media` on every returned audio/image media ref before it is used.
 
 - [ ] **Step 4: create an empty timeline named `Kinetic Operator Cut — 45s`**
@@ -372,17 +374,17 @@ Call `get_timeline` and confirm the new timeline is empty and active.
 
 - [ ] **Step 5: assemble exact picture timing on one video track**
 
-Use `add_clips` with the existing matte and reviewed media refs:
+Use `add_clips` with the two notebook-authored constant-frame plate videos and reviewed media refs. Palmier's long `animation="off"` text clips were observed blinking in rendered timeline frames, so title and CTA typography are baked into deterministic notebook-authored plate videos rather than left to the faulty renderer. These plates are framing graphics, never product proof:
 
 | Timeline frames | Media ref | Source seconds |
 |---|---|---|
-| 0–234 | `4387A028` | still via `endFrame=234` |
+| 0–234 | imported `title-45s.mp4` | complete 234-frame clip |
 | 234–486 | `791B452C` | 11.0–18.0, then 5/6× speed |
 | 486–572 | `14D82963` | 22.7–25.5667 |
 | 572–711 | `82D9D60A` | 12.0–16.6333 |
 | 711–832 | `63605F31` | 49.35–51.35, then 60/121× speed |
 | 832–950 | `4B29113A` | 6.4667–9.2, then 41/59× speed |
-| 950–1350 | `4387A028` | still via `endFrame=1350` |
+| 950–1350 | imported `cta-45s.mp4` | complete 400-frame clip |
 
 Omit `trackIndex` on every entry so Palmier creates one shared picture track. After placement, call `set_clip_properties` on Session with `speed=0.8333333333`, Routing with `speed=0.4958677686`, and Resume with `speed=0.6949152542`; each timing change expands the inspected real-source moment to its narration-aligned beat without synthesizing or repeating UI. These boundaries follow the caption sentence ranges: problem/title 0–234, harness + Session 234–486, Workers 486–572, Plan 572–711, Routing 711–832, Resume 832–950, and closing/CTA 950–1350. The resulting picture duration must be exactly 1,350 frames.
 
@@ -398,19 +400,17 @@ Add the five overlay images on one shared top video track:
 | 711–832 | `progress-4.png` |
 | 832–950 | `progress-5.png` |
 
-Add one top text track with these exact entries and no animation:
+Add one top text track with these exact proof cues and no animation. The title and CTA copy is already baked into the constant-frame plate videos:
 
 | Frames | Content |
 |---|---|
-| 0–234 | `SPUR\nONE DURABLE HARNESS FOR CODING AGENTS` |
 | 234–486 | `01 / SESSION\nONE OPERATOR HOME` |
 | 486–572 | `02 / WORKERS\nSTATE STAYS VISIBLE` |
 | 572–711 | `03 / PLAN\nEMPTY MEANS EMPTY` |
 | 711–832 | `04 / ROUTING\nAGENT · MODEL · EFFORT` |
 | 832–950 | `05 / RESUME\nCONTEXT SURVIVES` |
-| 950–1350 | `SPUR\nVISIBLE · ISOLATED · RECOVERABLE\nINSTALL COMMUNITY FREE` |
 
-Title and CTA use centered 76 px bold ivory text with 0.06 tracking and `centerX=0.5`, `centerY=0.5`, `width=0.78`, `height=0.38`. Proof cues use the locked upper-left cue style except `05 / RESUME`, which uses `centerX=0.75` and right alignment to preserve the captured resume marker.
+The notebook plates use centered 76 px SF Mono ivory typography on the ink matte with the exact title/CTA copy above. Proof cues use the locked upper-left cue style except `05 / RESUME`, which uses `centerX=0.75` and right alignment to preserve the captured resume marker.
 
 - [ ] **Step 7: apply the restrained shared grade and keyframed pushes**
 
@@ -448,7 +448,7 @@ Call `add_captions` with language `en`, `maxWords=7`, animation `off`, `centerX=
 
 Call `inspect_timeline` for frames 117, 360, 529, 641, 771, 891, and 1120. Then inspect 12 evenly sampled frames across 0–1350. Confirm narration-to-proof alignment, cue placement, rail state, caption legibility, status-bar visibility, and proof evidence. Do not export until the composited timeline is exactly 1,350 frames.
 
-No git commit: this task mutates the external Palmier project only.
+Commit the notebook source-of-truth fallback and plan correction; the timeline itself remains an external Palmier project mutation.
 
 ## Task 5: Build the 90-second Palmier timeline
 
