@@ -177,6 +177,83 @@ fn body_after_marker(bytes: &[u8]) -> Option<(Marker, &[u8])> {
     None
 }
 
+/// Marker-backed ownership classification used by runtime projection migration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum LegacyMarkerOwnership {
+    /// The target has a supported marker whose body still matches its digest.
+    Managed(Marker),
+    /// The target has a supported marker, but its body has been edited.
+    UserEdited,
+    /// The target is not an ordinary marked installer output.
+    Unmanaged,
+}
+
+/// Validate legacy installer ownership without duplicating marker parsing.
+pub(crate) fn legacy_marker_ownership(
+    target: &Path,
+) -> Result<LegacyMarkerOwnership, InstallError> {
+    let metadata = std::fs::symlink_metadata(target).map_err(|source| InstallError::Io {
+        path: target.to_path_buf(),
+        source,
+    })?;
+    if metadata.file_type().is_symlink() {
+        return Ok(LegacyMarkerOwnership::Unmanaged);
+    }
+    let marker_path = if metadata.is_dir() {
+        let mut entries = std::fs::read_dir(target)
+            .map_err(|source| InstallError::Io {
+                path: target.to_path_buf(),
+                source,
+            })?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|source| InstallError::Io {
+                path: target.to_path_buf(),
+                source,
+            })?;
+        if entries.len() != 1 || entries[0].file_name() != "SKILL.md" {
+            return Ok(LegacyMarkerOwnership::Unmanaged);
+        }
+        let Some(entry) = entries.pop() else {
+            return Ok(LegacyMarkerOwnership::Unmanaged);
+        };
+        let file_type = entry.file_type().map_err(|source| InstallError::Io {
+            path: entry.path(),
+            source,
+        })?;
+        if !file_type.is_file() || file_type.is_symlink() {
+            return Ok(LegacyMarkerOwnership::Unmanaged);
+        }
+        entry.path()
+    } else if metadata.is_file() {
+        target.to_path_buf()
+    } else {
+        return Ok(LegacyMarkerOwnership::Unmanaged);
+    };
+    let bytes = match std::fs::read(&marker_path) {
+        Ok(bytes) => bytes,
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(LegacyMarkerOwnership::Unmanaged);
+        }
+        Err(source) => {
+            return Err(InstallError::Io {
+                path: marker_path,
+                source,
+            });
+        }
+    };
+    let Some((marker, body)) = body_after_marker(&bytes) else {
+        return Ok(LegacyMarkerOwnership::Unmanaged);
+    };
+    if marker.version != 1 {
+        return Ok(LegacyMarkerOwnership::Unmanaged);
+    }
+    if sha256_hex(body) == marker.sha256 {
+        Ok(LegacyMarkerOwnership::Managed(marker))
+    } else {
+        Ok(LegacyMarkerOwnership::UserEdited)
+    }
+}
+
 fn iter_lines_with_positions(text: &str) -> impl Iterator<Item = (&str, usize)> {
     text.split_inclusive('\n').scan(0usize, |pos, line| {
         *pos += line.len();
