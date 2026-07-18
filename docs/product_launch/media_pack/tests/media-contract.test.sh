@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MANIFEST="$ROOT/proof-manifest.json"
+NOTEBOOK="$ROOT/product-hunt-media-pack.ipynb"
 HTML="$ROOT/html/index.html"
 GRAPH="$ROOT/demo_render/content-graph.json"
 failures=0
@@ -22,6 +23,19 @@ done
 
 [[ -f "$MANIFEST" ]] && pass "proof manifest exists" || fail "proof manifest exists"
 [[ -f "$HTML" ]] && pass "HTML artifact exists" || fail "HTML artifact exists"
+notebook_source="$(jq -r '.cells[].source | if type == "array" then join("") else . end' "$NOTEBOOK")"
+for required in \
+  'from Claude Code and Codex to Grok, OpenCode, and beyond' \
+  'delegates four read-only deep dives' \
+  'four read-only deep dives: ACP positioning, TUI proof, launch readiness, and media handoff' \
+  'Task 4 · Media handoff'; do
+  [[ "$notebook_source" == *"$required"* ]] \
+    && pass "four-agent notebook copy: $required" \
+    || fail "four-agent notebook copy: $required"
+done
+[[ "$notebook_source" != *'Kiro, Gemini'* && "$notebook_source" != *'three read-only deep dives'* ]] \
+  && pass "notebook removes the superseded three-agent copy" \
+  || fail "notebook removes the superseded three-agent copy"
 if rg -q 'ffmpeg -nostdin -y -v error -ss' "$ROOT/refresh.sh"; then
   pass "publisher protects manifest input from ffmpeg"
 else
