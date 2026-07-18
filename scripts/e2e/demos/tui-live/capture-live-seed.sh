@@ -133,6 +133,7 @@ convert_cast() {
   local agg_idle="${SPUR_AGG_IDLE_LIMIT:-1.5}"
   # Preview encode width (full Air-native gifs are huge; mp4 samples to 1920)
   local preview_w="${SPUR_CAPTURE_PREVIEW_WIDTH:-1920}"
+  local full_fidelity="${SPUR_CAPTURE_FULL_FIDELITY:-0}"
 
   if command -v agg >/dev/null 2>&1; then
     echo "==> agg gif (cols=${agg_cols} rows=${agg_rows} speed=${agg_speed})"
@@ -152,7 +153,15 @@ convert_cast() {
     echo "warn: agg not installed — cast saved; install with: brew install agg" >&2
   fi
 
-  if [[ -f "$gif_out" ]] && command -v ffmpeg >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1; then
+  if [[ -f "$gif_out" && "$full_fidelity" == "1" ]]; then
+    command -v ffmpeg >/dev/null 2>&1 || return 1
+    echo "==> ffmpeg full-fidelity mp4 (2560x1600, 30 fps)"
+    ffmpeg -nostdin -hide_banner -loglevel error -y -i "$gif_out" \
+      -vf 'fps=30,scale=2560:1600:force_original_aspect_ratio=decrease,pad=2560:1600:(ow-iw)/2:(oh-ih)/2:color=0x0B0E14' \
+      -c:v libx264 -pix_fmt yuv420p -preset medium -crf 18 \
+      -movflags +faststart "$mp4_out" || return 1
+    echo "mp4: $mp4_out"
+  elif [[ -f "$gif_out" ]] && command -v ffmpeg >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1; then
     echo "==> ffmpeg mp4 via sampled frames (preview width ${preview_w})"
     frames="$(mktemp -d "${TMPDIR:-/tmp}/seed-frames.XXXXXX")"
     if python3 - "$gif_out" "$frames" "$preview_w" <<'PY'
