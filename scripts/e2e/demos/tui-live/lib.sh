@@ -1319,20 +1319,23 @@ trigger_submit_plan_hitl_review_and_synthesize() {
   local positioning_task_id="ph-acp-positioning-$$"
   local proof_task_id="ph-tui-proof-$$"
   local readiness_task_id="ph-launch-readiness-$$"
+  local handoff_task_id="ph-media-handoff-$$"
 
   start_fresh_session_detail
   sleep_ms 0.8
-  printf '+ Product Hunt audit: ask brain for three independent read-only tasks\n'
+  printf '+ Product Hunt audit: ask brain for four independent read-only tasks\n'
 
   type_slow "PRODUCT HUNT LIVE CAPTURE. "
   type_text "Audit docs/product_launch/media_pack in real spur. "
-  type_text "Call submit_plan with exactly THREE independent read-only tasks. "
+  type_text "Call submit_plan with exactly FOUR independent read-only tasks. "
   type_text "Task 1 id: ${positioning_task_id}. Worker: claude-code. effort: medium. deps: none. "
   type_text "Inspect the approved ACP category line vs docs/integration. Return exactly one line beginning PH POSITIONING FINDING:. Make no file changes. "
-  type_text "Task 2 id: ${proof_task_id}. Worker: gemini. effort: medium. deps: none. "
+  type_text "Task 2 id: ${proof_task_id}. Worker: grok. effort: medium. deps: none. "
   type_text "Inspect real TUI captures for one launch claim needing stronger proof. Return exactly one line beginning PH PROOF FINDING:. Make no file changes. "
   type_text "Task 3 id: ${readiness_task_id}. Worker: codex. effort: medium. deps: none. "
-  type_text "Inspect pacing, accessibility, and handoff. Return exactly one line beginning PH READINESS FINDING:. Make no file changes. "
+  type_text "Inspect pacing and accessibility. Return exactly one line beginning PH READINESS FINDING:. Make no file changes. "
+  type_text "Task 4 id: ${handoff_task_id}. Worker: opencode. effort: medium. deps: none. "
+  type_text "Inspect manifest locks, filenames, and Product Hunt delivery notes. Return exactly one line beginning PH HANDOFF FINDING:. Make no file changes. "
   type_text "After submit_plan succeeds, reply with plan_id only. "
   type_text "When workers finish, do not call review_task, retry_plan_task, or merge_plan. "
   type_text "Leave every completed task awaiting_review for the operator."
@@ -1342,12 +1345,14 @@ trigger_submit_plan_hitl_review_and_synthesize() {
   story_hard_proof "The prompt names the ACP positioning task" "$positioning_task_id" 2.5
   story_hard_proof "The prompt names the TUI proof task" "$proof_task_id" 2.5
   story_hard_proof "The prompt names the launch readiness task" "$readiness_task_id" 2.5
+  story_hard_proof "The prompt names the media handoff task" "$handoff_task_id" 2.5
   story_hard_proof "The brain accepts the Product Hunt audit turn" "THINK" 2.5
 
-  story_workers_panel_hard_proof "The session exposes exactly three campaign workers" "Workers (3)" 2.5
+  story_workers_panel_hard_proof "The session exposes exactly four campaign workers" "Workers (4)" 2.5
   story_workers_panel_hard_proof "The positioning task is routed to Claude Code" "claude-code" 2.5
-  story_workers_panel_hard_proof "The proof task is routed to Gemini" "gemini" 2.5
+  story_workers_panel_hard_proof "The proof task is routed to Grok" "grok" 2.5
   story_workers_panel_hard_proof "The readiness task is routed to Codex" "codex" 2.5
+  story_workers_panel_hard_proof "The handoff task is routed to OpenCode" "opencode" 2.5
   story_dwell 3.5
   press_key Alt+d
 
@@ -1396,9 +1401,18 @@ trigger_submit_plan_hitl_review_and_synthesize() {
   press_key Enter
   story_hard_proof "The readiness task records approval" "approved" 3.0
 
+  press_key j
+  story_hard_proof "The inspector advances to the handoff task" "$handoff_task_id" 2.5
+  story_hard_proof "The handoff result reaches operator review" "awaiting_review" 4.0
+  story_plan_inspector_result_hard_proof "The handoff result exposes its finding" "PH HANDOFF FINDING:" 3.5
+  press_key a
+  story_hard_proof "The operator selects approval for handoff" "Decision: Approve" 3.5
+  press_key Enter
+  story_hard_proof "The handoff task records approval" "approved" 3.0
+
   return_to_campaign_session_detail
   story_session_land "The originating Session Detail remains the operator home" 2.5
-  type_text "Synthesize approved evidence from ${positioning_task_id}, ${proof_task_id}, and ${readiness_task_id} in one concise launch-audit paragraph. "
+  type_text "Synthesize approved evidence from ${positioning_task_id}, ${proof_task_id}, ${readiness_task_id}, and ${handoff_task_id} in one concise launch-audit paragraph. "
   type_text "Begin the response with the words PH AUDIT SYNTHESIS, then a colon, one space, and the proof task id ${proof_task_id}. "
   type_text "Do not call tools or delegate."
   sleep_ms 0.5
