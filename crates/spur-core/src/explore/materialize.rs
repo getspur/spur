@@ -208,6 +208,9 @@ pub fn append_materialization_record(
         .create(true)
         .append(true)
         .open(path)?;
+    if !raw.is_empty() && !raw.ends_with('\n') {
+        writeln!(file)?;
+    }
     writeln!(file, "{line}")?;
     Ok(())
 }
@@ -290,6 +293,9 @@ pub(crate) fn legacy_materialization_hints(
         else {
             continue;
         };
+        if record.items.is_empty() {
+            continue;
+        }
         let needs_fresh_ids = item_ids.as_ref().is_none_or(|ids| {
             ids.iter()
                 .any(|item_id| counts.get(item_id).copied() != Some(1))
@@ -996,6 +1002,59 @@ mod tests {
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].delegation_id, "new");
         assert_eq!(records[0].items, vec!["shared-skill"]);
+    }
+
+    #[test]
+    fn hint_snapshot_preserves_empty_legacy_record_and_malformed_lines() {
+        let repo = tempfile::tempdir().unwrap();
+        let worktree = repo.path().join("worker");
+        let cache = repo.path().join(".spur/explore/cache");
+        std::fs::create_dir_all(&cache).unwrap();
+        let empty = MaterializationRecord {
+            recorded_at_epoch: 1,
+            delegation_id: "empty".into(),
+            agent: "codex".into(),
+            worktree: worktree.display().to_string(),
+            items: vec![],
+        };
+        let raw = format!(
+            "not-json-before\n{}\nnot-json-after\n",
+            serde_json::to_string(&empty).unwrap()
+        );
+        let path = cache.join("materializations.jsonl");
+        std::fs::write(&path, &raw).unwrap();
+
+        assert!(legacy_materialization_hints(repo.path(), &worktree).is_empty());
+        assert_eq!(std::fs::read_to_string(path).unwrap(), raw);
+    }
+
+    #[test]
+    fn append_separates_an_existing_record_without_final_newline() {
+        let repo = tempfile::tempdir().unwrap();
+        let cache = repo.path().join(".spur/explore/cache");
+        std::fs::create_dir_all(&cache).unwrap();
+        let first = MaterializationRecord {
+            recorded_at_epoch: 1,
+            delegation_id: "first".into(),
+            agent: "codex".into(),
+            worktree: "/worker".into(),
+            items: vec!["first-skill".into()],
+        };
+        let second = MaterializationRecord {
+            recorded_at_epoch: 2,
+            delegation_id: "second".into(),
+            agent: "codex".into(),
+            worktree: "/worker".into(),
+            items: vec!["second-skill".into()],
+        };
+        let path = cache.join("materializations.jsonl");
+        std::fs::write(&path, serde_json::to_string(&first).unwrap()).unwrap();
+
+        append_materialization_record(repo.path(), &second).unwrap();
+
+        let records = read_recent_materializations(repo.path(), 10);
+        assert_eq!(records, vec![second, first]);
+        assert_eq!(std::fs::read_to_string(path).unwrap().lines().count(), 2);
     }
 
     #[test]
