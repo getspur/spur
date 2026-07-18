@@ -377,12 +377,32 @@ fn legacy_hints_ready_to_retire(
     let mut ready = Vec::new();
     'hint: for hint in hints {
         for adapter in crate::skills::adapters::Adapter::all() {
-            if examined.contains(adapter) {
-                continue;
-            }
             let target = legacy_target(*adapter, launch_root, &hint.skill_id)?;
-            if path_exists_no_follow(&target)? {
-                continue 'hint;
+            match path_exists_no_follow(&target) {
+                Ok(true) if !examined.contains(adapter) => continue 'hint,
+                Ok(true) => {}
+                Ok(false) => {}
+                Err(error) => {
+                    tracing::warn!(
+                        path = %target.display(),
+                        error = %error,
+                        "legacy materialization target could not be inspected; preserving hint"
+                    );
+                    continue 'hint;
+                }
+            }
+            let adapter_projection_root = projection_root(launch_root, adapter.key());
+            match generation_reference_for_target(&adapter_projection_root, &target) {
+                Ok(Some(_)) => continue 'hint,
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::warn!(
+                        path = %target.display(),
+                        error = %error,
+                        "legacy materialization target could not be resolved; preserving hint"
+                    );
+                    continue 'hint;
+                }
             }
         }
         ready.push(hint.clone());
@@ -488,9 +508,11 @@ fn plan_reconciliation(
         .collect::<Vec<_>>();
     plan_legacy_pool_removals(
         request.clone(),
+        projection_root,
         &legacy_skill_ids,
         &mut processed,
         &mut operations,
+        &mut preserved_generations,
         summary,
     )?;
 
@@ -731,9 +753,11 @@ fn plan_stale_target(
 
 fn plan_legacy_pool_removals(
     request: ProjectionRequest<'_>,
+    projection_root: &Path,
     legacy_skill_ids: &[String],
     processed: &mut HashSet<String>,
     operations: &mut Vec<PlannedOperation>,
+    preserved_generations: &mut BTreeSet<String>,
     summary: &mut ProjectionSummary,
 ) -> Result<(), ReconcileFailure> {
     for skill_id in legacy_skill_ids {
@@ -762,17 +786,31 @@ fn plan_legacy_pool_removals(
                 operations.push(remove_operation(skill_id, &relative, prior_state, true));
             }
             crate::skills::installer::LegacyMarkerOwnership::UserEdited => {
+                retain_generation_reference_for_target(
+                    projection_root,
+                    &target,
+                    preserved_generations,
+                )
+                .map_err(|source| ReconcileFailure::for_skill(skill_id, source))?;
                 summary.skipped.push(ProjectionSkip {
                     skill_id: skill_id.clone(),
                     path: target,
                     reason: ProjectionSkipReason::UserEdited,
                 });
             }
-            _ => summary.skipped.push(ProjectionSkip {
-                skill_id: skill_id.clone(),
-                path: target,
-                reason: ProjectionSkipReason::UserOwned,
-            }),
+            _ => {
+                retain_generation_reference_for_target(
+                    projection_root,
+                    &target,
+                    preserved_generations,
+                )
+                .map_err(|source| ReconcileFailure::for_skill(skill_id, source))?;
+                summary.skipped.push(ProjectionSkip {
+                    skill_id: skill_id.clone(),
+                    path: target,
+                    reason: ProjectionSkipReason::UserOwned,
+                });
+            }
         }
     }
     Ok(())
@@ -1519,11 +1557,11 @@ fn preserved_generation_references(
         if managed.contains(relative.as_str()) {
             continue;
         }
-        if let Some(generation) =
-            generation_reference_for_target(projection_root, &launch_root.join(relative))?
-        {
-            retained.insert(generation);
-        }
+        retain_generation_reference_for_target(
+            projection_root,
+            &launch_root.join(relative),
+            &mut retained,
+        )?;
     }
     Ok(retained)
 }
@@ -1533,8 +1571,33 @@ fn retain_generation_reference_for_target(
     target: &Path,
     preserved: &mut BTreeSet<String>,
 ) -> anyhow::Result<()> {
-    if let Some(generation) = generation_reference_for_target(projection_root, target)? {
-        preserved.insert(generation);
+    match generation_reference_for_target(projection_root, target) {
+        Ok(Some(generation)) => {
+            preserved.insert(generation);
+        }
+        Ok(None) => {}
+        Err(error) => {
+            tracing::warn!(
+                path = %target.display(),
+                error = %error,
+                "preserved target could not be resolved; retaining all generations"
+            );
+            retain_all_generation_references(projection_root, preserved)?;
+        }
+    }
+    Ok(())
+}
+
+fn retain_all_generation_references(
+    projection_root: &Path,
+    preserved: &mut BTreeSet<String>,
+) -> anyhow::Result<()> {
+    let generations = projection_root.join("generations");
+    if !generations.is_dir() {
+        return Ok(());
+    }
+    for entry in sorted_entries(&generations)? {
+        preserved.insert(entry.file_name().to_string_lossy().into_owned());
     }
     Ok(())
 }
@@ -2544,6 +2607,87 @@ mod tests {
         assert_eq!(summary.skipped[0].reason, ProjectionSkipReason::UserOwned);
         assert!(target.exists());
         assert!(first.root.exists());
+        assert!(std::fs::canonicalize(&target)
+            .unwrap()
+            .starts_with(&first.root));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unrelated_self_loop_symlink_does_not_block_reconciliation() {
+        let fixture = ProjectionFixture::new(Adapter::Codex);
+        fixture.write_bundled_skill("managed", "both", "BODY");
+        let target_root = fixture.launch_root().join(".codex/skills");
+        std::fs::create_dir_all(&target_root).unwrap();
+        let unrelated = target_root.join("unrelated");
+        std::os::unix::fs::symlink("unrelated", &unrelated).unwrap();
+
+        let summary = reconcile_with_linker(fixture.worktrees(), fixture.request(), &NativeLinker)
+            .await
+            .unwrap();
+
+        assert_eq!(summary.linked.len(), 1);
+        assert_eq!(summary.linked[0], codex_target(&fixture, "managed"));
+        assert!(std::fs::symlink_metadata(&unrelated)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(
+            std::fs::read_link(unrelated).unwrap(),
+            Path::new("unrelated")
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn prefixless_user_symlink_keeps_its_referenced_generation_alive() {
+        let fixture = ProjectionFixture::new(Adapter::Codex);
+        fixture.write_pool_skill("legacy-link", "clean", "OLD");
+        let first = publish_generation(fixture.request(), &fixture.resolve().unwrap()).unwrap();
+        let target = legacy_target(Adapter::Codex, fixture.launch_root(), "legacy-link").unwrap();
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        NativeLinker
+            .symlink(
+                &relative_symlink_source(&first.root.join("skills/legacy-link"), &target).unwrap(),
+                &target,
+                TargetKind::Directory,
+            )
+            .unwrap();
+        append_materialization_record(
+            fixture.repo_root(),
+            &MaterializationRecord {
+                recorded_at_epoch: 1,
+                delegation_id: "legacy-link".into(),
+                agent: "codex".into(),
+                worktree: fixture.launch_root().display().to_string(),
+                items: vec!["legacy-link".into()],
+            },
+        )
+        .unwrap();
+        fixture.write_pool_skill("legacy-link", "clean", "NEW");
+
+        let summary = reconcile_with_linker(fixture.worktrees(), fixture.request(), &NativeLinker)
+            .await
+            .unwrap();
+
+        assert!(summary.skipped.iter().any(|skip| {
+            skip.skill_id == "legacy-link" && skip.reason == ProjectionSkipReason::UserOwned
+        }));
+        assert!(path_exists_no_follow(&target).unwrap());
+        assert!(first.root.exists());
+        let records = read_recent_materializations(fixture.repo_root(), 10);
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].items, vec!["legacy-link"]);
+
+        reconcile_with_linker(fixture.worktrees(), fixture.request(), &NativeLinker)
+            .await
+            .unwrap();
+
+        assert!(path_exists_no_follow(&target).unwrap());
+        assert!(first.root.exists());
+        let records = read_recent_materializations(fixture.repo_root(), 10);
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].items, vec!["legacy-link"]);
         assert!(std::fs::canonicalize(&target)
             .unwrap()
             .starts_with(&first.root));
