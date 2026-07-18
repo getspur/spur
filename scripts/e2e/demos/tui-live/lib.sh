@@ -157,6 +157,41 @@ story_hard_proof() {
   story_dwell "$dwell"
 }
 
+# Extract only the expanded Workers widget from the current terminal frame.
+# The top and bottom titles are rendered by workers_panel::render_focused.
+workers_panel_text() {
+  "$shell_use_bin" --session "$session_name" text | awk '
+    index($0, "Workers (") > 0 { in_workers = 1 }
+    in_workers { print }
+    in_workers && index($0, "Alt+D collapse") > 0 { exit }
+  '
+}
+
+# Worker routing is proof only when the anchor appears inside the visible
+# Workers widget. The transcript and composer deliberately remain out of scope.
+story_workers_panel_hard_proof() {
+  local claim="$1"
+  local anchor="$2"
+  local dwell="${3:-3.0}"
+  local wait_ms="${4:-$timeout_ms}"
+  local deadline=$((SECONDS + (wait_ms + 999) / 1000))
+  local panel=""
+
+  while (( SECONDS < deadline )); do
+    panel="$(workers_panel_text || true)"
+    if [[ "$panel" == *"$anchor"* ]]; then
+      printf '+ proof: %s [Workers panel anchor=%s]\n' "$claim" "$anchor"
+      story_dwell "$dwell"
+      return 0
+    fi
+    sleep_ms 0.2
+  done
+
+  printf 'fatal: Workers panel never exposed anchor %s within %sms\n' "$anchor" "$wait_ms" >&2
+  "$shell_use_bin" --session "$session_name" text --full >&2 || true
+  return 1
+}
+
 # Live projects legitimately differ. Optional history/state must never masquerade
 # as proof: label both the observed and absent paths, then continue safely.
 story_soft_proof() {
@@ -455,6 +490,23 @@ _live_complete_session_attach() {
     return 0
   fi
   return 1
+}
+
+# Begin a paid campaign with no transcript, worker, or composer history that
+# could satisfy current-run proof. There is intentionally no resume fallback.
+start_fresh_session_detail() {
+  open_sessions_picker
+  wait_text "Start new session"
+  press_key n
+  sleep_ms 0.8
+  if ! _live_wait_session_detail 15000; then
+    "$shell_use_bin" --session "$session_name" text --full >&2 || true
+    printf 'fatal: fresh Session Detail attach failed after Start new session\n' >&2
+    return 1
+  fi
+  expect_text "INSERT"
+  printf '+ proof: fresh Session Detail isolates the paid campaign\n'
+  story_dwell 2.5
 }
 
 resume_session_skip_held() {
@@ -1197,7 +1249,7 @@ trigger_submit_plan_hitl_review_and_synthesize() {
   local proof_task_id="ph-tui-proof-$$"
   local readiness_task_id="ph-launch-readiness-$$"
 
-  land_session_detail "Attach Session Detail for the Product Hunt audit" 2.5
+  start_fresh_session_detail
   sleep_ms 0.8
   printf '+ Product Hunt audit: ask brain for three independent read-only tasks\n'
 
@@ -1222,10 +1274,10 @@ trigger_submit_plan_hitl_review_and_synthesize() {
   story_hard_proof "The brain accepts the Product Hunt audit turn" "THINK" 2.5
 
   press_key Alt+d
-  story_hard_proof "The session exposes exactly three campaign workers" "Workers (3)" 2.5
-  story_hard_proof "The positioning task is routed to Claude Code" "claude-code" 2.5
-  story_hard_proof "The proof task is routed to Gemini" "gemini" 2.5
-  story_hard_proof "The readiness task is routed to Codex" "codex" 2.5
+  story_workers_panel_hard_proof "The session exposes exactly three campaign workers" "Workers (3)" 2.5
+  story_workers_panel_hard_proof "The positioning task is routed to Claude Code" "claude-code" 2.5
+  story_workers_panel_hard_proof "The proof task is routed to Gemini" "gemini" 2.5
+  story_workers_panel_hard_proof "The readiness task is routed to Codex" "codex" 2.5
   story_dwell 3.5
   press_key Alt+d
 
