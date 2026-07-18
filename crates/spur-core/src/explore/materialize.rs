@@ -188,6 +188,87 @@ pub fn read_recent_materializations(repo_root: &Path, limit: usize) -> Vec<Mater
     records
 }
 
+/// Skill IDs mentioned by legacy pool materialization metadata for one worktree.
+///
+/// These IDs are migration hints only. Callers must independently prove the
+/// exact on-disk target before adopting or removing it.
+pub(crate) fn legacy_materialization_skill_ids(repo_root: &Path, worktree: &Path) -> Vec<String> {
+    let path = repo_root.join(".spur/explore/cache/materializations.jsonl");
+    let Ok(raw) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let mut skill_ids = raw
+        .lines()
+        .filter_map(|line| serde_json::from_str::<MaterializationRecord>(line).ok())
+        .filter(|record| Path::new(&record.worktree) == worktree)
+        .flat_map(|record| record.items)
+        .collect::<Vec<_>>();
+    skill_ids.sort();
+    skill_ids.dedup();
+    skill_ids
+}
+
+/// Consume legacy materialization hints after one successful reconciliation.
+pub(crate) fn retire_legacy_materializations(
+    repo_root: &Path,
+    worktree: &Path,
+    skill_ids: &[String],
+) -> anyhow::Result<()> {
+    if skill_ids.is_empty() {
+        return Ok(());
+    }
+    let path = repo_root.join(".spur/explore/cache/materializations.jsonl");
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error).with_context(|| format!("read {}", path.display())),
+    };
+    let retired = skill_ids.iter().map(String::as_str).collect::<HashSet<_>>();
+    let mut output = Vec::new();
+    for line in raw.lines() {
+        let Ok(mut record) = serde_json::from_str::<MaterializationRecord>(line) else {
+            output.push(line.to_string());
+            continue;
+        };
+        if Path::new(&record.worktree) != worktree {
+            output.push(line.to_string());
+            continue;
+        }
+        record.items.retain(|item| !retired.contains(item.as_str()));
+        if !record.items.is_empty() {
+            output.push(
+                serde_json::to_string(&record)
+                    .context("serialize retired materialization record")?,
+            );
+        }
+    }
+
+    let parent = path
+        .parent()
+        .with_context(|| format!("{} has no parent", path.display()))?;
+    std::fs::create_dir_all(parent)
+        .with_context(|| format!("create materialization cache {}", parent.display()))?;
+    let mut temporary = tempfile::NamedTempFile::new_in(parent).with_context(|| {
+        format!(
+            "create temporary materialization cache in {}",
+            parent.display()
+        )
+    })?;
+    for line in output {
+        writeln!(temporary, "{line}")
+            .with_context(|| format!("write temporary materialization cache {}", path.display()))?;
+    }
+    temporary
+        .as_file()
+        .sync_all()
+        .with_context(|| format!("sync temporary materialization cache {}", path.display()))?;
+    temporary
+        .persist(&path)
+        .map_err(|error| error.error)
+        .with_context(|| format!("persist {}", path.display()))?;
+    Ok(())
+}
+
 fn should_materialize(item: &ManifestItem, requested_names: Option<&HashSet<&str>>) -> bool {
     if item.kind != ItemKind::Skill {
         return false;
