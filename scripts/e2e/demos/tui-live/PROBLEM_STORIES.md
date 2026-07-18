@@ -55,16 +55,18 @@ Session Detail compose → brain turn (YOU/THINK)
 | `SPUR_DEMO_ALLOW_PLAN_START=1` | Start/Resume on Plans |
 
 The higher-spend D4 branch is separate from the minimal one-task seed and
-remains opt-in. It submits four independent read-only tasks in the real `spur`
-project: ACP positioning to Claude Code, TUI proof to Grok, launch readiness to
-Codex, and media handoff to OpenCode. In Plan Inspector the operator approves
-positioning, rejects the Grok proof once for a missing exact source window,
-retries it with `SOURCE:`, `WINDOW:`, and `RECOMMENDATION:`, then approves the
-proof, readiness, and handoff. All four are approved before the correlated
-`PH AUDIT SYNTHESIS:` appears in the originating Session Detail. Missing any
-task, state, summary, decision, retry evidence, or synthesis marker fails the
-journey rather than softening the proof. Any worker transport fallback makes
-the capture non-promotable.
+remains opt-in.
+
+The opt-in Product Hunt capture submits four independent read-only tasks in the
+real spur project: ACP positioning (Claude Code), TUI proof (Grok), launch
+readiness (Codex), and media handoff (OpenCode). The Grok proof task is rejected
+once for a missing exact source window, retried with
+SOURCE/WINDOW/RECOMMENDATION requirements, and approved. All four findings must
+be approved before the correlated PH AUDIT SYNTHESIS appears in the originating
+Session Detail. Any worker transport fallback makes the capture non-promotable.
+
+Missing any task, state, summary, decision, retry evidence, or synthesis marker
+fails the journey rather than softening the proof.
 
 The capture wrapper writes the new stable stem
 `17-live-product-hunt-four-agent-loop`, requires the same explicit spend opt-in and
