@@ -201,45 +201,71 @@ assert_has "$root/tapes/13-problem-plan-loop-drive.tape" 'Type "l"' 'plan-loop t
 
 hitl_capture="$root/capture-live-hitl.sh"
 plan_loop="$root/journeys/problem-plan-loop-drive.sh"
-
-assert_matches "$lib" '(?m)^require_hitl_loop_opt_in\(\) \{$' \
-  'D4 defines its dedicated spend guard at top level'
-assert_matches "$lib" '(?m)^require_hitl_loop_opt_in\(\) \{[[:blank:]]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+if \[\[ "\$\{SPUR_DEMO_ALLOW_HITL_LOOP:-0\}" != "1" \]\]; then[[:blank:]]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+fi[[:blank:]]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+if \[\[ ! -d "\$project/\.beads" \]\]; then[[:blank:]]*\n(?:^[[:blank:]]+.*\n|^\n)*?beads-backed project[^\n]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+return 2[[:blank:]]*$' \
-  'D4 direct journey guard rejects a project without a beads backend before spend'
-assert_matches "$lib" '(?m)^trigger_submit_plan_hitl_review_and_synthesize\(\) \{[[:blank:]]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+require_hitl_loop_opt_in[[:blank:]]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+local seed_task_id="demo-hitl-\$\$"[[:blank:]]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+type_text "Task id: \$\{seed_task_id\}[^"\n]*"[[:blank:]]*$' \
-  'D4 helper invokes its guard before declaring and typing the correlation tag'
-assert_matches "$lib" '(?m)^trigger_submit_plan_hitl_review_and_synthesize\(\) \{[[:blank:]]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+press_key Alt\+p[[:blank:]]*\n^[[:blank:]]+story_hard_proof[[:blank:]]+\\[[:blank:]]*\n[[:blank:]]+"Plan Inspector is open on the selected task detail"[[:blank:]]+\\[[:blank:]]*\n[[:blank:]]+"Task detail"[^\n]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+story_hard_proof[^\n]*\n[[:blank:]]+"[^"\n]*"[^\n]*\n[[:blank:]]+"\$seed_task_id"[^\n]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+story_hard_proof[^\n]*\n[[:blank:]]+"[^"\n]*"[^\n]*\n[[:blank:]]+"awaiting_review"[^\n]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+story_hard_proof[^\n]*\n[[:blank:]]+"[^"\n]*"[^\n]*\n[[:blank:]]+"summary: D4 FINDING:"[^\n]*$' \
-  'D4 proves the Plan Inspector task-detail view before transcript-derived review markers'
-assert_matches "$lib" '(?m)^trigger_submit_plan_hitl_review_and_synthesize\(\) \{[[:blank:]]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+press_key Alt\+p[[:blank:]]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+story_hard_proof[^\n]*\n[[:blank:]]+"[^"\n]*"[^\n]*\n[[:blank:]]+"\$seed_task_id"[^\n]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+story_hard_proof[^\n]*\n[[:blank:]]+"[^"\n]*"[^\n]*\n[[:blank:]]+"awaiting_review"[^\n]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+story_hard_proof[^\n]*\n[[:blank:]]+"[^"\n]*"[^\n]*\n[[:blank:]]+"summary: D4 FINDING:"[^\n]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+press_key d[[:blank:]]*$' \
-  'D4 first review hard-correlates task, state, and worker finding before reject'
-assert_matches "$lib" '(?m)^trigger_submit_plan_hitl_review_and_synthesize\(\) \{[[:blank:]]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+type_text "[^"\n]*D4 FINDING:[^"\n]*Make no file changes\.[^"\n]*"[[:blank:]]*$' \
-  'D4 initial FINDING prompt is read-only inside the HITL helper'
-assert_matches "$lib" '(?m)^trigger_submit_plan_hitl_review_and_synthesize\(\) \{[[:blank:]]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+"Retry Task"[^\n]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+type_text "[^"\n]*Make no file changes\.[^"\n]*"[[:blank:]]*$' \
-  'D4 post-Retry Task prompt is read-only inside the HITL helper'
-assert_matches "$lib" '(?m)^trigger_submit_plan_hitl_review_and_synthesize\(\) \{[[:blank:]]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+story_hard_proof[^\n]*\n[[:blank:]]+"[^"\n]*"[^\n]*\n[[:blank:]]+"Decision: Reject"[^\n]*$' \
-  'D4 captures Reject as a hard proof'
-assert_matches "$lib" '(?m)^trigger_submit_plan_hitl_review_and_synthesize\(\) \{[[:blank:]]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+story_hard_proof[^\n]*\n[[:blank:]]+"[^"\n]*"[^\n]*\n[[:blank:]]+"Retry Task"[^\n]*$' \
-  'D4 captures Retry Task as a hard proof'
-assert_matches "$lib" '(?m)^trigger_submit_plan_hitl_review_and_synthesize\(\) \{[[:blank:]]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+type_slow "[^"\n]*SOURCE: <exact path>[^"\n]*"[[:blank:]]*$' \
-  'D4 retry types an exact SOURCE path requirement'
-assert_matches "$lib" '(?m)^trigger_submit_plan_hitl_review_and_synthesize\(\) \{[[:blank:]]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+type_text "RECOMMENDATION: <one sentence>[^"\n]*"[[:blank:]]*$' \
-  'D4 retry types a RECOMMENDATION requirement'
-assert_matches "$lib" '(?m)^trigger_submit_plan_hitl_review_and_synthesize\(\) \{[[:blank:]]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+story_hard_proof[^\n]*\n[[:blank:]]+"[^"\n]*"[^\n]*\n[[:blank:]]+"Decision: Approve"[^\n]*$' \
-  'D4 captures Approve as a hard proof'
-assert_matches "$lib" '(?m)^trigger_submit_plan_hitl_review_and_synthesize\(\) \{[[:blank:]]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+"Decision: Approve"[^\n]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+return_to_session_detail[[:blank:]]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+type_slow "D4 HITL COMPLETE\. Synthesize[^"\n]*"[[:blank:]]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+type_text "Do not call tools or delegate\."[[:blank:]]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+story_hard_proof[^\n]*\n[[:blank:]]+"[^"\n]*"[^\n]*\n[[:blank:]]+"D4 SYNTHESIS:"[^\n]*$' \
-  'D4 synthesis follows approval and session return without redelegating'
-assert_matches "$lib" '(?m)^trigger_submit_plan_hitl_review_and_synthesize\(\) \{[[:blank:]]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+type_text "Do not call tools or delegate\."[[:blank:]]*$' \
-  'D4 synthesis types its explicit no-tools instruction inside the helper'
-assert_matches "$lib" '(?m)^trigger_submit_plan_hitl_review_and_synthesize\(\) \{[[:blank:]]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+press_key d[[:blank:]]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+"Decision: Reject"[^\n]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+press_key R[[:blank:]]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+"Retry Task"[^\n]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+press_key a[[:blank:]]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+"Decision: Approve"[^\n]*$' \
-  'D4 HITL helper performs Reject then Retry then Approve in order'
-assert_matches "$lib" '(?m)^trigger_submit_plan_hitl_review_and_synthesize\(\) \{[[:blank:]]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+"SOURCE:"[^\n]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+press_key Enter[[:blank:]]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+story_hard_proof[^\n]*\n[[:blank:]]+"[^"\n]*"[^\n]*\n[[:blank:]]+"awaiting_review"[^\n]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+story_hard_proof[^\n]*\n[[:blank:]]+"[^"\n]*"[^\n]*\n[[:blank:]]+"\$seed_task_id"[^\n]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+story_hard_proof[^\n]*\n[[:blank:]]+"[^"\n]*"[^\n]*\n[[:blank:]]+"summary: SOURCE:"[^\n]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+story_hard_proof[^\n]*\n[[:blank:]]+"[^"\n]*"[^\n]*\n[[:blank:]]+"RECOMMENDATION:"[^\n]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+press_key a[[:blank:]]*$' \
-  'D4 retry hard-correlates state, task, source, and recommendation before approve'
-assert_matches "$plan_loop" '(?m)^if \[\[ "\$\{SPUR_DEMO_ALLOW_HITL_LOOP:-0\}" == "1" \]\]; then[[:blank:]]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+trigger_submit_plan_hitl_review_and_synthesize[[:blank:]]*\n(?:^[[:blank:]]+.*\n|^\n)*?^elif \[\[ "\$\{SPUR_DEMO_ALLOW_PLAN_LOOP:-0\}" == "1" \]\]; then[[:blank:]]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+trigger_submit_plan_one_task_and_observe[[:blank:]]*$' \
-  'D4 executable branch precedes the existing minimal plan-loop branch'
-assert_matches "$hitl_capture" '(?m)^export SPUR_DEMO_ALLOW_HITL_LOOP=1[[:blank:]]*\n(?:^.*\n)*?^export SPUR_DEMO_ALLOW_PLAN_LOOP=0[[:blank:]]*\n(?:^.*\n)*?^exec "\$ROOT/capture-live-seed\.sh"[[:blank:]]*$' \
-  'D4 wrapper enables HITL, disables the minimal loop, then executes capture'
-assert_matches "$hitl_capture" '(?m)^export SPUR_DEMO_CAPTURE_STEM_PREFIX=15-live-hitl-agent-loop[[:space:]]*$' \
-  'D4 capture wrapper exports a distinct stable output stem'
+capture_seed="$root/capture-live-seed.sh"
+assert_matches "$lib" '(?m)^require_hitl_loop_opt_in\(\) \{[[:blank:]]*\n(?:^[[:blank:]]+local [^\n]*\n)*^[[:blank:]]+if \[\[ "\$\{SPUR_DEMO_ALLOW_HITL_LOOP:-0\}" != "1" \]\]; then[[:blank:]]*$' \
+  'PH audit spend guard checks opt-in before any non-local action'
+assert_matches "$lib" '(?m)^require_hitl_loop_opt_in\(\) \{[[:blank:]]*\n(?:^[[:blank:]]+local [^\n]*\n)*^[[:blank:]]+if \[\[ "\$\{SPUR_DEMO_ALLOW_HITL_LOOP:-0\}" != "1" \]\]; then[[:blank:]]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+return 2[[:blank:]]*\n^[[:blank:]]+fi[[:blank:]]*\n(?:^[[:blank:]]*#[^\n]*\n|^[[:blank:]]*\n)*^[[:blank:]]+if \[\[ ! -d "\$project/\.beads" \]\]; then[[:blank:]]*$' \
+  'PH audit opt-out returns 2 then hands directly to the beads preflight'
+assert_matches "$lib" '(?m)^require_hitl_loop_opt_in\(\) \{[[:blank:]]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+if \[\[ ! -d "\$project/\.beads" \]\]; then[[:blank:]]*\n(?:^[[:blank:]]+.*\n|^\n)*?^beads-backed project[^\n]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+return 2[[:blank:]]*\n^[[:blank:]]+fi[[:blank:]]*\n^\}[[:blank:]]*$' \
+  'PH audit missing-beads preflight emits its error and returns 2'
+assert_matches "$lib" '(?m)^trigger_submit_plan_hitl_review_and_synthesize\(\) \{[[:blank:]]*\n^[[:blank:]]+require_hitl_loop_opt_in[[:blank:]]*\n^[[:blank:]]+local positioning_task_id="ph-acp-positioning-\$\$"[[:blank:]]*\n^[[:blank:]]+local proof_task_id="ph-tui-proof-\$\$"[[:blank:]]*\n^[[:blank:]]+local readiness_task_id="ph-launch-readiness-\$\$"[[:blank:]]*$' \
+  'PH audit campaign guard is the first action before exact task ids'
+assert_matches "$lib" '(?m)^land_plan_inspector_for_task\(\) \{[[:blank:]]*\n^[[:blank:]]+local task_id="\$1"[[:blank:]]*\n^[[:blank:]]+local timeout_s="\$\{2:-180\}"[[:blank:]]*\n^[[:blank:]]+local deadline=\$\(\(SECONDS \+ timeout_s\)\)[[:blank:]]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+while \(\( SECONDS < deadline \)\); do[[:blank:]]*$' \
+  'PH audit Plan Inspector landing loop has a caller-bounded deadline'
+assert_matches "$lib" '(?m)^land_plan_inspector_for_task\(\) \{[[:blank:]]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+while \(\( SECONDS < deadline \)\); do[[:blank:]]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+press_key Alt\+p[[:blank:]]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+if soft_has_text "Task detail"[^\n]*&& soft_has_text "\$task_id"[^\n]*; then[[:blank:]]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+return 0[[:blank:]]*$' \
+  'PH audit Plan Inspector loop pins both task detail and requested task id'
+assert_matches "$lib" '(?m)^land_plan_inspector_for_task\(\) \{[[:blank:]]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+done[[:blank:]]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+printf [^\n]*fatal: Plan Inspector never pinned[^\n]*\n^[[:blank:]]+return [1-9][0-9]*[[:blank:]]*\n^\}[[:blank:]]*$' \
+  'PH audit Plan Inspector timeout is fatal and nonzero'
+assert_has "$lib" 'Call submit_plan with exactly THREE independent read-only tasks.' \
+  'PH audit requests a populated three-task plan'
+assert_count_at_least "$lib" 'effort: medium.' 3 \
+  'PH audit requests visible resolved effort for every worker'
+assert_matches "$lib" '(?m)^trigger_submit_plan_hitl_review_and_synthesize\(\) \{[[:blank:]]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+type_text "Task 1 id: \$\{positioning_task_id\}\. Worker: claude-code\. effort: medium\.[^"\n]*"[[:blank:]]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+type_text "[^"\n]*PH POSITIONING FINDING:[^"\n]*Make no file changes\.[^"\n]*"[[:blank:]]*\n^[[:blank:]]+type_text "Task 2 id: \$\{proof_task_id\}[^"\n]*"[[:blank:]]*$' \
+  'PH audit positioning prompt is read-only and precedes proof routing'
+assert_matches "$lib" '(?m)^trigger_submit_plan_hitl_review_and_synthesize\(\) \{[[:blank:]]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+type_text "Task 2 id: \$\{proof_task_id\}\. Worker: gemini\. effort: medium\.[^"\n]*"[[:blank:]]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+type_text "[^"\n]*PH PROOF FINDING:[^"\n]*Make no file changes\.[^"\n]*"[[:blank:]]*\n^[[:blank:]]+type_text "Task 3 id: \$\{readiness_task_id\}[^"\n]*"[[:blank:]]*$' \
+  'PH audit proof prompt is read-only and precedes readiness routing'
+assert_matches "$lib" '(?m)^trigger_submit_plan_hitl_review_and_synthesize\(\) \{[[:blank:]]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+type_text "Task 3 id: \$\{readiness_task_id\}\. Worker: codex\. effort: medium\.[^"\n]*"[[:blank:]]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+type_text "[^"\n]*PH READINESS FINDING:[^"\n]*Make no file changes\.[^"\n]*"[[:blank:]]*$' \
+  'PH audit readiness prompt is read-only with explicit routing and effort'
+assert_matches "$lib" '(?m)^trigger_submit_plan_hitl_review_and_synthesize\(\) \{[[:blank:]]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+type_text "Leave every completed task awaiting_review for the operator\."[[:blank:]]*\n(?:^[[:blank:]]+sleep_ms[^\n]*\n)?^[[:blank:]]+press_key Enter[[:blank:]]*$' \
+  'PH audit submits the operator review hold with the campaign prompt'
+assert_matches "$lib" '(?m)^trigger_submit_plan_hitl_review_and_synthesize\(\) \{[[:blank:]]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+land_plan_inspector_for_task "\$positioning_task_id"[^\n]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+story_hard_proof[^\n]*"awaiting_review"[^\n]*\n^[[:blank:]]+story_hard_proof[^\n]*"summary: PH POSITIONING FINDING:"[^\n]*\n^[[:blank:]]+press_key a[[:blank:]]*\n^[[:blank:]]+story_hard_proof[^\n]*"Decision: Approve"[^\n]*\n^[[:blank:]]+press_key Enter[[:blank:]]*\n^[[:blank:]]+story_hard_proof[^\n]*"approved"[^\n]*$' \
+  'PH audit correlates positioning review through confirmed approval'
+assert_matches "$lib" '(?m)^trigger_submit_plan_hitl_review_and_synthesize\(\) \{[[:blank:]]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+press_key j[[:blank:]]*\n^[[:blank:]]+story_hard_proof[^\n]*"\$proof_task_id"[^\n]*\n^[[:blank:]]+story_hard_proof[^\n]*"awaiting_review"[^\n]*\n^[[:blank:]]+story_hard_proof[^\n]*"summary: PH PROOF FINDING:"[^\n]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+press_key d[[:blank:]]*\n^[[:blank:]]+story_hard_proof[^\n]*"Decision: Reject"[^\n]*\n^[[:blank:]]+press_key Enter[[:blank:]]*\n^[[:blank:]]+story_hard_proof[^\n]*"rejected"[^\n]*$' \
+  'PH audit correlates proof review through confirmed rejection'
+assert_matches "$lib" '(?m)^trigger_submit_plan_hitl_review_and_synthesize\(\) \{[[:blank:]]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+press_key R[[:blank:]]*\n^[[:blank:]]+story_hard_proof[^\n]*"Retry Task"[^\n]*\n^[[:blank:]]+type_slow "READ ONLY\.[^"\n]*"[[:blank:]]*\n^[[:blank:]]+type_text "SOURCE: <exact path>; WINDOW: <exact seconds or line range>;[^"\n]*"[[:blank:]]*\n^[[:blank:]]+type_text "RECOMMENDATION: <one sentence>\. Make no file changes\."[[:blank:]]*\n(?:^[[:blank:]]+story_hard_proof[^\n]*"(?:SOURCE:|WINDOW:)"[^\n]*\n){2}^[[:blank:]]+press_key Enter[[:blank:]]*$' \
+  'PH audit retry submits read-only source window and recommendation requirements'
+assert_matches "$lib" '(?m)^trigger_submit_plan_hitl_review_and_synthesize\(\) \{[[:blank:]]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+press_key R[[:blank:]]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+press_key Enter[[:blank:]]*\n(?:^\n)*^[[:blank:]]+story_hard_proof[^\n]*"awaiting_review"[^\n]*\n^[[:blank:]]+story_hard_proof[^\n]*"\$proof_task_id"[^\n]*\n^[[:blank:]]+story_hard_proof[^\n]*"summary: SOURCE:"[^\n]*\n^[[:blank:]]+story_hard_proof[^\n]*"WINDOW:"[^\n]*\n^[[:blank:]]+story_hard_proof[^\n]*"RECOMMENDATION:"[^\n]*$' \
+  'PH audit retry remains on proof task and exposes all evidence markers'
+assert_matches "$lib" '(?m)^trigger_submit_plan_hitl_review_and_synthesize\(\) \{[[:blank:]]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+story_hard_proof[^\n]*"RECOMMENDATION:"[^\n]*\n^[[:blank:]]+press_key a[[:blank:]]*\n^[[:blank:]]+story_hard_proof[^\n]*"Decision: Approve"[^\n]*\n^[[:blank:]]+press_key Enter[[:blank:]]*\n^[[:blank:]]+story_hard_proof[^\n]*"approved"[^\n]*$' \
+  'PH audit retry approval is explicitly confirmed'
+assert_matches "$lib" '(?m)^trigger_submit_plan_hitl_review_and_synthesize\(\) \{[[:blank:]]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+press_key j[[:blank:]]*\n^[[:blank:]]+story_hard_proof[^\n]*"\$readiness_task_id"[^\n]*\n^[[:blank:]]+story_hard_proof[^\n]*"awaiting_review"[^\n]*\n^[[:blank:]]+story_hard_proof[^\n]*"summary: PH READINESS FINDING:"[^\n]*\n^[[:blank:]]+press_key a[[:blank:]]*\n^[[:blank:]]+story_hard_proof[^\n]*"Decision: Approve"[^\n]*\n^[[:blank:]]+press_key Enter[[:blank:]]*\n^[[:blank:]]+story_hard_proof[^\n]*"approved"[^\n]*$' \
+  'PH audit correlates readiness review through confirmed approval'
+assert_matches "$lib" '(?m)^trigger_submit_plan_hitl_review_and_synthesize\(\) \{[[:blank:]]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+return_to_session_detail[[:blank:]]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+type_text "[^"\n]*PH AUDIT SYNTHESIS:[^"\n]*"[[:blank:]]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+press_key Enter[[:blank:]]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+story_hard_proof(?:[^\n]*"PH AUDIT SYNTHESIS:"[^\n]*|[^\n]*\n^[[:blank:]]+"PH AUDIT SYNTHESIS:"[^\n]*)$' \
+  'PH audit synthesis returns home and requires visible hard proof output'
+assert_matches "$lib" '(?m)^trigger_submit_plan_hitl_review_and_synthesize\(\) \{[[:blank:]]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+land_plan_inspector_for_task "\$positioning_task_id"[^\n]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+[^\n]*"summary: PH POSITIONING FINDING:"[^\n]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+press_key a[[:blank:]]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+[^\n]*"Decision: Approve"[^\n]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+[^\n]*"summary: PH PROOF FINDING:"[^\n]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+press_key d[[:blank:]]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+[^\n]*"Decision: Reject"[^\n]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+press_key R[[:blank:]]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+[^\n]*"summary: SOURCE:"[^\n]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+press_key a[[:blank:]]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+[^\n]*"Decision: Approve"[^\n]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+[^\n]*"\$readiness_task_id"[^\n]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+press_key a[[:blank:]]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+[^\n]*"Decision: Approve"[^\n]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+return_to_session_detail[[:blank:]]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+story_hard_proof(?:[^\n]*"PH AUDIT SYNTHESIS:"[^\n]*|[^\n]*\n^[[:blank:]]+"PH AUDIT SYNTHESIS:"[^\n]*)$' \
+  'PH audit campaign order is positioning approve, proof retry, readiness approve, then synthesis'
+assert_has "$hitl_capture" 'SPUR_DEMO_CAPTURE_STEM_PREFIX=16-live-product-hunt-audit-loop' \
+  'PH capture wrapper preserves the D4 stem by using a new versioned stem'
+assert_has "$hitl_capture" 'SPUR_CAPTURE_FULL_FIDELITY=1' \
+  'PH capture requests the full-duration 2560x1600 encode path'
+assert_has "$hitl_capture" 'SPUR_AGG_IDLE_LIMIT="${SPUR_AGG_IDLE_LIMIT:-6.0}"' \
+  'PH capture preserves proof dwells instead of truncating them to 1.5 seconds'
+assert_has "$capture_seed" 'local full_fidelity="${SPUR_CAPTURE_FULL_FIDELITY:-0}"' \
+  'capture seed keeps full-fidelity encoding opt-in'
+assert_matches "$capture_seed" '(?m)^[[:blank:]]*if \[\[ -f "\$gif_out" && "\$full_fidelity" == "1" \]\]; then[[:blank:]]*\n^[[:blank:]]+command -v ffmpeg[^\n]*\|\| return 1[[:blank:]]*$' \
+  'full-fidelity encode is an active opt-in branch with ffmpeg preflight'
+assert_matches "$capture_seed" '(?m)^[[:blank:]]*if \[\[ -f "\$gif_out" && "\$full_fidelity" == "1" \]\]; then[[:blank:]]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+ffmpeg [^\n]*-i "\$gif_out"[^\n]*\n^[[:blank:]]+-vf '\''fps=30,scale=2560:1600:force_original_aspect_ratio=decrease,pad=2560:1600:[^'\'']*'\''[^\n]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]+-movflags [^\n]*"\$mp4_out" \|\| return 1[[:blank:]]*$' \
+  'full-fidelity branch directly encodes complete GIF at 30 fps and 2560x1600'
+assert_matches "$capture_seed" '(?m)^[[:blank:]]*if \[\[ -f "\$gif_out" && "\$full_fidelity" == "1" \]\]; then[[:blank:]]*\n(?:^[[:blank:]]+.*\n|^\n)*?^[[:blank:]]*elif \[\[ -f "\$gif_out" \]\] && command -v ffmpeg[^\n]*&& command -v python3[^\n]*; then[[:blank:]]*$' \
+  'full-fidelity branch falls through to sampled preview only via elif'
+assert_lacks <(awk '/if \[\[ -f "\$gif_out" && "\$full_fidelity" == "1" \]\]; then/ { in_full=1 } in_full && /elif \[\[ -f "\$gif_out" \]\]/ { exit } in_full { print }' "$capture_seed") 'python3' \
+  'full-fidelity branch never invokes the Python sampler'
+assert_lacks <(awk '/if \[\[ -f "\$gif_out" && "\$full_fidelity" == "1" \]\]; then/ { in_full=1 } in_full && /elif \[\[ -f "\$gif_out" \]\]/ { exit } in_full { print }' "$capture_seed") 'n // 120' \
+  'full-fidelity branch never uses n // 120 frame sampling'
+assert_matches "$capture_seed" '(?m)^[[:blank:]]*elif \[\[ -f "\$gif_out" \]\] && command -v ffmpeg[^\n]*&& command -v python3[^\n]*; then[[:blank:]]*\n^[[:blank:]]+echo "==> ffmpeg mp4 via sampled frames[^\n]*\n(?:^.*\n)*?^step = max\(1, n // 120\)[[:blank:]]*$' \
+  'default path preserves the existing sampled-preview encoder'
+assert_has "$plan_loop" 'trigger_submit_plan_hitl_review_and_synthesize' \
+  'PH journey still invokes the guarded campaign helper'
 assert_matches "$root/capture-live-seed.sh" '(?m)^export SPUR_DEMO_CAPTURE_STEM_PREFIX="\$\{SPUR_DEMO_CAPTURE_STEM_PREFIX:-14-live-plan-loop-seed\}"[[:blank:]]*\n(?:^.*\n)*?^stem_prefix="\$SPUR_DEMO_CAPTURE_STEM_PREFIX"[[:blank:]]*$' \
   'D4 shared capture derives its output stem from the explicit override'
 assert_matches "$root/capture-live-seed.sh" '(?m)^if \[\[ "\$\{SPUR_DEMO_ALLOW_HITL_LOOP:-0\}" != "1" \]\]; then[[:blank:]]*\n(?:^[[:blank:]]+.*\n)*?^fi[[:blank:]]*\n^export SPUR_DEMO_ALLOW_PLAN_LOOP="\$\{SPUR_DEMO_ALLOW_PLAN_LOOP:-0\}"[[:blank:]]*$' \
