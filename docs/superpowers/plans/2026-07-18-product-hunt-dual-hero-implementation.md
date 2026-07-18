@@ -349,10 +349,10 @@ Call `inspect_media` with `maxFrames=8` for these exact windows:
 | Media ref | Start | End | Required visible evidence |
 |---|---:|---:|---|
 | `791B452C` | 11.0 | 18.0 | Session Detail operator surface |
-| `14D82963` | 22.0 | 30.0 | Worker list and state |
-| `82D9D60A` | 12.0 | 19.0 | Plans / explicit empty state |
+| `14D82963` | 22.7 | 25.5667 | Worker list and state |
+| `82D9D60A` | 12.0 | 16.6333 | Plans / explicit empty state |
 | `63605F31` | 49.35 | 51.35 | Agent, model, and effort controls |
-| `4B29113A` | 5.2 | 9.2 | Resumed-from-prior-conversation marker |
+| `4B29113A` | 6.4667 | 9.2 | Resumed-from-prior-conversation marker |
 
 Fail closed if the required evidence is not visible throughout the candidate window; do not substitute the D4 diagnostic capture.
 
@@ -376,15 +376,15 @@ Use `add_clips` with the existing matte and reviewed media refs:
 
 | Timeline frames | Media ref | Source seconds |
 |---|---|---|
-| 0–90 | `4387A028` | still via `endFrame=90` |
-| 90–300 | `791B452C` | 11.0–18.0 |
-| 300–540 | `14D82963` | 22.0–30.0 |
-| 540–750 | `82D9D60A` | 12.0–19.0 |
-| 750–990 | `63605F31` | 49.35–51.35, then 0.25× speed |
-| 990–1200 | `4B29113A` | 5.2–9.2, then 4/7× speed |
-| 1200–1350 | `4387A028` | still via `endFrame=1350` |
+| 0–234 | `4387A028` | still via `endFrame=234` |
+| 234–486 | `791B452C` | 11.0–18.0, then 5/6× speed |
+| 486–572 | `14D82963` | 22.7–25.5667 |
+| 572–711 | `82D9D60A` | 12.0–16.6333 |
+| 711–832 | `63605F31` | 49.35–51.35, then 60/121× speed |
+| 832–950 | `4B29113A` | 6.4667–9.2, then 41/59× speed |
+| 950–1350 | `4387A028` | still via `endFrame=1350` |
 
-Omit `trackIndex` on every entry so Palmier creates one shared picture track. After placement, call `set_clip_properties` on the routing clip with `speed=0.25` and on the resume clip with `speed=0.5714285714`; each timing change expands the inspected real-source moment to its locked beat length without synthesizing or repeating UI. The resulting picture duration must be exactly 1,350 frames.
+Omit `trackIndex` on every entry so Palmier creates one shared picture track. After placement, call `set_clip_properties` on Session with `speed=0.8333333333`, Routing with `speed=0.4958677686`, and Resume with `speed=0.6949152542`; each timing change expands the inspected real-source moment to its narration-aligned beat without synthesizing or repeating UI. These boundaries follow the caption sentence ranges: problem/title 0–234, harness + Session 234–486, Workers 486–572, Plan 572–711, Routing 711–832, Resume 832–950, and closing/CTA 950–1350. The resulting picture duration must be exactly 1,350 frames.
 
 - [ ] **Step 6: add progress overlays and approved text**
 
@@ -392,23 +392,23 @@ Add the five overlay images on one shared top video track:
 
 | Frames | Plate |
 |---|---|
-| 90–300 | `progress-1.png` |
-| 300–540 | `progress-2.png` |
-| 540–750 | `progress-3.png` |
-| 750–990 | `progress-4.png` |
-| 990–1200 | `progress-5.png` |
+| 234–486 | `progress-1.png` |
+| 486–572 | `progress-2.png` |
+| 572–711 | `progress-3.png` |
+| 711–832 | `progress-4.png` |
+| 832–950 | `progress-5.png` |
 
 Add one top text track with these exact entries and no animation:
 
 | Frames | Content |
 |---|---|
-| 0–90 | `SPUR\nONE DURABLE HARNESS FOR CODING AGENTS` |
-| 90–300 | `01 / SESSION\nONE OPERATOR HOME` |
-| 300–540 | `02 / WORKERS\nSTATE STAYS VISIBLE` |
-| 540–750 | `03 / PLAN\nEMPTY MEANS EMPTY` |
-| 750–990 | `04 / ROUTING\nAGENT · MODEL · EFFORT` |
-| 990–1200 | `05 / RESUME\nCONTEXT SURVIVES` |
-| 1200–1350 | `SPUR\nVISIBLE · ISOLATED · RECOVERABLE\nINSTALL COMMUNITY FREE` |
+| 0–234 | `SPUR\nONE DURABLE HARNESS FOR CODING AGENTS` |
+| 234–486 | `01 / SESSION\nONE OPERATOR HOME` |
+| 486–572 | `02 / WORKERS\nSTATE STAYS VISIBLE` |
+| 572–711 | `03 / PLAN\nEMPTY MEANS EMPTY` |
+| 711–832 | `04 / ROUTING\nAGENT · MODEL · EFFORT` |
+| 832–950 | `05 / RESUME\nCONTEXT SURVIVES` |
+| 950–1350 | `SPUR\nVISIBLE · ISOLATED · RECOVERABLE\nINSTALL COMMUNITY FREE` |
 
 Title and CTA use centered 76 px bold ivory text with 0.06 tracking and `centerX=0.5`, `centerY=0.5`, `width=0.78`, `height=0.38`. Proof cues use the locked upper-left cue style except `05 / RESUME`, which uses `centerX=0.75` and right alignment to preserve the captured resume marker.
 
@@ -432,21 +432,21 @@ Position rows are:
 | Routing | `[-0.044,-0.050]` |
 | Resume | `[0,0]` |
 
-Use rows `[[0,0,0,"hold"],[30,0,0,"smooth"],[LAST,x,y,"smooth"]]`, where `LAST` is clip duration minus one: 209, 239, 209, 239, 209 respectively. The Resume push ends at 1.06× with its `[0,0]` top-left anchor so the captured resume marker remains fully visible; the other clips end at 1.08×. Inspect after keyframing; if any other proof text becomes clipped, reduce that clip's final scale to 1.06 rather than moving beyond the safe canvas.
+Use rows `[[0,0,0,"hold"],[30,0,0,"smooth"],[LAST,x,y,"smooth"]]`, where `LAST` is clip duration minus one: 251, 85, 138, 120, 117 respectively. The Resume push ends at 1.06× with its `[0,0]` top-left anchor so the captured resume marker remains fully visible; the other clips end at 1.08×. Inspect after keyframing; if any other proof text becomes clipped, reduce that clip's final scale to 1.06 rather than moving beyond the safe canvas.
 
 - [ ] **Step 8: add audio, captions, and music ducking**
 
 Add `narration-45s.wav` at frame 0 and `music-45s.wav` at frame 0 on separate audio tracks. Set narration volume to 1.0. Set music volume keyframes, clip-relative, to:
 
 ```json
-[[0,0.05,"linear"],[60,0.10,"smooth"],[120,0.14,"smooth"],[1170,0.14,"hold"],[1200,0.06,"smooth"],[1320,0.04,"smooth"],[1349,0.0,"smooth"]]
+[[0,0.05,"linear"],[60,0.10,"smooth"],[120,0.14,"smooth"],[900,0.14,"hold"],[950,0.10,"smooth"],[1098,0.06,"smooth"],[1320,0.04,"smooth"],[1349,0.0,"smooth"]]
 ```
 
 Call `add_captions` with language `en`, `maxWords=7`, animation `off`, `centerX=0.5`, `centerY=0.84`, and the locked caption style. Read the caption clips from `get_timeline`; compare their concatenated words against the exact 45-second script, then correct every transcription mismatch with `update_text`. The corrected concatenation must equal the approved script ignoring punctuation and case.
 
 - [ ] **Step 9: inspect every beat before export**
 
-Call `inspect_timeline` for frames 45, 105, 330, 570, 780, 1020, and 1260. Then inspect 12 evenly sampled frames across 0–1350. Confirm cue placement, rail state, caption legibility, status-bar visibility, and proof evidence. Do not export until the composited timeline is exactly 1,350 frames.
+Call `inspect_timeline` for frames 117, 360, 529, 641, 771, 891, and 1120. Then inspect 12 evenly sampled frames across 0–1350. Confirm narration-to-proof alignment, cue placement, rail state, caption legibility, status-bar visibility, and proof evidence. Do not export until the composited timeline is exactly 1,350 frames.
 
 No git commit: this task mutates the external Palmier project only.
 
