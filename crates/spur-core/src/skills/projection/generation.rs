@@ -52,6 +52,15 @@ pub struct PublishedGeneration {
 /// Failure while staging, hashing, validating, or publishing a generation.
 #[derive(Debug, thiserror::Error)]
 pub enum GenerationError {
+    /// Failure while staging one canonical skill.
+    #[error("generation staging failed for skill {skill_id}: {source}")]
+    Skill {
+        /// Canonical skill ID being staged.
+        skill_id: String,
+        /// Underlying staging failure.
+        #[source]
+        source: Box<GenerationError>,
+    },
     /// A source entry could escape its selected skill directory.
     #[error("unsafe source path {path} for skill {skill_id}")]
     UnsafeSourcePath {
@@ -94,7 +103,10 @@ pub(crate) fn publish_generation(
     let mut ordered = selected.iter().collect::<Vec<_>>();
     ordered.sort_by(|left, right| left.payload.id.cmp(&right.payload.id));
     for skill in ordered {
-        targets.push(stage_skill(&request, skill, staging.path())?);
+        targets.push(
+            stage_skill(&request, skill, staging.path())
+                .map_err(|source| generation_error_for_skill(&skill.payload.id, source))?,
+        );
     }
     if request.adapter == Adapter::Kiro {
         targets.push(stage_kiro_companion(&request, staging.path())?);
@@ -142,6 +154,16 @@ pub(crate) fn publish_generation(
         root: published_root,
         targets,
     })
+}
+
+fn generation_error_for_skill(skill_id: &str, source: GenerationError) -> GenerationError {
+    match source {
+        source @ GenerationError::UnsafeSourcePath { .. } => source,
+        source => GenerationError::Skill {
+            skill_id: skill_id.to_string(),
+            source: Box::new(source),
+        },
+    }
 }
 
 fn create_generation_root(
