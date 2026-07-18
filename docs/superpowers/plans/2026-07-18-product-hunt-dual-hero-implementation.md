@@ -348,11 +348,11 @@ Call `inspect_media` with `maxFrames=8` for these exact windows:
 
 | Media ref | Start | End | Required visible evidence |
 |---|---:|---:|---|
-| `791B452C` | 8.0 | 20.0 | Session Detail operator surface |
-| `14D82963` | 15.0 | 29.0 | Worker list and state |
-| `82D9D60A` | 8.0 | 20.0 | Plans / explicit empty state |
-| `63605F31` | 45.0 | 59.0 | Agent, model, and effort controls |
-| `4B29113A` | 0.0 | 9.2 | Resumed-from-prior-conversation marker |
+| `791B452C` | 11.0 | 18.0 | Session Detail operator surface |
+| `14D82963` | 22.0 | 30.0 | Worker list and state |
+| `82D9D60A` | 12.0 | 19.0 | Plans / explicit empty state |
+| `63605F31` | 49.35 | 51.35 | Agent, model, and effort controls |
+| `4B29113A` | 5.2 | 9.2 | Resumed-from-prior-conversation marker |
 
 Fail closed if the required evidence is not visible throughout the candidate window; do not substitute the D4 diagnostic capture.
 
@@ -377,14 +377,14 @@ Use `add_clips` with the existing matte and reviewed media refs:
 | Timeline frames | Media ref | Source seconds |
 |---|---|---|
 | 0–90 | `4387A028` | still via `endFrame=90` |
-| 90–300 | `791B452C` | 8.0–15.0 |
-| 300–540 | `14D82963` | 17.0–25.0 |
+| 90–300 | `791B452C` | 11.0–18.0 |
+| 300–540 | `14D82963` | 22.0–30.0 |
 | 540–750 | `82D9D60A` | 12.0–19.0 |
-| 750–990 | `63605F31` | 50.0–58.0 |
-| 990–1200 | `4B29113A` | 2.2–9.2 |
+| 750–990 | `63605F31` | 49.35–51.35, then 0.25× speed |
+| 990–1200 | `4B29113A` | 5.2–9.2, then 4/7× speed |
 | 1200–1350 | `4387A028` | still via `endFrame=1350` |
 
-Omit `trackIndex` on every entry so Palmier creates one shared picture track. The resulting picture duration must be exactly 1,350 frames.
+Omit `trackIndex` on every entry so Palmier creates one shared picture track. After placement, call `set_clip_properties` on the routing clip with `speed=0.25` and on the resume clip with `speed=0.5714285714`; each timing change expands the inspected real-source moment to its locked beat length without synthesizing or repeating UI. The resulting picture duration must be exactly 1,350 frames.
 
 - [ ] **Step 6: add progress overlays and approved text**
 
