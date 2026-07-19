@@ -26,6 +26,14 @@ done
 notebook_source="$(jq -r '.cells[].source | if type == "array" then join("") else . end' "$NOTEBOOK")"
 notebook_html="$(jq -r '.cells[].outputs[]? | .data["text/html"]? // empty |
   if type == "array" then join("") else . end' "$NOTEBOOK")"
+if rg -q --fixed-strings --glob '!media-contract.test.sh' 'beta.otobank.com' "$ROOT"; then
+  fail "SPUR media pack contains no unrelated Otobank domain"
+else
+  pass "SPUR media pack contains no unrelated Otobank domain"
+fi
+[[ "$notebook_source" == *'INSTALL SPUR · COMMUNITY FREE'* ]] \
+  && pass "notebook locks the domain-free SPUR end card" \
+  || fail "notebook locks the domain-free SPUR end card"
 for required in \
   'from Claude Code and Codex to Grok, OpenCode, and beyond' \
   'delegates four read-only deep dives' \
