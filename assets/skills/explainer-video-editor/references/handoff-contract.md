@@ -72,7 +72,7 @@ Optional fields include asset duration, aspect ratio, resolution, prompt revisio
 Run:
 
 ```sh
-scripts/validate-delivery.sh MANIFEST.json VIDEO.mp4
+assets/skills/explainer-video-editor/scripts/validate-delivery.sh MANIFEST.json VIDEO.mp4
 ```
 
 The supplied `VIDEO.mp4` path must exactly equal `delivery.path`. The matching file must also satisfy the declared duration, dimensions, frame rate, and checksum, contain readable video and audio streams, and pass strict full-decode validation.
