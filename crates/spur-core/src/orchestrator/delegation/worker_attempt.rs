@@ -2606,7 +2606,8 @@ mod profile_override_tests {
 
     struct SkillMaterializationConnection {
         checked: Arc<Mutex<bool>>,
-        skill_rel_path: String,
+        launch_root: PathBuf,
+        skill_rel_paths: Vec<String>,
         session_response: spur_acp::NewSessionResponse,
     }
 
@@ -2616,6 +2617,33 @@ mod profile_override_tests {
             &mut self,
             _request: InitializeRequest,
         ) -> anyhow::Result<spur_acp::InitializeResponse> {
+            for skill_rel_path in &self.skill_rel_paths {
+                let skill_path = self.launch_root.join(skill_rel_path);
+                assert!(
+                    skill_path.exists(),
+                    "skill should exist before connection initialization: {}",
+                    skill_path.display()
+                );
+                let ignored = Command::new("git")
+                    .args(["check-ignore", skill_rel_path])
+                    .current_dir(&self.launch_root)
+                    .output()
+                    .expect("run git check-ignore");
+                assert!(
+                    ignored.status.success(),
+                    "skill should be git-excluded: stderr={}",
+                    String::from_utf8_lossy(&ignored.stderr)
+                );
+            }
+            if !self.skill_rel_paths.is_empty() {
+                assert!(
+                    self.launch_root
+                        .join(".spur/runtime/skill-projections/codex/generations")
+                        .is_dir(),
+                    "generation store should exist before connection initialization"
+                );
+            }
+            *self.checked.lock().expect("skill check poisoned") = true;
             Ok(spur_acp::InitializeResponse::new(
                 spur_acp::ProtocolVersion::LATEST,
             ))
@@ -2626,23 +2654,7 @@ mod profile_override_tests {
             cwd: PathBuf,
             _mcp_servers: Vec<McpServer>,
         ) -> anyhow::Result<spur_acp::NewSessionResponse> {
-            let skill_path = cwd.join(&self.skill_rel_path);
-            assert!(
-                skill_path.exists(),
-                "pool skill should exist before session starts: {}",
-                skill_path.display()
-            );
-            let ignored = Command::new("git")
-                .args(["check-ignore", &self.skill_rel_path])
-                .current_dir(&cwd)
-                .output()
-                .expect("run git check-ignore");
-            assert!(
-                ignored.status.success(),
-                "pool skill should be git-excluded: stderr={}",
-                String::from_utf8_lossy(&ignored.stderr)
-            );
-            *self.checked.lock().expect("skill check poisoned") = true;
+            assert_eq!(cwd, self.launch_root);
             Ok(self.session_response.clone())
         }
 
@@ -2880,6 +2892,16 @@ mod profile_override_tests {
         git(dir.path(), &["config", "user.name", "t"]);
         std::fs::write(dir.path().join("README.md"), "base\n").expect("write readme");
         std::fs::create_dir_all(dir.path().join(".spur/worktrees")).expect("create worktree dir");
+        let bundled_dir = dir.path().join("test-bundled-skills");
+        std::fs::create_dir_all(&bundled_dir).expect("create bundled skill dir");
+        std::fs::write(
+            dir.path().join(".spur/config.toml"),
+            format!(
+                "[skills]\nbundled_dir = {:?}\n",
+                bundled_dir.display().to_string()
+            ),
+        )
+        .expect("write bundled skill config");
         std::fs::create_dir_all(dir.path().join(".claude/agents"))
             .expect("create committed agent dir");
         std::fs::write(
@@ -3252,6 +3274,18 @@ mod profile_override_tests {
         assert_eq!(second_config["keep"], "base");
     }
 
+    fn write_bundled_skill(repo: &Path, name: &str, role: &str) {
+        let skill_dir = repo.join("test-bundled-skills").join(name);
+        std::fs::create_dir_all(&skill_dir).expect("create bundled skill source");
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            format!(
+                "---\nname: {name}\ndescription: Bundled skill\nrole: {role}\n---\nbundled body for {name}\n"
+            ),
+        )
+        .expect("write bundled skill");
+    }
+
     fn write_pool_skill(repo: &Path, name: &str, verdict: &str) {
         let source = "acme/skills";
         let pinned_commit = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -3262,6 +3296,8 @@ mod profile_override_tests {
             format!("---\nname: {name}\ndescription: Clean skill\n---\nbody for {name}\n"),
         )
         .expect("write pool skill");
+        let content_sha256 =
+            crate::explore::content_hash(&pool_dir).expect("hash pool skill source");
         crate::explore::pool::Manifest {
             sources: vec![],
             items: vec![crate::explore::pool::ManifestItem {
@@ -3270,7 +3306,7 @@ mod profile_override_tests {
                 source: source.to_string(),
                 rel_path: format!("skills/{name}"),
                 pinned_commit: pinned_commit.to_string(),
-                content_sha256: "0".repeat(64),
+                content_sha256,
                 license: None,
                 gate: crate::explore::pool::GateRecord {
                     verdict: verdict.to_string(),
@@ -3281,6 +3317,20 @@ mod profile_override_tests {
         }
         .save(repo)
         .expect("save explore manifest");
+    }
+
+    fn tamper_pool_skill(repo: &Path, name: &str) {
+        let pool_dir = crate::explore::pool::pool_dir(
+            repo,
+            "acme/skills",
+            name,
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        );
+        std::fs::write(
+            pool_dir.join("SKILL.md"),
+            format!("---\nname: {name}\ndescription: Tampered\n---\ntampered body\n"),
+        )
+        .expect("tamper pool skill");
     }
 
     #[tokio::test]
@@ -4212,13 +4262,20 @@ mod profile_override_tests {
     }
 
     #[tokio::test]
-    async fn attempt_materializes_pool_skills_before_session() {
+    async fn attempt_projects_all_active_skills_before_connection_initialization() {
+        let _global_root = crate::explore::store::force_global_root_for_tests(None);
         let repo = setup_repo_with_committed_agent();
-        write_pool_skill(repo.path(), "clean-a", "clean");
+        write_bundled_skill(repo.path(), "brain-builtin", "brain");
+        write_pool_skill(repo.path(), "pool-active", "clean");
         let mut worktrees = spur_worktree::manager::WorktreeManager::new(repo.path().to_path_buf());
         let (funnel, _events_rx) = crate::event_funnel::test_channel();
         let brain_session_id = spur_acp::BrainSessionId::new(SessionId::new());
         let worker_session = SessionId::new();
+        let launch_root = repo
+            .path()
+            .join(".spur/worktrees")
+            .join(worker_session.to_string());
+        let launch_root_for_factory = launch_root.clone();
         let mut agent_config = spur_acp::AgentConfig::with_defaults("codex");
         agent_config.kind = spur_acp::types::AgentKind::CodexAcp;
         let fault_hooks = FaultInjectionHooks::default();
@@ -4237,7 +4294,7 @@ mod profile_override_tests {
                 agent: "codex",
                 profile: None,
                 profile_def: None,
-                skills: Some(vec!["clean-a".to_string()]),
+                skills: Some(vec!["legacy-narrowing-must-be-ignored".to_string()]),
                 model: None,
                 effort: None,
                 config_overrides: None,
@@ -4261,7 +4318,11 @@ mod profile_override_tests {
                 connection_factory: Some(&move |_cfg, _spawn_args, _launch_env, _repo_root| {
                     Box::new(SkillMaterializationConnection {
                         checked: Arc::clone(&checked_for_factory),
-                        skill_rel_path: ".codex/skills/clean-a/SKILL.md".to_string(),
+                        launch_root: launch_root_for_factory.clone(),
+                        skill_rel_paths: vec![
+                            ".codex/skills/spurpower-brain-builtin/SKILL.md".to_string(),
+                            ".codex/skills/spurpower-pool-active/SKILL.md".to_string(),
+                        ],
                         session_response: session.clone(),
                     })
                 }),
@@ -4273,25 +4334,242 @@ mod profile_override_tests {
         .expect("worker attempt succeeds");
 
         assert_eq!(outcome.worker_session, worker_session);
+        assert_eq!(outcome.worktree_path, launch_root);
         assert!(*checked.lock().expect("skill check poisoned"));
-        let skill_rel_path = ".codex/skills/clean-a/SKILL.md";
-        let skill_path = outcome.worktree_path.join(skill_rel_path);
-        let contents = std::fs::read_to_string(skill_path).expect("rendered skill");
-        assert!(contents.contains("body for clean-a"));
+        let bundled_rel = ".codex/skills/spurpower-brain-builtin/SKILL.md";
+        let pool_rel = ".codex/skills/spurpower-pool-active/SKILL.md";
+        let bundled_path = outcome.worktree_path.join(bundled_rel);
+        let pool_path = outcome.worktree_path.join(pool_rel);
+        assert!(std::fs::read_to_string(&bundled_path)
+            .expect("rendered bundled skill")
+            .contains("bundled body for brain-builtin"));
+        assert!(std::fs::read_to_string(&pool_path)
+            .expect("rendered pool skill")
+            .contains("body for pool-active"));
+        let projection_root = outcome
+            .worktree_path
+            .join(".spur/runtime/skill-projections/codex");
+        for target in [
+            bundled_path.parent().expect("bundled target dir"),
+            pool_path.parent().expect("pool target dir"),
+        ] {
+            let metadata = std::fs::symlink_metadata(target).expect("projection target metadata");
+            if metadata.file_type().is_symlink() {
+                assert!(
+                    std::fs::canonicalize(target)
+                        .expect("canonical generation target")
+                        .starts_with(projection_root.join("generations")),
+                    "symlink target should resolve through the generation store"
+                );
+            } else {
+                let manifest: serde_json::Value = serde_json::from_slice(
+                    &std::fs::read(projection_root.join("manifest.json"))
+                        .expect("read projection manifest"),
+                )
+                .expect("parse projection manifest");
+                assert!(
+                    manifest["targets"]
+                        .as_array()
+                        .expect("manifest targets")
+                        .iter()
+                        .any(|record| record["mode"] == "copy"),
+                    "non-symlink target should be a recorded copy fallback"
+                );
+            }
+        }
         assert_eq!(git(&outcome.worktree_path, &["status", "--short"]), "");
         assert_eq!(
-            git(&outcome.worktree_path, &["check-ignore", skill_rel_path]),
-            skill_rel_path
+            git(&outcome.worktree_path, &["check-ignore", bundled_rel]),
+            bundled_rel
+        );
+        assert_eq!(
+            git(&outcome.worktree_path, &["check-ignore", pool_rel]),
+            pool_rel
         );
         let records = crate::explore::materialize::read_recent_materializations(repo.path(), 10);
-        assert_eq!(records.len(), 1);
-        assert_eq!(records[0].delegation_id, "delegation-1");
-        assert_eq!(records[0].agent, "codex");
-        assert_eq!(
-            records[0].worktree,
-            outcome.worktree_path.display().to_string()
+        assert!(
+            records.is_empty(),
+            "runtime projection should not append legacy direct-materialization records"
         );
-        assert_eq!(records[0].items, vec!["clean-a".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn projection_failure_stops_connection_and_removes_worker_worktree() {
+        let _global_root = crate::explore::store::force_global_root_for_tests(None);
+        let repo = setup_repo_with_committed_agent();
+        write_pool_skill(repo.path(), "tampered", "clean");
+        tamper_pool_skill(repo.path(), "tampered");
+        let mut worktrees = spur_worktree::manager::WorktreeManager::new(repo.path().to_path_buf());
+        let (funnel, _events_rx) = crate::event_funnel::test_channel();
+        let brain_session_id = spur_acp::BrainSessionId::new(SessionId::new());
+        let worker_session = SessionId::new();
+        let launch_root = repo
+            .path()
+            .join(".spur/worktrees")
+            .join(worker_session.to_string());
+        let launch_root_for_factory = launch_root.clone();
+        let mut agent_config = spur_acp::AgentConfig::with_defaults("codex");
+        agent_config.kind = spur_acp::types::AgentKind::CodexAcp;
+        let fault_hooks = FaultInjectionHooks::default();
+        let feature_gate = spur_license::FeatureGate::new_with_install_id(
+            spur_license::policy::PolicyResolver::embedded(),
+            spur_license::InstallId::from_uuid(uuid::Uuid::nil()),
+        );
+        let connection_called = Arc::new(Mutex::new(false));
+        let connection_called_for_factory = Arc::clone(&connection_called);
+        let session = session_response(vec![]);
+
+        let result = run_one_worker_attempt(
+            worker_session.clone(),
+            WorkerAttemptCtx {
+                brain_session_id: &brain_session_id,
+                agent: "codex",
+                profile: None,
+                profile_def: None,
+                skills: Some(vec!["tampered".to_string()]),
+                model: None,
+                effort: None,
+                config_overrides: None,
+                task: "do the task",
+                request_id: "delegation-projection-error",
+                attempt: 1,
+                agent_config: &agent_config,
+                delegation_plan: None,
+                issue_id: None,
+                prior_branch_for_reuse: None,
+                peer_mailbox: None,
+                ack_tx: None,
+                base: None,
+                dispatched_base_oid_tx: None,
+                fault_injection_hooks: &fault_hooks,
+                worker_mcp_servers: &[],
+                worker_mcp_server: None,
+                worker_mcp_tool_names: None,
+                pm_service: None,
+                feature_gate: &feature_gate,
+                connection_factory: Some(&move |_cfg, _spawn_args, _launch_env, _repo_root| {
+                    *connection_called_for_factory
+                        .lock()
+                        .expect("connection call flag poisoned") = true;
+                    Box::new(SkillMaterializationConnection {
+                        checked: Arc::new(Mutex::new(false)),
+                        launch_root: launch_root_for_factory.clone(),
+                        skill_rel_paths: vec![],
+                        session_response: session.clone(),
+                    })
+                }),
+            },
+            &mut worktrees,
+            &funnel,
+        )
+        .await;
+
+        let error = match result {
+            Err(error) => error,
+            Ok(_) => panic!("projection failure should stop worker setup"),
+        };
+        let message = error.to_string();
+        assert!(message.starts_with("Failed to project worker skills:"));
+        assert!(message.contains("skill projection Resolve failed for codex"));
+        assert!(message.contains(&launch_root.display().to_string()));
+        assert!(message.contains("pool skill tampered digest mismatch"));
+        assert!(!*connection_called
+            .lock()
+            .expect("connection call flag poisoned"));
+        assert!(worktrees.active.get(&worker_session.to_string()).is_none());
+        assert!(
+            !launch_root.exists(),
+            "failed worker worktree should be removed from the filesystem"
+        );
+        assert!(
+            !git(repo.path(), &["worktree", "list", "--porcelain"])
+                .contains(&launch_root.display().to_string()),
+            "failed worker worktree should be removed from git metadata"
+        );
+    }
+
+    #[tokio::test]
+    async fn unsupported_agent_kind_skips_projection_without_creating_state() {
+        let _global_root = crate::explore::store::force_global_root_for_tests(None);
+        let repo = setup_repo_with_committed_agent();
+        let missing_bundled_dir = repo.path().join("missing-bundled-skills");
+        std::fs::write(
+            repo.path().join(".spur/config.toml"),
+            format!(
+                "[skills]\nbundled_dir = {:?}\n",
+                missing_bundled_dir.display().to_string()
+            ),
+        )
+        .expect("write missing bundled config");
+        let mut worktrees = spur_worktree::manager::WorktreeManager::new(repo.path().to_path_buf());
+        let (funnel, _events_rx) = crate::event_funnel::test_channel();
+        let brain_session_id = spur_acp::BrainSessionId::new(SessionId::new());
+        let worker_session = SessionId::new();
+        let launch_root = repo
+            .path()
+            .join(".spur/worktrees")
+            .join(worker_session.to_string());
+        let launch_root_for_factory = launch_root.clone();
+        let mut agent_config = spur_acp::AgentConfig::with_defaults("generic");
+        agent_config.kind = spur_acp::types::AgentKind::Generic;
+        let fault_hooks = FaultInjectionHooks::default();
+        let feature_gate = spur_license::FeatureGate::new_with_install_id(
+            spur_license::policy::PolicyResolver::embedded(),
+            spur_license::InstallId::from_uuid(uuid::Uuid::nil()),
+        );
+        let checked = Arc::new(Mutex::new(false));
+        let checked_for_factory = Arc::clone(&checked);
+        let session = session_response(vec![]);
+
+        let outcome = run_one_worker_attempt(
+            worker_session,
+            WorkerAttemptCtx {
+                brain_session_id: &brain_session_id,
+                agent: "generic",
+                profile: None,
+                profile_def: None,
+                skills: Some(vec!["legacy-narrowing-must-be-ignored".to_string()]),
+                model: None,
+                effort: None,
+                config_overrides: None,
+                task: "do the task",
+                request_id: "delegation-unsupported-agent",
+                attempt: 1,
+                agent_config: &agent_config,
+                delegation_plan: None,
+                issue_id: None,
+                prior_branch_for_reuse: None,
+                peer_mailbox: None,
+                ack_tx: None,
+                base: None,
+                dispatched_base_oid_tx: None,
+                fault_injection_hooks: &fault_hooks,
+                worker_mcp_servers: &[],
+                worker_mcp_server: None,
+                worker_mcp_tool_names: None,
+                pm_service: None,
+                feature_gate: &feature_gate,
+                connection_factory: Some(&move |_cfg, _spawn_args, _launch_env, _repo_root| {
+                    Box::new(SkillMaterializationConnection {
+                        checked: Arc::clone(&checked_for_factory),
+                        launch_root: launch_root_for_factory.clone(),
+                        skill_rel_paths: vec![],
+                        session_response: session.clone(),
+                    })
+                }),
+            },
+            &mut worktrees,
+            &funnel,
+        )
+        .await
+        .expect("unsupported agent should remain launchable");
+
+        assert!(*checked.lock().expect("skill check poisoned"));
+        assert_eq!(outcome.worktree_path, launch_root);
+        assert!(
+            !launch_root.join(".spur/runtime/skill-projections").exists(),
+            "unsupported agent should not create projection state"
+        );
     }
 }
 
