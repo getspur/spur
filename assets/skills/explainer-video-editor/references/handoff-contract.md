@@ -2,9 +2,9 @@
 
 Read this when building the scene ownership map, importing into PalmierPro, recovering a failed stage, or validating delivery.
 
-## Scene owner rule
+## Scene and asset owner rule
 
-Assign every asset exactly one primary owner.
+Assign every asset exactly one primary owner and every scene exactly one primary owner.
 
 | Owner | Owns | Asset boundary |
 |---|---|---|
@@ -14,7 +14,7 @@ Assign every asset exactly one primary owner.
 | `higgsfield` | Dry narration, metaphorical footage, atmospheric inserts | Never supply readable UI, product claims, logos, titles, or final assembly |
 | `palmier` | Native text, captions, transitions, mix, color, final timeline | Never perform unapproved generation or factual invention |
 
-A scene may composite multiple assets, but every input remains a singly-owned asset. If one asset appears to need two owners, split it before Palmier assembly.
+Every scene has one primary owner. If Palmier composites differently owned input assets, Palmier is the scene owner while inputs retain their own asset owners. If one asset appears to need two owners, split it before Palmier assembly.
 
 ## Manifest schema
 
@@ -81,8 +81,8 @@ The supplied `VIDEO.mp4` path must exactly equal `delivery.path`. The matching f
 
 | Gate | Required decision |
 |---|---|
-| `concept_layout` | Approve the concept and layout |
-| `script_storyboard` | Approve the script and storyboard |
+| `concept_layout` | Approve the palette, typography system, composition language, and pacing envelope |
+| `script_storyboard` | Approve the narration/script, storyboard, source selects, and scene ownership map |
 | `paid_generation` | Approve paid generation |
 
 There is no fourth production gate. The final export is a review artifact, and reversible Palmier edits do not require per-edit approval.
@@ -107,7 +107,7 @@ There is no fourth production gate. The final export is a review artifact, and r
 | Two equivalent failures | Revise the prompt; renew approval when cost or scope changes. |
 | Invented UI, text, or logo | Reject the asset. |
 | Higgsfield assembler unavailable | Continue final assembly in Palmier. |
-| Palmier state is stale | Reread the active Palmier timeline after a failure or out-of-band edit; continue only when it reflects the intended asset map. |
+| Palmier state is stale | Reread the active Palmier timeline, preserve successful edits, and retry the smallest failed mutation. |
 | Export queue warning | Inspect the `manage_exports` warning and result; accept only a successful terminal result. |
 
 ## Delivery checklist
