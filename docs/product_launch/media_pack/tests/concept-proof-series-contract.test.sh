@@ -121,6 +121,79 @@ if [[ -f "$MANIFEST" ]]; then
   fi
 
   if jq -e '
+      [.films[] | {id, proof_sources}] == [
+        {
+          "id": "control-loop",
+          "proof_sources": [
+            {
+              "source_id": "four-agent-diagnostic",
+              "source_seconds": [93, 112],
+              "duration_seconds": 19,
+              "watermark_required": true,
+              "claim_ids": [
+                "plan-task-state",
+                "parallel-worker-state",
+                "returned-evidence",
+                "brain-review-gate"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "durable-memory",
+          "proof_sources": [
+            {
+              "source_id": "session-detail",
+              "source_seconds": [8, 18],
+              "duration_seconds": 10,
+              "watermark_required": false,
+              "claim_ids": ["session-context"]
+            },
+            {
+              "source_id": "session-resume",
+              "source_seconds": [0, 9],
+              "duration_seconds": 9,
+              "watermark_required": false,
+              "claim_ids": ["session-resumed"]
+            }
+          ]
+        },
+        {
+          "id": "acp-agents",
+          "proof_sources": [
+            {
+              "source_id": "specialist-routing",
+              "source_seconds": [49, 59],
+              "duration_seconds": 10,
+              "watermark_required": false,
+              "claim_ids": ["explicit-agent-model-effort"]
+            },
+            {
+              "source_id": "four-agent-diagnostic",
+              "source_seconds": [93, 102],
+              "duration_seconds": 9,
+              "watermark_required": true,
+              "claim_ids": ["four-agent-roster"]
+            }
+          ]
+        }
+      ]
+      and all(.films[].proof_sources[];
+        (keys | sort) == [
+          "claim_ids",
+          "duration_seconds",
+          "source_id",
+          "source_seconds",
+          "watermark_required"
+        ]
+      )
+    ' "$MANIFEST" >/dev/null; then
+    pass "manifest locks exact proof source records"
+  else
+    fail "manifest locks exact proof source records"
+  fi
+
+  if jq -e '
       (.sources | keys | sort) == [
         "four-agent-diagnostic",
         "plan-state",
