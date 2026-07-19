@@ -290,6 +290,9 @@ expect_traceability_rejected \
   'mixed-owner inputs in a non-Palmier scene' \
   '.scenes[0].asset_ids += ["fixture-visual"]'
 expect_traceability_rejected \
+  'an open-design asset in a Palmier scene' \
+  '.scenes |= map(if .scene_id == "scene-title" then .asset_ids += ["source-doc"] else . end)'
+expect_traceability_rejected \
   'an unreferenced non-open-design asset' \
   '.assets += [{asset_id: "orphan-plate", owner: "html-video", type: "video", source_or_job_id: "orphan", approval_status: "approved", rights_status: "cleared"}]'
 expect_traceability_rejected \
