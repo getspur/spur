@@ -16,6 +16,81 @@ video="$tmp_dir/delivery.mp4"
 manifest="$tmp_dir/manifest.json"
 invalid_gate="$tmp_dir/invalid-gate.json"
 invalid_owner="$tmp_dir/invalid-owner.json"
+invalid_path="$tmp_dir/invalid-path.json"
+invalid_checksum="$tmp_dir/invalid-checksum.json"
+invalid_dimensions="$tmp_dir/invalid-dimensions.json"
+no_audio_video="$tmp_dir/no-audio.mp4"
+no_audio_manifest="$tmp_dir/no-audio.json"
+corrupt_video="$tmp_dir/corrupt.mp4"
+corrupt_manifest="$tmp_dir/corrupt.json"
+
+write_matching_manifest() {
+  local template="$1"
+  local media="$2"
+  local output="$3"
+  local duration
+  local width
+  local height
+  local frame_rate
+  local fps
+  local checksum_sha256
+
+  duration="$(
+    ffprobe -v error \
+      -show_entries format=duration \
+      -of default=noprint_wrappers=1:nokey=1 \
+      "$media" 2>/dev/null
+  )"
+  width="$(
+    ffprobe -v error \
+      -select_streams v:0 \
+      -show_entries stream=width \
+      -of default=noprint_wrappers=1:nokey=1 \
+      "$media" 2>/dev/null
+  )"
+  height="$(
+    ffprobe -v error \
+      -select_streams v:0 \
+      -show_entries stream=height \
+      -of default=noprint_wrappers=1:nokey=1 \
+      "$media" 2>/dev/null
+  )"
+  frame_rate="$(
+    ffprobe -v error \
+      -select_streams v:0 \
+      -show_entries stream=r_frame_rate \
+      -of default=noprint_wrappers=1:nokey=1 \
+      "$media" 2>/dev/null
+  )"
+  fps="$(
+    awk -v rate="$frame_rate" '
+      BEGIN {
+        if (split(rate, parts, "/") != 2 || parts[2] + 0 <= 0) {
+          exit 1
+        }
+        printf "%.12f\n", (parts[1] + 0) / (parts[2] + 0)
+      }
+    '
+  )"
+  checksum_sha256="$(shasum -a 256 "$media" | awk '{print $1}')"
+
+  jq \
+    --arg path "$media" \
+    --arg checksum_sha256 "$checksum_sha256" \
+    --argjson duration "$duration" \
+    --argjson width "$width" \
+    --argjson height "$height" \
+    --argjson fps "$fps" \
+    '
+      .delivery.path = $path
+      | .delivery.duration_seconds = $duration
+      | .delivery.width = $width
+      | .delivery.height = $height
+      | .delivery.fps = $fps
+      | .delivery.checksum_sha256 = $checksum_sha256
+    ' \
+    "$template" > "$output"
+}
 
 ffmpeg -loglevel error \
   -f lavfi -i "color=c=black:s=320x180:r=30:d=1" \
@@ -69,6 +144,68 @@ fi
 jq '.assets[0].owner = "unknown-editor"' "$manifest" > "$invalid_owner"
 if "$validator" "$invalid_owner" "$video" >/dev/null 2>&1; then
   echo "expected validator to reject unknown owner" >&2
+  exit 1
+fi
+
+jq --arg path "$tmp_dir/not-the-delivery.mp4" \
+  '.delivery.path = $path' "$manifest" > "$invalid_path"
+if "$validator" "$invalid_path" "$video" >/dev/null 2>&1; then
+  echo "expected validator to reject delivery.path mismatch" >&2
+  exit 1
+fi
+
+jq '.delivery.checksum_sha256 = ("0" * 64)' \
+  "$manifest" > "$invalid_checksum"
+if "$validator" "$invalid_checksum" "$video" >/dev/null 2>&1; then
+  echo "expected validator to reject checksum mismatch" >&2
+  exit 1
+fi
+
+jq '.delivery.width += 1' "$manifest" > "$invalid_dimensions"
+if "$validator" "$invalid_dimensions" "$video" >/dev/null 2>&1; then
+  echo "expected validator to reject dimension mismatch" >&2
+  exit 1
+fi
+
+ffmpeg -loglevel error \
+  -i "$video" \
+  -map 0:v:0 -c copy -an \
+  "$no_audio_video"
+write_matching_manifest "$manifest" "$no_audio_video" "$no_audio_manifest"
+if "$validator" "$no_audio_manifest" "$no_audio_video" >/dev/null 2>&1; then
+  echo "expected validator to reject video without audio" >&2
+  exit 1
+fi
+
+cp "$video" "$corrupt_video"
+key_packet="$(
+  ffprobe -v error \
+    -select_streams v:0 \
+    -show_packets \
+    -show_entries packet=pos,size,flags \
+    -of json \
+    "$corrupt_video" \
+    | jq -er '
+        [
+          .packets[]
+          | select((.flags // "") | contains("K"))
+          | select((.size | tonumber) > 64)
+        ][0]
+      '
+)"
+packet_pos="$(printf '%s\n' "$key_packet" | jq -er '.pos | tonumber')"
+packet_size="$(printf '%s\n' "$key_packet" | jq -er '.size | tonumber')"
+corrupt_offset=$((packet_pos + packet_size - 32))
+printf '\377%.0s' {1..16} \
+  | dd of="$corrupt_video" bs=1 seek="$corrupt_offset" count=16 conv=notrunc 2>/dev/null
+
+write_matching_manifest "$manifest" "$corrupt_video" "$corrupt_manifest"
+if corrupt_error="$("$validator" "$corrupt_manifest" "$corrupt_video" 2>&1)"; then
+  echo "expected validator to reject corrupt video during full decode" >&2
+  exit 1
+fi
+if [[ "$corrupt_error" != *"video fails strict full-decode validation"* ]]; then
+  echo "expected corruption to reach the strict full-decode gate" >&2
   exit 1
 fi
 
