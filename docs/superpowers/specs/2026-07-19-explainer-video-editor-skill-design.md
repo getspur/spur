@@ -26,9 +26,9 @@ Start by importing and inspecting the existing video in PalmierPro. Record usefu
 | HTML Video notebook | Timecoded content graph and deterministic motion plates | Factual product UI, narration, final assembly |
 | Higgsfield | Dry narration and approved metaphorical or atmospheric shots | Product UI, readable text, logos, factual claims, final edit |
 | PalmierPro | Media inspection, real captures, editorial timeline, native text, captions, mix, color, export | Unapproved paid generation or story invention |
-| Delivery manifest | Source, prompt, job, approval, and timeline-role traceability | Editorial decisions not represented in the notebook or Palmier timeline |
+| Delivery manifest | Exact approvals plus claims, eligible source assets, owner-specific provenance, scenes, jobs, and delivery verification | Editorial decisions not represented in the notebook or Palmier timeline |
 
-The notebook is the source of truth for intent, facts, storyboard, approvals, and the asset manifest. The active Palmier timeline is the source of truth for the delivered audiovisual sequence.
+The notebook is the source of truth for intent, facts, storyboard, approvals, and the claims/assets/scenes manifest. The active Palmier timeline is the source of truth for the delivered audiovisual sequence.
 
 ## Three approval gates
 
@@ -38,7 +38,7 @@ Lock audience, purpose, route, duration, aspect, CTA, source material, rights co
 
 ### Gate 2 — script and storyboard
 
-Ground factual claims in real sources. Approve the narration, source-video selections, timecoded content graph, HTML motion plates, creative inserts, Palmier-native titles, and final CTA. Assign every scene to exactly one asset owner.
+Ground factual claims in real sources. Approve the narration, source-video selections, timecoded content graph, HTML motion plates, creative inserts, Palmier-native titles, and final CTA. Assign every scene exactly one primary owner; Palmier owns scenes that composite differently owned input assets.
 
 ### Gate 3 — paid generation
 
@@ -61,16 +61,19 @@ After Gate 3, reversible Palmier edits proceed without per-edit approval. The fi
 11. Assemble real captures, HTML plates, generated footage, voice, ambience, native product text, and optional requested captions or music.
 12. Sample the timeline visually, export, verify, and record the final artifact in the notebook and manifest.
 
-## Asset handoff contract
+## Manifest handoff contract
 
-Every asset record must include, when applicable:
+Use one closed traceability graph:
 
 ```text
-asset_id, owner, type, source_or_job_id, source_locator,
-claim_ids, intended_timeline_slot, duration, aspect,
-resolution, fps, audio_format, prompt_or_script_revision,
-approval_status, rights_status, checksum
+eligible source asset <- claim.source_asset_ids <- claim <- scene.claim_ids <- scene -> scene.asset_ids -> timeline asset
 ```
+
+- Root approvals use exactly `concept_layout`, `paid_generation`, and `script_storyboard`, all set to `approved`.
+- Claims use unique `claim_id`, nonempty `text`, and unique `source_asset_ids` that resolve only to `real-capture` or `open-design` assets.
+- Assets use unique `asset_id`, one owner, `type`, `source_or_job_id`, approval, and rights. Real captures require numeric source start/end seconds; Higgsfield assets require `prompt_or_script_revision`.
+- Scenes use unique `scene_id`, one primary owner, numeric `timeline_slot`, unique known `asset_ids`, and unique known `claim_ids`. Non-Palmier scene inputs match the scene owner; Palmier scenes may composite mixed-owner inputs.
+- Delivery uses `path`, `duration_seconds`, `width`, `height`, `fps`, and `checksum_sha256`. Every non-Open-Design asset appears in a scene, and every claim is used by a scene.
 
 HTML plates must be self-contained, deterministic, and free of baked narration. Higgsfield narration should be dry and use one approved voice. Creative generated footage must not contain dialogue, captions, product claims, readable UI, logos, or watermarks. Product names, claims, CTA copy, and captions belong in Palmier-native text.
 
@@ -90,19 +93,19 @@ HTML plates must be self-contained, deterministic, and free of baked narration. 
 
 Default delivery consists of:
 
-- an H.264/AAC MP4 matching the approved duration, aspect, and resolution;
+- an H.264/AAC MP4 matching the approved `duration_seconds`, `width`, `height`, and `fps`, with the declared `checksum_sha256`;
 - an editable Palmier project;
 - the notebook containing the brief, claim register, storyboard, HTML artifacts, approvals, and final preview; and
-- an asset manifest connecting factual sources, captures, generated jobs, prompts, and timeline roles.
+- a manifest connecting claims to eligible source assets and scenes, and scenes to their owned timeline assets.
 
-Do not assume captions, ProRes, music, alternate ratios, or extra exports unless requested. Verify duration, resolution, frame rate, audio streams, full decode, representative visual frames, CTA spelling, narration intelligibility, and factual claim coverage before completion.
+Do not assume captions, ProRes, music, alternate ratios, or extra exports unless requested. Verify duration, width, height, frame rate, `checksum_sha256`, H.264/AAC streams, full decode, representative visual frames, CTA spelling, narration intelligibility, and complete claim/scene coverage before completion.
 
 ## Skill packaging
 
 Create the skill with the system `skill-creator` initializer and keep each file focused:
 
 - `assets/skills/explainer-video-editor/SKILL.md` contains concise orchestration rules and approval gates.
-- `assets/skills/explainer-video-editor/references/handoff-contract.md` contains the asset manifest schema, scene-owner rules, recovery matrix, and delivery checklist.
+- `assets/skills/explainer-video-editor/references/handoff-contract.md` contains the claims/assets/scenes manifest schema, scene-owner rules, recovery matrix, and delivery checklist.
 - `assets/skills/explainer-video-editor/scripts/validate-delivery.sh` deterministically validates a manifest and exported MP4 using `jq`, `ffprobe`, `ffmpeg`, and `shasum`.
 - `assets/skills/explainer-video-editor/scripts/test-validate-delivery.sh` exercises valid and invalid manifests plus a generated test video.
 - `assets/skills/explainer-video-editor/agents/openai.yaml` exposes generated display metadata and a default `$explainer-video-editor` prompt.

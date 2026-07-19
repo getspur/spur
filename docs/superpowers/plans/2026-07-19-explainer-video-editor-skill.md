@@ -19,6 +19,15 @@
 - Create `assets/skills/explainer-video-editor/scripts/test-validate-delivery.sh` — executable RED/GREEN regression test for the validator.
 - Create `docs/superpowers/plans/2026-07-19-explainer-video-editor-skill.md` — this plan.
 
+## Locked manifest vocabulary
+
+- `approvals` has exactly three keys: `concept_layout`, `paid_generation`, and `script_storyboard`, all set to `approved`.
+- `claims` connects unique `claim_id` values and nonempty text to eligible `real-capture` or `open-design` `source_asset_ids`.
+- `assets` uses unique `asset_id` values and owner-specific provenance: numeric `source_locator` for real capture and `prompt_or_script_revision` for Higgsfield.
+- `scenes` uses unique `scene_id`, one primary owner, numeric `timeline_slot`, known `asset_ids`, and known `claim_ids`. Palmier scenes alone may composite mixed-owner inputs.
+- `delivery` uses `path`, `duration_seconds`, `width`, `height`, `fps`, and `checksum_sha256`.
+- The graph closes from claims to eligible source assets and from claims/assets into scenes; every claim and every non-Open-Design asset is used by a scene.
+
 ### Task 1: Initialize the skill and establish the failing validator test
 
 **Files:**
@@ -72,11 +81,11 @@ ffmpeg -v error \
   -f lavfi -i sine=frequency=440:sample_rate=48000 \
   -t 1 -c:v libx264 -pix_fmt yuv420p -c:a aac -shortest "$video"
 
-checksum="$(shasum -a 256 "$video" | awk '{print $1}')"
+checksum_sha256="$(shasum -a 256 "$video" | awk '{print $1}')"
 
 jq -n \
   --arg path "$video" \
-  --arg checksum "$checksum" \
+  --arg checksum_sha256 "$checksum_sha256" \
   '{
     schema_version: 1,
     project: "validator-fixture",
@@ -86,14 +95,46 @@ jq -n \
       script_storyboard: "approved",
       paid_generation: "approved"
     },
+    claims: [
+      {
+        claim_id: "claim-proof",
+        text: "The approved capture demonstrates the workflow.",
+        source_asset_ids: ["demo-proof"]
+      }
+    ],
     assets: [
+      {
+        asset_id: "demo-proof",
+        owner: "real-capture",
+        type: "video",
+        source_or_job_id: "demo-source",
+        source_locator: {start_seconds: 0, end_seconds: 1},
+        approval_status: "approved",
+        rights_status: "cleared"
+      },
       {
         asset_id: "html-hook",
         owner: "html-video",
         type: "video",
-        source_or_job_id: "fixture",
+        source_or_job_id: "fixture-plate",
         approval_status: "approved",
         rights_status: "cleared"
+      }
+    ],
+    scenes: [
+      {
+        scene_id: "scene-proof",
+        owner: "real-capture",
+        timeline_slot: {start_seconds: 0, end_seconds: 0.5},
+        asset_ids: ["demo-proof"],
+        claim_ids: ["claim-proof"]
+      },
+      {
+        scene_id: "scene-hook",
+        owner: "html-video",
+        timeline_slot: {start_seconds: 0.5, end_seconds: 1},
+        asset_ids: ["html-hook"],
+        claim_ids: []
       }
     ],
     delivery: {
@@ -102,7 +143,7 @@ jq -n \
       width: 320,
       height: 180,
       fps: 30,
-      checksum_sha256: $checksum
+      checksum_sha256: $checksum_sha256
     }
   }' > "$manifest"
 
@@ -174,9 +215,10 @@ if ! jq -e '
   .schema_version == 1 and
   (.project | type == "string" and length > 0) and
   (.route == "create" or .route == "enhance") and
-  .approvals.concept_layout == "approved" and
-  .approvals.script_storyboard == "approved" and
-  .approvals.paid_generation == "approved" and
+  (.approvals | type == "object" and
+    keys == ["concept_layout", "paid_generation", "script_storyboard"] and
+    all(.[]; . == "approved")) and
+  (.claims | type == "array" and length > 0) and
   (.assets | type == "array" and length > 0) and
   (all(.assets[];
     (.asset_id | type == "string" and length > 0) and
@@ -186,9 +228,16 @@ if ! jq -e '
     (.type | type == "string" and length > 0) and
     (.source_or_job_id | type == "string" and length > 0) and
     .approval_status == "approved" and
-    (.rights_status == "cleared" or .rights_status == "owned")
+    (.rights_status == "cleared" or .rights_status == "owned") and
+    (.owner != "real-capture" or
+      (.source_locator.start_seconds | type == "number" and . >= 0) and
+      (.source_locator.end_seconds | type == "number") and
+      (.source_locator.end_seconds > .source_locator.start_seconds)) and
+    (.owner != "higgsfield" or
+      (.prompt_or_script_revision | type == "string" and length > 0))
   )) and
   (([.assets[].asset_id] | length) == ([.assets[].asset_id] | unique | length)) and
+  (.scenes | type == "array" and length > 0) and
   (.delivery.path | type == "string" and length > 0) and
   (.delivery.duration_seconds | type == "number" and . > 0) and
   (.delivery.width | type == "number" and . > 0) and
@@ -205,7 +254,7 @@ expected_duration="$(jq -r '.delivery.duration_seconds' "$manifest")"
 expected_width="$(jq -r '.delivery.width' "$manifest")"
 expected_height="$(jq -r '.delivery.height' "$manifest")"
 expected_fps="$(jq -r '.delivery.fps' "$manifest")"
-expected_checksum="$(jq -r '.delivery.checksum_sha256' "$manifest")"
+expected_checksum_sha256="$(jq -r '.delivery.checksum_sha256' "$manifest")"
 
 if [[ "$expected_path" != "$video" ]]; then
   echo "delivery.path does not match the supplied video" >&2
@@ -218,7 +267,7 @@ actual_height="$(ffprobe -v error -select_streams v:0 -show_entries stream=heigh
 actual_rate="$(ffprobe -v error -select_streams v:0 -show_entries stream=r_frame_rate -of default=noprint_wrappers=1:nokey=1 "$video")"
 actual_fps="$(awk -F/ '{if ($2 == 0) exit 1; printf "%.6f", $1 / $2}' <<<"$actual_rate")"
 audio_codec="$(ffprobe -v error -select_streams a:0 -show_entries stream=codec_name -of default=noprint_wrappers=1:nokey=1 "$video")"
-actual_checksum="$(shasum -a 256 "$video" | awk '{print $1}')"
+actual_checksum_sha256="$(shasum -a 256 "$video" | awk '{print $1}')"
 
 if [[ -z "$actual_width" || -z "$actual_height" || -z "$audio_codec" ]]; then
   echo "video must contain one readable video stream and one audio stream" >&2
@@ -236,8 +285,8 @@ if ! awk -v actual="$actual_fps" -v expected="$expected_fps" 'BEGIN { delta = ac
   echo "video frame rate does not match the manifest" >&2
   exit 1
 fi
-if [[ "$actual_checksum" != "$expected_checksum" ]]; then
-  echo "video checksum does not match the manifest" >&2
+if [[ "$actual_checksum_sha256" != "$expected_checksum_sha256" ]]; then
+  echo "video checksum_sha256 does not match the manifest" >&2
   exit 1
 fi
 
@@ -245,13 +294,13 @@ ffmpeg -v error -err_detect explode -i "$video" -f null -
 
 jq -n \
   --arg video "$video" \
-  --arg checksum "$actual_checksum" \
+  --arg checksum_sha256 "$actual_checksum_sha256" \
   --arg audio_codec "$audio_codec" \
   --argjson duration "$actual_duration" \
   --argjson width "$actual_width" \
   --argjson height "$actual_height" \
   --argjson fps "$actual_fps" \
-  '{status:"ok", video:$video, duration_seconds:$duration, width:$width, height:$height, fps:$fps, audio_codec:$audio_codec, checksum_sha256:$checksum}'
+  '{status:"ok", video:$video, duration_seconds:$duration, width:$width, height:$height, fps:$fps, audio_codec:$audio_codec, checksum_sha256:$checksum_sha256}'
 ```
 
 Run:
@@ -263,7 +312,21 @@ assets/skills/explainer-video-editor/scripts/test-validate-delivery.sh
 
 Expected: PASS with `validate-delivery tests passed`.
 
-- [ ] **Step 2: Commit the tested scripts**
+- [ ] **Step 2: Harden claims, provenance, and scene traceability**
+
+Extend the valid fixture with the locked `claims`, `assets`, and `scenes` graph. Add negative cases for an extra approval key; missing or duplicate claims/scenes; unknown or ineligible claim sources; unknown scene assets/claims/owners; invalid `timeline_slot`; mixed-owner non-Palmier scenes; uncovered non-Open-Design assets; unused claims; missing or invalid real-capture `source_locator`; and missing Higgsfield `prompt_or_script_revision`.
+
+Run the tests against the generic assets-only predicate and record the RED failures. Then update the `jq -e` program to enforce every locked manifest rule, including exact approval keys, unique IDs and references, owner-specific provenance, scene-owner consistency, timeline bounds, asset coverage, and claim use.
+
+Run:
+
+```bash
+assets/skills/explainer-video-editor/scripts/test-validate-delivery.sh
+```
+
+Expected: PASS while preserving codec, stream, checksum, and strict full-decode regressions.
+
+- [ ] **Step 3: Commit the tested scripts**
 
 ```bash
 git add assets/skills/explainer-video-editor/scripts
@@ -312,17 +375,31 @@ Use one JSON document with `schema_version: 1`.
     "script_storyboard": "approved",
     "paid_generation": "approved"
   },
+  "claims": [
+    {
+      "claim_id": "claim-03",
+      "text": "The real demo shows the product control loop.",
+      "source_asset_ids": ["demo-proof-01"]
+    }
+  ],
   "assets": [
     {
       "asset_id": "demo-proof-01",
       "owner": "real-capture",
       "type": "video",
       "source_or_job_id": "D1F10781",
-      "source_locator": "27.5-46.5 seconds",
-      "claim_ids": ["claim-03"],
-      "intended_timeline_slot": "16.0-35.0 seconds",
+      "source_locator": {"start_seconds": 27.5, "end_seconds": 46.5},
       "approval_status": "approved",
       "rights_status": "owned"
+    }
+  ],
+  "scenes": [
+    {
+      "scene_id": "scene-proof",
+      "owner": "real-capture",
+      "timeline_slot": {"start_seconds": 16, "end_seconds": 35},
+      "asset_ids": ["demo-proof-01"],
+      "claim_ids": ["claim-03"]
     }
   ],
   "delivery": {
@@ -336,7 +413,7 @@ Use one JSON document with `schema_version: 1`.
 }
 ```
 
-The validator requires every asset to have a unique `asset_id`, a known owner, a non-empty `type` and `source_or_job_id`, approved status, and `owned` or `cleared` rights. Add optional production fields such as duration, aspect, resolution, prompt revision, voice ID, or Palmier clip ID when they improve traceability.
+The validator requires the locked approvals, claims, assets, scenes, owner-specific provenance, cross-references, coverage, and delivery fields defined above. Optional asset metadata may include `duration_seconds`, `aspect_ratio`, `width`, `height`, `fps`, `audio_format`, voice, or Palmier clip ID; `source_locator`, `prompt_or_script_revision`, claim links, and scene timeline roles are required where the contract specifies them.
 
 ## Three gates
 
@@ -377,11 +454,11 @@ Do not invent a fourth production gate. The final export is a delivered review a
 - Narration is intelligible over ambience and optional requested music.
 - Product names, CTA, and optional captions are correctly spelled and inside safe areas.
 - Representative frames cover the hook, every transition family, product proof, and end card.
-- `validate-delivery.sh MANIFEST VIDEO` passes, including full decode and checksum.
+- `validate-delivery.sh MANIFEST VIDEO` passes, including full decode and `checksum_sha256`.
 - Deliver the MP4, editable Palmier project, notebook, and manifest. Add captions, ProRes, music, or alternate ratios only when requested.
 ```
 
-- [ ] **Step 2: Check the reference for placeholders and contradictions**
+- [ ] **Step 2: Check the reference for unfinished markers and contradictions**
 
 Run:
 
@@ -411,7 +488,7 @@ description: Use when creating or enhancing a sourced explainer, product story, 
 
 ## Core principle
 
-Use the notebook to decide the story and PalmierPro to decide the final frame. Keep every scene factual, assign it to one asset owner, and cross the three approval gates before spending credits.
+Use the notebook to decide the story and PalmierPro to decide the final frame. Keep every scene factual, assign it one primary owner, and cross the three approval gates before spending credits.
 
 **REQUIRED SUB-SKILL:** Use `open-design` for the interactive brief, claim register, visual direction, layout frames, and storyboard.
 
@@ -478,7 +555,7 @@ Rejoin timed-out jobs. Retry only failed assets. After two equivalent failures, 
 6. Add product names, claims, CTA, and requested captions as Palmier-native text.
 7. Use restrained transitions, color correction, and audio treatment. Do not hide weak story structure with effects.
 8. Inspect representative frames and every important cut before export.
-9. Export the approved aspect and resolution through PalmierPro and monitor the export queue.
+9. Export the approved aspect, width, and height through PalmierPro and monitor the export queue.
 
 Palmier edits are reversible. Do not introduce per-edit approval gates after Gate 3.
 
@@ -490,7 +567,7 @@ Create the manifest described in `references/handoff-contract.md`. Run:
 assets/skills/explainer-video-editor/scripts/validate-delivery.sh MANIFEST.json VIDEO.mp4
 ```
 
-Deliver the verified H.264/AAC MP4, editable Palmier project, notebook, and manifest. Report exact duration, dimensions, frame rate, audio codec, checksum, selected voice, generative models, subtitle status, and factual sources.
+Deliver the verified H.264/AAC MP4, editable Palmier project, notebook, and manifest. Report exact duration, width, height, frame rate, audio codec, `checksum_sha256`, selected voice, generative models, subtitle status, and factual sources.
 
 Do not assume captions, ProRes, music, alternate ratios, or additional exports unless requested.
 
@@ -566,7 +643,7 @@ rg -n 'T''BD|TO''DO|PLACE''HOLDER|FIX''ME' assets/skills/explainer-video-editor
 git diff --check
 ```
 
-Expected: exactly the five planned files, no placeholder matches, and no whitespace errors.
+Expected: exactly the five planned files, no unfinished-marker matches, and no whitespace errors.
 
 ### Task 6: Forward-test, refine, and finish
 
