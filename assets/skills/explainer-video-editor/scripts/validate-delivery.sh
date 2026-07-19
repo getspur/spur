@@ -62,7 +62,7 @@ if ! jq -e '
   and (.delivery.height | type == "number" and . > 0)
   and (.delivery.fps | type == "number" and . > 0)
   and (
-    .delivery.checksum
+    .delivery.checksum_sha256
     | type == "string" and test("^[0-9a-f]{64}$")
   )
 ' "$manifest" >/dev/null 2>&1; then
@@ -78,7 +78,7 @@ expected_duration="$(jq -r '.delivery.duration_seconds' "$manifest")"
 expected_width="$(jq -r '.delivery.width' "$manifest")"
 expected_height="$(jq -r '.delivery.height' "$manifest")"
 expected_fps="$(jq -r '.delivery.fps' "$manifest")"
-expected_checksum="$(jq -r '.delivery.checksum' "$manifest")"
+expected_checksum_sha256="$(jq -r '.delivery.checksum_sha256' "$manifest")"
 
 if ! probe_json="$(
   ffprobe -v error \
@@ -183,8 +183,8 @@ if ! awk -v expected="$expected_fps" -v actual="$actual_fps" '
   fail 'video frame rate differs from the manifest by more than 0.001 fps'
 fi
 
-actual_checksum="$(shasum -a 256 "$video" | awk '{print $1}')"
-if [[ "$actual_checksum" != "$expected_checksum" ]]; then
+actual_checksum_sha256="$(shasum -a 256 "$video" | awk '{print $1}')"
+if [[ "$actual_checksum_sha256" != "$expected_checksum_sha256" ]]; then
   fail 'video checksum does not match the manifest'
 fi
 
@@ -200,7 +200,7 @@ jq -n \
   --argjson height "$actual_height" \
   --argjson fps "$actual_fps" \
   --arg audio_codec "$audio_codec" \
-  --arg checksum_sha256 "$actual_checksum" \
+  --arg checksum_sha256 "$actual_checksum_sha256" \
   '{
     status: $status,
     video: $video,
