@@ -547,6 +547,17 @@ notebook_app_doctor(path="/Volumes/Projects/spur-notebook/app_gallery/html_video
 
 Expected: no failed cells, the `spur-ad-capture` port is valid, and both doctors return `ok: true`. Legacy manifest warnings are acceptable; capability, plugin-spawn, skill, or port failures are not.
 
+> **Runtime amendment — 2026-07-19:** The notebook canvas port was proven to
+> persist only two real frames for a 16-second capture, while the deterministic
+> HyperFrames runtime is not provisioned. Tasks 4–6 therefore keep the approved
+> notebook storyboard as the interactive visual specification but render each
+> concept plate as a separate native Palmier Pro timeline using solid mattes,
+> authored text, built-in text animation/keyframes, and the real proof-target
+> still for the 13–16 second match cut. This supersedes the notebook capture and
+> `spur-ad-render` execution steps below. Each Palmier export must still satisfy
+> the exact 16-second/30-fps/1920×1080 media gate and five-checkpoint critique;
+> existing V2 timelines and exports remain untouched.
+
 ### Task 4: Render and verify the control-loop concept plate
 
 **Files:**
