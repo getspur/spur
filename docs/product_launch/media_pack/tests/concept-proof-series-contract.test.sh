@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-MANIFEST="$ROOT/concept-proof-series-manifest.json"
+MANIFEST="${CONCEPT_PROOF_SERIES_MANIFEST:-$ROOT/concept-proof-series-manifest.json}"
 NOTEBOOK="$ROOT/product-hunt-media-pack.ipynb"
 failures=0
 
@@ -27,12 +27,15 @@ fi
 
 if [[ -f "$MANIFEST" ]]; then
   if jq -e '
-      .version == 1
+      .sources as $sources
+      | .fps as $fps
+      | .version == 1
       and .fps == 30
       and .canvas == {"width": 1920, "height": 1080}
       and (.films | type == "array" and length == 3)
       and all(.films[];
-        .duration_seconds == 40
+        .chapters as $chapters
+        | .duration_seconds == 40
         and .duration_frames == 1200
         and .chapters == {
           "hook": [0, 90],
@@ -41,61 +44,115 @@ if [[ -f "$MANIFEST" ]]; then
           "proof": [480, 1050],
           "end": [1050, 1200]
         }
+        and (.proof_sources | type == "array" and length > 0)
+        and all(.proof_sources[];
+          .source_id as $source_id
+          | .source_seconds as $source_seconds
+          | ($source_id | type) == "string"
+          and ($sources | has($source_id))
+          and ($source_seconds | type) == "array"
+          and ($source_seconds | length) == 2
+          and ($source_seconds[0] | type) == "number"
+          and ($source_seconds[1] | type) == "number"
+          and $source_seconds[0] >= 0
+          and $source_seconds[1] >= $source_seconds[0]
+          and ($source_seconds[1] - $source_seconds[0]) == .duration_seconds
+        )
         and ([.proof_sources[].duration_seconds] | add) == 19
+        and ([.proof_sources[].duration_seconds] | add)
+          == (($chapters.proof[1] - $chapters.proof[0]) / $fps)
       )
     ' "$MANIFEST" >/dev/null; then
-    pass "manifest locks the three-film 40-second series structure"
+    pass "manifest proof timing and source references are internally consistent"
   else
-    fail "manifest locks the three-film 40-second series structure"
+    fail "manifest proof timing and source references are internally consistent"
   fi
 
   if jq -e '
-      [.films[] | {id, concept_output, output, takeaway}] == [
+      .anime_version == "4.4.1"
+      and .music == {
+        "media_ref": "23DF6A98",
+        "source_seconds": [0, 40]
+      }
+      and .end_card == {
+        "media_ref": "5BECDF39",
+        "copy": "INSTALL SPUR · COMMUNITY FREE",
+        "duration_seconds": 5
+      }
+    ' "$MANIFEST" >/dev/null; then
+    pass "manifest locks animation, music, and end-card assets"
+  else
+    fail "manifest locks animation, music, and end-card assets"
+  fi
+
+  if jq -e '
+      [.films[] | {id, concept_output, output, takeaway, publishing_status}] == [
         {
           "id": "control-loop",
           "concept_output": "ph_ready/series/motion/spur-control-loop-concept-v3-16s.mp4",
           "output": "ph_ready/series/spur-control-loop-proof-40s.mp4",
-          "takeaway": "Delegate deeply. Keep the decision."
+          "takeaway": "Delegate deeply. Keep the decision.",
+          "publishing_status": "diagnostic-non-promotable"
         },
         {
           "id": "durable-memory",
           "concept_output": "ph_ready/series/motion/spur-durable-memory-concept-v3-16s.mp4",
           "output": "ph_ready/series/spur-durable-memory-proof-40s.mp4",
-          "takeaway": "The agent can stop. The work remains."
+          "takeaway": "The agent can stop. The work remains.",
+          "publishing_status": "review-required"
         },
         {
           "id": "acp-agents",
           "concept_output": "ph_ready/series/motion/spur-acp-agents-concept-v3-16s.mp4",
           "output": "ph_ready/series/spur-acp-agents-proof-40s.mp4",
-          "takeaway": "Choose the agent. Keep one control system."
+          "takeaway": "Choose the agent. Keep one control system.",
+          "publishing_status": "diagnostic-non-promotable"
         }
       ]
+      and all(.films[].proof_sources[];
+        (.claim_ids | type) == "array"
+        and (.claim_ids | length) > 0
+        and all(.claim_ids[]; (type == "string") and length > 0)
+      )
     ' "$MANIFEST" >/dev/null; then
-    pass "manifest locks film identities and artifact paths"
+    pass "manifest locks film publishing statuses and proof claims"
   else
-    fail "manifest locks film identities and artifact paths"
+    fail "manifest locks film publishing statuses and proof claims"
   fi
 
   if jq -e '
-      .sources["session-detail"].status == "approved"
+      (.sources | keys | sort) == [
+        "four-agent-diagnostic",
+        "plan-state",
+        "session-detail",
+        "session-resume",
+        "specialist-routing",
+        "worker-visibility"
+      ]
+      and .sources["session-detail"].status == "approved"
       and .sources["session-detail"].path == "live_demos/13-problem-plan-loop-drive.mp4"
       and .sources["session-detail"].sha256 == "4d94c2c9d320eb53b4cd4bb56f0bddac337239ee4419e6a3ffc31b47649797d9"
+      and .sources["session-detail"].media_ref == "791B452C"
       and .sources["worker-visibility"].status == "approved"
       and .sources["worker-visibility"].path == "live_demos/10-problem-ops-visibility.mp4"
       and .sources["worker-visibility"].sha256 == "4c252847c6498d6be5d7f581c79c0f06665a7fef90f12eb589811fefc207991c"
+      and .sources["worker-visibility"].media_ref == "14D82963"
       and .sources["plan-state"].status == "approved"
       and .sources["plan-state"].path == "live_demos/11-problem-plan-progress.mp4"
       and .sources["plan-state"].sha256 == "011f20addf6850055a9bd062521d22ca94a440898eaf4ec6d5c29c7630335407"
+      and .sources["plan-state"].media_ref == "82D9D60A"
       and .sources["specialist-routing"].status == "approved"
       and .sources["specialist-routing"].path == "live_demos/09-product-e2e-flow.mp4"
       and .sources["specialist-routing"].sha256 == "7fd8473a7870afff7b5085c6a00ef306ac257b0021d8f150884886caa84d47ec"
+      and .sources["specialist-routing"].media_ref == "63605F31"
       and .sources["session-resume"].status == "approved"
       and .sources["session-resume"].path == "live_demos/04-session-resume.mp4"
       and .sources["session-resume"].sha256 == "cb110d2cfa9149cb9d8344987f03f11852a181926ee85a572bebf8dbdff0660c"
+      and .sources["session-resume"].media_ref == "4B29113A"
     ' "$MANIFEST" >/dev/null; then
-    pass "manifest locks approved source identities"
+    pass "manifest locks approved source identities and media refs"
   else
-    fail "manifest locks approved source identities"
+    fail "manifest locks approved source identities and media refs"
   fi
 
   if source_metadata="$(jq -r '
@@ -147,20 +204,84 @@ if [[ -f "$MANIFEST" ]]; then
       ($source | type) == "object"
       and $source.status == "diagnostic"
       and $source.sha256 == $diagnostic_sha
+      and $source.media_ref == "F2C142AD"
+      and $source.duration_seconds == 197.567
     ' "$MANIFEST" >/dev/null; then
-    pass "four-agent diagnostic status and checksum are locked"
+    pass "four-agent diagnostic identity and duration are locked"
   else
-    fail "four-agent diagnostic status and checksum are locked"
+    fail "four-agent diagnostic identity and duration are locked"
   fi
 
   if jq -e '
-      all(.films[].proof_sources[]?;
-        .source_id != "four-agent-diagnostic" or .watermark == true
+      all(.films[].proof_sources[];
+        ((.watermark_required | type) == "boolean")
+        and (has("watermark") | not)
+        and (.source_id != "four-agent-diagnostic" or .watermark_required == true)
       )
     ' "$MANIFEST" >/dev/null; then
-    pass "four-agent diagnostic usage is watermarked"
+    pass "manifest proof watermark requirements are locked"
   else
-    fail "four-agent diagnostic usage is watermarked"
+    fail "manifest proof watermark requirements are locked"
+  fi
+
+  if proof_window_metadata="$(jq -r '
+      .sources as $sources
+      | .films[] as $film
+      | $film.proof_sources[] as $proof
+      | $sources[$proof.source_id] as $source
+      | [
+          $film.id,
+          $proof.source_id,
+          ($proof.source_seconds[1] | tostring),
+          ($source.path // "-"),
+          (($source.duration_seconds // "-") | tostring)
+        ]
+      | @tsv
+    ' "$MANIFEST" 2>/dev/null)"; then
+    if [[ -n "$proof_window_metadata" ]]; then
+      while IFS=$'\t' read -r film_id source_id source_end source_path declared_duration; do
+        if [[ "$source_path" != "-" ]]; then
+          proof_source="$ROOT/$source_path"
+          if [[ ! -f "$proof_source" ]]; then
+            fail "$film_id/$source_id proof source exists for range check"
+            continue
+          fi
+          if source_duration="$(ffprobe -v error -show_entries format=duration \
+              -of default=noprint_wrappers=1:nokey=1 "$proof_source" 2>/dev/null)" \
+              && [[ -n "$source_duration" ]]; then
+            :
+          else
+            fail "$film_id/$source_id proof source duration is readable"
+            continue
+          fi
+        else
+          source_duration="$declared_duration"
+        fi
+
+        if awk -v value="$source_end" '
+            BEGIN { exit !(value ~ /^([0-9]+([.][0-9]*)?|[.][0-9]+)$/) }
+          ' && awk -v value="$source_duration" '
+            BEGIN { exit !(value ~ /^([0-9]+([.][0-9]*)?|[.][0-9]+)$/) }
+          '; then
+          :
+        else
+          fail "$film_id/$source_id proof source bound is numeric"
+          continue
+        fi
+
+        if awk -v source_end="$source_end" -v source_duration="$source_duration" '
+            BEGIN { exit !(source_end <= source_duration + 0.000001) }
+          '; then
+          pass "$film_id/$source_id proof source window is in range"
+        else
+          fail "$film_id/$source_id proof source window is in range"
+        fi
+      done <<<"$proof_window_metadata"
+    else
+      fail "manifest proof source windows are enumerable"
+    fi
+  else
+    fail "manifest proof source windows are enumerable"
   fi
 fi
 

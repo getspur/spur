@@ -55,6 +55,7 @@
       "status": "diagnostic",
       "media_ref": "F2C142AD",
       "sha256": "b5c407a3753bae990b0cdf95fd5dac2c747934e15f8a314aaff42e52bf83ecb5",
+      "duration_seconds": 197.567,
       "proof_terms": ["Claude Code", "Grok", "Codex", "OpenCode"]
     }
   },
@@ -63,6 +64,7 @@
       "id": "control-loop",
       "title": "Keep the control loop",
       "takeaway": "Delegate deeply. Keep the decision.",
+      "publishing_status": "diagnostic-non-promotable",
       "duration_seconds": 40,
       "duration_frames": 1200,
       "chapters": {
@@ -79,7 +81,13 @@
           "source_id": "four-agent-diagnostic",
           "source_seconds": [93, 112],
           "duration_seconds": 19,
-          "watermark": true
+          "watermark_required": true,
+          "claim_ids": [
+            "plan-task-state",
+            "parallel-worker-state",
+            "returned-evidence",
+            "brain-review-gate"
+          ]
         }
       ]
     },
@@ -87,6 +95,7 @@
       "id": "durable-memory",
       "title": "Work survives the session",
       "takeaway": "The agent can stop. The work remains.",
+      "publishing_status": "review-required",
       "duration_seconds": 40,
       "duration_frames": 1200,
       "chapters": {
@@ -103,13 +112,15 @@
           "source_id": "session-detail",
           "source_seconds": [8, 18],
           "duration_seconds": 10,
-          "watermark": false
+          "watermark_required": false,
+          "claim_ids": ["session-context"]
         },
         {
           "source_id": "session-resume",
           "source_seconds": [0, 9],
           "duration_seconds": 9,
-          "watermark": false
+          "watermark_required": false,
+          "claim_ids": ["session-resumed"]
         }
       ]
     },
@@ -117,6 +128,7 @@
       "id": "acp-agents",
       "title": "Bring any ACP agent",
       "takeaway": "Choose the agent. Keep one control system.",
+      "publishing_status": "diagnostic-non-promotable",
       "duration_seconds": 40,
       "duration_frames": 1200,
       "chapters": {
@@ -133,13 +145,15 @@
           "source_id": "specialist-routing",
           "source_seconds": [49, 59],
           "duration_seconds": 10,
-          "watermark": false
+          "watermark_required": false,
+          "claim_ids": ["explicit-agent-model-effort"]
         },
         {
           "source_id": "four-agent-diagnostic",
           "source_seconds": [93, 102],
           "duration_seconds": 9,
-          "watermark": true
+          "watermark_required": true,
+          "claim_ids": ["four-agent-roster"]
         }
       ]
     }
