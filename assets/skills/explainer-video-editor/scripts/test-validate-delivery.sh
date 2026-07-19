@@ -23,6 +23,10 @@ no_audio_video="$tmp_dir/no-audio.mp4"
 no_audio_manifest="$tmp_dir/no-audio.json"
 corrupt_video="$tmp_dir/corrupt.mp4"
 corrupt_manifest="$tmp_dir/corrupt.json"
+non_h264_video="$tmp_dir/non-h264.mp4"
+non_h264_manifest="$tmp_dir/non-h264.json"
+non_aac_video="$tmp_dir/non-aac.mp4"
+non_aac_manifest="$tmp_dir/non-aac.json"
 
 write_matching_manifest() {
   local template="$1"
@@ -92,6 +96,35 @@ write_matching_manifest() {
     "$template" > "$output"
 }
 
+assert_stream_codec() {
+  local media="$1"
+  local stream_selector="$2"
+  local expected_codec="$3"
+  local actual_codec
+
+  actual_codec="$(
+    ffprobe -v error \
+      -select_streams "$stream_selector" \
+      -show_entries stream=codec_name \
+      -of default=noprint_wrappers=1:nokey=1 \
+      "$media"
+  )"
+  if [[ "$actual_codec" != "$expected_codec" ]]; then
+    echo "expected $media $stream_selector codec $expected_codec, got $actual_codec" >&2
+    exit 1
+  fi
+}
+
+assert_strictly_readable() {
+  local media="$1"
+
+  if ! ffmpeg -v error -xerror -err_detect explode \
+    -i "$media" -f null - >/dev/null 2>&1; then
+    echo "expected fixture to pass strict full-decode validation: $media" >&2
+    exit 1
+  fi
+}
+
 ffmpeg -loglevel error \
   -f lavfi -i "color=c=black:s=320x180:r=30:d=1" \
   -f lavfi -i "sine=frequency=440:sample_rate=48000:duration=1" \
@@ -134,6 +167,39 @@ jq -n \
   }' > "$manifest"
 
 "$validator" "$manifest" "$video"
+
+ffmpeg -loglevel error \
+  -i "$video" \
+  -map 0:v:0 -map 0:a:0 \
+  -c:v mpeg4 -q:v 5 -c:a copy \
+  "$non_h264_video"
+assert_stream_codec "$non_h264_video" v:0 mpeg4
+assert_stream_codec "$non_h264_video" a:0 aac
+assert_strictly_readable "$non_h264_video"
+write_matching_manifest "$manifest" "$non_h264_video" "$non_h264_manifest"
+
+ffmpeg -loglevel error \
+  -i "$video" \
+  -map 0:v:0 -map 0:a:0 \
+  -c:v copy -c:a alac \
+  "$non_aac_video"
+assert_stream_codec "$non_aac_video" v:0 h264
+assert_stream_codec "$non_aac_video" a:0 alac
+assert_strictly_readable "$non_aac_video"
+write_matching_manifest "$manifest" "$non_aac_video" "$non_aac_manifest"
+
+codec_rejection_failures=0
+if "$validator" "$non_h264_manifest" "$non_h264_video" >/dev/null 2>&1; then
+  echo "expected validator to reject non-H.264 video" >&2
+  codec_rejection_failures=$((codec_rejection_failures + 1))
+fi
+if "$validator" "$non_aac_manifest" "$non_aac_video" >/dev/null 2>&1; then
+  echo "expected validator to reject non-AAC audio" >&2
+  codec_rejection_failures=$((codec_rejection_failures + 1))
+fi
+if [[ "$codec_rejection_failures" -ne 0 ]]; then
+  exit 1
+fi
 
 jq '.approvals.paid_generation = "pending"' "$manifest" > "$invalid_gate"
 if "$validator" "$invalid_gate" "$video" >/dev/null 2>&1; then
