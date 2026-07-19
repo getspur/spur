@@ -125,6 +125,23 @@ assert_strictly_readable() {
   fi
 }
 
+traceability_rejection_failures=0
+traceability_case_number=0
+
+expect_traceability_rejected() {
+  local label="$1"
+  local filter="$2"
+  local candidate
+
+  traceability_case_number=$((traceability_case_number + 1))
+  candidate="$tmp_dir/traceability-$traceability_case_number.json"
+  jq "$filter" "$manifest" > "$candidate"
+  if "$validator" "$candidate" "$video" >/dev/null 2>&1; then
+    echo "validator accepted $label" >&2
+    traceability_rejection_failures=$((traceability_rejection_failures + 1))
+  fi
+}
+
 ffmpeg -loglevel error \
   -f lavfi -i "color=c=black:s=320x180:r=30:d=1" \
   -f lavfi -i "sine=frequency=440:sample_rate=48000:duration=1" \
@@ -146,7 +163,31 @@ jq -n \
       script_storyboard: "approved",
       paid_generation: "approved"
     },
+    claims: [
+      {
+        claim_id: "claim-01",
+        text: "The real source demonstrates the product workflow.",
+        source_asset_ids: ["source-doc", "capture-proof"]
+      }
+    ],
     assets: [
+      {
+        asset_id: "source-doc",
+        owner: "open-design",
+        type: "document",
+        source_or_job_id: "brief-source",
+        approval_status: "approved",
+        rights_status: "cleared"
+      },
+      {
+        asset_id: "capture-proof",
+        owner: "real-capture",
+        type: "video",
+        source_or_job_id: "demo-source",
+        source_locator: {start_seconds: 0, end_seconds: 0.8},
+        approval_status: "approved",
+        rights_status: "owned"
+      },
       {
         asset_id: "fixture-visual",
         owner: "html-video",
@@ -154,6 +195,53 @@ jq -n \
         source_or_job_id: "fixture-job",
         approval_status: "approved",
         rights_status: "cleared"
+      },
+      {
+        asset_id: "generated-narration",
+        owner: "higgsfield",
+        type: "audio",
+        source_or_job_id: "voice-job",
+        prompt_or_script_revision: "script-r1",
+        approval_status: "approved",
+        rights_status: "cleared"
+      },
+      {
+        asset_id: "palmier-title",
+        owner: "palmier",
+        type: "native-text",
+        source_or_job_id: "title-clip",
+        approval_status: "approved",
+        rights_status: "owned"
+      }
+    ],
+    scenes: [
+      {
+        scene_id: "scene-proof",
+        owner: "real-capture",
+        timeline_slot: {start_seconds: 0, end_seconds: 0.3},
+        asset_ids: ["capture-proof"],
+        claim_ids: ["claim-01"]
+      },
+      {
+        scene_id: "scene-plate",
+        owner: "html-video",
+        timeline_slot: {start_seconds: 0.3, end_seconds: 0.5},
+        asset_ids: ["fixture-visual"],
+        claim_ids: []
+      },
+      {
+        scene_id: "scene-voice",
+        owner: "higgsfield",
+        timeline_slot: {start_seconds: 0.5, end_seconds: 0.7},
+        asset_ids: ["generated-narration"],
+        claim_ids: []
+      },
+      {
+        scene_id: "scene-title",
+        owner: "palmier",
+        timeline_slot: {start_seconds: 0.7, end_seconds: 1},
+        asset_ids: ["palmier-title", "fixture-visual"],
+        claim_ids: ["claim-01"]
       }
     ],
     delivery: {
@@ -167,6 +255,62 @@ jq -n \
   }' > "$manifest"
 
 "$validator" "$manifest" "$video"
+
+expect_traceability_rejected \
+  'a fourth approval key' \
+  '.approvals.export_review = "approved"'
+expect_traceability_rejected \
+  'missing claims' \
+  'del(.claims)'
+expect_traceability_rejected \
+  'duplicate claim IDs' \
+  '.claims += [.claims[0]]'
+expect_traceability_rejected \
+  'an unknown claim source asset' \
+  '.claims[0].source_asset_ids = ["missing-source"]'
+expect_traceability_rejected \
+  'an ineligible claim source asset' \
+  '.claims[0].source_asset_ids = ["fixture-visual"]'
+expect_traceability_rejected \
+  'missing scenes' \
+  'del(.scenes)'
+expect_traceability_rejected \
+  'duplicate scene IDs' \
+  '.scenes[1].scene_id = .scenes[0].scene_id'
+expect_traceability_rejected \
+  'an unknown scene owner' \
+  '.scenes[0].owner = "open-design"'
+expect_traceability_rejected \
+  'an invalid scene timeline slot' \
+  '.scenes[0].timeline_slot = {start_seconds: 0.4, end_seconds: 0.3}'
+expect_traceability_rejected \
+  'an unknown scene asset' \
+  '.scenes[0].asset_ids = ["missing-asset"]'
+expect_traceability_rejected \
+  'mixed-owner inputs in a non-Palmier scene' \
+  '.scenes[0].asset_ids += ["fixture-visual"]'
+expect_traceability_rejected \
+  'an unreferenced non-open-design asset' \
+  '.assets += [{asset_id: "orphan-plate", owner: "html-video", type: "video", source_or_job_id: "orphan", approval_status: "approved", rights_status: "cleared"}]'
+expect_traceability_rejected \
+  'a missing real-capture source locator' \
+  '.assets |= map(if .asset_id == "capture-proof" then del(.source_locator) else . end)'
+expect_traceability_rejected \
+  'an invalid real-capture source locator' \
+  '.assets |= map(if .asset_id == "capture-proof" then .source_locator = {start_seconds: 0.5, end_seconds: 0.5} else . end)'
+expect_traceability_rejected \
+  'a missing Higgsfield prompt or script revision' \
+  '.assets |= map(if .asset_id == "generated-narration" then del(.prompt_or_script_revision) else . end)'
+expect_traceability_rejected \
+  'an unknown scene claim' \
+  '.scenes[0].claim_ids = ["missing-claim"]'
+expect_traceability_rejected \
+  'an unused claim' \
+  '.claims += [{claim_id: "unused-claim", text: "Unused factual claim", source_asset_ids: ["source-doc"]}]'
+
+if [[ "$traceability_rejection_failures" -ne 0 ]]; then
+  exit 1
+fi
 
 ffmpeg -loglevel error \
   -i "$video" \
