@@ -995,6 +995,245 @@ done
         agent
     }
 
+    fn git(repo: &Path, args: &[&str]) -> String {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .output()
+            .expect("run git");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    fn initialize_projection_repo(repo: &Path, bundled_dir: &Path) {
+        git(repo, &["init", "-q", "-b", "main"]);
+        git(repo, &["config", "user.email", "t@t"]);
+        git(repo, &["config", "user.name", "t"]);
+        std::fs::create_dir_all(repo.join(".spur")).expect("create SPUR config directory");
+        std::fs::write(
+            repo.join(".spur/config.toml"),
+            format!(
+                "[skills]\nbundled_dir = {:?}\n",
+                bundled_dir.display().to_string()
+            ),
+        )
+        .expect("write bundled skill configuration");
+    }
+
+    fn write_projection_skill(root: &Path, id: &str, role: &str, body: &str) {
+        let source_dir = root.join(id);
+        std::fs::create_dir_all(&source_dir).expect("create skill source");
+        std::fs::write(
+            source_dir.join("SKILL.md"),
+            format!(
+                "---\nname: {id}\ndescription: Projection fixture\nrole: {role}\n---\n{body}\n"
+            ),
+        )
+        .expect("write skill source");
+    }
+
+    fn write_projection_pool_skill(repo: &Path, id: &str) {
+        let source = "acme/skills";
+        let pinned_commit = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let source_dir = crate::explore::pool::pool_dir(repo, source, id, pinned_commit);
+        write_projection_skill(&source_dir, id, "both", "active pool body");
+        let content_sha256 =
+            crate::explore::content_hash(&source_dir).expect("hash pool skill source");
+        crate::explore::pool::Manifest {
+            sources: vec![],
+            items: vec![crate::explore::pool::ManifestItem {
+                name: id.to_string(),
+                kind: crate::explore::catalog::ItemKind::Skill,
+                source: source.to_string(),
+                rel_path: format!("skills/{id}"),
+                pinned_commit: pinned_commit.to_string(),
+                content_sha256,
+                license: None,
+                gate: crate::explore::pool::GateRecord {
+                    verdict: "clean".to_string(),
+                    justification: None,
+                    decided_at_epoch: None,
+                },
+            }],
+        }
+        .save(repo)
+        .expect("save pool manifest");
+    }
+
+    fn write_projection_probe_agent_script(repo: &Path) -> PathBuf {
+        let script = repo.join("projection_probe_agent.sh");
+        std::fs::write(
+            &script,
+            r#"#!/bin/bash
+set -u
+repo_root=$1
+marker=$2
+
+while IFS= read -r line; do
+    method=$(printf '%s' "$line" | sed -n 's/.*"method":"\([^"]*\)".*/\1/p')
+    id_json=$(printf '%s' "$line" | sed -E -n 's/.*"id"[[:space:]]*:[[:space:]]*("[^"]*"|[0-9]+).*/\1/p')
+
+    case "$method" in
+        initialize)
+            if ! test -e "$repo_root/.codex/skills/spurpower-brain-builtin/SKILL.md"; then
+                echo '{"jsonrpc":"2.0","id":'"$id_json"',"error":{"code":-32041,"message":"bundled projection missing before initialize"}}'
+                continue
+            fi
+            if ! test -e "$repo_root/.codex/skills/spurpower-pool-active/SKILL.md"; then
+                echo '{"jsonrpc":"2.0","id":'"$id_json"',"error":{"code":-32042,"message":"pool projection missing before initialize"}}'
+                continue
+            fi
+            if ! test -d "$repo_root/.spur/runtime/skill-projections/codex/generations"; then
+                echo '{"jsonrpc":"2.0","id":'"$id_json"',"error":{"code":-32043,"message":"generation store missing before initialize"}}'
+                continue
+            fi
+            touch "$marker"
+            echo '{"jsonrpc":"2.0","id":'"$id_json"',"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":false,"promptCapabilities":{}},"authMethods":[]}}'
+            ;;
+    esac
+done
+"#,
+        )
+        .expect("write projection probe script");
+        script
+    }
+
+    fn projection_probe_config(
+        name: &str,
+        script: &Path,
+        repo: &Path,
+        marker: &Path,
+    ) -> spur_acp::config::AgentConfig {
+        let mut agent = spur_acp::config::AgentConfig::with_defaults(name);
+        agent.command = "bash".to_string();
+        agent.args = vec![
+            script.display().to_string(),
+            repo.display().to_string(),
+            marker.display().to_string(),
+        ];
+        agent.transport = TransportKind::Acp;
+        agent.kind = AgentKind::CodexAcp;
+        agent
+    }
+
+    fn write_failing_brain_script(repo: &Path) -> PathBuf {
+        let script = repo.join("failing_brain_agent.sh");
+        std::fs::write(
+            &script,
+            r#"#!/bin/bash
+set -u
+marker=$2
+while IFS= read -r line; do
+    id_json=$(printf '%s' "$line" | sed -E -n 's/.*"id"[[:space:]]*:[[:space:]]*("[^"]*"|[0-9]+).*/\1/p')
+    touch "$marker"
+    echo '{"jsonrpc":"2.0","id":'"$id_json"',"error":{"code":-32017,"message":"intentional connection failure"}}'
+done
+"#,
+        )
+        .expect("write failing brain script");
+        script
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn connect_brain_projects_all_active_skills_before_initialize() {
+        let _global_root = crate::explore::store::force_global_root_for_tests(None);
+        let repo = tempfile::tempdir().expect("repo tempdir");
+        let bundled_dir = repo.path().join("test-bundled-skills");
+        std::fs::create_dir_all(&bundled_dir).expect("create bundled source root");
+        initialize_projection_repo(repo.path(), &bundled_dir);
+        write_projection_skill(&bundled_dir, "brain-builtin", "brain", "brain bundled body");
+        write_projection_pool_skill(repo.path(), "pool-active");
+        let initialize_marker = repo.path().join("initialize-observed");
+        let script = write_projection_probe_agent_script(repo.path());
+
+        let mut config = SpurConfig::default();
+        config.brain.default = "codex-probe".to_string();
+        config.agents.entries = vec![projection_probe_config(
+            "codex-probe",
+            &script,
+            repo.path(),
+            &initialize_marker,
+        )];
+        git(repo.path(), &["add", "."]);
+        git(repo.path(), &["commit", "-q", "-m", "projection fixture"]);
+        let mut orchestrator =
+            Orchestrator::new(repo.path().to_path_buf(), config, None).expect("orchestrator");
+
+        let (mut connection, brain_name, _) = orchestrator
+            .connect_brain(None, None)
+            .await
+            .expect("brain connection should initialize after projection");
+
+        assert_eq!(brain_name, "codex-probe");
+        assert!(
+            initialize_marker.exists(),
+            "agent initialize should observe projected skills"
+        );
+        let projection_root = repo.path().join(".spur/runtime/skill-projections/codex");
+        for id in ["brain-builtin", "pool-active"] {
+            let target = repo.path().join(format!(".codex/skills/spurpower-{id}"));
+            assert!(target.join("SKILL.md").exists());
+            let metadata = std::fs::symlink_metadata(&target).expect("projection target metadata");
+            if metadata.file_type().is_symlink() {
+                assert!(
+                    std::fs::canonicalize(&target)
+                        .expect("canonical generation target")
+                        .starts_with(projection_root.join("generations")),
+                    "symlink target should resolve through the generation store"
+                );
+            }
+        }
+        assert_eq!(git(repo.path(), &["status", "--short"]), "");
+        connection
+            .shutdown()
+            .await
+            .expect("shutdown probe connection");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn connect_brain_projection_failure_precedes_connection_initialization() {
+        let _global_root = crate::explore::store::force_global_root_for_tests(None);
+        let repo = tempfile::tempdir().expect("repo tempdir");
+        let missing_bundled_dir = repo.path().join("missing-bundled-skills");
+        initialize_projection_repo(repo.path(), &missing_bundled_dir);
+        let connection_marker = repo.path().join("connection-started");
+        let script = write_failing_brain_script(repo.path());
+
+        let mut config = SpurConfig::default();
+        config.brain.default = "codex-probe".to_string();
+        config.agents.entries = vec![projection_probe_config(
+            "codex-probe",
+            &script,
+            repo.path(),
+            &connection_marker,
+        )];
+        git(repo.path(), &["add", "."]);
+        git(
+            repo.path(),
+            &["commit", "-q", "-m", "projection failure fixture"],
+        );
+        let mut orchestrator =
+            Orchestrator::new(repo.path().to_path_buf(), config, None).expect("orchestrator");
+
+        let result = orchestrator.connect_brain(None, None).await;
+
+        let error = match result {
+            Err(error) => format!("{error:#}"),
+            Ok(_) => panic!("missing bundled catalog should stop brain connection"),
+        };
+        assert!(error.contains("skill projection for brain 'codex-probe'"));
+        assert!(error.contains("skill projection Resolve failed for codex"));
+        assert!(error.contains(&missing_bundled_dir.display().to_string()));
+        assert!(
+            !connection_marker.exists(),
+            "fatal projection error should win before connection initialization"
+        );
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn check_agents_caches_agent_model_catalog_after_ready_initialize() {
         let _guard = HOME_LOCK.lock().unwrap();
