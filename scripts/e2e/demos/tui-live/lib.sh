@@ -157,6 +157,50 @@ story_hard_proof() {
   story_dwell "$dwell"
 }
 
+# Extract only the expanded Workers widget from the current terminal frame.
+# The top and bottom titles are rendered by workers_panel::render_focused.
+workers_panel_text() {
+  "$shell_use_bin" --session "$session_name" text | awk '
+    index($0, "Workers (") > 0 {
+      buffer = $0 ORS
+      in_workers = 1
+      next
+    }
+    in_workers {
+      buffer = buffer $0 ORS
+      if (index($0, "Alt+D collapse") > 0) {
+        printf "%s", buffer
+        exit
+      }
+    }
+  '
+}
+
+# Worker routing is proof only when the anchor appears inside the visible
+# Workers widget. The transcript and composer deliberately remain out of scope.
+story_workers_panel_hard_proof() {
+  local claim="$1"
+  local anchor="$2"
+  local dwell="${3:-3.0}"
+  local wait_ms="${4:-$timeout_ms}"
+  local deadline=$((SECONDS + (wait_ms + 999) / 1000))
+  local panel=""
+
+  while (( SECONDS < deadline )); do
+    panel="$(workers_panel_text || true)"
+    if [[ "$panel" == *"$anchor"* ]]; then
+      printf '+ proof: %s [Workers panel anchor=%s]\n' "$claim" "$anchor"
+      story_dwell "$dwell"
+      return 0
+    fi
+    sleep_ms 0.2
+  done
+
+  printf 'fatal: Workers panel never exposed anchor %s within %sms\n' "$anchor" "$wait_ms" >&2
+  "$shell_use_bin" --session "$session_name" text --full >&2 || true
+  return 1
+}
+
 # Live projects legitimately differ. Optional history/state must never masquerade
 # as proof: label both the observed and absent paths, then continue safely.
 story_soft_proof() {
@@ -339,6 +383,24 @@ return_to_session_detail() {
   land_session_detail "Re-enter Session Detail after navigation" 2.0 || true
 }
 
+# The Product Hunt campaign must synthesize in the exact fresh session that
+# opened its Plan Inspector. Never attach or resume a different session here.
+return_to_campaign_session_detail() {
+  if session_detail_is_visible; then
+    return 0
+  fi
+
+  press_key Escape
+  if "$shell_use_bin" --session "$session_name" wait text "Session ·|INSERT" --regex --timeout "$timeout_ms" >/dev/null 2>&1; then
+    expect_text "INSERT"
+    return 0
+  fi
+
+  "$shell_use_bin" --session "$session_name" text --full >&2 || true
+  printf 'fatal: could not return directly to the campaign Session Detail\n' >&2
+  return 1
+}
+
 require_agent_send_opt_in() {
   if [[ "${SPUR_DEMO_ALLOW_AGENT_SEND:-0}" != "1" ]]; then
     cat >&2 <<'EOF'
@@ -455,6 +517,23 @@ _live_complete_session_attach() {
     return 0
   fi
   return 1
+}
+
+# Begin a paid campaign with no transcript, worker, or composer history that
+# could satisfy current-run proof. There is intentionally no resume fallback.
+start_fresh_session_detail() {
+  open_sessions_picker
+  wait_text "Start new session"
+  press_key n
+  _live_confirm_draft_if_needed || true
+  if ! _live_wait_session_detail 15000; then
+    "$shell_use_bin" --session "$session_name" text --full >&2 || true
+    printf 'fatal: fresh Session Detail attach failed after Start new session\n' >&2
+    return 1
+  fi
+  expect_text "INSERT"
+  printf '+ proof: fresh Session Detail isolates the paid campaign\n'
+  story_dwell 2.5
 }
 
 resume_session_skip_held() {
@@ -1023,6 +1102,30 @@ EOF
   fi
 }
 
+require_hitl_loop_opt_in() {
+  if [[ "${SPUR_DEMO_ALLOW_HITL_LOOP:-0}" != "1" ]]; then
+    printf '%s\n' \
+      'error: live Product Hunt audit loop is opt-in (real brain + four workers + one retry).' \
+      '' \
+      '  SPUR_DEMO_ALLOW_HITL_LOOP=1 bash journeys/problem-plan-loop-drive.sh' \
+      '' \
+      'Recommended capture wrapper: ./capture-live-hitl.sh' \
+      'Optional: SPUR_DEMO_PLAN_LOOP_WAIT_S=420' >&2
+    return 2
+  fi
+
+  if [[ ! -d "$project/.beads" ]]; then
+    cat >&2 <<-EOF
+beads-backed project required: live Product Hunt audit stopped before the brain prompt.
+	missing: $project/.beads
+
+	Set SPUR_DEMO_PROJECT=/path/to/beads-project before starting the journey,
+	or initialize beads in the effective project. No Product Hunt brain or worker spend was started.
+	EOF
+    return 2
+  fi
+}
+
 # Poll Session Detail for auto-loop signals after a seed (YOU / DELEGATE / EXEC / task id).
 # Soft-success: never hard-fail if workers are slow. Prefer session over dashboard lineage.
 wait_for_lineage_loop_activity() {
@@ -1145,6 +1248,223 @@ trigger_submit_plan_one_task_and_observe() {
   story_hop 0.8 0.4
   return_to_session_detail
   story_session_land "Loop observation ends at Session Detail home" 3.0
+}
+
+land_plan_inspector_for_task() {
+  local task_id="$1"
+  local timeout_s="${2:-${SPUR_DEMO_PLAN_LOOP_WAIT_S:-180}}"
+  local deadline=$((SECONDS + timeout_s))
+
+  while (( SECONDS < deadline )); do
+    press_key Alt+p
+    sleep 0.6
+    if soft_has_text "Task detail" 1200 && soft_has_text "$task_id" 1200; then
+      printf '+ proof: Plan Inspector pinned task %s\n' "$task_id"
+      story_dwell 3.5
+      return 0
+    fi
+    sleep 0.4
+  done
+
+  printf 'fatal: Plan Inspector never pinned task %s within %ss\n' "$task_id" "$timeout_s" >&2
+  return 1
+}
+
+# Extract only the selected task's complete result from the current Plan
+# Inspector frame. Issue description text follows this bounded Output section.
+plan_inspector_output_text() {
+  "$shell_use_bin" --session "$session_name" text --full | awk '
+    $0 ~ /^[[:space:]|│]*Output[[:space:]|│]*$/ {
+      buffer = $0 ORS
+      in_output = 1
+      next
+    }
+    in_output {
+      buffer = buffer $0 ORS
+      if (index($0, "next: review") > 0) {
+        printf "%s", buffer
+        exit
+      }
+    }
+  '
+}
+
+# Extract only the selected task's right-hand Task detail pane. The pane heading
+# is on the split top border; subsequent content rows begin after the ││ seam.
+plan_inspector_task_detail_text() {
+  "$shell_use_bin" --session "$session_name" text --full | awk '
+    {
+      if (!in_detail) {
+        if (index($0, "Task detail") > 0) {
+          in_detail = 1
+        }
+        next
+      }
+      boundary = index($0, "││")
+      if (boundary == 0) {
+        exit
+      }
+      right = substr($0, boundary + length("││"))
+      print right
+    }
+  '
+}
+
+# Approval status is proof only when the same bounded Task detail pane exposes
+# both the selected task id and its task-specific execution status.
+story_plan_inspector_task_status_hard_proof() {
+  local claim="$1"
+  local task_id="$2"
+  local status="$3"
+  local dwell="${4:-3.0}"
+  local timeout_s="${5:-${SPUR_DEMO_PLAN_LOOP_WAIT_S:-180}}"
+  local deadline=$((SECONDS + timeout_s))
+  local detail=""
+
+  while (( SECONDS < deadline )); do
+    detail="$(plan_inspector_task_detail_text || true)"
+    if [[ "$detail" == *"task: ${task_id}"* && "$detail" == *"status ${status}"* ]]; then
+      printf '+ proof: %s [Plan Inspector Task detail task=%s status=%s]\n' "$claim" "$task_id" "$status"
+      story_dwell "$dwell"
+      return 0
+    fi
+    sleep_ms 0.2
+  done
+
+  printf 'fatal: Plan Inspector Task detail never exposed task %s with status %s within %ss\n' "$task_id" "$status" "$timeout_s" >&2
+  "$shell_use_bin" --session "$session_name" text --full >&2 || true
+  return 1
+}
+
+# Worker-result markers are proof only inside a complete Plan Inspector Output
+# block. Requiring the summary label allows normalized prefixes before markers.
+story_plan_inspector_result_hard_proof() {
+  local claim="$1"
+  local marker="$2"
+  local dwell="${3:-3.0}"
+  local wait_ms="${4:-$timeout_ms}"
+  local deadline=$((SECONDS + (wait_ms + 999) / 1000))
+  local output=""
+
+  while (( SECONDS < deadline )); do
+    output="$(plan_inspector_output_text || true)"
+    if [[ "$output" == *"summary:"* && "$output" == *"$marker"* ]]; then
+      printf '+ proof: %s [Plan Inspector Output marker=%s]\n' "$claim" "$marker"
+      story_dwell "$dwell"
+      return 0
+    fi
+    sleep_ms 0.2
+  done
+
+  printf 'fatal: Plan Inspector Output never exposed summary plus marker %s within %sms\n' "$marker" "$wait_ms" >&2
+  "$shell_use_bin" --session "$session_name" text --full >&2 || true
+  return 1
+}
+
+trigger_submit_plan_hitl_review_and_synthesize() {
+  require_hitl_loop_opt_in
+  local positioning_task_id="ph-acp-positioning-$$"
+  local proof_task_id="ph-tui-proof-$$"
+  local readiness_task_id="ph-launch-readiness-$$"
+  local handoff_task_id="ph-media-handoff-$$"
+
+  start_fresh_session_detail
+  sleep_ms 0.8
+  printf '+ Product Hunt audit: ask brain for four independent read-only tasks\n'
+
+  type_slow "PRODUCT HUNT LIVE CAPTURE. "
+  type_text "Audit docs/product_launch/media_pack in real spur. "
+  type_text "Call submit_plan with exactly FOUR independent read-only tasks. "
+  type_text "Task 1 id: ${positioning_task_id}. Worker: claude-code. effort: medium. deps: none. "
+  type_text "Inspect the approved ACP category line vs docs/integration. Return exactly one line beginning PH POSITIONING FINDING:. Make no file changes. "
+  type_text "Task 2 id: ${proof_task_id}. Worker: grok. effort: medium. deps: none. "
+  type_text "Inspect real TUI captures for one launch claim needing stronger proof. Return exactly one line beginning PH PROOF FINDING:. Make no file changes. "
+  type_text "Task 3 id: ${readiness_task_id}. Worker: codex. effort: medium. deps: none. "
+  type_text "Inspect pacing and accessibility. Return exactly one line beginning PH READINESS FINDING:. Make no file changes. "
+  type_text "Task 4 id: ${handoff_task_id}. Worker: opencode. effort: medium. deps: none. "
+  type_text "Inspect manifest locks, filenames, and Product Hunt delivery notes. Return exactly one line beginning PH HANDOFF FINDING:. Make no file changes. "
+  type_text "After submit_plan succeeds, reply with plan_id only. "
+  type_text "When workers finish, do not call review_task, retry_plan_task, or merge_plan. "
+  type_text "Leave every completed task awaiting_review for the operator."
+  sleep_ms 0.5
+  press_key Enter
+
+  story_hard_proof "The prompt names the ACP positioning task" "$positioning_task_id" 2.5
+  story_hard_proof "The prompt names the TUI proof task" "$proof_task_id" 2.5
+  story_hard_proof "The prompt names the launch readiness task" "$readiness_task_id" 2.5
+  story_hard_proof "The prompt names the media handoff task" "$handoff_task_id" 2.5
+  story_hard_proof "The brain accepts the Product Hunt audit turn" "THINK" 2.5
+
+  story_workers_panel_hard_proof "The session exposes exactly four campaign workers" "Workers (4)" 2.5
+  story_workers_panel_hard_proof "The positioning task is routed to Claude Code" "claude-code" 2.5
+  story_workers_panel_hard_proof "The proof task is routed to Grok" "grok" 2.5
+  story_workers_panel_hard_proof "The readiness task is routed to Codex" "codex" 2.5
+  story_workers_panel_hard_proof "The handoff task is routed to OpenCode" "opencode" 2.5
+  story_dwell 3.5
+  press_key Alt+d
+
+  land_plan_inspector_for_task "$positioning_task_id"
+  story_hard_proof "The positioning result reaches operator review" "awaiting_review" 4.0
+  story_plan_inspector_result_hard_proof "The positioning result exposes its finding" "PH POSITIONING FINDING:" 3.5
+  press_key a
+  story_hard_proof "The operator selects approval for positioning" "Decision: Approve" 3.5
+  press_key Enter
+  story_plan_inspector_task_status_hard_proof "The positioning task records approval" "$positioning_task_id" "approved" 3.0
+
+  press_key j
+  story_hard_proof "The inspector advances to the proof task" "$proof_task_id" 2.5
+  story_hard_proof "The proof result reaches operator review" "awaiting_review" 4.0
+  story_plan_inspector_result_hard_proof "The proof result exposes its finding" "PH PROOF FINDING:" 3.5
+  press_key d
+  story_hard_proof "The operator rejects proof without a source window" "Decision: Reject" 3.5
+  press_key Enter
+  story_hard_proof "The proof task records rejection" "rejected" 3.0
+
+  press_key R
+  story_hard_proof "The operator opens the proof retry surface" "Retry Task" 3.0
+  type_slow "READ ONLY. Re-run the same check and return exactly three lines: "
+  type_text "SOURCE: <exact path>; WINDOW: <exact seconds or line range>; "
+  type_text "RECOMMENDATION: <one sentence>. Make no file changes."
+  story_hard_proof "The retry requires an exact source" "SOURCE:" 2.5
+  story_hard_proof "The retry requires an exact evidence window" "WINDOW:" 2.5
+  press_key Enter
+
+  story_hard_proof "The retried proof returns to operator review" "awaiting_review" 4.0
+  story_hard_proof "The retry stays correlated to the proof task" "$proof_task_id" 2.5
+  story_plan_inspector_result_hard_proof "The retry exposes source evidence" "SOURCE:" 3.5
+  story_plan_inspector_result_hard_proof "The retry exposes its evidence window" "WINDOW:" 3.5
+  story_plan_inspector_result_hard_proof "The retry exposes a recommendation" "RECOMMENDATION:" 3.5
+  press_key a
+  story_hard_proof "The operator selects approval for proof" "Decision: Approve" 3.5
+  press_key Enter
+  story_plan_inspector_task_status_hard_proof "The retried proof task records approval" "$proof_task_id" "approved" 3.0
+
+  press_key j
+  story_hard_proof "The inspector advances to the readiness task" "$readiness_task_id" 2.5
+  story_hard_proof "The readiness result reaches operator review" "awaiting_review" 4.0
+  story_plan_inspector_result_hard_proof "The readiness result exposes its finding" "PH READINESS FINDING:" 3.5
+  press_key a
+  story_hard_proof "The operator selects approval for readiness" "Decision: Approve" 3.5
+  press_key Enter
+  story_plan_inspector_task_status_hard_proof "The readiness task records approval" "$readiness_task_id" "approved" 3.0
+
+  press_key j
+  story_hard_proof "The inspector advances to the handoff task" "$handoff_task_id" 2.5
+  story_hard_proof "The handoff result reaches operator review" "awaiting_review" 4.0
+  story_plan_inspector_result_hard_proof "The handoff result exposes its finding" "PH HANDOFF FINDING:" 3.5
+  press_key a
+  story_hard_proof "The operator selects approval for handoff" "Decision: Approve" 3.5
+  press_key Enter
+  story_plan_inspector_task_status_hard_proof "The handoff task records approval" "$handoff_task_id" "approved" 3.0
+
+  return_to_campaign_session_detail
+  story_session_land "The originating Session Detail remains the operator home" 2.5
+  type_text "Synthesize approved evidence from ${positioning_task_id}, ${proof_task_id}, ${readiness_task_id}, and ${handoff_task_id} in one concise launch-audit paragraph. "
+  type_text "Begin the response with the words PH AUDIT SYNTHESIS, then a colon, one space, and the proof task id ${proof_task_id}. "
+  type_text "Do not call tools or delegate."
+  sleep_ms 0.5
+  press_key Enter
+  story_hard_proof "The brain synthesis is visible in the originating session" "PH AUDIT SYNTHESIS: ${proof_task_id}" 4.0
 }
 
 # Problem: backlog firehose — what is P0 open work?

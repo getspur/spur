@@ -50,8 +50,29 @@ Session Detail compose → brain turn (YOU/THINK)
 | Env | Effect |
 |-----|--------|
 | `SPUR_DEMO_ALLOW_PLAN_LOOP=1` | Seed 1-task submit_plan in session; wait DELEGATE/Done |
+| `SPUR_DEMO_ALLOW_HITL_LOOP=1` | Run the higher-spend four-worker Product Hunt audit |
 | `SPUR_DEMO_ALLOW_AGENT_SEND=1` | Light brain kick in session |
 | `SPUR_DEMO_ALLOW_PLAN_START=1` | Start/Resume on Plans |
+
+The higher-spend D4 branch is separate from the minimal one-task seed and
+remains opt-in.
+
+The opt-in Product Hunt capture submits four independent read-only tasks in the
+real spur project: ACP positioning (Claude Code), TUI proof (Grok), launch
+readiness (Codex), and media handoff (OpenCode). The Grok proof task is rejected
+once for a missing exact source window, retried with
+SOURCE/WINDOW/RECOMMENDATION requirements, and approved. All four findings must
+be approved before the correlated PH AUDIT SYNTHESIS appears in the originating
+Session Detail. Any worker transport fallback makes the capture non-promotable.
+
+Missing any task, state, summary, decision, retry evidence, or synthesis marker
+fails the journey rather than softening the proof.
+
+The capture wrapper writes the new stable stem
+`17-live-product-hunt-four-agent-loop`, requires the same explicit spend opt-in and
+initialized `.beads/` backend, and requests a full-duration 2560x1600 encode
+with preserved proof dwells. The shared capture path keeps its sampled-preview
+encoder by default when full fidelity is not requested.
 
 ## Mapping
 
