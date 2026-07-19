@@ -34,28 +34,15 @@ if ! jq -e '
   .schema_version == 1
   and (.project | type == "string" and length > 0)
   and (.route == "create" or .route == "enhance")
-  and (.approvals.concept_layout == "approved")
-  and (.approvals.script_storyboard == "approved")
-  and (.approvals.paid_generation == "approved")
-  and (.assets | type == "array" and length > 0)
-  and all(.assets[];
-    (.asset_id | type == "string" and length > 0)
-    and (
-      .owner == "open-design"
-      or .owner == "html-video"
-      or .owner == "higgsfield"
-      or .owner == "palmier"
-      or .owner == "real-capture"
-    )
-    and (.type | type == "string" and length > 0)
-    and (.source_or_job_id | type == "string" and length > 0)
-    and (.approval_status == "approved")
-    and (.rights_status == "cleared" or .rights_status == "owned")
-  )
   and (
-    [.assets[].asset_id] as $asset_ids
-    | ($asset_ids | length) == ($asset_ids | unique | length)
+    .approvals
+    | type == "object"
+      and keys == ["concept_layout", "paid_generation", "script_storyboard"]
+      and all(.[]; . == "approved")
   )
+  and (.assets | type == "array" and length > 0)
+  and (.claims | type == "array" and length > 0)
+  and (.scenes | type == "array" and length > 0)
   and (.delivery.path | type == "string" and length > 0)
   and (.delivery.duration_seconds | type == "number" and . > 0)
   and (.delivery.width | type == "number" and . > 0)
@@ -64,6 +51,126 @@ if ! jq -e '
   and (
     .delivery.checksum_sha256
     | type == "string" and test("^[0-9a-f]{64}$")
+  )
+  and (
+    .assets as $assets
+    | .claims as $claims
+    | .scenes as $scenes
+    | .delivery.duration_seconds as $delivery_duration
+    | all($assets[];
+        (.asset_id | type == "string" and length > 0)
+        and (
+          .owner == "open-design"
+          or .owner == "html-video"
+          or .owner == "higgsfield"
+          or .owner == "palmier"
+          or .owner == "real-capture"
+        )
+        and (.type | type == "string" and length > 0)
+        and (.source_or_job_id | type == "string" and length > 0)
+        and (.approval_status == "approved")
+        and (.rights_status == "cleared" or .rights_status == "owned")
+        and (
+          .owner != "real-capture"
+          or (
+            .source_locator
+            | type == "object"
+              and (.start_seconds | type == "number" and . >= 0)
+              and (.end_seconds | type == "number")
+              and (.end_seconds > .start_seconds)
+          )
+        )
+        and (
+          .owner != "higgsfield"
+          or (.prompt_or_script_revision | type == "string" and length > 0)
+        )
+      )
+      and (
+        [$assets[].asset_id] as $asset_ids
+        | ($asset_ids | length) == ($asset_ids | unique | length)
+      )
+      and all($claims[];
+        (.claim_id | type == "string" and length > 0)
+        and (.text | type == "string" and length > 0)
+        and (.source_asset_ids | type == "array" and length > 0)
+        and (
+          [.source_asset_ids[]] as $source_asset_ids
+          | ($source_asset_ids | length) == ($source_asset_ids | unique | length)
+        )
+        and all(.source_asset_ids[];
+          . as $source_asset_id
+          | any($assets[];
+              .asset_id == $source_asset_id
+              and (.owner == "real-capture" or .owner == "open-design")
+            )
+        )
+      )
+      and (
+        [$claims[].claim_id] as $claim_ids
+        | ($claim_ids | length) == ($claim_ids | unique | length)
+      )
+      and all($scenes[];
+        (.scene_id | type == "string" and length > 0)
+        and (
+          .owner == "real-capture"
+          or .owner == "html-video"
+          or .owner == "higgsfield"
+          or .owner == "palmier"
+        )
+        and (
+          .timeline_slot
+          | type == "object"
+            and (.start_seconds | type == "number" and . >= 0)
+            and (.end_seconds | type == "number")
+            and (.end_seconds > .start_seconds)
+            and (.end_seconds <= $delivery_duration)
+        )
+        and (.asset_ids | type == "array" and length > 0)
+        and (
+          [.asset_ids[]] as $scene_asset_ids
+          | ($scene_asset_ids | length) == ($scene_asset_ids | unique | length)
+        )
+        and all(.asset_ids[];
+          . as $asset_id
+          | any($assets[]; .asset_id == $asset_id)
+        )
+        and (.claim_ids | type == "array")
+        and (
+          [.claim_ids[]] as $scene_claim_ids
+          | ($scene_claim_ids | length) == ($scene_claim_ids | unique | length)
+        )
+        and all(.claim_ids[];
+          . as $claim_id
+          | any($claims[]; .claim_id == $claim_id)
+        )
+        and (
+          .owner == "palmier"
+          or (
+            .owner as $scene_owner
+            | all(.asset_ids[];
+                . as $asset_id
+                | any($assets[];
+                    .asset_id == $asset_id and .owner == $scene_owner
+                  )
+              )
+          )
+        )
+      )
+      and (
+        [$scenes[].scene_id] as $scene_ids
+        | ($scene_ids | length) == ($scene_ids | unique | length)
+      )
+      and all($assets[];
+        .owner == "open-design"
+        or (
+          .asset_id as $asset_id
+          | any($scenes[]; any(.asset_ids[]; . == $asset_id))
+        )
+      )
+      and all($claims[];
+        .claim_id as $claim_id
+        | any($scenes[]; any(.claim_ids[]; . == $claim_id))
+      )
   )
 ' "$manifest" >/dev/null 2>&1; then
   fail 'manifest violates the explainer delivery contract'
