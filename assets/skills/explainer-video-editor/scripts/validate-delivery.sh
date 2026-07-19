@@ -188,7 +188,7 @@ if [[ "$actual_checksum_sha256" != "$expected_checksum_sha256" ]]; then
   fail 'video checksum does not match the manifest'
 fi
 
-if ! ffmpeg -v error -err_detect explode -i "$video" -f null -; then
+if ! ffmpeg -v error -xerror -err_detect explode -i "$video" -f null -; then
   fail 'video fails strict full-decode validation'
 fi
 
