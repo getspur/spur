@@ -52,9 +52,52 @@ bash journeys/problem-plan-loop-drive.sh
 ./capture-live-seed.sh
 # → out/14-live-plan-loop-seed.{cast,gif,mp4,log}
 
+# LIVE Product Hunt audit: four deep dives → proof retry → approvals → brain synthesis
+# Four independent read-only workers + one evidence retry, with two real brain turns.
+./capture-live-hitl.sh
+# → targets out/17-live-product-hunt-four-agent-loop.{cast,gif,mp4,log}; availability below
+
 # Film (observe path without live seed)
 vhs -q tapes/13-problem-plan-loop-drive.tape
 ```
+
+`SPUR_DEMO_ALLOW_HITL_LOOP=1` is a separate, higher-spend opt-in gate from
+the minimal one-task `SPUR_DEMO_ALLOW_PLAN_LOOP=1` seed. The recommended D4
+entry is `./capture-live-hitl.sh`.
+
+The opt-in Product Hunt capture submits four independent read-only tasks in the
+real spur project: ACP positioning (Claude Code), TUI proof (Grok), launch
+readiness (Codex), and media handoff (OpenCode). The Grok proof task is rejected
+once for a missing exact source window, retried with
+SOURCE/WINDOW/RECOMMENDATION requirements, and approved. All four findings must
+be approved before the correlated PH AUDIT SYNTHESIS appears in the originating
+Session Detail. Any worker transport fallback makes the capture non-promotable.
+
+A normal main checkout with an initialized `.beads/` works as-is. From an
+isolated Git worktree without `.beads/`, set
+`SPUR_DEMO_PROJECT=/path/to/beads-project` to the initialized beads-backed
+project. The wrapper fails before TUI/model spend rather than creating or
+linking a `.beads` backend.
+
+D4 proof fails closed: missing any of the four correlated task identities,
+`awaiting_review` states, worker-summary markers, the proof **Reject** and
+**Retry Task**, its `SOURCE:`/`WINDOW:`/`RECOMMENDATION:` retry evidence, any
+required **Approve**, or the final `PH AUDIT SYNTHESIS:` aborts the journey.
+Every worker prompt is read-only and prohibits file changes, but the capture
+still incurs two real brain turns, four initial worker attempts, and one proof
+retry.
+
+The wrapper targets the stable names
+`out/17-live-product-hunt-four-agent-loop.{cast,gif,mp4,log}`. This explicit opt-in
+wrapper requests a full-duration 2560x1600 MP4 at 30 fps and preserves longer
+proof dwells. The shared `capture-live-seed.sh` default remains the existing
+sampled preview encoder when full fidelity is not requested. The stable `.log`
+is always copied after the journey, including failure. The `.cast` exists only
+when shell-use emits a cast; `.gif`/`.mp4` additionally depend on conversion
+tooling (`agg`/`ffmpeg`, with the supported Docker/frame-sampling fallbacks).
+Media-pack acceptance and promotion require both the stable log and cast: a
+run without a cast is not promotable even if the journey itself completes.
+Any worker transport fallback also makes the capture non-promotable.
 
 **Navigate-mode tip:** `Esc` leaves INSERT so `j`/`k` hit the Agents tree.
 `Tab` focuses Agents (digit `1` would re-enter Compose).
@@ -172,8 +215,8 @@ VHS tapes open Sessions → `n` after launch for a reliable attach.
 
 1. Cold start: `tui --dashboard`, then enter **Session Detail** as home.
 2. Ops, plan, and backlog stories are observe-only. `product-e2e-flow` applies the selected Explore skill/agent to the local pool, but never sends by default.
-3. Model/worker spend requires `SPUR_DEMO_ALLOW_AGENT_SEND=1` or `SPUR_DEMO_ALLOW_PLAN_LOOP=1`.
-4. Plan mutation requires `SPUR_DEMO_ALLOW_PLAN_START=1` or the live loop gate.
+3. Model/worker spend requires `SPUR_DEMO_ALLOW_AGENT_SEND=1`, `SPUR_DEMO_ALLOW_PLAN_LOOP=1`, or the separate higher-spend `SPUR_DEMO_ALLOW_HITL_LOOP=1` gate.
+4. Plan mutation requires `SPUR_DEMO_ALLOW_PLAN_START=1` or one of the live loop gates.
 5. Never deletes project files; not wired into CI `run-all.sh`.
 
 ## Authoring a new problem story

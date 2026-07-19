@@ -1,0 +1,161 @@
+{
+  "version": 1,
+  "fps": 30,
+  "canvas": {
+    "width": 1920,
+    "height": 1080
+  },
+  "anime_version": "4.4.1",
+  "end_card": {
+    "media_ref": "5BECDF39",
+    "copy": "INSTALL SPUR · COMMUNITY FREE",
+    "duration_seconds": 5
+  },
+  "music": {
+    "media_ref": "23DF6A98",
+    "source_seconds": [0, 40]
+  },
+  "sources": {
+    "session-detail": {
+      "status": "approved",
+      "path": "live_demos/13-problem-plan-loop-drive.mp4",
+      "sha256": "4d94c2c9d320eb53b4cd4bb56f0bddac337239ee4419e6a3ffc31b47649797d9",
+      "media_ref": "791B452C",
+      "proof_terms": ["INSERT", "following"]
+    },
+    "worker-visibility": {
+      "status": "approved",
+      "path": "live_demos/10-problem-ops-visibility.mp4",
+      "sha256": "4c252847c6498d6be5d7f581c79c0f06665a7fef90f12eb589811fefc207991c",
+      "media_ref": "14D82963",
+      "proof_terms": ["WORKERS", "worker", "running"]
+    },
+    "plan-state": {
+      "status": "approved",
+      "path": "live_demos/11-problem-plan-progress.mp4",
+      "sha256": "011f20addf6850055a9bd062521d22ca94a440898eaf4ec6d5c29c7630335407",
+      "media_ref": "82D9D60A",
+      "proof_terms": ["Plans", "No plans found"]
+    },
+    "specialist-routing": {
+      "status": "approved",
+      "path": "live_demos/09-product-e2e-flow.mp4",
+      "sha256": "7fd8473a7870afff7b5085c6a00ef306ac257b0021d8f150884886caa84d47ec",
+      "media_ref": "63605F31",
+      "proof_terms": ["agent=", "model=", "effort="]
+    },
+    "session-resume": {
+      "status": "approved",
+      "path": "live_demos/04-session-resume.mp4",
+      "sha256": "cb110d2cfa9149cb9d8344987f03f11852a181926ee85a572bebf8dbdff0660c",
+      "media_ref": "4B29113A",
+      "proof_terms": ["Session", "Resumed from prior conversation"]
+    },
+    "four-agent-diagnostic": {
+      "status": "diagnostic",
+      "media_ref": "F2C142AD",
+      "sha256": "b5c407a3753bae990b0cdf95fd5dac2c747934e15f8a314aaff42e52bf83ecb5",
+      "duration_seconds": 197.567,
+      "proof_terms": ["Claude Code", "Grok", "Codex", "OpenCode"]
+    }
+  },
+  "films": [
+    {
+      "id": "control-loop",
+      "title": "Keep the control loop",
+      "takeaway": "Delegate deeply. Keep the decision.",
+      "publishing_status": "diagnostic-non-promotable",
+      "duration_seconds": 40,
+      "duration_frames": 1200,
+      "chapters": {
+        "hook": [0, 90],
+        "concept": [90, 390],
+        "match": [390, 480],
+        "proof": [480, 1050],
+        "end": [1050, 1200]
+      },
+      "concept_output": "ph_ready/series/motion/spur-control-loop-concept-v3-16s.mp4",
+      "output": "ph_ready/series/spur-control-loop-proof-40s.mp4",
+      "proof_sources": [
+        {
+          "source_id": "four-agent-diagnostic",
+          "source_seconds": [93, 112],
+          "duration_seconds": 19,
+          "watermark_required": true,
+          "claim_ids": [
+            "plan-task-state",
+            "parallel-worker-state",
+            "returned-evidence",
+            "brain-review-gate"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "durable-memory",
+      "title": "Work survives the session",
+      "takeaway": "The agent can stop. The work remains.",
+      "publishing_status": "review-required",
+      "duration_seconds": 40,
+      "duration_frames": 1200,
+      "chapters": {
+        "hook": [0, 90],
+        "concept": [90, 390],
+        "match": [390, 480],
+        "proof": [480, 1050],
+        "end": [1050, 1200]
+      },
+      "concept_output": "ph_ready/series/motion/spur-durable-memory-concept-v3-16s.mp4",
+      "output": "ph_ready/series/spur-durable-memory-proof-40s.mp4",
+      "proof_sources": [
+        {
+          "source_id": "session-detail",
+          "source_seconds": [8, 18],
+          "duration_seconds": 10,
+          "watermark_required": false,
+          "claim_ids": ["session-context"]
+        },
+        {
+          "source_id": "session-resume",
+          "source_seconds": [0, 9],
+          "duration_seconds": 9,
+          "watermark_required": false,
+          "claim_ids": ["session-resumed"]
+        }
+      ]
+    },
+    {
+      "id": "acp-agents",
+      "title": "Bring any ACP agent",
+      "takeaway": "Choose the agent. Keep one control system.",
+      "publishing_status": "diagnostic-non-promotable",
+      "duration_seconds": 40,
+      "duration_frames": 1200,
+      "chapters": {
+        "hook": [0, 90],
+        "concept": [90, 390],
+        "match": [390, 480],
+        "proof": [480, 1050],
+        "end": [1050, 1200]
+      },
+      "concept_output": "ph_ready/series/motion/spur-acp-agents-concept-v3-16s.mp4",
+      "output": "ph_ready/series/spur-acp-agents-proof-40s.mp4",
+      "proof_sources": [
+        {
+          "source_id": "specialist-routing",
+          "source_seconds": [49, 59],
+          "duration_seconds": 10,
+          "watermark_required": false,
+          "claim_ids": ["explicit-agent-model-effort"]
+        },
+        {
+          "source_id": "four-agent-diagnostic",
+          "source_seconds": [93, 102],
+          "duration_seconds": 9,
+          "watermark_required": true,
+          "claim_ids": ["four-agent-roster"]
+        }
+      ]
+    }
+  ]
+}
