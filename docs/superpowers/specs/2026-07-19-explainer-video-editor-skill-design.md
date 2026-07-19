@@ -99,7 +99,15 @@ Do not assume captions, ProRes, music, alternate ratios, or extra exports unless
 
 ## Skill packaging
 
-Create `assets/skills/explainer-video-editor/SKILL.md` with concise orchestration rules and a single supporting reference for the handoff schema and recovery matrix if needed. Cross-reference the existing `open-design` and `html-video` skills by name instead of duplicating their notebook procedures. Use live tool help and model contracts for Higgsfield and PalmierPro details. Do not add a README or duplicate external API documentation.
+Create the skill with the system `skill-creator` initializer and keep each file focused:
+
+- `assets/skills/explainer-video-editor/SKILL.md` contains concise orchestration rules and approval gates.
+- `assets/skills/explainer-video-editor/references/handoff-contract.md` contains the asset manifest schema, scene-owner rules, recovery matrix, and delivery checklist.
+- `assets/skills/explainer-video-editor/scripts/validate-delivery.sh` deterministically validates a manifest and exported MP4 using `jq`, `ffprobe`, `ffmpeg`, and `shasum`.
+- `assets/skills/explainer-video-editor/scripts/test-validate-delivery.sh` exercises valid and invalid manifests plus a generated test video.
+- `assets/skills/explainer-video-editor/agents/openai.yaml` exposes generated display metadata and a default `$explainer-video-editor` prompt.
+
+Cross-reference the existing `open-design` and `html-video` skills by name instead of duplicating their notebook procedures. Use live tool help and model contracts for Higgsfield and PalmierPro details. Do not add a README, creation log, copied API documentation, or unused assets.
 
 ## Validation strategy
 
