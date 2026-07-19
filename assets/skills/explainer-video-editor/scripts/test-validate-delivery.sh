@@ -24,11 +24,11 @@ ffmpeg -loglevel error \
   -c:a aac -shortest \
   "$video"
 
-checksum="$(shasum -a 256 "$video" | awk '{print $1}')"
+checksum_sha256="$(shasum -a 256 "$video" | awk '{print $1}')"
 
 jq -n \
   --arg video "$video" \
-  --arg checksum "$checksum" \
+  --arg checksum_sha256 "$checksum_sha256" \
   '{
     schema_version: 1,
     project: "validator-fixture",
@@ -54,7 +54,7 @@ jq -n \
       width: 320,
       height: 180,
       fps: 30,
-      checksum: $checksum
+      checksum_sha256: $checksum_sha256
     }
   }' > "$manifest"
 
