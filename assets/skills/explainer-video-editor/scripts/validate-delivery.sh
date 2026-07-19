@@ -96,6 +96,17 @@ if ! actual_duration="$(
   fail 'video has no readable positive duration'
 fi
 
+if ! video_codec="$(
+  printf '%s\n' "$probe_json" \
+    | jq -er '[.streams[]? | select(.codec_type == "video")][0].codec_name | select(type == "string" and length > 0)'
+)"; then
+  fail 'video has no readable video stream'
+fi
+
+if [[ "$video_codec" != 'h264' ]]; then
+  fail 'video stream codec must be h264'
+fi
+
 if ! actual_width="$(
   printf '%s\n' "$probe_json" \
     | jq -er '[.streams[]? | select(.codec_type == "video")][0].width | select(type == "number" and . > 0)'
@@ -122,6 +133,10 @@ if ! audio_codec="$(
     | jq -er '[.streams[]? | select(.codec_type == "audio")][0].codec_name | select(type == "string" and length > 0)'
 )"; then
   fail 'video has no readable audio stream'
+fi
+
+if [[ "$audio_codec" != 'aac' ]]; then
+  fail 'audio stream codec must be aac'
 fi
 
 if ! actual_fps="$(
