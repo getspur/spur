@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MANIFEST="$ROOT/proof-manifest.json"
+NOTEBOOK="$ROOT/product-hunt-media-pack.ipynb"
 HTML="$ROOT/html/index.html"
 GRAPH="$ROOT/demo_render/content-graph.json"
 failures=0
@@ -16,12 +17,84 @@ require() {
   }
 }
 
-for tool in jq ffprobe rg shasum tesseract; do
+for tool in jq ffprobe python3 rg shasum tesseract; do
   require "$tool"
 done
 
 [[ -f "$MANIFEST" ]] && pass "proof manifest exists" || fail "proof manifest exists"
 [[ -f "$HTML" ]] && pass "HTML artifact exists" || fail "HTML artifact exists"
+notebook_source="$(jq -r '.cells[].source | if type == "array" then join("") else . end' "$NOTEBOOK")"
+notebook_html="$(jq -r '.cells[].outputs[]? | .data["text/html"]? // empty |
+  if type == "array" then join("") else . end' "$NOTEBOOK")"
+if rg -q --fixed-strings --glob '!media-contract.test.sh' 'beta.otobank.com' "$ROOT"; then
+  fail "SPUR media pack contains no unrelated Otobank domain"
+else
+  pass "SPUR media pack contains no unrelated Otobank domain"
+fi
+[[ "$notebook_source" == *'INSTALL SPUR · COMMUNITY FREE'* ]] \
+  && pass "notebook locks the domain-free SPUR end card" \
+  || fail "notebook locks the domain-free SPUR end card"
+for required in \
+  'from Claude Code and Codex to Grok, OpenCode, and beyond' \
+  'delegates four read-only deep dives' \
+  'four read-only deep dives: ACP positioning, TUI proof, launch readiness, and media handoff' \
+  'Task 4 · Media handoff'; do
+  [[ "$notebook_source" == *"$required"* ]] \
+    && pass "four-agent notebook copy: $required" \
+    || fail "four-agent notebook copy: $required"
+done
+[[ "$notebook_source" != *'Kiro, Gemini'* && "$notebook_source" != *'three read-only deep dives'* ]] \
+  && pass "notebook removes the superseded three-agent copy" \
+  || fail "notebook removes the superseded three-agent copy"
+for required in \
+  'from Claude Code and Codex to Grok, OpenCode, and beyond' \
+  'delegates four read-only deep dives' \
+  'four read-only deep dives: ACP positioning, TUI proof, launch readiness, and media handoff' \
+  'Task 4 · Media handoff' \
+  'ACP-compatible coding agents' \
+  '4-task real plan' \
+  'four-task, read-only launch audit' \
+  'four task identities'; do
+  [[ "$notebook_html" == *"$required"* ]] \
+    && pass "rendered four-agent notebook copy: $required" \
+    || fail "rendered four-agent notebook copy: $required"
+done
+for obsolete in \
+  'Claude Code, Codex, Kiro, and Gemini' \
+  'Claude Code, Codex, Kiro, and other coding agents' \
+  '3-task real plan' \
+  'three-task, read-only launch audit' \
+  'three task identities' \
+  'All three begin in Session Detail' \
+  'All three exist and correlate'; do
+  [[ "$notebook_html" != *"$obsolete"* ]] \
+    && pass "rendered notebook removes obsolete copy: $obsolete" \
+    || fail "rendered notebook removes obsolete copy: $obsolete"
+done
+script_90_word_count="$(python3 - "$NOTEBOOK" <<'PY'
+import json
+import re
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    notebook = json.load(handle)
+
+matches = []
+for cell in notebook["cells"]:
+    source = cell.get("source", "")
+    if isinstance(source, list):
+        source = "".join(source)
+    matches.extend(re.findall(r'script_90\s*=\s*"""(.*?)"""', source, re.DOTALL))
+
+print(len(matches[0].split()) if len(matches) == 1 else "missing-or-ambiguous")
+PY
+)"
+[[ "$script_90_word_count" == "179" ]] \
+  && pass "90-second narration contains exactly 179 words" \
+  || fail "90-second narration contains exactly 179 words (found $script_90_word_count)"
+[[ "$notebook_html" == *'179 WORDS'* ]] \
+  && pass "rendered 90-second narration keeps the 179-word label" \
+  || fail "rendered 90-second narration keeps the 179-word label"
 if rg -q 'ffmpeg -nostdin -y -v error -ss' "$ROOT/refresh.sh"; then
   pass "publisher protects manifest input from ffmpeg"
 else

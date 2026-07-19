@@ -19,11 +19,12 @@ source "$ROOT/../geometry.env"
 OUT="$ROOT/out"
 mkdir -p "$OUT"
 
-if ! SPUR_BIN="$(spur_e2e_resolve_spur_bin)"; then
-  exit 1
+if [[ "${SPUR_DEMO_ALLOW_HITL_LOOP:-0}" != "1" ]]; then
+  export SPUR_DEMO_ALLOW_PLAN_LOOP=1
 fi
-export SPUR_BIN
-export SPUR_DEMO_ALLOW_PLAN_LOOP=1
+export SPUR_DEMO_ALLOW_PLAN_LOOP="${SPUR_DEMO_ALLOW_PLAN_LOOP:-0}"
+export SPUR_DEMO_ALLOW_HITL_LOOP="${SPUR_DEMO_ALLOW_HITL_LOOP:-0}"
+export SPUR_DEMO_CAPTURE_STEM_PREFIX="${SPUR_DEMO_CAPTURE_STEM_PREFIX:-14-live-plan-loop-seed}"
 export SPUR_DEMO_PLAN_LOOP_WAIT_S="${SPUR_DEMO_PLAN_LOOP_WAIT_S:-240}"
 export SHELL_USE_TIMEOUT_MS="${SHELL_USE_TIMEOUT_MS:-180000}"
 # Film pacing for seed (readable high-res story; UAT leaves this unset/0)
@@ -31,8 +32,43 @@ export SPUR_DEMO_STORY_PACE="${SPUR_DEMO_STORY_PACE:-1}"
 # Story-friendly cast speed unless caller overrides
 export SPUR_AGG_SPEED="${SPUR_AGG_SPEED:-1.15}"
 
+if [[ -n "${SPUR_DEMO_PROJECT:-}" ]]; then
+  capture_project="$SPUR_DEMO_PROJECT"
+else
+  capture_project="$(git -C "$E2E_ROOT/../.." rev-parse --show-toplevel)"
+fi
+
+if [[ "$SPUR_DEMO_ALLOW_HITL_LOOP" == "1" && ! -d "$capture_project/.beads" ]]; then
+  cat >&2 <<EOF
+D4 requires a beads-backed project before TUI startup; capture aborted.
+missing: $capture_project/.beads
+
+SPUR_DEMO_PROJECT=/path/to/beads-project selects an initialized beads-backed project.
+Alternatively, initialize beads in the effective project.
+No D4 TUI, brain, or worker spend was started.
+EOF
+  exit 2
+fi
+
+if [[ "${SPUR_CAPTURE_FULL_FIDELITY:-0}" == "1" ]]; then
+  if ! command -v ffmpeg >/dev/null 2>&1; then
+    printf 'full-fidelity capture requires ffmpeg before paid journey launch\n' >&2
+    exit 2
+  fi
+  if ! command -v agg >/dev/null 2>&1 && ! command -v docker >/dev/null 2>&1; then
+    printf 'full-fidelity capture requires agg or Docker before paid journey launch\n' >&2
+    exit 2
+  fi
+fi
+
+if ! SPUR_BIN="$(spur_e2e_resolve_spur_bin)"; then
+  exit 1
+fi
+export SPUR_BIN
+
 stamp="$(date -u +%Y%m%dT%H%M%SZ)"
-stem="14-live-plan-loop-seed-${stamp}"
+stem_prefix="$SPUR_DEMO_CAPTURE_STEM_PREFIX"
+stem="${stem_prefix}-${stamp}"
 log="$OUT/${stem}.log"
 cast_dest="$OUT/${stem}.cast"
 
@@ -47,7 +83,10 @@ fi
 echo "=== live seed capture ==="
 echo "SPUR_BIN:                  $SPUR_BIN"
 echo "SPUR_DEMO_ALLOW_PLAN_LOOP: $SPUR_DEMO_ALLOW_PLAN_LOOP"
+echo "SPUR_DEMO_ALLOW_HITL_LOOP: $SPUR_DEMO_ALLOW_HITL_LOOP"
+echo "effective project:          $capture_project"
 echo "SPUR_DEMO_PLAN_LOOP_WAIT_S:$SPUR_DEMO_PLAN_LOOP_WAIT_S"
+echo "stable output stem:         $stem_prefix"
 echo "SHELL_USE_TIMEOUT_MS:      $SHELL_USE_TIMEOUT_MS"
 echo "geometry:                  ${SPUR_VHS_WIDTH}x${SPUR_VHS_HEIGHT} font=${SPUR_VHS_FONT_SIZE} pty=${SPUR_DEMO_COLS}x${SPUR_DEMO_ROWS}"
 echo "story_pace:                ${SPUR_DEMO_STORY_PACE} agg_speed=${SPUR_AGG_SPEED}"
@@ -64,6 +103,7 @@ set -e
 
 echo
 echo "journey exit: $rc"
+cp -p "$log" "$OUT/${stem_prefix}.log"
 
 # Newest cast not in before_list
 cast_src=""
@@ -74,7 +114,7 @@ if [[ -d "$cast_cache" ]]; then
     fi
   done < <(find "$cast_cache" -name 'spur-live-problem-plan-loop-drive-*.cast' -type f 2>/dev/null | sort)
   # Fallback: newest matching cast by mtime
-  if [[ -z "$cast_src" ]]; then
+  if [[ -z "$cast_src" && "${SPUR_CAPTURE_FULL_FIDELITY:-0}" != "1" ]]; then
     cast_src="$(find "$cast_cache" -name 'spur-live-problem-plan-loop-drive-*.cast' -type f -print0 2>/dev/null \
       | xargs -0 ls -t 2>/dev/null | head -1 || true)"
   fi
@@ -104,6 +144,7 @@ convert_cast() {
   local agg_idle="${SPUR_AGG_IDLE_LIMIT:-1.5}"
   # Preview encode width (full Air-native gifs are huge; mp4 samples to 1920)
   local preview_w="${SPUR_CAPTURE_PREVIEW_WIDTH:-1920}"
+  local full_fidelity="${SPUR_CAPTURE_FULL_FIDELITY:-0}"
 
   if command -v agg >/dev/null 2>&1; then
     echo "==> agg gif (cols=${agg_cols} rows=${agg_rows} speed=${agg_speed})"
@@ -113,17 +154,31 @@ convert_cast() {
     echo "gif: $gif_out"
   elif command -v docker >/dev/null 2>&1; then
     echo "==> docker agg (asciinema/agg)"
-    docker run --rm -v "$OUT:/data" -v "$(dirname "$src"):/casts:ro" \
-      ghcr.io/asciinema/agg:latest \
-      --cols "$agg_cols" --rows "$agg_rows" \
-      --idle-time-limit "$agg_idle" --speed "$agg_speed" \
-      "/casts/$(basename "$src")" "/data/$(basename "$gif_out")" \
-      && echo "gif: $gif_out" || true
+    if docker run --rm -v "$OUT:/data" -v "$(dirname "$src"):/casts:ro" ghcr.io/asciinema/agg:latest --cols "$agg_cols" --rows "$agg_rows" --idle-time-limit "$agg_idle" --speed "$agg_speed" "/casts/$(basename "$src")" "/data/$(basename "$gif_out")"; then
+      echo "gif: $gif_out"
+    elif [[ "$full_fidelity" == "1" ]]; then
+      return 1
+    fi
   else
     echo "warn: agg not installed — cast saved; install with: brew install agg" >&2
+    if [[ "$full_fidelity" == "1" ]]; then
+      return 1
+    fi
   fi
 
-  if [[ -f "$gif_out" ]] && command -v ffmpeg >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1; then
+  if [[ "$full_fidelity" == "1" && ! -s "$gif_out" ]]; then
+    return 1
+  fi
+
+  if [[ -f "$gif_out" && "$full_fidelity" == "1" ]]; then
+    command -v ffmpeg >/dev/null 2>&1 || return 1
+    echo "==> ffmpeg full-fidelity mp4 (2560x1600, 30 fps)"
+    ffmpeg -nostdin -hide_banner -loglevel error -y -i "$gif_out" \
+      -vf 'fps=30,scale=2560:1600:force_original_aspect_ratio=decrease,pad=2560:1600:(ow-iw)/2:(oh-ih)/2:color=0x0B0E14' \
+      -c:v libx264 -pix_fmt yuv420p -preset medium -crf 18 \
+      -movflags +faststart "$mp4_out" || return 1
+    echo "mp4: $mp4_out"
+  elif [[ -f "$gif_out" ]] && command -v ffmpeg >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1; then
     echo "==> ffmpeg mp4 via sampled frames (preview width ${preview_w})"
     frames="$(mktemp -d "${TMPDIR:-/tmp}/seed-frames.XXXXXX")"
     if python3 - "$gif_out" "$frames" "$preview_w" <<'PY'
@@ -168,23 +223,45 @@ PY
   fi
 }
 
+conversion_rc=0
 if [[ -f "$cast_dest" ]]; then
-  convert_cast "$cast_dest" || true
+  if [[ "${SPUR_CAPTURE_FULL_FIDELITY:-0}" == "1" ]]; then
+    convert_cast "$cast_dest" || conversion_rc=$?
+  else
+    convert_cast "$cast_dest" || true
+  fi
+elif [[ "${SPUR_CAPTURE_FULL_FIDELITY:-0}" == "1" ]]; then
+  conversion_rc=1
 fi
 
 # Stable symlink-style copies for latest
 if [[ -f "$cast_dest" ]]; then
-  cp -p "$cast_dest" "$OUT/14-live-plan-loop-seed.cast"
+  cp -p "$cast_dest" "$OUT/${stem_prefix}.cast"
 fi
 if [[ -f "$gif_out" ]]; then
-  cp -p "$gif_out" "$OUT/14-live-plan-loop-seed.gif"
+  cp -p "$gif_out" "$OUT/${stem_prefix}.gif"
 fi
 if [[ -f "$mp4_out" ]]; then
-  cp -p "$mp4_out" "$OUT/14-live-plan-loop-seed.mp4"
+  cp -p "$mp4_out" "$OUT/${stem_prefix}.mp4"
+fi
+
+if [[ "${SPUR_CAPTURE_FULL_FIDELITY:-0}" == "1" ]]; then
+  if [[ "$conversion_rc" -ne 0 ]]; then
+    printf 'fatal: full-fidelity capture conversion failed\n' >&2
+    rc=1
+  fi
+  for artifact in \
+    "$cast_dest" "$gif_out" "$mp4_out" \
+    "$OUT/${stem_prefix}.cast" "$OUT/${stem_prefix}.gif" "$OUT/${stem_prefix}.mp4"; do
+    if [[ ! -s "$artifact" ]]; then
+      printf 'fatal: full-fidelity capture artifact missing or empty: %s\n' "$artifact" >&2
+      rc=1
+    fi
+  done
 fi
 
 echo
 echo "=== capture summary ==="
-ls -la "$OUT"/14-live-plan-loop-seed* "$OUT"/${stem}* 2>/dev/null || ls -la "$OUT" | tail -20
+ls -la "$OUT"/${stem_prefix}* "$OUT"/${stem}* 2>/dev/null || ls -la "$OUT" | tail -20
 echo "log: $log"
 exit "$rc"
