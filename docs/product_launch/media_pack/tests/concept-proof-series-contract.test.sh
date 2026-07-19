@@ -228,6 +228,33 @@ if [[ -f "$MANIFEST" ]]; then
     fail "manifest locks approved source identities and media refs"
   fi
 
+  if jq -e '
+      {
+        "session-detail": .sources["session-detail"].proof_terms,
+        "worker-visibility": .sources["worker-visibility"].proof_terms,
+        "plan-state": .sources["plan-state"].proof_terms,
+        "specialist-routing": .sources["specialist-routing"].proof_terms,
+        "session-resume": .sources["session-resume"].proof_terms,
+        "four-agent-diagnostic": .sources["four-agent-diagnostic"].proof_terms
+      } == {
+        "session-detail": ["INSERT", "following"],
+        "worker-visibility": ["WORKERS", "worker", "running"],
+        "plan-state": ["Plans", "No plans found"],
+        "specialist-routing": ["agent=", "model=", "effort="],
+        "session-resume": ["Session", "Resumed from prior conversation"],
+        "four-agent-diagnostic": ["Claude Code", "Grok", "Codex", "OpenCode"]
+      }
+      and all(.sources[].proof_terms;
+        type == "array"
+        and length > 0
+        and all(.[]; (type == "string") and length > 0)
+      )
+    ' "$MANIFEST" >/dev/null; then
+    pass "manifest locks exact source proof terms"
+  else
+    fail "manifest locks exact source proof terms"
+  fi
+
   if source_metadata="$(jq -r '
       [
         "session-detail",
