@@ -49,6 +49,55 @@ if [[ -f "$MANIFEST" ]]; then
     fail "manifest locks the three-film 40-second series structure"
   fi
 
+  if jq -e '
+      [.films[] | {id, concept_output, output, takeaway}] == [
+        {
+          "id": "control-loop",
+          "concept_output": "ph_ready/series/motion/spur-control-loop-concept-v3-16s.mp4",
+          "output": "ph_ready/series/spur-control-loop-proof-40s.mp4",
+          "takeaway": "Delegate deeply. Keep the decision."
+        },
+        {
+          "id": "durable-memory",
+          "concept_output": "ph_ready/series/motion/spur-durable-memory-concept-v3-16s.mp4",
+          "output": "ph_ready/series/spur-durable-memory-proof-40s.mp4",
+          "takeaway": "The agent can stop. The work remains."
+        },
+        {
+          "id": "acp-agents",
+          "concept_output": "ph_ready/series/motion/spur-acp-agents-concept-v3-16s.mp4",
+          "output": "ph_ready/series/spur-acp-agents-proof-40s.mp4",
+          "takeaway": "Choose the agent. Keep one control system."
+        }
+      ]
+    ' "$MANIFEST" >/dev/null; then
+    pass "manifest locks film identities and artifact paths"
+  else
+    fail "manifest locks film identities and artifact paths"
+  fi
+
+  if jq -e '
+      .sources["session-detail"].status == "approved"
+      and .sources["session-detail"].path == "live_demos/13-problem-plan-loop-drive.mp4"
+      and .sources["session-detail"].sha256 == "4d94c2c9d320eb53b4cd4bb56f0bddac337239ee4419e6a3ffc31b47649797d9"
+      and .sources["worker-visibility"].status == "approved"
+      and .sources["worker-visibility"].path == "live_demos/10-problem-ops-visibility.mp4"
+      and .sources["worker-visibility"].sha256 == "4c252847c6498d6be5d7f581c79c0f06665a7fef90f12eb589811fefc207991c"
+      and .sources["plan-state"].status == "approved"
+      and .sources["plan-state"].path == "live_demos/11-problem-plan-progress.mp4"
+      and .sources["plan-state"].sha256 == "011f20addf6850055a9bd062521d22ca94a440898eaf4ec6d5c29c7630335407"
+      and .sources["specialist-routing"].status == "approved"
+      and .sources["specialist-routing"].path == "live_demos/09-product-e2e-flow.mp4"
+      and .sources["specialist-routing"].sha256 == "7fd8473a7870afff7b5085c6a00ef306ac257b0021d8f150884886caa84d47ec"
+      and .sources["session-resume"].status == "approved"
+      and .sources["session-resume"].path == "live_demos/04-session-resume.mp4"
+      and .sources["session-resume"].sha256 == "cb110d2cfa9149cb9d8344987f03f11852a181926ee85a572bebf8dbdff0660c"
+    ' "$MANIFEST" >/dev/null; then
+    pass "manifest locks approved source identities"
+  else
+    fail "manifest locks approved source identities"
+  fi
+
   for source_id in \
     session-detail \
     worker-visibility \
@@ -77,7 +126,10 @@ if [[ -f "$MANIFEST" ]]; then
       continue
     fi
 
-    actual_sha="$(shasum -a 256 "$approved_source" | awk '{print $1}')"
+    if ! actual_sha="$(shasum -a 256 "$approved_source" | awk '{print $1}')"; then
+      fail "$source_id source checksum is readable"
+      continue
+    fi
     if [[ -n "$expected_sha" && "$actual_sha" == "$expected_sha" ]]; then
       pass "$source_id checksum"
     else
@@ -109,41 +161,62 @@ if [[ -f "$MANIFEST" ]]; then
 fi
 
 if [[ -f "$NOTEBOOK" ]]; then
-  notebook_source="$(jq -r '
-    .cells[].source | if type == "array" then join("") else . end
-  ' "$NOTEBOOK")"
-  notebook_html="$(jq -r '
-    .cells[].outputs[]? | .data["text/html"]? // empty |
-    if type == "array" then join("") else . end
-  ' "$NOTEBOOK")"
+  notebook_source_ok=false
+  notebook_html_ok=false
+  if notebook_source="$(jq -r '
+      .cells[].source | if type == "array" then join("") else . end
+    ' "$NOTEBOOK" 2>/dev/null)"; then
+    notebook_source_ok=true
+    pass "notebook source JSON is readable"
+  else
+    notebook_source=""
+    fail "notebook source JSON is readable"
+  fi
+  if notebook_html="$(jq -r '
+      .cells[].outputs[]? | .data["text/html"]? // empty |
+      if type == "array" then join("") else . end
+    ' "$NOTEBOOK" 2>/dev/null)"; then
+    notebook_html_ok=true
+    pass "notebook HTML output JSON is readable"
+  else
+    notebook_html=""
+    fail "notebook HTML output JSON is readable"
+  fi
 
   for required in \
     'Delegate deeply. Keep the decision.' \
     'The agent can stop. The work remains.' \
     'Choose the agent. Keep one control system.' \
     'INSTALL SPUR · COMMUNITY FREE'; do
-    if [[ "$notebook_source" == *"$required"* ]]; then
-      pass "notebook source copy: $required"
-    else
-      fail "notebook source copy: $required"
+    if [[ "$notebook_source_ok" == true ]]; then
+      if [[ "$notebook_source" == *"$required"* ]]; then
+        pass "notebook source copy: $required"
+      else
+        fail "notebook source copy: $required"
+      fi
     fi
-    if [[ "$notebook_html" == *"$required"* ]]; then
-      pass "rendered notebook copy: $required"
-    else
-      fail "rendered notebook copy: $required"
+    if [[ "$notebook_html_ok" == true ]]; then
+      if [[ "$notebook_html" == *"$required"* ]]; then
+        pass "rendered notebook copy: $required"
+      else
+        fail "rendered notebook copy: $required"
+      fi
     fi
   done
 else
   fail "concept-proof series notebook exists"
 fi
 
-if rg -qi --hidden \
-    --glob '!concept-proof-series-contract.test.sh' \
-    'otobank' "$ROOT"; then
-  fail "SPUR concept-proof series contains no unrelated Otobank copy"
+if rg -qi --hidden --glob '!**/tests/**' 'otobank' "$ROOT"; then
+  leak_scan_status=0
 else
-  pass "SPUR concept-proof series contains no unrelated Otobank copy"
+  leak_scan_status=$?
 fi
+case "$leak_scan_status" in
+  0) fail "SPUR concept-proof series contains no unrelated Otobank copy" ;;
+  1) pass "SPUR concept-proof series contains no unrelated Otobank copy" ;;
+  *) fail "SPUR concept-proof series Otobank scan completes" ;;
+esac
 
 if [[ -f "$MANIFEST" ]]; then
   while IFS=$'\t' read -r film_id output expected_frames; do
@@ -190,7 +263,7 @@ if [[ -f "$MANIFEST" ]]; then
       fail "$film_id exact duration"
     fi
 
-    if ffmpeg -nostdin -v error -i "$film" -f null - >/dev/null 2>&1; then
+    if ffmpeg -nostdin -xerror -err_detect explode -v error -i "$film" -f null - >/dev/null 2>&1; then
       pass "$film_id full decode"
     else
       fail "$film_id full decode"
