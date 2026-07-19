@@ -132,7 +132,9 @@ if ! jq -e '
         )
         and all(.asset_ids[];
           . as $asset_id
-          | any($assets[]; .asset_id == $asset_id)
+          | any($assets[];
+              .asset_id == $asset_id and .owner != "open-design"
+            )
         )
         and (.claim_ids | type == "array")
         and (
