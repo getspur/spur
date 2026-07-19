@@ -7,7 +7,7 @@ description: Use when creating or enhancing a sourced explainer, product story, 
 
 ## Operating rule
 
-**Core principle:** Let the notebook decide the story and PalmierPro decide the final frame. Give every asset and scene one owner, and clear three approval gates before spending credits.
+**Core principle:** Let the notebook decide the story and PalmierPro decide the final frame. Give every asset one owner and every scene one primary owner, and clear three approval gates before spending credits.
 
 **REQUIRED SUB-SKILLS:**
 
@@ -32,15 +32,15 @@ Inspect content rather than inferring it from filenames. Ground every factual st
 | Higgsfield | Dry narration and approved metaphorical or atmospheric footage |
 | PalmierPro | Source inspection, real captures, native text, timeline assembly, mix, color, and export |
 
-Assign one owner to every asset and scene; split anything with mixed ownership. Never generate factual UI, product copy, logos, title cards, or proof. Never use Higgsfield `explainer_video` or any generated assembler. Use PalmierPro as the only final editor.
+Assign every asset one owner. Every scene has one primary owner. If PalmierPro composites differently owned input assets, Palmier is the scene owner while inputs retain their own asset owners. Never generate factual UI, product copy, logos, title cards, or proof. Never use Higgsfield `explainer_video` or any generated assembler. Use PalmierPro as the only final editor.
 
 ## Gate 1: Concept and layout
 
-Lock the audience, purpose, route, duration, aspect ratio, CTA, sources, rights, and deliverables. Build the brief and claim register, then use Open Design to present two or three visual directions. Wait for visual approval before continuing. Treat existing approvals as locked decisions and do not ask for them again.
+Lock the audience, purpose, route, duration, aspect ratio, CTA, sources, rights, and deliverables. Build the brief and claim register, then use Open Design to present two or three visual directions. Wait for approval of the palette, typography system, composition language, and pacing envelope. Treat existing approvals as locked decisions and do not ask for them again.
 
 ## Gate 2: Script and storyboard
 
-Write narration only from approved claims. Build a timecoded scene graph with one owner per beat: `real-capture`, `html-video`, `higgsfield`, or `palmier`. Record exact source start and end seconds. Specify every plate, generated insert, native title, CTA, and any captions or music the user explicitly requested. Wait for script and storyboard approval.
+Write narration only from approved claims. Build a timecoded scene graph with one primary owner per scene: `real-capture`, `html-video`, `higgsfield`, or `palmier`. Record exact source start and end seconds. Specify every plate, generated insert, native title, CTA, and any captions or music the user explicitly requested. Wait for approval of the narration/script, storyboard, source selects, and scene ownership map.
 
 After approval, use HTML Video to render exact-duration, self-contained plates with no baked narration.
 
@@ -54,7 +54,7 @@ Rejoin timed-out jobs instead of duplicating them. Retry only failed jobs. After
 
 ## Assemble in PalmierPro
 
-Create a new project and a separate final timeline. Call `get_timeline` once, apply delta patches, and reread the timeline after any failure or out-of-band edit. Import and inspect every asset before placement. Organize clips, then place them with PalmierPro frame semantics and recorded source seconds.
+Create a new project or a separate timeline. Call `get_timeline` once and apply delta patches. After any failure or out-of-band edit, reread the active timeline, then preserve successful edits and retry the smallest failed mutation. Import and inspect every asset before placement. Organize clips, then place them with PalmierPro frame semantics and recorded source seconds.
 
 Keep narration on its own track and lower ambience beneath it. Create all product text natively in PalmierPro. Use restrained transitions, color, and audio treatment. Inspect representative frames and every important cut. Export, monitor the queue through its terminal result, and accept only a successful export. After Gate 3, make reversible edits without per-edit approval gates.
 
