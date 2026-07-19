@@ -16,6 +16,14 @@ Assign every asset exactly one primary owner and every scene exactly one primary
 
 Every scene has one primary owner. If Palmier composites differently owned input assets, Palmier is the scene owner while inputs retain their own asset owners. If one asset appears to need two owners, split it before Palmier assembly.
 
+Close the traceability graph before delivery:
+
+```text
+eligible source asset <- claim.source_asset_ids <- claim <- scene.claim_ids <- scene -> scene.asset_ids -> timeline asset
+```
+
+Claims therefore identify their factual source assets, scenes identify the claims they use, and scenes identify every production asset placed on the timeline.
+
 ## Manifest schema
 
 Use schema version 1:
@@ -30,7 +38,22 @@ Use schema version 1:
     "script_storyboard": "approved",
     "paid_generation": "approved"
   },
+  "claims": [
+    {
+      "claim_id": "claim-03",
+      "text": "The product shows the control loop in the real demo.",
+      "source_asset_ids": ["brief-source-01", "demo-proof-01"]
+    }
+  ],
   "assets": [
+    {
+      "asset_id": "brief-source-01",
+      "owner": "open-design",
+      "type": "document",
+      "source_or_job_id": "approved-brief-v3",
+      "approval_status": "approved",
+      "rights_status": "cleared"
+    },
     {
       "asset_id": "demo-proof-01",
       "owner": "real-capture",
@@ -40,13 +63,63 @@ Use schema version 1:
         "start_seconds": 27.5,
         "end_seconds": 46.5
       },
-      "claim_ids": ["claim-03"],
-      "timeline_slot": {
-        "start_seconds": 16,
-        "end_seconds": 35
-      },
       "approval_status": "approved",
       "rights_status": "owned"
+    },
+    {
+      "asset_id": "control-loop-plate-01",
+      "owner": "html-video",
+      "type": "video",
+      "source_or_job_id": "notebook-plate-v2",
+      "approval_status": "approved",
+      "rights_status": "owned"
+    },
+    {
+      "asset_id": "narration-01",
+      "owner": "higgsfield",
+      "type": "audio",
+      "source_or_job_id": "voice-job-1842",
+      "prompt_or_script_revision": "script-v5",
+      "approval_status": "approved",
+      "rights_status": "cleared"
+    },
+    {
+      "asset_id": "end-card-title-01",
+      "owner": "palmier",
+      "type": "native-text",
+      "source_or_job_id": "palmier-title-clip-7",
+      "approval_status": "approved",
+      "rights_status": "owned"
+    }
+  ],
+  "scenes": [
+    {
+      "scene_id": "scene-proof",
+      "owner": "real-capture",
+      "timeline_slot": {"start_seconds": 16, "end_seconds": 35},
+      "asset_ids": ["demo-proof-01"],
+      "claim_ids": ["claim-03"]
+    },
+    {
+      "scene_id": "scene-concept",
+      "owner": "html-video",
+      "timeline_slot": {"start_seconds": 35, "end_seconds": 45},
+      "asset_ids": ["control-loop-plate-01"],
+      "claim_ids": []
+    },
+    {
+      "scene_id": "scene-voice",
+      "owner": "higgsfield",
+      "timeline_slot": {"start_seconds": 0, "end_seconds": 60},
+      "asset_ids": ["narration-01"],
+      "claim_ids": []
+    },
+    {
+      "scene_id": "scene-end-card",
+      "owner": "palmier",
+      "timeline_slot": {"start_seconds": 45, "end_seconds": 60},
+      "asset_ids": ["end-card-title-01"],
+      "claim_ids": []
     }
   ],
   "delivery": {
@@ -63,11 +136,16 @@ Use schema version 1:
 Required fields and exact constraints:
 
 - Root: `schema_version` is `1`; `project` is a nonempty string; `route` is `create` or `enhance`.
-- `approvals`: `concept_layout`, `script_storyboard`, and `paid_generation` are each `approved`.
+- `approvals`: an object whose exact sorted key set is `concept_layout`, `paid_generation`, and `script_storyboard`; every value is exactly `approved`. Extra gates are invalid.
+- `claims`: a nonempty array with unique nonempty `claim_id` values. Every claim has nonempty `text` and nonempty unique `source_asset_ids`; each source ID resolves to an existing `real-capture` or `open-design` asset.
 - `assets`: a nonempty array with unique `asset_id` values. Every asset has a nonempty string `asset_id`, `type`, and `source_or_job_id`; `owner` is exactly `open-design`, `html-video`, `higgsfield`, `palmier`, or `real-capture`; `approval_status` is `approved`; and `rights_status` is `owned` or `cleared`.
+- `real-capture` assets: require numeric `source_locator.start_seconds >= 0` and `source_locator.end_seconds > source_locator.start_seconds`.
+- `higgsfield` assets: require a nonempty `prompt_or_script_revision`.
+- `scenes`: a nonempty array with unique nonempty `scene_id` values. Each scene has one scalar `owner` from `real-capture`, `html-video`, `higgsfield`, or `palmier`; a numeric `timeline_slot` beginning at or after zero, ending after it begins, and ending no later than `delivery.duration_seconds`; nonempty unique known `asset_ids`; and an array of unique known `claim_ids`. Non-factual scenes may use an empty `claim_ids` array.
+- Scene ownership: every asset in a non-`palmier` scene has the same owner as the scene. A `palmier` scene may composite mixed-owner inputs. Every non-`open-design` asset appears in at least one scene, and every claim is used by at least one scene.
 - `delivery`: `path` is a nonempty string; `duration_seconds`, `width`, `height`, and `fps` are positive numbers; `checksum_sha256` is exactly 64 lowercase hexadecimal characters.
 
-Optional fields include asset duration, aspect ratio, resolution, prompt revision, voice, and Palmier clip IDs. A schema failure reports the generic error `manifest violates the explainer delivery contract`; inspect all required fields, types, exact values, uniqueness, and checksum format to locate the cause.
+Optional asset metadata may include `duration_seconds`, `aspect_ratio`, `width`, `height`, `fps`, `audio_format`, voice, and Palmier clip IDs. A schema failure reports the generic error `manifest violates the explainer delivery contract`; inspect all required fields, types, exact values, uniqueness, references, ownership, coverage, and `checksum_sha256` format to locate the cause.
 
 Run:
 
@@ -75,7 +153,7 @@ Run:
 assets/skills/explainer-video-editor/scripts/validate-delivery.sh MANIFEST.json VIDEO.mp4
 ```
 
-The supplied `VIDEO.mp4` path must exactly equal `delivery.path`. The matching file must also satisfy the declared duration, dimensions, frame rate, and checksum, contain readable video and audio streams, and pass strict full-decode validation.
+The supplied `VIDEO.mp4` path must exactly equal `delivery.path`. The matching file must also satisfy the declared duration, width, height, frame rate, and `checksum_sha256`, contain H.264 video and AAC audio streams, and pass strict full-decode validation.
 
 ## Three gates
 
