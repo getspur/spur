@@ -328,15 +328,21 @@ async fn reconcile_with_linker_deferred_with_hints<L: Linker>(
 
     let excluded = worktrees.worktree_excluded_paths(request.launch_root).await;
     preserved_generations.extend(
-        preserved_generation_references(request.launch_root, &projection_root, &excluded, &next)
-            .map_err(|error| {
-                projection_error(
-                    request.clone(),
-                    ProjectionPhase::GarbageCollect,
-                    None,
-                    error,
-                )
-            })?,
+        preserved_generation_references(
+            request.launch_root,
+            &projection_root,
+            request.adapter,
+            &excluded,
+            &next,
+        )
+        .map_err(|error| {
+            projection_error(
+                request.clone(),
+                ProjectionPhase::GarbageCollect,
+                None,
+                error,
+            )
+        })?,
     );
     garbage_collect_generations(&projection_root, &next, &preserved_generations).map_err(
         |error| {
@@ -1533,17 +1539,38 @@ fn retain_preserved_generation(
             preserved.insert(prior.generation.clone());
         }
         ProjectionMode::Symlink => {
-            if let Some(generation) = generation_reference_for_target(projection_root, target)? {
-                preserved.insert(generation);
-            }
+            retain_generation_reference_for_target(projection_root, target, preserved)?;
         }
     }
     Ok(())
 }
 
+fn preserved_exclude_candidates(
+    launch_root: &Path,
+    adapter: crate::skills::adapters::Adapter,
+    relative: &str,
+) -> anyhow::Result<Vec<PathBuf>> {
+    let exact = launch_root.join(relative);
+    let mut candidates = vec![exact.clone()];
+    if !adapter.target_is_directory() || exact.file_name().is_none_or(|name| name != "SKILL.md") {
+        return Ok(candidates);
+    }
+    let Some(parent) = exact.parent() else {
+        return Ok(candidates);
+    };
+    let Some(skill_id) = parent.file_name().and_then(|name| name.to_str()) else {
+        return Ok(candidates);
+    };
+    if legacy_target(adapter, launch_root, skill_id)? == parent {
+        candidates.push(parent.to_path_buf());
+    }
+    Ok(candidates)
+}
+
 fn preserved_generation_references(
     launch_root: &Path,
     projection_root: &Path,
+    adapter: crate::skills::adapters::Adapter,
     excluded: &[String],
     manifest: &ProjectionManifest,
 ) -> anyhow::Result<BTreeSet<String>> {
@@ -1554,14 +1581,13 @@ fn preserved_generation_references(
         .collect::<HashSet<_>>();
     let mut retained = BTreeSet::new();
     for relative in excluded {
-        if managed.contains(relative.as_str()) {
-            continue;
+        for target in preserved_exclude_candidates(launch_root, adapter, relative)? {
+            let target_rel = normalized_relative(launch_root, &target)?;
+            if managed.contains(target_rel.as_str()) {
+                continue;
+            }
+            retain_generation_reference_for_target(projection_root, &target, &mut retained)?;
         }
-        retain_generation_reference_for_target(
-            projection_root,
-            &launch_root.join(relative),
-            &mut retained,
-        )?;
     }
     Ok(retained)
 }
@@ -2640,6 +2666,46 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn manifest_owned_self_loop_is_relinquished_without_blocking_later_sweeps() {
+        let fixture = ProjectionFixture::new(Adapter::Codex);
+        fixture.write_bundled_skill("looped", "both", "OLD");
+        let first = reconcile_with_linker(fixture.worktrees(), fixture.request(), &NativeLinker)
+            .await
+            .unwrap();
+        let old_generation = generation_root(&fixture, &first.generation);
+        let target = codex_target(&fixture, "looped");
+
+        std::fs::remove_file(&target).unwrap();
+        std::os::unix::fs::symlink("spurpower-looped", &target).unwrap();
+        remove_source(&fixture, "looped");
+
+        let second = reconcile_with_linker(fixture.worktrees(), fixture.request(), &NativeLinker)
+            .await
+            .unwrap();
+
+        assert!(second.skipped.iter().any(|skip| {
+            skip.skill_id == "looped" && skip.reason == ProjectionSkipReason::OwnershipLost
+        }));
+        assert_eq!(
+            std::fs::read_link(&target).unwrap(),
+            Path::new("spurpower-looped")
+        );
+        assert!(old_generation.exists());
+
+        fixture.write_bundled_skill("fresh-after-loop", "both", "FRESH");
+        reconcile_with_linker(fixture.worktrees(), fixture.request(), &NativeLinker)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            std::fs::read_link(&target).unwrap(),
+            Path::new("spurpower-looped")
+        );
+        assert!(old_generation.exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn prefixless_user_symlink_keeps_its_referenced_generation_alive() {
         let fixture = ProjectionFixture::new(Adapter::Codex);
         fixture.write_pool_skill("legacy-link", "clean", "OLD");
@@ -2691,6 +2757,90 @@ mod tests {
         assert!(std::fs::canonicalize(&target)
             .unwrap()
             .starts_with(&first.root));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unavailable_hint_snapshot_preserves_prefixless_directory_generation_across_sweeps() {
+        let fixture = ProjectionFixture::new(Adapter::Codex);
+        fixture.write_pool_skill("legacy-exclude", "clean", "OLD");
+        let first = publish_generation(fixture.request(), &fixture.resolve().unwrap()).unwrap();
+        let old_generation = first.root.clone();
+        let target =
+            legacy_target(Adapter::Codex, fixture.launch_root(), "legacy-exclude").unwrap();
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        NativeLinker
+            .symlink(
+                &relative_symlink_source(&old_generation.join("skills/legacy-exclude"), &target)
+                    .unwrap(),
+                &target,
+                TargetKind::Directory,
+            )
+            .unwrap();
+        let original_destination = std::fs::read_link(&target).unwrap();
+        let legacy_exclude =
+            normalized_relative(fixture.launch_root(), &target.join("SKILL.md")).unwrap();
+        fixture
+            .worktrees()
+            .add_worktree_excludes(fixture.launch_root(), std::slice::from_ref(&legacy_exclude))
+            .await
+            .unwrap();
+
+        let cache = fixture.repo_root().join(".spur/explore/cache");
+        std::fs::create_dir_all(&cache).unwrap();
+        std::fs::write(cache.join("materializations.jsonl"), b"\xff").unwrap();
+        assert!(
+            snapshot_legacy_materialization_hints(fixture.repo_root(), fixture.launch_root(),)
+                .is_empty()
+        );
+
+        fixture.write_pool_skill("legacy-exclude", "clean", "NEW");
+        let second = reconcile_with_linker(fixture.worktrees(), fixture.request(), &NativeLinker)
+            .await
+            .unwrap();
+        assert_ne!(first.digest, second.generation);
+        assert_eq!(std::fs::read_link(&target).unwrap(), original_destination);
+        assert!(old_generation.exists());
+        assert!(std::fs::canonicalize(&target)
+            .unwrap()
+            .starts_with(&old_generation));
+
+        fixture.write_bundled_skill("fresh-after-hint-failure", "both", "FRESH");
+        let third = reconcile_with_linker(fixture.worktrees(), fixture.request(), &NativeLinker)
+            .await
+            .unwrap();
+
+        assert_ne!(second.generation, third.generation);
+        assert_eq!(std::fs::read_link(&target).unwrap(), original_destination);
+        assert!(old_generation.exists());
+        assert!(std::fs::canonicalize(&target)
+            .unwrap()
+            .starts_with(&old_generation));
+        assert!(!generation_root(&fixture, &second.generation).exists());
+    }
+
+    #[test]
+    fn preserved_exclude_candidates_follow_every_adapter_target_shape() {
+        let launch = tempfile::tempdir().unwrap();
+        let payload = crate::skills::SkillPayload {
+            id: "shape".into(),
+            description: "shape".into(),
+            body: "BODY".into(),
+            source: crate::skills::SkillSource::Pool,
+            role: crate::skills::SkillRole::Both,
+        };
+
+        for &adapter in Adapter::all() {
+            let rendered = adapter.render_with_prefix(&payload, launch.path(), "");
+            let relative = normalized_relative(launch.path(), &rendered.path).unwrap();
+            let candidates =
+                preserved_exclude_candidates(launch.path(), adapter, &relative).unwrap();
+            let mut expected = vec![rendered.path.clone()];
+            if adapter.target_is_directory() {
+                expected.push(rendered.path.parent().unwrap().to_path_buf());
+            }
+            assert_eq!(candidates, expected, "adapter={}", adapter.key());
+        }
     }
 
     #[tokio::test]
