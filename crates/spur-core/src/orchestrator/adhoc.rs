@@ -101,16 +101,13 @@ impl Orchestrator {
             mcp_handle,
         ): McpGuarded<BrainRunBootstrap> = cleanup_mcp_on_err(mcp_handle, async {
             // 6. Spawn brain agent via AgentConnection.
-            let mut connection = self.create_connection(&brain_config, None);
-
-            let init_request = InitializeRequest::new(ProtocolVersion::LATEST);
-            let _capabilities = connection
-                .initialize(init_request)
+            let (mut connection, connected_brain_name, _capabilities) = self
+                .connect_brain(Some(brain_name.as_str()), None)
                 .await
-                .context("Failed to initialize brain agent")?;
+                .with_context(|| format!("Failed to connect ad-hoc brain '{brain_name}'"))?;
 
             debug!(
-                brain = %brain_name,
+                brain = %connected_brain_name,
                 "Brain agent initialized"
             );
 
