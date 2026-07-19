@@ -1,0 +1,4 @@
+interface:
+  display_name: "Explainer Video Editor"
+  short_description: "Design, generate, and finish sourced explainers"
+  default_prompt: "Use $explainer-video-editor to create or enhance a sourced explainer and finish it in PalmierPro."
