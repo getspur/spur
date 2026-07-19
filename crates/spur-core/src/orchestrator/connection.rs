@@ -960,6 +960,7 @@ pub(super) fn build_connection_from_transport(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::RunOpts;
     use spur_acp::config::SpurConfig;
     use spur_acp::types::AgentKind;
     use std::ffi::OsString;
@@ -1140,6 +1141,12 @@ while IFS= read -r line; do
             touch "$marker"
             echo '{"jsonrpc":"2.0","id":'"$id_json"',"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":false,"promptCapabilities":{}},"authMethods":[]}}'
             ;;
+        session/new)
+            echo '{"jsonrpc":"2.0","id":'"$id_json"',"result":{"sessionId":"projection-probe-session"}}'
+            ;;
+        session/prompt)
+            echo '{"jsonrpc":"2.0","id":'"$id_json"',"result":{"stopReason":"end_turn"}}'
+            ;;
     esac
 done
 "#,
@@ -1280,6 +1287,135 @@ done
             !connection_marker.exists(),
             "fatal projection error should win before connection initialization"
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn run_adhoc_projects_all_active_skills_before_initialize_and_session() {
+        let _global_root = crate::explore::store::force_global_root_for_tests(None);
+        let repo = tempfile::tempdir().expect("repo tempdir");
+        let cost_dir = tempfile::tempdir().expect("cost tempdir");
+        let bundled_dir = repo.path().join("test-bundled-skills");
+        std::fs::create_dir_all(&bundled_dir).expect("create bundled source root");
+        initialize_projection_repo(repo.path(), &bundled_dir);
+        write_projection_skill(&bundled_dir, "brain-builtin", "brain", "brain bundled body");
+        write_projection_pool_skill(repo.path(), "pool-active");
+        let initialize_marker = repo.path().join("initialize-observed");
+        let script = write_projection_probe_agent_script(repo.path());
+
+        let mut config = SpurConfig::default();
+        config.brain.default = "codex-probe".to_string();
+        config.cost.db_path = cost_dir.path().join("cost.db").display().to_string();
+        config.agents.entries = vec![projection_probe_config(
+            "codex-probe",
+            &script,
+            repo.path(),
+            &initialize_marker,
+        )];
+        git(repo.path(), &["add", "."]);
+        git(
+            repo.path(),
+            &["commit", "-q", "-m", "ad-hoc projection fixture"],
+        );
+        let mut orchestrator =
+            Orchestrator::new(repo.path().to_path_buf(), config, None).expect("orchestrator");
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            orchestrator.run_adhoc(
+                "verify runtime projection",
+                RunOpts {
+                    brain: None,
+                    issue: None,
+                    background: false,
+                },
+            ),
+        )
+        .await
+        .expect("ad-hoc run should complete")
+        .expect("ad-hoc brain should start after projection");
+
+        assert!(result.success);
+        assert!(
+            initialize_marker.exists(),
+            "agent initialize should observe projected skills"
+        );
+        for id in ["brain-builtin", "pool-active"] {
+            assert!(
+                repo.path()
+                    .join(format!(".codex/skills/spurpower-{id}/SKILL.md"))
+                    .exists(),
+                "ad-hoc launch should project {id}"
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn run_adhoc_projection_failure_precedes_connection_and_cleans_mcp_server() {
+        let _global_root = crate::explore::store::force_global_root_for_tests(None);
+        let repo = tempfile::tempdir().expect("repo tempdir");
+        let cost_dir = tempfile::tempdir().expect("cost tempdir");
+        let missing_bundled_dir = repo.path().join("missing-bundled-skills");
+        initialize_projection_repo(repo.path(), &missing_bundled_dir);
+        let connection_marker = repo.path().join("connection-started");
+        let script = write_failing_brain_script(repo.path());
+
+        let mut config = SpurConfig::default();
+        config.brain.default = "codex-probe".to_string();
+        config.cost.db_path = cost_dir.path().join("cost.db").display().to_string();
+        config.agents.entries = vec![projection_probe_config(
+            "codex-probe",
+            &script,
+            repo.path(),
+            &connection_marker,
+        )];
+        git(repo.path(), &["add", "."]);
+        git(
+            repo.path(),
+            &["commit", "-q", "-m", "ad-hoc projection failure fixture"],
+        );
+        let mut orchestrator =
+            Orchestrator::new(repo.path().to_path_buf(), config, None).expect("orchestrator");
+        let baseline_tasks = tokio::runtime::Handle::current()
+            .metrics()
+            .num_alive_tasks();
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            orchestrator.run_adhoc(
+                "projection must fail first",
+                RunOpts {
+                    brain: None,
+                    issue: None,
+                    background: false,
+                },
+            ),
+        )
+        .await
+        .expect("projection failure should return after MCP cleanup");
+
+        let error = match result {
+            Err(error) => format!("{error:#}"),
+            Ok(_) => panic!("missing bundled catalog should stop ad-hoc brain connection"),
+        };
+        assert!(error.contains("skill projection for brain 'codex-probe'"));
+        assert!(error.contains("skill projection Resolve failed for codex"));
+        assert!(error.contains(&missing_bundled_dir.display().to_string()));
+        assert!(
+            !connection_marker.exists(),
+            "fatal projection error should win before connection initialization"
+        );
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while tokio::runtime::Handle::current()
+                .metrics()
+                .num_alive_tasks()
+                > baseline_tasks
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("MCP callback server task should be cleaned after projection failure");
     }
 
     #[tokio::test(flavor = "current_thread")]
