@@ -98,44 +98,48 @@ if [[ -f "$MANIFEST" ]]; then
     fail "manifest locks approved source identities"
   fi
 
-  for source_id in \
-    session-detail \
-    worker-visibility \
-    plan-state \
-    specialist-routing \
-    session-resume; do
-    if jq -e --arg source_id "$source_id" '
-        .sources[$source_id] as $source |
-        ($source | type) == "object"
-      ' "$MANIFEST" >/dev/null; then
-      pass "$source_id source is keyed"
-    else
-      fail "$source_id source is keyed"
-      continue
-    fi
+  if source_metadata="$(jq -r '
+      [
+        "session-detail",
+        "worker-visibility",
+        "plan-state",
+        "specialist-routing",
+        "session-resume"
+      ][] as $source_id |
+      [$source_id, .sources[$source_id].path, .sources[$source_id].sha256] | @tsv
+    ' "$MANIFEST" 2>/dev/null)"; then
+    while IFS=$'\t' read -r source_id source_path expected_sha; do
+      if jq -e --arg source_id "$source_id" '
+          .sources[$source_id] as $source |
+          ($source | type) == "object"
+        ' "$MANIFEST" >/dev/null; then
+        pass "$source_id source is keyed"
+      else
+        fail "$source_id source is keyed"
+        continue
+      fi
 
-    IFS=$'\t' read -r source_path expected_sha < <(
-      jq -r --arg source_id "$source_id" \
-        '.sources[$source_id] | [.path, .sha256] | @tsv' "$MANIFEST"
-    )
-    approved_source="$ROOT/$source_path"
-    if [[ -f "$approved_source" ]]; then
-      pass "$source_id source exists"
-    else
-      fail "$source_id source exists"
-      continue
-    fi
+      approved_source="$ROOT/$source_path"
+      if [[ -f "$approved_source" ]]; then
+        pass "$source_id source exists"
+      else
+        fail "$source_id source exists"
+        continue
+      fi
 
-    if ! actual_sha="$(shasum -a 256 "$approved_source" | awk '{print $1}')"; then
-      fail "$source_id source checksum is readable"
-      continue
-    fi
-    if [[ -n "$expected_sha" && "$actual_sha" == "$expected_sha" ]]; then
-      pass "$source_id checksum"
-    else
-      fail "$source_id checksum"
-    fi
-  done
+      if ! actual_sha="$(shasum -a 256 "$approved_source" | awk '{print $1}')"; then
+        fail "$source_id source checksum is readable"
+        continue
+      fi
+      if [[ -n "$expected_sha" && "$actual_sha" == "$expected_sha" ]]; then
+        pass "$source_id checksum"
+      else
+        fail "$source_id checksum"
+      fi
+    done <<<"$source_metadata"
+  else
+    fail "series source metadata readable"
+  fi
 
   diagnostic_sha="b5c407a3753bae990b0cdf95fd5dac2c747934e15f8a314aaff42e52bf83ecb5"
   if jq -e --arg diagnostic_sha "$diagnostic_sha" '
@@ -219,56 +223,64 @@ case "$leak_scan_status" in
 esac
 
 if [[ -f "$MANIFEST" ]]; then
-  while IFS=$'\t' read -r film_id output expected_frames; do
-    film="$ROOT/$output"
-    if [[ ! -f "$film" ]]; then
-      fail "$film_id output exists"
-      continue
-    fi
+  if film_outputs="$(jq -r '
+      .films[] | [.id, .output, (.duration_frames | tostring)] | @tsv
+    ' "$MANIFEST" 2>/dev/null)"; then
+    if [[ -n "$film_outputs" ]]; then
+      while IFS=$'\t' read -r film_id output expected_frames; do
+        film="$ROOT/$output"
+        if [[ ! -f "$film" ]]; then
+          fail "$film_id output exists"
+          continue
+        fi
 
-    video_spec="$(ffprobe -v error -select_streams v:0 \
-      -show_entries stream=codec_name,width,height,r_frame_rate,avg_frame_rate,nb_frames \
-      -of json "$film" 2>/dev/null || true)"
-    if [[ -n "$video_spec" ]] && jq -e --argjson expected_frames "$expected_frames" '
-        .streams[0].codec_name == "h264"
-        and .streams[0].width == 1920
-        and .streams[0].height == 1080
-        and .streams[0].r_frame_rate == "30/1"
-        and .streams[0].avg_frame_rate == "30/1"
-        and (.streams[0].nb_frames | tonumber) == $expected_frames
-      ' <<<"$video_spec" >/dev/null; then
-      pass "$film_id H.264 1920x1080 30fps frame contract"
-    else
-      fail "$film_id H.264 1920x1080 30fps frame contract"
-    fi
+        video_spec="$(ffprobe -v error -select_streams v:0 \
+          -show_entries stream=codec_name,width,height,r_frame_rate,avg_frame_rate,nb_frames \
+          -of json "$film" 2>/dev/null || true)"
+        if [[ -n "$video_spec" ]] && jq -e --argjson expected_frames "$expected_frames" '
+            .streams[0].codec_name == "h264"
+            and .streams[0].width == 1920
+            and .streams[0].height == 1080
+            and .streams[0].r_frame_rate == "30/1"
+            and .streams[0].avg_frame_rate == "30/1"
+            and (.streams[0].nb_frames | tonumber) == $expected_frames
+          ' <<<"$video_spec" >/dev/null; then
+          pass "$film_id H.264 1920x1080 30fps frame contract"
+        else
+          fail "$film_id H.264 1920x1080 30fps frame contract"
+        fi
 
-    audio_spec="$(ffprobe -v error -select_streams a:0 \
-      -show_entries stream=codec_name,sample_rate,channels \
-      -of json "$film" 2>/dev/null || true)"
-    if [[ -n "$audio_spec" ]] && jq -e '
-        .streams[0].codec_name == "aac"
-        and .streams[0].sample_rate == "48000"
-        and .streams[0].channels == 2
-      ' <<<"$audio_spec" >/dev/null; then
-      pass "$film_id AAC 48k stereo contract"
-    else
-      fail "$film_id AAC 48k stereo contract"
-    fi
+        audio_spec="$(ffprobe -v error -select_streams a:0 \
+          -show_entries stream=codec_name,sample_rate,channels \
+          -of json "$film" 2>/dev/null || true)"
+        if [[ -n "$audio_spec" ]] && jq -e '
+            .streams[0].codec_name == "aac"
+            and .streams[0].sample_rate == "48000"
+            and .streams[0].channels == 2
+          ' <<<"$audio_spec" >/dev/null; then
+          pass "$film_id AAC 48k stereo contract"
+        else
+          fail "$film_id AAC 48k stereo contract"
+        fi
 
-    duration="$(ffprobe -v error -show_entries format=duration \
-      -of default=noprint_wrappers=1:nokey=1 "$film" 2>/dev/null || true)"
-    if [[ "$duration" == "40.000000" ]]; then
-      pass "$film_id exact duration"
-    else
-      fail "$film_id exact duration"
-    fi
+        duration="$(ffprobe -v error -show_entries format=duration \
+          -of default=noprint_wrappers=1:nokey=1 "$film" 2>/dev/null || true)"
+        if [[ "$duration" == "40.000000" ]]; then
+          pass "$film_id exact duration"
+        else
+          fail "$film_id exact duration"
+        fi
 
-    if ffmpeg -nostdin -xerror -err_detect explode -v error -i "$film" -f null - >/dev/null 2>&1; then
-      pass "$film_id full decode"
-    else
-      fail "$film_id full decode"
+        if ffmpeg -nostdin -xerror -err_detect explode -v error -i "$film" -f null - >/dev/null 2>&1; then
+          pass "$film_id full decode"
+        else
+          fail "$film_id full decode"
+        fi
+      done <<<"$film_outputs"
     fi
-  done < <(jq -r '.films[] | [.id, .output, (.duration_frames | tostring)] | @tsv' "$MANIFEST")
+  else
+    fail "series film outputs readable"
+  fi
 fi
 
 [[ "$failures" -eq 0 ]] || {
