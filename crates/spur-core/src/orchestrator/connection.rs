@@ -182,6 +182,45 @@ impl Orchestrator {
             .ok_or_else(|| anyhow!("Brain agent '{}' not found in registry", brain_name))?
             .clone();
 
+        let worktrees = spur_worktree::manager::WorktreeManager::new(self.repo_root.clone());
+        let projection = crate::skills::projection::reconcile_for_agent_kind(
+            &worktrees,
+            &self.repo_root,
+            &self.repo_root,
+            brain_config.kind,
+            crate::skills::projection::RuntimeRole::Brain,
+        )
+        .await
+        .map_err(|error| {
+            let source_chain = format!("{:#}", error.source);
+            anyhow!("skill projection for brain '{brain_name}': {error}: {source_chain}")
+        })?;
+        if let Some(summary) = projection {
+            info!(
+                brain = %brain_name,
+                adapter = %summary.adapter,
+                generation = %summary.generation,
+                selected = summary.selected.len(),
+                linked = summary.linked.len(),
+                copied = summary.copied.len(),
+                unchanged = summary.unchanged.len(),
+                removed = summary.removed.len(),
+                migrated = summary.migrated.len(),
+                skipped = summary.skipped.len(),
+                "runtime brain skill projection reconciled"
+            );
+            for skipped in &summary.skipped {
+                warn!(
+                    brain = %brain_name,
+                    adapter = %summary.adapter,
+                    skill_id = %skipped.skill_id,
+                    path = %skipped.path.display(),
+                    reason = %skipped.reason,
+                    "runtime brain skill projection preserved target"
+                );
+            }
+        }
+
         let mut connection = self.create_connection(&brain_config, permission_tx);
 
         let init_request = InitializeRequest::new(ProtocolVersion::LATEST);
@@ -1040,7 +1079,14 @@ done
         let source = "acme/skills";
         let pinned_commit = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
         let source_dir = crate::explore::pool::pool_dir(repo, source, id, pinned_commit);
-        write_projection_skill(&source_dir, id, "both", "active pool body");
+        std::fs::create_dir_all(&source_dir).expect("create pool skill source");
+        std::fs::write(
+            source_dir.join("SKILL.md"),
+            format!(
+                "---\nname: {id}\ndescription: Projection fixture\nrole: both\n---\nactive pool body\n"
+            ),
+        )
+        .expect("write pool skill source");
         let content_sha256 =
             crate::explore::content_hash(&source_dir).expect("hash pool skill source");
         crate::explore::pool::Manifest {
@@ -1187,7 +1233,9 @@ done
                 );
             }
         }
-        assert_eq!(git(repo.path(), &["status", "--short"]), "");
+        let status = git(repo.path(), &["status", "--short"]);
+        assert!(!status.contains(".codex/skills"));
+        assert!(!status.contains(".spur/runtime/skill-projections"));
         connection
             .shutdown()
             .await

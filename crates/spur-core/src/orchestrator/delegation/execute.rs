@@ -269,6 +269,9 @@ pub(crate) async fn execute_delegation(
                     AttemptSetupError::WorktreeFailed(error) => DelegationStatus::Failed {
                         error: spur_acp::AttemptSetupError::WorktreeFailed { error }.to_string(),
                     },
+                    AttemptSetupError::SkillProjectionFailed(error) => DelegationStatus::Failed {
+                        error: format!("Failed to project worker skills: {error}"),
+                    },
                     AttemptSetupError::InitFailed(error) => DelegationStatus::Failed {
                         error: spur_acp::AttemptSetupError::InitFailed { error }.to_string(),
                     },

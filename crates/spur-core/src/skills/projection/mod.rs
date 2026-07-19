@@ -165,6 +165,33 @@ pub async fn reconcile_with_worktrees(
     reconcile::run(worktrees, request).await
 }
 
+/// Reconcile the v1 `AllActive` projection for one supported runtime agent.
+///
+/// Unsupported agent kinds return `Ok(None)` without touching the filesystem.
+pub async fn reconcile_for_agent_kind(
+    worktrees: &spur_worktree::manager::WorktreeManager,
+    source_repo_root: &std::path::Path,
+    launch_root: &std::path::Path,
+    kind: spur_acp::types::AgentKind,
+    role: RuntimeRole,
+) -> Result<Option<ProjectionSummary>, ProjectionError> {
+    let Some(adapter) = crate::skills::adapters::Adapter::for_agent_kind(kind) else {
+        return Ok(None);
+    };
+    reconcile_with_worktrees(
+        worktrees,
+        ProjectionRequest {
+            source_repo_root,
+            launch_root,
+            adapter,
+            role,
+            policy: SelectionPolicy::AllActive,
+        },
+    )
+    .await
+    .map(Some)
+}
+
 /// Reconcile adapters in caller-supplied order for manual initialization.
 pub async fn reconcile_many(
     source_repo_root: &std::path::Path,

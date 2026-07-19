@@ -42,6 +42,7 @@ pub(crate) fn format_worker_task(task: &str, context_files: &[String]) -> String
 pub(crate) enum AttemptSetupError {
     SnapshotFailed(String),
     WorktreeFailed(String),
+    SkillProjectionFailed(String),
     InitFailed(String),
     SessionFailed(String),
     OverlayConflict {
@@ -55,6 +56,7 @@ impl std::fmt::Display for AttemptSetupError {
         match self {
             Self::SnapshotFailed(e) => write!(f, "Failed to snapshot brain state: {e}"),
             Self::WorktreeFailed(e) => write!(f, "Failed to create worktree: {e}"),
+            Self::SkillProjectionFailed(e) => write!(f, "Failed to project worker skills: {e}"),
             Self::InitFailed(e) => write!(f, "Failed to initialize worker: {e}"),
             Self::SessionFailed(e) => write!(f, "Failed to create worker session: {e}"),
             Self::OverlayConflict {
@@ -1022,18 +1024,58 @@ pub(crate) async fn run_one_worker_attempt(
         )
         .await;
     }
-    crate::explore::materialize::materialize_pool_skills(
+    // The legacy request-level skill allowlist remains part of delegation
+    // compatibility, but v1 runtime projection deliberately ignores it.
+    let _legacy_skill_selection = &ctx.skills;
+    let source_repo_root = worktrees.repo_root.clone();
+    let projection = crate::skills::projection::reconcile_for_agent_kind(
         worktrees,
+        &source_repo_root,
         &worktree_info.path,
         ctx.agent_config.kind,
-        &worktrees.repo_root,
-        ctx.skills.as_deref(),
-        Some(crate::explore::materialize::MaterializeMeta {
-            request_id: ctx.request_id,
-            agent: ctx.agent,
-        }),
+        crate::skills::projection::RuntimeRole::Worker,
     )
     .await;
+    match projection {
+        Ok(Some(summary)) => {
+            tracing::info!(
+                agent = %ctx.agent,
+                adapter = %summary.adapter,
+                generation = %summary.generation,
+                selected = summary.selected.len(),
+                linked = summary.linked.len(),
+                copied = summary.copied.len(),
+                unchanged = summary.unchanged.len(),
+                removed = summary.removed.len(),
+                migrated = summary.migrated.len(),
+                skipped = summary.skipped.len(),
+                "runtime worker skill projection reconciled"
+            );
+            for skipped in &summary.skipped {
+                tracing::warn!(
+                    agent = %ctx.agent,
+                    adapter = %summary.adapter,
+                    skill_id = %skipped.skill_id,
+                    path = %skipped.path.display(),
+                    reason = %skipped.reason,
+                    "runtime worker skill projection preserved target"
+                );
+            }
+        }
+        Ok(None) => {}
+        Err(error) => {
+            let source_chain = format!("{:#}", error.source);
+            let message = format!("{error}: {source_chain}");
+            if let Err(cleanup_error) = worktrees.remove_worktree(&worker_session).await {
+                tracing::warn!(
+                    session = %worker_session,
+                    error = %cleanup_error,
+                    "failed to remove worker worktree after skill projection failure"
+                );
+            }
+            return Err(AttemptSetupError::SkillProjectionFailed(message));
+        }
+    }
 
     // 2. Spawn worker agent in worktree via AgentConnection.
     // Workers never receive a permission_tx, so L2 auto-approve is
@@ -2624,8 +2666,13 @@ mod profile_override_tests {
                     "skill should exist before connection initialization: {}",
                     skill_path.display()
                 );
+                let target_rel_path = Path::new(skill_rel_path)
+                    .parent()
+                    .expect("skill entry point has target parent")
+                    .to_str()
+                    .expect("projection target path is UTF-8");
                 let ignored = Command::new("git")
-                    .args(["check-ignore", skill_rel_path])
+                    .args(["check-ignore", target_rel_path])
                     .current_dir(&self.launch_root)
                     .output()
                     .expect("run git check-ignore");
@@ -4378,13 +4425,18 @@ mod profile_override_tests {
             }
         }
         assert_eq!(git(&outcome.worktree_path, &["status", "--short"]), "");
+        let bundled_target_rel = ".codex/skills/spurpower-brain-builtin";
+        let pool_target_rel = ".codex/skills/spurpower-pool-active";
         assert_eq!(
-            git(&outcome.worktree_path, &["check-ignore", bundled_rel]),
-            bundled_rel
+            git(
+                &outcome.worktree_path,
+                &["check-ignore", bundled_target_rel]
+            ),
+            bundled_target_rel
         );
         assert_eq!(
-            git(&outcome.worktree_path, &["check-ignore", pool_rel]),
-            pool_rel
+            git(&outcome.worktree_path, &["check-ignore", pool_target_rel]),
+            pool_target_rel
         );
         let records = crate::explore::materialize::read_recent_materializations(repo.path(), 10);
         assert!(
@@ -4472,7 +4524,10 @@ mod profile_override_tests {
         assert!(message.starts_with("Failed to project worker skills:"));
         assert!(message.contains("skill projection Resolve failed for codex"));
         assert!(message.contains(&launch_root.display().to_string()));
-        assert!(message.contains("pool skill tampered digest mismatch"));
+        assert!(
+            message.contains("pool skill tampered digest mismatch"),
+            "projection error should retain the resolver cause: {message}"
+        );
         assert!(!*connection_called
             .lock()
             .expect("connection call flag poisoned"));
