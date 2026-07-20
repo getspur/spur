@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>plate-edges-dark</title>
+<style>
+  html,body{margin:0;width:1920px;height:1080px;overflow:hidden;background:#0d0d0d}
+  canvas{display:block}
+</style>
+</head>
+<body>
+<canvas id="c" width="1920" height="1080" data-capture="true" data-capture-duration-sec="11"></canvas>
+<script>
+const W=1920,H=1080,DUR=11;
+const BG='#0d0d0d', SURF='#141414', CYAN='#00D4AA', GRAY='#5a5a5a', TEXT='#f2f2f2', MUTED='#9a9a9a';
+const canvas=document.getElementById('c');
+const ctx=canvas.getContext('2d');
+
+function ease(t){return t<0.5?2*t*t:1-Math.pow(-2*t+2,2)/2}
+function clamp(t){return Math.max(0,Math.min(1,t))}
+
+function node(x,y,r,fill,label,alpha=1){
+  ctx.save();ctx.globalAlpha=alpha;
+  ctx.beginPath();ctx.arc(x,y,r,0,Math.PI*2);
+  ctx.fillStyle=fill;ctx.fill();
+  ctx.lineWidth=2;ctx.strokeStyle='rgba(255,255,255,0.12)';ctx.stroke();
+  if(label){
+    ctx.fillStyle=TEXT;ctx.font='600 18px ui-monospace,SFMono-Regular,Menlo,monospace';
+    ctx.textAlign='center';ctx.fillText(label,x,y+r+28);
+  }
+  ctx.restore();
+}
+
+function edge(x1,y1,x2,y2,color,width=2,dash=null,alpha=1){
+  ctx.save();ctx.globalAlpha=alpha;
+  ctx.beginPath();ctx.moveTo(x1,y1);ctx.lineTo(x2,y2);
+  ctx.strokeStyle=color;ctx.lineWidth=width;
+  if(dash)ctx.setLineDash(dash);
+  ctx.stroke();ctx.restore();
+}
+
+function panel(x,y,w,h,title){
+  ctx.fillStyle=SURF;ctx.strokeStyle='rgba(255,255,255,0.08)';ctx.lineWidth=1;
+  roundRect(x,y,w,h,16);ctx.fill();ctx.stroke();
+  ctx.fillStyle=MUTED;ctx.font='700 14px ui-sans-serif,system-ui,sans-serif';
+  ctx.letterSpacing='0.18em';ctx.fillText(title,x+28,y+36);
+}
+
+function roundRect(x,y,w,h,r){
+  ctx.beginPath();
+  ctx.moveTo(x+r,y);ctx.arcTo(x+w,y,x+w,y+h,r);ctx.arcTo(x+w,y+h,x,y+h,r);
+  ctx.arcTo(x,y+h,x,y,r);ctx.arcTo(x,y,x+w,y,r);ctx.closePath();
+}
+
+window.__draw=function(tSec){
+  const p=clamp(tSec/DUR);
+  ctx.clearRect(0,0,W,H);
+  ctx.fillStyle=BG;ctx.fillRect(0,0,W,H);
+  // grid
+  ctx.strokeStyle='rgba(255,255,255,0.03)';ctx.lineWidth=1;
+  for(let x=0;x<W;x+=48){ctx.beginPath();ctx.moveTo(x,0);ctx.lineTo(x,H);ctx.stroke()}
+  for(let y=0;y<H;y+=48){ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(W,y);ctx.stroke()}
+
+  ctx.fillStyle=TEXT;ctx.font='700 42px ui-sans-serif,system-ui,sans-serif';
+  ctx.textAlign='left';ctx.fillText('Edges leave the worktree',80,90);
+  ctx.fillStyle=MUTED;ctx.font='500 22px ui-sans-serif,system-ui,sans-serif';
+  ctx.fillText('Resolved inside the repo  ·  Dark when the call crosses a dependency',80,130);
+
+  // Worktree panel
+  panel(80,180,820,780,'WORKTREE');
+  const wt=[
+    {x:280,y:380,l:'handler'},
+    {x:480,y:520,l:'parse'},
+    {x:320,y:700,l:'model'},
+    {x:560,y:700,l:'query'},
+  ];
+  // internal resolved edges
+  const inAlpha=ease(clamp(p/0.25));
+  edge(wt[0].x,wt[0].y,wt[1].x,wt[1].y,CYAN,3,null,inAlpha);
+  edge(wt[1].x,wt[1].y,wt[2].x,wt[2].y,CYAN,3,null,inAlpha);
+  edge(wt[1].x,wt[1].y,wt[3].x,wt[3].y,CYAN,3,null,inAlpha);
+  wt.forEach(n=>node(n.x,n.y,22,CYAN,n.l,inAlpha));
+
+  // Dependencies panel
+  panel(1020,180,820,780,'DEPENDENCIES');
+  const dep=[
+    {x:1240,y:420,l:'serde'},
+    {x:1480,y:420,l:'tokio'},
+    {x:1360,y:640,l:'sqlx'},
+  ];
+  dep.forEach(n=>node(n.x,n.y,22,GRAY,n.l,0.9));
+
+  // Cross-plane edges: start resolved then go dark
+  const breakP=ease(clamp((p-0.3)/0.35));
+  const dark=breakP;
+  const crossColor=lerpColor(CYAN,GRAY,dark);
+  const crossAlpha=1-dark*0.35;
+  edge(wt[1].x,wt[1].y,dep[0].x,dep[0].y,crossColor,3,[8,8],crossAlpha);
+  edge(wt[3].x,wt[3].y,dep[2].x,dep[2].y,crossColor,3,[8,8],crossAlpha);
+
+  // Agent guess label
+  if(p>0.55){
+    const a=ease(clamp((p-0.55)/0.2));
+    ctx.save();ctx.globalAlpha=a;
+    ctx.fillStyle='rgba(255,80,80,0.12)';
+    roundRect(1180,780,500,90,12);ctx.fill();
+    ctx.strokeStyle='rgba(255,120,120,0.35)';ctx.stroke();
+    ctx.fillStyle='#ffb4b4';ctx.font='700 20px ui-monospace,Menlo,monospace';
+    ctx.fillText('agent: external edge → guess',1210,835);
+    ctx.restore();
+  }
+
+  // progress bar
+  ctx.fillStyle='rgba(0,212,170,0.25)';ctx.fillRect(0,H-6,W*p,6);
+};
+
+function lerpColor(a,b,t){
+  const pa=hex(a),pb=hex(b);
+  const r=Math.round(pa[0]+(pb[0]-pa[0])*t);
+  const g=Math.round(pa[1]+(pb[1]-pa[1])*t);
+  const bl=Math.round(pa[2]+(pb[2]-pa[2])*t);
+  return `rgb(${r},${g},${bl})`;
+}
+function hex(h){h=h.replace('#','');return [parseInt(h.slice(0,2),16),parseInt(h.slice(2,4),16),parseInt(h.slice(4,6),16)]}
+
+window.__draw(0);
+</script>
+</body>
+</html>

@@ -1,0 +1,54 @@
+{
+  "path": "/Volumes/Projects/spur/docs/product_launch/media_pack/explainers/context-service-code-explore/delivery/context-service-code-explore-v1.mp4",
+  "duration_seconds": 61.332683,
+  "width": 1920,
+  "height": 1080,
+  "fps": 24.0,
+  "vcodec": "h264",
+  "acodec": "aac",
+  "checksum_sha256": "db9e0d858a388dcd312b70e37dbcd1dd879e37b3c7f9d76bd63c09a9a1db5698",
+  "timeline": [
+    {
+      "scene": "S01",
+      "start": 0.0,
+      "end": 4.0,
+      "duration": 4.0,
+      "vo": 3.8
+    },
+    {
+      "scene": "S02",
+      "start": 4.0,
+      "end": 16.08,
+      "duration": 12.08,
+      "vo": 12.08
+    },
+    {
+      "scene": "S03",
+      "start": 16.08,
+      "end": 29.08,
+      "duration": 13.0,
+      "vo": 11.34
+    },
+    {
+      "scene": "S04",
+      "start": 29.08,
+      "end": 37.28,
+      "duration": 8.2,
+      "vo": 8.2
+    },
+    {
+      "scene": "S05",
+      "start": 37.28,
+      "end": 51.28,
+      "duration": 14.0,
+      "vo": 13.02
+    },
+    {
+      "scene": "S06",
+      "start": 51.28,
+      "end": 61.28,
+      "duration": 10.0,
+      "vo": 8.48
+    }
+  ]
+}

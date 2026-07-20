@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>plate-selector</title>
+<style>
+  html,body{margin:0;width:1920px;height:1080px;overflow:hidden;background:#0d0d0d}
+  canvas{display:block}
+</style>
+</head>
+<body>
+<canvas id="c" width="1920" height="1080" data-capture="true" data-capture-duration-sec="8"></canvas>
+<script>
+const W=1920,H=1080,DUR=8;
+const BG='#0d0d0d', SURF='#141414', CYAN='#00D4AA', TEXT='#f2f2f2', MUTED='#9a9a9a', PART='#7aa2ff';
+const canvas=document.getElementById('c');
+const ctx=canvas.getContext('2d');
+function clamp(t){return Math.max(0,Math.min(1,t))}
+function ease(t){return t<0.5?2*t*t:1-Math.pow(-2*t+2,2)/2}
+function roundRect(x,y,w,h,r){
+  ctx.beginPath();
+  ctx.moveTo(x+r,y);ctx.arcTo(x+w,y,x+w,y+h,r);ctx.arcTo(x+w,y+h,x,y+h,r);
+  ctx.arcTo(x,y+h,x,y,r);ctx.arcTo(x,y,x+w,y,r);ctx.closePath();
+}
+
+const parts=[
+  {key:'source', val:'registry:crates-io', color:MUTED},
+  {key:'package', val:'serde', color:CYAN},
+  {key:'revision', val:'1.0.197', color:PART},
+  {key:'symbol', val:'Deserialize', color:TEXT},
+];
+
+window.__draw=function(tSec){
+  const p=clamp(tSec/DUR);
+  ctx.clearRect(0,0,W,H);
+  ctx.fillStyle=BG;ctx.fillRect(0,0,W,H);
+
+  ctx.fillStyle=TEXT;ctx.font='700 42px ui-sans-serif,system-ui,sans-serif';
+  ctx.fillText('Pinned identity',80,90);
+  ctx.fillStyle=MUTED;ctx.font='500 22px ui-sans-serif,system-ui,sans-serif';
+  ctx.fillText('Every unit is (source, package, revision) — no cross-version drift',80,130);
+
+  // big selector string
+  ctx.fillStyle=SURF;roundRect(120,280,1680,160,18);ctx.fill();
+  ctx.strokeStyle='rgba(0,212,170,0.35)';ctx.lineWidth=2;ctx.stroke();
+
+  const full='pkg:serde@1.0.197::Deserialize';
+  const n=Math.floor(ease(clamp(p/0.45))*full.length);
+  const shown=full.slice(0,n)+(p<0.45?'▌':'');
+  ctx.fillStyle=CYAN;ctx.font='700 48px ui-monospace,Menlo,monospace';
+  ctx.textAlign='left';ctx.fillText(shown,160,380);
+
+  // anatomy cards
+  parts.forEach((part,i)=>{
+    const a=ease(clamp((p-0.35-i*0.08)/0.15));
+    const x=120+i*430;
+    ctx.save();ctx.globalAlpha=a;
+    ctx.fillStyle=SURF;roundRect(x,560,400,280,16);ctx.fill();
+    ctx.strokeStyle=part.color;ctx.lineWidth=1.5;ctx.stroke();
+    ctx.fillStyle=MUTED;ctx.font='700 14px ui-sans-serif,system-ui,sans-serif';
+    ctx.fillText(part.key.toUpperCase(),x+28,610);
+    ctx.fillStyle=part.color;ctx.font='700 28px ui-monospace,Menlo,monospace';
+    ctx.fillText(part.val,x+28,680);
+    ctx.fillStyle=MUTED;ctx.font='500 18px ui-sans-serif,system-ui,sans-serif';
+    const blurb={
+      source:'registry or git origin',
+      package:'crate / package name',
+      revision:'exact version or SHA',
+      symbol:'stable path into the graph',
+    }[part.key];
+    ctx.fillText(blurb,x+28,740);
+    ctx.restore();
+  });
+
+  ctx.fillStyle='rgba(0,212,170,0.25)';ctx.fillRect(0,H-6,W*p,6);
+};
+window.__draw(0);
+</script>
+</body>
+</html>

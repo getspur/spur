@@ -1,0 +1,15 @@
+[
+  {
+    "created_at": "2026-07-20T08:06:31.320712Z",
+    "display_name": "Inworld Text to Speech",
+    "id": "2e756d4e-ebed-4d72-92db-c2f381a4d7fb",
+    "job_type": "inworld_text_to_speech",
+    "min_result_url": null,
+    "params": {
+      "prompt": "Version-precise answers without cloning every crate. Open context dot get spur dot dev.",
+      "voice": "Graham (en)"
+    },
+    "result_url": "https://d8j0ntlcm91z4.cloudfront.net/user_3EcES93KcXY0NJKNj3IkWjRV5Gh/hf_20260720_080631_2e756d4e-ebed-4d72-92db-c2f381a4d7fb.wav",
+    "status": "completed"
+  }
+]

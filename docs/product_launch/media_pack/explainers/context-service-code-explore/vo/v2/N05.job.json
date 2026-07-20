@@ -1,0 +1,15 @@
+[
+  {
+    "created_at": "2026-07-20T08:11:58.822528Z",
+    "display_name": "Inworld Text to Speech",
+    "id": "1a86d908-0693-4abc-ade3-470ef665dd1e",
+    "job_type": "inworld_text_to_speech",
+    "min_result_url": null,
+    "params": {
+      "prompt": "Orient, read source, walk callers and callees. Cold: index on demand, keep working, poll. Complements code tools — never cross planes.",
+      "voice": "Graham (en)"
+    },
+    "result_url": "https://d8j0ntlcm91z4.cloudfront.net/user_3EcES93KcXY0NJKNj3IkWjRV5Gh/hf_20260720_081158_1a86d908-0693-4abc-ade3-470ef665dd1e.wav",
+    "status": "completed"
+  }
+]

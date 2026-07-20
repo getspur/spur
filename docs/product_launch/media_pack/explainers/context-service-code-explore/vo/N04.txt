@@ -1,0 +1,1 @@
+Every unit is source, package, and revision. Selectors pin the version — for example, serde one-point-oh-one-nine-seven, trait Deserialize. No stale docs. No version drift.
