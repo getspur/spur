@@ -182,8 +182,12 @@ jobs:
           fi
           # Layout contract: archive root is share/spur/skills (matches
           # package_asset_candidates + cargo xtask install).
-          tar -tzf "${skills[0]}" | grep -q 'share/spur/skills/.*/SKILL.md' \
-            || { echo "skills archive missing share/spur/skills/*/SKILL.md" >&2; tar -tzf "${skills[0]}" | head >&2; exit 1; }
+          skill_entries="$(tar -tzf "${skills[0]}")"
+          if ! grep -Eq 'share/spur/skills/.*/SKILL\.md' <<<"$skill_entries"; then
+            echo "skills archive missing share/spur/skills/*/SKILL.md" >&2
+            sed -n '1,10p' <<<"$skill_entries" >&2
+            exit 1
+          fi
           if [[ ${#bins[@]} -eq 0 ]]; then
             echo "skills archive present; binary smoke skipped (no linux-x64)"
             exit 0
