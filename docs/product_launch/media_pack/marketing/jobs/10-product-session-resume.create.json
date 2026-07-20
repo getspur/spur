@@ -1,0 +1,17 @@
+{
+  "asset": "10-product-session-resume.png",
+  "tool": "higgsfield product-photoshoot create",
+  "mode": "product_shot",
+  "count": 1,
+  "prompt": "studio product shot of SPUR session resume state, continuity and zero lost context, dark tech catalog lighting",
+  "product_context": "SPUR: control tower for CLI coding agents. Session Detail primary surface; plans, workers, specialist routing, session resume. Tagline: one brain, many workers, zero lost context.",
+  "brand_context": "Developer tool brand. Dark UI, monochrome terminal aesthetic. Premium, precise, operator-grade.",
+  "images": [
+    "gallery_stills/session-resume.png",
+    "ph_ready/thumbnail-512.png"
+  ],
+  "job_id": "a72a9a00-851a-4d90-8dad-21091d5ad8ce",
+  "approved_at": "2026-07-20",
+  "channel": "marketing_only",
+  "ph_gallery": false
+}

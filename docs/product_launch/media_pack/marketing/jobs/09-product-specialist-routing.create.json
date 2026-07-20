@@ -1,0 +1,17 @@
+{
+  "asset": "09-product-specialist-routing.png",
+  "tool": "higgsfield product-photoshoot create",
+  "mode": "product_shot",
+  "count": 1,
+  "prompt": "studio product shot of SPUR specialist routing surface — agent model effort selectors, precise dispatch UI",
+  "product_context": "SPUR: control tower for CLI coding agents. Session Detail primary surface; plans, workers, specialist routing, session resume. Tagline: one brain, many workers, zero lost context.",
+  "brand_context": "Developer tool brand. Dark UI, monochrome terminal aesthetic. Premium, precise, operator-grade.",
+  "images": [
+    "gallery_stills/specialist-routing.png",
+    "ph_ready/thumbnail-512.png"
+  ],
+  "job_id": "9713df68-a63f-4bc8-8abc-d4ce818fc46e",
+  "approved_at": "2026-07-20",
+  "channel": "marketing_only",
+  "ph_gallery": false
+}
