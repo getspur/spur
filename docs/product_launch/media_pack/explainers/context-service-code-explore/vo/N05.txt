@@ -1,0 +1,1 @@
+Same graph-first loop outside the worktree: orient, read real source, walk callers and callees. If a revision is cold, index on demand, keep working, poll status. Complements local code tools — never mix package selectors into worktree reads.

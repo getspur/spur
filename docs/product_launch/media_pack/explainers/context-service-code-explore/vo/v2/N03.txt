@@ -1,0 +1,1 @@
+Two planes. Worktree code tools answer what's in this repo. External MCP tools answer what's in dependency X at version Y.
