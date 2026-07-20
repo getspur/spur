@@ -118,35 +118,14 @@ pub(crate) fn publish_generation(
     let digest = generation_digest(request.adapter, &staged_tree_sha256);
     let published_root = generations.join(&digest);
 
-    if path_exists_no_follow(&published_root)? {
-        validate_existing_generation(
-            &published_root,
-            request.adapter,
-            &digest,
-            &staged_tree_sha256,
-            &targets,
-        )?;
-    } else {
-        match fs::rename(staging.path(), &published_root) {
-            Ok(()) => staging.disarm(),
-            Err(source) => {
-                if path_exists_no_follow(&published_root)? {
-                    validate_existing_generation(
-                        &published_root,
-                        request.adapter,
-                        &digest,
-                        &staged_tree_sha256,
-                        &targets,
-                    )?;
-                } else {
-                    return Err(GenerationError::Io {
-                        path: published_root,
-                        source,
-                    });
-                }
-            }
-        }
-    }
+    accept_or_rebuild_generation(
+        &published_root,
+        request.adapter,
+        &digest,
+        &staged_tree_sha256,
+        &targets,
+        &mut staging,
+    )?;
 
     Ok(PublishedGeneration {
         adapter: request.adapter,
@@ -154,6 +133,105 @@ pub(crate) fn publish_generation(
         root: published_root,
         targets,
     })
+}
+
+/// Reuse a content-addressed generation when it still matches, otherwise replace
+/// a corrupted on-disk generation with the freshly staged tree.
+///
+/// Publication is serialized by `.publish.lock`, so rebuilds under an exclusive
+/// lock can safely remove a same-digest path that no longer validates (for
+/// example Finder `.DS_Store` pollution or permission drift).
+fn accept_or_rebuild_generation(
+    published_root: &Path,
+    adapter: Adapter,
+    digest: &str,
+    expected_tree_sha256: &str,
+    targets: &[DesiredTarget],
+    staging: &mut StagingDirectory,
+) -> Result<(), GenerationError> {
+    if path_exists_no_follow(published_root)? {
+        match validate_existing_generation(
+            published_root,
+            adapter,
+            digest,
+            expected_tree_sha256,
+            targets,
+        ) {
+            Ok(()) => return Ok(()),
+            Err(validation_error) => {
+                tracing::warn!(
+                    adapter = adapter.key(),
+                    generation = %digest,
+                    path = %published_root.display(),
+                    error = %validation_error,
+                    "existing skill-projection generation failed validation; rebuilding"
+                );
+                remove_generation_tree(published_root)?;
+            }
+        }
+    }
+    install_staged_generation(
+        published_root,
+        adapter,
+        digest,
+        expected_tree_sha256,
+        targets,
+        staging,
+    )
+}
+
+fn install_staged_generation(
+    published_root: &Path,
+    adapter: Adapter,
+    digest: &str,
+    expected_tree_sha256: &str,
+    targets: &[DesiredTarget],
+    staging: &mut StagingDirectory,
+) -> Result<(), GenerationError> {
+    match fs::rename(staging.path(), published_root) {
+        Ok(()) => {
+            staging.disarm();
+            Ok(())
+        }
+        Err(source) => {
+            if path_exists_no_follow(published_root)? {
+                // Another publisher won the rename race; accept only if valid.
+                validate_existing_generation(
+                    published_root,
+                    adapter,
+                    digest,
+                    expected_tree_sha256,
+                    targets,
+                )
+            } else {
+                Err(GenerationError::Io {
+                    path: published_root.to_path_buf(),
+                    source,
+                })
+            }
+        }
+    }
+}
+
+fn remove_generation_tree(path: &Path) -> Result<(), GenerationError> {
+    let metadata = symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() {
+        return Err(GenerationError::Hash(anyhow::anyhow!(
+            "refusing to remove generation that is a symlink: {}",
+            path.display()
+        )));
+    }
+    if metadata.is_dir() {
+        fs::remove_dir_all(path).map_err(|source| GenerationError::Io {
+            path: path.to_path_buf(),
+            source,
+        })
+    } else {
+        fs::remove_file(path).map_err(|source| GenerationError::Io {
+            path: path.to_path_buf(),
+            source,
+        })
+    }
 }
 
 fn generation_error_for_skill(skill_id: &str, source: GenerationError) -> GenerationError {
@@ -1079,9 +1157,25 @@ mod tests {
         );
     }
 
+    #[test]
+    fn polluted_existing_generation_is_rebuilt_instead_of_failing() {
+        let fixture = ProjectionFixture::new(Adapter::Codex);
+        fixture.write_bundled_skill("polluted", "both", "BODY");
+        let selected = fixture.resolve().unwrap();
+        let first = publish_generation(fixture.request(), &selected).unwrap();
+        std::fs::write(first.root.join("skills/.DS_Store"), b"finder-noise\n").unwrap();
+
+        let second = publish_generation(fixture.request(), &selected).unwrap();
+
+        assert_eq!(first.digest, second.digest);
+        assert_eq!(first.root, second.root);
+        assert!(!second.root.join("skills/.DS_Store").exists());
+        assert!(second.root.join("skills/polluted/SKILL.md").is_file());
+    }
+
     #[cfg(unix)]
     #[test]
-    fn changed_published_file_mode_prevents_generation_reuse() {
+    fn changed_published_file_mode_triggers_generation_rebuild() {
         use std::os::unix::fs::PermissionsExt;
 
         let fixture = ProjectionFixture::new(Adapter::Cursor);
@@ -1089,11 +1183,20 @@ mod tests {
         let selected = fixture.resolve().unwrap();
         let first = publish_generation(fixture.request(), &selected).unwrap();
         let rendered = first.root.join(&first.targets[0].generation_rel);
+        let original_mode = std::fs::metadata(&rendered).unwrap().permissions().mode() & 0o777;
         std::fs::set_permissions(&rendered, std::fs::Permissions::from_mode(0o755)).unwrap();
 
-        let error = publish_generation(fixture.request(), &selected).unwrap_err();
+        let second = publish_generation(fixture.request(), &selected).unwrap();
 
-        assert!(matches!(error, GenerationError::Hash(_)));
+        assert_eq!(first.digest, second.digest);
+        assert_eq!(first.root, second.root);
+        let rebuilt_mode = std::fs::metadata(second.root.join(&second.targets[0].generation_rel))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(rebuilt_mode, original_mode);
+        assert_ne!(rebuilt_mode, 0o755);
     }
 
     #[test]
