@@ -1,0 +1,1 @@
+Orient, read source, walk callers and callees. Cold: index on demand, keep working, poll. Complements code tools — never cross planes.

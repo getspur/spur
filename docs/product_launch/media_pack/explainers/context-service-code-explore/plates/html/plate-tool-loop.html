@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>plate-tool-loop</title>
+<style>
+  html,body{margin:0;width:1920px;height:1080px;overflow:hidden;background:#0d0d0d}
+  canvas{display:block}
+</style>
+</head>
+<body>
+<canvas id="c" width="1920" height="1080" data-capture="true" data-capture-duration-sec="14"></canvas>
+<script>
+const W=1920,H=1080,DUR=14;
+const BG='#0d0d0d', SURF='#141414', CYAN='#00D4AA', TEXT='#f2f2f2', MUTED='#9a9a9a', WARN='#e8a54b', BLUE='#7aa2ff';
+const canvas=document.getElementById('c');
+const ctx=canvas.getContext('2d');
+function clamp(t){return Math.max(0,Math.min(1,t))}
+function ease(t){return t<0.5?2*t*t:1-Math.pow(-2*t+2,2)/2}
+function roundRect(x,y,w,h,r){
+  ctx.beginPath();
+  ctx.moveTo(x+r,y);ctx.arcTo(x+w,y,x+w,y+h,r);ctx.arcTo(x+w,y+h,x,y+h,r);
+  ctx.arcTo(x,y+h,x,y,r);ctx.arcTo(x,y,x+w,y,r);ctx.closePath();
+}
+
+const steps=[
+  {id:'1', title:'orient', tool:'external_knowledge_context', color:CYAN},
+  {id:'2', title:'search', tool:'external_code_search', color:CYAN},
+  {id:'3', title:'read', tool:'external_code_read', color:CYAN},
+  {id:'4', title:'impact', tool:'callers / callees', color:BLUE},
+  {id:'5', title:'cold', tool:'external_index → status', color:WARN},
+];
+
+window.__draw=function(tSec){
+  const p=clamp(tSec/DUR);
+  ctx.clearRect(0,0,W,H);
+  ctx.fillStyle=BG;ctx.fillRect(0,0,W,H);
+
+  ctx.fillStyle=TEXT;ctx.font='700 42px ui-sans-serif,system-ui,sans-serif';
+  ctx.fillText('Graph-first tool loop',80,90);
+  ctx.fillStyle=MUTED;ctx.font='500 22px ui-sans-serif,system-ui,sans-serif';
+  ctx.fillText('Orient → precision → walk the graph · index on demand when cold',80,130);
+
+  // main flow
+  const startX=80, y=320, cardW=300, gap=40;
+  steps.forEach((s,i)=>{
+    const appear=ease(clamp((p-i*0.1)/0.18));
+    const x=startX+i*(cardW+gap);
+    const active=p>i*0.12 && p<(i*0.12+0.25);
+    ctx.save();ctx.globalAlpha=appear;
+    ctx.fillStyle=SURF;
+    ctx.strokeStyle=active?s.color:'rgba(255,255,255,0.1)';
+    ctx.lineWidth=active?2.5:1;
+    roundRect(x,y,cardW,220,16);ctx.fill();ctx.stroke();
+    ctx.fillStyle=s.color;ctx.font='700 14px ui-sans-serif,system-ui,sans-serif';
+    ctx.fillText('STEP '+s.id,x+22,y+40);
+    ctx.fillStyle=TEXT;ctx.font='700 28px ui-sans-serif,system-ui,sans-serif';
+    ctx.fillText(s.title,x+22,y+90);
+    ctx.fillStyle=MUTED;ctx.font='600 16px ui-monospace,Menlo,monospace';
+    wrapText(s.tool,x+22,y+140,cardW-44,24);
+    ctx.restore();
+    if(i<steps.length-1){
+      const la=ease(clamp((p-(i*0.1+0.08))/0.1));
+      ctx.save();ctx.globalAlpha=la;
+      ctx.strokeStyle=CYAN;ctx.lineWidth=2;
+      ctx.beginPath();
+      ctx.moveTo(x+cardW+6,y+110);ctx.lineTo(x+cardW+gap-6,y+110);
+      ctx.stroke();
+      ctx.fillStyle=CYAN;
+      ctx.beginPath();
+      ctx.moveTo(x+cardW+gap-6,y+110);
+      ctx.lineTo(x+cardW+gap-16,y+104);
+      ctx.lineTo(x+cardW+gap-16,y+116);
+      ctx.fill();
+      ctx.restore();
+    }
+  });
+
+  // anti-pattern + complement callouts
+  if(p>0.55){
+    const a=ease(clamp((p-0.55)/0.2));
+    ctx.save();ctx.globalAlpha=a;
+    // complement
+    ctx.fillStyle=SURF;roundRect(80,640,880,280,16);ctx.fill();
+    ctx.strokeStyle='rgba(0,212,170,0.35)';ctx.stroke();
+    ctx.fillStyle=CYAN;ctx.font='700 14px ui-sans-serif,system-ui,sans-serif';
+    ctx.fillText('COMPLEMENT',110,690);
+    ctx.fillStyle=TEXT;ctx.font='700 28px ui-sans-serif,system-ui,sans-serif';
+    ctx.fillText('Does not replace worktree code_*',110,750);
+    ctx.fillStyle=MUTED;ctx.font='500 20px ui-sans-serif,system-ui,sans-serif';
+    ctx.fillText('Local intelligence for your repo. External for pinned deps.',110,800);
+
+    // anti-pattern
+    ctx.fillStyle=SURF;roundRect(1000,640,840,280,16);ctx.fill();
+    ctx.strokeStyle='rgba(232,165,75,0.45)';ctx.stroke();
+    ctx.fillStyle=WARN;ctx.font='700 14px ui-sans-serif,system-ui,sans-serif';
+    ctx.fillText('ANTI-PATTERN',1030,690);
+    ctx.fillStyle=TEXT;ctx.font='700 28px ui-sans-serif,system-ui,sans-serif';
+    ctx.fillText('Don\'t cross the planes',1030,750);
+    ctx.fillStyle=MUTED;ctx.font='500 20px ui-sans-serif,system-ui,sans-serif';
+    ctx.fillText('Never feed pkg: selectors into worktree code_read.',1030,800);
+    ctx.fillText('Cold builds: index, keep working, poll status.',1030,840);
+    ctx.restore();
+  }
+
+  ctx.fillStyle='rgba(0,212,170,0.25)';ctx.fillRect(0,H-6,W*p,6);
+};
+
+function wrapText(text,x,y,maxW,lineH){
+  const words=text.split(' ');
+  let line='', yy=y;
+  for(const w of words){
+    const test=line?line+' '+w:w;
+    if(ctx.measureText(test).width>maxW && line){
+      ctx.fillText(line,x,yy);line=w;yy+=lineH;
+    } else line=test;
+  }
+  if(line)ctx.fillText(line,x,yy);
+}
+window.__draw(0);
+</script>
+</body>
+</html>

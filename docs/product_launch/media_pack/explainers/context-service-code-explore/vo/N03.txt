@@ -1,0 +1,1 @@
+Two planes. Worktree tools — knowledge context pack and code tools — answer what's in this repo. External MCP tools from Context Service answer what's in dependency X at version Y.
