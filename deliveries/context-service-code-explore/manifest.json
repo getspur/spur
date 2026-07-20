@@ -1,0 +1,273 @@
+{
+  "schema_version": 1,
+  "project": "context-service-code-explore",
+  "route": "create",
+  "approvals": {
+    "concept_layout": "approved",
+    "script_storyboard": "approved",
+    "paid_generation": "approved"
+  },
+  "claims": [
+    {
+      "claim_id": "C01",
+      "text": "SPUR Context Service is cloud code context for third-party packages.",
+      "source_asset_ids": ["src-web-context", "src-product-usage"]
+    },
+    {
+      "claim_id": "C02",
+      "text": "Code has edges that leave the worktree; without external context, agents guess dependency APIs.",
+      "source_asset_ids": ["src-web-context", "src-product-usage"]
+    },
+    {
+      "claim_id": "C03",
+      "text": "Worktree tools answer what is in this repo, while external tools answer what is in a dependency at a pinned version.",
+      "source_asset_ids": ["src-web-context", "src-product-usage"]
+    },
+    {
+      "claim_id": "C04",
+      "text": "The worktree plane uses knowledge_context_pack_2 and code_* tools.",
+      "source_asset_ids": ["src-web-context", "src-product-usage"]
+    },
+    {
+      "claim_id": "C05",
+      "text": "The external plane uses external_* MCP tools served by Context Service.",
+      "source_asset_ids": ["src-web-context", "src-product-usage"]
+    },
+    {
+      "claim_id": "C06",
+      "text": "Without structured external context, agents fall back to web search, outdated docs, or API guesses across versions.",
+      "source_asset_ids": ["src-web-context", "src-product-usage"]
+    },
+    {
+      "claim_id": "C07",
+      "text": "Wrong dependency assumptions cause broken integrations, missed breaking changes, and rework.",
+      "source_asset_ids": ["src-web-context", "src-product-usage"]
+    },
+    {
+      "claim_id": "C08",
+      "text": "Indexed unit identity is source, package, and revision; a pkg selector pins the dependency version.",
+      "source_asset_ids": ["src-web-context", "src-product-usage"]
+    },
+    {
+      "claim_id": "C09",
+      "text": "The graph-first loop orients with external_knowledge_context, reads source, follows callers and callees, and indexes cold revisions with status polling.",
+      "source_asset_ids": ["src-web-context", "src-product-usage"]
+    },
+    {
+      "claim_id": "C10",
+      "text": "External context complements local intelligence; pkg selectors should not be mixed into worktree code_* reads.",
+      "source_asset_ids": ["src-web-context", "src-product-usage"]
+    },
+    {
+      "claim_id": "C11",
+      "text": "Context Service provides version-precise answers without cloning every crate while preserving a graph-first workflow.",
+      "source_asset_ids": ["src-web-context", "src-product-usage"]
+    }
+  ],
+  "assets": [
+    {
+      "asset_id": "src-web-context",
+      "owner": "open-design",
+      "type": "document",
+      "source_or_job_id": "https://getspur.dev/context",
+      "approval_status": "approved",
+      "rights_status": "cleared"
+    },
+    {
+      "asset_id": "src-product-usage",
+      "owner": "open-design",
+      "type": "document",
+      "source_or_job_id": "crates/spur-context-service/docs/PRODUCT_AND_USAGE.md",
+      "approval_status": "approved",
+      "rights_status": "owned"
+    },
+    {
+      "asset_id": "src-architecture",
+      "owner": "open-design",
+      "type": "document",
+      "source_or_job_id": "crates/spur-context-service/docs/ARCHITECTURE.md",
+      "approval_status": "approved",
+      "rights_status": "owned"
+    },
+    {
+      "asset_id": "narration-s01",
+      "owner": "higgsfield",
+      "type": "audio",
+      "source_or_job_id": "3742a995-57bd-4eb2-a57d-cf2d15323b50",
+      "prompt_or_script_revision": "final-maya-v1-s01-retry",
+      "duration_seconds": 4.32,
+      "voice": "Maya",
+      "model": "ElevenLabs via Higgsfield text2speech_v2",
+      "approval_status": "approved",
+      "rights_status": "cleared"
+    },
+    {
+      "asset_id": "narration-s02",
+      "owner": "higgsfield",
+      "type": "audio",
+      "source_or_job_id": "ef9b9ff5-8403-45f9-95ef-04e82dfafa06",
+      "prompt_or_script_revision": "final-maya-v1-s02",
+      "duration_seconds": 10.08,
+      "voice": "Maya",
+      "model": "ElevenLabs via Higgsfield text2speech_v2",
+      "approval_status": "approved",
+      "rights_status": "cleared"
+    },
+    {
+      "asset_id": "narration-s03",
+      "owner": "higgsfield",
+      "type": "audio",
+      "source_or_job_id": "4243fd39-fdb6-4fde-b333-3b2fd6c1fd06",
+      "prompt_or_script_revision": "final-maya-v1-s03",
+      "duration_seconds": 10.32,
+      "voice": "Maya",
+      "model": "ElevenLabs via Higgsfield text2speech_v2",
+      "approval_status": "approved",
+      "rights_status": "cleared"
+    },
+    {
+      "asset_id": "narration-s04",
+      "owner": "higgsfield",
+      "type": "audio",
+      "source_or_job_id": "4c9c271d-b416-4136-9c76-0b7dd8afeb94",
+      "prompt_or_script_revision": "final-maya-v1-s04",
+      "duration_seconds": 7.6,
+      "voice": "Maya",
+      "model": "ElevenLabs via Higgsfield text2speech_v2",
+      "approval_status": "approved",
+      "rights_status": "cleared"
+    },
+    {
+      "asset_id": "narration-s05",
+      "owner": "higgsfield",
+      "type": "audio",
+      "source_or_job_id": "d0672fe1-6e20-4890-8542-9b184d668cfb",
+      "prompt_or_script_revision": "final-maya-v1-s05",
+      "duration_seconds": 12.4,
+      "voice": "Maya",
+      "model": "ElevenLabs via Higgsfield text2speech_v2",
+      "approval_status": "approved",
+      "rights_status": "cleared"
+    },
+    {
+      "asset_id": "narration-s06",
+      "owner": "higgsfield",
+      "type": "audio",
+      "source_or_job_id": "maya-timing-test-s06-reuse",
+      "prompt_or_script_revision": "final-maya-v1-s06-reuse",
+      "duration_seconds": 6.4,
+      "voice": "Maya",
+      "model": "ElevenLabs via Higgsfield text2speech_v2",
+      "approval_status": "approved",
+      "rights_status": "cleared"
+    },
+    {
+      "asset_id": "palmier-background",
+      "owner": "palmier",
+      "type": "matte",
+      "source_or_job_id": "A4F0AE7A",
+      "approval_status": "approved",
+      "rights_status": "owned"
+    },
+    {
+      "asset_id": "palmier-title",
+      "owner": "palmier",
+      "type": "native-text",
+      "source_or_job_id": "17AE6745,40750EDB",
+      "approval_status": "approved",
+      "rights_status": "owned"
+    },
+    {
+      "asset_id": "palmier-edge-scene",
+      "owner": "palmier",
+      "type": "native-text-group",
+      "source_or_job_id": "1A773524,4BACD9A3,3BD6EB28,645AE097",
+      "approval_status": "approved",
+      "rights_status": "owned"
+    },
+    {
+      "asset_id": "palmier-two-planes-scene",
+      "owner": "palmier",
+      "type": "native-text-group",
+      "source_or_job_id": "A1853AFB,3381A06F,6D4BD406,AFAF4C1C",
+      "approval_status": "approved",
+      "rights_status": "owned"
+    },
+    {
+      "asset_id": "palmier-selector-scene",
+      "owner": "palmier",
+      "type": "native-text-group",
+      "source_or_job_id": "C74D76ED,1774C495,F0B94879,1E3A07B8",
+      "approval_status": "approved",
+      "rights_status": "owned"
+    },
+    {
+      "asset_id": "palmier-tool-loop-scene",
+      "owner": "palmier",
+      "type": "native-text-group",
+      "source_or_job_id": "8A02FDC0,6A91EE8E,70FB955B,3570A839,8E72A7AD",
+      "approval_status": "approved",
+      "rights_status": "owned"
+    },
+    {
+      "asset_id": "palmier-cta",
+      "owner": "palmier",
+      "type": "native-text",
+      "source_or_job_id": "6DEA644C,5E04D586",
+      "approval_status": "approved",
+      "rights_status": "owned"
+    }
+  ],
+  "scenes": [
+    {
+      "scene_id": "S01",
+      "owner": "palmier",
+      "timeline_slot": {"start_seconds": 0, "end_seconds": 4},
+      "asset_ids": ["palmier-background", "palmier-title", "narration-s01"],
+      "claim_ids": ["C01"]
+    },
+    {
+      "scene_id": "S02",
+      "owner": "palmier",
+      "timeline_slot": {"start_seconds": 4, "end_seconds": 15},
+      "asset_ids": ["palmier-background", "palmier-edge-scene", "narration-s02"],
+      "claim_ids": ["C02", "C06", "C07"]
+    },
+    {
+      "scene_id": "S03",
+      "owner": "palmier",
+      "timeline_slot": {"start_seconds": 15, "end_seconds": 28},
+      "asset_ids": ["palmier-background", "palmier-two-planes-scene", "narration-s03"],
+      "claim_ids": ["C03", "C04", "C05"]
+    },
+    {
+      "scene_id": "S04",
+      "owner": "palmier",
+      "timeline_slot": {"start_seconds": 28, "end_seconds": 36},
+      "asset_ids": ["palmier-background", "palmier-selector-scene", "narration-s04"],
+      "claim_ids": ["C08"]
+    },
+    {
+      "scene_id": "S05",
+      "owner": "palmier",
+      "timeline_slot": {"start_seconds": 36, "end_seconds": 50},
+      "asset_ids": ["palmier-background", "palmier-tool-loop-scene", "narration-s05"],
+      "claim_ids": ["C09", "C10"]
+    },
+    {
+      "scene_id": "S06",
+      "owner": "palmier",
+      "timeline_slot": {"start_seconds": 50, "end_seconds": 60},
+      "asset_ids": ["palmier-background", "palmier-cta", "narration-s06"],
+      "claim_ids": ["C11"]
+    }
+  ],
+  "delivery": {
+    "path": "/Volumes/Projects/spur/deliveries/context-service-code-explore/context-service-code-explore-v1.mp4",
+    "duration_seconds": 60,
+    "width": 1920,
+    "height": 1080,
+    "fps": 30,
+    "checksum_sha256": "30754d44f2f800998e1de0fd0d73d3fb05362ab9261bdcafab6079825ab50479"
+  }
+}
