@@ -37,4 +37,3 @@ launch film and its HyperFrames control-flow insert.
 
 The contact sheets are selection aids. Publish the individual full-resolution
 or web files instead.
-
