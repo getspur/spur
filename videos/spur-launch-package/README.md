@@ -42,4 +42,3 @@ sheet is a review aid and does not need to be published.
 - HyperFrames insert: `../spur-brain-control-flow-motion/`
 - Production brief:
   `../../docs/superpowers/specs/2026-07-23-spur-launch-video-production-brief.md`
-
