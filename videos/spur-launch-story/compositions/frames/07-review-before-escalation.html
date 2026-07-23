@@ -1,5 +1,5 @@
 <template>
-  <div id="root" data-composition-id="07-review-before-escalation" data-width="1920" data-height="1080" data-duration="7.45">
+  <div data-hf-id="hf-1s2h" id="root" data-composition-id="07-review-before-escalation" data-width="1920" data-height="1080" data-duration="7.45">
     <style>
       @font-face {
         font-family: "JetBrains Mono";
@@ -146,6 +146,8 @@
         border-color: rgba(140,146,143,.22);
       }
       #root .f7-human-body {
+        position: relative;
+        height: 306px;
         padding: 34px 24px;
       }
       #root .f7-human-label {
@@ -153,8 +155,14 @@
         font-size: 12px;
         letter-spacing: .14em;
       }
+      #root .f7-human-idle-title {
+        color: #d6a85f;
+        font-size: 27px;
+        line-height: 1.15;
+        font-weight: 700;
+        letter-spacing: -.035em;
+      }
       #root .f7-human-title {
-        margin-top: 28px;
         color: #c78074;
         font-size: 31px;
         line-height: 1.15;
@@ -168,6 +176,21 @@
         color: #8c928f;
         font-size: 14px;
         line-height: 1.55;
+      }
+      #root .f7-human-idle-copy {
+        margin-top: 30px;
+        padding-top: 20px;
+        border-top: 1px solid rgba(243,239,228,.1);
+        color: #8c928f;
+        font-size: 14px;
+        line-height: 1.55;
+        max-width: 250px;
+      }
+      #root .f7-human-state {
+        position: absolute;
+        top: 80px;
+        left: 24px;
+        right: 24px;
       }
       #root .f7-connector {
         position: absolute;
@@ -183,36 +206,42 @@
       #root .f7-node { fill: #c78074; }
     </style>
 
-    <div id="f7-bg" class="clip f7-bg" data-start="0" data-duration="7.45" data-track-index="0"></div>
-    <div id="f7-stage" class="clip f7-stage" data-start="0" data-duration="7.45" data-track-index="1">
-      <div class="f7-kicker">SPUR / REVIEW POLICY</div>
-      <div id="f7-title" class="f7-title">THE BRAIN <em>REVIEWS FIRST.</em></div>
+    <div data-hf-id="hf-cif6" id="f7-bg" class="clip f7-bg" data-start="0" data-duration="7.45" data-track-index="0"></div>
+    <div data-hf-id="hf-64nv" id="f7-stage" class="clip f7-stage" data-start="0" data-duration="7.45" data-track-index="1">
+      <div data-hf-id="hf-q7iy" class="f7-kicker">SPUR / REVIEW POLICY</div>
+      <div data-hf-id="hf-nj7x" id="f7-title" class="f7-title">THE BRAIN <em data-hf-id="hf-k7ck">REVIEWS FIRST.</em></div>
 
-      <div class="f7-layout">
-        <section id="f7-brain" class="f7-brain">
-          <div class="f7-panel-head"><span>BRAIN REVIEW</span><b>PRIMARY GATE</b></div>
-          <div id="f7-bundle" class="f7-bundle">artifact://review/auth-refactor<br /><small>diff · tests · trace · cost</small></div>
-          <div class="f7-checks">
-            <div id="f7-row-1" class="f7-row"><div id="f7-mark-1" class="f7-mark">01</div><strong>API stable</strong><span>VERIFY</span></div>
-            <div id="f7-row-2" class="f7-row"><div id="f7-mark-2" class="f7-mark">02</div><strong>tests passed</strong><span>84 / 84</span></div>
-            <div id="f7-row-3" class="f7-row"><div id="f7-mark-3" class="f7-mark">03</div><strong>trace complete</strong><span>ATTACHED</span></div>
+      <div data-hf-id="hf-tzps" class="f7-layout">
+        <section data-hf-id="hf-2djq" id="f7-brain" class="f7-brain">
+          <div data-hf-id="hf-dbo3" class="f7-panel-head"><span data-hf-id="hf-nnbd">BRAIN REVIEW</span><b data-hf-id="hf-p4h8">PRIMARY GATE</b></div>
+          <div data-hf-id="hf-n0ho" id="f7-bundle" class="f7-bundle">artifact://review/auth-refactor<br data-hf-id="hf-x5px"><small data-hf-id="hf-j9s3">diff · tests · trace · cost</small></div>
+          <div data-hf-id="hf-1ebh" class="f7-checks">
+            <div data-hf-id="hf-y1h4" id="f7-row-1" class="f7-row"><div data-hf-id="hf-jqi9" id="f7-mark-1" class="f7-mark">01</div><strong data-hf-id="hf-1oql">API stable</strong><span data-hf-id="hf-sifc">VERIFY</span></div>
+            <div data-hf-id="hf-8wyr" id="f7-row-2" class="f7-row"><div data-hf-id="hf-wmgv" id="f7-mark-2" class="f7-mark">02</div><strong data-hf-id="hf-mbad">tests passed</strong><span data-hf-id="hf-0lak">84 / 84</span></div>
+            <div data-hf-id="hf-2r8y" id="f7-row-3" class="f7-row"><div data-hf-id="hf-9j7x" id="f7-mark-3" class="f7-mark">03</div><strong data-hf-id="hf-1pf6">trace complete</strong><span data-hf-id="hf-m30h">ATTACHED</span></div>
           </div>
-          <div id="f7-critical" class="f7-critical"><b>CRITICAL</b><strong>rotate production key?</strong><span>HUMAN</span></div>
+          <div data-hf-id="hf-kjss" id="f7-critical" class="f7-critical"><b data-hf-id="hf-faco">CRITICAL</b><strong data-hf-id="hf-7blw">rotate production key?</strong><span data-hf-id="hf-s3au">HUMAN</span></div>
         </section>
 
-        <aside id="f7-human" class="f7-human">
-          <div class="f7-panel-head"><span>HUMAN</span><span>1 DECISION</span></div>
-          <div class="f7-human-body">
-            <div class="f7-human-label">ATTENTION / CRITICAL</div>
-            <div id="f7-human-title" class="f7-human-title">YOUR<br />DECISION.</div>
-            <div id="f7-human-copy" class="f7-human-copy">Everything else<br />keeps moving.</div>
+        <aside data-hf-id="hf-xo35" id="f7-human" class="f7-human">
+          <div data-hf-id="hf-komr" class="f7-panel-head"><span data-hf-id="hf-j8yi">HUMAN</span><span data-hf-id="hf-zosm" id="f7-human-count">STANDBY</span></div>
+          <div data-hf-id="hf-3cqe" class="f7-human-body">
+            <div data-hf-id="hf-n0wc" id="f7-human-label" class="f7-human-label">BRAIN GATE / ACTIVE</div>
+            <div data-hf-id="hf-gqbb" id="f7-human-idle" class="f7-human-state">
+              <div data-hf-id="hf-pbp2" id="f7-human-idle-title" class="f7-human-idle-title">BRAIN<br data-hf-id="hf-szow">REVIEWING.</div>
+              <div data-hf-id="hf-zc8l" id="f7-human-idle-copy" class="f7-human-idle-copy">Human attention stays reserved until the decision is critical.</div>
+            </div>
+            <div id="f7-human-decision" class="f7-human-state">
+              <div data-hf-id="hf-ve73" id="f7-human-title" class="f7-human-title">YOUR<br data-hf-id="hf-rsrt">DECISION.</div>
+              <div data-hf-id="hf-w1n0" id="f7-human-copy" class="f7-human-copy">Everything else keeps moving.</div>
+            </div>
           </div>
         </aside>
 
-        <svg class="f7-connector" viewBox="0 0 1792 620" aria-hidden="true">
-          <path id="f7-path" d="M1280 540 C1350 540 1365 310 1442 310" />
-          <circle id="f7-node-a" class="f7-node" cx="1280" cy="540" r="5" />
-          <circle id="f7-node-b" class="f7-node" cx="1442" cy="310" r="5" />
+        <svg data-hf-id="hf-xug9" class="f7-connector" viewBox="0 0 1792 620" aria-hidden="true">
+          <path data-hf-id="hf-8b0v" id="f7-path" d="M1280 540 C1350 540 1365 310 1442 310" />
+          <circle data-hf-id="hf-2ocm" id="f7-node-a" class="f7-node" cx="1280" cy="540" r="5" />
+          <circle data-hf-id="hf-jk4a" id="f7-node-b" class="f7-node" cx="1442" cy="310" r="5" />
         </svg>
       </div>
     </div>
@@ -222,9 +251,13 @@
       const tl = gsap.timeline({ paused: true });
       const path = document.querySelector("#f7-path");
       const pathLength = path.getTotalLength();
+      const reviewRows = ["#f7-row-1", "#f7-row-2", "#f7-row-3"];
+      const reviewMarks = ["#f7-mark-1", "#f7-mark-2", "#f7-mark-3"];
       gsap.set(path, { strokeDasharray: pathLength, strokeDashoffset: pathLength });
       gsap.set(["#f7-node-a", "#f7-node-b"], { opacity: 0 });
-      gsap.set(["#f7-mark-1", "#f7-mark-2", "#f7-mark-3"], { opacity: 0, scale: .8 });
+      gsap.set(reviewRows, { x: 12, opacity: .34 });
+      gsap.set(reviewMarks, { opacity: 1, scale: 1 });
+      gsap.set("#f7-human-decision", { y: 14, opacity: 0 });
 
       tl.fromTo("#f7-title",
         { y: -20, opacity: 0 },
@@ -239,15 +272,10 @@
         { x: 0, opacity: 1, duration: .42, ease: "power3.out" },
         1.02);
 
-      ["#f7-row-1", "#f7-row-2", "#f7-row-3"].forEach((row, index) => {
+      reviewRows.forEach((row, index) => {
         const t = 1.58 + index * .66;
-        tl.fromTo(row,
-          { x: 20, opacity: 0 },
-          { x: 0, opacity: 1, duration: .36, ease: "power3.out" },
-          t);
+        tl.to(row, { x: 0, opacity: 1, duration: .36, ease: "power3.out" }, t);
         tl.to(`#f7-mark-${index + 1}`, {
-          opacity: 1,
-          scale: 1,
           backgroundColor: "#69c98d",
           borderColor: "#69c98d",
           color: "#0b0e14",
@@ -262,22 +290,21 @@
         { x: 24, opacity: 0 },
         { x: 0, opacity: 1, duration: .46, ease: "power3.out" },
         3.9);
-      tl.set("#f7-node-a", { opacity: 1 }, 4.4);
-      tl.to("#f7-path", { strokeDashoffset: 0, duration: .72, ease: "power2.out" }, 4.42);
-      tl.set("#f7-node-b", { opacity: 1 }, 5.08);
+      tl.set("#f7-node-a", { opacity: 1 }, 4.28);
+      tl.to("#f7-path", { strokeDashoffset: 0, duration: .68, ease: "power2.out" }, 4.3);
+      tl.set("#f7-node-b", { opacity: 1 }, 4.94);
 
-      tl.fromTo("#f7-human",
-        { opacity: .2, x: 18 },
-        { opacity: 1, x: 0, borderColor: "rgba(199,128,116,.65)", duration: .52, ease: "power3.out" },
-        5.36);
-      tl.fromTo("#f7-human-title",
-        { y: 16, opacity: 0 },
+      tl.to("#f7-human-idle", { y: -10, opacity: 0, duration: .3, ease: "power2.in" }, 4.34);
+      tl.set("#f7-human-count", { textContent: "1 DECISION", color: "#c78074" }, 4.58);
+      tl.set("#f7-human-label", { textContent: "ATTENTION / CRITICAL", color: "#c78074" }, 4.58);
+      tl.to("#f7-human", {
+        borderColor: "rgba(199,128,116,.65)",
+        duration: .42,
+        ease: "power2.out"
+      }, 4.58);
+      tl.to("#f7-human-decision",
         { y: 0, opacity: 1, duration: .42, ease: "power3.out" },
-        5.62);
-      tl.fromTo("#f7-human-copy",
-        { y: 12, opacity: 0 },
-        { y: 0, opacity: 1, duration: .4, ease: "power3.out" },
-        6.02);
+        4.66);
 
       window.__timelines["07-review-before-escalation"] = tl;
     </script>
