@@ -1,0 +1,250 @@
+<template>
+  <div id="root" data-composition-id="08-resume-and-close" data-width="1920" data-height="1080" data-duration="7">
+    <style>
+      @font-face {
+        font-family: "JetBrains Mono";
+        src: url("assets/fonts/JetBrainsMono-400.woff2") format("woff2");
+        font-weight: 400;
+      }
+      @font-face {
+        font-family: "JetBrains Mono";
+        src: url("assets/fonts/JetBrainsMono-700.woff2") format("woff2");
+        font-weight: 700;
+      }
+      #root {
+        position: relative;
+        width: 1920px;
+        height: 1080px;
+        overflow: hidden;
+        color: #f3efe4;
+        font-family: "JetBrains Mono", monospace;
+      }
+      #root * { box-sizing: border-box; }
+      #root .f8-bg {
+        position: absolute;
+        inset: 0;
+        background: #0b0e14;
+      }
+      #root .f8-stage {
+        position: absolute;
+        inset: 0 0 184px;
+        overflow: hidden;
+      }
+      #root .f8-shells {
+        position: absolute;
+        left: 280px;
+        right: 280px;
+        top: 126px;
+        height: 570px;
+      }
+      #root .f8-shell {
+        position: absolute;
+        inset: 0;
+        overflow: hidden;
+        border: 1px solid rgba(243,239,228,.13);
+        border-radius: 12px;
+        background: #161b24;
+      }
+      #root .f8-shell::before {
+        content: "";
+        position: absolute;
+        inset: 0;
+        background: url("assets/product/06-closing-promise.jpg") center / cover no-repeat;
+        opacity: .08;
+        filter: grayscale(.2) contrast(1.15);
+      }
+      #root .f8-shell-head {
+        position: relative;
+        z-index: 2;
+        height: 58px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 0 22px;
+        border-bottom: 1px solid rgba(243,239,228,.1);
+        color: #8c928f;
+        font-size: 12px;
+        letter-spacing: .13em;
+      }
+      #root .f8-shell-state {
+        position: relative;
+        z-index: 2;
+        display: grid;
+        place-items: center;
+        height: 452px;
+        color: #8c928f;
+        font-size: 58px;
+        font-weight: 700;
+        letter-spacing: -.045em;
+      }
+      #root .f8-shell.closed .f8-shell-state { color: #8c928f; }
+      #root .f8-shell.resume { border-color: rgba(214,168,95,.42); }
+      #root .f8-shell.resume .f8-shell-state { color: #d6a85f; }
+      #root .f8-shell.working { border-color: rgba(105,201,141,.46); }
+      #root .f8-shell.working .f8-shell-state { color: #69c98d; }
+      #root .f8-ledger {
+        position: absolute;
+        z-index: 8;
+        left: 50%;
+        top: 325px;
+        width: 760px;
+        height: 118px;
+        margin-left: -380px;
+        padding: 0 28px;
+        display: grid;
+        grid-template-columns: 1.2fr .9fr .8fr;
+        align-items: center;
+        border: 1px solid #d6a85f;
+        border-radius: 12px;
+        background: #0b0e14;
+        box-shadow: 0 22px 60px rgba(0,0,0,.42);
+      }
+      #root .f8-ledger div {
+        min-height: 64px;
+        padding: 8px 20px;
+        border-right: 1px solid rgba(243,239,228,.1);
+      }
+      #root .f8-ledger div:last-child { border-right: 0; }
+      #root .f8-ledger small {
+        display: block;
+        margin-bottom: 10px;
+        color: #8c928f;
+        font-size: 10px;
+        letter-spacing: .13em;
+      }
+      #root .f8-ledger b { font-size: 15px; font-weight: 400; }
+      #root .f8-ledger .ok { color: #69c98d; }
+      #root .f8-intact {
+        position: absolute;
+        left: 280px;
+        right: 280px;
+        top: 728px;
+        color: #69c98d;
+        text-align: center;
+        font-size: 20px;
+        letter-spacing: .12em;
+      }
+      #root .f8-lockup {
+        position: absolute;
+        inset: 96px 100px 184px;
+        display: grid;
+        grid-template-columns: .9fr 1.1fr;
+        align-items: center;
+        gap: 90px;
+      }
+      #root .f8-brand {
+        padding-right: 70px;
+        border-right: 1px solid rgba(243,239,228,.13);
+        color: #d6a85f;
+        text-align: right;
+        font-size: 132px;
+        line-height: .9;
+        font-weight: 700;
+        letter-spacing: -.075em;
+      }
+      #root .f8-lines {
+        display: grid;
+        gap: 18px;
+        font-size: 45px;
+        line-height: 1.05;
+        font-weight: 700;
+        letter-spacing: -.045em;
+      }
+      #root .f8-lines span { display: block; }
+      #root #f8-line-3 { color: #69c98d; }
+      #root .f8-small {
+        margin-top: 32px;
+        color: #8c928f;
+        font-size: 13px;
+        font-weight: 400;
+        letter-spacing: .14em;
+      }
+    </style>
+
+    <div id="f8-bg" class="clip f8-bg" data-start="0" data-duration="7" data-track-index="0"></div>
+    <div id="f8-stage" class="clip f8-stage" data-start="0" data-duration="7" data-track-index="1">
+      <div id="f8-shells" class="f8-shells">
+        <section id="f8-shell-closed" class="f8-shell closed">
+          <div class="f8-shell-head"><span>SPUR / DURABLE SESSION</span><span>STATE 01</span></div>
+          <div class="f8-shell-state" data-layout-allow-occlusion>SESSION CLOSED</div>
+        </section>
+        <section id="f8-shell-resume" class="f8-shell resume">
+          <div class="f8-shell-head"><span>SPUR / DURABLE SESSION</span><span>STATE 02</span></div>
+          <div class="f8-shell-state" data-layout-allow-occlusion>RESUME</div>
+        </section>
+        <section id="f8-shell-working" class="f8-shell working">
+          <div class="f8-shell-head"><span>SPUR / DURABLE SESSION</span><span>STATE 03</span></div>
+          <div class="f8-shell-state" data-layout-allow-occlusion>WORK CONTINUES</div>
+        </section>
+      </div>
+
+      <div id="f8-ledger" class="f8-ledger" data-layout-allow-overlap data-layout-allow-occlusion>
+        <div><small>BRAIN</small><b>auth-refactor</b></div>
+        <div><small>EVIDENCE</small><b class="ok">4 attached</b></div>
+        <div><small>DECISION</small><b>1 critical</b></div>
+      </div>
+
+      <div id="f8-intact" class="f8-intact">THE THREAD IS INTACT.</div>
+
+      <div id="f8-lockup" class="f8-lockup">
+        <div id="f8-brand" class="f8-brand">SPUR</div>
+        <div class="f8-lines">
+          <span id="f8-line-1">ONE BRAIN.</span>
+          <span id="f8-line-2">EVERY WORKER.</span>
+          <span id="f8-line-3">UNDER CONTROL.</span>
+          <div id="f8-small" class="f8-small">PLAN · LOOP · AD HOC · REVIEW</div>
+        </div>
+      </div>
+    </div>
+
+    <script>
+      window.__timelines = window.__timelines || {};
+      const tl = gsap.timeline({ paused: true });
+
+      gsap.set("#f8-shell-closed", { opacity: 1 });
+      gsap.set(["#f8-shell-resume", "#f8-shell-working"], { opacity: 0 });
+      tl.fromTo("#f8-ledger",
+        { y: 22, opacity: 0 },
+        { y: 0, opacity: 1, duration: .58, ease: "power3.out" },
+        .05);
+      tl.fromTo("#f8-shells",
+        { opacity: 0 },
+        { opacity: 1, duration: .42, ease: "power2.out" },
+        .18);
+
+      tl.to("#f8-shell-closed", { opacity: 0, duration: .28, ease: "power2.inOut" }, 1.38);
+      tl.to("#f8-shell-resume", { opacity: 1, duration: .28, ease: "power2.inOut" }, 1.38);
+      tl.to("#f8-shell-resume", { opacity: 0, duration: .28, ease: "power2.inOut" }, 2.42);
+      tl.to("#f8-shell-working", { opacity: 1, duration: .28, ease: "power2.inOut" }, 2.42);
+
+      tl.fromTo("#f8-intact",
+        { y: 12, opacity: 0 },
+        { y: 0, opacity: 1, duration: .44, ease: "power3.out" },
+        3.78);
+
+      tl.to(["#f8-shells", "#f8-ledger", "#f8-intact"], { opacity: 0, duration: .28, ease: "power2.in" }, 4.56);
+      tl.fromTo("#f8-brand",
+        { x: -24, opacity: 0 },
+        { x: 0, opacity: 1, duration: .52, ease: "power3.out" },
+        4.78);
+      tl.fromTo("#f8-line-1",
+        { x: 28, opacity: 0 },
+        { x: 0, opacity: 1, duration: .38, ease: "power3.out" },
+        5.02);
+      tl.fromTo("#f8-line-2",
+        { x: 28, opacity: 0 },
+        { x: 0, opacity: 1, duration: .38, ease: "power3.out" },
+        5.48);
+      tl.fromTo("#f8-line-3",
+        { x: 28, opacity: 0 },
+        { x: 0, opacity: 1, duration: .38, ease: "power3.out" },
+        5.94);
+      tl.fromTo("#f8-small",
+        { y: 10, opacity: 0 },
+        { y: 0, opacity: 1, duration: .36, ease: "power3.out" },
+        6.28);
+
+      window.__timelines["08-resume-and-close"] = tl;
+    </script>
+  </div>
+</template>

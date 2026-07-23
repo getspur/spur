@@ -1,0 +1,7 @@
+{
+  "scene": "02-tell-the-brain",
+  "duration_s": 9,
+  "rules": ["discrete-text-sequence", "context-sensitive-cursor", "anchored-layout-expand", "physics-press-reaction", "nudge-curve"],
+  "exit": { "vector": "none", "still_moving": false },
+  "entry": { "vector": "up 52px/s", "from_rest": true }
+}

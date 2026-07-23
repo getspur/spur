@@ -1,0 +1,278 @@
+<template>
+  <div id="root" data-composition-id="05-control-tower" data-width="1920" data-height="1080" data-duration="10.5">
+    <style>
+      @font-face {
+        font-family: "JetBrains Mono";
+        src: url("assets/fonts/JetBrainsMono-400.woff2") format("woff2");
+        font-weight: 400;
+      }
+      @font-face {
+        font-family: "JetBrains Mono";
+        src: url("assets/fonts/JetBrainsMono-700.woff2") format("woff2");
+        font-weight: 700;
+      }
+      #root {
+        position: relative;
+        width: 1920px;
+        height: 1080px;
+        overflow: hidden;
+        color: #f3efe4;
+        font-family: "JetBrains Mono", monospace;
+      }
+      #root * { box-sizing: border-box; }
+      #root .f5-bg { position: absolute; inset: 0; background: #0b0e14; }
+      #root .f5-stage {
+        position: absolute;
+        inset: 0 0 184px;
+        overflow: hidden;
+      }
+      #root .f5-world {
+        position: absolute;
+        left: 0;
+        top: 0;
+        width: 1920px;
+        height: 896px;
+        padding: 42px 52px 44px;
+        will-change: transform;
+      }
+      #root .f5-header {
+        height: 66px;
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+      }
+      #root .f5-kicker { color: #8c928f; font-size: 13px; letter-spacing: .16em; }
+      #root .f5-system {
+        display: flex;
+        gap: 22px;
+        color: #8c928f;
+        font-size: 12px;
+      }
+      #root .f5-system b { color: #69c98d; font-weight: 400; }
+      #root .f5-grid {
+        height: 690px;
+        display: grid;
+        grid-template-columns: 390px 1fr 550px;
+        grid-template-rows: 330px 342px;
+        gap: 18px;
+      }
+      #root .f5-panel {
+        position: relative;
+        overflow: hidden;
+        border: 1px solid rgba(243,239,228,.12);
+        border-radius: 12px;
+        background: #161b24;
+      }
+      #root .f5-panel-head {
+        height: 42px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 0 16px;
+        border-bottom: 1px solid rgba(243,239,228,.09);
+        color: #8c928f;
+        font-size: 11px;
+        letter-spacing: .13em;
+      }
+      #root .f5-brain { grid-row: 1 / span 2; }
+      #root .f5-work { grid-column: 2; grid-row: 1; }
+      #root .f5-workers { grid-column: 3; grid-row: 1 / span 2; }
+      #root .f5-evidence { grid-column: 2; grid-row: 2; }
+      #root .f5-prompt {
+        margin: 22px 18px;
+        padding: 18px;
+        border-left: 2px solid #d6a85f;
+        background: #0b0e14;
+        font-size: 15px;
+        line-height: 1.5;
+      }
+      #root .f5-brain-note {
+        margin: 18px;
+        color: #8c928f;
+        font-size: 13px;
+        line-height: 1.7;
+      }
+      #root .f5-brain-note b { color: #f3efe4; }
+      #root .f5-shapes {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 10px;
+        padding: 18px;
+      }
+      #root .f5-shape {
+        min-height: 110px;
+        padding: 15px;
+        border: 1px solid rgba(243,239,228,.11);
+        border-radius: 12px;
+      }
+      #root .f5-shape b { color: #d6a85f; font-size: 14px; }
+      #root .f5-shape span { display: block; margin-top: 14px; color: #8c928f; font-size: 11px; line-height: 1.5; }
+      #root .f5-worker-row, #root .f5-evidence-row {
+        display: grid;
+        align-items: center;
+        min-height: 63px;
+        padding: 0 16px;
+        border-bottom: 1px solid rgba(243,239,228,.075);
+        font-size: 12px;
+      }
+      #root .f5-worker-row { grid-template-columns: 94px 1fr 92px; }
+      #root .f5-worker-row span:last-child { text-align: right; color: #d6a85f; }
+      #root .f5-worker-row.done span:last-child { color: #69c98d; }
+      #root .f5-evidence-row { grid-template-columns: 1fr 120px; }
+      #root .f5-evidence-row strong { font-size: 13px; font-weight: 400; }
+      #root .f5-evidence-row span { text-align: right; color: #69c98d; }
+      #root .f5-evidence-row.pending span { color: #d6a85f; }
+      #root .f5-focus {
+        border-color: rgba(105,201,141,.7);
+        background: rgba(105,201,141,.075);
+      }
+      #root .f5-blocked {
+        position: absolute;
+        left: 16px;
+        right: 16px;
+        bottom: 18px;
+        height: 54px;
+        display: grid;
+        grid-template-columns: 90px 1fr 82px;
+        align-items: center;
+        padding: 0 14px;
+        border: 1px solid rgba(243,239,228,.12);
+        border-radius: 12px;
+        color: #8c928f;
+        font-size: 11px;
+      }
+      #root .f5-blocked b { color: #8c928f; font-weight: 400; }
+      #root .f5-blocked i { text-align: right; color: #8c928f; font-style: normal; }
+      #root .f5-wide-title {
+        position: absolute;
+        left: 520px;
+        right: 520px;
+        top: 122px;
+        z-index: 5;
+        padding: 18px 20px;
+        border: 1px solid rgba(214,168,95,.32);
+        border-radius: 12px;
+        background: rgba(11,14,20,.9);
+        color: #d6a85f;
+        text-align: center;
+        font-size: 24px;
+        font-weight: 700;
+        letter-spacing: .045em;
+      }
+      #root .f5-scan {
+        position: absolute;
+        right: 22px;
+        bottom: 18px;
+        width: 240px;
+        height: 135px;
+        overflow: hidden;
+        border: 1px solid rgba(243,239,228,.1);
+        border-radius: 12px;
+      }
+      #root .f5-scan img {
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+        opacity: .34;
+        filter: saturate(.7) contrast(1.15);
+      }
+    </style>
+
+    <div id="f5-bg" class="clip f5-bg" data-start="0" data-duration="10.5" data-track-index="0"></div>
+    <div id="f5-stage" class="clip f5-stage" data-start="0" data-duration="10.5" data-track-index="1">
+      <div id="f5-world" class="f5-world" data-layout-allow-overflow>
+        <div class="f5-header">
+          <div class="f5-kicker">SPUR / CONTROL TOWER</div>
+          <div class="f5-system"><span>brain <b>online</b></span><span>workers <b>3</b></span><span>evidence <b id="f5-count">03</b></span></div>
+        </div>
+
+        <div class="f5-grid">
+          <section class="f5-panel f5-brain">
+            <div class="f5-panel-head"><span>BRAIN SESSION</span><span>DIRECT</span></div>
+            <div class="f5-prompt">Refactor auth.<br />Keep the API stable.<br />Run the tests.</div>
+            <div class="f5-brain-note">
+              <b>Plan owned.</b><br />Three delegated tasks.<br />Review policy: brain first.<br />Escalation: critical only.
+            </div>
+          </section>
+
+          <section class="f5-panel f5-work">
+            <div class="f5-panel-head"><span>WORK SHAPE</span><span>3 ROUTES</span></div>
+            <div class="f5-shapes">
+              <div class="f5-shape"><b>PLAN</b><span>bounded milestones<br />implementation</span></div>
+              <div class="f5-shape"><b>LOOP</b><span>recurring checks<br />review cadence</span></div>
+              <div class="f5-shape"><b>AD HOC</b><span>one-off trace<br />investigation</span></div>
+            </div>
+          </section>
+
+          <section class="f5-panel f5-workers">
+            <div class="f5-panel-head"><span>WORKERS</span><span>OBSERVABLE</span></div>
+            <div class="f5-worker-row done"><span>CODEX</span><b>patch written</b><span>VERIFIED</span></div>
+            <div class="f5-worker-row done"><span>CLAUDE</span><b>contract review</b><span>VERIFIED</span></div>
+            <div class="f5-worker-row"><span>GEMINI</span><b>trace capture</b><span>ACTIVE</span></div>
+            <div id="f5-blocked" class="f5-blocked"><span>BLOCKED</span><b>production key</b><i>WAITING</i></div>
+            <div class="f5-scan"><img src="assets/product/04-control-tower.jpg" alt="" /></div>
+          </section>
+
+          <section class="f5-panel f5-evidence">
+            <div class="f5-panel-head"><span>EVIDENCE</span><span>REVIEW QUEUE</span></div>
+            <div id="f5-tests" class="f5-evidence-row f5-focus"><strong>tests</strong><span>84 / 84</span></div>
+            <div id="f5-trace" class="f5-evidence-row"><strong>trace</strong><span>ATTACHED</span></div>
+            <div id="f5-review" class="f5-evidence-row pending"><strong>review</strong><span>PENDING</span></div>
+          </section>
+        </div>
+      </div>
+
+      <div id="f5-wide-title" class="f5-wide-title">EVERY WORKER STAYS VISIBLE.</div>
+    </div>
+
+    <script>
+      window.__timelines = window.__timelines || {};
+      const tl = gsap.timeline({ paused: true });
+
+      tl.set("#f5-world", {
+        x: -3040,
+        y: -1232,
+        scale: 4,
+        transformOrigin: "0 0"
+      }, 0);
+      tl.fromTo("#f5-tests",
+        { backgroundColor: "rgba(105,201,141,.02)" },
+        { backgroundColor: "rgba(105,201,141,.11)", duration: .46, ease: "power2.out" },
+        .08);
+      tl.fromTo("#f5-trace",
+        { x: 18, opacity: 0 },
+        { x: 0, opacity: 1, duration: .48, ease: "power3.out" },
+        1.12);
+      tl.to("#f5-tests", { backgroundColor: "rgba(105,201,141,.02)", duration: .3, ease: "power2.out" }, 2.42);
+      tl.to("#f5-trace", { backgroundColor: "rgba(214,168,95,.08)", duration: .32, ease: "power2.out" }, 2.56);
+      tl.fromTo("#f5-review",
+        { x: 18, opacity: 0 },
+        { x: 0, opacity: 1, duration: .46, ease: "power3.out" },
+        2.92);
+
+      tl.to("#f5-world", {
+        x: 0,
+        y: 0,
+        scale: 1,
+        duration: 1,
+        ease: "expo.out"
+      }, 4.2);
+
+      tl.to("#f5-blocked", {
+        borderColor: "rgba(214,168,95,.72)",
+        color: "#d6a85f",
+        duration: .42,
+        ease: "power2.out"
+      }, 5.64);
+      tl.to("#f5-blocked b", { color: "#f3efe4", duration: .28, ease: "none" }, 5.76);
+      tl.to("#f5-blocked i", { color: "#d6a85f", duration: .28, ease: "none" }, 5.76);
+      tl.set("#f5-count", { textContent: "04" }, 6.28);
+      tl.fromTo("#f5-wide-title",
+        { y: -16, opacity: 0 },
+        { y: 0, opacity: 1, duration: .5, ease: "power3.out" },
+        7);
+
+      window.__timelines["05-control-tower"] = tl;
+    </script>
+  </div>
+</template>

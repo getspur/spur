@@ -1,0 +1,7 @@
+{
+  "scene": "01-one-place-to-think",
+  "duration_s": 8,
+  "rules": ["dynamic-content-sequencing", "discrete-text-sequence", "svg-path-draw"],
+  "exit": { "vector": "none", "still_moving": false },
+  "entry": { "vector": "down 48px/s", "from_rest": true }
+}

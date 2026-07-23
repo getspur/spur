@@ -1,0 +1,7 @@
+{
+  "scene": "05-control-tower",
+  "duration_s": 10,
+  "rules": ["viewport-change", "coordinate-target-zoom", "multi-phase-camera"],
+  "exit": { "vector": "none", "still_moving": false },
+  "entry": { "vector": "none", "from_rest": true }
+}
