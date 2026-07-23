@@ -83,4 +83,10 @@ the brain. Watch the work. SPUR.
   fade-in and fade-out
 - Narration: intentionally omitted from this assembly because the existing
   narration contradicts the approved brain-first review story
+- HyperFrames insert: `videos/spur-brain-control-flow-motion`
+- Render: `videos/spur-brain-control-flow-motion/renders/spur-brain-control-flow.mp4`
+- Placement: frames 390-630 (13-21 seconds) on the top video track
+- Insert story: user intent enters the brain; Plan, Loop, and Ad hoc workers
+  return diff, tests, and trace evidence; the brain approves routine work and
+  escalates only the critical branch to human review
 - Export: pending final user approval

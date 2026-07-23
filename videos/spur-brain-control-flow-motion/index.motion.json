@@ -1,0 +1,36 @@
+{
+  "duration": 8,
+  "maxStaticSec": 1.5,
+  "assertions": [
+    {
+      "kind": "appearsBy",
+      "selector": "#brain",
+      "bySec": 1
+    },
+    {
+      "kind": "before",
+      "a": "#brain",
+      "b": "#human"
+    },
+    {
+      "kind": "staysInFrame",
+      "selector": "#brain"
+    },
+    {
+      "kind": "staysInFrame",
+      "selector": "#worker-a"
+    },
+    {
+      "kind": "staysInFrame",
+      "selector": "#worker-b"
+    },
+    {
+      "kind": "staysInFrame",
+      "selector": "#worker-c"
+    },
+    {
+      "kind": "keepsMoving",
+      "withinSelector": "#control-flow-scene"
+    }
+  ]
+}
