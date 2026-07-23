@@ -8,6 +8,7 @@ Release-ready assets for the 60-second SPUR brain-control-tower launch film.
 - `SPUR-Launch-Poster.jpg` — 16:9 end-card poster or video thumbnail
 - `SPUR-Launch-Editable.palmier/` — self-contained editable Palmier project
 - `SPUR-Launch-QA-Contact-Sheet.jpg` — visual QA reference across the full cut
+- `media-shots/` — launch stills, explanatory HyperFrames images, and web derivatives
 - `SHA256SUMS.txt` — integrity hashes
 
 ## Master specification
