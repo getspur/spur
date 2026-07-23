@@ -1,0 +1,285 @@
+<template>
+  <div id="root" data-composition-id="07-review-before-escalation" data-width="1920" data-height="1080" data-duration="7.45">
+    <style>
+      @font-face {
+        font-family: "JetBrains Mono";
+        src: url("assets/fonts/JetBrainsMono-400.woff2") format("woff2");
+        font-weight: 400;
+      }
+      @font-face {
+        font-family: "JetBrains Mono";
+        src: url("assets/fonts/JetBrainsMono-700.woff2") format("woff2");
+        font-weight: 700;
+      }
+      #root {
+        position: relative;
+        width: 1920px;
+        height: 1080px;
+        overflow: hidden;
+        color: #f3efe4;
+        font-family: "JetBrains Mono", monospace;
+      }
+      #root * { box-sizing: border-box; }
+      #root .f7-bg {
+        position: absolute;
+        inset: 0;
+        background: #0b0e14;
+      }
+      #root .f7-stage {
+        position: absolute;
+        inset: 52px 64px 184px;
+      }
+      #root .f7-kicker {
+        color: #8c928f;
+        font-size: 13px;
+        letter-spacing: .16em;
+      }
+      #root .f7-title {
+        margin-top: 15px;
+        font-size: 49px;
+        font-weight: 700;
+        letter-spacing: -.045em;
+      }
+      #root .f7-title em { color: #d6a85f; font-style: normal; }
+      #root .f7-layout {
+        position: absolute;
+        left: 0;
+        right: 0;
+        top: 124px;
+        height: 620px;
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) 350px;
+        gap: 76px;
+      }
+      #root .f7-brain, #root .f7-human {
+        position: relative;
+        overflow: hidden;
+        border: 1px solid rgba(243,239,228,.13);
+        border-radius: 12px;
+        background: #161b24;
+      }
+      #root .f7-brain::before {
+        content: "";
+        position: absolute;
+        inset: 0;
+        background: url("assets/product/05-brain-review.jpg") center / cover no-repeat;
+        opacity: .03;
+        filter: grayscale(.2) contrast(1.2);
+      }
+      #root .f7-panel-head {
+        position: relative;
+        z-index: 2;
+        height: 54px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 0 20px;
+        border-bottom: 1px solid rgba(243,239,228,.1);
+        color: #8c928f;
+        font-size: 12px;
+        letter-spacing: .13em;
+      }
+      #root .f7-panel-head b { color: #d6a85f; font-weight: 400; }
+      #root .f7-bundle {
+        position: relative;
+        z-index: 2;
+        margin: 22px;
+        padding: 18px 20px;
+        border-left: 2px solid #69c98d;
+        background: rgba(11,14,20,.88);
+        font-size: 14px;
+      }
+      #root .f7-bundle small { color: #8c928f; }
+      #root .f7-checks {
+        position: relative;
+        z-index: 2;
+        margin: 0 22px;
+        border: 1px solid rgba(243,239,228,.09);
+        border-radius: 12px;
+        background: rgba(15,19,27,.92);
+      }
+      #root .f7-row {
+        height: 68px;
+        display: grid;
+        grid-template-columns: 44px 1fr 112px;
+        align-items: center;
+        padding: 0 18px;
+        border-bottom: 1px solid rgba(243,239,228,.075);
+      }
+      #root .f7-row:last-child { border-bottom: none; }
+      #root .f7-mark {
+        width: 28px;
+        height: 28px;
+        display: grid;
+        place-items: center;
+        border: 1px solid rgba(243,239,228,.22);
+        border-radius: 50%;
+        color: #8c928f;
+        font-size: 11px;
+      }
+      #root .f7-mark.done { border-color: #69c98d; background: #69c98d; color: #0b0e14; }
+      #root .f7-row strong { font-size: 15px; font-weight: 400; }
+      #root .f7-row span:last-child { text-align: right; color: #8c928f; font-size: 11px; letter-spacing: .1em; }
+      #root .f7-critical {
+        position: relative;
+        z-index: 2;
+        margin: 18px 22px 0;
+        height: 70px;
+        display: grid;
+        grid-template-columns: 112px 1fr 96px;
+        align-items: center;
+        padding: 0 18px;
+        border: 1px solid #c78074;
+        border-radius: 12px;
+        background: rgba(199,128,116,.08);
+      }
+      #root .f7-critical b {
+        color: #c78074;
+        font-size: 12px;
+        letter-spacing: .1em;
+      }
+      #root .f7-critical strong { font-size: 15px; font-weight: 400; }
+      #root .f7-critical span { text-align: right; color: #c78074; font-size: 11px; }
+      #root .f7-human {
+        align-self: center;
+        height: 360px;
+        border-color: rgba(140,146,143,.22);
+      }
+      #root .f7-human-body {
+        padding: 34px 24px;
+      }
+      #root .f7-human-label {
+        color: #8c928f;
+        font-size: 12px;
+        letter-spacing: .14em;
+      }
+      #root .f7-human-title {
+        margin-top: 28px;
+        color: #c78074;
+        font-size: 31px;
+        line-height: 1.15;
+        font-weight: 700;
+        letter-spacing: -.035em;
+      }
+      #root .f7-human-copy {
+        margin-top: 30px;
+        padding-top: 20px;
+        border-top: 1px solid rgba(243,239,228,.1);
+        color: #8c928f;
+        font-size: 14px;
+        line-height: 1.55;
+      }
+      #root .f7-connector {
+        position: absolute;
+        inset: 0;
+        z-index: 6;
+        pointer-events: none;
+      }
+      #root .f7-connector path {
+        fill: none;
+        stroke: #c78074;
+        stroke-width: 2;
+      }
+      #root .f7-node { fill: #c78074; }
+    </style>
+
+    <div id="f7-bg" class="clip f7-bg" data-start="0" data-duration="7.45" data-track-index="0"></div>
+    <div id="f7-stage" class="clip f7-stage" data-start="0" data-duration="7.45" data-track-index="1">
+      <div class="f7-kicker">SPUR / REVIEW POLICY</div>
+      <div id="f7-title" class="f7-title">THE BRAIN <em>REVIEWS FIRST.</em></div>
+
+      <div class="f7-layout">
+        <section id="f7-brain" class="f7-brain">
+          <div class="f7-panel-head"><span>BRAIN REVIEW</span><b>PRIMARY GATE</b></div>
+          <div id="f7-bundle" class="f7-bundle">artifact://review/auth-refactor<br /><small>diff · tests · trace · cost</small></div>
+          <div class="f7-checks">
+            <div id="f7-row-1" class="f7-row"><div id="f7-mark-1" class="f7-mark">01</div><strong>API stable</strong><span>VERIFY</span></div>
+            <div id="f7-row-2" class="f7-row"><div id="f7-mark-2" class="f7-mark">02</div><strong>tests passed</strong><span>84 / 84</span></div>
+            <div id="f7-row-3" class="f7-row"><div id="f7-mark-3" class="f7-mark">03</div><strong>trace complete</strong><span>ATTACHED</span></div>
+          </div>
+          <div id="f7-critical" class="f7-critical"><b>CRITICAL</b><strong>rotate production key?</strong><span>HUMAN</span></div>
+        </section>
+
+        <aside id="f7-human" class="f7-human">
+          <div class="f7-panel-head"><span>HUMAN</span><span>1 DECISION</span></div>
+          <div class="f7-human-body">
+            <div class="f7-human-label">ATTENTION / CRITICAL</div>
+            <div id="f7-human-title" class="f7-human-title">YOUR<br />DECISION.</div>
+            <div id="f7-human-copy" class="f7-human-copy">Everything else<br />keeps moving.</div>
+          </div>
+        </aside>
+
+        <svg class="f7-connector" viewBox="0 0 1792 620" aria-hidden="true">
+          <path id="f7-path" d="M1280 540 C1350 540 1365 310 1442 310" />
+          <circle id="f7-node-a" class="f7-node" cx="1280" cy="540" r="5" />
+          <circle id="f7-node-b" class="f7-node" cx="1442" cy="310" r="5" />
+        </svg>
+      </div>
+    </div>
+
+    <script>
+      window.__timelines = window.__timelines || {};
+      const tl = gsap.timeline({ paused: true });
+      const path = document.querySelector("#f7-path");
+      const pathLength = path.getTotalLength();
+      gsap.set(path, { strokeDasharray: pathLength, strokeDashoffset: pathLength });
+      gsap.set(["#f7-node-a", "#f7-node-b"], { opacity: 0 });
+      gsap.set(["#f7-mark-1", "#f7-mark-2", "#f7-mark-3"], { opacity: 0, scale: .8 });
+
+      tl.fromTo("#f7-title",
+        { y: -20, opacity: 0 },
+        { y: 0, opacity: 1, duration: .52, ease: "power3.out" },
+        .05);
+      tl.fromTo("#f7-brain",
+        { x: -30, opacity: 0 },
+        { x: 0, opacity: 1, duration: .58, ease: "power3.out" },
+        .28);
+      tl.fromTo("#f7-bundle",
+        { x: 20, opacity: 0 },
+        { x: 0, opacity: 1, duration: .42, ease: "power3.out" },
+        1.02);
+
+      ["#f7-row-1", "#f7-row-2", "#f7-row-3"].forEach((row, index) => {
+        const t = 1.58 + index * .66;
+        tl.fromTo(row,
+          { x: 20, opacity: 0 },
+          { x: 0, opacity: 1, duration: .36, ease: "power3.out" },
+          t);
+        tl.to(`#f7-mark-${index + 1}`, {
+          opacity: 1,
+          scale: 1,
+          backgroundColor: "#69c98d",
+          borderColor: "#69c98d",
+          color: "#0b0e14",
+          duration: .36,
+          ease: "power3.out"
+        }, t + .28);
+        tl.set(`#f7-mark-${index + 1}`, { textContent: "✓" }, t + .42);
+        tl.to(`${row} strong`, { color: "#8c928f", duration: .28, ease: "none" }, t + .44);
+      });
+
+      tl.fromTo("#f7-critical",
+        { x: 24, opacity: 0 },
+        { x: 0, opacity: 1, duration: .46, ease: "power3.out" },
+        3.9);
+      tl.set("#f7-node-a", { opacity: 1 }, 4.4);
+      tl.to("#f7-path", { strokeDashoffset: 0, duration: .72, ease: "power2.out" }, 4.42);
+      tl.set("#f7-node-b", { opacity: 1 }, 5.08);
+
+      tl.fromTo("#f7-human",
+        { opacity: .2, x: 18 },
+        { opacity: 1, x: 0, borderColor: "rgba(199,128,116,.65)", duration: .52, ease: "power3.out" },
+        5.36);
+      tl.fromTo("#f7-human-title",
+        { y: 16, opacity: 0 },
+        { y: 0, opacity: 1, duration: .42, ease: "power3.out" },
+        5.62);
+      tl.fromTo("#f7-human-copy",
+        { y: 12, opacity: 0 },
+        { y: 0, opacity: 1, duration: .4, ease: "power3.out" },
+        6.02);
+
+      window.__timelines["07-review-before-escalation"] = tl;
+    </script>
+  </div>
+</template>

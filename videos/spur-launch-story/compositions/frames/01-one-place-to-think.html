@@ -1,0 +1,196 @@
+<template>
+  <div id="root" data-composition-id="01-one-place-to-think" data-width="1920" data-height="1080" data-duration="8.4">
+    <style>
+      @font-face {
+        font-family: "JetBrains Mono";
+        src: url("assets/fonts/JetBrainsMono-400.woff2") format("woff2");
+        font-weight: 400;
+      }
+      @font-face {
+        font-family: "JetBrains Mono";
+        src: url("assets/fonts/JetBrainsMono-700.woff2") format("woff2");
+        font-weight: 700;
+      }
+      #root {
+        position: relative;
+        width: 1920px;
+        height: 1080px;
+        overflow: hidden;
+        color: #f3efe4;
+        font-family: "JetBrains Mono", monospace;
+      }
+      #root * { box-sizing: border-box; }
+      #root .hf-bg {
+        position: absolute;
+        inset: 0;
+        background: #0b0e14;
+      }
+      #root .hf-stage {
+        position: absolute;
+        inset: 0 0 184px;
+        overflow: hidden;
+      }
+      #root .hf-phrase {
+        position: absolute;
+        left: 120px;
+        right: 120px;
+        top: 300px;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        gap: .34em;
+        white-space: nowrap;
+        font-size: 94px;
+        line-height: 1;
+        font-weight: 700;
+        letter-spacing: -.065em;
+      }
+      #root .hf-phrase span { display: inline-block; }
+      #root .hf-accent { color: #d6a85f; }
+      #root .hf-terminal {
+        position: absolute;
+        left: 126px;
+        right: 126px;
+        top: 182px;
+        height: 510px;
+        overflow: hidden;
+        border: 1px solid rgba(214,168,95,.32);
+        border-radius: 12px;
+        background: #161b24;
+        box-shadow: 0 34px 90px rgba(0,0,0,.42);
+      }
+      #root .hf-terminal img {
+        display: none;
+      }
+      #root .hf-terminal::after {
+        content: "";
+        position: absolute;
+        inset: 0;
+        background: rgba(11,14,20,.82);
+      }
+      #root .hf-terminal-rule {
+        position: absolute;
+        left: 0;
+        right: 0;
+        top: 44px;
+        height: 1px;
+        background: rgba(243,239,228,.12);
+      }
+      #root .hf-terminal-label {
+        position: absolute;
+        left: 24px;
+        top: 17px;
+        z-index: 2;
+        color: #8c928f;
+        font-size: 15px;
+        letter-spacing: .14em;
+      }
+      #root .hf-ready {
+        position: absolute;
+        top: 482px;
+        left: 50%;
+        width: 276px;
+        height: 54px;
+        margin-left: -138px;
+        display: grid;
+        place-items: center;
+        color: #d6a85f;
+        font-size: 18px;
+        letter-spacing: .18em;
+      }
+      #root .hf-ready-border {
+        position: absolute;
+        inset: 0;
+        border: 1px solid #d6a85f;
+        border-radius: 27px;
+        transform-origin: left center;
+      }
+      #root .hf-ready-text { position: relative; }
+      #root .hf-index {
+        position: absolute;
+        left: 52px;
+        top: 42px;
+        color: #8c928f;
+        font-size: 14px;
+        letter-spacing: .15em;
+      }
+    </style>
+
+    <div id="f1-bg" class="clip hf-bg" data-start="0" data-duration="8.4" data-track-index="0"></div>
+    <div id="f1-stage" class="clip hf-stage" data-start="0" data-duration="8.4" data-track-index="1">
+      <div class="hf-index">SPUR / 00:00</div>
+
+      <div id="f1-p1" class="hf-phrase">
+        <span>FIVE</span><span>CODING</span><span>AGENTS.</span>
+      </div>
+
+      <div id="f1-p2" class="hf-phrase">
+        <span class="hf-accent">ONE</span><span>PLACE</span><span>TO</span><span>THINK.</span>
+      </div>
+
+      <div id="f1-terminal" class="hf-terminal">
+        <img src="assets/product/01-launch-hook.jpg" alt="" />
+        <div class="hf-terminal-rule"></div>
+        <div class="hf-terminal-label">SESSION / BRAIN</div>
+      </div>
+
+      <div id="f1-p3" class="hf-phrase">
+        <span>WORK</span><span>WITH</span><span class="hf-accent">ONE BRAIN.</span>
+      </div>
+
+      <div id="f1-ready" class="hf-ready">
+        <div id="f1-ready-border" class="hf-ready-border"></div>
+        <div class="hf-ready-text">SPUR · READY</div>
+      </div>
+    </div>
+
+    <script>
+      window.__timelines = window.__timelines || {};
+      const tl = gsap.timeline({ paused: true });
+      const p1 = Array.from(document.querySelectorAll("#f1-p1 span"));
+      const p2 = Array.from(document.querySelectorAll("#f1-p2 span"));
+      const p3 = Array.from(document.querySelectorAll("#f1-p3 span"));
+      gsap.set([p2, p3], { opacity: 0 });
+
+      tl.fromTo(p1,
+        { y: 30, opacity: 0 },
+        { y: 0, opacity: 1, duration: .62, stagger: .14, ease: "power3.out" },
+        .08);
+
+      tl.to(p1,
+        { x: -230, opacity: 0, duration: .34, stagger: .025, ease: "power4.in" },
+        1.72);
+      tl.fromTo(p2,
+        { x: 230, opacity: .28 },
+        { x: 0, opacity: 1, duration: .42, stagger: .025, ease: "power4.out", immediateRender: false },
+        1.93);
+      tl.fromTo("#f1-p2 .hf-accent",
+        { color: "#f3efe4" },
+        { color: "#d6a85f", duration: .28, ease: "power2.out" },
+        3.25);
+
+      tl.to(p2,
+        { x: -230, opacity: 0, duration: .32, stagger: .02, ease: "power4.in" },
+        4.18);
+      tl.fromTo("#f1-terminal",
+        { y: 120, opacity: 0 },
+        { y: 0, opacity: 1, duration: .72, ease: "power3.out" },
+        4.34);
+      tl.fromTo(p3,
+        { x: 230, opacity: .24 },
+        { x: 0, opacity: 1, duration: .48, stagger: .045, ease: "power4.out", immediateRender: false },
+        4.5);
+
+      tl.fromTo("#f1-ready",
+        { opacity: 0, y: 14 },
+        { opacity: 1, y: 0, duration: .44, ease: "power3.out" },
+        6.15);
+      tl.fromTo("#f1-ready-border",
+        { scaleX: 0 },
+        { scaleX: 1, duration: .5, ease: "power3.out" },
+        6.12);
+
+      window.__timelines["01-one-place-to-think"] = tl;
+    </script>
+  </div>
+</template>

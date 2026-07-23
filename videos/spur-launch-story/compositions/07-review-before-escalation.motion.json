@@ -1,0 +1,7 @@
+{
+  "scene": "07-review-before-escalation",
+  "duration_s": 7,
+  "rules": ["dynamic-content-sequencing", "scale-swap-transition", "svg-path-draw"],
+  "exit": { "vector": "none", "still_moving": false },
+  "entry": { "vector": "right 44px/s", "from_rest": true }
+}
