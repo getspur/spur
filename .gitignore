@@ -19,6 +19,8 @@ coverage/
 .env
 .env.local
 .env.*.local
+local.env
+*.local.env
 python/dist/
 __pycache__/
 
@@ -103,3 +105,7 @@ crates/spur-context-service/Cargo.lock
 # downloaded binary in local npm wrapper test runs
 npm/spur-cli/bin/
 infra/spur-context-service/local-live-sync.tfvars
+# Operator-local Terraform values (account/image pins). Use env/*.tfvars +
+# TF_VAR_* for secrets. Never commit real terraform.tfvars / *.auto.tfvars.
+infra/spur-context-service/terraform.tfvars
+infra/spur-context-service/*.auto.tfvars
