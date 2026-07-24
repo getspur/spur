@@ -793,8 +793,9 @@ compatibility endpoint and its removal is optional.
 
 Terraform uses a partial S3 backend declared in `versions.tf`:
 `backend "s3" {}`. The backend is configured per environment at init time,
-and variable values are loaded from `env/<environment>.tfvars`. The committed
-`terraform.tfvars` file is placeholder-only and is not the deployment source.
+and variable values are loaded from `env/<environment>.tfvars`. Do **not**
+commit `terraform.tfvars` or `*.auto.tfvars` (gitignored); keep operator-local
+overrides untracked and supply secrets only via `TF_VAR_*`.
 
 Before the first deployment, an operator must bootstrap the remote-state
 resources once outside this module:
