@@ -217,6 +217,6 @@ Types: `feat`, `fix`, `test`, `docs`, `refactor`, `chore`. Keep subjects under 7
 
 ## License
 
-SPUR is a proprietary product. The free Community tier is available without a license key under the terms of the EULA at [https://getspur.dev/eula](https://getspur.dev/eula). Pro / Team / Enterprise tiers require a signed license file. See [LICENSE](LICENSE) for terms.
+SPUR is licensed under the [GNU General Public License v3.0 only](LICENSE) (`GPL-3.0-only`).
 
-> The source in this repository is not open source. Issues, feedback, and feature requests are welcome via [https://getspur.dev/feedback](https://getspur.dev/feedback) or your team's support channel.
+Pro / Team / Enterprise tier unlocks still use a signed license file from your account dashboard for feature entitlements; that product tiering is separate from the source license. Issues, feedback, and feature requests are welcome via [https://getspur.dev/feedback](https://getspur.dev/feedback) or your team's support channel.

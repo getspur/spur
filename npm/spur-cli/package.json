@@ -7,7 +7,7 @@
     "url": "git+https://github.com/getspur/spur-releases.git"
   },
   "homepage": "https://github.com/getspur/spur-releases",
-  "license": "MIT",
+  "license": "GPL-3.0-only",
   "bin": {
     "spur": "run-spur.js"
   },
