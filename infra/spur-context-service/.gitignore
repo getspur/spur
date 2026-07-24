@@ -3,3 +3,7 @@
 *.tfstate.*
 crash.log
 local-live-sync.tfvars
+# Operator-local overrides — never commit. Prefer env/<name>.tfvars (tracked
+# non-secret config) and TF_VAR_* for secrets (e.g. Google OAuth).
+terraform.tfvars
+*.auto.tfvars
