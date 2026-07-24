@@ -20,11 +20,11 @@ name = "spur-cli"
 version = "1.0.4"
 description = "Spur — agent orchestration CLI"
 requires-python = ">=3.8"
-license = { text = "Proprietary" }
+license = { text = "GPL-3.0-only" }
 # Replace with real contact / URL when public.
 authors = [{ name = "Spur" }]
 classifiers = [
-    "License :: Other/Proprietary License",
+    "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
     "Programming Language :: Rust",
     "Operating System :: POSIX :: Linux",
     "Operating System :: MacOS",
