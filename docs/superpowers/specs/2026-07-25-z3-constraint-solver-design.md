@@ -1,9 +1,12 @@
 # Z3 Constraint Solver for Coding Agents — Design
 
-**Status:** Approved (brainstorming) — **post architect-reviewer amendments**  
+**Status:** Approved (brainstorming) — **post dual architect-reviewer amendments**  
 **Date:** 2026-07-25  
 **Crate (proposed):** `spur-solver`  
-**Review:** claude-code `architect-reviewer` @ `7b7e5a20` → **Accept-with-changes** (P0/P1 folded below)  
+**Reviews:**
+- claude-code `architect-reviewer` @ `7b7e5a20` → Accept-with-changes (P0/P1 folded)
+- codex `architect-reviewer` @ `21688cae` → Accept-with-changes on pre-patch `f963b1a9d`; residual items folded below (Codex did not see the first amendment commit)
+
 **Related prior art:** [alejandroqh/z39](https://github.com/alejandroqh/z39) (agent MCP over subprocess Z3)
 
 ## Purpose
@@ -55,23 +58,26 @@ Give SPUR brain and worker agents a **constraint model-finder** so coding work s
 ```
 Agent (brain | worker)
   → MCP: solve_constraints | solve_smt | get_solve_result
-    → SolverMcpModule (ToolModule)
-      → spur-solver
+    → SolverMcpModule (ToolModule; thin adapter)
+      → shared SolverService (process-wide, injected)
            ├─ types + validate
            ├─ B′ encoder → SMT-LIB2
-           ├─ raw SMT gate (size + reject-only command policy)
-           └─ Z3Process (spawn, timeout, kill, parse)
-                → optional persist <repo_root>/.spur/solver/<solve_id>.json
+           ├─ raw SMT gate (size + command allowlist)
+           ├─ process-wide semaphore + Z3Process
+           └─ optional persist <repo_root>/.spur/solver/<solve_id>.json
 ```
 
 ### Crate boundaries
 
 | Unit | Responsibility | Depends on |
 |---|---|---|
-| `crates/spur-solver` | Request/response types, B′→SMT encoder, Z3 runner, model parse, optional file persist | `serde`, tokio process; **not** `z3` / `z3-sys` |
-| `SolverMcpModule` | Tool definitions + dispatch; lives in `spur-solver` (crate layout like `spur-graph` / `spur-analyst` MCP modules) | `spur-mcp::ToolModule` |
-| Registry wiring (normative) | See composition sites below | `spur-core` |
-| Z3 binary | External solver | `SPUR_Z3_BIN`, then `PATH` |
+| `crates/spur-solver` | Types, encoder, raw gate, `Z3Process`, **`SolverService`**, persist | `serde`, tokio process; **not** `z3` / `z3-sys` |
+| `SolverService` | Process-wide ownership: binary discovery, version probe, semaphore, spawn/kill, persist root | constructed once at MCP server boot |
+| `SolverMcpModule` | Thin ToolModule adapter; no private Z3 state | `Arc<SolverService>` (or equivalent inject) |
+| Registry wiring (normative) | See composition sites below | `spur-core` injects the **same** `SolverService` into brain and worker modules when co-hosted |
+| Z3 binary | External solver | **Operator-only:** `SPUR_Z3_BIN` then `PATH`. Agents **never** supply executable path or argv |
+
+**Worker bridge:** Worker MCP servers receive `SolverService` via the same construction path as other worker modules (deps struct / `catalog_only` split). No separate auth protocol beyond existing worker MCP exposure; solver tools are not on the deny-list.
 
 ### Registry composition sites (normative)
 
@@ -145,7 +151,7 @@ All three tools are available to **brain and workers**. None belong in worker de
 
 **Output:** same status envelope; model parsing from preferred `(get-value (…))` when var list known, else `get-model`.
 
-**Guards (reject-only, v1):** exceed max script bytes → `invalid_params`; do **not** silently strip or rewrite agent SMT. Implementation maintains a deny-list of disallowed command prefixes (e.g. anything that is not pure SMT-LIB assert/check/get/set-logic/declare). Reject entire script if deny-list matches. Never shell out beyond `z3 -in`.
+**Guards (allowlist, v1):** exceed max script bytes → `invalid_params`. Parse SMT-LIB commands (line/S-expr aware enough for top-level forms). **Allow only** a fixed set such as: `set-logic`, `set-option` (restricted keys), `declare-const`, `declare-fun`, `declare-datatype`/`declare-datatypes` (optional v1.x), `assert`, `check-sat`, `get-model`, `get-value`, `push`, `pop`, `echo` (optional). **Reject entire script** if any other top-level command appears. Runner-owned suffix may append `(check-sat)` / `(get-value …)` when absent. Never shell out beyond fixed `z3` argv (`-in`, `-memory:…`, optional `-T:…`). Agents cannot pass custom flags.
 
 ### `get_solve_result`
 
@@ -268,15 +274,15 @@ Do **not** use a separate `Z3NotFound` code; use `solver_unavailable`.
 
 ## Z3 process lifecycle
 
-1. **Discover binary:** `SPUR_Z3_BIN` → `PATH` lookup for `z3` (`z3.exe` on Windows). If missing → `solver_unavailable` with install hint (no silent download in v1).
-2. **Spawn:** `z3 -in` plus resource flags when supported:
-   - memory soft limit via Z3 `-memory:<MB>` (default **1024**)
-   - optional internal `-T:` timeout as a backstop; **wall-clock kill remains authoritative**
+1. **Discover binary (boot + lazy):** `SPUR_Z3_BIN` → `PATH` lookup for `z3` (`z3.exe` on Windows). If missing → `solver_unavailable` with install hint (no silent download in v1). **Version probe:** run `z3 --version` once; store string on `SolverService` / artifacts. Unsupported platform behavior: same discovery failure path.
+2. **Spawn:** fixed argv only: `z3 -in` plus:
+   - `-memory:<MB>` (default **1024**)
+   - optional `-T:<secs>` backstop; **wall-clock kill remains authoritative**
 3. **Timeout:** wall-clock `timeout_ms` (default 30000, max 60000). Waiters on the concurrency semaphore **consume the same budget** (queue time counts).
-4. **Kill:** on timeout/cancel/shutdown, kill the child **process group** on Unix (`process_group(0)` + kill group); on Windows use the platform equivalent job-object / kill-tree pattern already used by spur-acp adapters. No zombies.
-5. **Parse:** prefer `(get-value (v1 v2 …))` for declared surface vars after sat; fall back to `get-model`. Tolerate multi-line `define-fun` and rational/int prints Z3 emits; map enum indices → labels. Unparseable after stdout cap → `status=error` / `parse_error`.
-6. **Concurrency:** **process-wide** `Semaphore` (default 4) around spawn. Normative: wait, don’t reject-busy, until timeout budget exhausts.
-7. **Stdout cap:** 1 MiB default; exceed → kill + `output_too_large` / `error`.
+4. **Kill / reap:** on timeout/cancel/shutdown, kill the child **process group** on Unix; on Windows use job-object / kill-tree as in spur-acp. Reap to avoid zombies. Concurrently drain **stdout and stderr** pipes (bounded).
+5. **Parse:** prefer `(get-value (…))` for declared surface vars after sat; fall back to `get-model`. Tolerate multi-line `define-fun` and int/rational prints; map enum indices → labels. Unparseable after caps → `status=error` / `parse_error`.
+6. **Concurrency:** **process-wide** `Semaphore` on `SolverService` (default 4). Wait until budget exhausts (no separate “busy” error required in v1).
+7. **Output caps:** stdout **1 MiB**, stderr **256 KiB**; exceed → kill + `output_too_large` / `error`.
 
 ### Testability
 
@@ -292,11 +298,15 @@ Do **not** use a separate `Z3NotFound` code; use `solver_unavailable`.
 | `persist: false` | Ephemeral result only; `solve_id` may be omitted |
 | `persist: true` | Atomic write of artifact under resolve root |
 
-**Persist root (normative):** hosting process **repo root** (same notion as orchestrator `repo_root` / worktree root for the MCP server). Path: `<repo_root>/.spur/solver/<solve_id>.json`.
+**Persist root (normative):** hosting process **repo root** (orchestrator `repo_root` / worktree root). Path: `<repo_root>/.spur/solver/<solve_id>.json`.
 
-**Atomic write:** write temp file in the same directory, `fsync`, then rename.
+**Git:** `.spur/solver/` **must be gitignored** (add to repo `.gitignore` / existing `.spur` ignore policy in the implementation plan). Solver artifacts are **not** a collaboration source of truth — beads remains SoT for tasks; `solve_id` is a handoff cache only.
 
-**`solve_id` format (pinned):** `sol_` + exactly 16 lowercase hex chars. Regex: `^sol_[0-9a-f]{16}$`. Validate **before** path join (traversal-safe).
+**Atomic write:** temp file in the same directory, `fsync`, rename. Prefer mode `0600` where OS allows.
+
+**Quota (v1):** max **256** artifacts per repo root or max **64 MiB** total under `.spur/solver/` (whichever first); on exceed, reject new `persist:true` with clear error (no silent GC in v1).
+
+**`solve_id` format (pinned):** `sol_` + exactly 16 lowercase hex chars. Regex: `^sol_[0-9a-f]{16}$`. Validate **before** path join (traversal-safe; reject `..`, slashes, uppercase).
 
 ### Artifact schema v1
 
@@ -332,15 +342,19 @@ Do **not** use a separate `Z3NotFound` code; use `solver_unavailable`.
 
 - **No** agent-supplied strings interpolated into SMT as free fragments inside the JSON path.
 - Encoder owns all SMT serialization of names and literals (after mangling).
-- Raw `solve_smt`: size limit; reject-only policy; stdin-only to Z3.
+- Raw `solve_smt`: size limit; **command allowlist**; stdin-only to fixed `z3` argv.
+- **`SPUR_Z3_BIN` / `PATH` are operator configuration.** Agents must never pass executable paths or Z3 flags.
+- Persisted formulas/models may be sensitive; default logging must not dump full SMT/models at info level.
 - **Injection / abuse test vectors (required):**
   - hostile identifiers / reserved names
   - SMT metacharacters in names (must fail validation pre-encode)
   - path traversal in `solve_id` (`../`, absolute paths)
   - oversized scripts / deep nesting / too many vars
   - enum label vs var name collisions
+  - raw SMT disallowed commands (`exit`, `(echo` abuse, non-allowlisted forms)
   - model echo-spoof / unexpected Z3 stdout shapes
   - concurrent storm against semaphore + timeout budget
+  - artifact quota exceed
 
 ## Resource defaults (contract)
 
@@ -352,7 +366,10 @@ Do **not** use a separate `Z3NotFound` code; use `solver_unavailable`.
 | Z3 `-memory:` soft cap | 1024 (MB) |
 | Z3 `-T:` backstop | equal to wall timeout seconds (optional; wall kill wins) |
 | Max SMT script bytes (raw) | 256 KiB |
+| Max generated SMT bytes (JSON path) | 256 KiB |
 | Max stdout bytes | 1 MiB |
+| Max stderr bytes | 256 KiB |
+| Max persisted artifacts / total size | 256 files or 64 MiB |
 
 ## Worked examples (normative fixtures)
 
@@ -363,7 +380,7 @@ Do **not** use a separate `Z3NotFound` code; use `solver_unavailable`.
 **Vars:** `workers` int_range 1..16, `batch` int_range 8..128.  
 **Constraints:** `workers >= 4` and `workers * (48 + 2*batch) <= 512` using tagged ConstraintExpr.
 
-**Example model:** `{ "workers": 4, "batch": 40 }` (exactly 512 MiB).
+**Example model (one feasible point; Z3 may return any sat assignment):** `{ "workers": 4, "batch": 40 }` satisfies equality to 512 MiB. Fixtures must assert **constraint satisfaction**, not a single golden model, unless the constraints force uniqueness.
 
 **Worker:** constants + unit test asserting the inequality.
 
@@ -389,9 +406,9 @@ Do **not** use a separate `Z3NotFound` code; use `solver_unavailable`.
   (encode nested `add`/`mul`/`sub` per wire form)
 - `ge(main, 640)`
 
-**Example model (all ints):** `{ "sidebar": 320, "rail": 280, "gutter": 16, "main": 808 }`.
+**Example model (illustrative; any sat model is valid):** `{ "sidebar": 320, "rail": 280, "gutter": 16, "main": 808 }`.
 
-**Prefer wide sidebar:** after a sat model, optional second query with `ge(sidebar, 300)` (or ratchet); do not claim optimality.
+**Prefer wide sidebar:** after a sat model, optional second query with `ge(sidebar, 300)` (or ratchet); do not claim optimality. Tests check feasibility predicates, not pixel uniqueness, unless forced.
 
 **Worker:** CSS variables + layout test using integer px.
 
@@ -426,11 +443,11 @@ Phased build (~4–5 engineering days, estimate only):
 
 | Phase | Scope |
 |---|---|
-| 0–2 | Types, validation, encoder, mangling, `Z3Process`, **semaphore**, fake-solver + kill tests |
-| 3 | `SolverMcpModule` + wiring into the three composition sites |
-| 4 | Shutdown coordination polish; optional idempotency cache (non-blocking) |
-| 5 | Persist artifact schema v1 + `get_solve_result` |
-| 6 | `solve_smt` reject-only gate + docs/skill note |
+| 0–2 | Types, validation, encoder, mangling, `Z3Process`, **`SolverService` + semaphore**, version probe, fake-solver + kill/reap tests |
+| 3 | `SolverMcpModule` + inject shared service into the three composition sites |
+| 4 | Shutdown coordination; optional idempotency cache (non-blocking) |
+| 5 | Persist artifact schema v1, gitignore, quota + `get_solve_result` |
+| 6 | `solve_smt` **allowlist** gate + docs/skill note |
 | 7 | Optional blob-store (deferred) |
 
 **Success criteria for implementation:**
