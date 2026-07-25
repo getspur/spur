@@ -284,6 +284,38 @@ impl SolveConstraintsRequest {
     }
 }
 
+/// Request for raw SMT-LIB2 model-finding.
+///
+/// The raw script bypasses B′ expression validation, but
+/// [`crate::smt_gate`] still enforces the script byte cap and top-level command
+/// allowlist before any subprocess is invoked.
+///
+/// # Examples
+///
+/// ```
+/// use spur_solver::types::{SolveSmtRequest, DEFAULT_TIMEOUT_MS};
+///
+/// let request = SolveSmtRequest {
+///     smt_lib: "(declare-const answer Int)\n(check-sat)\n".to_owned(),
+///     timeout_ms: DEFAULT_TIMEOUT_MS,
+///     persist: false,
+/// };
+///
+/// assert!(request.smt_lib.contains("check-sat"));
+/// ```
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SolveSmtRequest {
+    /// Complete SMT-LIB2 script passed to the fixed solver stdin.
+    pub smt_lib: String,
+    /// Wall-clock budget in milliseconds.
+    #[serde(default = "default_timeout_ms")]
+    pub timeout_ms: u64,
+    /// Whether the service should persist the solve for later retrieval.
+    #[serde(default)]
+    pub persist: bool,
+}
+
 /// Status reported by the solver service.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -308,7 +340,7 @@ pub enum ModelValue {
     Bool(bool),
     /// Signed integer model value.
     Int(i64),
-    /// Enum label, mapped back from its internal representation.
+    /// Enum label, or an opaque SMT-LIB value from the raw solver path.
     Enum(String),
 }
 
