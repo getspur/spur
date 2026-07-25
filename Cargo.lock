@@ -11302,6 +11302,7 @@ dependencies = [
  "spur-license",
  "spur-mcp",
  "spur-pm",
+ "spur-solver",
  "spur-telemetry",
  "spur-test-madsim",
  "spur-worktree",
@@ -11499,6 +11500,23 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "spur-solver"
+version = "1.19.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "fs2",
+ "libc",
+ "serde",
+ "serde_json",
+ "spur-mcp",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
  "uuid",
 ]
 
