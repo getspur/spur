@@ -316,10 +316,10 @@ fn supported_usage_without_update_renders_placeholder() {
 }
 
 #[test]
-fn one_hundred_seventy_columns_use_compact_model_effort_usage_form() {
-    // Narrow enough that full metrics (~103 cols) + hint (~98 cols) don't fit,
-    // but wide enough that compact metrics (~50 cols) + hint do — the band
-    // where compacting the metrics actually buys back the hint's space.
+fn one_hundred_seventy_columns_keep_full_metrics_with_compact_hint() {
+    // With the compact-hint reserve, 170 cols still fits full metrics while
+    // the long SessionDetail full-hint may not — so compact the left-side
+    // keys without dropping model/effort/usage on the right.
     let line = render_status(
         170,
         Some("gpt-5-super-long-model-name"),
@@ -330,17 +330,23 @@ fn one_hundred_seventy_columns_use_compact_model_effort_usage_form() {
     );
 
     assert!(
-        line.contains("super-long-mo… · ctx 47%"),
-        "compact status bar should keep truncated model and usage: {line}"
+        line.contains("Medium") && line.contains("ctx 47%"),
+        "170-column bar should keep full effort/usage metrics: {line}"
     );
     assert!(
-        !line.contains("Medium"),
-        "compact status bar should drop effort: {line}"
+        line.contains("[Esc]back") && line.contains("[Enter]send"),
+        "170-column bar should keep SessionDetail key hints: {line}"
+    );
+    assert!(
+        !line.contains("[j/k]") || line.contains("[Alt-d]workers"),
+        "when space is tight prefer compact keys or correct worker label: {line}"
     );
 }
 
 #[test]
-fn one_hundred_columns_keep_full_model_effort_usage_form() {
+fn one_hundred_columns_prefer_compact_metrics_and_keep_esc_hint() {
+    // Typical laptop width: full metrics (~100) + full SessionDetail hint (~85)
+    // cannot coexist. Prefer compact metrics so Esc/send hints stay visible.
     let line = render_status(
         100,
         Some("GPT-5 Codex"),
@@ -351,8 +357,41 @@ fn one_hundred_columns_keep_full_model_effort_usage_form() {
     );
 
     assert!(
-        line.contains("[default] GPT-5 Codex · Medium · ctx 47%"),
-        "100-column status bar should keep the full model/effort/usage group: {line}"
+        line.contains("[Esc]back") || line.contains("[Enter]send"),
+        "100-column SessionDetail status bar must keep key hints visible: {line}"
+    );
+    assert!(
+        !line.contains("Medium"),
+        "100-column status bar should drop effort in compact metrics: {line}"
+    );
+    assert!(
+        line.contains("ctx 47%") || line.contains("GPT") || line.contains("Codex"),
+        "compact metrics should still surface model or usage: {line}"
+    );
+}
+
+#[test]
+fn one_hundred_twenty_columns_show_compact_session_detail_hint() {
+    let line = render_status(
+        120,
+        Some("GPT-5 Codex"),
+        Some("Medium"),
+        true,
+        Some(47),
+        Some(100),
+    );
+
+    assert!(
+        line.contains("[Esc]back"),
+        "120-column status bar should keep [Esc]back: {line}"
+    );
+    assert!(
+        line.contains("[Enter]send"),
+        "120-column status bar should keep [Enter]send: {line}"
+    );
+    assert!(
+        !line.contains("[Alt-g]"),
+        "SessionDetail hints must not advertise Alt-g as workers: {line}"
     );
 }
 

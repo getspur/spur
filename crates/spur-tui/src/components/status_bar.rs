@@ -69,21 +69,40 @@ pub fn render_tombstone_badge(
     )])
 }
 
-/// Returns the status-bar hint string for the SessionDetail view.
+/// Returns the full status-bar hint string for the SessionDetail view.
 ///
 /// When `stream_in_flight` is true and the composer will not consume Esc,
 /// the hint shows `[Esc]stop`; otherwise it shows `[Esc]back`. The caller is
 /// responsible for AND-ing with `!cancelling_in_flight` before passing the
 /// stream flag so the misleading `[Esc]stop` disappears once a cancel is
 /// already in progress.
+///
+/// Key labels match real bindings:
+/// - `Alt-m` toggles plan mode
+/// - `Alt-d` toggles the inline workers panel (not global `Alt-g` InspectWorkers)
+/// - `Ctrl-r` opens input history
 pub(crate) fn hint_for_session_detail(
     stream_in_flight: bool,
     esc_consumed_by_composer: bool,
 ) -> &'static str {
     if stream_in_flight && !esc_consumed_by_composer {
-        " [Enter]send [Esc]stop [j/k]scroll [Alt-m]plan [Alt-d]panel [Alt-g]workers [Ctrl-r]history [?]help"
+        " [Enter]send [Esc]stop [j/k]scroll [Alt-m]plan [Alt-d]workers [Ctrl-r]history [?]help"
     } else {
-        " [Enter]send [Esc]back [j/k]scroll [Alt-m]plan [Alt-d]panel [Alt-g]workers [Ctrl-r]history [?]help"
+        " [Enter]send [Esc]back [j/k]scroll [Alt-m]plan [Alt-d]workers [Ctrl-r]history [?]help"
+    }
+}
+
+/// Compact SessionDetail hint used when the full hint does not fit the
+/// left-hand status-bar slot. Keeps send/Esc plus the highest-value
+/// session-local shortcuts; drops j/k scroll and Ctrl-r history.
+pub(crate) fn hint_for_session_detail_compact(
+    stream_in_flight: bool,
+    esc_consumed_by_composer: bool,
+) -> &'static str {
+    if stream_in_flight && !esc_consumed_by_composer {
+        " [Enter]send [Esc]stop [Alt-m]plan [Alt-d]workers [?]help"
+    } else {
+        " [Enter]send [Esc]back [Alt-m]plan [Alt-d]workers [?]help"
     }
 }
 
@@ -247,20 +266,35 @@ impl StatusBar {
         let compact_line = Line::from(compact_spans);
         let compact_width = compact_line.width() as u16;
 
-        // SessionDetail's hint text is longer and state-dependent (unlike the other
-        // views' short fixed hints), so reserve exactly its rendered width instead of
-        // the other views' flat 45-col guess. Without this, metrics could claim the
-        // whole line and clip the hint text mid-word with no fallback.
-        let use_compact = if matches!(props.view, ViewId::SessionDetail(_)) {
-            let hint_text = props.view_hint_override.map(|o| o.full).unwrap_or_else(|| {
-                hint_for_session_detail(props.stream_in_flight, props.esc_consumed_by_composer)
+        // Effective hint for this frame: explicit override, or SessionDetail's
+        // full+compact pair. Other views keep short fixed strings below.
+        let session_detail_hint =
+            matches!(props.view, ViewId::SessionDetail(_)).then(|| HintOverride {
+                full: hint_for_session_detail(
+                    props.stream_in_flight,
+                    props.esc_consumed_by_composer,
+                ),
+                compact: Some(hint_for_session_detail_compact(
+                    props.stream_in_flight,
+                    props.esc_consumed_by_composer,
+                )),
+                hide_on_overflow: false,
             });
-            let hints_reserve = Span::raw(hint_text).width() as u16;
-            full_width + hints_reserve > area.width && compact_width + hints_reserve <= area.width
+        let effective_hint = props.view_hint_override.or(session_detail_hint);
+
+        // Reserve space for the *smallest usable* hint so metrics compact
+        // early enough for typical SessionDetail terminals (100–140 cols).
+        // Prefer compact metrics whenever full metrics crowd that reserve —
+        // do not require compact_metrics + full_hint to still fit (that gate
+        // previously kept full metrics on narrow widths and zeroed the hints).
+        let hints_reserve = if let Some(o) = effective_hint.as_ref() {
+            o.compact
+                .map(|c| Span::raw(c).width() as u16)
+                .unwrap_or_else(|| Span::raw(o.full).width() as u16)
         } else {
-            let hints_reserve = 45u16;
-            full_width + hints_reserve > area.width && compact_width + hints_reserve <= area.width
+            45u16
         };
+        let use_compact = full_width + hints_reserve > area.width && compact_width < full_width;
         let (right, right_width) = if use_compact {
             (compact_line, compact_width)
         } else {
@@ -272,7 +306,7 @@ impl StatusBar {
             .width
             .saturating_sub(right_width.max(1))
             .saturating_sub(2);
-        let resolved_hint: &str = if let Some(o) = props.view_hint_override.as_ref() {
+        let resolved_hint: &str = if let Some(o) = effective_hint.as_ref() {
             let full_w = Span::raw(o.full).width() as u16;
             let compact_w = o.compact.map(|c| Span::raw(c).width() as u16);
 
@@ -305,9 +339,11 @@ impl StatusBar {
                     " [j/k]navigate [Enter]inspect [p]pause/resume [x]retire [r]refresh [Esc]back"
                 }
                 ViewId::ExploreBrowser => "explore — Tab tabs · space select · r reload",
-                ViewId::SessionDetail(_) => {
-                    hint_for_session_detail(props.stream_in_flight, props.esc_consumed_by_composer)
-                }
+                // Covered by `effective_hint` above; keep arm for exhaustiveness.
+                ViewId::SessionDetail(_) => hint_for_session_detail(
+                    props.stream_in_flight,
+                    props.esc_consumed_by_composer,
+                ),
                 ViewId::SessionPicker => " [\u{2191}\u{2193}]navigate [Enter]select [Esc]back",
                 ViewId::PlanInspector(_) => " [Esc]back [Alt-p]close",
                 ViewId::Insights => "Insights",
@@ -524,9 +560,12 @@ impl StatusBar {
 
 #[cfg(test)]
 mod status_bar_hint_tests {
-    use super::{hint_for_session_detail, StatusBar, StatusBarProps};
+    use super::{
+        hint_for_session_detail, hint_for_session_detail_compact, StatusBar, StatusBarProps,
+    };
     use crate::action::ViewId;
     use ratatui::style::Style;
+    use ratatui::text::Span;
 
     fn status_bar_metric_contents(
         view: &ViewId,
@@ -576,6 +615,11 @@ mod status_bar_hint_tests {
         let hint = hint_for_session_detail(true, false);
         assert!(hint.contains("[Esc]stop"), "got: {hint}");
         assert!(!hint.contains("[Esc]back"));
+        assert!(hint.contains("[Alt-d]workers"), "got: {hint}");
+        assert!(
+            !hint.contains("[Alt-g]"),
+            "Alt-g is global InspectWorkers, not the inline panel: {hint}"
+        );
     }
 
     #[test]
@@ -590,6 +634,20 @@ mod status_bar_hint_tests {
         let hint = hint_for_session_detail(false, false);
         assert!(hint.contains("[Esc]back"), "got: {hint}");
         assert!(!hint.contains("[Esc]stop"));
+    }
+
+    #[test]
+    fn compact_hint_keeps_esc_and_drops_scroll_history() {
+        let full = hint_for_session_detail(true, false);
+        let compact = hint_for_session_detail_compact(true, false);
+        assert!(compact.contains("[Esc]stop"), "got: {compact}");
+        assert!(compact.contains("[Alt-d]workers"), "got: {compact}");
+        assert!(!compact.contains("[j/k]"), "got: {compact}");
+        assert!(!compact.contains("[Ctrl-r]"), "got: {compact}");
+        assert!(
+            Span::raw(compact).width() < Span::raw(full).width(),
+            "compact must be shorter than full"
+        );
     }
 
     #[test]
