@@ -292,6 +292,7 @@ fn variable_schema() -> Value {
                     "values": {
                         "type": "array",
                         "minItems": 1,
+                        "uniqueItems": true,
                         "items": { "type": "string" }
                     }
                 },
@@ -369,6 +370,193 @@ fn constraint_expression_schema() -> Value {
 fn identifier_schema() -> Value {
     json!({
         "type": "string",
+        "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
         "description": "B-prime surface identifier; validation rejects reserved or unsafe names."
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use serde_json::{json, Value};
+
+    use super::{
+        serialize_response, service_error, tool_definitions, INVALID_PARAMS_CODE,
+        RESOURCE_NOT_FOUND_CODE,
+    };
+    use crate::{
+        persist::PersistError,
+        service::{InvalidRequestError, SolverServiceError},
+        smt_gate::MAX_RAW_SMT_BYTES,
+        types::{
+            ModelValue, SolveConstraintsResponse, SolveStatus, DEFAULT_TIMEOUT_MS, MAX_CONSTRAINTS,
+            MAX_TIMEOUT_MS, MAX_VARIABLES,
+        },
+    };
+
+    #[test]
+    fn solver_tool_schemas_cover_the_full_request_contract() {
+        let tools = tool_definitions();
+        let names: Vec<_> = tools.iter().map(|tool| tool.name.as_str()).collect();
+        assert_eq!(
+            names,
+            ["solve_constraints", "solve_smt", "get_solve_result"]
+        );
+
+        let typed = schema(&tools, "solve_constraints");
+        assert_eq!(typed["required"], json!(["vars", "constraints"]));
+        assert_eq!(typed["additionalProperties"], false);
+        assert_eq!(
+            typed["properties"]["vars"]["maxItems"],
+            json!(MAX_VARIABLES)
+        );
+        assert_eq!(
+            typed["properties"]["constraints"]["maxItems"],
+            json!(MAX_CONSTRAINTS)
+        );
+        assert_timeout_schema(&typed["properties"]["timeout_ms"]);
+        assert_eq!(typed["properties"]["persist"]["default"], false);
+
+        let variable_variants = typed["properties"]["vars"]["items"]["oneOf"]
+            .as_array()
+            .expect("variable schema must use oneOf");
+        let variable_types: Vec<_> = variable_variants
+            .iter()
+            .map(|variant| {
+                variant["properties"]["type"]["const"]
+                    .as_str()
+                    .expect("variable variant must have a type tag")
+            })
+            .collect();
+        assert_eq!(variable_types, ["bool", "int", "int_range", "enum"]);
+        for variant in variable_variants {
+            assert_eq!(
+                variant["properties"]["name"]["pattern"],
+                "^[A-Za-z_][A-Za-z0-9_]*$"
+            );
+        }
+        assert_eq!(
+            variable_variants[3]["properties"]["values"]["uniqueItems"],
+            true
+        );
+
+        let expression_variants = typed["properties"]["constraints"]["items"]["oneOf"]
+            .as_array()
+            .expect("constraint expression schema must use oneOf");
+        let expression_kinds: Vec<_> = expression_variants
+            .iter()
+            .map(|variant| {
+                variant["properties"]["kind"]["const"]
+                    .as_str()
+                    .expect("constraint variant must have a kind tag")
+            })
+            .collect();
+        assert_eq!(expression_kinds, ["var", "int", "bool", "enum_label", "op"]);
+        assert_eq!(
+            expression_variants[4]["properties"]["op"]["enum"],
+            json!(["eq", "ne", "lt", "le", "gt", "ge", "add", "sub", "mul", "and", "or", "not"])
+        );
+
+        let raw = schema(&tools, "solve_smt");
+        assert_eq!(raw["required"], json!(["smt_lib"]));
+        assert_eq!(raw["additionalProperties"], false);
+        assert_eq!(
+            raw["properties"]["smt_lib"]["maxLength"],
+            json!(MAX_RAW_SMT_BYTES)
+        );
+        assert_timeout_schema(&raw["properties"]["timeout_ms"]);
+
+        let lookup = schema(&tools, "get_solve_result");
+        assert_eq!(lookup["required"], json!(["solve_id"]));
+        assert_eq!(lookup["additionalProperties"], false);
+        assert_eq!(
+            lookup["properties"]["solve_id"]["pattern"],
+            "^sol_[0-9a-f]{16}$"
+        );
+    }
+
+    #[test]
+    fn result_statuses_serialize_without_changing_transport_meaning() {
+        for (status, expected, model, reason) in [
+            (
+                SolveStatus::Sat,
+                "sat",
+                Some(BTreeMap::from([("value".to_owned(), ModelValue::Int(4))])),
+                None,
+            ),
+            (SolveStatus::Unsat, "unsat", None, None),
+            (SolveStatus::Unknown, "unknown", None, None),
+            (SolveStatus::Timeout, "timeout", None, None),
+            (
+                SolveStatus::Error,
+                "error",
+                None,
+                Some("parse_error".to_owned()),
+            ),
+        ] {
+            let value = serialize_response(
+                "solve_constraints",
+                SolveConstraintsResponse {
+                    status,
+                    model,
+                    duration_ms: 1,
+                    solve_id: None,
+                    reason,
+                    smt: None,
+                },
+            )
+            .expect("solver result status must serialize");
+
+            assert_eq!(value["status"], expected);
+        }
+    }
+
+    #[test]
+    fn service_errors_map_to_stable_mcp_codes() {
+        let invalid_request = service_error(SolverServiceError::InvalidParams {
+            source: InvalidRequestError::TimeoutTooLarge {
+                timeout_ms: MAX_TIMEOUT_MS + 1,
+                max_timeout_ms: MAX_TIMEOUT_MS,
+            },
+        });
+        assert_eq!(invalid_request.code.0, INVALID_PARAMS_CODE);
+
+        let invalid_id = service_error(SolverServiceError::Persistence(
+            PersistError::InvalidSolveId {
+                solve_id: "../escape".to_owned(),
+            },
+        ));
+        assert_eq!(invalid_id.code.0, INVALID_PARAMS_CODE);
+
+        let missing_id = service_error(SolverServiceError::Persistence(
+            PersistError::SolveIdNotFound {
+                solve_id: "sol_0000000000000000".to_owned(),
+            },
+        ));
+        assert_eq!(missing_id.code.0, RESOURCE_NOT_FOUND_CODE);
+
+        for internal in [
+            SolverServiceError::SolverUnavailable {
+                message: "install z3".to_owned(),
+            },
+            SolverServiceError::RepoRootNotConfigured,
+        ] {
+            assert_eq!(service_error(internal).code.0, -32603);
+        }
+    }
+
+    fn schema<'a>(tools: &'a [spur_mcp::ToolDefinition], tool_name: &str) -> &'a serde_json::Value {
+        &tools
+            .iter()
+            .find(|tool| tool.name == tool_name)
+            .unwrap_or_else(|| panic!("missing {tool_name} tool definition"))
+            .input_schema
+    }
+
+    fn assert_timeout_schema(schema: &Value) {
+        assert_eq!(schema["minimum"], 0);
+        assert_eq!(schema["maximum"], json!(MAX_TIMEOUT_MS));
+        assert_eq!(schema["default"], json!(DEFAULT_TIMEOUT_MS));
+    }
 }
