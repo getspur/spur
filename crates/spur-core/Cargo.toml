@@ -44,6 +44,7 @@ spur-blob-store = { workspace = true }
 spur-graph = { workspace = true, default-features = false }
 spur-mcp = { workspace = true }
 spur-pm = { workspace = true }
+spur-solver = { workspace = true }
 spur-worktree = { workspace = true }
 spur-cost = { workspace = true }
 spur-telemetry = { path = "../spur-telemetry" }
