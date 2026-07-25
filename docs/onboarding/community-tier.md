@@ -19,11 +19,11 @@ Pro adds: parallel workers within one orchestrator (`max_concurrent_workers = 10
 
 The canonical feature list lives in [`crates/spur-license/resources/default_policy.json`](../../crates/spur-license/resources/default_policy.json) under `tier_policies`. It is signed (Ed25519) and verified at compile time and runtime, and it is the single source of truth for tier entitlements — there are no runtime feature grants outside the signed policy.
 
-## Single SPUR per repo
+## Multiple SPUR TUIs per repo
 
-Community enforces one SPUR TUI orchestrator per repository at a time. Launching a second `spur tui` in the same repo will exit cleanly with a message identifying the running process. Read-only commands (`spur auth status`, `spur sessions list`) are not affected.
+Community allows multiple `spur tui` processes to run against the same repository. TUI startup does not acquire a tier-specific repository pidfile, so another running Community TUI does not block a new one.
 
-This keeps Community focused on a single coordinated workflow per project. Pro removes this limit and adds parallel workers within a single orchestrator (up to 10 concurrent) with shared lineage across all of them — the recommended way to run multiple agents simultaneously.
+The signed Community policy still limits each orchestrator to one concurrent worker (`max_concurrent_workers = 1`). Multiple TUI processes therefore provide process-level concurrency, but they do not share cross-instance state coordination. Pro adds up to 10 concurrent workers within one orchestrator with shared lineage.
 
 ## Upgrading to Pro
 
