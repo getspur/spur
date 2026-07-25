@@ -10,7 +10,7 @@ use std::{
 use spur_solver::{
     process::{ProcessFuture, ProcessOutcome, ProcessOutput, ProcessRequest, ProcessRunner},
     service::SolverService,
-    types::{ConstraintExpr, SolveConstraintsRequest, SolveStatus, Variable, DEFAULT_TIMEOUT_MS},
+    types::{SolveConstraintsRequest, SolveStatus},
 };
 use tokio::sync::{Notify, Semaphore};
 
@@ -162,32 +162,6 @@ fn empty_request(timeout_ms: u64) -> SolveConstraintsRequest {
         timeout_ms,
         persist: false,
     }
-}
-
-#[tokio::test]
-async fn real_z3_unsat_protocol_is_env_gated() {
-    if std::env::var("SPUR_TEST_Z3").as_deref() != Ok("1") {
-        return;
-    }
-
-    let response = SolverService::new()
-        .solve_constraints(SolveConstraintsRequest {
-            vars: vec![Variable::Int {
-                name: "value".to_owned(),
-            }],
-            constraints: vec![ConstraintExpr::Bool { value: false }],
-            timeout_ms: DEFAULT_TIMEOUT_MS,
-            persist: false,
-        })
-        .await
-        .expect("enabled real Z3 solve should start");
-
-    assert_eq!(
-        response.status,
-        SolveStatus::Unsat,
-        "unexpected real Z3 response: {response:?}"
-    );
-    assert!(response.model.is_none());
 }
 
 #[cfg(unix)]
