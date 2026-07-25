@@ -7,7 +7,11 @@ pub mod review_verdict;
 pub mod signals;
 pub mod worker;
 
-use std::sync::{Arc, OnceLock};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex, OnceLock, Weak},
+};
 
 pub use context_service::{ContextServiceAuth, ContextServiceClient};
 pub use local_projects::{IndexedLocalProjectValidator, LocalProjectMcpComposition};
@@ -64,12 +68,48 @@ pub fn brain_tool_registry(
     )
 }
 
+pub(crate) fn brain_tool_registry_for_repo_root(
+    delegation_deps: delegation::DelegationMcpDeps,
+    plan_deps: plan::PlanMcpDeps,
+    signal_deps: signals::SignalMcpDeps,
+    context_service_config: &ContextServiceConfig,
+    repo_root: &Path,
+) -> Result<spur_mcp::ToolRegistry, spur_mcp::ToolRegistryError> {
+    let local_projects = delegation_deps.local_projects().clone();
+    brain_tool_registry_with_local_projects_and_repo_root(
+        delegation_deps,
+        plan_deps,
+        signal_deps,
+        context_service_config,
+        &local_projects,
+        Some(repo_root),
+    )
+}
+
 pub(crate) fn brain_tool_registry_with_local_projects(
     delegation_deps: delegation::DelegationMcpDeps,
     plan_deps: plan::PlanMcpDeps,
     signal_deps: signals::SignalMcpDeps,
     context_service_config: &ContextServiceConfig,
     local_projects: &LocalProjectMcpComposition,
+) -> Result<spur_mcp::ToolRegistry, spur_mcp::ToolRegistryError> {
+    brain_tool_registry_with_local_projects_and_repo_root(
+        delegation_deps,
+        plan_deps,
+        signal_deps,
+        context_service_config,
+        local_projects,
+        None,
+    )
+}
+
+fn brain_tool_registry_with_local_projects_and_repo_root(
+    delegation_deps: delegation::DelegationMcpDeps,
+    plan_deps: plan::PlanMcpDeps,
+    signal_deps: signals::SignalMcpDeps,
+    context_service_config: &ContextServiceConfig,
+    local_projects: &LocalProjectMcpComposition,
+    repo_root: Option<&Path>,
 ) -> Result<spur_mcp::ToolRegistry, spur_mcp::ToolRegistryError> {
     let mut builder = spur_mcp::ToolRegistry::builder()
         .with(delegation::DelegationMcpModule::new(delegation_deps))?
@@ -80,7 +120,7 @@ pub(crate) fn brain_tool_registry_with_local_projects(
         .with(plan::PlanMcpModule::remainder(plan_deps))?
         .with(signals::SignalMcpModule::new(signal_deps))?
         .with(spur_solver::mcp::SolverMcpModule::new(
-            shared_solver_service(),
+            shared_solver_service(repo_root),
         ))?
         .with_alias("code_search", "code_symbol_search")?;
     if let Some(context_service_client) = context_service_client(context_service_config) {
@@ -162,6 +202,13 @@ pub fn worker_tool_registry_with_context_service(
 fn worker_tool_registry_with_client(
     context_service_client: Option<context_service::ContextServiceClient>,
 ) -> Result<spur_mcp::ToolRegistry, spur_mcp::ToolRegistryError> {
+    worker_tool_registry_with_client_and_repo_root(context_service_client, None)
+}
+
+fn worker_tool_registry_with_client_and_repo_root(
+    context_service_client: Option<context_service::ContextServiceClient>,
+    repo_root: Option<&Path>,
+) -> Result<spur_mcp::ToolRegistry, spur_mcp::ToolRegistryError> {
     let mut builder = spur_mcp::ToolRegistry::builder()
         .with(catalog::WorkerCatalogMcpModule::prelude())?
         .with(worker::WorkerReadMcpModule::plan(
@@ -178,7 +225,7 @@ fn worker_tool_registry_with_client(
         }))?
         .with(review_verdict::ReviewVerdictMcpModule)?
         .with(spur_solver::mcp::SolverMcpModule::new(
-            shared_solver_service(),
+            shared_solver_service(repo_root),
         ))?
         .with_alias("code_search", "code_symbol_search")?;
     if let Some(context_service_client) = context_service_client {
@@ -189,19 +236,44 @@ fn worker_tool_registry_with_client(
         .build())
 }
 
-fn shared_solver_service() -> Arc<spur_solver::service::SolverService> {
-    static SERVICE: OnceLock<Arc<spur_solver::service::SolverService>> = OnceLock::new();
-    Arc::clone(SERVICE.get_or_init(|| Arc::new(spur_solver::service::SolverService::new())))
+struct SharedSolverServices {
+    unrooted: Arc<spur_solver::service::SolverService>,
+    rooted: Mutex<HashMap<PathBuf, Weak<spur_solver::service::SolverService>>>,
+}
+
+fn shared_solver_service(repo_root: Option<&Path>) -> Arc<spur_solver::service::SolverService> {
+    static SERVICES: OnceLock<SharedSolverServices> = OnceLock::new();
+    let services = SERVICES.get_or_init(|| SharedSolverServices {
+        unrooted: Arc::new(spur_solver::service::SolverService::new()),
+        rooted: Mutex::new(HashMap::new()),
+    });
+    let Some(repo_root) = repo_root else {
+        return Arc::clone(&services.unrooted);
+    };
+
+    let mut rooted = services
+        .rooted
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(service) = rooted.get(repo_root).and_then(Weak::upgrade) {
+        return service;
+    }
+
+    let service = Arc::new(services.unrooted.as_ref().clone().with_repo_root(repo_root));
+    rooted.insert(repo_root.to_path_buf(), Arc::downgrade(&service));
+    service
 }
 
 pub(crate) fn worker_tool_dispatch(
     context_service_config: &ContextServiceConfig,
+    repo_root: Option<&Path>,
 ) -> (
     Result<spur_mcp::ToolRegistry, spur_mcp::ToolRegistryError>,
     Option<context_service::ContextServiceClient>,
 ) {
     let context_service_client = context_service_client(context_service_config);
-    let registry = worker_tool_registry_with_client(context_service_client.clone());
+    let registry =
+        worker_tool_registry_with_client_and_repo_root(context_service_client.clone(), repo_root);
     (registry, context_service_client)
 }
 

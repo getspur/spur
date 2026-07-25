@@ -1136,7 +1136,7 @@ impl WorkerToolHandler {
         context_service_config: &ContextServiceConfig,
     ) -> (Self, Vec<String>) {
         let (tool_registry, context_service_client) =
-            crate::mcp::worker_tool_dispatch(context_service_config);
+            crate::mcp::worker_tool_dispatch(context_service_config, deps.repo_root.as_deref());
         let worker_mcp_tool_names = tool_registry
             .as_ref()
             .map(crate::mcp::worker_mcp_claude_tool_names_for_registry)
