@@ -224,7 +224,7 @@ impl Orchestrator {
         plan_deps: crate::mcp::plan::PlanMcpDeps,
         event_sink: Option<Arc<dyn spur_mcp::McpEventSink>>,
     ) -> Result<spur_mcp::ToolRegistry, spur_mcp::ToolRegistryError> {
-        crate::mcp::brain_tool_registry(
+        crate::mcp::brain_tool_registry_for_repo_root(
             delegation_deps,
             plan_deps,
             crate::mcp::signals::SignalMcpDeps {
@@ -233,6 +233,7 @@ impl Orchestrator {
                 feature_gate: self.mcp_feature_gate(),
             },
             &self.config.context_service,
+            &self.repo_root,
         )
     }
 
