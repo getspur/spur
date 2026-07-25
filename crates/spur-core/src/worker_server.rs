@@ -3862,6 +3862,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn worker_solver_registry_reads_artifacts_from_dispatcher_repo_root() {
+        let dir = TempDir::new().expect("tempdir");
+        let writer = spur_solver::service::SolverService::new().with_repo_root(dir.path());
+        let request = spur_solver::types::SolveConstraintsRequest {
+            vars: Vec::new(),
+            constraints: Vec::new(),
+            timeout_ms: spur_solver::types::DEFAULT_TIMEOUT_MS,
+            persist: false,
+        };
+        let result = spur_solver::types::SolveConstraintsResponse {
+            status: spur_solver::types::SolveStatus::Unsat,
+            model: None,
+            duration_ms: 12,
+            solve_id: None,
+            reason: None,
+            smt: None,
+        };
+        let artifact = writer
+            .persist(&request, &result)
+            .expect("seed repository-local solver artifact");
+        let pm = pm_service_fixture(dir.path()).await;
+        let mut deps = worker_mcp_deps_fixture(
+            pm,
+            pro_feature_gate(),
+            Arc::new(RecordingWorkerSignalSink::default()),
+        );
+        deps.repo_root = Some(dir.path().to_path_buf());
+        let server = WorkerMcpServer::start("brain-A".into(), deps)
+            .await
+            .expect("start worker server");
+        server.register_delegation("del-solver-root".into(), DelegationContext::default());
+        let token = server.issue_token("del-solver-root", Duration::from_secs(60));
+        let config =
+            StreamableHttpClientTransportConfig::with_uri(server.url()).auth_header(&token);
+        let client =
+            ().serve(StreamableHttpClientTransport::from_config(config))
+                .await
+                .expect("rmcp client initialize");
+        let mut request = CallToolRequestParams::new("get_solve_result");
+        request.arguments = json!({ "solve_id": artifact.solve_id })
+            .as_object()
+            .cloned();
+
+        let response = client
+            .call_tool(request)
+            .await
+            .expect("rooted worker registry must load the artifact");
+        let response = serde_json::to_value(response).expect("serialize solver response");
+        let body = response["content"][0]["text"]
+            .as_str()
+            .expect("solver response must contain JSON text");
+        let payload: Value = serde_json::from_str(body).expect("solver response text must be JSON");
+        assert_eq!(payload["solve_id"], artifact.solve_id);
+        assert_eq!(payload["status"], "unsat");
+
+        drop(client);
+        server.shutdown(Duration::from_secs(5)).await;
+    }
+
+    #[tokio::test]
     async fn shutdown_reports_active_call_until_durable_handler_acknowledges() {
         let dir = TempDir::new().expect("tempdir");
         let pm = pm_service_fixture(dir.path()).await;

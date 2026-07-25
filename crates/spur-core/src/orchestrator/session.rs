@@ -1474,6 +1474,86 @@ mod session_attach_guard_transfer_tests {
     }
 
     #[tokio::test]
+    async fn brain_solver_registry_reads_artifacts_from_orchestrator_repo_root() {
+        let tmp = tempfile::TempDir::new().expect("create repository root");
+        let writer = spur_solver::service::SolverService::new().with_repo_root(tmp.path());
+        let request = spur_solver::types::SolveConstraintsRequest {
+            vars: Vec::new(),
+            constraints: Vec::new(),
+            timeout_ms: spur_solver::types::DEFAULT_TIMEOUT_MS,
+            persist: false,
+        };
+        let result = spur_solver::types::SolveConstraintsResponse {
+            status: spur_solver::types::SolveStatus::Unsat,
+            model: None,
+            duration_ms: 12,
+            solve_id: None,
+            reason: None,
+            smt: None,
+        };
+        let artifact = writer
+            .persist(&request, &result)
+            .expect("seed repository-local solver artifact");
+
+        let mut config = SpurConfig::default();
+        config.cost.db_path = tmp.path().join("cost.db").display().to_string();
+        let orchestrator =
+            Orchestrator::new(tmp.path().to_path_buf(), config, None).expect("orchestrator");
+        let session_id = SessionId("solver-repo-root-test".to_owned());
+        let brain_session_id: spur_acp::BrainSessionId = session_id.clone().into();
+        let session_id_cell = Arc::new(std::sync::OnceLock::new());
+        session_id_cell
+            .set(session_id)
+            .expect("test brain session id set once");
+        let continuation_ctx = orchestrator.build_continuation_ctx(session_id_cell);
+        let (mut server, _channel) = McpCallbackServer::new(
+            Some(&brain_session_id),
+            orchestrator.pm_service.clone(),
+            None,
+            continuation_ctx,
+            orchestrator.outcome_store.clone(),
+            orchestrator.mcp_feature_gate(),
+        );
+        orchestrator.apply_mcp_server_settings(&mut server);
+        let registry = orchestrator
+            .brain_tool_registry(
+                crate::mcp::delegation::DelegationMcpDeps::from_server(&server),
+                crate::mcp::plan::PlanMcpDeps::from_server(&server),
+                None,
+            )
+            .expect("compose brain MCP tool registry");
+
+        let response = registry
+            .call_json_tool(
+                spur_mcp::ToolCallContext::new(
+                    spur_mcp::ServerKind::Brain,
+                    spur_mcp::ToolAuthority::Brain,
+                    Some(&brain_session_id),
+                    None,
+                ),
+                "get_solve_result",
+                serde_json::json!({ "solve_id": artifact.solve_id }),
+            )
+            .await;
+
+        assert!(
+            response.error.is_none(),
+            "rooted brain registry must load the artifact: {:?}",
+            response.error
+        );
+        let body = response
+            .result
+            .as_ref()
+            .and_then(|value| value.pointer("/content/0/text"))
+            .and_then(serde_json::Value::as_str)
+            .expect("solver response must contain JSON text");
+        let payload: serde_json::Value =
+            serde_json::from_str(body).expect("solver response text must be JSON");
+        assert_eq!(payload["solve_id"], artifact.solve_id);
+        assert_eq!(payload["status"], "unsat");
+    }
+
+    #[tokio::test]
     async fn rebuilt_brain_registry_reuses_server_local_project_composition() {
         let tmp = tempfile::TempDir::new().unwrap();
         let mut config = SpurConfig::default();
