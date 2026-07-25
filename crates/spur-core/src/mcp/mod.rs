@@ -7,6 +7,8 @@ pub mod review_verdict;
 pub mod signals;
 pub mod worker;
 
+use std::sync::{Arc, OnceLock};
+
 pub use context_service::{ContextServiceAuth, ContextServiceClient};
 pub use local_projects::{IndexedLocalProjectValidator, LocalProjectMcpComposition};
 use spur_acp::config::ContextServiceConfig;
@@ -77,6 +79,9 @@ pub(crate) fn brain_tool_registry_with_local_projects(
         .with(catalog::ServerCatalogMcpModule::remainder())?
         .with(plan::PlanMcpModule::remainder(plan_deps))?
         .with(signals::SignalMcpModule::new(signal_deps))?
+        .with(spur_solver::mcp::SolverMcpModule::new(
+            shared_solver_service(),
+        ))?
         .with_alias("code_search", "code_symbol_search")?;
     if let Some(context_service_client) = context_service_client(context_service_config) {
         builder = builder.with(context_service_client)?;
@@ -129,6 +134,7 @@ pub fn catalog_tool_registry() -> Result<spur_mcp::ToolRegistry, spur_mcp::ToolR
             event_sink: None,
             feature_gate: crate::server::community_feature_gate(),
         }))?
+        .with(spur_solver::mcp::SolverMcpModule::catalog_only())?
         .with_alias("code_search", "code_symbol_search")
         .map(spur_mcp::registry::ToolRegistryBuilder::build)
 }
@@ -171,6 +177,9 @@ fn worker_tool_registry_with_client(
             feature_gate: crate::server::community_feature_gate(),
         }))?
         .with(review_verdict::ReviewVerdictMcpModule)?
+        .with(spur_solver::mcp::SolverMcpModule::new(
+            shared_solver_service(),
+        ))?
         .with_alias("code_search", "code_symbol_search")?;
     if let Some(context_service_client) = context_service_client {
         builder = builder.with(context_service_client)?;
@@ -178,6 +187,11 @@ fn worker_tool_registry_with_client(
     Ok(builder
         .with_denied_tool_calls(WORKER_DENIED_TOOL_CALLS.iter().copied())
         .build())
+}
+
+fn shared_solver_service() -> Arc<spur_solver::service::SolverService> {
+    static SERVICE: OnceLock<Arc<spur_solver::service::SolverService>> = OnceLock::new();
+    Arc::clone(SERVICE.get_or_init(|| Arc::new(spur_solver::service::SolverService::new())))
 }
 
 pub(crate) fn worker_tool_dispatch(
@@ -279,6 +293,9 @@ mod tests {
             "mcp__spur-worker-mcp__report_signal",
             "mcp__spur-worker-mcp__code_read_symbol",
             "mcp__spur-worker-mcp__query",
+            "mcp__spur-worker-mcp__solve_constraints",
+            "mcp__spur-worker-mcp__solve_smt",
+            "mcp__spur-worker-mcp__get_solve_result",
         ] {
             assert!(
                 names.iter().any(|name| name == sentinel),
@@ -287,6 +304,26 @@ mod tests {
         }
         // …and brain-only tools must not leak in.
         assert!(!names.iter().any(|name| name.contains("delegate_to_worker")));
+    }
+
+    #[tokio::test]
+    async fn worker_registry_dispatches_solver_tools() {
+        let registry = worker_tool_registry().expect("worker registry");
+
+        for tool_name in ["solve_constraints", "solve_smt", "get_solve_result"] {
+            let context =
+                ToolCallContext::new(ServerKind::Worker, ToolAuthority::Worker, None, None);
+            let error = match registry.call_tool(context, tool_name, json!({})).await {
+                Ok(_) => panic!("missing solver arguments must be rejected: {tool_name}"),
+                Err(error) => error,
+            };
+
+            assert_eq!(
+                error.code,
+                ErrorCode(-32602),
+                "{tool_name} must reach the live solver module"
+            );
+        }
     }
 
     #[test]
