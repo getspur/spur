@@ -4,6 +4,7 @@ members = [
     "crates/spur-acp",
     "crates/spur-blob-store",
     "crates/spur-mcp",
+    "crates/spur-solver",
     "crates/spur-core",
     "crates/spur-pm",
     "crates/spur-worktree",
@@ -126,6 +127,7 @@ licenseseat = "=0.5.3"
 spur-acp = { path = "crates/spur-acp" }
 spur-blob-store = { path = "crates/spur-blob-store" }
 spur-mcp = { path = "crates/spur-mcp" }
+spur-solver = { path = "crates/spur-solver" }
 spur-core = { path = "crates/spur-core", default-features = false }
 spur-pm = { path = "crates/spur-pm" }
 spur-worktree = { path = "crates/spur-worktree" }
