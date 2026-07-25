@@ -3,11 +3,13 @@
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     num::NonZeroUsize,
+    path::PathBuf,
     str,
     sync::Arc,
     time::Duration,
 };
 
+use serde::Serialize;
 use thiserror::Error;
 use tokio::{
     sync::Semaphore,
@@ -16,6 +18,10 @@ use tokio::{
 
 use crate::{
     encode::{encode_solve_constraints, EncodeError, SMT_IDENTIFIER_PREFIX},
+    persist::{
+        validate_solve_id, ArtifactStore, GetSolveResultResponse, PersistError, SolveArtifact,
+        UNKNOWN_Z3_VERSION,
+    },
     process::{ProcessError, ProcessOutcome, ProcessRequest, ProcessRunner, Z3Process},
     types::{
         ModelValue, SolveConstraintsRequest, SolveConstraintsResponse, SolveModel, SolveStatus,
@@ -42,6 +48,12 @@ pub enum SolverServiceError {
         /// Installation or discovery diagnostic.
         message: String,
     },
+    /// Persistence was requested before the hosting repository root was set.
+    #[error("solver persistence requires an explicit repository root")]
+    RepoRootNotConfigured,
+    /// Persisting or retrieving a repository-local solve artifact failed.
+    #[error(transparent)]
+    Persistence(#[from] PersistError),
 }
 
 /// Process-wide owner of solver concurrency and subprocess execution.
@@ -53,6 +65,7 @@ pub struct SolverService {
     runner: Arc<dyn ProcessRunner>,
     semaphore: Arc<Semaphore>,
     max_concurrent_solves: usize,
+    artifacts: Option<ArtifactStore>,
 }
 
 impl SolverService {
@@ -83,6 +96,7 @@ impl SolverService {
             runner,
             semaphore: Arc::new(Semaphore::new(DEFAULT_MAX_CONCURRENT_SOLVES)),
             max_concurrent_solves: DEFAULT_MAX_CONCURRENT_SOLVES,
+            artifacts: None,
         }
     }
 
@@ -96,13 +110,66 @@ impl SolverService {
             runner,
             semaphore: Arc::new(Semaphore::new(max_concurrent_solves.get())),
             max_concurrent_solves: max_concurrent_solves.get(),
+            artifacts: None,
         }
+    }
+
+    /// Configures the repository root used for `.spur/solver/` artifacts.
+    ///
+    /// Clones created after this call share the same repository-local store and
+    /// quota lock. Existing clones retain their original store.
+    #[must_use]
+    pub fn with_repo_root(mut self, repo_root: impl Into<PathBuf>) -> Self {
+        self.artifacts = Some(ArtifactStore::for_repo_root(repo_root));
+        self
     }
 
     /// Returns the configured maximum number of concurrent solver children.
     #[must_use]
     pub const fn max_concurrent_solves(&self) -> usize {
         self.max_concurrent_solves
+    }
+
+    /// Persists a solve response as a schema-v1 handoff artifact.
+    ///
+    /// This cache does not replace Beads as the collaboration source of truth.
+    /// The returned artifact contains the generated traversal-safe `solve_id`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SolverServiceError::Persistence`] if serialization, quota
+    /// enforcement, or the atomic write fails.
+    pub fn persist<T: Serialize>(
+        &self,
+        request: &T,
+        response: &SolveConstraintsResponse,
+    ) -> Result<SolveArtifact, SolverServiceError> {
+        self.artifacts
+            .as_ref()
+            .ok_or(SolverServiceError::RepoRootNotConfigured)?
+            .persist(request, response, UNKNOWN_Z3_VERSION)
+            .map_err(SolverServiceError::from)
+    }
+
+    /// Loads a persisted solve artifact by its pinned identifier.
+    ///
+    /// The identifier is validated before it is joined to the configured
+    /// repository root.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SolverServiceError::Persistence`] for malformed identifiers,
+    /// missing artifacts, invalid payloads, or filesystem failures.
+    pub fn get_solve_result(
+        &self,
+        solve_id: &str,
+    ) -> Result<GetSolveResultResponse, SolverServiceError> {
+        validate_solve_id(solve_id)?;
+        self.artifacts
+            .as_ref()
+            .ok_or(SolverServiceError::RepoRootNotConfigured)?
+            .get(solve_id)
+            .map_err(SolverServiceError::from)
     }
 
     /// Encodes and solves one typed B′ constraint request.
@@ -127,33 +194,48 @@ impl SolverService {
         let deadline = started + Duration::from_millis(request.timeout_ms);
 
         if Instant::now() >= deadline {
-            return Ok(timeout_response(started));
+            return self.finish_response(&request, timeout_response(started));
         }
 
         let permit = match time::timeout_at(deadline, self.semaphore.acquire()).await {
             Ok(Ok(permit)) => permit,
             Ok(Err(_closed)) => {
-                return Ok(error_response(
-                    started,
-                    "solver concurrency semaphore is closed".to_owned(),
-                ));
+                return self.finish_response(
+                    &request,
+                    error_response(started, "solver concurrency semaphore is closed".to_owned()),
+                );
             }
-            Err(_elapsed) => return Ok(timeout_response(started)),
+            Err(_elapsed) => {
+                return self.finish_response(&request, timeout_response(started));
+            }
         };
 
         let outcome = self.runner.run(ProcessRequest::new(smt, deadline)).await;
         drop(permit);
 
-        match outcome {
-            Ok(ProcessOutcome::TimedOut) => Ok(timeout_response(started)),
+        let response = match outcome {
+            Ok(ProcessOutcome::TimedOut) => timeout_response(started),
             Ok(ProcessOutcome::Completed(output)) => {
-                Ok(response_from_output(&request, output, started))
+                response_from_output(&request, output, started)
             }
             Err(ProcessError::SolverUnavailable { message }) => {
-                Err(SolverServiceError::SolverUnavailable { message })
+                return Err(SolverServiceError::SolverUnavailable { message });
             }
-            Err(error) => Ok(error_response(started, error.to_string())),
+            Err(error) => error_response(started, error.to_string()),
+        };
+        self.finish_response(&request, response)
+    }
+
+    fn finish_response(
+        &self,
+        request: &SolveConstraintsRequest,
+        mut response: SolveConstraintsResponse,
+    ) -> Result<SolveConstraintsResponse, SolverServiceError> {
+        if request.persist {
+            let artifact = self.persist(request, &response)?;
+            response.solve_id = Some(artifact.solve_id);
         }
+        Ok(response)
     }
 }
 
