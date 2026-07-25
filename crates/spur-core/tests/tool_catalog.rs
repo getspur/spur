@@ -64,6 +64,9 @@ const EXPECTED: &[&str] = &[
     "submit_plan_mutation",
     "report_signal",
     "report_progress",
+    "solve_constraints",
+    "solve_smt",
+    "get_solve_result",
 ];
 
 const PM_ISSUE_GRAPH_TOOLS: &[&str] = &[
@@ -88,6 +91,21 @@ fn tool_catalog_matches_expected() {
         actual, expected,
         "tool_catalog drift detected; update EXPECTED in tests/tool_catalog.rs if intentional",
     );
+}
+
+#[test]
+fn solver_tools_are_advertised_to_catalog_and_workers() {
+    for (catalog_name, tools) in [
+        ("tools_list", tools_list()),
+        ("worker_tools_list", worker_tools_list()),
+    ] {
+        for tool_name in ["solve_constraints", "solve_smt", "get_solve_result"] {
+            assert!(
+                tools.iter().any(|tool| tool.name == tool_name),
+                "{catalog_name} missing {tool_name}"
+            );
+        }
+    }
 }
 
 #[test]

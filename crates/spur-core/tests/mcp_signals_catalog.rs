@@ -62,6 +62,9 @@ const EXPECTED_BRAIN_TOOLS: &[&str] = &[
     "submit_plan_mutation",
     "report_signal",
     "report_progress",
+    "solve_constraints",
+    "solve_smt",
+    "get_solve_result",
     "external_catalog",
     "external_code_search",
     "external_code_read",
@@ -174,6 +177,36 @@ fn core_brain_registry_preserves_compatibility_catalog() {
         names, expected,
         "brain catalog order and size must not drift"
     );
+}
+
+#[tokio::test]
+async fn core_brain_registry_dispatches_solver_tools() {
+    let registry = spur_core::mcp::brain_tool_registry(
+        spur_core::mcp::delegation::DelegationMcpDeps::catalog_only(),
+        plan_deps(),
+        catalog_deps(),
+        &ContextServiceConfig::default(),
+    )
+    .expect("core-composed brain registry");
+
+    for tool_name in ["solve_constraints", "solve_smt", "get_solve_result"] {
+        let context = spur_mcp::ToolCallContext::new(
+            spur_mcp::ServerKind::Brain,
+            spur_mcp::ToolAuthority::Brain,
+            None,
+            None,
+        );
+        let error = match registry.call_tool(context, tool_name, json!({})).await {
+            Ok(_) => panic!("missing solver arguments must be rejected: {tool_name}"),
+            Err(error) => error,
+        };
+
+        assert_eq!(
+            error.code,
+            spur_mcp::ErrorCode(-32602),
+            "{tool_name} must reach the live solver module"
+        );
+    }
 }
 
 #[test]

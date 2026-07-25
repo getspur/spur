@@ -1162,6 +1162,56 @@ impl WorkerToolHandler {
         })
     }
 
+    async fn call_worker_registry_tool(
+        &self,
+        tool_name: &'static str,
+        arguments: JsonObject,
+    ) -> Result<CallToolResult, McpError> {
+        let context = spur_mcp::ToolCallContext::new(
+            spur_mcp::ServerKind::Worker,
+            spur_mcp::ToolAuthority::Worker,
+            None,
+            None,
+        );
+        let response = self
+            .worker_registry()?
+            .call_json_tool(context, tool_name, Value::Object(arguments))
+            .await;
+        spur_mcp::json_rpc_to_call_tool_result(response, tool_name)
+    }
+
+    #[tool(
+        name = "solve_constraints",
+        description = "Find one concrete model for typed B-prime constraints."
+    )]
+    async fn solve_constraints_tool(
+        &self,
+        arguments: JsonObject,
+    ) -> Result<CallToolResult, McpError> {
+        self.call_worker_registry_tool("solve_constraints", arguments)
+            .await
+    }
+
+    #[tool(
+        name = "solve_smt",
+        description = "Solve a size-bounded, allowlisted SMT-LIB2 script."
+    )]
+    async fn solve_smt_tool(&self, arguments: JsonObject) -> Result<CallToolResult, McpError> {
+        self.call_worker_registry_tool("solve_smt", arguments).await
+    }
+
+    #[tool(
+        name = "get_solve_result",
+        description = "Reload a persisted solver result by its solve_id."
+    )]
+    async fn get_solve_result_tool(
+        &self,
+        arguments: JsonObject,
+    ) -> Result<CallToolResult, McpError> {
+        self.call_worker_registry_tool("get_solve_result", arguments)
+            .await
+    }
+
     fn context_from_request(
         &self,
         context: &RequestContext<RoleServer>,
@@ -2924,6 +2974,7 @@ mod tests {
     use async_trait::async_trait;
     use rmcp::{
         model::CallToolRequestParams,
+        service::ServiceError,
         transport::{
             streamable_http_client::StreamableHttpClientTransportConfig,
             StreamableHttpClientTransport,
@@ -3756,6 +3807,57 @@ mod tests {
         assert_eq!(server.active_count(), 0);
         drop(guards);
 
+        server.shutdown(Duration::from_secs(5)).await;
+    }
+
+    #[tokio::test]
+    async fn solver_tools_reach_live_registry_over_worker_http() {
+        let dir = TempDir::new().expect("tempdir");
+        let pm = pm_service_fixture(dir.path()).await;
+        let server = WorkerMcpServer::start(
+            "brain-A".into(),
+            worker_mcp_deps_fixture(
+                pm,
+                pro_feature_gate(),
+                Arc::new(RecordingWorkerSignalSink::default()),
+            ),
+        )
+        .await
+        .expect("start worker server");
+        server.register_delegation("del-solver".into(), DelegationContext::default());
+        let token = server.issue_token("del-solver", Duration::from_secs(60));
+        let config =
+            StreamableHttpClientTransportConfig::with_uri(server.url()).auth_header(&token);
+        let client =
+            ().serve(StreamableHttpClientTransport::from_config(config))
+                .await
+                .expect("rmcp client initialize");
+
+        for tool_name in ["solve_constraints", "solve_smt", "get_solve_result"] {
+            let error = client
+                .call_tool(CallToolRequestParams::new(tool_name))
+                .await
+                .expect_err("empty solver arguments must be rejected");
+            match error {
+                ServiceError::McpError(error) => {
+                    assert_eq!(
+                        error.code,
+                        rmcp::model::ErrorCode(-32602),
+                        "{tool_name} must reject empty arguments"
+                    );
+                    assert!(
+                        error
+                            .message
+                            .contains(&format!("invalid `{tool_name}` request")),
+                        "{tool_name} must reach the live solver module: {}",
+                        error.message
+                    );
+                }
+                other => panic!("{tool_name} returned a non-MCP error: {other}"),
+            }
+        }
+
+        drop(client);
         server.shutdown(Duration::from_secs(5)).await;
     }
 
