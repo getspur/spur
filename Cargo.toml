@@ -4,6 +4,7 @@ members = [
     "crates/spur-acp",
     "crates/spur-blob-store",
     "crates/spur-mcp",
+    "crates/spur-solver",
     "crates/spur-core",
     "crates/spur-pm",
     "crates/spur-worktree",
