@@ -11506,12 +11506,15 @@ dependencies = [
 name = "spur-solver"
 version = "1.19.0"
 dependencies = [
+ "chrono",
+ "fs2",
  "libc",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "uuid",
 ]
 
 [[package]]
