@@ -11503,6 +11503,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "spur-solver"
+version = "1.19.0"
+
+[[package]]
 name = "spur-telemetry"
 version = "1.19.0"
 dependencies = [
