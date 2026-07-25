@@ -302,9 +302,10 @@ pub struct NativeAcpConnection {
     /// callers can distinguish RPC failure from successful stream closure.
     prompt_response_rx: Option<oneshot::Receiver<anyhow::Result<PromptResponse>>>,
     /// Process-group id of the spawned child (equal to its pid because we spawn
-    /// with `process_group(0)`). Populated by the ACP thread after spawn, read
-    /// by the graceful shutdown path and the `Drop` safety net to kill the
-    /// entire descendant tree via `killpg`.
+    /// with `setsid` / session detach, which also creates a new process group).
+    /// Populated by the ACP thread after spawn, read by the graceful shutdown
+    /// path and the `Drop` safety net to kill the entire descendant tree via
+    /// `killpg`.
     child_pgid: Arc<Mutex<Option<i32>>>,
     /// Repo root used to resolve `.spur/pgids/<pgid>.toml` for the orphan-
     /// reaping registry. Defaults to `PathBuf::from(".")` so production
@@ -1619,12 +1620,13 @@ fn acp_thread_main(
             .stdout(std::process::Stdio::piped())
             .stderr(stderr_cfg)
             .kill_on_drop(true);
-        // Put the child (and its descendants, e.g. the `node` tree beneath
-        // `claude-agent-acp`) in its own process group so shutdown can reap
-        // the whole tree with `killpg`. Without this, grandchildren orphan
-        // to init when spur exits.
+        // Detach into a new session (and process group). `process_group(0)` alone
+        // keeps the child in Spur's controlling session so background `/dev/tty`
+        // reads deliver SIGTTIN and can freeze the TUI (codex/npx under
+        // `spur tui --brain codex`). `setsid` keeps pgid == child pid for killpg
+        // while removing the controlling TTY.
         #[cfg(unix)]
-        cmd.process_group(0);
+        detach_acp_child_session(&mut cmd);
         let child_result = cmd.spawn();
 
         let mut child = match child_result {
@@ -1639,7 +1641,7 @@ fn acp_thread_main(
             }
         };
 
-        // Record the pgid (= child pid under `process_group(0)`) so the
+        // Record the pgid (= child pid under session detach / setsid) so the
         // `Drop` safety net and the graceful shutdown arm can reach the
         // entire process group.
         if let Some(pid) = child.id() {
@@ -1936,7 +1938,7 @@ fn acp_thread_main(
                             .kill_on_drop(true);
                         configure_terminal_create_stdio(&mut cmd);
                         #[cfg(unix)]
-                        cmd.process_group(0);
+                        detach_acp_child_session(&mut cmd);
                         for env_var in &req.env {
                             cmd.env(&env_var.name, &env_var.value);
                         }
@@ -2963,12 +2965,43 @@ fn normalize_grok_terminal_command(
 
 /// Prevents ACP terminal tools from inheriting Spur's terminal through fd 0.
 ///
-/// This closes the inherited-stdin route only; a child can still open `/dev/tty`.
+/// This closes the inherited-stdin route only; pair with
+/// [`detach_acp_child_session`] so the child also cannot open `/dev/tty` on
+/// Spur's controlling session.
 fn configure_terminal_create_stdio(command: &mut tokio::process::Command) {
     command
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
+}
+
+/// Detach an ACP child from Spur's controlling terminal session.
+///
+/// Creates a new session via `setsid` so the child is no longer in the TUI's
+/// session and has no controlling TTY. Also makes the child its own process
+/// group leader (`pgid == pid`), preserving `killpg` reaping used by
+/// shutdown / orphan sweep.
+///
+/// Prefer this over `process_group(0)` alone: a new process group in the same
+/// session still inherits the controlling TTY, and background reads of
+/// `/dev/tty` then receive SIGTTIN (reproduced under `spur tui --brain codex`).
+#[cfg(unix)]
+#[expect(
+    unsafe_code,
+    reason = "pre_exec is required to call setsid after fork before exec"
+)]
+fn detach_acp_child_session(command: &mut tokio::process::Command) {
+    // SAFETY: the child callback only invokes the async-signal-safe `setsid`
+    // syscall and reports its errno. No allocation or lock is used after fork.
+    // `tokio::process::Command::pre_exec` is the Unix-only hook for this.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
 }
 
 fn append_terminal_output(
@@ -3679,7 +3712,7 @@ mod native_helper_tests {
             .stdin(std::process::Stdio::from(tty_stdin))
             .kill_on_drop(true);
         configure_terminal_create_stdio(&mut command);
-        command.process_group(0);
+        detach_acp_child_session(&mut command);
 
         let mut child = command.spawn().expect("test child should spawn");
         let status = match tokio::time::timeout(Duration::from_secs(2), child.wait()).await {
@@ -3700,6 +3733,97 @@ mod native_helper_tests {
             status.success(),
             "child should exit cleanly after read observes EOF: {status}"
         );
+    }
+
+    /// Regression for SIGTTIN under `spur tui --brain codex`: process_group(0)
+    /// alone keeps the child in the TUI session; setsid must create a new one.
+    #[cfg(unix)]
+    #[tokio::test]
+    #[expect(
+        unsafe_code,
+        reason = "test inspects session/pgid via getsid/getpgid after setsid detach"
+    )]
+    async fn acp_child_session_detach_uses_new_session_and_pgid_equals_pid() {
+        use std::{
+            fs,
+            time::{Duration, Instant},
+        };
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let hold_path = temp.path().join("hold");
+        let pid_path = temp.path().join("child.pid");
+        fs::write(&hold_path, b"").expect("hold file");
+
+        let mut command = tokio::process::Command::new("/bin/sh");
+        command
+            .arg("-c")
+            .arg(format!(
+                "printf '%s\\n' \"$$\" > '{}'; while [ -e '{}' ]; do sleep 0.05; done",
+                pid_path.display(),
+                hold_path.display()
+            ))
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true);
+        detach_acp_child_session(&mut command);
+
+        let mut child = command.spawn().expect("spawn detached child");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let child_pid = loop {
+            match fs::read_to_string(&pid_path) {
+                Ok(text) => {
+                    break text
+                        .trim()
+                        .parse::<i32>()
+                        .expect("numeric child pid from shell $$")
+                }
+                Err(err)
+                    if err.kind() == std::io::ErrorKind::NotFound && Instant::now() < deadline =>
+                {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+                Err(err) => panic!("read child pid: {err}"),
+            }
+        };
+
+        // SAFETY: getsid/getpgid only inspect kernel process metadata.
+        let parent_sid = unsafe { libc::getsid(0) };
+        let child_sid = unsafe { libc::getsid(child_pid) };
+        let child_pgid = unsafe { libc::getpgid(child_pid) };
+        assert_ne!(parent_sid, -1, "parent getsid failed");
+        assert_ne!(child_sid, -1, "child getsid failed");
+        assert_ne!(child_pgid, -1, "child getpgid failed");
+        assert_ne!(
+            child_sid, parent_sid,
+            "ACP child must not share Spur's controlling session (SIGTTIN risk)"
+        );
+        assert_eq!(
+            child_pgid, child_pid,
+            "setsid child must remain killpg-reachable via pid-as-pgid"
+        );
+
+        // Without a controlling TTY, /dev/tty open fails (ENXIO) instead of
+        // stopping the process with SIGTTIN in a shared session.
+        let mut tty_probe = tokio::process::Command::new("/bin/sh");
+        tty_probe
+            .arg("-c")
+            .arg("exec 3<>/dev/tty 2>/dev/null; echo $?")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true);
+        detach_acp_child_session(&mut tty_probe);
+        let output = tty_probe.output().await.expect("tty probe should run");
+        let code = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        assert_ne!(
+            code, "0",
+            "detached child must not successfully open /dev/tty; got exit echo {code:?}"
+        );
+
+        let _ = fs::remove_file(&hold_path);
+        let _ = child.kill().await;
+        let _ = child.wait().await;
     }
 
     #[cfg(unix)]
