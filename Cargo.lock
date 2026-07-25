@@ -11505,6 +11505,10 @@ dependencies = [
 [[package]]
 name = "spur-solver"
 version = "1.19.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "spur-telemetry"
