@@ -177,10 +177,11 @@ The `Tui` arm (main.rs:1242) holds the most inline logic:
    `spur tui …` and returns.
 4. Loads `SpurConfig` (falls back to `Default` with a warning).
 5. `onboarding::maybe_prompt_first_run(&license)` — first-run prompt.
-6. **Community singleton lock** (main.rs:1314) — on Community tier, acquires a
-   `PidFileGuard` at `.spur/.spur-tui.pid`; one TUI orchestrator per repo. Pro /
-   Team / Enterprise skip the lock (Phase B will land cross-instance state
-   coordination). Failure prints a CTA pointing to `spur auth login --key`.
+6. **Multi-process startup** — every tier may run multiple TUI processes
+   against the same repository; there is no tier-specific repository pidfile.
+   Each invocation constructs an independent orchestrator. Community's signed
+   `max_concurrent_workers = 1` quota still applies within each process, and
+   cross-instance state coordination is not provided.
 7. Optional `PmService::try_new` — gated by
    `pm_service_gate_allows_construction`; constructs GitHub + beads adapters or
    logs a tier message and returns `None`.
