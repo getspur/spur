@@ -22,25 +22,47 @@ use crate::{
         validate_solve_id, ArtifactStore, GetSolveResultResponse, PersistError, SolveArtifact,
         UNKNOWN_Z3_VERSION,
     },
-    process::{ProcessError, ProcessOutcome, ProcessRequest, ProcessRunner, Z3Process},
+    process::{
+        ProcessError, ProcessOutcome, ProcessOutput, ProcessRequest, ProcessRunner, Z3Process,
+    },
+    smt_gate::{validate_smt_script, SmtGateError},
     types::{
-        ModelValue, SolveConstraintsRequest, SolveConstraintsResponse, SolveModel, SolveStatus,
-        Variable,
+        ModelValue, SolveConstraintsRequest, SolveConstraintsResponse, SolveModel, SolveSmtRequest,
+        SolveStatus, Variable, MAX_TIMEOUT_MS,
     },
 };
 
 /// Default maximum number of concurrent Z3 children in one shared service.
 pub const DEFAULT_MAX_CONCURRENT_SOLVES: usize = 4;
 
+/// Validation failure shared by typed and raw solver requests.
+#[derive(Debug, Error)]
+pub enum InvalidRequestError {
+    /// B′ validation or generated SMT serialization failed.
+    #[error(transparent)]
+    Constraints(#[from] EncodeError),
+    /// The raw SMT-LIB2 gate rejected the complete script.
+    #[error(transparent)]
+    RawSmt(#[from] SmtGateError),
+    /// A raw solve requested more than the process-wide timeout cap.
+    #[error("timeout {timeout_ms} ms exceeds maximum {max_timeout_ms} ms")]
+    TimeoutTooLarge {
+        /// Requested wall-clock budget.
+        timeout_ms: u64,
+        /// Maximum accepted wall-clock budget.
+        max_timeout_ms: u64,
+    },
+}
+
 /// Transport-facing failure that prevents a solve result envelope.
 #[derive(Debug, Error)]
 pub enum SolverServiceError {
-    /// Typed validation or generated-script limits rejected the request.
+    /// Request validation or generated-script limits rejected the request.
     #[error("invalid solver request: {source}")]
     InvalidParams {
-        /// Encoder or request validation failure.
+        /// Typed or raw request validation failure.
         #[source]
-        source: EncodeError,
+        source: InvalidRequestError,
     },
     /// Operator configuration did not resolve a runnable Z3 binary.
     #[error("solver unavailable: {message}")]
@@ -189,54 +211,113 @@ impl SolverService {
         request: SolveConstraintsRequest,
     ) -> Result<SolveConstraintsResponse, SolverServiceError> {
         let started = Instant::now();
-        let smt = encode_solve_constraints(&request)
-            .map_err(|source| SolverServiceError::InvalidParams { source })?;
+        let smt = encode_solve_constraints(&request).map_err(|source| {
+            SolverServiceError::InvalidParams {
+                source: source.into(),
+            }
+        })?;
         let deadline = started + Duration::from_millis(request.timeout_ms);
 
+        let response = match self.run_script(smt, deadline).await? {
+            ServiceRunOutcome::TimedOut => timeout_response(started),
+            ServiceRunOutcome::Completed(output) => response_from_output(&request, output, started),
+            ServiceRunOutcome::Error(message) => error_response(started, message),
+        };
+        self.finish_response(&request, request.persist, response)
+    }
+
+    /// Gates and solves one raw SMT-LIB2 request without B′ validation.
+    ///
+    /// Accepted scripts are passed byte-for-byte to the same process-wide
+    /// semaphore, deadline, and fixed-argv runner used by
+    /// [`Self::solve_constraints`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SolverServiceError::InvalidParams`] when the timeout exceeds
+    /// the shared cap or the reject-only raw SMT gate rejects the script.
+    /// Returns [`SolverServiceError::SolverUnavailable`] when operator binary
+    /// discovery cannot launch Z3. Process, output, and parse failures are
+    /// represented by [`SolveStatus::Error`] result envelopes.
+    pub async fn solve_smt(
+        &self,
+        request: SolveSmtRequest,
+    ) -> Result<SolveConstraintsResponse, SolverServiceError> {
+        let started = Instant::now();
+        if request.timeout_ms > MAX_TIMEOUT_MS {
+            return Err(SolverServiceError::InvalidParams {
+                source: InvalidRequestError::TimeoutTooLarge {
+                    timeout_ms: request.timeout_ms,
+                    max_timeout_ms: MAX_TIMEOUT_MS,
+                },
+            });
+        }
+        validate_smt_script(&request.smt_lib).map_err(|source| {
+            SolverServiceError::InvalidParams {
+                source: source.into(),
+            }
+        })?;
+
+        let deadline = started + Duration::from_millis(request.timeout_ms);
+        let response = match self.run_script(request.smt_lib.clone(), deadline).await? {
+            ServiceRunOutcome::TimedOut => timeout_response(started),
+            ServiceRunOutcome::Completed(output) => response_from_raw_output(output, started),
+            ServiceRunOutcome::Error(message) => error_response(started, message),
+        };
+        self.finish_response(&request, request.persist, response)
+    }
+
+    async fn run_script(
+        &self,
+        smt: String,
+        deadline: Instant,
+    ) -> Result<ServiceRunOutcome, SolverServiceError> {
         if Instant::now() >= deadline {
-            return self.finish_response(&request, timeout_response(started));
+            return Ok(ServiceRunOutcome::TimedOut);
         }
 
         let permit = match time::timeout_at(deadline, self.semaphore.acquire()).await {
             Ok(Ok(permit)) => permit,
             Ok(Err(_closed)) => {
-                return self.finish_response(
-                    &request,
-                    error_response(started, "solver concurrency semaphore is closed".to_owned()),
-                );
+                return Ok(ServiceRunOutcome::Error(
+                    "solver concurrency semaphore is closed".to_owned(),
+                ));
             }
-            Err(_elapsed) => {
-                return self.finish_response(&request, timeout_response(started));
-            }
+            Err(_elapsed) => return Ok(ServiceRunOutcome::TimedOut),
         };
 
         let outcome = self.runner.run(ProcessRequest::new(smt, deadline)).await;
         drop(permit);
 
-        let response = match outcome {
-            Ok(ProcessOutcome::TimedOut) => timeout_response(started),
-            Ok(ProcessOutcome::Completed(output)) => {
-                response_from_output(&request, output, started)
-            }
+        match outcome {
+            Ok(ProcessOutcome::TimedOut) => Ok(ServiceRunOutcome::TimedOut),
+            Ok(ProcessOutcome::Completed(output)) => Ok(ServiceRunOutcome::Completed(output)),
             Err(ProcessError::SolverUnavailable { message }) => {
-                return Err(SolverServiceError::SolverUnavailable { message });
+                Err(SolverServiceError::SolverUnavailable { message })
             }
-            Err(error) => error_response(started, error.to_string()),
-        };
-        self.finish_response(&request, response)
+            Err(error) => Ok(ServiceRunOutcome::Error(error.to_string())),
+        }
     }
 
-    fn finish_response(
+    fn finish_response<T: Serialize>(
         &self,
-        request: &SolveConstraintsRequest,
+        request: &T,
+        persist: bool,
         mut response: SolveConstraintsResponse,
     ) -> Result<SolveConstraintsResponse, SolverServiceError> {
-        if request.persist {
+        if persist {
             let artifact = self.persist(request, &response)?;
             response.solve_id = Some(artifact.solve_id);
         }
         Ok(response)
     }
+}
+
+#[derive(Debug)]
+enum ServiceRunOutcome {
+    TimedOut,
+    Completed(ProcessOutput),
+    Error(String),
 }
 
 impl Default for SolverService {
@@ -270,6 +351,46 @@ fn response_from_output(
             .as_ref()
             .is_ok_and(|parsed| parsed.expected_get_value_failure);
     if !output.success && !expected_get_value_failure {
+        let exit = output
+            .exit_code
+            .map_or_else(|| "signal".to_owned(), |code| format!("exit code {code}"));
+        return error_response(started, format!("Z3 exited unsuccessfully ({exit})"));
+    }
+
+    match parsed.map(|parsed| parsed.solve) {
+        Ok(ParsedSolve::Sat(model)) => response(SolveStatus::Sat, Some(model), started, None),
+        Ok(ParsedSolve::Unsat) => response(SolveStatus::Unsat, None, started, None),
+        Ok(ParsedSolve::Unknown) => response(
+            SolveStatus::Unknown,
+            None,
+            started,
+            Some("Z3 returned unknown".to_owned()),
+        ),
+        Err(error) => error_response(started, format!("failed to parse Z3 output: {error}")),
+    }
+}
+
+fn response_from_raw_output(output: ProcessOutput, started: Instant) -> SolveConstraintsResponse {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !stderr.trim().is_empty() {
+        return error_response(
+            started,
+            format!("Z3 wrote to stderr: {}", diagnostic_text(&stderr)),
+        );
+    }
+
+    let stdout = match str::from_utf8(&output.stdout) {
+        Ok(stdout) => stdout,
+        Err(error) => {
+            return error_response(started, format!("Z3 stdout was not UTF-8: {error}"));
+        }
+    };
+    let parsed = parse_raw_solver_output(stdout);
+    let expected_model_failure = output.exit_code == Some(1)
+        && parsed
+            .as_ref()
+            .is_ok_and(|parsed| parsed.expected_get_value_failure);
+    if !output.success && !expected_model_failure {
         let exit = output
             .exit_code
             .map_or_else(|| "signal".to_owned(), |code| format!("exit code {code}"));
@@ -381,6 +502,174 @@ fn parse_solver_output(
             "unexpected solver status `{other}`"
         ))),
     }
+}
+
+fn parse_raw_solver_output(stdout: &str) -> Result<ParsedSolverOutput, ParseError> {
+    let forms = SExpressionParser::new(stdout).parse_all()?;
+    let status = forms
+        .first()
+        .and_then(SExpression::as_atom)
+        .ok_or_else(|| ParseError::new("expected status atom as first output form"))?;
+
+    match status {
+        "sat" => Ok(ParsedSolverOutput {
+            solve: parse_raw_sat_output(&forms)?,
+            expected_get_value_failure: false,
+        }),
+        "unsat" => Ok(ParsedSolverOutput {
+            solve: ParsedSolve::Unsat,
+            expected_get_value_failure: require_raw_non_sat_output(&forms, "unsat")?,
+        }),
+        "unknown" => Ok(ParsedSolverOutput {
+            solve: ParsedSolve::Unknown,
+            expected_get_value_failure: require_raw_non_sat_output(&forms, "unknown")?,
+        }),
+        other => Err(ParseError::new(format!(
+            "unexpected solver status `{other}`"
+        ))),
+    }
+}
+
+fn parse_raw_sat_output(forms: &[SExpression]) -> Result<ParsedSolve, ParseError> {
+    match forms {
+        [_status] => Ok(ParsedSolve::Sat(BTreeMap::new())),
+        [_status, model] => Ok(ParsedSolve::Sat(parse_raw_model(model)?)),
+        _ => Err(ParseError::new(
+            "sat output must contain at most one model or get-value response",
+        )),
+    }
+}
+
+fn parse_raw_model(form: &SExpression) -> Result<SolveModel, ParseError> {
+    let values = form
+        .as_list()
+        .ok_or_else(|| ParseError::new("raw model response must be a list"))?;
+    if values.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+
+    if values.first().and_then(SExpression::as_atom) == Some("model") {
+        return parse_raw_definitions(&values[1..]);
+    }
+    if values.iter().all(is_define_fun) {
+        return parse_raw_definitions(values);
+    }
+    parse_raw_get_value_bindings(values)
+}
+
+fn is_define_fun(expression: &SExpression) -> bool {
+    expression
+        .as_list()
+        .and_then(|values| values.first())
+        .and_then(SExpression::as_atom)
+        == Some("define-fun")
+}
+
+fn parse_raw_definitions(definitions: &[SExpression]) -> Result<SolveModel, ParseError> {
+    let mut model = BTreeMap::new();
+    for definition in definitions {
+        let fields = definition
+            .as_list()
+            .ok_or_else(|| ParseError::new("model definition must be a list"))?;
+        if fields.len() != 5 || fields[0].as_atom() != Some("define-fun") {
+            return Err(ParseError::new(
+                "model definition must be a five-field define-fun",
+            ));
+        }
+        let name = fields[1]
+            .as_atom()
+            .ok_or_else(|| ParseError::new("model definition name must be an atom"))?;
+        let arguments = fields[2]
+            .as_list()
+            .ok_or_else(|| ParseError::new("model definition arguments must be a list"))?;
+        if !arguments.is_empty() {
+            continue;
+        }
+        insert_raw_binding(&mut model, name.to_owned(), &fields[4])?;
+    }
+    Ok(model)
+}
+
+fn parse_raw_get_value_bindings(bindings: &[SExpression]) -> Result<SolveModel, ParseError> {
+    let mut model = BTreeMap::new();
+    for binding in bindings {
+        let pair = binding
+            .as_list()
+            .ok_or_else(|| ParseError::new("get-value binding must be a pair"))?;
+        if pair.len() != 2 {
+            return Err(ParseError::new(
+                "get-value binding must contain expression and value",
+            ));
+        }
+        let key = pair[0]
+            .as_atom()
+            .map_or_else(|| render_s_expression(&pair[0]), str::to_owned);
+        insert_raw_binding(&mut model, key, &pair[1])?;
+    }
+    Ok(model)
+}
+
+fn insert_raw_binding(
+    model: &mut SolveModel,
+    key: String,
+    value: &SExpression,
+) -> Result<(), ParseError> {
+    if model
+        .insert(key.clone(), parse_raw_model_value(value))
+        .is_some()
+    {
+        return Err(ParseError::new(format!(
+            "raw model returned duplicate binding `{key}`"
+        )));
+    }
+    Ok(())
+}
+
+fn parse_raw_model_value(value: &SExpression) -> ModelValue {
+    match value.as_atom() {
+        Some("true") => return ModelValue::Bool(true),
+        Some("false") => return ModelValue::Bool(false),
+        _ => {}
+    }
+    if let Ok(integer) = parse_integer(value) {
+        return ModelValue::Int(integer);
+    }
+    match value {
+        SExpression::String(value) => ModelValue::Enum(value.clone()),
+        SExpression::Atom(_) | SExpression::List(_) => ModelValue::Enum(render_s_expression(value)),
+    }
+}
+
+fn render_s_expression(expression: &SExpression) -> String {
+    match expression {
+        SExpression::Atom(value) => value.clone(),
+        SExpression::String(value) => {
+            format!("\"{}\"", value.replace('"', "\"\""))
+        }
+        SExpression::List(values) => {
+            let mut rendered = String::from("(");
+            for (index, value) in values.iter().enumerate() {
+                if index > 0 {
+                    rendered.push(' ');
+                }
+                rendered.push_str(&render_s_expression(value));
+            }
+            rendered.push(')');
+            rendered
+        }
+    }
+}
+
+fn require_raw_non_sat_output(forms: &[SExpression], status: &str) -> Result<bool, ParseError> {
+    if forms.len() == 1 {
+        return Ok(false);
+    }
+    if forms.len() == 2 && forms[1].is_model_unavailable_error() {
+        return Ok(true);
+    }
+    Err(ParseError::new(format!(
+        "unexpected output after `{status}` status"
+    )))
 }
 
 fn require_non_sat_output(
@@ -596,6 +885,8 @@ struct SExpressionParser<'a> {
     cursor: usize,
 }
 
+const MAX_SOLVER_OUTPUT_NESTING: usize = 256;
+
 impl<'a> SExpressionParser<'a> {
     const fn new(input: &'a str) -> Self {
         Self {
@@ -608,7 +899,7 @@ impl<'a> SExpressionParser<'a> {
         let mut forms = Vec::new();
         self.skip_whitespace();
         while self.cursor < self.bytes.len() {
-            forms.push(self.parse_expression()?);
+            forms.push(self.parse_expression(0)?);
             self.skip_whitespace();
         }
         if forms.is_empty() {
@@ -617,18 +908,22 @@ impl<'a> SExpressionParser<'a> {
         Ok(forms)
     }
 
-    fn parse_expression(&mut self) -> Result<SExpression, ParseError> {
+    fn parse_expression(&mut self, nesting: usize) -> Result<SExpression, ParseError> {
         self.skip_whitespace();
         match self.bytes.get(self.cursor).copied() {
-            Some(b'(') => self.parse_list(),
+            Some(b'(') if nesting == MAX_SOLVER_OUTPUT_NESTING => Err(ParseError::new(format!(
+                "solver output expression nesting exceeds maximum {MAX_SOLVER_OUTPUT_NESTING}"
+            ))),
+            Some(b'(') => self.parse_list(nesting + 1),
             Some(b')') => Err(ParseError::new("unexpected closing parenthesis")),
             Some(b'"') => self.parse_string(),
+            Some(b'|') => self.parse_quoted_symbol(),
             Some(_) => self.parse_atom(),
             None => Err(ParseError::new("unexpected end of output")),
         }
     }
 
-    fn parse_list(&mut self) -> Result<SExpression, ParseError> {
+    fn parse_list(&mut self, nesting: usize) -> Result<SExpression, ParseError> {
         self.cursor += 1;
         let mut values = Vec::new();
         loop {
@@ -638,7 +933,7 @@ impl<'a> SExpressionParser<'a> {
                     self.cursor += 1;
                     return Ok(SExpression::List(values));
                 }
-                Some(_) => values.push(self.parse_expression()?),
+                Some(_) => values.push(self.parse_expression(nesting)?),
                 None => return Err(ParseError::new("unterminated list")),
             }
         }
@@ -658,6 +953,21 @@ impl<'a> SExpressionParser<'a> {
         let atom = str::from_utf8(&self.bytes[start..self.cursor])
             .map_err(|error| ParseError::new(format!("invalid UTF-8 atom: {error}")))?;
         Ok(SExpression::Atom(atom.to_owned()))
+    }
+
+    fn parse_quoted_symbol(&mut self) -> Result<SExpression, ParseError> {
+        let start = self.cursor;
+        self.cursor += 1;
+        while let Some(byte) = self.bytes.get(self.cursor).copied() {
+            self.cursor += 1;
+            if byte == b'|' {
+                let atom = str::from_utf8(&self.bytes[start..self.cursor]).map_err(|error| {
+                    ParseError::new(format!("invalid UTF-8 quoted symbol: {error}"))
+                })?;
+                return Ok(SExpression::Atom(atom.to_owned()));
+            }
+        }
+        Err(ParseError::new("unterminated quoted symbol"))
     }
 
     fn parse_string(&mut self) -> Result<SExpression, ParseError> {
@@ -716,7 +1026,7 @@ impl ParseError {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_solver_output, ParsedSolve};
+    use super::{parse_solver_output, ParsedSolve, SExpressionParser};
     use crate::types::{ModelValue, Variable};
 
     #[test]
@@ -759,5 +1069,17 @@ mod tests {
         .expect_err("duplicate binding must fail");
 
         assert!(error.to_string().contains("duplicate"));
+    }
+
+    #[test]
+    fn rejects_solver_output_with_excessive_expression_nesting() {
+        let nesting = 257;
+        let output = format!("{}value{}", "(".repeat(nesting), ")".repeat(nesting));
+
+        let error = SExpressionParser::new(&output)
+            .parse_all()
+            .expect_err("deep solver output must fail before exhausting the stack");
+
+        assert!(error.to_string().contains("nesting"));
     }
 }
