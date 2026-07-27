@@ -117,9 +117,18 @@ Eight focused demos cover the full SPUR workflow in under eight minutes. Follow 
 </tr>
 </table>
 
-> **DAG-aware planning and integration · 1:25.** The [featured demo above](./docs/demos/spur-dag-aware-multi-agent.webm) shows staged dependencies, parallel branches, plan inspection, and convergence into one review flow.
+### 4. Explore code with `spur-graph`
 
-> **Graph-first code exploration · 0:33.** [Watch a Grok brain inspect `spur-graph`](./crates/spur-graph/assets/spur-graph-explore-code.webm), follow graph-backed source and impact evidence, and assemble a concrete mental model. The [`spur-graph` guide](./crates/spur-graph/README.md) covers the underlying pipeline and query surface.
+[![A Grok brain exploring spur-graph and assembling a live impact map](./crates/spur-graph/assets/spur-graph-explore-code-poster.jpg)](./crates/spur-graph/assets/spur-graph-explore-code.webm)
+
+<p align="center">
+  <sub>
+    <a href="./crates/spur-graph/assets/spur-graph-explore-code.webm">Watch the 33-second WebM demo</a>
+    — resolve current source, follow consumers, and assemble a concrete impact model from graph-backed evidence. The <a href="./crates/spur-graph/README.md"><code>spur-graph</code> guide</a> covers the underlying pipeline and query surface.
+  </sub>
+</p>
+
+> **DAG-aware planning and integration · 1:25.** The [featured demo above](./docs/demos/spur-dag-aware-multi-agent.webm) shows staged dependencies, parallel branches, plan inspection, and convergence into one review flow.
 
 ## Quick start
 
