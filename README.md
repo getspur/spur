@@ -18,6 +18,8 @@
   ·
   <a href="./docs/user-docs">Documentation</a>
   ·
+  <a href="#capability-demos">Demos</a>
+  ·
   <a href="#quick-start">Quick start</a>
   ·
   <a href="./CONTRIBUTING.md">Contributing</a>
@@ -26,9 +28,9 @@
 > [!WARNING]
 > SPUR is early-stage software. APIs, configuration, and workflows may change while the project stabilizes.
 
-## See SPUR in action
+## Featured demo
 
-[![SPUR coordinating a DAG-aware multi-agent coding session](docs/demos/spur-demo-poster.jpg)](docs/demos/spur-dag-aware-multi-agent.webm)
+[![SPUR coordinating a DAG-aware multi-agent coding session](docs/demos/spur-dag-aware-multi-agent-poster.jpg)](docs/demos/spur-dag-aware-multi-agent.webm)
 
 <p align="center">
   <sub>
@@ -53,6 +55,69 @@ SPUR is a Rust-native terminal application that sits above the agents you alread
 | Cross-vendor visibility | A unified cost ledger and analytics across supported agent CLIs |
 | Code-aware delegation | A tree-sitter code graph with stable symbol identities and incremental rebuilds |
 | Review away from the terminal | An optional Telegram frontend backed by the same orchestration state machine |
+
+## Capability demos
+
+Seven focused demos cover the full SPUR workflow in under seven minutes. Follow them in order for a guided tour, or jump directly to the capability you need.
+
+### 1. Get productive
+
+<table>
+<tr>
+<td width="50%" valign="top">
+<a href="./docs/demos/spur-install-and-init.webm"><img src="./docs/demos/spur-install-and-init-poster.jpg" alt="SPUR detecting installed agents during project initialization" /></a>
+<h4>Install, detect, initialize</h4>
+<p>Install the npm package, let <code>spur init</code> discover agent and PM tools, choose a brain, review permission settings, and launch the TUI.</p>
+<p><a href="./docs/demos/spur-install-and-init.webm">Watch the 1:10 demo →</a></p>
+</td>
+<td width="50%" valign="top">
+<a href="./docs/demos/spur-help-and-shortcuts.webm"><img src="./docs/demos/spur-help-and-shortcuts-poster.jpg" alt="SPUR keyboard help overlay" /></a>
+<h4>Learn the keyboard model</h4>
+<p>Open the built-in help, understand navigation and compose modes, and learn the shortcuts for panels, lineage, review, and session control.</p>
+<p><a href="./docs/demos/spur-help-and-shortcuts.webm">Watch the 8-second demo →</a></p>
+</td>
+</tr>
+</table>
+
+### 2. Control the workspace
+
+<table>
+<tr>
+<td width="50%" valign="top">
+<a href="./docs/demos/spur-session-navigation.webm"><img src="./docs/demos/spur-session-navigation-poster.jpg" alt="SPUR session navigation and command palette" /></a>
+<h4>Navigate sessions and commands</h4>
+<p>Open the session picker, return to prior work, inspect lineage, and use the universal command palette without leaving the keyboard.</p>
+<p><a href="./docs/demos/spur-session-navigation.webm">Watch the 13-second demo →</a></p>
+</td>
+<td width="50%" valign="top">
+<a href="./docs/demos/spur-tui-tour.webm"><img src="./docs/demos/spur-tui-tour-poster.jpg" alt="SPUR plan browser and TUI surfaces" /></a>
+<h4>Tour the operating surfaces</h4>
+<p>Move through the command palette, lineage and worker views, sprint browser, plan inspector, and the task detail surfaces used during real work.</p>
+<p><a href="./docs/demos/spur-tui-tour.webm">Watch the 36-second demo →</a></p>
+</td>
+</tr>
+</table>
+
+### 3. Orchestrate real work
+
+<table>
+<tr>
+<td width="50%" valign="top">
+<a href="./docs/demos/spur-live-delegation.webm"><img src="./docs/demos/spur-live-delegation-poster.jpg" alt="SPUR following multiple parallel worker delegations" /></a>
+<h4>Follow live delegation</h4>
+<p>Watch a brain dispatch complementary reviews to multiple vendors, follow each worker in real time, and keep the active fleet visible in one terminal.</p>
+<p><a href="./docs/demos/spur-live-delegation.webm">Watch the 1:26 demo →</a></p>
+</td>
+<td width="50%" valign="top">
+<a href="./docs/demos/spur-kiro-brain-multi-agent.webm"><img src="./docs/demos/spur-kiro-brain-multi-agent-poster.jpg" alt="Kiro orchestrating Gemini, Kimi, and Codex workers through SPUR" /></a>
+<h4>Use Kiro as a cross-vendor brain</h4>
+<p>Run Kiro as the orchestrator while Gemini, Kimi, and Codex inspect the same code from distinct angles, then bring their outcomes back for consolidation.</p>
+<p><a href="./docs/demos/spur-kiro-brain-multi-agent.webm">Watch the 1:59 demo →</a></p>
+</td>
+</tr>
+</table>
+
+> **DAG-aware planning and integration · 1:25.** The [featured demo above](./docs/demos/spur-dag-aware-multi-agent.webm) shows staged dependencies, parallel branches, plan inspection, and convergence into one review flow.
 
 ## Quick start
 
