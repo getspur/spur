@@ -6,6 +6,17 @@ Multi-language **code-graph substrate** for SPUR: tree-sitter extraction, conten
 
 It does **not** do ranked SQL analytics or evidence packs — that is `spur-analyst` over DuckDB. Agents and brains consume this crate’s facts through MCP (`code_*` tools); they do not normally load Parquet directly.
 
+## Explainer
+
+[![spur-graph turning worktree files into freshness-aware graph answers](./assets/spur-graph-explainer-poster.jpg)](./assets/spur-graph-explainer.webm)
+
+<p align="center">
+  <sub>
+    <a href="./assets/spur-graph-explainer.webm">Watch the 48-second WebM explainer</a>
+    — files become normalized facts, stable identities, incremental rebuilds, and freshness-aware <code>code_*</code> answers.
+  </sub>
+</p>
+
 ```
 Worktree + git (gix)
         │
