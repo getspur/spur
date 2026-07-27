@@ -119,7 +119,7 @@ Nine focused demos cover the full SPUR workflow in under nine minutes. Follow th
 
 ### 4. Explore code with `spur-graph`
 
-[![A Grok brain exploring spur-graph and assembling a live impact map](./crates/spur-graph/assets/spur-graph-explore-code-poster.jpg)](./crates/spur-graph/assets/spur-graph-explore-code.webm)
+[spur-graph-explore-code.webm](https://github.com/user-attachments/assets/95ed7a64-d8ce-444f-8cf5-b9db6890fae9)
 
 <p align="center">
   <sub>
