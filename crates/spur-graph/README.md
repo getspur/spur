@@ -11,8 +11,6 @@ It does **not** do ranked SQL analytics or evidence packs — that is `spur-anal
 ### Four-beat explainer
 [spur-graph-explainer.webm](https://github.com/user-attachments/assets/9c9f0999-bf13-4716-be1c-9d889db62ced)
 
-[spur-graph turning worktree files into freshness-aware graph answers](./assets/spur-graph-explainer.webm)
-
 <p align="center">
   <sub>
     <a href="./assets/spur-graph-explainer.webm">Watch the 48-second WebM explainer</a>
@@ -22,7 +20,8 @@ It does **not** do ranked SQL analytics or evidence packs — that is `spur-anal
 
 ### Graph-first code exploration
 
-[A Grok brain exploring spur-graph and assembling a live impact map](./assets/spur-graph-explore-code.webm)
+[spur-graph-explore-code.webm](https://github.com/user-attachments/assets/95ed7a64-d8ce-444f-8cf5-b9db6890fae9)
+
 
 <p align="center">
   <sub>
