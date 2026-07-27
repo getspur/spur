@@ -36,9 +36,32 @@ kept out of the default tree so clones stay small and contributor-focused.
 
 ## History note
 
-Removing paths from the current tree does **not** purge historical blobs.
-A later `git filter-repo` / BFG pass may shrink clone size; that requires a
-coordinated force-push and is intentionally **not** part of the first cleanup.
+**2026-07-27:** `main` was rewritten with `git filter-repo` to drop historical
+blobs under:
+
+- `docs/product_launch/`, `videos/`, `deliveries/`, `marketing/`, `output/`
+- `crates/spur-notebook/` (moved out of monorepo earlier)
+- `.spur/analyst-overlays/`, historical `vendor/`
+- residual `*.mp4` / `*.mp3` / `*.m4a` / `*.wav` / `*.parquet`
+
+Recovery point (pre-rewrite tip + media): tag
+`backup/pre-oss-history-purge-20260727T010021Z` → commit `536fb6cf9`.
+
+**Everyone with an existing clone must re-sync** (rewritten history):
+
+```sh
+git fetch origin
+git checkout main
+git reset --hard origin/main
+# or re-clone fresh
+```
+
+Local feature branches / worktrees based on pre-purge SHAs will not merge
+cleanly; recreate them from the new `main` or cherry-pick carefully.
+
+**Local 14GB `.git`:** often packed local unreachable objects and worktrees,
+not origin size. After reset: `git reflog expire --expire=now --all && git gc --prune=now`,
+or re-clone.
 
 ## Do not re-add
 
