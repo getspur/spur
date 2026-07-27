@@ -1,8 +1,10 @@
 # OSS boundary
 
 This monorepo is the **public SPUR product** (CLI, orchestration, TUI, MCP,
-build tooling). Company marketing, launch media, and operator scratch are
+build tooling). Company marketing, production media, and operator scratch are
 kept out of the default tree so clones stay small and contributor-focused.
+Small, web-optimized product demos may live under `docs/demos/` when they are
+referenced directly by public documentation.
 
 ## In scope (tracked)
 
@@ -11,6 +13,7 @@ kept out of the default tree so clones stay small and contributor-focused.
 | `crates/` | Product source |
 | `scripts/`, `xtask/`, `npm/`, `tests/`, `third_party/` | Build, release, quality |
 | `docs/architecture*`, `docs/user-docs/`, `docs/onboarding/`, design/RCA as needed | Engineering docs |
+| `docs/demos/` | Curated, web-optimized product demos used by public docs |
 | `.github/` | CI / release |
 | `.spur/config.toml.example`, `.spur/skills/` | Example config + product skills |
 | Root: `README`, `LICENSE`, `CONTRIBUTING`, `CHANGELOG`, `ARCHITECTURE`, Cargo files | OSS hygiene |
@@ -20,7 +23,7 @@ kept out of the default tree so clones stay small and contributor-focused.
 | Path | Why |
 |---|---|
 | `marketing/**` | GTM, competitors, campaign plans |
-| `videos/**`, `deliveries/**`, `video-assets/` | Films and production outputs |
+| `videos/**`, `deliveries/**`, `video-assets/` | Raw recordings, films, and production outputs |
 | `docs/product_launch/**` | PH packs, media, launch checklists |
 | `output/` | One-off migration dumps / screenshots |
 | `app_gallery/`, `sdk/` | Local checkouts, not monorepo product |
@@ -65,7 +68,9 @@ or re-clone.
 
 ## Do not re-add
 
-- Multi‑MB `.mp4` / `.mp3` / parquet analyst overlays
+- Unoptimized production media; keep public `docs/demos/` assets curated and
+  under 10 MB each
+- Parquet analyst overlays
 - Local IDE skill forests for third-party media tools as product defaults
 - Operator `terraform.tfvars` or env secrets
 
