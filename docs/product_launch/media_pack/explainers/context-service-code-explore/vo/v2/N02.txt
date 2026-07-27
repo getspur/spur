@@ -1,1 +1,0 @@
-In-repo edges resolve. Cross a dependency — the edge goes dark, and the agent guesses. Wrong APIs break integrations and force rework.

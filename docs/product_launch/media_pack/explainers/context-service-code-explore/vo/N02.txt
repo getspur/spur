@@ -1,1 +1,0 @@
-Inside your repo, call sites resolve. Cross a dependency, and the edge goes dark — the agent guesses. Without structured external context, teams fall back to web search, outdated docs, or wrong APIs. That breaks integrations and burns rework.

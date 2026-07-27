@@ -215,6 +215,19 @@ cargo run -p spur-cli -- --help
 
 Types: `feat`, `fix`, `test`, `docs`, `refactor`, `chore`. Keep subjects under 72 characters.
 
+Prefer `scripts/spur-cargo` for build/test in agent and CI environments (see `AGENTS.md`).
+
+## Repository layout
+
+| Path | Role |
+|---|---|
+| `crates/` | Product source (CLI, core, TUI, MCP, …) |
+| `scripts/`, `xtask/`, `npm/`, `tests/` | Build, release, quality |
+| `docs/` | Architecture, user docs, design notes |
+| `.spur/config.toml.example`, `.spur/skills/` | Example config + product skills |
+
+Marketing trees, launch media, and operator scratch (`marketing/`, `videos/`, `deliveries/`, `docs/product_launch/`, local `.spur` logs) are **out of the public tree** — see [`docs/OSS_BOUNDARY.md`](docs/OSS_BOUNDARY.md).
+
 ## License
 
 SPUR is licensed under the [GNU General Public License v3.0 only](LICENSE) (`GPL-3.0-only`).

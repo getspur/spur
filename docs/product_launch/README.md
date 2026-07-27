@@ -1,21 +1,21 @@
-# Product launch docs
+# Product launch docs (relocated)
 
-Operational checklists and launch-facing plans for public SPUR releases.
+Product Hunt checklists, media packs, hero videos, and explainer production
+artifacts are **not tracked** in the public SPUR monorepo.
 
-| Doc | Purpose |
+| Former content | Intended home |
 |---|---|
-| [producthunt-launch-checklist.md](./producthunt-launch-checklist.md) | **Canonical** Product Hunt success checklist (PRD v2.3 + current PH policy; rev 1.1+) |
-| [product-journey-ph.md](./product-journey-ph.md) | **PH product journey** crosswalked to live TUI problem stories (`scripts/e2e/demos/tui-live`) |
-| [media_pack/MANIFEST.md](./media_pack/MANIFEST.md) | **PH media pack** — real VHS captures only (`out/` + `tapes/`) |
-| [media_pack/marketing/MARKETING.md](./media_pack/marketing/MARKETING.md) | Higgsfield marketing layer conditioned on real stills (social/OG/trailer) |
-| [media_pack/html/index.html](./media_pack/html/index.html) | Offline visualizer of the media pack |
-| [media_pack/refresh.sh](./media_pack/refresh.sh) | Re-copy films + re-extract gallery stills from `tui-live/out` |
-| [producthunt-checklist-content-review.md](./producthunt-checklist-content-review.md) | Codex `content-marketer` audit (2026-07-16) — P0/P1 findings and copy patches |
+| PH checklists, journey crosswalks | Private marketing repo |
+| `media_pack/` (films, stills, notebooks, plates) | Media repo / CDN — never product git |
+| Explainer VO / gate status | Media or marketing repo |
 
-## Related (marketing tree)
+## Contributor-facing docs stay elsewhere
 
-| Path | Purpose |
+| Need | Path |
 |---|---|
-| [`marketing/launch/product-hunt.md`](../../marketing/launch/product-hunt.md) | **Superseded for execution** (2026-05 package) — audit before any reuse |
-| [`marketing/launch/playbook.md`](../../marketing/launch/playbook.md) | Multi-channel T−14 → T+7 ops (import PH timestamp/copy from the checklist) |
-| [`SPUR_PRD.md`](../../SPUR_PRD.md) | Product truth for claims, tiers, and positioning |
+| Install / use SPUR | `docs/user-docs/`, `docs/onboarding/` |
+| Architecture | `docs/architecture/`, root `ARCHITECTURE.md` |
+| Contributing | `CONTRIBUTING.md` |
+
+If you need launch assets, use the private marketing/media trees — do not
+re-import multi‑MB media into this repository.

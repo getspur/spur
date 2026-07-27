@@ -1,7 +1,0 @@
-{
-  "scene": "06-evidence-comes-back",
-  "duration_s": 9,
-  "rules": ["3d-page-scroll", "dynamic-content-sequencing", "cursor-click-ripple", "anchored-layout-expand"],
-  "exit": { "vector": "none", "still_moving": false },
-  "entry": { "vector": "up 38px/s", "from_rest": true }
-}

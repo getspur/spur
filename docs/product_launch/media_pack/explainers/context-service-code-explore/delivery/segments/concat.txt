@@ -1,6 +1,0 @@
-file '/Volumes/Projects/spur/docs/product_launch/media_pack/explainers/context-service-code-explore/delivery/segments/S01.mp4'
-file '/Volumes/Projects/spur/docs/product_launch/media_pack/explainers/context-service-code-explore/delivery/segments/S02.mp4'
-file '/Volumes/Projects/spur/docs/product_launch/media_pack/explainers/context-service-code-explore/delivery/segments/S03.mp4'
-file '/Volumes/Projects/spur/docs/product_launch/media_pack/explainers/context-service-code-explore/delivery/segments/S04.mp4'
-file '/Volumes/Projects/spur/docs/product_launch/media_pack/explainers/context-service-code-explore/delivery/segments/S05.mp4'
-file '/Volumes/Projects/spur/docs/product_launch/media_pack/explainers/context-service-code-explore/delivery/segments/S06.mp4'

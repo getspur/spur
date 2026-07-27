@@ -1,6 +1,0 @@
-04-session-resume.tape
-09-product-e2e-flow.tape
-10-problem-ops-visibility.tape
-11-problem-plan-progress.tape
-12-problem-backlog-triage.tape
-13-problem-plan-loop-drive.tape

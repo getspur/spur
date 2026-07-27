@@ -1,5 +1,0 @@
-9067fde77168ebd8c1007c782d896d460f2e35ba2ad8fe05df1065e2a77b7b92  SPUR-Launch-Master-1080p.mp4
-5d2aa20edae3c9b1acbd6ff16d1b0e7423171e0cca2c5e57d036d49a7fa2596f  SPUR-Launch-Poster.jpg
-dd0d56a06102d21102a80e75b596d5f071b6f135985c3c00c22d558450dc553b  SPUR-Launch-QA-Contact-Sheet.jpg
-cd3c10e7df3ef2cb5e82beb4713889d40acc5dadf6b8e982994a32f26dd7fceb  SPUR-Launch-Editable.palmier (tree hash of sorted per-file SHA-256 records)
-7e4487f17fde13a384b629a92d3818cdb3bff000b3c3eb6ff430e975d0beef20  media-shots (tree hash of sorted per-file SHA-256 records)

@@ -1,1 +1,0 @@
-Every unit is source, package, and revision. Selectors pin the version — no stale docs, no drift.

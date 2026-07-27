@@ -1,7 +1,0 @@
-{
-  "scene": "03-shape-the-work",
-  "duration_s": 9,
-  "rules": ["viewport-change", "svg-path-draw", "multi-phase-camera"],
-  "exit": { "vector": "none", "still_moving": false },
-  "entry": { "vector": "up 44px/s", "from_rest": true }
-}

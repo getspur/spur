@@ -1,7 +1,0 @@
-{
-  "scene": "08-resume-and-close",
-  "duration_s": 7,
-  "rules": ["theme-crossfade-morph", "discrete-text-sequence", "dynamic-content-sequencing"],
-  "exit": { "vector": "none", "still_moving": false },
-  "entry": { "vector": "up 40px/s", "from_rest": true }
-}

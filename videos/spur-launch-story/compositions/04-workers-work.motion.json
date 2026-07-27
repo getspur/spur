@@ -1,7 +1,0 @@
-{
-  "scene": "04-workers-work",
-  "duration_s": 10,
-  "rules": ["cursor-click-ripple", "svg-icon-enrichment", "scale-swap-transition", "svg-path-draw"],
-  "exit": { "vector": "none", "still_moving": false },
-  "entry": { "vector": "up 42px/s", "from_rest": true }
-}
