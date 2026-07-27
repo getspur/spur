@@ -16,7 +16,7 @@ Design: [`docs/superpowers/specs/2026-07-25-z3-constraint-solver-design.md`](../
 
 ---
 
-## Why coding agents need a solver — four beats
+## Why coding agents need a solver 
 
 Modern coding agents are excellent at *proposing* structure and terrible at *guaranteeing* multi-variable feasibility. The product thesis is a four-beat loop:
 
@@ -40,7 +40,7 @@ flowchart LR
   class B4 feedback
 ```
 
-### Beat 1 — LLM alone invents constants
+### Problem: LLM alone invents constants
 
 Without a model-finder, agents fill in numbers by feel. The drafts look confident; nothing returns `sat` or `unsat`.
 
@@ -95,7 +95,7 @@ flowchart TB
 
 ---
 
-### Beat 2 — Formal solvers alone stay inaccessible
+### Formal solvers alone stay inaccessible
 
 Z3 (and other SMT solvers) *can* decide these systems rigorously. Coding agents do not natively speak SMT-LIB2, manage process budgets, or hand models across brain and worker sessions.
 
@@ -132,7 +132,7 @@ So the state of the art is not “replace the LLM with Z3.” It is **give the L
 
 ---
 
-### Beat 3 — Merge: LLM as translator, solver as reasoner
+### Beat 3 — Merge: LLM as translator, solver as reasoner with MCP 
 
 **Product thesis:** the LLM translates intent into a closed constraint language; Z3 (subprocess) runs the strict reasoning step; agents consume the model.
 
@@ -203,7 +203,7 @@ One feasible model (Z3 may return any sat assignment): `{ "workers": 4, "batch":
 
 ---
 
-### Beat 4 — Feedback: self-correct on sat / unsat
+### Feedback Loop: self-correct on sat / unsat
 
 A single solve is not the whole story. The durable advantage is the **feedback loop**: statuses flow back so the agent can re-encode instead of double-down on a guess.
 
