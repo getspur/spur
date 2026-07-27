@@ -56,16 +56,15 @@ __pycache__/
 /resource/superpowers/
 .superpowers/brainstorm/
 /.spur/sessions/**
-
-# Vendored marketing skills — ignore everything except SKILL.md files (so worker
-# worktrees can resolve them) and the upstream LICENSE / README.
-marketing/marketingskills/*
-!marketing/marketingskills/skills/
-marketing/marketingskills/skills/*/*
-!marketing/marketingskills/skills/*/SKILL.md
-!marketing/marketingskills/LICENSE
-!marketing/marketingskills/README.md
 .spur/analyst.duckdb*
+
+# Operator-local .spur noise (never product). Keep config.toml.example + skills/.
+.spur/config.toml
+.spur/remote-cargo.enabled
+.spur/s3-*
+.spur/s4-*
+.spur/*.log
+.spur/*.log.*
 
 # spur pm (beads) — derived files; commit issues.jsonl
 .beads/beads.db
@@ -110,3 +109,34 @@ infra/spur-context-service/local-live-sync.tfvars
 # TF_VAR_* for secrets. Never commit real terraform.tfvars / *.auto.tfvars.
 infra/spur-context-service/terraform.tfvars
 infra/spur-context-service/*.auto.tfvars
+
+# ---------------------------------------------------------------------------
+# OSS boundary — not part of the public product tree
+# Local copies may remain on disk for company ops; only pointer READMEs are
+# tracked where noted. Sibling homes: getspur/spur-marketing, spur-media (planned).
+# ---------------------------------------------------------------------------
+
+# GTM / campaign / competitor research (private marketing tree)
+/marketing/**
+!/marketing/README.md
+
+# Launch films, HyperFrames projects, explainer deliveries
+/videos/**
+!/videos/README.md
+/deliveries/**
+!/deliveries/README.md
+/video-assets/
+/docs/product_launch/**
+!/docs/product_launch/README.md
+
+# One-off migration / screenshot dumps
+/output/
+
+# Local-only app / SDK checkouts (not monorepo product)
+/app_gallery/
+/sdk/
+
+# Accidental root npm / skill lock from media tooling
+/package.json
+/package-lock.json
+/skills-lock.json
