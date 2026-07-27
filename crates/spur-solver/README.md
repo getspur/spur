@@ -14,6 +14,17 @@ Constraint **model-finding** for SPUR coding agents.
 
 Design: [`docs/superpowers/specs/2026-07-25-z3-constraint-solver-design.md`](../../docs/superpowers/specs/2026-07-25-z3-constraint-solver-design.md)
 
+## Demo
+
+[![A Grok brain using spur-solver to test constraints and produce concrete models](./assets/spur-tui-solver-poster.jpg)](./assets/spur-tui-solver.webm)
+
+<p align="center">
+  <sub>
+    <a href="./assets/spur-tui-solver.webm">Watch the 67-second WebM demo</a>
+    — encode real overlay limits as constraints, check satisfiability, and turn each concrete model into an engineering verdict.
+  </sub>
+</p>
+
 ---
 
 ## Why coding agents need a solver 

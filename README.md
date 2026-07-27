@@ -58,7 +58,7 @@ SPUR is a Rust-native terminal application that sits above the agents you alread
 
 ## Capability demos
 
-Eight focused demos cover the full SPUR workflow in under eight minutes. Follow them in order for a guided tour, or jump directly to the capability you need.
+Nine focused demos cover the full SPUR workflow in under nine minutes. Follow them in order for a guided tour, or jump directly to the capability you need.
 
 ### 1. Get productive
 
@@ -125,6 +125,17 @@ Eight focused demos cover the full SPUR workflow in under eight minutes. Follow 
   <sub>
     <a href="./crates/spur-graph/assets/spur-graph-explore-code.webm">Watch the 33-second WebM demo</a>
     — resolve current source, follow consumers, and assemble a concrete impact model from graph-backed evidence. The <a href="./crates/spur-graph/README.md"><code>spur-graph</code> guide</a> covers the underlying pipeline and query surface.
+  </sub>
+</p>
+
+### 5. Prove constraints with `spur-solver`
+
+[![A Grok brain using spur-solver to test constraints and produce concrete models](./crates/spur-solver/assets/spur-tui-solver-poster.jpg)](./crates/spur-solver/assets/spur-tui-solver.webm)
+
+<p align="center">
+  <sub>
+    <a href="./crates/spur-solver/assets/spur-tui-solver.webm">Watch the 67-second WebM demo</a>
+    — translate a real engineering question into constraints, return concrete <code>sat</code> models, and separate correctness gaps from explicit design limits. The <a href="./crates/spur-solver/README.md"><code>spur-solver</code> guide</a> explains the model-finding loop.
   </sub>
 </p>
 
