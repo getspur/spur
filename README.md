@@ -30,7 +30,7 @@
 
 ## Featured demo
 
-[![SPUR coordinating a DAG-aware multi-agent coding session](docs/demos/spur-dag-aware-multi-agent-poster.jpg)](docs/demos/spur-dag-aware-multi-agent.webm)
+[spur-dag-aware-multi-agent.webm](https://github.com/user-attachments/assets/16d2fe40-d1cb-4024-b415-1aadebae63ac)
 
 <p align="center">
   <sub>
@@ -58,64 +58,79 @@ SPUR is a Rust-native terminal application that sits above the agents you alread
 
 ## Capability demos
 
-Nine focused demos cover the full SPUR workflow in under nine minutes. Follow them in order for a guided tour, or jump directly to the capability you need.
+Eight focused capability demos — plus the featured walkthrough above — cover the full SPUR workflow in under nine minutes. Follow them in order for a guided tour, or jump directly to the capability you need.
 
 ### 1. Get productive
 
-<table>
-<tr>
-<td width="50%" valign="top">
-<a href="./docs/demos/spur-install-and-init.webm"><img src="./docs/demos/spur-install-and-init-poster.jpg" alt="SPUR detecting installed agents during project initialization" /></a>
-<h4>Install, detect, initialize</h4>
-<p>Install the npm package, let <code>spur init</code> discover agent and PM tools, choose a brain, review permission settings, and launch the TUI.</p>
-<p><a href="./docs/demos/spur-install-and-init.webm">Watch the 1:10 demo →</a></p>
-</td>
-<td width="50%" valign="top">
-<a href="./docs/demos/spur-help-and-shortcuts.webm"><img src="./docs/demos/spur-help-and-shortcuts-poster.jpg" alt="SPUR keyboard help overlay" /></a>
-<h4>Learn the keyboard model</h4>
-<p>Open the built-in help, understand navigation and compose modes, and learn the shortcuts for panels, lineage, review, and session control.</p>
-<p><a href="./docs/demos/spur-help-and-shortcuts.webm">Watch the 8-second demo →</a></p>
-</td>
-</tr>
-</table>
+#### Install, detect, initialize
+
+[spur-install-and-init.webm](https://github.com/user-attachments/assets/4ec5b465-7312-492f-926f-2883cf1e90b4)
+
+<p align="center">
+  <sub>
+    <a href="./docs/demos/spur-install-and-init.webm">Watch the 1:10 WebM demo</a>
+    — install the npm package, let <code>spur init</code> discover agent and PM tools, choose a brain, review permission settings, and launch the TUI.
+  </sub>
+</p>
+
+#### Learn the keyboard model
+
+[spur-help-and-shortcuts.webm](https://github.com/user-attachments/assets/3ca1c72f-976d-4ea8-a039-43b6c0f71747)
+
+<p align="center">
+  <sub>
+    <a href="./docs/demos/spur-help-and-shortcuts.webm">Watch the 8-second WebM demo</a>
+    — open the built-in help, understand navigation and compose modes, and learn the shortcuts for panels, lineage, review, and session control.
+  </sub>
+</p>
 
 ### 2. Control the workspace
 
-<table>
-<tr>
-<td width="50%" valign="top">
-<a href="./docs/demos/spur-session-navigation.webm"><img src="./docs/demos/spur-session-navigation-poster.jpg" alt="SPUR session navigation and command palette" /></a>
-<h4>Navigate sessions and commands</h4>
-<p>Open the session picker, return to prior work, inspect lineage, and use the universal command palette without leaving the keyboard.</p>
-<p><a href="./docs/demos/spur-session-navigation.webm">Watch the 13-second demo →</a></p>
-</td>
-<td width="50%" valign="top">
-<a href="./docs/demos/spur-tui-tour.webm"><img src="./docs/demos/spur-tui-tour-poster.jpg" alt="SPUR plan browser and TUI surfaces" /></a>
-<h4>Tour the operating surfaces</h4>
-<p>Move through the command palette, lineage and worker views, sprint browser, plan inspector, and the task detail surfaces used during real work.</p>
-<p><a href="./docs/demos/spur-tui-tour.webm">Watch the 36-second demo →</a></p>
-</td>
-</tr>
-</table>
+#### Navigate sessions and commands
+
+[spur-session-navigation.webm](https://github.com/user-attachments/assets/5f75d862-010a-4eda-bc2c-b162bd5c9452)
+
+<p align="center">
+  <sub>
+    <a href="./docs/demos/spur-session-navigation.webm">Watch the 13-second WebM demo</a>
+    — open the session picker, return to prior work, inspect lineage, and use the universal command palette without leaving the keyboard.
+  </sub>
+</p>
+
+#### Tour the operating surfaces
+
+[spur-tui-tour.webm](https://github.com/user-attachments/assets/9d10be9c-8a48-4511-95cb-82653704d740)
+
+<p align="center">
+  <sub>
+    <a href="./docs/demos/spur-tui-tour.webm">Watch the 36-second WebM demo</a>
+    — move through the command palette, lineage and worker views, sprint browser, plan inspector, and the task detail surfaces used during real work.
+  </sub>
+</p>
 
 ### 3. Orchestrate real work
 
-<table>
-<tr>
-<td width="50%" valign="top">
-<a href="./docs/demos/spur-live-delegation.webm"><img src="./docs/demos/spur-live-delegation-poster.jpg" alt="SPUR following multiple parallel worker delegations" /></a>
-<h4>Follow live delegation</h4>
-<p>Watch a brain dispatch complementary reviews to multiple vendors, follow each worker in real time, and keep the active fleet visible in one terminal.</p>
-<p><a href="./docs/demos/spur-live-delegation.webm">Watch the 1:26 demo →</a></p>
-</td>
-<td width="50%" valign="top">
-<a href="./docs/demos/spur-kiro-brain-multi-agent.webm"><img src="./docs/demos/spur-kiro-brain-multi-agent-poster.jpg" alt="Kiro orchestrating Gemini, Kimi, and Codex workers through SPUR" /></a>
-<h4>Use Kiro as a cross-vendor brain</h4>
-<p>Run Kiro as the orchestrator while Gemini, Kimi, and Codex inspect the same code from distinct angles, then bring their outcomes back for consolidation.</p>
-<p><a href="./docs/demos/spur-kiro-brain-multi-agent.webm">Watch the 1:59 demo →</a></p>
-</td>
-</tr>
-</table>
+#### Follow live delegation
+
+[spur-live-delegation.webm](https://github.com/user-attachments/assets/28c0b009-d1e3-4d6c-9856-5b42c666c752)
+
+<p align="center">
+  <sub>
+    <a href="./docs/demos/spur-live-delegation.webm">Watch the 1:26 WebM demo</a>
+    — watch a brain dispatch complementary reviews to multiple vendors, follow each worker in real time, and keep the active fleet visible in one terminal.
+  </sub>
+</p>
+
+#### Use Kiro as a cross-vendor brain
+
+[spur-kiro-brain-multi-agent.webm](https://github.com/user-attachments/assets/49d70fca-45f9-4dec-a9de-c5c4f5ac1dfe)
+
+<p align="center">
+  <sub>
+    <a href="./docs/demos/spur-kiro-brain-multi-agent.webm">Watch the 1:59 WebM demo</a>
+    — run Kiro as the orchestrator while Gemini, Kimi, and Codex inspect the same code from distinct angles, then bring their outcomes back for consolidation.
+  </sub>
+</p>
 
 ### 4. Explore code with `spur-graph`
 
@@ -130,7 +145,7 @@ Nine focused demos cover the full SPUR workflow in under nine minutes. Follow th
 
 ### 5. Prove constraints with `spur-solver`
 
-[![A Grok brain using spur-solver to test constraints and produce concrete models](./crates/spur-solver/assets/spur-tui-solver-poster.jpg)](./crates/spur-solver/assets/spur-tui-solver.webm)
+[spur-tui-solver.webm](https://github.com/user-attachments/assets/60e745cf-bd86-4345-809c-80d9f1da28f3)
 
 <p align="center">
   <sub>

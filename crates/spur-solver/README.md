@@ -16,7 +16,7 @@ Design: [`docs/superpowers/specs/2026-07-25-z3-constraint-solver-design.md`](../
 
 ## Demo
 
-[![A Grok brain using spur-solver to test constraints and produce concrete models](./assets/spur-tui-solver-poster.jpg)](./assets/spur-tui-solver.webm)
+[spur-tui-solver.webm](https://github.com/user-attachments/assets/60e745cf-bd86-4345-809c-80d9f1da28f3)
 
 <p align="center">
   <sub>
