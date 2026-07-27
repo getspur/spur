@@ -58,7 +58,7 @@ SPUR is a Rust-native terminal application that sits above the agents you alread
 
 ## Capability demos
 
-Seven focused demos cover the full SPUR workflow in under seven minutes. Follow them in order for a guided tour, or jump directly to the capability you need.
+Eight focused demos cover the full SPUR workflow in under eight minutes. Follow them in order for a guided tour, or jump directly to the capability you need.
 
 ### 1. Get productive
 
@@ -118,6 +118,8 @@ Seven focused demos cover the full SPUR workflow in under seven minutes. Follow 
 </table>
 
 > **DAG-aware planning and integration · 1:25.** The [featured demo above](./docs/demos/spur-dag-aware-multi-agent.webm) shows staged dependencies, parallel branches, plan inspection, and convergence into one review flow.
+
+> **Graph-first code exploration · 0:33.** [Watch a Grok brain inspect `spur-graph`](./crates/spur-graph/assets/spur-graph-explore-code.webm), follow graph-backed source and impact evidence, and assemble a concrete mental model. The [`spur-graph` guide](./crates/spur-graph/README.md) covers the underlying pipeline and query surface.
 
 ## Quick start
 

@@ -6,7 +6,9 @@ Multi-language **code-graph substrate** for SPUR: tree-sitter extraction, conten
 
 It does **not** do ranked SQL analytics or evidence packs — that is `spur-analyst` over DuckDB. Agents and brains consume this crate’s facts through MCP (`code_*` tools); they do not normally load Parquet directly.
 
-## Explainer
+## Videos
+
+### Four-beat explainer
 
 [![spur-graph turning worktree files into freshness-aware graph answers](./assets/spur-graph-explainer-poster.jpg)](./assets/spur-graph-explainer.webm)
 
@@ -14,6 +16,17 @@ It does **not** do ranked SQL analytics or evidence packs — that is `spur-anal
   <sub>
     <a href="./assets/spur-graph-explainer.webm">Watch the 48-second WebM explainer</a>
     — files become normalized facts, stable identities, incremental rebuilds, and freshness-aware <code>code_*</code> answers.
+  </sub>
+</p>
+
+### Graph-first code exploration
+
+[![A Grok brain exploring spur-graph and assembling a live impact map](./assets/spur-graph-explore-code-poster.jpg)](./assets/spur-graph-explore-code.webm)
+
+<p align="center">
+  <sub>
+    <a href="./assets/spur-graph-explore-code.webm">Watch the 33-second WebM demo</a>
+    — a Grok brain uses graph-backed code exploration to resolve current source, follow consumers, and assemble a concrete impact model.
   </sub>
 </p>
 
