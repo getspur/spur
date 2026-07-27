@@ -9,6 +9,7 @@ It does **not** do ranked SQL analytics or evidence packs — that is `spur-anal
 ## Videos
 
 ### Four-beat explainer
+[spur-graph-explainer.webm](https://github.com/user-attachments/assets/9c9f0999-bf13-4716-be1c-9d889db62ced)
 
 [spur-graph turning worktree files into freshness-aware graph answers](./assets/spur-graph-explainer.webm)
 
