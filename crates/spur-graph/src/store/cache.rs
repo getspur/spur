@@ -1,4 +1,7 @@
-use std::collections::{HashMap, VecDeque};
+#[cfg(test)]
+use std::cell::Cell;
+use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::ffi::OsStr;
 use std::fs::{self, File};
 use std::io;
 use std::path::{Path, PathBuf};
@@ -18,8 +21,9 @@ use crate::store::lance_sections::{
 };
 use crate::store::pointer::resolve_artifact_location;
 use crate::store::{
-    read_artifact_header_parquet, read_artifact_parquet, write_artifact_parquet,
-    write_current_pointer, ArtifactStagingDir, GraphArtifactSidecarStatus, WriteOptions,
+    read_artifact_header_parquet, read_artifact_parquet, read_current_pointer,
+    write_artifact_parquet, write_current_pointer, ArtifactStagingDir, GraphArtifactSidecarStatus,
+    WriteOptions,
 };
 use crate::{git, git::GitCtx, GraphIndexArtifact, GraphIndexPointer, SourceKind};
 
@@ -30,6 +34,7 @@ const WORKTREE_ARTIFACT_PATH: &str = ".spur/graph";
 const POINTER_PATH: &str = ".spur/graph-index.pointer.json";
 pub const COMMIT_INDEX_POINTER_PATH: &str = ".spur/commit-index.pointer.json";
 const POINTER_SCHEMA: &str = "spur-graph-pointer-v1";
+const RETAINED_CANONICAL_ARTIFACTS: usize = 3;
 // LRU cap for in-process GraphIndexArtifact reuse. Bumped from 4 to 64 when the
 // Lance section sidecar landed (s1): write_sections_dataset re-loads the artifact
 // per finalization to compute incremental row diffs, and the prior cap evicted
@@ -38,6 +43,11 @@ const BASE_ARTIFACT_CACHE_CAP: usize = 64;
 
 #[cfg(test)]
 static LOCK_TIMEOUT_MS_OVERRIDE: AtomicU64 = AtomicU64::new(5_000);
+
+#[cfg(test)]
+thread_local! {
+    static POINTER_PUBLICATION_FAILURE: Cell<bool> = const { Cell::new(false) };
+}
 
 static BASE_ARTIFACT_CACHE: OnceLock<Mutex<BaseArtifactCache>> = OnceLock::new();
 
@@ -52,6 +62,12 @@ struct BaseArtifactCacheKey {
 struct BaseArtifactCache {
     artifacts: HashMap<BaseArtifactCacheKey, Arc<GraphIndexArtifact>>,
     order: VecDeque<BaseArtifactCacheKey>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CanonicalArtifactCandidate {
+    path: PathBuf,
+    modified: SystemTime,
 }
 
 #[derive(Debug, Clone)]
@@ -128,29 +144,34 @@ pub fn write_with_dedup_with_section_sidecar_options(
         return Ok(());
     }
 
-    let write_result = if canonical.join("manifest.json").is_file() {
-        repair_canonical_sidecar_if_incomplete(
-            worktree_root,
-            &canonical,
-            section_sidecar_options,
-            section_sidecar_progress,
-        )?;
-        Ok(canonical)
-    } else {
-        write_canonical_atomically(
-            artifact,
-            worktree_root,
-            &canonical_dir,
-            section_sidecar_options,
-            section_sidecar_progress,
-        )
-    };
+    let publish_result = (|| -> Result<()> {
+        let written_dir = if canonical.join("manifest.json").is_file() {
+            repair_canonical_sidecar_if_incomplete(
+                worktree_root,
+                &canonical,
+                section_sidecar_options,
+                section_sidecar_progress,
+            )?;
+            canonical
+        } else {
+            write_canonical_atomically(
+                artifact,
+                worktree_root,
+                &canonical_dir,
+                section_sidecar_options,
+                section_sidecar_progress,
+            )?
+        };
+
+        write_current_pointer(worktree_root, &written_dir)?;
+        write_pointer(artifact, worktree_root, ctx, &written_dir)?;
+        prune_after_success_best_effort(worktree_root, &canonical_dir, &written_dir);
+        Ok(())
+    })();
     let unlock_result = fs2::FileExt::unlock(&lock).context("failed to unlock graph cache lock");
-    let written_dir = write_result?;
+    publish_result?;
     unlock_result?;
 
-    write_current_pointer(worktree_root, &written_dir)?;
-    write_pointer(artifact, worktree_root, ctx, &written_dir)?;
     Ok(())
 }
 
@@ -205,6 +226,241 @@ fn canonical_base_dir(common_dir: &Path, manifest_version: &str) -> PathBuf {
 
 fn canonical_path(common_dir: &Path, manifest_version: &str, hash: &str) -> PathBuf {
     canonical_base_dir(common_dir, manifest_version).join(format!("{hash}.parquet"))
+}
+
+fn protected_canonical_artifacts(
+    worktree_root: &Path,
+    canonical_dir: &Path,
+    written_dir: &Path,
+) -> Result<BTreeSet<PathBuf>> {
+    let canonical_dir = canonical_dir.canonicalize().with_context(|| {
+        format!(
+            "failed to canonicalize graph artifact directory `{}`",
+            canonical_dir.display()
+        )
+    })?;
+    let written_dir = canonical_direct_child(&canonical_dir, written_dir)?.with_context(|| {
+        format!(
+            "new graph artifact `{}` is not a direct child of `{}`",
+            written_dir.display(),
+            canonical_dir.display()
+        )
+    })?;
+    let mut protected = BTreeSet::from([written_dir]);
+
+    let worktrees = git::registered_worktree_roots(worktree_root)
+        .context("failed to enumerate registered worktrees for graph artifact pruning")?;
+    for worktree in worktrees {
+        if let Some(target) = current_pointer_target(&worktree)? {
+            if let Some(target) = canonical_direct_child(&canonical_dir, &target)? {
+                protected.insert(target);
+            }
+        }
+        if let Some(target) = graph_index_pointer_target(&worktree)? {
+            if let Some(target) = canonical_direct_child(&canonical_dir, &target)? {
+                protected.insert(target);
+            }
+        }
+    }
+
+    Ok(protected)
+}
+
+fn current_pointer_target(worktree_root: &Path) -> Result<Option<PathBuf>> {
+    let current_path = worktree_root.join(WORKTREE_ARTIFACT_PATH).join("CURRENT");
+    match fs::symlink_metadata(&current_path) {
+        Ok(_) => read_current_pointer(worktree_root)
+            .map(Some)
+            .with_context(|| format!("failed to inspect `{}`", current_path.display())),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => {
+            Err(error).with_context(|| format!("failed to inspect `{}`", current_path.display()))
+        }
+    }
+}
+
+fn graph_index_pointer_target(worktree_root: &Path) -> Result<Option<PathBuf>> {
+    let pointer_path = worktree_root.join(POINTER_PATH);
+    match fs::symlink_metadata(&pointer_path) {
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("failed to inspect `{}`", pointer_path.display()));
+        }
+    }
+
+    let bytes = fs::read(&pointer_path)
+        .with_context(|| format!("failed to read `{}`", pointer_path.display()))?;
+    let pointer: GraphIndexPointer = serde_json::from_slice(&bytes)
+        .with_context(|| format!("invalid graph index pointer `{}`", pointer_path.display()))?;
+    let target = if pointer.canonical_artifact_path.is_absolute() {
+        pointer.canonical_artifact_path
+    } else {
+        worktree_root.join(pointer.canonical_artifact_path)
+    };
+    Ok(Some(target))
+}
+
+fn canonical_direct_child(canonical_dir: &Path, target: &Path) -> Result<Option<PathBuf>> {
+    let target = target.canonicalize().with_context(|| {
+        format!(
+            "failed to canonicalize pointer target `{}`",
+            target.display()
+        )
+    })?;
+    Ok((target.parent() == Some(canonical_dir)).then_some(target))
+}
+
+fn canonical_artifact_candidates(canonical_dir: &Path) -> Result<Vec<CanonicalArtifactCandidate>> {
+    let canonical_dir = canonical_dir.canonicalize().with_context(|| {
+        format!(
+            "failed to canonicalize graph artifact directory `{}`",
+            canonical_dir.display()
+        )
+    })?;
+    let entries = fs::read_dir(&canonical_dir)
+        .with_context(|| format!("failed to scan `{}`", canonical_dir.display()))?;
+    let mut candidates = Vec::new();
+
+    for entry in entries {
+        let entry =
+            entry.with_context(|| format!("failed to scan `{}`", canonical_dir.display()))?;
+        let file_type = entry
+            .file_type()
+            .with_context(|| format!("failed to inspect `{}`", entry.path().display()))?;
+        if !file_type.is_dir() {
+            continue;
+        }
+
+        let path = entry.path();
+        let name = entry.file_name();
+        if name.to_string_lossy().contains(".parquet.tmp.")
+            || path.extension() != Some(OsStr::new("parquet"))
+        {
+            continue;
+        }
+
+        match fs::metadata(path.join("manifest.json")) {
+            Ok(metadata) if metadata.is_file() => {}
+            Ok(_) => continue,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("failed to inspect `{}`", path.display()));
+            }
+        }
+
+        let modified = entry
+            .metadata()
+            .with_context(|| format!("failed to inspect `{}`", path.display()))?
+            .modified()
+            .with_context(|| {
+                format!("failed to read modification time for `{}`", path.display())
+            })?;
+        candidates.push(CanonicalArtifactCandidate { path, modified });
+    }
+
+    Ok(candidates)
+}
+
+fn stale_canonical_artifacts(
+    mut candidates: Vec<CanonicalArtifactCandidate>,
+    protected: &BTreeSet<PathBuf>,
+) -> Vec<PathBuf> {
+    candidates.sort_by(|left, right| {
+        right
+            .modified
+            .cmp(&left.modified)
+            .then_with(|| left.path.cmp(&right.path))
+    });
+    candidates
+        .into_iter()
+        .enumerate()
+        .filter_map(|(rank, candidate)| {
+            (rank >= RETAINED_CANONICAL_ARTIFACTS && !protected.contains(&candidate.path))
+                .then_some(candidate.path)
+        })
+        .collect()
+}
+
+fn prune_canonical_artifacts_best_effort(
+    canonical_dir: &Path,
+    written_dir: &Path,
+    protected: &BTreeSet<PathBuf>,
+) {
+    let canonical_dir = match canonical_dir.canonicalize() {
+        Ok(path) => path,
+        Err(error) => {
+            tracing::warn!(
+                path = %canonical_dir.display(),
+                error = %error,
+                "spur-graph: skipping canonical artifact pruning; directory is not canonicalizable"
+            );
+            return;
+        }
+    };
+    let written_dir = match canonical_direct_child(&canonical_dir, written_dir) {
+        Ok(Some(path)) => path,
+        Ok(None) => {
+            tracing::warn!(
+                path = %written_dir.display(),
+                canonical_dir = %canonical_dir.display(),
+                "spur-graph: skipping canonical artifact pruning; written artifact is outside the cache"
+            );
+            return;
+        }
+        Err(error) => {
+            tracing::warn!(
+                path = %written_dir.display(),
+                error = %error,
+                "spur-graph: skipping canonical artifact pruning; written artifact is uncertain"
+            );
+            return;
+        }
+    };
+    let candidates = match canonical_artifact_candidates(&canonical_dir) {
+        Ok(candidates) => candidates,
+        Err(error) => {
+            tracing::warn!(
+                canonical_dir = %canonical_dir.display(),
+                error = %error,
+                "spur-graph: skipping canonical artifact pruning; candidate discovery failed"
+            );
+            return;
+        }
+    };
+    let mut protected = protected.clone();
+    protected.insert(written_dir);
+    let stale = stale_canonical_artifacts(candidates, &protected);
+    delete_stale_canonical_artifacts(stale);
+}
+
+fn delete_stale_canonical_artifacts(stale: Vec<PathBuf>) {
+    for path in stale {
+        if let Err(error) = fs::remove_dir_all(&path) {
+            tracing::warn!(
+                path = %path.display(),
+                error = %error,
+                "spur-graph: failed to prune stale canonical graph artifact"
+            );
+        }
+    }
+}
+
+fn prune_after_success_best_effort(worktree_root: &Path, canonical_dir: &Path, written_dir: &Path) {
+    let protected = match protected_canonical_artifacts(worktree_root, canonical_dir, written_dir) {
+        Ok(protected) => protected,
+        Err(error) => {
+            tracing::warn!(
+                canonical_dir = %canonical_dir.display(),
+                error = %error,
+                "spur-graph: skipping canonical artifact pruning; protected-target discovery failed"
+            );
+            return;
+        }
+    };
+    prune_canonical_artifacts_best_effort(canonical_dir, written_dir, &protected);
 }
 
 fn write_canonical_atomically(
@@ -610,6 +866,11 @@ fn write_pointer(
     ctx: &GitCtx,
     canonical: &Path,
 ) -> Result<()> {
+    #[cfg(test)]
+    if POINTER_PUBLICATION_FAILURE.with(Cell::get) {
+        anyhow::bail!("injected graph index pointer publication failure");
+    }
+
     let pointer_path = worktree_root.join(POINTER_PATH);
     if let Some(parent) = pointer_path.parent() {
         fs::create_dir_all(parent)
@@ -696,26 +957,253 @@ fn lock_timeout() -> Duration {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
     use std::fs::{self, File};
+    use std::path::{Path, PathBuf};
     use std::process::Command;
     use std::sync::atomic::Ordering;
+    use std::time::{Duration, UNIX_EPOCH};
 
     use fs2::FileExt as _;
     use tempfile::TempDir;
 
     use super::{
-        lookup_canonical, write_with_dedup, write_with_dedup_with_section_sidecar_options,
+        delete_stale_canonical_artifacts, lookup_canonical, protected_canonical_artifacts,
+        prune_after_success_best_effort, prune_canonical_artifacts_best_effort,
+        stale_canonical_artifacts, write_with_dedup, write_with_dedup_with_section_sidecar_options,
+        CanonicalArtifactCandidate, POINTER_PUBLICATION_FAILURE, RETAINED_CANONICAL_ARTIFACTS,
     };
     use crate::git::GitCtx;
     use crate::store::lance_sections::{SectionEmbeddingOptions, SectionSidecarOptions};
     use crate::store::{
         read_artifact_header_parquet, read_artifact_parquet, read_current_pointer,
-        stamp_sidecar_status, GraphArtifactSidecarRowCounts, GraphArtifactSidecarStatus,
+        stamp_sidecar_status, write_current_pointer, GraphArtifactSidecarRowCounts,
+        GraphArtifactSidecarStatus,
     };
     use crate::{
         GraphFileArtifact, GraphFileManifestEntry, GraphIndexArtifact, GraphIndexHeader,
         GraphIndexPointer, GraphSymbolArtifact, NodeId, SourceKind,
     };
+
+    #[test]
+    fn retention_count_covers_current_and_two_rollbacks() {
+        const CURRENT: usize = 1;
+        const ROLLBACKS: usize = 2;
+
+        assert_eq!(RETAINED_CANONICAL_ARTIFACTS, CURRENT + ROLLBACKS);
+    }
+
+    #[test]
+    fn prune_keeps_current_and_two_rollback_generations() {
+        let env = GitCacheEnv::new();
+        let generations = ["z-oldest", "b-rollback-two", "c-rollback-one", "a-current"];
+
+        for hash in generations {
+            write_with_dedup(&artifact(hash, "src/lib.rs"), env.repo.path(), &env.ctx).unwrap();
+        }
+
+        assert!(!env.canonical("z-oldest").exists());
+        assert!(env.canonical("b-rollback-two").exists());
+        assert!(env.canonical("c-rollback-one").exists());
+        assert!(env.canonical("a-current").exists());
+        assert_eq!(
+            read_current_pointer(env.repo.path()).unwrap(),
+            fs::canonicalize(env.canonical("a-current")).unwrap()
+        );
+    }
+
+    #[test]
+    fn prune_orders_candidates_by_explicit_modification_time() {
+        let canonical_dir = PathBuf::from("/canonical");
+        let candidates = (1..=4)
+            .map(|generation| CanonicalArtifactCandidate {
+                path: canonical_dir.join(format!("hash-{generation}.parquet")),
+                modified: UNIX_EPOCH + Duration::from_secs(generation),
+            })
+            .collect();
+        let protected = BTreeSet::from([canonical_dir.join("hash-4.parquet")]);
+
+        let stale = stale_canonical_artifacts(candidates, &protected);
+
+        assert_eq!(stale, vec![canonical_dir.join("hash-1.parquet")]);
+    }
+
+    #[test]
+    fn prune_breaks_equal_modification_times_by_full_path() {
+        let canonical_dir = PathBuf::from("/canonical");
+        let modified = UNIX_EPOCH + Duration::from_secs(1);
+        let candidates = ["hash-d", "hash-b", "hash-a", "hash-c"]
+            .map(|hash| CanonicalArtifactCandidate {
+                path: canonical_dir.join(format!("{hash}.parquet")),
+                modified,
+            })
+            .into();
+
+        let stale = stale_canonical_artifacts(candidates, &BTreeSet::new());
+
+        assert_eq!(stale, vec![canonical_dir.join("hash-d.parquet")]);
+    }
+
+    #[test]
+    fn prune_keeps_an_older_generation_pinned_by_a_worktree() {
+        let canonical_dir = PathBuf::from("/canonical");
+        let candidates = (1..=5)
+            .map(|generation| CanonicalArtifactCandidate {
+                path: canonical_dir.join(format!("hash-{generation}.parquet")),
+                modified: UNIX_EPOCH + Duration::from_secs(generation),
+            })
+            .collect();
+        let protected = BTreeSet::from([canonical_dir.join("hash-1.parquet")]);
+
+        let stale = stale_canonical_artifacts(candidates, &protected);
+
+        assert_eq!(stale, vec![canonical_dir.join("hash-2.parquet")]);
+    }
+
+    #[test]
+    fn prune_protects_current_and_pointer_targets_from_registered_worktrees() {
+        let env = GitCacheEnv::new();
+        let linked_parent = TempDir::new().unwrap();
+        let linked = add_linked_worktree(env.repo.path(), linked_parent.path());
+        let canonical_dir = env.canonical_dir();
+        let written = completed_candidate(&canonical_dir, "written.parquet");
+        let main_current = completed_candidate(&canonical_dir, "main-current.parquet");
+        let linked_pointer = completed_candidate(&canonical_dir, "linked-pointer.parquet");
+        write_current_pointer(env.repo.path(), &main_current).unwrap();
+        write_test_pointer(&linked, &linked_pointer);
+
+        let protected =
+            protected_canonical_artifacts(env.repo.path(), &canonical_dir, &written).unwrap();
+
+        assert_eq!(
+            protected,
+            BTreeSet::from([
+                fs::canonicalize(written).unwrap(),
+                fs::canonicalize(main_current).unwrap(),
+                fs::canonicalize(linked_pointer).unwrap(),
+            ])
+        );
+    }
+
+    #[test]
+    fn prune_ignores_noncanonical_incomplete_and_other_manifest_entries() {
+        let root = TempDir::new().unwrap();
+        let canonical_dir = root.path().join("manifest-a");
+        let other_manifest_dir = root.path().join("manifest-b");
+        let completed: Vec<_> = [
+            "z-oldest.parquet",
+            "b-rollback-two.parquet",
+            "c-rollback-one.parquet",
+            "a-current.parquet",
+        ]
+        .into_iter()
+        .map(|name| completed_candidate(&canonical_dir, name))
+        .collect();
+        let temporary = completed_candidate(&canonical_dir, "hash.parquet.tmp.123");
+        let foreign_dir = completed_candidate(&canonical_dir, "foreign");
+        let incomplete = canonical_dir.join("incomplete.parquet");
+        fs::create_dir_all(&incomplete).unwrap();
+        let foreign_file = canonical_dir.join("foreign.parquet");
+        fs::write(&foreign_file, b"foreign").unwrap();
+        let other_manifest = completed_candidate(&other_manifest_dir, "other-manifest.parquet");
+        let written = fs::canonicalize(completed.last().unwrap()).unwrap();
+        let protected = BTreeSet::from([written.clone()]);
+
+        prune_canonical_artifacts_best_effort(&canonical_dir, &written, &protected);
+
+        assert!(!completed[0].exists());
+        assert!(completed[1..].iter().all(|path| path.exists()));
+        assert!(temporary.exists());
+        assert!(foreign_dir.exists());
+        assert!(incomplete.exists());
+        assert!(foreign_file.exists());
+        assert!(other_manifest.exists());
+    }
+
+    #[test]
+    fn prune_skips_the_whole_pass_on_discovery_uncertainty() {
+        let root = TempDir::new().unwrap();
+        let worktree = TempDir::new().unwrap();
+        let canonical_dir = root.path().join("manifest-a");
+        let completed: Vec<_> = (1..=4)
+            .map(|generation| {
+                completed_candidate(&canonical_dir, &format!("hash-{generation}.parquet"))
+            })
+            .collect();
+        let written = completed.last().unwrap();
+
+        prune_after_success_best_effort(worktree.path(), &canonical_dir, written);
+
+        assert!(completed.iter().all(|path| path.exists()));
+    }
+
+    #[test]
+    fn prune_skips_the_whole_pass_for_a_malformed_registered_worktree_pointer() {
+        let env = GitCacheEnv::new();
+        let linked_parent = TempDir::new().unwrap();
+        let linked = add_linked_worktree(env.repo.path(), linked_parent.path());
+        let canonical_dir = env.canonical_dir();
+        let completed: Vec<_> = (1..=4)
+            .map(|generation| {
+                completed_candidate(&canonical_dir, &format!("hash-{generation}.parquet"))
+            })
+            .collect();
+        let pointer_path = linked.join(".spur/graph-index.pointer.json");
+        fs::create_dir_all(pointer_path.parent().unwrap()).unwrap();
+        fs::write(pointer_path, b"{not-json").unwrap();
+
+        prune_after_success_best_effort(env.repo.path(), &canonical_dir, completed.last().unwrap());
+
+        assert!(completed.iter().all(|path| path.exists()));
+    }
+
+    #[test]
+    fn prune_continues_after_an_individual_deletion_failure() {
+        let root = TempDir::new().unwrap();
+        let missing = root.path().join("missing.parquet");
+        let stale = completed_candidate(root.path(), "stale.parquet");
+
+        delete_stale_canonical_artifacts(vec![missing, stale.clone()]);
+
+        assert!(!stale.exists());
+    }
+
+    #[test]
+    fn prune_is_not_invoked_after_pointer_publication_fails() {
+        let env = GitCacheEnv::new();
+        let canonical_dir = env.canonical_dir();
+        let old: Vec<_> = (1..=6)
+            .map(|generation| {
+                completed_candidate(&canonical_dir, &format!("old-{generation}.parquet"))
+            })
+            .collect();
+        write_current_pointer(env.repo.path(), &old[0]).unwrap();
+        write_test_pointer(env.repo.path(), &old[0]);
+        POINTER_PUBLICATION_FAILURE.with(|failure| failure.set(true));
+
+        let result = write_with_dedup(&artifact("new", "src/lib.rs"), env.repo.path(), &env.ctx);
+
+        POINTER_PUBLICATION_FAILURE.with(|failure| failure.set(false));
+        assert!(result.is_err(), "pointer publication should fail");
+        assert_eq!(
+            read_current_pointer(env.repo.path()).unwrap(),
+            fs::canonicalize(env.canonical("new")).unwrap(),
+            "CURRENT should publish before the injected graph-index pointer failure"
+        );
+        let pointer: GraphIndexPointer = serde_json::from_slice(
+            &fs::read(env.repo.path().join(".spur/graph-index.pointer.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            pointer.canonical_artifact_path,
+            fs::canonicalize(&old[0]).unwrap(),
+            "the failed publication should leave the prior graph-index pointer readable"
+        );
+        assert!(
+            old.iter().all(|path| path.exists()),
+            "publication failure must leave every prior generation untouched"
+        );
+    }
 
     #[test]
     fn write_creates_canonical_parquet_and_current_pointer() {
@@ -975,6 +1463,99 @@ mod tests {
                 ctx,
             }
         }
+    }
+
+    struct GitCacheEnv {
+        repo: TempDir,
+        ctx: GitCtx,
+    }
+
+    impl GitCacheEnv {
+        fn new() -> Self {
+            let repo = TempDir::new().unwrap();
+            run_git(repo.path(), &["init"]);
+            run_git(repo.path(), &["config", "user.name", "SPUR Test"]);
+            run_git(
+                repo.path(),
+                &["config", "user.email", "spur-test@example.invalid"],
+            );
+            fs::write(repo.path().join("README.md"), "seed\n").unwrap();
+            run_git(repo.path(), &["add", "README.md"]);
+            run_git(repo.path(), &["commit", "--no-gpg-sign", "-m", "seed"]);
+            let git_common_dir = fs::canonicalize(repo.path().join(".git")).unwrap();
+            let ctx = GitCtx {
+                worktree_root: repo.path().to_path_buf(),
+                git_common_dir,
+                head_oid: "head-a".to_owned(),
+            };
+            Self { repo, ctx }
+        }
+
+        fn canonical_dir(&self) -> PathBuf {
+            self.ctx
+                .git_common_dir
+                .join("spur-graph/artifacts/manifest-a")
+        }
+
+        fn canonical(&self, hash: &str) -> PathBuf {
+            self.canonical_dir().join(format!("{hash}.parquet"))
+        }
+    }
+
+    fn run_git(root: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {} failed\nstdout:\n{}\nstderr:\n{}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn add_linked_worktree(repo: &Path, parent: &Path) -> PathBuf {
+        let linked = parent.join("linked worktree");
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(["worktree", "add", "--detach"])
+            .arg(&linked)
+            .arg("HEAD")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git worktree add failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        linked
+    }
+
+    fn completed_candidate(canonical_dir: &Path, name: &str) -> PathBuf {
+        let candidate = canonical_dir.join(name);
+        fs::create_dir_all(&candidate).unwrap();
+        fs::write(candidate.join("manifest.json"), b"{}").unwrap();
+        candidate
+    }
+
+    fn write_test_pointer(worktree: &Path, target: &Path) {
+        let pointer = GraphIndexPointer {
+            schema: "spur-graph-pointer-v1".to_owned(),
+            graph_content_hash: "test-hash".to_owned(),
+            manifest_version: "manifest-a".to_owned(),
+            source_kind: SourceKind::Git,
+            indexed_commit_oid: Some("head-a".to_owned()),
+            canonical_artifact_path: fs::canonicalize(target).unwrap(),
+        };
+        let path = worktree.join(".spur/graph-index.pointer.json");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, serde_json::to_vec(&pointer).unwrap()).unwrap();
     }
 
     fn artifact(hash: &str, file_path: &str) -> GraphIndexArtifact {
