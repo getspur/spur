@@ -37,6 +37,68 @@ pub fn detect(worktree_root: &Path) -> Option<GitCtx> {
     })
 }
 
+/// Returns the roots of every worktree registered with the repository at `root`.
+///
+/// The roots retain the deterministic order emitted by Git.
+///
+/// # Examples
+///
+/// ```no_run
+/// use std::path::Path;
+///
+/// let roots = spur_graph::git::registered_worktree_roots(Path::new("."))?;
+/// assert!(!roots.is_empty());
+/// # Ok::<(), anyhow::Error>(())
+/// ```
+///
+/// # Errors
+///
+/// Returns an error when Git cannot enumerate the worktrees or its
+/// NUL-delimited porcelain output contains malformed or non-UTF-8 records.
+pub fn registered_worktree_roots(root: &Path) -> anyhow::Result<Vec<PathBuf>> {
+    let out = git_stdout_bytes(root, &["worktree", "list", "--porcelain", "-z"])?;
+    parse_registered_worktree_roots(&out).with_context(|| {
+        format!(
+            "failed to parse registered worktrees for `{}`",
+            root.display()
+        )
+    })
+}
+
+fn parse_registered_worktree_roots(out: &[u8]) -> anyhow::Result<Vec<PathBuf>> {
+    let mut roots = Vec::new();
+
+    for (index, record) in out
+        .split(|byte| *byte == 0)
+        .filter(|record| !record.is_empty())
+        .enumerate()
+    {
+        let record = std::str::from_utf8(record).with_context(|| {
+            format!("git worktree list emitted non-UTF-8 record at field {index}")
+        })?;
+        if let Some(path) = record.strip_prefix("worktree ") {
+            if path.is_empty() {
+                return Err(anyhow!(
+                    "malformed git worktree record at field {index}: missing path"
+                ));
+            }
+            roots.push(PathBuf::from(path));
+        } else if record.starts_with("worktree") {
+            return Err(anyhow!(
+                "malformed git worktree record at field {index}: expected `worktree <path>`"
+            ));
+        }
+    }
+
+    if roots.is_empty() {
+        return Err(anyhow!(
+            "malformed git worktree list output: no worktree records"
+        ));
+    }
+
+    Ok(roots)
+}
+
 pub fn rev_parse_head(root: &Path) -> anyhow::Result<String> {
     git_stdout(root, &["rev-parse", "HEAD"]).map(|out| out.trim_end().to_owned())
 }
@@ -188,8 +250,56 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{
-        detect, ls_files_with_oids, rev_parse_common_dir, rev_parse_head, status_dirty_paths,
+        detect, ls_files_with_oids, parse_registered_worktree_roots, registered_worktree_roots,
+        rev_parse_common_dir, rev_parse_head, status_dirty_paths,
     };
+
+    #[test]
+    fn registered_worktree_roots_includes_linked_path_with_spaces_in_git_order() {
+        let repo = init_repo();
+        commit_file(repo.path(), "README.md", "worktree fixture\n");
+        let linked_parent = TempDir::new().unwrap();
+        let linked_root = linked_parent.path().join("linked worktree");
+        let linked_root_arg = linked_root.to_str().expect("linked worktree path is UTF-8");
+        run_git(
+            repo.path(),
+            &["worktree", "add", "--detach", linked_root_arg],
+        );
+
+        let roots = registered_worktree_roots(repo.path()).unwrap();
+        let canonical_roots: Vec<_> = roots
+            .into_iter()
+            .map(|root| root.canonicalize().unwrap())
+            .collect();
+
+        assert_eq!(
+            canonical_roots,
+            vec![
+                repo.path().canonicalize().unwrap(),
+                linked_root.canonicalize().unwrap(),
+            ]
+        );
+    }
+
+    #[test]
+    fn registered_worktree_roots_rejects_empty_worktree_record() {
+        let error = parse_registered_worktree_roots(b"worktree \0\0").unwrap_err();
+
+        assert!(
+            format!("{error:#}").contains("malformed git worktree record at field 0: missing path"),
+            "unexpected error: {error:#}"
+        );
+    }
+
+    #[test]
+    fn registered_worktree_roots_rejects_non_utf8_record() {
+        let error = parse_registered_worktree_roots(b"worktree /repo\0HEAD \xff\0\0").unwrap_err();
+
+        assert!(
+            format!("{error:#}").contains("git worktree list emitted non-UTF-8 record"),
+            "unexpected error: {error:#}"
+        );
+    }
 
     #[test]
     fn detect_returns_context_inside_repo_and_none_outside() {
