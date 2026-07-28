@@ -39,6 +39,10 @@ const GIT_WORKTREE_OP_TIMEOUT: Duration = Duration::from_secs(30);
 const GIT_COMMIT_TIMEOUT: Duration = Duration::from_secs(60);
 const STALE_INDEX_LOCK_THRESHOLD: Duration = Duration::from_secs(10);
 
+// Solver-backed by sol_f8cc62a3c22947ef: four 50 ms sleeps cover a 200 ms lock hold.
+const CONFIG_LOCK_MAX_ATTEMPTS: usize = 5;
+const CONFIG_LOCK_BACKOFF_MS: u64 = 50;
+
 /// Backoff schedule for retrying git invocations that fail on transient
 /// `index.lock` / `cannot lock ref` errors. Five attempts produce four
 /// inter-attempt sleeps (cumulative ≈900 ms = 50+100+250+500); the final
@@ -480,6 +484,67 @@ impl WorktreeManager {
             || s.contains("is locked")
     }
 
+    async fn worktree_config_enabled(&self, worktree_path: &Path) -> Result<bool> {
+        let value = self
+            .run_git(
+                &[
+                    "config",
+                    "--local",
+                    "--type=bool",
+                    "--get",
+                    "--default=false",
+                    "extensions.worktreeConfig",
+                ],
+                Some(worktree_path),
+            )
+            .await?;
+        Ok(value.trim().eq_ignore_ascii_case("true"))
+    }
+
+    async fn enable_worktree_config(&self, worktree_path: &Path) -> Result<()> {
+        let args = ["config", "extensions.worktreeConfig", "true"];
+        for attempt in 1..=CONFIG_LOCK_MAX_ATTEMPTS {
+            match self.run_git(&args, Some(worktree_path)).await {
+                Ok(_) => {
+                    if attempt > 1 {
+                        tracing::warn!(
+                            target: "spur.worktree.retry",
+                            attempt,
+                            "enabled per-worktree git config after shared config lock retry",
+                        );
+                    }
+                    return Ok(());
+                }
+                Err(error)
+                    if attempt < CONFIG_LOCK_MAX_ATTEMPTS
+                        && Self::is_config_lock_contention(&error) =>
+                {
+                    tracing::debug!(
+                        target: "spur.worktree.retry",
+                        attempt,
+                        max_attempts = CONFIG_LOCK_MAX_ATTEMPTS,
+                        error = %error,
+                        "shared git config is locked; retrying worktree config enable",
+                    );
+                    tokio::time::sleep(Duration::from_millis(CONFIG_LOCK_BACKOFF_MS)).await;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Err(anyhow!(
+            "worktree config enable retry exhausted without an attempt"
+        ))
+    }
+
+    fn is_config_lock_contention(error: &anyhow::Error) -> bool {
+        error.chain().any(|cause| {
+            cause
+                .to_string()
+                .to_ascii_lowercase()
+                .contains("could not lock config file")
+        })
+    }
+
     /// Resolve HEAD of the given worktree path to its OID.
     pub async fn resolve_head(&self, worktree_path: &Path) -> Result<String> {
         self.run_git(&["rev-parse", "HEAD"], Some(worktree_path))
@@ -518,12 +583,15 @@ impl WorktreeManager {
         worktree_path: &Path,
         patterns: &[String],
     ) -> Result<PathBuf> {
-        self.run_git(
-            &["config", "extensions.worktreeConfig", "true"],
-            Some(worktree_path),
-        )
-        .await
-        .context("failed to enable per-worktree git config")?;
+        let worktree_config_enabled = self
+            .worktree_config_enabled(worktree_path)
+            .await
+            .context("failed to read per-worktree git config state")?;
+        if !worktree_config_enabled {
+            self.enable_worktree_config(worktree_path)
+                .await
+                .context("failed to enable per-worktree git config")?;
+        }
 
         let exclude_path = self.worktree_excludes_path(worktree_path).await?;
         let exclude_path_str = exclude_path
@@ -2212,6 +2280,92 @@ mod finalize_worker_branch_tests {
             .unwrap();
         assert_eq!(outcome.case, FinalizeCase::NoOp);
         assert_eq!(commit_count(&worker_path, &base), "0");
+    }
+
+    #[tokio::test]
+    async fn add_worktree_excludes_skips_enabled_extension_under_shared_config_lock() {
+        let dir = init_repo();
+        run_git(dir.path(), &["config", "extensions.worktreeConfig", "yes"]);
+        let (manager, worker_path, _session, _base) = setup_worker(&dir);
+        let config_lock = dir.path().join(".git/config.lock");
+        std::fs::write(&config_lock, "held by another worker").unwrap();
+        let injected = ".claude/agents/spur-x.md".to_string();
+
+        let exclude_path = manager
+            .add_worktree_excludes(&worker_path, std::slice::from_ref(&injected))
+            .await
+            .expect("an enabled extension must not rewrite the shared config");
+
+        assert!(config_lock.exists(), "SPUR must not remove Git lock files");
+        assert_eq!(
+            run_git(
+                &worker_path,
+                &["config", "--worktree", "--get", "core.excludesFile"]
+            ),
+            exclude_path.to_string_lossy()
+        );
+        assert_eq!(
+            manager.worktree_excluded_paths(&worker_path).await,
+            vec![injected]
+        );
+    }
+
+    #[tokio::test]
+    async fn add_worktree_excludes_retries_transient_shared_config_lock() {
+        let dir = init_repo();
+        let (manager, worker_path, _session, _base) = setup_worker(&dir);
+        let config_lock = dir.path().join(".git/config.lock");
+        std::fs::write(&config_lock, "held by another worker").unwrap();
+        let unlock = tokio::spawn({
+            let config_lock = config_lock.clone();
+            async move {
+                tokio::time::sleep(Duration::from_millis(75)).await;
+                std::fs::remove_file(config_lock).unwrap();
+            }
+        });
+        let injected = ".claude/agents/spur-x.md".to_string();
+
+        let exclude_path = manager
+            .add_worktree_excludes(&worker_path, std::slice::from_ref(&injected))
+            .await
+            .expect("the shared config lock should clear within the retry budget");
+        unlock.await.unwrap();
+
+        assert_eq!(
+            run_git(
+                &worker_path,
+                &[
+                    "config",
+                    "--type=bool",
+                    "--get",
+                    "extensions.worktreeConfig"
+                ]
+            ),
+            "true"
+        );
+        assert_eq!(
+            manager.worktree_excluded_paths(&worker_path).await,
+            vec![injected]
+        );
+        assert!(exclude_path.exists());
+    }
+
+    #[tokio::test]
+    async fn add_worktree_excludes_preserves_enable_context_after_lock_exhaustion() {
+        let dir = init_repo();
+        let (manager, worker_path, _session, _base) = setup_worker(&dir);
+        let config_lock = dir.path().join(".git/config.lock");
+        std::fs::write(&config_lock, "held by another worker").unwrap();
+
+        let error = manager
+            .add_worktree_excludes(&worker_path, &[".codex/skills".to_string()])
+            .await
+            .expect_err("a persistent shared config lock must still fail hard");
+        let error = format!("{error:#}");
+
+        assert!(config_lock.exists(), "SPUR must not remove Git lock files");
+        assert!(error.contains("failed to enable per-worktree git config"));
+        assert!(error.contains("could not lock config file"));
     }
 
     #[tokio::test]
