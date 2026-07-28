@@ -21,21 +21,100 @@ retention count.
 
 ---
 
-### Task 1: Implement safe canonical graph artifact retention
+### Task 1: Enumerate registered Git worktrees safely
 
-**Task ID:** `graph-artifact-retention`
+**Task ID:** `registered-worktree-discovery`
 
 **Files:**
 - Modify: `crates/spur-graph/src/git.rs`
-- Modify: `crates/spur-graph/src/store/cache.rs`
-- Test: unit tests colocated in both files
+- Test: unit tests colocated in `crates/spur-graph/src/git.rs`
 
 **Depends on:** none
 
 **Acceptance Criteria:**
+- [ ] A public helper returns every registered Git worktree root.
+- [ ] Parsing is NUL-safe and handles a worktree path containing spaces.
+- [ ] Malformed or non-UTF-8 output returns a contextual error.
+- [ ] Existing `spur-graph` Git tests remain green.
+
+**Suggested Worker:** Codex using profile `rust-engineer`, model
+`gpt-5.6-sol`, effort `max`.
+
+**Scope Boundary:**
+- IN scope: Git subprocess invocation and registered-worktree parsing in
+  `crates/spur-graph/src/git.rs`.
+- OUT of scope: cache retention, pointer parsing, CLI changes, and other files.
+- If another file is required, emit a `scope_drift` signal before editing it.
+
+**Implementation:**
+
+- [ ] **Step 1: Write the failing worktree-enumeration test**
+
+Add a NUL-safe helper with this wished-for production contract:
+
+```rust
+pub fn registered_worktree_roots(root: &Path) -> anyhow::Result<Vec<PathBuf>>;
+```
+
+The test creates a temporary Git repository and linked worktree, invokes the
+helper, canonicalizes the returned roots, and asserts that both roots are
+present. Include a linked-worktree path containing spaces so line-based parsing
+cannot pass accidentally.
+
+- [ ] **Step 2: Verify RED**
+
+Run:
+
+```bash
+scripts/spur-cargo test -p spur-graph git::tests::registered_worktree_roots -- --nocapture
+```
+
+Expected: FAIL because the helper/behavior does not exist yet.
+
+- [ ] **Step 3: Implement NUL-safe registered worktree discovery**
+
+Use the existing `git_stdout_bytes` helper with:
+
+```rust
+["worktree", "list", "--porcelain", "-z"]
+```
+
+Parse only `worktree ` records, preserve paths as platform paths, reject
+malformed UTF-8 with context, and return roots in Git's deterministic order.
+Do not fall back to human-formatted `git worktree list`.
+
+- [ ] **Step 4: Verify GREEN and format**
+
+Run:
+
+```bash
+scripts/spur-cargo test -p spur-graph git::tests::registered_worktree_roots -- --nocapture
+scripts/spur-cargo fmt --all
+```
+
+Both commands must exit `0`.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add crates/spur-graph/src/git.rs
+git commit -m "feat(spur-graph): G1.a enumerate registered worktrees"
+```
+
+### Task 2: Prune stale canonical graph generations
+
+**Task ID:** `graph-artifact-retention`
+
+**Files:**
+- Modify: `crates/spur-graph/src/store/cache.rs`
+- Test: unit tests colocated in `crates/spur-graph/src/store/cache.rs`
+
+**Depends on:** `registered-worktree-discovery`
+
+**Acceptance Criteria:**
 - [ ] `RETAINED_CANONICAL_ARTIFACTS` equals the solved value `3`.
-- [ ] Four sequential canonical publications retain the current artifact and
-      two rollback artifacts.
+- [ ] Four canonical publications retain the current artifact and two rollback
+      artifacts.
 - [ ] Canonical targets referenced by registered worktrees are retained even
       when older than the newest three.
 - [ ] Temporary, foreign, incomplete, and other-manifest entries are untouched.
@@ -54,17 +133,18 @@ retention count.
   `sol_c63d53d133b447bc`.
 
 **Scope Boundary:**
-- IN scope: registered-worktree discovery and canonical cache retention inside
-  `spur-graph`.
-- OUT of scope: CLI flags, explicit output cleanup, age/byte quotas, other
-  crates, standalone cleanup commands, and unrelated cache refactors.
+- IN scope: canonical cache retention and cache-writer tests in
+  `crates/spur-graph/src/store/cache.rs`.
+- OUT of scope: Git helper changes, CLI flags, explicit output cleanup,
+  age/byte quotas, other crates, standalone cleanup commands, and unrelated
+  cache refactors.
 - If another file is required, emit a `scope_drift` signal before editing it.
 
 **Scope Drift Checkpoint:**
 - If estimated remaining work exceeds the task by more than 50%, emit
   `scope_drift`.
-- If safe pointer discovery cannot be implemented in the two listed files,
-  emit `risk` with the unsafe case before proceeding.
+- If the Task 1 API cannot safely discover protected pointers, emit `risk`
+  before changing the interface.
 
 **Implementation:**
 
@@ -76,7 +156,7 @@ Call:
 {"solve_id":"sol_e8ce7c3b90e74292"}
 ```
 
-Add a constant and invariant test in `store/cache.rs`:
+Add the solver-backed constant and invariant test:
 
 ```rust
 const RETAINED_CANONICAL_ARTIFACTS: usize = 3;
@@ -89,54 +169,9 @@ fn retention_count_covers_current_and_two_rollbacks() {
 }
 ```
 
-- [ ] **Step 2: Write failing Git worktree-enumeration tests**
+- [ ] **Step 2: Write failing retention tests**
 
-Add a NUL-safe helper with this production contract:
-
-```rust
-pub fn registered_worktree_roots(root: &Path) -> anyhow::Result<Vec<PathBuf>>;
-```
-
-The test creates a temporary Git repository and linked worktree, invokes the
-helper, canonicalizes the returned roots, and asserts that both roots are
-present. Include a path containing spaces so line-based parsing cannot pass
-accidentally.
-
-- [ ] **Step 3: Verify the Git test fails for the missing behavior**
-
-Run:
-
-```bash
-scripts/spur-cargo test -p spur-graph git::tests::registered_worktree_roots -- --nocapture
-```
-
-Expected: FAIL because the helper/behavior does not exist yet.
-
-- [ ] **Step 4: Implement NUL-safe registered worktree discovery**
-
-Use the existing `git_stdout_bytes` helper with:
-
-```rust
-["worktree", "list", "--porcelain", "-z"]
-```
-
-Parse only `worktree ` records, preserve paths as platform paths, reject
-malformed UTF-8 with context, and return roots in Git's deterministic order.
-Do not fall back to human-formatted `git worktree list`.
-
-- [ ] **Step 5: Verify the Git discovery test passes**
-
-Run:
-
-```bash
-scripts/spur-cargo test -p spur-graph git::tests::registered_worktree_roots -- --nocapture
-```
-
-Expected: PASS.
-
-- [ ] **Step 6: Write failing retention tests**
-
-In `store/cache.rs`, test the behavior through focused filesystem fixtures:
+In `store/cache.rs`, add:
 
 ```rust
 #[test]
@@ -144,14 +179,12 @@ fn prune_keeps_current_and_two_rollback_generations() {
     // Arrange four CanonicalArtifactCandidate values with explicit
     // `UNIX_EPOCH + Duration::from_secs(1..=4)` modification times and
     // protect the fourth as current.
-    // Act with the production stale-candidate selector.
-    // Assert generations 2, 3, and 4 remain and generation 1 is removed.
+    // Assert generations 2, 3, and 4 remain and generation 1 is stale.
 }
 
 #[test]
 fn prune_keeps_an_older_generation_pinned_by_a_worktree() {
-    // Arrange five completed generations.
-    // Protect the newest current generation and the oldest worktree target.
+    // Arrange five completed generations and protect the oldest pointer target.
     // Assert the newest three plus the pinned oldest generation remain.
 }
 
@@ -163,10 +196,9 @@ fn prune_ignores_noncanonical_and_incomplete_entries() {
 ```
 
 Keep ordering tests independent from filesystem timestamp resolution by
-constructing candidate records with explicit `SystemTime` values. Exercise
-filesystem classification/deletion separately in the ignored-entry test.
+constructing candidate records with explicit `SystemTime` values.
 
-- [ ] **Step 7: Verify retention tests fail for missing cleanup**
+- [ ] **Step 3: Verify RED**
 
 Run:
 
@@ -176,9 +208,9 @@ scripts/spur-cargo test -p spur-graph store::cache::tests::prune_ -- --nocapture
 
 Expected: FAIL because no pruning helper/integration exists.
 
-- [ ] **Step 8: Implement protected-set discovery and pruning**
+- [ ] **Step 4: Implement protected-set discovery and pruning**
 
-Add focused private helpers in `store/cache.rs`:
+Add focused private helpers:
 
 ```rust
 struct CanonicalArtifactCandidate {
@@ -207,8 +239,7 @@ fn prune_canonical_artifacts_best_effort(
 Required behavior:
 
 - start protection with the canonicalized `written_dir`;
-- enumerate registered worktrees through
-  `git::registered_worktree_roots`;
+- enumerate worktrees through `git::registered_worktree_roots`;
 - inspect existing `CURRENT` and pointer JSON targets;
 - protect only canonicalized direct children of `canonical_dir`;
 - scan only completed direct-child `.parquet` directories containing
@@ -219,7 +250,7 @@ Required behavior:
 - warn and continue on individual deletion failure;
 - skip the whole pass on discovery/inspection uncertainty.
 
-- [ ] **Step 9: Integrate cleanup after publication under the cache lock**
+- [ ] **Step 5: Integrate cleanup after publication under the cache lock**
 
 Restructure `write_with_dedup_with_section_sidecar_options` so the successful
 canonical branch performs:
@@ -231,10 +262,10 @@ prune_after_success_best_effort(worktree_root, &canonical_dir, &written_dir);
 ```
 
 before explicitly unlocking the manifest lock. Ensure every error path still
-unlocks or drops the lock and that cleanup is not called when either pointer
-write returns an error. Do not add cleanup to the lock-timeout fallback branch.
+unlocks or drops the lock and cleanup is not called when either pointer write
+returns an error. Do not add cleanup to the lock-timeout fallback branch.
 
-- [ ] **Step 10: Verify green and run the crate checks**
+- [ ] **Step 6: Verify GREEN and run the crate checks**
 
 Run:
 
@@ -245,14 +276,12 @@ scripts/spur-cargo fmt --all
 SPUR_REMOTE=1 scripts/spur-cargo clippy -p spur-graph -- -D warnings
 ```
 
-All commands must exit `0`. Inspect the final diff to confirm only the two
-scoped Rust files changed.
+All commands must exit `0`. Inspect the final diff to confirm only
+`crates/spur-graph/src/store/cache.rs` changed in this task.
 
-- [ ] **Step 11: Commit**
-
-Commit the complete implementation:
+- [ ] **Step 7: Commit**
 
 ```bash
-git add crates/spur-graph/src/git.rs crates/spur-graph/src/store/cache.rs
-git commit -m "feat(spur-graph): G1 bound canonical artifact retention"
+git add crates/spur-graph/src/store/cache.rs
+git commit -m "feat(spur-graph): G1.b bound artifact retention"
 ```
