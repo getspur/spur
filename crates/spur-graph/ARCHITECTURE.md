@@ -47,7 +47,7 @@ flowchart LR
     TS --> SG
     GIX --> SG
     BLAKE --> SG
-    FE -. "opt-in". -> SG
+    FE --> SG 
 
     SG -- "Parquet artifacts\n+ pointer files" --> ANALYST
     SG -- "GraphMcpModule\n(code_* tools)" --> MCP
