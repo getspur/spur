@@ -70,6 +70,7 @@ async fn request_changes_feedback_survives_reprojection_and_reaches_worker() {
             issue_id: None,
             issue_title: None,
             context_files: vec![],
+            planned_write_files: None,
         }],
     )
     .await
@@ -105,6 +106,7 @@ async fn request_changes_feedback_survives_reprojection_and_reaches_worker() {
                 issue_id: Some(task_issue_id.clone()),
                 issue_title: None,
                 context_files: Vec::new(),
+                planned_write_files: None,
             },
             status: PlanTaskStatus::AwaitingReview {
                 summary: Some("done".into()),

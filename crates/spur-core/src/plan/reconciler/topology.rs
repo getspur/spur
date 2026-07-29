@@ -287,6 +287,7 @@ mod tests {
                 issue_id: Some(format!("bd-{task_id}")),
                 issue_title: None,
                 context_files: Vec::new(),
+                planned_write_files: None,
             },
             status: PlanTaskStatus::Approved { summary: None },
             result: None,

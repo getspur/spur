@@ -70,6 +70,7 @@ impl MutationProposer for ScopeDriftSplitProposer {
                         ),
                         assignee: None,
                         priority: None,
+                        planned_write_files: Some(Vec::new()),
                     })
                     .collect();
                 vec![MutationBatch {
@@ -270,6 +271,7 @@ mod tests {
                     description: "".into(),
                     assignee: None,
                     priority: None,
+                    planned_write_files: None,
                 }],
                 dep_rewire: DepRewirePolicy::Barrier,
             }],
@@ -295,6 +297,7 @@ mod tests {
                 issue_id: Some(task_id.to_string()),
                 issue_title: None,
                 context_files: Vec::new(),
+                planned_write_files: None,
             },
             status: super::super::PlanTaskStatus::Pending,
             result: None,

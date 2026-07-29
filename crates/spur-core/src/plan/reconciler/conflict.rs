@@ -22,6 +22,63 @@ pub(super) async fn persist_setup_overlay_conflict(
     source_task_id: &str,
     files: &[String],
 ) -> anyhow::Result<()> {
+    persist_dispatched_integration_conflict(
+        pm,
+        issue_id,
+        feature_gate,
+        delegation_id,
+        source_task_id,
+        files,
+    )
+    .await?;
+    tracing::warn!(
+        %plan_id,
+        %issue_id,
+        %delegation_id,
+        dep_task_id = %source_task_id,
+        files = ?files,
+        "routed setup overlay conflict to integration-conflict signal"
+    );
+    Ok(())
+}
+
+pub(crate) async fn persist_observed_write_conflict(
+    pm: &dyn crate::plan::PmLike,
+    issue_id: &str,
+    feature_gate: &spur_license::FeatureGate,
+    plan_id: &str,
+    delegation_id: &str,
+    source_task_id: &str,
+    files: &[String],
+) -> anyhow::Result<()> {
+    persist_dispatched_integration_conflict(
+        pm,
+        issue_id,
+        feature_gate,
+        delegation_id,
+        source_task_id,
+        files,
+    )
+    .await?;
+    tracing::warn!(
+        %plan_id,
+        %issue_id,
+        %delegation_id,
+        dep_task_id = %source_task_id,
+        files = ?files,
+        "blocked completion after observed write collision"
+    );
+    Ok(())
+}
+
+async fn persist_dispatched_integration_conflict(
+    pm: &dyn crate::plan::PmLike,
+    issue_id: &str,
+    feature_gate: &spur_license::FeatureGate,
+    delegation_id: &str,
+    source_task_id: &str,
+    files: &[String],
+) -> anyhow::Result<()> {
     crate::server::require_feature(
         spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
         feature_gate,
@@ -70,14 +127,6 @@ pub(super) async fn persist_setup_overlay_conflict(
         },
     )
     .await?;
-    tracing::warn!(
-        %plan_id,
-        %issue_id,
-        %delegation_id,
-        dep_task_id = %source_task_id,
-        files = ?files,
-        "routed setup overlay conflict to integration-conflict signal"
-    );
     Ok(())
 }
 

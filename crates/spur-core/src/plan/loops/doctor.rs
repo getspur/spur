@@ -187,6 +187,7 @@ fn normalize_tasks(
             issue_id: None,
             issue_title: None,
             context_files: dedupe_nonempty(draft.context_files.clone()),
+            planned_write_files: Some(dedupe_nonempty(draft.planned_write_files.clone())),
         });
         extras.insert(
             task_id,
@@ -274,6 +275,8 @@ fn build_template(tasks: &[PlanTask], extras: &HashMap<String, TaskExtras>) -> V
             if !task.context_files.is_empty() {
                 value["context_files"] = json!(task.context_files);
             }
+            value["planned_write_files"] =
+                json!(task.planned_write_files.as_deref().unwrap_or(&[]));
             if let Some(extra) = extras.get(&task.task_id) {
                 if !extra.labels.is_empty() {
                     value["labels"] = json!(extra.labels);
@@ -449,6 +452,7 @@ mod tests {
             task: task.to_string(),
             depends_on: Vec::new(),
             context_files: Vec::new(),
+            planned_write_files: Vec::new(),
             triage: false,
             labels: Vec::new(),
             issue_labels: Vec::new(),
@@ -490,6 +494,11 @@ mod tests {
         assert_eq!(canonical.spec.goal, "Keep CI green");
         assert_eq!(canonical.spec.cadence_secs, 86_400);
         assert_eq!(canonical.spec.loop_id, "");
+        assert_eq!(
+            canonical.spec.template["tasks"][0]["planned_write_files"],
+            serde_json::json!([]),
+            "built-in loop planner must emit an explicit planned write set"
+        );
         assert_eq!(
             output.client_idempotency_key.as_deref(),
             output

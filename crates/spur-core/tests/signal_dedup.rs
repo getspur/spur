@@ -97,6 +97,7 @@ async fn build_single_task_plan(pm: &PmService, plan_id: &str) -> String {
         issue_id: None,
         issue_title: None,
         context_files: vec![],
+        planned_write_files: None,
     }];
     let subgraph = spur_core::build_epic_subgraph(
         pm,

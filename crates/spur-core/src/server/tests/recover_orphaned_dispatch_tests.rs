@@ -125,6 +125,7 @@ async fn setup_recovery_task(
             issue_id: None,
             issue_title: None,
             context_files: Vec::new(),
+            planned_write_files: None,
         }],
     )
     .await
@@ -343,6 +344,7 @@ async fn recover_orphaned_dispatch_promotes_dispatched_task_to_awaiting_review()
             issue_id: None,
             issue_title: None,
             context_files: Vec::new(),
+            planned_write_files: None,
         }],
     )
     .await
@@ -950,6 +952,7 @@ async fn recover_orphaned_dispatch_rejects_label_only_delegation_without_audit()
             issue_id: None,
             issue_title: None,
             context_files: Vec::new(),
+            planned_write_files: None,
         }],
     )
     .await

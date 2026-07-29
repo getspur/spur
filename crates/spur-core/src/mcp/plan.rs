@@ -483,7 +483,12 @@ fn submit_plan_def() -> ToolDefinition {
                             "context_files": {
                                 "type": "array",
                                 "items": { "type": "string" },
-                                "description": "Optional file paths for worker context"
+                                "description": "Optional file paths supplied to the worker as prompt/read context"
+                            },
+                            "planned_write_files": {
+                                "type": "array",
+                                "items": { "type": "string" },
+                                "description": "Advisory intended create/modify/delete paths. Omitted preserves legacy behavior and falls back to context_files for submit-time overlap detection; [] explicitly declares no planned writes."
                             }
                         },
                         "required": ["task_id", "agent", "task"]

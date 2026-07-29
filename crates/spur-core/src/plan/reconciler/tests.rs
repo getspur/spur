@@ -323,6 +323,7 @@ async fn completion_collector_project_timeout_delivers_via_deferred_push() {
         attempt,
         &materializer,
         None,
+        None,
         Some(task_id),
     )
     .await
@@ -610,6 +611,7 @@ fn prior_branch_for_reuse_uses_last_attempt_only_when_reuse_requested() {
             issue_id: Some("bd-1".into()),
             issue_title: None,
             context_files: vec![],
+            planned_write_files: None,
         },
         status: crate::plan::PlanTaskStatus::Ready,
         result: None,
@@ -1237,6 +1239,7 @@ async fn seed_mock_ready_tasks_plan(
             None,
             None,
             &[],
+            None,
         )
         .await
         .expect("task spec audit");
@@ -1638,6 +1641,7 @@ async fn seed_system_l3_awaiting_review_plan(
         &system_id,
         1,
         &materializer,
+        None,
         None,
         Some(task_ids[0]),
     )
@@ -3019,6 +3023,169 @@ async fn l2_autonomy_dispatches_all_ready_tasks() {
     );
 }
 
+#[tokio::test]
+async fn completion_blocks_observed_write_collision_between_parallel_siblings() {
+    let repo = tempfile::tempdir().expect("temp repo");
+    let base_oid = seed_git_repo(repo.path());
+    let first_branch = create_worker_branch(repo.path(), "spur/worker-observed-first", "shared.rs");
+    let second_branch =
+        create_worker_branch(repo.path(), "spur/worker-observed-second", "shared.rs");
+    let pm = crate::plan::test_util::MockPm::new().arc();
+    let brain_session_id =
+        spur_acp::BrainSessionId::new(spur_acp::SessionId("brain-observed-writes".into()));
+    let issue_ids = seed_mock_ready_tasks_plan(
+        &pm,
+        "P-OBSERVED-WRITES",
+        &["first", "second"],
+        &brain_session_id,
+    )
+    .await;
+    let (delegation_tx, mut delegation_rx) =
+        tokio::sync::mpsc::channel::<crate::DelegationRequest>(2);
+    let reconciler = Reconciler::new_with_pm_like(
+        ReconcilerConfig {
+            repo_root: repo.path().to_path_buf(),
+            predispatch_preview: PreviewStrategy::AlwaysClean,
+            ..Default::default()
+        },
+        pm.clone(),
+        Arc::new(Notify::new()),
+        Some(test_dispatch_ctx(delegation_tx, brain_session_id).into_dispatch()),
+        None,
+        pro_feature_gate(),
+    );
+
+    reconciler
+        .tick_once()
+        .await
+        .expect("dispatch both siblings");
+    let mut requests = vec![
+        delegation_rx.recv().await.expect("first request"),
+        delegation_rx.recv().await.expect("second request"),
+    ];
+    let first_index = requests
+        .iter()
+        .position(|request| request.issue_id.as_deref() == Some(issue_ids[0].as_str()))
+        .expect("first task request");
+    let first_request = requests.swap_remove(first_index);
+    let second_request = requests.pop().expect("second task request");
+
+    let complete = |request: crate::DelegationRequest, branch: String| {
+        if let Some(base_tx) = &request.dispatched_base_oid_tx {
+            base_tx
+                .send(Some(base_oid.clone()))
+                .expect("publish dispatched base oid");
+        }
+        request
+            .respond_to
+            .send(spur_acp::DelegationResult {
+                resolved_config: None,
+                status: spur_acp::DelegationStatus::Success,
+                diff: Some("diff --git a/shared.rs b/shared.rs".into()),
+                diff_summary: Some(spur_acp::DiffSummary {
+                    files_changed: 1,
+                    insertions: 1,
+                    deletions: 0,
+                    files: vec![std::path::PathBuf::from("shared.rs")],
+                }),
+                summary: Some("updated shared runtime".into()),
+                estimated_cost_usd: 0.0,
+                worker_branch: Some(branch),
+                artifact: None,
+            })
+            .expect("return worker result");
+    };
+
+    complete(first_request, first_branch);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if pm
+                .issue(&issue_ids[0])
+                .await
+                .labels
+                .contains(&crate::plan::labels::READY_FOR_REVIEW.to_string())
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("first sibling reaches review");
+
+    complete(second_request, second_branch);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let labels = pm.issue(&issue_ids[1]).await.labels;
+            if labels.contains(&crate::plan::labels::SIGNAL_LABEL_INTEGRATION_CONFLICT.to_string())
+                || labels.contains(&crate::plan::labels::READY_FOR_REVIEW.to_string())
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("second sibling completion is persisted");
+
+    let second = pm.issue(&issue_ids[1]).await;
+    assert!(
+        second
+            .labels
+            .contains(&crate::plan::labels::SIGNAL_LABEL_INTEGRATION_CONFLICT.to_string()),
+        "observed overlapping writes must surface a structured integration-conflict signal"
+    );
+    assert!(
+        !second
+            .labels
+            .contains(&crate::plan::labels::READY_FOR_REVIEW.to_string()),
+        "collision must be blocked before AwaitingReview"
+    );
+    let signals = pm
+        .comments(&issue_ids[1])
+        .await
+        .into_iter()
+        .filter_map(|comment| {
+            comment
+                .body
+                .trim_start()
+                .strip_prefix(crate::plan::signals::SENTINEL_PREFIX)
+                .and_then(|json| serde_json::from_str::<serde_json::Value>(json.trim()).ok())
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        signals.iter().any(|signal| {
+            signal
+                .get("kind")
+                .is_some_and(|kind| kind == "integration_conflict")
+                && signal
+                    .get("dep_task_id")
+                    .is_some_and(|task| task == "first")
+                && signal
+                    .get("files")
+                    .is_some_and(|files| files == &serde_json::json!(["shared.rs"]))
+        }),
+        "expected deterministic observed-write conflict payload, got {signals:?}"
+    );
+    let projected = crate::plan::projector::project_plan_from_beads(
+        pm.as_ref(),
+        "P-OBSERVED-WRITES",
+        &pro_feature_gate(),
+    )
+    .await
+    .expect("project observed-write conflict");
+    let second_projected = projected
+        .tasks
+        .iter()
+        .find(|entry| entry.spec.task_id == "second")
+        .expect("projected second sibling");
+    assert!(matches!(
+        &second_projected.status,
+        crate::plan::PlanTaskStatus::BlockedOnSetupConflict { dep_task_id, files }
+            if dep_task_id == "first" && files == &["shared.rs".to_string()]
+    ));
+}
+
 #[tokio::test(start_paused = true)]
 async fn plan_task_profile_round_trips_to_dispatch_and_retry() {
     let pm = crate::plan::test_util::MockPm::new().arc();
@@ -3038,6 +3205,7 @@ async fn plan_task_profile_round_trips_to_dispatch_and_retry() {
         None,
         None,
         &[],
+        None,
     )
     .await
     .expect("profile task spec audit");
@@ -3117,6 +3285,7 @@ async fn plan_task_skills_round_trips_to_dispatch() {
         None,
         None,
         &[],
+        None,
     )
     .await
     .expect("skills task spec audit");
@@ -3470,6 +3639,7 @@ async fn seed_ready_overlay_plan(
         None,
         None,
         &["x.rs".to_string()],
+        None,
     )
     .await
     .expect("dep task spec audit");
@@ -3484,6 +3654,7 @@ async fn seed_ready_overlay_plan(
         None,
         None,
         &["z.rs".to_string()],
+        None,
     )
     .await
     .expect("second dep task spec audit");
@@ -3498,6 +3669,7 @@ async fn seed_ready_overlay_plan(
         None,
         None,
         &["y.rs".to_string()],
+        None,
     )
     .await
     .expect("ready task spec audit");
@@ -4276,6 +4448,7 @@ async fn tick_once_retains_agent_and_plan_task_id_for_empty_context_files_task()
             issue_id: None,
             issue_title: None,
             context_files: Vec::new(),
+            planned_write_files: None,
         }],
     )
     .await

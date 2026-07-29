@@ -178,6 +178,7 @@ fn persisted_task(agent: &str) -> Vec<PlanTask> {
         issue_id: None,
         issue_title: None,
         context_files: vec![],
+        planned_write_files: None,
     }]
 }
 
@@ -198,6 +199,7 @@ fn persisted_task_with_context(agent: &str, context_files: &[&str]) -> Vec<PlanT
             .iter()
             .map(|path| (*path).to_string())
             .collect(),
+        planned_write_files: None,
     }]
 }
 
@@ -619,6 +621,7 @@ async fn t_v0c_4_reject_closes_task_and_blocks_watcher() {
                 issue_id: Some(task_id.clone()),
                 issue_title: None,
                 context_files: Vec::new(),
+                planned_write_files: None,
             },
             status: PlanTaskStatus::AwaitingReview {
                 summary: Some("done".into()),
@@ -706,6 +709,7 @@ async fn t_v0c_5_request_changes_stays_open_and_reconciler_redispatches() {
                 issue_id: Some(task_id.clone()),
                 issue_title: None,
                 context_files: Vec::new(),
+                planned_write_files: None,
             },
             status: PlanTaskStatus::AwaitingReview {
                 summary: Some("done".into()),

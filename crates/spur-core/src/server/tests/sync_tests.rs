@@ -51,6 +51,7 @@ async fn create_dispatch_task(
             issue_id: None,
             issue_title: None,
             context_files: Vec::new(),
+            planned_write_files: None,
         }],
     )
     .await
@@ -134,6 +135,7 @@ async fn resolve_dispatch_orphan_proceeds_when_ready_label_is_label_only() {
             issue_id: None,
             issue_title: None,
             context_files: Vec::new(),
+            planned_write_files: None,
         }],
     )
     .await
@@ -291,6 +293,7 @@ async fn resolve_dispatch_orphan_skips_when_delegation_label_has_no_audit() {
             issue_id: None,
             issue_title: None,
             context_files: Vec::new(),
+            planned_write_files: None,
         }],
     )
     .await

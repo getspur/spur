@@ -110,6 +110,8 @@ pub enum AuditSentinelKind {
         #[serde(default)]
         context_files: Vec<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        planned_write_files: Option<Vec<String>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         profile: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         skills: Option<Vec<String>>,
@@ -632,12 +634,64 @@ mod tests {
     }
 
     #[test]
+    fn task_spec_round_trip_preserves_planned_write_files_three_states() {
+        for (raw_value, expected) in [
+            (
+                serde_json::json!({
+                    "kind": "task-spec",
+                    "task_id": "legacy",
+                    "context_files": ["docs/spec.md"]
+                }),
+                None,
+            ),
+            (
+                serde_json::json!({
+                    "kind": "task-spec",
+                    "task_id": "empty",
+                    "context_files": ["docs/spec.md"],
+                    "planned_write_files": []
+                }),
+                Some(serde_json::json!([])),
+            ),
+            (
+                serde_json::json!({
+                    "kind": "task-spec",
+                    "task_id": "files",
+                    "context_files": ["docs/spec.md"],
+                    "planned_write_files": ["src/runtime.rs"]
+                }),
+                Some(serde_json::json!(["src/runtime.rs"])),
+            ),
+        ] {
+            let raw = format!("{SENTINEL_PREFIX}\n{raw_value}");
+            let parsed = parse_comment(&raw)
+                .expect("sentinel prefix")
+                .expect("valid task-spec");
+            let encoded = encode_comment(&parsed);
+            let encoded_json: serde_json::Value = serde_json::from_str(
+                encoded
+                    .strip_prefix(SENTINEL_PREFIX)
+                    .expect("encoded prefix")
+                    .trim(),
+            )
+            .expect("encoded JSON");
+
+            assert_eq!(
+                encoded_json.get("planned_write_files").cloned(),
+                expected,
+                "task-spec must preserve omission separately from an explicit empty list"
+            );
+        }
+    }
+
+    #[test]
     fn encode_then_parse_round_trips_all_variants() {
         let cases = vec![
             sample_plan_submit(),
             AuditSentinelKind::TaskSpec {
                 task_id: "t1".into(),
                 context_files: vec!["docs/spec.md".into(), "src/lib.rs".into()],
+                planned_write_files: None,
                 profile: None,
                 skills: None,
                 model: None,

@@ -67,15 +67,45 @@ Tasks must be **truly independent** — no shared state, no file overlaps. Each 
   "name": "submit_plan",
   "arguments": {
     "tasks": [
-      {"task_id": "setup", "agent": "claude-code-acp", "task": "...", "depends_on": []},
-      {"task_id": "impl_a", "agent": "claude-code-acp", "task": "...", "depends_on": ["setup"]},
-      {"task_id": "impl_b", "agent": "codex", "task": "...", "depends_on": ["setup"]},
-      {"task_id": "wire",   "agent": "claude-code-acp", "task": "...", "depends_on": ["impl_a", "impl_b"]}
+      {
+        "task_id": "setup",
+        "agent": "claude-code-acp",
+        "task": "...",
+        "depends_on": [],
+        "context_files": ["docs/design.md"],
+        "planned_write_files": []
+      },
+      {
+        "task_id": "impl_a",
+        "agent": "claude-code-acp",
+        "task": "...",
+        "depends_on": ["setup"],
+        "context_files": ["docs/design.md", "src/a.rs"],
+        "planned_write_files": ["src/a.rs"]
+      },
+      {
+        "task_id": "impl_b",
+        "agent": "codex",
+        "task": "...",
+        "depends_on": ["setup"],
+        "context_files": ["docs/design.md", "src/b.rs"],
+        "planned_write_files": ["src/b.rs"]
+      },
+      {
+        "task_id": "wire",
+        "agent": "claude-code-acp",
+        "task": "...",
+        "depends_on": ["impl_a", "impl_b"],
+        "context_files": ["docs/design.md", "src/a.rs", "src/b.rs"],
+        "planned_write_files": ["src/router.rs"]
+      }
     ],
     "delegation_plan": {"chosen": "mixed", "rationale": "Diamond DAG; parallel middle."}
   }
 }
 ```
+
+For every new `submit_plan` task, include `planned_write_files`, using `[]` for read-only or intentionally no-write work. `context_files` controls what the worker receives as prompt/read context; it is not a write manifest. Omission is reserved for legacy callers and temporarily falls back to `context_files` when Spur detects sibling overlap.
 
 The orchestrator:
 1. Dispatches `setup` immediately.

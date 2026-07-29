@@ -93,6 +93,7 @@ mod plan_truncate_and_restart_tests {
                 issue_id: Some(format!("bd-{task_id}")),
                 issue_title: None,
                 context_files: Vec::new(),
+                planned_write_files: None,
             },
             status,
             result: None,
@@ -1029,6 +1030,7 @@ mod plan_handler_mcp_tests {
                     issue_id: Some(issue_id),
                     issue_title: None,
                     context_files: Vec::new(),
+                    planned_write_files: None,
                 },
                 status,
                 result: None,
@@ -2263,6 +2265,7 @@ mod reconciler_fast_forward_tests {
                     issue_id: Some("bd-1".into()),
                     issue_title: None,
                     context_files: Vec::new(),
+                    planned_write_files: None,
                 },
                 status: crate::plan::PlanTaskStatus::Ready,
                 result: None,
@@ -2308,6 +2311,7 @@ mod reconciler_fast_forward_tests {
             issue_id: None,
             issue_title: None,
             context_files: Vec::new(),
+            planned_write_files: None,
         }];
         let feature_gate = super::pro_feature_gate();
         let subgraph = crate::build_epic_subgraph(
@@ -2398,6 +2402,7 @@ mod reconciler_fast_forward_tests {
                     issue_id: Some("bd-1".into()),
                     issue_title: None,
                     context_files: Vec::new(),
+                    planned_write_files: None,
                 },
                 status: crate::plan::PlanTaskStatus::Ready,
                 result: None,
@@ -2430,6 +2435,7 @@ mod reconciler_fast_forward_tests {
                         issue_id: Some("bd-1".into()),
                         issue_title: None,
                         context_files: Vec::new(),
+                        planned_write_files: None,
                     },
                     status: crate::plan::PlanTaskStatus::Ready,
                     result: None,
@@ -2453,6 +2459,7 @@ mod reconciler_fast_forward_tests {
                         issue_id: Some("bd-2".into()),
                         issue_title: None,
                         context_files: Vec::new(),
+                        planned_write_files: None,
                     },
                     status: crate::plan::PlanTaskStatus::Pending,
                     result: None,
@@ -2499,6 +2506,7 @@ mod reconciler_fast_forward_tests {
             issue_id: None,
             issue_title: None,
             context_files: Vec::new(),
+            planned_write_files: None,
         }];
         let feature_gate = super::pro_feature_gate();
         let sg = crate::build_epic_subgraph(
@@ -2562,6 +2570,7 @@ mod reconciler_fast_forward_tests {
             issue_id: None,
             issue_title: None,
             context_files: Vec::new(),
+            planned_write_files: None,
         }];
         let feature_gate = super::pro_feature_gate();
         let sg = crate::build_epic_subgraph(

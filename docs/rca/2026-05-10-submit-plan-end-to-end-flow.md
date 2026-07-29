@@ -405,17 +405,17 @@ This section calls out concrete weaknesses surfaced during the walk. Severity is
 
 **Fix sketch:** make state-transition writes transactional or at least retry-with-backoff with a hard failure that demotes the plan to "needs reconciliation" and refuses further mutations until reconciled.
 
-### 7.3 [MEDIUM] Sibling-overlap detection is `context_files`-shaped, not edit-shaped
+### 7.3 [RESOLVED] Planned writes are distinct from prompt context
 
-`submit_plan_normalize_tasks` (`plan/mod.rs:1296`) injects synthetic dependency edges between tasks that share a `context_files` entry. But:
+`submit_plan_normalize_tasks` now injects synthetic dependency edges from each task's effective planned write set, while `context_files` remains worker prompt/read context. The compatibility contract is deliberately three-state:
 
-- A worker can edit any file in the worktree, regardless of whether it was declared in `context_files`.
-- `context_files` is brain-supplied prompt context, not a write manifest.
-- A task that declares `context_files: ["A.rs"]` but actually edits `A.rs` and `B.rs` will silently collide with a sibling editing `B.rs`.
+- omitted `planned_write_files` (`None`) identifies a legacy caller and falls back to `context_files`;
+- `planned_write_files: []` (`Some([])`) explicitly declares no planned writes;
+- a non-empty `planned_write_files` list is the authoritative submit-time intended create/modify/delete set.
 
-**Why it matters:** the architecture's only at-submit collision detection is based on a field the brain populates with no enforcement. The post-approve "clobber detector" (`server.rs:6648`) is the safety net, but it runs *after* approval and only on the approved branch.
+The exact state is persisted in `TaskSpec` audit sentinels and reconstructed by the durable projector, including after task mutations and process restarts. Built-in loop planning emits the field even when the list is empty.
 
-**Fix sketch:** complement `context_files` overlap with a post-dispatch diff-touched-files check at completion time, before `AwaitingReview` is set.
+Because planned writes remain advisory, the existing setup-overlay and post-approval clobber protections remain in place. In addition, successful worker completion derives the actual touched paths from the worker branch diff and compares them with concurrently executed, dependency-unrelated siblings. A deterministic overlap emits the existing structured `integration_conflict` signal and clears the dispatch intent before the task can transition to `AwaitingReview`.
 
 ### 7.4 [MEDIUM] `BaseTarget` tolerant deserializer is a protocol patch
 

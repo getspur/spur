@@ -64,6 +64,7 @@ fn one_task() -> Vec<PlanTask> {
         issue_id: None,
         issue_title: None,
         context_files: vec![],
+        planned_write_files: None,
     }]
 }
 

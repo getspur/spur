@@ -112,6 +112,7 @@ pub(crate) async fn build_epic_subgraph_with_activation_labels(
             task.effort.as_deref(),
             task.config_overrides.as_ref(),
             &task.context_files,
+            task.planned_write_files.as_deref(),
         )
         .await
         .map_err(|e| format!("failed to persist child task spec for task '{task_id}': {e}"))?;
@@ -913,6 +914,7 @@ mod topo_tests {
             issue_id: None,
             issue_title: None,
             context_files: Vec::new(),
+            planned_write_files: None,
         }
     }
 
@@ -931,6 +933,7 @@ mod topo_tests {
             model: Some("gpt-5-codex".to_string()),
             effort: Some("low".to_string()),
             config_overrides: None,
+            planned_write_files: None,
         }];
 
         let (_, children) = super::plan_epic_issue_creates("plan-1", "Epic", None, &tasks).unwrap();
@@ -961,6 +964,7 @@ mod topo_tests {
             model: None,
             effort: None,
             config_overrides: None,
+            planned_write_files: None,
         }];
 
         let (_, children) = super::plan_epic_issue_creates("plan-1", "Epic", None, &tasks).unwrap();

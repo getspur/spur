@@ -33,6 +33,7 @@ fn sample_tasks() -> Vec<PlanTask> {
         issue_id: None,
         issue_title: None,
         context_files: Vec::new(),
+        planned_write_files: None,
     }]
 }
 

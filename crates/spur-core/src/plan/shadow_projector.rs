@@ -99,6 +99,7 @@ mod tests {
             issue_id: Some(format!("I-{task_id}")),
             issue_title: Some(format!("Task {task_id}")),
             context_files: Vec::new(),
+            planned_write_files: None,
         }
     }
 

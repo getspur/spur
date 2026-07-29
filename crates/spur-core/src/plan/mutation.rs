@@ -19,6 +19,9 @@ pub struct TaskDraft {
     pub assignee: Option<String>,
     #[serde(default)]
     pub priority: Option<i32>,
+    /// Advisory intended create/modify/delete set for the new task.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub planned_write_files: Option<Vec<String>>,
 }
 
 /// How children of a split relate to the original downstream edges.
@@ -63,6 +66,8 @@ pub enum PlanMutationOp {
         new_agent: Option<String>,
         new_profile: Option<String>,
         new_context_files: Option<Vec<String>>,
+        /// Omitted retains the current exact three-state value.
+        new_planned_write_files: Option<Vec<String>>,
         new_depends_on: Option<Vec<String>>,
     },
     /// bd-2m2u Phase 2c — terminal abandonment. Marks the issue Failed; if
@@ -165,6 +170,7 @@ mod tests {
                     description: "...".into(),
                     assignee: Some("claude-code-acp".into()),
                     priority: None,
+                    planned_write_files: None,
                 }],
                 dep_rewire: DepRewirePolicy::Barrier,
             }],
@@ -174,5 +180,50 @@ mod tests {
         assert_eq!(back.trigger_task_id, "bd-102");
         assert_eq!(back.op_tag(), "split_task");
         assert_eq!(back.op_tags(), vec!["split_task"]);
+    }
+
+    #[test]
+    fn mutation_round_trip_preserves_planned_write_file_updates() {
+        let value = serde_json::json!({
+            "mutation_id": Uuid::nil(),
+            "trigger_signal_id": null,
+            "trigger_task_id": "bd-parent",
+            "ops": [
+                {
+                    "op": "split_task",
+                    "parent": "bd-parent",
+                    "children": [{
+                        "title": "Read-only child",
+                        "description": "Inspect only",
+                        "assignee": null,
+                        "priority": null,
+                        "planned_write_files": []
+                    }],
+                    "dep_rewire": { "policy": "barrier" }
+                },
+                {
+                    "op": "modify_task_spec",
+                    "issue_id": "bd-existing",
+                    "new_task": null,
+                    "new_agent": null,
+                    "new_profile": null,
+                    "new_context_files": null,
+                    "new_planned_write_files": ["src/runtime.rs"],
+                    "new_depends_on": null
+                }
+            ]
+        });
+
+        let batch: MutationBatch = serde_json::from_value(value).expect("valid mutation batch");
+        let encoded = serde_json::to_value(batch).expect("serialize mutation batch");
+
+        assert_eq!(
+            encoded["ops"][0]["children"][0]["planned_write_files"],
+            serde_json::json!([])
+        );
+        assert_eq!(
+            encoded["ops"][1]["new_planned_write_files"],
+            serde_json::json!(["src/runtime.rs"])
+        );
     }
 }

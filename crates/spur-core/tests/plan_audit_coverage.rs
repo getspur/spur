@@ -141,6 +141,7 @@ async fn plan_audit_coverage_all_four_sentinels() {
         issue_id: None,
         issue_title: None,
         context_files: vec![],
+        planned_write_files: None,
     }];
 
     // Build epic subgraph — creates epic + child issue in beads.
@@ -227,6 +228,7 @@ async fn plan_audit_coverage_all_four_sentinels() {
             issue_id: Some(task_issue_id.clone()),
             issue_title: None,
             context_files: vec![],
+            planned_write_files: None,
         },
         status: PlanTaskStatus::AwaitingReview {
             summary: Some("looks good".into()),
@@ -662,6 +664,7 @@ async fn reject_closes_issue_and_adds_review_rejected_label() {
         issue_id: None,
         issue_title: None,
         context_files: vec![],
+        planned_write_files: None,
     }];
 
     // Build epic subgraph — creates epic + child issue in beads.
@@ -710,6 +713,7 @@ async fn reject_closes_issue_and_adds_review_rejected_label() {
             issue_id: Some(task_issue_id.clone()),
             issue_title: None,
             context_files: vec![],
+            planned_write_files: None,
         },
         status: PlanTaskStatus::AwaitingReview {
             summary: Some("worker done".into()),
@@ -826,6 +830,7 @@ async fn request_changes_leaves_issue_open_and_not_review_ready() {
                 issue_id: Some(task_issue_id.clone()),
                 issue_title: None,
                 context_files: vec![],
+                planned_write_files: None,
             },
             status: PlanTaskStatus::AwaitingReview {
                 summary: Some("request changes narrative".into()),
@@ -919,6 +924,7 @@ async fn request_changes_does_not_emit_dispatch_audit() {
                 issue_id: Some(task_issue_id.clone()),
                 issue_title: None,
                 context_files: vec![],
+                planned_write_files: None,
             },
             status: PlanTaskStatus::AwaitingReview {
                 summary: Some("request changes narrative".into()),
@@ -1016,6 +1022,7 @@ async fn approve_closes_issue_and_clears_ready_for_review() {
                 issue_id: Some(task_issue_id.clone()),
                 issue_title: None,
                 context_files: vec![],
+                planned_write_files: None,
             },
             status: PlanTaskStatus::AwaitingReview {
                 summary: Some("approve narrative".into()),

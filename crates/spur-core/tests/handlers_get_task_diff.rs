@@ -103,6 +103,7 @@ fn make_plan_with_cached_result(plan_id: &str) -> PlanState {
                 issue_id: None,
                 issue_title: None,
                 context_files: vec![],
+                planned_write_files: None,
             },
             status: PlanTaskStatus::Approved {
                 summary: Some("approved".into()),
@@ -142,6 +143,7 @@ fn make_plan_needing_recovery(plan_id: &str) -> PlanState {
                 issue_id: Some("issue-task".into()),
                 issue_title: None,
                 context_files: vec![],
+                planned_write_files: None,
             },
             status: PlanTaskStatus::Approved { summary: None },
             // No cached result — handler must walk the recovery branch.
@@ -351,6 +353,7 @@ fn plan_with_in_memory_history() -> PlanState {
                 issue_id: None,
                 issue_title: None,
                 context_files: vec![],
+                planned_write_files: None,
             },
             status: PlanTaskStatus::AwaitingReview {
                 summary: Some("attempt 2 in flight".into()),

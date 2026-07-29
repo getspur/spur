@@ -55,6 +55,7 @@ mod ready;
 mod reviews;
 
 mod conflict;
+pub(crate) use conflict::persist_observed_write_conflict;
 
 mod base_spec;
 
@@ -390,7 +391,7 @@ fn expected_plan_id_from_audits(
 fn expected_plan_task_id_from_audits(
     audits: &[crate::plan::audit_sentinel::AuditSentinelKind],
 ) -> Option<String> {
-    if let Some((task_id, _, _, _, _, _, _)) = crate::plan::projector::latest_task_spec(audits) {
+    if let Some((task_id, _, _, _, _, _, _, _)) = crate::plan::projector::latest_task_spec(audits) {
         return Some(task_id);
     }
     use crate::plan::audit_sentinel::AuditSentinelKind;
@@ -1767,6 +1768,7 @@ impl Reconciler {
                     task_attempt,
                     &materializer,
                     dispatched_base_oid,
+                    Some(repo_root.clone()),
                     Some(&task_id),
                 )
                 .await

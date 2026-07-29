@@ -1335,7 +1335,7 @@ impl McpCallbackServer {
                 })
                 .collect();
             format!(
-                "{response_text}\n\nAuto-serialized {} sibling pair(s) with overlapping context_files:\n{}",
+                "{response_text}\n\nAuto-serialized {} sibling pair(s) with overlapping planned writes:\n{}",
                 submitted.auto_serialized.len(),
                 edges.join("\n")
             )

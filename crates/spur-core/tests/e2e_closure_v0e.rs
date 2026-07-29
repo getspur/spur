@@ -545,6 +545,7 @@ async fn t_v0e_1_no_persisted_direct_dispatch() {
                 issue_id: Some(task_a_id.clone()),
                 issue_title: None,
                 context_files: vec![],
+                planned_write_files: None,
             },
             status: PlanTaskStatus::AwaitingReview { summary: None },
             result: None,

@@ -97,6 +97,7 @@ async fn setup_persisted_merge_ready_plan(
         issue_id: None,
         issue_title: None,
         context_files: Vec::new(),
+        planned_write_files: None,
     }];
     let feature_gate = super::pro_feature_gate();
     let subgraph = crate::build_epic_subgraph(
@@ -307,6 +308,7 @@ async fn setup_persisted_retried_plan(plan_id: &str, clear_cache: bool) -> Persi
         issue_id: None,
         issue_title: None,
         context_files: Vec::new(),
+        planned_write_files: None,
     }];
     let feature_gate = super::pro_feature_gate();
     let subgraph = crate::build_epic_subgraph(
@@ -608,6 +610,7 @@ async fn setup_cached_overlay_diff_plan(
             issue_id: None,
             issue_title: None,
             context_files: Vec::new(),
+            planned_write_files: None,
         },
         PlanTask {
             task_id: "task-b".into(),
@@ -622,6 +625,7 @@ async fn setup_cached_overlay_diff_plan(
             issue_id: None,
             issue_title: None,
             context_files: Vec::new(),
+            planned_write_files: None,
         },
     ];
     let feature_gate = super::pro_feature_gate();

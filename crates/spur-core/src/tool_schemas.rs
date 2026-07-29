@@ -353,6 +353,10 @@ pub struct LoopDoctorDraftTask {
     pub depends_on: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub context_files: Vec<String>,
+    /// Advisory intended create/modify/delete paths. Built-in planners emit
+    /// this field even when it is empty.
+    #[serde(default)]
+    pub planned_write_files: Vec<String>,
     #[serde(default)]
     pub triage: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

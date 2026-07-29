@@ -32,6 +32,7 @@ fn sample_tasks(with_c: bool) -> Vec<PlanTask> {
             issue_id: None,
             issue_title: None,
             context_files: Vec::new(),
+            planned_write_files: None,
         },
         PlanTask {
             task_id: "b".into(),
@@ -46,6 +47,7 @@ fn sample_tasks(with_c: bool) -> Vec<PlanTask> {
             issue_id: Some("bd-42".into()),
             issue_title: None,
             context_files: Vec::new(),
+            planned_write_files: None,
         },
     ];
     if with_c {
@@ -62,6 +64,7 @@ fn sample_tasks(with_c: bool) -> Vec<PlanTask> {
             issue_id: None,
             issue_title: None,
             context_files: Vec::new(),
+            planned_write_files: None,
         });
     }
     v
@@ -152,6 +155,7 @@ fn cycle_produces_error() {
             issue_id: None,
             issue_title: None,
             context_files: Vec::new(),
+            planned_write_files: None,
         },
         PlanTask {
             task_id: "b".into(),
@@ -166,6 +170,7 @@ fn cycle_produces_error() {
             issue_id: None,
             issue_title: None,
             context_files: Vec::new(),
+            planned_write_files: None,
         },
     ];
     let err = plan_epic_issue_creates("p", "t", None, &tasks).unwrap_err();
@@ -191,6 +196,35 @@ fn submit_plan_schema_still_advertises_tasks_as_required() {
         .map(|v| v.as_str().unwrap())
         .collect();
     assert!(required.contains(&"tasks"));
+}
+
+#[test]
+fn submit_plan_schema_advertises_planned_write_files_as_optional() {
+    let schema = tools_list()
+        .into_iter()
+        .find(|tool| tool.name == "submit_plan")
+        .expect("submit_plan tool")
+        .input_schema;
+    let task_schema = &schema["properties"]["tasks"]["items"];
+
+    assert_eq!(
+        task_schema["properties"]["planned_write_files"]["type"],
+        "array"
+    );
+    assert!(
+        task_schema["properties"]["planned_write_files"]["description"]
+            .as_str()
+            .is_some_and(|description| description.contains("create/modify/delete")),
+        "schema should distinguish planned writes from prompt/read context"
+    );
+    assert!(
+        !task_schema["required"]
+            .as_array()
+            .expect("task required fields")
+            .iter()
+            .any(|field| field == "planned_write_files"),
+        "legacy callers may omit planned_write_files"
+    );
 }
 
 /// INV-5: verify that `handle_review_task` releases the plan-state lock BEFORE
@@ -228,6 +262,7 @@ async fn review_approve_releases_plan_lock_before_beads_io() {
                 issue_id: Some("bd-1".into()),
                 issue_title: None,
                 context_files: vec![],
+                planned_write_files: None,
             },
             status: spur_core::plan::PlanTaskStatus::AwaitingReview { summary: None },
             result: None,
@@ -314,6 +349,7 @@ fn tasks_abc() -> Vec<PlanTask> {
             issue_id: None,
             issue_title: None,
             context_files: Vec::new(),
+            planned_write_files: None,
         },
         PlanTask {
             task_id: "b".into(),
@@ -328,6 +364,7 @@ fn tasks_abc() -> Vec<PlanTask> {
             issue_id: None,
             issue_title: None,
             context_files: Vec::new(),
+            planned_write_files: None,
         },
         PlanTask {
             task_id: "c".into(),
@@ -342,6 +379,7 @@ fn tasks_abc() -> Vec<PlanTask> {
             issue_id: None,
             issue_title: None,
             context_files: Vec::new(),
+            planned_write_files: None,
         },
     ]
 }
@@ -415,6 +453,7 @@ fn build_entries_does_not_overwrite_existing_issue_id() {
         issue_id: Some("bd-42".into()),
         issue_title: None,
         context_files: Vec::new(),
+        planned_write_files: None,
     }];
     let mut task_map = HashMap::new();
     // task_map carries the newly-created beads child ID

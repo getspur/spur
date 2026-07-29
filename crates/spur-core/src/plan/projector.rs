@@ -554,6 +554,7 @@ fn partial_compare_status(legacy: &PlanTaskStatus, shadow: &PlanTaskStatus) -> S
 pub type LatestTaskSpec = (
     String,
     Vec<String>,
+    Option<Vec<String>>,
     Option<String>,
     Option<Vec<String>>,
     Option<String>,
@@ -562,7 +563,7 @@ pub type LatestTaskSpec = (
 );
 
 pub fn latest_task_spec(audits: &[AuditSentinelKind]) -> Option<LatestTaskSpec> {
-    let mut task_id_and_context_files = None;
+    let mut latest_core = None;
     let mut latest_profile = None;
     let mut latest_skills = None;
     let mut latest_model = None;
@@ -572,6 +573,7 @@ pub fn latest_task_spec(audits: &[AuditSentinelKind]) -> Option<LatestTaskSpec> 
         if let AuditSentinelKind::TaskSpec {
             task_id,
             context_files,
+            planned_write_files,
             profile,
             skills,
             model,
@@ -580,8 +582,12 @@ pub fn latest_task_spec(audits: &[AuditSentinelKind]) -> Option<LatestTaskSpec> 
             ..
         } = audit
         {
-            if task_id_and_context_files.is_none() {
-                task_id_and_context_files = Some((task_id.clone(), context_files.clone()));
+            if latest_core.is_none() {
+                latest_core = Some((
+                    task_id.clone(),
+                    context_files.clone(),
+                    planned_write_files.clone(),
+                ));
             }
             if latest_profile.is_none() {
                 latest_profile = profile.clone();
@@ -601,10 +607,11 @@ pub fn latest_task_spec(audits: &[AuditSentinelKind]) -> Option<LatestTaskSpec> 
         }
     }
 
-    task_id_and_context_files.map(|(task_id, context_files)| {
+    latest_core.map(|(task_id, context_files, planned_write_files)| {
         (
             task_id,
             context_files,
+            planned_write_files,
             latest_profile,
             latest_skills,
             latest_model,
@@ -1351,6 +1358,7 @@ pub async fn project_plan_from_beads(
         audits: Vec<crate::plan::audit_sentinel::AuditSentinelKind>,
         task_id: String,
         context_files: Vec<String>,
+        planned_write_files: Option<Vec<String>>,
         profile: Option<String>,
         skills: Option<Vec<String>>,
         model: Option<String>,
@@ -1365,23 +1373,33 @@ pub async fn project_plan_from_beads(
             adv.list_comments(&task_issue.id).await?,
         )?;
         let task_spec = latest_task_spec(&audits);
-        let (task_id, context_files, profile, skills, model, effort, config_overrides) = task_spec
-            .unwrap_or_else(|| {
-                (
-                    task_id_for_issue(&task_issue),
-                    Vec::new(),
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                )
-            });
+        let (
+            task_id,
+            context_files,
+            planned_write_files,
+            profile,
+            skills,
+            model,
+            effort,
+            config_overrides,
+        ) = task_spec.unwrap_or_else(|| {
+            (
+                task_id_for_issue(&task_issue),
+                Vec::new(),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+        });
         projected_tasks.push(ProjectedTask {
             issue: task_issue,
             audits,
             task_id,
             context_files,
+            planned_write_files,
             profile,
             skills,
             model,
@@ -1444,6 +1462,7 @@ pub async fn project_plan_from_beads(
                 issue_id: Some(projected_task.issue.id.clone()),
                 issue_title: Some(projected_task.issue.title.clone()),
                 context_files: projected_task.context_files.clone(),
+                planned_write_files: projected_task.planned_write_files.clone(),
             },
             status,
             result: None,
@@ -2521,6 +2540,98 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn project_plan_from_beads_preserves_planned_write_files_three_states() {
+        let plan_id = "planned-writes-plan";
+        let epic = spur_pm::Issue {
+            issue_type: Some("epic".to_string()),
+            ..issue(
+                "bd-planned-writes-epic",
+                "open",
+                vec![crate::plan::labels::plan_id(plan_id)],
+                Vec::new(),
+            )
+        };
+        let task_cases = [
+            ("legacy", None),
+            ("empty", Some(serde_json::json!([]))),
+            (
+                "files",
+                Some(serde_json::json!(["src/runtime.rs", "src/outbox.rs"])),
+            ),
+        ];
+        let mut issues = vec![epic.clone()];
+        let mut comments = HashMap::new();
+
+        for (task_id, planned_write_files) in &task_cases {
+            let issue_id = format!("bd-{task_id}");
+            issues.push(spur_pm::Issue {
+                issue_type: Some("task".to_string()),
+                ..issue(
+                    &issue_id,
+                    "open",
+                    vec![
+                        crate::plan::labels::plan_id(plan_id),
+                        crate::plan::labels::plan_task_id(task_id),
+                        crate::plan::labels::agent("codex"),
+                    ],
+                    vec![epic.id.clone()],
+                )
+            });
+            let mut audit = serde_json::json!({
+                "kind": "task-spec",
+                "task_id": task_id,
+                "context_files": ["docs/design.md"],
+                "agent": "codex"
+            });
+            if let Some(files) = planned_write_files {
+                audit["planned_write_files"] = files.clone();
+            }
+            comments.insert(
+                issue_id,
+                vec![comment(
+                    &format!("comment-{task_id}"),
+                    format!(
+                        "{}\n{}",
+                        crate::plan::audit_sentinel::SENTINEL_PREFIX,
+                        audit
+                    ),
+                    0,
+                )],
+            );
+        }
+
+        let pm = TestPm::new(issues, comments, "closed");
+        let projected = super::project_plan_from_beads(&pm, plan_id, &pro_feature_gate())
+            .await
+            .expect("project persisted plan");
+        let serialized_by_id = projected
+            .tasks
+            .iter()
+            .map(|entry| {
+                (
+                    entry.spec.task_id.as_str(),
+                    serde_json::to_value(&entry.spec).expect("serialize projected task"),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+
+        assert!(
+            serialized_by_id["legacy"]
+                .get("planned_write_files")
+                .is_none(),
+            "omitted legacy state must remain omitted after restart projection"
+        );
+        assert_eq!(
+            serialized_by_id["empty"].get("planned_write_files"),
+            Some(&serde_json::json!([]))
+        );
+        assert_eq!(
+            serialized_by_id["files"].get("planned_write_files"),
+            Some(&serde_json::json!(["src/runtime.rs", "src/outbox.rs"]))
+        );
+    }
+
     #[test]
     fn open_task_with_delegation_label_projects_dispatched() {
         let issue = issue(
@@ -3300,6 +3411,7 @@ mod tests {
                     issue_id: Some("bd-1".into()),
                     issue_title: None,
                     context_files: Vec::new(),
+                    planned_write_files: None,
                 },
                 status: PlanTaskStatus::Approved { summary: None },
                 result: None,
@@ -3323,6 +3435,7 @@ mod tests {
                     issue_id: Some("bd-2".into()),
                     issue_title: None,
                     context_files: Vec::new(),
+                    planned_write_files: None,
                 },
                 status: PlanTaskStatus::Pending,
                 result: None,
@@ -3396,6 +3509,7 @@ mod tests {
                     issue_id: Some("bd-1".into()),
                     issue_title: Some("Task".into()),
                     context_files: Vec::new(),
+                    planned_write_files: None,
                 },
                 status: PlanTaskStatus::Superseded {
                     mutation_id: "m-1".into(),

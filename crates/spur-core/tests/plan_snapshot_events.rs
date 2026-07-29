@@ -309,6 +309,7 @@ async fn recover_persisted_plans_skips_unowned_legacy_plan() {
         issue_id: None,
         issue_title: None,
         context_files: Vec::new(),
+        planned_write_files: None,
     }];
     let subgraph = spur_core::build_epic_subgraph(
         pm.as_ref(),

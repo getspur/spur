@@ -132,6 +132,7 @@ async fn t_v0d_3_merge_plan_works_after_restart_on_persisted_plan() {
         issue_id: None,
         issue_title: None,
         context_files: Vec::new(),
+        planned_write_files: None,
     }];
     let feature_gate = common::server_builder::pro_feature_gate();
     let subgraph = build_epic_subgraph(

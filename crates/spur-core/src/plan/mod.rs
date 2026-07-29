@@ -34,6 +34,18 @@ pub(crate) fn system_review_target_lock(issue_id: &str) -> &'static tokio::sync:
     issue_id.hash(&mut hasher);
     &locks[hasher.finish() as usize % STRIPES]
 }
+
+fn observed_write_plan_lock(plan_id: &str) -> &'static tokio::sync::Mutex<()> {
+    use std::hash::{Hash, Hasher};
+    use std::sync::OnceLock;
+
+    const STRIPES: usize = 64;
+    static LOCKS: OnceLock<Vec<tokio::sync::Mutex<()>>> = OnceLock::new();
+    let locks = LOCKS.get_or_init(|| (0..STRIPES).map(|_| tokio::sync::Mutex::new(())).collect());
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    plan_id.hash(&mut hasher);
+    &locks[hasher.finish() as usize % STRIPES]
+}
 pub mod snapshot;
 pub mod staging;
 #[doc(hidden)]
@@ -74,8 +86,26 @@ pub struct PlanTask {
     pub issue_id: Option<String>,
     #[serde(default)]
     pub issue_title: Option<String>,
+    /// Files supplied to the worker as prompt/read context.
     #[serde(default)]
     pub context_files: Vec<String>,
+    /// Advisory submit-time create/modify/delete set.
+    ///
+    /// `None` is the legacy state and falls back to `context_files` for
+    /// sibling-overlap detection. `Some([])` is an authoritative empty write
+    /// set; `Some(files)` is the authoritative planned write set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub planned_write_files: Option<Vec<String>>,
+}
+
+impl PlanTask {
+    /// Return the write set used for submit-time sibling overlap detection.
+    #[must_use]
+    pub fn effective_planned_write_files(&self) -> &[String] {
+        self.planned_write_files
+            .as_deref()
+            .unwrap_or(self.context_files.as_slice())
+    }
 }
 
 /// Status of an individual plan task.
@@ -821,6 +851,7 @@ mod approved_dep_closure_tests {
                 issue_id: Some(format!("bd-{id}")),
                 issue_title: None,
                 context_files: Vec::new(),
+                planned_write_files: None,
             },
             status,
             result: None,
@@ -935,6 +966,7 @@ mod scope_snapshot_integration_tests {
             issue_id: Some(format!("bd-{task_id}")),
             issue_title: None,
             context_files: vec![],
+            planned_write_files: None,
         }
     }
 
@@ -1245,6 +1277,7 @@ pub fn derive_epic_plan_from_issues(
             issue_id: Some(id),
             issue_title: Some(title),
             context_files: vec![],
+            planned_write_files: None,
         });
     }
 
@@ -1373,10 +1406,11 @@ pub async fn derive_epic_plan(
                     .map_err(|e| format!("failed to list comments for task '{issue_id}': {e}"))?,
             )
             .map_err(|e| format!("failed to parse audits for task '{issue_id}': {e}"))?;
-            if let Some((_, context_files, _, skills, _, _, _)) =
+            if let Some((_, context_files, planned_write_files, _, skills, _, _, _)) =
                 crate::plan::projector::latest_task_spec(&audits)
             {
                 task.context_files = context_files;
+                task.planned_write_files = planned_write_files;
                 task.skills = skills;
             }
         }
@@ -1585,14 +1619,14 @@ pub struct SiblingOverlap {
     pub from: String,
     /// Task that gets the synthetic `depends_on: from` edge (lex-higher).
     pub to: String,
-    /// The intersection of `context_files` that triggered the synthetic edge.
+    /// The intersection of effective planned write sets that triggered the edge.
     pub shared_files: Vec<String>,
 }
 
 /// Detect pairs of tasks where:
 ///   1. Neither is a transitive ancestor of the other (i.e., they could
 ///      currently dispatch in parallel), AND
-///   2. Their `context_files` sets intersect.
+///   2. Their effective planned write sets intersect.
 ///
 /// For each such pair, produce one `SiblingOverlap` with `from` = lex-lower
 /// task_id, `to` = lex-higher task_id. Determinism matters: callers will
@@ -1635,12 +1669,15 @@ pub fn find_sibling_overlaps(tasks: &[PlanTask]) -> Vec<SiblingOverlap> {
             if related(i, j) {
                 continue;
             }
-            let files_i: HashSet<&str> =
-                tasks[i].context_files.iter().map(String::as_str).collect();
-            let shared: Vec<String> = tasks[j]
-                .context_files
+            let files_i: HashSet<&str> = tasks[i]
+                .effective_planned_write_files()
                 .iter()
-                .filter(|f| files_i.contains(f.as_str()))
+                .map(String::as_str)
+                .collect();
+            let shared: Vec<String> = tasks[j]
+                .effective_planned_write_files()
+                .iter()
+                .filter(|file| files_i.contains(file.as_str()))
                 .cloned()
                 .collect();
             if shared.is_empty() {
@@ -1654,6 +1691,7 @@ pub fn find_sibling_overlaps(tasks: &[PlanTask]) -> Vec<SiblingOverlap> {
             };
             let mut shared_sorted = shared;
             shared_sorted.sort();
+            shared_sorted.dedup();
             overlaps.push(SiblingOverlap {
                 from: from.clone(),
                 to: to.clone(),
@@ -1855,10 +1893,12 @@ pub(crate) async fn emit_task_spec_audit(
     effort: Option<&str>,
     config_overrides: Option<&HashMap<String, String>>,
     context_files: &[String],
+    planned_write_files: Option<&[String]>,
 ) -> anyhow::Result<()> {
     let kind = crate::plan::audit_sentinel::AuditSentinelKind::TaskSpec {
         task_id: task_id.to_string(),
         context_files: context_files.to_vec(),
+        planned_write_files: planned_write_files.map(<[String]>::to_vec),
         profile: profile.map(str::to_string),
         skills: skills.map(<[String]>::to_vec),
         model: model.map(str::to_string),
@@ -1886,6 +1926,7 @@ pub(crate) async fn emit_extended_task_spec_audit(
     issue_id: &str,
     task_id: &str,
     context_files: &[String],
+    planned_write_files: Option<&[String]>,
     task_text: Option<&str>,
     agent: Option<&str>,
     profile: Option<&str>,
@@ -1894,6 +1935,7 @@ pub(crate) async fn emit_extended_task_spec_audit(
     let kind = crate::plan::audit_sentinel::AuditSentinelKind::TaskSpec {
         task_id: task_id.to_string(),
         context_files: context_files.to_vec(),
+        planned_write_files: planned_write_files.map(<[String]>::to_vec),
         profile: profile.map(str::to_string),
         skills: None,
         model: None,
@@ -2819,6 +2861,200 @@ async fn persist_completion_result_with_retry_for_task(
     })
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct ObservedWriteConflict {
+    dep_task_id: String,
+    files: Vec<String>,
+}
+
+fn normalized_observed_path(path: &std::path::Path) -> Option<String> {
+    let path = path.to_string_lossy();
+    let normalized = path.strip_prefix("./").unwrap_or(path.as_ref());
+    (!normalized.is_empty()).then(|| normalized.to_string())
+}
+
+fn diff_summary_touched_files(result: &DelegationResult) -> BTreeSet<String> {
+    result
+        .diff_summary
+        .as_ref()
+        .into_iter()
+        .flat_map(|summary| &summary.files)
+        .filter_map(|path| normalized_observed_path(path))
+        .collect()
+}
+
+async fn git_diff_touched_files(
+    repo_root: &std::path::Path,
+    base_oid: &str,
+    worker_branch: &str,
+) -> anyhow::Result<BTreeSet<String>> {
+    let output = spur_mcp::git::run_git_capture(
+        repo_root,
+        None,
+        &[
+            "diff",
+            "--name-only",
+            "-z",
+            "--no-renames",
+            base_oid,
+            worker_branch,
+            "--",
+        ],
+    )
+    .await
+    .map_err(|error| {
+        anyhow::anyhow!("derive observed touched files for {base_oid}..{worker_branch}: {error}")
+    })?;
+    Ok(output
+        .split('\0')
+        .filter(|path| !path.is_empty())
+        .map(str::to_string)
+        .collect())
+}
+
+async fn current_completion_touched_files(
+    repo_root: Option<&std::path::Path>,
+    dispatched_base_oid: Option<&str>,
+    worker_branch: Option<&str>,
+    result: &DelegationResult,
+) -> anyhow::Result<BTreeSet<String>> {
+    let summary_files = diff_summary_touched_files(result);
+    let (Some(repo_root), Some(base_oid), Some(worker_branch)) =
+        (repo_root, dispatched_base_oid, worker_branch)
+    else {
+        return Ok(summary_files);
+    };
+
+    match git_diff_touched_files(repo_root, base_oid, worker_branch).await {
+        Ok(files) => Ok(files),
+        Err(error) if !summary_files.is_empty() => {
+            tracing::warn!(
+                %base_oid,
+                %worker_branch,
+                "git touched-file detection failed; using worker diff summary: {error}"
+            );
+            Ok(summary_files)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn plan_tasks_are_dependency_related(tasks: &[PlanTaskEntry], left: &str, right: &str) -> bool {
+    fn reaches(tasks: &[PlanTaskEntry], from: &str, target: &str) -> bool {
+        let by_id: HashMap<&str, &PlanTaskEntry> = tasks
+            .iter()
+            .map(|entry| (entry.spec.task_id.as_str(), entry))
+            .collect();
+        let mut seen = HashSet::new();
+        let mut stack = vec![from];
+        while let Some(task_id) = stack.pop() {
+            let Some(entry) = by_id.get(task_id) else {
+                continue;
+            };
+            for dependency in &entry.spec.depends_on {
+                if dependency == target {
+                    return true;
+                }
+                if seen.insert(dependency.as_str()) {
+                    stack.push(dependency);
+                }
+            }
+        }
+        false
+    }
+
+    reaches(tasks, left, right) || reaches(tasks, right, left)
+}
+
+async fn detect_observed_write_conflict(
+    pm: &dyn PmLike,
+    feature_gate: &spur_license::FeatureGate,
+    plan_id: &str,
+    task_id: &str,
+    repo_root: Option<&std::path::Path>,
+    dispatched_base_oid: Option<&str>,
+    result: &DelegationResult,
+) -> anyhow::Result<Option<ObservedWriteConflict>> {
+    let current_files = current_completion_touched_files(
+        repo_root,
+        dispatched_base_oid,
+        result.worker_branch.as_deref(),
+        result,
+    )
+    .await?;
+    if current_files.is_empty() {
+        return Ok(None);
+    }
+    let Some(repo_root) = repo_root else {
+        tracing::warn!(
+            %plan_id,
+            %task_id,
+            "observed write guard skipped because completion has no repository root"
+        );
+        return Ok(None);
+    };
+    if crate::server::require_feature(
+        spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
+        feature_gate,
+    )
+    .is_err()
+        || pm.advanced().is_none()
+    {
+        tracing::warn!(
+            %plan_id,
+            %task_id,
+            "observed write guard skipped because durable plan projection is unavailable"
+        );
+        return Ok(None);
+    }
+
+    let projected =
+        crate::plan::projector::project_plan_from_beads(pm, plan_id, feature_gate).await?;
+    let mut siblings = projected
+        .tasks
+        .iter()
+        .filter(|entry| entry.spec.task_id != task_id)
+        .filter(|entry| {
+            matches!(
+                entry.status,
+                PlanTaskStatus::AwaitingReview { .. } | PlanTaskStatus::Approved { .. }
+            )
+        })
+        .collect::<Vec<_>>();
+    siblings.sort_by(|left, right| left.spec.task_id.cmp(&right.spec.task_id));
+
+    for sibling in siblings {
+        if plan_tasks_are_dependency_related(&projected.tasks, task_id, &sibling.spec.task_id) {
+            continue;
+        }
+        let (Some(base_oid), Some(worker_branch)) = (
+            sibling.dispatched_base_oid.as_deref(),
+            sibling.worker_branch.as_deref(),
+        ) else {
+            tracing::warn!(
+                %plan_id,
+                %task_id,
+                sibling_task_id = %sibling.spec.task_id,
+                "cannot compare observed writes for legacy sibling without durable git metadata"
+            );
+            continue;
+        };
+        let sibling_files = git_diff_touched_files(repo_root, base_oid, worker_branch).await?;
+        let shared_files = current_files
+            .intersection(&sibling_files)
+            .cloned()
+            .collect::<Vec<_>>();
+        if !shared_files.is_empty() {
+            return Ok(Some(ObservedWriteConflict {
+                dep_task_id: sibling.spec.task_id.clone(),
+                files: shared_files,
+            }));
+        }
+    }
+
+    Ok(None)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn persist_worker_completion_and_notify(
     pm: &dyn PmLike,
@@ -2832,6 +3068,7 @@ pub(crate) async fn persist_worker_completion_and_notify(
     attempt: u32,
     materializer: &crate::outcome_materializer::OutcomeMaterializer,
     dispatched_base_oid: Option<String>,
+    repo_root: Option<std::path::PathBuf>,
     task_id: Option<&str>,
 ) -> anyhow::Result<Option<DeferredCompletionPush>> {
     let (completion_state, audits) =
@@ -2855,7 +3092,7 @@ pub(crate) async fn persist_worker_completion_and_notify(
         attempt,
         materializer,
         dispatched_base_oid,
-        None,
+        repo_root,
         task_id,
     )
     .await
@@ -3020,6 +3257,38 @@ async fn persist_completion_inner(
     let estimated_cost_micros = Some(crate::outcome_materializer::usd_to_micros_saturating(
         result.estimated_cost_usd,
     ));
+
+    let _observed_write_guard =
+        if matches!(completion_state, CompletionState::AwaitingReview) && !already_emitted {
+            let guard = observed_write_plan_lock(plan_id).lock().await;
+            if let Some(conflict) = detect_observed_write_conflict(
+                pm,
+                feature_gate,
+                plan_id,
+                task_id.unwrap_or(issue_id),
+                repo_root.as_deref(),
+                dispatched_base_oid.as_deref(),
+                result,
+            )
+            .await?
+            {
+                crate::plan::reconciler::persist_observed_write_conflict(
+                    pm,
+                    issue_id,
+                    feature_gate,
+                    plan_id,
+                    delegation_id,
+                    &conflict.dep_task_id,
+                    &conflict.files,
+                )
+                .await?;
+                crate::plan::continuation::notify_fast_forward(fast_forward);
+                return Ok(None);
+            }
+            Some(guard)
+        } else {
+            None
+        };
 
     if matches!(completion_state, CompletionState::Superseded) {
         persist_completion_result_after_worker_output_invariant(
@@ -5350,6 +5619,7 @@ pub mod test_support {
             materializer,
             dispatched_base_oid,
             None,
+            None,
         )
         .await
     }
@@ -5385,6 +5655,7 @@ pub mod test_support {
             attempt,
             materializer,
             dispatched_base_oid,
+            None,
             task_id,
         )
         .await
@@ -5480,6 +5751,7 @@ mod tests {
             issue_id: None,
             issue_title: None,
             context_files: vec![],
+            planned_write_files: None,
         }
     }
 
@@ -5611,6 +5883,7 @@ mod tests {
                 issue_id: None,
                 issue_title: None,
                 context_files: vec![],
+                planned_write_files: None,
             },
             status: super::PlanTaskStatus::Approved { summary: None },
             result: None,
@@ -5656,6 +5929,7 @@ mod tests {
             issue_id: None,
             issue_title: None,
             context_files: vec![],
+            planned_write_files: None,
         };
         let missing_oid_entry = super::PlanTaskEntry {
             spec: base_spec.clone(),
@@ -5757,7 +6031,94 @@ mod tests {
             issue_id: None,
             issue_title: None,
             context_files: files.iter().map(|s| s.to_string()).collect(),
+            planned_write_files: None,
         }
+    }
+
+    fn task_from_json(
+        id: &str,
+        context_files: &[&str],
+        planned_write_files: Option<&[&str]>,
+    ) -> PlanTask {
+        let mut value = serde_json::json!({
+            "task_id": id,
+            "agent": "test-agent",
+            "task": "test task",
+            "context_files": context_files,
+        });
+        if let Some(files) = planned_write_files {
+            value["planned_write_files"] = serde_json::json!(files);
+        }
+        serde_json::from_value(value).expect("valid plan task")
+    }
+
+    #[test]
+    fn plan_task_serde_preserves_planned_write_files_three_states() {
+        let legacy = task_from_json("legacy", &["docs/spec.md"], None);
+        let explicit_empty = task_from_json("empty", &["docs/spec.md"], Some(&[]));
+        let explicit_files = task_from_json("files", &["docs/spec.md"], Some(&["src/runtime.rs"]));
+
+        let legacy_json = serde_json::to_value(legacy).expect("serialize legacy task");
+        let empty_json = serde_json::to_value(explicit_empty).expect("serialize empty task");
+        let files_json = serde_json::to_value(explicit_files).expect("serialize files task");
+
+        assert!(
+            legacy_json.get("planned_write_files").is_none(),
+            "legacy omission must remain omitted"
+        );
+        assert_eq!(
+            empty_json.get("planned_write_files"),
+            Some(&serde_json::json!([])),
+            "explicit empty writes must not collapse to legacy omission"
+        );
+        assert_eq!(
+            files_json.get("planned_write_files"),
+            Some(&serde_json::json!(["src/runtime.rs"]))
+        );
+    }
+
+    #[test]
+    fn sibling_overlap_uses_explicit_planned_writes_not_shared_context() {
+        let tasks = vec![
+            task_from_json(
+                "routing",
+                &["docs/design.ipynb"],
+                Some(&["src/routing_runtime.rs"]),
+            ),
+            task_from_json("outbox", &["docs/design.ipynb"], Some(&["src/outbox.rs"])),
+        ];
+
+        assert!(
+            super::find_sibling_overlaps(&tasks).is_empty(),
+            "shared prompt context with disjoint planned writes must stay parallel"
+        );
+    }
+
+    #[test]
+    fn sibling_overlap_serializes_disjoint_context_with_shared_planned_write() {
+        let tasks = vec![
+            task_from_json("routing", &["docs/routing.md"], Some(&["src/shared.rs"])),
+            task_from_json("outbox", &["docs/outbox.md"], Some(&["src/shared.rs"])),
+        ];
+
+        let overlaps = super::find_sibling_overlaps(&tasks);
+        assert_eq!(overlaps.len(), 1);
+        assert_eq!(overlaps[0].from, "outbox");
+        assert_eq!(overlaps[0].to, "routing");
+        assert_eq!(overlaps[0].shared_files, vec!["src/shared.rs"]);
+    }
+
+    #[test]
+    fn sibling_overlap_explicit_empty_writes_disable_legacy_fallback() {
+        let tasks = vec![
+            task_from_json("docs-a", &["docs/design.md"], Some(&[])),
+            task_from_json("docs-b", &["docs/design.md"], Some(&[])),
+        ];
+
+        assert!(
+            super::find_sibling_overlaps(&tasks).is_empty(),
+            "Some([]) is an authoritative empty write set"
+        );
     }
 
     #[test]
@@ -6146,6 +6507,7 @@ mod tests {
                 issue_id: Some("bd-1".into()),
                 issue_title: None,
                 context_files: vec![],
+                planned_write_files: None,
             },
             status: super::PlanTaskStatus::Ready,
             result: None,
@@ -6189,6 +6551,7 @@ mod tests {
                 issue_id: Some("bd-1".into()),
                 issue_title: None,
                 context_files: vec![],
+                planned_write_files: None,
             },
             status: super::PlanTaskStatus::Ready,
             result: None,
@@ -6230,6 +6593,7 @@ mod tests {
                 issue_id: Some("bd-1".into()),
                 issue_title: None,
                 context_files: vec![],
+                planned_write_files: None,
             },
             status: super::PlanTaskStatus::Ready,
             result: None,
@@ -6719,6 +7083,7 @@ mod tests {
                 issue_id: None,
                 issue_title: None,
                 context_files: vec![],
+                planned_write_files: None,
             },
             super::PlanTask {
                 task_id: "B".to_string(),
@@ -6733,6 +7098,7 @@ mod tests {
                 issue_id: None,
                 issue_title: None,
                 context_files: vec![],
+                planned_write_files: None,
             },
             super::PlanTask {
                 task_id: "C".to_string(),
@@ -6747,6 +7113,7 @@ mod tests {
                 issue_id: None,
                 issue_title: None,
                 context_files: vec![],
+                planned_write_files: None,
             },
         ];
         let mut state = super::PlanState {
@@ -7057,6 +7424,7 @@ mod tests {
             &materializer,
             None,
             None,
+            None,
         )
         .await
         .expect("persist completion");
@@ -7181,6 +7549,7 @@ mod tests {
             None,
             None,
             &context_files,
+            None,
         )
         .await
         .expect("task-spec audit");
@@ -7195,6 +7564,7 @@ mod tests {
             crate::plan::audit_sentinel::AuditSentinelKind::TaskSpec {
                 task_id,
                 context_files,
+                planned_write_files,
                 model,
                 effort,
                 profile,
@@ -7205,6 +7575,7 @@ mod tests {
                 depends_on,
             } if task_id == "T1"
                 && context_files == vec!["src/lib.rs".to_string(), "docs/spec.md".to_string()]
+                && planned_write_files.is_none()
                 && model.is_none()
                 && effort.is_none()
                 && profile.is_none()
@@ -7233,6 +7604,7 @@ mod tests {
             None,
             None,
             &context_files,
+            None,
         )
         .await
         .expect("task-spec audit");
@@ -7247,6 +7619,7 @@ mod tests {
             crate::plan::audit_sentinel::AuditSentinelKind::TaskSpec {
                 task_id,
                 context_files,
+                planned_write_files,
                 model,
                 effort,
                 profile,
@@ -7257,6 +7630,7 @@ mod tests {
                 depends_on,
             } if task_id == "T2"
                 && context_files.is_empty()
+                && planned_write_files.is_none()
                 && model.is_none()
                 && effort.is_none()
                 && profile.is_none()
@@ -7300,6 +7674,7 @@ mod tests {
             &brain_session_id,
             2,
             &materializer,
+            None,
             None,
             None,
         )
@@ -7350,6 +7725,7 @@ mod tests {
                     issue_id: None,
                     issue_title: None,
                     context_files: vec![],
+                    planned_write_files: None,
                 },
                 status: PlanTaskStatus::Approved { summary: None },
                 result: None,
@@ -7373,6 +7749,7 @@ mod tests {
                     issue_id: None,
                     issue_title: None,
                     context_files: vec![],
+                    planned_write_files: None,
                 },
                 status: PlanTaskStatus::EscalatedToBrain {
                     last_error: "exhausted".into(),
@@ -8489,6 +8866,7 @@ mod tests {
                     issue_id: None,
                     issue_title: None,
                     context_files: vec![],
+                    planned_write_files: None,
                 },
                 status: super::PlanTaskStatus::Approved { summary: None },
                 result: None,
@@ -8533,6 +8911,7 @@ mod tests {
                     issue_id: None,
                     issue_title: None,
                     context_files: vec![],
+                    planned_write_files: None,
                 },
                 status: super::PlanTaskStatus::Approved { summary: None },
                 result: None,
@@ -9251,6 +9630,7 @@ mod tests {
                 issue_id: Some("bd-1".into()),
                 issue_title: None,
                 context_files: Vec::new(),
+                planned_write_files: None,
             },
             status: PlanTaskStatus::AwaitingReview { summary: None },
             result: None,
@@ -9480,6 +9860,7 @@ mod tests {
             &spur_acp::BrainSessionId::new(spur_acp::SessionId("brain".into())),
             1,
             test_materializer().as_ref(),
+            None,
             None,
             Some("task-1"),
         )

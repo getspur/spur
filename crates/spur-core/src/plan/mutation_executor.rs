@@ -153,7 +153,7 @@ pub async fn apply_mutation(
                 )
                 .with_context(|| format!("parse comments for parent issue {parent}"))?;
                 let parent_context_files = super::projector::latest_task_spec(&parent_audits)
-                    .map(|(_, context_files, _, _, _, _, _)| context_files)
+                    .map(|(_, context_files, _, _, _, _, _, _)| context_files)
                     .unwrap_or_default();
                 let original_downstreams = downstream_issue_ids(pm.as_ref(), parent).await?;
 
@@ -197,6 +197,7 @@ pub async fn apply_mutation(
                             None,
                             None,
                             &parent_context_files,
+                            draft.planned_write_files.as_deref(),
                         )
                         .await
                         .with_context(|| format!("persist child task spec {id}"))?;
@@ -286,6 +287,7 @@ pub async fn apply_mutation(
                 new_agent,
                 new_profile,
                 new_context_files,
+                new_planned_write_files,
                 new_depends_on,
             } => {
                 affected_task_ids.push(issue_id.clone());
@@ -298,6 +300,7 @@ pub async fn apply_mutation(
                         new_agent: new_agent.as_deref(),
                         new_profile: new_profile.as_deref(),
                         new_context_files: new_context_files.as_deref(),
+                        new_planned_write_files: new_planned_write_files.as_deref(),
                         new_depends_on: new_depends_on.as_deref(),
                     },
                     &mut executed_ops,
@@ -1368,6 +1371,7 @@ struct ModifyTaskSpecInput<'a> {
     new_agent: Option<&'a str>,
     new_profile: Option<&'a str>,
     new_context_files: Option<&'a [String]>,
+    new_planned_write_files: Option<&'a [String]>,
     new_depends_on: Option<&'a [String]>,
 }
 
@@ -1491,11 +1495,12 @@ async fn apply_modify_task_spec(
             .with_context(|| format!("list comments for modify target {issue_id}"))?,
     )
     .with_context(|| format!("parse comments for modify target {issue_id}"))?;
-    let (prior_task_id, prior_context_files, _, _, _, _, _) =
+    let (prior_task_id, prior_context_files, prior_planned_write_files, _, _, _, _, _) =
         super::projector::latest_task_spec(&prior_audits).unwrap_or_else(|| {
             (
                 issue_id.to_string(),
                 Vec::new(),
+                None,
                 None,
                 None,
                 None,
@@ -1507,12 +1512,17 @@ async fn apply_modify_task_spec(
         Some(files) => files.to_vec(),
         None => prior_context_files,
     };
+    let planned_write_files = input
+        .new_planned_write_files
+        .map(<[String]>::to_vec)
+        .or(prior_planned_write_files);
 
     super::emit_extended_task_spec_audit(
         adv,
         issue_id,
         &prior_task_id,
         &context_files,
+        planned_write_files.as_deref(),
         input.new_task,
         input.new_agent,
         input.new_profile,
@@ -1666,6 +1676,21 @@ async fn apply_insert_task_before(
         )
         .await
         .with_context(|| format!("persist plan scope on inserted child {new_id}"))?;
+        super::emit_task_spec_audit(
+            adv,
+            &new_id,
+            &new_id,
+            agent,
+            None,
+            None,
+            None,
+            None,
+            None,
+            &[],
+            draft.planned_write_files.as_deref(),
+        )
+        .await
+        .with_context(|| format!("persist inserted child task spec {new_id}"))?;
     }
 
     pm.add_dependency(target_issue_id, &new_id)
@@ -1969,6 +1994,7 @@ mod tests {
             description: description.to_string(),
             assignee: None,
             priority: None,
+            planned_write_files: None,
         }
     }
 
@@ -2083,12 +2109,14 @@ mod tests {
                         description: "Split child one".into(),
                         assignee: None,
                         priority: None,
+                        planned_write_files: None,
                     },
                     TaskDraft {
                         title: "Second child".into(),
                         description: "Split child two".into(),
                         assignee: None,
                         priority: None,
+                        planned_write_files: None,
                     },
                 ],
                 dep_rewire: DepRewirePolicy::Barrier,
@@ -2130,6 +2158,7 @@ mod tests {
             })
             .await
             .expect("create task");
+        let planned_write_files = vec!["src/runtime.rs".to_string()];
         crate::plan::emit_task_spec_audit(
             adv,
             &issue_id,
@@ -2141,6 +2170,7 @@ mod tests {
             None,
             None,
             &[],
+            Some(&planned_write_files),
         )
         .await
         .expect("initial task spec");
@@ -2155,6 +2185,7 @@ mod tests {
                 new_agent: None,
                 new_profile: Some("code-reviewer".to_string()),
                 new_context_files: None,
+                new_planned_write_files: None,
                 new_depends_on: None,
             }],
         };
@@ -2167,8 +2198,9 @@ mod tests {
             adv.list_comments(&issue_id).await.expect("comments"),
         )
         .expect("parse audits");
-        let (_, _, profile, _, _, _, _) =
+        let (_, _, projected_planned_write_files, profile, _, _, _, _) =
             crate::plan::projector::latest_task_spec(&audits).expect("latest task spec");
+        assert_eq!(projected_planned_write_files, Some(planned_write_files));
         assert_eq!(profile.as_deref(), Some("code-reviewer"));
     }
 
@@ -2481,6 +2513,7 @@ mod tests {
                 new_agent: Some("claude-code-acp"),
                 new_profile: Some("reviewer"),
                 new_context_files: Some(&context_files),
+                new_planned_write_files: None,
                 new_depends_on: Some(&depends_on),
             },
             &mut executed_ops,
@@ -2522,7 +2555,7 @@ mod tests {
             adv.list_comments(&target).await.expect("comments"),
         )
         .expect("parse audits");
-        let (_, files, profile, _, _, _, _) =
+        let (_, files, _, profile, _, _, _, _) =
             crate::plan::projector::latest_task_spec(&audits).expect("latest task spec");
         assert_eq!(files, context_files);
         assert_eq!(profile.as_deref(), Some("reviewer"));
@@ -2543,6 +2576,7 @@ mod tests {
                 new_agent: None,
                 new_profile: None,
                 new_context_files: None,
+                new_planned_write_files: None,
                 new_depends_on: None,
             },
             &mut executed_ops,
@@ -2653,11 +2687,13 @@ mod tests {
 
         let mutation_id = test_uuid("000000000003");
         let mut executed_ops = Vec::new();
+        let mut draft = task_draft("Inserted prereq", "Prepare the target");
+        draft.planned_write_files = Some(Vec::new());
         let new_id = apply_insert_task_before(
             pm.as_ref(),
             adv,
             &target,
-            &task_draft("Inserted prereq", "Prepare the target"),
+            &draft,
             &mutation_id,
             &mut executed_ops,
         )
@@ -2688,6 +2724,15 @@ mod tests {
             .labels
             .iter()
             .any(|label| label == &crate::plan::labels::agent("codex")));
+        let child_audits = crate::plan::projector::collect_sorted_audits_for_issue(
+            &new_id,
+            adv.list_comments(&new_id).await.expect("child comments"),
+        )
+        .expect("parse child audits");
+        let (_, _, child_planned_write_files, _, _, _, _, _) =
+            crate::plan::projector::latest_task_spec(&child_audits)
+                .expect("inserted child task spec");
+        assert_eq!(child_planned_write_files, Some(Vec::new()));
         match executed_ops.as_slice() {
             [ExecutedOp::InsertTaskBefore(insert)] => {
                 assert_eq!(insert.target_issue_id, target);

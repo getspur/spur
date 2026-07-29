@@ -238,6 +238,7 @@ mod tests {
                 issue_id: Some(format!("bd-{task_id}")),
                 issue_title: None,
                 context_files: vec![],
+                planned_write_files: None,
             },
             status,
             result: None,

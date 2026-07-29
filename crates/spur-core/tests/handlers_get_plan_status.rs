@@ -41,6 +41,7 @@ fn make_plan_state(plan_id: &str) -> PlanState {
                 issue_id: None,
                 issue_title: None,
                 context_files: vec![],
+                planned_write_files: None,
             },
             status: PlanTaskStatus::Approved { summary: None },
             result: None,

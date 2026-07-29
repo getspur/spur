@@ -38,6 +38,7 @@ async fn create_persisted_plan(
         issue_id: None,
         issue_title: None,
         context_files: Vec::new(),
+        planned_write_files: None,
     }];
     let feature_gate = common::server_builder::pro_feature_gate();
     let subgraph = spur_core::build_epic_subgraph(

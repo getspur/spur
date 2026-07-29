@@ -453,6 +453,7 @@ async fn validation_rejects_reuse_without_worker_branch() {
                 issue_id: None,
                 issue_title: None,
                 context_files: vec![],
+                planned_write_files: None,
             },
             status: spur_core::plan::PlanTaskStatus::AwaitingReview {
                 summary: Some("wip".into()),
@@ -522,6 +523,7 @@ async fn replay_determinism_preserves_reuse_prior_worktree_in_projection() {
             issue_id: None,
             issue_title: None,
             context_files: vec![],
+            planned_write_files: None,
         }],
     )
     .await

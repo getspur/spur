@@ -138,6 +138,7 @@ fn plan_task(task_id: &str) -> PlanTask {
         issue_id: None,
         issue_title: None,
         context_files: Vec::new(),
+        planned_write_files: None,
     }
 }
 
@@ -189,6 +190,7 @@ fn dependent_plan_tasks() -> Vec<PlanTask> {
             issue_id: None,
             issue_title: None,
             context_files: Vec::new(),
+            planned_write_files: None,
         },
         PlanTask {
             task_id: "T2".to_string(),
@@ -203,6 +205,7 @@ fn dependent_plan_tasks() -> Vec<PlanTask> {
             issue_id: None,
             issue_title: None,
             context_files: Vec::new(),
+            planned_write_files: None,
         },
     ]
 }
@@ -1763,6 +1766,7 @@ async fn tick_once_persists_failed_completion_when_respond_to_drops() {
     let task_spec = audit_sentinel::encode_comment(&AuditSentinelKind::TaskSpec {
         task_id: "t1".to_string(),
         context_files: Vec::new(),
+        planned_write_files: None,
         profile: None,
         skills: None,
         model: None,
