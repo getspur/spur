@@ -875,10 +875,7 @@ fn require_all_args(
 const fn equality_is_valid(left: ExpressionSort, right: ExpressionSort) -> bool {
     match (left, right) {
         (ExpressionSort::Int, ExpressionSort::Int)
-        | (ExpressionSort::Bool(BoolOrigin::Variable), ExpressionSort::Bool(BoolOrigin::Literal))
-        | (ExpressionSort::Bool(BoolOrigin::Literal), ExpressionSort::Bool(BoolOrigin::Variable)) => {
-            true
-        }
+        | (ExpressionSort::Bool(_), ExpressionSort::Bool(_)) => true,
         (ExpressionSort::Enum(left_domain), ExpressionSort::Enum(right_domain)) => {
             left_domain == right_domain
         }
