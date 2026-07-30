@@ -1416,14 +1416,8 @@ mod tests {
         let invalid = [
             op(ConstraintOp::Add, vec![var("count"), var("enabled")]),
             op(ConstraintOp::Lt, vec![var("enabled"), bool_literal(true)]),
-            op(ConstraintOp::Eq, vec![var("enabled"), var("ready")]),
-            op(
-                ConstraintOp::Eq,
-                vec![
-                    op(ConstraintOp::Not, vec![var("enabled")]),
-                    bool_literal(true),
-                ],
-            ),
+            op(ConstraintOp::Eq, vec![var("enabled"), int(1)]),
+            op(ConstraintOp::Ne, vec![int(1), bool_literal(false)]),
             op(ConstraintOp::And, vec![var("enabled"), int(1)]),
         ];
         for expression in invalid {
@@ -1432,6 +1426,52 @@ mod tests {
                 .unwrap_err();
             assert_eq!(error.kind, ValidationErrorKind::TypeMismatch);
         }
+    }
+
+    #[test]
+    fn validation_accepts_all_boolean_equality_operand_origins() {
+        let vars = vec![
+            Variable::Bool {
+                name: "enabled".to_owned(),
+            },
+            Variable::Bool {
+                name: "ready".to_owned(),
+            },
+        ];
+        let cases = [
+            ("variable/variable", var("enabled"), var("ready")),
+            ("literal/literal", bool_literal(true), bool_literal(false)),
+            (
+                "compound/literal",
+                op(ConstraintOp::Not, vec![var("enabled")]),
+                bool_literal(true),
+            ),
+            (
+                "compound/compound",
+                op(ConstraintOp::Not, vec![var("enabled")]),
+                op(ConstraintOp::And, vec![var("enabled"), var("ready")]),
+            ),
+        ];
+        let mut rejected = Vec::new();
+
+        for comparison in [ConstraintOp::Eq, ConstraintOp::Ne] {
+            for (case, left, right) in &cases {
+                let result = request(
+                    vars.clone(),
+                    vec![op(comparison, vec![left.clone(), right.clone()])],
+                )
+                .validate();
+                if result.is_err() {
+                    rejected.push(format!("{comparison} {case}"));
+                }
+            }
+        }
+
+        assert!(
+            rejected.is_empty(),
+            "same-sort Boolean equality rejected: {}",
+            rejected.join(", ")
+        );
     }
 
     #[test]
