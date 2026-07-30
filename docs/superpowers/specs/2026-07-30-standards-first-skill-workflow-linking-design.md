@@ -1,7 +1,7 @@
 # Standards-First Skill Workflow Linking Design
 
 **Decision date:** 2026-07-30
-**Status:** Approved in brainstorming; written-spec review pending
+**Status:** Empirically validated; written-spec review pending
 **Design epic:** `bd-1vnls`
 **Plan ID:** `3139f802-06fc-4fdc-968d-1ad72a495cd4`
 **Target area:** `assets/skills/`, `crates/spur-core/src/skills/`, runtime skill
@@ -24,6 +24,14 @@ each host actually exposes. For example, canonical `spur-way` may render as
 `spurpower-spur-way`; every generated workflow reference must be rewritten
 through the same name map. This closes the current gap where frontmatter names
 are prefixed but body references remain unprefixed.
+
+Projection makes a skill available; it does not activate the skill body.
+SPUR will therefore compile the selected graph into an adapter-specific
+activation agenda for the launch prompt, while the projected `Workflow links`
+block gives the agent imperative instructions for later handoffs. Codex and
+OpenCode use different activation mechanisms, so success is defined as loading
+and following the exact target body rather than emitting one universal tool
+call.
 
 Only `requires` edges form an acyclic dependency DAG. Guards, handoffs, retries,
 and role transitions have distinct semantics; handoff and retry paths may
@@ -77,6 +85,9 @@ Therefore:
 4. SPUR alone is responsible for deterministic graph validation, role
    selection, closure, and target-name rewriting.
 
+These boundaries were confirmed against real Codex and OpenCode ACP sessions.
+See the [ACP probe results](2026-07-30-skill-linking-acp-probe-results.md).
+
 ## Goals
 
 - Keep `assets/skills/<id>/SKILL.md` valid under the Agent Skills standard.
@@ -85,6 +96,7 @@ Therefore:
 - Give SPUR one machine-readable source for graph construction.
 - Prevent metadata/body drift.
 - Resolve canonical IDs to adapter- and plugin-visible names deterministically.
+- Compile selected requirements into host-specific activation instructions.
 - Reduce runtime catalog size through role and workflow closure.
 - Preserve the existing immutable generation, ownership, reconciliation, and
   user-file safety contracts.
@@ -99,6 +111,8 @@ Therefore:
 - Guaranteeing dependency auto-loading when a skill is copied outside SPUR.
   The body remains understandable, but standalone hosts decide whether to
   follow a named handoff.
+- Defining one cross-vendor nested skill-invocation RPC. No such ACP primitive
+  was exposed consistently by the tested hosts.
 - Replacing the current projection manifest, ownership journal, symlink/copy
   fallback, or generation garbage collection.
 - Dynamically changing a host's discovered skills in the middle of an existing
@@ -125,6 +139,7 @@ resolver
 adapter renderer
   builds canonical-ID -> host-visible-name map
   rewrites generated metadata/body references
+  compiles adapter-specific activation agenda
                          |
                          v
 immutable runtime generation
@@ -139,7 +154,7 @@ responsibilities:
 | Canonical `SKILL.md` metadata | Workflow semantics and logical IDs | Yes |
 | Canonical `Workflow links` body block | Generated human/agent view | Only through generator |
 | Projected `SKILL.md` | Host-specific derived package | No |
-| Runtime graph/name map | Diagnostics and launch evidence | No |
+| Runtime graph/name map/activation agenda | Diagnostics and launch evidence | No |
 
 ## Canonical Skill Layout
 
@@ -312,8 +327,10 @@ Cross-role handoffs are recorded but do not leak role-incompatible skills into
 the current agent catalog.
 
 This structural narrowing reduces description pressure without encoding a
-host-specific token constant. The projection summary records selected skill
-count and total description characters so host warnings can be diagnosed.
+host-specific token constant. The ordered prerequisite/root set also becomes
+the activation agenda rendered by the launch adapter. The projection summary
+records selected skill count and total description characters so host warnings
+can be diagnosed.
 
 ## Projection and Name Rewriting
 
@@ -342,6 +359,46 @@ namespace, an unprefixed hermetic skill, or a future adapter convention.
 An unresolved endpoint is a fatal generation error. Rendering a body that tells
 the agent to invoke a nonexistent name is never a warning-only condition.
 
+### Availability, activation, and enforcement
+
+These are distinct contracts:
+
+| Contract | Owner | Evidence |
+|---|---|---|
+| Availability | Resolver and projection | Target exists in the session's advertised catalog |
+| Activation | Launch adapter and generated workflow instructions | Target body was loaded before dependent action |
+| Enforcement | SPUR workflow/review state | Required transition or guard was recorded and validated |
+
+The runtime graph is not expected to be interpreted by a native host. The
+adapter compiles a bounded launch-prompt segment from the topologically ordered
+`requires` closure and selected roots. It uses exact visible names and tells
+the host to activate each prerequisite before the root.
+
+Later guards and same-session handoffs use the projected `Workflow links`
+block. The renderer must use an adapter activation primitive rather than a
+single generic sentence. The adapter contract exposes the conceptual
+operation:
+
+```text
+render_activation(visible_skill_name, purpose) -> bounded instruction text
+```
+
+For the probed hosts:
+
+- OpenCode activation directs the agent to call its native `skill` tool with
+  the exact visible name.
+- Codex activation uses the visible `$skill-name` form for initial invocation
+  and an explicit instruction to read and follow the exact projected skill for
+  nested workflow steps. Codex ACP did not expose a nested skill tool.
+
+An adapter may implement another activation style, but it must pass an
+integration probe that proves the target body was loaded. Tests must not assert
+that all hosts emit the same ACP tool-call variant.
+
+Projection closure is still computed before launch. The activation agenda does
+not add or remove discovered skills in a live session; it only activates the
+already selected subset.
+
 ## Runtime Artifacts
 
 The existing generation layout remains authoritative for ownership and
@@ -353,6 +410,7 @@ reconciliation. The manifest gains:
 - selected canonical IDs;
 - canonical-to-visible name map;
 - resolved same-role and cross-role edges;
+- adapter activation style and ordered launch activation agenda;
 - selected skill count and description-character total.
 
 An optional `workflow-graph.json` may be emitted beside the generation manifest
@@ -372,7 +430,8 @@ parallel installer:
 | `projection::resolver::resolve_effective_skills` | Honor `RuntimeRole`, apply the selected policy, validate graph endpoints, and compute closure |
 | `projection::SelectionPolicy` | Add role-scoped and explicit-root workflow policies |
 | `Adapter::render_with_prefix` and render helpers | Build/use a name map and render rewritten workflow metadata/body blocks |
-| projection generation/manifest | Include graph, root, name-map, and context-budget diagnostics in the digest and manifest |
+| adapter launch-prompt rendering | Compile ordered requirements and roots into exact-name activation instructions |
+| projection generation/manifest | Include graph, root, name-map, activation, and context-budget diagnostics in the digest and manifest |
 | bundled-skill conformance tests | Reject nonstandard top-level fields and validate generated workflow blocks |
 
 The runtime projection design's immutable generations, locking, pending
@@ -424,7 +483,8 @@ These conditions fail validation or generation:
 - missing adapter overlay;
 - stale or malformed generated workflow block;
 - projected-name collision;
-- selected edge whose visible endpoint cannot be rendered.
+- selected edge whose visible endpoint cannot be rendered;
+- adapter without an activation renderer for a selected workflow skill.
 
 These conditions are non-fatal:
 
@@ -487,6 +547,8 @@ constraints. They do not replace conformance and integration tests.
 - Golden-test canonical-to-visible name maps for every adapter.
 - Verify frontmatter, metadata endpoints, and workflow body endpoints use the
   same visible name.
+- Golden-test each adapter's launch activation agenda and projected handoff
+  instructions.
 - Reproduce the current `writing-plans` raw-reference failure and prove the new
   projection emits resolvable names.
 - Include workflow graph and name map in stable generation hashing.
@@ -496,6 +558,12 @@ constraints. They do not replace conformance and integration tests.
 
 - Brain launch selects required brain roots and the correct agent overlay.
 - Worker launch includes mandatory discipline plus plan-selected roots.
+- Launch prompt activates ordered prerequisites and then the root using exact
+  host-visible names.
+- Codex and OpenCode fixtures prove target-body loading with a hidden evidence
+  token; the test accepts host-specific trace shapes.
+- Metadata-only fixtures prove hosts do not implicitly execute
+  `getspur.requires`.
 - Manual initialization still materializes the complete catalog.
 - Projection summary reports skill count and description characters.
 - Fatal graph/name errors prevent the agent session from starting.
@@ -510,7 +578,8 @@ The implementation plan should preserve these boundaries:
    legacy-role migration support.
 2. **Graph/generator** — edge validation, workflow block generation, cycle
    rules.
-3. **Adapter name mapping** — visible-name map and projected workflow rewrite.
+3. **Adapter mapping and activation** — visible-name map, projected workflow
+   rewrite, and host-specific activation rendering.
 4. **Resolver selection** — role-aware and explicit-root closure policies.
 5. **Asset migration** — bundled metadata, generated links, shortened
    descriptions.
@@ -555,8 +624,10 @@ metadata.
 6. Brain and worker runtime projections honor role and workflow closure.
 7. Every projected workflow endpoint resolves to the exact name exposed by the
    target adapter.
-8. The runtime manifest records canonical IDs, visible names, graph digest,
-   roots, selected count, and description characters.
-9. Existing ownership and user-file preservation tests continue to pass.
-10. Focused conformance, graph, adapter, resolver, and launch integration tests
+8. Launch activation loads every same-session prerequisite before its
+   dependent root on Codex and OpenCode fixtures.
+9. The runtime manifest records canonical IDs, visible names, graph digest,
+   roots, activation agenda, selected count, and description characters.
+10. Existing ownership and user-file preservation tests continue to pass.
+11. Focused conformance, graph, adapter, resolver, and launch integration tests
     pass through `scripts/spur-cargo`.
