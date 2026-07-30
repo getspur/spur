@@ -67,6 +67,8 @@ code, not after as a check.
 | arith | `add`,`sub`,`mul` (no `div`) | add/mul ≥2; sub 2 → Int |
 | bool | `and`,`or` / `not` | and/or ≥1; not 1 → Bool |
 
+**Operand compatibility:** `eq`/`ne` accept compatible same-sort operands: Int/Int, any Bool-sorted expression with any Bool-sorted expression (variable, literal, or compound), and Enum/Enum from the same declared `values` domain. `lt`/`le`/`gt`/`ge` remain Int-only; mixed sorts and cross-domain enum comparisons are invalid.
+
 **Every ConstraintExpr node is a tagged object** — bare strings/numbers are invalid: `{kind:"var",name:"x"}`, `{kind:"int",value:48}`, `{kind:"enum_label",var:"mode",label:"fast"}`, `{kind:"op",op:"le",args:[...]}`. Full type rules (enum≠arith, bare-leaf rejection, nest/size caps) → §Anti-patterns below; exhaustive grammar in the [tool spec §ConstraintExpr](../../docs/superpowers/specs/2026-07-25-z3-constraint-solver-design.md#b-types-and-constraint-ast).
 
 One full end-to-end encoding is shown in Example 1 below — copy and adapt.
@@ -181,12 +183,13 @@ The persist path for sharing a solved model across the delegation boundary:
 1. **Treating `unsat` as failure.** `unsat` is a *result*, not an error. For invariant checks, unsat = proof of soundness. For feasibility, unsat = "report impossibility, don't invent." Never retry-on-unsat or suppress it.
 2. **Collapsing `unknown`/`timeout` into `unsat`.** They mean "I don't know." Tighten encoding, raise timeout (≤60s cap), or simplify. Do NOT conclude impossibility.
 3. **Inventing a value instead of solving.** About to write `const BUFFER_SIZE: usize = ???` with ≥2 constraints on it → solve first. (Anthropic: "no voodoo constants.")
-4. **Enum as arithmetic.** Enums are not Int operands. Only `eq`/`ne` vs `enum_label` (or another enum of the same values). `add`/`mul`/`lt` on enums → `invalid_params`. Encode "mode is fast" as `{kind:"enum_label",var:"mode",label:"fast"}`, never as an int index.
-5. **Bare leaf nodes.** Every ConstraintExpr is a tagged object. `42` and `"workers"` are invalid → `{kind:"int",value:42}`, `{kind:"var",name:"workers"}`.
-6. **No `div`.** B′ has no division. Encode ratios by cross-multiplying (`a/b = c/d` → `a*d = c*b`).
-7. **Re-inventing constants in the worker.** Brain passed a `solve_id` → reload via `get_solve_result`, treat as authoritative.
-8. **Direct file reads of `.spur/solver/`.** Always `get_solve_result`. Path/format is an implementation detail.
-9. **`solve_smt` when B′ suffices.** Escape hatch is for theories B′ can't express. If bool/int/enum + arithmetic covers it → `solve_constraints`.
+4. **Enum as arithmetic.** Enums are not Int operands. Only `eq`/`ne` vs `enum_label` (or another enum from the same declared `values` domain). `add`/`mul`/`lt` on enums → `invalid_params`. Encode "mode is fast" as `{kind:"enum_label",var:"mode",label:"fast"}`, never as an int index.
+5. **Manually expanding Boolean equivalence.** Use `eq(p, q)` directly for Bool-sorted operands, whether each operand is a variable, literal, or compound expression. Do not rewrite it as `or(and(p,q),and(not(p),not(q)))`; expansion is noisier and obscures intent.
+6. **Bare leaf nodes.** Every ConstraintExpr is a tagged object. `42` and `"workers"` are invalid → `{kind:"int",value:42}`, `{kind:"var",name:"workers"}`.
+7. **No `div`.** B′ has no division. Encode ratios by cross-multiplying (`a/b = c/d` → `a*d = c*b`).
+8. **Re-inventing constants in the worker.** Brain passed a `solve_id` → reload via `get_solve_result`, treat as authoritative.
+9. **Direct file reads of `.spur/solver/`.** Always `get_solve_result`. Path/format is an implementation detail.
+10. **`solve_smt` when B′ suffices.** Escape hatch is for theories B′ can't express. If bool/int/enum + arithmetic covers it → `solve_constraints`.
 
 ## TL;DR
 

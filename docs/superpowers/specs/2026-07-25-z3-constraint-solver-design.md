@@ -200,11 +200,22 @@ ConstraintExpr =
 **Type rules (validate before encode):**
 
 1. Each `var` / `enum_label.var` must name a declared variable.
-2. Compare/arith args must be Int-sorted (bool vars only with `eq`/`ne` against bool literals, or used inside bool ops).
-3. **Enum variables are not arithmetic operands.** Only `eq` / `ne` against `enum_label` (or another enum var of the same `values` set) are allowed. No `add`/`mul`/`lt`/… on enums.
-4. Top-level constraints must be Bool-sorted.
-5. Integer literals must fit signed 64-bit; reject otherwise.
-6. Unknown `op` or wrong arity → `invalid_params` (never pass through to Z3).
+2. `eq` / `ne` accept only compatible same-sort operands:
+
+   | Left operand sort | Right operand sort | Allowed? | Notes |
+   |---|---|---|---|
+   | Int | Int | Yes | Any Int-sorted expressions |
+   | Bool | Bool | Yes | Any Bool-sorted expressions, including variables, literals, and compound expressions |
+   | Enum(D) | Enum(D) | Yes | Both operands belong to the same enum domain |
+   | Enum(D1) | Enum(D2), where D1 ≠ D2 | No | Cross-domain enum equality is invalid |
+   | Any sort | A different sort | No | Mixed-sort equality is invalid |
+
+   `Enum(D)` denotes the declared `values` domain; an `enum_label` inherits the domain of its `var`.
+3. `lt` / `le` / `gt` / `ge` require two Int-sorted operands.
+4. `add` / `sub` / `mul` require Int-sorted operands. **Enum variables are not arithmetic operands.**
+5. Top-level constraints must be Bool-sorted.
+6. Integer literals must fit signed 64-bit; reject otherwise.
+7. Unknown `op` or wrong arity → `invalid_params` (never pass through to Z3).
 
 **Caps:** nest depth 32; max constraints 256; max vars 64.
 
