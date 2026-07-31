@@ -5,6 +5,7 @@ pub mod local_projects;
 pub mod plan;
 pub mod review_verdict;
 pub mod signals;
+pub mod skills_catalog;
 pub mod worker;
 
 use std::{
@@ -126,7 +127,9 @@ fn brain_tool_registry_with_local_projects_and_repo_root(
     if let Some(context_service_client) = context_service_client(context_service_config) {
         builder = builder.with(context_service_client)?;
     }
-    Ok(builder.build())
+    Ok(builder
+        .with(skills_catalog::SkillsCatalogMcpModule::new(repo_root))?
+        .build())
 }
 
 fn context_service_client(
@@ -156,7 +159,7 @@ fn non_empty_trimmed(value: String) -> Option<String> {
 
 pub fn catalog_tool_registry() -> Result<spur_mcp::ToolRegistry, spur_mcp::ToolRegistryError> {
     let local_projects = LocalProjectMcpComposition::from_environment();
-    spur_mcp::ToolRegistry::builder()
+    let builder = spur_mcp::ToolRegistry::builder()
         .with(delegation::DelegationMcpModule::new(
             delegation::DelegationMcpDeps::catalog_only(),
         ))?
@@ -175,8 +178,10 @@ pub fn catalog_tool_registry() -> Result<spur_mcp::ToolRegistry, spur_mcp::ToolR
             feature_gate: crate::server::community_feature_gate(),
         }))?
         .with(spur_solver::mcp::SolverMcpModule::catalog_only())?
-        .with_alias("code_search", "code_symbol_search")
-        .map(spur_mcp::registry::ToolRegistryBuilder::build)
+        .with_alias("code_search", "code_symbol_search")?;
+    Ok(builder
+        .with(skills_catalog::SkillsCatalogMcpModule::new(None))?
+        .build())
 }
 
 pub fn tools_list() -> Vec<spur_mcp::ToolDefinition> {
@@ -232,6 +237,7 @@ fn worker_tool_registry_with_client_and_repo_root(
         builder = builder.with(context_service_client)?;
     }
     Ok(builder
+        .with(skills_catalog::SkillsCatalogMcpModule::new(repo_root))?
         .with_denied_tool_calls(WORKER_DENIED_TOOL_CALLS.iter().copied())
         .build())
 }
@@ -318,6 +324,367 @@ mod tests {
     use rmcp::model::ErrorCode;
     use serde_json::json;
     use spur_mcp::{ServerKind, ToolAuthority, ToolCallContext};
+
+    fn snapshot_files(root: &Path) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
+        fn visit(
+            root: &Path,
+            current: &Path,
+            snapshot: &mut std::collections::BTreeMap<PathBuf, Vec<u8>>,
+        ) {
+            for entry in std::fs::read_dir(current).expect("read snapshot directory") {
+                let entry = entry.expect("snapshot entry");
+                let path = entry.path();
+                if path.is_dir() {
+                    visit(root, &path, snapshot);
+                } else {
+                    let relative = path.strip_prefix(root).expect("relative snapshot path");
+                    snapshot.insert(
+                        relative.to_path_buf(),
+                        std::fs::read(&path).expect("read snapshot file"),
+                    );
+                }
+            }
+        }
+
+        let mut snapshot = std::collections::BTreeMap::new();
+        visit(root, root, &mut snapshot);
+        snapshot
+    }
+
+    fn expected_skill_search_schema() -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "query": { "type": "string", "minLength": 1 },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 5,
+                    "default": 5
+                },
+                "source": { "type": ["string", "null"] }
+            },
+            "required": ["query"],
+            "additionalProperties": false
+        })
+    }
+
+    fn expected_skill_read_schema() -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "skill_id": { "type": "string", "minLength": 1 },
+                "resource": { "type": ["string", "null"] }
+            },
+            "required": ["skill_id"],
+            "additionalProperties": false
+        })
+    }
+
+    fn tool_result_json(response: spur_mcp::response::JsonRpcResponse) -> serde_json::Value {
+        assert!(
+            response.error.is_none(),
+            "unexpected error: {:?}",
+            response.error
+        );
+        let text = response
+            .result
+            .as_ref()
+            .and_then(|result| result["content"][0]["text"].as_str())
+            .expect("MCP tool result text");
+        serde_json::from_str(text).expect("JSON tool result")
+    }
+
+    #[test]
+    fn skill_catalog_schemas_are_identical_in_unrooted_catalogs() {
+        for (catalog_name, definitions) in
+            [("brain", tools_list()), ("worker", worker_tools_list())]
+        {
+            let search = definitions
+                .iter()
+                .find(|definition| definition.name == "skill_search")
+                .unwrap_or_else(|| panic!("{catalog_name} catalog missing skill_search"));
+            let read = definitions
+                .iter()
+                .find(|definition| definition.name == "skill_read")
+                .unwrap_or_else(|| panic!("{catalog_name} catalog missing skill_read"));
+
+            assert_eq!(search.input_schema, expected_skill_search_schema());
+            assert_eq!(read.input_schema, expected_skill_read_schema());
+            assert_eq!(
+                definitions
+                    .iter()
+                    .rev()
+                    .take(2)
+                    .map(|definition| definition.name.as_str())
+                    .collect::<Vec<_>>(),
+                ["skill_read", "skill_search"],
+                "{catalog_name} must append skills without reordering existing tools"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn unrooted_skill_catalog_call_requires_repository_authority() {
+        let registry = worker_tool_registry().expect("worker registry");
+        let context = ToolCallContext::new(ServerKind::Worker, ToolAuthority::Worker, None, None);
+
+        let error = match registry
+            .call_tool(context, "skill_search", json!({ "query": "verification" }))
+            .await
+        {
+            Ok(_) => panic!("unrooted skill search must fail"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.code, ErrorCode(-32001));
+        assert!(error.message.contains("repository authority root"));
+        assert_eq!(
+            error.data,
+            Some(json!({
+                "error_kind": "authority_root_required",
+                "write_effect": "none"
+            }))
+        );
+    }
+
+    #[tokio::test]
+    async fn unrooted_skill_catalog_rejects_before_parsing_arguments() {
+        let registry = worker_tool_registry().expect("worker registry");
+        let context = ToolCallContext::new(ServerKind::Worker, ToolAuthority::Worker, None, None);
+
+        let error = match registry.call_tool(context, "skill_search", json!({})).await {
+            Ok(_) => panic!("unrooted skill search must fail"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.code, ErrorCode(-32001));
+        assert_eq!(
+            error.data,
+            Some(json!({
+                "error_kind": "authority_root_required",
+                "write_effect": "none"
+            }))
+        );
+    }
+
+    #[tokio::test]
+    async fn rooted_worker_skill_read_rejects_malformed_arguments_as_invalid_params() {
+        let temp = tempfile::TempDir::new().expect("temp repo");
+        let before = snapshot_files(temp.path());
+        let registry = worker_tool_registry_with_client_and_repo_root(None, Some(temp.path()))
+            .expect("rooted worker registry");
+
+        for (case, args) in [
+            ("missing skill_id", json!({})),
+            ("wrong skill_id type", json!({ "skill_id": 7 })),
+            (
+                "unknown field",
+                json!({ "skill_id": "opaque-reference", "unexpected": true }),
+            ),
+        ] {
+            let context =
+                ToolCallContext::new(ServerKind::Worker, ToolAuthority::Worker, None, None);
+            let response = registry.call_json_tool(context, "skill_read", args).await;
+            let error = response.error.unwrap_or_else(|| panic!("{case} must fail"));
+
+            assert_eq!(error.code, -32602, "unexpected code for {case}");
+            assert_eq!(
+                error.data,
+                Some(json!({
+                    "error_kind": "invalid_query",
+                    "write_effect": "none"
+                })),
+                "unexpected error data for {case}"
+            );
+        }
+
+        assert_eq!(snapshot_files(temp.path()), before);
+    }
+
+    #[tokio::test]
+    async fn rooted_worker_skill_read_rejects_empty_id_as_invalid_params() {
+        let temp = tempfile::TempDir::new().expect("temp repo");
+        let before = snapshot_files(temp.path());
+        let registry = worker_tool_registry_with_client_and_repo_root(None, Some(temp.path()))
+            .expect("rooted worker registry");
+        let context = ToolCallContext::new(ServerKind::Worker, ToolAuthority::Worker, None, None);
+
+        let response = registry
+            .call_json_tool(context, "skill_read", json!({ "skill_id": "" }))
+            .await;
+        let error = response.error.expect("empty skill_id must fail");
+
+        assert_eq!(error.code, -32602);
+        assert_eq!(
+            error.data,
+            Some(json!({
+                "error_kind": "invalid_query",
+                "write_effect": "none"
+            }))
+        );
+        assert_eq!(snapshot_files(temp.path()), before);
+    }
+
+    #[tokio::test]
+    async fn rooted_worker_skill_catalog_searches_metadata_and_reads_exact_text() {
+        let temp = tempfile::TempDir::new().expect("temp repo");
+        let skill_dir = temp.path().join("assets/skills/catalog-needle");
+        std::fs::create_dir_all(&skill_dir).expect("create skill dir");
+        let document = concat!(
+            "---\n",
+            "name: catalog-needle\n",
+            "description: Find a unique catalog needle for MCP tests\n",
+            "role: worker\n",
+            "---\n\n",
+            "# Catalog Needle\n\n",
+            "EXACT_INSTRUCTION_BODY_MUST_NOT_LEAK_FROM_SEARCH\n",
+        );
+        std::fs::write(skill_dir.join("SKILL.md"), document).expect("write skill");
+        for index in 0..6 {
+            let candidate_dir = temp
+                .path()
+                .join(format!("assets/skills/common-candidate-{index}"));
+            std::fs::create_dir_all(&candidate_dir).expect("create candidate dir");
+            std::fs::write(
+                candidate_dir.join("SKILL.md"),
+                format!(
+                    "---\nname: common-candidate-{index}\ndescription: Shared bounded catalog candidate\nrole: worker\n---\n\n# Candidate {index}\n"
+                ),
+            )
+            .expect("write candidate skill");
+        }
+        let before = snapshot_files(temp.path());
+
+        let brain = brain_tool_registry_for_repo_root(
+            delegation::DelegationMcpDeps::catalog_only(),
+            plan::PlanMcpDeps::catalog_only(),
+            signals::SignalMcpDeps {
+                pm_service: None,
+                event_sink: None,
+                feature_gate: crate::server::community_feature_gate(),
+            },
+            &ContextServiceConfig::default(),
+            temp.path(),
+        )
+        .expect("rooted brain registry");
+        for tool_name in ["skill_search", "skill_read"] {
+            assert!(
+                brain
+                    .list_tools()
+                    .iter()
+                    .any(|definition| definition.name == tool_name),
+                "rooted brain registry missing {tool_name}"
+            );
+        }
+        let registry = worker_tool_registry_with_client_and_repo_root(None, Some(temp.path()))
+            .expect("rooted worker registry");
+
+        let request_id = json!(41);
+        let context = ToolCallContext::new(
+            ServerKind::Worker,
+            ToolAuthority::Worker,
+            None,
+            Some(&request_id),
+        );
+        let search = registry
+            .call_json_tool(
+                context,
+                "skill_search",
+                json!({ "query": "unique catalog needle" }),
+            )
+            .await;
+        let search = tool_result_json(search);
+        assert!(search["results"]
+            .as_array()
+            .is_some_and(|results| (1..=5).contains(&results.len())));
+        assert_eq!(search["results"][0]["name"], "catalog-needle");
+        assert!(search.get("content").is_none());
+        assert!(!search
+            .to_string()
+            .contains("EXACT_INSTRUCTION_BODY_MUST_NOT_LEAK_FROM_SEARCH"));
+        assert_eq!(search["results"][0]["source"], "bundled");
+
+        let context = ToolCallContext::new(ServerKind::Worker, ToolAuthority::Worker, None, None);
+        let bounded = registry
+            .call_json_tool(
+                context,
+                "skill_search",
+                json!({ "query": "shared bounded catalog candidate" }),
+            )
+            .await;
+        let bounded = tool_result_json(bounded);
+        assert_eq!(bounded["results"].as_array().map(Vec::len), Some(5));
+
+        let context = ToolCallContext::new(ServerKind::Worker, ToolAuthority::Worker, None, None);
+        let exact_source = registry
+            .call_json_tool(
+                context,
+                "skill_search",
+                json!({
+                    "query": "shared bounded catalog candidate",
+                    "source": "Bundled"
+                }),
+            )
+            .await;
+        let exact_source = tool_result_json(exact_source);
+        assert_eq!(exact_source["results"].as_array().map(Vec::len), Some(0));
+
+        let context = ToolCallContext::new(ServerKind::Worker, ToolAuthority::Worker, None, None);
+        let over_limit = registry
+            .call_json_tool(
+                context,
+                "skill_search",
+                json!({ "query": "candidate", "limit": 6 }),
+            )
+            .await;
+        let error = over_limit.error.expect("over-limit search error");
+        assert_eq!(error.code, -32602);
+        assert_eq!(
+            error.data,
+            Some(json!({
+                "error_kind": "invalid_query",
+                "write_effect": "none"
+            }))
+        );
+
+        let context = ToolCallContext::new(ServerKind::Worker, ToolAuthority::Worker, None, None);
+        let null_limit = registry
+            .call_json_tool(
+                context,
+                "skill_search",
+                json!({ "query": "candidate", "limit": null }),
+            )
+            .await;
+        let error = null_limit.error.expect("null limit search error");
+        assert_eq!(error.code, -32602);
+        assert_eq!(
+            error.data,
+            Some(json!({
+                "error_kind": "invalid_query",
+                "write_effect": "none"
+            }))
+        );
+
+        let skill_id = search["results"][0]["skill_id"]
+            .as_str()
+            .expect("opaque skill id");
+        let request_id = json!(42);
+        let context = ToolCallContext::new(
+            ServerKind::Worker,
+            ToolAuthority::Worker,
+            None,
+            Some(&request_id),
+        );
+        let read = registry
+            .call_json_tool(context, "skill_read", json!({ "skill_id": skill_id }))
+            .await;
+        let read = tool_result_json(read);
+        assert_eq!(read["resource"], "SKILL.md");
+        assert_eq!(read["media_type"], "text/markdown");
+        assert_eq!(read["content"], document);
+        assert_eq!(snapshot_files(temp.path()), before);
+    }
 
     #[tokio::test]
     async fn worker_registry_dispatches_allowed_read_tools_through_core_module() {
