@@ -439,6 +439,11 @@ sync_workspace() {
     log "Enumerating git-tracked files..."
     cd "$GIT_TOPLEVEL"
     git ls-files -z --cached --others --exclude-standard >"$FILE_LIST" || return $?
+    "$SCRIPT_DIR/_sync-dangling-symlinks.sh" partition \
+        "$GIT_TOPLEVEL" \
+        "$FILE_LIST" \
+        "$RSYNC_FILE_LIST" \
+        "$DANGLING_SYMLINK_LIST" || return $?
     local count
     count=$(tr -cd '\0' <"$FILE_LIST" | wc -c | tr -d ' ')
     log "  $count files"
@@ -469,9 +474,24 @@ sync_workspace() {
     # again, and force cargo to rebuild workspace crates. Checksum mode makes the
     # delta content-based, and --omit-dir-times keeps directory metadata churn out
     # of $XFER_LIST so only content changes are restamped.
-    rsync -azcO --delete -0 --files-from="$FILE_LIST" --out-format='%n' \
+    rsync -azcO --delete -0 --files-from="$RSYNC_FILE_LIST" --out-format='%n' \
         -e "$TRANSPORT" \
         "$GIT_TOPLEVEL/" "$VM_NAME:$REMOTE_DIR/" >"$XFER_LIST" || return $?
+
+    if [[ -s "$DANGLING_SYMLINK_LIST" ]]; then
+        local remote_symlink_manifest="/tmp/spur-sync-symlinks.$WORKTREE_FILE_KEY"
+        local remote_symlink_helper="/tmp/spur-sync-symlinks.$WORKTREE_FILE_KEY.sh"
+        local symlink_count
+        symlink_count=$(($(tr -cd '\0' <"$DANGLING_SYMLINK_LIST" | wc -c | tr -d ' ') / 2))
+        log "Reconstructing $symlink_count tracked dangling symlink(s)..."
+        rsync -az -e "$TRANSPORT" \
+            "$DANGLING_SYMLINK_LIST" "$VM_NAME:$remote_symlink_manifest" || return $?
+        rsync -az -e "$TRANSPORT" \
+            "$SCRIPT_DIR/_sync-dangling-symlinks.sh" "$VM_NAME:$remote_symlink_helper" || return $?
+        remote_ssh \
+            --command="bash \"$remote_symlink_helper\" restore \"$REMOTE_DIR\" \"$remote_symlink_manifest\"" \
+            >>"$XFER_LIST" || return $?
+    fi
 
     # ---- normalize mtimes of just-synced files to the VM clock -------------
     # Cargo decides whether to rebuild a path dependency (e.g. jute) by comparing
@@ -678,12 +698,16 @@ sync_back_workspace() {
 #     unchanged ("a red remote test is a real failure").
 FILE_LIST=""
 XFER_LIST=""
+RSYNC_FILE_LIST=""
+DANGLING_SYMLINK_LIST=""
 cleanup() {
     release_build_queue_slot
     vm_lifecycle_unlock
     queue_unlock
     [[ -n "${FILE_LIST:-}" ]] && rm -f "$FILE_LIST"
     [[ -n "${XFER_LIST:-}" ]] && rm -f "$XFER_LIST"
+    [[ -n "${RSYNC_FILE_LIST:-}" ]] && rm -f "$RSYNC_FILE_LIST"
+    [[ -n "${DANGLING_SYMLINK_LIST:-}" ]] && rm -f "$DANGLING_SYMLINK_LIST"
 }
 trap cleanup EXIT
 trap 'cleanup; exit 130' INT TERM
@@ -692,6 +716,8 @@ acquire_build_queue_slot
 
 FILE_LIST=$(mktemp)
 XFER_LIST=$(mktemp)
+RSYNC_FILE_LIST=$(mktemp)
+DANGLING_SYMLINK_LIST=$(mktemp)
 
 ensure_vm_up
 choose_transport
