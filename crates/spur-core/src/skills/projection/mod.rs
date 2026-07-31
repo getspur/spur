@@ -12,6 +12,8 @@ pub mod resolver;
 pub enum SelectionPolicy {
     /// Include every bundled and accepted active pool skill.
     AllActive,
+    /// Include only the bundled skills-catalog bootstrap.
+    CatalogOnly,
 }
 
 /// Runtime entry point requesting a skill projection.
@@ -165,7 +167,24 @@ pub async fn reconcile_with_worktrees(
     reconcile::run(worktrees, request).await
 }
 
-/// Reconcile the v1 `AllActive` projection for one supported runtime agent.
+fn selection_policy_for_role(
+    source_repo_root: &std::path::Path,
+    role: RuntimeRole,
+) -> anyhow::Result<SelectionPolicy> {
+    if role == RuntimeRole::Init {
+        return Ok(SelectionPolicy::AllActive);
+    }
+
+    let mode = spur_acp::config::load_layered(source_repo_root)?
+        .skills
+        .projection_mode;
+    Ok(match mode {
+        spur_acp::config::SkillsProjectionMode::AllActive => SelectionPolicy::AllActive,
+        spur_acp::config::SkillsProjectionMode::CatalogOnly => SelectionPolicy::CatalogOnly,
+    })
+}
+
+/// Reconcile the configured projection for one supported runtime agent.
 ///
 /// Unsupported agent kinds return `Ok(None)` without touching the filesystem.
 pub async fn reconcile_for_agent_kind(
@@ -178,6 +197,14 @@ pub async fn reconcile_for_agent_kind(
     let Some(adapter) = crate::skills::adapters::Adapter::for_agent_kind(kind) else {
         return Ok(None);
     };
+    let policy =
+        selection_policy_for_role(source_repo_root, role).map_err(|source| ProjectionError {
+            phase: ProjectionPhase::Resolve,
+            launch_root: launch_root.to_path_buf(),
+            adapter: adapter.key().to_owned(),
+            skill_id: None,
+            source,
+        })?;
     reconcile_with_worktrees(
         worktrees,
         ProjectionRequest {
@@ -185,7 +212,7 @@ pub async fn reconcile_for_agent_kind(
             launch_root,
             adapter,
             role,
-            policy: SelectionPolicy::AllActive,
+            policy,
         },
     )
     .await
@@ -231,4 +258,56 @@ pub async fn reconcile_many(
         )?;
     }
     Ok(summaries)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{selection_policy_for_role, RuntimeRole, SelectionPolicy};
+
+    #[test]
+    fn runtime_roles_select_catalog_only_from_layered_repository_config() {
+        let repo = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(repo.path().join(".spur")).unwrap();
+        std::fs::write(
+            repo.path().join(".spur/config.toml"),
+            "[skills]\nprojection_mode = \"catalog_only\"\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            selection_policy_for_role(repo.path(), RuntimeRole::Brain).unwrap(),
+            SelectionPolicy::CatalogOnly
+        );
+        assert_eq!(
+            selection_policy_for_role(repo.path(), RuntimeRole::Worker).unwrap(),
+            SelectionPolicy::CatalogOnly
+        );
+    }
+
+    #[test]
+    fn init_stays_all_active_and_explicit_rollback_selects_all_active() {
+        let repo = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(repo.path().join(".spur")).unwrap();
+        let config_path = repo.path().join(".spur/config.toml");
+        std::fs::write(
+            &config_path,
+            "[skills]\nprojection_mode = \"catalog_only\"\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            selection_policy_for_role(repo.path(), RuntimeRole::Init).unwrap(),
+            SelectionPolicy::AllActive
+        );
+
+        std::fs::write(config_path, "[skills]\nprojection_mode = \"all_active\"\n").unwrap();
+        assert_eq!(
+            selection_policy_for_role(repo.path(), RuntimeRole::Brain).unwrap(),
+            SelectionPolicy::AllActive
+        );
+        assert_eq!(
+            selection_policy_for_role(repo.path(), RuntimeRole::Worker).unwrap(),
+            SelectionPolicy::AllActive
+        );
+    }
 }

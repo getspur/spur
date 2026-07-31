@@ -500,18 +500,38 @@ impl Default for ContextServiceConfig {
     }
 }
 
-/// Bundled skill asset resolution.
+/// Runtime skill projection mode.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SkillsProjectionMode {
+    /// Project every bundled and accepted active skill.
+    #[default]
+    AllActive,
+    /// Project only the bundled skills-catalog bootstrap.
+    CatalogOnly,
+}
+
+impl SkillsProjectionMode {
+    fn is_all_active(&self) -> bool {
+        *self == Self::AllActive
+    }
+}
+
+/// Bundled skill asset resolution and runtime projection policy.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SkillsConfig {
     /// Directory containing `assets/skills/<skill-id>/SKILL.md`-style entries.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bundled_dir: Option<PathBuf>,
+    /// Effective runtime skill set for newly reconciled brain and worker sessions.
+    #[serde(default, skip_serializing_if = "SkillsProjectionMode::is_all_active")]
+    pub projection_mode: SkillsProjectionMode,
 }
 
 impl SkillsConfig {
     fn is_default(&self) -> bool {
-        self.bundled_dir.is_none()
+        self.bundled_dir.is_none() && self.projection_mode.is_all_active()
     }
 }
 
@@ -1548,5 +1568,40 @@ level = "warn,spur_core::orchestrator=info"
 
         assert_eq!(cfg.context_service.url, "https://context.example.test");
         assert_eq!(cfg.context_service.token.as_deref(), Some("secret-token"));
+    }
+
+    #[test]
+    fn skills_projection_modes_round_trip() {
+        for (serialized_mode, expected) in [
+            ("all_active", SkillsProjectionMode::AllActive),
+            ("catalog_only", SkillsProjectionMode::CatalogOnly),
+        ] {
+            let config: SpurConfig = toml::from_str(&format!(
+                "[skills]\nprojection_mode = \"{serialized_mode}\"\n"
+            ))
+            .expect("projection mode should parse");
+            assert_eq!(config.skills.projection_mode, expected);
+
+            let serialized = toml::to_string(&config).expect("config should serialize");
+            let round_trip: SpurConfig =
+                toml::from_str(&serialized).expect("serialized config should parse");
+            assert_eq!(round_trip.skills.projection_mode, expected);
+        }
+    }
+
+    #[test]
+    fn skills_projection_mode_defaults_to_all_active_when_absent() {
+        let empty: SpurConfig = toml::from_str("").expect("empty config should parse");
+        assert_eq!(
+            empty.skills.projection_mode,
+            SkillsProjectionMode::AllActive
+        );
+
+        let skills_section: SpurConfig =
+            toml::from_str("[skills]\n").expect("empty skills section should parse");
+        assert_eq!(
+            skills_section.skills.projection_mode,
+            SkillsProjectionMode::AllActive
+        );
     }
 }
