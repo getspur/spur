@@ -381,6 +381,35 @@ mod tests {
         })
     }
 
+    fn expected_skill_navigate_schema() -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Full-text query over skill PageIndex nodes. Required when root is omitted."
+                },
+                "root": {
+                    "type": "string",
+                    "description": "Skill id or skill_id:node_id. When set, expand one tree hop instead of FTS."
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 5,
+                    "default": 5
+                },
+                "source": { "type": ["string", "null"] },
+                "include_lede": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "When true, include node lede snippets. When false, omit lede fields."
+                }
+            },
+            "additionalProperties": false
+        })
+    }
+
     fn tool_result_json(response: spur_mcp::response::JsonRpcResponse) -> serde_json::Value {
         assert!(
             response.error.is_none(),
@@ -408,17 +437,22 @@ mod tests {
                 .iter()
                 .find(|definition| definition.name == "skill_read")
                 .unwrap_or_else(|| panic!("{catalog_name} catalog missing skill_read"));
+            let navigate = definitions
+                .iter()
+                .find(|definition| definition.name == "skill_navigate")
+                .unwrap_or_else(|| panic!("{catalog_name} catalog missing skill_navigate"));
 
             assert_eq!(search.input_schema, expected_skill_search_schema());
             assert_eq!(read.input_schema, expected_skill_read_schema());
+            assert_eq!(navigate.input_schema, expected_skill_navigate_schema());
             assert_eq!(
                 definitions
                     .iter()
                     .rev()
-                    .take(2)
+                    .take(3)
                     .map(|definition| definition.name.as_str())
                     .collect::<Vec<_>>(),
-                ["skill_read", "skill_search"],
+                ["skill_navigate", "skill_read", "skill_search"],
                 "{catalog_name} must append skills without reordering existing tools"
             );
         }
@@ -568,7 +602,7 @@ mod tests {
             temp.path(),
         )
         .expect("rooted brain registry");
-        for tool_name in ["skill_search", "skill_read"] {
+        for tool_name in ["skill_search", "skill_read", "skill_navigate"] {
             assert!(
                 brain
                     .list_tools()
@@ -683,6 +717,95 @@ mod tests {
         assert_eq!(read["resource"], "SKILL.md");
         assert_eq!(read["media_type"], "text/markdown");
         assert_eq!(read["content"], document);
+
+        let request_id = json!(43);
+        let context = ToolCallContext::new(
+            ServerKind::Worker,
+            ToolAuthority::Worker,
+            None,
+            Some(&request_id),
+        );
+        let navigate = registry
+            .call_json_tool(
+                context,
+                "skill_navigate",
+                json!({ "query": "unique catalog needle" }),
+            )
+            .await;
+        let navigate = tool_result_json(navigate);
+        assert!(navigate["catalog_revision"].as_str().is_some());
+        assert!(navigate["hits"]
+            .as_array()
+            .is_some_and(|hits| (1..=5).contains(&hits.len())));
+        assert!(navigate["hits"][0].get("lede").is_some());
+        assert!(navigate.get("content").is_none());
+
+        let context = ToolCallContext::new(ServerKind::Worker, ToolAuthority::Worker, None, None);
+        let navigate_no_lede = registry
+            .call_json_tool(
+                context,
+                "skill_navigate",
+                json!({
+                    "query": "unique catalog needle",
+                    "include_lede": false
+                }),
+            )
+            .await;
+        let navigate_no_lede = tool_result_json(navigate_no_lede);
+        assert!(navigate_no_lede["hits"]
+            .as_array()
+            .is_some_and(|hits| !hits.is_empty()));
+        assert!(navigate_no_lede["hits"][0].get("lede").is_none());
+
+        let context = ToolCallContext::new(ServerKind::Worker, ToolAuthority::Worker, None, None);
+        let navigate_root = registry
+            .call_json_tool(
+                context,
+                "skill_navigate",
+                json!({ "root": skill_id, "limit": 5 }),
+            )
+            .await;
+        let navigate_root = tool_result_json(navigate_root);
+        assert!(navigate_root["hits"]
+            .as_array()
+            .is_some_and(|hits| !hits.is_empty()));
+
+        let context = ToolCallContext::new(ServerKind::Worker, ToolAuthority::Worker, None, None);
+        let missing_query = registry
+            .call_json_tool(context, "skill_navigate", json!({}))
+            .await;
+        let error = missing_query
+            .error
+            .expect("skill_navigate without query/root must fail");
+        assert_eq!(error.code, -32602);
+        assert_eq!(
+            error.data,
+            Some(json!({
+                "error_kind": "invalid_query",
+                "write_effect": "none"
+            }))
+        );
+
+        let context = ToolCallContext::new(ServerKind::Worker, ToolAuthority::Worker, None, None);
+        let unknown_field = registry
+            .call_json_tool(
+                context,
+                "skill_navigate",
+                json!({ "query": "needle", "unexpected": true }),
+            )
+            .await;
+        let error = unknown_field
+            .error
+            .expect("skill_navigate unknown field must fail");
+        assert_eq!(error.code, -32602);
+        assert_eq!(
+            error.data,
+            Some(json!({
+                "error_kind": "invalid_query",
+                "write_effect": "none"
+            }))
+        );
+
         assert_eq!(snapshot_files(temp.path()), before);
     }
 

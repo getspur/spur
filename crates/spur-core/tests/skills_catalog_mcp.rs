@@ -580,7 +580,7 @@ async fn skills_catalog_rollout_gate_is_context_only_reversible_and_measurable()
     let brain = rooted_registry(world.repo_root());
     let worker = rooted_registry(world.repo_root());
     for (registry_name, registry) in [("brain", &brain), ("worker", &worker)] {
-        for tool_name in ["skill_search", "skill_read"] {
+        for tool_name in ["skill_search", "skill_read", "skill_navigate"] {
             assert!(
                 registry
                     .list_tools()

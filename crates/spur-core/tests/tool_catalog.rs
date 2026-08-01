@@ -69,6 +69,7 @@ const EXPECTED: &[&str] = &[
     "get_solve_result",
     "skill_search",
     "skill_read",
+    "skill_navigate",
 ];
 
 const PM_ISSUE_GRAPH_TOOLS: &[&str] = &[

@@ -12,6 +12,7 @@ use crate::explore::serving::{ServingCatalog, ServingError, ServingErrorKind};
 
 const SKILL_SEARCH: &str = "skill_search";
 const SKILL_READ: &str = "skill_read";
+const SKILL_NAVIGATE: &str = "skill_navigate";
 const AUTHORITY_ROOT_REQUIRED: &str = "authority_root_required";
 
 /// Bridges the read-only Explore serving facade to the public MCP module contract.
@@ -174,6 +175,101 @@ impl SkillsCatalogMcpModule {
         })?;
         Ok(ToolResponse::json_text(id, value))
     }
+
+    fn call_navigate(&self, id: Value, args: Value) -> Result<ToolResponse, McpError> {
+        let started = Instant::now();
+        let input: SkillNavigateInput = serde_json::from_value(args).map_err(|error| {
+            let error = mcp_error_for_kind(
+                ServingErrorKind::InvalidQuery,
+                format!("invalid skill_navigate arguments: {error}"),
+            );
+            trace_failure(
+                SKILL_NAVIGATE,
+                None,
+                None,
+                ServingErrorKind::InvalidQuery.as_str(),
+                started,
+            );
+            error
+        })?;
+        let source = input.source.as_deref();
+        let root = input
+            .root
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let query = input
+            .query
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        if root.is_none() && query.is_none() {
+            trace_failure(
+                SKILL_NAVIGATE,
+                source,
+                None,
+                ServingErrorKind::InvalidQuery.as_str(),
+                started,
+            );
+            return Err(mcp_error_for_kind(
+                ServingErrorKind::InvalidQuery,
+                "invalid skill_navigate arguments: query is required when root is omitted",
+            ));
+        }
+        tracing::debug!(
+            event = "skill_navigate_started",
+            tool = SKILL_NAVIGATE,
+            source = source.unwrap_or_default(),
+            has_root = root.is_some(),
+            has_query = query.is_some(),
+            include_lede = input.include_lede,
+            write_effect = "none",
+            "navigating eligible skill PageIndex"
+        );
+        let catalog = self.load_catalog().inspect_err(|error| {
+            trace_failure(SKILL_NAVIGATE, source, None, error_kind(error), started);
+        })?;
+        let revision = catalog.revision().to_owned();
+        let response = match root {
+            Some(root) => catalog.navigate_root(root, input.limit),
+            None => catalog.navigate(query.unwrap_or(""), input.limit, source),
+        }
+        .map_err(|error| {
+            trace_failure(
+                SKILL_NAVIGATE,
+                source,
+                Some(&revision),
+                error.kind().as_str(),
+                started,
+            );
+            serving_error(error)
+        })?;
+        tracing::info!(
+            event = "skill_navigate_completed",
+            tool = SKILL_NAVIGATE,
+            source = source.unwrap_or_default(),
+            catalog_revision = %response.catalog_revision,
+            result_count = response.hits.len(),
+            include_lede = input.include_lede,
+            latency_ms = elapsed_millis(started),
+            write_effect = "none",
+            "served skill PageIndex navigation hits"
+        );
+        let mut value = serde_json::to_value(response).map_err(|error| {
+            trace_failure(
+                SKILL_NAVIGATE,
+                source,
+                Some(&revision),
+                "internal_error",
+                started,
+            );
+            serialization_error(error)
+        })?;
+        if !input.include_lede {
+            strip_lede_fields(&mut value);
+        }
+        Ok(ToolResponse::json_text(id, value))
+    }
 }
 
 #[async_trait]
@@ -190,15 +286,16 @@ impl ToolModule for SkillsCatalogMcpModule {
     ) -> Result<ToolResponse, McpError> {
         let id = ctx.request_id_value();
         match name {
-            SKILL_SEARCH | SKILL_READ => {
+            SKILL_SEARCH | SKILL_READ | SKILL_NAVIGATE => {
                 let started = Instant::now();
                 self.repo_root().inspect_err(|error| {
                     trace_failure(name, None, None, error_kind(error), started);
                 })?;
-                if name == SKILL_SEARCH {
-                    self.call_search(id, args)
-                } else {
-                    self.call_read(id, args)
+                match name {
+                    SKILL_SEARCH => self.call_search(id, args),
+                    SKILL_READ => self.call_read(id, args),
+                    SKILL_NAVIGATE => self.call_navigate(id, args),
+                    _ => unreachable!("matched skill catalog tool names"),
                 }
             }
             _ => Err(mcp_error(
@@ -228,6 +325,25 @@ struct SkillReadInput {
     resource: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SkillNavigateInput {
+    #[serde(default)]
+    query: Option<String>,
+    #[serde(default)]
+    root: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_present_limit")]
+    limit: Option<usize>,
+    #[serde(default)]
+    source: Option<String>,
+    #[serde(default = "default_include_lede")]
+    include_lede: bool,
+}
+
+fn default_include_lede() -> bool {
+    true
+}
+
 fn tool_definitions() -> Vec<ToolDefinition> {
     vec![
         ToolDefinition {
@@ -241,6 +357,12 @@ fn tool_definitions() -> Vec<ToolDefinition> {
             description: "Read exact verified UTF-8 text for a currently eligible skill reference returned by skill_search. Omit resource for SKILL.md; reads are reauthorized and never materialized into the worker filesystem."
                 .to_owned(),
             input_schema: skill_read_schema(),
+        },
+        ToolDefinition {
+            name: SKILL_NAVIGATE.to_owned(),
+            description: "Navigate the eligible Explore skill PageIndex. Without root, BM25-searches node tokens (query required). With root (skill_id or skill_id:node_id), expands one tree hop. Returns at most five metadata+lede hits; never full instruction bodies or filesystem installs."
+                .to_owned(),
+            input_schema: skill_navigate_schema(),
         },
     ]
 }
@@ -273,6 +395,45 @@ fn skill_read_schema() -> Value {
         "required": ["skill_id"],
         "additionalProperties": false
     })
+}
+
+fn skill_navigate_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "query": {
+                "type": "string",
+                "description": "Full-text query over skill PageIndex nodes. Required when root is omitted."
+            },
+            "root": {
+                "type": "string",
+                "description": "Skill id or skill_id:node_id. When set, expand one tree hop instead of FTS."
+            },
+            "limit": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 5,
+                "default": 5
+            },
+            "source": { "type": ["string", "null"] },
+            "include_lede": {
+                "type": "boolean",
+                "default": true,
+                "description": "When true, include node lede snippets. When false, omit lede fields."
+            }
+        },
+        "additionalProperties": false
+    })
+}
+
+fn strip_lede_fields(value: &mut Value) {
+    if let Some(hits) = value.get_mut("hits").and_then(Value::as_array_mut) {
+        for hit in hits {
+            if let Some(object) = hit.as_object_mut() {
+                object.remove("lede");
+            }
+        }
+    }
 }
 
 fn serving_error(error: ServingError) -> McpError {
@@ -335,10 +496,10 @@ fn trace_failure(
     error_kind: &str,
     started: Instant,
 ) {
-    let event = if tool == SKILL_READ {
-        "skill_read_failed"
-    } else {
-        "skill_search_failed"
+    let event = match tool {
+        SKILL_READ => "skill_read_failed",
+        SKILL_NAVIGATE => "skill_navigate_failed",
+        _ => "skill_search_failed",
     };
     tracing::warn!(
         event,
@@ -387,6 +548,56 @@ mod tests {
             "unexpected": true
         }))
         .is_err());
+    }
+
+    #[test]
+    fn navigate_request_deserialization_defaults_and_rejects_unknown_fields() {
+        let defaulted: SkillNavigateInput =
+            serde_json::from_value(json!({ "query": "navigate skills" })).expect("navigate input");
+        assert_eq!(defaulted.query.as_deref(), Some("navigate skills"));
+        assert_eq!(defaulted.root, None);
+        assert_eq!(defaulted.limit, None);
+        assert_eq!(defaulted.source, None);
+        assert!(defaulted.include_lede);
+
+        let rooted: SkillNavigateInput = serde_json::from_value(json!({
+            "root": "opaque-skill-id",
+            "limit": 3,
+            "include_lede": false,
+            "source": "bundled"
+        }))
+        .expect("rooted navigate input");
+        assert_eq!(rooted.root.as_deref(), Some("opaque-skill-id"));
+        assert_eq!(rooted.limit, Some(3));
+        assert!(!rooted.include_lede);
+        assert_eq!(rooted.source.as_deref(), Some("bundled"));
+
+        assert!(serde_json::from_value::<SkillNavigateInput>(json!({
+            "query": "navigate",
+            "limit": null
+        }))
+        .is_err());
+        assert!(serde_json::from_value::<SkillNavigateInput>(json!({
+            "query": "navigate",
+            "unexpected": true
+        }))
+        .is_err());
+    }
+
+    #[test]
+    fn strip_lede_fields_removes_only_hit_ledes() {
+        let mut value = json!({
+            "catalog_revision": "rev-1",
+            "hits": [
+                { "skill_id": "a", "lede": "snippet-a", "node_id": "n1" },
+                { "skill_id": "b", "lede": "snippet-b", "node_id": "n2" }
+            ]
+        });
+        strip_lede_fields(&mut value);
+        assert!(value["hits"][0].get("lede").is_none());
+        assert!(value["hits"][1].get("lede").is_none());
+        assert_eq!(value["hits"][0]["node_id"], "n1");
+        assert_eq!(value["catalog_revision"], "rev-1");
     }
 
     #[test]

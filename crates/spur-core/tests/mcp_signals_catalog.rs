@@ -78,6 +78,7 @@ const EXPECTED_BRAIN_TOOLS: &[&str] = &[
     "external_index_status",
     "skill_search",
     "skill_read",
+    "skill_navigate",
 ];
 
 fn pro_feature_gate() -> Arc<FeatureGate> {

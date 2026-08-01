@@ -1230,6 +1230,15 @@ impl WorkerToolHandler {
             .await
     }
 
+    #[tool(
+        name = "skill_navigate",
+        description = "Navigate the eligible Explore skill PageIndex via FTS or one-hop tree expand."
+    )]
+    async fn skill_navigate_tool(&self, arguments: JsonObject) -> Result<CallToolResult, McpError> {
+        self.call_worker_registry_tool("skill_navigate", arguments)
+            .await
+    }
+
     fn context_from_request(
         &self,
         context: &RequestContext<RoleServer>,
