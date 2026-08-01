@@ -182,12 +182,51 @@ struct TextResource {
 }
 
 /// Kind of a navigable PageIndex node built for an eligible skill.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SkillNavNodeKind {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SkillNavNodeKind {
     Frontmatter,
     Document,
     Section,
     Resource,
+}
+
+impl SkillNavNodeKind {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Frontmatter => "frontmatter",
+            Self::Document => "document",
+            Self::Section => "section",
+            Self::Resource => "resource",
+        }
+    }
+}
+
+/// One PageIndex hit from `navigate` / `navigate_root` (metadata + lede only).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct NavigateHit {
+    pub skill_id: String,
+    pub node_id: String,
+    pub name: String,
+    pub node_kind: SkillNavNodeKind,
+    pub path: String,
+    pub heading: Option<String>,
+    pub heading_level: Option<u8>,
+    pub child_count: usize,
+    /// BM25 score for FTS hits; absent on pure tree-hop expansions.
+    pub score: Option<f64>,
+    pub lede: String,
+    pub source: String,
+    pub availability: Eligibility,
+    pub rank: usize,
+}
+
+/// Response envelope for skill PageIndex navigation.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct NavigateResponse {
+    pub catalog_revision: String,
+    pub hits: Vec<NavigateHit>,
 }
 
 /// In-memory PageIndex node for skill navigation (FTS + tree hop).
@@ -483,6 +522,189 @@ impl ServingCatalog {
         Ok(SearchResponse {
             catalog_revision: self.revision.clone(),
             results,
+        })
+    }
+
+    /// Full-text navigate over PageIndex nodes of eligible skills.
+    ///
+    /// Returns at most `limit` ranked hits (default/max 5) with metadata + lede
+    /// only — never full instruction bodies. Optional `source` filters like
+    /// [`Self::search`].
+    pub fn navigate(
+        &self,
+        query: &str,
+        limit: Option<usize>,
+        source: Option<&str>,
+    ) -> Result<NavigateResponse, ServingError> {
+        let limit = limit.unwrap_or(DEFAULT_SEARCH_LIMIT);
+        let query_tokens = tokenize(query);
+        if query.trim().is_empty()
+            || query_tokens.is_empty()
+            || !(1..=MAX_SEARCH_LIMIT).contains(&limit)
+        {
+            return Err(ServingError::new(
+                ServingErrorKind::InvalidQuery,
+                "query must be non-empty and limit must be between 1 and 5",
+            ));
+        }
+
+        let candidates: Vec<(usize, usize)> = self
+            .eligible_indices
+            .iter()
+            .copied()
+            .filter(|state_index| {
+                source.is_none_or(|source| self.states[*state_index].source == source)
+            })
+            .flat_map(|state_index| {
+                let state = &self.states[state_index];
+                (0..state.nodes.len()).map(move |node_index| (state_index, node_index))
+            })
+            .collect();
+
+        let documents: Vec<Vec<String>> = candidates
+            .iter()
+            .map(|(state_index, node_index)| {
+                self.states[*state_index].nodes[*node_index].tokens.clone()
+            })
+            .collect();
+        let scores = bm25_scores_for_docs(&documents, &query_tokens);
+        let query_set: BTreeSet<_> = query_tokens.iter().cloned().collect();
+
+        let mut ranked: Vec<(usize, usize, f64, usize)> = candidates
+            .into_iter()
+            .zip(scores)
+            .filter_map(|((state_index, node_index), score)| {
+                let node = &self.states[state_index].nodes[node_index];
+                let matched = query_set
+                    .iter()
+                    .filter(|token| node.tokens.iter().any(|candidate| candidate == *token))
+                    .count();
+                (matched > 0).then_some((state_index, node_index, score, matched))
+            })
+            .collect();
+
+        ranked.sort_by(|left, right| {
+            right
+                .2
+                .total_cmp(&left.2)
+                .then_with(|| right.3.cmp(&left.3))
+                .then_with(|| {
+                    identity_sort_key(&self.states[left.0].identity)
+                        .cmp(&identity_sort_key(&self.states[right.0].identity))
+                })
+                .then_with(|| {
+                    self.states[left.0].nodes[left.1]
+                        .node_id
+                        .cmp(&self.states[right.0].nodes[right.1].node_id)
+                })
+        });
+
+        let hits = ranked
+            .into_iter()
+            .take(limit)
+            .enumerate()
+            .map(|(offset, (state_index, node_index, score, _))| {
+                let state = &self.states[state_index];
+                let node = &state.nodes[node_index];
+                NavigateHit {
+                    skill_id: state.skill_id.clone(),
+                    node_id: node.node_id.clone(),
+                    name: state.name.clone(),
+                    node_kind: node.kind,
+                    path: node.path.clone(),
+                    heading: node.heading.clone(),
+                    heading_level: node.heading_level,
+                    child_count: node.child_count,
+                    score: Some(score),
+                    lede: node.lede.clone(),
+                    source: state.source.clone(),
+                    availability: state.eligibility,
+                    rank: offset + 1,
+                }
+            })
+            .collect();
+
+        Ok(NavigateResponse {
+            catalog_revision: self.revision.clone(),
+            hits,
+        })
+    }
+
+    /// One-hop tree expand from a skill root (`skill_id`) or node root
+    /// (`skill_id:node_id`). Children are ordered as built (document order /
+    /// path insertion). Optional `limit` caps the returned children (1–5).
+    pub fn navigate_root(
+        &self,
+        root: &str,
+        limit: Option<usize>,
+    ) -> Result<NavigateResponse, ServingError> {
+        let limit = limit.unwrap_or(DEFAULT_SEARCH_LIMIT);
+        if root.trim().is_empty() || !(1..=MAX_SEARCH_LIMIT).contains(&limit) {
+            return Err(ServingError::new(
+                ServingErrorKind::InvalidQuery,
+                "root must be non-empty and limit must be between 1 and 5",
+            ));
+        }
+
+        let (skill_id, node_id) = parse_navigate_root(root);
+        let state = self
+            .eligible_indices
+            .iter()
+            .copied()
+            .map(|index| &self.states[index])
+            .find(|state| state.skill_id == skill_id)
+            .ok_or_else(|| {
+                ServingError::new(
+                    ServingErrorKind::SkillNotFound,
+                    "navigate root does not match an eligible skill",
+                )
+            })?;
+
+        let children: Vec<&SkillNavNode> = match node_id {
+            None => state
+                .nodes
+                .iter()
+                .filter(|node| node.parent_node_id.is_none())
+                .collect(),
+            Some(target) => {
+                if !state.nodes.iter().any(|node| node.node_id == target) {
+                    return Err(ServingError::new(
+                        ServingErrorKind::SkillNotFound,
+                        "navigate root node is unknown for this skill",
+                    ));
+                }
+                state
+                    .nodes
+                    .iter()
+                    .filter(|node| node.parent_node_id.as_deref() == Some(target))
+                    .collect()
+            }
+        };
+
+        let hits = children
+            .into_iter()
+            .take(limit)
+            .enumerate()
+            .map(|(offset, node)| NavigateHit {
+                skill_id: state.skill_id.clone(),
+                node_id: node.node_id.clone(),
+                name: state.name.clone(),
+                node_kind: node.kind,
+                path: node.path.clone(),
+                heading: node.heading.clone(),
+                heading_level: node.heading_level,
+                child_count: node.child_count,
+                score: None,
+                lede: node.lede.clone(),
+                source: state.source.clone(),
+                availability: state.eligibility,
+                rank: offset + 1,
+            })
+            .collect();
+
+        Ok(NavigateResponse {
+            catalog_revision: self.revision.clone(),
+            hits,
         })
     }
 
@@ -1408,12 +1630,16 @@ fn tokenize(value: &str) -> Vec<String> {
 }
 
 fn bm25_scores(states: &[ServingState], candidates: &[usize], query_tokens: &[String]) -> Vec<f64> {
-    const K1: f64 = 1.2;
-    const B: f64 = 0.75;
     let documents: Vec<_> = candidates
         .iter()
         .map(|index| document_tokens(&states[*index]))
         .collect();
+    bm25_scores_for_docs(&documents, query_tokens)
+}
+
+fn bm25_scores_for_docs(documents: &[Vec<String>], query_tokens: &[String]) -> Vec<f64> {
+    const K1: f64 = 1.2;
+    const B: f64 = 0.75;
     let document_count = usize_as_f64(documents.len());
     let average_length = if documents.is_empty() {
         1.0
@@ -1453,6 +1679,20 @@ fn bm25_scores(states: &[ServingState], candidates: &[usize], query_tokens: &[St
                 .sum()
         })
         .collect()
+}
+
+/// Parse a navigate root handle.
+///
+/// - `skillref.v1…` alone expands the skill root
+/// - `skillref.v1…:node_id` expands one Contains hop under that node
+///
+/// `skill_id` never contains `:`, so the first colon cleanly separates the node id
+/// (which may itself include `#` or `/`).
+fn parse_navigate_root(root: &str) -> (&str, Option<&str>) {
+    match root.split_once(':') {
+        Some((skill_id, node_id)) => (skill_id, Some(node_id)),
+        None => (root, None),
+    }
 }
 
 fn usize_as_f64(value: usize) -> f64 {
@@ -1914,6 +2154,307 @@ mod tests {
             .iter()
             .any(|token| token == "yamlblockonlytoken"));
         assert!(!document.lede.contains("description:"));
+    }
+
+    #[test]
+    fn navigate_fts_hits_frontmatter_section_and_resource_vocabulary() {
+        let world = TestWorld::new();
+        let dir = world.bundled.path().join("nav-fts");
+        fs::create_dir_all(dir.join("references")).unwrap();
+        fs::write(
+            dir.join("SKILL.md"),
+            concat!(
+                "---\n",
+                "name: nav-fts\n",
+                "description: Use when applying rarefrontmattertoken in sessions\n",
+                "role: worker\n",
+                "---\n",
+                "# Navigation FTS\n",
+                "\n",
+                "Section body carries sectiononlytoken for heading search.\n",
+            ),
+        )
+        .unwrap();
+        fs::write(
+            dir.join("references/guide.md"),
+            "# Resource Guide\n\nBody carries resourcemdonlytoken for FTS.\n",
+        )
+        .unwrap();
+
+        let catalog = world.load();
+
+        let frontmatter = catalog
+            .navigate("rarefrontmattertoken", None, None)
+            .expect("frontmatter FTS");
+        assert_eq!(frontmatter.hits.len(), 1);
+        assert_eq!(frontmatter.hits[0].name, "nav-fts");
+        assert_eq!(frontmatter.hits[0].node_kind, SkillNavNodeKind::Frontmatter);
+        assert!(frontmatter.hits[0].lede.contains("rarefrontmattertoken"));
+        assert!(
+            frontmatter.hits[0].lede.chars().count() <= super::LEDE_CHARS,
+            "lede must stay within LEDE_CHARS"
+        );
+        assert!(
+            !frontmatter.hits[0].lede.contains("sectiononlytoken"),
+            "frontmatter lede must not include section body text"
+        );
+        assert!(frontmatter.hits[0].score.is_some());
+
+        let section = catalog
+            .navigate("sectiononlytoken", None, None)
+            .expect("section FTS");
+        assert!(
+            section
+                .hits
+                .iter()
+                .any(|hit| hit.node_kind == SkillNavNodeKind::Section
+                    && hit.heading.as_deref() == Some("Navigation FTS")),
+            "section body vocabulary must surface a section hit: {:?}",
+            section.hits
+        );
+        let section_hit = section
+            .hits
+            .iter()
+            .find(|hit| hit.node_kind == SkillNavNodeKind::Section)
+            .unwrap();
+        assert!(section_hit.lede.contains("sectiononlytoken"));
+        assert!(!section_hit.lede.contains("rarefrontmattertoken"));
+
+        let resource = catalog
+            .navigate("resourcemdonlytoken", None, None)
+            .expect("resource FTS");
+        assert!(
+            resource.hits.iter().any(|hit| {
+                hit.path == "references/guide.md" && hit.lede.contains("resourcemdonlytoken")
+            }),
+            "approved resource body must be searchable: {:?}",
+            resource.hits
+        );
+        for hit in resource.hits.iter().chain(section.hits.iter()) {
+            assert!(hit.lede.chars().count() <= super::LEDE_CHARS);
+            assert!(!hit.lede.contains("#!/bin/sh"));
+        }
+    }
+
+    #[test]
+    fn navigate_rejects_empty_query_and_out_of_range_limit() {
+        let world = TestWorld::new();
+        world.bundled_skill("nav-limit", "navigation limit workflow");
+        let catalog = world.load();
+
+        assert_eq!(
+            catalog.navigate("   ", None, None).unwrap_err().kind(),
+            ServingErrorKind::InvalidQuery
+        );
+        assert_eq!(
+            catalog
+                .navigate("navigation", Some(0), None)
+                .unwrap_err()
+                .kind(),
+            ServingErrorKind::InvalidQuery
+        );
+        assert_eq!(
+            catalog
+                .navigate("navigation", Some(6), None)
+                .unwrap_err()
+                .kind(),
+            ServingErrorKind::InvalidQuery
+        );
+        assert_eq!(
+            catalog
+                .navigate("navigation", Some(5), None)
+                .unwrap()
+                .hits
+                .len()
+                .min(5),
+            catalog
+                .navigate("navigation", None, None)
+                .unwrap()
+                .hits
+                .len()
+                .min(5)
+        );
+    }
+
+    #[test]
+    fn navigate_source_filter_matches_search_eligibility() {
+        let world = TestWorld::new();
+        world.bundled_skill("bundled-nav", "sharednavtoken bundled navigation");
+        world.pool_skill(
+            Layer::Local,
+            "external-nav",
+            "acme/skills",
+            &"a".repeat(40),
+            "sharednavtoken external navigation",
+            Some("clean"),
+        );
+        world.pool_skill(
+            Layer::Local,
+            "flagged-nav",
+            "acme/skills",
+            &"b".repeat(40),
+            "sharednavtoken flagged navigation",
+            Some("flagged"),
+        );
+
+        let catalog = world.load();
+        let all = catalog.navigate("sharednavtoken", None, None).unwrap();
+        assert!(all.hits.iter().any(|hit| hit.name == "bundled-nav"));
+        assert!(all.hits.iter().any(|hit| hit.name == "external-nav"));
+        assert!(!all.hits.iter().any(|hit| hit.name == "flagged-nav"));
+
+        let filtered = catalog
+            .navigate("sharednavtoken", None, Some("acme/skills"))
+            .unwrap();
+        assert!(
+            filtered.hits.iter().all(|hit| hit.source == "acme/skills"),
+            "source filter must match skill_search semantics: {:?}",
+            filtered.hits
+        );
+        assert!(filtered.hits.iter().any(|hit| hit.name == "external-nav"));
+        assert!(!filtered.hits.iter().any(|hit| hit.name == "bundled-nav"));
+    }
+
+    #[test]
+    fn navigate_root_lists_skill_children_and_document_headings() {
+        let world = TestWorld::new();
+        let dir = world.bundled.path().join("nav-tree");
+        fs::create_dir_all(dir.join("references")).unwrap();
+        fs::write(
+            dir.join("SKILL.md"),
+            concat!(
+                "---\n",
+                "name: nav-tree\n",
+                "description: tree hop navigation skill\n",
+                "---\n",
+                "# Root Heading\n",
+                "\n",
+                "Intro for root.\n",
+                "\n",
+                "## Nested Heading\n",
+                "\n",
+                "Nested body.\n",
+            ),
+        )
+        .unwrap();
+        fs::write(
+            dir.join("references/guide.md"),
+            "# Guide\n\nResource body.\n",
+        )
+        .unwrap();
+
+        let catalog = world.load();
+        let skill_id = catalog
+            .states
+            .iter()
+            .find(|state| state.name == "nav-tree")
+            .expect("nav-tree")
+            .skill_id
+            .clone();
+
+        let root_hits = catalog
+            .navigate_root(&skill_id, None)
+            .expect("skill root hop");
+        let kinds: Vec<_> = root_hits
+            .hits
+            .iter()
+            .map(|hit| (hit.node_kind, hit.path.as_str(), hit.node_id.as_str()))
+            .collect();
+        assert!(
+            kinds.iter().any(|(kind, path, _)| {
+                *kind == SkillNavNodeKind::Frontmatter && *path == "SKILL.md"
+            }),
+            "skill root should include frontmatter: {kinds:?}"
+        );
+        assert!(
+            kinds
+                .iter()
+                .any(|(kind, path, id)| *kind == SkillNavNodeKind::Document
+                    && *path == "SKILL.md"
+                    && *id == "SKILL.md"),
+            "skill root should include SKILL.md document: {kinds:?}"
+        );
+        assert!(
+            kinds.iter().any(|(kind, path, _)| {
+                *kind == SkillNavNodeKind::Resource && *path == "references/guide.md"
+            }),
+            "skill root should include approved resources: {kinds:?}"
+        );
+        assert!(
+            !kinds
+                .iter()
+                .any(|(kind, _, _)| *kind == SkillNavNodeKind::Section),
+            "skill root hop is one level — no section dump: {kinds:?}"
+        );
+        for hit in &root_hits.hits {
+            assert!(hit.score.is_none(), "tree hop hits have no FTS score");
+            assert!(hit.lede.chars().count() <= super::LEDE_CHARS);
+        }
+
+        let doc_root = format!("{skill_id}:SKILL.md");
+        let doc_children = catalog
+            .navigate_root(&doc_root, None)
+            .expect("document hop");
+        assert!(
+            doc_children
+                .hits
+                .iter()
+                .any(|hit| hit.heading.as_deref() == Some("Root Heading")),
+            "document hop returns top-level headings: {:?}",
+            doc_children.hits
+        );
+        assert!(
+            !doc_children
+                .hits
+                .iter()
+                .any(|hit| hit.heading.as_deref() == Some("Nested Heading")),
+            "one hop must not flatten nested headings: {:?}",
+            doc_children.hits
+        );
+
+        let root_heading_id = doc_children
+            .hits
+            .iter()
+            .find(|hit| hit.heading.as_deref() == Some("Root Heading"))
+            .map(|hit| hit.node_id.clone())
+            .expect("root heading node");
+        let nested = catalog
+            .navigate_root(&format!("{skill_id}:{root_heading_id}"), None)
+            .expect("section hop");
+        assert!(
+            nested
+                .hits
+                .iter()
+                .any(|hit| hit.heading.as_deref() == Some("Nested Heading")),
+            "section hop returns nested heading children: {:?}",
+            nested.hits
+        );
+
+        assert_eq!(
+            catalog
+                .navigate_root("skillref.v1.deadbeef.deadbeef", None)
+                .unwrap_err()
+                .kind(),
+            ServingErrorKind::SkillNotFound
+        );
+        assert_eq!(
+            catalog
+                .navigate_root(&format!("{skill_id}:missing-node"), None)
+                .unwrap_err()
+                .kind(),
+            ServingErrorKind::SkillNotFound
+        );
+        assert_eq!(
+            catalog.navigate_root("", None).unwrap_err().kind(),
+            ServingErrorKind::InvalidQuery
+        );
+        assert_eq!(
+            catalog
+                .navigate_root(&skill_id, Some(0))
+                .unwrap_err()
+                .kind(),
+            ServingErrorKind::InvalidQuery
+        );
     }
 
     #[test]
