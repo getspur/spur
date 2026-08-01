@@ -354,7 +354,7 @@ fn tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: SKILL_READ.to_owned(),
-            description: "Read exact verified UTF-8 text for a currently eligible skill reference returned by skill_search. Omit resource for SKILL.md; reads are reauthorized and never materialized into the worker filesystem."
+            description: "Read exact verified UTF-8 text for a currently eligible skill reference returned by skill_navigate or skill_search. Omit resource for SKILL.md; reads are reauthorized and never materialized into the worker filesystem."
                 .to_owned(),
             input_schema: skill_read_schema(),
         },

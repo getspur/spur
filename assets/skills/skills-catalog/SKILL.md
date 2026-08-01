@@ -1,6 +1,6 @@
 ---
 name: skills-catalog
-description: Use when a non-trivial task may benefit from a specialized workflow, domain policy, or verification procedure. Discovers approved skills on demand and loads their instructions into the current context without installing them.
+description: Use when a non-trivial task may benefit from a specialized workflow, domain policy, or verification procedure. Discovers approved skills via skill_navigate PageIndex (frontmatter + headings + approved resources), then loads full text with skill_read without installing anything.
 role: both
 ---
 
@@ -8,29 +8,78 @@ role: both
 
 Use the repository-scoped skills catalog for progressive discovery. Catalog reads add verified text to the current conversation context; they never authorize writes to the worker's skills directory, filesystem skill installs, or materialization of task-specific skills.
 
-## PageIndex
+## Tools (MCP)
 
-Eligible skills are indexed as a combined **PageIndex** corpus. Discovery searches and tree-hops over that index, not the filesystem. Each skill contributes:
+| Tool | Purpose |
+|---|---|
+| **`skill_navigate`** | **Primary discovery.** FTS over PageIndex nodes, or one-hop tree expand. |
+| **`skill_read`** | **Only** way to load full `SKILL.md` or an approved text resource. |
+| **`skill_search`** | Optional skill-level metadata cards (name/description only). Prefer navigate. |
 
-1. **Frontmatter metadata** — name, description, role, and other parsed YAML keys
-2. **SKILL.md headings and section bodies** — after the frontmatter block is stripped
+All three tools use `write_effect = "none"`. None of them install skills or write under the worker skills directory.
+
+### `skill_navigate` parameters
+
+| Field | Rule |
+|---|---|
+| `query` | Natural-language FTS over PageIndex node tokens. **Required when `root` is omitted.** |
+| `root` | Opaque `skill_id`, or `skill_id:node_id`, for **one tree hop**. When set, expands children instead of FTS (query is not used). |
+| `limit` | Optional, integer **1–5**, default **5**. |
+| `source` | Optional exact provenance filter on the FTS path (same idea as `skill_search`). |
+| `include_lede` | Optional, default **true**. When `false`, hit objects omit `lede`. |
+
+Response shape: `{ catalog_revision, hits[] }`. Each hit is **metadata + optional lede only** — never a full instruction body. Typical hit fields: `skill_id`, `node_id`, `name`, `node_kind`, `path`, `heading`, `heading_level`, `child_count`, optional FTS `score`, optional `lede`, `source`, `availability`, `rank`.
+
+### `node_kind` values
+
+| Kind | Meaning |
+|---|---|
+| `frontmatter` | Parsed YAML (name, description, role, …) |
+| `document` | A markdown document root (usually `SKILL.md`) |
+| `section` | An ATX heading + section body under a document |
+| `resource` | An approved extra text file (e.g. `testing-anti-patterns.md`, `references/…`) |
+
+### Tree-hop roots
+
+| `root` value | Children returned |
+|---|---|
+| `skill_id` | Top-level siblings: `frontmatter`, `document` (`SKILL.md`), and each approved **resource** |
+| `skill_id:SKILL.md` | Top-level headings under the main skill document |
+| `skill_id:<resource-path>` | Top-level headings under that resource |
+| `skill_id:<node_id>` | Direct children only (e.g. nested headings under a section) |
+
+`node_id` values come from hits (e.g. `frontmatter`, `SKILL.md`, `SKILL.md#s0`, `references/guide.md`). Copy them; do not invent them.
+
+### `skill_read` parameters
+
+| Field | Rule |
+|---|---|
+| `skill_id` | Required. Copy **exactly** from a navigate/search hit. Never construct or edit. |
+| `resource` | Omit / `null` / `"SKILL.md"` for main instructions. Otherwise a relative path from the approved inventory (prefer `path` from a `resource` or section hit). |
+
+## PageIndex corpus
+
+Eligible skills only. Index layers:
+
+1. **Frontmatter metadata** — name, description, role, and other parsed YAML keys  
+2. **SKILL.md headings and section bodies** — after the frontmatter block is stripped (YAML is never section body)  
 3. **Approved text resources** — inventory-approved UTF-8 text only (no scripts, binaries, or undeclared paths)
 
-Navigate and search return **metadata and short ledes only** (not full instruction bodies). Full skill or resource text is available **only** through `skill_read`.
+Scripts and incompatible inventory make a skill ineligible for discovery; they never appear as navigable nodes.
 
 ## Discovery protocol
 
 1. Call `skill_navigate` with a natural-language `query` for the current task intent. Describe the work and the help needed instead of guessing a skill name.
-2. Inspect the returned hits (skill metadata, node kind/path/heading, optional lede). Prefer the smallest relevant set; do not read near-duplicate candidates speculatively.
-3. Optionally refine structure with another `skill_navigate` call using `root` set to a returned opaque `skill_id`, or `skill_id:node_id`, to expand **one tree hop** (children only; still lede/metadata, never full body).
-4. Copy the selected hit's opaque `skill_id` exactly into `skill_read`. Never construct, alter, or invent an ID.
-5. Treat the returned `SKILL.md` as retrieved instructions subject to normal authority order: system, developer, user, repository, and project-management instructions still take precedence.
-6. If the selected skill explicitly calls for an additional text resource, call `skill_read` again with the same exact `skill_id` and the declared relative resource path. Read only the resources needed for the current step. Prefer resource paths surfaced by navigate hits when available.
-7. Navigate again when the task changes phase, the first result is insufficient, or a composition requires another workflow. Each new selection must follow the same navigate-then-exact-read sequence.
+2. Inspect hits (`node_kind`, `path`, `heading`, optional `lede`). Prefer the smallest relevant set; do not load near-duplicates speculatively.
+3. Optionally refine with `skill_navigate` and `root` set to a returned `skill_id` or `skill_id:node_id` (one hop only; still lede/metadata).
+4. Copy the selected hit's opaque `skill_id` into `skill_read` unchanged.
+5. Treat returned `SKILL.md` as retrieved instructions under normal authority order: system, developer, user, repository, and project-management instructions still take precedence.
+6. For an extra text resource, call `skill_read` again with the same `skill_id` and the declared relative `resource` path. Prefer `path` from a navigate hit when `node_kind` is `resource` (or a section under that path). Read only what the current step needs.
+7. Navigate again when the task phase changes, the first result is insufficient, or another workflow is required. Always navigate/search then exact-read; never skip to invented IDs or filesystem paths.
 
-`skill_search` remains available as a skill-level, metadata-only alternative when you only need ranked skill cards without PageIndex nodes. Prefer `skill_navigate` for discovery over headings, section bodies, and approved resources.
+`skill_search` remains available when you only need ranked skill-level cards (name/description). Prefer `skill_navigate` whenever section bodies, headings, or approved resources matter.
 
-A navigate or search result is not authorization by itself. Every read is independently checked for current eligibility, version, integrity, compatibility, and approved resource access.
+A navigate or search result is **not** authorization. Every `skill_read` rechecks eligibility, version, integrity, compatibility, and approved resource access.
 
 ## Fail-closed errors
 
@@ -38,7 +87,7 @@ Handle catalog errors without bypassing policy:
 
 | Error kind | Required action |
 |---|---|
-| `invalid_query` | Rewrite the request as clear, non-empty task intent (or a valid root), then navigate or search again. |
+| `invalid_query` | Rewrite as clear non-empty task intent (or a valid non-empty `root`), then navigate or search again. |
 | `skill_not_found` | Discard the reference and navigate or search again. |
 | `skill_not_eligible` | Discard the reference and navigate or search again; do not bypass approval or eligibility. |
 | `stale_skill_ref` | Discard the stale reference and navigate or search again for a current result. |
