@@ -9,6 +9,9 @@ use std::path::{Component, Path, PathBuf};
 /// Agent text content size policy, solved by `sol_ece03f4a166e4004`.
 pub const MAX_TEXT_CONTENT_BYTES: usize = 262_144;
 
+/// Lede length for PageIndex skill nodes (matches `doc_navigate`).
+const LEDE_CHARS: usize = 200;
+
 /// Default and maximum result count from the approved API contract.
 pub const DEFAULT_SEARCH_LIMIT: usize = 5;
 pub const MAX_SEARCH_LIMIT: usize = 5;
@@ -178,6 +181,33 @@ struct TextResource {
     sha256: String,
 }
 
+/// Kind of a navigable PageIndex node built for an eligible skill.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SkillNavNodeKind {
+    Frontmatter,
+    Document,
+    Section,
+    Resource,
+}
+
+/// In-memory PageIndex node for skill navigation (FTS + tree hop).
+///
+/// Built only for eligible skills from frontmatter metadata, SKILL.md
+/// headings/section bodies (post-frontmatter strip), and approved text resources.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SkillNavNode {
+    skill_id: String,
+    node_id: String,
+    kind: SkillNavNodeKind,
+    path: String,
+    heading: Option<String>,
+    heading_level: Option<u8>,
+    parent_node_id: Option<String>,
+    child_count: usize,
+    lede: String,
+    tokens: Vec<String>,
+}
+
 #[derive(Debug, Clone)]
 struct ServingState {
     identity: VersionIdentity,
@@ -190,6 +220,8 @@ struct ServingState {
     main: Option<TextResource>,
     resources: BTreeMap<String, TextResource>,
     resource_manifest_sha256: String,
+    /// PageIndex nodes for eligible skills; empty when ineligible.
+    nodes: Vec<SkillNavNode>,
     input: EligibilityInput,
     eligibility: Eligibility,
     compatibility: ContextCompatibility,
@@ -334,7 +366,12 @@ impl ServingCatalog {
             insert_preferred_state(&mut by_identity, state);
         }
 
-        let states: Vec<_> = by_identity.into_values().collect();
+        let mut states: Vec<_> = by_identity.into_values().collect();
+        for state in &mut states {
+            if state.eligibility == Eligibility::Eligible {
+                state.nodes = build_skill_pageindex(state);
+            }
+        }
         let eligible_indices = choose_eligible_indices(&states);
         let revision = catalog_revision(&states, &eligible_indices)?;
         Ok(Self {
@@ -683,6 +720,7 @@ fn build_state(
         main: scan.main,
         resources: scan.resources,
         resource_manifest_sha256: scan.resource_manifest_sha256,
+        nodes: Vec::new(),
         input,
         eligibility: evaluate_eligibility(input),
         compatibility,
@@ -1092,6 +1130,275 @@ fn document_tokens(state: &ServingState) -> Vec<String> {
     tokens
 }
 
+/// Build the combined PageIndex corpus for one eligible skill.
+///
+/// Layers: (1) YAML frontmatter via `parse_source`, (2) SKILL.md body
+/// headings/sections after frontmatter strip, (3) inventory-approved text resources.
+fn build_skill_pageindex(state: &ServingState) -> Vec<SkillNavNode> {
+    let Some(main) = state.main.as_ref() else {
+        return Vec::new();
+    };
+    let Ok(raw) = read_verified_text(&state.source_dir, main) else {
+        return Vec::new();
+    };
+    let parsed = crate::skills::frontmatter::parse_source(&raw);
+    let mut nodes = Vec::new();
+
+    push_frontmatter_node(&mut nodes, state, &parsed);
+    push_markdown_document(
+        &mut nodes,
+        &state.skill_id,
+        "SKILL.md",
+        parsed.body,
+        &state.name,
+        SkillNavNodeKind::Document,
+    );
+
+    for (path, resource) in &state.resources {
+        let Ok(content) = read_verified_text(&state.source_dir, resource) else {
+            continue;
+        };
+        if is_markdown_media(&resource.media_type, path) {
+            // Markdown resources get a Resource root + optional section children.
+            push_markdown_document(
+                &mut nodes,
+                &state.skill_id,
+                path,
+                &content,
+                &state.name,
+                SkillNavNodeKind::Resource,
+            );
+            continue;
+        }
+        let stem = path_file_stem(path);
+        let search_text = format!("{} {} {} {}", path, stem, state.name, content);
+        nodes.push(SkillNavNode {
+            skill_id: state.skill_id.clone(),
+            node_id: path.clone(),
+            kind: SkillNavNodeKind::Resource,
+            path: path.clone(),
+            heading: None,
+            heading_level: None,
+            parent_node_id: None,
+            child_count: 0,
+            lede: lede_text(&search_text),
+            tokens: tokenize(&search_text),
+        });
+    }
+
+    fill_child_counts(&mut nodes);
+    nodes
+}
+
+fn push_frontmatter_node(
+    nodes: &mut Vec<SkillNavNode>,
+    state: &ServingState,
+    parsed: &crate::skills::frontmatter::ParsedSource<'_>,
+) {
+    let mut parts = Vec::new();
+    let name = parsed
+        .name
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(state.name.as_str());
+    parts.push(name);
+    if let Some(description) = parsed
+        .description
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        parts.push(description);
+    } else if !state.description.is_empty() {
+        parts.push(state.description.as_str());
+    }
+    if let Some(role) = parsed.role {
+        parts.push(skill_role_token(role));
+    }
+    let search_text = parts.join(" ");
+    nodes.push(SkillNavNode {
+        skill_id: state.skill_id.clone(),
+        node_id: "frontmatter".to_string(),
+        kind: SkillNavNodeKind::Frontmatter,
+        path: "SKILL.md".to_string(),
+        heading: None,
+        heading_level: None,
+        parent_node_id: None,
+        child_count: 0,
+        lede: lede_text(&search_text),
+        tokens: tokenize(&search_text),
+    });
+}
+
+fn push_markdown_document(
+    nodes: &mut Vec<SkillNavNode>,
+    skill_id: &str,
+    path: &str,
+    body: &str,
+    skill_name: &str,
+    root_kind: SkillNavNodeKind,
+) {
+    let headings = collect_atx_headings(body);
+    let stem = path_file_stem(path);
+    let preamble = headings
+        .first()
+        .map(|heading| &body[..heading.line_start])
+        .unwrap_or(body);
+    let document_search = if headings.is_empty() {
+        format!("{path} {stem} {skill_name} {body}")
+    } else {
+        format!("{path} {stem} {skill_name} {preamble}")
+    };
+    let document_node_id = path.to_string();
+    nodes.push(SkillNavNode {
+        skill_id: skill_id.to_string(),
+        node_id: document_node_id.clone(),
+        kind: root_kind,
+        path: path.to_string(),
+        heading: None,
+        heading_level: None,
+        parent_node_id: None,
+        child_count: 0,
+        lede: lede_text(&document_search),
+        tokens: tokenize(&document_search),
+    });
+
+    // Stack of (heading_level, node_id) for parent linkage.
+    let mut stack: Vec<(u8, String)> = Vec::new();
+    for (index, heading) in headings.iter().enumerate() {
+        while stack
+            .last()
+            .is_some_and(|(level, _)| *level >= heading.level)
+        {
+            stack.pop();
+        }
+        let parent_node_id = stack
+            .last()
+            .map(|(_, node_id)| node_id.clone())
+            .unwrap_or_else(|| document_node_id.clone());
+        let content_end = headings
+            .get(index + 1)
+            .map(|next| next.line_start)
+            .unwrap_or(body.len());
+        let section_body = body.get(heading.content_start..content_end).unwrap_or("");
+        let search_text = format!("{skill_name} {} {section_body}", heading.title);
+        let node_id = format!("{path}#s{index}");
+        nodes.push(SkillNavNode {
+            skill_id: skill_id.to_string(),
+            node_id: node_id.clone(),
+            kind: SkillNavNodeKind::Section,
+            path: path.to_string(),
+            heading: Some(heading.title.clone()),
+            heading_level: Some(heading.level),
+            parent_node_id: Some(parent_node_id),
+            child_count: 0,
+            lede: lede_text(&search_text),
+            tokens: tokenize(&search_text),
+        });
+        stack.push((heading.level, node_id));
+    }
+}
+
+#[derive(Debug)]
+struct AtxHeading {
+    level: u8,
+    title: String,
+    line_start: usize,
+    content_start: usize,
+}
+
+fn collect_atx_headings(body: &str) -> Vec<AtxHeading> {
+    let mut headings = Vec::new();
+    let mut in_fence = false;
+    let mut offset = 0;
+    for line in body.split_inclusive('\n') {
+        let line_start = offset;
+        offset += line.len();
+        let trimmed = line.trim_end_matches(['\n', '\r']);
+        let fence_marker = trimmed
+            .trim_start()
+            .strip_prefix("```")
+            .or_else(|| trimmed.trim_start().strip_prefix("~~~"));
+        if fence_marker.is_some() {
+            in_fence = !in_fence;
+            continue;
+        }
+        if in_fence {
+            continue;
+        }
+        if let Some((level, title)) = parse_atx_heading_line(trimmed) {
+            headings.push(AtxHeading {
+                level,
+                title,
+                line_start,
+                content_start: offset,
+            });
+        }
+    }
+    headings
+}
+
+fn parse_atx_heading_line(line: &str) -> Option<(u8, String)> {
+    let bytes = line.as_bytes();
+    let mut hash_count = 0_usize;
+    while hash_count < bytes.len() && bytes[hash_count] == b'#' {
+        hash_count += 1;
+    }
+    if hash_count == 0 || hash_count > 6 {
+        return None;
+    }
+    if hash_count < bytes.len() && bytes[hash_count] != b' ' && bytes[hash_count] != b'\t' {
+        return None;
+    }
+    let title = line[hash_count..]
+        .trim()
+        .trim_end_matches(|ch: char| ch == '#' || ch.is_whitespace())
+        .trim()
+        .to_string();
+    if title.is_empty() {
+        return None;
+    }
+    Some((u8::try_from(hash_count).unwrap_or(6), title))
+}
+
+fn fill_child_counts(nodes: &mut [SkillNavNode]) {
+    let mut counts = BTreeMap::<String, usize>::new();
+    for node in nodes.iter() {
+        if let Some(parent) = &node.parent_node_id {
+            *counts.entry(parent.clone()).or_default() += 1;
+        }
+    }
+    for node in nodes.iter_mut() {
+        node.child_count = counts.get(&node.node_id).copied().unwrap_or(0);
+    }
+}
+
+fn lede_text(value: &str) -> String {
+    value.chars().take(LEDE_CHARS).collect()
+}
+
+fn path_file_stem(path: &str) -> &str {
+    Path::new(path)
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or(path)
+}
+
+fn is_markdown_media(media_type: &str, path: &str) -> bool {
+    media_type == "text/markdown"
+        || path.ends_with(".md")
+        || path.ends_with(".markdown")
+        || path.ends_with(".MD")
+}
+
+fn skill_role_token(role: crate::skills::SkillRole) -> &'static str {
+    match role {
+        crate::skills::SkillRole::Brain => "brain",
+        crate::skills::SkillRole::Worker => "worker",
+        crate::skills::SkillRole::Both => "both",
+    }
+}
+
 fn tokenize(value: &str) -> Vec<String> {
     value
         .split(|character: char| !character.is_alphanumeric())
@@ -1193,7 +1500,8 @@ fn decode_skill_ref(skill_id: &str) -> Option<SkillReference> {
 mod tests {
     use super::{
         decode_skill_ref, evaluate_eligibility, ContextCompatibility, Eligibility,
-        EligibilityInput, ServingCatalog, ServingErrorKind, MAX_TEXT_CONTENT_BYTES,
+        EligibilityInput, ServingCatalog, ServingErrorKind, SkillNavNodeKind,
+        MAX_TEXT_CONTENT_BYTES,
     };
     use crate::explore::catalog::{Catalog, CatalogEntry, ItemKind};
     use crate::explore::pool::{GateRecord, Manifest, ManifestItem};
@@ -1378,6 +1686,234 @@ mod tests {
             });
             self.save_manifest(layer, &manifest);
         }
+    }
+
+    #[test]
+    fn pageindex_indexes_frontmatter_tokens_including_folded_description() {
+        let world = TestWorld::new();
+        let dir = world.bundled.path().join("folded-skill");
+        fs::create_dir_all(&dir).unwrap();
+        // Avoid `\` line-continuations: they strip indentation required by folded YAML.
+        fs::write(
+            dir.join("SKILL.md"),
+            concat!(
+                "---\n",
+                "name: folded-skill\n",
+                "description: >\n",
+                "  Use when hunting rarefrontmattertoken across sessions.\n",
+                "  Keeps implementation honest.\n",
+                "role: worker\n",
+                "---\n",
+                "# Folded Skill\n",
+                "\n",
+                "Section body carries sectiononlytoken for navigation.\n",
+            ),
+        )
+        .unwrap();
+
+        let catalog = world.load();
+        let state = catalog
+            .states
+            .iter()
+            .find(|state| state.name == "folded-skill")
+            .expect("eligible skill state");
+        assert_eq!(state.eligibility, Eligibility::Eligible);
+        assert!(!state.nodes.is_empty());
+
+        let frontmatter = state
+            .nodes
+            .iter()
+            .find(|node| node.kind == SkillNavNodeKind::Frontmatter)
+            .expect("frontmatter node");
+        assert!(
+            frontmatter
+                .tokens
+                .iter()
+                .any(|token| token == "rarefrontmattertoken"),
+            "folded description must contribute frontmatter tokens: {:?}",
+            frontmatter.tokens
+        );
+        assert!(
+            frontmatter.tokens.iter().any(|token| token == "worker"),
+            "role must contribute frontmatter tokens: {:?}",
+            frontmatter.tokens
+        );
+        assert!(
+            frontmatter.lede.contains("rarefrontmattertoken"),
+            "lede should surface frontmatter text: {}",
+            frontmatter.lede
+        );
+
+        let section = state
+            .nodes
+            .iter()
+            .find(|node| node.kind == SkillNavNodeKind::Section)
+            .expect("section node");
+        assert!(
+            section
+                .tokens
+                .iter()
+                .any(|token| token == "sectiononlytoken"),
+            "section tokens must include body: {:?}",
+            section.tokens
+        );
+        assert!(
+            !section
+                .tokens
+                .iter()
+                .any(|token| token == "rarefrontmattertoken"),
+            "section tokens must not include frontmatter-only description: {:?}",
+            section.tokens
+        );
+        assert!(
+            !section.tokens.iter().any(|token| token == "description"),
+            "section body must not index the YAML frontmatter block: {:?}",
+            section.tokens
+        );
+        assert_eq!(section.heading.as_deref(), Some("Folded Skill"));
+        assert_eq!(section.heading_level, Some(1));
+        assert_eq!(section.parent_node_id.as_deref(), Some("SKILL.md"));
+        assert!(section.lede.chars().count() <= super::LEDE_CHARS);
+    }
+
+    #[test]
+    fn pageindex_indexes_approved_markdown_resources_and_excludes_scripts() {
+        let world = TestWorld::new();
+        let dir = world.bundled_skill("resource-nav", "resource navigation workflow");
+        fs::create_dir_all(dir.join("references")).unwrap();
+        fs::write(
+            dir.join("references/guide.md"),
+            "# Resource Guide\n\nBody carries resourcemdonlytoken for FTS.\n",
+        )
+        .unwrap();
+        // scripts would make the skill ineligible under inventory rules; model that
+        // path as denied so PageIndex never indexes script content.
+        let scripted = world.bundled_skill("scripted-nav", "scripted navigation workflow");
+        fs::create_dir_all(scripted.join("scripts")).unwrap();
+        fs::write(
+            scripted.join("scripts/run.sh"),
+            "#!/bin/sh\necho scriptonlytoken\n",
+        )
+        .unwrap();
+
+        let catalog = world.load();
+
+        let resource_state = catalog
+            .states
+            .iter()
+            .find(|state| state.name == "resource-nav")
+            .expect("resource skill");
+        assert_eq!(resource_state.eligibility, Eligibility::Eligible);
+        let resource_node = resource_state
+            .nodes
+            .iter()
+            .find(|node| {
+                node.kind == SkillNavNodeKind::Resource && node.path == "references/guide.md"
+            })
+            .expect("resource document node");
+        assert_eq!(resource_node.node_id, "references/guide.md");
+        let resource_section = resource_state
+            .nodes
+            .iter()
+            .find(|node| {
+                node.kind == SkillNavNodeKind::Section && node.path == "references/guide.md"
+            })
+            .expect("resource section");
+        assert!(
+            resource_section
+                .tokens
+                .iter()
+                .any(|token| token == "resourcemdonlytoken"),
+            "approved .md resource body must be indexed: {:?}",
+            resource_section.tokens
+        );
+        assert!(
+            resource_state
+                .nodes
+                .iter()
+                .any(|node| node.kind == SkillNavNodeKind::Frontmatter),
+            "eligible skills still get a frontmatter node"
+        );
+
+        let scripted_state = catalog
+            .states
+            .iter()
+            .find(|state| state.name == "scripted-nav")
+            .expect("scripted skill state");
+        assert_eq!(
+            scripted_state.compatibility,
+            ContextCompatibility::RequiresScripts
+        );
+        assert_eq!(scripted_state.eligibility, Eligibility::Ineligible);
+        assert!(
+            scripted_state.nodes.is_empty(),
+            "ineligible scripted skills must not build a PageIndex"
+        );
+        assert!(
+            !scripted_state
+                .nodes
+                .iter()
+                .any(|node| node.tokens.iter().any(|token| token == "scriptonlytoken")),
+            "script content must never be indexed"
+        );
+    }
+
+    #[test]
+    fn pageindex_section_search_text_excludes_yaml_frontmatter_block() {
+        let world = TestWorld::new();
+        let dir = world.bundled.path().join("guard-skill");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("SKILL.md"),
+            concat!(
+                "---\n",
+                "name: guard-skill\n",
+                "description: yamlblockonlytoken lives only in frontmatter\n",
+                "---\n",
+                "# After Frontmatter\n",
+                "\n",
+                "Body uses bodyonlytoken and must not re-index the YAML fence.\n",
+            ),
+        )
+        .unwrap();
+
+        let catalog = world.load();
+        let state = catalog
+            .states
+            .iter()
+            .find(|state| state.name == "guard-skill")
+            .expect("guard-skill skill");
+        let frontmatter = state
+            .nodes
+            .iter()
+            .find(|node| node.kind == SkillNavNodeKind::Frontmatter)
+            .expect("frontmatter");
+        assert!(frontmatter
+            .tokens
+            .iter()
+            .any(|token| token == "yamlblockonlytoken"));
+        let section = state
+            .nodes
+            .iter()
+            .find(|node| node.kind == SkillNavNodeKind::Section)
+            .expect("section");
+        assert!(section.tokens.iter().any(|token| token == "bodyonlytoken"));
+        assert!(!section
+            .tokens
+            .iter()
+            .any(|token| token == "yamlblockonlytoken"));
+        assert!(!section.lede.contains("---"));
+        assert!(!section.lede.contains("description:"));
+        let document = state
+            .nodes
+            .iter()
+            .find(|node| node.kind == SkillNavNodeKind::Document)
+            .expect("document node");
+        assert!(!document
+            .tokens
+            .iter()
+            .any(|token| token == "yamlblockonlytoken"));
+        assert!(!document.lede.contains("description:"));
     }
 
     #[test]
