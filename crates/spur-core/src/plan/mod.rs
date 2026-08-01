@@ -1736,9 +1736,10 @@ pub fn submit_plan_normalize_tasks(
     validate_plan(tasks)?;
     let overlaps = find_sibling_overlaps(tasks);
     apply_sibling_overlaps(tasks, &overlaps);
-    // Re-validate after mutation. Synthetic edges should never introduce a
-    // cycle (lex-ordered pairs are acyclic by construction), but a future
-    // refactor could break this — fail loudly if it does.
+    // Re-validate after mutation. Lex-forward synthetic edges alone are
+    // acyclic, but mixing them with existing reverse-lex deps can create a
+    // cycle (see sibling_auto_serialize_with_reverse_lex_dep_can_form_cycle).
+    // Fail loudly when that happens.
     validate_plan(tasks).map_err(|e| {
         format!("auto-serialize-siblings produced an invalid plan (this is a bug): {e}")
     })?;
@@ -6248,9 +6249,8 @@ mod tests {
 
     #[test]
     fn apply_sibling_overlaps_keeps_validate_plan_passing() {
-        // After injecting synthetic edges, the resulting plan must still pass
-        // validate_plan (no cycles introduced — synthetic edges go lex-lower→higher,
-        // and original DAG was acyclic).
+        // Pure sibling injection (no reverse-lex existing deps): synthetic
+        // edges are lex-lower→higher only, so the result stays acyclic.
         let mut tasks = vec![
             task_with_files("A", &[], &["x.rs"]),
             task_with_files("B", &[], &["x.rs"]),
@@ -6259,6 +6259,70 @@ mod tests {
         let overlaps = super::find_sibling_overlaps(&tasks);
         super::apply_sibling_overlaps(&mut tasks, &overlaps);
         super::validate_plan(&tasks).expect("post-injection plan must validate");
+    }
+
+    /// Z3 counterexample (n=3): an existing reverse-lex dep plus two
+    /// pairwise sibling shares forms a cycle after auto-serialize.
+    ///
+    /// Input (acyclic): `A.depends_on = [C]`; AB share `ab.rs`; BC share `bc.rs`.
+    /// Synthetic adds: B→A dep (`B.depends_on += A`), C→B dep (`C.depends_on += B`).
+    /// Result: A→C→B→A cycle. Normalize must reject via re-validate (safety net).
+    #[test]
+    fn sibling_auto_serialize_with_reverse_lex_dep_can_form_cycle() {
+        let mut tasks = vec![
+            task_with_files("A", &["C"], &["ab.rs"]),
+            task_with_files("B", &[], &["ab.rs", "bc.rs"]),
+            task_with_files("C", &[], &["bc.rs"]),
+        ];
+        super::validate_plan(&tasks).expect("input plan is acyclic");
+
+        let overlaps = super::find_sibling_overlaps(&tasks);
+        assert_eq!(
+            overlaps.len(),
+            2,
+            "expect AB and BC sibling edges only (AC already related)"
+        );
+        assert!(
+            overlaps
+                .iter()
+                .any(|o| o.from == "A" && o.to == "B" && o.shared_files == ["ab.rs"]),
+            "AB synthetic: {overlaps:?}"
+        );
+        assert!(
+            overlaps
+                .iter()
+                .any(|o| o.from == "B" && o.to == "C" && o.shared_files == ["bc.rs"]),
+            "BC synthetic: {overlaps:?}"
+        );
+
+        super::apply_sibling_overlaps(&mut tasks, &overlaps);
+        let err = super::validate_plan(&tasks).expect_err("synthetic ∪ reverse-lex forms a cycle");
+        assert!(
+            err.contains("Cycle"),
+            "expected cycle detection, got: {err}"
+        );
+    }
+
+    #[test]
+    fn submit_plan_normalize_tasks_rejects_reverse_lex_sibling_cycle() {
+        // Same graph as sibling_auto_serialize_with_reverse_lex_dep_can_form_cycle:
+        // post-hoc re-validate is the user-facing safety net.
+        let mut tasks = vec![
+            task_with_files("A", &["C"], &["ab.rs"]),
+            task_with_files("B", &[], &["ab.rs", "bc.rs"]),
+            task_with_files("C", &[], &["bc.rs"]),
+        ];
+        let err = super::submit_plan_normalize_tasks(&mut tasks).expect_err(
+            "normalize must reject when sibling edges close a cycle with reverse-lex deps",
+        );
+        assert!(
+            err.contains("auto-serialize-siblings produced an invalid plan"),
+            "expected auto-serialize re-validate error, got: {err}"
+        );
+        assert!(
+            err.contains("Cycle"),
+            "expected cycle in re-validate message, got: {err}"
+        );
     }
 
     #[test]
