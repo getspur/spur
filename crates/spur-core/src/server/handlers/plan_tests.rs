@@ -831,6 +831,30 @@ mod plan_handler_mcp_tests {
         (dir, workspace, Arc::new(server), pm)
     }
 
+    async fn new_beads_server_with_fast_forward() -> (
+        TempDir,
+        spur_pm::test_workspace::TestBeadsWorkspace,
+        Arc<McpCallbackServer>,
+        Arc<spur_pm::PmService>,
+        Arc<tokio::sync::Notify>,
+    ) {
+        let dir = TempDir::new().expect("tempdir");
+        let (workspace, pm) = super::init_beads_pm(dir.path()).await;
+        let session_id = BrainSessionId::new(SessionId("brain".into()));
+        let (mut server, _channel) = McpCallbackServer::new(
+            Some(&session_id),
+            Some(Arc::clone(&pm)),
+            None,
+            no_op_ctx(),
+            Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+            super::pro_feature_gate(),
+        );
+        let fast_forward = Arc::new(tokio::sync::Notify::new());
+        server.set_repo_root(dir.path().to_path_buf());
+        server.set_reconciler_enabled(true, Some(Arc::clone(&fast_forward)));
+        (dir, workspace, Arc::new(server), pm, fast_forward)
+    }
+
     async fn new_mock_server() -> (
         Arc<McpCallbackServer>,
         Arc<crate::plan::test_util::MockPm>,
@@ -1569,7 +1593,8 @@ mod plan_handler_mcp_tests {
 
     #[tokio::test]
     async fn submit_plan_mutation_retry_reopens_issue_and_clears_escalation() {
-        let (_dir, _workspace, server, pm) = new_beads_server().await;
+        let (_dir, _workspace, server, pm, fast_forward) =
+            new_beads_server_with_fast_forward().await;
         let issue_id = create_task_issue(
             pm.as_ref(),
             "Retry me",
@@ -1657,6 +1682,12 @@ mod plan_handler_mcp_tests {
             crate::plan::audit_sentinel::AuditSentinelKind::MutationCommit { op_tags, .. }
                 if op_tags == &vec!["retry_task".to_string()]
         )));
+        tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            fast_forward.notified(),
+        )
+        .await
+        .expect("successful retry mutation must fast-forward the reconciler");
     }
 
     #[tokio::test]

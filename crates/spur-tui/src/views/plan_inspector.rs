@@ -43,7 +43,7 @@ pub struct PlanInspectorView {
     task_detail_scroll: usize,
     mode: PlanInspectorMode,
     confirm: Option<PlanInspectorConfirm>,
-    loop_event_status: Option<String>,
+    loop_event_status: Option<PlanInspectorEventStatus>,
 }
 
 #[derive(Debug)]
@@ -51,6 +51,20 @@ enum TaskIssueState {
     Loading,
     Loaded(Box<spur_pm::Issue>),
     Error(String),
+}
+
+#[derive(Debug)]
+enum PlanInspectorEventStatus {
+    CommandError(String),
+    Loop(String),
+}
+
+impl PlanInspectorEventStatus {
+    fn message(&self) -> &str {
+        match self {
+            Self::CommandError(message) | Self::Loop(message) => message,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -75,8 +89,7 @@ enum PlanInspectorConfirm {
         task_name: String,
         delegation_id: String,
         status: String,
-        append_prompt: String,
-        cursor: usize,
+        retry_guidance: String,
     },
     Review {
         plan_id: String,
@@ -534,8 +547,7 @@ impl PlanInspectorView {
             task_name: task.task_name.clone(),
             delegation_id,
             status: task.status.clone(),
-            append_prompt: String::new(),
-            cursor: 0,
+            retry_guidance: retry_guidance_after_stop(task),
         });
         None
     }
@@ -611,11 +623,19 @@ impl PlanInspectorView {
                 issue_id,
                 append_prompt,
                 ..
-            } => Some(Action::RetryPlanTask {
-                plan_id: Some(plan_id),
-                issue_id,
-                append_prompt: non_empty_prompt(append_prompt),
-            }),
+            } => {
+                if matches!(
+                    self.loop_event_status.as_ref(),
+                    Some(PlanInspectorEventStatus::CommandError(_))
+                ) {
+                    self.loop_event_status = None;
+                }
+                Some(Action::RetryPlanTask {
+                    plan_id: Some(plan_id),
+                    issue_id,
+                    append_prompt: non_empty_prompt(append_prompt),
+                })
+            }
             PlanInspectorConfirm::StopTask { delegation_id, .. } => {
                 Some(Action::CancelDelegation { delegation_id })
             }
@@ -925,10 +945,7 @@ fn is_terminal_phase(phase: LifecycleState) -> bool {
 impl View for PlanInspectorView {
     fn handle_key(&mut self, key: KeyEvent, ctx: &super::ViewContext) -> Option<Action> {
         let key = super::normalize_macos_option(key);
-        if matches!(
-            self.confirm,
-            Some(PlanInspectorConfirm::RetryTask { .. } | PlanInspectorConfirm::StopTask { .. })
-        ) {
+        if matches!(self.confirm, Some(PlanInspectorConfirm::RetryTask { .. })) {
             return self.handle_prompt_confirm_key(key);
         }
         if self.confirm.is_some() {
@@ -1047,7 +1064,7 @@ impl View for PlanInspectorView {
         }
     }
 
-    fn handle_spur_event(&mut self, event: &SpurEvent, _ctx: &super::ViewContext) {
+    fn handle_spur_event(&mut self, event: &SpurEvent, ctx: &super::ViewContext) {
         match &event.body {
             spur_acp::SpurEventBody::IssueDetailFetched {
                 requested_id,
@@ -1090,22 +1107,57 @@ impl View for PlanInspectorView {
                     }
                 }
             }
+            spur_acp::SpurEventBody::PlanCommandError {
+                operation,
+                plan_id,
+                error,
+            } => {
+                let displayed_plan_id = self.pinned_plan_id.as_deref().or_else(|| {
+                    ctx.plan_projection
+                        .current_for_session(&self.session_id)
+                        .map(|plan| plan.plan_id.as_str())
+                });
+                if matches!(
+                    (displayed_plan_id, plan_id.as_deref()),
+                    (Some(displayed), Some(event_plan)) if displayed != event_plan
+                ) {
+                    return;
+                }
+                let display_error = error
+                    .split_once(": ")
+                    .map(|(prefix, rest)| {
+                        if prefix.chars().all(|c| c.is_ascii_lowercase() || c == '_') {
+                            rest
+                        } else {
+                            error.as_str()
+                        }
+                    })
+                    .unwrap_or(error.as_str());
+                let message = match plan_id {
+                    Some(plan_id) => {
+                        format!("{operation} blocked for {plan_id}: {display_error}")
+                    }
+                    None => format!("{operation} blocked: {display_error}"),
+                };
+                self.loop_event_status = Some(PlanInspectorEventStatus::CommandError(message));
+            }
             spur_acp::SpurEventBody::LoopArmed {
                 loop_id,
                 generation,
                 next_run,
             } => {
-                self.loop_event_status = Some(format!(
+                self.loop_event_status = Some(PlanInspectorEventStatus::Loop(format!(
                     "loop {loop_id} gen {generation}: armed next {next_run}"
-                ));
+                )));
             }
             spur_acp::SpurEventBody::LoopGenerationStarted {
                 loop_id,
                 generation,
                 plan_id,
             } => {
-                self.loop_event_status =
-                    Some(format!("loop {loop_id} gen {generation}: plan {plan_id}"));
+                self.loop_event_status = Some(PlanInspectorEventStatus::Loop(format!(
+                    "loop {loop_id} gen {generation}: plan {plan_id}"
+                )));
             }
             spur_acp::SpurEventBody::LoopRunRecorded {
                 loop_id,
@@ -1113,12 +1165,14 @@ impl View for PlanInspectorView {
                 outcome,
                 cost_micros,
             } => {
-                self.loop_event_status = Some(format!(
+                self.loop_event_status = Some(PlanInspectorEventStatus::Loop(format!(
                     "loop {loop_id} gen {generation}: [{outcome}] {cost_micros} micros"
-                ));
+                )));
             }
             spur_acp::SpurEventBody::LoopPaused { loop_id, by } => {
-                self.loop_event_status = Some(format!("loop {loop_id}: {by}"));
+                self.loop_event_status = Some(PlanInspectorEventStatus::Loop(format!(
+                    "loop {loop_id}: {by}"
+                )));
             }
             _ => {}
         }
@@ -1416,7 +1470,9 @@ impl View for PlanInspectorView {
             review_hint,
             scroll_hint,
             self.open_issue_id.is_none() && self.active_plan(ctx).is_some(),
-            self.loop_event_status.as_deref(),
+            self.loop_event_status
+                .as_ref()
+                .map(PlanInspectorEventStatus::message),
         );
         frame.render_widget(
             Paragraph::new(Line::from(vec![Span::styled(
@@ -1488,8 +1544,7 @@ impl PlanInspectorView {
                 task_name,
                 delegation_id,
                 status,
-                append_prompt,
-                cursor,
+                retry_guidance,
                 ..
             } => (
                 " Stop Task ",
@@ -1499,11 +1554,9 @@ impl PlanInspectorView {
                     Line::from(format!("  Task: {task_id} - {task_name}")),
                     Line::from(format!("  Delegation: {delegation_id}")),
                     Line::from(format!("  Status: {status}")),
-                    prompt_input_line(append_prompt, *cursor, theme),
                     Line::from(""),
-                    Line::from(
-                        "  Task will be cancelled. Press R after stop to retry with appended instructions.",
-                    ),
+                    Line::from("  This cancels the active worker."),
+                    Line::from(format!("  {retry_guidance}")),
                 ],
             ),
             PlanInspectorConfirm::Review {
@@ -1723,7 +1776,10 @@ fn operator_status_label(status: &str) -> &str {
 }
 
 fn is_retryable_task_status(status: &str) -> bool {
-    matches!(status, "failed" | "rejected" | "error")
+    matches!(
+        status,
+        "failed" | "rejected" | "error" | "cancelled" | "escalated_to_brain"
+    )
 }
 
 fn is_stoppable_task_status(status: &str) -> bool {
@@ -1738,6 +1794,19 @@ fn is_retryable_task(task: &spur_core::TrackedTask) -> bool {
     task.issue_id.is_some()
         && is_retryable_task_status(&task.status)
         && task.attempt < task.max_attempts
+}
+
+fn retry_guidance_after_stop(task: &spur_core::TrackedTask) -> String {
+    if task.issue_id.is_none() {
+        "Retry unavailable: no linked issue.".into()
+    } else if task.attempt >= task.max_attempts {
+        format!(
+            "Retry unavailable: attempt limit reached ({}/{}).",
+            task.attempt, task.max_attempts
+        )
+    } else {
+        "Press R afterward to retry.".into()
+    }
 }
 
 fn is_stoppable_task(task: &spur_core::TrackedTask) -> bool {
@@ -1824,11 +1893,6 @@ fn confirm_prompt_mut(
 ) -> Option<(&mut String, &mut usize)> {
     match confirm.as_mut()? {
         PlanInspectorConfirm::RetryTask {
-            append_prompt,
-            cursor,
-            ..
-        }
-        | PlanInspectorConfirm::StopTask {
             append_prompt,
             cursor,
             ..
@@ -2353,6 +2417,15 @@ mod tests {
         session_id: &SessionId,
         delegation_id: &str,
     ) -> PlanProjectionStore {
+        projection_with_stoppable_task(session_id, delegation_id, 1, 3)
+    }
+
+    fn projection_with_stoppable_task(
+        session_id: &SessionId,
+        delegation_id: &str,
+        attempt: u32,
+        max_attempts: u32,
+    ) -> PlanProjectionStore {
         let mut projection = PlanProjectionStore::new();
         projection.apply(&SpurEvent::now(SpurEventBody::PlanSnapshotUpdated {
             session_id: session_id.clone(),
@@ -2374,8 +2447,8 @@ mod tests {
                     issue_id: Some("bd-epic.1".into()),
                     issue_title: None,
                     status: "dispatched".into(),
-                    attempt: 1,
-                    max_attempts: 3,
+                    attempt,
+                    max_attempts,
                     depends_on: Vec::new(),
                     blocked_by: Vec::new(),
                     unblocks: Vec::new(),
@@ -3352,15 +3425,12 @@ mod tests {
                 ref task_name,
                 ref delegation_id,
                 ref status,
-                ref append_prompt,
-                cursor,
+                ..
             }) if plan_id == "plan-1"
                 && task_id == "t-12"
                 && task_name == "Stage A"
                 && delegation_id == "deleg-12"
                 && status == "dispatched"
-                && append_prompt.is_empty()
-                && cursor == 0
         ));
     }
 
@@ -3417,6 +3487,278 @@ mod tests {
             action,
             Some(Action::CancelDelegation { delegation_id }) if delegation_id == "deleg-12"
         ));
+    }
+
+    // ── Operate-gate contracts (F1–F8) ─────────────────────────────────────
+    // Audit findings locked as RED tests before the production fix:
+    //   F1 stop → cancelled terminal (worker kill + Completion(Cancelled))
+    //   F2 cancelled excluded from is_retryable (blocks stop-then-retry)
+    //   F3 escalated_to_brain excluded from is_retryable
+    //   F4 stop modal claims "Press R … with appended instructions"
+    //   F5 stop confirm append_prompt is collected then discarded on confirm
+    //   F6 retry is requeue-only (submit_plan_mutation retry_task), no inline spawn
+    //   F7 retry mutation path does not fast_forward_reconciler
+    //   F8 PlanCommandError ignored in PlanInspectorView (handled only in plan_browser)
+    //
+    // F6/F7 implementer note (bridge, not TUI-local — assert in spur-core):
+    // After a successful RetryPlanTask / submit_plan_mutation(retry_task), call
+    // `McpCallbackServer::fast_forward_reconciler()` so the reconciler leaves
+    // idle backoff and re-dispatches. Preferred call site: success arm of
+    // `handle_submit_plan_mutation` in crates/spur-core/src/server/handlers/plan.rs
+    // (covers MCP + TUI `call_retry_plan_task`). Alternative: success path of
+    // InteractiveInput::RetryPlanTask in interactive_loop.rs. Today neither
+    // path notifies; requeue alone leaves the task open but undispatched.
+
+    /// F1/F2: post-stop `cancelled` status must be retryable (stop-then-retry).
+    #[test]
+    fn post_stop_cancelled_status_opens_retry_confirmation() {
+        let session_id = SessionId("brain-1".into());
+        // Simulates projection after a successful stop path lands
+        // Completion(Cancelled) → snapshot status "cancelled".
+        let projection =
+            projection_with_single_task_status(&session_id, "cancelled", Some("bd-epic.1"), 1, 3);
+        let lineage = ExecutorLineage::new();
+        let ctx = view_context_for_tests(&lineage, &projection);
+        let mut view = PlanInspectorView::new_for_plan(session_id, "plan-1".into());
+
+        let action = view.handle_key(key_char('R'), &ctx);
+
+        assert!(
+            action.is_none(),
+            "R on cancelled (post-stop) must open retry confirm, not flash; got {action:?}"
+        );
+        assert!(
+            matches!(
+                view.confirm,
+                Some(PlanInspectorConfirm::RetryTask {
+                    ref status,
+                    ref issue_id,
+                    ..
+                }) if status == "cancelled" && issue_id == "bd-epic.1"
+            ),
+            "expected RetryTask confirm for cancelled task, got {:?}",
+            view.confirm
+        );
+    }
+
+    /// F3: escalated_to_brain is a recovery status and must open retry.
+    #[test]
+    fn escalated_to_brain_status_opens_retry_confirmation() {
+        let session_id = SessionId("brain-1".into());
+        let projection = projection_with_single_task_status(
+            &session_id,
+            "escalated_to_brain",
+            Some("bd-epic.1"),
+            1,
+            3,
+        );
+        let lineage = ExecutorLineage::new();
+        let ctx = view_context_for_tests(&lineage, &projection);
+        let mut view = PlanInspectorView::new_for_plan(session_id, "plan-1".into());
+
+        let action = view.handle_key(key_char('R'), &ctx);
+
+        assert!(
+            action.is_none(),
+            "R on escalated_to_brain must open retry confirm; got {action:?}"
+        );
+        assert!(
+            matches!(
+                view.confirm,
+                Some(PlanInspectorConfirm::RetryTask {
+                    ref status,
+                    ref issue_id,
+                    ..
+                }) if status == "escalated_to_brain" && issue_id == "bd-epic.1"
+            ),
+            "expected RetryTask confirm for escalated_to_brain, got {:?}",
+            view.confirm
+        );
+    }
+
+    /// F1/F2/F3: footer must advertise R for cancelled and escalated_to_brain.
+    #[test]
+    fn footer_advertises_retry_for_cancelled_and_escalated_statuses() {
+        for status in ["cancelled", "escalated_to_brain"] {
+            let session_id = SessionId(format!("brain-{status}"));
+            let projection =
+                projection_with_single_task_status(&session_id, status, Some("bd-epic.1"), 1, 3);
+            let lineage = ExecutorLineage::new();
+            let ctx = view_context_for_tests(&lineage, &projection);
+
+            let mut view = PlanInspectorView::new_for_plan(session_id, "plan-1".into());
+            view.set_selected_task_id_for_tests(Some("t-12".into()));
+
+            let backend = ratatui::backend::TestBackend::new(160, 24);
+            let mut terminal = ratatui::Terminal::new(backend).unwrap();
+            terminal
+                .draw(|frame| {
+                    <PlanInspectorView as View>::render(&mut view, frame, frame.area(), &ctx);
+                })
+                .unwrap();
+
+            let dump = format!("{:?}", terminal.backend().buffer());
+            assert!(
+                dump.contains("R: retry"),
+                "expected footer to advertise retry for status={status}:\n{dump}"
+            );
+        }
+    }
+
+    /// F4/F5: stop confirm must not show a dead append-prompt editor, and must
+    /// not claim typed stop instructions will be applied (CancelDelegation has
+    /// no prompt channel). Operators append instructions on the subsequent R
+    /// retry modal after the task is cancelled.
+    #[test]
+    fn stop_confirm_does_not_offer_unwired_append_prompt() {
+        let session_id = SessionId("brain-1".into());
+        let projection = projection_with_epic_and_worker(&session_id);
+        let lineage = ExecutorLineage::new();
+        let ctx = view_context_for_tests(&lineage, &projection);
+        let mut view = PlanInspectorView::new_for_plan(session_id, "plan-1".into());
+
+        assert!(view.handle_key(key_shift('X'), &ctx).is_none());
+        assert!(matches!(
+            view.confirm,
+            Some(PlanInspectorConfirm::StopTask { .. })
+        ));
+
+        let backend = ratatui::backend::TestBackend::new(100, 28);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                <PlanInspectorView as View>::render(&mut view, frame, frame.area(), &ctx);
+            })
+            .unwrap();
+
+        let dump = buffer_text(terminal.backend().buffer());
+        assert!(
+            !dump.contains("Append:"),
+            "stop confirm must not show an Append prompt editor unless it is wired through confirm; got:\n{dump}"
+        );
+        assert!(
+            !dump.contains("with appended instructions"),
+            "stop confirm must not claim stop-time typed instructions are applied; got:\n{dump}"
+        );
+    }
+
+    #[test]
+    fn stop_confirm_marks_retry_ineligible_at_attempt_limit() {
+        let session_id = SessionId("brain-1".into());
+        let projection = projection_with_stoppable_task(&session_id, "deleg-12", 3, 3);
+        let lineage = ExecutorLineage::new();
+        let ctx = view_context_for_tests(&lineage, &projection);
+        let mut view = PlanInspectorView::new_for_plan(session_id, "plan-1".into());
+
+        assert!(view.handle_key(key_shift('X'), &ctx).is_none());
+
+        let backend = ratatui::backend::TestBackend::new(100, 28);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                <PlanInspectorView as View>::render(&mut view, frame, frame.area(), &ctx);
+            })
+            .unwrap();
+
+        let dump = buffer_text(terminal.backend().buffer());
+        assert!(
+            dump.contains("Retry unavailable: attempt limit reached (3/3)."),
+            "stop confirm must explain that retry attempts are exhausted; got:\n{dump}"
+        );
+        assert!(
+            !dump.contains("Press R afterward to retry."),
+            "stop confirm must not promise retry after the attempt limit; got:\n{dump}"
+        );
+    }
+
+    /// F8: PlanCommandError must surface in the inspector footer (or equivalent
+    /// status strip), matching plan_browser's operator-visible error path.
+    #[test]
+    fn plan_command_error_surfaces_in_footer_status() {
+        let session_id = SessionId("brain-1".into());
+        let projection = projection_with_epic_and_worker(&session_id);
+        let lineage = ExecutorLineage::new();
+        let ctx = view_context_for_tests(&lineage, &projection);
+        let mut view = PlanInspectorView::new_for_plan(session_id, "plan-1".into());
+
+        <PlanInspectorView as View>::handle_spur_event(
+            &mut view,
+            &SpurEvent::now(SpurEventBody::PlanCommandError {
+                operation: "RetryPlanTask".into(),
+                plan_id: Some("plan-1".into()),
+                error: "retry_task: issue is not retryable".into(),
+            }),
+            &ctx,
+        );
+
+        let backend = ratatui::backend::TestBackend::new(120, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                <PlanInspectorView as View>::render(&mut view, frame, frame.area(), &ctx);
+            })
+            .unwrap();
+
+        let footer = buffer_row(terminal.backend().buffer(), 23);
+        assert!(
+            footer.contains("RetryPlanTask") || footer.contains("blocked"),
+            "expected PlanCommandError to surface in footer status, got:\n{footer}"
+        );
+        assert!(
+            footer.contains("not retryable") || footer.contains("issue is not"),
+            "expected error detail in footer status, got:\n{footer}"
+        );
+    }
+
+    #[test]
+    fn pinned_inspector_ignores_plan_command_error_for_another_plan() {
+        let session_id = SessionId("brain-1".into());
+        let projection = projection_with_epic_and_worker(&session_id);
+        let lineage = ExecutorLineage::new();
+        let ctx = view_context_for_tests(&lineage, &projection);
+        let mut view = PlanInspectorView::new_for_plan(session_id, "plan-1".into());
+
+        <PlanInspectorView as View>::handle_spur_event(
+            &mut view,
+            &SpurEvent::now(SpurEventBody::PlanCommandError {
+                operation: "RetryPlanTask".into(),
+                plan_id: Some("plan-2".into()),
+                error: "retry_task: issue is not retryable".into(),
+            }),
+            &ctx,
+        );
+
+        assert!(view.loop_event_status.is_none());
+    }
+
+    #[test]
+    fn retry_confirmation_clears_prior_plan_command_error() {
+        let session_id = SessionId("brain-1".into());
+        let projection =
+            projection_with_single_task_status(&session_id, "rejected", Some("bd-epic.1"), 2, 3);
+        let lineage = ExecutorLineage::new();
+        let ctx = view_context_for_tests(&lineage, &projection);
+        let mut view = PlanInspectorView::new_for_plan(session_id, "plan-1".into());
+
+        <PlanInspectorView as View>::handle_spur_event(
+            &mut view,
+            &SpurEvent::now(SpurEventBody::PlanCommandError {
+                operation: "RetryPlanTask".into(),
+                plan_id: Some("plan-1".into()),
+                error: "retry_task: issue is not retryable".into(),
+            }),
+            &ctx,
+        );
+        assert!(view.loop_event_status.is_some());
+
+        assert!(view.handle_key(key_char('R'), &ctx).is_none());
+        let action = view.handle_key(key(KeyCode::Enter), &ctx);
+
+        assert!(matches!(action, Some(Action::RetryPlanTask { .. })));
+        assert!(
+            view.loop_event_status.is_none(),
+            "successful local retry confirmation must clear the prior command error"
+        );
     }
 
     #[test]
