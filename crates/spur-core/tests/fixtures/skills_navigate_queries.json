@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "description": "SN5 PageIndex skill_navigate integration vocabulary. Tokens are layered so frontmatter-only, section-body-only, and approved-resource-only queries prove the three-layer index end-to-end.",
+  "skill_name": "pageindex-nav",
+  "cases": [
+    {
+      "id": "fts-frontmatter-only",
+      "query": "sn5frontmatteronlytoken",
+      "layer": "frontmatter",
+      "expected_name": "pageindex-nav",
+      "expected_node_kind": "frontmatter",
+      "expected_path": "SKILL.md",
+      "skill_search_must_hit": true,
+      "navigate_must_hit": true
+    },
+    {
+      "id": "fts-section-body-not-in-name-description",
+      "query": "sn5sectiononlytoken",
+      "layer": "section",
+      "expected_name": "pageindex-nav",
+      "expected_node_kind": "section",
+      "expected_heading": "PageIndex Navigation Fixture",
+      "skill_search_must_hit": false,
+      "navigate_must_hit": true
+    },
+    {
+      "id": "fts-approved-resource-body",
+      "query": "sn5resourceonlytoken",
+      "layer": "resource",
+      "expected_name": "pageindex-nav",
+      "expected_path": "references/sn5-guide.md",
+      "skill_search_must_hit": false,
+      "navigate_must_hit": true
+    },
+    {
+      "id": "script-body-never-indexed",
+      "query": "sn5scriptonlytoken",
+      "layer": "scripts",
+      "skill_search_must_hit": false,
+      "navigate_must_hit": false
+    }
+  ]
+}

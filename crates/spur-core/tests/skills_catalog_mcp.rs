@@ -3,6 +3,7 @@ use std::{
     ffi::OsString,
     fs,
     path::{Path, PathBuf},
+    sync::{Mutex, MutexGuard, OnceLock},
 };
 
 use serde::{Deserialize, Serialize};
@@ -29,6 +30,7 @@ use spur_mcp::{ServerKind, ToolAuthority, ToolCallContext, ToolRegistry};
 
 const BOOTSTRAP_SKILL: &str = include_str!("../../../assets/skills/skills-catalog/SKILL.md");
 const RETRIEVAL_FIXTURE: &str = include_str!("fixtures/skills_catalog_queries.json");
+const NAVIGATE_FIXTURE: &str = include_str!("fixtures/skills_navigate_queries.json");
 
 #[derive(Debug, Clone, Copy)]
 enum Layer {
@@ -45,22 +47,35 @@ struct PoolSkillSpec<'a> {
     body: &'a str,
 }
 
+/// Serializes HOME/USERPROFILE mutation across parallel integration tests.
+fn env_lock() -> MutexGuard<'static, ()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 struct EnvironmentGuard {
+    _lock: MutexGuard<'static, ()>,
     saved: Vec<(&'static str, Option<OsString>)>,
 }
 
 impl EnvironmentGuard {
     fn isolated_home(home: &Path) -> Self {
+        // Hold the process-wide env lock for the full TestWorld lifetime so
+        // parallel skills_catalog_mcp tests cannot clobber each other's HOME.
+        let lock = env_lock();
         const HOME_KEYS: [&str; 2] = ["HOME", "USERPROFILE"];
         let saved = HOME_KEYS
             .into_iter()
             .map(|key| {
                 let previous = std::env::var_os(key);
+                // Serialized by env_lock across this test binary.
                 std::env::set_var(key, home);
                 (key, previous)
             })
             .collect();
-        Self { saved }
+        Self { _lock: lock, saved }
     }
 }
 
@@ -443,6 +458,15 @@ fn snapshot_tree(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
     output
 }
 
+/// Unique PageIndex vocabulary used by SN5 integration coverage.
+/// Frontmatter-only / section-only / resource-only tokens must not cross layers.
+const SN5_FRONTMATTER_TOKEN: &str = "sn5frontmatteronlytoken";
+const SN5_SECTION_TOKEN: &str = "sn5sectiononlytoken";
+const SN5_RESOURCE_TOKEN: &str = "sn5resourceonlytoken";
+const SN5_SCRIPT_TOKEN: &str = "sn5scriptonlytoken";
+const SN5_BODY_SECRET: &str = "SN5_FULL_BODY_SECRET_NEVER_IN_NAVIGATE_HITS";
+const SN5_SKILL_NAME: &str = "pageindex-nav";
+
 fn populate_world(world: &TestWorld) -> PathBuf {
     let auth = world.bundled_skill(
         "auth-review",
@@ -460,6 +484,41 @@ fn populate_world(world: &TestWorld) -> PathBuf {
         "Deployment rollback and release recovery workflow",
         "rollback instructions",
     );
+
+    // SN5 PageIndex three-layer fixture: frontmatter / section body / approved resource.
+    // Description carries frontmatter-only vocabulary; body carries section-only
+    // vocabulary that skill_search (name+description) must not surface.
+    let pageindex = world.repo.path().join("assets/skills").join(SN5_SKILL_NAME);
+    fs::create_dir_all(pageindex.join("references")).expect("create pageindex references");
+    // Pad past LEDE_CHARS (200) so the full-body secret is only available via skill_read.
+    let section_padding = "padding ".repeat(40);
+    fs::write(
+        pageindex.join("SKILL.md"),
+        format!(
+            "---\n\
+             name: {SN5_SKILL_NAME}\n\
+             description: Use when applying {SN5_FRONTMATTER_TOKEN} in catalog sessions\n\
+             role: both\n\
+             ---\n\
+             \n\
+             # PageIndex Navigation Fixture\n\
+             \n\
+             Section body carries {SN5_SECTION_TOKEN} for heading FTS and must never appear in name or description.\n\
+             \n\
+             {section_padding}\n\
+             \n\
+             {SN5_BODY_SECRET}\n"
+        ),
+    )
+    .expect("write pageindex SKILL.md");
+    fs::write(
+        pageindex.join("references/sn5-guide.md"),
+        format!(
+            "# SN5 Resource Guide\n\nBody carries {SN5_RESOURCE_TOKEN} for approved resource FTS.\n"
+        ),
+    )
+    .expect("write pageindex resource");
+
     for index in 0..6 {
         world.bundled_skill(
             &format!("bounded-candidate-{index}"),
@@ -470,7 +529,11 @@ fn populate_world(world: &TestWorld) -> PathBuf {
 
     let script = world.bundled_skill("script-dependent", "script dependent workflow", "script");
     fs::create_dir_all(script.join("scripts")).expect("create scripts directory");
-    fs::write(script.join("scripts/run.sh"), "#!/bin/sh\n").expect("write script");
+    fs::write(
+        script.join("scripts/run.sh"),
+        format!("#!/bin/sh\necho {SN5_SCRIPT_TOKEN}\n"),
+    )
+    .expect("write script");
     let binary = world.bundled_skill("binary-dependent", "binary dependent workflow", "binary");
     fs::write(binary.join("payload.png"), [0_u8, 159, 146, 150]).expect("write binary");
     let non_utf8 = world.bundled_skill("non-utf8", "non utf8 workflow", "non utf8");
@@ -919,4 +982,343 @@ async fn skills_catalog_rollout_gate_is_context_only_reversible_and_measurable()
             "bootstrap fallback missing: {required_protocol}"
         );
     }
+}
+
+#[derive(Debug, Deserialize)]
+struct NavigateFixture {
+    schema_version: u32,
+    skill_name: String,
+    cases: Vec<NavigateCase>,
+}
+
+#[derive(Debug, Deserialize)]
+struct NavigateCase {
+    id: String,
+    query: String,
+    layer: String,
+    #[serde(default)]
+    expected_name: Option<String>,
+    #[serde(default)]
+    expected_node_kind: Option<String>,
+    #[serde(default)]
+    expected_path: Option<String>,
+    #[serde(default)]
+    expected_heading: Option<String>,
+    skill_search_must_hit: bool,
+    navigate_must_hit: bool,
+}
+
+fn assert_navigate_hit_is_metadata_only(hit: &Value, case_id: &str) {
+    assert!(
+        hit.get("content").is_none(),
+        "navigate hit for {case_id} must not embed full content"
+    );
+    assert!(
+        hit.get("skill_id")
+            .and_then(Value::as_str)
+            .is_some_and(|id| !id.is_empty()),
+        "navigate hit for {case_id} needs skill_id"
+    );
+    assert!(
+        hit.get("node_id")
+            .and_then(Value::as_str)
+            .is_some_and(|id| !id.is_empty()),
+        "navigate hit for {case_id} needs node_id"
+    );
+    if let Some(lede) = hit.get("lede").and_then(Value::as_str) {
+        assert!(
+            lede.chars().count() <= 200,
+            "navigate lede for {case_id} must stay within LEDE_CHARS"
+        );
+        assert!(
+            !lede.contains(SN5_BODY_SECRET),
+            "navigate lede for {case_id} must not leak the full-body secret"
+        );
+        assert!(
+            !lede.contains(SN5_SCRIPT_TOKEN),
+            "navigate lede for {case_id} must never surface script vocabulary"
+        );
+    }
+}
+
+/// SN5: skill_navigate PageIndex three-layer index works end-to-end over MCP.
+///
+/// Covers: (1) FTS via frontmatter-only vocabulary, (2) FTS via section body not
+/// in name/description, (3) FTS via approved resource body, (4) tree hop lists
+/// SKILL.md + resources and excludes scripts, (5) navigate then skill_read stays
+/// write_effect none and reauth-clean, (6) brain and worker both advertise
+/// skill_navigate.
+#[tokio::test(flavor = "current_thread")]
+async fn skill_navigate_pageindex_three_layer_index_works_end_to_end() {
+    let world = TestWorld::new();
+    assert_eq!(store::global_root(), Some(world.global_root()));
+    let _integrity_dir = populate_world(&world);
+
+    let fixture: NavigateFixture =
+        serde_json::from_str(NAVIGATE_FIXTURE).expect("parse navigate fixture");
+    assert_eq!(fixture.schema_version, 1, "navigate fixture schema");
+    assert_eq!(fixture.skill_name, SN5_SKILL_NAME);
+
+    let brain = rooted_registry(world.repo_root());
+    let worker = rooted_registry(world.repo_root());
+
+    // (6) brain and worker both advertise skill_navigate.
+    for (registry_name, registry) in [("brain", &brain), ("worker", &worker)] {
+        let tools = registry.list_tools();
+        assert!(
+            tools.iter().any(|tool| tool.name == "skill_navigate"),
+            "{registry_name} must advertise skill_navigate"
+        );
+        assert!(
+            tools.iter().any(|tool| tool.name == "skill_search"),
+            "{registry_name} must advertise skill_search"
+        );
+        assert!(
+            tools.iter().any(|tool| tool.name == "skill_read"),
+            "{registry_name} must advertise skill_read"
+        );
+    }
+
+    let before = snapshot_tree(world.repo_root());
+    let worker_ctx = || ToolCallContext::new(ServerKind::Worker, ToolAuthority::Worker, None, None);
+    let brain_ctx = || ToolCallContext::new(ServerKind::Brain, ToolAuthority::Brain, None, None);
+
+    // (1)(2)(3)(+ scripts never indexed): fixture-driven FTS cases.
+    let mut pageindex_skill_id = None;
+    for case in &fixture.cases {
+        let search = worker
+            .call_json_tool(worker_ctx(), "skill_search", json!({ "query": case.query }))
+            .await;
+        let search = tool_result_json(&search);
+        let search_hit = search["results"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|result| result["name"] == SN5_SKILL_NAME);
+        assert_eq!(
+            search_hit, case.skill_search_must_hit,
+            "skill_search hit mismatch for {} ({})",
+            case.id, case.layer
+        );
+        assert!(
+            search.get("content").is_none(),
+            "skill_search for {} must not return bodies",
+            case.id
+        );
+
+        let navigate = worker
+            .call_json_tool(
+                worker_ctx(),
+                "skill_navigate",
+                json!({ "query": case.query }),
+            )
+            .await;
+        let navigate = tool_result_json(&navigate);
+        assert!(
+            navigate.get("content").is_none(),
+            "skill_navigate for {} must not return full bodies",
+            case.id
+        );
+        assert!(navigate["catalog_revision"].as_str().is_some());
+        let hits = navigate["hits"]
+            .as_array()
+            .expect("hits array")
+            .iter()
+            .collect::<Vec<_>>();
+        assert!(
+            hits.len() <= MAX_SEARCH_LIMIT,
+            "navigate limit for {}",
+            case.id
+        );
+
+        let matching: Vec<&Value> = hits
+            .iter()
+            .copied()
+            .filter(|hit| {
+                case.expected_name
+                    .as_ref()
+                    .is_none_or(|name| hit["name"].as_str() == Some(name.as_str()))
+                    && case
+                        .expected_node_kind
+                        .as_ref()
+                        .is_none_or(|kind| hit["node_kind"].as_str() == Some(kind.as_str()))
+                    && case
+                        .expected_path
+                        .as_ref()
+                        .is_none_or(|path| hit["path"].as_str() == Some(path.as_str()))
+                    && case
+                        .expected_heading
+                        .as_ref()
+                        .is_none_or(|heading| hit["heading"].as_str() == Some(heading.as_str()))
+                    && hit["lede"]
+                        .as_str()
+                        .is_some_and(|lede| lede.contains(&case.query))
+            })
+            .collect();
+
+        if case.navigate_must_hit {
+            assert!(
+                !matching.is_empty(),
+                "navigate must hit layer {} for {}: {:?}",
+                case.layer,
+                case.id,
+                hits
+            );
+            for hit in &matching {
+                assert_navigate_hit_is_metadata_only(hit, &case.id);
+                assert!(hit["score"].as_f64().is_some(), "FTS hit needs score");
+            }
+            if pageindex_skill_id.is_none() {
+                pageindex_skill_id = matching[0]["skill_id"].as_str().map(str::to_owned);
+            }
+        } else {
+            assert!(
+                matching.is_empty()
+                    && hits.iter().all(|hit| {
+                        hit["lede"]
+                            .as_str()
+                            .map(|lede| !lede.contains(&case.query))
+                            .unwrap_or(true)
+                            && hit["name"].as_str() != Some("script-dependent")
+                    }),
+                "navigate must not index scripts for {}: {:?}",
+                case.id,
+                hits
+            );
+        }
+    }
+
+    let pageindex_skill_id = pageindex_skill_id.expect("pageindex skill_id from FTS hits");
+
+    // (4) tree hop lists SKILL.md + approved resources and excludes scripts.
+    let root = worker
+        .call_json_tool(
+            worker_ctx(),
+            "skill_navigate",
+            json!({ "root": pageindex_skill_id, "limit": 5 }),
+        )
+        .await;
+    let root = tool_result_json(&root);
+    let root_hits = root["hits"].as_array().expect("tree hop hits");
+    assert!(!root_hits.is_empty(), "tree hop must return children");
+    let paths: Vec<&str> = root_hits
+        .iter()
+        .filter_map(|hit| hit["path"].as_str())
+        .collect();
+    let kinds: Vec<&str> = root_hits
+        .iter()
+        .filter_map(|hit| hit["node_kind"].as_str())
+        .collect();
+    assert!(
+        kinds.iter().any(|kind| *kind == "frontmatter")
+            && paths.iter().any(|path| *path == "SKILL.md"),
+        "tree hop must list SKILL.md frontmatter: kinds={kinds:?} paths={paths:?}"
+    );
+    assert!(
+        kinds.iter().any(|kind| *kind == "document")
+            && paths.iter().any(|path| *path == "SKILL.md"),
+        "tree hop must list SKILL.md document: kinds={kinds:?} paths={paths:?}"
+    );
+    assert!(
+        kinds.iter().any(|kind| *kind == "resource")
+            && paths.iter().any(|path| *path == "references/sn5-guide.md"),
+        "tree hop must list approved resources: kinds={kinds:?} paths={paths:?}"
+    );
+    assert!(
+        !paths.iter().any(|path| path.starts_with("scripts/")),
+        "tree hop must exclude scripts paths: {paths:?}"
+    );
+    assert!(
+        !kinds.iter().any(|kind| *kind == "section"),
+        "skill root hop is one level — no section dump: {kinds:?}"
+    );
+    for hit in root_hits {
+        assert_navigate_hit_is_metadata_only(hit, "tree-hop");
+        assert!(
+            hit.get("score").is_none() || hit["score"].is_null(),
+            "tree hop hits have no FTS score"
+        );
+    }
+
+    // (5) navigate then skill_read remains write_effect none and reauth-clean.
+    let brain_navigate = brain
+        .call_json_tool(
+            brain_ctx(),
+            "skill_navigate",
+            json!({ "query": SN5_SECTION_TOKEN }),
+        )
+        .await;
+    let brain_navigate = tool_result_json(&brain_navigate);
+    let brain_skill_id = brain_navigate["hits"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|hit| hit["name"] == SN5_SKILL_NAME)
+        .and_then(|hit| hit["skill_id"].as_str())
+        .expect("brain navigate hit")
+        .to_owned();
+    assert_eq!(brain_skill_id, pageindex_skill_id);
+
+    let worker_read = worker
+        .call_json_tool(
+            worker_ctx(),
+            "skill_read",
+            json!({ "skill_id": pageindex_skill_id }),
+        )
+        .await;
+    let worker_read = tool_result_json(&worker_read);
+    assert_eq!(worker_read["resource"], "SKILL.md");
+    let content = worker_read["content"].as_str().expect("skill_read content");
+    assert!(
+        content.contains(SN5_SECTION_TOKEN) && content.contains(SN5_BODY_SECRET),
+        "reauth skill_read must return exact SKILL.md body"
+    );
+    assert!(
+        content.contains(SN5_FRONTMATTER_TOKEN),
+        "SKILL.md frontmatter remains available only via exact read"
+    );
+
+    let resource_read = worker
+        .call_json_tool(
+            worker_ctx(),
+            "skill_read",
+            json!({
+                "skill_id": pageindex_skill_id,
+                "resource": "references/sn5-guide.md"
+            }),
+        )
+        .await;
+    let resource_read = tool_result_json(&resource_read);
+    assert_eq!(resource_read["resource"], "references/sn5-guide.md");
+    assert!(resource_read["content"]
+        .as_str()
+        .is_some_and(|text| text.contains(SN5_RESOURCE_TOKEN)));
+
+    // Denied paths stay write-free after navigate handoff.
+    let denied = worker
+        .call_json_tool(
+            worker_ctx(),
+            "skill_read",
+            json!({
+                "skill_id": pageindex_skill_id,
+                "resource": "scripts/run.sh"
+            }),
+        )
+        .await;
+    assert_error_kind(denied, "resource_denied");
+
+    let missing_root = worker
+        .call_json_tool(
+            worker_ctx(),
+            "skill_navigate",
+            json!({ "root": "skillref.v1.deadbeef.deadbeef" }),
+        )
+        .await;
+    assert_error_kind(missing_root, "skill_not_found");
+
+    assert_eq!(
+        snapshot_tree(world.repo_root()),
+        before,
+        "navigate + read must leave the repository tree unchanged (write_effect none)"
+    );
 }
