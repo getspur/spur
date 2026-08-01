@@ -1801,6 +1801,11 @@ async fn add_review_signal(
     delegation_id: &str,
     signal: &crate::plan::signals::WorkerSignal,
 ) {
+    crate::server::require_feature(
+        spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
+        pro_feature_gate().as_ref(),
+    )
+    .expect("pro gate");
     let (severity, reason) = match signal {
         crate::plan::signals::WorkerSignal::ScopeDrift {
             severity, reason, ..
@@ -1990,6 +1995,11 @@ async fn system_l3_review_blocks_unattributed_legacy_mark_noop() {
         signal_id: uuid::Uuid::new_v4(),
         reason: "legacy no-op without authenticated maker attribution".into(),
     };
+    crate::server::require_feature(
+        spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
+        pro_feature_gate().as_ref(),
+    )
+    .expect("pro gate");
     pm.advanced()
         .expect("beads advanced")
         .add_comment(&issues[0], &crate::plan::signals::encode_comment(&signal))

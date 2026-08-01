@@ -786,10 +786,8 @@ impl McpCallbackServer {
             }
         };
 
-        if let Some(response) =
-            self.require_feature_response(id.clone(), FeatureKey::PM_PRO_BEADS_ADVANCED)
-        {
-            return response;
+        if let Err(error) = self.require_feature(FeatureKey::PM_PRO_BEADS_ADVANCED) {
+            return JsonRpcResponse::mcp_error(id, error);
         }
 
         let epics = match pm

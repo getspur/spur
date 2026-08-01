@@ -1305,6 +1305,11 @@ mod plan_handler_mcp_tests {
             .expect("list system-owned L3 generations");
         assert!(visible.iter().any(|issue| issue.id == epic_id));
 
+        super::require_feature(
+            spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
+            super::pro_feature_gate().as_ref(),
+        )
+        .expect("pro gate");
         let audits = parse_audit_comments(
             pm.advanced()
                 .expect("advanced pm")
