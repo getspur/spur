@@ -13,6 +13,12 @@ The Jupyter-style notebook UI, `jute-notebook`, and `rest-table-gateway` source 
 
 Source lives in each crate’s `src/`. Integration tests are primarily in `crates/spur-acp/tests`, `crates/spur-core/tests`, `crates/spur-tui/tests`, and `crates/spur-cli/tests`. Specs and implementation plans live in `docs/superpowers/specs/` and `docs/superpowers/plans/`.
 
+## Skills: Foundation Preload + Catalog Navigate/Load
+
+Only **bundled foundation skills** are pre-materialized by default (`skills.projection_mode = "catalog_only"`): `skills-catalog`, `spur-way`, `code-explore`, `solve`, `brain-delegation`, `brain-review-gate`, `plan-task-discipline`, `worker-signals`, `beads-lifecycle`, `spur-analyst`.
+
+All other skills: use **`skill_navigate`** (PageIndex FTS / tree hop) then **`skill_read`** for full text. Prefer navigate over `skill_search`. Do not filesystem-walk skill dirs or request task-specific materialization. Rollback: `projection_mode = "all_active"`. Details: `AGENTS.md`, `assets/skills/skills-catalog/SKILL.md`.
+
 ## Code Retrieval & Exploration
 
 **`knowledge_context_pack_2` is the first-class tool for discovery and exploration — reach for it first.** For any "where does X live / what's around this concept / get me oriented" question, issue one `knowledge_context_pack_2` call before hand-chaining `code_*`. The old `knowledge_context_pack` name remains as a deprecated alias that routes to v2 behavior. The pack returns bounded hybrid retrieval over code + docs, scorecard signals, exact graph caller/callee context with popular-sink boundaries, staleness metadata, graph reasoning evidence, and `recommended_next_tools` with pre-filled selectors. One call replaces several rounds of manual search.

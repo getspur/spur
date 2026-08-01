@@ -100,30 +100,40 @@ If you want to override these instructions for a specific project:
 
 ## Skills Catalog MCP Rollout
 
-The skills catalog runtime is an explicit, reversible opt-in for newly reconciled brain and worker sessions. It is not the default. When `skills.projection_mode` is absent, Spur uses `all_active`, the existing projection that remains implemented as the rollback path.
+The skills catalog runtime is the **default** projection for brain, worker, and init sessions. When `skills.projection_mode` is absent, Spur uses `catalog_only`: only **bundled foundation skills** are materialized into adapter skill directories. All other skills are discovered and loaded through the catalog MCP (`skill_navigate` / `skill_read`), not by pre-installing them on disk.
 
-Catalog-only mode projects exactly one bundled bootstrap skill, `skills-catalog`. Repository or pool content cannot replace that bootstrap. A missing bootstrap, a symlink in its place, invalid frontmatter, or another integrity failure stops projection instead of falling back to unverified content.
+**Foundation set** (bundled only; pool/overrides excluded):  
+`skills-catalog`, `spur-way`, `code-explore`, `solve`, `brain-delegation`, `brain-review-gate`, `plan-task-discipline`, `worker-signals`, `beads-lifecycle`, `spur-analyst`
 
-The `Init` projection path remains all-active. Evaluate a catalog-only opt-in by launching a new brain or worker session; do not assume that running `spur init` changed an existing session's projection.
+The bootstrap skill `skills-catalog` is required. A missing bootstrap, a symlink in its place, invalid frontmatter, or another integrity failure stops projection instead of falling back to unverified content. Other foundation IDs are included when present in the bundled root.
 
-### Opt in through layered configuration
+Legacy full materialization remains available as an explicit rollback: `projection_mode = "all_active"`.
+
+### Layered configuration
 
 The effective precedence is:
 
-1. built-in default: `all_active`;
+1. built-in default: `catalog_only` (foundation preload);
 2. user setting: `~/.spur/config.toml`;
 3. repository setting: `<repo>/.spur/config.toml`.
 
-To opt in every repository that does not override the setting, add this to `~/.spur/config.toml`:
+To force the legacy full skill materialization, add this to the appropriate config file:
+
+```toml
+[skills]
+projection_mode = "all_active"
+```
+
+To pin foundation/catalog mode explicitly (same as the default):
 
 ```toml
 [skills]
 projection_mode = "catalog_only"
 ```
 
-To opt in only one repository, put the same table in that repository's `.spur/config.toml`. A repository value wins over the user value. The only accepted values are `"all_active"` and `"catalog_only"`.
+A repository value wins over the user value. The only accepted values are `"all_active"` and `"catalog_only"`.
 
-The effective setting is read when Spur reconciles a new brain or worker runtime. Start a new session after changing it. Existing conversations retain skills and retrieved text already delivered to their context.
+The effective setting is read when Spur reconciles a new brain, worker, or init projection. Start a new session after changing it. Existing conversations retain skills and retrieved text already delivered to their context.
 
 ### One-bootstrap navigate/read flow
 
@@ -277,7 +287,7 @@ Collect and retain evidence for all four gates:
 | Integration | Fresh rooted brain and worker registry navigate/search/read tests, exact-one catalog-only projection evidence, MCP-unavailable fallback evidence, and an exercised `all_active` rollback. |
 | Observation | An approved observation window showing acceptable navigate/search/read latency and error rates, lower startup skill-token use, catalog-churn behavior, skills-read accumulation, and no meaningful downstream task regression. |
 
-If any gate fails or lacks evidence, keep or restore `all_active`. All four gates passing only permits a separate, later change to make catalog-only the default or retire the legacy path; it does not perform or authorize that change automatically. This release neither makes catalog-only the default nor removes all-active projection.
+If operational gates fail after a foundation/catalog default rollout, restore `all_active` via layered config (see Roll back). The `all_active` path remains implemented and is the supported full-materialization rollback.
 
 The design evidence also includes persisted solve result `sol_46039afe656a4dff` (`sat`, showing the one-bootstrap, approval-gated, lexical, repeated-search, context-only design is feasible) and `sol_b57f4c1096ef4a0c` (`unsat`, excluding an unapproved successful read or a task-specific filesystem write under the encoded policy). The first result's `search_result_limit = 3` is a feasibility witness, not the API contract; the implemented default and maximum are both `5`. Solver and NS-Mermaid evidence validate encoded contracts and do not replace fresh tests or operational measurements.
 
@@ -293,15 +303,15 @@ scripts/spur-cargo test -p spur-core --test tool_catalog
 scripts/spur-cargo test -p spur-core --test skills_catalog_mcp
 ```
 
-### Roll back
+### Roll back to full materialization
 
-Set the most specific applicable layer to `all_active`. For a repository opt-in, change `<repo>/.spur/config.toml`:
+Set the most specific applicable layer to `all_active`. For a repository, change `<repo>/.spur/config.toml`:
 
 ```toml
 [skills]
 projection_mode = "all_active"
 ```
 
-An explicit project value is safer than merely deleting the key when `~/.spur/config.toml` might still opt in globally. For a user-wide rollback, set `all_active` in `~/.spur/config.toml` and also change any repositories whose project file still sets `catalog_only`, because project configuration wins.
+An explicit project value is safer than merely deleting the key when `~/.spur/config.toml` might still set foundation mode. For a user-wide rollback, set `all_active` in `~/.spur/config.toml` and also change any repositories whose project file still sets `catalog_only`, because project configuration wins.
 
 Start new brain and worker sessions after the change. Confirm the effective layer, observe that the new runtime uses the legacy all-active projection, and retain the catalog traces and failure evidence that triggered rollback. Existing conversations retain context already delivered to them; rollback does not erase prior model context.

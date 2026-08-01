@@ -24,9 +24,15 @@ impl ProjectionFixture {
         init_git_repo(repo.path());
         init_git_repo(launch.path());
         std::fs::create_dir_all(repo.path().join(".spur")).expect("create SPUR config directory");
+        // Reconcile unit tests exercise full materialization of arbitrary skill
+        // IDs; pin all_active so default foundation/catalog_only does not filter
+        // them out (or fail closed without skills-catalog).
         std::fs::write(
             repo.path().join(".spur/config.toml"),
-            format!("[skills]\nbundled_dir = \"{}\"\n", toml_path(assets.path())),
+            format!(
+                "[skills]\nbundled_dir = \"{}\"\nprojection_mode = \"all_active\"\n",
+                toml_path(assets.path())
+            ),
         )
         .expect("write bundled skill configuration");
         let worktrees = spur_worktree::manager::WorktreeManager::new(launch.path().to_path_buf());

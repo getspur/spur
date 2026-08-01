@@ -7,6 +7,24 @@ use std::path::{Path, PathBuf};
 
 const CATALOG_BOOTSTRAP_ID: &str = "skills-catalog";
 
+/// Bundled SPUR skills always projected under [`SelectionPolicy::CatalogOnly`].
+///
+/// Everything else is discovered on demand via `skill_navigate` / `skill_read`
+/// (PageIndex skills catalog). Keep this list small: only load-bearing runtime
+/// foundations plus the catalog bootstrap itself.
+pub const FOUNDATION_SKILL_IDS: &[&str] = &[
+    "skills-catalog",
+    "spur-way",
+    "code-explore",
+    "solve",
+    "brain-delegation",
+    "brain-review-gate",
+    "plan-task-discipline",
+    "worker-signals",
+    "beads-lifecycle",
+    "spur-analyst",
+];
+
 /// Origin selected for one effective skill ID.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -69,7 +87,7 @@ pub fn resolve_effective_skills(
 ) -> Result<Vec<ResolvedSkill>, ResolveError> {
     match policy {
         super::SelectionPolicy::AllActive => {}
-        super::SelectionPolicy::CatalogOnly => return resolve_catalog_bootstrap(repo_root),
+        super::SelectionPolicy::CatalogOnly => return resolve_foundation_skills(repo_root),
     }
 
     let mut by_id = BTreeMap::new();
@@ -137,9 +155,34 @@ pub fn resolve_effective_skills(
     Ok(by_id.into_values().collect())
 }
 
-fn resolve_catalog_bootstrap(repo_root: &Path) -> Result<Vec<ResolvedSkill>, ResolveError> {
+/// Project only bundled foundation skills (incl. skills-catalog).
+///
+/// Pool and repository overrides are intentionally excluded: progressive
+/// discovery goes through the skills catalog MCP (`skill_navigate` /
+/// `skill_read`), not filesystem materialization of the full explore set.
+fn resolve_foundation_skills(repo_root: &Path) -> Result<Vec<ResolvedSkill>, ResolveError> {
     let catalog = SkillCatalog::discover(repo_root)?;
     let bundled_root = catalog.bundled_root();
+    let mut resolved = Vec::new();
+
+    // skills-catalog is required and fail-closed with strict integrity.
+    resolved.push(resolve_required_bootstrap(bundled_root)?);
+
+    for skill_id in FOUNDATION_SKILL_IDS
+        .iter()
+        .copied()
+        .filter(|id| *id != CATALOG_BOOTSTRAP_ID)
+    {
+        if let Some(skill) = try_resolve_bundled_foundation(bundled_root, skill_id)? {
+            resolved.push(skill);
+        }
+    }
+
+    resolved.sort_by(|left, right| left.payload.id.cmp(&right.payload.id));
+    Ok(resolved)
+}
+
+fn resolve_required_bootstrap(bundled_root: &Path) -> Result<ResolvedSkill, ResolveError> {
     let source_dir = bundled_root.join(CATALOG_BOOTSTRAP_ID);
     let skill_path = source_dir.join("SKILL.md");
 
@@ -261,10 +304,83 @@ fn resolve_catalog_bootstrap(repo_root: &Path) -> Result<Vec<ResolvedSkill>, Res
         },
         source_dir,
     };
-    Ok(vec![resolve_candidate(
+    resolve_candidate(candidate, ResolvedSourceKind::Bundled)
+}
+
+fn try_resolve_bundled_foundation(
+    bundled_root: &Path,
+    skill_id: &str,
+) -> Result<Option<ResolvedSkill>, ResolveError> {
+    let source_dir = bundled_root.join(skill_id);
+    let skill_path = source_dir.join("SKILL.md");
+    let source_metadata = match std::fs::symlink_metadata(&source_dir) {
+        Ok(metadata) => metadata,
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(source) => {
+            return Err(ResolveError::ReadSource {
+                path: source_dir,
+                source,
+            });
+        }
+    };
+    if source_metadata.file_type().is_symlink() || !source_metadata.is_dir() {
+        // Soft-skip corrupt optional foundations; bootstrap remains hard-required.
+        return Ok(None);
+    }
+    let skill_metadata = match std::fs::symlink_metadata(&skill_path) {
+        Ok(metadata) => metadata,
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(source) => {
+            return Err(ResolveError::ReadSource {
+                path: skill_path,
+                source,
+            });
+        }
+    };
+    if skill_metadata.file_type().is_symlink() || !skill_metadata.is_file() {
+        return Ok(None);
+    }
+    let raw = match std::fs::read_to_string(&skill_path) {
+        Ok(raw) => raw,
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(source) => {
+            return Err(ResolveError::ReadSource {
+                path: skill_path,
+                source,
+            });
+        }
+    };
+    let parsed = crate::skills::frontmatter::parse_source(&raw);
+    if parsed.name != Some(skill_id) {
+        return Ok(None);
+    }
+    let Some(description) = parsed
+        .description
+        .as_deref()
+        .filter(|description| !description.trim().is_empty())
+    else {
+        return Ok(None);
+    };
+    let Some(role) = parsed.role else {
+        return Ok(None);
+    };
+    if parsed.body.trim().is_empty() {
+        return Ok(None);
+    }
+    let candidate = SkillSourceCandidate {
+        payload: SkillPayload {
+            id: skill_id.to_owned(),
+            description: description.to_owned(),
+            body: parsed.body.to_owned(),
+            source: SkillSource::Bundled,
+            role,
+        },
+        source_dir,
+    };
+    Ok(Some(resolve_candidate(
         candidate,
         ResolvedSourceKind::Bundled,
-    )?])
+    )?))
 }
 
 fn resolve_candidate(
@@ -421,10 +537,12 @@ mod tests {
     }
 
     #[test]
-    fn catalog_only_resolves_exactly_the_bundled_bootstrap() {
+    fn catalog_only_resolves_foundation_bundled_skills_not_pool_or_overrides() {
         let _global_root = crate::explore::store::force_global_root_for_tests(None);
         let fixture = ResolverHarness::new();
         fixture.write_bundled("skills-catalog", "both", "bootstrap body\n");
+        fixture.write_bundled("spur-way", "both", "spur way body\n");
+        fixture.write_bundled("code-explore", "both", "code explore body\n");
         fixture.write_bundled("other-bundled", "both", "other body\n");
         fixture.write_pool("pool-only", "clean", "pool body\n");
         fixture.write_override("override-only", "worker", "override body\n");
@@ -433,10 +551,24 @@ mod tests {
             .resolve_with_policy(Adapter::Codex, SelectionPolicy::CatalogOnly)
             .unwrap();
 
-        assert_eq!(resolved.len(), 1);
-        assert_eq!(resolved[0].payload.id, "skills-catalog");
-        assert_eq!(resolved[0].payload.body, "bootstrap body\n");
-        assert_eq!(resolved[0].source.kind, ResolvedSourceKind::Bundled);
+        let ids: Vec<_> = resolved
+            .iter()
+            .map(|skill| skill.payload.id.as_str())
+            .collect();
+        assert!(ids.contains(&"skills-catalog"));
+        assert!(ids.contains(&"spur-way"));
+        assert!(ids.contains(&"code-explore"));
+        assert!(!ids.contains(&"other-bundled"));
+        assert!(!ids.contains(&"pool-only"));
+        assert!(!ids.contains(&"override-only"));
+        assert!(resolved
+            .iter()
+            .all(|skill| skill.source.kind == ResolvedSourceKind::Bundled));
+        let catalog = resolved
+            .iter()
+            .find(|skill| skill.payload.id == "skills-catalog")
+            .unwrap();
+        assert_eq!(catalog.payload.body, "bootstrap body\n");
     }
 
     #[test]
@@ -451,10 +583,13 @@ mod tests {
             .resolve_with_policy(Adapter::Codex, SelectionPolicy::CatalogOnly)
             .unwrap();
 
-        assert_eq!(resolved.len(), 1);
-        assert_eq!(resolved[0].payload.id, "skills-catalog");
-        assert_eq!(resolved[0].payload.body, "bundled body\n");
-        assert_eq!(resolved[0].source.kind, ResolvedSourceKind::Bundled);
+        let catalog = resolved
+            .iter()
+            .find(|skill| skill.payload.id == "skills-catalog")
+            .expect("skills-catalog present");
+        assert_eq!(catalog.payload.body, "bundled body\n");
+        assert_eq!(catalog.source.kind, ResolvedSourceKind::Bundled);
+        assert!(resolved.iter().all(|skill| skill.payload.id != "pool-only"));
     }
 
     #[test]

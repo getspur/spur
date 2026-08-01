@@ -34,6 +34,23 @@ The Jupyter-style notebook UI, `jute-notebook`, and `rest-table-gateway` source 
 
 Source lives in each crate’s `src/`. Integration tests are primarily in `crates/spur-acp/tests`, `crates/spur-core/tests`, `crates/spur-tui/tests`, and `crates/spur-cli/tests`. Specs and implementation plans live in `docs/superpowers/specs/` and `docs/superpowers/plans/`.
 
+## Skills: Foundation Preload + Catalog Navigate/Load
+
+SPUR **does not** pre-materialize every bundled or Explore skill into the agent filesystem. Runtime projection defaults to **foundation only** (`skills.projection_mode = "catalog_only"`):
+
+**Always projected (bundled foundation):**
+`skills-catalog`, `spur-way`, `code-explore`, `solve`, `brain-delegation`, `brain-review-gate`, `plan-task-discipline`, `worker-signals`, `beads-lifecycle`, `spur-analyst`
+
+**Everything else** (TDD, systematic debugging, writing-plans, marketing skills, pool skills, …) is **not** installed into worker skill dirs by default. Discover and load them through the skills catalog MCP:
+
+1. **`skill_navigate`** — primary discovery over the eligible PageIndex (frontmatter + SKILL.md headings/bodies + approved text resources). Use `query` for FTS, or `root` (`skill_id` / `skill_id:node_id`) for one tree hop. Returns metadata + short ledes only (limit 1–5).
+2. **`skill_read`** — only channel for full `SKILL.md` or an approved resource path. Copy `skill_id` exactly from a navigate (or search) hit; never invent IDs or walk skill directories.
+3. **`skill_search`** — optional skill-level name/description cards; prefer navigate when section/resource content matters.
+
+**Do not** search the filesystem for catalog skills, request materialization of task-specific skills, or treat navigate ledes as full instructions. If the catalog MCP is unavailable, continue with foundation skills and base agent capabilities.
+
+Rollback to full materialization (legacy): set `[skills] projection_mode = "all_active"` in layered config. See `docs/user-docs/05-configuration.md` and `assets/skills/skills-catalog/SKILL.md`.
+
 ## Code Retrieval & Exploration
 
 Treat the repository code graph as the first-class retrieval layer for code work. Choose tools based on question shape, but **start with `knowledge_context_pack` for discovery and exploration.**

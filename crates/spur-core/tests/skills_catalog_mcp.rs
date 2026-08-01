@@ -923,25 +923,32 @@ async fn skills_catalog_rollout_gate_is_context_only_reversible_and_measurable()
         "---\nname: other-bundled\ndescription: other workflow\nrole: both\n---\nother\n",
     )
     .expect("write other bundled skill");
-    let opt_in = resolve_effective_skills(
+    let foundation = resolve_effective_skills(
         projection_repo.path(),
         Adapter::Codex,
         RuntimeRole::Worker,
         SelectionPolicy::CatalogOnly,
     )
-    .expect("catalog-only projection");
-    assert_eq!(opt_in.len(), 1);
-    assert_eq!(opt_in[0].payload.id, "skills-catalog");
+    .expect("foundation/catalog-only projection");
+    assert!(foundation
+        .iter()
+        .any(|skill| skill.payload.id == "skills-catalog"));
+    assert!(
+        foundation
+            .iter()
+            .all(|skill| skill.payload.id != "other-bundled"),
+        "non-foundation bundled skills must not materialize under catalog_only"
+    );
 
     assert_eq!(
         SpurConfig::default().skills.projection_mode,
-        SkillsProjectionMode::AllActive
+        SkillsProjectionMode::CatalogOnly
     );
-    let configured: SpurConfig = toml::from_str("[skills]\nprojection_mode = \"catalog_only\"\n")
-        .expect("parse catalog-only opt-in");
+    let configured: SpurConfig = toml::from_str("[skills]\nprojection_mode = \"all_active\"\n")
+        .expect("parse all_active rollback");
     assert_eq!(
         configured.skills.projection_mode,
-        SkillsProjectionMode::CatalogOnly
+        SkillsProjectionMode::AllActive
     );
     let rollback = resolve_effective_skills(
         projection_repo.path(),
@@ -956,7 +963,7 @@ async fn skills_catalog_rollout_gate_is_context_only_reversible_and_measurable()
     assert!(rollback
         .iter()
         .any(|skill| skill.payload.id == "other-bundled"));
-    assert!(rollback.len() > opt_in.len());
+    assert!(rollback.len() > foundation.len());
 
     let unavailable = ToolRegistry::builder()
         .with(SkillsCatalogMcpModule::new(None))

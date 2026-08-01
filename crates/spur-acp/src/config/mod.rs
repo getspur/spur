@@ -504,16 +504,17 @@ impl Default for ContextServiceConfig {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SkillsProjectionMode {
-    /// Project every bundled and accepted active skill.
-    #[default]
+    /// Project every bundled and accepted active pool skill (legacy full materialization).
     AllActive,
-    /// Project only the bundled skills-catalog bootstrap.
+    /// Project only bundled foundation skills (skills-catalog + core SPUR skills).
+    /// Remaining skills are loaded on demand via skill_navigate / skill_read.
+    #[default]
     CatalogOnly,
 }
 
 impl SkillsProjectionMode {
-    fn is_all_active(&self) -> bool {
-        *self == Self::AllActive
+    fn is_catalog_only(&self) -> bool {
+        *self == Self::CatalogOnly
     }
 }
 
@@ -525,13 +526,13 @@ pub struct SkillsConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bundled_dir: Option<PathBuf>,
     /// Effective runtime skill set for newly reconciled brain and worker sessions.
-    #[serde(default, skip_serializing_if = "SkillsProjectionMode::is_all_active")]
+    #[serde(default, skip_serializing_if = "SkillsProjectionMode::is_catalog_only")]
     pub projection_mode: SkillsProjectionMode,
 }
 
 impl SkillsConfig {
     fn is_default(&self) -> bool {
-        self.bundled_dir.is_none() && self.projection_mode.is_all_active()
+        self.bundled_dir.is_none() && self.projection_mode.is_catalog_only()
     }
 }
 
@@ -1590,18 +1591,23 @@ level = "warn,spur_core::orchestrator=info"
     }
 
     #[test]
-    fn skills_projection_mode_defaults_to_all_active_when_absent() {
+    fn skills_projection_mode_defaults_to_catalog_only_when_absent() {
         let empty: SpurConfig = toml::from_str("").expect("empty config should parse");
         assert_eq!(
             empty.skills.projection_mode,
-            SkillsProjectionMode::AllActive
+            SkillsProjectionMode::CatalogOnly
         );
 
         let skills_section: SpurConfig =
             toml::from_str("[skills]\n").expect("empty skills section should parse");
         assert_eq!(
             skills_section.skills.projection_mode,
-            SkillsProjectionMode::AllActive
+            SkillsProjectionMode::CatalogOnly
+        );
+
+        assert_eq!(
+            SpurConfig::default().skills.projection_mode,
+            SkillsProjectionMode::CatalogOnly
         );
     }
 }

@@ -12,7 +12,8 @@ pub mod resolver;
 pub enum SelectionPolicy {
     /// Include every bundled and accepted active pool skill.
     AllActive,
-    /// Include only the bundled skills-catalog bootstrap.
+    /// Include only bundled foundation skills (skills-catalog + core SPUR skills).
+    /// Remaining skills are discovered via skill_navigate / skill_read.
     CatalogOnly,
 }
 
@@ -171,10 +172,9 @@ fn selection_policy_for_role(
     source_repo_root: &std::path::Path,
     role: RuntimeRole,
 ) -> anyhow::Result<SelectionPolicy> {
-    if role == RuntimeRole::Init {
-        return Ok(SelectionPolicy::AllActive);
-    }
-
+    // Init also uses the configured mode so `spur init` does not re-materialize
+    // the full historical skill set when foundation/catalog projection is active.
+    let _ = role;
     let mode = spur_acp::config::load_layered(source_repo_root)?
         .skills
         .projection_mode;
@@ -229,6 +229,19 @@ pub async fn reconcile_many(
     let mut summaries = Vec::with_capacity(adapters.len());
     let legacy_hints =
         reconcile::snapshot_legacy_materialization_hints(source_repo_root, launch_root);
+    let policy =
+        selection_policy_for_role(source_repo_root, RuntimeRole::Init).map_err(|source| {
+            ProjectionError {
+                phase: ProjectionPhase::Resolve,
+                launch_root: launch_root.to_path_buf(),
+                adapter: adapters
+                    .first()
+                    .map(|adapter| adapter.key().to_owned())
+                    .unwrap_or_else(|| "unknown".to_owned()),
+                skill_id: None,
+                source,
+            }
+        })?;
     for adapter in adapters {
         let outcome = reconcile::run_deferred(
             &worktrees,
@@ -237,7 +250,7 @@ pub async fn reconcile_many(
                 launch_root,
                 adapter: *adapter,
                 role: RuntimeRole::Init,
-                policy: SelectionPolicy::AllActive,
+                policy,
             },
             &legacy_hints,
         )
@@ -251,7 +264,7 @@ pub async fn reconcile_many(
                 launch_root,
                 adapter,
                 role: RuntimeRole::Init,
-                policy: SelectionPolicy::AllActive,
+                policy,
             },
             adapters,
             &legacy_hints,
@@ -285,7 +298,7 @@ mod tests {
     }
 
     #[test]
-    fn init_stays_all_active_and_explicit_rollback_selects_all_active() {
+    fn init_follows_layered_config_and_explicit_all_active_rollbacks() {
         let repo = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(repo.path().join(".spur")).unwrap();
         let config_path = repo.path().join(".spur/config.toml");
@@ -297,7 +310,7 @@ mod tests {
 
         assert_eq!(
             selection_policy_for_role(repo.path(), RuntimeRole::Init).unwrap(),
-            SelectionPolicy::AllActive
+            SelectionPolicy::CatalogOnly
         );
 
         std::fs::write(config_path, "[skills]\nprojection_mode = \"all_active\"\n").unwrap();
@@ -308,6 +321,19 @@ mod tests {
         assert_eq!(
             selection_policy_for_role(repo.path(), RuntimeRole::Worker).unwrap(),
             SelectionPolicy::AllActive
+        );
+        assert_eq!(
+            selection_policy_for_role(repo.path(), RuntimeRole::Init).unwrap(),
+            SelectionPolicy::AllActive
+        );
+    }
+
+    #[test]
+    fn default_layered_config_selects_foundation_catalog_only() {
+        let repo = tempfile::tempdir().unwrap();
+        assert_eq!(
+            selection_policy_for_role(repo.path(), RuntimeRole::Brain).unwrap(),
+            SelectionPolicy::CatalogOnly
         );
     }
 }
