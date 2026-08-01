@@ -3419,6 +3419,198 @@ mod tests {
         ));
     }
 
+    // ── Operate-gate contracts (F1–F8) ─────────────────────────────────────
+    // Audit findings locked as RED tests before the production fix:
+    //   F1 stop → cancelled terminal (worker kill + Completion(Cancelled))
+    //   F2 cancelled excluded from is_retryable (blocks stop-then-retry)
+    //   F3 escalated_to_brain excluded from is_retryable
+    //   F4 stop modal claims "Press R … with appended instructions"
+    //   F5 stop confirm append_prompt is collected then discarded on confirm
+    //   F6 retry is requeue-only (submit_plan_mutation retry_task), no inline spawn
+    //   F7 retry mutation path does not fast_forward_reconciler
+    //   F8 PlanCommandError ignored in PlanInspectorView (handled only in plan_browser)
+    //
+    // F6/F7 implementer note (bridge, not TUI-local — assert in spur-core):
+    // After a successful RetryPlanTask / submit_plan_mutation(retry_task), call
+    // `McpCallbackServer::fast_forward_reconciler()` so the reconciler leaves
+    // idle backoff and re-dispatches. Preferred call site: success arm of
+    // `handle_submit_plan_mutation` in crates/spur-core/src/server/handlers/plan.rs
+    // (covers MCP + TUI `call_retry_plan_task`). Alternative: success path of
+    // InteractiveInput::RetryPlanTask in interactive_loop.rs. Today neither
+    // path notifies; requeue alone leaves the task open but undispatched.
+
+    /// F1/F2: post-stop `cancelled` status must be retryable (stop-then-retry).
+    #[test]
+    fn post_stop_cancelled_status_opens_retry_confirmation() {
+        let session_id = SessionId("brain-1".into());
+        // Simulates projection after a successful stop path lands
+        // Completion(Cancelled) → snapshot status "cancelled".
+        let projection =
+            projection_with_single_task_status(&session_id, "cancelled", Some("bd-epic.1"), 1, 3);
+        let lineage = ExecutorLineage::new();
+        let ctx = view_context_for_tests(&lineage, &projection);
+        let mut view = PlanInspectorView::new_for_plan(session_id, "plan-1".into());
+
+        let action = view.handle_key(key_char('R'), &ctx);
+
+        assert!(
+            action.is_none(),
+            "R on cancelled (post-stop) must open retry confirm, not flash; got {action:?}"
+        );
+        assert!(
+            matches!(
+                view.confirm,
+                Some(PlanInspectorConfirm::RetryTask {
+                    ref status,
+                    ref issue_id,
+                    ..
+                }) if status == "cancelled" && issue_id == "bd-epic.1"
+            ),
+            "expected RetryTask confirm for cancelled task, got {:?}",
+            view.confirm
+        );
+    }
+
+    /// F3: escalated_to_brain is a recovery status and must open retry.
+    #[test]
+    fn escalated_to_brain_status_opens_retry_confirmation() {
+        let session_id = SessionId("brain-1".into());
+        let projection = projection_with_single_task_status(
+            &session_id,
+            "escalated_to_brain",
+            Some("bd-epic.1"),
+            1,
+            3,
+        );
+        let lineage = ExecutorLineage::new();
+        let ctx = view_context_for_tests(&lineage, &projection);
+        let mut view = PlanInspectorView::new_for_plan(session_id, "plan-1".into());
+
+        let action = view.handle_key(key_char('R'), &ctx);
+
+        assert!(
+            action.is_none(),
+            "R on escalated_to_brain must open retry confirm; got {action:?}"
+        );
+        assert!(
+            matches!(
+                view.confirm,
+                Some(PlanInspectorConfirm::RetryTask {
+                    ref status,
+                    ref issue_id,
+                    ..
+                }) if status == "escalated_to_brain" && issue_id == "bd-epic.1"
+            ),
+            "expected RetryTask confirm for escalated_to_brain, got {:?}",
+            view.confirm
+        );
+    }
+
+    /// F1/F2/F3: footer must advertise R for cancelled and escalated_to_brain.
+    #[test]
+    fn footer_advertises_retry_for_cancelled_and_escalated_statuses() {
+        for status in ["cancelled", "escalated_to_brain"] {
+            let session_id = SessionId(format!("brain-{status}"));
+            let projection =
+                projection_with_single_task_status(&session_id, status, Some("bd-epic.1"), 1, 3);
+            let lineage = ExecutorLineage::new();
+            let ctx = view_context_for_tests(&lineage, &projection);
+
+            let mut view = PlanInspectorView::new_for_plan(session_id, "plan-1".into());
+            view.set_selected_task_id_for_tests(Some("t-12".into()));
+
+            let backend = ratatui::backend::TestBackend::new(160, 24);
+            let mut terminal = ratatui::Terminal::new(backend).unwrap();
+            terminal
+                .draw(|frame| {
+                    <PlanInspectorView as View>::render(&mut view, frame, frame.area(), &ctx);
+                })
+                .unwrap();
+
+            let dump = format!("{:?}", terminal.backend().buffer());
+            assert!(
+                dump.contains("R: retry"),
+                "expected footer to advertise retry for status={status}:\n{dump}"
+            );
+        }
+    }
+
+    /// F4/F5: stop confirm must not show a dead append-prompt editor, and must
+    /// not claim typed stop instructions will be applied (CancelDelegation has
+    /// no prompt channel). Operators append instructions on the subsequent R
+    /// retry modal after the task is cancelled.
+    #[test]
+    fn stop_confirm_does_not_offer_unwired_append_prompt() {
+        let session_id = SessionId("brain-1".into());
+        let projection = projection_with_epic_and_worker(&session_id);
+        let lineage = ExecutorLineage::new();
+        let ctx = view_context_for_tests(&lineage, &projection);
+        let mut view = PlanInspectorView::new_for_plan(session_id, "plan-1".into());
+
+        assert!(view.handle_key(key_shift('X'), &ctx).is_none());
+        assert!(matches!(
+            view.confirm,
+            Some(PlanInspectorConfirm::StopTask { .. })
+        ));
+
+        let backend = ratatui::backend::TestBackend::new(100, 28);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                <PlanInspectorView as View>::render(&mut view, frame, frame.area(), &ctx);
+            })
+            .unwrap();
+
+        let dump = buffer_text(terminal.backend().buffer());
+        assert!(
+            !dump.contains("Append:"),
+            "stop confirm must not show an Append prompt editor unless it is wired through confirm; got:\n{dump}"
+        );
+        assert!(
+            !dump.contains("with appended instructions"),
+            "stop confirm must not claim stop-time typed instructions are applied; got:\n{dump}"
+        );
+    }
+
+    /// F8: PlanCommandError must surface in the inspector footer (or equivalent
+    /// status strip), matching plan_browser's operator-visible error path.
+    #[test]
+    fn plan_command_error_surfaces_in_footer_status() {
+        let session_id = SessionId("brain-1".into());
+        let projection = projection_with_epic_and_worker(&session_id);
+        let lineage = ExecutorLineage::new();
+        let ctx = view_context_for_tests(&lineage, &projection);
+        let mut view = PlanInspectorView::new_for_plan(session_id, "plan-1".into());
+
+        <PlanInspectorView as View>::handle_spur_event(
+            &mut view,
+            &SpurEvent::now(SpurEventBody::PlanCommandError {
+                operation: "RetryPlanTask".into(),
+                plan_id: Some("plan-1".into()),
+                error: "retry_task: issue is not retryable".into(),
+            }),
+            &ctx,
+        );
+
+        let backend = ratatui::backend::TestBackend::new(120, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                <PlanInspectorView as View>::render(&mut view, frame, frame.area(), &ctx);
+            })
+            .unwrap();
+
+        let footer = buffer_row(terminal.backend().buffer(), 23);
+        assert!(
+            footer.contains("RetryPlanTask") || footer.contains("blocked"),
+            "expected PlanCommandError to surface in footer status, got:\n{footer}"
+        );
+        assert!(
+            footer.contains("not retryable") || footer.contains("issue is not"),
+            "expected error detail in footer status, got:\n{footer}"
+        );
+    }
+
     #[test]
     fn enter_from_retry_confirmation_dispatches_retry_action() {
         let session_id = SessionId("brain-1".into());
