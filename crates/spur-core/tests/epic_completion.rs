@@ -45,6 +45,43 @@ fn run_br_json(repo: &Path, args: &[&str]) -> String {
         .unwrap_or_else(|err| panic!("test beads command {args:?} failed: {err}"))
 }
 
+fn run_git(repo: &Path, args: &[&str]) -> String {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(args)
+        .output()
+        .unwrap_or_else(|error| panic!("run git {args:?}: {error}"));
+    assert!(
+        output.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout)
+        .expect("git output is utf-8")
+        .trim()
+        .to_string()
+}
+
+fn seed_git_repo(repo: &Path) -> String {
+    run_git(repo, &["init", "--quiet"]);
+    run_git(
+        repo,
+        &[
+            "-c",
+            "user.name=SPUR Test",
+            "-c",
+            "user.email=spur-test@example.invalid",
+            "commit",
+            "--quiet",
+            "--allow-empty",
+            "-m",
+            "fixture base",
+        ],
+    );
+    run_git(repo, &["rev-parse", "HEAD"])
+}
+
 fn parse_id_from_create(json: &str) -> String {
     let value: serde_json::Value = serde_json::from_str(json).expect("br create json");
     value["id"].as_str().expect("br create id").to_string()
@@ -251,9 +288,22 @@ fn mock_reconciler(
     plan_id: &str,
     dispatch: Option<ReconcilerDispatchCtx>,
 ) -> Reconciler {
+    mock_reconciler_at(pm, plan_id, dispatch, None)
+}
+
+fn mock_reconciler_at(
+    pm: Arc<spur_core::plan::test_util::MockPm>,
+    plan_id: &str,
+    dispatch: Option<ReconcilerDispatchCtx>,
+    repo_root: Option<&Path>,
+) -> Reconciler {
     let pm_like: Arc<dyn PmLike> = pm;
+    let mut config = ReconcilerConfig::default();
+    if let Some(repo_root) = repo_root {
+        config.repo_root = repo_root.to_path_buf();
+    }
     Reconciler::new_with_pm_like(
-        ReconcilerConfig::default(),
+        config,
         pm_like,
         Arc::new(Notify::new()),
         dispatch.map(ReconcilerDispatchCtx::into_dispatch),
@@ -592,6 +642,8 @@ async fn mock_pm_reconciler_plan_completed_counts_cancelled_and_suppresses_ready
 #[tokio::test(flavor = "current_thread")]
 async fn mock_pm_reconciler_success_completion_fires_awaiting_review_continuation() {
     let _guard = epic_completion_test_lock();
+    let repo = TempDir::new().expect("temp git repo");
+    let base_oid = seed_git_repo(repo.path());
     let pm = spur_core::plan::test_util::MockPm::new().arc();
     let plan_id = "P-mock-awaiting-review-continuation";
     let (_epic_id, task_issues) = seed_mock_plan(&pm, plan_id, &[("A", &[])]).await;
@@ -599,9 +651,7 @@ async fn mock_pm_reconciler_success_completion_fires_awaiting_review_continuatio
     pm.update_issue(
         &task_issue,
         spur_pm::IssueUpdate {
-            add_labels: vec![labels::dispatched_base_oid(
-                "0000000000000000000000000000000000000001",
-            )],
+            add_labels: vec![labels::dispatched_base_oid(&base_oid)],
             ..Default::default()
         },
     )
@@ -610,7 +660,8 @@ async fn mock_pm_reconciler_success_completion_fires_awaiting_review_continuatio
     let (continuation_tx, mut continuation_rx) = tokio::sync::mpsc::unbounded_channel();
     let (dispatch, mut delegation_rx, task_tracker) =
         mock_dispatch_ctx(None, Arc::new(continuation_ctx(continuation_tx)));
-    let reconciler = mock_reconciler(Arc::clone(&pm), plan_id, Some(dispatch));
+    let reconciler =
+        mock_reconciler_at(Arc::clone(&pm), plan_id, Some(dispatch), Some(repo.path()));
 
     assert!(reconciler.tick_once().await.expect("dispatch A"));
     let request = tokio::time::timeout(Duration::from_secs(2), delegation_rx.recv())
@@ -627,10 +678,10 @@ async fn mock_pm_reconciler_success_completion_fires_awaiting_review_continuatio
             diff_summary: None,
             summary: Some("A awaits review".into()),
             estimated_cost_usd: 0.0,
-            worker_branch: Some("spur/worker-A".into()),
+            worker_branch: Some("HEAD".into()),
             artifact: None,
         },
-        "0000000000000000000000000000000000000001",
+        &base_oid,
     )
     .expect("send success");
 
@@ -1056,6 +1107,7 @@ async fn three_task_plan_drops_plan_outcomes_on_epic_close_but_retains_global_ri
     let _guard = epic_completion_test_lock();
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
+    let base_oid = seed_git_repo(dir.path());
 
     let epic_id = parse_id_from_create(&run_br_json(
         dir.path(),
@@ -1097,11 +1149,7 @@ async fn three_task_plan_drops_plan_outcomes_on_epic_close_but_retains_global_ri
             &labels::plan_task_id(&format!("t{index}")),
         );
         label_issue(dir.path(), task_id, &labels::agent("codex"));
-        label_issue(
-            dir.path(),
-            task_id,
-            &labels::dispatched_base_oid("0000000000000000000000000000000000000001"),
-        );
+        label_issue(dir.path(), task_id, &labels::dispatched_base_oid(&base_oid));
         run_br(dir.path(), &["dep", "add", task_id, &epic_id]);
         let task_spec = audit_sentinel::encode_comment(&AuditSentinelKind::TaskSpec {
             task_id: format!("t{index}"),
@@ -1149,7 +1197,10 @@ async fn three_task_plan_drops_plan_outcomes_on_epic_close_but_retains_global_ri
     let (delegation_tx, mut delegation_rx) = tokio::sync::mpsc::channel(3);
     let task_tracker = spur_core::server::AbortableTaskTracker::new();
     let mut reconciler = Reconciler::new(
-        ReconcilerConfig::default(),
+        ReconcilerConfig {
+            repo_root: dir.path().to_path_buf(),
+            ..ReconcilerConfig::default()
+        },
         Arc::clone(&pm),
         Arc::new(Notify::new()),
         Some(ReconcilerDispatchCtx {
@@ -1196,10 +1247,10 @@ async fn three_task_plan_drops_plan_outcomes_on_epic_close_but_retains_global_ri
                 diff_summary: None,
                 summary: Some("done".into()),
                 estimated_cost_usd: 0.0,
-                worker_branch: Some("spur/worker-prune-test".into()),
+                worker_branch: Some("HEAD".into()),
                 artifact: None,
             },
-            "0000000000000000000000000000000000000001",
+            &base_oid,
         )
         .expect("send worker result");
     }
