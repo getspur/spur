@@ -125,19 +125,55 @@ To opt in only one repository, put the same table in that repository's `.spur/co
 
 The effective setting is read when Spur reconciles a new brain or worker runtime. Start a new session after changing it. Existing conversations retain skills and retrieved text already delivered to their context.
 
-### One-bootstrap search/read flow
+### One-bootstrap navigate/read flow
 
-The `skills-catalog` bootstrap uses a bounded, repeated discovery flow:
+The `skills-catalog` bootstrap uses a bounded, repeated PageIndex discovery flow:
 
-1. Call `skill_search` with the current task intent.
-2. Choose a relevant metadata result and copy its opaque `skill_id` unchanged.
-3. Call `skill_read` with that exact `skill_id` to load `SKILL.md`.
-4. If the loaded skill explicitly needs an approved text resource, call `skill_read` again with the same `skill_id` and the declared relative `resource` path.
-5. Search again when the task changes phase or the first query is insufficient.
+1. Call `skill_navigate` with a natural-language `query` for the current task intent.
+2. Inspect hits (skill metadata, node kind/path/heading, optional lede). Optionally call `skill_navigate` again with `root` set to a returned `skill_id` or `skill_id:node_id` to expand one tree hop.
+3. Choose a relevant hit and copy its opaque `skill_id` unchanged.
+4. Call `skill_read` with that exact `skill_id` to load `SKILL.md`.
+5. If the loaded skill explicitly needs an approved text resource, call `skill_read` again with the same `skill_id` and the declared relative `resource` path.
+6. Navigate again when the task changes phase or the first query is insufficient.
 
-If the catalog MCP is unavailable, the bootstrap directs the agent to continue with base-agent capabilities or report that no approved workflow could be loaded. It must not search the filesystem, fabricate an ID, or install a task-specific skill.
+If the catalog MCP is unavailable, the bootstrap directs the agent to continue with base-agent capabilities or report that no approved workflow could be loaded. It must not search the filesystem, walk skill directories, fabricate an ID, or install a task-specific skill.
 
-`skill_search` accepts this schema:
+#### PageIndex corpus
+
+`skill_navigate` searches and tree-hops an in-memory **PageIndex** built only for currently eligible skills. The index combines:
+
+1. **Frontmatter metadata** — parsed YAML fields such as name, description, and role
+2. **SKILL.md headings and section bodies** — after the frontmatter block is stripped
+3. **Approved text resources** — inventory-approved UTF-8 text only (scripts, binaries, and undeclared paths are excluded)
+
+Navigate hits are **metadata + lede only** (lede defaults to the first ~200 UTF-8 characters of the node’s searchable text). Full instruction or resource bodies are never returned by navigate or search; they are available only through `skill_read`.
+
+#### `skill_navigate`
+
+`skill_navigate` accepts this schema:
+
+```json
+{
+  "query": "validate authentication changes before merging",
+  "root": null,
+  "limit": 5,
+  "source": null,
+  "include_lede": true
+}
+```
+
+- `query` is required when `root` is omitted or empty; it is full-text BM25 over PageIndex node tokens.
+- `root`, when set, is an opaque `skill_id` or `skill_id:node_id`. The tool expands **one tree hop** (children of that node) instead of running FTS.
+- `limit` is optional, defaults to `5`, and must be an integer from `1` through `5`.
+- `source` is optional and, when set, is an exact provenance filter (FTS path only; same semantics as `skill_search`).
+- `include_lede` is optional and defaults to `true`. When `false`, lede fields are omitted from hits.
+- Unknown fields and wrong field types are rejected. An empty call (no non-empty `query` and no non-empty `root`) fails with `invalid_query`.
+
+A successful response contains `catalog_revision` and `hits`. Each hit includes `skill_id`, `node_id`, `name`, `node_kind` (`frontmatter`, `document`, `section`, or `resource`), `path`, `heading`, `heading_level`, `child_count`, optional FTS `score`, optional `lede`, `source`, `availability`, and `rank`. Hits never contain full instruction bodies and never write to the worker filesystem (`write_effect = "none"`).
+
+#### `skill_search`
+
+`skill_search` remains available as skill-level, metadata-only discovery (no PageIndex nodes). It accepts this schema:
 
 ```json
 {
@@ -154,16 +190,18 @@ If the catalog MCP is unavailable, the bootstrap directs the agent to continue w
 
 Search is metadata-only. Its top-level response contains `catalog_revision` and `results`. Each result contains `skill_id`, `name`, `description`, `source`, `pinned_commit`, `content_sha256`, `resource_manifest_sha256`, `compatibility`, `availability`, `rank`, and `match_reason`; it never contains the instruction body.
 
+#### `skill_read`
+
 `skill_read` accepts this schema:
 
 ```json
 {
-  "skill_id": "opaque-versioned-reference-from-search",
+  "skill_id": "opaque-versioned-reference-from-navigate-or-search",
   "resource": null
 }
 ```
 
-- `skill_id` is required, non-empty, opaque, and must be copied from search rather than parsed or constructed.
+- `skill_id` is required, non-empty, opaque, and must be copied from navigate or search rather than parsed or constructed.
 - Omit `resource`, set it to `null`, or use `"SKILL.md"` to read the main instructions.
 - Otherwise, `resource` must be a normalized relative path in the approved text-resource inventory.
 - Unknown fields and wrong field types are rejected.
@@ -174,12 +212,13 @@ A successful read returns `skill_id`, `name`, `source`, `catalog_revision`, `con
 
 `source` and `pinned_commit` identify provenance. `content_sha256` identifies the pinned skill content, `resource_manifest_sha256` identifies the approved text-resource inventory, and `catalog_revision` identifies the merged eligible catalog and policy view used for the response. Treat `skill_id` as an opaque, version-pinned reference; unrelated catalog changes do not authorize altering it.
 
-A search result is not an authorization capability. Before every read, Spur reloads current catalog state and rechecks the opaque reference, current eligibility, context compatibility, version identity, requested resource, and content integrity. A removed, disabled, unapproved, changed, or no-longer-compatible result fails closed. Eligibility is `enabled AND compatible AND (bundled OR (adopted AND gate-approved))`.
+A navigate or search result is not an authorization capability. Before every read, Spur reloads current catalog state and rechecks the opaque reference, current eligibility, context compatibility, version identity, requested resource, and content integrity. A removed, disabled, unapproved, changed, or no-longer-compatible result fails closed. Eligibility is `enabled AND compatible AND (bundled OR (adopted AND gate-approved))`.
 
 Delivery is context-only:
 
-- `skill_search` and `skill_read` have `write_effect = "none"` and do not install or materialize task-specific skills in the worker filesystem.
-- Reads return verified UTF-8 text in the MCP result. Scripts, binary resources, non-UTF-8 files, symlinks, undeclared resources, unsupported media, absolute paths, traversal, and cross-skill paths are denied.
+- `skill_navigate`, `skill_search`, and `skill_read` have `write_effect = "none"` and do not install or materialize task-specific skills in the worker filesystem.
+- Navigate and search return metadata and optional ledes only; only `skill_read` returns full verified UTF-8 skill or resource text in the MCP result.
+- Scripts, binary resources, non-UTF-8 files, symlinks, undeclared resources, unsupported media, absolute paths, traversal, and cross-skill paths are denied.
 - Text is limited to `262144` bytes by `MAX_TEXT_CONTENT_BYTES`, recorded by persisted solve result `sol_ece03f4a166e4004`.
 - A resource is checked for type, size, canonical containment, and SHA-256 immediately before return; the whole skill content hash is rechecked after the resource read.
 - Retrieved instructions remain below system, developer, user, repository, and project-management authority.
@@ -214,13 +253,16 @@ level = "warn,spur_core::orchestrator=info,spur_core::mcp::skills_catalog=debug"
 
 | Event | Evidence fields |
 |---|---|
+| `skill_navigate_started` | `tool`, exact `source` filter, `has_root`, `has_query`, `include_lede`, `write_effect` |
+| `skill_navigate_completed` | `tool`, `source`, `catalog_revision`, `result_count`, `include_lede`, `latency_ms`, `write_effect` |
+| `skill_navigate_failed` | `tool`, `source`, `catalog_revision`, `result_count`, `error_kind`, `latency_ms`, `write_effect` |
 | `skill_search_started` | `tool`, exact `source` filter, `write_effect` |
 | `skill_search_completed` | `tool`, `source`, `catalog_revision`, `result_count`, `latency_ms`, `write_effect` |
 | `skill_search_failed` | `tool`, `source`, `catalog_revision`, `result_count`, `error_kind`, `latency_ms`, `write_effect` |
 | `skill_read_completed` | `tool`, `source`, opaque `skill_id`, `catalog_revision`, `content_sha256`, `resource`, `result_count`, `latency_ms`, `write_effect` |
 | `skill_read_failed` | `tool`, `source`, `catalog_revision`, `result_count`, `error_kind`, `latency_ms`, `write_effect` |
 
-Raw search queries and returned skill content are not logged by these events. Preserve event counts, latency distributions, stable-error rates, stale/denied read rates, skills read per task, startup and cumulative skill-token use, and downstream task outcomes for the observation window.
+Raw navigate/search queries and returned skill content are not logged by these events. Preserve event counts, latency distributions, stable-error rates, stale/denied read rates, skills read per task, startup and cumulative skill-token use, and downstream task outcomes for the observation window.
 
 ### Four-gate rollout decision
 
@@ -232,8 +274,8 @@ Collect and retain evidence for all four gates:
 |---|---|
 | Retrieval | Deterministic fixture results for recall@5, precision@5, mean reciprocal rank, zero-result rate, and refinement recovery, compared with the approved frozen baseline; include activation/no-match precision and downstream task outcomes before changing defaults. |
 | Security | Fresh tests for eligibility, revocation, stale references, unapproved shadowing, resource confinement, content-size policy, integrity mismatch, and unchanged worker files; runtime failures must remain fail-closed with `write_effect = "none"`. |
-| Integration | Fresh rooted brain and worker registry search/read tests, exact-one catalog-only projection evidence, MCP-unavailable fallback evidence, and an exercised `all_active` rollback. |
-| Observation | An approved observation window showing acceptable search/read latency and error rates, lower startup skill-token use, catalog-churn behavior, skills-read accumulation, and no meaningful downstream task regression. |
+| Integration | Fresh rooted brain and worker registry navigate/search/read tests, exact-one catalog-only projection evidence, MCP-unavailable fallback evidence, and an exercised `all_active` rollback. |
+| Observation | An approved observation window showing acceptable navigate/search/read latency and error rates, lower startup skill-token use, catalog-churn behavior, skills-read accumulation, and no meaningful downstream task regression. |
 
 If any gate fails or lacks evidence, keep or restore `all_active`. All four gates passing only permits a separate, later change to make catalog-only the default or retire the legacy path; it does not perform or authorize that change automatically. This release neither makes catalog-only the default nor removes all-active projection.
 
