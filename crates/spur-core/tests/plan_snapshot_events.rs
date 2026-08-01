@@ -41,6 +41,23 @@ fn run_git(repo: &Path, args: &[&str]) {
     );
 }
 
+fn run_git_output(repo: &Path, args: &[&str]) -> String {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(repo)
+        .output()
+        .expect("git invocation failed");
+    assert!(
+        output.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout)
+        .expect("git output should be UTF-8")
+        .trim()
+        .to_string()
+}
+
 async fn beads_pm(repo: &Path) -> Arc<PmService> {
     Arc::new(
         PmService::try_new(None, true, false, repo, None)
@@ -368,7 +385,10 @@ async fn reconciler_dispatch_and_completion_emit_refreshed_snapshots() {
     let tracker = AbortableTaskTracker::new();
     let sink_ref: Arc<dyn McpEventSink> = Arc::clone(&fixture.sink) as Arc<dyn McpEventSink>;
     let reconciler = Reconciler::new(
-        ReconcilerConfig::default(),
+        ReconcilerConfig {
+            repo_root: fixture._dir.path().to_path_buf(),
+            ..ReconcilerConfig::default()
+        },
         Arc::clone(&fixture.pm),
         Arc::new(Notify::new()),
         Some(ReconcilerDispatchCtx {
@@ -391,6 +411,12 @@ async fn reconciler_dispatch_and_completion_emit_refreshed_snapshots() {
 
     let request = delegation_rx.recv().await.expect("dispatch request");
     assert_eq!(request.issue_id.as_deref(), Some(issue_id.as_str()));
+
+    let dispatched_base_oid = run_git_output(fixture._dir.path(), &["rev-parse", "HEAD"]);
+    run_git(
+        fixture._dir.path(),
+        &["branch", "spur/worker-t1", &dispatched_base_oid],
+    );
 
     {
         let events = fixture.sink.events.lock().unwrap();
@@ -420,7 +446,7 @@ async fn reconciler_dispatch_and_completion_emit_refreshed_snapshots() {
             worker_branch: Some("spur/worker-t1".into()),
             artifact: None,
         },
-        "0000000000000000000000000000000000000001",
+        &dispatched_base_oid,
     )
     .expect("send delegation result");
 
