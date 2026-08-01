@@ -769,7 +769,7 @@ pub async fn run_tui(
         .ok()
         .and_then(|cwd| spur_core::project_root::discover(&cwd).ok())
         .unwrap_or_else(|| std::path::PathBuf::from("."));
-    run_tui_with_license(
+    Box::pin(run_tui_with_license(
         event_rx,
         user_input_tx,
         perm_rx,
@@ -781,7 +781,7 @@ pub async fn run_tui(
         repo_root,
         None,
         None,
-    )
+    ))
     .await
 }
 
@@ -1062,7 +1062,7 @@ pub async fn run_tui_with_config(
         .ok()
         .and_then(|cwd| spur_core::project_root::discover(&cwd).ok())
         .unwrap_or_else(|| std::path::PathBuf::from("."));
-    run_tui_with_license(
+    Box::pin(run_tui_with_license(
         event_rx,
         user_input_tx,
         perm_rx,
@@ -1074,7 +1074,7 @@ pub async fn run_tui_with_config(
         repo_root,
         None,
         None,
-    )
+    ))
     .await
 }
 

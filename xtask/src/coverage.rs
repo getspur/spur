@@ -123,6 +123,12 @@ impl LineCoverage {
         Self { files }
     }
 
+    // Coverage totals are commutative, so hash iteration order cannot affect
+    // the result and sorting would add work without improving determinism.
+    #[expect(
+        clippy::iter_over_hash_type,
+        reason = "coverage totals are independent of hash traversal order"
+    )]
     pub(crate) fn total_coverage(&self) -> CoverageStats {
         let mut covered = 0u64;
         let mut total = 0u64;
@@ -263,6 +269,11 @@ impl GateResult {
     }
 }
 
+// The gate only counts hits; neither hash traversal order can affect its result.
+#[expect(
+    clippy::iter_over_hash_type,
+    reason = "coverage hit counts are independent of hash traversal order"
+)]
 pub(crate) fn evaluate_gate(
     coverage: &LineCoverage,
     changed_lines: &HashMap<String, HashSet<u32>>,
@@ -359,7 +370,7 @@ impl CoverageStats {
 fn parse_percent(flag: &str, value: &str) -> Result<f64, String> {
     value
         .parse()
-        .map_err(|_| format!("{flag} {value:?} is not a number"))
+        .map_err(|_parse_error| format!("{flag} {value:?} is not a number"))
 }
 
 #[cfg(test)]

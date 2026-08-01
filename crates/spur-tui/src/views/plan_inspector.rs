@@ -769,6 +769,10 @@ impl PlanInspectorView {
         }
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "overlay rendering keeps borrowed frame and view state explicit"
+    )]
     fn render_peek_overlay(
         frame: &mut Frame,
         parent_area: Rect,
@@ -1894,6 +1898,10 @@ fn clamp_char_boundary(text: &str, cursor: usize) -> usize {
     cursor
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "footer hint inputs are independent optional command labels"
+)]
 fn footer_hint(
     width: u16,
     enter_hint: &str,

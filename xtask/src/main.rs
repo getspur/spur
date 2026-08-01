@@ -439,7 +439,7 @@ fn zigbuild_install_fetch_command(workspace_root: &Path, triple: &str, debug: bo
 
 #[cfg(unix)]
 fn mark_executable(path: &Path) -> Result<(), String> {
-    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::fs::PermissionsExt as _;
     fs::set_permissions(path, fs::Permissions::from_mode(0o755))
         .map_err(|err| format!("failed to mark {} executable: {err}", path.display()))
 }
@@ -457,21 +457,21 @@ enum DistPlatform {
     /// Native VM target. The AWS Graviton builder emits aarch64 Linux
     /// binaries; the artifact suffix tracks that.
     LinuxAarch64,
-    /// x86_64 ELF via `spur-cargo zigbuild` (zig cross C/C++ + ELF link).
+    /// `x86_64` ELF via `spur-cargo zigbuild` (zig cross C/C++ + ELF link).
     /// Exists for npm parity: @getspur/spur-cli must serve linux x64.
     LinuxX64Gnu,
-    /// Fat arm64 + x86_64 Mach-O via `spur-cargo zigbuild`.
+    /// Fat arm64 + `x86_64` Mach-O via `spur-cargo zigbuild`.
     MacUniversal2,
     /// PE32+ via `spur-cargo xwin`.
     WindowsX64,
 }
 
 impl DistPlatform {
-    const ALL: [DistPlatform; 4] = [
-        DistPlatform::LinuxAarch64,
-        DistPlatform::LinuxX64Gnu,
-        DistPlatform::MacUniversal2,
-        DistPlatform::WindowsX64,
+    const ALL: [Self; 4] = [
+        Self::LinuxAarch64,
+        Self::LinuxX64Gnu,
+        Self::MacUniversal2,
+        Self::WindowsX64,
     ];
 
     fn parse(value: &str) -> Result<Self, String> {
@@ -988,6 +988,8 @@ fn dist_artifacts_in(out_dir: &Path) -> Result<Vec<PathBuf>, String> {
 /// Write a coreutils-compatible SHA256SUMS file (hash, two spaces, name).
 /// Shells out to sha256sum (Linux) or shasum -a 256 (macOS).
 fn write_sha256sums(artifacts: &[PathBuf], sums_path: &Path) -> Result<(), String> {
+    use std::fmt::Write as _;
+
     let mut lines = String::new();
     for artifact in artifacts {
         let hash = sha256_file(artifact)?;
@@ -995,7 +997,7 @@ fn write_sha256sums(artifacts: &[PathBuf], sums_path: &Path) -> Result<(), Strin
             .file_name()
             .and_then(|name| name.to_str())
             .ok_or_else(|| format!("unrepresentable artifact name: {}", artifact.display()))?;
-        lines.push_str(&format!("{hash}  {name}\n"));
+        writeln!(&mut lines, "{hash}  {name}").expect("writing to a String cannot fail");
     }
     fs::write(sums_path, lines)
         .map_err(|err| format!("failed to write {}: {err}", sums_path.display()))
@@ -1015,7 +1017,7 @@ fn sha256_file(path: &Path) -> Result<String, String> {
                     .to_owned();
                 return Ok(hash);
             }
-            _ => continue,
+            _ => {}
         }
     }
     Err(format!(
@@ -1235,7 +1237,7 @@ fn install_binary_from(
         .map_err(|err| format!("failed to create {}: {err}", bin_dir.display()))?;
     let installed_binary = bin_dir.join(binary_name);
     remove_existing_path(&installed_binary)?;
-    fs::copy(&built_binary, &installed_binary).map_err(|err| {
+    fs::copy(built_binary, &installed_binary).map_err(|err| {
         format!(
             "failed to copy {} to {}: {err}",
             built_binary.display(),
@@ -1369,7 +1371,7 @@ fn workspace_root() -> PathBuf {
 }
 
 /// Resolve from the invoking cargo's runtime environment, never from
-/// compile-time env!(): the xtask binary can be a stale cache hit compiled in
+/// compile-time `env!()`: the xtask binary can be a stale cache hit compiled in
 /// a different copy of the workspace (remote per-run dirs share one target
 /// dir), and a baked-in manifest path would silently point every subcommand
 /// at that older tree.
