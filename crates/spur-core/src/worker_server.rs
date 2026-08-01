@@ -1212,6 +1212,24 @@ impl WorkerToolHandler {
             .await
     }
 
+    #[tool(
+        name = "skill_search",
+        description = "Search the current repository's eligible Explore skill catalog."
+    )]
+    async fn skill_search_tool(&self, arguments: JsonObject) -> Result<CallToolResult, McpError> {
+        self.call_worker_registry_tool("skill_search", arguments)
+            .await
+    }
+
+    #[tool(
+        name = "skill_read",
+        description = "Read exact verified text for an eligible Explore skill reference."
+    )]
+    async fn skill_read_tool(&self, arguments: JsonObject) -> Result<CallToolResult, McpError> {
+        self.call_worker_registry_tool("skill_read", arguments)
+            .await
+    }
+
     fn context_from_request(
         &self,
         context: &RequestContext<RoleServer>,
@@ -3856,6 +3874,78 @@ mod tests {
                 other => panic!("{tool_name} returned a non-MCP error: {other}"),
             }
         }
+
+        drop(client);
+        server.shutdown(Duration::from_secs(5)).await;
+    }
+
+    #[tokio::test]
+    async fn skill_catalog_tools_reach_rooted_worker_registry_over_http() {
+        let dir = TempDir::new().expect("tempdir");
+        let skill_dir = dir.path().join("assets/skills/http-catalog-needle");
+        std::fs::create_dir_all(&skill_dir).expect("create skill dir");
+        let document = concat!(
+            "---\n",
+            "name: http-catalog-needle\n",
+            "description: Find a unique HTTP catalog needle\n",
+            "role: worker\n",
+            "---\n\n",
+            "# HTTP Catalog Needle\n\n",
+            "EXACT_HTTP_SKILL_TEXT\n",
+        );
+        std::fs::write(skill_dir.join("SKILL.md"), document).expect("write skill document");
+
+        let pm = pm_service_fixture(dir.path()).await;
+        let mut deps = worker_mcp_deps_fixture(
+            pm,
+            pro_feature_gate(),
+            Arc::new(RecordingWorkerSignalSink::default()),
+        );
+        deps.repo_root = Some(dir.path().to_path_buf());
+        let server = WorkerMcpServer::start("brain-A".into(), deps)
+            .await
+            .expect("start worker server");
+        server.register_delegation("del-skills".into(), DelegationContext::default());
+        let token = server.issue_token("del-skills", Duration::from_secs(60));
+        let config =
+            StreamableHttpClientTransportConfig::with_uri(server.url()).auth_header(&token);
+        let client =
+            ().serve(StreamableHttpClientTransport::from_config(config))
+                .await
+                .expect("rmcp client initialize");
+
+        let mut search_request = CallToolRequestParams::new("skill_search");
+        search_request.arguments = json!({ "query": "unique HTTP catalog needle" })
+            .as_object()
+            .cloned();
+        let search = client
+            .call_tool(search_request)
+            .await
+            .expect("skill_search reaches rooted worker registry");
+        let search = serde_json::to_value(search).expect("serialize search response");
+        let search_text = search["content"][0]["text"]
+            .as_str()
+            .expect("search response contains JSON text");
+        let search_payload: Value =
+            serde_json::from_str(search_text).expect("search response text is JSON");
+        assert!(search_payload.get("content").is_none());
+        let skill_id = search_payload["results"][0]["skill_id"]
+            .as_str()
+            .expect("opaque skill id");
+
+        let mut read_request = CallToolRequestParams::new("skill_read");
+        read_request.arguments = json!({ "skill_id": skill_id }).as_object().cloned();
+        let read = client
+            .call_tool(read_request)
+            .await
+            .expect("skill_read reaches rooted worker registry");
+        let read = serde_json::to_value(read).expect("serialize read response");
+        let read_text = read["content"][0]["text"]
+            .as_str()
+            .expect("read response contains JSON text");
+        let read_payload: Value =
+            serde_json::from_str(read_text).expect("read response text is JSON");
+        assert_eq!(read_payload["content"], document);
 
         drop(client);
         server.shutdown(Duration::from_secs(5)).await;

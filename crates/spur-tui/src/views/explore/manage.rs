@@ -9,7 +9,8 @@ use spur_core::explore::{
     apply,
     catalog::ItemKind,
     materialize::{read_recent_materializations, MaterializationRecord},
-    pool::{self, StatusReport},
+    pool::{self, Manifest, StatusReport},
+    serving::{ContextCompatibility, Eligibility, ServingCatalog, ServingDecision},
 };
 
 use crate::action::Action;
@@ -25,15 +26,101 @@ pub enum ManageLens {
     LastMaterialization,
 }
 
+/// Fits the `agent` header and every marker without exceeding the existing
+/// compact six-cell columns, as witnessed by `sol_26a4532a782743e3`.
+const AGENT_COLUMN_WIDTH: u16 = 5;
+
+type AgentDecisionMap =
+    std::collections::BTreeMap<String, std::collections::BTreeMap<String, ServingDecision>>;
+
+struct AgentAvailabilitySnapshot {
+    repo_root: std::path::PathBuf,
+    /// `None` records a failed catalog load so rendering does not retry it.
+    decisions: Option<AgentDecisionMap>,
+}
+
+thread_local! {
+    /// Explore has one active browser view per TUI thread. Keeping its serving
+    /// snapshot here avoids widening the view state outside this focused lens.
+    static AGENT_AVAILABILITY_CACHE: std::cell::RefCell<Option<AgentAvailabilitySnapshot>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+fn load_agent_availability(
+    repo_root: &std::path::Path,
+    manifest: &Manifest,
+) -> AgentAvailabilitySnapshot {
+    let decisions = if manifest
+        .items
+        .iter()
+        .any(|item| item.kind == ItemKind::Skill)
+    {
+        ServingCatalog::load(repo_root).ok().map(|catalog| {
+            let mut decisions = AgentDecisionMap::new();
+            for item in &manifest.items {
+                if let Some(decision) = catalog.decision(&item.name, &item.source) {
+                    decisions
+                        .entry(item.name.clone())
+                        .or_default()
+                        .insert(item.source.clone(), decision);
+                }
+            }
+            decisions
+        })
+    } else {
+        Some(AgentDecisionMap::new())
+    };
+    AgentAvailabilitySnapshot {
+        repo_root: repo_root.to_path_buf(),
+        decisions,
+    }
+}
+
+fn invalidate_agent_availability() {
+    AGENT_AVAILABILITY_CACHE.with(|cache| {
+        cache.borrow_mut().take();
+    });
+}
+
+fn refresh_agent_availability(repo_root: &std::path::Path, manifest: &Manifest) {
+    let snapshot = load_agent_availability(repo_root, manifest);
+    AGENT_AVAILABILITY_CACHE.with(|cache| {
+        *cache.borrow_mut() = Some(snapshot);
+    });
+}
+
+fn with_agent_availability<R>(
+    repo_root: &std::path::Path,
+    manifest: &Manifest,
+    render: impl FnOnce(Option<&AgentDecisionMap>) -> R,
+) -> R {
+    AGENT_AVAILABILITY_CACHE.with(|cache| {
+        let needs_refresh = cache
+            .borrow()
+            .as_ref()
+            .is_none_or(|snapshot| snapshot.repo_root != repo_root);
+        if needs_refresh {
+            *cache.borrow_mut() = Some(load_agent_availability(repo_root, manifest));
+        }
+        let cache = cache.borrow();
+        let decisions = cache
+            .as_ref()
+            .and_then(|snapshot| snapshot.decisions.as_ref());
+        render(decisions)
+    })
+}
+
 impl ExploreBrowserView {
     pub(super) fn invalidate_manage_cache(&mut self) {
         self.cached_status = None;
         self.cached_materializations = None;
+        invalidate_agent_availability();
     }
 
     pub(super) fn refresh_manage_cache(&mut self) {
         self.cached_status = Some(pool::status(&self.repo_root, &self.manifest));
         self.cached_materializations = Some(read_recent_materializations(&self.repo_root, 20));
+        refresh_agent_availability(&self.repo_root, &self.manifest);
     }
 
     fn cached_status(&mut self) -> &StatusReport {
@@ -171,31 +258,38 @@ impl ExploreBrowserView {
                 Style::default().fg(Color::DarkGray),
             ))])]
         } else {
-            self.manifest
-                .items
-                .iter()
-                .map(|item| {
-                    let verdict = item.gate.verdict.clone();
-                    let layer = self
-                        .manifest_layers
-                        .get(&item.name)
-                        .copied()
-                        .map(StoreLayer::label)
-                        .unwrap_or("");
-                    Row::new(vec![
-                        Cell::from(item.name.clone()),
-                        Cell::from(layer),
-                        Cell::from(kind_label(item.kind)),
-                        Cell::from(sha7(&item.pinned_commit).to_string()),
-                        Cell::from(Span::styled(verdict.clone(), verdict_style(&verdict))),
-                        Cell::from(
-                            item.license
-                                .clone()
-                                .unwrap_or_else(|| "unknown".to_string()),
-                        ),
-                    ])
-                })
-                .collect()
+            with_agent_availability(&self.repo_root, &self.manifest, |decisions| {
+                self.manifest
+                    .items
+                    .iter()
+                    .map(|item| {
+                        let verdict = item.gate.verdict.clone();
+                        let layer = self
+                            .manifest_layers
+                            .get(&item.name)
+                            .copied()
+                            .map(StoreLayer::label)
+                            .unwrap_or("");
+                        let decision = decisions
+                            .and_then(|by_name| by_name.get(&item.name))
+                            .and_then(|by_source| by_source.get(&item.source));
+                        let (agent_marker, agent_style) = agent_availability(item.kind, decision);
+                        Row::new(vec![
+                            Cell::from(item.name.clone()),
+                            Cell::from(layer),
+                            Cell::from(kind_label(item.kind)),
+                            Cell::from(Span::styled(agent_marker, agent_style)),
+                            Cell::from(sha7(&item.pinned_commit).to_string()),
+                            Cell::from(Span::styled(verdict.clone(), verdict_style(&verdict))),
+                            Cell::from(
+                                item.license
+                                    .clone()
+                                    .unwrap_or_else(|| "unknown".to_string()),
+                            ),
+                        ])
+                    })
+                    .collect()
+            })
         };
         let report = self.cached_status();
         // Status is rendered as a full-width line (not a Table footer). Table
@@ -229,14 +323,17 @@ impl ExploreBrowserView {
                 Constraint::Min(10),
                 Constraint::Length(6),
                 Constraint::Length(7),
+                Constraint::Length(AGENT_COLUMN_WIDTH),
                 Constraint::Length(7),
                 Constraint::Length(12),
                 Constraint::Length(12),
             ],
         )
         .header(
-            Row::new(vec!["name", "layer", "kind", "sha", "verdict", "license"])
-                .style(Style::new().bold()),
+            Row::new(vec![
+                "name", "layer", "kind", "agent", "sha", "verdict", "license",
+            ])
+            .style(Style::new().bold()),
         )
         .row_highlight_style(Style::new().reversed())
         .highlight_symbol(">>")
@@ -380,6 +477,22 @@ fn verdict_style(verdict: &str) -> Style {
     }
 }
 
+fn agent_availability(kind: ItemKind, decision: Option<&ServingDecision>) -> (&'static str, Style) {
+    match (kind, decision) {
+        (ItemKind::Agent, _) => ("n/a", Style::default().fg(Color::DarkGray)),
+        (ItemKind::Skill, Some(decision)) if decision.eligibility == Eligibility::Eligible => {
+            ("yes", Style::default().fg(Color::Green))
+        }
+        (ItemKind::Skill, Some(decision))
+            if decision.compatibility != ContextCompatibility::Compatible =>
+        {
+            ("ctx", Style::default().fg(Color::Yellow))
+        }
+        (ItemKind::Skill, Some(_)) => ("no", Style::default().fg(Color::Red)),
+        (ItemKind::Skill, None) => ("?", Style::default().fg(Color::DarkGray)),
+    }
+}
+
 fn kind_label(kind: ItemKind) -> &'static str {
     match kind {
         ItemKind::Skill => "skill",
@@ -487,6 +600,144 @@ mod tests {
             out.push('\n');
         }
         out
+    }
+
+    fn rendered_row<'a>(rendered: &'a str, name: &str) -> &'a str {
+        rendered
+            .lines()
+            .find(|line| line.contains(name))
+            .unwrap_or_else(|| panic!("missing row for {name}:\n{rendered}"))
+    }
+
+    #[test]
+    fn pool_table_uses_serving_decisions_for_agent_availability() {
+        let repo = tempfile::tempdir().unwrap();
+        let cases = [
+            ("agent-ready", "clean"),
+            ("unapproved", "pending"),
+            ("disabled", "disabled"),
+            ("rejected", "rejected"),
+            ("context-incompatible", "clean"),
+        ];
+        let mut entries = Vec::new();
+        let mut items = Vec::new();
+        for (name, verdict) in cases {
+            let mut entry = manifest_entry(name, Some("MIT"));
+            let dir = pool::pool_dir(
+                repo.path(),
+                &entry.source,
+                &entry.name,
+                &entry.pinned_commit,
+            );
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("SKILL.md"), "fixture body").unwrap();
+            if name == "context-incompatible" {
+                std::fs::create_dir_all(dir.join("scripts")).unwrap();
+                std::fs::write(dir.join("scripts/run.sh"), "#!/bin/sh\n").unwrap();
+            }
+            entry.content_sha256 = spur_core::explore::content_hash(&dir).unwrap();
+            items.push(item_from_entry(
+                &entry,
+                GateRecord {
+                    verdict: verdict.to_string(),
+                    justification: None,
+                    decided_at_epoch: None,
+                },
+            ));
+            entries.push(entry);
+        }
+        Catalog {
+            synced_at_epoch: None,
+            entries,
+        }
+        .save(repo.path())
+        .unwrap();
+        Manifest {
+            sources: Vec::new(),
+            items,
+        }
+        .save(repo.path())
+        .unwrap();
+        let mut view = ExploreBrowserView::new(repo.path().to_path_buf());
+        enter_manage(&mut view);
+
+        let rendered = render_manage_to_string(&mut view);
+
+        assert!(
+            rendered.lines().any(|line| {
+                line.contains("verdict") && line.contains("agent") && line.contains("license")
+            }),
+            "rendered:\n{rendered}"
+        );
+        assert!(rendered_row(&rendered, "agent-ready").contains("yes"));
+        for name in ["unapproved", "disabled", "rejected"] {
+            assert!(
+                rendered_row(&rendered, name).contains("no"),
+                "{name} row should be unavailable to agents:\n{rendered}"
+            );
+        }
+        assert!(
+            rendered_row(&rendered, "context-incompatible").contains("ctx"),
+            "context-incompatible row should expose its context boundary:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn agent_availability_stays_cached_until_reload() {
+        let repo = tempfile::tempdir().unwrap();
+        let mut entry = manifest_entry("cached-agent-skill", Some("MIT"));
+        entry.content_sha256 = vendor_pool_body(repo.path(), &entry);
+        Catalog {
+            synced_at_epoch: None,
+            entries: vec![entry.clone()],
+        }
+        .save(repo.path())
+        .unwrap();
+        Manifest {
+            sources: Vec::new(),
+            items: vec![item_from_entry(
+                &entry,
+                GateRecord {
+                    verdict: "clean".into(),
+                    justification: None,
+                    decided_at_epoch: None,
+                },
+            )],
+        }
+        .save(repo.path())
+        .unwrap();
+        let mut view = ExploreBrowserView::new(repo.path().to_path_buf());
+        enter_manage(&mut view);
+
+        let first_render = render_manage_to_string(&mut view);
+        assert!(rendered_row(&first_render, &entry.name).contains("yes"));
+
+        Manifest {
+            sources: Vec::new(),
+            items: vec![item_from_entry(
+                &entry,
+                GateRecord {
+                    verdict: "disabled".into(),
+                    justification: None,
+                    decided_at_epoch: None,
+                },
+            )],
+        }
+        .save(repo.path())
+        .unwrap();
+
+        let second_render = render_manage_to_string(&mut view);
+        assert!(
+            rendered_row(&second_render, &entry.name).contains("yes"),
+            "agent availability should stay cached until explicit reload:\n{second_render}"
+        );
+
+        assert!(view.handle_key(key(KeyCode::Char('r'))).is_none());
+        let after_reload = render_manage_to_string(&mut view);
+        assert!(
+            rendered_row(&after_reload, &entry.name).contains("no"),
+            "reload should refresh the serving decision:\n{after_reload}"
+        );
     }
 
     #[test]
@@ -685,6 +936,7 @@ mod tests {
         assert!(rendered.contains("kind"));
         assert!(rendered.contains("sha"));
         assert!(rendered.contains("verdict"));
+        assert!(rendered.contains("agent"));
         assert!(rendered.contains("license"));
     }
 

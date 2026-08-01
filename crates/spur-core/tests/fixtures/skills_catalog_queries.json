@@ -1,0 +1,74 @@
+{
+  "schema_version": 1,
+  "k": 5,
+  "cases": [
+    {
+      "id": "exact-name",
+      "query": "auth-review",
+      "acceptable_skill_ids": ["auth-review"],
+      "expected_source": "bundled",
+      "expected_zero_results": false
+    },
+    {
+      "id": "conceptual-authentication",
+      "query": "validate authentication changes before merging",
+      "acceptable_skill_ids": ["auth-review"],
+      "expected_source": "bundled",
+      "expected_zero_results": false
+    },
+    {
+      "id": "source-filter",
+      "query": "supply chain provenance audit",
+      "source": "trusted/catalog",
+      "acceptable_skill_ids": ["supply-chain-audit"],
+      "expected_source": "trusted/catalog",
+      "expected_zero_results": false
+    },
+    {
+      "id": "multi-phase-rollback",
+      "query": "deployment rollback release recovery",
+      "acceptable_skill_ids": ["deployment-rollback"],
+      "expected_source": "bundled",
+      "expected_zero_results": false
+    },
+    {
+      "id": "approved-shadow-neighbor",
+      "query": "secure review",
+      "acceptable_skill_ids": ["secure-review"],
+      "expected_source": "trusted/global",
+      "expected_zero_results": false
+    },
+    {
+      "id": "vocabulary-refinement",
+      "query": "identity boundary hardening",
+      "acceptable_skill_ids": [],
+      "expected_zero_results": true,
+      "refinement": {
+        "query": "authentication security review",
+        "acceptable_skill_ids": ["auth-review"]
+      }
+    },
+    {
+      "id": "rollback-refinement",
+      "query": "unwind failed launch",
+      "acceptable_skill_ids": [],
+      "expected_zero_results": true,
+      "refinement": {
+        "query": "deployment rollback",
+        "acceptable_skill_ids": ["deployment-rollback"]
+      }
+    },
+    {
+      "id": "no-match",
+      "query": "quantum hydroponics",
+      "acceptable_skill_ids": [],
+      "expected_zero_results": true
+    },
+    {
+      "id": "revoked-skill",
+      "query": "legacy incident drill",
+      "acceptable_skill_ids": [],
+      "expected_zero_results": true
+    }
+  ]
+}

@@ -22,6 +22,9 @@ const EXPECTED_BRAIN_TOOLS: &[&str] = &[
     "create_issue",
     "add_dependency",
     "create_pr",
+    "local_project_add",
+    "local_project_list",
+    "local_project_remove",
     "merge_plan",
     "resume_plan",
     "force_reclaim_plan",
@@ -73,6 +76,8 @@ const EXPECTED_BRAIN_TOOLS: &[&str] = &[
     "external_knowledge_context",
     "external_index",
     "external_index_status",
+    "skill_search",
+    "skill_read",
 ];
 
 fn pro_feature_gate() -> Arc<FeatureGate> {

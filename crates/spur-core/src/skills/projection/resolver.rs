@@ -1,9 +1,11 @@
 use crate::explore::catalog::ItemKind;
 use crate::explore::pool::Manifest;
 use crate::skills::adapters::Adapter;
-use crate::skills::{SkillPayload, SkillRole, SkillSourceCandidate};
+use crate::skills::{SkillCatalog, SkillPayload, SkillRole, SkillSource, SkillSourceCandidate};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+
+const CATALOG_BOOTSTRAP_ID: &str = "skills-catalog";
 
 /// Origin selected for one effective skill ID.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -46,6 +48,10 @@ pub enum ResolveError {
     },
     #[error("pool skill {id} collides with bundled without replaced-bundled verdict")]
     PoolReplacementNotAuthorized { id: String },
+    #[error("bundled catalog bootstrap is missing at {path}")]
+    CatalogBootstrapMissing { path: PathBuf },
+    #[error("bundled catalog bootstrap at {path} failed integrity validation: {reason}")]
+    CatalogBootstrapIntegrity { path: PathBuf, reason: &'static str },
     #[error("failed to read skill source {path}: {source}")]
     ReadSource {
         path: PathBuf,
@@ -54,7 +60,7 @@ pub enum ResolveError {
     },
 }
 
-/// Resolve every active skill for one adapter in canonical ID order.
+/// Resolve the policy-selected skill set for one adapter in canonical ID order.
 pub fn resolve_effective_skills(
     repo_root: &Path,
     adapter: Adapter,
@@ -63,6 +69,7 @@ pub fn resolve_effective_skills(
 ) -> Result<Vec<ResolvedSkill>, ResolveError> {
     match policy {
         super::SelectionPolicy::AllActive => {}
+        super::SelectionPolicy::CatalogOnly => return resolve_catalog_bootstrap(repo_root),
     }
 
     let mut by_id = BTreeMap::new();
@@ -128,6 +135,136 @@ pub fn resolve_effective_skills(
     }
 
     Ok(by_id.into_values().collect())
+}
+
+fn resolve_catalog_bootstrap(repo_root: &Path) -> Result<Vec<ResolvedSkill>, ResolveError> {
+    let catalog = SkillCatalog::discover(repo_root)?;
+    let bundled_root = catalog.bundled_root();
+    let source_dir = bundled_root.join(CATALOG_BOOTSTRAP_ID);
+    let skill_path = source_dir.join("SKILL.md");
+
+    let source_metadata = match std::fs::symlink_metadata(&source_dir) {
+        Ok(metadata) => metadata,
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+            return Err(ResolveError::CatalogBootstrapMissing { path: skill_path });
+        }
+        Err(source) => {
+            return Err(ResolveError::ReadSource {
+                path: source_dir,
+                source,
+            });
+        }
+    };
+    if source_metadata.file_type().is_symlink() || !source_metadata.is_dir() {
+        return Err(ResolveError::CatalogBootstrapIntegrity {
+            path: source_dir,
+            reason: "bootstrap source must be a real directory, not a symlink",
+        });
+    }
+
+    let canonical_root =
+        std::fs::canonicalize(bundled_root).map_err(|source| ResolveError::ReadSource {
+            path: bundled_root.to_path_buf(),
+            source,
+        })?;
+    let canonical_source =
+        std::fs::canonicalize(&source_dir).map_err(|source| ResolveError::ReadSource {
+            path: source_dir.clone(),
+            source,
+        })?;
+    if canonical_source.parent() != Some(canonical_root.as_path()) {
+        return Err(ResolveError::CatalogBootstrapIntegrity {
+            path: source_dir,
+            reason: "bootstrap source must be a direct child of the bundled root",
+        });
+    }
+
+    let skill_metadata = match std::fs::symlink_metadata(&skill_path) {
+        Ok(metadata) => metadata,
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+            return Err(ResolveError::CatalogBootstrapMissing { path: skill_path });
+        }
+        Err(source) => {
+            return Err(ResolveError::ReadSource {
+                path: skill_path,
+                source,
+            });
+        }
+    };
+    if skill_metadata.file_type().is_symlink() || !skill_metadata.is_file() {
+        return Err(ResolveError::CatalogBootstrapIntegrity {
+            path: skill_path,
+            reason: "bootstrap SKILL.md must be a real regular file, not a symlink",
+        });
+    }
+    let canonical_skill =
+        std::fs::canonicalize(&skill_path).map_err(|source| ResolveError::ReadSource {
+            path: skill_path.clone(),
+            source,
+        })?;
+    if canonical_skill.parent() != Some(canonical_source.as_path()) {
+        return Err(ResolveError::CatalogBootstrapIntegrity {
+            path: skill_path,
+            reason: "bootstrap SKILL.md must be contained by its source directory",
+        });
+    }
+
+    let raw = match std::fs::read_to_string(&skill_path) {
+        Ok(raw) => raw,
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+            return Err(ResolveError::CatalogBootstrapMissing { path: skill_path });
+        }
+        Err(source) => {
+            return Err(ResolveError::ReadSource {
+                path: skill_path,
+                source,
+            });
+        }
+    };
+    let parsed = crate::skills::frontmatter::parse_source(&raw);
+    if parsed.name != Some(CATALOG_BOOTSTRAP_ID) {
+        return Err(ResolveError::CatalogBootstrapIntegrity {
+            path: skill_path,
+            reason: "frontmatter name must match the canonical bundled skill id",
+        });
+    }
+    let Some(description) = parsed
+        .description
+        .as_deref()
+        .filter(|description| !description.trim().is_empty())
+    else {
+        return Err(ResolveError::CatalogBootstrapIntegrity {
+            path: skill_path,
+            reason: "frontmatter description must be present and non-empty",
+        });
+    };
+    if parsed.role != Some(SkillRole::Both) {
+        return Err(ResolveError::CatalogBootstrapIntegrity {
+            path: skill_path,
+            reason: "frontmatter role must be both",
+        });
+    }
+    if parsed.body.trim().is_empty() {
+        return Err(ResolveError::CatalogBootstrapIntegrity {
+            path: skill_path,
+            reason: "instruction body must be non-empty",
+        });
+    }
+
+    let candidate = SkillSourceCandidate {
+        payload: SkillPayload {
+            id: CATALOG_BOOTSTRAP_ID.to_owned(),
+            description: description.to_owned(),
+            body: parsed.body.to_owned(),
+            source: SkillSource::Bundled,
+            role: SkillRole::Both,
+        },
+        source_dir,
+    };
+    Ok(vec![resolve_candidate(
+        candidate,
+        ResolvedSourceKind::Bundled,
+    )?])
 }
 
 fn resolve_candidate(
@@ -221,13 +358,16 @@ mod tests {
             source_dir
         }
 
+        fn resolve_with_policy(
+            &self,
+            adapter: Adapter,
+            policy: SelectionPolicy,
+        ) -> Result<Vec<super::ResolvedSkill>, ResolveError> {
+            resolve_effective_skills(self.repo.path(), adapter, RuntimeRole::Worker, policy)
+        }
+
         fn resolve(&self, adapter: Adapter) -> Result<Vec<super::ResolvedSkill>, ResolveError> {
-            resolve_effective_skills(
-                self.repo.path(),
-                adapter,
-                RuntimeRole::Worker,
-                SelectionPolicy::AllActive,
-            )
+            self.resolve_with_policy(adapter, SelectionPolicy::AllActive)
         }
     }
 
@@ -277,6 +417,129 @@ mod tests {
                 .payload
                 .source,
             SkillSource::Pool
+        ));
+    }
+
+    #[test]
+    fn catalog_only_resolves_exactly_the_bundled_bootstrap() {
+        let _global_root = crate::explore::store::force_global_root_for_tests(None);
+        let fixture = ResolverHarness::new();
+        fixture.write_bundled("skills-catalog", "both", "bootstrap body\n");
+        fixture.write_bundled("other-bundled", "both", "other body\n");
+        fixture.write_pool("pool-only", "clean", "pool body\n");
+        fixture.write_override("override-only", "worker", "override body\n");
+
+        let resolved = fixture
+            .resolve_with_policy(Adapter::Codex, SelectionPolicy::CatalogOnly)
+            .unwrap();
+
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].payload.id, "skills-catalog");
+        assert_eq!(resolved[0].payload.body, "bootstrap body\n");
+        assert_eq!(resolved[0].source.kind, ResolvedSourceKind::Bundled);
+    }
+
+    #[test]
+    fn catalog_only_ignores_pool_and_repository_bootstrap_shadows() {
+        let _global_root = crate::explore::store::force_global_root_for_tests(None);
+        let fixture = ResolverHarness::new();
+        fixture.write_bundled("skills-catalog", "both", "bundled body\n");
+        fixture.write_pool("skills-catalog", "replaced-bundled", "pool shadow body\n");
+        fixture.write_override("skills-catalog", "worker", "override shadow body\n");
+
+        let resolved = fixture
+            .resolve_with_policy(Adapter::Codex, SelectionPolicy::CatalogOnly)
+            .unwrap();
+
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].payload.id, "skills-catalog");
+        assert_eq!(resolved[0].payload.body, "bundled body\n");
+        assert_eq!(resolved[0].source.kind, ResolvedSourceKind::Bundled);
+    }
+
+    #[test]
+    fn catalog_only_fails_closed_when_bootstrap_is_missing() {
+        let _global_root = crate::explore::store::force_global_root_for_tests(None);
+        let fixture = ResolverHarness::new();
+        fixture.write_bundled("other-bundled", "both", "other body\n");
+
+        let error = fixture
+            .resolve_with_policy(Adapter::Codex, SelectionPolicy::CatalogOnly)
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            ResolveError::CatalogBootstrapMissing { .. }
+        ));
+    }
+
+    #[test]
+    fn catalog_only_fails_closed_when_bootstrap_identity_is_invalid() {
+        let _global_root = crate::explore::store::force_global_root_for_tests(None);
+        let fixture = ResolverHarness::new();
+        write_skill_source(
+            &fixture.assets.path().join("skills-catalog"),
+            "different-name",
+            "both",
+            "bootstrap body\n",
+        );
+
+        let error = fixture
+            .resolve_with_policy(Adapter::Codex, SelectionPolicy::CatalogOnly)
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            ResolveError::CatalogBootstrapIntegrity { .. }
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn catalog_only_rejects_symlinked_bootstrap_directory_during_resolution() {
+        let _global_root = crate::explore::store::force_global_root_for_tests(None);
+        let fixture = ResolverHarness::new();
+        fixture.write_override("skills-catalog", "both", "repository shadow body\n");
+        std::os::unix::fs::symlink(
+            fixture.repo.path().join(".spur/skills/skills-catalog"),
+            fixture.assets.path().join("skills-catalog"),
+        )
+        .unwrap();
+
+        let error = fixture
+            .resolve_with_policy(Adapter::Codex, SelectionPolicy::CatalogOnly)
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            ResolveError::CatalogBootstrapIntegrity { .. }
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn catalog_only_rejects_symlinked_bootstrap_file_during_resolution() {
+        let _global_root = crate::explore::store::force_global_root_for_tests(None);
+        let fixture = ResolverHarness::new();
+        let shadow_dir = fixture.repo.path().join(".spur/skills/catalog-shadow");
+        write_skill_source(
+            &shadow_dir,
+            "skills-catalog",
+            "both",
+            "repository shadow body\n",
+        );
+        let bootstrap_dir = fixture.assets.path().join("skills-catalog");
+        std::fs::create_dir_all(&bootstrap_dir).unwrap();
+        std::os::unix::fs::symlink(shadow_dir.join("SKILL.md"), bootstrap_dir.join("SKILL.md"))
+            .unwrap();
+
+        let error = fixture
+            .resolve_with_policy(Adapter::Codex, SelectionPolicy::CatalogOnly)
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            ResolveError::CatalogBootstrapIntegrity { .. }
         ));
     }
 

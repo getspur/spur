@@ -458,6 +458,11 @@ async fn tools_list_returns_curated_worker_tools_including_code_graph_reads() {
         "report_signal",
         "report_progress",
         "submit_review_verdict",
+        "solve_constraints",
+        "solve_smt",
+        "get_solve_result",
+        "skill_search",
+        "skill_read",
     ];
     assert_eq!(
         tools.len(),

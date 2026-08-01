@@ -523,6 +523,8 @@ async fn tick_once_dispatches_ready_task_with_single_approved_dep_branch_base() 
     std::fs::write(dir.path().join("dep.txt"), "dependency output\n").expect("write dep");
     run_git(dir.path(), &["add", "dep.txt"]);
     run_git(dir.path(), &["commit", "-m", "t1 worker"]);
+    let retry_base_oid = run_git_output(dir.path(), &["rev-parse", "HEAD"]);
+    run_git(dir.path(), &["branch", "spur/worker-t2", &retry_base_oid]);
     run_git(dir.path(), &["checkout", &base_branch]);
     run_br(dir.path(), &["init"]);
 
@@ -642,10 +644,10 @@ async fn tick_once_dispatches_ready_task_with_single_approved_dep_branch_base() 
         .expect("dispatched_base_oid sender");
     let retry_dispatched_base_oid_tx = dispatched_base_oid_tx.clone();
     dispatched_base_oid_tx
-        .send(Some("attempt-1-base".to_string()))
+        .send(Some(base_oid.clone()))
         .expect("first base oid send");
     retry_dispatched_base_oid_tx
-        .send(Some("attempt-2-base".to_string()))
+        .send(Some(retry_base_oid.clone()))
         .expect("retry base oid send");
     let base = request.base.expect("plan dispatch must pass BaseSpec");
     match base {
@@ -685,7 +687,7 @@ async fn tick_once_dispatches_ready_task_with_single_approved_dep_branch_base() 
     });
     assert_eq!(
         completion_base,
-        Some("attempt-2-base"),
+        Some(retry_base_oid.as_str()),
         "completion audit must persist the successful retry attempt's dispatched base"
     );
 }

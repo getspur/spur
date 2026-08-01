@@ -204,7 +204,7 @@ fn loading_state() {
         "",
         "",
         "",
-        "Esc back                                                 \u{25b6}0 R0 $0.00 0m 00s spur",
+        "Esc back         0 running \u{b7} 0 review \u{b7} $0.00 \u{b7} 0m 00s [Ctrl+K: go] ?: help spur",
     ];
     assert_render(&mut picker, expected);
 }
@@ -364,7 +364,7 @@ fn populated_with_filter() {
         "",
         "",
         "",
-        "type to filter \u{b7} Enter commit \u{b7} Esc exit search          \u{25b6}0 R0 $0.00 0m 00s spur",
+        "\u{2191}\u{2193} pick \u{b7} Esc    0 running \u{b7} 0 review \u{b7} $0.00 \u{b7} 0m 00s [Ctrl+K: go] ?: help spur",
     ];
     assert_render(&mut picker, expected);
 }

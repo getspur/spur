@@ -221,6 +221,7 @@ impl super::Reconciler {
             };
             if review_verdict_exists(
                 self.pm.as_ref(),
+                self.feature_gate.as_ref(),
                 &target_issue_id,
                 maker_delegation_id,
                 reviewer_delegation_id,
@@ -241,6 +242,10 @@ impl super::Reconciler {
         dispatch: &dyn super::ReconcilerDispatch,
         request: ReviewDispatchRequest<'_>,
     ) -> anyhow::Result<()> {
+        crate::server::require_feature(
+            spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
+            self.feature_gate.as_ref(),
+        )?;
         let ReviewDispatchRequest {
             task,
             identity,
@@ -360,10 +365,12 @@ impl super::Reconciler {
         let reviewer_id_for_result = reviewer_delegation_id.clone();
         let review_issue_for_result = review_issue_id.clone();
         let fast_forward = Arc::clone(&self.fast_forward);
+        let feature_gate = Arc::clone(&self.feature_gate);
         dispatch.track_task(Box::pin(async move {
             let _ = result_rx.await;
             let verdict_exists = review_verdict_exists(
                 pm.as_ref(),
+                feature_gate.as_ref(),
                 &target_issue_id,
                 &maker_delegation_id,
                 &reviewer_id_for_result,
@@ -472,6 +479,10 @@ impl super::Reconciler {
         dispatch: &ReviewDispatchRecord,
         verdict: &ReviewVerdictRecord,
     ) -> anyhow::Result<()> {
+        crate::server::require_feature(
+            spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
+            self.feature_gate.as_ref(),
+        )?;
         let fresh = self.project_plan_from_beads(&identity.plan_id).await?;
         let fresh_task = fresh
             .tasks
@@ -867,11 +878,16 @@ fn review_dispatch_is_stale(
 
 async fn review_verdict_exists(
     pm: &dyn crate::plan::PmLike,
+    feature_gate: &spur_license::FeatureGate,
     target_issue_id: &str,
     maker_delegation_id: &str,
     reviewer_delegation_id: &str,
     review_issue_id: &str,
 ) -> anyhow::Result<bool> {
+    crate::server::require_feature(
+        spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
+        feature_gate,
+    )?;
     let comments = pm
         .advanced()
         .ok_or_else(|| anyhow::anyhow!("review verdict lookup requires beads advanced"))?
