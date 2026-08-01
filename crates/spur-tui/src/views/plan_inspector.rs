@@ -75,8 +75,6 @@ enum PlanInspectorConfirm {
         task_name: String,
         delegation_id: String,
         status: String,
-        append_prompt: String,
-        cursor: usize,
     },
     Review {
         plan_id: String,
@@ -534,8 +532,6 @@ impl PlanInspectorView {
             task_name: task.task_name.clone(),
             delegation_id,
             status: task.status.clone(),
-            append_prompt: String::new(),
-            cursor: 0,
         });
         None
     }
@@ -925,10 +921,7 @@ fn is_terminal_phase(phase: LifecycleState) -> bool {
 impl View for PlanInspectorView {
     fn handle_key(&mut self, key: KeyEvent, ctx: &super::ViewContext) -> Option<Action> {
         let key = super::normalize_macos_option(key);
-        if matches!(
-            self.confirm,
-            Some(PlanInspectorConfirm::RetryTask { .. } | PlanInspectorConfirm::StopTask { .. })
-        ) {
+        if matches!(self.confirm, Some(PlanInspectorConfirm::RetryTask { .. })) {
             return self.handle_prompt_confirm_key(key);
         }
         if self.confirm.is_some() {
@@ -1089,6 +1082,28 @@ impl View for PlanInspectorView {
                             .insert(open_issue_id.clone(), TaskIssueState::Error(error.clone()));
                     }
                 }
+            }
+            spur_acp::SpurEventBody::PlanCommandError {
+                operation,
+                plan_id,
+                error,
+            } => {
+                let display_error = error
+                    .split_once(": ")
+                    .map(|(prefix, rest)| {
+                        if prefix.chars().all(|c| c.is_ascii_lowercase() || c == '_') {
+                            rest
+                        } else {
+                            error.as_str()
+                        }
+                    })
+                    .unwrap_or(error.as_str());
+                self.loop_event_status = Some(match plan_id {
+                    Some(plan_id) => {
+                        format!("{operation} blocked for {plan_id}: {display_error}")
+                    }
+                    None => format!("{operation} blocked: {display_error}"),
+                });
             }
             spur_acp::SpurEventBody::LoopArmed {
                 loop_id,
@@ -1442,7 +1457,7 @@ impl PlanInspectorView {
                 ..
             } if !feedback.trim().is_empty() => 10,
             PlanInspectorConfirm::RetryTask { .. } => 10,
-            PlanInspectorConfirm::StopTask { .. } => 11,
+            PlanInspectorConfirm::StopTask { .. } => 10,
             _ => 9,
         };
         let popup = centered_rect(area, 72, popup_height);
@@ -1488,8 +1503,6 @@ impl PlanInspectorView {
                 task_name,
                 delegation_id,
                 status,
-                append_prompt,
-                cursor,
                 ..
             } => (
                 " Stop Task ",
@@ -1499,11 +1512,8 @@ impl PlanInspectorView {
                     Line::from(format!("  Task: {task_id} - {task_name}")),
                     Line::from(format!("  Delegation: {delegation_id}")),
                     Line::from(format!("  Status: {status}")),
-                    prompt_input_line(append_prompt, *cursor, theme),
                     Line::from(""),
-                    Line::from(
-                        "  Task will be cancelled. Press R after stop to retry with appended instructions.",
-                    ),
+                    Line::from("  This cancels the active worker. Press R afterward to retry."),
                 ],
             ),
             PlanInspectorConfirm::Review {
@@ -1723,7 +1733,10 @@ fn operator_status_label(status: &str) -> &str {
 }
 
 fn is_retryable_task_status(status: &str) -> bool {
-    matches!(status, "failed" | "rejected" | "error")
+    matches!(
+        status,
+        "failed" | "rejected" | "error" | "cancelled" | "escalated_to_brain"
+    )
 }
 
 fn is_stoppable_task_status(status: &str) -> bool {
@@ -1824,11 +1837,6 @@ fn confirm_prompt_mut(
 ) -> Option<(&mut String, &mut usize)> {
     match confirm.as_mut()? {
         PlanInspectorConfirm::RetryTask {
-            append_prompt,
-            cursor,
-            ..
-        }
-        | PlanInspectorConfirm::StopTask {
             append_prompt,
             cursor,
             ..
@@ -3352,15 +3360,11 @@ mod tests {
                 ref task_name,
                 ref delegation_id,
                 ref status,
-                ref append_prompt,
-                cursor,
             }) if plan_id == "plan-1"
                 && task_id == "t-12"
                 && task_name == "Stage A"
                 && delegation_id == "deleg-12"
                 && status == "dispatched"
-                && append_prompt.is_empty()
-                && cursor == 0
         ));
     }
 

@@ -2208,6 +2208,7 @@ impl McpCallbackServer {
         .await
         {
             Ok(result) => {
+                self.fast_forward_reconciler();
                 if let Some(sink) = self.event_sink.as_deref() {
                     let plan_id =
                         derive_plan_id_from_trigger_issue(pm.as_ref(), &trigger_task_id_for_event)
