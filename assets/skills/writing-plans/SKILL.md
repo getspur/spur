@@ -14,7 +14,7 @@ A plan in SPUR is not a markdown checklist. It is a **DAG of beads issues** mana
 
 **Announce at start:** "I'm using the writing-plans skill to create the beads-backed implementation plan."
 
-**Context:** This runs in the brain session after `brainstorming` has produced an approved spec and closed design epic.
+**Context:** This runs in the brain session after `brainstorming` has produced an approved spec and closed design epic. Prefer design notebooks (`…-design.ipynb` with native `ns_mermaid` cells); accept legacy `…-design.md` when that is what brainstorming recorded.
 
 **Save plan to:** `docs/superpowers/plans/YYYY-MM-DD-<feature-name>.md`
 - (User preferences for plan location override this default)
@@ -66,7 +66,8 @@ Before defining tasks, map out which files will be created or modified and what 
 > **For SPUR orchestrator:** This plan is designed for `submit_plan(persist_as_epic=true)`.
 > Each task becomes a beads issue with `spur:plan-task-id` and `spur:plan-id` labels.
 
-**Source spec:** `docs/superpowers/specs/<filename>.md`
+**Source spec:** `docs/superpowers/specs/<filename>.ipynb` (preferred) or `…/<filename>.md` (legacy)
+**Formal @spec cells (if notebook):** `<ids or none>`
 **Design epic:** `<issue_id>` (closed)
 
 **Goal:** [One sentence describing what this builds]
@@ -264,7 +265,7 @@ After submission, the plan reaches terminal state when:
 
 ## Cross-References
 
-- **brainstorming** — Previous skill in the chain; produces the approved spec
+- **brainstorming** — Previous skill in the chain; produces the approved design notebook (or legacy markdown) and formal `@spec` cell list
 - **plan-task-discipline** — DAG rules, task boundaries, and lifecycle enforcement
 - **beads-lifecycle** — Status state machine and label semantics for plan issues
 - **brain-delegation** — Worker routing decisions at dispatch time
