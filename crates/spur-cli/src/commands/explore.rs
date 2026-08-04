@@ -2,6 +2,7 @@ use anyhow::{bail, Context, Result};
 use clap::Subcommand;
 use std::path::Path;
 
+use spur_core::explore::add_source;
 use spur_core::explore::apply::{self, Resolution, Selection};
 use spur_core::explore::catalog::{Catalog, CatalogEntry, ItemKind};
 use spur_core::explore::migrate;
@@ -44,6 +45,20 @@ pub enum ExploreCommands {
         /// Replace a bundled skill with the selected pool item
         #[arg(long)]
         replace_bundled: bool,
+    },
+    /// Add a git URL as an explore catalog source and sync
+    AddSource {
+        /// Git repository URL (HTTPS or SSH)
+        url: String,
+        /// Pin ref (branch, tag, or commit)
+        #[arg(long, default_value = "main")]
+        pin: String,
+        /// Write catalog/cache to the shared user-wide explore store
+        #[arg(long, conflicts_with = "local")]
+        global: bool,
+        /// Write catalog/cache to this repository only
+        #[arg(long, conflicts_with = "global")]
+        local: bool,
     },
     /// Remove an item from the pool
     Remove { name: String },
@@ -90,6 +105,12 @@ pub fn run(cmd: ExploreCommands, repo_root: &Path) -> Result<()> {
                 )
             }
         }
+        ExploreCommands::AddSource {
+            url,
+            pin,
+            global,
+            local,
+        } => run_add_source(repo_root, &url, &pin, sync_target(global, local)?),
         ExploreCommands::Remove { name } => run_remove(repo_root, &name),
         ExploreCommands::MigrateGlobal { dry_run } => run_migrate_global(repo_root, dry_run),
         ExploreCommands::Status => run_status(repo_root),
@@ -208,6 +229,14 @@ pub fn run_add_with_target(
         bail!("skipped {reasons}");
     }
 
+    Ok(())
+}
+
+pub fn run_add_source(repo_root: &Path, url: &str, pin: &str, target: StoreTarget) -> Result<()> {
+    let store_root = store_root_for(repo_root, target)?;
+    let repo = add_source::parse_git_url_repo(url).map_err(anyhow::Error::msg)?;
+    add_source::add_source_and_sync(repo_root, url, pin, &store_root)?;
+    println!("added source {repo} pin={pin}");
     Ok(())
 }
 
