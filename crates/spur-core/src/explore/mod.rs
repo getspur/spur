@@ -1,3 +1,4 @@
+pub mod add_source;
 pub mod apply;
 pub mod catalog;
 pub mod gate;
