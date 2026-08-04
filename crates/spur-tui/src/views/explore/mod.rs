@@ -138,6 +138,10 @@ pub struct ExploreBrowserView {
     pub(crate) selected: usize,
     pub(crate) filter: Option<String>,
     filter_input_active: bool,
+    add_source_url_active: bool,
+    add_source_pin_active: bool,
+    add_source_url: String,
+    add_source_pin: String,
     pub(crate) starred: BTreeSet<StarKey>,
     pre_scan_cache: RefCell<BTreeMap<StarKey, PreScanBadge>>,
     pub(crate) cached_bundled_ids: Vec<String>,
@@ -175,6 +179,10 @@ impl ExploreBrowserView {
             selected: 0,
             filter: None,
             filter_input_active: false,
+            add_source_url_active: false,
+            add_source_pin_active: false,
+            add_source_url: String::new(),
+            add_source_pin: String::new(),
             starred: BTreeSet::new(),
             pre_scan_cache: RefCell::new(BTreeMap::new()),
             cached_bundled_ids: loaded.cached_bundled_ids,
@@ -213,6 +221,12 @@ impl ExploreBrowserView {
     }
 
     fn handle_browse_key(&mut self, key: KeyEvent) -> Option<Action> {
+        if self.add_source_url_active {
+            return self.handle_add_source_url_input(key);
+        }
+        if self.add_source_pin_active {
+            return self.handle_add_source_pin_input(key);
+        }
         if self.filter_input_active {
             return self.handle_filter_input(key);
         }
@@ -243,6 +257,11 @@ impl ExploreBrowserView {
                 self.manage_lens = ManageLens::Pool;
                 self.manage_selected = 0;
                 self.clamp_manage_selection();
+                None
+            }
+            KeyCode::Char('a') if key.modifiers == KeyModifiers::CONTROL => {
+                self.add_source_url_active = true;
+                self.add_source_url = String::new();
                 None
             }
             KeyCode::Char('/') if key.modifiers.is_empty() => {
@@ -299,6 +318,83 @@ impl ExploreBrowserView {
             _ => {}
         }
         None
+    }
+
+    fn handle_add_source_url_input(&mut self, key: KeyEvent) -> Option<Action> {
+        match key.code {
+            KeyCode::Enter if !self.add_source_url.trim().is_empty() => {
+                if spur_core::explore::add_source::parse_git_url_repo(&self.add_source_url).is_ok()
+                {
+                    self.add_source_url_active = false;
+                    self.add_source_pin_active = true;
+                    self.add_source_pin = String::new();
+                } else {
+                    self.load_error = Some(format!("invalid git URL: {}", self.add_source_url));
+                }
+                None
+            }
+            KeyCode::Esc => {
+                self.add_source_url_active = false;
+                self.add_source_url = String::new();
+                None
+            }
+            KeyCode::Backspace => {
+                self.add_source_url.pop();
+                None
+            }
+            KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.add_source_url.push(ch);
+                None
+            }
+            _ => None,
+        }
+    }
+
+    fn handle_add_source_pin_input(&mut self, key: KeyEvent) -> Option<Action> {
+        match key.code {
+            KeyCode::Enter => {
+                let pin = if self.add_source_pin.is_empty() {
+                    "main".to_string()
+                } else {
+                    self.add_source_pin.clone()
+                };
+                let store_root = if global_layer_enabled() {
+                    store::global_root().unwrap_or_else(|| store::local_root(&self.repo_root))
+                } else {
+                    store::local_root(&self.repo_root)
+                };
+                match spur_core::explore::add_source::add_source_and_sync(
+                    &self.repo_root,
+                    &self.add_source_url,
+                    &pin,
+                    &store_root,
+                ) {
+                    Ok(()) => self.reload(),
+                    Err(e) => {
+                        self.load_error = Some(format!("add source failed: {e:#}"));
+                    }
+                }
+                self.add_source_pin_active = false;
+                self.add_source_url = String::new();
+                self.add_source_pin = String::new();
+                None
+            }
+            KeyCode::Esc => {
+                self.add_source_pin_active = false;
+                self.add_source_url = String::new();
+                self.add_source_pin = String::new();
+                None
+            }
+            KeyCode::Backspace => {
+                self.add_source_pin.pop();
+                None
+            }
+            KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.add_source_pin.push(ch);
+                None
+            }
+            _ => None,
+        }
     }
 
     fn set_filter_text(&mut self, text: String) {
@@ -602,6 +698,19 @@ impl ExploreBrowserView {
             ]));
             lines.push(Line::from(""));
         }
+        if self.add_source_url_active {
+            lines.push(Line::from(vec![
+                Span::styled("add source URL: ", Style::default().fg(Color::Yellow)),
+                Span::raw(format!("{}_", self.add_source_url)),
+            ]));
+            lines.push(Line::from(""));
+        } else if self.add_source_pin_active {
+            lines.push(Line::from(vec![
+                Span::styled("pin [main]: ", Style::default().fg(Color::Yellow)),
+                Span::raw(format!("{}_", self.add_source_pin)),
+            ]));
+            lines.push(Line::from(""));
+        }
         if entries.is_empty() {
             if self.filter.is_some() {
                 let message = if self.filter_input_active {
@@ -747,11 +856,16 @@ impl ExploreBrowserView {
         let text = match self.stage {
             ExploreStage::Gate => self.gate.footer_hint(),
             ExploreStage::Manage => "j/k move  l lens  x remove  m browse  r reload  Esc browse",
+            ExploreStage::Browse
+                if self.add_source_url_active || self.add_source_pin_active =>
+            {
+                "type  Enter confirm  Esc cancel"
+            }
             ExploreStage::Browse if self.filter_input_active => {
                 "type filter  Backspace edit  Enter keep  Esc clear"
             }
             ExploreStage::Browse => {
-                "j/k move  Tab tabs  space select  Enter gate  m manage  r reload  Esc dashboard"
+                "j/k move  Tab tabs  space select  Enter gate  m manage  Ctrl+A add source  r reload  Esc dashboard"
             }
         };
         frame.render_widget(
@@ -1198,6 +1312,19 @@ mod tests {
 
     fn shift_key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::SHIFT)
+    }
+
+    fn ctrl_key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::CONTROL)
+    }
+
+    fn explore_view_with_empty_catalog() -> ExploreBrowserView {
+        let repo = tempfile::tempdir().unwrap();
+        save_catalog(repo.path(), Vec::new());
+        // Keep the tempdir so the path remains valid for the view lifetime.
+        // Tests that only drive key handlers do not need cleanup.
+        let path = repo.keep();
+        ExploreBrowserView::new(path)
     }
 
     fn save_catalog(root: &Path, entries: Vec<CatalogEntry>) {
@@ -1759,6 +1886,67 @@ mod tests {
     }
 
     #[test]
+    fn add_source_esc_cancels_at_url_prompt() {
+        let mut view = explore_view_with_empty_catalog();
+        view.handle_key(ctrl_key(KeyCode::Char('a')));
+        assert!(view.add_source_url_active);
+        view.handle_key(key(KeyCode::Esc));
+        assert!(!view.add_source_url_active);
+    }
+
+    #[test]
+    fn add_source_url_enter_transitions_to_pin_prompt() {
+        let mut view = explore_view_with_empty_catalog();
+        view.handle_key(ctrl_key(KeyCode::Char('a')));
+        for ch in "https://github.com/owner/repo".chars() {
+            view.handle_key(key(KeyCode::Char(ch)));
+        }
+        view.handle_key(key(KeyCode::Enter));
+        assert!(!view.add_source_url_active);
+        assert!(view.add_source_pin_active);
+    }
+
+    #[test]
+    fn add_source_empty_url_enter_stays_at_url_prompt() {
+        let mut view = explore_view_with_empty_catalog();
+        view.handle_key(ctrl_key(KeyCode::Char('a')));
+        view.handle_key(key(KeyCode::Enter));
+        assert!(view.add_source_url_active);
+        assert!(!view.add_source_pin_active);
+    }
+
+    #[test]
+    fn add_source_invalid_url_sets_load_error_and_stays_at_url_prompt() {
+        let mut view = explore_view_with_empty_catalog();
+        view.handle_key(ctrl_key(KeyCode::Char('a')));
+        for ch in "not-a-url".chars() {
+            view.handle_key(key(KeyCode::Char(ch)));
+        }
+        view.handle_key(key(KeyCode::Enter));
+        assert!(view.add_source_url_active);
+        assert!(!view.add_source_pin_active);
+        assert!(view
+            .load_error
+            .as_deref()
+            .is_some_and(|m| m.contains("invalid git URL")));
+    }
+
+    #[test]
+    fn add_source_pin_esc_cancels() {
+        let mut view = explore_view_with_empty_catalog();
+        view.handle_key(ctrl_key(KeyCode::Char('a')));
+        for ch in "https://github.com/owner/repo".chars() {
+            view.handle_key(key(KeyCode::Char(ch)));
+        }
+        view.handle_key(key(KeyCode::Enter));
+        assert!(view.add_source_pin_active);
+        view.handle_key(key(KeyCode::Esc));
+        assert!(!view.add_source_pin_active);
+        assert!(view.add_source_url.is_empty());
+        assert!(view.add_source_pin.is_empty());
+    }
+
+    #[test]
     fn browse_filter_typing_narrows_entries_and_resets_selection() {
         let repo = tempfile::tempdir().unwrap();
         save_catalog(
@@ -2201,6 +2389,7 @@ mod tests {
         let text = render_to_string(&mut view);
         assert!(text.contains("Enter"), "footer text:\n{text}");
         assert!(text.contains("m manage"), "footer text:\n{text}");
+        assert!(text.contains("Ctrl+A add source"), "footer text:\n{text}");
         assert!(text.contains("Esc dashboard"), "footer text:\n{text}");
         assert!(!text.contains("Esc back"), "footer text:\n{text}");
     }
