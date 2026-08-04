@@ -40,6 +40,60 @@ code, not after as a check.
 
 **The load-bearing rule: never collapse `unknown`/`timeout` into `unsat`.** `unsat` is a proof; `unknown`/`timeout` are "I don't know."
 
+## Reasoning loop: first principles → feasibility → ratchet (agent-side MCTS)
+
+v1 is **model-finding only** (no νZ maximize/minimize). Any `sat` model is *a* feasible point, not a proven optimum. Simplicity and preference quality come from **how you frame and re-query**, not from a single call.
+
+### 1. First principles before encode
+
+Strip the problem to irreducible **hard** rules before opening a tool:
+
+1. **Hard only.** Budgets, safety bounds, identity equations, exclusive enums — things that make a model invalid if violated.
+2. **Preferences are soft.** "Prefer wide sidebar", "as few workers as possible", "nice default of 16" are *not* hard constraints on the first solve.
+3. **Drop non-load-bearing assumptions.** Legacy defaults, cargo-cult floors, and "we always used N" are suspects until justified by a real rule.
+4. **Minimal surface.** Fewer vars, tight `int_range`, one constraint per real rule. Complexity in the encoding is usually complexity you invented.
+
+Ask: *What is the smallest set of facts such that any model of those facts is correct for the system?*
+
+### 2. Feasibility first, then search
+
+1. Encode **hard constraints only** → `solve_constraints`.
+2. On `unsat`: the hard set conflicts — diagnose (relax a false hard rule or report impossibility). Do **not** invent values.
+3. On `sat`: you have a feasible baseline. **Do not stop here** if the user (or the domain) cares about simplicity or a preference axis.
+
+### 3. Agent-side MCTS feedback (ratchet / binary search)
+
+Treat re-queries as a short search tree. Z3 is the simulator; you own selection and backpropagation.
+
+| Phase | Agent does | Z3 feedback |
+|---|---|---|
+| **Select** | Pick next hypothesis: tighten a prefer-axis, drop a free var, binary-search a bound, or simplify a bloated encoding | — |
+| **Expand** | New `solve_constraints` with only the delta (ratchet `ge`/`le`, shrink `int_range`, assert `eq` to a candidate) | — |
+| **Simulate** | One solve call | `sat` / `unsat` / `unknown` / `timeout` |
+| **Backprop** | Score the branch: hard-sat required; then preference quality; then **simplicity** (fewer free vars, tighter ranges, fewer ops) | update best-so-far |
+
+**Ratchet pattern (soft goals without νZ):**
+
+```
+sat baseline → re-query with stronger preference bound
+  → sat: keep, ratchet further
+  → unsat: back off one step; that frontier is your "good enough"
+  → unknown/timeout: simplify encoding or split; never treat as unsat
+```
+
+Example (prefer wide sidebar after feasibility): first model may give `sidebar=240`; re-query with `ge(sidebar, 300)` → if sat, try `310`… stop at last sat. Document as *feasible + ratcheted toward wide*, not as proven optimum.
+
+**Simplicity branches to try (in order):**
+
+1. Collapse a free var to a fixed value that still sat (`eq(workers, 4)`).
+2. Shrink ranges to the smallest band that remains sat.
+3. Drop constraints that were preferences mislabeled as hard.
+4. Prefer the encoding with fewer vars/ops among equal preference scores.
+
+**Stop when:** hard constraints remain sat, further preference ratchets go unsat, and no simpler encoding still covers the hard set.
+
+**Never claim a proven global optimum** unless the discrete space is exhaustively covered (or a future optimize API ships). Tests assert **feasibility predicates**, not uniqueness of the model, unless uniqueness is forced by hard constraints.
+
 ## Tool surface
 
 | Tool | When | Input | Output |
@@ -102,7 +156,7 @@ Fit a worker pool in 512 MiB; ≥4 workers; batch 8–128; each worker costs `48
 }
 ```
 
-→ `sat`, model `{workers:4, batch:40}`. The worker bakes `const WORKERS: u32 = 4; const BATCH: usize = 40;` plus a test asserting `workers * (48 + 2*batch) <= 512`. This is a **feasibility predicate, not a golden model** — any sat assignment is valid; Z3 may return any.
+→ `sat`, model `{workers:4, batch:40}`. The worker bakes `const WORKERS: u32 = 4; const BATCH: usize = 40;` plus a test asserting `workers * (48 + 2*batch) <= 512`. This is a **feasibility predicate, not a golden model** — any sat assignment is valid; Z3 may return any. If you prefer max batch or min workers, **ratchet** with a second solve (see §Reasoning loop); do not treat the first model as optimal.
 
 ### Example 2 — prove an invariant sound (unsat → proof)
 
@@ -183,24 +237,32 @@ The persist path for sharing a solved model across the delegation boundary:
 1. **Treating `unsat` as failure.** `unsat` is a *result*, not an error. For invariant checks, unsat = proof of soundness. For feasibility, unsat = "report impossibility, don't invent." Never retry-on-unsat or suppress it.
 2. **Collapsing `unknown`/`timeout` into `unsat`.** They mean "I don't know." Tighten encoding, raise timeout (≤60s cap), or simplify. Do NOT conclude impossibility.
 3. **Inventing a value instead of solving.** About to write `const BUFFER_SIZE: usize = ???` with ≥2 constraints on it → solve first. (Anthropic: "no voodoo constants.")
-4. **Enum as arithmetic.** Enums are not Int operands. Only `eq`/`ne` vs `enum_label` (or another enum from the same declared `values` domain). `add`/`mul`/`lt` on enums → `invalid_params`. Encode "mode is fast" as `{kind:"enum_label",var:"mode",label:"fast"}`, never as an int index.
-5. **Manually expanding Boolean equivalence.** Use `eq(p, q)` directly for Bool-sorted operands, whether each operand is a variable, literal, or compound expression. Do not rewrite it as `or(and(p,q),and(not(p),not(q)))`; expansion is noisier and obscures intent.
-6. **Bare leaf nodes.** Every ConstraintExpr is a tagged object. `42` and `"workers"` are invalid → `{kind:"int",value:42}`, `{kind:"var",name:"workers"}`.
-7. **No `div`.** B′ has no division. Encode ratios by cross-multiplying (`a/b = c/d` → `a*d = c*b`).
-8. **Re-inventing constants in the worker.** Brain passed a `solve_id` → reload via `get_solve_result`, treat as authoritative.
-9. **Direct file reads of `.spur/solver/`.** Always `get_solve_result`. Path/format is an implementation detail.
-10. **`solve_smt` when B′ suffices.** Escape hatch is for theories B′ can't express. If bool/int/enum + arithmetic covers it → `solve_constraints`.
+4. **Baking the first sat model as "optimal".** First sat is feasibility only. Preferences → ratchet; simplicity → fewer free vars. Never claim proven optimum without exhaustive cover or an optimize API.
+5. **Encoding preferences as hard constraints on the first solve.** Soft goals ("prefer wide", "as small as possible") go in the MCTS/ratchet loop, not the initial hard set — otherwise you get spurious unsat or over-constrained junk.
+6. **Bloated encodings.** Extra vars, loose unbounded `int`, and cargo-cult floors violate first principles. Minimal surface first.
+7. **Enum as arithmetic.** Enums are not Int operands. Only `eq`/`ne` vs `enum_label` (or another enum from the same declared `values` domain). `add`/`mul`/`lt` on enums → `invalid_params`. Encode "mode is fast" as `{kind:"enum_label",var:"mode",label:"fast"}`, never as an int index.
+8. **Manually expanding Boolean equivalence.** Use `eq(p, q)` directly for Bool-sorted operands, whether each operand is a variable, literal, or compound expression. Do not rewrite it as `or(and(p,q),and(not(p),not(q)))`; expansion is noisier and obscures intent.
+9. **Bare leaf nodes.** Every ConstraintExpr is a tagged object. `42` and `"workers"` are invalid → `{kind:"int",value:42}`, `{kind:"var",name:"workers"}`.
+10. **No `div`.** B′ has no division. Encode ratios by cross-multiplying (`a/b = c/d` → `a*d = c*b`).
+11. **Re-inventing constants in the worker.** Brain passed a `solve_id` → reload via `get_solve_result`, treat as authoritative.
+12. **Direct file reads of `.spur/solver/`.** Always `get_solve_result`. Path/format is an implementation detail.
+13. **`solve_smt` when B′ suffices.** Escape hatch is for theories B′ can't express. If bool/int/enum + arithmetic covers it → `solve_constraints`.
 
 ## TL;DR
 
 ```
 0. Recognize: about to write a magic number / invariant / config value with
    ≥2 constraints? → solve.
-1. Encode: vars (bool|int|int_range|enum) + tagged ConstraintExpr
+1. First principles: hard constraints only; strip preferences & cargo-cult defaults;
+   minimal vars/ranges.
+2. Encode: vars (bool|int|int_range|enum) + tagged ConstraintExpr
    (every node is {kind:…}).
-2. solve_constraints (default); solve_smt only for BitVec/Reals/theories beyond B′.
-3. Status: sat → bake model into code + test; unsat → proof/impossibility;
+3. solve_constraints (default); solve_smt only for BitVec/Reals/theories beyond B′.
+4. Status: sat → feasible baseline (not optimum); unsat → proof/impossibility;
    unknown/timeout → NOT unsat.
-4. Hand off: persist:true + solve_id → worker get_solve_result (authoritative).
-5. Gotchas: enum≠arith, no div, bare leaves rejected, never unknown→unsat.
+5. Prefer / simplify: agent-side MCTS — ratchet bounds, drop free vars, re-query;
+   keep last sat on the prefer-axis; never claim proven optimum.
+6. Hand off: persist:true + solve_id → worker get_solve_result (authoritative).
+7. Gotchas: enum≠arith, no div, bare leaves rejected, never unknown→unsat,
+   never first-sat = optimal.
 ```
