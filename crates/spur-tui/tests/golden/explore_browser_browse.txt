@@ -27,4 +27,4 @@ never synced
 │                      ││                                    ││                                    │
 │                      ││                                    ││                                    │
 └──────────────────────┘└────────────────────────────────────┘└────────────────────────────────────┘
-j/k move  Tab tabs  space select  Enter gate  m manage  r reload  Esc dashboard
+j/k move  Tab tabs  space select  Enter gate  m manage  Ctrl+A add source  r reload  Esc dashboard
