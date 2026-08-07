@@ -3,7 +3,7 @@ name: writing-plans
 description: "Use when writing an implementation plan, creating a task breakdown, converting a spec to code, or planning work steps. Triggers on phrases like \"write plan\", \"create plan\", \"plan tasks\", \"implementation plan\", \"break this into tasks\", or \"how should we implement this\". In SPUR, produces a beads-backed DAG with dependencies, file scope boundaries, and worker routing."
 role: brain
 ---
-<!-- SPUR-MANAGED v=1 skill=writing-plans sha256=9c96dbf34c7c7be94345a182547d2eaf70657b0adc369aa9bd2cb78f49dee6d5 -->
+<!-- SPUR-MANAGED v=1 skill=writing-plans sha256=78217082cdf595782167fd3419b1260694cc4e328a5db1727018e07a1502da2b -->
 
 # SPUR Writing Plans — Specs Into Beads-Backed DAGs
 
@@ -15,7 +15,7 @@ A plan in SPUR is not a markdown checklist. It is a **DAG of beads issues** mana
 
 **Announce at start:** "I'm using the writing-plans skill to create the beads-backed implementation plan."
 
-**Context:** This runs in the brain session after `brainstorming` has produced an approved spec and closed design epic.
+**Context:** This runs in the brain session after `brainstorming` has produced an approved spec and closed design epic. Prefer design notebooks (`…-design.ipynb` with native `ns_mermaid` cells); accept legacy `…-design.md` when that is what brainstorming recorded.
 
 **Save plan to:** `docs/superpowers/plans/YYYY-MM-DD-<feature-name>.md`
 - (User preferences for plan location override this default)
@@ -67,7 +67,8 @@ Before defining tasks, map out which files will be created or modified and what 
 > **For SPUR orchestrator:** This plan is designed for `submit_plan(persist_as_epic=true)`.
 > Each task becomes a beads issue with `spur:plan-task-id` and `spur:plan-id` labels.
 
-**Source spec:** `docs/superpowers/specs/<filename>.md`
+**Source spec:** `docs/superpowers/specs/<filename>.ipynb` (preferred) or `…/<filename>.md` (legacy)
+**Formal @spec cells (if notebook):** `<ids or none>`
 **Design epic:** `<issue_id>` (closed)
 
 **Goal:** [One sentence describing what this builds]
@@ -265,7 +266,7 @@ After submission, the plan reaches terminal state when:
 
 ## Cross-References
 
-- **brainstorming** — Previous skill in the chain; produces the approved spec
+- **brainstorming** — Previous skill in the chain; produces the approved design notebook (or legacy markdown) and formal `@spec` cell list
 - **plan-task-discipline** — DAG rules, task boundaries, and lifecycle enforcement
 - **beads-lifecycle** — Status state machine and label semantics for plan issues
 - **brain-delegation** — Worker routing decisions at dispatch time
