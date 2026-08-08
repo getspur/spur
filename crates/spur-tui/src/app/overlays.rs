@@ -110,6 +110,51 @@ impl App {
         }
     }
 
+    /// Open the fuzzy brain picker on views that host an InputCompletionPort;
+    /// otherwise fall back to a status-bar list flash.
+    pub(super) fn open_brain_picker_or_flash_status(
+        &mut self,
+        brains: Vec<spur_acp::BrainInfo>,
+        active: &str,
+    ) {
+        match &self.current_view {
+            ViewId::Dashboard => {
+                self.dashboard.open_brain_picker(brains, active);
+                self.dirty = true;
+            }
+            ViewId::SessionDetail(_) => {
+                if let Some(ref mut detail) = self.session_detail {
+                    detail.open_brain_picker(brains, active);
+                    self.dirty = true;
+                } else {
+                    self.flash_brains_status(&brains, active);
+                }
+            }
+            _ => self.flash_brains_status(&brains, active),
+        }
+    }
+
+    pub(super) fn flash_brains_status(&mut self, brains: &[spur_acp::BrainInfo], active: &str) {
+        let list = if brains.is_empty() {
+            "(none)".to_string()
+        } else {
+            brains
+                .iter()
+                .map(|b| {
+                    let marker = if b.name == active { "*" } else { " " };
+                    let def = if b.is_default { " (default)" } else { "" };
+                    format!("{marker}{}{def}", b.name)
+                })
+                .collect::<Vec<_>>()
+                .join("  ")
+        };
+        self.flash_hint(
+            format!("brains: {list}  — /brain <name> to switch"),
+            Duration::from_secs(6),
+        );
+        self.dirty = true;
+    }
+
     fn flash_theme_status(&mut self) {
         let available = crate::theme::list_available_themes();
         let active = &self.active_theme_name;

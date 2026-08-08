@@ -1641,4 +1641,169 @@ mod brain_switch_status_tests {
         );
         assert!(app.brain_name.is_none());
     }
+
+    /// Scope A: switching while already on SessionDetail must update
+    /// `current_view` to the new session id (not leave a stale ViewId).
+    #[test]
+    fn brain_spawned_while_on_session_detail_updates_view_id() {
+        let mut app = App::new_for_tests();
+        let s1 = SessionId("s1".into());
+        let s2 = SessionId("s2".into());
+        app.handle_spur_event(wrap(SpurEventBody::BrainSpawned {
+            agent: "grok".into(),
+            session: s1.clone(),
+        }));
+        assert_eq!(app.current_view(), &ViewId::SessionDetail(s1.clone()));
+        // History after Dashboard → SessionDetail(s1) is [Dashboard].
+        let hist_before = app.view_history.clone();
+
+        app.handle_spur_event(wrap(SpurEventBody::BrainSpawned {
+            agent: "codex".into(),
+            session: s2.clone(),
+        }));
+
+        assert_eq!(
+            app.current_view(),
+            &ViewId::SessionDetail(s2.clone()),
+            "ViewId must track the new session after hot-swap BrainSpawned"
+        );
+        let detail = app.session_detail.as_ref().expect("detail present");
+        assert_eq!(detail.session_id(), &s2);
+        assert_eq!(
+            app.view_history, hist_before,
+            "must not push retired SessionDetail onto the back stack"
+        );
+        assert!(
+            !app.view_history
+                .iter()
+                .any(|v| matches!(v, ViewId::SessionDetail(id) if id == &s1)),
+            "retired session must not appear in view history"
+        );
+    }
+
+    #[test]
+    fn brain_picker_open_on_session_detail_opens_picker() {
+        let mut app = App::new_for_tests();
+        app.handle_spur_event(wrap(SpurEventBody::BrainSpawned {
+            agent: "grok".into(),
+            session: SessionId("s1".into()),
+        }));
+
+        app.handle_spur_event(wrap(SpurEventBody::BrainPickerOpen {
+            brains: vec![
+                spur_acp::BrainInfo {
+                    name: "grok".into(),
+                    kind: spur_acp::AgentKind::Grok,
+                    is_default: true,
+                },
+                spur_acp::BrainInfo {
+                    name: "codex".into(),
+                    kind: spur_acp::AgentKind::CodexAcp,
+                    is_default: false,
+                },
+            ],
+            active: "grok".into(),
+        }));
+
+        assert!(
+            app.session_detail
+                .as_ref()
+                .is_some_and(|d| d.completion_active()),
+            "BrainPickerOpen on SessionDetail must open the fuzzy brain picker"
+        );
+        assert!(
+            app.transient_hint_for_test().is_none(),
+            "picker path should not fall back to the brains list flash"
+        );
+    }
+
+    #[test]
+    fn brain_picker_open_on_dashboard_opens_picker() {
+        let mut app = App::new_for_tests();
+        // Stay on Dashboard (no BrainSpawned navigation).
+        app.handle_spur_event(wrap(SpurEventBody::BrainPickerOpen {
+            brains: vec![spur_acp::BrainInfo {
+                name: "grok".into(),
+                kind: spur_acp::AgentKind::Grok,
+                is_default: true,
+            }],
+            active: "grok".into(),
+        }));
+
+        assert!(
+            app.dashboard_for_test().completion_active(),
+            "BrainPickerOpen on Dashboard must open the fuzzy brain picker"
+        );
+    }
+
+    #[test]
+    fn brain_picker_open_on_unwired_view_flashes_status() {
+        let mut app = App::new_for_tests();
+        app.current_view = ViewId::SessionPicker;
+
+        app.handle_spur_event(wrap(SpurEventBody::BrainPickerOpen {
+            brains: vec![spur_acp::BrainInfo {
+                name: "grok".into(),
+                kind: spur_acp::AgentKind::Grok,
+                is_default: true,
+            }],
+            active: "grok".into(),
+        }));
+
+        let hint = app
+            .transient_hint_for_test()
+            .expect("unwired views should flash brains status");
+        assert!(
+            hint.text.contains("brains:"),
+            "status flash should list brains, got `{}`",
+            hint.text
+        );
+    }
+
+    #[test]
+    fn brain_error_flashes_long_hint() {
+        let mut app = App::new_for_tests();
+        app.handle_spur_event(wrap(SpurEventBody::BrainError {
+            session: SessionId("s1".into()),
+            message: "spawn failed: binary not found".into(),
+        }));
+
+        let hint = app
+            .transient_hint_for_test()
+            .expect("BrainError must set a transient hint");
+        assert!(
+            hint.text.contains("spawn failed"),
+            "hint should include error message, got `{}`",
+            hint.text
+        );
+        assert!(
+            hint.expires_at.duration_since(std::time::Instant::now())
+                > std::time::Duration::from_secs(5),
+            "spawn errors must stay visible longer than a short flash"
+        );
+        assert!(matches!(app.brain_status, BrainStatus::Error(_)));
+    }
+
+    #[test]
+    fn process_brain_cmd_without_tx_surfaces_loud_error() {
+        let mut app = App::new_for_tests();
+        // new_for_tests has no user_input_tx.
+        app.process_action(crate::action::Action::BrainCommand {
+            arg: "codex".into(),
+        });
+
+        let hint = app
+            .transient_hint_for_test()
+            .expect("missing channel must flash loudly");
+        assert!(
+            hint.text.contains("channel") || hint.text.contains("failed"),
+            "expected channel-failure hint, got `{}`",
+            hint.text
+        );
+        assert_eq!(
+            app.brain_status,
+            BrainStatus::Idle,
+            "failed named switch must not leave optimistic Connecting"
+        );
+    }
 }

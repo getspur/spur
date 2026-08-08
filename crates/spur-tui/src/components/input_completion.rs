@@ -326,6 +326,13 @@ impl InputCompletionPort {
         self.pending_mention_query = None;
     }
 
+    pub fn open_brain_picker(&mut self, brains: Vec<spur_acp::BrainInfo>, active: &str) {
+        let source = crate::components::brain_query_source::BrainQuerySource::new(brains, active);
+        self.picker_shell = Some(PickerShell::open(Box::new(source)));
+        self.trigger_detector.reset();
+        self.pending_mention_query = None;
+    }
+
     pub fn flush_pending_query_if_due(&mut self) -> bool {
         self.flush_pending_query_if_due_at(Instant::now())
     }

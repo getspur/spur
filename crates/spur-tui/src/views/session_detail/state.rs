@@ -751,6 +751,10 @@ impl SessionDetailView {
         self.completion.open_theme_picker(active_theme_name);
     }
 
+    pub(crate) fn open_brain_picker(&mut self, brains: Vec<spur_acp::BrainInfo>, active: &str) {
+        self.completion.open_brain_picker(brains, active);
+    }
+
     pub fn handle_paste(&mut self, text: &str) {
         self.input_bar.insert_paste(text);
         self.dispatch_intent(crate::components::completion_trigger::IntentEvent::Pasted);

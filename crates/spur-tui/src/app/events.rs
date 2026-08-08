@@ -533,9 +533,22 @@ impl App {
                     detail.set_disable_paste_burst(self.config.tui.disable_paste_burst);
                 }
 
-                // Auto-navigate from Dashboard or SessionPicker
-                if matches!(self.current_view, ViewId::Dashboard | ViewId::SessionPicker) {
-                    self.navigate_to(ViewId::SessionDetail(session.clone()));
+                // Always land on SessionDetail(new_session). When already on
+                // SessionDetail for a *different* id, update current_view in
+                // place — do not `navigate_to` (that would push the retired
+                // session onto the back stack and reintroduce ViewId drift
+                // on navigate_back). Same-id stays a no-op.
+                let target = ViewId::SessionDetail(session.clone());
+                match &self.current_view {
+                    ViewId::SessionDetail(existing) if existing != session => {
+                        self.current_view = target;
+                        self.emit_view_opened();
+                        self.dirty = true;
+                    }
+                    ViewId::SessionDetail(_) => {}
+                    _ => {
+                        self.navigate_to(target);
+                    }
                 }
             }
             SpurEventBody::AgentSessionReady {
@@ -596,6 +609,13 @@ impl App {
             SpurEventBody::BrainError { message, .. } => {
                 self.brain_status = BrainStatus::Error(message.clone());
                 self.pending_first_user_message = None;
+                // Spawn / hot-swap failures must outlast a 2s flash so the
+                // user can read the chain before the status bar alone remains.
+                self.flash_hint(
+                    format!("brain error: {message}"),
+                    std::time::Duration::from_secs(8),
+                );
+                self.dirty = true;
             }
             SpurEventBody::BrainReconnecting { .. } => {
                 self.brain_status = BrainStatus::Thinking;
@@ -684,25 +704,15 @@ impl App {
                 );
                 self.dirty = true;
             }
-            SpurEventBody::BrainsListed { brains, active }
-            | SpurEventBody::BrainPickerOpen { brains, active } => {
-                let list = if brains.is_empty() {
-                    "(none)".to_string()
-                } else {
-                    brains
-                        .iter()
-                        .map(|b| {
-                            let marker = if b.name == *active { "*" } else { " " };
-                            let def = if b.is_default { " (default)" } else { "" };
-                            format!("{marker}{}{def}", b.name)
-                        })
-                        .collect::<Vec<_>>()
-                        .join("  ")
-                };
-                self.flash_hint(
-                    format!("brains: {list}  — /brain <name> to switch"),
-                    std::time::Duration::from_secs(6),
-                );
+            SpurEventBody::BrainPickerOpen { brains, active } => {
+                // Bare `/brain` → real fuzzy picker (theme-picker pattern).
+                // Fall back to a status flash only when the current view has
+                // no InputCompletionPort (e.g. SessionPicker).
+                self.open_brain_picker_or_flash_status(brains.clone(), active);
+            }
+            SpurEventBody::BrainsListed { brains, active } => {
+                // Explicit list-only (palette /brains): keep flash status.
+                self.flash_brains_status(brains, active);
                 self.dirty = true;
             }
             // Variants that don't affect brain status — handled by views.

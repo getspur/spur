@@ -642,6 +642,11 @@ impl DashboardView {
         self.completion.open_theme_picker(active_theme_name);
     }
 
+    pub(crate) fn open_brain_picker(&mut self, brains: Vec<spur_acp::BrainInfo>, active: &str) {
+        self.mode = DashboardMode::Compose;
+        self.completion.open_brain_picker(brains, active);
+    }
+
     #[cfg(any(test, debug_assertions))]
     pub fn open_slash_picker_for_test(&mut self) {
         self.mode = DashboardMode::Compose;

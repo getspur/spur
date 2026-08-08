@@ -6,8 +6,8 @@ impl App {
         None
     }
 
-    /// `/brain [<name>]` — Scope A hot-swap. Empty arg opens the orchestrator
-    /// brain picker; a name requests a switch to that brain-capable agent.
+    /// `/brain [<name>]` — Scope A hot-swap. Empty arg asks the orchestrator
+    /// for `BrainPickerOpen` (real fuzzy picker); a name requests a switch.
     pub(super) fn process_brain_cmd(&mut self, arg: String) -> Option<Action> {
         let name = {
             let trimmed = arg.trim();
@@ -17,15 +17,47 @@ impl App {
                 Some(trimmed.to_string())
             }
         };
+        let is_named = name.is_some();
         if let Some(ref target) = name {
             self.flash_hint_short(format!("switching brain to {target}…"));
             self.brain_status = BrainStatus::Connecting;
             self.sync_brain_status();
-        } else {
-            self.flash_hint_short("listing brains…");
         }
-        if let Some(ref tx) = self.user_input_tx {
-            let _ = tx.try_send(crate::UserInput::SwitchBrain { name });
+
+        let send_ok = match self.user_input_tx.as_ref() {
+            Some(tx) => match tx.try_send(crate::UserInput::SwitchBrain { name }) {
+                Ok(()) => true,
+                Err(e) => {
+                    tracing::error!(
+                        err = ?e,
+                        "process_brain_cmd: user_input tx send failed — brain switch not delivered"
+                    );
+                    false
+                }
+            },
+            None => {
+                tracing::error!(
+                    "process_brain_cmd: user_input_tx is None — cannot switch or list brains"
+                );
+                false
+            }
+        };
+
+        if !send_ok {
+            // Revert optimistic Connecting and surface the failure longer than
+            // a 2s flash so a full channel is not silent.
+            if is_named {
+                self.brain_status = if self.session_detail.is_some() {
+                    BrainStatus::Ready
+                } else {
+                    BrainStatus::Idle
+                };
+                self.sync_brain_status();
+            }
+            self.flash_hint(
+                "brain command failed: orchestrator channel unavailable or full — retry",
+                std::time::Duration::from_secs(6),
+            );
         }
         self.dirty = true;
         None

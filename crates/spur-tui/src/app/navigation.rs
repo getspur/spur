@@ -91,7 +91,7 @@ impl App {
         }
     }
 
-    fn emit_view_opened(&self) {
+    pub(super) fn emit_view_opened(&self) {
         let event = spur_telemetry::tier2_events::TuiViewOpened {
             view_name: Self::telemetry_view_name_for(&self.current_view),
         };
