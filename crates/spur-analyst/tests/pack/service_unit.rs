@@ -1461,10 +1461,11 @@ fn recommended_next_tools_are_intent_adaptive() {
             .iter()
             .map(|tool| tool["tool"].as_str().expect("tool name"))
             .collect::<Vec<_>>(),
-        vec!["doc_navigate", "code_file_symbols"]
+        vec!["code_read_symbol", "doc_navigate", "code_file_symbols"]
     );
-    assert_eq!(plan_tools[0]["root"], "doc-1");
-    assert_eq!(plan_tools[1]["file"], "crates/spur-mcp/src/lib.rs");
+    assert_eq!(plan_tools[0]["stable_symbol_id"], "doc-1");
+    assert_eq!(plan_tools[1]["root"], "doc-1");
+    assert_eq!(plan_tools[2]["file"], "crates/spur-mcp/src/lib.rs");
 
     let fallback = recommended_next_tools(KnowledgeIntent::Debug, &[], &[]);
     assert_eq!(fallback[0]["tool"], "code_semantic_search");
@@ -1492,6 +1493,34 @@ fn code_next_tools_are_intent_adaptive() {
         vec!["code_read_symbol", "code_file_symbols"]
     );
     assert_eq!(tools(KnowledgeIntent::Explain), vec!["code_read_symbol"]);
+}
+
+#[test]
+fn doc_next_tools_prefer_code_read_symbol_and_omit_tree_hop_for_leaves() {
+    let with_unknown_children = doc_next_tools("doc-1", None);
+    assert_eq!(
+        with_unknown_children
+            .iter()
+            .map(|tool| tool["tool"].as_str().expect("tool name"))
+            .collect::<Vec<_>>(),
+        vec!["code_read_symbol", "doc_navigate"]
+    );
+    assert_eq!(with_unknown_children[0]["stable_symbol_id"], "doc-1");
+    assert_eq!(with_unknown_children[1]["root"], "doc-1");
+
+    let leaf = doc_next_tools("doc-leaf", Some(0));
+    assert_eq!(leaf.len(), 1);
+    assert_eq!(leaf[0]["tool"], "code_read_symbol");
+    assert_eq!(leaf[0]["stable_symbol_id"], "doc-leaf");
+
+    let parent = doc_next_tools("doc-parent", Some(3));
+    assert_eq!(
+        parent
+            .iter()
+            .map(|tool| tool["tool"].as_str().expect("tool name"))
+            .collect::<Vec<_>>(),
+        vec!["code_read_symbol", "doc_navigate"]
+    );
 }
 
 #[tokio::test]
@@ -2742,8 +2771,17 @@ async fn knowledge_context_pack_returns_grounded_evidence_and_followups() {
     assert_eq!(pack["supporting_docs"][0]["stable_symbol_id"], "doc-1");
     assert_eq!(
         pack["supporting_docs"][0]["next"][0]["tool"],
+        "code_read_symbol"
+    );
+    assert_eq!(
+        pack["supporting_docs"][0]["next"][0]["stable_symbol_id"],
+        "doc-1"
+    );
+    assert_eq!(
+        pack["supporting_docs"][0]["next"][1]["tool"],
         "doc_navigate"
     );
+    assert_eq!(pack["supporting_docs"][0]["next"][1]["root"], "doc-1");
     assert_eq!(pack["recommended_next_tools"][0]["tool"], "code_callers");
     assert_eq!(
         pack["recommended_next_tools"][0]["selector"],

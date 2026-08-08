@@ -3,6 +3,7 @@ use serde_json::{json, Value};
 use crate::KnowledgeCandidate;
 
 use super::impact::normalized_code_selector;
+use super::next_tools::doc_next_tools;
 use super::{code_next_tools, KnowledgeContextPackRequest, KnowledgeIntent};
 
 pub(crate) fn split_evidence(
@@ -35,7 +36,9 @@ fn evidence_from_candidate(candidate: &KnowledgeCandidate, intent: KnowledgeInte
     let next = if is_code {
         code_next_tools(intent)
     } else if let Some(root) = candidate.stable_symbol_id.as_deref() {
-        vec![json!({ "tool": "doc_navigate", "root": root })]
+        // Lede-only discovery → terminal body read via code_read_symbol;
+        // keep doc_navigate as optional one-hop outline follow-up.
+        doc_next_tools(root, None)
     } else {
         vec![json!({ "tool": "code_semantic_search", "query": candidate.title })]
     };

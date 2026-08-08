@@ -29,6 +29,31 @@ pub(crate) fn recommended_next_tools(
     }
 }
 
+/// Follow-ups after discovering a documentation section.
+///
+/// `code_read_symbol` is the terminal body read — `doc_navigate` only returns a
+/// short lede. Optional `doc_navigate` tree hop is included when child outline
+/// may still be needed (`child_count` unknown, or `child_count > 0`).
+pub(crate) fn doc_next_tools(section_id: &str, child_count: Option<u32>) -> Vec<Value> {
+    let mut tools = vec![json!({
+        "tool": "code_read_symbol",
+        "stable_symbol_id": section_id,
+        "reason": "Read full section body; doc_navigate lede is discovery-only."
+    })];
+    let include_tree_hop = match child_count {
+        Some(0) => false,
+        Some(_) | None => true,
+    };
+    if include_tree_hop {
+        tools.push(json!({
+            "tool": "doc_navigate",
+            "root": section_id,
+            "reason": "Expand one-hop child sections when outline under this section is needed."
+        }));
+    }
+    tools
+}
+
 fn change_next_tools(selector: &str) -> Vec<Value> {
     vec![
         json!({ "tool": "code_callers", "selector": selector, "reason": "Find direct change impact before editing." }),
@@ -55,11 +80,7 @@ fn review_next_tools(selector: &str) -> Vec<Value> {
 fn plan_next_tools(top_doc_root: Option<&str>, top_file: Option<&str>) -> Vec<Value> {
     let mut tools = Vec::new();
     if let Some(root) = top_doc_root {
-        tools.push(json!({
-            "tool": "doc_navigate",
-            "root": root,
-            "reason": "Start planning from the most relevant documentation evidence."
-        }));
+        tools.extend(doc_next_tools(root, None));
     }
     if let Some(file) = top_file {
         tools.push(json!({

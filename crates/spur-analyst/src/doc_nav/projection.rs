@@ -5,6 +5,7 @@ use arrow_array::{
 use serde_json::{json, Value};
 
 use crate::mcp::McpHandlerError;
+use crate::pack::doc_next_tools;
 
 const LEDE_CHARS: usize = 200;
 
@@ -22,12 +23,14 @@ pub(super) struct DocHit {
 
 impl DocHit {
     pub(super) fn into_value(self, include_lede: bool) -> Value {
+        let next = doc_next_tools(&self.stable_symbol_id, Some(self.child_count));
         let mut value = json!({
             "stable_symbol_id": self.stable_symbol_id,
             "qualified_name": self.qualified_name,
             "file_path": self.file_path,
             "heading_level": self.heading_level,
             "child_count": self.child_count,
+            "next": next,
         });
         if let Some(score) = self.score {
             value["score"] = json!(score);

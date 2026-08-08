@@ -225,8 +225,11 @@ Write statements are rejected. Results are capped at **1000 rows** without rewri
 
 ### `doc_navigate`
 
+Discovery only — metadata + ~200-char `lede`, never full section body.
+
 - FTS: `{ "query": "overlay merge-on-read", "k": 20 }`
 - Tree hop: `{ "root": "<stable_section_id>", "include_lede": true }`
+- Each hit includes `next[]`. **Terminal body read:** `code_read_symbol({ stable_symbol_id })` (section symbols are graph `symbol_kind: "section"`). Use `doc_navigate` with `root` only for outline expansion.
 
 ---
 
@@ -238,6 +241,7 @@ Write statements are rejected. Results are capped at **1000 rows** without rewri
 | Exact symbol body / callers / callees | `code_*` (exact graph) |
 | Ranked hotspots, PageRank, co-change, multi-hop SQL | Analyst SQL / pack risk sections |
 | Doc outline or section tree | `doc_navigate` |
+| Full doc section body after a hit | `code_read_symbol` on the section `stable_symbol_id` |
 
 **Trust rule:** treat pack hits as candidates; use `staleness` + `response_file_oids_match` / graph hash before high-impact claims; ground with exact graph tools.
 

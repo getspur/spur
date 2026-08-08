@@ -80,8 +80,14 @@
       "why_relevant": "BM25 0.4, kind=section, grounding=bm25-doc",
       "next": [
         {
+          "tool": "code_read_symbol",
+          "stable_symbol_id": "doc-dispatch",
+          "reason": "Read full section body; doc_navigate lede is discovery-only."
+        },
+        {
           "tool": "doc_navigate",
-          "root": "doc-dispatch"
+          "root": "doc-dispatch",
+          "reason": "Expand one-hop child sections when outline under this section is needed."
         }
       ]
     }

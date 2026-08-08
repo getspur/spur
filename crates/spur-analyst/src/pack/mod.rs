@@ -21,9 +21,9 @@ pub(crate) use graph_reasoning::{
 pub(crate) use impact::{exact_graph_context_for_result, raw_stable_symbol_id, ExactGraphContext};
 #[cfg(test)]
 pub(crate) use impact::{SymbolImpactSummary, POPULAR_SINK_CALLERS_THRESHOLD};
-pub(crate) use next_tools::code_next_tools;
 #[cfg(test)]
 pub(crate) use next_tools::recommended_next_tools;
+pub(crate) use next_tools::{code_next_tools, doc_next_tools};
 pub(crate) use request::{
     KnowledgeContextPackRequest, KnowledgeContextPackV2Request, KnowledgeIntent,
 };

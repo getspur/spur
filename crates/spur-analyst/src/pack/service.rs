@@ -28,9 +28,10 @@ use crate::pack::{
 };
 #[cfg(test)]
 use crate::pack::{
-    code_next_tools, collect_graph_paths, graph_reasoning_sections_for_pack, pack_query_result,
-    pack_query_result_v2_with_graph_sections, path_budget_plan, recommended_next_tools,
-    ExactGraphContext, KnowledgeIntent, SymbolImpactSummary, POPULAR_SINK_CALLERS_THRESHOLD,
+    code_next_tools, collect_graph_paths, doc_next_tools, graph_reasoning_sections_for_pack,
+    pack_query_result, pack_query_result_v2_with_graph_sections, path_budget_plan,
+    recommended_next_tools, ExactGraphContext, KnowledgeIntent, SymbolImpactSummary,
+    POPULAR_SINK_CALLERS_THRESHOLD,
 };
 
 use crate::mcp::McpHandlerError;

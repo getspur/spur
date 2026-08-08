@@ -72,7 +72,7 @@ Most code questions are not call-graph questions. Pick the right shape before re
 | Question shape | Right tool sequence |
 |---|---|
 | **"Get me oriented / where does <concept> live / what's the impact area?"** (new investigation, no symbol in hand) | `knowledge_context_pack_2` (layer 1) — then follow its `recommended_next_tools` selectors into the rows below. |
-| **"How does <concept> work / where is it documented?"** (you know the *topic*, not the symbol name) | `knowledge_context_pack_2` or `code_semantic_search` — hybrid/BM25 doc + code retrieval. Then `code_read_symbol` / `doc_navigate` on a hit. |
+| **"How does <concept> work / where is it documented?"** (you know the *topic*, not the symbol name) | `knowledge_context_pack_2` or `code_semantic_search` / `doc_navigate` for discovery (lede only). Then **`code_read_symbol` on the section `stable_symbol_id`** for the full body — there is no `doc_read`. Use `doc_navigate` with `root` only to expand child outline. |
 | **"How does <concept> work in external package <pkg>?"** | `external_knowledge_context` — then follow its package `selector` into `external_code_read` or external edge tools. If the revision is missing, use `external_index` → `external_index_status` first. |
 | **"What does X mean / contain / advertise?"** (schema audit, doc read, single-symbol body) | filtered `code_symbol_search` → `code_read_symbol`. **No call graph.** |
 | **"What breaks if I change X?"** (refactor, rename) | `code_callers` with `include_unresolved=true`. Counts-first; bail on popular sinks. |

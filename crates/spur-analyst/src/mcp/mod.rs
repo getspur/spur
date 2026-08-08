@@ -173,7 +173,7 @@ pub fn local_project_tool_definitions() -> Vec<ToolDefinition> {
 fn doc_navigate_def() -> ToolDefinition {
     ToolDefinition {
         name: "doc_navigate".into(),
-        description: "Navigate indexed documentation sections. Without root, performs BM25 full-text search over section body_text in the Lance sidecar. With root, returns one-hop child sections via Contains order using the stable_symbol_id frontier.".into(),
+        description: "Navigate indexed documentation sections (metadata + ~200-char lede only; never full body). Without root, BM25 FTS over section body_text in the Lance sidecar. With root, one-hop child sections via Contains order. Each hit includes next[] — follow code_read_symbol(stable_symbol_id) for the full section body.".into(),
         input_schema: json!({
             "type": "object",
             "properties": {
