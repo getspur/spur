@@ -110,6 +110,25 @@ impl App {
         }
     }
 
+    /// Brain-capable agents from the TUI's local `SpurConfig` (mirrors
+    /// orchestrator `brain_info_list` so bare `/brain` can open the picker
+    /// without waiting for a `BrainPickerOpen` event).
+    pub(super) fn local_brain_info_list(&self) -> Vec<spur_acp::BrainInfo> {
+        use spur_acp::AgentRole;
+        let default = self.config.brain.default.as_str();
+        self.config
+            .agents
+            .entries
+            .iter()
+            .filter(|e| matches!(e.role, AgentRole::Brain | AgentRole::Both))
+            .map(|e| spur_acp::BrainInfo {
+                name: e.name.clone(),
+                kind: e.kind,
+                is_default: e.name == default,
+            })
+            .collect()
+    }
+
     /// Open the fuzzy brain picker on views that host an InputCompletionPort;
     /// otherwise fall back to a status-bar list flash.
     pub(super) fn open_brain_picker_or_flash_status(

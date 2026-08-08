@@ -1806,4 +1806,57 @@ mod brain_switch_status_tests {
             "failed named switch must not leave optimistic Connecting"
         );
     }
+
+    fn seed_brain_agents(app: &mut App) {
+        // SpurConfig::default() has empty agents.entries; seed like a real
+        // project config so local_brain_info_list is non-empty.
+        let mut cfg = (*app.config).clone();
+        cfg.brain.default = "grok".into();
+        let mut grok = spur_acp::AgentConfig::with_defaults("grok");
+        grok.kind = spur_acp::AgentKind::Grok;
+        grok.role = spur_acp::AgentRole::Both;
+        let mut codex = spur_acp::AgentConfig::with_defaults("codex");
+        codex.kind = spur_acp::AgentKind::CodexAcp;
+        codex.role = spur_acp::AgentRole::Both;
+        cfg.agents.entries = vec![grok, codex];
+        app.config = std::sync::Arc::new(cfg);
+    }
+
+    /// Bare `/brain` must open the picker from local config immediately —
+    /// no orchestrator round-trip, no user_input_tx required.
+    #[test]
+    fn bare_brain_command_opens_local_picker_without_channel() {
+        let mut app = App::new_for_tests();
+        seed_brain_agents(&mut app);
+
+        app.process_action(crate::action::Action::BrainCommand { arg: String::new() });
+
+        assert!(
+            app.dashboard_for_test().completion_active(),
+            "bare `/brain` on Dashboard must open the fuzzy picker locally"
+        );
+        assert!(
+            app.transient_hint_for_test().is_none(),
+            "local picker path must not flash the brains list"
+        );
+    }
+
+    #[test]
+    fn bare_brain_command_on_session_detail_opens_local_picker() {
+        let mut app = App::new_for_tests();
+        seed_brain_agents(&mut app);
+        app.handle_spur_event(wrap(SpurEventBody::BrainSpawned {
+            agent: "grok".into(),
+            session: SessionId("s1".into()),
+        }));
+
+        app.process_action(crate::action::Action::BrainCommand { arg: String::new() });
+
+        assert!(
+            app.session_detail
+                .as_ref()
+                .is_some_and(|d| d.completion_active()),
+            "bare `/brain` on SessionDetail must open the fuzzy picker locally"
+        );
+    }
 }

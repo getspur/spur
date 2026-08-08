@@ -6,8 +6,11 @@ impl App {
         None
     }
 
-    /// `/brain [<name>]` — Scope A hot-swap. Empty arg asks the orchestrator
-    /// for `BrainPickerOpen` (real fuzzy picker); a name requests a switch.
+    /// `/brain [<name>]` — Scope A hot-swap.
+    ///
+    /// Bare `/brain` opens the fuzzy picker **locally** from config (same
+    /// pattern as `/theme`) so the UI does not wait on an orchestrator
+    /// round-trip. Named `/brain <name>` still goes through the channel.
     pub(super) fn process_brain_cmd(&mut self, arg: String) -> Option<Action> {
         let name = {
             let trimmed = arg.trim();
@@ -17,15 +20,33 @@ impl App {
                 Some(trimmed.to_string())
             }
         };
-        let is_named = name.is_some();
-        if let Some(ref target) = name {
-            self.flash_hint_short(format!("switching brain to {target}…"));
-            self.brain_status = BrainStatus::Connecting;
-            self.sync_brain_status();
+
+        // Bare command: open picker immediately from local SpurConfig.
+        if name.is_none() {
+            let brains = self.local_brain_info_list();
+            let active = self
+                .brain_name
+                .clone()
+                .unwrap_or_else(|| self.config.brain.default.clone());
+            if brains.is_empty() {
+                self.flash_hint(
+                    "no brain-capable agents in config — check agents.entries roles",
+                    std::time::Duration::from_secs(6),
+                );
+            } else {
+                self.open_brain_picker_or_flash_status(brains, &active);
+            }
+            self.dirty = true;
+            return None;
         }
 
+        let target = name.expect("named path");
+        self.flash_hint_short(format!("switching brain to {target}…"));
+        self.brain_status = BrainStatus::Connecting;
+        self.sync_brain_status();
+
         let send_ok = match self.user_input_tx.as_ref() {
-            Some(tx) => match tx.try_send(crate::UserInput::SwitchBrain { name }) {
+            Some(tx) => match tx.try_send(crate::UserInput::SwitchBrain { name: Some(target) }) {
                 Ok(()) => true,
                 Err(e) => {
                     tracing::error!(
@@ -36,9 +57,7 @@ impl App {
                 }
             },
             None => {
-                tracing::error!(
-                    "process_brain_cmd: user_input_tx is None — cannot switch or list brains"
-                );
+                tracing::error!("process_brain_cmd: user_input_tx is None — cannot switch brain");
                 false
             }
         };
@@ -46,14 +65,12 @@ impl App {
         if !send_ok {
             // Revert optimistic Connecting and surface the failure longer than
             // a 2s flash so a full channel is not silent.
-            if is_named {
-                self.brain_status = if self.session_detail.is_some() {
-                    BrainStatus::Ready
-                } else {
-                    BrainStatus::Idle
-                };
-                self.sync_brain_status();
-            }
+            self.brain_status = if self.session_detail.is_some() {
+                BrainStatus::Ready
+            } else {
+                BrainStatus::Idle
+            };
+            self.sync_brain_status();
             self.flash_hint(
                 "brain command failed: orchestrator channel unavailable or full — retry",
                 std::time::Duration::from_secs(6),
