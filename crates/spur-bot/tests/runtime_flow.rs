@@ -30,7 +30,12 @@ fn mk_permission_request() -> (
     );
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
     (
-        spur_acp::types::PermissionRequest { args, reply_tx },
+        spur_acp::types::PermissionRequest {
+            args,
+            reply_tx,
+            generation: 0,
+            operation_fence: 0,
+        },
         reply_rx,
     )
 }
@@ -549,7 +554,12 @@ async fn permission_callback_becomes_stale_after_topic_archived_with_preserved_a
         ],
     );
     let (reply_tx, _reply_rx) = tokio::sync::oneshot::channel();
-    let request = spur_acp::types::PermissionRequest { args, reply_tx };
+    let request = spur_acp::types::PermissionRequest {
+        args,
+        reply_tx,
+        generation: 0,
+        operation_fence: 0,
+    };
 
     let (_key, renders) = runtime.handle_permission_request(request).unwrap();
     let token = renders

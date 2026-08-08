@@ -262,6 +262,8 @@ pub struct NativeAcpConnection {
     health_status: AgentHealth,
     /// Optional sender for interactive permission requests (forwarded to the TUI).
     permission_tx: Option<mpsc::UnboundedSender<crate::types::PermissionRequest>>,
+    /// Optional shared lease stamp snapshotted at permission-handler entry.
+    permission_stamp: Option<std::sync::Arc<crate::types::PermissionLeaseStamp>>,
     /// Receiver for vendor-extension notifications. Filled at construction,
     /// taken once by the orchestrator via `take_ext_notification_rx`.
     ext_notification_rx: Option<mpsc::UnboundedReceiver<ExtNotificationPayload>>,
@@ -650,6 +652,7 @@ impl NativeAcpConnection {
             thread_handle: None,
             health_status: AgentHealth::Unknown,
             permission_tx,
+            permission_stamp: None,
             ext_notification_rx: Some(ext_rx),
             ext_notification_tx: ext_tx,
             agent_client_request_rx: Some(agent_client_request_rx),
@@ -671,6 +674,14 @@ impl NativeAcpConnection {
     /// tests use this to redirect the registry into a tempdir.
     pub fn set_repo_root(&mut self, root: PathBuf) {
         self.repo_root = root;
+    }
+
+    /// Bind the shared lease stamp snapshotted onto interactive permission requests.
+    pub fn set_permission_stamp(
+        &mut self,
+        stamp: std::sync::Arc<crate::types::PermissionLeaseStamp>,
+    ) {
+        self.permission_stamp = Some(stamp);
     }
 
     /// Configure additional workspace roots sent on every new ACP session.
@@ -816,6 +827,7 @@ impl AgentConnection for NativeAcpConnection {
         // Spawn the dedicated thread that will own the !Send SDK connection.
         let thread_agent_name = agent_name.clone();
         let permission_tx = self.permission_tx.clone();
+        let permission_stamp = self.permission_stamp.clone();
         let ext_tx = self.ext_notification_tx.clone();
         let agent_client_request_tx = self.agent_client_request_tx.clone();
         let session_notif_tx_for_thread = self.session_notif_tx.clone();
@@ -836,6 +848,7 @@ impl AgentConnection for NativeAcpConnection {
                     launch_env,
                     cmd_rx,
                     permission_tx,
+                    permission_stamp,
                     ext_tx,
                     agent_client_request_tx,
                     session_notif_tx_for_thread,
@@ -1528,6 +1541,7 @@ fn acp_thread_main(
     launch_env: BTreeMap<String, String>,
     mut cmd_rx: mpsc::UnboundedReceiver<AcpCommand>,
     permission_tx: Option<mpsc::UnboundedSender<crate::types::PermissionRequest>>,
+    permission_stamp: Option<std::sync::Arc<crate::types::PermissionLeaseStamp>>,
     ext_notification_tx: mpsc::UnboundedSender<ExtNotificationPayload>,
     agent_client_request_tx: mpsc::UnboundedSender<AgentClientRequestPayload>,
     session_notif_tx: tokio::sync::broadcast::Sender<SessionNotification>,
@@ -1774,6 +1788,7 @@ fn acp_thread_main(
             // it owns its captures; we hand it a fresh clone of every Arc /
             // sender it needs.
             let perm_tx_h = permission_tx.clone();
+            let perm_stamp_h = permission_stamp.clone();
             let session_notif_tx_h = session_notif_tx.clone();
             let ext_notification_tx_h = ext_notification_tx.clone();
             let agent_client_request_tx_h = agent_client_request_tx.clone();
@@ -1820,8 +1835,14 @@ fn acp_thread_main(
                     async move |req: RequestPermissionRequest, responder, cx| {
                         cx.spawn({
                             let permission_tx = perm_tx_h.clone();
+                            let permission_stamp = perm_stamp_h.clone();
                             async move {
-                                let outcome = handle_request_permission(req, permission_tx).await;
+                                let outcome = handle_request_permission(
+                                    req,
+                                    permission_tx,
+                                    permission_stamp,
+                                )
+                                .await;
                                 responder.respond_with_result(outcome)
                             }
                         })?;
@@ -2768,27 +2789,43 @@ fn acp_thread_main(
 
 /// Permission request handler factored out so the handler closure stays
 /// small. Keeps the original 60s timeout + auto-fallback behaviour.
+///
+/// Fail-closed on a closed interactive channel (deny). `permission_tx = None`
+/// remains the product skip-permissions auto-approve path.
 async fn handle_request_permission(
     args: RequestPermissionRequest,
     permission_tx: Option<mpsc::UnboundedSender<crate::types::PermissionRequest>>,
+    permission_stamp: Option<std::sync::Arc<crate::types::PermissionLeaseStamp>>,
 ) -> agent_client_protocol::Result<RequestPermissionResponse> {
     let Some(perm_tx) = permission_tx else {
         return auto_approve(&args);
     };
 
+    // Capture lease identity at handler entry (not at send time) so a late
+    // request still carries the fence observed when the handler began.
+    let session_id = args.session_id.0.as_ref();
+    let (generation, operation_fence) = permission_stamp
+        .as_ref()
+        .map(|stamp| stamp.snapshot_for_session(session_id))
+        .unwrap_or((0, 0));
+
     let (reply_tx, reply_rx) = oneshot::channel();
     let request = crate::types::PermissionRequest {
         args: args.clone(),
         reply_tx,
+        generation,
+        operation_fence,
     };
 
     if perm_tx.send(request).is_err() {
-        tracing::warn!("NativeAcpConnection: permission channel closed, auto-approving");
-        return auto_approve(&args);
+        tracing::warn!("NativeAcpConnection: permission channel closed, denying");
+        return auto_deny(&args);
     }
 
     tracing::debug!(
         session = %args.session_id,
+        generation,
+        operation_fence,
         "NativeAcpConnection: awaiting interactive permission response"
     );
 
@@ -3494,7 +3531,7 @@ mod native_helper_tests {
             permission_option("allow_once", PermissionOptionKind::AllowOnce),
         ]);
 
-        let response = handle_request_permission(args, None)
+        let response = handle_request_permission(args, None, None)
             .await
             .expect("auto approve should succeed");
 
@@ -3504,17 +3541,26 @@ mod native_helper_tests {
     #[tokio::test]
     async fn handle_request_permission_forwards_to_channel_and_uses_reply() {
         let (permission_tx, mut permission_rx) = mpsc::unbounded_channel();
+        let stamp = crate::types::PermissionLeaseStamp::new();
+        stamp.set_generation(7);
+        stamp.set_session_fence("session", 3);
         let args = permission_request(vec![permission_option(
             "allow_once",
             PermissionOptionKind::AllowOnce,
         )]);
-        let task = tokio::spawn(handle_request_permission(args.clone(), Some(permission_tx)));
+        let task = tokio::spawn(handle_request_permission(
+            args.clone(),
+            Some(permission_tx),
+            Some(stamp),
+        ));
 
         let request = permission_rx
             .recv()
             .await
             .expect("permission request should be forwarded");
         assert_eq!(request.args, args);
+        assert_eq!(request.generation, 7);
+        assert_eq!(request.operation_fence, 3);
         request
             .reply_tx
             .send(crate::types::PermissionResponse {
@@ -3531,19 +3577,57 @@ mod native_helper_tests {
     }
 
     #[tokio::test]
-    async fn handle_request_permission_auto_approves_when_channel_closed() {
+    async fn handle_request_permission_auto_denies_when_channel_closed() {
         let (permission_tx, permission_rx) = mpsc::unbounded_channel();
         drop(permission_rx);
+        // auto_deny selects the last option (reject-class preferred at end).
         let args = permission_request(vec![
-            permission_option("reject_once", PermissionOptionKind::RejectOnce),
             permission_option("allow_once", PermissionOptionKind::AllowOnce),
+            permission_option("reject_once", PermissionOptionKind::RejectOnce),
         ]);
 
-        let response = handle_request_permission(args, Some(permission_tx))
+        let response = handle_request_permission(args, Some(permission_tx), None)
             .await
             .expect("closed channel fallback should succeed");
 
-        assert_eq!(selected_option_id(response), "allow_once");
+        assert_eq!(selected_option_id(response), "reject_once");
+    }
+
+    #[tokio::test]
+    async fn handle_request_permission_stamps_fence_at_handler_entry() {
+        let (permission_tx, mut permission_rx) = mpsc::unbounded_channel();
+        let stamp = crate::types::PermissionLeaseStamp::new();
+        stamp.set_generation(1);
+        stamp.set_session_fence("session", 1);
+        let args = permission_request(vec![
+            permission_option("allow_once", PermissionOptionKind::AllowOnce),
+            permission_option("reject_once", PermissionOptionKind::RejectOnce),
+        ]);
+        let stamp_for_task = stamp.clone();
+        let task = tokio::spawn(handle_request_permission(
+            args,
+            Some(permission_tx),
+            Some(stamp_for_task),
+        ));
+
+        // Rotate the live lease after the handler has already started and
+        // stamped fence=1 — the forwarded request must keep the entry fence.
+        let request = permission_rx
+            .recv()
+            .await
+            .expect("permission request should be forwarded");
+        stamp.set_generation(2);
+        stamp.set_session_fence("session", 9);
+        assert_eq!(request.generation, 1);
+        assert_eq!(request.operation_fence, 1);
+        drop(request.reply_tx);
+
+        let response = tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .expect("permission handler should finish")
+            .expect("permission task should not panic")
+            .expect("permission handler should return auto-deny response");
+        assert_eq!(selected_option_id(response), "reject_once");
     }
 
     #[tokio::test]
@@ -3553,7 +3637,7 @@ mod native_helper_tests {
             permission_option("allow_once", PermissionOptionKind::AllowOnce),
             permission_option("reject_once", PermissionOptionKind::RejectOnce),
         ]);
-        let task = tokio::spawn(handle_request_permission(args, Some(permission_tx)));
+        let task = tokio::spawn(handle_request_permission(args, Some(permission_tx), None));
 
         let request = permission_rx
             .recv()

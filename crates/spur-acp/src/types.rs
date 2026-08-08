@@ -232,10 +232,72 @@ pub enum CancelMode {
 
 // ─── Permission Flow ──────────────────────────────────────────────────
 
-/// A permission request sent from the ACP thread to the TUI.
+/// Shared lease identity stamped onto interactive permission requests.
+///
+/// The ACP permission handler snapshots generation + per-session fence **at
+/// handler entry** so a late send after lease rotation still carries the
+/// fence observed when the request began — not the live lease at send time.
+///
+/// Fences are session-keyed so concurrent sessions on one manager do not
+/// clobber each other.
+#[derive(Debug, Default)]
+pub struct PermissionLeaseStamp {
+    generation: std::sync::atomic::AtomicU64,
+    fences: std::sync::Mutex<std::collections::HashMap<String, u64>>,
+}
+
+impl PermissionLeaseStamp {
+    /// Allocate a new shared stamp (generation and fences both empty/zero).
+    #[must_use]
+    pub fn new() -> std::sync::Arc<Self> {
+        std::sync::Arc::new(Self::default())
+    }
+
+    /// Publish the connection generation that currently owns the ACP process.
+    pub fn set_generation(&self, generation: u64) {
+        self.generation
+            .store(generation, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Publish the live operation fence for one ACP session (`0` is unused).
+    pub fn set_session_fence(&self, session_id: &str, fence: u64) {
+        self.fences
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(session_id.to_owned(), fence);
+    }
+
+    /// Clear the live fence for one session (no permission owner for it).
+    pub fn clear_session_fence(&self, session_id: &str) {
+        self.fences
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(session_id);
+    }
+
+    /// Snapshot `(generation, operation_fence)` for one session.
+    #[must_use]
+    pub fn snapshot_for_session(&self, session_id: &str) -> (u64, u64) {
+        let generation = self.generation.load(std::sync::atomic::Ordering::SeqCst);
+        let fence = self
+            .fences
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(session_id)
+            .copied()
+            .unwrap_or(0);
+        (generation, fence)
+    }
+}
+
+/// A permission request sent from the ACP thread to the interactive UI.
 pub struct PermissionRequest {
     pub args: agent_client_protocol::schema::v1::RequestPermissionRequest,
     pub reply_tx: tokio::sync::oneshot::Sender<PermissionResponse>,
+    /// Connection generation captured at permission-handler entry.
+    pub generation: u64,
+    /// Operation fence captured at permission-handler entry (`0` = no owner).
+    pub operation_fence: u64,
 }
 
 /// The user's permission decision.
