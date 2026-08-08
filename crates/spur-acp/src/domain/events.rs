@@ -601,6 +601,9 @@ pub enum BrainRetireReason {
     UserClear,
     /// Session swap via `ResumeSession` (user selected a different session).
     ResumeSwitch,
+    /// In-process brain-type hot-swap (`/brain <name>`). Warm restart of the
+    /// live brain; not a `/clear` view wipe and not a same-kind session resume.
+    BrainSwitch,
     /// Orchestrator shutting down.
     Shutdown,
 }
@@ -1159,6 +1162,32 @@ pub enum SpurEventBody {
     SessionsListError {
         message: String,
     },
+    // ── Multi-brain Scope A (hot-swap) ──────────────────────────────
+    /// Active brain type changed via `/brain <name>` (or equivalent).
+    /// Always followed by a fresh spawn path (`BrainSpawned` / errors).
+    BrainSwitched {
+        from: String,
+        to: String,
+    },
+    /// `/brain <name>` targeted the already-active brain — no retire/spawn.
+    BrainSwitchNoop {
+        name: String,
+    },
+    /// `/brain <name>` targeted an unknown / non-brain-capable agent.
+    BrainSwitchError {
+        name: String,
+        available: Vec<String>,
+    },
+    /// Response to `/brains` — read-only listing of brain-capable agents.
+    BrainsListed {
+        brains: Vec<BrainInfo>,
+        active: String,
+    },
+    /// Response to bare `/brain` — TUI should present a brain picker.
+    BrainPickerOpen {
+        brains: Vec<BrainInfo>,
+        active: String,
+    },
     /// Replayed conversation history from disk (when agent doesn't support `load_session`).
     SessionHistory {
         session: SessionId,
@@ -1512,6 +1541,17 @@ pub enum SpurEventBody {
         pgid: i32,
         age_secs: i64,
     },
+}
+
+/// One brain-capable agent for picker / listing events (Scope A hot-swap).
+///
+/// Derived on demand from [`crate::AgentRegistry::brain_capable`]; never
+/// persisted as a separate registry type.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BrainInfo {
+    pub name: String,
+    pub kind: crate::types::AgentKind,
+    pub is_default: bool,
 }
 
 impl PartialEq for SpurEventBody {

@@ -1554,3 +1554,91 @@ mod synopsis_wire_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod brain_switch_status_tests {
+    //! P0 audit fixes: optimistic Connecting from `/brain` must clear on
+    //! noop/error; BrainSwitch retire must not wipe the session view.
+    use super::super::super::*;
+    use spur_acp::domain::events::{BrainRetireReason, SpurEvent, SpurEventBody};
+    use spur_acp::SessionId;
+
+    fn wrap(body: SpurEventBody) -> SpurEvent {
+        SpurEvent::now(body)
+    }
+
+    #[test]
+    fn brain_switch_noop_clears_optimistic_connecting() {
+        let mut app = App::new_for_tests();
+        app.handle_spur_event(wrap(SpurEventBody::BrainSpawned {
+            agent: "grok".into(),
+            session: SessionId("s1".into()),
+        }));
+        app.brain_status = BrainStatus::Connecting;
+
+        app.handle_spur_event(wrap(SpurEventBody::BrainSwitchNoop {
+            name: "grok".into(),
+        }));
+
+        assert_eq!(
+            app.brain_status,
+            BrainStatus::Ready,
+            "noop must clear optimistic Connecting when a session detail exists"
+        );
+    }
+
+    #[test]
+    fn brain_switch_error_clears_optimistic_connecting() {
+        let mut app = App::new_for_tests();
+        app.handle_spur_event(wrap(SpurEventBody::BrainSpawned {
+            agent: "grok".into(),
+            session: SessionId("s1".into()),
+        }));
+        app.brain_status = BrainStatus::Connecting;
+
+        app.handle_spur_event(wrap(SpurEventBody::BrainSwitchError {
+            name: "nope".into(),
+            available: vec!["grok".into(), "opencode".into()],
+        }));
+
+        assert_eq!(
+            app.brain_status,
+            BrainStatus::Ready,
+            "error must clear optimistic Connecting when a session detail exists"
+        );
+    }
+
+    #[test]
+    fn brain_switch_error_without_session_goes_idle() {
+        let mut app = App::new_for_tests();
+        app.brain_status = BrainStatus::Connecting;
+
+        app.handle_spur_event(wrap(SpurEventBody::BrainSwitchError {
+            name: "nope".into(),
+            available: vec![],
+        }));
+
+        assert_eq!(app.brain_status, BrainStatus::Idle);
+    }
+
+    #[test]
+    fn brain_retired_brain_switch_does_not_clear_session_view() {
+        let mut app = App::new_for_tests();
+        app.handle_spur_event(wrap(SpurEventBody::BrainSpawned {
+            agent: "grok".into(),
+            session: SessionId("s1".into()),
+        }));
+
+        app.handle_spur_event(wrap(SpurEventBody::BrainRetired {
+            session: SessionId("s1".into()),
+            reason: BrainRetireReason::BrainSwitch,
+        }));
+
+        let detail = app.session_detail.as_ref().expect("view retained");
+        assert!(
+            !detail.is_cleared(),
+            "BrainSwitch must not trigger UserClear view wipe; BrainSpawned rebuilds"
+        );
+        assert!(app.brain_name.is_none());
+    }
+}

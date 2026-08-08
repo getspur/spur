@@ -114,12 +114,12 @@ pub use crate::domain::events::{
     ReviewDecision, ReviewKind, ReviewPayload, Role, Table,
 };
 pub use domain::{
-    ArtifactKind, AttemptSetupError, CancelOutcome, CancellationControl, DelegationAbortHandle,
-    DelegationAbortReason, DelegationDispatchError, DelegationId, DelegationPlan, DelegationResult,
-    DelegationStatus, GraphEdgeEvent, GraphNodeEvent, HistoryEntry, IssueCommentEvent,
-    IssueDetailEvent, IssueSummaryEvent, LicenseBindingMode, LicensePlan, LicenseStateEvent,
-    LicenseStatusEvent, LicenseSubjectKind, PlanCandidate, PlanSubtask, ResolvedSessionConfig,
-    SpurEvent, SpurEventBody, TimeoutFallback, WorkerArtifact,
+    ArtifactKind, AttemptSetupError, BrainInfo, CancelOutcome, CancellationControl,
+    DelegationAbortHandle, DelegationAbortReason, DelegationDispatchError, DelegationId,
+    DelegationPlan, DelegationResult, DelegationStatus, GraphEdgeEvent, GraphNodeEvent,
+    HistoryEntry, IssueCommentEvent, IssueDetailEvent, IssueSummaryEvent, LicenseBindingMode,
+    LicensePlan, LicenseStateEvent, LicenseStatusEvent, LicenseSubjectKind, PlanCandidate,
+    PlanSubtask, ResolvedSessionConfig, SpurEvent, SpurEventBody, TimeoutFallback, WorkerArtifact,
 };
 
 // Re-export all remaining types for backward compatibility

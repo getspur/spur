@@ -49,8 +49,10 @@ impl SpurLocalSource {
     ///   for the life of the session.
     /// - `/configure` — owned by the TUI because it mutates SPUR's own
     ///   worker configuration rather than prompting the current brain.
+    /// - `/brain` / `/brains` — client-owned multi-brain Scope A hot-swap;
+    ///   never forwarded to the agent as prompt text.
     pub fn exclusive_names() -> &'static [&'static str] {
-        &["clear", "theme", "notebook", "configure"]
+        &["clear", "theme", "notebook", "configure", "brain", "brains"]
     }
 
     pub fn entries() -> Vec<CommandEntry> {
@@ -85,6 +87,22 @@ impl SpurLocalSource {
                 hint: None,
                 source: CommandSource::Spur,
                 dispatch: Dispatch::SpurLocal(Action::RequestSessions),
+                arg_picker_spec: None,
+            },
+            CommandEntry {
+                name: "brain".into(),
+                description: "Switch brain type or open brain picker".into(),
+                hint: Some("[name]".into()),
+                source: CommandSource::Spur,
+                dispatch: Dispatch::SpurLocal(Action::BrainCommand { arg: String::new() }),
+                arg_picker_spec: None,
+            },
+            CommandEntry {
+                name: "brains".into(),
+                description: "List brain-capable agents".into(),
+                hint: None,
+                source: CommandSource::Spur,
+                dispatch: Dispatch::SpurLocal(Action::ListBrains),
                 arg_picker_spec: None,
             },
             CommandEntry {

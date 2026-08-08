@@ -616,9 +616,9 @@ impl App {
                 // `brain_status` is intentionally NOT touched here:
                 //  - UserClear: already set to Idle by the ClearSession
                 //    action handler before the event round-trips back.
-                //  - ResumeSwitch: the orchestrator's ResumeSession arm
-                //    is already loading the next brain; overriding to
-                //    Idle would race that transition.
+                //  - ResumeSwitch / BrainSwitch: the orchestrator is already
+                //    loading/spawning the next brain; overriding to Idle
+                //    would race that transition (Connecting/Thinking).
                 self.brain_name = None;
                 self.pending_first_user_message = None;
                 // Clear auto-resume pointers so /clear followed by a
@@ -631,9 +631,8 @@ impl App {
                 // Defensive belt-and-suspenders reset for the UserClear path.
                 // Idempotent against Action::ClearSession's eager reset.
                 // Gated on UserClear only:
-                //  - ResumeSwitch: in-flight ResumeSession is already loading the next
-                //    brain via BrainSpawned (app.rs:919-975); resetting here would
-                //    briefly blank the new view mid-load.
+                //  - ResumeSwitch / BrainSwitch: next BrainSpawned rebuilds
+                //    SessionDetail; resetting here blanks the view mid-swap.
                 //  - Shutdown: terminal; reset is moot.
                 if matches!(reason, BrainRetireReason::UserClear) {
                     tracing::info!("BrainRetired{{UserClear}}: defensive view reset");
@@ -644,6 +643,67 @@ impl App {
             }
             SpurEventBody::LicenseUpdated { state } => {
                 self.update_license_state(state.clone());
+            }
+            SpurEventBody::BrainSwitched { from, to } => {
+                self.brain_name = Some(to.clone());
+                // BrainSpawned already set Thinking; keep that pipeline.
+                self.flash_hint_short(format!("brain switched: {from} → {to} (new session)"));
+                self.dirty = true;
+            }
+            SpurEventBody::BrainSwitchNoop { name } => {
+                // Clear optimistic Connecting from process_brain_cmd.
+                if matches!(self.brain_status, BrainStatus::Connecting) {
+                    self.brain_status = if self.session_detail.is_some() {
+                        BrainStatus::Ready
+                    } else {
+                        BrainStatus::Idle
+                    };
+                    self.sync_brain_status();
+                }
+                self.flash_hint_short(format!("already on brain `{name}`"));
+                self.dirty = true;
+            }
+            SpurEventBody::BrainSwitchError { name, available } => {
+                // Clear optimistic Connecting from process_brain_cmd.
+                if matches!(self.brain_status, BrainStatus::Connecting) {
+                    self.brain_status = if self.session_detail.is_some() {
+                        BrainStatus::Ready
+                    } else {
+                        BrainStatus::Idle
+                    };
+                    self.sync_brain_status();
+                }
+                let list = if available.is_empty() {
+                    "(none registered)".to_string()
+                } else {
+                    available.join(", ")
+                };
+                self.flash_hint(
+                    format!("unknown brain `{name}`; available: {list}"),
+                    std::time::Duration::from_secs(5),
+                );
+                self.dirty = true;
+            }
+            SpurEventBody::BrainsListed { brains, active }
+            | SpurEventBody::BrainPickerOpen { brains, active } => {
+                let list = if brains.is_empty() {
+                    "(none)".to_string()
+                } else {
+                    brains
+                        .iter()
+                        .map(|b| {
+                            let marker = if b.name == *active { "*" } else { " " };
+                            let def = if b.is_default { " (default)" } else { "" };
+                            format!("{marker}{}{def}", b.name)
+                        })
+                        .collect::<Vec<_>>()
+                        .join("  ")
+                };
+                self.flash_hint(
+                    format!("brains: {list}  — /brain <name> to switch"),
+                    std::time::Duration::from_secs(6),
+                );
+                self.dirty = true;
             }
             // Variants that don't affect brain status — handled by views.
             SpurEventBody::DelegationRequested { .. }

@@ -27,6 +27,20 @@ pub enum InteractiveInput {
     /// next `Message` (the `/clear` semantics).
     NewSession,
     ListSessions,
+    /// Switch the live brain type in-process (`/brain [<name>]`).
+    ///
+    /// - `None` — open the brain picker (list brain-capable agents).
+    /// - `Some(name)` — retire the active brain and spawn `name` when it
+    ///   differs from the active brain; noop/error otherwise.
+    ///
+    /// Warm-restart semantics: always retires the current brain; exactly
+    /// one live brain after success. See
+    /// `docs/superpowers/specs/2026-08-08-brain-agent-type-switch-design.ipynb`.
+    SwitchBrain {
+        name: Option<String>,
+    },
+    /// Read-only listing of brain-capable agents (`/brains`).
+    ListBrains,
     ResumeSession {
         session_id: String,
     },

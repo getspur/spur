@@ -128,6 +128,25 @@ pub fn route_with_caps(
         };
     }
 
+    // /brain [<name>] → Scope A hot-swap; preserve trailing arg.
+    if text == "/brain" {
+        return SubmitDecision::Local {
+            action: Action::BrainCommand { arg: String::new() },
+        };
+    }
+    if let Some(rest) = text.strip_prefix("/brain ") {
+        return SubmitDecision::Local {
+            action: Action::BrainCommand {
+                arg: rest.trim().to_string(),
+            },
+        };
+    }
+    if text == "/brains" {
+        return SubmitDecision::Local {
+            action: Action::ListBrains,
+        };
+    }
+
     if text == "/notebook" {
         return SubmitDecision::Local {
             action: Action::NotebookCommand { arg: String::new() },
@@ -564,6 +583,48 @@ mod image_block_tests {
         assert!(blocks
             .iter()
             .all(|block| !matches!(block, ContentBlock::Image(_))));
+    }
+}
+
+#[cfg(test)]
+mod brain_slash_tests {
+    use super::*;
+    use crate::commands::registry::CommandRegistry;
+
+    #[test]
+    fn slash_brain_bare_routes_to_brain_command_empty_arg() {
+        let registry = CommandRegistry::from_configs(&[]);
+        let decision = route("/brain", &[], &[], &registry, false);
+        match decision {
+            SubmitDecision::Local {
+                action: Action::BrainCommand { arg },
+            } if arg.is_empty() => {}
+            other => panic!("expected BrainCommand empty arg, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn slash_brain_named_preserves_arg() {
+        let registry = CommandRegistry::from_configs(&[]);
+        let decision = route("/brain opencode", &[], &[], &registry, false);
+        match decision {
+            SubmitDecision::Local {
+                action: Action::BrainCommand { arg },
+            } if arg == "opencode" => {}
+            other => panic!("expected BrainCommand opencode, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn slash_brains_routes_to_list_brains() {
+        let registry = CommandRegistry::from_configs(&[]);
+        let decision = route("/brains", &[], &[], &registry, false);
+        match decision {
+            SubmitDecision::Local {
+                action: Action::ListBrains,
+            } => {}
+            other => panic!("expected ListBrains, got {other:?}"),
+        }
     }
 }
 

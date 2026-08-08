@@ -131,6 +131,13 @@ impl App {
 
             Action::ThemeCommand { arg } => self.process_theme_cmd(arg),
             Action::NotebookCommand { arg } => self.process_notebook_cmd(arg),
+            Action::BrainCommand { arg } => self.process_brain_cmd(arg),
+            Action::ListBrains => {
+                if let Some(ref tx) = self.user_input_tx {
+                    let _ = tx.try_send(crate::UserInput::ListBrains);
+                }
+                None
+            }
             Action::AgentModelCatalogProbeCompleted { worker_name } => {
                 self.agent_model_catalog_probes_in_flight
                     .remove(&worker_name);

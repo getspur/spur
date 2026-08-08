@@ -114,6 +114,13 @@ pub enum UserInput {
     /// Dashboard compose view.
     NewSession,
     ListSessions,
+    /// Switch live brain type (`/brain [<name>]`). Maps to
+    /// `InteractiveInput::SwitchBrain`.
+    SwitchBrain {
+        name: Option<String>,
+    },
+    /// List brain-capable agents (`/brains`).
+    ListBrains,
     ResumeSession {
         session_id: String,
     },

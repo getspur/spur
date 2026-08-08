@@ -45,6 +45,7 @@ impl DashboardView {
                 let reason_label = match reason {
                     spur_acp::domain::events::BrainRetireReason::UserClear => "cleared",
                     spur_acp::domain::events::BrainRetireReason::ResumeSwitch => "switched",
+                    spur_acp::domain::events::BrainRetireReason::BrainSwitch => "brain-switch",
                     spur_acp::domain::events::BrainRetireReason::Shutdown => "shutdown",
                     _ => "retired",
                 };

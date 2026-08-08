@@ -68,6 +68,12 @@ pub enum Action {
     Tick,
     PermissionGrant(PermissionChoice),
     RequestSessions,
+    /// `/brain [<name>]` — empty arg opens picker; named value switches.
+    BrainCommand {
+        arg: String,
+    },
+    /// `/brains` — read-only listing of brain-capable agents.
+    ListBrains,
     ResumeSession {
         session_id: String,
     },

@@ -258,6 +258,131 @@ impl Orchestrator {
         self.emit_session_synopsis_seeds(&brain_sessions);
     }
 
+    /// Brain-capable agents for `/brain` picker and `/brains` listing.
+    fn brain_info_list(&self) -> Vec<spur_acp::BrainInfo> {
+        let default = self.config.brain.default.as_str();
+        self.registry
+            .brain_capable()
+            .into_iter()
+            .map(|cfg| spur_acp::BrainInfo {
+                name: cfg.name.clone(),
+                kind: cfg.kind,
+                is_default: cfg.name == default,
+            })
+            .collect()
+    }
+
+    fn brain_capable_names(&self) -> Vec<String> {
+        self.registry
+            .brain_capable()
+            .into_iter()
+            .map(|cfg| cfg.name.clone())
+            .collect()
+    }
+
+    fn emit_brains_listed(&mut self, active: &str) {
+        self.emit(SpurEvent::now(SpurEventBody::BrainsListed {
+            brains: self.brain_info_list(),
+            active: active.to_string(),
+        }));
+    }
+
+    fn emit_brain_picker_open(&mut self, active: &str) {
+        self.emit(SpurEvent::now(SpurEventBody::BrainPickerOpen {
+            brains: self.brain_info_list(),
+            active: active.to_string(),
+        }));
+    }
+
+    /// Scope A hot-swap: bare `/brain` opens picker; named switch retires the
+    /// live brain and spawns the target type (warm restart, one live brain).
+    async fn handle_switch_brain(
+        &mut self,
+        name: Option<String>,
+        active_brain_name: &mut String,
+        brain: &mut Option<BrainSession>,
+        agent_connection: &mut Option<ActiveConnection>,
+        scheduler: &mut crate::scheduler::BrainScheduler,
+        overflow_continuations: &crate::continuation_bridge::OverflowBuf,
+        permission_tx: &Option<
+            tokio::sync::mpsc::UnboundedSender<spur_acp::types::PermissionRequest>,
+        >,
+    ) {
+        let Some(target) = name else {
+            self.emit_brain_picker_open(active_brain_name);
+            return;
+        };
+
+        let available = self.brain_capable_names();
+        if !available.iter().any(|n| n == &target) {
+            self.emit(SpurEvent::now(SpurEventBody::BrainSwitchError {
+                name: target,
+                available,
+            }));
+            return;
+        }
+
+        if target == *active_brain_name {
+            self.emit(SpurEvent::now(SpurEventBody::BrainSwitchNoop {
+                name: target,
+            }));
+            return;
+        }
+
+        let from = active_brain_name.clone();
+        self.retire_active_brain(
+            brain,
+            agent_connection,
+            scheduler,
+            overflow_continuations,
+            spur_acp::domain::events::BrainRetireReason::BrainSwitch,
+            None,
+        )
+        .await;
+        // Old brain kind's transport cannot be reused for a different kind.
+        // retire_active_brain stashes it for same-kind reuse; drop it here.
+        let _ = agent_connection.take();
+
+        // Atomic name: commit `active_brain_name` only after spawn succeeds so
+        // failed switch leaves identity aligned with the last live brain type
+        // (still no live session until the next spawn/message).
+        match self
+            .spawn_brain_session(Some(target.as_str()), permission_tx.clone())
+            .await
+        {
+            Ok(b) => {
+                *active_brain_name = target.clone();
+                let new_sid = Some(b.spur_session_id.clone().into());
+                scheduler.note_session_swap(new_sid, overflow_continuations);
+                *brain = Some(b);
+                self.emit(SpurEvent::now(SpurEventBody::BrainSwitched {
+                    from,
+                    to: target,
+                }));
+            }
+            Err(e) => {
+                let error_message = format_error_chain(&e);
+                error!(
+                    error = %error_message,
+                    from = %from,
+                    to = %target,
+                    "SwitchBrain: failed to spawn target brain"
+                );
+                if Self::is_auth_required_error(&e) {
+                    self.emit(SpurEvent::now(SpurEventBody::AuthRequired {
+                        session: SessionId(String::new()),
+                        message: Self::auth_required_banner(),
+                    }));
+                } else {
+                    self.emit(SpurEvent::now(SpurEventBody::BrainError {
+                        session: SessionId::new(),
+                        message: error_message,
+                    }));
+                }
+            }
+        }
+    }
+
     fn emit_session_synopsis_seeds(&mut self, sessions: &[spur_acp::SessionInfo]) {
         for session in sessions {
             let spur_session_id = SessionId(session.session_id.0.to_string());
@@ -299,6 +424,12 @@ impl Orchestrator {
         // Pre-connected (initialized) agent connection, ready for create_brain_session
         // or load_brain_session without re-running connect_brain.
         let mut agent_connection: Option<ActiveConnection> = None;
+        // Mutable active brain type for Scope A hot-swap (`/brain <name>`).
+        // Seeded from CLI `--brain` or config default; mutated only by SwitchBrain.
+        let mut active_brain_name = self.selected_brain_name(brain_override.as_deref());
+        // Set mid-stream when the user requests a brain switch; applied after
+        // the current turn ends (cancel is armed so retire can proceed cleanly).
+        let mut pending_brain_switch: Option<Option<String>> = None;
 
         let mut reconnect_failures: std::collections::VecDeque<std::time::Instant> =
             std::collections::VecDeque::new();
@@ -337,6 +468,21 @@ impl Orchestrator {
             super::loop_runtime::ProjectLoopRuntimeSupervisor::start_for_orchestrator(&self);
 
         loop {
+            // Mid-stream SwitchBrain sets this after cancel; apply on the next
+            // top-of-loop pass so early-continue error paths still honor it.
+            if let Some(name) = pending_brain_switch.take() {
+                self.handle_switch_brain(
+                    name,
+                    &mut active_brain_name,
+                    &mut brain,
+                    &mut agent_connection,
+                    &mut scheduler,
+                    &overflow_continuations,
+                    &permission_tx,
+                )
+                .await;
+            }
+
             // ── (a) Drain overflow buffer so scheduler sees fresh state ──
             {
                 let mut over = overflow_continuations.lock().await;
@@ -378,13 +524,14 @@ impl Orchestrator {
                             continue;
                         }
 
-                        let target_brain = self.selected_brain_name(brain_override.as_deref());
+                        let target_brain =
+                            self.selected_brain_name(Some(active_brain_name.as_str()));
                         self.emit(SpurEvent::now(SpurEventBody::BrainConnectStarted {
                             brain: target_brain.clone(),
                         }));
 
                         match self
-                            .connect_brain(brain_override.as_deref(), permission_tx.clone())
+                            .connect_brain(Some(active_brain_name.as_str()), permission_tx.clone())
                             .await
                         {
                             Ok((conn, brain_name, init_response)) => {
@@ -448,6 +595,25 @@ impl Orchestrator {
                         }
                         continue;
                     }
+                    // SwitchBrain — Scope A hot-swap: retire → drop old-kind
+                    // transport → spawn target brain type.
+                    InteractiveInput::SwitchBrain { name } => {
+                        self.handle_switch_brain(
+                            name,
+                            &mut active_brain_name,
+                            &mut brain,
+                            &mut agent_connection,
+                            &mut scheduler,
+                            &overflow_continuations,
+                            &permission_tx,
+                        )
+                        .await;
+                        continue;
+                    }
+                    InteractiveInput::ListBrains => {
+                        self.emit_brains_listed(&active_brain_name);
+                        continue;
+                    }
                     // NewSession — retire brain, then eagerly spawn a fresh
                     // session with no first prompt so the TUI can land on the
                     // new SessionDetail (via the BrainSpawned auto-navigate).
@@ -481,7 +647,7 @@ impl Orchestrator {
                             }
                             None => {
                                 self.spawn_brain_session(
-                                    brain_override.as_deref(),
+                                    Some(active_brain_name.as_str()),
                                     permission_tx.clone(),
                                 )
                                 .await
@@ -524,7 +690,10 @@ impl Orchestrator {
                             Some(existing) => existing,
                             None => {
                                 match self
-                                    .connect_brain(brain_override.as_deref(), permission_tx.clone())
+                                    .connect_brain(
+                                        Some(active_brain_name.as_str()),
+                                        permission_tx.clone(),
+                                    )
                                     .await
                                 {
                                     Ok((transport, brain_name, init_response)) => {
@@ -621,10 +790,14 @@ impl Orchestrator {
                                 // UI can transition to a "connecting" loading state.
                                 self.emit(SpurEvent::now(SpurEventBody::BrainConnecting {
                                     session: SessionId(session_id.clone()),
-                                    brain_name: self.selected_brain_name(brain_override.as_deref()),
+                                    brain_name: self
+                                        .selected_brain_name(Some(active_brain_name.as_str())),
                                 }));
                                 match self
-                                    .connect_brain(brain_override.as_deref(), permission_tx.clone())
+                                    .connect_brain(
+                                        Some(active_brain_name.as_str()),
+                                        permission_tx.clone(),
+                                    )
                                     .await
                                 {
                                     Ok((transport, brain_name, init_response)) => {
@@ -800,7 +973,7 @@ impl Orchestrator {
                                                 .reconnect_with_events(
                                                     dead,
                                                     permission_tx.clone(),
-                                                    brain_override.as_deref(),
+                                                    Some(active_brain_name.as_str()),
                                                     reason,
                                                     &mut reconnect_failures,
                                                     RECONNECT_CIRCUIT_LIMIT,
@@ -1651,8 +1824,11 @@ impl Orchestrator {
                         .await
                     }
                     None => {
-                        self.spawn_brain_session(brain_override.as_deref(), permission_tx.clone())
-                            .await
+                        self.spawn_brain_session(
+                            Some(active_brain_name.as_str()),
+                            permission_tx.clone(),
+                        )
+                        .await
                     }
                 };
 
@@ -1783,7 +1959,7 @@ impl Orchestrator {
                             .reconnect_with_events(
                                 dead,
                                 permission_tx.clone(),
-                                brain_override.as_deref(),
+                                Some(active_brain_name.as_str()),
                                 reason,
                                 &mut reconnect_failures,
                                 RECONNECT_CIRCUIT_LIMIT,
@@ -1904,6 +2080,17 @@ impl Orchestrator {
                                     let _ = b.connection.cancel(&b.acp_session_id).await;
                                     arm_cancel_deadline(&mut cancel_deadline);
                                 }
+                                InteractiveInput::ListBrains => {
+                                    self.emit_brains_listed(&active_brain_name);
+                                }
+                                InteractiveInput::SwitchBrain { name } => {
+                                    // Cancel the in-flight turn, then apply
+                                    // the switch after the stream ends so
+                                    // retire can run without a held borrow.
+                                    pending_brain_switch = Some(name);
+                                    let _ = b.connection.cancel(&b.acp_session_id).await;
+                                    arm_cancel_deadline(&mut cancel_deadline);
+                                }
                                 InteractiveInput::SystemContinuation { continuation, .. } => {
                                     scheduler.push_continuation(continuation);
                                 }
@@ -2010,7 +2197,7 @@ impl Orchestrator {
                         .reconnect_with_events(
                             dead,
                             permission_tx.clone(),
-                            brain_override.as_deref(),
+                            Some(active_brain_name.as_str()),
                             reason,
                             &mut reconnect_failures,
                             RECONNECT_CIRCUIT_LIMIT,
@@ -2067,6 +2254,7 @@ impl Orchestrator {
             self.emit(SpurEvent::now(SpurEventBody::TurnComplete {
                 session: b.spur_session_id.clone(),
             }));
+            // pending_brain_switch (if any) is applied at top of next loop.
         }
 
         // ── Cleanup ─────────────────────────────────────────────────────

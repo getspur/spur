@@ -6,6 +6,31 @@ impl App {
         None
     }
 
+    /// `/brain [<name>]` — Scope A hot-swap. Empty arg opens the orchestrator
+    /// brain picker; a name requests a switch to that brain-capable agent.
+    pub(super) fn process_brain_cmd(&mut self, arg: String) -> Option<Action> {
+        let name = {
+            let trimmed = arg.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        };
+        if let Some(ref target) = name {
+            self.flash_hint_short(format!("switching brain to {target}…"));
+            self.brain_status = BrainStatus::Connecting;
+            self.sync_brain_status();
+        } else {
+            self.flash_hint_short("listing brains…");
+        }
+        if let Some(ref tx) = self.user_input_tx {
+            let _ = tx.try_send(crate::UserInput::SwitchBrain { name });
+        }
+        self.dirty = true;
+        None
+    }
+
     pub(super) fn process_notebook_cmd(&mut self, arg: String) -> Option<Action> {
         if self.session_detail.is_none() {
             return Some(Action::FlashHint {

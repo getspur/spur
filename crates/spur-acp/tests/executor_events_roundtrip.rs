@@ -2,10 +2,11 @@
 
 use chrono::{TimeZone, Utc};
 use spur_acp::{
-    Column, DatasourceEntry, DatasourceKind, IssueSummaryEvent, LoopDetailEvent,
-    LoopRunRecordEvent, LoopSummaryEvent, PlanLifecycleEvent, PlanLoadWarningEvent,
-    PlanLoopOriginEvent, PlanOwnerStateEvent, PlanSummaryCountsEvent, PlanSummaryEvent,
-    ReviewDecision, ReviewKind, ReviewPayload, Role, SessionId, SpurEvent, SpurEventBody,
+    AgentKind, BrainInfo, Column, DatasourceEntry, DatasourceKind, IssueSummaryEvent,
+    LoopDetailEvent, LoopRunRecordEvent, LoopSummaryEvent, PlanLifecycleEvent,
+    PlanLoadWarningEvent, PlanLoopOriginEvent, PlanOwnerStateEvent, PlanSummaryCountsEvent,
+    PlanSummaryEvent, ReviewDecision, ReviewKind, ReviewPayload, Role, SessionId, SpurEvent,
+    SpurEventBody,
 };
 
 #[test]
@@ -1028,4 +1029,114 @@ fn delegation_result_deserializes_without_resolved_config_for_backward_compat() 
     let result: DelegationResult =
         serde_json::from_value(json).expect("pre-existing DelegationResult must deserialize");
     assert!(result.resolved_config.is_none());
+}
+
+#[test]
+fn brain_switched_roundtrips() {
+    let ev = SpurEvent::now(SpurEventBody::BrainSwitched {
+        from: "grok".into(),
+        to: "opencode".into(),
+    });
+    let json = serde_json::to_string(&ev).unwrap();
+    let round: SpurEvent = serde_json::from_str(&json).unwrap();
+    match round.body {
+        SpurEventBody::BrainSwitched { from, to } => {
+            assert_eq!(from, "grok");
+            assert_eq!(to, "opencode");
+        }
+        other => panic!("expected BrainSwitched, got {other:?}"),
+    }
+}
+
+#[test]
+fn brain_switch_noop_roundtrips() {
+    let ev = SpurEvent::now(SpurEventBody::BrainSwitchNoop {
+        name: "grok".into(),
+    });
+    let json = serde_json::to_string(&ev).unwrap();
+    let round: SpurEvent = serde_json::from_str(&json).unwrap();
+    assert!(matches!(
+        round.body,
+        SpurEventBody::BrainSwitchNoop { name } if name == "grok"
+    ));
+}
+
+#[test]
+fn brain_switch_error_roundtrips() {
+    let ev = SpurEvent::now(SpurEventBody::BrainSwitchError {
+        name: "nope".into(),
+        available: vec!["grok".into(), "opencode".into()],
+    });
+    let json = serde_json::to_string(&ev).unwrap();
+    let round: SpurEvent = serde_json::from_str(&json).unwrap();
+    match round.body {
+        SpurEventBody::BrainSwitchError { name, available } => {
+            assert_eq!(name, "nope");
+            assert_eq!(available, vec!["grok", "opencode"]);
+        }
+        other => panic!("expected BrainSwitchError, got {other:?}"),
+    }
+}
+
+#[test]
+fn brains_listed_roundtrips() {
+    let ev = SpurEvent::now(SpurEventBody::BrainsListed {
+        brains: vec![BrainInfo {
+            name: "grok".into(),
+            kind: AgentKind::Grok,
+            is_default: true,
+        }],
+        active: "grok".into(),
+    });
+    let json = serde_json::to_string(&ev).unwrap();
+    let round: SpurEvent = serde_json::from_str(&json).unwrap();
+    match round.body {
+        SpurEventBody::BrainsListed { brains, active } => {
+            assert_eq!(active, "grok");
+            assert_eq!(brains.len(), 1);
+            assert_eq!(brains[0].name, "grok");
+            assert_eq!(brains[0].kind, AgentKind::Grok);
+            assert!(brains[0].is_default);
+        }
+        other => panic!("expected BrainsListed, got {other:?}"),
+    }
+}
+
+#[test]
+fn brain_picker_open_roundtrips() {
+    let ev = SpurEvent::now(SpurEventBody::BrainPickerOpen {
+        brains: vec![BrainInfo {
+            name: "opencode".into(),
+            kind: AgentKind::OpenCode,
+            is_default: false,
+        }],
+        active: "grok".into(),
+    });
+    let json = serde_json::to_string(&ev).unwrap();
+    let round: SpurEvent = serde_json::from_str(&json).unwrap();
+    match round.body {
+        SpurEventBody::BrainPickerOpen { brains, active } => {
+            assert_eq!(active, "grok");
+            assert_eq!(brains[0].name, "opencode");
+            assert_eq!(brains[0].kind, AgentKind::OpenCode);
+        }
+        other => panic!("expected BrainPickerOpen, got {other:?}"),
+    }
+}
+
+#[test]
+fn brain_retired_brain_switch_reason_roundtrips() {
+    use spur_acp::domain::events::BrainRetireReason;
+    let ev = SpurEvent::now(SpurEventBody::BrainRetired {
+        session: SessionId("s1".into()),
+        reason: BrainRetireReason::BrainSwitch,
+    });
+    let json = serde_json::to_string(&ev).unwrap();
+    let round: SpurEvent = serde_json::from_str(&json).unwrap();
+    match round.body {
+        SpurEventBody::BrainRetired { reason, .. } => {
+            assert_eq!(reason, BrainRetireReason::BrainSwitch);
+        }
+        other => panic!("expected BrainRetired, got {other:?}"),
+    }
 }
