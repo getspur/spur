@@ -315,7 +315,7 @@ Do **not** use a separate `Z3NotFound` code; use `solver_unavailable`.
 
 **Atomic write:** temp file in the same directory, `fsync`, rename. Prefer mode `0600` where OS allows.
 
-**Quota (v1):** max **256** artifacts per repo root or max **64 MiB** total under `.spur/solver/` (whichever first); on exceed, reject new `persist:true` with clear error (no silent GC in v1).
+**Quota (v1.1):** max **512** artifacts per repo root or max **64 MiB** total under `.spur/solver/` (whichever first). On pressure, **oldest-first ring eviction** frees slots/bytes until the new write fits. A single artifact larger than the total byte budget is still rejected (no silent drop of the new write).
 
 **`solve_id` format (pinned):** `sol_` + exactly 16 lowercase hex chars. Regex: `^sol_[0-9a-f]{16}$`. Validate **before** path join (traversal-safe; reject `..`, slashes, uppercase).
 
@@ -380,7 +380,7 @@ Do **not** use a separate `Z3NotFound` code; use `solver_unavailable`.
 | Max generated SMT bytes (JSON path) | 256 KiB |
 | Max stdout bytes | 1 MiB |
 | Max stderr bytes | 256 KiB |
-| Max persisted artifacts / total size | 256 files or 64 MiB |
+| Max persisted artifacts / total size | 512 files or 64 MiB (oldest-first ring) |
 
 ## Worked examples (normative fixtures)
 

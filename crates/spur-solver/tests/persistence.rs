@@ -196,25 +196,33 @@ async fn solve_constraints_does_not_touch_cache_when_persist_is_false() -> Resul
 }
 
 #[test]
-fn persist_rejects_artifact_count_quota() -> Result<(), Box<dyn Error>> {
+fn persist_evicts_oldest_when_artifact_count_is_full() -> Result<(), Box<dyn Error>> {
     let repo = tempdir()?;
     let artifact_dir = repo.path().join(".spur/solver");
     fs::create_dir_all(&artifact_dir)?;
     for index in 0..MAX_ARTIFACTS {
-        fs::write(artifact_dir.join(format!("sol_{index:016x}.json")), b"{}\n")?;
+        // Fixed-width fractional seconds so lexical order matches creation order.
+        let body = format!("{{\n  \"created_at_wall\": \"2026-01-01T00:00:00.{index:09}Z\"\n}}\n");
+        fs::write(artifact_dir.join(format!("sol_{index:016x}.json")), body)?;
     }
+    let oldest = artifact_dir.join(format!("sol_{:016x}.json", 0));
+    assert!(oldest.is_file());
 
     let service = SolverService::new().with_repo_root(repo.path());
-    let error = service
-        .persist(&request(false), &unsat_response())
-        .expect_err("artifact count quota must reject a new artifact");
-    assert!(matches!(
-        error,
-        SolverServiceError::Persistence(PersistError::QuotaExceeded {
-            kind: ArtifactQuotaKind::ArtifactCount,
-            ..
-        })
-    ));
+    let artifact = service.persist(&request(false), &unsat_response())?;
+
+    assert!(
+        !oldest.exists(),
+        "oldest artifact must be ring-evicted to free a count slot"
+    );
+    assert!(artifact_dir
+        .join(format!("{}.json", artifact.solve_id))
+        .is_file());
+    let remaining = count_json_artifacts(&artifact_dir)?;
+    assert_eq!(
+        remaining, MAX_ARTIFACTS,
+        "ring must keep the cache at the count cap after eviction + write"
+    );
 
     Ok(())
 }
@@ -224,8 +232,11 @@ fn independent_services_share_the_repository_quota_lock() -> Result<(), Box<dyn 
     let repo = tempdir()?;
     let artifact_dir = repo.path().join(".spur/solver");
     fs::create_dir_all(&artifact_dir)?;
-    for index in 0..(MAX_ARTIFACTS - 1) {
-        fs::write(artifact_dir.join(format!("sol_{index:016x}.json")), b"{}\n")?;
+    // Start full so both writers must serialize through the repo lock and
+    // ring-evict under that lock without racing past MAX_ARTIFACTS.
+    for index in 0..MAX_ARTIFACTS {
+        let body = format!("{{\n  \"created_at_wall\": \"2026-01-01T00:00:00.{index:09}Z\"\n}}\n");
+        fs::write(artifact_dir.join(format!("sol_{index:016x}.json")), body)?;
     }
 
     let barrier = Arc::new(Barrier::new(3));
@@ -241,7 +252,6 @@ fn independent_services_share_the_repository_quota_lock() -> Result<(), Box<dyn 
     barrier.wait();
 
     let mut persisted = 0;
-    let mut quota_rejected = 0;
     for worker in workers {
         let result = match worker.join() {
             Ok(result) => result,
@@ -249,20 +259,17 @@ fn independent_services_share_the_repository_quota_lock() -> Result<(), Box<dyn 
         };
         match result {
             Ok(_artifact) => persisted += 1,
-            Err(SolverServiceError::Persistence(PersistError::QuotaExceeded {
-                kind: ArtifactQuotaKind::ArtifactCount,
-                ..
-            })) => quota_rejected += 1,
             Err(error) => return Err(error.into()),
         }
     }
     assert_eq!(
-        persisted, 1,
-        "exactly one service may consume the final artifact slot"
+        persisted, 2,
+        "both services must complete under the shared lock"
     );
-    assert_eq!(
-        quota_rejected, 1,
-        "the other service must observe the repository-wide quota"
+    let remaining = count_json_artifacts(&artifact_dir)?;
+    assert!(
+        remaining <= MAX_ARTIFACTS,
+        "concurrent ring writes must not exceed the count cap (got {remaining})"
     );
     assert!(
         artifact_dir.join(".lock").is_file(),
@@ -299,16 +306,48 @@ fn persisted_artifact_and_lock_are_private_on_unix() -> Result<(), Box<dyn Error
 }
 
 #[test]
-fn persist_rejects_total_byte_quota() -> Result<(), Box<dyn Error>> {
+fn persist_evicts_until_byte_budget_fits() -> Result<(), Box<dyn Error>> {
     let repo = tempdir()?;
     let artifact_dir = repo.path().join(".spur/solver");
     fs::create_dir_all(&artifact_dir)?;
-    File::create(artifact_dir.join("existing.bin"))?.set_len(MAX_ARTIFACT_BYTES)?;
+    // One oversized occupant that leaves no room for a real JSON artifact
+    // until it is ring-evicted.
+    File::create(artifact_dir.join("sol_0000000000000001.json"))?.set_len(MAX_ARTIFACT_BYTES)?;
 
     let service = SolverService::new().with_repo_root(repo.path());
+    let artifact = service.persist(&request(false), &unsat_response())?;
+
+    assert!(
+        !artifact_dir.join("sol_0000000000000001.json").exists(),
+        "byte-budget pressure must evict the oversized occupant"
+    );
+    assert!(artifact_dir
+        .join(format!("{}.json", artifact.solve_id))
+        .is_file());
+
+    Ok(())
+}
+
+#[test]
+fn persist_rejects_single_artifact_larger_than_byte_budget() -> Result<(), Box<dyn Error>> {
+    let repo = tempdir()?;
+    let service = SolverService::new().with_repo_root(repo.path());
+
+    // Build a response whose serialized form exceeds the whole cache budget
+    // by stuffing an enormous reason string.
+    let huge_reason = "x".repeat((MAX_ARTIFACT_BYTES as usize) + 1);
+    let response = SolveConstraintsResponse {
+        status: SolveStatus::Unsat,
+        model: None,
+        duration_ms: 1,
+        solve_id: None,
+        reason: Some(huge_reason),
+        smt: None,
+    };
+
     let error = service
-        .persist(&request(false), &unsat_response())
-        .expect_err("artifact byte quota must reject a new artifact");
+        .persist(&request(false), &response)
+        .expect_err("a single oversized artifact must still be rejected");
     assert!(matches!(
         error,
         SolverServiceError::Persistence(PersistError::QuotaExceeded {
@@ -316,7 +355,6 @@ fn persist_rejects_total_byte_quota() -> Result<(), Box<dyn Error>> {
             ..
         })
     ));
-
     Ok(())
 }
 
@@ -350,4 +388,17 @@ fn assert_valid_solve_id(solve_id: &str) {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
         "solve_id suffix must contain only lowercase hexadecimal digits"
     );
+}
+
+fn count_json_artifacts(artifact_dir: &std::path::Path) -> Result<usize, Box<dyn Error>> {
+    let mut count = 0;
+    for entry in fs::read_dir(artifact_dir)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.ends_with(".json") {
+            count += 1;
+        }
+    }
+    Ok(count)
 }

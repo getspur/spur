@@ -2,6 +2,10 @@
 //!
 //! Artifacts are a handoff cache for `solve_id` values. They do not replace
 //! Beads as SPUR's collaboration source of truth.
+//!
+//! The cache is a fixed-capacity ring: when a new `persist` would exceed the
+//! artifact count or total-byte budget, oldest entries are evicted first until
+//! the write fits (or the single new artifact is larger than the whole budget).
 
 use std::{
     ffi::OsStr,
@@ -23,7 +27,10 @@ use crate::types::{SolveConstraintsResponse, SolveModel, SolveStatus, Validation
 /// Version of the on-disk solve artifact schema.
 pub const ARTIFACT_SCHEMA_VERSION: u32 = 1;
 /// Maximum number of files allowed in one repository's solver cache.
-pub const MAX_ARTIFACTS: usize = 256;
+///
+/// When a new persist would exceed this count (or the byte budget), the store
+/// evicts oldest artifacts first (ring / FIFO) until the write fits.
+pub const MAX_ARTIFACTS: usize = 512;
 /// Maximum total bytes allowed in one repository's solver cache.
 pub const MAX_ARTIFACT_BYTES: u64 = 64 * 1024 * 1024;
 /// Placeholder used until a process runner exposes its probed Z3 version.
@@ -35,11 +42,16 @@ const ID_GENERATION_ATTEMPTS: usize = 16;
 const LOCK_FILE_NAME: &str = ".lock";
 
 /// Quota dimension that rejected a new artifact.
+///
+/// Count and byte pressure normally cycle the ring (oldest first). These kinds
+/// are returned only when a single new artifact cannot fit even after every
+/// existing cache entry is removed (or the new payload alone exceeds the
+/// repository byte budget).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ArtifactQuotaKind {
-    /// The next write would exceed [`MAX_ARTIFACTS`].
+    /// The next write cannot fit under [`MAX_ARTIFACTS`] even after eviction.
     ArtifactCount,
-    /// The next write would exceed [`MAX_ARTIFACT_BYTES`].
+    /// The next write cannot fit under [`MAX_ARTIFACT_BYTES`] even after eviction.
     TotalBytes,
 }
 
@@ -297,7 +309,7 @@ impl ArtifactStore {
             })?;
         bytes.push(b'\n');
 
-        self.check_quota(bytes.len())?;
+        self.make_room_for(bytes.len())?;
         let path = self.artifact_path(&artifact.solve_id)?;
         write_atomic(&path, &bytes)?;
         Ok(artifact)
@@ -389,48 +401,132 @@ impl ArtifactStore {
         Err(PersistError::IdGenerationExhausted)
     }
 
-    fn check_quota(&self, new_artifact_bytes: usize) -> Result<(), PersistError> {
-        let mut artifact_count = 0_u64;
-        let mut total_bytes = 0_u64;
-        let entries = fs::read_dir(&*self.directory)
+    /// Evict oldest artifacts until `new_artifact_bytes` fits under both
+    /// [`MAX_ARTIFACTS`] and [`MAX_ARTIFACT_BYTES`].
+    ///
+    /// Callers must hold the repository write lock. A payload larger than the
+    /// total byte budget is rejected without deleting existing entries.
+    fn make_room_for(&self, new_artifact_bytes: usize) -> Result<(), PersistError> {
+        let new_artifact_bytes = u64::try_from(new_artifact_bytes).unwrap_or(u64::MAX);
+        let count_limit = u64::try_from(MAX_ARTIFACTS).unwrap_or(u64::MAX);
+
+        if new_artifact_bytes > MAX_ARTIFACT_BYTES {
+            return Err(PersistError::QuotaExceeded {
+                kind: ArtifactQuotaKind::TotalBytes,
+                limit: MAX_ARTIFACT_BYTES,
+                attempted: new_artifact_bytes,
+            });
+        }
+
+        loop {
+            let mut entries = self.list_cache_entries()?;
+            let artifact_count = u64::try_from(entries.len()).unwrap_or(u64::MAX);
+            let total_bytes = entries
+                .iter()
+                .fold(0_u64, |acc, entry| acc.saturating_add(entry.size));
+
+            let count_fits = artifact_count < count_limit;
+            let bytes_fit = total_bytes.saturating_add(new_artifact_bytes) <= MAX_ARTIFACT_BYTES;
+            if count_fits && bytes_fit {
+                return Ok(());
+            }
+
+            if entries.is_empty() {
+                // Nothing left to evict; new payload still does not fit.
+                if !count_fits {
+                    return Err(PersistError::QuotaExceeded {
+                        kind: ArtifactQuotaKind::ArtifactCount,
+                        limit: count_limit,
+                        attempted: artifact_count.saturating_add(1),
+                    });
+                }
+                return Err(PersistError::QuotaExceeded {
+                    kind: ArtifactQuotaKind::TotalBytes,
+                    limit: MAX_ARTIFACT_BYTES,
+                    attempted: total_bytes.saturating_add(new_artifact_bytes),
+                });
+            }
+
+            // Oldest first (ring): RFC 3339 wall clock when present, else mtime.
+            entries.sort_by(|left, right| {
+                left.order_key
+                    .cmp(&right.order_key)
+                    .then_with(|| left.path.cmp(&right.path))
+            });
+            let victim = &entries[0];
+            fs::remove_file(&victim.path)
+                .map_err(|source| io_error("evict", &victim.path, source))?;
+        }
+    }
+
+    fn list_cache_entries(&self) -> Result<Vec<CacheEntry>, PersistError> {
+        let mut entries = Vec::new();
+        let dir_entries = fs::read_dir(&*self.directory)
             .map_err(|source| io_error("list", &self.directory, source))?;
 
-        for entry in entries {
+        for entry in dir_entries {
             let entry = entry.map_err(|source| io_error("list", &self.directory, source))?;
-            if entry.file_name() == OsStr::new(LOCK_FILE_NAME) {
+            let file_name = entry.file_name();
+            if file_name == OsStr::new(LOCK_FILE_NAME) {
                 continue;
             }
+            // Skip in-progress atomic write temps (`.{uuid}.tmp`).
+            let file_name_lossy = file_name.to_string_lossy();
+            if file_name_lossy.starts_with('.') && file_name_lossy.ends_with(".tmp") {
+                continue;
+            }
+
             let path = entry.path();
             let metadata =
                 fs::symlink_metadata(&path).map_err(|source| io_error("inspect", &path, source))?;
             if !metadata.is_file() || metadata.file_type().is_symlink() {
                 return Err(PersistError::NonRegularEntry { path });
             }
-            artifact_count = artifact_count.saturating_add(1);
-            total_bytes = total_bytes.saturating_add(metadata.len());
-        }
 
-        let attempted_count = artifact_count.saturating_add(1);
-        let count_limit = u64::try_from(MAX_ARTIFACTS).unwrap_or(u64::MAX);
-        if attempted_count > count_limit {
-            return Err(PersistError::QuotaExceeded {
-                kind: ArtifactQuotaKind::ArtifactCount,
-                limit: count_limit,
-                attempted: attempted_count,
+            let order_key = cache_entry_order_key(&path, &metadata);
+            entries.push(CacheEntry {
+                path,
+                size: metadata.len(),
+                order_key,
             });
         }
-
-        let new_artifact_bytes = u64::try_from(new_artifact_bytes).unwrap_or(u64::MAX);
-        let attempted_bytes = total_bytes.saturating_add(new_artifact_bytes);
-        if attempted_bytes > MAX_ARTIFACT_BYTES {
-            return Err(PersistError::QuotaExceeded {
-                kind: ArtifactQuotaKind::TotalBytes,
-                limit: MAX_ARTIFACT_BYTES,
-                attempted: attempted_bytes,
-            });
-        }
-        Ok(())
+        Ok(entries)
     }
+}
+
+#[derive(Debug)]
+struct CacheEntry {
+    path: PathBuf,
+    size: u64,
+    /// Lexicographic key: prefer `created_at_wall` (RFC 3339), else mtime nanos.
+    order_key: String,
+}
+
+fn cache_entry_order_key(path: &Path, metadata: &fs::Metadata) -> String {
+    if let Some(created_at) = peek_created_at_wall(path) {
+        return format!("t:{created_at}");
+    }
+    let modified = metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    format!("m:{modified:032}")
+}
+
+/// Best-effort read of `created_at_wall` without full artifact validation.
+fn peek_created_at_wall(path: &Path) -> Option<String> {
+    let bytes = fs::read(path).ok()?;
+    // Cap parse work for oversized/corrupt stubs used in tests.
+    if bytes.len() > 64 * 1024 {
+        return None;
+    }
+    let value: Value = serde_json::from_slice(&bytes).ok()?;
+    value
+        .get("created_at_wall")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
 }
 
 /// Validates the pinned `sol_` plus 16-lowercase-hex identifier format.

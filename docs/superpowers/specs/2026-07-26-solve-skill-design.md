@@ -258,7 +258,7 @@ The persist path for sharing a solved model across the delegation boundary:
 
 - Worker treats the model as **authoritative**; do not re-invent constants or re-solve.
 - `.spur/solver/` is gitignored; beads remains SoT for tasks; `solve_id` is a handoff cache only.
-- Quota: 256 artifacts or 64 MiB per repo root (whichever first).
+- Quota: 512 artifacts or 64 MiB per repo root (whichever first); oldest-first ring eviction when full.
 
 ### §10 — Anti-patterns
 
