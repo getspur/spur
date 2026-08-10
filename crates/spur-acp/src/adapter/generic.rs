@@ -1,6 +1,6 @@
 use serde_json::Value;
 
-use super::{ObservePayload, ToolFamily, ToolInputDisplay};
+use super::{ObservePayload, ToolFamily, ToolInputDisplay, JSON_INPUT_PREVIEW_LINES};
 
 /// Generic `refine` — catches common `Other`-kinded tools the protocol
 /// didn't classify, via case-insensitive substring match on `title`.
@@ -46,16 +46,23 @@ pub fn format_input(raw: &Value) -> ToolInputDisplay {
                     return ToolInputDisplay::Query(q.to_string());
                 }
             }
-            // Fall back to pretty JSON, truncated to 8 lines
+            // Fall back to pretty JSON, capped to JSON_INPUT_PREVIEW_LINES.
+            // Truncation affordance is carried via omitted_lines (not a body sentinel).
             let pretty = serde_json::to_string_pretty(raw).unwrap_or_default();
-            let truncated = truncate_lines(&pretty, 8);
-            ToolInputDisplay::Json(truncated)
+            let (body, omitted_lines) = truncate_lines(&pretty, JSON_INPUT_PREVIEW_LINES);
+            ToolInputDisplay::Json {
+                body,
+                omitted_lines,
+            }
         }
         Value::String(s) => ToolInputDisplay::Text(s.clone()),
         _ => {
             let pretty = serde_json::to_string_pretty(raw).unwrap_or_default();
-            let truncated = truncate_lines(&pretty, 8);
-            ToolInputDisplay::Json(truncated)
+            let (body, omitted_lines) = truncate_lines(&pretty, JSON_INPUT_PREVIEW_LINES);
+            ToolInputDisplay::Json {
+                body,
+                omitted_lines,
+            }
         }
     }
 }
@@ -163,12 +170,79 @@ pub fn extract_observe(raw: &Value) -> ObservePayload {
     }
 }
 
-fn truncate_lines(s: &str, max_lines: usize) -> String {
+/// Cap `s` to `max_lines` content lines.
+///
+/// Returns `(body, omitted_lines)` where `omitted_lines` is the count of lines
+/// beyond the cap (0 when complete). The body never embeds a `"…"` sentinel —
+/// the TUI owns the truncation affordance from `omitted_lines`.
+fn truncate_lines(s: &str, max_lines: usize) -> (String, usize) {
     let mut lines = s.lines();
     let collected: Vec<&str> = lines.by_ref().take(max_lines).collect();
-    if lines.next().is_some() {
-        format!("{}\n…", collected.join("\n"))
-    } else {
-        collected.join("\n")
+    let omitted = lines.count();
+    (collected.join("\n"), omitted)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn truncate_lines_no_omission_when_within_cap() {
+        let (body, omitted) = truncate_lines("a\nb\nc", 8);
+        assert_eq!(body, "a\nb\nc");
+        assert_eq!(omitted, 0);
+    }
+
+    #[test]
+    fn truncate_lines_reports_omitted_without_sentinel() {
+        let src = (0..12)
+            .map(|i| format!("line{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let (body, omitted) = truncate_lines(&src, 8);
+        assert_eq!(body.lines().count(), 8);
+        assert_eq!(omitted, 4);
+        assert!(!body.contains('…'), "body must not embed ellipsis sentinel");
+        assert!(!body.contains("line8"), "must drop lines beyond cap");
+    }
+
+    #[test]
+    fn format_input_json_fallback_sets_omitted_lines() {
+        // Object with no path/command/query keys → Json fallback.
+        let mut obj = serde_json::Map::new();
+        for i in 0..12 {
+            obj.insert(format!("k{i}"), json!(i));
+        }
+        let display = format_input(&Value::Object(obj));
+        match display {
+            ToolInputDisplay::Json {
+                body,
+                omitted_lines,
+            } => {
+                assert!(body.lines().count() <= JSON_INPUT_PREVIEW_LINES);
+                assert!(
+                    omitted_lines > 0,
+                    "pretty-print of 12 keys must exceed {JSON_INPUT_PREVIEW_LINES} lines"
+                );
+                assert!(!body.lines().any(|l| l.trim() == "…"));
+            }
+            other => panic!("expected Json, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn format_input_small_json_omitted_zero() {
+        let display = format_input(&json!({"a": 1}));
+        match display {
+            ToolInputDisplay::Json {
+                body,
+                omitted_lines,
+            } => {
+                assert_eq!(omitted_lines, 0);
+                assert!(body.contains("\"a\""));
+            }
+            other => panic!("expected Json, got {other:?}"),
+        }
     }
 }

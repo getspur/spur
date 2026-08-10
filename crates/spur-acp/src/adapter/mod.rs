@@ -70,12 +70,24 @@ pub enum ToolInputDisplay {
         cwd: Option<String>,
     },
     Query(String),
-    /// Pretty-printed JSON, truncated to 8 lines.
-    Json(String),
+    /// Pretty-printed JSON, capped to [`JSON_INPUT_PREVIEW_LINES`] content lines.
+    ///
+    /// When `omitted_lines > 0`, more source lines existed and the renderer must
+    /// show a truncation affordance (the adapter does **not** embed a `"…"`
+    /// sentinel in `body` — that dual-capped path dropped the marker in the TUI).
+    Json {
+        body: String,
+        /// Count of pretty-printed lines omitted after the cap; `0` = complete.
+        omitted_lines: usize,
+    },
     Text(String),
     /// Nothing meaningful to show — callers fall back to `TraceEntry.text`.
     Empty,
 }
+
+/// Max content lines kept for [`ToolInputDisplay::Json`] after pretty-print.
+/// Shared contract with the TUI preview (see `trace_format::input_display_lines`).
+pub const JSON_INPUT_PREVIEW_LINES: usize = 8;
 
 /// Structured representation of a tool's output for rendering.
 #[derive(Debug, Clone)]

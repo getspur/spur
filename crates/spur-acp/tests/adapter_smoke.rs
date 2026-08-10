@@ -164,6 +164,35 @@ fn format_input_command_field() {
 }
 
 #[test]
+fn format_input_json_fallback_omitted_lines_not_body_sentinel() {
+    use spur_acp::adapter::{ToolInputDisplay, JSON_INPUT_PREVIEW_LINES};
+    // No path/command/query keys → Json fallback; many keys force pretty-print overflow.
+    let mut map = serde_json::Map::new();
+    for i in 0..20 {
+        map.insert(format!("field_{i}"), json!(i));
+    }
+    let result = adapter::format_input(&serde_json::Value::Object(map), AgentKind::Generic);
+    match result {
+        ToolInputDisplay::Json {
+            body,
+            omitted_lines,
+        } => {
+            assert!(
+                body.lines().count() <= JSON_INPUT_PREVIEW_LINES,
+                "body must be capped at {JSON_INPUT_PREVIEW_LINES} lines, got {}",
+                body.lines().count()
+            );
+            assert!(omitted_lines > 0, "expected truncation for 20-key object");
+            assert!(
+                !body.lines().any(|l| l.trim() == "…"),
+                "adapter must not embed ellipsis sentinel in body"
+            );
+        }
+        other => panic!("expected Json, got {other:?}"),
+    }
+}
+
+#[test]
 fn codex_harmony_command_array_formats_as_command_input() {
     let raw = json!({
         "command": ["/bin/zsh", "-lc", "sed -n '1,180p' AGENTS.md"],

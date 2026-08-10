@@ -128,7 +128,7 @@ pub(crate) fn input_summary(input: &ToolInputDisplay, tool: &str) -> String {
             .find(|l| !l.trim().is_empty())
             .unwrap_or("")
             .to_string(),
-        ToolInputDisplay::Json(_) | ToolInputDisplay::Empty => tool.to_string(),
+        ToolInputDisplay::Json { .. } | ToolInputDisplay::Empty => tool.to_string(),
     }
 }
 
@@ -279,11 +279,26 @@ pub(crate) fn input_display_lines(theme: &Theme, input: &ToolInputDisplay) -> Ve
                 ),
             ]));
         }
-        ToolInputDisplay::Json(p) => {
-            for jl in p.lines().take(8) {
+        ToolInputDisplay::Json {
+            body,
+            omitted_lines,
+        } => {
+            // Body is already capped to JSON_INPUT_PREVIEW_LINES by the adapter;
+            // render every content line and own the truncation affordance here
+            // (adapter no longer embeds a "…" sentinel — dual-cap dropped it).
+            for jl in body.lines() {
                 lines.push(Line::from(vec![
                     Span::raw("   "),
                     Span::styled(terminal_safe_text(jl), Style::default().fg(subtle)),
+                ]));
+            }
+            if *omitted_lines > 0 {
+                lines.push(Line::from(vec![
+                    Span::raw("   "),
+                    Span::styled(
+                        format!("[… {} more]", omitted_lines),
+                        Style::default().fg(subtle),
+                    ),
                 ]));
             }
         }
@@ -550,6 +565,49 @@ mod tests {
         assert_eq!(rendered.len(), 18, "path + 16 diff lines + truncation");
         assert!(rendered.iter().any(|line| line.contains("+line 15")));
         assert_eq!(rendered.last().expect("truncation line"), "   [… 4 more]");
+    }
+
+    #[test]
+    fn json_input_shows_omitted_affordance_not_body_sentinel() {
+        // Adapter contract: body has ≤ JSON_INPUT_PREVIEW_LINES content lines,
+        // omitted_lines carries the count; TUI owns "[… N more]".
+        let body = (0..8)
+            .map(|n| format!("  \"k{n}\": {n},"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let input = ToolInputDisplay::Json {
+            body,
+            omitted_lines: 4,
+        };
+
+        let lines = input_display_lines(crate::theme::fallback_theme(), &input);
+        let rendered = lines.iter().map(line_text).collect::<Vec<_>>();
+
+        assert_eq!(rendered.len(), 9, "8 content + 1 affordance");
+        assert!(
+            !rendered.iter().any(|l| l.trim() == "…"),
+            "must not render body ellipsis sentinel"
+        );
+        assert_eq!(
+            rendered.last().expect("affordance"),
+            "   [… 4 more]",
+            "affordance must show omitted count"
+        );
+    }
+
+    #[test]
+    fn json_input_complete_has_no_affordance() {
+        let input = ToolInputDisplay::Json {
+            body: "{\n  \"a\": 1\n}".to_string(),
+            omitted_lines: 0,
+        };
+        let lines = input_display_lines(crate::theme::fallback_theme(), &input);
+        let rendered = lines.iter().map(line_text).collect::<Vec<_>>();
+        assert_eq!(rendered.len(), 3);
+        assert!(
+            !rendered.iter().any(|l| l.contains("more")),
+            "complete Json must not show truncation affordance"
+        );
     }
 
     #[test]
