@@ -37,8 +37,14 @@ code, not after as a check.
 | `unsat` | impossible / sound | report the impossibility, OR (for invariant checks) ship with confidence — unsat is a proof |
 | `unknown` | solver incomplete | do NOT treat as unsat; tighten encoding or raise timeout within the 60s cap |
 | `timeout` | wall clock exceeded | do NOT treat as unsat; simplify the problem or split it |
+| `ended` | session closed (`session_op: end`) | **not a model** — ignore `model`; do not invent constants |
+| `error` | validation/process/parse | fix request or operator install |
 
 **The load-bearing rule: never collapse `unknown`/`timeout` into `unsat`.** `unsat` is a proof; `unknown`/`timeout` are "I don't know."
+
+**Cache:** `use_cache` defaults true for **stateless** solves. Only **sat/unsat** are cached (never `unknown`/`timeout`). Set `use_cache: false` when diagnosing incompleteness. `cached: true` on the response means a fingerprint hit — still a valid model, not a new Z3 run.
+
+**Sessions:** `session_op: end` → `status: ended`, `model` absent, `reason: "session ended"`. Never treat `ended` as feasibility.
 
 ## Reasoning loop: first principles → feasibility → ratchet (agent-side MCTS)
 

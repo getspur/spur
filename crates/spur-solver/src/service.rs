@@ -232,9 +232,11 @@ impl SolverService {
         match self.sessions.apply(&request)? {
             SessionApply::Stateless => {}
             SessionApply::Ended { session_id } => {
+                // Protocol: `ended` is not a feasible model. Agents must not
+                // treat it as sat or invent constants from an empty model.
                 let mut response = response(
-                    SolveStatus::Sat,
-                    Some(BTreeMap::new()),
+                    SolveStatus::Ended,
+                    None,
                     started,
                     Some("session ended".to_owned()),
                     None,
@@ -296,12 +298,9 @@ impl SolverService {
         };
         response.session_id = response_session_id;
 
-        if cacheable
-            && matches!(
-                response.status,
-                SolveStatus::Sat | SolveStatus::Unsat | SolveStatus::Unknown
-            )
-        {
+        // Cache only decisive feasibility outcomes. Never cache unknown/timeout
+        // (incompleteness must not sticky-replay across later solves).
+        if cacheable && matches!(response.status, SolveStatus::Sat | SolveStatus::Unsat) {
             if let Ok(key) = fingerprint_request(&request) {
                 let mut to_store = response.clone();
                 to_store.cached = false;

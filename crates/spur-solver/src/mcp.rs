@@ -628,6 +628,12 @@ mod tests {
                 None,
                 Some("parse_error".to_owned()),
             ),
+            (
+                SolveStatus::Ended,
+                "ended",
+                None,
+                Some("session ended".to_owned()),
+            ),
         ] {
             let value = serialize_response(
                 "solve_constraints",

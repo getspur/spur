@@ -756,6 +756,11 @@ pub enum SolveStatus {
     Timeout,
     /// Validation, process, output, or parsing failed.
     Error,
+    /// An incremental session was closed (`session_op: end`); no model is present.
+    ///
+    /// Agents must not treat this as a feasible assignment. Check
+    /// `session_id` + reason `"session ended"`.
+    Ended,
 }
 
 /// A scalar value returned for one surface variable.
@@ -821,7 +826,8 @@ impl SolveConstraintsResponse {
             SolveStatus::Unsat
             | SolveStatus::Unknown
             | SolveStatus::Timeout
-            | SolveStatus::Error => self.model.is_none(),
+            | SolveStatus::Error
+            | SolveStatus::Ended => self.model.is_none(),
         };
         if !model_is_valid {
             return Err(ValidationError::new(
@@ -2418,5 +2424,36 @@ mod tests {
             session_id: None,
         };
         assert_eq!(sat.validate(), Ok(()));
+
+        let ended = SolveConstraintsResponse {
+            status: SolveStatus::Ended,
+            model: None,
+            duration_ms: 1,
+            solve_id: None,
+            reason: Some("session ended".to_owned()),
+            smt: None,
+            unsat_core: None,
+            cached: false,
+            session_id: Some("sess_0123456789abcdef".to_owned()),
+        };
+        assert_eq!(ended.validate(), Ok(()));
+
+        let ended_with_model = SolveConstraintsResponse {
+            status: SolveStatus::Ended,
+            model: Some(BTreeMap::new()),
+            duration_ms: 1,
+            solve_id: None,
+            reason: Some("session ended".to_owned()),
+            smt: None,
+            unsat_core: None,
+            cached: false,
+            session_id: None,
+        }
+        .validate()
+        .unwrap_err();
+        assert_eq!(
+            ended_with_model.kind,
+            ValidationErrorKind::ResponseModelMismatch
+        );
     }
 }

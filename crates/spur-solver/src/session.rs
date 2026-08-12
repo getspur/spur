@@ -281,4 +281,100 @@ mod tests {
         };
         assert!(session_id.starts_with(SESSION_ID_PREFIX));
     }
+
+    use crate::{
+        process::{ProcessFuture, ProcessOutcome, ProcessOutput, ProcessRequest, ProcessRunner},
+        service::SolverService,
+        types::SolveStatus,
+    };
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+
+    #[derive(Debug)]
+    struct CountingRunner {
+        calls: AtomicUsize,
+        stdout: Vec<u8>,
+    }
+
+    impl ProcessRunner for CountingRunner {
+        fn run(&self, _request: ProcessRequest) -> ProcessFuture<'_> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let stdout = self.stdout.clone();
+            Box::pin(async move {
+                Ok(ProcessOutcome::Completed(ProcessOutput {
+                    success: true,
+                    exit_code: Some(0),
+                    stdout,
+                    stderr: Vec::new(),
+                }))
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn session_end_returns_ended_without_model() {
+        let service = SolverService::with_runner(Arc::new(CountingRunner {
+            calls: AtomicUsize::new(0),
+            stdout: b"sat\n((v_x 1))\n".to_vec(),
+        }));
+        let begin = service
+            .solve_constraints(request(SessionOp::Begin, None))
+            .await
+            .expect("begin");
+        let session_id = begin.session_id.expect("begin returns session_id");
+
+        let ended = service
+            .solve_constraints(request(SessionOp::End, Some(session_id.clone())))
+            .await
+            .expect("end");
+        assert_eq!(ended.status, SolveStatus::Ended);
+        assert!(ended.model.is_none());
+        assert_eq!(ended.reason.as_deref(), Some("session ended"));
+        assert_eq!(ended.session_id.as_deref(), Some(session_id.as_str()));
+        ended.validate().expect("ended envelope is valid");
+    }
+
+    #[tokio::test]
+    async fn unknown_outcomes_are_not_cached() {
+        let runner = Arc::new(CountingRunner {
+            calls: AtomicUsize::new(0),
+            stdout: b"unknown\n".to_vec(),
+        });
+        let service = SolverService::with_runner(Arc::clone(&runner) as Arc<dyn ProcessRunner>);
+        let mut req = request(SessionOp::None, None);
+        req.use_cache = true;
+        req.constraints = vec![ConstraintExpr::Bool { value: true }.into()];
+
+        let first = service.solve_constraints(req.clone()).await.expect("first");
+        assert_eq!(first.status, SolveStatus::Unknown);
+        assert!(!first.cached);
+
+        let second = service.solve_constraints(req).await.expect("second");
+        assert_eq!(second.status, SolveStatus::Unknown);
+        assert!(!second.cached);
+        // Both calls must hit the runner — unknown must not sticky-cache.
+        assert_eq!(runner.calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn sat_outcomes_are_cached_on_second_call() {
+        let runner = Arc::new(CountingRunner {
+            calls: AtomicUsize::new(0),
+            stdout: b"sat\n((v_x 1))\n".to_vec(),
+        });
+        let service = SolverService::with_runner(Arc::clone(&runner) as Arc<dyn ProcessRunner>);
+        let mut req = request(SessionOp::None, None);
+        req.use_cache = true;
+
+        let first = service.solve_constraints(req.clone()).await.expect("first");
+        assert_eq!(first.status, SolveStatus::Sat);
+        assert!(!first.cached);
+
+        let second = service.solve_constraints(req).await.expect("second");
+        assert_eq!(second.status, SolveStatus::Sat);
+        assert!(second.cached);
+        assert_eq!(runner.calls.load(Ordering::SeqCst), 1);
+    }
 }
