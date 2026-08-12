@@ -174,6 +174,14 @@ pub type ProcessFuture<'a> =
 pub trait ProcessRunner: Send + Sync + fmt::Debug {
     /// Runs one complete solver invocation.
     fn run(&self, request: ProcessRequest) -> ProcessFuture<'_>;
+
+    /// Returns a cached operator Z3 version string when known.
+    ///
+    /// Fake runners and unresolved discovery return
+    /// [`crate::persist::UNKNOWN_Z3_VERSION`].
+    fn solver_version(&self) -> String {
+        crate::persist::UNKNOWN_Z3_VERSION.to_owned()
+    }
 }
 
 /// Production subprocess runner for `z3 -in`.
@@ -185,6 +193,7 @@ pub trait ProcessRunner: Send + Sync + fmt::Debug {
 pub struct Z3Process {
     configured_binary: Option<PathBuf>,
     discovered_binary: OnceLock<Result<PathBuf, String>>,
+    version: OnceLock<String>,
 }
 
 impl Z3Process {
@@ -203,6 +212,7 @@ impl Z3Process {
         Self {
             configured_binary: None,
             discovered_binary: OnceLock::new(),
+            version: OnceLock::new(),
         }
     }
 
@@ -215,6 +225,7 @@ impl Z3Process {
         Self {
             configured_binary: Some(binary),
             discovered_binary: OnceLock::new(),
+            version: OnceLock::new(),
         }
     }
 
@@ -229,6 +240,15 @@ impl Z3Process {
             .map_err(|message| ProcessError::SolverUnavailable {
                 message: message.clone(),
             })
+    }
+
+    fn cached_version(&self) -> String {
+        self.version
+            .get_or_init(|| match self.resolve_binary() {
+                Ok(binary) => probe_z3_version(binary),
+                Err(_) => crate::persist::UNKNOWN_Z3_VERSION.to_owned(),
+            })
+            .clone()
     }
 
     async fn run_inner(&self, request: ProcessRequest) -> Result<ProcessOutcome, ProcessError> {
@@ -383,6 +403,26 @@ impl Default for Z3Process {
 impl ProcessRunner for Z3Process {
     fn run(&self, request: ProcessRequest) -> ProcessFuture<'_> {
         Box::pin(self.run_inner(request))
+    }
+
+    fn solver_version(&self) -> String {
+        self.cached_version()
+    }
+}
+
+/// Probes `z3 --version` once per binary path; never agent-controlled.
+fn probe_z3_version(binary: &Path) -> String {
+    match std::process::Command::new(binary).arg("--version").output() {
+        Ok(output) if output.status.success() => {
+            let text = String::from_utf8_lossy(&output.stdout);
+            let line = text.lines().next().unwrap_or("").trim();
+            if line.is_empty() {
+                crate::persist::UNKNOWN_Z3_VERSION.to_owned()
+            } else {
+                line.to_owned()
+            }
+        }
+        Ok(_) | Err(_) => crate::persist::UNKNOWN_Z3_VERSION.to_owned(),
     }
 }
 

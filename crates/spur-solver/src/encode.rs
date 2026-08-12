@@ -12,7 +12,8 @@
 use std::{collections::HashMap, error::Error, fmt};
 
 use crate::types::{
-    ConstraintExpr, ConstraintOp, SolveConstraintsRequest, ValidationError, Variable,
+    ConstraintExpr, ConstraintItem, ConstraintOp, SolveConstraintsRequest, ValidationError,
+    Variable,
 };
 
 /// Prefix applied to every validated surface variable name in generated SMT.
@@ -109,9 +110,10 @@ impl From<ValidationError> for EncodeError {
 ///             },
 ///             ConstraintExpr::Int { value: 3 },
 ///         ],
-///     }],
+///     }].into_iter().map(Into::into).collect(),
 ///     timeout_ms: 30_000,
 ///     persist: false,
+///     include_smt: false,
 /// };
 ///
 /// let smt = encode_solve_constraints(&request)?;
@@ -128,6 +130,15 @@ pub fn encode_solve_constraints(request: &SolveConstraintsRequest) -> Result<Str
         .output
         .push_line("(set-option :produce-models true)")?;
 
+    // Unsat cores require named hard assertions. Z3 cannot combine
+    // produce-unsat-cores with soft (optimize) constraints in one query.
+    let want_cores = request.has_named_hard_constraints() && !request.has_soft_constraints();
+    if want_cores {
+        encoder
+            .output
+            .push_line("(set-option :produce-unsat-cores true)")?;
+    }
+
     for variable in &request.vars {
         encoder.write_declaration(variable)?;
     }
@@ -135,12 +146,15 @@ pub fn encode_solve_constraints(request: &SolveConstraintsRequest) -> Result<Str
         encoder.write_bounds(variable)?;
     }
     for constraint in &request.constraints {
-        encoder.output.push("(assert ")?;
-        encoder.write_expression(constraint)?;
-        encoder.output.push_line(")")?;
+        encoder.write_constraint(constraint)?;
     }
 
     encoder.output.push_line("(check-sat)")?;
+    if want_cores {
+        // Emitted before get-value so unsat scripts still surface a core when
+        // the subsequent get-value errors with "model is not available".
+        encoder.output.push_line("(get-unsat-core)")?;
+    }
     encoder.write_get_value()?;
     Ok(encoder.output.finish())
 }
@@ -193,6 +207,41 @@ impl<'a> Encoder<'a> {
             Variable::Enum { name, values } => {
                 self.write_unsigned_bound(">=", name, 0)?;
                 self.write_unsigned_bound("<=", name, values.len().saturating_sub(1))
+            }
+        }
+    }
+
+    fn write_constraint(&mut self, constraint: &ConstraintItem) -> Result<(), EncodeError> {
+        if constraint.is_soft() {
+            let weight = constraint
+                .soft_weight()
+                .ok_or(EncodeError::InternalInvariant(
+                    "soft constraint missing effective weight after validation",
+                ))?;
+            self.output.push("(assert-soft ")?;
+            self.write_expression(constraint.expr())?;
+            self.output.push(" :weight ")?;
+            self.write_integer(weight)?;
+            if let Some(id) = constraint.id() {
+                self.output.push(" :id ")?;
+                self.output.push(id)?;
+            }
+            return self.output.push_line(")");
+        }
+
+        match constraint.id() {
+            Some(id) => {
+                // (! expr :named id) enables get-unsat-core mapping to surface ids.
+                self.output.push("(assert (! ")?;
+                self.write_expression(constraint.expr())?;
+                self.output.push(" :named ")?;
+                self.output.push(id)?;
+                self.output.push_line("))")
+            }
+            None => {
+                self.output.push("(assert ")?;
+                self.write_expression(constraint.expr())?;
+                self.output.push_line(")")
             }
         }
     }
@@ -439,9 +488,13 @@ mod tests {
                     ConstraintOp::Ne,
                     vec![variable("batch"), ConstraintExpr::Int { value: -5 }],
                 ),
-            ],
+            ]
+            .into_iter()
+            .map(Into::into)
+            .collect(),
             timeout_ms: DEFAULT_TIMEOUT_MS,
             persist: false,
+            include_smt: false,
         };
 
         let smt = encode_solve_constraints(&request).expect("valid request should encode");
@@ -487,9 +540,13 @@ mod tests {
                     op(ConstraintOp::Mul, vec![variable("left"), variable("right")]),
                     ConstraintExpr::Int { value: 12 },
                 ],
-            )],
+            )]
+            .into_iter()
+            .map(Into::into)
+            .collect(),
             timeout_ms: DEFAULT_TIMEOUT_MS,
             persist: false,
+            include_smt: false,
         };
 
         let smt = encode_solve_constraints(&request).expect("valid request should encode");
@@ -519,9 +576,13 @@ mod tests {
                         label: hostile_label.to_owned(),
                     },
                 ],
-            )],
+            )]
+            .into_iter()
+            .map(Into::into)
+            .collect(),
             timeout_ms: DEFAULT_TIMEOUT_MS,
             persist: false,
+            include_smt: false,
         };
 
         let smt = encode_solve_constraints(&request).expect("valid request should encode");
@@ -574,9 +635,13 @@ mod tests {
                         },
                     ],
                 ),
-            ],
+            ]
+            .into_iter()
+            .map(Into::into)
+            .collect(),
             timeout_ms: DEFAULT_TIMEOUT_MS,
             persist: false,
+            include_smt: false,
         };
 
         let smt = encode_solve_constraints(&request).expect("valid request should encode");
@@ -595,6 +660,7 @@ mod tests {
             constraints: Vec::new(),
             timeout_ms: DEFAULT_TIMEOUT_MS,
             persist: false,
+            include_smt: false,
         };
 
         let error = encode_solve_constraints(&request).expect_err("hostile name must be rejected");
@@ -647,9 +713,13 @@ mod tests {
                         ConstraintExpr::Bool { value: true },
                     ],
                 ),
-            ],
+            ]
+            .into_iter()
+            .map(Into::into)
+            .collect(),
             timeout_ms: DEFAULT_TIMEOUT_MS,
             persist: false,
+            include_smt: false,
         };
 
         let smt = encode_solve_constraints(&request).expect("valid request should encode");
@@ -676,9 +746,13 @@ mod tests {
             constraints: vec![op(
                 ConstraintOp::Eq,
                 vec![variable("minimum"), ConstraintExpr::Int { value: i64::MIN }],
-            )],
+            )]
+            .into_iter()
+            .map(Into::into)
+            .collect(),
             timeout_ms: DEFAULT_TIMEOUT_MS,
             persist: false,
+            include_smt: false,
         };
 
         let smt = encode_solve_constraints(&request).expect("valid request should encode");
@@ -687,12 +761,96 @@ mod tests {
     }
 
     #[test]
+    fn encodes_named_hard_constraints_with_unsat_cores_enabled() {
+        use crate::types::{ConstraintDecl, ConstraintItem};
+
+        let request = SolveConstraintsRequest {
+            vars: vec![Variable::IntRange {
+                name: "x".to_owned(),
+                min: 0,
+                max: 10,
+            }],
+            constraints: vec![
+                ConstraintItem::Declared(ConstraintDecl {
+                    id: Some("lower".to_owned()),
+                    soft: false,
+                    weight: None,
+                    expr: op(
+                        ConstraintOp::Ge,
+                        vec![variable("x"), ConstraintExpr::Int { value: 5 }],
+                    ),
+                }),
+                ConstraintItem::Declared(ConstraintDecl {
+                    id: Some("upper".to_owned()),
+                    soft: false,
+                    weight: None,
+                    expr: op(
+                        ConstraintOp::Le,
+                        vec![variable("x"), ConstraintExpr::Int { value: 3 }],
+                    ),
+                }),
+            ],
+            timeout_ms: DEFAULT_TIMEOUT_MS,
+            persist: false,
+            include_smt: false,
+        };
+
+        let smt = encode_solve_constraints(&request).expect("valid request should encode");
+        assert!(smt.contains("(set-option :produce-unsat-cores true)"));
+        assert!(smt.contains("(assert (! (>= v_x 5) :named lower))"));
+        assert!(smt.contains("(assert (! (<= v_x 3) :named upper))"));
+        assert!(smt.contains("(get-unsat-core)"));
+    }
+
+    #[test]
+    fn encodes_soft_constraints_without_unsat_cores() {
+        use crate::types::{ConstraintDecl, ConstraintItem};
+
+        let request = SolveConstraintsRequest {
+            vars: vec![Variable::IntRange {
+                name: "sidebar".to_owned(),
+                min: 200,
+                max: 400,
+            }],
+            constraints: vec![
+                op(
+                    ConstraintOp::Ge,
+                    vec![variable("sidebar"), ConstraintExpr::Int { value: 200 }],
+                )
+                .into(),
+                ConstraintItem::Declared(ConstraintDecl {
+                    id: Some("prefer_wide".to_owned()),
+                    soft: true,
+                    weight: Some(5),
+                    expr: op(
+                        ConstraintOp::Ge,
+                        vec![variable("sidebar"), ConstraintExpr::Int { value: 320 }],
+                    ),
+                }),
+            ],
+            timeout_ms: DEFAULT_TIMEOUT_MS,
+            persist: false,
+            include_smt: false,
+        };
+
+        let smt = encode_solve_constraints(&request).expect("valid request should encode");
+        assert!(!smt.contains(":produce-unsat-cores"));
+        assert!(!smt.contains("(get-unsat-core)"));
+        assert!(smt.contains("(assert-soft (>= v_sidebar 320) :weight 5 :id prefer_wide)"));
+        assert!(smt.contains("(assert (>= v_sidebar 200))"));
+    }
+
+    #[test]
     fn omits_get_value_for_an_empty_surface_variable_set() {
         let request = SolveConstraintsRequest {
             vars: Vec::new(),
-            constraints: vec![ConstraintExpr::Bool { value: true }],
+            constraints: vec![ConstraintExpr::Bool { value: true }]
+                .into_iter()
+                .map(Into::into)
+                .collect(),
             timeout_ms: DEFAULT_TIMEOUT_MS,
             persist: false,
+            include_smt: false,
         };
 
         let smt = encode_solve_constraints(&request).expect("valid request should encode");
@@ -717,6 +875,7 @@ mod tests {
             constraints: Vec::new(),
             timeout_ms: DEFAULT_TIMEOUT_MS,
             persist: false,
+            include_smt: false,
         };
 
         let error = encode_solve_constraints(&request).expect_err("oversized SMT must fail");

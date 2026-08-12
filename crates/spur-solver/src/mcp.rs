@@ -192,13 +192,19 @@ fn solve_constraints_schema() -> Value {
             "constraints": {
                 "type": "array",
                 "maxItems": MAX_CONSTRAINTS,
-                "items": constraint_expression_schema()
+                "items": constraint_item_schema(),
+                "description": "Hard or soft constraints. Bare ConstraintExpr remains accepted; named/soft use {id?, soft?, weight?, expr}."
             },
             "timeout_ms": timeout_schema(),
             "persist": {
                 "type": "boolean",
                 "default": false,
                 "description": "Persist the result for later get_solve_result retrieval."
+            },
+            "include_smt": {
+                "type": "boolean",
+                "default": false,
+                "description": "Echo the generated SMT-LIB2 script in the response smt field."
             }
         },
         "required": ["vars", "constraints"],
@@ -220,10 +226,42 @@ fn solve_smt_schema() -> Value {
                 "type": "boolean",
                 "default": false,
                 "description": "Persist the result for later get_solve_result retrieval."
+            },
+            "include_smt": {
+                "type": "boolean",
+                "default": false,
+                "description": "Echo the submitted SMT-LIB2 script in the response smt field."
             }
         },
         "required": ["smt_lib"],
         "additionalProperties": false
+    })
+}
+
+fn constraint_item_schema() -> Value {
+    json!({
+        "oneOf": [
+            constraint_expression_schema(),
+            {
+                "type": "object",
+                "properties": {
+                    "id": identifier_schema(),
+                    "soft": {
+                        "type": "boolean",
+                        "default": false,
+                        "description": "When true, encode as assert-soft (preference), not a hard assert."
+                    },
+                    "weight": {
+                        "type": "integer",
+                        "exclusiveMinimum": 0,
+                        "description": "Soft weight; defaults to 1 when soft and omitted. Forbidden when soft is false."
+                    },
+                    "expr": constraint_expression_schema()
+                },
+                "required": ["expr"],
+                "additionalProperties": false
+            }
+        ]
     })
 }
 
@@ -441,9 +479,14 @@ mod tests {
             true
         );
 
-        let expression_variants = typed["properties"]["constraints"]["items"]["oneOf"]
+        // Constraint items: bare ConstraintExpr oneOf + named/soft wrapper.
+        let item_variants = typed["properties"]["constraints"]["items"]["oneOf"]
             .as_array()
-            .expect("constraint expression schema must use oneOf");
+            .expect("constraint item schema must use oneOf");
+        assert_eq!(item_variants.len(), 2);
+        let expression_variants = item_variants[0]["oneOf"]
+            .as_array()
+            .expect("bare expression schema must use oneOf");
         let expression_kinds: Vec<_> = expression_variants
             .iter()
             .map(|variant| {
@@ -457,6 +500,8 @@ mod tests {
             expression_variants[4]["properties"]["op"]["enum"],
             json!(["eq", "ne", "lt", "le", "gt", "ge", "add", "sub", "mul", "and", "or", "not"])
         );
+        assert_eq!(item_variants[1]["required"], json!(["expr"]));
+        assert_eq!(typed["properties"]["include_smt"]["default"], false);
 
         let raw = schema(&tools, "solve_smt");
         assert_eq!(raw["required"], json!(["smt_lib"]));
@@ -466,6 +511,7 @@ mod tests {
             json!(MAX_RAW_SMT_BYTES)
         );
         assert_timeout_schema(&raw["properties"]["timeout_ms"]);
+        assert_eq!(raw["properties"]["include_smt"]["default"], false);
 
         let lookup = schema(&tools, "get_solve_result");
         assert_eq!(lookup["required"], json!(["solve_id"]));
@@ -504,6 +550,7 @@ mod tests {
                     solve_id: None,
                     reason,
                     smt: None,
+                    unsat_core: None,
                 },
             )
             .expect("solver result status must serialize");

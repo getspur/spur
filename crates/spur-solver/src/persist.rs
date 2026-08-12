@@ -163,6 +163,9 @@ pub struct SolveArtifactResult {
     pub duration_ms: u64,
     /// Human-readable diagnostic for non-sat or error outcomes.
     pub reason: Option<String>,
+    /// Named hard unsat core surface ids when recorded with the solve.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unsat_core: Option<Vec<String>>,
 }
 
 impl SolveArtifactResult {
@@ -175,6 +178,7 @@ impl SolveArtifactResult {
             model: response.model.clone(),
             duration_ms: response.duration_ms,
             reason: response.reason.clone(),
+            unsat_core: response.unsat_core.clone(),
         })
     }
 
@@ -186,6 +190,7 @@ impl SolveArtifactResult {
             solve_id: None,
             reason: self.reason.clone(),
             smt: None,
+            unsat_core: self.unsat_core.clone(),
         }
         .validate()
         .map_err(|source| PersistError::InvalidResult { source })

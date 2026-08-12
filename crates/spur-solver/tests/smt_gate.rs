@@ -66,13 +66,14 @@ fn rejects_spoofing_stateful_and_definition_commands() {
 }
 
 #[test]
-fn restricts_set_option_to_the_model_production_boolean() {
+fn restricts_set_option_to_the_safe_boolean_subset() {
     for script in [
         "(set-option :timeout 60000)",
         r#"(set-option :regular-output-channel "captured.txt")"#,
         "(set-option :print-success true)",
         "(set-option :produce-models 1)",
         "(set-option :produce-models true false)",
+        "(set-option :opt.priority lex)",
     ] {
         assert!(
             validate_smt_script(script).is_err(),
@@ -81,7 +82,27 @@ fn restricts_set_option_to_the_model_production_boolean() {
     }
 
     validate_smt_script("(set-option :produce-models false)")
-        .expect("the safe option accepts a Boolean value");
+        .expect("produce-models accepts a Boolean value");
+    validate_smt_script("(set-option :produce-unsat-cores true)")
+        .expect("produce-unsat-cores accepts a Boolean value");
+}
+
+#[test]
+fn allows_soft_optimize_and_unsat_core_commands() {
+    let script = r"
+(set-logic QF_LIA)
+(set-option :produce-models true)
+(set-option :produce-unsat-cores true)
+(declare-const x Int)
+(assert (! (>= x 0) :named nonneg))
+(assert-soft (<= x 10) :weight 5 :id prefer_small)
+(maximize x)
+(minimize x)
+(check-sat)
+(get-unsat-core)
+(get-value (x))
+";
+    validate_smt_script(script).expect("optimize/core command family should pass the gate");
 }
 
 #[test]
@@ -177,6 +198,7 @@ async fn solve_smt_gates_and_runs_the_original_script_without_z3() {
             smt_lib: smt_lib.to_owned(),
             timeout_ms: DEFAULT_TIMEOUT_MS,
             persist: false,
+            include_smt: false,
         })
         .await
         .expect("allowed raw SMT should run");
@@ -219,6 +241,7 @@ async fn solve_smt_decodes_get_model_constant_definitions_without_z3() {
             .to_owned(),
             timeout_ms: DEFAULT_TIMEOUT_MS,
             persist: false,
+            include_smt: false,
         })
         .await
         .expect("allowed get-model script should run");
@@ -245,6 +268,7 @@ async fn solve_smt_keeps_quoted_get_value_symbols_intact() {
             .to_owned(),
             timeout_ms: DEFAULT_TIMEOUT_MS,
             persist: false,
+            include_smt: false,
         })
         .await
         .expect("allowed quoted-symbol script should run");
@@ -271,6 +295,7 @@ async fn solve_smt_persists_through_the_shared_artifact_store() {
             smt_lib: "(assert false)\n(check-sat)\n".to_owned(),
             timeout_ms: DEFAULT_TIMEOUT_MS,
             persist: true,
+            include_smt: false,
         })
         .await
         .expect("persisted raw solve should return");
@@ -293,6 +318,7 @@ async fn solve_smt_rejects_before_invoking_the_runner() {
             smt_lib: "(exit)".to_owned(),
             timeout_ms: DEFAULT_TIMEOUT_MS,
             persist: false,
+            include_smt: false,
         })
         .await
         .expect_err("disallowed SMT should be invalid params");
@@ -312,6 +338,7 @@ async fn solve_smt_rejects_timeout_over_the_shared_cap_before_running() {
             smt_lib: "(check-sat)".to_owned(),
             timeout_ms: MAX_TIMEOUT_MS + 1,
             persist: false,
+            include_smt: false,
         })
         .await
         .expect_err("oversized timeout should be invalid params");

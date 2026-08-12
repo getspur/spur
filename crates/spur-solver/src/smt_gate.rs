@@ -57,9 +57,11 @@ pub enum SmtGateError {
 /// nested expressions remain entirely solver-owned. Accepted scripts are not
 /// rewritten, stripped, or normalized.
 ///
-/// `set-option` is restricted to `:produce-models` with a Boolean value.
+/// `set-option` is restricted to a fixed Boolean subset:
+/// `:produce-models` and `:produce-unsat-cores`.
 /// Commands beginning with `declare-` are accepted alongside `set-logic`,
-/// `assert`, `check-sat`, `get-model`, `get-value`, `push`, and `pop`.
+/// `assert`, `assert-soft`, `check-sat`, `get-model`, `get-value`,
+/// `get-unsat-core`, `maximize`, `minimize`, `push`, and `pop`.
 ///
 /// # Errors
 ///
@@ -80,6 +82,8 @@ pub enum SmtGateError {
 ///
 /// assert!(validate_smt_script(script).is_ok());
 /// assert!(validate_smt_script("(exit)").is_err());
+/// assert!(validate_smt_script("(maximize answer)").is_ok());
+/// assert!(validate_smt_script("(assert-soft true :weight 1)").is_ok());
 /// ```
 pub fn validate_smt_script(script: &str) -> Result<(), SmtGateError> {
     let actual_bytes = script.len();
@@ -145,10 +149,24 @@ pub fn validate_smt_script(script: &str) -> Result<(), SmtGateError> {
 fn is_allowed_command(command: &str) -> bool {
     matches!(
         command,
-        "set-logic" | "assert" | "check-sat" | "get-model" | "get-value" | "push" | "pop"
+        "set-logic"
+            | "assert"
+            | "assert-soft"
+            | "check-sat"
+            | "get-model"
+            | "get-value"
+            | "get-unsat-core"
+            | "maximize"
+            | "minimize"
+            | "push"
+            | "pop"
     ) || command
         .strip_prefix("declare-")
         .is_some_and(|suffix| !suffix.is_empty())
+}
+
+fn is_allowed_set_option(option: &str) -> bool {
+    matches!(option, ":produce-models" | ":produce-unsat-cores")
 }
 
 fn validate_set_option(lexer: &mut Lexer<'_>) -> Result<(), SmtGateError> {
@@ -167,7 +185,7 @@ fn validate_set_option(lexer: &mut Lexer<'_>) -> Result<(), SmtGateError> {
             });
         }
     };
-    if option != ":produce-models" {
+    if !is_allowed_set_option(option) {
         return Err(SmtGateError::DisallowedOption {
             option: option.to_owned(),
             offset: option_offset,
@@ -182,13 +200,13 @@ fn validate_set_option(lexer: &mut Lexer<'_>) -> Result<(), SmtGateError> {
         Some(other) => {
             return Err(SmtGateError::InvalidSetOption {
                 offset: other.offset(),
-                message: ":produce-models requires a Boolean value",
+                message: "allowed set-option keys require a Boolean value",
             });
         }
         None => {
             return Err(SmtGateError::InvalidSetOption {
                 offset: lexer.cursor(),
-                message: "missing :produce-models value",
+                message: "missing set-option value",
             });
         }
     }

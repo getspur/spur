@@ -20,7 +20,6 @@ use crate::{
     encode::{encode_solve_constraints, EncodeError, SMT_IDENTIFIER_PREFIX},
     persist::{
         validate_solve_id, ArtifactStore, GetSolveResultResponse, PersistError, SolveArtifact,
-        UNKNOWN_Z3_VERSION,
     },
     process::{
         ProcessError, ProcessOutcome, ProcessOutput, ProcessRequest, ProcessRunner, Z3Process,
@@ -166,11 +165,18 @@ impl SolverService {
         request: &T,
         response: &SolveConstraintsResponse,
     ) -> Result<SolveArtifact, SolverServiceError> {
+        let z3_version = self.runner.solver_version();
         self.artifacts
             .as_ref()
             .ok_or(SolverServiceError::RepoRootNotConfigured)?
-            .persist(request, response, UNKNOWN_Z3_VERSION)
+            .persist(request, response, &z3_version)
             .map_err(SolverServiceError::from)
+    }
+
+    /// Returns the operator Z3 version string known to the process runner.
+    #[must_use]
+    pub fn z3_version(&self) -> String {
+        self.runner.solver_version()
     }
 
     /// Loads a persisted solve artifact by its pinned identifier.
@@ -217,13 +223,21 @@ impl SolverService {
             }
         })?;
         let deadline = started + Duration::from_millis(request.timeout_ms);
+        let include_smt = request.include_smt;
+        let smt_for_echo = if include_smt { Some(smt.clone()) } else { None };
 
         let response = match self.run_script(smt, deadline).await? {
             ServiceRunOutcome::TimedOut => timeout_response(started),
             ServiceRunOutcome::Completed(output) => response_from_output(&request, output, started),
             ServiceRunOutcome::Error(message) => error_response(started, message),
         };
-        self.finish_response(&request, request.persist, response)
+        self.finish_response(
+            &request,
+            request.persist,
+            include_smt,
+            smt_for_echo,
+            response,
+        )
     }
 
     /// Gates and solves one raw SMT-LIB2 request without B′ validation.
@@ -259,12 +273,24 @@ impl SolverService {
         })?;
 
         let deadline = started + Duration::from_millis(request.timeout_ms);
+        let include_smt = request.include_smt;
+        let smt_for_echo = if include_smt {
+            Some(request.smt_lib.clone())
+        } else {
+            None
+        };
         let response = match self.run_script(request.smt_lib.clone(), deadline).await? {
             ServiceRunOutcome::TimedOut => timeout_response(started),
             ServiceRunOutcome::Completed(output) => response_from_raw_output(output, started),
             ServiceRunOutcome::Error(message) => error_response(started, message),
         };
-        self.finish_response(&request, request.persist, response)
+        self.finish_response(
+            &request,
+            request.persist,
+            include_smt,
+            smt_for_echo,
+            response,
+        )
     }
 
     async fn run_script(
@@ -303,8 +329,13 @@ impl SolverService {
         &self,
         request: &T,
         persist: bool,
+        include_smt: bool,
+        smt: Option<String>,
         mut response: SolveConstraintsResponse,
     ) -> Result<SolveConstraintsResponse, SolverServiceError> {
+        if include_smt {
+            response.smt = smt;
+        }
         if persist {
             let artifact = self.persist(request, &response)?;
             response.solve_id = Some(artifact.solve_id);
@@ -332,57 +363,76 @@ fn response_from_output(
     started: Instant,
 ) -> SolveConstraintsResponse {
     let stderr = String::from_utf8_lossy(&output.stderr);
-    if !stderr.trim().is_empty() {
-        return error_response(
-            started,
-            format!("Z3 wrote to stderr: {}", diagnostic_text(&stderr)),
-        );
-    }
-
     let stdout = match str::from_utf8(&output.stdout) {
         Ok(stdout) => stdout,
         Err(error) => {
-            return error_response(started, format!("Z3 stdout was not UTF-8: {error}"));
+            return error_response(
+                started,
+                with_optional_stderr(format!("Z3 stdout was not UTF-8: {error}"), stderr.as_ref()),
+            );
         }
     };
-    let parsed = parse_solver_output(stdout, &request.vars);
+    let want_cores = request.has_named_hard_constraints() && !request.has_soft_constraints();
+    let parsed = parse_solver_output(stdout, &request.vars, want_cores);
     let expected_get_value_failure = output.exit_code == Some(1)
         && parsed
             .as_ref()
             .is_ok_and(|parsed| parsed.expected_get_value_failure);
-    if !output.success && !expected_get_value_failure {
+
+    // Prefer a successfully parsed status over stderr noise. Hard-fail only
+    // when the process failed without a known post-unsat get-value error and
+    // the stdout parse also failed.
+    if !output.success && !expected_get_value_failure && parsed.is_err() {
         let exit = output
             .exit_code
             .map_or_else(|| "signal".to_owned(), |code| format!("exit code {code}"));
-        return error_response(started, format!("Z3 exited unsuccessfully ({exit})"));
+        return error_response(
+            started,
+            with_optional_stderr(
+                format!("Z3 exited unsuccessfully ({exit})"),
+                stderr.as_ref(),
+            ),
+        );
     }
 
-    match parsed.map(|parsed| parsed.solve) {
-        Ok(ParsedSolve::Sat(model)) => response(SolveStatus::Sat, Some(model), started, None),
-        Ok(ParsedSolve::Unsat) => response(SolveStatus::Unsat, None, started, None),
-        Ok(ParsedSolve::Unknown) => response(
+    match parsed {
+        Ok(ParsedSolverOutput {
+            solve: ParsedSolve::Sat(model),
+            ..
+        }) => response(SolveStatus::Sat, Some(model), started, None, None),
+        Ok(ParsedSolverOutput {
+            solve: ParsedSolve::Unsat { unsat_core },
+            ..
+        }) => response(SolveStatus::Unsat, None, started, None, unsat_core),
+        Ok(ParsedSolverOutput {
+            solve: ParsedSolve::Unknown,
+            ..
+        }) => response(
             SolveStatus::Unknown,
             None,
             started,
             Some("Z3 returned unknown".to_owned()),
+            None,
         ),
-        Err(error) => error_response(started, format!("failed to parse Z3 output: {error}")),
+        Err(error) => error_response(
+            started,
+            with_optional_stderr(
+                format!("failed to parse Z3 output: {error}"),
+                stderr.as_ref(),
+            ),
+        ),
     }
 }
 
 fn response_from_raw_output(output: ProcessOutput, started: Instant) -> SolveConstraintsResponse {
     let stderr = String::from_utf8_lossy(&output.stderr);
-    if !stderr.trim().is_empty() {
-        return error_response(
-            started,
-            format!("Z3 wrote to stderr: {}", diagnostic_text(&stderr)),
-        );
-    }
-
     let stdout = match str::from_utf8(&output.stdout) {
         Ok(stdout) => stdout,
         Err(error) => {
-            return error_response(started, format!("Z3 stdout was not UTF-8: {error}"));
+            return error_response(
+                started,
+                with_optional_stderr(format!("Z3 stdout was not UTF-8: {error}"), stderr.as_ref()),
+            );
         }
     };
     let parsed = parse_raw_solver_output(stdout);
@@ -390,23 +440,45 @@ fn response_from_raw_output(output: ProcessOutput, started: Instant) -> SolveCon
         && parsed
             .as_ref()
             .is_ok_and(|parsed| parsed.expected_get_value_failure);
-    if !output.success && !expected_model_failure {
+    if !output.success && !expected_model_failure && parsed.is_err() {
         let exit = output
             .exit_code
             .map_or_else(|| "signal".to_owned(), |code| format!("exit code {code}"));
-        return error_response(started, format!("Z3 exited unsuccessfully ({exit})"));
+        return error_response(
+            started,
+            with_optional_stderr(
+                format!("Z3 exited unsuccessfully ({exit})"),
+                stderr.as_ref(),
+            ),
+        );
     }
 
-    match parsed.map(|parsed| parsed.solve) {
-        Ok(ParsedSolve::Sat(model)) => response(SolveStatus::Sat, Some(model), started, None),
-        Ok(ParsedSolve::Unsat) => response(SolveStatus::Unsat, None, started, None),
-        Ok(ParsedSolve::Unknown) => response(
+    match parsed {
+        Ok(ParsedSolverOutput {
+            solve: ParsedSolve::Sat(model),
+            ..
+        }) => response(SolveStatus::Sat, Some(model), started, None, None),
+        Ok(ParsedSolverOutput {
+            solve: ParsedSolve::Unsat { unsat_core },
+            ..
+        }) => response(SolveStatus::Unsat, None, started, None, unsat_core),
+        Ok(ParsedSolverOutput {
+            solve: ParsedSolve::Unknown,
+            ..
+        }) => response(
             SolveStatus::Unknown,
             None,
             started,
             Some("Z3 returned unknown".to_owned()),
+            None,
         ),
-        Err(error) => error_response(started, format!("failed to parse Z3 output: {error}")),
+        Err(error) => error_response(
+            started,
+            with_optional_stderr(
+                format!("failed to parse Z3 output: {error}"),
+                stderr.as_ref(),
+            ),
+        ),
     }
 }
 
@@ -415,6 +487,7 @@ fn response(
     model: Option<SolveModel>,
     started: Instant,
     reason: Option<String>,
+    unsat_core: Option<Vec<String>>,
 ) -> SolveConstraintsResponse {
     SolveConstraintsResponse {
         status,
@@ -423,6 +496,16 @@ fn response(
         solve_id: None,
         reason,
         smt: None,
+        unsat_core,
+    }
+}
+
+fn with_optional_stderr(message: String, stderr: &str) -> String {
+    let trimmed = stderr.trim();
+    if trimmed.is_empty() {
+        message
+    } else {
+        format!("{message}; stderr: {}", diagnostic_text(trimmed))
     }
 }
 
@@ -432,11 +515,12 @@ fn timeout_response(started: Instant) -> SolveConstraintsResponse {
         None,
         started,
         Some("wall-clock solve budget exhausted".to_owned()),
+        None,
     )
 }
 
 fn error_response(started: Instant, reason: String) -> SolveConstraintsResponse {
-    response(SolveStatus::Error, None, started, Some(reason))
+    response(SolveStatus::Error, None, started, Some(reason), None)
 }
 
 fn elapsed_millis(started: Instant) -> u64 {
@@ -459,7 +543,7 @@ fn diagnostic_text(text: &str) -> String {
 #[derive(Debug, Eq, PartialEq)]
 enum ParsedSolve {
     Sat(SolveModel),
-    Unsat,
+    Unsat { unsat_core: Option<Vec<String>> },
     Unknown,
 }
 
@@ -472,6 +556,7 @@ struct ParsedSolverOutput {
 fn parse_solver_output(
     stdout: &str,
     variables: &[Variable],
+    want_cores: bool,
 ) -> Result<ParsedSolverOutput, ParseError> {
     let forms = SExpressionParser::new(stdout).parse_all()?;
     let status = forms
@@ -481,13 +566,14 @@ fn parse_solver_output(
 
     match status {
         "sat" => Ok(ParsedSolverOutput {
-            solve: parse_sat_output(&forms, variables)?,
+            solve: parse_sat_output(&forms, variables, want_cores)?,
             expected_get_value_failure: false,
         }),
         "unsat" => {
-            let expected_get_value_failure = require_non_sat_output(&forms, variables, "unsat")?;
+            let (expected_get_value_failure, unsat_core) =
+                parse_unsat_output(&forms, variables, want_cores)?;
             Ok(ParsedSolverOutput {
-                solve: ParsedSolve::Unsat,
+                solve: ParsedSolve::Unsat { unsat_core },
                 expected_get_value_failure,
             })
         }
@@ -517,7 +603,9 @@ fn parse_raw_solver_output(stdout: &str) -> Result<ParsedSolverOutput, ParseErro
             expected_get_value_failure: false,
         }),
         "unsat" => Ok(ParsedSolverOutput {
-            solve: ParsedSolve::Unsat,
+            solve: ParsedSolve::Unsat {
+                unsat_core: extract_raw_unsat_core(&forms),
+            },
             expected_get_value_failure: require_raw_non_sat_output(&forms, "unsat")?,
         }),
         "unknown" => Ok(ParsedSolverOutput {
@@ -528,6 +616,24 @@ fn parse_raw_solver_output(stdout: &str) -> Result<ParsedSolverOutput, ParseErro
             "unexpected solver status `{other}`"
         ))),
     }
+}
+
+fn extract_raw_unsat_core(forms: &[SExpression]) -> Option<Vec<String>> {
+    forms.iter().skip(1).find_map(|form| {
+        let values = form.as_list()?;
+        // A core is a list of atoms (assertion names). Skip error forms and models.
+        if values.iter().all(|item| item.as_atom().is_some()) {
+            Some(
+                values
+                    .iter()
+                    .filter_map(SExpression::as_atom)
+                    .map(str::to_owned)
+                    .collect(),
+            )
+        } else {
+            None
+        }
+    })
 }
 
 fn parse_raw_sat_output(forms: &[SExpression]) -> Result<ParsedSolve, ParseError> {
@@ -664,12 +770,25 @@ fn require_raw_non_sat_output(forms: &[SExpression], status: &str) -> Result<boo
     if forms.len() == 1 {
         return Ok(false);
     }
-    if forms.len() == 2 && forms[1].is_model_unavailable_error() {
-        return Ok(true);
+    // Accept model-unavailable errors and optional unsat-core atom lists.
+    let mut saw_model_error = false;
+    for form in forms.iter().skip(1) {
+        if form.is_model_unavailable_error() || form.is_unsat_core_unavailable_error() {
+            saw_model_error = true;
+            continue;
+        }
+        if form
+            .as_list()
+            .is_some_and(|values| values.iter().all(|item| item.as_atom().is_some()))
+        {
+            // bare unsat core list (optional on raw scripts)
+            continue;
+        }
+        return Err(ParseError::new(format!(
+            "unexpected output after `{status}` status"
+        )));
     }
-    Err(ParseError::new(format!(
-        "unexpected output after `{status}` status"
-    )))
+    Ok(saw_model_error)
 }
 
 fn require_non_sat_output(
@@ -680,41 +799,104 @@ fn require_non_sat_output(
     if forms.len() == 1 {
         return Ok(false);
     }
-    if !variables.is_empty() && forms.len() == 2 && forms[1].is_model_unavailable_error() {
-        return Ok(true);
+    let mut saw_model_error = false;
+    for form in forms.iter().skip(1) {
+        if form.is_model_unavailable_error() || form.is_unsat_core_unavailable_error() {
+            saw_model_error = true;
+            continue;
+        }
+        if form
+            .as_list()
+            .is_some_and(|values| values.iter().all(|item| item.as_atom().is_some()))
+        {
+            continue;
+        }
+        let _ = variables;
+        return Err(ParseError::new(format!(
+            "unexpected output after `{status}` status"
+        )));
     }
-    Err(ParseError::new(format!(
-        "unexpected output after `{status}` status"
-    )))
+    Ok(saw_model_error)
+}
+
+fn parse_unsat_output(
+    forms: &[SExpression],
+    variables: &[Variable],
+    want_cores: bool,
+) -> Result<(bool, Option<Vec<String>>), ParseError> {
+    let expected_get_value_failure = require_non_sat_output(forms, variables, "unsat")?;
+    let unsat_core = if want_cores {
+        forms.iter().skip(1).find_map(|form| {
+            let values = form.as_list()?;
+            if values.is_empty() {
+                return Some(Vec::new());
+            }
+            if values.iter().all(|item| item.as_atom().is_some())
+                && !form.is_model_unavailable_error()
+                && !form.is_unsat_core_unavailable_error()
+            {
+                Some(
+                    values
+                        .iter()
+                        .filter_map(SExpression::as_atom)
+                        .map(str::to_owned)
+                        .collect(),
+                )
+            } else {
+                None
+            }
+        })
+    } else {
+        None
+    };
+    Ok((expected_get_value_failure, unsat_core))
 }
 
 fn require_status_only(forms: &[SExpression], status: &str) -> Result<(), ParseError> {
     if forms.len() == 1 {
         Ok(())
     } else {
-        Err(ParseError::new(format!(
-            "unexpected output after `{status}` status"
-        )))
+        // Allow ignored core-unavailable errors when cores were requested on a sat path.
+        for form in forms.iter().skip(1) {
+            if form.is_unsat_core_unavailable_error() {
+                continue;
+            }
+            return Err(ParseError::new(format!(
+                "unexpected output after `{status}` status"
+            )));
+        }
+        Ok(())
     }
 }
 
 fn parse_sat_output(
     forms: &[SExpression],
     variables: &[Variable],
+    want_cores: bool,
 ) -> Result<ParsedSolve, ParseError> {
     if variables.is_empty() {
         require_status_only(forms, "sat")?;
         return Ok(ParsedSolve::Sat(BTreeMap::new()));
     }
-    if forms.len() != 2 {
-        return Err(ParseError::new(
-            "sat output must contain exactly one get-value response",
-        ));
-    }
 
-    let pairs = forms[1]
-        .as_list()
-        .ok_or_else(|| ParseError::new("get-value response must be a list"))?;
+    // When cores are requested the script emits get-unsat-core before get-value.
+    // On sat, that produces an error form we skip.
+    let pairs_form = forms.iter().skip(1).find(|form| {
+        if form.is_model_unavailable_error() || form.is_unsat_core_unavailable_error() {
+            return false;
+        }
+        form.as_list().is_some_and(|values| {
+            !values.is_empty()
+                && values.iter().all(|item| {
+                    item.as_list()
+                        .is_some_and(|pair| pair.len() == 2 && pair[0].as_atom().is_some())
+                })
+        })
+    });
+    let pairs = pairs_form
+        .and_then(SExpression::as_list)
+        .ok_or_else(|| ParseError::new("sat output must contain one get-value response"))?;
+    let _ = want_cores;
     if pairs.len() != variables.len() {
         return Err(ParseError::new(format!(
             "get-value returned {} bindings for {} variables",
@@ -870,13 +1052,22 @@ impl SExpression {
     }
 
     fn is_model_unavailable_error(&self) -> bool {
+        self.is_error_containing("model is not available")
+    }
+
+    fn is_unsat_core_unavailable_error(&self) -> bool {
+        self.is_error_containing("unsat core is not available")
+            || self.is_error_containing("unsat cores are not available")
+    }
+
+    fn is_error_containing(&self, needle: &str) -> bool {
         let Some([head, message]) = self.as_list() else {
             return false;
         };
         head.as_atom() == Some("error")
             && message
                 .as_string()
-                .is_some_and(|message| message.contains("model is not available"))
+                .is_some_and(|message| message.to_ascii_lowercase().contains(needle))
     }
 }
 
@@ -1036,6 +1227,7 @@ mod tests {
             &[Variable::Int {
                 name: "floor".to_owned(),
             }],
+            false,
         )
         .expect("minimum integer should parse");
 
@@ -1047,7 +1239,7 @@ mod tests {
 
     #[test]
     fn rejects_extra_output_after_unsat() {
-        let error = parse_solver_output("unsat\nsat\n", &[])
+        let error = parse_solver_output("unsat\nsat\n", &[], false)
             .expect_err("extra status can spoof output and must fail");
 
         assert!(error.to_string().contains("unexpected output"));
@@ -1065,10 +1257,32 @@ mod tests {
                     name: "other".to_owned(),
                 },
             ],
+            false,
         )
         .expect_err("duplicate binding must fail");
 
         assert!(error.to_string().contains("duplicate"));
+    }
+
+    #[test]
+    fn parses_named_unsat_core_after_get_value_error() {
+        let parsed = parse_solver_output(
+            "unsat\n(lower upper)\n(error \"model is not available\")\n",
+            &[Variable::Int {
+                name: "x".to_owned(),
+            }],
+            true,
+        )
+        .expect("unsat core should parse");
+
+        let ParsedSolve::Unsat { unsat_core } = parsed.solve else {
+            panic!("expected unsat");
+        };
+        assert!(parsed.expected_get_value_failure);
+        assert_eq!(
+            unsat_core.as_deref(),
+            Some(["lower".to_owned(), "upper".to_owned()].as_slice())
+        );
     }
 
     #[test]

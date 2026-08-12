@@ -38,9 +38,13 @@ async fn trivial_sat_model_satisfies_declared_constraints() {
                     },
                     ConstraintExpr::Int { value: 4 },
                 ],
-            }],
+            }]
+            .into_iter()
+            .map(Into::into)
+            .collect(),
             timeout_ms: DEFAULT_TIMEOUT_MS,
             persist: false,
+            include_smt: false,
         })
         .await
         .expect("enabled real Z3 solve should start");
@@ -73,9 +77,13 @@ async fn unsat_protocol_has_no_model() {
             vars: vec![Variable::Int {
                 name: "value".to_owned(),
             }],
-            constraints: vec![ConstraintExpr::Bool { value: false }],
+            constraints: vec![ConstraintExpr::Bool { value: false }]
+                .into_iter()
+                .map(Into::into)
+                .collect(),
             timeout_ms: DEFAULT_TIMEOUT_MS,
             persist: false,
+            include_smt: false,
         })
         .await
         .expect("enabled real Z3 solve should start");

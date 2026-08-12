@@ -161,6 +161,7 @@ fn empty_request(timeout_ms: u64) -> SolveConstraintsRequest {
         constraints: Vec::new(),
         timeout_ms,
         persist: false,
+        include_smt: false,
     }
 }
 
@@ -418,6 +419,7 @@ mod unix {
             constraints: Vec::new(),
             timeout_ms,
             persist: false,
+            include_smt: false,
         }
     }
 
@@ -427,6 +429,7 @@ mod unix {
             constraints: Vec::new(),
             timeout_ms,
             persist: false,
+            include_smt: false,
         }
     }
 

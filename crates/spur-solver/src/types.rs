@@ -18,9 +18,15 @@ pub const MAX_VARIABLES: usize = 64;
 pub const MAX_CONSTRAINTS: usize = 256;
 /// Maximum number of parent-to-child edges in a constraint expression.
 pub const MAX_EXPRESSION_DEPTH: usize = 32;
+/// Default weight applied to soft constraints when `weight` is omitted.
+pub const DEFAULT_SOFT_WEIGHT: i64 = 1;
 
 const fn default_timeout_ms() -> u64 {
     DEFAULT_TIMEOUT_MS
+}
+
+const fn default_false() -> bool {
+    false
 }
 
 /// A declared variable in the B′ constraint language.
@@ -177,6 +183,81 @@ pub enum ConstraintExpr {
     },
 }
 
+/// A top-level constraint entry.
+///
+/// Bare [`ConstraintExpr`] values remain accepted for backward compatibility
+/// (always hard, unnamed). Named and soft constraints use [`ConstraintDecl`].
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(untagged)]
+pub enum ConstraintItem {
+    /// Named and/or soft constraint wrapper.
+    Declared(ConstraintDecl),
+    /// Legacy bare boolean expression (hard, unnamed).
+    Bare(ConstraintExpr),
+}
+
+impl ConstraintItem {
+    /// Returns the boolean expression carried by this entry.
+    #[must_use]
+    pub fn expr(&self) -> &ConstraintExpr {
+        match self {
+            Self::Declared(decl) => &decl.expr,
+            Self::Bare(expr) => expr,
+        }
+    }
+
+    /// Returns the optional surface id used for unsat cores / soft tracking.
+    #[must_use]
+    pub fn id(&self) -> Option<&str> {
+        match self {
+            Self::Declared(decl) => decl.id.as_deref(),
+            Self::Bare(_) => None,
+        }
+    }
+
+    /// Returns whether this entry is a soft (preference) constraint.
+    #[must_use]
+    pub fn is_soft(&self) -> bool {
+        match self {
+            Self::Declared(decl) => decl.soft,
+            Self::Bare(_) => false,
+        }
+    }
+
+    /// Effective soft weight (`DEFAULT_SOFT_WEIGHT` when soft and omitted).
+    #[must_use]
+    pub fn soft_weight(&self) -> Option<i64> {
+        match self {
+            Self::Declared(decl) if decl.soft => Some(decl.weight.unwrap_or(DEFAULT_SOFT_WEIGHT)),
+            Self::Declared(_) | Self::Bare(_) => None,
+        }
+    }
+}
+
+impl From<ConstraintExpr> for ConstraintItem {
+    fn from(expr: ConstraintExpr) -> Self {
+        Self::Bare(expr)
+    }
+}
+
+/// Named and/or soft wrapper around a boolean constraint expression.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConstraintDecl {
+    /// Optional surface identifier for unsat-core reporting or soft grouping.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    /// When true, encode as `assert-soft` (preference), not a hard `assert`.
+    #[serde(default = "default_false")]
+    pub soft: bool,
+    /// Soft weight; defaults to [`DEFAULT_SOFT_WEIGHT`] when `soft` and omitted.
+    /// Must be strictly positive when present. Forbidden when `soft` is false.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub weight: Option<i64>,
+    /// Boolean expression that must hold (hard) or is preferred (soft).
+    pub expr: ConstraintExpr,
+}
+
 /// Request for typed B′ constraint model-finding.
 ///
 /// # Examples
@@ -200,9 +281,11 @@ pub enum ConstraintExpr {
 ///             },
 ///             ConstraintExpr::Int { value: 4 },
 ///         ],
-///     }],
+///     }
+///     .into()],
 ///     timeout_ms: DEFAULT_TIMEOUT_MS,
 ///     persist: false,
+///     include_smt: false,
 /// };
 ///
 /// assert!(request.validate().is_ok());
@@ -212,14 +295,17 @@ pub enum ConstraintExpr {
 pub struct SolveConstraintsRequest {
     /// Variables available to constraint expressions.
     pub vars: Vec<Variable>,
-    /// Boolean expressions that every returned model must satisfy.
-    pub constraints: Vec<ConstraintExpr>,
+    /// Boolean constraints (bare expressions, named hard, or soft).
+    pub constraints: Vec<ConstraintItem>,
     /// Wall-clock budget in milliseconds.
     #[serde(default = "default_timeout_ms")]
     pub timeout_ms: u64,
     /// Whether the service should persist the solve for later retrieval.
-    #[serde(default)]
+    #[serde(default = "default_false")]
     pub persist: bool,
+    /// When true, echo the generated SMT-LIB2 script in the response `smt` field.
+    #[serde(default = "default_false")]
+    pub include_smt: bool,
 }
 
 impl SolveConstraintsRequest {
@@ -264,10 +350,52 @@ impl SolveConstraintsRequest {
         }
 
         let variables = VariableTable::build(&self.vars)?;
+        let mut seen_ids = HashSet::new();
         for (constraint_index, constraint) in self.constraints.iter().enumerate() {
+            if let ConstraintItem::Declared(decl) = constraint {
+                if let Some(id) = decl.id.as_deref() {
+                    if !is_valid_surface_name(id) {
+                        return Err(ValidationError::new(
+                            ValidationErrorKind::InvalidConstraintId,
+                            format!("constraints[{constraint_index}].id"),
+                            format!("constraint id {id:?} must match [A-Za-z_][A-Za-z0-9_]*"),
+                        ));
+                    }
+                    if !seen_ids.insert(id) {
+                        return Err(ValidationError::new(
+                            ValidationErrorKind::DuplicateConstraintId,
+                            format!("constraints[{constraint_index}].id"),
+                            format!("constraint id {id:?} is declared more than once"),
+                        ));
+                    }
+                }
+                if decl.soft {
+                    if let Some(weight) = decl.weight {
+                        if weight <= 0 {
+                            return Err(ValidationError::new(
+                                ValidationErrorKind::InvalidSoftWeight,
+                                format!("constraints[{constraint_index}].weight"),
+                                format!("soft constraint weight must be > 0, found {weight}"),
+                            ));
+                        }
+                    }
+                } else if decl.weight.is_some() {
+                    return Err(ValidationError::new(
+                        ValidationErrorKind::WeightWithoutSoft,
+                        format!("constraints[{constraint_index}].weight"),
+                        "weight is only valid when soft is true",
+                    ));
+                }
+            }
+
             let mut child_path = Vec::new();
-            let sort =
-                infer_expression(constraint, &variables, constraint_index, 0, &mut child_path)?;
+            let sort = infer_expression(
+                constraint.expr(),
+                &variables,
+                constraint_index,
+                0,
+                &mut child_path,
+            )?;
             if !matches!(sort, ExpressionSort::Bool(_)) {
                 return Err(ValidationError::new(
                     ValidationErrorKind::TopLevelNotBoolean,
@@ -281,6 +409,20 @@ impl SolveConstraintsRequest {
         }
 
         Ok(())
+    }
+
+    /// Returns true when any constraint is soft (preference / assert-soft).
+    #[must_use]
+    pub fn has_soft_constraints(&self) -> bool {
+        self.constraints.iter().any(ConstraintItem::is_soft)
+    }
+
+    /// Returns true when any hard constraint carries a surface id (unsat cores).
+    #[must_use]
+    pub fn has_named_hard_constraints(&self) -> bool {
+        self.constraints
+            .iter()
+            .any(|item| !item.is_soft() && item.id().is_some())
     }
 }
 
@@ -299,6 +441,7 @@ impl SolveConstraintsRequest {
 ///     smt_lib: "(declare-const answer Int)\n(check-sat)\n".to_owned(),
 ///     timeout_ms: DEFAULT_TIMEOUT_MS,
 ///     persist: false,
+///     include_smt: false,
 /// };
 ///
 /// assert!(request.smt_lib.contains("check-sat"));
@@ -312,8 +455,11 @@ pub struct SolveSmtRequest {
     #[serde(default = "default_timeout_ms")]
     pub timeout_ms: u64,
     /// Whether the service should persist the solve for later retrieval.
-    #[serde(default)]
+    #[serde(default = "default_false")]
     pub persist: bool,
+    /// When true, echo the submitted SMT-LIB2 script in the response `smt` field.
+    #[serde(default = "default_false")]
+    pub include_smt: bool,
 }
 
 /// Status reported by the solver service.
@@ -363,8 +509,15 @@ pub struct SolveConstraintsResponse {
     pub solve_id: Option<String>,
     /// Human-readable diagnostic for non-sat or error outcomes.
     pub reason: Option<String>,
-    /// Optional generated SMT-LIB debug output.
+    /// Optional generated or submitted SMT-LIB debug output (`include_smt`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub smt: Option<String>,
+    /// Surface ids of a minimal hard unsat core, when available.
+    ///
+    /// Present only for [`SolveStatus::Unsat`] when the request used named hard
+    /// constraints and no soft constraints (Z3 cannot combine cores with soft).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unsat_core: Option<Vec<String>>,
 }
 
 impl SolveConstraintsResponse {
@@ -374,6 +527,8 @@ impl SolveConstraintsResponse {
     ///
     /// Returns [`ValidationErrorKind::ResponseModelMismatch`] unless a model
     /// is present exactly when the response status is [`SolveStatus::Sat`].
+    /// Returns [`ValidationErrorKind::ResponseCoreMismatch`] when `unsat_core`
+    /// is present for a non-unsat status.
     pub fn validate(&self) -> Result<(), ValidationError> {
         let model_is_valid = match self.status {
             SolveStatus::Sat => self.model.is_some(),
@@ -387,6 +542,13 @@ impl SolveConstraintsResponse {
                 ValidationErrorKind::ResponseModelMismatch,
                 "model",
                 "model must be present if and only if status is sat",
+            ));
+        }
+        if self.unsat_core.is_some() && self.status != SolveStatus::Unsat {
+            return Err(ValidationError::new(
+                ValidationErrorKind::ResponseCoreMismatch,
+                "unsat_core",
+                "unsat_core may only be present when status is unsat",
             ));
         }
 
@@ -427,8 +589,18 @@ pub enum ValidationErrorKind {
     TypeMismatch,
     /// A top-level constraint is not Boolean-sorted.
     TopLevelNotBoolean,
+    /// A constraint id violates `[A-Za-z_][A-Za-z0-9_]*`.
+    InvalidConstraintId,
+    /// Two constraint declarations share the same surface id.
+    DuplicateConstraintId,
+    /// A soft constraint weight is missing positivity.
+    InvalidSoftWeight,
+    /// `weight` was set on a non-soft constraint.
+    WeightWithoutSoft,
     /// A response's model presence does not match its status.
     ResponseModelMismatch,
+    /// A response's unsat core presence does not match its status.
+    ResponseCoreMismatch,
 }
 
 impl fmt::Display for ValidationErrorKind {
@@ -449,7 +621,12 @@ impl fmt::Display for ValidationErrorKind {
             Self::WrongArity => "wrong_arity",
             Self::TypeMismatch => "type_mismatch",
             Self::TopLevelNotBoolean => "top_level_not_boolean",
+            Self::InvalidConstraintId => "invalid_constraint_id",
+            Self::DuplicateConstraintId => "duplicate_constraint_id",
+            Self::InvalidSoftWeight => "invalid_soft_weight",
+            Self::WeightWithoutSoft => "weight_without_soft",
             Self::ResponseModelMismatch => "response_model_mismatch",
+            Self::ResponseCoreMismatch => "response_core_mismatch",
         };
         formatter.write_str(name)
     }
@@ -919,7 +1096,7 @@ mod tests {
     use serde_json::{json, Value};
 
     use super::{
-        ConstraintExpr, ConstraintOp, ModelValue, SolveConstraintsRequest,
+        ConstraintExpr, ConstraintItem, ConstraintOp, ModelValue, SolveConstraintsRequest,
         SolveConstraintsResponse, SolveStatus, ValidationErrorKind, Variable, DEFAULT_TIMEOUT_MS,
         MAX_CONSTRAINTS, MAX_EXPRESSION_DEPTH, MAX_TIMEOUT_MS, MAX_VARIABLES,
     };
@@ -927,9 +1104,10 @@ mod tests {
     fn request(vars: Vec<Variable>, constraints: Vec<ConstraintExpr>) -> SolveConstraintsRequest {
         SolveConstraintsRequest {
             vars,
-            constraints,
+            constraints: constraints.into_iter().map(ConstraintItem::from).collect(),
             timeout_ms: DEFAULT_TIMEOUT_MS,
             persist: false,
+            include_smt: false,
         }
     }
 
@@ -1133,12 +1311,88 @@ mod tests {
 
         assert_eq!(request.timeout_ms, DEFAULT_TIMEOUT_MS);
         assert!(!request.persist);
+        assert!(!request.include_smt);
         assert_eq!(
             serde_json::from_value::<SolveConstraintsRequest>(
                 serde_json::to_value(&request).unwrap()
             )
             .unwrap(),
             request
+        );
+    }
+
+    #[test]
+    fn named_and_soft_constraint_items_round_trip_and_validate() {
+        let request: SolveConstraintsRequest = serde_json::from_value(json!({
+            "vars": [{"name": "x", "type": "int_range", "min": 0, "max": 10}],
+            "constraints": [
+                {
+                    "id": "lower",
+                    "expr": {
+                        "kind": "op",
+                        "op": "ge",
+                        "args": [{"kind": "var", "name": "x"}, {"kind": "int", "value": 1}]
+                    }
+                },
+                {
+                    "id": "prefer_high",
+                    "soft": true,
+                    "weight": 3,
+                    "expr": {
+                        "kind": "op",
+                        "op": "ge",
+                        "args": [{"kind": "var", "name": "x"}, {"kind": "int", "value": 8}]
+                    }
+                }
+            ]
+        }))
+        .unwrap();
+
+        assert!(request.validate().is_ok());
+        assert!(request.has_soft_constraints());
+        assert!(request.has_named_hard_constraints());
+        assert_eq!(request.constraints[0].id(), Some("lower"));
+        assert!(!request.constraints[0].is_soft());
+        assert_eq!(request.constraints[1].soft_weight(), Some(3));
+    }
+
+    #[test]
+    fn validation_rejects_duplicate_ids_and_invalid_soft_weights() {
+        let duplicate: SolveConstraintsRequest = serde_json::from_value(json!({
+            "vars": [{"name": "x", "type": "int", }],
+            "constraints": [
+                {"id": "c", "expr": {"kind": "bool", "value": true}},
+                {"id": "c", "expr": {"kind": "bool", "value": false}}
+            ]
+        }))
+        .unwrap();
+        assert_eq!(
+            duplicate.validate().unwrap_err().kind,
+            ValidationErrorKind::DuplicateConstraintId
+        );
+
+        let bad_weight: SolveConstraintsRequest = serde_json::from_value(json!({
+            "vars": [],
+            "constraints": [
+                {"soft": true, "weight": 0, "expr": {"kind": "bool", "value": true}}
+            ]
+        }))
+        .unwrap();
+        assert_eq!(
+            bad_weight.validate().unwrap_err().kind,
+            ValidationErrorKind::InvalidSoftWeight
+        );
+
+        let weight_without_soft: SolveConstraintsRequest = serde_json::from_value(json!({
+            "vars": [],
+            "constraints": [
+                {"weight": 2, "expr": {"kind": "bool", "value": true}}
+            ]
+        }))
+        .unwrap();
+        assert_eq!(
+            weight_without_soft.validate().unwrap_err().kind,
+            ValidationErrorKind::WeightWithoutSoft
         );
     }
 
@@ -1155,6 +1409,7 @@ mod tests {
             solve_id: Some("sol_a1b2c3d4e5f67890".to_owned()),
             reason: None,
             smt: None,
+            unsat_core: None,
         };
         let value = serde_json::to_value(&response).unwrap();
 
@@ -1177,6 +1432,7 @@ mod tests {
             solve_id: None,
             reason: None,
             smt: None,
+            unsat_core: None,
         })
         .unwrap();
 
@@ -1237,9 +1493,13 @@ mod tests {
                     name: format!("v{index}"),
                 })
                 .collect(),
-            constraints: vec![bool_literal(true); MAX_CONSTRAINTS],
+            constraints: vec![bool_literal(true); MAX_CONSTRAINTS]
+                .into_iter()
+                .map(Into::into)
+                .collect(),
             timeout_ms: MAX_TIMEOUT_MS,
             persist: false,
+            include_smt: false,
         };
         assert_eq!(at_limits.validate(), Ok(()));
 
@@ -1567,6 +1827,7 @@ mod tests {
             solve_id: None,
             reason: None,
             smt: None,
+            unsat_core: None,
         }
         .validate()
         .unwrap_err();
@@ -1583,6 +1844,7 @@ mod tests {
             solve_id: None,
             reason: None,
             smt: None,
+            unsat_core: None,
         }
         .validate()
         .unwrap_err();
@@ -1598,6 +1860,7 @@ mod tests {
             solve_id: None,
             reason: None,
             smt: None,
+            unsat_core: None,
         };
         assert_eq!(sat.validate(), Ok(()));
     }

@@ -102,6 +102,18 @@ Example (prefer wide sidebar after feasibility): first model may give `sidebar=2
 | `solve_smt` | **escape hatch** — BitVec, Reals, Arrays, Strings, quantifiers, theories beyond B′ | raw SMT-LIB2 (command-allowlisted) | same envelope |
 | `get_solve_result` | **reload** a persisted solve (brain→worker handoff) | `solve_id` (`sol_<16hex>`) | stored artifact |
 
+**Optional request flags:** `persist` (handoff cache), `include_smt` (echo generated/submitted SMT in `response.smt` for debug).
+
+**Constraint entries** (each item in `constraints[]`):
+
+| Form | Wire | Meaning |
+|---|---|---|
+| Bare expr (compat) | `{kind:"op",…}` | Hard, unnamed |
+| Named hard | `{id:"budget", expr:{…}}` | Hard; `id` appears in `unsat_core` on unsat |
+| Soft preference | `{id:"prefer_wide", soft:true, weight:5, expr:{…}}` | `assert-soft`; default weight `1` |
+
+On unsat with **named hard** constraints and **no soft** constraints, the response may include `unsat_core: ["budget", …]` — use it to relax only the conflicting hard rules. Soft + cores are mutually exclusive in one call (Z3 limitation).
+
 ## Encoding (B′ typed JSON)
 
 **Vars:**
@@ -192,6 +204,93 @@ The two examples above are the entry points. These are the other constraint shap
 | What input reaches this branch? / prove none exists | `int` for inputs; assert the predicate (or its negation) | sat → test input; **unsat → unreachable** |
 | Does this bitmask/shift/index overflow? | ⚠ needs `solve_smt` (B′ has no BitVec) — `(declare-const x (_ BitVec 32))`, assert no-wrap | sat → offending input |
 | What order respects these deps? (build/CI/migration) | `int_range` position per task; `lt` for before/after | sat → valid order; **unsat → cycle** |
+
+### Template A — portfolio selection with 0/1 ints (not bool for arithmetic)
+
+B′ `mul`/`add` are **Int-only**. Do **not** multiply `bool` by a score. Encode “include feature?” as `int_range` 0..1:
+
+```json
+{
+  "vars": [
+    {"name": "polish", "type": "int_range", "min": 0, "max": 1},
+    {"name": "cores", "type": "int_range", "min": 0, "max": 1},
+    {"name": "total_value", "type": "int_range", "min": 0, "max": 100},
+    {"name": "total_cost", "type": "int_range", "min": 0, "max": 50}
+  ],
+  "constraints": [
+    {"kind": "op", "op": "eq", "args": [
+      {"kind": "var", "name": "total_value"},
+      {"kind": "op", "op": "add", "args": [
+        {"kind": "op", "op": "mul", "args": [{"kind": "var", "name": "polish"}, {"kind": "int", "value": 7}]},
+        {"kind": "op", "op": "mul", "args": [{"kind": "var", "name": "cores"}, {"kind": "int", "value": 10}]}
+      ]}
+    ]},
+    {"kind": "op", "op": "eq", "args": [
+      {"kind": "var", "name": "total_cost"},
+      {"kind": "op", "op": "add", "args": [
+        {"kind": "op", "op": "mul", "args": [{"kind": "var", "name": "polish"}, {"kind": "int", "value": 2}]},
+        {"kind": "op", "op": "mul", "args": [{"kind": "var", "name": "cores"}, {"kind": "int", "value": 6}]}
+      ]}
+    ]},
+    {"kind": "op", "op": "le", "args": [{"kind": "var", "name": "total_cost"}, {"kind": "int", "value": 20}]},
+    {"kind": "op", "op": "ge", "args": [{"kind": "var", "name": "total_value"}, {"kind": "int", "value": 10}]}
+  ]
+}
+```
+
+Ratchet `total_value` upward until last `sat` for a feasible high-value portfolio (not a proven optimum without νZ).
+
+### Template B — assert-negation (prove invariant)
+
+To prove safety property P under bounds: assert **¬P** (the unsafe condition) and require `unsat`.
+
+```json
+{
+  "vars": [
+    {"name": "pos", "type": "int_range", "min": 0, "max": 512},
+    {"name": "len", "type": "int_range", "min": 0, "max": 512}
+  ],
+  "constraints": [
+    {"id": "overflow", "expr": {
+      "kind": "op", "op": "gt", "args": [
+        {"kind": "op", "op": "add", "args": [
+          {"kind": "var", "name": "pos"},
+          {"kind": "var", "name": "len"}
+        ]},
+        {"kind": "int", "value": 1024}
+      ]
+    }}
+  ]
+}
+```
+
+→ `unsat` proves no overflow under the bounds. `sat` model is a counterexample for a failing test.
+
+### Template C — hard vs soft (prefer without poisoning feasibility)
+
+**Hard first** (must hold). **Soft** = preferences (`soft: true`). Do not put “prefer wide sidebar” in the hard set.
+
+```json
+{
+  "vars": [{"name": "sidebar", "type": "int_range", "min": 200, "max": 480}],
+  "constraints": [
+    {"id": "min_main", "expr": {
+      "kind": "op", "op": "le", "args": [
+        {"kind": "var", "name": "sidebar"},
+        {"kind": "int", "value": 400}
+      ]
+    }},
+    {"id": "prefer_wide", "soft": true, "weight": 5, "expr": {
+      "kind": "op", "op": "ge", "args": [
+        {"kind": "var", "name": "sidebar"},
+        {"kind": "int", "value": 320}
+      ]
+    }}
+  ]
+}
+```
+
+On hard-only conflict, give each hard rule an `id` and read `unsat_core` instead of binary-search re-encodes.
 
 ## `solve_smt` escape hatch
 
