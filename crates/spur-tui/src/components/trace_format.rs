@@ -26,9 +26,16 @@ fn token(theme: &Theme, name: &str) -> Color {
 /// it reaches ratatui's backend.
 ///
 /// Raw C0 controls break ratatui's cursor model: a tab jumps to a terminal tab
-/// stop, carriage return moves to column 0, and ESC can begin an ANSI sequence.
-/// In a contiguous diff stream that leaves stale cells behind, which matches
-/// the ghost characters visible after numbered file-output rows.
+/// stop, carriage return rewrites the current line, and ESC begins CSI/OSC
+/// sequences (colors, bracketed-paste `?2004h/l`, etc.). Half-escaping ESC to
+/// `^[` left the rest of the CSI body visible as noise (`^[[?2004l`) and burned
+/// collapsed preview rows — strip complete escape sequences instead.
+///
+/// Rules:
+/// - `\t` → four spaces
+/// - `\r` → within a single display line, restart the line (progress-bar overwrite)
+/// - CSI (`ESC [ … final`) and OSC (`ESC ] … BEL/ST`) → dropped entirely
+/// - other C0 / DEL → caret notation (`^C`, …) so they stay visible but inert
 pub(crate) fn terminal_safe_text(input: &str) -> String {
     if !input
         .as_bytes()
@@ -39,11 +46,45 @@ pub(crate) fn terminal_safe_text(input: &str) -> String {
     }
 
     let mut out = String::with_capacity(input.len());
-    for ch in input.chars() {
+    let mut chars = input.chars().peekable();
+    while let Some(ch) = chars.next() {
         match ch {
             '\t' => out.push_str("    "),
-            '\x1b' => out.push_str("^["),
-            '\x00'..='\x08' | '\x0b'..='\x0c' | '\x0e'..='\x1f' | '\x7f' | '\r' | '\n' => {
+            '\r' => {
+                // Per-line callers already split on `\n`; CR rewrites from col 0.
+                out.clear();
+            }
+            '\x1b' => match chars.peek().copied() {
+                // CSI: ESC [ intermediate/params final(@-~)
+                Some('[') => {
+                    chars.next();
+                    for c in chars.by_ref() {
+                        if ('\u{40}'..='\u{7e}').contains(&c) {
+                            break;
+                        }
+                    }
+                }
+                // OSC: ESC ] … BEL or ESC \
+                Some(']') => {
+                    chars.next();
+                    while let Some(c) = chars.next() {
+                        if c == '\u{07}' {
+                            break;
+                        }
+                        if c == '\x1b' && chars.peek() == Some(&'\\') {
+                            chars.next();
+                            break;
+                        }
+                    }
+                }
+                // 2-byte Fe sequences (ESC @.._) — drop both.
+                Some(c) if ('\u{40}'..='\u{5f}').contains(&c) => {
+                    chars.next();
+                }
+                // Lone ESC or unknown — drop silently (do not emit `^[`).
+                _ => {}
+            },
+            '\x00'..='\x08' | '\x0b'..='\x0c' | '\x0e'..='\x1f' | '\x7f' | '\n' => {
                 out.push('^');
                 out.push(control_name(ch));
             }
@@ -347,11 +388,18 @@ pub(crate) fn observe_payload_lines(
             ]));
             let stdout_limit = if collapsed { 8 } else { usize::MAX };
             let stderr_limit = if collapsed { 4 } else { usize::MAX };
-            let stdout_total = stdout.lines().count();
-            for sl in stdout.lines().take(stdout_limit) {
+            // Sanitize first so CSI-only lines (bracketed-paste probes, color
+            // resets) collapse to empty and do not burn the preview budget.
+            let stdout_safe: Vec<String> = stdout
+                .lines()
+                .map(terminal_safe_text)
+                .filter(|s| !s.is_empty())
+                .collect();
+            let stdout_total = stdout_safe.len();
+            for sl in stdout_safe.iter().take(stdout_limit) {
                 lines.push(Line::from(vec![
                     Span::raw("   "),
-                    Span::styled(terminal_safe_text(sl), Style::default().fg(body)),
+                    Span::styled(sl.clone(), Style::default().fg(body)),
                 ]));
             }
             if collapsed && stdout_total > stdout_limit {
@@ -366,11 +414,16 @@ pub(crate) fn observe_payload_lines(
                     ),
                 ]));
             }
-            let stderr_total = stderr.lines().count();
-            for el in stderr.lines().take(stderr_limit) {
+            let stderr_safe: Vec<String> = stderr
+                .lines()
+                .map(terminal_safe_text)
+                .filter(|s| !s.is_empty())
+                .collect();
+            let stderr_total = stderr_safe.len();
+            for el in stderr_safe.iter().take(stderr_limit) {
                 lines.push(Line::from(vec![
                     Span::raw("   "),
-                    Span::styled(terminal_safe_text(el), Style::default().fg(error)),
+                    Span::styled(el.clone(), Style::default().fg(error)),
                 ]));
             }
             if collapsed && stderr_total > stderr_limit {
@@ -547,8 +600,38 @@ mod tests {
             terminal_safe_text("2728\tself.process_action();"),
             "2728    self.process_action();"
         );
-        assert_eq!(terminal_safe_text("red\x1b[31m"), "red^[[31m");
-        assert_eq!(terminal_safe_text("left\rright"), "left^Mright");
+        // CSI color sequences strip completely (no `^[[31m` litter).
+        assert_eq!(terminal_safe_text("red\x1b[31m"), "red");
+        // Bracketed-paste mode probes must not burn preview rows as noise.
+        assert_eq!(terminal_safe_text("\x1b[?2004l"), "");
+        assert_eq!(terminal_safe_text("\x1b[?2004hhello"), "hello");
+        // CR rewrites the current line (progress-bar / spinner overwrite).
+        assert_eq!(terminal_safe_text("left\rright"), "right");
+        // Other C0 still caret-escaped so they stay inert but visible.
+        assert_eq!(terminal_safe_text("a\x00b"), "a^@b");
+    }
+
+    #[test]
+    fn command_output_preview_skips_csi_only_noise_lines() {
+        let payload = ObservePayload::CommandOutput {
+            exit_code: Some(0),
+            stdout: "\x1b[?2004l\nreal line 1\nreal line 2\n".to_string(),
+            stderr: String::new(),
+        };
+        let lines = observe_payload_lines(crate::theme::fallback_theme(), &payload, true);
+        let rendered = lines.iter().map(line_text).collect::<Vec<_>>();
+        assert!(
+            !rendered
+                .iter()
+                .any(|l| l.contains("2004") || l.contains("^[")),
+            "CSI noise must not appear: {rendered:?}"
+        );
+        assert!(
+            rendered.iter().any(|l| l.contains("real line 1")),
+            "useful stdout must remain: {rendered:?}"
+        );
+        // exit header + 2 useful lines (CSI-only line dropped)
+        assert_eq!(rendered.len(), 3, "rendered={rendered:?}");
     }
 
     #[test]

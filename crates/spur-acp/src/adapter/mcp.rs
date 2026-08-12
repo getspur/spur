@@ -1,11 +1,12 @@
 use serde_json::{Map, Value};
 use std::borrow::Cow;
 
-/// Unwrap the standard MCP content-block envelope
-/// `{"items": [{"Json": J}, {"Text": T}, ...]}` into a single Value.
+/// Unwrap MCP / ACP tool-result envelopes into a single Value for observe extractors.
 ///
 /// Strategy (deterministic, documented):
-/// - Non-envelope (no `items` array) → passthrough.
+///
+/// **ACP `items` envelope** `{"items": [{"Json": J}, {"Text": T}, ...]}`:
+/// - Non-envelope (no `items` array) → try standard MCP shape, else passthrough.
 /// - 0 items → passthrough.
 /// - Single `Json` item → the inner Json value.
 /// - Single `Text` item → `Value::String(text)`.
@@ -15,9 +16,13 @@ use std::borrow::Cow;
 ///   can flag partial data. If first Json is non-object, wrap in
 ///   `{"value": <original>, "__truncated__": true}`.
 /// - Unrecursive: only the outer envelope is unwrapped, never nested.
+///
+/// **Standard MCP `CallToolResult`** `{"content":[{"type":"text","text":…}], "isError"?}`:
+/// - All text blocks → joined `Value::String` (or `{error:true, message}` when `isError`).
+/// - Otherwise passthrough so extractors can still match other shapes.
 pub fn unwrap_envelope(v: &Value) -> Cow<'_, Value> {
     let Some(items) = v.get("items").and_then(|i| i.as_array()) else {
-        return Cow::Borrowed(v);
+        return unwrap_mcp_content_array(v);
     };
 
     if items.is_empty() {
@@ -74,6 +79,45 @@ pub fn unwrap_envelope(v: &Value) -> Cow<'_, Value> {
 
     // Nothing recognizable — passthrough
     Cow::Borrowed(v)
+}
+
+/// Peel standard MCP `CallToolResult.content[]` text blocks into a string Value.
+///
+/// Without this, generic observe falls through to pretty-printed raw JSON and
+/// the TUI shows the envelope scaffolding (`"content": [ { "type": "text" …`)
+/// instead of the tool's message — the garbled MCP tool output in session detail.
+fn unwrap_mcp_content_array(v: &Value) -> Cow<'_, Value> {
+    let Some(content) = v.get("content").and_then(|c| c.as_array()) else {
+        return Cow::Borrowed(v);
+    };
+    if content.is_empty() {
+        return Cow::Borrowed(v);
+    }
+
+    let mut texts: Vec<&str> = Vec::new();
+    for block in content {
+        let ty = block.get("type").and_then(|t| t.as_str()).unwrap_or("");
+        if ty == "text" {
+            if let Some(t) = block.get("text").and_then(|t| t.as_str()) {
+                texts.push(t);
+            }
+        } else {
+            // Mixed media (image/resource) — leave structured for extractors.
+            return Cow::Borrowed(v);
+        }
+    }
+    if texts.is_empty() {
+        return Cow::Borrowed(v);
+    }
+
+    let joined = texts.join("\n");
+    if v.get("isError").and_then(|e| e.as_bool()).unwrap_or(false) {
+        let mut err = Map::new();
+        err.insert("error".to_string(), Value::Bool(true));
+        err.insert("message".to_string(), Value::String(joined));
+        return Cow::Owned(Value::Object(err));
+    }
+    Cow::Owned(Value::String(joined))
 }
 
 #[cfg(test)]
@@ -181,5 +225,44 @@ mod tests {
         let result = unwrap_envelope(&v);
         assert_eq!(result["value"], json!("raw string"));
         assert_eq!(result["__truncated__"], json!(true));
+    }
+
+    #[test]
+    fn standard_mcp_content_text_array_unwraps_to_string() {
+        let v = json!({
+            "content": [
+                {"type": "text", "text": "Created issue spur-abc"},
+                {"type": "text", "text": "status: open"}
+            ]
+        });
+        let result = unwrap_envelope(&v);
+        assert_eq!(
+            *result,
+            Value::String("Created issue spur-abc\nstatus: open".to_string())
+        );
+    }
+
+    #[test]
+    fn standard_mcp_content_is_error_becomes_error_object() {
+        let v = json!({
+            "content": [{"type": "text", "text": "permission denied"}],
+            "isError": true
+        });
+        let result = unwrap_envelope(&v);
+        assert_eq!(result["error"], json!(true));
+        assert_eq!(result["message"], json!("permission denied"));
+    }
+
+    #[test]
+    fn standard_mcp_content_with_image_passthrough() {
+        let v = json!({
+            "content": [
+                {"type": "text", "text": "caption"},
+                {"type": "image", "data": "abc", "mimeType": "image/png"}
+            ]
+        });
+        let result = unwrap_envelope(&v);
+        assert!(matches!(result, Cow::Borrowed(_)));
+        assert_eq!(*result, v);
     }
 }
