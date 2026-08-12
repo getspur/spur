@@ -12,8 +12,8 @@
 use std::{collections::HashMap, error::Error, fmt};
 
 use crate::types::{
-    ConstraintExpr, ConstraintItem, ConstraintOp, SolveConstraintsRequest, ValidationError,
-    Variable,
+    ConstraintExpr, ConstraintItem, ConstraintOp, Objective, SolveConstraintsRequest,
+    ValidationError, Variable,
 };
 
 /// Prefix applied to every validated surface variable name in generated SMT.
@@ -111,6 +111,7 @@ impl From<ValidationError> for EncodeError {
 ///             ConstraintExpr::Int { value: 3 },
 ///         ],
 ///     }].into_iter().map(Into::into).collect(),
+///     objectives: vec![],
 ///     timeout_ms: 30_000,
 ///     persist: false,
 ///     include_smt: false,
@@ -131,8 +132,8 @@ pub fn encode_solve_constraints(request: &SolveConstraintsRequest) -> Result<Str
         .push_line("(set-option :produce-models true)")?;
 
     // Unsat cores require named hard assertions. Z3 cannot combine
-    // produce-unsat-cores with soft (optimize) constraints in one query.
-    let want_cores = request.has_named_hard_constraints() && !request.has_soft_constraints();
+    // produce-unsat-cores with soft constraints or νZ objectives in one query.
+    let want_cores = request.wants_unsat_cores();
     if want_cores {
         encoder
             .output
@@ -147,6 +148,9 @@ pub fn encode_solve_constraints(request: &SolveConstraintsRequest) -> Result<Str
     }
     for constraint in &request.constraints {
         encoder.write_constraint(constraint)?;
+    }
+    for objective in &request.objectives {
+        encoder.write_objective(objective)?;
     }
 
     encoder.output.push_line("(check-sat)")?;
@@ -244,6 +248,14 @@ impl<'a> Encoder<'a> {
                 self.output.push_line(")")
             }
         }
+    }
+
+    fn write_objective(&mut self, objective: &Objective) -> Result<(), EncodeError> {
+        self.output.push("(")?;
+        self.output.push(objective.op.as_str())?;
+        self.output.push(" ")?;
+        self.write_expression(&objective.expr)?;
+        self.output.push_line(")")
     }
 
     fn write_integer_bound(
@@ -492,6 +504,7 @@ mod tests {
             .into_iter()
             .map(Into::into)
             .collect(),
+            objectives: vec![],
             timeout_ms: DEFAULT_TIMEOUT_MS,
             persist: false,
             include_smt: false,
@@ -544,6 +557,7 @@ mod tests {
             .into_iter()
             .map(Into::into)
             .collect(),
+            objectives: vec![],
             timeout_ms: DEFAULT_TIMEOUT_MS,
             persist: false,
             include_smt: false,
@@ -580,6 +594,7 @@ mod tests {
             .into_iter()
             .map(Into::into)
             .collect(),
+            objectives: vec![],
             timeout_ms: DEFAULT_TIMEOUT_MS,
             persist: false,
             include_smt: false,
@@ -639,6 +654,7 @@ mod tests {
             .into_iter()
             .map(Into::into)
             .collect(),
+            objectives: vec![],
             timeout_ms: DEFAULT_TIMEOUT_MS,
             persist: false,
             include_smt: false,
@@ -658,6 +674,7 @@ mod tests {
                 name: "x) (exit".to_owned(),
             }],
             constraints: Vec::new(),
+            objectives: vec![],
             timeout_ms: DEFAULT_TIMEOUT_MS,
             persist: false,
             include_smt: false,
@@ -717,6 +734,7 @@ mod tests {
             .into_iter()
             .map(Into::into)
             .collect(),
+            objectives: vec![],
             timeout_ms: DEFAULT_TIMEOUT_MS,
             persist: false,
             include_smt: false,
@@ -750,6 +768,7 @@ mod tests {
             .into_iter()
             .map(Into::into)
             .collect(),
+            objectives: vec![],
             timeout_ms: DEFAULT_TIMEOUT_MS,
             persist: false,
             include_smt: false,
@@ -790,6 +809,7 @@ mod tests {
                     ),
                 }),
             ],
+            objectives: vec![],
             timeout_ms: DEFAULT_TIMEOUT_MS,
             persist: false,
             include_smt: false,
@@ -828,6 +848,7 @@ mod tests {
                     ),
                 }),
             ],
+            objectives: vec![],
             timeout_ms: DEFAULT_TIMEOUT_MS,
             persist: false,
             include_smt: false,
@@ -841,6 +862,51 @@ mod tests {
     }
 
     #[test]
+    fn encodes_maximize_minimize_objectives_and_disables_cores() {
+        use crate::types::{ConstraintDecl, ConstraintItem, Objective, ObjectiveOp};
+
+        let request = SolveConstraintsRequest {
+            vars: vec![Variable::IntRange {
+                name: "batch".to_owned(),
+                min: 8,
+                max: 128,
+            }],
+            constraints: vec![ConstraintItem::Declared(ConstraintDecl {
+                id: Some("floor".to_owned()),
+                soft: false,
+                weight: None,
+                expr: op(
+                    ConstraintOp::Ge,
+                    vec![variable("batch"), ConstraintExpr::Int { value: 16 }],
+                ),
+            })],
+            objectives: vec![
+                Objective {
+                    op: ObjectiveOp::Maximize,
+                    expr: variable("batch"),
+                },
+                Objective {
+                    op: ObjectiveOp::Minimize,
+                    expr: op(
+                        ConstraintOp::Sub,
+                        vec![ConstraintExpr::Int { value: 200 }, variable("batch")],
+                    ),
+                },
+            ],
+            timeout_ms: DEFAULT_TIMEOUT_MS,
+            persist: false,
+            include_smt: false,
+        };
+
+        let smt = encode_solve_constraints(&request).expect("valid request should encode");
+        assert!(smt.contains("(maximize v_batch)"));
+        assert!(smt.contains("(minimize (- 200 v_batch))"));
+        assert!(!smt.contains(":produce-unsat-cores"));
+        assert!(!smt.contains("(get-unsat-core)"));
+        assert!(smt.contains("(assert (! (>= v_batch 16) :named floor))"));
+    }
+
+    #[test]
     fn omits_get_value_for_an_empty_surface_variable_set() {
         let request = SolveConstraintsRequest {
             vars: Vec::new(),
@@ -848,6 +914,7 @@ mod tests {
                 .into_iter()
                 .map(Into::into)
                 .collect(),
+            objectives: vec![],
             timeout_ms: DEFAULT_TIMEOUT_MS,
             persist: false,
             include_smt: false,
@@ -873,6 +940,7 @@ mod tests {
                 name: "a".repeat(MAX_GENERATED_SMT_BYTES),
             }],
             constraints: Vec::new(),
+            objectives: vec![],
             timeout_ms: DEFAULT_TIMEOUT_MS,
             persist: false,
             include_smt: false,

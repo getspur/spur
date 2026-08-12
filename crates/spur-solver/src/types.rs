@@ -20,6 +20,8 @@ pub const MAX_CONSTRAINTS: usize = 256;
 pub const MAX_EXPRESSION_DEPTH: usize = 32;
 /// Default weight applied to soft constraints when `weight` is omitted.
 pub const DEFAULT_SOFT_WEIGHT: i64 = 1;
+/// Maximum number of νZ objectives in one typed solve.
+pub const MAX_OBJECTIVES: usize = 4;
 
 const fn default_timeout_ms() -> u64 {
     DEFAULT_TIMEOUT_MS
@@ -258,6 +260,48 @@ pub struct ConstraintDecl {
     pub expr: ConstraintExpr,
 }
 
+/// Direction of a νZ objective over an integer expression.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ObjectiveOp {
+    /// Prefer larger values of the expression among hard-feasible models.
+    Maximize,
+    /// Prefer smaller values of the expression among hard-feasible models.
+    Minimize,
+}
+
+impl ObjectiveOp {
+    /// Wire / SMT command name (`maximize` / `minimize`).
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Maximize => "maximize",
+            Self::Minimize => "minimize",
+        }
+    }
+}
+
+impl fmt::Display for ObjectiveOp {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+/// One integer objective for the typed νZ path.
+///
+/// Objectives are evaluated after hard (and soft) constraints. Multiple
+/// objectives are emitted in request order (Z3 lexicographic default).
+/// This is *optimized under νZ*, not a proof of unique global optimum over
+/// an infinite discrete space unless the domain is fully forced by hard rules.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Objective {
+    /// Maximize or minimize.
+    pub op: ObjectiveOp,
+    /// Integer-sorted expression to optimize.
+    pub expr: ConstraintExpr,
+}
+
 /// Request for typed B′ constraint model-finding.
 ///
 /// # Examples
@@ -283,6 +327,7 @@ pub struct ConstraintDecl {
 ///         ],
 ///     }
 ///     .into()],
+///     objectives: vec![],
 ///     timeout_ms: DEFAULT_TIMEOUT_MS,
 ///     persist: false,
 ///     include_smt: false,
@@ -297,6 +342,9 @@ pub struct SolveConstraintsRequest {
     pub vars: Vec<Variable>,
     /// Boolean constraints (bare expressions, named hard, or soft).
     pub constraints: Vec<ConstraintItem>,
+    /// Optional νZ objectives over integer expressions (lex order).
+    #[serde(default)]
+    pub objectives: Vec<Objective>,
     /// Wall-clock budget in milliseconds.
     #[serde(default = "default_timeout_ms")]
     pub timeout_ms: u64,
@@ -335,6 +383,16 @@ impl SolveConstraintsRequest {
                 format!(
                     "constraint count {} exceeds maximum {MAX_CONSTRAINTS}",
                     self.constraints.len()
+                ),
+            ));
+        }
+        if self.objectives.len() > MAX_OBJECTIVES {
+            return Err(ValidationError::new(
+                ValidationErrorKind::TooManyObjectives,
+                "objectives",
+                format!(
+                    "objective count {} exceeds maximum {MAX_OBJECTIVES}",
+                    self.objectives.len()
                 ),
             ));
         }
@@ -408,6 +466,36 @@ impl SolveConstraintsRequest {
             }
         }
 
+        for (objective_index, objective) in self.objectives.iter().enumerate() {
+            let mut child_path = Vec::new();
+            let sort = match infer_expression(
+                &objective.expr,
+                &variables,
+                objective_index,
+                0,
+                &mut child_path,
+            ) {
+                Ok(sort) => sort,
+                Err(error) => {
+                    return Err(ValidationError::new(
+                        error.kind,
+                        rewrite_objective_path(objective_index, &error.path),
+                        error.message,
+                    ));
+                }
+            };
+            if !matches!(sort, ExpressionSort::Int) {
+                return Err(ValidationError::new(
+                    ValidationErrorKind::ObjectiveNotInteger,
+                    format!("objectives[{objective_index}].expr"),
+                    format!(
+                        "objective expression must be Int, found {}",
+                        sort.description()
+                    ),
+                ));
+            }
+        }
+
         Ok(())
     }
 
@@ -423,6 +511,21 @@ impl SolveConstraintsRequest {
         self.constraints
             .iter()
             .any(|item| !item.is_soft() && item.id().is_some())
+    }
+
+    /// Returns true when the request declares one or more νZ objectives.
+    #[must_use]
+    pub fn has_objectives(&self) -> bool {
+        !self.objectives.is_empty()
+    }
+
+    /// Unsat cores are available only for pure named-hard feasibility queries.
+    ///
+    /// Soft constraints and νZ objectives use Z3's optimize path, which does
+    /// not combine with `produce-unsat-cores` in one call.
+    #[must_use]
+    pub fn wants_unsat_cores(&self) -> bool {
+        self.has_named_hard_constraints() && !self.has_soft_constraints() && !self.has_objectives()
     }
 }
 
@@ -597,6 +700,10 @@ pub enum ValidationErrorKind {
     InvalidSoftWeight,
     /// `weight` was set on a non-soft constraint.
     WeightWithoutSoft,
+    /// More than [`MAX_OBJECTIVES`] objectives were declared.
+    TooManyObjectives,
+    /// An objective expression is not integer-sorted.
+    ObjectiveNotInteger,
     /// A response's model presence does not match its status.
     ResponseModelMismatch,
     /// A response's unsat core presence does not match its status.
@@ -625,6 +732,8 @@ impl fmt::Display for ValidationErrorKind {
             Self::DuplicateConstraintId => "duplicate_constraint_id",
             Self::InvalidSoftWeight => "invalid_soft_weight",
             Self::WeightWithoutSoft => "weight_without_soft",
+            Self::TooManyObjectives => "too_many_objectives",
+            Self::ObjectiveNotInteger => "objective_not_integer",
             Self::ResponseModelMismatch => "response_model_mismatch",
             Self::ResponseCoreMismatch => "response_core_mismatch",
         };
@@ -1082,6 +1191,15 @@ fn expression_path(constraint_index: usize, child_path: &[usize]) -> String {
     path
 }
 
+fn rewrite_objective_path(objective_index: usize, constraint_style_path: &str) -> String {
+    // infer_expression builds paths under constraints[i]; rewrite for objectives.
+    let suffix = constraint_style_path
+        .find(']')
+        .map(|idx| &constraint_style_path[idx + 1..])
+        .unwrap_or("");
+    format!("objectives[{objective_index}].expr{suffix}")
+}
+
 fn expression_field_path(constraint_index: usize, child_path: &[usize], field: &str) -> String {
     let mut path = expression_path(constraint_index, child_path);
     path.push('.');
@@ -1105,6 +1223,7 @@ mod tests {
         SolveConstraintsRequest {
             vars,
             constraints: constraints.into_iter().map(ConstraintItem::from).collect(),
+            objectives: vec![],
             timeout_ms: DEFAULT_TIMEOUT_MS,
             persist: false,
             include_smt: false,
@@ -1357,6 +1476,62 @@ mod tests {
     }
 
     #[test]
+    fn objectives_require_integer_expressions_and_cap() {
+        use super::{Objective, ObjectiveOp, MAX_OBJECTIVES};
+
+        let good: SolveConstraintsRequest = serde_json::from_value(json!({
+            "vars": [{"name": "x", "type": "int_range", "min": 0, "max": 10}],
+            "constraints": [],
+            "objectives": [
+                {"op": "maximize", "expr": {"kind": "var", "name": "x"}},
+                {"op": "minimize", "expr": {
+                    "kind": "op", "op": "sub",
+                    "args": [{"kind": "int", "value": 10}, {"kind": "var", "name": "x"}]
+                }}
+            ]
+        }))
+        .unwrap();
+        assert!(good.validate().is_ok());
+        assert!(good.has_objectives());
+        assert!(!good.wants_unsat_cores());
+
+        let not_int: SolveConstraintsRequest = serde_json::from_value(json!({
+            "vars": [{"name": "flag", "type": "bool"}],
+            "constraints": [],
+            "objectives": [
+                {"op": "maximize", "expr": {"kind": "var", "name": "flag"}}
+            ]
+        }))
+        .unwrap();
+        assert_eq!(
+            not_int.validate().unwrap_err().kind,
+            ValidationErrorKind::ObjectiveNotInteger
+        );
+
+        let too_many = SolveConstraintsRequest {
+            vars: vec![Variable::Int {
+                name: "x".to_owned(),
+            }],
+            constraints: vec![],
+            objectives: (0..=MAX_OBJECTIVES)
+                .map(|_| Objective {
+                    op: ObjectiveOp::Maximize,
+                    expr: ConstraintExpr::Var {
+                        name: "x".to_owned(),
+                    },
+                })
+                .collect(),
+            timeout_ms: DEFAULT_TIMEOUT_MS,
+            persist: false,
+            include_smt: false,
+        };
+        assert_eq!(
+            too_many.validate().unwrap_err().kind,
+            ValidationErrorKind::TooManyObjectives
+        );
+    }
+
+    #[test]
     fn validation_rejects_duplicate_ids_and_invalid_soft_weights() {
         let duplicate: SolveConstraintsRequest = serde_json::from_value(json!({
             "vars": [{"name": "x", "type": "int", }],
@@ -1497,6 +1672,7 @@ mod tests {
                 .into_iter()
                 .map(Into::into)
                 .collect(),
+            objectives: vec![],
             timeout_ms: MAX_TIMEOUT_MS,
             persist: false,
             include_smt: false,
@@ -1526,6 +1702,7 @@ mod tests {
         assert_eq!(too_many_constraints.path, "constraints");
 
         let timeout = SolveConstraintsRequest {
+            objectives: vec![],
             timeout_ms: MAX_TIMEOUT_MS + 1,
             ..request(vec![], vec![])
         }

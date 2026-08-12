@@ -42,7 +42,7 @@ code, not after as a check.
 
 ## Reasoning loop: first principles → feasibility → ratchet (agent-side MCTS)
 
-v1 is **model-finding only** (no νZ maximize/minimize). Any `sat` model is *a* feasible point, not a proven optimum. Simplicity and preference quality come from **how you frame and re-query**, not from a single call.
+Default path is **feasibility** (hard constraints → sat model). Soft preferences (`soft: true`) and typed νZ **objectives** (`maximize` / `minimize` integer exprs) can prefer among feasible models in one call. Any sat model is still not a proven unique global optimum unless the discrete domain is forced by hard rules — tests assert feasibility (and preference when objectives/soft are used), not uniqueness.
 
 ### 1. First principles before encode
 
@@ -112,7 +112,20 @@ Example (prefer wide sidebar after feasibility): first model may give `sidebar=2
 | Named hard | `{id:"budget", expr:{…}}` | Hard; `id` appears in `unsat_core` on unsat |
 | Soft preference | `{id:"prefer_wide", soft:true, weight:5, expr:{…}}` | `assert-soft`; default weight `1` |
 
-On unsat with **named hard** constraints and **no soft** constraints, the response may include `unsat_core: ["budget", …]` — use it to relax only the conflicting hard rules. Soft + cores are mutually exclusive in one call (Z3 limitation).
+On unsat with **named hard** constraints and **no soft / no objectives**, the response may include `unsat_core: ["budget", …]` — use it to relax only the conflicting hard rules. Soft + objectives + cores are mutually exclusive in one call (Z3 optimize vs cores).
+
+**Objectives (typed νZ):**
+
+```json
+"objectives": [
+  {"op": "maximize", "expr": {"kind": "var", "name": "batch"}},
+  {"op": "minimize", "expr": {"kind": "var", "name": "workers"}}
+]
+```
+
+- Each `expr` must be **Int**-sorted (not Bool/Enum).
+- Multiple objectives apply in **request order** (lexicographic).
+- Document results as *feasible + optimized under νZ*, not proven unique optimum.
 
 ## Encoding (B′ typed JSON)
 

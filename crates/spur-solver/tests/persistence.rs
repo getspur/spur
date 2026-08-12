@@ -363,6 +363,7 @@ fn request(persist: bool) -> SolveConstraintsRequest {
     SolveConstraintsRequest {
         vars: Vec::new(),
         constraints: Vec::new(),
+        objectives: vec![],
         timeout_ms: DEFAULT_TIMEOUT_MS,
         persist,
         include_smt: false,

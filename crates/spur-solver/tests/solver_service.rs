@@ -159,6 +159,7 @@ fn empty_request(timeout_ms: u64) -> SolveConstraintsRequest {
     SolveConstraintsRequest {
         vars: Vec::new(),
         constraints: Vec::new(),
+        objectives: vec![],
         timeout_ms,
         persist: false,
         include_smt: false,
@@ -417,6 +418,7 @@ mod unix {
                 },
             ],
             constraints: Vec::new(),
+            objectives: vec![],
             timeout_ms,
             persist: false,
             include_smt: false,
@@ -427,6 +429,7 @@ mod unix {
         SolveConstraintsRequest {
             vars: Vec::new(),
             constraints: Vec::new(),
+            objectives: vec![],
             timeout_ms,
             persist: false,
             include_smt: false,

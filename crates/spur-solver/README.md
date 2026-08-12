@@ -10,7 +10,7 @@ Constraint **model-finding** for SPUR coding agents.
 | Silent rule violations ship | **`unsat`** surfaces impossibility before code |
 | Brain→worker drift on “reasonable” numbers | Shared `solve_id` / model map |
 
-**v1.x scope:** model-finding plus named hard unsat cores and soft (`assert-soft`) preferences. Full νZ maximize/minimize objectives remain out of scope (agent-side ratchet still valid).
+**v1.x scope:** model-finding plus named hard unsat cores, soft (`assert-soft`) preferences, and typed νZ `maximize`/`minimize` objectives over integer expressions.
 
 Design: [`docs/superpowers/specs/2026-07-25-z3-constraint-solver-design.md`](../../docs/superpowers/specs/2026-07-25-z3-constraint-solver-design.md)
 
@@ -364,7 +364,17 @@ Every expression node is tagged (`kind`: `var` | `int` | `bool` | `enum_label` |
 | Named hard | `{id:"budget", expr:{…}}` | `(assert (! … :named budget))` + cores on unsat |
 | Soft | `{id:"prefer", soft:true, weight:5, expr:{…}}` | `(assert-soft … :weight 5 :id prefer)` |
 
-Request flags: `persist`, `include_smt` (echo generated SMT). Soft + unsat cores are mutually exclusive in one call.
+Request flags: `persist`, `include_smt` (echo generated SMT).
+
+**Objectives** (optional, max 4):
+
+```json
+"objectives": [
+  { "op": "maximize", "expr": { "kind": "var", "name": "batch" } }
+]
+```
+
+Soft constraints, νZ objectives, and unsat cores are mutually exclusive in one call (optimize path vs cores).
 
 ### Resource defaults
 
@@ -468,7 +478,7 @@ Illustrative success envelope:
 
 - Full program verification / typechecking replacement
 - Proof certificates / interpolants (named unsat cores ship; full proofs do not)
-- First-class νZ maximize/minimize objectives (soft preferences ship; max/min via `solve_smt` escape hatch only)
+- Multi-objective Pareto / box priorities beyond default lex order
 - JSON theories: Real, BitVec, String, Array, Float, quantifiers (use `solve_smt` if needed)
 - Bundling Z3 into dist artifacts / auto-download
 - TUI surface for solves

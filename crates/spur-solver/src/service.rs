@@ -372,7 +372,7 @@ fn response_from_output(
             );
         }
     };
-    let want_cores = request.has_named_hard_constraints() && !request.has_soft_constraints();
+    let want_cores = request.wants_unsat_cores();
     let parsed = parse_solver_output(stdout, &request.vars, want_cores);
     let expected_get_value_failure = output.exit_code == Some(1)
         && parsed

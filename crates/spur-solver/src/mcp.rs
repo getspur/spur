@@ -12,7 +12,7 @@ use crate::{
     service::{SolverService, SolverServiceError},
     types::{
         SolveConstraintsRequest, SolveSmtRequest, DEFAULT_TIMEOUT_MS, MAX_CONSTRAINTS,
-        MAX_TIMEOUT_MS, MAX_VARIABLES,
+        MAX_OBJECTIVES, MAX_TIMEOUT_MS, MAX_VARIABLES,
     },
 };
 
@@ -194,6 +194,24 @@ fn solve_constraints_schema() -> Value {
                 "maxItems": MAX_CONSTRAINTS,
                 "items": constraint_item_schema(),
                 "description": "Hard or soft constraints. Bare ConstraintExpr remains accepted; named/soft use {id?, soft?, weight?, expr}."
+            },
+            "objectives": {
+                "type": "array",
+                "maxItems": MAX_OBJECTIVES,
+                "default": [],
+                "description": "Optional νZ objectives over integer expressions, applied in request order (lexicographic). Soft constraints and objectives disable unsat cores in the same call.",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "op": {
+                            "type": "string",
+                            "enum": ["maximize", "minimize"]
+                        },
+                        "expr": constraint_expression_schema()
+                    },
+                    "required": ["op", "expr"],
+                    "additionalProperties": false
+                }
             },
             "timeout_ms": timeout_schema(),
             "persist": {

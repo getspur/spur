@@ -15,7 +15,8 @@ Give SPUR brain and worker agents a **constraint model-finder** so coding work s
 
 **Product thesis:** LLMs propose constraints; Z3 (or an equivalent SMT solver) returns `sat` + a concrete model (or `unsat` / `unknown` / `timeout`). Coding agents consume the model in config, layout, infra, tests, and constants.
 
-**v1 job:** model-finding only. Proof/refutation, unsat cores, and optimization are deferred.
+**v1 job (original):** model-finding only.  
+**v1.x shipped (2026-08):** named hard **unsat cores**, **soft** preferences (`assert-soft`), typed νZ **maximize/minimize** objectives (int expr, max 4, lex order), `include_smt`, real `z3 --version` probe. Soft/objectives and cores remain mutually exclusive in one call.
 
 ## Value
 
@@ -39,12 +40,12 @@ Give SPUR brain and worker agents a **constraint model-finder** so coding work s
 | Timeout | **Default 30s**; **hard cap 60s** (never above cap) |
 | Concurrency | Process-wide semaphore; default **4** concurrent Z3 children |
 | Constraint language | **Closed** AST ops only; no string-concat into SMT from agent fragments |
-| Optimization (νZ) | Out of v1; agents re-query with tighter bounds (“prefer X” doctrine) |
+| Optimization (νZ) | **v1.x:** typed `objectives[]` maximize/minimize Int expr (≤4, lex); soft constraints; agent re-query still valid for discrete search |
 
-## Non-goals (v1)
+## Non-goals (v1 original / still deferred beyond v1.x)
 
-- Proof generation, validity checking, unsat cores, interpolants
-- νZ maximize/minimize as first-class API
+- Proof generation, interpolants, full validity certificates (named unsat cores **ship** in v1.x)
+- Multi-objective Pareto/box priority modes beyond default lex
 - Theories in JSON: Real, BitVec, String, Array, Float, quantifiers (use `solve_smt` if needed)
 - Incremental sessions (`push`/`pop`), process pooling as a product feature
 - Solver portfolio (cvc5, Bitwuzla, …)
@@ -489,7 +490,7 @@ Phased build (~4–5 engineering days, estimate only):
 | Timeout policy | Default 30s; hard cap 60s |
 | AST extensibility | Closed ops + tagged wire form; raw SMT is the escape hatch |
 | Artifact GC | Manual / no GC in v1 |
-| Soft “prefer” goals | Re-query doctrine; no νZ in v1 |
+| Soft “prefer” goals | **v1.x:** `soft` + weight; objectives maximize/minimize; re-query still valid |
 
 ## References
 
