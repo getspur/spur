@@ -244,6 +244,17 @@ EOF
 EOF
         echo "profile.d libproc self-heal added"
     fi
+    # Keep ort-sys prebuilts on the cargo volume (lockstep with startup-aws.sh
+    # MACCROSS / build.sh). Root reclaim used to wipe ~/.cache/ort.pyke.io and
+    # race cargo xtask install with missing libonnxruntime.a.
+    if ! grep -q 'XDG_CACHE_HOME=/mnt/cargo/.cache' /etc/profile.d/spur-build.sh; then
+        sudo tee -a /etc/profile.d/spur-build.sh >/dev/null <<'EOF'
+# ort-sys (pyke onnxruntime) + other XDG caches on the big disk — not root EBS.
+mkdir -p /mnt/cargo/.cache
+export XDG_CACHE_HOME=/mnt/cargo/.cache
+EOF
+        echo "profile.d XDG_CACHE_HOME added"
+    fi
 else
     echo "WARNING: no passwordless sudo; set SDKROOT/CFLAGS_aarch64_apple_darwin manually"
 fi

@@ -74,6 +74,14 @@ on the VM and rebuild (see "libproc" below for why).
    with Xcode CLT (compiler-rt), not the SDK. zig searches the SDK lib dir,
    so dropping the ~830 KB archive there resolves it.
 
+5b. **`XDG_CACHE_HOME=/mnt/cargo/.cache`** — ort-sys downloads pyke's static
+   `libonnxruntime.a` into `$XDG_CACHE_HOME/ort.pyke.io` (default
+   `~/.cache/ort.pyke.io` on the **49G root EBS**). The spur-disk-watchdog
+   used to `rm -rf ~/.cache/ort.pyke.io` on root reclaim, racing
+   `cargo xtask install` / `spur-cargo zigbuild` and producing:
+   `error: could not find native static library onnxruntime`. Cache lives on
+   the big cargo volume now; root reclaim only drops a leftover home copy.
+
 6. **libproc (pulled by spur-acp) cannot cross-build as published** — its
    build.rs gates bindgen behind `#[cfg(target_os = "macos")]`, a HOST cfg,
    and hardcodes a `/Library/Developer/...` include path. On a Linux host the
