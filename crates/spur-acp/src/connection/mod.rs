@@ -168,6 +168,18 @@ pub trait AgentConnection: Send + Sync {
         None
     }
 
+    /// Return the last known LLM model id for an ACP session, if the transport
+    /// tracks it (e.g. Grok `_x.ai/session_notification` `model_changed`).
+    ///
+    /// Must **not** return the coding-agent entry name — only a model id such
+    /// as `grok-4.5`. Default: unknown.
+    ///
+    /// Authority: sol_55e2f7194a224bba phase C
+    fn session_llm_model(&self, acp_session_id: &str) -> Option<String> {
+        let _ = acp_session_id;
+        None
+    }
+
     /// Cancel an in-flight prompt for the given session.
     ///
     /// This is a best-effort notification; the agent may or may not honor it.

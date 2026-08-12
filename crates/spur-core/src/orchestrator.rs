@@ -745,6 +745,8 @@ impl Orchestrator {
         );
 
         let success = true;
+        // ACP session id (distinct from spur session_id used in cost.db).
+        let acp_session_id = session_response.session_id.to_string();
         let prompt_outcome = crate::notification_drain::drive_prompt_notifications(
             &mut *connection,
             prompt_request,
@@ -761,6 +763,32 @@ impl Orchestrator {
         .await?;
         let prompt_usage = prompt_outcome.usage;
 
+        // sol_55e2f7194a224bba phase C: LLM id for pricing/model column — never
+        // the coding-agent entry name (e.g. "grok"). Prefer ACP-reported model.
+        let llm_model = connection
+            .session_llm_model(&acp_session_id)
+            .filter(|m| m != agent_name);
+
+        // sol_55e2f7194a224bba phase A: surface missing ACP usage so ADE token
+        // zeros are diagnosable (Grok often omits PromptResponse.usage).
+        if prompt_usage.is_none() {
+            tracing::warn!(
+                agent = %agent_name,
+                spur_session = %session_id,
+                acp_session = %acp_session_id,
+                "prompt usage missing after exec_direct; cost.db tokens will stay null \
+                 (agent must emit PromptResponse.usage or mappable UsageUpdate meta)"
+            );
+        } else if let Some(ref u) = prompt_usage {
+            if u.input_tokens == 0 && u.output_tokens == 0 {
+                tracing::warn!(
+                    agent = %agent_name,
+                    spur_session = %session_id,
+                    "prompt usage present but zero tokens; treating as observed zeros"
+                );
+            }
+        }
+
         let _ = connection.shutdown().await;
         let duration = start.elapsed();
 
@@ -773,7 +801,7 @@ impl Orchestrator {
                     duration,
                     agent_config.cost_tier,
                     prompt_usage_to_token_usage(usage),
-                    Some(agent_config.name.as_str()),
+                    llm_model.as_deref(),
                 ),
                 None => ct.end_session(&session_id, status, duration, agent_config.cost_tier),
             };
@@ -784,7 +812,7 @@ impl Orchestrator {
             agent_config.cost_tier,
             duration,
             prompt_usage.as_ref(),
-            Some(agent_config.name.as_str()),
+            llm_model.as_deref(),
         );
         println!();
 

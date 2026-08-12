@@ -64,7 +64,7 @@ use agent_client_protocol::schema::v1::{
     SessionModeState, SessionNotification, SessionUpdate, SetSessionConfigOptionRequest,
     SetSessionConfigOptionResponse, SetSessionModeRequest, SetSessionModeResponse,
     TerminalExitStatus, TerminalId, TerminalOutputRequest, TerminalOutputResponse, Usage,
-    WaitForTerminalExitRequest, WaitForTerminalExitResponse, WriteTextFileRequest,
+    UsageUpdate, WaitForTerminalExitRequest, WaitForTerminalExitResponse, WriteTextFileRequest,
     WriteTextFileResponse,
 };
 use agent_client_protocol::{Agent, ByteStreams, Client, ConnectionTo, Handled, UntypedMessage};
@@ -430,6 +430,93 @@ fn cache_grok_model_changed(
     if let Ok(mut guard) = cache.lock() {
         guard.insert(session_id.to_owned(), model_id.to_owned());
     }
+}
+
+/// sol_55e2f7194a224bba phase B / sol_5d3dc964920d420f:
+/// Fill `last_prompt_usage` from `UsageUpdate` **only** when:
+/// - slot is still empty (do not clobber PromptResponse.usage), and
+/// - meta carries *observed* billable token fields (not context-window `used`/`size`).
+fn maybe_fill_usage_from_session_update(
+    last_prompt_usage: &Arc<Mutex<Option<Usage>>>,
+    update: &SessionUpdate,
+) {
+    let SessionUpdate::UsageUpdate(usage_update) = update else {
+        return;
+    };
+    let Ok(mut slot) = last_prompt_usage.lock() else {
+        return;
+    };
+    if slot.is_some() {
+        // PromptResponse.usage (or a prior meta fill) wins.
+        return;
+    }
+    let Some(usage) = usage_from_usage_update_meta(usage_update) else {
+        tracing::trace!(
+            used = usage_update.used,
+            size = usage_update.size,
+            "UsageUpdate without billable token meta; not inventing input_tokens from used/size"
+        );
+        return;
+    };
+    *slot = Some(usage);
+}
+
+/// Extract ACP [`Usage`] from UsageUpdate.meta when agents embed token counts.
+///
+/// Recognized keys (snake or camel): input_tokens, output_tokens,
+/// cached_read_tokens / cache_read_input_tokens, cached_write_tokens /
+/// cache_creation_input_tokens, total_tokens.
+fn usage_from_usage_update_meta(update: &UsageUpdate) -> Option<Usage> {
+    let meta = update.meta.as_ref()?;
+    let input = meta_u64(meta, &["input_tokens", "inputTokens"])?;
+    let output = meta_u64(meta, &["output_tokens", "outputTokens"]).unwrap_or(0);
+    let cached_read = meta_u64(
+        meta,
+        &[
+            "cached_read_tokens",
+            "cachedReadTokens",
+            "cache_read_input_tokens",
+            "cacheReadInputTokens",
+        ],
+    );
+    let cached_write = meta_u64(
+        meta,
+        &[
+            "cached_write_tokens",
+            "cachedWriteTokens",
+            "cache_creation_input_tokens",
+            "cacheCreationInputTokens",
+        ],
+    );
+    let total = meta_u64(meta, &["total_tokens", "totalTokens"])
+        .unwrap_or_else(|| input.saturating_add(output));
+    let mut usage = Usage::new(total, input, output);
+    if let Some(r) = cached_read {
+        usage = usage.cached_read_tokens(r);
+    }
+    if let Some(w) = cached_write {
+        usage = usage.cached_write_tokens(w);
+    }
+    Some(usage)
+}
+
+fn meta_u64(meta: &serde_json::Map<String, serde_json::Value>, keys: &[&str]) -> Option<u64> {
+    for key in keys {
+        if let Some(v) = meta.get(*key) {
+            if let Some(n) = v.as_u64() {
+                return Some(n);
+            }
+            if let Some(n) = v.as_i64() {
+                return Some(n.max(0) as u64);
+            }
+            if let Some(s) = v.as_str() {
+                if let Ok(n) = s.parse::<u64>() {
+                    return Some(n);
+                }
+            }
+        }
+    }
+    None
 }
 
 fn cache_session_modes(
@@ -1007,6 +1094,13 @@ impl AgentConnection for NativeAcpConnection {
                 self.agent_name
             )
         })??;
+        // Belt-and-suspenders: also record usage here (ACP thread path does the same).
+        // sol_55e2f7194a224bba primary path — PromptResponse.usage → last_prompt_usage
+        if let Some(ref usage) = response.usage {
+            if let Ok(mut slot) = self.last_prompt_usage.lock() {
+                *slot = Some(usage.clone());
+            }
+        }
         Ok(Some(response))
     }
 
@@ -1015,6 +1109,14 @@ impl AgentConnection for NativeAcpConnection {
             .lock()
             .ok()
             .and_then(|mut u| u.take())
+    }
+
+    fn session_llm_model(&self, acp_session_id: &str) -> Option<String> {
+        // Grok (and similar) report model via extension notifications.
+        self.grok_session_models
+            .lock()
+            .ok()
+            .and_then(|guard| guard.get(acp_session_id).cloned())
     }
 
     // ─── cancel ─────────────────────────────────────────────────────────
@@ -1796,6 +1898,8 @@ fn acp_thread_main(
             let session_event_standardizer_h = session_event_standardizer.clone();
             let session_modes_h = session_modes.clone();
             let grok_session_models_h = grok_session_models.clone();
+            // For UsageUpdate → last_prompt_usage fill (phase B) during notify.
+            let last_prompt_usage_h = last_prompt_usage.clone();
 
             let cwd_read = cwd.clone();
             let cwd_write = cwd.clone();
@@ -2165,6 +2269,13 @@ fn acp_thread_main(
                                     .unwrap()
                                     .standardize(args);
                                 cache_session_notification_mode_update(&session_modes_h, &args);
+                                // sol_55e2f7194a224bba phase B: when PromptResponse.usage is
+                                // absent, accept *observed* token fields from UsageUpdate.meta
+                                // only (never invent from used/size context-window fields).
+                                maybe_fill_usage_from_session_update(
+                                    &last_prompt_usage_h,
+                                    &args.update,
+                                );
                                 let variant = session_update_variant_name(&args.update);
                                 let text_len = match &args.update {
                                     SessionUpdate::AgentMessageChunk(c)
@@ -4783,6 +4894,75 @@ mod shutdown_timeout_tests {
 // A unit-level "regression test" that greps this file's source for symbol
 // ordering passes for the wrong reasons (textual reorder, not runtime
 // ordering) and silently breaks on refactor — explicitly omitted.
+
+#[cfg(test)]
+mod usage_fill_tests {
+    use super::*;
+    use agent_client_protocol::schema::v1::UsageUpdate;
+
+    #[test]
+    fn usage_from_meta_reads_billable_token_fields() {
+        let mut update = UsageUpdate::new(100, 200_000);
+        update.meta = Some(
+            serde_json::json!({
+                "input_tokens": 1200,
+                "output_tokens": 340,
+                "cached_read_tokens": 50,
+                "cached_write_tokens": 10,
+                "total_tokens": 1600
+            })
+            .as_object()
+            .expect("object")
+            .clone(),
+        );
+        let usage = usage_from_usage_update_meta(&update).expect("usage from meta");
+        assert_eq!(usage.input_tokens, 1200);
+        assert_eq!(usage.output_tokens, 340);
+        assert_eq!(usage.cached_read_tokens, Some(50));
+        assert_eq!(usage.cached_write_tokens, Some(10));
+        assert_eq!(usage.total_tokens, 1600);
+    }
+
+    #[test]
+    fn usage_from_meta_ignores_context_window_only_update() {
+        // used/size alone must not invent input_tokens (sol_5d3dc964920d420f).
+        let update = UsageUpdate::new(42_000, 200_000);
+        assert!(usage_from_usage_update_meta(&update).is_none());
+    }
+
+    #[test]
+    fn maybe_fill_does_not_clobber_existing_prompt_usage() {
+        let slot = Arc::new(Mutex::new(Some(Usage::new(100, 80, 20))));
+        let mut update = UsageUpdate::new(1, 2);
+        update.meta = Some(
+            serde_json::json!({"input_tokens": 9999, "output_tokens": 1})
+                .as_object()
+                .expect("object")
+                .clone(),
+        );
+        maybe_fill_usage_from_session_update(&slot, &SessionUpdate::UsageUpdate(update));
+        let guarded = slot.lock().unwrap();
+        let u = guarded.as_ref().unwrap();
+        assert_eq!(u.input_tokens, 80); // not clobbered
+    }
+
+    #[test]
+    fn maybe_fill_writes_when_slot_empty_and_meta_present() {
+        let slot = Arc::new(Mutex::new(None));
+        let mut update = UsageUpdate::new(1, 2);
+        update.meta = Some(
+            serde_json::json!({"inputTokens": 500, "outputTokens": 25})
+                .as_object()
+                .expect("object")
+                .clone(),
+        );
+        maybe_fill_usage_from_session_update(&slot, &SessionUpdate::UsageUpdate(update));
+        let guarded = slot.lock().unwrap();
+        let u = guarded.as_ref().unwrap();
+        assert_eq!(u.input_tokens, 500);
+        assert_eq!(u.output_tokens, 25);
+    }
+}
 
 #[cfg(test)]
 mod stderr_capture_tests {

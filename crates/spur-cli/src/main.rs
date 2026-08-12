@@ -1196,6 +1196,8 @@ async fn run() -> Result<()> {
                 },
                 result.total_cost_usd,
             );
+            // sol_3b1887a27da7475a phase3: machine-readable metrics for ADE / harnesses
+            print_spur_agent_metrics(&orch, &result, None);
             if let Some(url) = result.pr_url {
                 println!("[spur] PR: {url}");
             }
@@ -1215,6 +1217,8 @@ async fn run() -> Result<()> {
                 },
                 result.total_cost_usd,
             );
+            // sol_3b1887a27da7475a phase3 — ADE SpurAgent parses this line
+            print_spur_agent_metrics(&orch, &result, Some(agent.as_str()));
             Ok(())
         }
         Commands::Sessions { command } => {
@@ -2108,6 +2112,94 @@ fn load_orchestrator(repo_root: PathBuf) -> Result<Orchestrator> {
     let config = load_config()?;
     let license = SpurLicense::from_env_or_disabled();
     Orchestrator::new(repo_root, config, Some(license.feature_gate()))
+}
+
+/// Emit one machine-readable metrics line after `spur exec` / `spur run`.
+///
+/// Authority: sol_3b1887a27da7475a phase3
+/// - `coding_agent` = ACP entry / registry agent (e.g. grok), **not** LLM id
+/// - `model_name` = LLM id when known and distinct from coding agent
+/// - Prefer cost.db session row when present (duration, tokens)
+fn print_spur_agent_metrics(
+    orch: &Orchestrator,
+    result: &spur_core::RunResult,
+    coding_agent_fallback: Option<&str>,
+) {
+    let mut coding_agent = coding_agent_fallback.unwrap_or("unknown").to_string();
+    let mut cost_usd = result.total_cost_usd;
+    let mut runtime_ms: u64 = 0;
+    let mut input_tokens: u64 = 0;
+    let mut output_tokens: u64 = 0;
+    let mut cache_tokens: u64 = 0;
+    let mut model_name: Option<String> = None;
+
+    if let Some(ref ct) = orch.cost_tracker {
+        if let Ok(Some(s)) = ct.session_detail(&result.session_id) {
+            if !s.agent.is_empty() {
+                coding_agent = s.agent.clone();
+            }
+            if let Some(c) = s.estimated_cost_usd {
+                cost_usd = c;
+            }
+            if let Some(d) = s.duration_seconds {
+                runtime_ms = (d.max(0) as u64).saturating_mul(1000);
+            }
+            if let Some(t) = s.input_tokens {
+                input_tokens = t.max(0) as u64;
+            }
+            if let Some(t) = s.output_tokens {
+                output_tokens = t.max(0) as u64;
+            }
+            let mut cache: u64 = 0;
+            if let Some(t) = s.cache_creation_tokens {
+                cache = cache.saturating_add(t.max(0) as u64);
+            }
+            if let Some(t) = s.cache_read_tokens {
+                cache = cache.saturating_add(t.max(0) as u64);
+            }
+            cache_tokens = cache;
+            // Identity: do not report coding-agent name as model_name.
+            if let Some(m) = s.model {
+                if m != coding_agent {
+                    model_name = Some(m);
+                }
+            }
+        }
+    }
+
+    let mut map = serde_json::Map::new();
+    map.insert(
+        "session_id".into(),
+        serde_json::Value::String(result.session_id.0.clone()),
+    );
+    map.insert(
+        "coding_agent".into(),
+        serde_json::Value::String(coding_agent),
+    );
+    if let Some(m) = model_name {
+        map.insert("model_name".into(), serde_json::Value::String(m));
+    } else {
+        map.insert("model_name".into(), serde_json::Value::Null);
+    }
+    map.insert("input_tokens".into(), serde_json::json!(input_tokens));
+    map.insert("output_tokens".into(), serde_json::json!(output_tokens));
+    map.insert("cache_tokens".into(), serde_json::json!(cache_tokens));
+    map.insert("num_turns".into(), serde_json::json!(0));
+    map.insert("runtime_ms".into(), serde_json::json!(runtime_ms));
+    map.insert("cost_usd".into(), serde_json::json!(cost_usd));
+    map.insert("success".into(), serde_json::json!(result.success));
+    map.insert(
+        "source".into(),
+        serde_json::Value::String("spur_cli".into()),
+    );
+
+    // Compact single-line JSON for ADE line parsers.
+    match serde_json::to_string(&serde_json::Value::Object(map)) {
+        Ok(payload) => println!("SPUR_AGENT_METRICS:{payload}"),
+        Err(_) => {
+            // Never fail the user-facing command on metrics serialization.
+        }
+    }
 }
 
 async fn run_gc_outcomes(
