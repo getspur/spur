@@ -22,6 +22,12 @@ pub const MAX_EXPRESSION_DEPTH: usize = 32;
 pub const DEFAULT_SOFT_WEIGHT: i64 = 1;
 /// Maximum number of νZ objectives in one typed solve.
 pub const MAX_OBJECTIVES: usize = 4;
+/// Maximum BitVec width accepted by the typed surface.
+pub const MAX_BITVEC_WIDTH: u32 = 64;
+/// Maximum concurrent incremental sessions per process.
+pub const MAX_SOLVE_SESSIONS: usize = 8;
+/// Maximum push-frame depth for one incremental session.
+pub const MAX_SESSION_FRAMES: usize = 16;
 
 const fn default_timeout_ms() -> u64 {
     DEFAULT_TIMEOUT_MS
@@ -29,6 +35,18 @@ const fn default_timeout_ms() -> u64 {
 
 const fn default_false() -> bool {
     false
+}
+
+const fn default_true() -> bool {
+    true
+}
+
+const fn default_objective_priority() -> ObjectivePriority {
+    ObjectivePriority::Lex
+}
+
+const fn default_session_op() -> SessionOp {
+    SessionOp::None
 }
 
 /// A declared variable in the B′ constraint language.
@@ -64,6 +82,18 @@ pub enum Variable {
         /// Allowed labels.
         values: Vec<String>,
     },
+    /// An unbounded real (SMT `Real`) variable.
+    Real {
+        /// Surface name used by constraint expressions and returned models.
+        name: String,
+    },
+    /// A fixed-width bit-vector variable (`(_ BitVec width)`).
+    BitVec {
+        /// Surface name used by constraint expressions and returned models.
+        name: String,
+        /// Bit width in `1..=MAX_BITVEC_WIDTH`.
+        width: u32,
+    },
 }
 
 impl Variable {
@@ -74,7 +104,9 @@ impl Variable {
             Self::Bool { name }
             | Self::Int { name }
             | Self::IntRange { name, .. }
-            | Self::Enum { name, .. } => name,
+            | Self::Enum { name, .. }
+            | Self::Real { name }
+            | Self::BitVec { name, .. } => name,
         }
     }
 }
@@ -99,7 +131,7 @@ pub enum ConstraintOp {
     Add,
     /// Integer subtraction.
     Sub,
-    /// Integer multiplication.
+    /// Integer / real / bit-vector multiplication.
     Mul,
     /// Boolean conjunction.
     And,
@@ -107,6 +139,28 @@ pub enum ConstraintOp {
     Or,
     /// Boolean negation.
     Not,
+    /// Bit-vector bitwise AND (same width).
+    BvAnd,
+    /// Bit-vector bitwise OR (same width).
+    BvOr,
+    /// Bit-vector bitwise XOR (same width).
+    BvXor,
+    /// Bit-vector bitwise NOT.
+    BvNot,
+    /// Bit-vector addition (same width).
+    BvAdd,
+    /// Bit-vector subtraction (same width).
+    BvSub,
+    /// Bit-vector multiplication (same width).
+    BvMul,
+    /// Unsigned bit-vector `<`.
+    BvUlt,
+    /// Unsigned bit-vector `≤`.
+    BvUle,
+    /// Unsigned bit-vector `>`.
+    BvUgt,
+    /// Unsigned bit-vector `≥`.
+    BvUge,
 }
 
 impl ConstraintOp {
@@ -126,17 +180,42 @@ impl ConstraintOp {
             Self::And => "and",
             Self::Or => "or",
             Self::Not => "not",
+            Self::BvAnd => "bv_and",
+            Self::BvOr => "bv_or",
+            Self::BvXor => "bv_xor",
+            Self::BvNot => "bv_not",
+            Self::BvAdd => "bv_add",
+            Self::BvSub => "bv_sub",
+            Self::BvMul => "bv_mul",
+            Self::BvUlt => "bv_ult",
+            Self::BvUle => "bv_ule",
+            Self::BvUgt => "bv_ugt",
+            Self::BvUge => "bv_uge",
         }
     }
 
     const fn arity(self) -> Arity {
         match self {
-            Self::Eq | Self::Ne | Self::Lt | Self::Le | Self::Gt | Self::Ge | Self::Sub => {
-                Arity::Exact(2)
-            }
+            Self::Eq
+            | Self::Ne
+            | Self::Lt
+            | Self::Le
+            | Self::Gt
+            | Self::Ge
+            | Self::Sub
+            | Self::BvAnd
+            | Self::BvOr
+            | Self::BvXor
+            | Self::BvAdd
+            | Self::BvSub
+            | Self::BvMul
+            | Self::BvUlt
+            | Self::BvUle
+            | Self::BvUgt
+            | Self::BvUge => Arity::Exact(2),
             Self::Add | Self::Mul => Arity::AtLeast(2),
             Self::And | Self::Or => Arity::AtLeast(1),
-            Self::Not => Arity::Exact(1),
+            Self::Not | Self::BvNot => Arity::Exact(1),
         }
     }
 }
@@ -176,6 +255,20 @@ pub enum ConstraintExpr {
         /// Label in the referenced enum variable's `values`.
         label: String,
     },
+    /// Rational real literal `num/den` with `den > 0`.
+    Real {
+        /// Numerator.
+        num: i64,
+        /// Positive denominator.
+        den: i64,
+    },
+    /// Unsigned bit-vector literal of fixed width.
+    Bv {
+        /// Bit width in `1..=MAX_BITVEC_WIDTH`.
+        width: u32,
+        /// Unsigned value; must fit in `width` bits.
+        value: u64,
+    },
     /// Application of a closed B′ operation.
     Op {
         /// Operation to apply.
@@ -183,6 +276,48 @@ pub enum ConstraintExpr {
         /// Tagged child expressions.
         args: Vec<Self>,
     },
+}
+
+/// Multi-objective combination mode for νZ.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ObjectivePriority {
+    /// Lexicographic objectives in request order (Z3 default).
+    #[default]
+    Lex,
+    /// Pareto front (Z3 `:opt.priority pareto`).
+    Pareto,
+    /// Independent box objectives (Z3 `:opt.priority box`).
+    Box,
+}
+
+impl ObjectivePriority {
+    /// SMT-LIB option atom for `:opt.priority`.
+    #[must_use]
+    pub const fn as_smt(self) -> &'static str {
+        match self {
+            Self::Lex => "lex",
+            Self::Pareto => "pareto",
+            Self::Box => "box",
+        }
+    }
+}
+
+/// Incremental session control on a typed solve request.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionOp {
+    /// Stateless solve (default); may still attach to a session for full re-solve.
+    #[default]
+    None,
+    /// Start a new session with this request's variables and first constraint frame.
+    Begin,
+    /// Push a new constraint frame onto `session_id` and solve.
+    Push,
+    /// Pop the newest constraint frame of `session_id` and solve remainder.
+    Pop,
+    /// Drop `session_id` (no solve required if constraints empty).
+    End,
 }
 
 /// A top-level constraint entry.
@@ -298,7 +433,7 @@ impl fmt::Display for ObjectiveOp {
 pub struct Objective {
     /// Maximize or minimize.
     pub op: ObjectiveOp,
-    /// Integer-sorted expression to optimize.
+    /// Integer, real, or bit-vector expression to optimize.
     pub expr: ConstraintExpr,
 }
 
@@ -328,9 +463,13 @@ pub struct Objective {
 ///     }
 ///     .into()],
 ///     objectives: vec![],
+///     objective_priority: spur_solver::types::ObjectivePriority::Lex,
 ///     timeout_ms: DEFAULT_TIMEOUT_MS,
 ///     persist: false,
 ///     include_smt: false,
+///     use_cache: true,
+///     session_id: None,
+///     session_op: spur_solver::types::SessionOp::None,
 /// };
 ///
 /// assert!(request.validate().is_ok());
@@ -342,9 +481,12 @@ pub struct SolveConstraintsRequest {
     pub vars: Vec<Variable>,
     /// Boolean constraints (bare expressions, named hard, or soft).
     pub constraints: Vec<ConstraintItem>,
-    /// Optional νZ objectives over integer expressions (lex order).
+    /// Optional νZ objectives over numeric expressions.
     #[serde(default)]
     pub objectives: Vec<Objective>,
+    /// How multiple objectives are combined (lex / pareto / box).
+    #[serde(default = "default_objective_priority")]
+    pub objective_priority: ObjectivePriority,
     /// Wall-clock budget in milliseconds.
     #[serde(default = "default_timeout_ms")]
     pub timeout_ms: u64,
@@ -354,6 +496,15 @@ pub struct SolveConstraintsRequest {
     /// When true, echo the generated SMT-LIB2 script in the response `smt` field.
     #[serde(default = "default_false")]
     pub include_smt: bool,
+    /// When true (default), consult the process-wide request fingerprint cache.
+    #[serde(default = "default_true")]
+    pub use_cache: bool,
+    /// Incremental session identifier (`sess_` + 16 hex) when continuing a session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    /// Incremental session control (begin / push / pop / end).
+    #[serde(default = "default_session_op")]
+    pub session_op: SessionOp,
 }
 
 impl SolveConstraintsRequest {
@@ -484,13 +635,39 @@ impl SolveConstraintsRequest {
                     ));
                 }
             };
-            if !matches!(sort, ExpressionSort::Int) {
+            if !matches!(
+                sort,
+                ExpressionSort::Int | ExpressionSort::Real | ExpressionSort::BitVec(_)
+            ) {
                 return Err(ValidationError::new(
-                    ValidationErrorKind::ObjectiveNotInteger,
+                    ValidationErrorKind::ObjectiveNotNumeric,
                     format!("objectives[{objective_index}].expr"),
                     format!(
-                        "objective expression must be Int, found {}",
+                        "objective expression must be Int, Real, or BitVec, found {}",
                         sort.description()
+                    ),
+                ));
+            }
+        }
+
+        if matches!(
+            self.session_op,
+            SessionOp::Push | SessionOp::Pop | SessionOp::End
+        ) && self.session_id.is_none()
+        {
+            return Err(ValidationError::new(
+                ValidationErrorKind::MissingSessionId,
+                "session_id",
+                "session_op push/pop/end requires session_id",
+            ));
+        }
+        if let Some(session_id) = self.session_id.as_deref() {
+            if !is_valid_session_id(session_id) {
+                return Err(ValidationError::new(
+                    ValidationErrorKind::InvalidSessionId,
+                    "session_id",
+                    format!(
+                        "session_id {session_id:?} must match sess_ followed by 16 lowercase hex digits"
                     ),
                 ));
             }
@@ -589,7 +766,7 @@ pub enum ModelValue {
     Bool(bool),
     /// Signed integer model value.
     Int(i64),
-    /// Enum label, or an opaque SMT-LIB value from the raw solver path.
+    /// Enum label, real decimal/fraction text, bit-vector text, or opaque SMT value.
     Enum(String),
 }
 
@@ -618,9 +795,15 @@ pub struct SolveConstraintsResponse {
     /// Surface ids of a minimal hard unsat core, when available.
     ///
     /// Present only for [`SolveStatus::Unsat`] when the request used named hard
-    /// constraints and no soft constraints (Z3 cannot combine cores with soft).
+    /// constraints and no soft/objectives (Z3 cannot combine cores with optimize).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unsat_core: Option<Vec<String>>,
+    /// True when served from the process-wide request fingerprint cache.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cached: bool,
+    /// Incremental session identifier when begin/push/pop produced or used one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
 }
 
 impl SolveConstraintsResponse {
@@ -702,8 +885,18 @@ pub enum ValidationErrorKind {
     WeightWithoutSoft,
     /// More than [`MAX_OBJECTIVES`] objectives were declared.
     TooManyObjectives,
-    /// An objective expression is not integer-sorted.
-    ObjectiveNotInteger,
+    /// An objective expression is not Int/Real/BitVec.
+    ObjectiveNotNumeric,
+    /// BitVec width is zero or exceeds [`MAX_BITVEC_WIDTH`].
+    InvalidBitVecWidth,
+    /// BitVec literal value does not fit in its width.
+    BitVecValueTooWide,
+    /// Real literal has non-positive denominator.
+    InvalidRealLiteral,
+    /// Session op requires a session_id that was missing.
+    MissingSessionId,
+    /// Session id fails the pinned wire format.
+    InvalidSessionId,
     /// A response's model presence does not match its status.
     ResponseModelMismatch,
     /// A response's unsat core presence does not match its status.
@@ -733,7 +926,12 @@ impl fmt::Display for ValidationErrorKind {
             Self::InvalidSoftWeight => "invalid_soft_weight",
             Self::WeightWithoutSoft => "weight_without_soft",
             Self::TooManyObjectives => "too_many_objectives",
-            Self::ObjectiveNotInteger => "objective_not_integer",
+            Self::ObjectiveNotNumeric => "objective_not_numeric",
+            Self::InvalidBitVecWidth => "invalid_bitvec_width",
+            Self::BitVecValueTooWide => "bitvec_value_too_wide",
+            Self::InvalidRealLiteral => "invalid_real_literal",
+            Self::MissingSessionId => "missing_session_id",
+            Self::InvalidSessionId => "invalid_session_id",
             Self::ResponseModelMismatch => "response_model_mismatch",
             Self::ResponseCoreMismatch => "response_core_mismatch",
         };
@@ -801,6 +999,8 @@ enum VariableSort {
     Int,
     Bool,
     Enum(usize),
+    Real,
+    BitVec(u32),
 }
 
 #[derive(Clone, Copy)]
@@ -838,6 +1038,19 @@ impl<'a> VariableTable<'a> {
             let sort = match variable {
                 Variable::Bool { .. } => VariableSort::Bool,
                 Variable::Int { .. } => VariableSort::Int,
+                Variable::Real { .. } => VariableSort::Real,
+                Variable::BitVec { width, .. } => {
+                    if *width == 0 || *width > MAX_BITVEC_WIDTH {
+                        return Err(ValidationError::new(
+                            ValidationErrorKind::InvalidBitVecWidth,
+                            format!("vars[{index}].width"),
+                            format!(
+                                "bitvec width must be in 1..={MAX_BITVEC_WIDTH}, found {width}"
+                            ),
+                        ));
+                    }
+                    VariableSort::BitVec(*width)
+                }
                 Variable::IntRange { min, max, .. } => {
                     if min > max {
                         return Err(ValidationError::new(
@@ -912,6 +1125,8 @@ enum ExpressionSort {
     Int,
     Bool(BoolOrigin),
     Enum(usize),
+    Real,
+    BitVec(u32),
 }
 
 impl ExpressionSort {
@@ -920,6 +1135,8 @@ impl ExpressionSort {
             Self::Int => "Int",
             Self::Bool(_) => "Bool",
             Self::Enum(_) => "Enum",
+            Self::Real => "Real",
+            Self::BitVec(_) => "BitVec",
         }
     }
 }
@@ -931,6 +1148,26 @@ fn is_valid_surface_name(name: &str) -> bool {
     };
     (first.is_ascii_alphabetic() || first == b'_')
         && bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+}
+
+fn is_valid_session_id(session_id: &str) -> bool {
+    let Some(hex) = session_id.strip_prefix("sess_") else {
+        return false;
+    };
+    hex.len() == 16
+        && hex
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+}
+
+fn bitvec_value_fits(width: u32, value: u64) -> bool {
+    if width == 0 || width > 64 {
+        return false;
+    }
+    if width == 64 {
+        return true;
+    }
+    value < (1_u64 << width)
 }
 
 fn infer_expression(
@@ -961,10 +1198,39 @@ fn infer_expression(
                 VariableSort::Int => ExpressionSort::Int,
                 VariableSort::Bool => ExpressionSort::Bool(BoolOrigin::Variable),
                 VariableSort::Enum(domain_id) => ExpressionSort::Enum(domain_id),
+                VariableSort::Real => ExpressionSort::Real,
+                VariableSort::BitVec(width) => ExpressionSort::BitVec(width),
             })
         }
         ConstraintExpr::Int { .. } => Ok(ExpressionSort::Int),
         ConstraintExpr::Bool { .. } => Ok(ExpressionSort::Bool(BoolOrigin::Literal)),
+        ConstraintExpr::Real { den, .. } => {
+            if *den <= 0 {
+                return Err(ValidationError::new(
+                    ValidationErrorKind::InvalidRealLiteral,
+                    expression_field_path(constraint_index, child_path, "den"),
+                    format!("real denominator must be > 0, found {den}"),
+                ));
+            }
+            Ok(ExpressionSort::Real)
+        }
+        ConstraintExpr::Bv { width, value } => {
+            if *width == 0 || *width > MAX_BITVEC_WIDTH {
+                return Err(ValidationError::new(
+                    ValidationErrorKind::InvalidBitVecWidth,
+                    expression_field_path(constraint_index, child_path, "width"),
+                    format!("bitvec width must be in 1..={MAX_BITVEC_WIDTH}, found {width}"),
+                ));
+            }
+            if !bitvec_value_fits(*width, *value) {
+                return Err(ValidationError::new(
+                    ValidationErrorKind::BitVecValueTooWide,
+                    expression_field_path(constraint_index, child_path, "value"),
+                    format!("bitvec value {value} does not fit in {width} bits"),
+                ));
+            }
+            Ok(ExpressionSort::BitVec(*width))
+        }
         ConstraintExpr::EnumLabel { var, label } => {
             let info = variables.get(var).ok_or_else(|| {
                 ValidationError::new(
@@ -1042,28 +1308,56 @@ fn infer_operation(
             }
         }
         ConstraintOp::Lt | ConstraintOp::Le | ConstraintOp::Gt | ConstraintOp::Ge => {
-            require_all_args(
-                op,
-                args,
-                ExpressionClass::Int,
-                variables,
-                constraint_index,
-                depth,
-                child_path,
-            )?;
-            Ok(ExpressionSort::Bool(BoolOrigin::Compound))
+            let left = infer_child(&args[0], 0, variables, constraint_index, depth, child_path)?;
+            let right = infer_child(&args[1], 1, variables, constraint_index, depth, child_path)?;
+            if ordered_numeric_pair(left, right) {
+                Ok(ExpressionSort::Bool(BoolOrigin::Compound))
+            } else {
+                Err(type_mismatch(
+                    constraint_index,
+                    child_path,
+                    format!(
+                        "operation {op} requires homogeneous Int or Real operands, found {} and {}",
+                        left.description(),
+                        right.description()
+                    ),
+                ))
+            }
         }
         ConstraintOp::Add | ConstraintOp::Sub | ConstraintOp::Mul => {
-            require_all_args(
-                op,
-                args,
-                ExpressionClass::Int,
-                variables,
-                constraint_index,
-                depth,
-                child_path,
-            )?;
-            Ok(ExpressionSort::Int)
+            let first = infer_child(&args[0], 0, variables, constraint_index, depth, child_path)?;
+            if !matches!(first, ExpressionSort::Int | ExpressionSort::Real) {
+                return Err(type_mismatch(
+                    constraint_index,
+                    child_path,
+                    format!(
+                        "operation {op} requires Int or Real operands, found {}",
+                        first.description()
+                    ),
+                ));
+            }
+            for (child_index, argument) in args.iter().enumerate().skip(1) {
+                let sort = infer_child(
+                    argument,
+                    child_index,
+                    variables,
+                    constraint_index,
+                    depth,
+                    child_path,
+                )?;
+                if sort != first {
+                    return Err(type_mismatch(
+                        constraint_index,
+                        child_path,
+                        format!(
+                            "operation {op} requires homogeneous operands, found {} and {}",
+                            first.description(),
+                            sort.description()
+                        ),
+                    ));
+                }
+            }
+            Ok(first)
         }
         ConstraintOp::And | ConstraintOp::Or | ConstraintOp::Not => {
             require_all_args(
@@ -1076,6 +1370,58 @@ fn infer_operation(
                 child_path,
             )?;
             Ok(ExpressionSort::Bool(BoolOrigin::Compound))
+        }
+        ConstraintOp::BvNot => {
+            let sort = infer_child(&args[0], 0, variables, constraint_index, depth, child_path)?;
+            match sort {
+                ExpressionSort::BitVec(width) => Ok(ExpressionSort::BitVec(width)),
+                other => Err(type_mismatch(
+                    constraint_index,
+                    child_path,
+                    format!("bv_not requires BitVec, found {}", other.description()),
+                )),
+            }
+        }
+        ConstraintOp::BvAnd
+        | ConstraintOp::BvOr
+        | ConstraintOp::BvXor
+        | ConstraintOp::BvAdd
+        | ConstraintOp::BvSub
+        | ConstraintOp::BvMul => {
+            let left = infer_child(&args[0], 0, variables, constraint_index, depth, child_path)?;
+            let right = infer_child(&args[1], 1, variables, constraint_index, depth, child_path)?;
+            match (left, right) {
+                (ExpressionSort::BitVec(w1), ExpressionSort::BitVec(w2)) if w1 == w2 => {
+                    Ok(ExpressionSort::BitVec(w1))
+                }
+                _ => Err(type_mismatch(
+                    constraint_index,
+                    child_path,
+                    format!(
+                        "operation {op} requires same-width BitVec operands, found {} and {}",
+                        left.description(),
+                        right.description()
+                    ),
+                )),
+            }
+        }
+        ConstraintOp::BvUlt | ConstraintOp::BvUle | ConstraintOp::BvUgt | ConstraintOp::BvUge => {
+            let left = infer_child(&args[0], 0, variables, constraint_index, depth, child_path)?;
+            let right = infer_child(&args[1], 1, variables, constraint_index, depth, child_path)?;
+            match (left, right) {
+                (ExpressionSort::BitVec(w1), ExpressionSort::BitVec(w2)) if w1 == w2 => {
+                    Ok(ExpressionSort::Bool(BoolOrigin::Compound))
+                }
+                _ => Err(type_mismatch(
+                    constraint_index,
+                    child_path,
+                    format!(
+                        "operation {op} requires same-width BitVec operands, found {} and {}",
+                        left.description(),
+                        right.description()
+                    ),
+                )),
+            }
         }
     }
 }
@@ -1102,21 +1448,16 @@ fn infer_child(
 
 #[derive(Clone, Copy)]
 enum ExpressionClass {
-    Int,
     Bool,
 }
 
 impl ExpressionClass {
     const fn accepts(self, sort: ExpressionSort) -> bool {
-        match self {
-            Self::Int => matches!(sort, ExpressionSort::Int),
-            Self::Bool => matches!(sort, ExpressionSort::Bool(_)),
-        }
+        matches!(self, Self::Bool if matches!(sort, ExpressionSort::Bool(_)))
     }
 
     const fn description(self) -> &'static str {
         match self {
-            Self::Int => "Int",
             Self::Bool => "Bool",
         }
     }
@@ -1161,12 +1502,23 @@ fn require_all_args(
 const fn equality_is_valid(left: ExpressionSort, right: ExpressionSort) -> bool {
     match (left, right) {
         (ExpressionSort::Int, ExpressionSort::Int)
-        | (ExpressionSort::Bool(_), ExpressionSort::Bool(_)) => true,
+        | (ExpressionSort::Bool(_), ExpressionSort::Bool(_))
+        | (ExpressionSort::Real, ExpressionSort::Real) => true,
         (ExpressionSort::Enum(left_domain), ExpressionSort::Enum(right_domain)) => {
             left_domain == right_domain
         }
+        (ExpressionSort::BitVec(left_width), ExpressionSort::BitVec(right_width)) => {
+            left_width == right_width
+        }
         _ => false,
     }
+}
+
+const fn ordered_numeric_pair(left: ExpressionSort, right: ExpressionSort) -> bool {
+    matches!(
+        (left, right),
+        (ExpressionSort::Int, ExpressionSort::Int) | (ExpressionSort::Real, ExpressionSort::Real)
+    )
 }
 
 fn type_mismatch(
@@ -1224,6 +1576,10 @@ mod tests {
             vars,
             constraints: constraints.into_iter().map(ConstraintItem::from).collect(),
             objectives: vec![],
+            objective_priority: Default::default(),
+            use_cache: true,
+            session_id: None,
+            session_op: Default::default(),
             timeout_ms: DEFAULT_TIMEOUT_MS,
             persist: false,
             include_smt: false,
@@ -1505,7 +1861,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             not_int.validate().unwrap_err().kind,
-            ValidationErrorKind::ObjectiveNotInteger
+            ValidationErrorKind::ObjectiveNotNumeric
         );
 
         let too_many = SolveConstraintsRequest {
@@ -1521,6 +1877,10 @@ mod tests {
                     },
                 })
                 .collect(),
+            objective_priority: Default::default(),
+            use_cache: true,
+            session_id: None,
+            session_op: Default::default(),
             timeout_ms: DEFAULT_TIMEOUT_MS,
             persist: false,
             include_smt: false,
@@ -1585,6 +1945,8 @@ mod tests {
             reason: None,
             smt: None,
             unsat_core: None,
+            cached: false,
+            session_id: None,
         };
         let value = serde_json::to_value(&response).unwrap();
 
@@ -1608,6 +1970,8 @@ mod tests {
             reason: None,
             smt: None,
             unsat_core: None,
+            cached: false,
+            session_id: None,
         })
         .unwrap();
 
@@ -1673,6 +2037,10 @@ mod tests {
                 .map(Into::into)
                 .collect(),
             objectives: vec![],
+            objective_priority: Default::default(),
+            use_cache: true,
+            session_id: None,
+            session_op: Default::default(),
             timeout_ms: MAX_TIMEOUT_MS,
             persist: false,
             include_smt: false,
@@ -1703,6 +2071,10 @@ mod tests {
 
         let timeout = SolveConstraintsRequest {
             objectives: vec![],
+            objective_priority: Default::default(),
+            use_cache: true,
+            session_id: None,
+            session_op: Default::default(),
             timeout_ms: MAX_TIMEOUT_MS + 1,
             ..request(vec![], vec![])
         }
@@ -2005,6 +2377,8 @@ mod tests {
             reason: None,
             smt: None,
             unsat_core: None,
+            cached: false,
+            session_id: None,
         }
         .validate()
         .unwrap_err();
@@ -2022,6 +2396,8 @@ mod tests {
             reason: None,
             smt: None,
             unsat_core: None,
+            cached: false,
+            session_id: None,
         }
         .validate()
         .unwrap_err();
@@ -2038,6 +2414,8 @@ mod tests {
             reason: None,
             smt: None,
             unsat_core: None,
+            cached: false,
+            session_id: None,
         };
         assert_eq!(sat.validate(), Ok(()));
     }

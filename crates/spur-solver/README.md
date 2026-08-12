@@ -376,6 +376,8 @@ Request flags: `persist`, `include_smt` (echo generated SMT).
 
 Soft constraints, νZ objectives, and unsat cores are mutually exclusive in one call (optimize path vs cores).
 
+**Also:** `objective_priority` (`lex`/`pareto`/`box`), `use_cache` (default true), incremental `session_op`/`session_id`, domains `real` + `bit_vec`.
+
 ### Resource defaults
 
 | Parameter | Default |

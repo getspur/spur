@@ -160,9 +160,13 @@ fn empty_request(timeout_ms: u64) -> SolveConstraintsRequest {
         vars: Vec::new(),
         constraints: Vec::new(),
         objectives: vec![],
+        objective_priority: Default::default(),
         timeout_ms,
         persist: false,
         include_smt: false,
+        use_cache: true,
+        session_id: None,
+        session_op: Default::default(),
     }
 }
 
@@ -419,9 +423,13 @@ mod unix {
             ],
             constraints: Vec::new(),
             objectives: vec![],
+            objective_priority: Default::default(),
             timeout_ms,
             persist: false,
             include_smt: false,
+            use_cache: true,
+            session_id: None,
+            session_op: Default::default(),
         }
     }
 
@@ -430,9 +438,13 @@ mod unix {
             vars: Vec::new(),
             constraints: Vec::new(),
             objectives: vec![],
+            objective_priority: Default::default(),
             timeout_ms,
             persist: false,
             include_smt: false,
+            use_cache: true,
+            session_id: None,
+            session_op: Default::default(),
         }
     }
 

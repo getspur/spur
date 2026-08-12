@@ -166,7 +166,10 @@ fn is_allowed_command(command: &str) -> bool {
 }
 
 fn is_allowed_set_option(option: &str) -> bool {
-    matches!(option, ":produce-models" | ":produce-unsat-cores")
+    matches!(
+        option,
+        ":produce-models" | ":produce-unsat-cores" | ":opt.priority"
+    )
 }
 
 fn validate_set_option(lexer: &mut Lexer<'_>) -> Result<(), SmtGateError> {
@@ -192,22 +195,43 @@ fn validate_set_option(lexer: &mut Lexer<'_>) -> Result<(), SmtGateError> {
         });
     }
 
-    match lexer.next_token()? {
-        Some(Token::Atom {
-            value: "true" | "false",
-            ..
-        }) => {}
-        Some(other) => {
-            return Err(SmtGateError::InvalidSetOption {
-                offset: other.offset(),
-                message: "allowed set-option keys require a Boolean value",
-            });
+    if option == ":opt.priority" {
+        match lexer.next_token()? {
+            Some(Token::Atom {
+                value: "lex" | "pareto" | "box",
+                ..
+            }) => {}
+            Some(other) => {
+                return Err(SmtGateError::InvalidSetOption {
+                    offset: other.offset(),
+                    message: ":opt.priority requires lex, pareto, or box",
+                });
+            }
+            None => {
+                return Err(SmtGateError::InvalidSetOption {
+                    offset: lexer.cursor(),
+                    message: "missing :opt.priority value",
+                });
+            }
         }
-        None => {
-            return Err(SmtGateError::InvalidSetOption {
-                offset: lexer.cursor(),
-                message: "missing set-option value",
-            });
+    } else {
+        match lexer.next_token()? {
+            Some(Token::Atom {
+                value: "true" | "false",
+                ..
+            }) => {}
+            Some(other) => {
+                return Err(SmtGateError::InvalidSetOption {
+                    offset: other.offset(),
+                    message: "allowed set-option keys require a Boolean value",
+                });
+            }
+            None => {
+                return Err(SmtGateError::InvalidSetOption {
+                    offset: lexer.cursor(),
+                    message: "missing set-option value",
+                });
+            }
         }
     }
 

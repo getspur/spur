@@ -112,9 +112,13 @@ impl From<ValidationError> for EncodeError {
 ///         ],
 ///     }].into_iter().map(Into::into).collect(),
 ///     objectives: vec![],
+///     objective_priority: spur_solver::types::ObjectivePriority::Lex,
 ///     timeout_ms: 30_000,
 ///     persist: false,
 ///     include_smt: false,
+///     use_cache: true,
+///     session_id: None,
+///     session_op: spur_solver::types::SessionOp::None,
 /// };
 ///
 /// let smt = encode_solve_constraints(&request)?;
@@ -126,7 +130,9 @@ pub fn encode_solve_constraints(request: &SolveConstraintsRequest) -> Result<Str
     request.validate()?;
 
     let mut encoder = Encoder::new(request);
-    encoder.output.push_line("(set-logic QF_NIA)")?;
+    encoder
+        .output
+        .push_line(&format!("(set-logic {})", select_logic(request)))?;
     encoder
         .output
         .push_line("(set-option :produce-models true)")?;
@@ -138,6 +144,11 @@ pub fn encode_solve_constraints(request: &SolveConstraintsRequest) -> Result<Str
         encoder
             .output
             .push_line("(set-option :produce-unsat-cores true)")?;
+    }
+    if request.has_objectives() {
+        encoder.output.push("(set-option :opt.priority ")?;
+        encoder.output.push(request.objective_priority.as_smt())?;
+        encoder.output.push_line(")")?;
     }
 
     for variable in &request.vars {
@@ -161,6 +172,40 @@ pub fn encode_solve_constraints(request: &SolveConstraintsRequest) -> Result<Str
     }
     encoder.write_get_value()?;
     Ok(encoder.output.finish())
+}
+
+/// Encode a request that may merge session frames (caller supplies final constraints).
+pub fn encode_solve_constraints_with_constraints(
+    request: &SolveConstraintsRequest,
+    constraints: &[crate::types::ConstraintItem],
+) -> Result<String, EncodeError> {
+    let mut merged = request.clone();
+    merged.constraints = constraints.to_vec();
+    encode_solve_constraints(&merged)
+}
+
+fn select_logic(request: &SolveConstraintsRequest) -> &'static str {
+    let has_bv = request
+        .vars
+        .iter()
+        .any(|variable| matches!(variable, Variable::BitVec { .. }));
+    let has_real = request
+        .vars
+        .iter()
+        .any(|variable| matches!(variable, Variable::Real { .. }));
+    let has_int = request.vars.iter().any(|variable| {
+        matches!(
+            variable,
+            Variable::Int { .. } | Variable::IntRange { .. } | Variable::Enum { .. }
+        )
+    });
+    match (has_bv, has_real, has_int) {
+        (true, true, _) | (true, _, true) => "ALL",
+        (true, false, false) => "QF_BV",
+        (false, true, true) => "QF_NIRA",
+        (false, true, false) => "QF_NRA",
+        (false, false, _) => "QF_NIA",
+    }
 }
 
 struct Encoder<'a> {
@@ -198,12 +243,21 @@ impl<'a> Encoder<'a> {
             Variable::Int { .. } | Variable::IntRange { .. } | Variable::Enum { .. } => {
                 self.output.push_line(" Int)")
             }
+            Variable::Real { .. } => self.output.push_line(" Real)"),
+            Variable::BitVec { width, .. } => {
+                self.output.push(" (_ BitVec ")?;
+                self.output.push_u64(u64::from(*width))?;
+                self.output.push_line("))")
+            }
         }
     }
 
     fn write_bounds(&mut self, variable: &Variable) -> Result<(), EncodeError> {
         match variable {
-            Variable::Bool { .. } | Variable::Int { .. } => Ok(()),
+            Variable::Bool { .. }
+            | Variable::Int { .. }
+            | Variable::Real { .. }
+            | Variable::BitVec { .. } => Ok(()),
             Variable::IntRange { name, min, max } => {
                 self.write_integer_bound(">=", name, *min)?;
                 self.write_integer_bound("<=", name, *max)
@@ -295,6 +349,28 @@ impl<'a> Encoder<'a> {
             ConstraintExpr::Bool { value } => {
                 self.output.push(if *value { "true" } else { "false" })
             }
+            ConstraintExpr::Real { num, den } => {
+                // SMT-LIB rational: (/ num den) with integers.
+                self.output.push("(/ ")?;
+                self.write_integer(*num)?;
+                self.output.push(" ")?;
+                self.write_integer(*den)?;
+                self.output.push(")")
+            }
+            ConstraintExpr::Bv { width, value } => {
+                // Prefer hex when width is a multiple of 4.
+                if width % 4 == 0 {
+                    let digits = (*width / 4) as usize;
+                    self.output.push(&format!("#x{value:0digits$x}"))
+                } else {
+                    let mut bits = String::with_capacity(*width as usize);
+                    for shift in (0..*width).rev() {
+                        bits.push(if (value >> shift) & 1 == 1 { '1' } else { '0' });
+                    }
+                    self.output.push("#b")?;
+                    self.output.push(&bits)
+                }
+            }
             ConstraintExpr::EnumLabel { var, label } => {
                 let index = self.enum_label_index(var, label)?;
                 self.output.push_usize(index)
@@ -377,6 +453,17 @@ const fn operation_token(operation: ConstraintOp) -> &'static str {
         ConstraintOp::And => "and",
         ConstraintOp::Or => "or",
         ConstraintOp::Not => "not",
+        ConstraintOp::BvAnd => "bvand",
+        ConstraintOp::BvOr => "bvor",
+        ConstraintOp::BvXor => "bvxor",
+        ConstraintOp::BvNot => "bvnot",
+        ConstraintOp::BvAdd => "bvadd",
+        ConstraintOp::BvSub => "bvsub",
+        ConstraintOp::BvMul => "bvmul",
+        ConstraintOp::BvUlt => "bvult",
+        ConstraintOp::BvUle => "bvule",
+        ConstraintOp::BvUgt => "bvugt",
+        ConstraintOp::BvUge => "bvuge",
     }
 }
 
@@ -505,6 +592,10 @@ mod tests {
             .map(Into::into)
             .collect(),
             objectives: vec![],
+            objective_priority: Default::default(),
+            use_cache: true,
+            session_id: None,
+            session_op: Default::default(),
             timeout_ms: DEFAULT_TIMEOUT_MS,
             persist: false,
             include_smt: false,
@@ -558,6 +649,10 @@ mod tests {
             .map(Into::into)
             .collect(),
             objectives: vec![],
+            objective_priority: Default::default(),
+            use_cache: true,
+            session_id: None,
+            session_op: Default::default(),
             timeout_ms: DEFAULT_TIMEOUT_MS,
             persist: false,
             include_smt: false,
@@ -595,6 +690,10 @@ mod tests {
             .map(Into::into)
             .collect(),
             objectives: vec![],
+            objective_priority: Default::default(),
+            use_cache: true,
+            session_id: None,
+            session_op: Default::default(),
             timeout_ms: DEFAULT_TIMEOUT_MS,
             persist: false,
             include_smt: false,
@@ -655,6 +754,10 @@ mod tests {
             .map(Into::into)
             .collect(),
             objectives: vec![],
+            objective_priority: Default::default(),
+            use_cache: true,
+            session_id: None,
+            session_op: Default::default(),
             timeout_ms: DEFAULT_TIMEOUT_MS,
             persist: false,
             include_smt: false,
@@ -675,6 +778,10 @@ mod tests {
             }],
             constraints: Vec::new(),
             objectives: vec![],
+            objective_priority: Default::default(),
+            use_cache: true,
+            session_id: None,
+            session_op: Default::default(),
             timeout_ms: DEFAULT_TIMEOUT_MS,
             persist: false,
             include_smt: false,
@@ -735,6 +842,10 @@ mod tests {
             .map(Into::into)
             .collect(),
             objectives: vec![],
+            objective_priority: Default::default(),
+            use_cache: true,
+            session_id: None,
+            session_op: Default::default(),
             timeout_ms: DEFAULT_TIMEOUT_MS,
             persist: false,
             include_smt: false,
@@ -769,6 +880,10 @@ mod tests {
             .map(Into::into)
             .collect(),
             objectives: vec![],
+            objective_priority: Default::default(),
+            use_cache: true,
+            session_id: None,
+            session_op: Default::default(),
             timeout_ms: DEFAULT_TIMEOUT_MS,
             persist: false,
             include_smt: false,
@@ -810,6 +925,10 @@ mod tests {
                 }),
             ],
             objectives: vec![],
+            objective_priority: Default::default(),
+            use_cache: true,
+            session_id: None,
+            session_op: Default::default(),
             timeout_ms: DEFAULT_TIMEOUT_MS,
             persist: false,
             include_smt: false,
@@ -849,6 +968,10 @@ mod tests {
                 }),
             ],
             objectives: vec![],
+            objective_priority: Default::default(),
+            use_cache: true,
+            session_id: None,
+            session_op: Default::default(),
             timeout_ms: DEFAULT_TIMEOUT_MS,
             persist: false,
             include_smt: false,
@@ -893,6 +1016,10 @@ mod tests {
                     ),
                 },
             ],
+            objective_priority: Default::default(),
+            use_cache: true,
+            session_id: None,
+            session_op: Default::default(),
             timeout_ms: DEFAULT_TIMEOUT_MS,
             persist: false,
             include_smt: false,
@@ -915,6 +1042,10 @@ mod tests {
                 .map(Into::into)
                 .collect(),
             objectives: vec![],
+            objective_priority: Default::default(),
+            use_cache: true,
+            session_id: None,
+            session_op: Default::default(),
             timeout_ms: DEFAULT_TIMEOUT_MS,
             persist: false,
             include_smt: false,
@@ -941,6 +1072,10 @@ mod tests {
             }],
             constraints: Vec::new(),
             objectives: vec![],
+            objective_priority: Default::default(),
+            use_cache: true,
+            session_id: None,
+            session_op: Default::default(),
             timeout_ms: DEFAULT_TIMEOUT_MS,
             persist: false,
             include_smt: false,

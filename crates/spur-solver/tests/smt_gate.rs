@@ -73,7 +73,7 @@ fn restricts_set_option_to_the_safe_boolean_subset() {
         "(set-option :print-success true)",
         "(set-option :produce-models 1)",
         "(set-option :produce-models true false)",
-        "(set-option :opt.priority lex)",
+        "(set-option :opt.priority wmax)",
     ] {
         assert!(
             validate_smt_script(script).is_err(),
@@ -85,6 +85,10 @@ fn restricts_set_option_to_the_safe_boolean_subset() {
         .expect("produce-models accepts a Boolean value");
     validate_smt_script("(set-option :produce-unsat-cores true)")
         .expect("produce-unsat-cores accepts a Boolean value");
+    for priority in ["lex", "pareto", "box"] {
+        validate_smt_script(&format!("(set-option :opt.priority {priority})"))
+            .unwrap_or_else(|_| panic!("opt.priority {priority} should be allowed"));
+    }
 }
 
 #[test]

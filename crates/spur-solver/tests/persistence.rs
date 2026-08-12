@@ -344,6 +344,8 @@ fn persist_rejects_single_artifact_larger_than_byte_budget() -> Result<(), Box<d
         reason: Some(huge_reason),
         smt: None,
         unsat_core: None,
+        cached: false,
+        session_id: None,
     };
 
     let error = service
@@ -364,6 +366,10 @@ fn request(persist: bool) -> SolveConstraintsRequest {
         vars: Vec::new(),
         constraints: Vec::new(),
         objectives: vec![],
+        objective_priority: Default::default(),
+        use_cache: true,
+        session_id: None,
+        session_op: Default::default(),
         timeout_ms: DEFAULT_TIMEOUT_MS,
         persist,
         include_smt: false,
@@ -379,6 +385,8 @@ fn unsat_response() -> SolveConstraintsResponse {
         reason: None,
         smt: None,
         unsat_core: None,
+        cached: false,
+        session_id: None,
     }
 }
 

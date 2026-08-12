@@ -124,8 +124,13 @@ On unsat with **named hard** constraints and **no soft / no objectives**, the re
 ```
 
 - Each `expr` must be **Int**-sorted (not Bool/Enum).
-- Multiple objectives apply in **request order** (lexicographic).
+- Multiple objectives apply in request order; set `objective_priority` to `lex` (default), `pareto`, or `box`.
 - Document results as *feasible + optimized under νZ*, not proven unique optimum.
+
+**Domains (v1.x+):** `bool` / `int` / `int_range` / `enum` / **`real`** / **`bit_vec{width}`**.  
+BitVec ops: `bv_and|or|xor|not|add|sub|mul|ult|ule|ugt|uge`. Literals: `{kind:"real",num,den}`, `{kind:"bv",width,value}`.
+
+**Cache:** `use_cache` defaults true (stateless solves). **Sessions:** `session_op` `begin|push|pop|end` + `session_id` stacks constraint frames (re-encoded each call).
 
 ## Encoding (B′ typed JSON)
 

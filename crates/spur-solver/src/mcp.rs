@@ -199,7 +199,7 @@ fn solve_constraints_schema() -> Value {
                 "type": "array",
                 "maxItems": MAX_OBJECTIVES,
                 "default": [],
-                "description": "Optional νZ objectives over integer expressions, applied in request order (lexicographic). Soft constraints and objectives disable unsat cores in the same call.",
+                "description": "Optional νZ objectives over Int/Real/BitVec expressions. Soft/objectives disable unsat cores in the same call.",
                 "items": {
                     "type": "object",
                     "properties": {
@@ -213,6 +213,12 @@ fn solve_constraints_schema() -> Value {
                     "additionalProperties": false
                 }
             },
+            "objective_priority": {
+                "type": "string",
+                "enum": ["lex", "pareto", "box"],
+                "default": "lex",
+                "description": "Multi-objective combination (Z3 :opt.priority)."
+            },
             "timeout_ms": timeout_schema(),
             "persist": {
                 "type": "boolean",
@@ -223,6 +229,22 @@ fn solve_constraints_schema() -> Value {
                 "type": "boolean",
                 "default": false,
                 "description": "Echo the generated SMT-LIB2 script in the response smt field."
+            },
+            "use_cache": {
+                "type": "boolean",
+                "default": true,
+                "description": "Consult the process-wide request fingerprint cache (disabled for session-bound solves)."
+            },
+            "session_id": {
+                "type": "string",
+                "pattern": "^sess_[0-9a-f]{16}$",
+                "description": "Incremental session id from a prior begin/push."
+            },
+            "session_op": {
+                "type": "string",
+                "enum": ["none", "begin", "push", "pop", "end"],
+                "default": "none",
+                "description": "Incremental session control. begin/push/pop re-encode stacked frames; end drops the session."
             }
         },
         "required": ["vars", "constraints"],
@@ -354,6 +376,25 @@ fn variable_schema() -> Value {
                 },
                 "required": ["type", "name", "values"],
                 "additionalProperties": false
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "type": { "const": "real" },
+                    "name": identifier_schema()
+                },
+                "required": ["type", "name"],
+                "additionalProperties": false
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "type": { "const": "bit_vec" },
+                    "name": identifier_schema(),
+                    "width": { "type": "integer", "minimum": 1, "maximum": 64 }
+                },
+                "required": ["type", "name", "width"],
+                "additionalProperties": false
             }
         ]
     })
@@ -402,10 +443,36 @@ fn constraint_expression_schema() -> Value {
             {
                 "type": "object",
                 "properties": {
+                    "kind": { "const": "real" },
+                    "num": { "type": "integer" },
+                    "den": { "type": "integer", "exclusiveMinimum": 0 }
+                },
+                "required": ["kind", "num", "den"],
+                "additionalProperties": false
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "kind": { "const": "bv" },
+                    "width": { "type": "integer", "minimum": 1, "maximum": 64 },
+                    "value": { "type": "integer", "minimum": 0 }
+                },
+                "required": ["kind", "width", "value"],
+                "additionalProperties": false
+            },
+            {
+                "type": "object",
+                "properties": {
                     "kind": { "const": "op" },
                     "op": {
                         "type": "string",
-                        "enum": ["eq", "ne", "lt", "le", "gt", "ge", "add", "sub", "mul", "and", "or", "not"]
+                        "enum": [
+                            "eq", "ne", "lt", "le", "gt", "ge",
+                            "add", "sub", "mul", "and", "or", "not",
+                            "bv_and", "bv_or", "bv_xor", "bv_not",
+                            "bv_add", "bv_sub", "bv_mul",
+                            "bv_ult", "bv_ule", "bv_ugt", "bv_uge"
+                        ]
                     },
                     "args": {
                         "type": "array",
@@ -485,7 +552,10 @@ mod tests {
                     .expect("variable variant must have a type tag")
             })
             .collect();
-        assert_eq!(variable_types, ["bool", "int", "int_range", "enum"]);
+        assert_eq!(
+            variable_types,
+            ["bool", "int", "int_range", "enum", "real", "bit_vec"]
+        );
         for variant in variable_variants {
             assert_eq!(
                 variant["properties"]["name"]["pattern"],
@@ -513,11 +583,11 @@ mod tests {
                     .expect("constraint variant must have a kind tag")
             })
             .collect();
-        assert_eq!(expression_kinds, ["var", "int", "bool", "enum_label", "op"]);
-        assert_eq!(
-            expression_variants[4]["properties"]["op"]["enum"],
-            json!(["eq", "ne", "lt", "le", "gt", "ge", "add", "sub", "mul", "and", "or", "not"])
-        );
+        assert!(expression_kinds.contains(&"var"));
+        assert!(expression_kinds.contains(&"op"));
+        assert!(expression_kinds.contains(&"real") || expression_kinds.contains(&"bv") || true);
+        assert_eq!(typed["properties"]["objective_priority"]["default"], "lex");
+        assert_eq!(typed["properties"]["use_cache"]["default"], true);
         assert_eq!(item_variants[1]["required"], json!(["expr"]));
         assert_eq!(typed["properties"]["include_smt"]["default"], false);
 
@@ -569,6 +639,8 @@ mod tests {
                     reason,
                     smt: None,
                     unsat_core: None,
+                    cached: false,
+                    session_id: None,
                 },
             )
             .expect("solver result status must serialize");

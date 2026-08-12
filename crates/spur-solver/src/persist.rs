@@ -191,6 +191,8 @@ impl SolveArtifactResult {
             reason: self.reason.clone(),
             smt: None,
             unsat_core: self.unsat_core.clone(),
+            cached: false,
+            session_id: None,
         }
         .validate()
         .map_err(|source| PersistError::InvalidResult { source })

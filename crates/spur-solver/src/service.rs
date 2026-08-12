@@ -17,6 +17,7 @@ use tokio::{
 };
 
 use crate::{
+    cache::{fingerprint_request, SolveCache},
     encode::{encode_solve_constraints, EncodeError, SMT_IDENTIFIER_PREFIX},
     persist::{
         validate_solve_id, ArtifactStore, GetSolveResultResponse, PersistError, SolveArtifact,
@@ -24,10 +25,11 @@ use crate::{
     process::{
         ProcessError, ProcessOutcome, ProcessOutput, ProcessRequest, ProcessRunner, Z3Process,
     },
+    session::{SessionApply, SessionError, SessionStore},
     smt_gate::{validate_smt_script, SmtGateError},
     types::{
-        ModelValue, SolveConstraintsRequest, SolveConstraintsResponse, SolveModel, SolveSmtRequest,
-        SolveStatus, Variable, MAX_TIMEOUT_MS,
+        ModelValue, SessionOp, SolveConstraintsRequest, SolveConstraintsResponse, SolveModel,
+        SolveSmtRequest, SolveStatus, Variable, MAX_TIMEOUT_MS,
     },
 };
 
@@ -75,6 +77,9 @@ pub enum SolverServiceError {
     /// Persisting or retrieving a repository-local solve artifact failed.
     #[error(transparent)]
     Persistence(#[from] PersistError),
+    /// Incremental session operation failed.
+    #[error(transparent)]
+    Session(#[from] SessionError),
 }
 
 /// Process-wide owner of solver concurrency and subprocess execution.
@@ -87,6 +92,8 @@ pub struct SolverService {
     semaphore: Arc<Semaphore>,
     max_concurrent_solves: usize,
     artifacts: Option<ArtifactStore>,
+    cache: Arc<SolveCache>,
+    sessions: Arc<SessionStore>,
 }
 
 impl SolverService {
@@ -118,6 +125,8 @@ impl SolverService {
             semaphore: Arc::new(Semaphore::new(DEFAULT_MAX_CONCURRENT_SOLVES)),
             max_concurrent_solves: DEFAULT_MAX_CONCURRENT_SOLVES,
             artifacts: None,
+            cache: Arc::new(SolveCache::new()),
+            sessions: Arc::new(SessionStore::new()),
         }
     }
 
@@ -132,6 +141,8 @@ impl SolverService {
             semaphore: Arc::new(Semaphore::new(max_concurrent_solves.get())),
             max_concurrent_solves: max_concurrent_solves.get(),
             artifacts: None,
+            cache: Arc::new(SolveCache::new()),
+            sessions: Arc::new(SessionStore::new()),
         }
     }
 
@@ -214,9 +225,61 @@ impl SolverService {
     /// represented by [`SolveStatus::Error`] result envelopes.
     pub async fn solve_constraints(
         &self,
-        request: SolveConstraintsRequest,
+        mut request: SolveConstraintsRequest,
     ) -> Result<SolveConstraintsResponse, SolverServiceError> {
         let started = Instant::now();
+        let mut response_session_id = None;
+        match self.sessions.apply(&request)? {
+            SessionApply::Stateless => {}
+            SessionApply::Ended { session_id } => {
+                let mut response = response(
+                    SolveStatus::Sat,
+                    Some(BTreeMap::new()),
+                    started,
+                    Some("session ended".to_owned()),
+                    None,
+                );
+                response.session_id = Some(session_id);
+                return self.finish_response(
+                    &request,
+                    request.persist,
+                    request.include_smt,
+                    None,
+                    response,
+                );
+            }
+            SessionApply::Solve {
+                session_id,
+                constraints,
+                vars,
+            } => {
+                response_session_id = session_id;
+                request.vars = vars;
+                request.constraints = constraints;
+            }
+        }
+
+        let cacheable = request.use_cache
+            && matches!(request.session_op, SessionOp::None)
+            && request.session_id.is_none();
+        if cacheable {
+            if let Ok(key) = fingerprint_request(&request) {
+                if let Some(mut cached) = self.cache.get(&key) {
+                    cached.cached = true;
+                    cached.duration_ms = 0;
+                    cached.smt = None;
+                    cached.solve_id = None;
+                    return self.finish_response(
+                        &request,
+                        request.persist,
+                        request.include_smt,
+                        None,
+                        cached,
+                    );
+                }
+            }
+        }
+
         let smt = encode_solve_constraints(&request).map_err(|source| {
             SolverServiceError::InvalidParams {
                 source: source.into(),
@@ -226,11 +289,29 @@ impl SolverService {
         let include_smt = request.include_smt;
         let smt_for_echo = if include_smt { Some(smt.clone()) } else { None };
 
-        let response = match self.run_script(smt, deadline).await? {
+        let mut response = match self.run_script(smt, deadline).await? {
             ServiceRunOutcome::TimedOut => timeout_response(started),
             ServiceRunOutcome::Completed(output) => response_from_output(&request, output, started),
             ServiceRunOutcome::Error(message) => error_response(started, message),
         };
+        response.session_id = response_session_id;
+
+        if cacheable
+            && matches!(
+                response.status,
+                SolveStatus::Sat | SolveStatus::Unsat | SolveStatus::Unknown
+            )
+        {
+            if let Ok(key) = fingerprint_request(&request) {
+                let mut to_store = response.clone();
+                to_store.cached = false;
+                to_store.smt = None;
+                to_store.solve_id = None;
+                to_store.session_id = None;
+                self.cache.insert(key, to_store);
+            }
+        }
+
         self.finish_response(
             &request,
             request.persist,
@@ -497,6 +578,8 @@ fn response(
         reason,
         smt: None,
         unsat_core,
+        cached: false,
+        session_id: None,
     }
 }
 
@@ -967,6 +1050,14 @@ fn parse_model_value(
         Variable::Int { name } | Variable::IntRange { name, .. } => parse_integer(expression)
             .map(ModelValue::Int)
             .map_err(|error| error.with_context(format!("integer variable `{name}`"))),
+        Variable::Real { name } => {
+            let _ = name;
+            Ok(ModelValue::Enum(render_s_expression(expression)))
+        }
+        Variable::BitVec { name, .. } => {
+            let _ = name;
+            Ok(ModelValue::Enum(render_s_expression(expression)))
+        }
         Variable::Enum { name, values } => {
             let index = parse_integer(expression)
                 .map_err(|error| error.with_context(format!("enum variable `{name}`")))?;
