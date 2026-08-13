@@ -304,7 +304,9 @@ pub(crate) async fn execute_delegation(
             }
         };
 
-        total_cost += outcome.cost;
+        if let Some(c) = outcome.cost {
+            total_cost += c;
+        }
 
         // On first attempt, capture executor_id from worker_session.
         if executor_id.is_none() {

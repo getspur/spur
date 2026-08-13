@@ -16,11 +16,14 @@ pub fn estimate_cost(tier: CostTier, duration: Duration) -> f64 {
     duration.as_secs_f64() * rate
 }
 
-/// Estimate cost from actual token usage and an optional model name.
+/// Post-price a turn from observed tokens × published rates.
 ///
-/// If `model` is provided and found in the built-in pricing registry,
-/// the cost is calculated from per-token rates. Otherwise falls back to
-/// the time-based [`estimate_cost`] heuristic.
+/// Returns `None` when `model` is missing or unknown. Does **not** invent a
+/// duration/$tier number — LiteLLM / provider billing never use wall clock
+/// as a token-cost substitute. Callers must persist and emit JSON `null`
+/// (print `NaN`) when this returns `None`.
+///
+/// `tier` and `duration` are accepted for call-site compatibility and ignored.
 ///
 /// # Example
 /// ```
@@ -41,24 +44,17 @@ pub fn estimate_cost(tier: CostTier, duration: Duration) -> f64 {
 ///     usage,
 ///     Some("gpt-5"),
 /// );
-/// assert!(cost > 0.0);
+/// assert!(cost.expect("gpt-5 is registered") > 0.0);
 /// ```
 pub fn estimate_cost_from_tokens(
-    tier: CostTier,
-    duration: Duration,
+    _tier: CostTier,
+    _duration: Duration,
     usage: TokenUsage,
     model: Option<&str>,
-) -> f64 {
-    // If we have a model name, try token-based calculation first
-    if let Some(model_name) = model {
-        let registry = PricingRegistry::with_builtin_prices();
-        if let Some(cost) = calculate_cost_for_model(usage, model_name, &registry) {
-            return cost;
-        }
-    }
-
-    // Fall back to time-based estimation when tokens or model are unavailable
-    estimate_cost(tier, duration)
+) -> Option<f64> {
+    let model_name = model.filter(|m| !m.is_empty())?;
+    let registry = PricingRegistry::with_builtin_prices();
+    calculate_cost_for_model(usage, model_name, &registry)
 }
 
 #[cfg(test)]
@@ -86,7 +82,8 @@ mod tests {
             Duration::from_secs(60),
             usage,
             Some("gpt-5"),
-        );
+        )
+        .expect("gpt-5 is registered");
         // Token-based should produce a different value than time-based
         let time_based = estimate_cost(CostTier::Medium, Duration::from_secs(60));
         assert_ne!(cost, time_based);
@@ -95,22 +92,29 @@ mod tests {
     }
 
     #[test]
-    fn test_fallback_to_time_based() {
-        let usage = TokenUsage::default();
+    fn unknown_model_is_none_not_duration() {
+        let usage = TokenUsage {
+            input_tokens: 6_964,
+            output_tokens: 3,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 128,
+        };
         let cost = estimate_cost_from_tokens(
             CostTier::Medium,
-            Duration::from_secs(60),
+            Duration::from_secs(4),
             usage,
             Some("unknown-model"),
         );
-        assert_eq!(
-            cost,
-            estimate_cost(CostTier::Medium, Duration::from_secs(60))
+        assert_eq!(cost, None);
+        assert_ne!(
+            4.0 * 0.003,
+            0.0,
+            "duration heuristic must not be used as a stand-in"
         );
     }
 
     #[test]
-    fn test_fallback_when_no_model() {
+    fn missing_model_is_none_not_duration() {
         let usage = TokenUsage {
             input_tokens: 1_000,
             output_tokens: 500,
@@ -118,6 +122,56 @@ mod tests {
             cache_read_input_tokens: 0,
         };
         let cost = estimate_cost_from_tokens(CostTier::Low, Duration::from_secs(120), usage, None);
-        assert_eq!(cost, estimate_cost(CostTier::Low, Duration::from_secs(120)));
+        assert_eq!(cost, None);
+    }
+
+    #[test]
+    fn grok_46_prices_uncached_input_plus_cache_read() {
+        // docs.x.ai grok-4.6 <200k: $2 / $0.50 cached / $6 out per 1M.
+        // input includes cache (15271 = 3623 uncached + 11648 cached).
+        let usage = TokenUsage {
+            input_tokens: 15_271,
+            output_tokens: 32,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 11_648,
+        };
+        let cost = estimate_cost_from_tokens(
+            CostTier::Medium,
+            Duration::from_secs(4),
+            usage,
+            Some("grok-4.6-build"),
+        )
+        .expect("grok-4.6 must be in the registry");
+        let expected =
+            3_623.0 * 2.0 / 1_000_000.0 + 11_648.0 * 0.50 / 1_000_000.0 + 32.0 * 6.0 / 1_000_000.0;
+        assert!(
+            (cost - expected).abs() < 1e-9,
+            "cost={cost} expected={expected}"
+        );
+        assert!((cost - 0.013262).abs() < 1e-9, "cost={cost}");
+    }
+
+    #[test]
+    fn glm_52_zai_plan_id_prices_from_tokens() {
+        // Z.ai / OpenCode Zen GLM-5.2: $1.40 / $0.26 cached / $4.40 out per 1M.
+        let usage = TokenUsage {
+            input_tokens: 6_964,
+            output_tokens: 3,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 128,
+        };
+        let cost = estimate_cost_from_tokens(
+            CostTier::Medium,
+            Duration::from_secs(4),
+            usage,
+            Some("zai-coding-plan/glm-5.2"),
+        )
+        .expect("glm-5.2 must resolve through provider prefix");
+        let expected =
+            6_836.0 * 1.40 / 1_000_000.0 + 128.0 * 0.26 / 1_000_000.0 + 3.0 * 4.40 / 1_000_000.0;
+        assert!(
+            (cost - expected).abs() < 1e-9,
+            "cost={cost} expected={expected}"
+        );
     }
 }

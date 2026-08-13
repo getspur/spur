@@ -150,16 +150,14 @@ fn estimate_prompt_cost(
     duration: Duration,
     usage: Option<&spur_acp::Usage>,
     model: Option<&str>,
-) -> f64 {
-    match usage {
-        Some(usage) => spur_cost::estimator::estimate_cost_from_tokens(
-            tier,
-            duration,
-            prompt_usage_to_token_usage(usage),
-            model,
-        ),
-        None => spur_cost::estimator::estimate_cost(tier, duration),
-    }
+) -> Option<f64> {
+    let usage = usage?;
+    spur_cost::estimator::estimate_cost_from_tokens(
+        tier,
+        duration,
+        prompt_usage_to_token_usage(usage),
+        model,
+    )
 }
 
 const MAX_SESSION_LIST_PAGES: usize = 1000;
@@ -983,7 +981,8 @@ mod prompt_usage_cost_tests {
         let duration = Duration::from_secs(60);
 
         let cost =
-            super::estimate_prompt_cost(CostTier::Medium, duration, Some(&usage), Some("gpt-5"));
+            super::estimate_prompt_cost(CostTier::Medium, duration, Some(&usage), Some("gpt-5"))
+                .expect("gpt-5 is registered");
 
         // gpt-5: $1.25/M input + $10/M output + $1.25/M cache write
         // + $0.125/M cache read.
@@ -991,14 +990,11 @@ mod prompt_usage_cost_tests {
     }
 
     #[test]
-    fn estimates_prompt_cost_from_duration_when_usage_missing() {
+    fn estimate_prompt_cost_is_none_when_usage_missing() {
         let duration = Duration::from_secs(60);
 
         let cost = super::estimate_prompt_cost(CostTier::Low, duration, None, Some("gpt-5"));
 
-        assert_eq!(
-            cost,
-            spur_cost::estimator::estimate_cost(CostTier::Low, duration)
-        );
+        assert_eq!(cost, None);
     }
 }

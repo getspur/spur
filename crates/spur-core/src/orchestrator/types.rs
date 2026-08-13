@@ -41,7 +41,8 @@ pub struct RunResult {
     pub session_id: SessionId,
     pub success: bool,
     pub pr_url: Option<String>,
-    pub total_cost_usd: f64,
+    /// Token × published-rate price, or `None` when the model is unpriced.
+    pub total_cost_usd: Option<f64>,
     /// Observed LLM model id from ACP (not coding-agent entry name).
     /// Authority: sol_0225528da3534508 P2.
     pub model_name: Option<String>,

@@ -79,7 +79,7 @@ pub(crate) struct WorkerAttemptOutcome {
     pub(crate) diff: Option<String>,
     pub(crate) diff_summary: Option<spur_acp::DiffSummary>,
     pub(crate) summary: Option<String>,
-    pub(crate) cost: f64,
+    pub(crate) cost: Option<f64>,
     /// Path to the worktree that holds this attempt's diff.
     /// Used by `execute_delegation` to log a preserved path on
     /// `Rejected` / `TimedOut` — worktree removal is deferred to

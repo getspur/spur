@@ -7,7 +7,7 @@ use crate::db::{
     self, CostSummary, DelegationRecord, ModelCostSummary, ProjectCostSummary, SessionRecord,
     TokenSummary,
 };
-use crate::estimator::{estimate_cost, estimate_cost_from_tokens};
+use crate::estimator::estimate_cost_from_tokens;
 use crate::pricing::TokenUsage;
 use crate::reporter::Reporter;
 use crate::reports::{DailyReport, LiveReport, MonthlyReport, SessionReport, WeeklyReport};
@@ -66,27 +66,23 @@ impl CostTracker {
         db::insert_session(&self.conn, &record)
     }
 
-    /// Record the end of a session, computing the estimated cost from the
-    /// provided duration and cost tier.
+    /// Record the end of a session without observed token pricing.
     ///
-    /// This is the legacy time-based estimator. Prefer [`Self::end_session_with_tokens`]
-    /// for accurate token-based costing.
+    /// Cost is stored as NULL — wall-clock × tier is not a token price.
     pub fn end_session(
         &self,
         id: &SessionId,
         status: &str,
         duration: Duration,
-        cost_tier: CostTier,
+        _cost_tier: CostTier,
     ) -> Result<()> {
-        let cost = estimate_cost(cost_tier, duration);
-        db::update_session_end(&self.conn, &id.0, status, duration.as_secs() as i64, cost)
+        db::update_session_end(&self.conn, &id.0, status, duration.as_secs() as i64, None)
     }
 
     /// Record the end of a session with actual token usage.
     ///
-    /// If `model` is provided and known in the pricing registry, cost is
-    /// calculated from per-token rates. Otherwise falls back to the time-based
-    /// estimate derived from `cost_tier` and `duration`.
+    /// Cost is tokens × published rates when `model` is in the registry.
+    /// Otherwise NULL (not a duration stand-in).
     pub fn end_session_with_tokens(
         &self,
         id: &SessionId,

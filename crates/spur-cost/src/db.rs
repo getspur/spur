@@ -271,7 +271,7 @@ pub fn update_session_end(
     id: &str,
     status: &str,
     duration: i64,
-    cost: f64,
+    cost: Option<f64>,
 ) -> Result<()> {
     let now = chrono::Utc::now().to_rfc3339();
     conn.execute(
@@ -292,7 +292,7 @@ pub fn update_session_end_with_tokens(
     id: &str,
     status: &str,
     duration: i64,
-    cost: f64,
+    cost: Option<f64>,
     model: Option<&str>,
     input_tokens: Option<i64>,
     output_tokens: Option<i64>,
@@ -655,5 +655,6 @@ mod tests {
         assert_eq!(row.cache_creation_tokens, None);
         assert_eq!(row.cache_read_tokens, None);
         assert_eq!(row.num_turns, None);
+        assert_eq!(row.estimated_cost_usd, None);
     }
 }

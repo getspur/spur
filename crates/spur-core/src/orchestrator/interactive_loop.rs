@@ -142,12 +142,14 @@ fn emit_prompt_usage_cost_update(
         return;
     };
 
-    let estimated_cost_usd = estimate_prompt_cost(
+    let Some(estimated_cost_usd) = estimate_prompt_cost(
         agent_config.cost_tier,
         duration,
         Some(&usage),
         Some(prompt_cost_model_hint(brain)),
-    );
+    ) else {
+        return;
+    };
 
     funnel.emit(SpurEventBody::CostUpdate {
         session: brain.spur_session_id.clone(),

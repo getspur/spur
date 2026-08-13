@@ -1193,14 +1193,14 @@ async fn run() -> Result<()> {
                 )
                 .await?;
             println!(
-                "[spur] Session {} {} (${:.2})",
+                "[spur] Session {} {} ({})",
                 result.session_id,
                 if result.success {
                     "completed"
                 } else {
                     "failed"
                 },
-                result.total_cost_usd,
+                format_cost_usd(result.total_cost_usd),
             );
             // sol_3b1887a27da7475a phase3: machine-readable metrics for ADE / harnesses
             print_spur_agent_metrics(&orch, &result, None);
@@ -1224,14 +1224,14 @@ async fn run() -> Result<()> {
                 .exec_direct(&agent, &task, spur_core::ExecOpts { enable_mcp })
                 .await?;
             println!(
-                "[spur] Session {} {} (${:.2})",
+                "[spur] Session {} {} ({})",
                 result.session_id,
                 if result.success {
                     "completed"
                 } else {
                     "failed"
                 },
-                result.total_cost_usd,
+                format_cost_usd(result.total_cost_usd),
             );
             // sol_3b1887a27da7475a phase3 — ADE SpurAgent parses this line
             print_spur_agent_metrics(&orch, &result, Some(agent.as_str()));
@@ -2171,6 +2171,13 @@ fn opt_token(v: Option<i64>) -> Option<u64> {
     v.map(|t| t.max(0) as u64)
 }
 
+fn format_cost_usd(cost: Option<f64>) -> String {
+    match cost {
+        Some(c) => format!("${c:.2}"),
+        None => "NaN".to_string(),
+    }
+}
+
 fn json_opt_u64(v: Option<u64>) -> serde_json::Value {
     match v {
         Some(n) => serde_json::json!(n),
@@ -2206,8 +2213,8 @@ fn print_spur_agent_metrics(
             if !s.agent.is_empty() {
                 coding_agent = s.agent.clone();
             }
-            if let Some(c) = s.estimated_cost_usd {
-                cost_usd = c;
+            if s.estimated_cost_usd.is_some() {
+                cost_usd = s.estimated_cost_usd;
             }
             if let Some(d) = s.duration_seconds {
                 runtime_ms = (d.max(0) as u64).saturating_mul(1000);
@@ -2298,10 +2305,6 @@ fn print_spur_agent_metrics(
     } else {
         map.insert("effort_provenance".into(), serde_json::Value::Null);
     }
-    let usage_present = input_tokens.is_some()
-        || output_tokens.is_some()
-        || cache_creation_tokens.is_some()
-        || cache_read_tokens.is_some();
     let cache_tokens = match (cache_creation_tokens, cache_read_tokens) {
         (None, None) => None,
         (a, b) => Some(a.unwrap_or(0).saturating_add(b.unwrap_or(0))),
@@ -2316,14 +2319,17 @@ fn print_spur_agent_metrics(
     map.insert("cache_tokens".into(), json_opt_u64(cache_tokens));
     map.insert("num_turns".into(), json_opt_u64(num_turns));
     map.insert("runtime_ms".into(), serde_json::json!(runtime_ms));
-    map.insert("cost_usd".into(), serde_json::json!(cost_usd));
+    match cost_usd {
+        Some(c) => map.insert("cost_usd".into(), serde_json::json!(c)),
+        None => map.insert("cost_usd".into(), serde_json::Value::Null),
+    };
     map.insert(
         "cost_provenance".into(),
         serde_json::Value::String(
-            if usage_present {
-                "observed_tokens"
+            if cost_usd.is_some() {
+                "token_pricing"
             } else {
-                "duration_estimate"
+                "unknown"
             }
             .into(),
         ),
@@ -2451,11 +2457,11 @@ mod tests {
         assert_eq!(json_opt_u64(Some(22371)), serde_json::json!(22371));
         let usage_present = false;
         let provenance = if usage_present {
-            "observed_tokens"
+            "token_pricing"
         } else {
-            "duration_estimate"
+            "unknown"
         };
-        assert_eq!(provenance, "duration_estimate");
+        assert_eq!(provenance, "unknown");
     }
 
     #[tokio::test]

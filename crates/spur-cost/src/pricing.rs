@@ -26,6 +26,10 @@ pub struct ModelPricing {
     pub cache_read_input_token_cost: f64,
     /// Optional tiered pricing for tokens above a threshold (e.g., 200k).
     pub tiered: Option<TieredPricing>,
+    /// When true, `input_tokens` already includes `cache_read` (OpenAI / xAI /
+    /// Z.ai). Full input rate applies only to `input − cache_read`.
+    /// Anthropic-style usage reports uncached input separately — leave false.
+    pub input_includes_cached_reads: bool,
 }
 
 /// Tiered pricing for large-context models.
@@ -103,6 +107,7 @@ impl PricingRegistry {
                     cache_creation_input_token_cost_above: 37.50 / 1_000_000.0,
                     cache_read_input_token_cost_above: 3.00 / 1_000_000.0,
                 }),
+                input_includes_cached_reads: false,
             },
         );
         reg.insert(
@@ -119,6 +124,7 @@ impl PricingRegistry {
                     cache_creation_input_token_cost_above: 7.50 / 1_000_000.0,
                     cache_read_input_token_cost_above: 0.60 / 1_000_000.0,
                 }),
+                input_includes_cached_reads: false,
             },
         );
         reg.insert(
@@ -129,6 +135,7 @@ impl PricingRegistry {
                 cache_creation_input_token_cost: 0.625 / 1_000_000.0,
                 cache_read_input_token_cost: 0.05 / 1_000_000.0,
                 tiered: None,
+                input_includes_cached_reads: false,
             },
         );
         // TODO: verify 4.5 pricing differs from 4
@@ -146,6 +153,7 @@ impl PricingRegistry {
                     cache_creation_input_token_cost_above: 37.50 / 1_000_000.0,
                     cache_read_input_token_cost_above: 3.00 / 1_000_000.0,
                 }),
+                input_includes_cached_reads: false,
             },
         );
         reg.insert(
@@ -162,6 +170,7 @@ impl PricingRegistry {
                     cache_creation_input_token_cost_above: 7.50 / 1_000_000.0,
                     cache_read_input_token_cost_above: 0.60 / 1_000_000.0,
                 }),
+                input_includes_cached_reads: false,
             },
         );
         reg.insert(
@@ -172,6 +181,7 @@ impl PricingRegistry {
                 cache_creation_input_token_cost: 0.625 / 1_000_000.0,
                 cache_read_input_token_cost: 0.05 / 1_000_000.0,
                 tiered: None,
+                input_includes_cached_reads: false,
             },
         );
 
@@ -184,6 +194,7 @@ impl PricingRegistry {
                 cache_creation_input_token_cost: 1.25 / 1_000_000.0,
                 cache_read_input_token_cost: 0.125 / 1_000_000.0,
                 tiered: None,
+                input_includes_cached_reads: false,
             },
         );
         reg.insert(
@@ -194,6 +205,7 @@ impl PricingRegistry {
                 cache_creation_input_token_cost: 1.25 / 1_000_000.0,
                 cache_read_input_token_cost: 0.125 / 1_000_000.0,
                 tiered: None,
+                input_includes_cached_reads: false,
             },
         );
         reg.insert(
@@ -204,6 +216,7 @@ impl PricingRegistry {
                 cache_creation_input_token_cost: 2.50 / 1_000_000.0,
                 cache_read_input_token_cost: 1.25 / 1_000_000.0,
                 tiered: None,
+                input_includes_cached_reads: false,
             },
         );
         reg.insert(
@@ -214,6 +227,7 @@ impl PricingRegistry {
                 cache_creation_input_token_cost: 0.15 / 1_000_000.0,
                 cache_read_input_token_cost: 0.075 / 1_000_000.0,
                 tiered: None,
+                input_includes_cached_reads: false,
             },
         );
 
@@ -226,6 +240,7 @@ impl PricingRegistry {
                 cache_creation_input_token_cost: 1.25 / 1_000_000.0,
                 cache_read_input_token_cost: 0.125 / 1_000_000.0,
                 tiered: None,
+                input_includes_cached_reads: false,
             },
         );
         reg.insert(
@@ -236,6 +251,7 @@ impl PricingRegistry {
                 cache_creation_input_token_cost: 0.15 / 1_000_000.0,
                 cache_read_input_token_cost: 0.075 / 1_000_000.0,
                 tiered: None,
+                input_includes_cached_reads: false,
             },
         );
 
@@ -248,6 +264,40 @@ impl PricingRegistry {
                 cache_creation_input_token_cost: KIMI_CACHE_CREATE_PRICE_PER_MTOK / 1_000_000.0,
                 cache_read_input_token_cost: KIMI_CACHE_READ_PRICE_PER_MTOK / 1_000_000.0,
                 tiered: None,
+                input_includes_cached_reads: false,
+            },
+        );
+
+        // ─── xAI / Grok (docs.x.ai 2026-08-13) ──────────────────────
+        // input_tokens includes cached reads.
+        reg.insert(
+            "grok-4.6",
+            ModelPricing {
+                input_cost_per_token: 2.0 / 1_000_000.0,
+                output_cost_per_token: 6.0 / 1_000_000.0,
+                cache_creation_input_token_cost: 0.0,
+                cache_read_input_token_cost: 0.50 / 1_000_000.0,
+                tiered: Some(TieredPricing {
+                    threshold: 200_000,
+                    input_cost_per_token_above: 4.0 / 1_000_000.0,
+                    output_cost_per_token_above: 12.0 / 1_000_000.0,
+                    cache_creation_input_token_cost_above: 0.0,
+                    cache_read_input_token_cost_above: 1.00 / 1_000_000.0,
+                }),
+                input_includes_cached_reads: true,
+            },
+        );
+
+        // ─── Z.ai / OpenCode GLM-5.2 (docs.z.ai + OpenCode Zen) ──────
+        reg.insert(
+            "glm-5.2",
+            ModelPricing {
+                input_cost_per_token: 1.40 / 1_000_000.0,
+                output_cost_per_token: 4.40 / 1_000_000.0,
+                cache_creation_input_token_cost: 0.0,
+                cache_read_input_token_cost: 0.26 / 1_000_000.0,
+                tiered: None,
+                input_includes_cached_reads: true,
             },
         );
 
@@ -258,6 +308,8 @@ impl PricingRegistry {
         reg.alias("claude-opus", "claude-opus-4");
         reg.alias("claude-sonnet", "claude-sonnet-4");
         reg.alias("claude-haiku", "claude-haiku-4");
+        reg.alias("grok-4.6-build", "grok-4.6");
+        reg.alias("glm-5.2-highspeed", "glm-5.2");
 
         reg
     }
@@ -282,12 +334,24 @@ impl PricingRegistry {
             return None;
         }
         let key = model.to_lowercase();
+        if let Some(p) = self.lookup_key(&key) {
+            return Some(p);
+        }
+        // `provider/model` (OpenCode / ACP): try the model segment.
+        if let Some((_, rest)) = key.rsplit_once('/') {
+            if let Some(p) = self.lookup_key(rest) {
+                return Some(p);
+            }
+        }
+        None
+    }
 
-        if let Some(p) = self.models.get(&key) {
+    fn lookup_key(&self, key: &str) -> Option<&ModelPricing> {
+        if let Some(p) = self.models.get(key) {
             return Some(p);
         }
 
-        if let Some(canon) = self.aliases.get(&key) {
+        if let Some(canon) = self.aliases.get(key) {
             if let Some(p) = self.models.get(canon) {
                 return Some(p);
             }
@@ -346,6 +410,7 @@ impl PricingRegistry {
 ///     cache_creation_input_token_cost: 3.75 / 1_000_000.0,
 ///     cache_read_input_token_cost: 0.30 / 1_000_000.0,
 ///     tiered: None,
+///     input_includes_cached_reads: false,
 /// };
 /// let usage = TokenUsage {
 ///     input_tokens: 1_000,
@@ -357,8 +422,14 @@ impl PricingRegistry {
 /// assert!(cost > 0.0);
 /// ```
 pub fn calculate_cost(usage: TokenUsage, pricing: &ModelPricing) -> f64 {
+    let cache_read_tokens = usage.cache_read_input_tokens.min(usage.input_tokens);
+    let billable_input = if pricing.input_includes_cached_reads {
+        usage.input_tokens.saturating_sub(cache_read_tokens)
+    } else {
+        usage.input_tokens
+    };
     let input_cost = tiered_token_cost(
-        usage.input_tokens,
+        billable_input,
         pricing.input_cost_per_token,
         pricing
             .tiered
@@ -384,8 +455,6 @@ pub fn calculate_cost(usage: TokenUsage, pricing: &ModelPricing) -> f64 {
             .map(|t| (t.threshold, t.cache_creation_input_token_cost_above)),
     );
 
-    // Cap cache-read tokens at input tokens to avoid over-billing
-    let cache_read_tokens = usage.cache_read_input_tokens.min(usage.input_tokens);
     let cache_read_cost = tiered_token_cost(
         cache_read_tokens,
         pricing.cache_read_input_token_cost,
@@ -450,6 +519,7 @@ mod tests {
                 cache_creation_input_token_cost_above: 7.50 / 1_000_000.0,
                 cache_read_input_token_cost_above: 0.60 / 1_000_000.0,
             }),
+            input_includes_cached_reads: false,
         }
     }
 
@@ -461,6 +531,7 @@ mod tests {
             cache_creation_input_token_cost: 1.25e-6,
             cache_read_input_token_cost: 0.125e-6,
             tiered: None,
+            input_includes_cached_reads: false,
         };
         let usage = TokenUsage {
             input_tokens: 1_000,
@@ -549,6 +620,7 @@ mod tests {
             cache_creation_input_token_cost: 0.0,
             cache_read_input_token_cost: 0.5e-6,
             tiered: None,
+            input_includes_cached_reads: false,
         };
         let usage = TokenUsage {
             input_tokens: 100,
@@ -613,6 +685,7 @@ mod tests {
             cache_creation_input_token_cost: 3.0,
             cache_read_input_token_cost: 4.0,
             tiered: None,
+            input_includes_cached_reads: false,
         };
         let foo_bar = ModelPricing {
             input_cost_per_token: 5.0,
@@ -620,6 +693,7 @@ mod tests {
             cache_creation_input_token_cost: 7.0,
             cache_read_input_token_cost: 8.0,
             tiered: None,
+            input_includes_cached_reads: false,
         };
         let mut r2 = PricingRegistry::new();
         r2.insert("foo", foo);
@@ -632,6 +706,7 @@ mod tests {
             cache_creation_input_token_cost: 11.0,
             cache_read_input_token_cost: 12.0,
             tiered: None,
+            input_includes_cached_reads: false,
         };
         let mut r3 = PricingRegistry::new();
         r3.insert("gpt-4", gpt_4);

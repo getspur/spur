@@ -308,7 +308,10 @@ impl Orchestrator {
         info!(
             session = %session_id,
             duration_secs = duration.as_secs(),
-            cost_usd = format!("{:.2}", total_cost),
+            cost_usd = match total_cost {
+                Some(c) => format!("{c:.2}"),
+                None => "NaN".into(),
+            },
             "Run complete"
         );
 
