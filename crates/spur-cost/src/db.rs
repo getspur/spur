@@ -25,6 +25,7 @@ pub struct SessionRecord {
     pub output_tokens: Option<i64>,
     pub cache_creation_tokens: Option<i64>,
     pub cache_read_tokens: Option<i64>,
+    pub num_turns: Option<i64>,
 }
 
 /// A logged delegation from brain to worker.
@@ -97,7 +98,8 @@ pub fn init_db(path: &Path) -> Result<Connection> {
             input_tokens INTEGER,
             output_tokens INTEGER,
             cache_creation_tokens INTEGER,
-            cache_read_tokens INTEGER
+            cache_read_tokens INTEGER,
+            num_turns INTEGER
         );
 
         CREATE TABLE IF NOT EXISTS delegation_log (
@@ -126,6 +128,7 @@ pub fn init_db(path: &Path) -> Result<Connection> {
         --   ALTER TABLE sessions ADD COLUMN output_tokens INTEGER;
         --   ALTER TABLE sessions ADD COLUMN cache_creation_tokens INTEGER;
         --   ALTER TABLE sessions ADD COLUMN cache_read_tokens INTEGER;
+        --   ALTER TABLE sessions ADD COLUMN num_turns INTEGER;
         
         -- Create view for token summary
         CREATE VIEW IF NOT EXISTS v_session_tokens AS
@@ -196,6 +199,9 @@ pub fn init_db(path: &Path) -> Result<Connection> {
         ",
     )?;
 
+    // Existing DBs created before num_turns: ignore duplicate-column errors.
+    let _ = conn.execute("ALTER TABLE sessions ADD COLUMN num_turns INTEGER", []);
+
     Ok(conn)
 }
 
@@ -220,6 +226,7 @@ fn session_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionRecord> 
         output_tokens: row.get(14)?,
         cache_creation_tokens: row.get(15)?,
         cache_read_tokens: row.get(16)?,
+        num_turns: row.get(17)?,
     })
 }
 
@@ -232,8 +239,8 @@ pub fn insert_session(conn: &Connection, session: &SessionRecord) -> Result<()> 
             id, agent, role, parent_session, task_summary, project,
             issue_ref, started_at, ended_at, status, duration_seconds,
             estimated_cost_usd, model, input_tokens, output_tokens,
-            cache_creation_tokens, cache_read_tokens
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+            cache_creation_tokens, cache_read_tokens, num_turns
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
         params![
             session.id,
             session.agent,
@@ -252,6 +259,7 @@ pub fn insert_session(conn: &Connection, session: &SessionRecord) -> Result<()> 
             session.output_tokens,
             session.cache_creation_tokens,
             session.cache_read_tokens,
+            session.num_turns,
         ],
     )?;
     Ok(())
@@ -290,6 +298,7 @@ pub fn update_session_end_with_tokens(
     output_tokens: Option<i64>,
     cache_creation_tokens: Option<i64>,
     cache_read_tokens: Option<i64>,
+    num_turns: Option<i64>,
 ) -> Result<()> {
     let now = chrono::Utc::now().to_rfc3339();
     conn.execute(
@@ -302,8 +311,9 @@ pub fn update_session_end_with_tokens(
             input_tokens = ?6,
             output_tokens = ?7,
             cache_creation_tokens = ?8,
-            cache_read_tokens = ?9
-         WHERE id = ?10",
+            cache_read_tokens = ?9,
+            num_turns = ?10
+         WHERE id = ?11",
         params![
             now,
             status,
@@ -314,6 +324,7 @@ pub fn update_session_end_with_tokens(
             output_tokens,
             cache_creation_tokens,
             cache_read_tokens,
+            num_turns,
             id,
         ],
     )?;
@@ -326,7 +337,7 @@ pub fn query_session(conn: &Connection, id: &str) -> Result<Option<SessionRecord
         "SELECT id, agent, role, parent_session, task_summary, project,
                 issue_ref, started_at, ended_at, status, duration_seconds,
                 estimated_cost_usd, model, input_tokens, output_tokens,
-                cache_creation_tokens, cache_read_tokens
+                cache_creation_tokens, cache_read_tokens, num_turns
          FROM sessions WHERE id = ?1",
     )?;
 
@@ -343,7 +354,7 @@ pub fn query_recent_sessions(conn: &Connection, limit: usize) -> Result<Vec<Sess
         "SELECT id, agent, role, parent_session, task_summary, project,
                 issue_ref, started_at, ended_at, status, duration_seconds,
                 estimated_cost_usd, model, input_tokens, output_tokens,
-                cache_creation_tokens, cache_read_tokens
+                cache_creation_tokens, cache_read_tokens, num_turns
          FROM sessions
          ORDER BY started_at DESC
          LIMIT ?1",
@@ -586,4 +597,63 @@ pub fn query_cost_by_model(conn: &Connection) -> Result<Vec<ModelCostSummary>> {
         })
     })?;
     rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::tracker::CostTracker;
+    use spur_acp::{CostTier, SessionId};
+    use std::time::Duration;
+
+    #[test]
+    fn r1_persists_turn_completed_tokens_and_num_turns() {
+        let dir = tempfile::tempdir().unwrap();
+        let tracker = CostTracker::open(&dir.path().join("cost.db")).unwrap();
+        let id = SessionId::new();
+        tracker
+            .start_session(&id, "grok", "worker", None, "ping", None, None)
+            .unwrap();
+        tracker
+            .end_session_with_tokens(
+                &id,
+                "completed",
+                Duration::from_secs(2),
+                CostTier::Medium,
+                crate::pricing::TokenUsage {
+                    input_tokens: 20_000,
+                    output_tokens: 2_371,
+                    cache_creation_input_tokens: 0,
+                    cache_read_input_tokens: 50,
+                },
+                Some("grok-4.6"),
+                Some(1),
+            )
+            .unwrap();
+        let row = tracker.session_detail(&id).unwrap().expect("session");
+        assert_eq!(row.input_tokens, Some(20_000));
+        assert_eq!(row.output_tokens, Some(2_371));
+        assert_eq!(row.cache_creation_tokens, Some(0));
+        assert_eq!(row.cache_read_tokens, Some(50));
+        assert_eq!(row.num_turns, Some(1));
+        assert_eq!(row.model.as_deref(), Some("grok-4.6"));
+    }
+
+    #[test]
+    fn h2_h7_missing_usage_leaves_tokens_null() {
+        let dir = tempfile::tempdir().unwrap();
+        let tracker = CostTracker::open(&dir.path().join("cost.db")).unwrap();
+        let id = SessionId::new();
+        tracker
+            .start_session(&id, "grok", "worker", None, "ping", None, None)
+            .unwrap();
+        tracker
+            .end_session(&id, "completed", Duration::from_secs(2), CostTier::Medium)
+            .unwrap();
+        let row = tracker.session_detail(&id).unwrap().expect("session");
+        assert_eq!(row.input_tokens, None);
+        assert_eq!(row.output_tokens, None);
+        assert_eq!(row.cache_creation_tokens, None);
+        assert_eq!(row.cache_read_tokens, None);
+        assert_eq!(row.num_turns, None);
+    }
 }

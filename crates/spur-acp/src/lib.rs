@@ -87,6 +87,7 @@ pub mod session_liveness;
 pub mod session_lock;
 pub mod spur_agent_caps;
 pub mod types;
+pub mod usage_ingest;
 
 pub use config::{
     load_seed_template, validate_agent_config, AgentConfig, AgentReviewPolicy, AgentsConfig,

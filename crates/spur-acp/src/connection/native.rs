@@ -304,6 +304,8 @@ pub struct NativeAcpConnection {
     /// Cleared when a new prompt starts and consumed by the orchestrator after
     /// `drive_prompt_notifications` observes turn completion.
     last_prompt_usage: Arc<Mutex<Option<Usage>>>,
+    /// Observed `numTurns` from Grok `turn_completed.usage` for the last prompt.
+    last_num_turns: Arc<Mutex<Option<u64>>>,
     /// Terminal response receiver for the most recently started prompt.
     /// Kept separate from the compatibility notification stream so native
     /// callers can distinguish RPC failure from successful stream closure.
@@ -795,6 +797,7 @@ impl NativeAcpConnection {
             session_efforts: Arc::new(Mutex::new(HashMap::new())),
             session_capabilities: Arc::new(Mutex::new(None)),
             last_prompt_usage: Arc::new(Mutex::new(None)),
+            last_num_turns: Arc::new(Mutex::new(None)),
             prompt_response_rx: None,
             child_pgid: Arc::new(Mutex::new(None)),
             repo_root: PathBuf::from("."),
@@ -968,6 +971,7 @@ impl AgentConnection for NativeAcpConnection {
         let grok_session_models = self.grok_session_models.clone();
         let session_efforts = self.session_efforts.clone();
         let last_prompt_usage = self.last_prompt_usage.clone();
+        let last_num_turns = self.last_num_turns.clone();
         let child_pgid = self.child_pgid.clone();
         let repo_root = self.repo_root.clone();
         let log_config = self.log_config.clone();
@@ -990,6 +994,7 @@ impl AgentConnection for NativeAcpConnection {
                     grok_session_models,
                     session_efforts,
                     last_prompt_usage,
+                    last_num_turns,
                     child_pgid,
                     repo_root,
                     log_config,
@@ -1092,6 +1097,9 @@ impl AgentConnection for NativeAcpConnection {
         if let Ok(mut usage) = self.last_prompt_usage.lock() {
             *usage = None;
         }
+        if let Ok(mut turns) = self.last_num_turns.lock() {
+            *turns = None;
+        }
 
         let session_id = request.session_id.clone();
 
@@ -1157,6 +1165,10 @@ impl AgentConnection for NativeAcpConnection {
             .lock()
             .ok()
             .and_then(|mut u| u.take())
+    }
+
+    fn take_last_num_turns(&mut self) -> Option<u64> {
+        self.last_num_turns.lock().ok().and_then(|mut n| n.take())
     }
 
     fn session_llm_model(&self, acp_session_id: &str) -> Option<String> {
@@ -1707,6 +1719,7 @@ fn acp_thread_main(
     grok_session_models: Arc<Mutex<HashMap<String, String>>>,
     session_efforts: Arc<Mutex<HashMap<String, String>>>,
     last_prompt_usage: Arc<Mutex<Option<Usage>>>,
+    last_num_turns: Arc<Mutex<Option<u64>>>,
     child_pgid: Arc<Mutex<Option<i32>>>,
     repo_root: PathBuf,
     log_config: LogConfig,
@@ -1958,6 +1971,7 @@ fn acp_thread_main(
             let session_efforts_h = session_efforts.clone();
             // For UsageUpdate → last_prompt_usage fill (phase B) during notify.
             let last_prompt_usage_h = last_prompt_usage.clone();
+            let last_num_turns_h = last_num_turns.clone();
 
             let cwd_read = cwd.clone();
             let cwd_write = cwd.clone();
@@ -2382,6 +2396,19 @@ fn acp_thread_main(
                                 if method == "_x.ai/session_notification" {
                                     cache_grok_model_changed(&grok_session_models_h, &params);
                                 }
+                                // R1 / sol_10e37ea151524119: Grok turn_completed.usage
+                                // arrives on `_x.ai/session/update` (not events.jsonl,
+                                // not chunk `_meta.totalTokens`).
+                                if method == "_x.ai/session/update"
+                                    || method == "_x.ai/session_notification"
+                                {
+                                    crate::usage_ingest::maybe_apply_turn_completed(
+                                        last_prompt_usage_h.as_ref(),
+                                        last_num_turns_h.as_ref(),
+                                        grok_session_models_h.as_ref(),
+                                        &params,
+                                    );
+                                }
                                 tracing::debug!(
                                     method = %method,
                                     "NativeAcpConnection: ext_notification"
@@ -2568,8 +2595,16 @@ fn acp_thread_main(
                                             emit_acp_request_result(request_started_at, &prompt_result);
                                             let terminal_result = match prompt_result {
                                                 Ok(response) => {
-                                                    if let Ok(mut usage) = last_prompt_usage_loop.lock() {
-                                                        *usage = response.usage.clone();
+                                                    // H6: PromptResponse.usage wins when
+                                                    // present. Do not clobber a prior
+                                                    // turn_completed / UsageUpdate fill
+                                                    // with None.
+                                                    if let Some(ref u) = response.usage {
+                                                        if let Ok(mut usage) =
+                                                            last_prompt_usage_loop.lock()
+                                                        {
+                                                            *usage = Some(u.clone());
+                                                        }
                                                     }
                                                     tracing::debug!(
                                                         agent = %agent_name_loop,

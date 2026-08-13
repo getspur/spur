@@ -47,6 +47,8 @@ pub struct RunResult {
     pub model_name: Option<String>,
     /// Observed effort / thought-level value id from ACP config options.
     pub effort: Option<String>,
+    /// Observed `numTurns` from Grok `turn_completed.usage` when present.
+    pub num_turns: Option<u64>,
 }
 
 /// Holds the active brain transport along with metadata that must

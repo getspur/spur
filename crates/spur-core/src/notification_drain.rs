@@ -21,6 +21,7 @@ use spur_acp::connection::AgentConnection;
 
 pub(crate) struct PromptDrainResult {
     pub(crate) usage: Option<Usage>,
+    pub(crate) num_turns: Option<u64>,
 }
 
 /// Outcome of a single broadcast receive attempt.
@@ -131,6 +132,7 @@ where
 
     Ok(PromptDrainResult {
         usage: connection.take_last_prompt_usage(),
+        num_turns: connection.take_last_num_turns(),
     })
 }
 

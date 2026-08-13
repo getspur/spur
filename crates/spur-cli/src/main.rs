@@ -2167,6 +2167,21 @@ async fn load_orchestrator_with_pm(repo_root: PathBuf) -> Result<Orchestrator> {
 /// - `coding_agent` = ACP entry / registry agent (e.g. grok), **not** LLM id
 /// - `model_name` = LLM id when known and distinct from coding agent
 /// - Prefer cost.db session row when present (duration, tokens)
+fn opt_token(v: Option<i64>) -> Option<u64> {
+    v.map(|t| t.max(0) as u64)
+}
+
+fn json_opt_u64(v: Option<u64>) -> serde_json::Value {
+    match v {
+        Some(n) => serde_json::json!(n),
+        None => serde_json::Value::Null,
+    }
+}
+
+fn accept_model_name(name: &str, coding_agent: &str) -> bool {
+    name != coding_agent && spur_acp::usage_ingest::is_llm_model_id(name)
+}
+
 fn print_spur_agent_metrics(
     orch: &Orchestrator,
     result: &spur_core::RunResult,
@@ -2175,9 +2190,12 @@ fn print_spur_agent_metrics(
     let mut coding_agent = coding_agent_fallback.unwrap_or("unknown").to_string();
     let mut cost_usd = result.total_cost_usd;
     let mut runtime_ms: u64 = 0;
-    let mut input_tokens: u64 = 0;
-    let mut output_tokens: u64 = 0;
-    let mut cache_tokens: u64 = 0;
+    // H7: missing = NULL. Do not coerce absent cost.db tokens to 0.
+    let mut input_tokens: Option<u64> = None;
+    let mut output_tokens: Option<u64> = None;
+    let mut cache_creation_tokens: Option<u64> = None;
+    let mut cache_read_tokens: Option<u64> = None;
+    let mut num_turns: Option<u64> = result.num_turns;
     let mut model_name: Option<String> = None;
     let mut model_provenance: Option<String> = None;
     let mut effort: Option<String> = None;
@@ -2194,23 +2212,16 @@ fn print_spur_agent_metrics(
             if let Some(d) = s.duration_seconds {
                 runtime_ms = (d.max(0) as u64).saturating_mul(1000);
             }
-            if let Some(t) = s.input_tokens {
-                input_tokens = t.max(0) as u64;
+            input_tokens = opt_token(s.input_tokens);
+            output_tokens = opt_token(s.output_tokens);
+            cache_creation_tokens = opt_token(s.cache_creation_tokens);
+            cache_read_tokens = opt_token(s.cache_read_tokens);
+            if num_turns.is_none() {
+                num_turns = opt_token(s.num_turns);
             }
-            if let Some(t) = s.output_tokens {
-                output_tokens = t.max(0) as u64;
-            }
-            let mut cache: u64 = 0;
-            if let Some(t) = s.cache_creation_tokens {
-                cache = cache.saturating_add(t.max(0) as u64);
-            }
-            if let Some(t) = s.cache_read_tokens {
-                cache = cache.saturating_add(t.max(0) as u64);
-            }
-            cache_tokens = cache;
-            // Identity: do not report coding-agent name as model_name.
+            // Identity: never report coding-agent / runtime name as model_name.
             if let Some(m) = s.model {
-                if m != coding_agent {
+                if accept_model_name(&m, &coding_agent) {
                     model_name = Some(m);
                 }
             }
@@ -2220,7 +2231,7 @@ fn print_spur_agent_metrics(
     // P2 ACP observe from exec_direct RunResult.
     if model_name.is_none() {
         if let Some(ref m) = result.model_name {
-            if m != &coding_agent {
+            if accept_model_name(m, &coding_agent) {
                 model_name = Some(m.clone());
                 model_provenance = Some("acp".into());
             }
@@ -2240,7 +2251,7 @@ fn print_spur_agent_metrics(
     if model_name.is_none() {
         if let Ok(m) = std::env::var("SPUR_MODEL") {
             let m = m.trim().to_string();
-            if !m.is_empty() && m != coding_agent {
+            if accept_model_name(&m, &coding_agent) {
                 model_name = Some(m);
                 model_provenance = Some("env_override".into());
             }
@@ -2287,12 +2298,36 @@ fn print_spur_agent_metrics(
     } else {
         map.insert("effort_provenance".into(), serde_json::Value::Null);
     }
-    map.insert("input_tokens".into(), serde_json::json!(input_tokens));
-    map.insert("output_tokens".into(), serde_json::json!(output_tokens));
-    map.insert("cache_tokens".into(), serde_json::json!(cache_tokens));
-    map.insert("num_turns".into(), serde_json::json!(0));
+    let usage_present = input_tokens.is_some()
+        || output_tokens.is_some()
+        || cache_creation_tokens.is_some()
+        || cache_read_tokens.is_some();
+    let cache_tokens = match (cache_creation_tokens, cache_read_tokens) {
+        (None, None) => None,
+        (a, b) => Some(a.unwrap_or(0).saturating_add(b.unwrap_or(0))),
+    };
+    map.insert("input_tokens".into(), json_opt_u64(input_tokens));
+    map.insert("output_tokens".into(), json_opt_u64(output_tokens));
+    map.insert(
+        "cache_creation_tokens".into(),
+        json_opt_u64(cache_creation_tokens),
+    );
+    map.insert("cache_read_tokens".into(), json_opt_u64(cache_read_tokens));
+    map.insert("cache_tokens".into(), json_opt_u64(cache_tokens));
+    map.insert("num_turns".into(), json_opt_u64(num_turns));
     map.insert("runtime_ms".into(), serde_json::json!(runtime_ms));
     map.insert("cost_usd".into(), serde_json::json!(cost_usd));
+    map.insert(
+        "cost_provenance".into(),
+        serde_json::Value::String(
+            if usage_present {
+                "observed_tokens"
+            } else {
+                "duration_estimate"
+            }
+            .into(),
+        ),
+    );
     map.insert("success".into(), serde_json::json!(result.success));
     map.insert(
         "source".into(),
@@ -2397,6 +2432,30 @@ mod tests {
             user_rx,
             review_rx,
         )
+    }
+
+    #[test]
+    fn h3_accept_model_name_rejects_runtime_ids() {
+        assert!(!accept_model_name("grok", "grok"));
+        assert!(!accept_model_name("opencode", "claude"));
+        assert!(!accept_model_name("codex", "codex"));
+        assert!(!accept_model_name("spur", "grok"));
+        assert!(accept_model_name("grok-4.6", "grok"));
+        assert!(accept_model_name("grok-4.6-build", "grok"));
+    }
+
+    #[test]
+    fn h2_h7_metrics_null_vs_zero_and_cost_provenance() {
+        assert_eq!(json_opt_u64(None), serde_json::Value::Null);
+        assert_eq!(json_opt_u64(Some(0)), serde_json::json!(0));
+        assert_eq!(json_opt_u64(Some(22371)), serde_json::json!(22371));
+        let usage_present = false;
+        let provenance = if usage_present {
+            "observed_tokens"
+        } else {
+            "duration_estimate"
+        };
+        assert_eq!(provenance, "duration_estimate");
     }
 
     #[tokio::test]

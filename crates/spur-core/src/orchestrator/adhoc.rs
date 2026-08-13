@@ -285,6 +285,7 @@ impl Orchestrator {
                     brain_config.cost_tier,
                     prompt_usage_to_token_usage(usage),
                     Some(brain_config.name.as_str()),
+                    None,
                 ),
                 None => ct.end_session(&session_id, status, duration, brain_config.cost_tier),
             };
@@ -318,6 +319,7 @@ impl Orchestrator {
             total_cost_usd: total_cost,
             model_name: None,
             effort: None,
+            num_turns: None,
         })
     }
 }

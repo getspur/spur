@@ -168,6 +168,12 @@ pub trait AgentConnection: Send + Sync {
         None
     }
 
+    /// Return and clear `numTurns` from the most recent Grok
+    /// `turn_completed.usage`, when the transport observed that field.
+    fn take_last_num_turns(&mut self) -> Option<u64> {
+        None
+    }
+
     /// Return the last known LLM model id for an ACP session, if the transport
     /// tracks it (e.g. Grok `_x.ai/session_notification` `model_changed`).
     ///

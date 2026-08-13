@@ -61,6 +61,7 @@ impl CostTracker {
             output_tokens: None,
             cache_creation_tokens: None,
             cache_read_tokens: None,
+            num_turns: None,
         };
         db::insert_session(&self.conn, &record)
     }
@@ -94,6 +95,7 @@ impl CostTracker {
         cost_tier: CostTier,
         usage: TokenUsage,
         model: Option<&str>,
+        num_turns: Option<u64>,
     ) -> Result<()> {
         let cost = estimate_cost_from_tokens(cost_tier, duration, usage, model);
         db::update_session_end_with_tokens(
@@ -107,6 +109,7 @@ impl CostTracker {
             Some(usage.output_tokens as i64),
             Some(usage.cache_creation_input_tokens as i64),
             Some(usage.cache_read_input_tokens as i64),
+            num_turns.map(|n| n as i64),
         )
     }
 

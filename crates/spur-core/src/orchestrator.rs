@@ -800,6 +800,7 @@ impl Orchestrator {
         )
         .await?;
         let prompt_usage = prompt_outcome.usage;
+        let num_turns = prompt_outcome.num_turns;
 
         // sol_55e2f7194a224bba phase C: LLM id for pricing/model column — never
         // the coding-agent entry name (e.g. "grok"). Prefer ACP-reported model.
@@ -817,7 +818,8 @@ impl Orchestrator {
                 spur_session = %session_id,
                 acp_session = %acp_session_id,
                 "prompt usage missing after exec_direct; cost.db tokens will stay null \
-                 (agent must emit PromptResponse.usage or mappable UsageUpdate meta)"
+                 (agent must emit PromptResponse.usage, turn_completed.usage, \
+                  or mappable UsageUpdate meta)"
             );
         } else if let Some(ref u) = prompt_usage {
             if u.input_tokens == 0 && u.output_tokens == 0 {
@@ -854,6 +856,7 @@ impl Orchestrator {
                     agent_config.cost_tier,
                     prompt_usage_to_token_usage(usage),
                     llm_model.as_deref(),
+                    num_turns,
                 ),
                 None => ct.end_session(&session_id, status, duration, agent_config.cost_tier),
             };
@@ -875,6 +878,7 @@ impl Orchestrator {
             total_cost_usd: total_cost,
             model_name: llm_model,
             effort: llm_effort,
+            num_turns,
         })
     }
 
