@@ -226,7 +226,8 @@ pub use lineage::{
 #[cfg(any(test, feature = "test-support"))]
 pub use orchestrator::test_support;
 pub use orchestrator::{
-    review_dispatcher_loop, BrainSession, InteractiveInput, Orchestrator, RunOpts, RunResult,
+    review_dispatcher_loop, BrainSession, ExecOpts, InteractiveInput, Orchestrator, RunOpts,
+    RunResult,
 };
 pub use plan_projection::{PlanProjectionStore, TrackedPlan, TrackedTask};
 pub use review_sink::{ReviewSink, ReviewSinkError};

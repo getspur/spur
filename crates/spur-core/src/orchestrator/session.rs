@@ -1480,8 +1480,14 @@ mod session_attach_guard_transfer_tests {
         let request = spur_solver::types::SolveConstraintsRequest {
             vars: Vec::new(),
             constraints: Vec::new(),
+            objectives: vec![],
+            objective_priority: Default::default(),
             timeout_ms: spur_solver::types::DEFAULT_TIMEOUT_MS,
             persist: false,
+            include_smt: false,
+            use_cache: true,
+            session_id: None,
+            session_op: Default::default(),
         };
         let result = spur_solver::types::SolveConstraintsResponse {
             status: spur_solver::types::SolveStatus::Unsat,
@@ -1490,6 +1496,9 @@ mod session_attach_guard_transfer_tests {
             solve_id: None,
             reason: None,
             smt: None,
+            unsat_core: None,
+            cached: false,
+            session_id: None,
         };
         let artifact = writer
             .persist(&request, &result)

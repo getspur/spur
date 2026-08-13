@@ -336,6 +336,37 @@ pub fn thought_level_option_from(options: &[SessionConfigOption]) -> Option<&Ses
     )
 }
 
+/// Current select **value id** (not display label) for a config option.
+#[must_use]
+pub fn current_select_value_id(option: &SessionConfigOption) -> Option<&str> {
+    match &option.kind {
+        SessionConfigKind::Select(select) => {
+            let v = select.current_value.0.as_ref();
+            if v.is_empty() {
+                None
+            } else {
+                Some(v)
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Active model **id** from config options (for cost.db / metrics; not label).
+/// Authority: sol_0225528da3534508 P2 ACP observe.
+#[must_use]
+pub fn model_id_from_config_options(options: &[SessionConfigOption]) -> Option<String> {
+    let option = model_option_from(options)?;
+    current_select_value_id(option).map(str::to_owned)
+}
+
+/// Active effort / thought-level **id** from config options.
+#[must_use]
+pub fn effort_id_from_config_options(options: &[SessionConfigOption]) -> Option<String> {
+    let option = thought_level_option_from(options)?;
+    current_select_value_id(option).map(str::to_owned)
+}
+
 #[derive(Clone, Copy)]
 enum KnownConfigCategory {
     Model,
@@ -1022,6 +1053,57 @@ mod tests {
         assert!(
             !caps.meta_capability("terminal_output"),
             "non-bool meta value is treated as false"
+        );
+    }
+}
+
+#[cfg(test)]
+mod p2_model_effort_id_tests {
+    use super::*;
+    use agent_client_protocol::schema::v1::{
+        SessionConfigId, SessionConfigOption, SessionConfigOptionCategory,
+        SessionConfigSelectOption, SessionConfigValueId,
+    };
+
+    fn select_opt(
+        id: &str,
+        current: &str,
+        category: Option<SessionConfigOptionCategory>,
+    ) -> SessionConfigOption {
+        let mut opt = SessionConfigOption::select(
+            SessionConfigId::new(id.to_string()),
+            "label".to_string(),
+            current.to_string(),
+            vec![SessionConfigSelectOption::new(
+                SessionConfigValueId::new(current.to_string()),
+                "Name".to_string(),
+            )],
+        );
+        if let Some(cat) = category {
+            opt = opt.category(cat);
+        }
+        opt
+    }
+
+    #[test]
+    fn model_id_from_config_options_reads_select_current() {
+        let opts = vec![select_opt(
+            "model",
+            "gpt-5.5",
+            Some(SessionConfigOptionCategory::Model),
+        )];
+        assert_eq!(
+            model_id_from_config_options(&opts).as_deref(),
+            Some("gpt-5.5")
+        );
+    }
+
+    #[test]
+    fn effort_id_from_reasoning_effort_option() {
+        let opts = vec![select_opt("reasoning_effort", "high", None)];
+        assert_eq!(
+            effort_id_from_config_options(&opts).as_deref(),
+            Some("high")
         );
     }
 }

@@ -24,7 +24,7 @@ digraph plan_task_lifecycle {
     Completed [shape=box];
     Approved [shape=box];
     Rejected [shape=box];
-
+    
     Pending -> Dispatched [label="brain dispatches"];
     Dispatched -> InProgress [label="worker starts"];
     InProgress -> Completed [label="worker finishes"];

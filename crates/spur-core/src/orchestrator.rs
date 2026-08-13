@@ -39,7 +39,7 @@ use spur_acp::{
     SetSessionModeRequest, TextContent,
 };
 
-use crate::worker_server::WorkerMcpServer;
+use crate::worker_server::{WorkerMcpDeps, WorkerMcpServer};
 use crate::BaseSpec;
 use crate::{DelegationChannel, DelegationRequest};
 use spur_blob_store::{
@@ -89,8 +89,8 @@ pub use review::{cleanup_cancelled_review, review_dispatcher_loop};
 use session::{abort_mcp_handle, cleanup_mcp_on_err, retire_brain_session};
 use session_discovery::classify_sessions;
 pub use types::{
-    ActiveConnection, BrainSession, FaultInjectionHooks, LoadBrainSessionError, ReconnectError,
-    RunOpts, RunResult,
+    ActiveConnection, BrainSession, ExecOpts, FaultInjectionHooks, LoadBrainSessionError,
+    ReconnectError, RunOpts, RunResult,
 };
 pub use util::normalize_agent_name;
 use util::{
@@ -98,7 +98,7 @@ use util::{
     reconnect_failure_event, render_beads_startup_warning, shellexpand_tilde,
     startup_beads_warning,
 };
-use worker_mcp::{build_worker_mcp_servers_with, WorkerMcpFetcher};
+use worker_mcp::{build_direct_mcp_servers_with, build_worker_mcp_servers_with, WorkerMcpFetcher};
 
 type McpGuarded<T> = (T, AbortOnDropHandle<()>);
 type BrainRunBootstrap = (
@@ -698,7 +698,17 @@ impl Orchestrator {
     }
 
     /// Execute a task directly on a single agent (no brain, no delegation).
-    pub async fn exec_direct(&mut self, agent_name: &str, task: &str) -> Result<RunResult> {
+    ///
+    /// When [`ExecOpts::enable_mcp`] is true, boots a short-lived curated
+    /// worker MCP server (`spur-worker-mcp`) for the session — never the
+    /// brain catalog (no `delegate_*` / plan-lifecycle tools). Default is
+    /// off (historical `mcp_servers = vec![]`).
+    pub async fn exec_direct(
+        &mut self,
+        agent_name: &str,
+        task: &str,
+        opts: ExecOpts,
+    ) -> Result<RunResult> {
         let start = Instant::now();
         let session_id = SessionId::new();
 
@@ -708,7 +718,12 @@ impl Orchestrator {
             .ok_or_else(|| anyhow!("Agent '{}' not found in registry", agent_name))?
             .clone();
 
-        info!(agent = %agent_name, session = %session_id, "Direct execution");
+        info!(
+            agent = %agent_name,
+            session = %session_id,
+            enable_mcp = opts.enable_mcp,
+            "Direct execution"
+        );
 
         if let Some(ref ct) = self.cost_tracker {
             let _ = ct.start_session(
@@ -722,6 +737,29 @@ impl Orchestrator {
             );
         }
 
+        // Optional worker MCP for direct sessions (opt-in). Default off keeps
+        // the historical empty mcp_servers vec. When enabled we boot a
+        // short-lived spur-worker-mcp, inject it into session/new, then
+        // complete_delegation + shutdown after the prompt finishes.
+        let mut direct_mcp: Option<DirectMcpSession> = None;
+        let mcp_servers = if opts.enable_mcp {
+            let session = self
+                .start_direct_worker_mcp(&session_id)
+                .await
+                .context("Failed to start direct-session worker MCP")?;
+            let servers = build_direct_mcp_servers_with(true, || {
+                let url = session.server.url();
+                let token = session.token.clone();
+                async move { Ok::<_, DelegationDispatchError>((url, token)) }
+            })
+            .await
+            .map_err(|e| anyhow!("direct MCP dispatch failed: {e}"))?;
+            direct_mcp = Some(session);
+            servers
+        } else {
+            Vec::new()
+        };
+
         let mut connection = self.create_connection(&agent_config, None);
 
         let init_request = InitializeRequest::new(ProtocolVersion::LATEST);
@@ -734,7 +772,7 @@ impl Orchestrator {
             &mut *connection,
             &agent_config,
             self.repo_root.clone(),
-            vec![],
+            mcp_servers,
         )
         .await
         .context("Failed to create agent session")?;
@@ -768,6 +806,8 @@ impl Orchestrator {
         let llm_model = connection
             .session_llm_model(&acp_session_id)
             .filter(|m| m != agent_name);
+        // sol_0225528da3534508 P2: effort from ACP config_options (may be None).
+        let llm_effort = connection.session_effort(&acp_session_id);
 
         // sol_55e2f7194a224bba phase A: surface missing ACP usage so ADE token
         // zeros are diagnosable (Grok often omits PromptResponse.usage).
@@ -790,6 +830,18 @@ impl Orchestrator {
         }
 
         let _ = connection.shutdown().await;
+
+        // Tear down optional direct MCP after the agent disconnects.
+        if let Some(session) = direct_mcp.take() {
+            session
+                .server
+                .complete_delegation(&session.delegation_id, "success");
+            let _ = session
+                .server
+                .shutdown(std::time::Duration::from_secs(5))
+                .await;
+        }
+
         let duration = start.elapsed();
 
         if let Some(ref ct) = self.cost_tracker {
@@ -821,8 +873,92 @@ impl Orchestrator {
             success,
             pr_url: None,
             total_cost_usd: total_cost,
+            model_name: llm_model,
+            effort: llm_effort,
         })
     }
+
+    /// Boot a one-shot worker MCP server for `exec_direct` when
+    /// [`ExecOpts::enable_mcp`] is set. Uses the curated worker catalog
+    /// (not brain). Synthetic brain/delegation ids are scoped to this
+    /// direct session only.
+    async fn start_direct_worker_mcp(&self, session_id: &SessionId) -> Result<DirectMcpSession> {
+        let pm = self.pm_service.clone().ok_or_else(|| {
+            anyhow!(
+                "enable_mcp requires a PM service on the orchestrator \
+                 (beads or github backend); attach via with_pm_service"
+            )
+        })?;
+        let gate = self.mcp_feature_gate();
+        let funnel: Arc<dyn spur_mcp::McpEventSink> = Arc::new(self.funnel.clone());
+
+        let worker_signal_sink = Arc::new(crate::mcp::signals::WorkerSignalMcpToolModule::new(
+            crate::mcp::signals::SignalMcpDeps {
+                pm_service: Some(Arc::clone(&pm)),
+                event_sink: Some(Arc::clone(&funnel)),
+                feature_gate: Arc::clone(&gate),
+            },
+        ));
+
+        // Plan resolver is a no-op for direct sessions (no brain-owned plan
+        // state). catalog_only seeds NoopPlanResolver; we overlay live PM +
+        // outcome store so read tools that need them still work.
+        let mut read_deps = crate::mcp::worker::WorkerReadMcpDeps::catalog_only();
+        read_deps.pm_service = Some(Arc::clone(&pm));
+        read_deps.feature_gate = Arc::clone(&gate);
+        read_deps.outcome_store = Arc::clone(&self.outcome_store);
+        read_deps.repo_root = Some(self.repo_root.clone());
+        let worker_read_sink = Arc::new(crate::mcp::worker::WorkerReadMcpModule::new(read_deps));
+
+        let deps = WorkerMcpDeps {
+            pm_service: pm,
+            feature_gate: gate,
+            funnel,
+            worker_signal_sink,
+            worker_read_sink,
+            repo_root: Some(self.repo_root.clone()),
+        };
+
+        // Synthetic ids: direct exec has no real brain/delegation, but the
+        // worker MCP auth token is keyed on (brain_session_id, delegation_id).
+        let brain_session_id = spur_acp::BrainSessionId::new(session_id.clone());
+        let delegation_id = format!("direct-exec-{}", session_id);
+
+        let server = WorkerMcpServer::start_with_context_service_config(
+            brain_session_id.to_string(),
+            deps,
+            self.config.context_service.clone(),
+        )
+        .await
+        .map_err(|e| anyhow!("direct WorkerMcpServer bind failed: {e}"))?;
+
+        server.register_delegation(
+            delegation_id.clone(),
+            crate::worker_server::DelegationContext::default(),
+        );
+        // Code graph tools resolve freshness against the worktree root.
+        server.register_delegation_worktree_root(delegation_id.clone(), self.repo_root.clone());
+
+        let token = server.issue_token(&delegation_id, std::time::Duration::from_secs(3600));
+        info!(
+            session = %session_id,
+            url = %server.url(),
+            "Direct-session WorkerMcpServer started"
+        );
+
+        Ok(DirectMcpSession {
+            server,
+            delegation_id,
+            token,
+        })
+    }
+}
+
+/// Short-lived worker MCP binding for one `exec_direct` invocation.
+struct DirectMcpSession {
+    server: Arc<WorkerMcpServer>,
+    delegation_id: String,
+    token: String,
 }
 
 #[cfg(any(test, feature = "test-support"))]

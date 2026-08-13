@@ -6,7 +6,7 @@ use crate::worker_server::{WorkerMcpDeps, WorkerMcpServer};
 use dashmap::DashMap;
 use spur_acp::config::ContextServiceConfig;
 use spur_acp::DelegationDispatchError;
-use spur_acp::{McpServer, McpServerHttp};
+use spur_acp::{HttpHeader, McpServer, McpServerHttp};
 use spur_blob_store::OutcomeStore;
 use spur_pm::PmService;
 
@@ -122,9 +122,17 @@ impl WorkerMcpFetcher {
 ///
 /// Returns `Vec::new()` only when `enable_worker_mcp` is `Some(false)`
 /// (explicit opt-out). When `None` (omitted) or `Some(true)`, awaits
-/// `fetch` to obtain `(url, token)`, assembles the `?token=` URL, and
-/// returns a single `McpServer::Http` entry named `spur-worker-mcp`.
-/// Any error from `fetch` is propagated.
+/// `fetch` to obtain `(url, token)`, assembles a dual-delivery
+/// `McpServer::Http` entry named `spur-worker-mcp`:
+///
+/// 1. `url?token=<token>` — clients that preserve query strings (Claude)
+/// 2. `headers: Authorization: Bearer <token>` — clients that strip query
+///    and only send configured headers (Codex streamable HTTP)
+///
+/// Server middleware accepts either channel (`extract_bearer_token` OR
+/// `extract_query_token`). Dual delivery is required for Codex
+/// (`sol_9c4300ee48ee42e9` proves query-only unsat; `sol_496a02a85819450c`
+/// proves dual sat).
 pub(super) async fn build_worker_mcp_servers_with<F, Fut>(
     enable_worker_mcp: Option<bool>,
     fetch: F,
@@ -137,11 +145,44 @@ where
         return Ok(Vec::new());
     }
     let (url, token) = fetch().await?;
-    let url_with_token = format!("{}?token={}", url, token);
-    Ok(vec![McpServer::Http(McpServerHttp::new(
+    Ok(vec![assemble_worker_mcp_http_entry(&url, &token)])
+}
+
+/// Assemble the ACP `McpServer::Http` entry with dual token delivery.
+///
+/// Pure helper so unit tests can assert both channels without booting a
+/// server. Keep URL query AND Bearer header in lockstep.
+pub(super) fn assemble_worker_mcp_http_entry(url: &str, token: &str) -> McpServer {
+    let url_with_token = format!("{url}?token={token}");
+    let http = McpServerHttp::new(
         crate::worker_server::WORKER_MCP_SERVER_NAME,
         &url_with_token,
-    ))])
+    )
+    .headers(vec![HttpHeader::new(
+        "Authorization",
+        format!("Bearer {token}"),
+    )]);
+    McpServer::Http(http)
+}
+
+/// Direct-exec MCP gate (`spur exec` / [`crate::Orchestrator::exec_direct`]).
+///
+/// **Default OFF** — unlike worker dispatch (`build_worker_mcp_servers_with`),
+/// which defaults on when the flag is omitted. Direct sessions historically
+/// received `mcp_servers = vec![]`; enablement is explicit opt-in only.
+///
+/// When `enable_mcp` is true, awaits `fetch` and returns a single
+/// `spur-worker-mcp` HTTP entry (curated worker catalog — never brain).
+pub(super) async fn build_direct_mcp_servers_with<F, Fut>(
+    enable_mcp: bool,
+    fetch: F,
+) -> Result<Vec<McpServer>, DelegationDispatchError>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<(String, String), DelegationDispatchError>>,
+{
+    // Explicit Some(bool): never inherit worker's default-on semantics.
+    build_worker_mcp_servers_with(Some(enable_mcp), fetch).await
 }
 
 /// Compute-once cache helper for [`Orchestrator::ensure_worker_mcp_server`].
@@ -485,9 +526,43 @@ mod worker_mcp_dispatch_tests {
     //! PlanResolver to boot). The contract under test is the gating
     //! logic and URL assembly.
 
-    use super::build_worker_mcp_servers_with;
+    use super::{assemble_worker_mcp_http_entry, build_worker_mcp_servers_with};
     use spur_acp::DelegationDispatchError;
     use spur_acp::McpServer;
+
+    fn assert_dual_token_delivery(entry: &McpServer, expected_token: &str) {
+        match entry {
+            McpServer::Http(http) => {
+                assert_eq!(
+                    http.name, "spur-worker-mcp",
+                    "entry must be named spur-worker-mcp"
+                );
+                assert!(
+                    http.url.contains(&format!("?token={expected_token}")),
+                    "URL must embed token for query-channel clients: {}",
+                    http.url
+                );
+                let auth = http
+                    .headers
+                    .iter()
+                    .find(|h| h.name.eq_ignore_ascii_case("Authorization"))
+                    .unwrap_or_else(|| panic!("missing Authorization header for Codex clients"));
+                assert_eq!(
+                    auth.value,
+                    format!("Bearer {expected_token}"),
+                    "Authorization must be Bearer token for header-channel clients"
+                );
+            }
+            other => panic!("expected McpServer::Http, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn assemble_dual_delivers_query_and_bearer() {
+        // sol_496a02a85819450c — dual delivery is the preferred feasible model.
+        let entry = assemble_worker_mcp_http_entry("http://127.0.0.1:54321/mcp", "tok-dual-xyz");
+        assert_dual_token_delivery(&entry, "tok-dual-xyz");
+    }
 
     #[tokio::test]
     async fn flag_none_defaults_on_and_runs_fetch() {
@@ -512,6 +587,7 @@ mod worker_mcp_dispatch_tests {
             fetch_called,
             "fetch closure MUST run when flag is None (default-on)"
         );
+        assert_dual_token_delivery(&result[0], "tok-default");
     }
 
     #[tokio::test]
@@ -536,7 +612,7 @@ mod worker_mcp_dispatch_tests {
     }
 
     #[tokio::test]
-    async fn flag_some_true_emits_one_entry_with_token_in_url() {
+    async fn flag_some_true_emits_one_entry_with_dual_token_delivery() {
         let result = build_worker_mcp_servers_with(Some(true), || async {
             Ok::<_, DelegationDispatchError>((
                 "http://127.0.0.1:54321/mcp".into(),
@@ -546,17 +622,9 @@ mod worker_mcp_dispatch_tests {
         .await
         .expect("Some(true) flag must succeed");
         assert_eq!(result.len(), 1, "flag-true must produce exactly 1 entry");
+        assert_dual_token_delivery(&result[0], "tok-abc-123");
         match &result[0] {
             McpServer::Http(http) => {
-                assert_eq!(
-                    http.name, "spur-worker-mcp",
-                    "entry must be named spur-worker-mcp"
-                );
-                assert!(
-                    http.url.contains("?token=tok-abc-123"),
-                    "URL must embed token: {}",
-                    http.url
-                );
                 assert!(
                     http.url.starts_with("http://127.0.0.1:54321/mcp"),
                     "URL must start with the server URL: {}",
@@ -578,6 +646,83 @@ mod worker_mcp_dispatch_tests {
         match result {
             Err(DelegationDispatchError::WorkerMcpUnavailable { reason }) => {
                 assert!(reason.contains("stub: deps not configured"));
+            }
+            other => panic!("expected WorkerMcpUnavailable, got {other:?}"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod direct_mcp_dispatch_tests {
+    //! Direct-exec MCP gate: default OFF (opt-in only). Contrasts with
+    //! worker dispatch which defaults ON when the flag is omitted.
+    //!
+    //! Authority: sol_58c84431580148b7 (legacy empty default),
+    //! sol_d46d56e171ec482b (enabled → worker catalog, count≥1).
+
+    use super::build_direct_mcp_servers_with;
+    use spur_acp::DelegationDispatchError;
+    use spur_acp::McpServer;
+
+    #[tokio::test]
+    async fn enable_false_emits_zero_entries_and_skips_fetch() {
+        let mut fetch_called = false;
+        let result = build_direct_mcp_servers_with(false, || {
+            fetch_called = true;
+            async {
+                Ok::<_, DelegationDispatchError>(("http://127.0.0.1:1/mcp".into(), "tok".into()))
+            }
+        })
+        .await
+        .expect("enable_mcp=false must succeed");
+        assert!(
+            result.is_empty(),
+            "direct-exec default/off must produce zero entries"
+        );
+        assert!(!fetch_called, "fetch must not run when enable_mcp=false");
+    }
+
+    #[tokio::test]
+    async fn enable_true_emits_one_worker_mcp_entry_with_dual_token() {
+        let result = build_direct_mcp_servers_with(true, || async {
+            Ok::<_, DelegationDispatchError>((
+                "http://127.0.0.1:54321/mcp".into(),
+                "direct-tok".into(),
+            ))
+        })
+        .await
+        .expect("enable_mcp=true must succeed");
+        assert_eq!(result.len(), 1);
+        match &result[0] {
+            McpServer::Http(http) => {
+                assert_eq!(http.name, "spur-worker-mcp");
+                assert!(
+                    http.url.contains("?token=direct-tok"),
+                    "URL must embed token: {}",
+                    http.url
+                );
+                let auth = http
+                    .headers
+                    .iter()
+                    .find(|h| h.name.eq_ignore_ascii_case("Authorization"))
+                    .expect("Authorization header required for Codex");
+                assert_eq!(auth.value, "Bearer direct-tok");
+            }
+            other => panic!("expected McpServer::Http, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn enable_true_propagates_fetch_error() {
+        let result = build_direct_mcp_servers_with(true, || async {
+            Err::<(String, String), _>(DelegationDispatchError::WorkerMcpUnavailable {
+                reason: "pm_service not configured".into(),
+            })
+        })
+        .await;
+        match result {
+            Err(DelegationDispatchError::WorkerMcpUnavailable { reason }) => {
+                assert!(reason.contains("pm_service not configured"));
             }
             other => panic!("expected WorkerMcpUnavailable, got {other:?}"),
         }

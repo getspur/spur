@@ -2,7 +2,7 @@
 name: spurpower-code-explore
 description: "You MUST use this before any code exploration, navigation, or impact analysis — instead of Grep/Glob/Read-walking. Establishes the three-layer retrieval stack: knowledge_context_pack_2 for orientation, the code_* MCP graph tools for precise symbol work and blast-radius bounding, spur-analyst SQL for aggregation and graph algorithms, and external_* MCP tools for indexed external packages."
 ---
-<!-- SPUR-MANAGED v=1 skill=spurpower-code-explore sha256=709ebb86d43a345da9ccd8e46d4a9f6fbc9d7d24fd30602ce470bff96ce44935 -->
+<!-- SPUR-MANAGED v=1 skill=spurpower-code-explore sha256=20be250e2867bf6bb7871d713c9cca3db71cd63e656cec219d4f97406b39c7eb -->
 
 # Code Explore — Graph-First Navigation
 
@@ -72,7 +72,7 @@ Most code questions are not call-graph questions. Pick the right shape before re
 | Question shape | Right tool sequence |
 |---|---|
 | **"Get me oriented / where does <concept> live / what's the impact area?"** (new investigation, no symbol in hand) | `knowledge_context_pack_2` (layer 1) — then follow its `recommended_next_tools` selectors into the rows below. |
-| **"How does <concept> work / where is it documented?"** (you know the *topic*, not the symbol name) | `knowledge_context_pack_2` or `code_semantic_search` — hybrid/BM25 doc + code retrieval. Then `code_read_symbol` / `doc_navigate` on a hit. |
+| **"How does <concept> work / where is it documented?"** (you know the *topic*, not the symbol name) | `knowledge_context_pack_2` or `code_semantic_search` / `doc_navigate` for discovery (lede only). Then **`code_read_symbol` on the section `stable_symbol_id`** for the full body — there is no `doc_read`. Use `doc_navigate` with `root` only to expand child outline. |
 | **"How does <concept> work in external package <pkg>?"** | `external_knowledge_context` — then follow its package `selector` into `external_code_read` or external edge tools. If the revision is missing, use `external_index` → `external_index_status` first. |
 | **"What does X mean / contain / advertise?"** (schema audit, doc read, single-symbol body) | filtered `code_symbol_search` → `code_read_symbol`. **No call graph.** |
 | **"What breaks if I change X?"** (refactor, rename) | `code_callers` with `include_unresolved=true`. Counts-first; bail on popular sinks. |

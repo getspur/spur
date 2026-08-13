@@ -290,6 +290,12 @@ enum Commands {
         agent: String,
         /// The task description
         task: String,
+        /// Inject curated worker MCP (`spur-worker-mcp`) into the session.
+        /// Default off — preserves the historical no-MCP direct path.
+        /// Requires a PM backend (beads/github) so tool handlers can resolve
+        /// issues and signals. Does not enable brain/delegation tools.
+        #[arg(long)]
+        enable_mcp: bool,
     },
     /// List and manage active sessions
     Sessions {
@@ -1203,10 +1209,20 @@ async fn run() -> Result<()> {
             }
             Ok(())
         }
-        Commands::Exec { agent, task } => {
+        Commands::Exec {
+            agent,
+            task,
+            enable_mcp,
+        } => {
             require_cli_gate(spur_license::FeatureKey::CLI_CORE_EXEC)?;
-            let mut orch = load_orchestrator(repo_root)?;
-            let result = orch.exec_direct(&agent, &task).await?;
+            let mut orch = if enable_mcp {
+                load_orchestrator_with_pm(repo_root).await?
+            } else {
+                load_orchestrator(repo_root)?
+            };
+            let result = orch
+                .exec_direct(&agent, &task, spur_core::ExecOpts { enable_mcp })
+                .await?;
             println!(
                 "[spur] Session {} {} (${:.2})",
                 result.session_id,
@@ -2114,6 +2130,37 @@ fn load_orchestrator(repo_root: PathBuf) -> Result<Orchestrator> {
     Orchestrator::new(repo_root, config, Some(license.feature_gate()))
 }
 
+/// Like [`load_orchestrator`], but also attaches a PM service when the
+/// license tier and config allow it. Used by `spur exec --enable-mcp`,
+/// which needs PM for worker MCP issue/signal handlers.
+async fn load_orchestrator_with_pm(repo_root: PathBuf) -> Result<Orchestrator> {
+    let config = load_config()?;
+    let license = SpurLicense::from_env_or_disabled();
+    let pm_service = if pm_service_gate_allows_construction(license.feature_gate().as_ref()) {
+        spur_pm::PmService::try_new(
+            config.pm.github.as_ref().and_then(|g| g.repo.clone()),
+            config.pm.beads.as_ref().is_none_or(|b| b.enabled),
+            config.pm.github.as_ref().is_none_or(|g| g.enabled),
+            &repo_root,
+            None,
+        )
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!("PM service initialization failed: {e}");
+            None
+        })
+    } else {
+        tracing::info!("PM integration not available on current tier");
+        None
+    };
+    let orch = Orchestrator::new(repo_root, config, Some(license.feature_gate()))?;
+    Ok(if let Some(pm) = pm_service.map(std::sync::Arc::new) {
+        orch.with_pm_service(pm)
+    } else {
+        orch
+    })
+}
+
 /// Emit one machine-readable metrics line after `spur exec` / `spur run`.
 ///
 /// Authority: sol_3b1887a27da7475a phase3
@@ -2132,6 +2179,9 @@ fn print_spur_agent_metrics(
     let mut output_tokens: u64 = 0;
     let mut cache_tokens: u64 = 0;
     let mut model_name: Option<String> = None;
+    let mut model_provenance: Option<String> = None;
+    let mut effort: Option<String> = None;
+    let mut effort_provenance: Option<String> = None;
 
     if let Some(ref ct) = orch.cost_tracker {
         if let Ok(Some(s)) = ct.session_detail(&result.session_id) {
@@ -2167,6 +2217,47 @@ fn print_spur_agent_metrics(
         }
     }
 
+    // P2 ACP observe from exec_direct RunResult.
+    if model_name.is_none() {
+        if let Some(ref m) = result.model_name {
+            if m != &coding_agent {
+                model_name = Some(m.clone());
+                model_provenance = Some("acp".into());
+            }
+        }
+    }
+    if effort.is_none() {
+        if let Some(ref e) = result.effort {
+            if !e.is_empty() {
+                effort = Some(e.clone());
+                effort_provenance = Some("acp".into());
+            }
+        }
+    }
+
+    // sol_0225528da3534508: provenance ladder (env/config are weak fills).
+    // Prefer cost.db (acp) already applied above; then SPUR_MODEL / SPUR_EFFORT.
+    if model_name.is_none() {
+        if let Ok(m) = std::env::var("SPUR_MODEL") {
+            let m = m.trim().to_string();
+            if !m.is_empty() && m != coding_agent {
+                model_name = Some(m);
+                model_provenance = Some("env_override".into());
+            }
+        }
+    } else if model_provenance.is_none() {
+        model_provenance = Some("acp".into());
+    }
+    if let Ok(e) =
+        std::env::var("SPUR_EFFORT").or_else(|_| std::env::var("OPENAI_CODEX_REASONING_EFFORT"))
+    {
+        let e = e.trim().to_string();
+        if !e.is_empty() {
+            effort = Some(e);
+            effort_provenance = Some("env_override".into());
+        }
+    }
+
     let mut map = serde_json::Map::new();
     map.insert(
         "session_id".into(),
@@ -2180,6 +2271,21 @@ fn print_spur_agent_metrics(
         map.insert("model_name".into(), serde_json::Value::String(m));
     } else {
         map.insert("model_name".into(), serde_json::Value::Null);
+    }
+    if let Some(p) = model_provenance {
+        map.insert("model_provenance".into(), serde_json::Value::String(p));
+    } else {
+        map.insert("model_provenance".into(), serde_json::Value::Null);
+    }
+    if let Some(e) = effort {
+        map.insert("effort".into(), serde_json::Value::String(e));
+    } else {
+        map.insert("effort".into(), serde_json::Value::Null);
+    }
+    if let Some(p) = effort_provenance {
+        map.insert("effort_provenance".into(), serde_json::Value::String(p));
+    } else {
+        map.insert("effort_provenance".into(), serde_json::Value::Null);
     }
     map.insert("input_tokens".into(), serde_json::json!(input_tokens));
     map.insert("output_tokens".into(), serde_json::json!(output_tokens));

@@ -135,7 +135,7 @@ pub use agent_client_protocol::schema::v1::{
     CloseSessionRequest, CloseSessionResponse, ConfigOptionUpdate, Content, ContentBlock,
     ContentChunk, CreateTerminalRequest, CreateTerminalResponse, CurrentModeUpdate,
     DeleteSessionRequest, DeleteSessionResponse, Diff, EmbeddedResource, EmbeddedResourceResource,
-    ExtNotification, ExtRequest, ExtResponse, FileSystemCapabilities, ImageContent,
+    ExtNotification, ExtRequest, ExtResponse, FileSystemCapabilities, HttpHeader, ImageContent,
     InitializeRequest, InitializeResponse, KillTerminalRequest, KillTerminalResponse,
     ListSessionsRequest, ListSessionsResponse, LoadSessionRequest, LoadSessionResponse, McpServer,
     McpServerHttp, McpServerStdio, NewSessionRequest, NewSessionResponse, PermissionOption,

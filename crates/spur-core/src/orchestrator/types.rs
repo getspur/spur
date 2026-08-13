@@ -18,12 +18,35 @@ pub struct RunOpts {
     pub background: bool,
 }
 
+/// Options for `spur exec` / [`crate::Orchestrator::exec_direct`].
+///
+/// Direct execution is intentionally no-brain / no-delegation. MCP is an
+/// optional tooling surface, not a control plane: when enabled the agent
+/// receives the curated **worker** MCP catalog (`spur-worker-mcp`), never
+/// the brain catalog (no `delegate_*` / plan-lifecycle tools).
+///
+/// Default is off — preserves the historical `mcp_servers = vec![]`
+/// contract (solve: `sol_58c84431580148b7` legacy path; enabled path
+/// `sol_d46d56e171ec482b` requires worker catalog with ≥1 server).
+#[derive(Debug, Clone, Default)]
+pub struct ExecOpts {
+    /// When `true`, boot a short-lived worker MCP server for this direct
+    /// session and inject it into ACP `session/new`. Requires a configured
+    /// PM service on the orchestrator.
+    pub enable_mcp: bool,
+}
+
 /// Result of a completed run.
 pub struct RunResult {
     pub session_id: SessionId,
     pub success: bool,
     pub pr_url: Option<String>,
     pub total_cost_usd: f64,
+    /// Observed LLM model id from ACP (not coding-agent entry name).
+    /// Authority: sol_0225528da3534508 P2.
+    pub model_name: Option<String>,
+    /// Observed effort / thought-level value id from ACP config options.
+    pub effort: Option<String>,
 }
 
 /// Holds the active brain transport along with metadata that must

@@ -180,6 +180,12 @@ pub trait AgentConnection: Send + Sync {
         None
     }
 
+    /// Last known reasoning/effort value id for an ACP session, when tracked.
+    fn session_effort(&self, acp_session_id: &str) -> Option<String> {
+        let _ = acp_session_id;
+        None
+    }
+
     /// Cancel an in-flight prompt for the given session.
     ///
     /// This is a best-effort notification; the agent may or may not honor it.

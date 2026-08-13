@@ -289,7 +289,12 @@ pub struct NativeAcpConnection {
     session_modes: Arc<Mutex<HashMap<String, AcpSessionModeSnapshot>>>,
     /// Last Grok model confirmed by a successful set call or a
     /// `model_changed` extension notification.
+    /// Session LLM model ids (ACP config_option / Grok model_changed / set_model).
+    /// Keyed by ACP session id. Not the coding-agent entry name.
+    /// Authority: sol_0225528da3534508 P2 (generalized beyond Grok-only).
     grok_session_models: Arc<Mutex<HashMap<String, String>>>,
+    /// Session effort / thought-level value ids from ACP config options.
+    session_efforts: Arc<Mutex<HashMap<String, String>>>,
     /// Session lifecycle capabilities from this connection's
     /// `InitializeResponse`. `None` means initialize has not completed yet;
     /// `Some(default)` means the agent initialized but did not advertise
@@ -517,6 +522,46 @@ fn meta_u64(meta: &serde_json::Map<String, serde_json::Value>, keys: &[&str]) ->
         }
     }
     None
+}
+
+/// Cache model + effort ids from ACP `config_options` (NewSession / ConfigOptionUpdate).
+/// Identity: does not store empty strings. sol_0225528da3534508 P2.
+fn cache_config_options_model_effort(
+    models: &Arc<Mutex<HashMap<String, String>>>,
+    efforts: &Arc<Mutex<HashMap<String, String>>>,
+    session_id: &str,
+    options: &[SessionConfigOption],
+) {
+    if session_id.is_empty() {
+        return;
+    }
+    if let Some(model_id) = crate::spur_agent_caps::model_id_from_config_options(options) {
+        if let Ok(mut guard) = models.lock() {
+            guard.insert(session_id.to_string(), model_id);
+        }
+    }
+    if let Some(effort_id) = crate::spur_agent_caps::effort_id_from_config_options(options) {
+        if let Ok(mut guard) = efforts.lock() {
+            guard.insert(session_id.to_string(), effort_id);
+        }
+    }
+}
+
+fn cache_session_notification_config_options(
+    models: &Arc<Mutex<HashMap<String, String>>>,
+    efforts: &Arc<Mutex<HashMap<String, String>>>,
+    notification: &SessionNotification,
+) {
+    let SessionUpdate::ConfigOptionUpdate(update) = &notification.update else {
+        return;
+    };
+    // ConfigOptionUpdate holds the full options snapshot (or deltas) as Vec.
+    cache_config_options_model_effort(
+        models,
+        efforts,
+        notification.session_id.0.as_ref(),
+        &update.config_options,
+    );
 }
 
 fn cache_session_modes(
@@ -747,6 +792,7 @@ impl NativeAcpConnection {
             session_notif_tx,
             session_modes: Arc::new(Mutex::new(HashMap::new())),
             grok_session_models: Arc::new(Mutex::new(HashMap::new())),
+            session_efforts: Arc::new(Mutex::new(HashMap::new())),
             session_capabilities: Arc::new(Mutex::new(None)),
             last_prompt_usage: Arc::new(Mutex::new(None)),
             prompt_response_rx: None,
@@ -920,6 +966,7 @@ impl AgentConnection for NativeAcpConnection {
         let session_notif_tx_for_thread = self.session_notif_tx.clone();
         let session_modes = self.session_modes.clone();
         let grok_session_models = self.grok_session_models.clone();
+        let session_efforts = self.session_efforts.clone();
         let last_prompt_usage = self.last_prompt_usage.clone();
         let child_pgid = self.child_pgid.clone();
         let repo_root = self.repo_root.clone();
@@ -941,6 +988,7 @@ impl AgentConnection for NativeAcpConnection {
                     session_notif_tx_for_thread,
                     session_modes,
                     grok_session_models,
+                    session_efforts,
                     last_prompt_usage,
                     child_pgid,
                     repo_root,
@@ -1112,8 +1160,16 @@ impl AgentConnection for NativeAcpConnection {
     }
 
     fn session_llm_model(&self, acp_session_id: &str) -> Option<String> {
-        // Grok (and similar) report model via extension notifications.
+        // ACP config_option model / Grok model_changed / set_session_model.
+        // Authority: sol_0225528da3534508 P2 (not Grok-only).
         self.grok_session_models
+            .lock()
+            .ok()
+            .and_then(|guard| guard.get(acp_session_id).cloned())
+    }
+
+    fn session_effort(&self, acp_session_id: &str) -> Option<String> {
+        self.session_efforts
             .lock()
             .ok()
             .and_then(|guard| guard.get(acp_session_id).cloned())
@@ -1649,6 +1705,7 @@ fn acp_thread_main(
     session_notif_tx: tokio::sync::broadcast::Sender<SessionNotification>,
     session_modes: Arc<Mutex<HashMap<String, AcpSessionModeSnapshot>>>,
     grok_session_models: Arc<Mutex<HashMap<String, String>>>,
+    session_efforts: Arc<Mutex<HashMap<String, String>>>,
     last_prompt_usage: Arc<Mutex<Option<Usage>>>,
     child_pgid: Arc<Mutex<Option<i32>>>,
     repo_root: PathBuf,
@@ -1898,6 +1955,7 @@ fn acp_thread_main(
             let session_event_standardizer_h = session_event_standardizer.clone();
             let session_modes_h = session_modes.clone();
             let grok_session_models_h = grok_session_models.clone();
+            let session_efforts_h = session_efforts.clone();
             // For UsageUpdate → last_prompt_usage fill (phase B) during notify.
             let last_prompt_usage_h = last_prompt_usage.clone();
 
@@ -2269,6 +2327,11 @@ fn acp_thread_main(
                                     .unwrap()
                                     .standardize(args);
                                 cache_session_notification_mode_update(&session_modes_h, &args);
+                                cache_session_notification_config_options(
+                                    &grok_session_models_h,
+                                    &session_efforts_h,
+                                    &args,
+                                );
                                 // sol_55e2f7194a224bba phase B: when PromptResponse.usage is
                                 // absent, accept *observed* token fields from UsageUpdate.meta
                                 // only (never invent from used/size context-window fields).
@@ -2429,6 +2492,14 @@ fn acp_thread_main(
                                         &response.session_id,
                                         response.modes.as_ref(),
                                     );
+                                    if let Some(ref opts) = response.config_options {
+                                        cache_config_options_model_effort(
+                                            &grok_session_models,
+                                            &session_efforts,
+                                            response.session_id.0.as_ref(),
+                                            opts,
+                                        );
+                                    }
                                 }
                                 let _ = reply.send(result.map_err(|e| {
                                     anyhow::anyhow!(
@@ -2645,6 +2716,14 @@ fn acp_thread_main(
                                                         &session_id_for_probe,
                                                         response.modes.as_ref(),
                                                     );
+                                    if let Some(ref opts) = response.config_options {
+                                        cache_config_options_model_effort(
+                                            &grok_session_models,
+                                            &session_efforts,
+                                            session_id_for_probe.0.as_ref(),
+                                            opts,
+                                        );
+                                    }
                                                     tracing::debug!(
                                                         agent = %agent_name_loop,
                                                         session = %session_id_for_probe,
@@ -2682,6 +2761,14 @@ fn acp_thread_main(
                                         &session_id,
                                         response.modes.as_ref(),
                                     );
+                                    if let Some(ref opts) = response.config_options {
+                                        cache_config_options_model_effort(
+                                            &grok_session_models,
+                                            &session_efforts,
+                                            session_id.0.as_ref(),
+                                            opts,
+                                        );
+                                    }
                                 }
                                 let _ = reply.send(result.map_err(|e| {
                                     anyhow::anyhow!(

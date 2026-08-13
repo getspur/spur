@@ -316,6 +316,8 @@ impl Orchestrator {
             success,
             pr_url,
             total_cost_usd: total_cost,
+            model_name: None,
+            effort: None,
         })
     }
 }

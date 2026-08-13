@@ -24,7 +24,7 @@ digraph status_fsm {
     closed [shape=box];
     deferred [shape=box];
     draft [shape=box];
-
+    
     open -> in_progress [label="dispatch"];
     open -> deferred [label="postpone"];
     open -> closed [label="wontfix"];
