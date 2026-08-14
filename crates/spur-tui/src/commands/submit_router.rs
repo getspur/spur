@@ -17,7 +17,10 @@ use std::path::Path;
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use serde_json::Value;
-use spur_acp::{ContentBlock, ResourceLink, SpurAgentCaps, TextContent};
+use spur_acp::{
+    ContentBlock, EmbeddedResource, EmbeddedResourceResource, ResourceLink, SpurAgentCaps,
+    TextContent, TextResourceContents,
+};
 
 use crate::action::Action;
 use crate::components::input_bar::{ImageAttachment, ProtectedRange, RangeKind};
@@ -270,8 +273,30 @@ pub fn route_with_caps(
         // verbatim as prompts).
     }
 
-    let blocks = assemble_blocks(text, ranges, images);
+    let blocks =
+        assemble_blocks_with_prompt_caps(text, ranges, images, PromptBlockCaps::from_agent(caps));
     SubmitDecision::Send { blocks, interrupt }
+}
+
+/// Prompt-type gates from the agent's advertised `promptCapabilities`.
+/// Omitted / unknown caps are treated as unsupported (ACP initialize).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PromptBlockCaps {
+    pub image: bool,
+    pub embedded_context: bool,
+}
+
+impl PromptBlockCaps {
+    #[must_use]
+    pub fn from_agent(caps: Option<&SpurAgentCaps>) -> Self {
+        let Some(caps) = caps else {
+            return Self::default();
+        };
+        Self {
+            image: caps.agent.prompt_capabilities.image,
+            embedded_context: caps.agent.prompt_capabilities.embedded_context,
+        }
+    }
 }
 
 pub(crate) fn local_action_from_picker_accept(
@@ -298,12 +323,22 @@ fn rest_after_first_token(text: &str) -> String {
 }
 
 /// Walk `text` + sorted `ranges` interleaved → `[Text, ResourceLink/Image, Text, …]`.
+/// Uses protocol-safe defaults (no image, no embed) when caps are unknown.
 pub fn assemble_blocks(
     text: &str,
     ranges: &[ProtectedRange],
     images: &[ImageAttachment],
 ) -> Vec<ContentBlock> {
-    assemble_blocks_inner(text, ranges, images, None)
+    assemble_blocks_with_prompt_caps(text, ranges, images, PromptBlockCaps::default())
+}
+
+pub fn assemble_blocks_with_prompt_caps(
+    text: &str,
+    ranges: &[ProtectedRange],
+    images: &[ImageAttachment],
+    caps: PromptBlockCaps,
+) -> Vec<ContentBlock> {
+    assemble_blocks_inner(text, ranges, images, None, caps)
 }
 
 const CODE_SYMBOL_TOPOLOGY_HINT: &str =
@@ -321,7 +356,25 @@ pub fn assemble_blocks_with_code_mentions<'a>(
     ranges: &[ProtectedRange],
     images: &[ImageAttachment],
     worktree_root: &Path,
+    lookup_code_payload: impl FnMut(&str) -> Option<&'a CodeMentionPayload>,
+) -> Vec<ContentBlock> {
+    assemble_blocks_with_code_mentions_and_caps(
+        text,
+        ranges,
+        images,
+        worktree_root,
+        lookup_code_payload,
+        PromptBlockCaps::default(),
+    )
+}
+
+pub fn assemble_blocks_with_code_mentions_and_caps<'a>(
+    text: &str,
+    ranges: &[ProtectedRange],
+    images: &[ImageAttachment],
+    worktree_root: &Path,
     mut lookup_code_payload: impl FnMut(&str) -> Option<&'a CodeMentionPayload>,
+    caps: PromptBlockCaps,
 ) -> Vec<ContentBlock> {
     let mut lookup = |uri: &str| {
         lookup_code_payload(uri).map(|payload| {
@@ -338,7 +391,7 @@ pub fn assemble_blocks_with_code_mentions<'a>(
             }
         })
     };
-    assemble_blocks_inner(text, ranges, images, Some(&mut lookup))
+    assemble_blocks_inner(text, ranges, images, Some(&mut lookup), caps)
 }
 
 fn assemble_blocks_inner(
@@ -346,6 +399,7 @@ fn assemble_blocks_inner(
     ranges: &[ProtectedRange],
     images: &[ImageAttachment],
     mut code_expansion_lookup: CodeExpansionLookup<'_>,
+    caps: PromptBlockCaps,
 ) -> Vec<ContentBlock> {
     let mut out: Vec<ContentBlock> = Vec::new();
     let mut cursor = 0usize;
@@ -358,20 +412,26 @@ fn assemble_blocks_inner(
             )));
         }
         match &r.kind {
-            RangeKind::ImageRef(id) => match images.iter().find(|att| att.id == *id) {
-                Some(att) => match encode_image_attachment(att) {
-                    Ok(block) => out.push(block),
-                    Err(err) => {
-                        tracing::error!("image encode failed for id={}: {err}", id);
-                        out.push(ContentBlock::Text(TextContent::new(format!(
-                            "[image encode error: {err}]"
-                        ))));
+            RangeKind::ImageRef(id) => {
+                if !caps.image {
+                    out.push(ContentBlock::Text(TextContent::new(r.name.clone())));
+                } else {
+                    match images.iter().find(|att| att.id == *id) {
+                        Some(att) => match encode_image_attachment(att) {
+                            Ok(block) => out.push(block),
+                            Err(err) => {
+                                tracing::error!("image encode failed for id={}: {err}", id);
+                                out.push(ContentBlock::Text(TextContent::new(format!(
+                                    "[image encode error: {err}]"
+                                ))));
+                            }
+                        },
+                        None => {
+                            tracing::warn!("ImageRef(id={}) not found in images list", id);
+                        }
                     }
-                },
-                None => {
-                    tracing::warn!("ImageRef(id={}) not found in images list", id);
                 }
-            },
+            }
             _ => {
                 if r.uri.starts_with("graph://") {
                     if let Some(expansion) = code_expansion_lookup
@@ -395,10 +455,7 @@ fn assemble_blocks_inner(
                         ))));
                     }
                 } else {
-                    out.push(ContentBlock::ResourceLink(ResourceLink::new(
-                        r.name.clone(),
-                        r.uri.clone(),
-                    )));
+                    out.push(mention_content_block(r, caps));
                 }
             }
         }
@@ -418,6 +475,51 @@ fn assemble_blocks_inner(
         )));
     }
     out
+}
+
+fn mention_content_block(range: &ProtectedRange, caps: PromptBlockCaps) -> ContentBlock {
+    if caps.embedded_context {
+        if let Some(block) = try_embed_file_mention(range) {
+            return block;
+        }
+    }
+    ContentBlock::ResourceLink(ResourceLink::new(range.name.clone(), range.uri.clone()))
+}
+
+fn try_embed_file_mention(range: &ProtectedRange) -> Option<ContentBlock> {
+    let path = range.uri.strip_prefix("file://")?;
+    let path = Path::new(path);
+    if !path.is_file() {
+        return None;
+    }
+    let bytes = std::fs::read(path).ok()?;
+    if bytes.len() > PER_PROMPT_CAP_BYTES {
+        return None;
+    }
+    let text = String::from_utf8(bytes).ok()?;
+    Some(ContentBlock::Resource(EmbeddedResource::new(
+        EmbeddedResourceResource::TextResourceContents(
+            TextResourceContents::new(text, range.uri.clone())
+                .mime_type(Some(file_mention_mime(path).to_string())),
+        ),
+    )))
+}
+
+fn file_mention_mime(path: &Path) -> &'static str {
+    match path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("rs") => "text/x-rust",
+        Some("py") => "text/x-python",
+        Some("md") => "text/markdown",
+        Some("json") => "application/json",
+        Some("toml") => "text/x-toml",
+        Some("ts" | "tsx" | "js" | "jsx") => "text/javascript",
+        _ => "text/plain",
+    }
 }
 
 fn encode_image_attachment(att: &ImageAttachment) -> anyhow::Result<ContentBlock> {
@@ -548,7 +650,15 @@ mod image_block_tests {
             name: label.to_string(),
         }];
 
-        let blocks = assemble_blocks(&text, &ranges, &images);
+        let blocks = assemble_blocks_with_prompt_caps(
+            &text,
+            &ranges,
+            &images,
+            PromptBlockCaps {
+                image: true,
+                embedded_context: false,
+            },
+        );
 
         assert_eq!(blocks.len(), 3, "expected Text + Image + Text");
         assert!(matches!(&blocks[0], ContentBlock::Text(_)));
@@ -590,6 +700,64 @@ mod image_block_tests {
         match decision {
             SubmitDecision::Send { blocks, interrupt } => {
                 assert!(!interrupt);
+                assert!(
+                    !blocks.iter().any(|b| matches!(b, ContentBlock::Image(_))),
+                    "omitted image cap must not send Image, got {blocks:?}"
+                );
+                assert!(
+                    blocks
+                        .iter()
+                        .any(|b| matches!(b, ContentBlock::Text(t) if t.text == label)),
+                    "expected placeholder text for omitted image, got {blocks:?}"
+                );
+            }
+            other => panic!("expected Send, got {other:?}"),
+        }
+    }
+
+    fn spur_caps_with_prompt(image: bool, embedded_context: bool) -> SpurAgentCaps {
+        let mut agent = spur_acp::AgentCapabilities::default();
+        agent.prompt_capabilities.image = image;
+        agent.prompt_capabilities.embedded_context = embedded_context;
+        SpurAgentCaps {
+            agent,
+            modes: None,
+            config_options: Vec::new(),
+            agent_kind: spur_acp::AgentKind::Generic,
+            grok_display: None,
+            kiro_display: None,
+        }
+    }
+
+    #[test]
+    fn route_with_caps_emits_image_when_agent_advertises_image() {
+        let (tmp, dims) = make_png_file();
+        let label = "[Image #1 - 2x2]";
+        let attachment = ImageAttachment {
+            id: 0,
+            source_path: tmp.path().to_path_buf(),
+            mime_type: "image/png".to_string(),
+            dimensions: dims,
+            byte_size: 0,
+            owned_temp: None,
+        };
+        let images = vec![attachment];
+        let text = format!("before {} after", label);
+        let ranges = vec![ProtectedRange {
+            start: "before ".len(),
+            end: "before ".len() + label.len(),
+            kind: RangeKind::ImageRef(0),
+            uri: String::new(),
+            name: label.to_string(),
+        }];
+        let registry = CommandRegistry::new();
+        let caps = spur_caps_with_prompt(true, false);
+
+        let decision = route_with_caps(&text, &ranges, &images, &registry, false, Some(&caps));
+
+        match decision {
+            SubmitDecision::Send { blocks, interrupt } => {
+                assert!(!interrupt);
                 assert_eq!(blocks.len(), 3, "expected Text + Image + Text");
                 assert!(matches!(&blocks[0], ContentBlock::Text(_)));
                 assert!(matches!(&blocks[1], ContentBlock::Image(_)));
@@ -597,6 +765,86 @@ mod image_block_tests {
             }
             other => panic!("expected Send, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn assemble_embeds_file_mention_when_embedded_context_advertised() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), "fn hello() {}\n").unwrap();
+        let uri = format!("file://{}", tmp.path().display());
+        let atom = format!("@{}", tmp.path().file_name().unwrap().to_string_lossy());
+        let text = format!("review {atom} now");
+        let start = "review ".len();
+        let ranges = vec![ProtectedRange {
+            start,
+            end: start + atom.len(),
+            kind: RangeKind::Atom,
+            uri: uri.clone(),
+            name: tmp.path().file_name().unwrap().to_string_lossy().into(),
+        }];
+
+        let blocks = assemble_blocks_with_prompt_caps(
+            &text,
+            &ranges,
+            &[],
+            PromptBlockCaps {
+                image: false,
+                embedded_context: true,
+            },
+        );
+
+        assert!(
+            blocks.iter().any(|b| matches!(
+                b,
+                ContentBlock::Resource(r)
+                    if matches!(
+                        &r.resource,
+                        EmbeddedResourceResource::TextResourceContents(t)
+                            if t.uri == uri && t.text.contains("fn hello")
+                    )
+            )),
+            "expected embedded Resource with file bytes, got {blocks:?}"
+        );
+        assert!(
+            !blocks
+                .iter()
+                .any(|b| matches!(b, ContentBlock::ResourceLink(_))),
+            "must not also send ResourceLink when embed succeeds, got {blocks:?}"
+        );
+    }
+
+    #[test]
+    fn assemble_keeps_resource_link_when_embedded_context_off() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), "fn hello() {}\n").unwrap();
+        let uri = format!("file://{}", tmp.path().display());
+        let atom = "@lib.rs";
+        let text = format!("review {atom} now");
+        let start = "review ".len();
+        let ranges = vec![ProtectedRange {
+            start,
+            end: start + atom.len(),
+            kind: RangeKind::Atom,
+            uri: uri.clone(),
+            name: "lib.rs".into(),
+        }];
+
+        let blocks =
+            assemble_blocks_with_prompt_caps(&text, &ranges, &[], PromptBlockCaps::default());
+
+        assert!(
+            blocks.iter().any(|b| matches!(
+                b,
+                ContentBlock::ResourceLink(r) if r.uri == uri && r.name == "lib.rs"
+            )),
+            "expected ResourceLink fallback, got {blocks:?}"
+        );
+        assert!(
+            !blocks
+                .iter()
+                .any(|b| matches!(b, ContentBlock::Resource(_))),
+            "must not embed without embeddedContext, got {blocks:?}"
+        );
     }
 
     #[test]

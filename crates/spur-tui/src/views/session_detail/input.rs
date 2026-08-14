@@ -161,12 +161,15 @@ impl SessionDetailView {
                                         mention_registry.retain_code_payloads_for_uris(
                                             ranges.iter().map(|range| range.uri.as_str()),
                                         );
-                                        blocks = crate::commands::submit_router::assemble_blocks_with_code_mentions(
+                                        blocks = crate::commands::submit_router::assemble_blocks_with_code_mentions_and_caps(
                                             &text,
                                             &ranges,
                                             &pending_images,
                                             &self.cwd,
                                             |uri| mention_registry.lookup_code_payload(uri),
+                                            crate::commands::submit_router::PromptBlockCaps::from_agent(
+                                                self.spur_agent_caps.as_deref(),
+                                            ),
                                         );
                                     }
                                     if has_datasource_mentions {
