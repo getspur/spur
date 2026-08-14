@@ -48,7 +48,7 @@ code, not after as a check.
 
 ## Reasoning loop: first principles → feasibility → ratchet (agent-side MCTS)
 
-Default path is **feasibility** (hard constraints → sat model). Soft preferences (`soft: true`) and typed νZ **objectives** (`maximize` / `minimize` integer exprs) can prefer among feasible models in one call. Any sat model is still not a proven unique global optimum unless the discrete domain is forced by hard rules — tests assert feasibility (and preference when objectives/soft are used), not uniqueness.
+Default path is **feasibility** (hard constraints → sat model). Soft preferences (`soft: true`) and typed νZ **objectives** (`maximize` / `minimize` Int/Real/BitVec exprs) can prefer among feasible models in one call. Any sat model is still not a proven unique global optimum unless the discrete domain is forced by hard rules — tests assert feasibility (and preference when objectives/soft are used), not uniqueness.
 
 ### 1. First principles before encode
 
@@ -98,14 +98,14 @@ Example (prefer wide sidebar after feasibility): first model may give `sidebar=2
 
 **Stop when:** hard constraints remain sat, further preference ratchets go unsat, and no simpler encoding still covers the hard set.
 
-**Never claim a proven global optimum** unless the discrete space is exhaustively covered (or a future optimize API ships). Tests assert **feasibility predicates**, not uniqueness of the model, unless uniqueness is forced by hard constraints.
+**Never claim a proven global optimum** unless the discrete space is exhaustively covered or hard constraints force a unique model. νZ `objectives[]` pick a preferred feasible model — still not a uniqueness proof. Tests assert **feasibility predicates** (and the stated preference), not uniqueness of the model.
 
 ## Tool surface
 
 | Tool | When | Input | Output |
 |---|---|---|---|
-| `solve_constraints` | **default** — B′ can express it (bool/int/enum + arithmetic) | `vars[]` + `constraints[]` (tagged JSON) | sat+model / unsat / unknown / timeout |
-| `solve_smt` | **escape hatch** — BitVec, Reals, Arrays, Strings, quantifiers, theories beyond B′ | raw SMT-LIB2 (command-allowlisted) | same envelope |
+| `solve_constraints` | **default** — B′ can express it (`bool`/`int`/`int_range`/`enum`/`real`/`bit_vec` + closed ops) | `vars[]` + `constraints[]` (tagged JSON) | sat+model / unsat / unknown / timeout |
+| `solve_smt` | **escape hatch** — Arrays, Strings, Datatypes, quantifiers, shifts/rotates, or a logic B′ will not emit | raw SMT-LIB2 (command-allowlisted) | same envelope |
 | `get_solve_result` | **reload** a persisted solve (brain→worker handoff) | `solve_id` (`sol_<16hex>`) | stored artifact |
 
 **Optional request flags:** `persist` (handoff cache), `include_smt` (echo generated/submitted SMT in `response.smt` for debug).
@@ -129,11 +129,11 @@ On unsat with **named hard** constraints and **no soft / no objectives**, the re
 ]
 ```
 
-- Each `expr` must be **Int**-sorted (not Bool/Enum).
+- Each `expr` must be **Int, Real, or BitVec** (not Bool/Enum). Cap 4 per call.
 - Multiple objectives apply in request order; set `objective_priority` to `lex` (default), `pareto`, or `box`.
 - Document results as *feasible + optimized under νZ*, not proven unique optimum.
 
-**Domains (v1.x+):** `bool` / `int` / `int_range` / `enum` / **`real`** / **`bit_vec{width}`**.  
+**Domains:** `bool` / `int` / `int_range` / `enum` / `real` / `bit_vec{width}` (`width` 1..=64).  
 BitVec ops: `bv_and|or|xor|not|add|sub|mul|ult|ule|ugt|uge`. Literals: `{kind:"real",num,den}`, `{kind:"bv",width,value}`.
 
 **Cache:** `use_cache` defaults true (stateless solves). **Sessions:** `session_op` `begin|push|pop|end` + `session_id` stacks constraint frames (re-encoded each call).
@@ -148,16 +148,19 @@ BitVec ops: `bv_and|or|xor|not|add|sub|mul|ult|ule|ugt|uge`. Literals: `{kind:"r
 | `int` | `name` (prefer `int_range` when bounds known) | `{name:"x",type:"int"}` |
 | `int_range` | `name`,`min`,`max` (`min≤max`) | `{name:"workers",type:"int_range",min:1,max:16}` |
 | `enum` | `name`,`values[]` (non-empty, unique) | `{name:"mode",type:"enum",values:["fast","safe"]}` |
+| `real` | `name` | `{name:"ratio",type:"real"}` |
+| `bit_vec` | `name`,`width` (1..=64) | `{name:"word",type:"bit_vec",width:32}` |
 
 **Ops:**
 
 | class | ops | arity |
 |---|---|---|
 | compare | `eq`,`ne`,`lt`,`le`,`gt`,`ge` | 2 → Bool |
-| arith | `add`,`sub`,`mul` (no `div`) | add/mul ≥2; sub 2 → Int |
+| arith | `add`,`sub`,`mul` (no `div`) | add/mul ≥2; sub 2 → same numeric sort |
 | bool | `and`,`or` / `not` | and/or ≥1; not 1 → Bool |
+| bitvec | `bv_and`,`bv_or`,`bv_xor`,`bv_not`,`bv_add`,`bv_sub`,`bv_mul`,`bv_ult`,`bv_ule`,`bv_ugt`,`bv_uge` | not 1; others 2; same width |
 
-**Operand compatibility:** `eq`/`ne` accept compatible same-sort operands: Int/Int, any Bool-sorted expression with any Bool-sorted expression (variable, literal, or compound), and Enum/Enum from the same declared `values` domain. `lt`/`le`/`gt`/`ge` remain Int-only; mixed sorts and cross-domain enum comparisons are invalid.
+**Operand compatibility:** `eq`/`ne` accept compatible same-sort operands: Int/Int, Real/Real, BitVec/BitVec (same width), any Bool-sorted expression with any Bool-sorted expression (variable, literal, or compound), and Enum/Enum from the same declared `values` domain. `lt`/`le`/`gt`/`ge` are homogeneous Int or Real. Mixed sorts and cross-domain enum comparisons are invalid.
 
 **Every ConstraintExpr node is a tagged object** — bare strings/numbers are invalid: `{kind:"var",name:"x"}`, `{kind:"int",value:48}`, `{kind:"enum_label",var:"mode",label:"fast"}`, `{kind:"op",op:"le",args:[...]}`. Full type rules (enum≠arith, bare-leaf rejection, nest/size caps) → §Anti-patterns below; exhaustive grammar in the [tool spec §ConstraintExpr](../../docs/superpowers/specs/2026-07-25-z3-constraint-solver-design.md#b-types-and-constraint-ast).
 
@@ -226,12 +229,12 @@ The two examples above are the entry points. These are the other constraint shap
 | Do these config / feature-flag / RBAC rules conflict? | `bool` + `enum` vars; assert all rules; check sat vs unsat | **unsat = conflict** |
 | Does this layout/geometry fit? (panels, columns, gutters) | `int_range`; `add`/`sub` + `or(eq,…)` for fixed-value options; `≤` width budget | sat → px values |
 | What input reaches this branch? / prove none exists | `int` for inputs; assert the predicate (or its negation) | sat → test input; **unsat → unreachable** |
-| Does this bitmask/shift/index overflow? | ⚠ needs `solve_smt` (B′ has no BitVec) — `(declare-const x (_ BitVec 32))`, assert no-wrap | sat → offending input |
+| Does this bitmask/index overflow? | `bit_vec{width}` + `bv_add`/`bv_ult` (no wrap); `int_range` for index math | sat → offending input. Shifts/rotates → `solve_smt` |
 | What order respects these deps? (build/CI/migration) | `int_range` position per task; `lt` for before/after | sat → valid order; **unsat → cycle** |
 
 ### Template A — portfolio selection with 0/1 ints (not bool for arithmetic)
 
-B′ `mul`/`add` are **Int-only**. Do **not** multiply `bool` by a score. Encode “include feature?” as `int_range` 0..1:
+Do **not** multiply `bool` by a score (`mul` is Int/Real only). Encode “include feature?” as `int_range` 0..1:
 
 ```json
 {
@@ -262,7 +265,7 @@ B′ `mul`/`add` are **Int-only**. Do **not** multiply `bool` by a score. Encode
 }
 ```
 
-Ratchet `total_value` upward until last `sat` for a feasible high-value portfolio (not a proven optimum without νZ).
+Ratchet `total_value` upward until last `sat`, or `maximize` it with νZ. Either way: feasible preferred model, not a uniqueness proof.
 
 ### Template B — assert-negation (prove invariant)
 
@@ -318,24 +321,26 @@ On hard-only conflict, give each hard rule an `id` and read `unsat_core` instead
 
 ## `solve_smt` escape hatch
 
-Escalate from `solve_constraints` when the problem needs:
+Escalate from `solve_constraints` when the problem needs something B′ cannot express:
 
-- **BitVec** / machine integers / bitmask reasoning (B′ has no BitVec sort)
-- **Reals** / floating point (B′ is integer-only)
-- **Arrays, Strings, Datatypes, quantifiers** (B′ is QF_LIA + enums + bool)
-- A specific `(set-logic …)` the B′ encoder won't emit
+- **Arrays, Strings, Datatypes, quantifiers**
+- **Shifts / rotates** (B′ BitVec has bitwise + add/sub/mul/unsigned compare; no `bvshl`/`bvlshr`)
+- IEEE floats, or a specific `(set-logic …)` the B′ encoder will not emit
+- A raw SMT-LIB2 script you already have
+
+Prefer `solve_constraints` for `real` and `bit_vec` — those domains are typed B′, not an escape hatch.
 
 **Guards (non-negotiable):**
 
-- Command allowlist: `set-logic`, `set-option` (restricted keys), `declare-const`, `declare-fun`, `assert`, `check-sat`, `get-model`, `get-value`, `push`, `pop`. Any other top-level command → entire script rejected.
+- Command allowlist: `set-logic`; `set-option` (`:produce-models`, `:produce-unsat-cores`, `:opt.priority`); any `declare-*`; `assert`; `assert-soft`; `check-sat`; `get-model`; `get-value`; `get-unsat-core`; `maximize`; `minimize`; `push`; `pop`. Any other top-level command → entire script rejected.
 - 256 KiB size cap. Fixed `z3` argv; agents never pass flags.
 - Same status envelope (sat/unsat/unknown/timeout).
 
 **Pattern:** declare consts → assert constraints → end with `(check-sat)`:
 
 ```smt
-(declare-const x (_ BitVec 32))
-(assert (bvult x #x00010000))
+(declare-const a (Array Int Int))
+(assert (= (select a 0) 1))
 (check-sat)
 ```
 
@@ -360,7 +365,7 @@ The persist path for sharing a solved model across the delegation boundary:
 1. **Treating `unsat` as failure.** `unsat` is a *result*, not an error. For invariant checks, unsat = proof of soundness. For feasibility, unsat = "report impossibility, don't invent." Never retry-on-unsat or suppress it.
 2. **Collapsing `unknown`/`timeout` into `unsat`.** They mean "I don't know." Tighten encoding, raise timeout (≤60s cap), or simplify. Do NOT conclude impossibility.
 3. **Inventing a value instead of solving.** About to write `const BUFFER_SIZE: usize = ???` with ≥2 constraints on it → solve first. (Anthropic: "no voodoo constants.")
-4. **Baking the first sat model as "optimal".** First sat is feasibility only. Preferences → ratchet; simplicity → fewer free vars. Never claim proven optimum without exhaustive cover or an optimize API.
+4. **Baking the first sat model as "optimal".** First sat is feasibility only. Preferences → ratchet or νZ `objectives[]`. Never claim a proven unique optimum unless hard constraints force it.
 5. **Encoding preferences as hard constraints on the first solve.** Soft goals ("prefer wide", "as small as possible") go in the MCTS/ratchet loop, not the initial hard set — otherwise you get spurious unsat or over-constrained junk.
 6. **Bloated encodings.** Extra vars, loose unbounded `int`, and cargo-cult floors violate first principles. Minimal surface first.
 7. **Enum as arithmetic.** Enums are not Int operands. Only `eq`/`ne` vs `enum_label` (or another enum from the same declared `values` domain). `add`/`mul`/`lt` on enums → `invalid_params`. Encode "mode is fast" as `{kind:"enum_label",var:"mode",label:"fast"}`, never as an int index.
@@ -369,7 +374,7 @@ The persist path for sharing a solved model across the delegation boundary:
 10. **No `div`.** B′ has no division. Encode ratios by cross-multiplying (`a/b = c/d` → `a*d = c*b`).
 11. **Re-inventing constants in the worker.** Brain passed a `solve_id` → reload via `get_solve_result`, treat as authoritative.
 12. **Direct file reads of `.spur/solver/`.** Always `get_solve_result`. Path/format is an implementation detail.
-13. **`solve_smt` when B′ suffices.** Escape hatch is for theories B′ can't express. If bool/int/enum + arithmetic covers it → `solve_constraints`.
+13. **`solve_smt` when B′ suffices.** Escape hatch is for theories B′ can't express. If `bool`/`int`/`int_range`/`enum`/`real`/`bit_vec` + closed ops cover it → `solve_constraints`.
 
 ## TL;DR
 
@@ -378,13 +383,14 @@ The persist path for sharing a solved model across the delegation boundary:
    ≥2 constraints? → solve.
 1. First principles: hard constraints only; strip preferences & cargo-cult defaults;
    minimal vars/ranges.
-2. Encode: vars (bool|int|int_range|enum) + tagged ConstraintExpr
+2. Encode: vars (bool|int|int_range|enum|real|bit_vec) + tagged ConstraintExpr
    (every node is {kind:…}).
-3. solve_constraints (default); solve_smt only for BitVec/Reals/theories beyond B′.
-4. Status: sat → feasible baseline (not optimum); unsat → proof/impossibility;
+3. solve_constraints (default); solve_smt only for Arrays/Strings/quantifiers/
+   shifts/theories beyond B′.
+4. Status: sat → feasible baseline (not unique optimum); unsat → proof/impossibility;
    unknown/timeout → NOT unsat.
-5. Prefer / simplify: agent-side MCTS — ratchet bounds, drop free vars, re-query;
-   keep last sat on the prefer-axis; never claim proven optimum.
+5. Prefer / simplify: νZ objectives, or ratchet bounds / drop free vars;
+   keep last sat on the prefer-axis; never claim proven unique optimum.
 6. Hand off: persist:true + solve_id → worker get_solve_result (authoritative).
 7. Gotchas: enum≠arith, no div, bare leaves rejected, never unknown→unsat,
    never first-sat = optimal.

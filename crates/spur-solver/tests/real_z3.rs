@@ -302,6 +302,86 @@ async fn soft_preference_and_maximize_prefer_high_values() {
     assert!(!smt.contains("produce-unsat-cores"));
 }
 
+#[tokio::test]
+#[ignore = "requires SPUR_TEST_Z3=1 and an installed Z3 binary"]
+async fn skill_example_1_budget_json_is_sat() {
+    if !real_z3_enabled() {
+        return;
+    }
+
+    let request: SolveConstraintsRequest = serde_json::from_value(serde_json::json!({
+        "vars": [
+            {"name":"workers","type":"int_range","min":1,"max":16},
+            {"name":"batch","type":"int_range","min":8,"max":128}
+        ],
+        "constraints": [
+            {"kind":"op","op":"ge","args":[{"kind":"var","name":"workers"},{"kind":"int","value":4}]},
+            {"kind":"op","op":"le","args":[
+              {"kind":"op","op":"mul","args":[
+                {"kind":"var","name":"workers"},
+                {"kind":"op","op":"add","args":[
+                  {"kind":"int","value":48},
+                  {"kind":"op","op":"mul","args":[{"kind":"int","value":2},{"kind":"var","name":"batch"}]}
+                ]}
+              ]},
+              {"kind":"int","value":512}
+            ]}
+        ],
+        "timeout_ms": 30000
+    }))
+    .expect("skill example 1 JSON must deserialize");
+
+    let response = SolverService::new()
+        .solve_constraints(request)
+        .await
+        .expect("skill example 1 should start");
+    assert_eq!(response.status, SolveStatus::Sat, "{response:?}");
+    let model = response.model.expect("sat must include a model");
+    let workers = match model.get("workers") {
+        Some(ModelValue::Int(value)) => *value,
+        other => panic!("expected workers int, got {other:?}"),
+    };
+    let batch = match model.get("batch") {
+        Some(ModelValue::Int(value)) => *value,
+        other => panic!("expected batch int, got {other:?}"),
+    };
+    assert!(workers >= 4 && workers <= 16, "workers={workers}");
+    assert!((8..=128).contains(&batch), "batch={batch}");
+    assert!(
+        workers * (48 + 2 * batch) <= 512,
+        "model violates budget: workers={workers} batch={batch}"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires SPUR_TEST_Z3=1 and an installed Z3 binary"]
+async fn skill_example_2_overflow_json_is_unsat() {
+    if !real_z3_enabled() {
+        return;
+    }
+
+    let request: SolveConstraintsRequest = serde_json::from_value(serde_json::json!({
+        "vars": [
+            {"name":"pos","type":"int_range","min":0,"max":512},
+            {"name":"len","type":"int_range","min":0,"max":512}
+        ],
+        "constraints": [
+            {"kind":"op","op":"gt","args":[
+              {"kind":"op","op":"add","args":[{"kind":"var","name":"pos"},{"kind":"var","name":"len"}]},
+              {"kind":"int","value":1024}
+            ]}
+        ]
+    }))
+    .expect("skill example 2 JSON must deserialize");
+
+    let response = SolverService::new()
+        .solve_constraints(request)
+        .await
+        .expect("skill example 2 should start");
+    assert_eq!(response.status, SolveStatus::Unsat, "{response:?}");
+    assert!(response.model.is_none(), "{response:?}");
+}
+
 fn real_z3_enabled() -> bool {
     std::env::var("SPUR_TEST_Z3").as_deref() == Ok("1")
 }
