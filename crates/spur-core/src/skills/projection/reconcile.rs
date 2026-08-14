@@ -174,7 +174,19 @@ async fn reconcile_with_linker_deferred_with_hints<L: Linker>(
         .and_then(|manifest| {
             if let Some(manifest) = &manifest {
                 validate_manifest_target_paths(request.launch_root, manifest)?;
-                validate_manifest_generation(&projection_root, manifest)?;
+                // Generation trees are content-addressed but symlink projection
+                // aliases a writable agent path onto the store. Agent rewrites
+                // (content or mode) change projected_sha256. Treat that drift as
+                // stale and keep the prior as an ownership record so Generate
+                // can rebuild / retarget instead of failing Manifest.
+                if let Err(error) = validate_manifest_generation(&projection_root, manifest) {
+                    tracing::warn!(
+                        adapter = %adapter,
+                        generation = %manifest.generation,
+                        error = %error,
+                        "prior skill-projection generation is stale; continuing with rebuild"
+                    );
+                }
             }
             Ok(manifest)
         })
@@ -2252,6 +2264,41 @@ mod tests {
         assert!(second.copied.is_empty());
         assert_eq!(second.unchanged, vec![target.clone()]);
         assert_eq!(target_state_bytes(&target), before);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn mutated_generation_target_does_not_block_next_reconcile() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let fixture = ProjectionFixture::new(Adapter::Codex);
+        fixture.write_bundled_skill("mutated", "both", "ORIGINAL");
+        let first = reconcile_with_linker(fixture.worktrees(), fixture.request(), &NativeLinker)
+            .await
+            .unwrap();
+
+        let generation = generation_target(&fixture, &first.generation, "mutated");
+        let skill_md = generation.join("SKILL.md");
+        std::fs::write(&skill_md, b"AGENT REWRITE THROUGH SYMLINK\n").unwrap();
+        let mut permissions = std::fs::metadata(&skill_md).unwrap().permissions();
+        permissions.set_mode(0o600);
+        std::fs::set_permissions(&skill_md, permissions).unwrap();
+
+        let second = reconcile_with_linker(fixture.worktrees(), fixture.request(), &NativeLinker)
+            .await
+            .expect("write-through digest drift must not fail Manifest");
+
+        let restored = generation_target(&fixture, &second.generation, "mutated").join("SKILL.md");
+        let restored = std::fs::read_to_string(restored).unwrap();
+        assert!(
+            restored.contains("ORIGINAL"),
+            "reconcile must republish the rendered source, got {restored:?}"
+        );
+        assert!(
+            !restored.contains("AGENT REWRITE THROUGH SYMLINK"),
+            "agent write-through must not remain the projected generation"
+        );
+        assert!(codex_target(&fixture, "mutated").exists());
     }
 
     #[tokio::test]
