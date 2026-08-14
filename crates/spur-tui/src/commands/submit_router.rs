@@ -449,20 +449,54 @@ fn encode_image_attachment(att: &ImageAttachment) -> anyhow::Result<ContentBlock
     )))
 }
 
+/// Agent-facing worker/datasource framing. Local echo and history restore
+/// must not replay this as user-typed text — the mention already follows
+/// as a `ResourceLink` / `Resource`.
+const UI_HINT_PREFIX: &str = "[UI hint]";
+
+/// Flatten one outbound prompt block into the user-visible composer/trace
+/// form. Returns `None` for agent-only framing and for variants with no
+/// mention display (image/audio).
+pub fn flatten_prompt_block(block: &ContentBlock) -> Option<String> {
+    match block {
+        ContentBlock::Text(t) if t.text.starts_with(UI_HINT_PREFIX) => None,
+        ContentBlock::Text(t) => Some(t.text.clone()),
+        ContentBlock::ResourceLink(r) => Some(format!("@{}", r.name)),
+        ContentBlock::Resource(r) => Some(format!("@{}", resource_display_name(r))),
+        _ => None,
+    }
+}
+
+fn resource_display_name(resource: &spur_acp::EmbeddedResource) -> String {
+    use spur_acp::EmbeddedResourceResource;
+    let uri = match &resource.resource {
+        EmbeddedResourceResource::TextResourceContents(t) => t.uri.as_str(),
+        _ => return "resource".to_string(),
+    };
+    mention_name_from_uri(uri)
+}
+
+pub(crate) fn mention_name_from_uri(uri: &str) -> String {
+    let path = uri
+        .strip_prefix("file://")
+        .or_else(|| uri.split_once("://").map(|(_, rest)| rest))
+        .unwrap_or(uri);
+    path.rsplit(|c| c == '/' || c == '\\')
+        .find(|seg| !seg.is_empty())
+        .unwrap_or(path)
+        .to_string()
+}
+
 /// Flatten blocks into a human-readable string for the local trace echo.
 ///
-/// `Text` blocks concatenate their text; `ResourceLink` blocks render as
-/// `@<name>`; unknown variants are skipped.
+/// `Text` blocks concatenate their text except `[UI hint]` framing;
+/// `ResourceLink` / `Resource` blocks render as `@<name>`; other
+/// variants are skipped.
 pub fn blocks_preview(blocks: &[ContentBlock]) -> String {
     let mut s = String::new();
     for b in blocks {
-        match b {
-            ContentBlock::Text(t) => s.push_str(&t.text),
-            ContentBlock::ResourceLink(r) => {
-                s.push('@');
-                s.push_str(&r.name);
-            }
-            _ => {}
+        if let Some(piece) = flatten_prompt_block(b) {
+            s.push_str(&piece);
         }
     }
     s

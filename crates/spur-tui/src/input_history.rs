@@ -1,7 +1,19 @@
 use serde::{Deserialize, Serialize};
-use spur_acp::ContentBlock;
+use spur_acp::{ContentBlock, EmbeddedResource, EmbeddedResourceResource};
 
 use crate::components::input_bar::{ProtectedRange, RangeKind};
+
+fn resource_atom_identity(
+    resource: &EmbeddedResource,
+    name_from_uri: impl Fn(&str) -> String,
+) -> (String, String) {
+    let uri = match &resource.resource {
+        EmbeddedResourceResource::TextResourceContents(t) => t.uri.clone(),
+        _ => String::new(),
+    };
+    let name = name_from_uri(&uri);
+    (uri, name)
+}
 
 /// Maximum number of submitted-input entries retained in both the in-memory
 /// `InputBar` ring buffer and the persisted `SessionMetadata::input_history`
@@ -104,26 +116,40 @@ impl InputStateSnapshot {
 
     /// Rebuild a restorable input snapshot from outbound content blocks.
     pub fn from_blocks(blocks: &[ContentBlock]) -> Self {
+        use crate::commands::submit_router::{flatten_prompt_block, mention_name_from_uri};
+
         let mut text = String::new();
         let mut protected_ranges = Vec::new();
 
         for block in blocks {
+            let Some(piece) = flatten_prompt_block(block) else {
+                continue;
+            };
             match block {
-                ContentBlock::Text(t) => text.push_str(&t.text),
                 ContentBlock::ResourceLink(r) => {
                     let start = text.len();
-                    text.push('@');
-                    text.push_str(&r.name);
-                    let end = text.len();
+                    text.push_str(&piece);
                     protected_ranges.push(ProtectedRange {
                         start,
-                        end,
+                        end: text.len(),
                         kind: RangeKind::Atom,
                         uri: r.uri.clone(),
                         name: r.name.clone(),
                     });
                 }
-                _ => {}
+                ContentBlock::Resource(r) => {
+                    let start = text.len();
+                    text.push_str(&piece);
+                    let (uri, name) = resource_atom_identity(r, &mention_name_from_uri);
+                    protected_ranges.push(ProtectedRange {
+                        start,
+                        end: text.len(),
+                        kind: RangeKind::Atom,
+                        uri,
+                        name,
+                    });
+                }
+                _ => text.push_str(&piece),
             }
         }
 

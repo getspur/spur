@@ -93,3 +93,56 @@ fn blocks_preview_roundtrips_text() {
     let blocks = vec![ContentBlock::Text(spur_acp::TextContent::new("hello"))];
     assert_eq!(blocks_preview(&blocks), "hello");
 }
+
+#[test]
+fn blocks_preview_skips_ui_hint_and_keeps_resource_link_at_name() {
+    use spur_acp::{ResourceLink, TextContent};
+    use spur_tui::commands::submit_router::blocks_preview;
+
+    let blocks = vec![
+        ContentBlock::Text(TextContent::new(
+            "[UI hint] User-suggested workers for delegation this turn: claude-code \
+             (preference, not override; honor unless `delegation.avoid_for` clearly matches).",
+        )),
+        ContentBlock::ResourceLink(ResourceLink::new("claude-code", "worker://claude-code")),
+    ];
+    assert_eq!(blocks_preview(&blocks), "@claude-code");
+}
+
+#[test]
+fn blocks_preview_renders_embedded_resource_as_at_name() {
+    use spur_acp::{EmbeddedResource, EmbeddedResourceResource, TextContent, TextResourceContents};
+    use spur_tui::commands::submit_router::blocks_preview;
+
+    let blocks = vec![
+        ContentBlock::Text(TextContent::new("review ")),
+        ContentBlock::Resource(EmbeddedResource::new(
+            EmbeddedResourceResource::TextResourceContents(TextResourceContents::new(
+                "fn main() {}",
+                "file:///tmp/proj/src/lib.rs",
+            )),
+        )),
+        ContentBlock::Text(TextContent::new(" now")),
+    ];
+    assert_eq!(blocks_preview(&blocks), "review @lib.rs now");
+}
+
+#[test]
+fn from_blocks_skips_ui_hint_and_restores_resource_atom() {
+    use spur_acp::{ResourceLink, TextContent};
+    use spur_tui::input_history::InputStateSnapshot;
+
+    let blocks = vec![
+        ContentBlock::Text(TextContent::new(
+            "[UI hint] User-suggested workers for delegation this turn: claude-code \
+             (preference, not override).",
+        )),
+        ContentBlock::ResourceLink(ResourceLink::new("claude-code", "worker://claude-code")),
+    ];
+    let snap = InputStateSnapshot::from_blocks(&blocks);
+    assert_eq!(snap.text, "@claude-code");
+    assert!(!snap.text.contains("[UI hint]"));
+    assert_eq!(snap.protected_ranges.len(), 1);
+    assert_eq!(snap.protected_ranges[0].uri, "worker://claude-code");
+    assert_eq!(snap.protected_ranges[0].name, "claude-code");
+}
