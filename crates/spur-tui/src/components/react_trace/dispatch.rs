@@ -66,8 +66,11 @@ pub fn dispatch_session_update<F: Fn() -> String>(
             }
         }
         SessionUpdate::UserMessageChunk(chunk) => {
-            if let ContentBlock::Text(tc) = &chunk.content {
-                trace.append_user_message(&tc.text, (ctx.now_stamp)());
+            if let Some(text) = crate::commands::submit_router::flatten_prompt_block(&chunk.content)
+            {
+                if !text.is_empty() {
+                    trace.append_user_message(&text, (ctx.now_stamp)());
+                }
             }
         }
         SessionUpdate::ToolCall(tc) => {
@@ -488,6 +491,43 @@ mod tests {
 
     fn ctx<'a>(tool_depth: &'a mut HashMap<String, u8>) -> DispatchCtx<'a, impl Fn() -> String> {
         ctx_for(tool_depth, AgentKind::Generic)
+    }
+
+    #[test]
+    fn user_message_chunks_do_not_duplicate_seeded_mention_preview() {
+        use spur_acp::{ContentChunk, ResourceLink};
+
+        let mut trace = ReactTrace::new();
+        trace.push(super::TraceEntry {
+            kind: super::TraceKind::UserMessage,
+            text: "review @src/lib.rs now".to_string(),
+            timestamp: "10:00:01".to_string(),
+            #[cfg(feature = "markdown")]
+            markdown: None,
+        });
+        let mut tool_depth = HashMap::new();
+        let mut ctx = ctx(&mut tool_depth);
+        for update in [
+            SessionUpdate::UserMessageChunk(ContentChunk::new(ContentBlock::Text(
+                TextContent::new("review "),
+            ))),
+            SessionUpdate::UserMessageChunk(ContentChunk::new(ContentBlock::ResourceLink(
+                ResourceLink::new("src/lib.rs", "file:///tmp/proj/src/lib.rs"),
+            ))),
+            SessionUpdate::UserMessageChunk(ContentChunk::new(ContentBlock::Text(
+                TextContent::new(" now"),
+            ))),
+        ] {
+            dispatch_session_update(&mut trace, &update, &mut ctx);
+        }
+
+        let entries = trace.entries_for_test();
+        let user: Vec<_> = entries
+            .iter()
+            .filter(|e| matches!(&e.kind, super::TraceKind::UserMessage))
+            .collect();
+        assert_eq!(user.len(), 1);
+        assert_eq!(user[0].text, "review @src/lib.rs now");
     }
 
     fn text_tool_content(text: &str) -> ToolCallContent {

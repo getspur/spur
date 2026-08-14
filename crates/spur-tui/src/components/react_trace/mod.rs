@@ -570,11 +570,13 @@ impl ReactTrace {
 
         match target_idx {
             Some(idx) => {
-                // Idempotency guard: if the tail already ends with this chunk,
-                // the content was previously seeded (e.g. by push_user_message
-                // from the HistoryEntry replay path). Skip the append to avoid
-                // doubling.
-                if self.entries[idx].text.ends_with(text) {
+                // Idempotency: local echo (`blocks_preview`) already seeded
+                // the full turn, including `@name` reconstructions of
+                // ResourceLink/Resource. Inbound ACP chunks are fragments
+                // (`"review "`, `" now"`) that do not suffix-match the
+                // seeded preview. Skip any non-empty chunk already present
+                // in the tail so mention-shaped turns do not double.
+                if text.is_empty() || self.entries[idx].text.contains(text) {
                     return;
                 }
                 self.entries[idx].text.push_str(text);
@@ -2092,6 +2094,31 @@ mod tests {
         assert_eq!(
             user[0].text, "list the files in src/",
             "must not double the seeded text"
+        );
+    }
+
+    #[test]
+    fn append_user_message_skips_mention_prefix_already_in_seeded_preview() {
+        let mut trace = ReactTrace::new();
+        trace.push(TraceEntry {
+            kind: TraceKind::UserMessage,
+            text: "review @src/lib.rs now".to_string(),
+            timestamp: "10:00:01".to_string(),
+            #[cfg(feature = "markdown")]
+            markdown: None,
+        });
+        trace.append_user_message("review ", "10:00:02".to_string());
+        trace.append_user_message(" now", "10:00:03".to_string());
+
+        let entries = trace.entries_for_test();
+        let user: Vec<_> = entries
+            .iter()
+            .filter(|e| matches!(&e.kind, TraceKind::UserMessage))
+            .collect();
+        assert_eq!(user.len(), 1);
+        assert_eq!(
+            user[0].text, "review @src/lib.rs now",
+            "split Text+ResourceLink echo must not grow a mention-shaped local preview"
         );
     }
 
