@@ -181,14 +181,22 @@ fn continuation_resource_body(c: &BrainContinuation) -> ContinuationResourceBody
 }
 
 fn continuation_resource_block(c: &BrainContinuation) -> ContentBlock {
+    continuation_payload_block(c, true)
+}
+
+fn continuation_payload_block(c: &BrainContinuation, embed_resources: bool) -> ContentBlock {
     let json = serde_json::to_string(&continuation_resource_body(c))
         .expect("continuation resource body must serialize");
-    ContentBlock::Resource(EmbeddedResource::new(
-        EmbeddedResourceResource::TextResourceContents(
-            TextResourceContents::new(json, continuation_uri(c.delegation_id.as_str()))
-                .mime_type(Some("application/json".into())),
-        ),
-    ))
+    let uri = continuation_uri(c.delegation_id.as_str());
+    if embed_resources {
+        ContentBlock::Resource(EmbeddedResource::new(
+            EmbeddedResourceResource::TextResourceContents(
+                TextResourceContents::new(json, uri).mime_type(Some("application/json".into())),
+            ),
+        ))
+    } else {
+        ContentBlock::Text(TextContent::new(json))
+    }
 }
 
 fn text_block(s: &str) -> ContentBlock {
@@ -253,6 +261,15 @@ pub fn render_merged_turn_with_spill_v2(
     conts: &[BrainContinuation],
     budget_bytes: usize,
 ) -> RenderOutcome {
+    render_merged_turn_with_spill_v2_gated(user_blocks, conts, budget_bytes, true)
+}
+
+pub fn render_merged_turn_with_spill_v2_gated(
+    user_blocks: &[ContentBlock],
+    conts: &[BrainContinuation],
+    budget_bytes: usize,
+    embed_resources: bool,
+) -> RenderOutcome {
     let packed = pack_continuations(conts, budget_bytes);
     let mut blocks: Vec<ContentBlock> = user_blocks.to_vec();
 
@@ -269,7 +286,7 @@ pub fn render_merged_turn_with_spill_v2(
             ) {
                 has_conflict = true;
             }
-            blocks.push(continuation_resource_block(continuation));
+            blocks.push(continuation_payload_block(continuation, embed_resources));
         }
         if has_escalation {
             blocks.push(text_block(ESCALATION_HINT));
@@ -291,6 +308,14 @@ pub fn render_autonomous_turn_with_spill_v2(
     conts: &[BrainContinuation],
     budget_bytes: usize,
 ) -> RenderOutcome {
+    render_autonomous_turn_with_spill_v2_gated(conts, budget_bytes, true)
+}
+
+pub fn render_autonomous_turn_with_spill_v2_gated(
+    conts: &[BrainContinuation],
+    budget_bytes: usize,
+    embed_resources: bool,
+) -> RenderOutcome {
     let packed = pack_continuations(conts, budget_bytes);
     let mut blocks = Vec::new();
 
@@ -307,7 +332,7 @@ pub fn render_autonomous_turn_with_spill_v2(
             ) {
                 has_conflict = true;
             }
-            blocks.push(continuation_resource_block(continuation));
+            blocks.push(continuation_payload_block(continuation, embed_resources));
         }
         blocks.push(text_block(ACTION_HINT));
         if has_escalation {
@@ -757,6 +782,37 @@ mod tests {
         assert_eq!(
             json["base_hint"],
             Value::from("Pass worker_branch as base for follow-up.")
+        );
+    }
+
+    #[test]
+    fn gated_render_uses_text_not_resource_when_embed_disabled() {
+        let continuation = mk_cont(
+            "id-1",
+            1,
+            ContinuationSource::AsyncRequested,
+            Some("done".into()),
+        );
+        let outcome = render_autonomous_turn_with_spill_v2_gated(
+            std::slice::from_ref(&continuation),
+            continuation_cost(&continuation),
+            false,
+        );
+        assert!(
+            !outcome
+                .blocks
+                .iter()
+                .any(|b| matches!(b, ContentBlock::Resource(_))),
+            "embeddedContext off must not send Resource, got {:?}",
+            outcome.blocks
+        );
+        assert!(
+            outcome
+                .blocks
+                .iter()
+                .any(|b| matches!(b, ContentBlock::Text(t) if t.text.contains("schema_version"))),
+            "fallback must keep the JSON body as Text, got {:?}",
+            outcome.blocks
         );
     }
 

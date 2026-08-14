@@ -1771,21 +1771,37 @@ impl Orchestrator {
                         }
                         None => unreachable!("merged prompt must retain its input"),
                     };
-                    let outcome = crate::continuation_bridge::render_merged_turn_with_spill_v2(
-                        &base,
-                        batch.items(),
-                        crate::continuation_bridge::MERGE_BUDGET_DEFAULT_BYTES,
-                    );
+                    let embed_resources = brain.as_ref().is_some_and(|session| {
+                        session
+                            .spur_agent_caps
+                            .as_ref()
+                            .is_some_and(|caps| caps.agent.prompt_capabilities.embedded_context)
+                    });
+                    let outcome =
+                        crate::continuation_bridge::render_merged_turn_with_spill_v2_gated(
+                            &base,
+                            batch.items(),
+                            crate::continuation_bridge::MERGE_BUDGET_DEFAULT_BYTES,
+                            embed_resources,
+                        );
                     let blocks = outcome.blocks.clone();
                     drained_batch = Some(batch);
                     render_outcome = Some(outcome);
                     blocks
                 }
                 crate::scheduler::ScheduledAction::ContinuationPrompt(batch) => {
-                    let outcome = crate::continuation_bridge::render_autonomous_turn_with_spill_v2(
-                        batch.items(),
-                        crate::continuation_bridge::MERGE_BUDGET_DEFAULT_BYTES,
-                    );
+                    let embed_resources = brain.as_ref().is_some_and(|session| {
+                        session
+                            .spur_agent_caps
+                            .as_ref()
+                            .is_some_and(|caps| caps.agent.prompt_capabilities.embedded_context)
+                    });
+                    let outcome =
+                        crate::continuation_bridge::render_autonomous_turn_with_spill_v2_gated(
+                            batch.items(),
+                            crate::continuation_bridge::MERGE_BUDGET_DEFAULT_BYTES,
+                            embed_resources,
+                        );
                     let blocks = outcome.blocks.clone();
                     drained_batch = Some(batch);
                     render_outcome = Some(outcome);
