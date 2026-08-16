@@ -5,6 +5,7 @@ pub mod encode;
 pub mod mcp;
 pub mod persist;
 pub mod process;
+pub mod rules;
 pub mod service;
 pub mod session;
 pub mod smt_gate;

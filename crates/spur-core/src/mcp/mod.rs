@@ -855,6 +855,8 @@ mod tests {
             "mcp__spur-worker-mcp__report_signal",
             "mcp__spur-worker-mcp__code_read_symbol",
             "mcp__spur-worker-mcp__query",
+            "mcp__spur-worker-mcp__solve_rule_spec",
+            "mcp__spur-worker-mcp__solve_rules",
             "mcp__spur-worker-mcp__solve_constraints",
             "mcp__spur-worker-mcp__solve_smt",
             "mcp__spur-worker-mcp__get_solve_result",
@@ -872,7 +874,21 @@ mod tests {
     async fn worker_registry_dispatches_solver_tools() {
         let registry = worker_tool_registry().expect("worker registry");
 
-        for tool_name in ["solve_constraints", "solve_smt", "get_solve_result"] {
+        let guide = registry
+            .call_tool(
+                ToolCallContext::new(ServerKind::Worker, ToolAuthority::Worker, None, None),
+                "solve_rule_spec",
+                json!({}),
+            )
+            .await;
+        assert!(guide.is_ok(), "rule guide must dispatch without Z3");
+
+        for tool_name in [
+            "solve_rules",
+            "solve_constraints",
+            "solve_smt",
+            "get_solve_result",
+        ] {
             let context =
                 ToolCallContext::new(ServerKind::Worker, ToolAuthority::Worker, None, None);
             let error = match registry.call_tool(context, tool_name, json!({})).await {

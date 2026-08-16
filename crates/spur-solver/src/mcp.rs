@@ -9,6 +9,12 @@ use spur_mcp::{ErrorCode, McpError, ToolCallContext, ToolDefinition, ToolModule,
 
 use crate::{
     persist::PersistError,
+    rules::execute::{self, PrepareRulesError},
+    rules::families::design::{
+        compile::MAX_DESIGN_RULE_BINDINGS,
+        scene::{MAX_DESIGN_NODES, MAX_DESIGN_UNKNOWNS},
+    },
+    rules::spec::{self, RuleSpecError, RuleSpecRequest},
     service::{SolverService, SolverServiceError},
     types::{
         SolveConstraintsRequest, SolveSmtRequest, DEFAULT_TIMEOUT_MS, MAX_CONSTRAINTS,
@@ -43,7 +49,7 @@ impl SolverMcpModule {
     /// use spur_solver::{mcp::SolverMcpModule, service::SolverService};
     ///
     /// let module = SolverMcpModule::new(Arc::new(SolverService::new()));
-    /// assert_eq!(module.tools().len(), 3);
+    /// assert_eq!(module.tools().len(), 5);
     /// ```
     #[must_use]
     pub const fn new(service: Arc<SolverService>) -> Self {
@@ -81,6 +87,19 @@ impl ToolModule for SolverMcpModule {
         args: Value,
     ) -> Result<ToolResponse, McpError> {
         let result = match name {
+            "solve_rule_spec" => {
+                let request = parse_request::<RuleSpecRequest>(name, args)?;
+                spec::query(request).map_err(rule_spec_error)?
+            }
+            "solve_rules" => {
+                let prepared = execute::prepare(args).map_err(rule_execution_error)?;
+                let response = self
+                    .live_service(name)?
+                    .solve_constraints(prepared.request.clone())
+                    .await
+                    .map_err(service_error)?;
+                serialize_response(name, execute::finish(prepared, response))?
+            }
             "solve_constraints" => {
                 let request = parse_request::<SolveConstraintsRequest>(name, args)?;
                 let response = self
@@ -158,10 +177,33 @@ fn service_error(error: SolverServiceError) -> McpError {
     }
 }
 
-/// Returns the three solver tool definitions in stable catalog order.
+fn rule_spec_error(error: RuleSpecError) -> McpError {
+    match error {
+        error @ (RuleSpecError::AmbiguousSelector | RuleSpecError::UnknownSelector { .. }) => {
+            McpError::new(ErrorCode(INVALID_PARAMS_CODE), error.to_string(), None)
+        }
+        error => McpError::internal_error(error.to_string(), None),
+    }
+}
+
+fn rule_execution_error(error: PrepareRulesError) -> McpError {
+    McpError::new(ErrorCode(INVALID_PARAMS_CODE), error.to_string(), None)
+}
+
+/// Returns the solver tool definitions in stable catalog order.
 #[must_use]
 pub fn tool_definitions() -> Vec<ToolDefinition> {
     vec![
+        ToolDefinition {
+            name: "solve_rule_spec".to_owned(),
+            description: "Discover versioned solver rule families and progressively load exact rule guidance, examples, or encodings. This read-only tool does not run Z3.".to_owned(),
+            input_schema: solve_rule_spec_schema(),
+        },
+        ToolDefinition {
+            name: "solve_rules".to_owned(),
+            description: "Verify facts or synthesize bounded unknowns using one versioned rule family. Preserves raw solver status and adds a mode-specific domain outcome.".to_owned(),
+            input_schema: solve_rules_schema(),
+        },
         ToolDefinition {
             name: "solve_constraints".to_owned(),
             description: "Find one concrete model for typed B-prime constraints. Prefer this over raw SMT-LIB2; sat, unsat, unknown, and timeout are successful result statuses.".to_owned(),
@@ -178,6 +220,182 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
             input_schema: get_solve_result_schema(),
         },
     ]
+}
+
+fn solve_rules_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "family": {
+                "type": "string",
+                "enum": ["design"],
+                "description": "Rule-family compiler selected for this request."
+            },
+            "mode": {
+                "type": "string",
+                "enum": ["verify", "synthesize"]
+            },
+            "rules": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": MAX_DESIGN_RULE_BINDINGS,
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "rule_id": {
+                            "type": "string",
+                            "enum": [
+                                "layout.containment",
+                                "layout.non_overlap",
+                                "media.aspect_ratio"
+                            ]
+                        },
+                        "subjects": {
+                            "type": "array",
+                            "minItems": 1,
+                            "maxItems": 2,
+                            "items": {"type": "string"}
+                        },
+                        "parameters": design_rule_parameters_schema()
+                    },
+                    "required": ["rule_id", "subjects"],
+                    "additionalProperties": false
+                }
+            },
+            "scene": design_scene_schema(),
+            "unknowns": {
+                "type": "array",
+                "maxItems": MAX_DESIGN_UNKNOWNS,
+                "default": [],
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "node": {"type": "string"},
+                        "field": {
+                            "type": "string",
+                            "enum": ["x", "y", "width", "height"]
+                        },
+                        "min": {"type": "integer"},
+                        "max": {"type": "integer"}
+                    },
+                    "required": ["node", "field", "min", "max"],
+                    "additionalProperties": false
+                }
+            },
+            "timeout_ms": timeout_schema(),
+            "persist": {"type": "boolean", "default": false},
+            "include_smt": {"type": "boolean", "default": false}
+        },
+        "required": ["family", "mode", "rules", "scene"],
+        "additionalProperties": false
+    })
+}
+
+fn design_rule_parameters_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "padding": {"type": "integer", "minimum": 0},
+            "minimum_gap": {"type": "integer", "minimum": 0},
+            "source_width": {"type": "integer", "minimum": 1},
+            "source_height": {"type": "integer", "minimum": 1}
+        },
+        "additionalProperties": false
+    })
+}
+
+fn design_scene_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "viewport": {
+                "type": "object",
+                "properties": {
+                    "width": {"type": "integer", "minimum": 1},
+                    "height": {"type": "integer", "minimum": 1}
+                },
+                "required": ["width", "height"],
+                "additionalProperties": false
+            },
+            "nodes": {
+                "type": "object",
+                "maxProperties": MAX_DESIGN_NODES,
+                "additionalProperties": {
+                    "type": "object",
+                    "properties": {
+                        "parent": {"type": "string"},
+                        "rect": {
+                            "type": "object",
+                            "properties": {
+                                "x": {"type": ["integer", "null"]},
+                                "y": {"type": ["integer", "null"]},
+                                "width": {"type": ["integer", "null"]},
+                                "height": {"type": ["integer", "null"]}
+                            },
+                            "additionalProperties": false
+                        }
+                    },
+                    "required": ["rect"],
+                    "additionalProperties": false
+                }
+            }
+        },
+        "required": ["viewport", "nodes"],
+        "additionalProperties": false
+    })
+}
+
+fn solve_rule_spec_schema() -> Value {
+    let selectors = ["family", "profile", "rule_id", "primitive"];
+    let exclusions = selectors
+        .iter()
+        .enumerate()
+        .flat_map(|(index, left)| {
+            selectors[index + 1..].iter().map(move |right| {
+                json!({
+                    "not": {
+                        "required": [left, right]
+                    }
+                })
+            })
+        })
+        .collect::<Vec<_>>();
+
+    json!({
+        "type": "object",
+        "properties": {
+            "family": {
+                "type": "string",
+                "description": "Exact rule-family ID. Omit every selector to list bounded family cards."
+            },
+            "profile": {
+                "type": "string",
+                "description": "Exact profile ID."
+            },
+            "rule_id": {
+                "type": "string",
+                "description": "Exact stable rule ID."
+            },
+            "primitive": {
+                "type": "string",
+                "description": "Exact primitive name; may return more than one rule card."
+            },
+            "include": {
+                "type": "string",
+                "enum": [
+                    "summary",
+                    "valid_example",
+                    "invalid_example",
+                    "llm_encoding",
+                    "solver_encoding",
+                    "all"
+                ],
+                "default": "summary"
+            }
+        },
+        "allOf": exclusions,
+        "additionalProperties": false
+    })
 }
 
 fn solve_constraints_schema() -> Value {
@@ -524,8 +742,18 @@ mod tests {
         let names: Vec<_> = tools.iter().map(|tool| tool.name.as_str()).collect();
         assert_eq!(
             names,
-            ["solve_constraints", "solve_smt", "get_solve_result"]
+            [
+                "solve_rule_spec",
+                "solve_rules",
+                "solve_constraints",
+                "solve_smt",
+                "get_solve_result"
+            ]
         );
+
+        let rule_spec = schema(&tools, "solve_rule_spec");
+        assert_eq!(rule_spec["additionalProperties"], false);
+        assert_eq!(rule_spec["properties"]["include"]["default"], "summary");
 
         let typed = schema(&tools, "solve_constraints");
         assert_eq!(typed["required"], json!(["vars", "constraints"]));

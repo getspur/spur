@@ -65,6 +65,8 @@ const EXPECTED_BRAIN_TOOLS: &[&str] = &[
     "submit_plan_mutation",
     "report_signal",
     "report_progress",
+    "solve_rule_spec",
+    "solve_rules",
     "solve_constraints",
     "solve_smt",
     "get_solve_result",
@@ -195,7 +197,26 @@ async fn core_brain_registry_dispatches_solver_tools() {
     )
     .expect("core-composed brain registry");
 
-    for tool_name in ["solve_constraints", "solve_smt", "get_solve_result"] {
+    let guide = registry
+        .call_tool(
+            spur_mcp::ToolCallContext::new(
+                spur_mcp::ServerKind::Brain,
+                spur_mcp::ToolAuthority::Brain,
+                None,
+                None,
+            ),
+            "solve_rule_spec",
+            json!({}),
+        )
+        .await;
+    assert!(guide.is_ok(), "rule guide must dispatch without Z3");
+
+    for tool_name in [
+        "solve_rules",
+        "solve_constraints",
+        "solve_smt",
+        "get_solve_result",
+    ] {
         let context = spur_mcp::ToolCallContext::new(
             spur_mcp::ServerKind::Brain,
             spur_mcp::ToolAuthority::Brain,
