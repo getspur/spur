@@ -93,12 +93,10 @@ impl ToolModule for SolverMcpModule {
             }
             "solve_rules" => {
                 let prepared = execute::prepare(args).map_err(rule_execution_error)?;
-                let response = self
-                    .live_service(name)?
-                    .solve_constraints(prepared.request.clone())
+                let response = execute::run(self.live_service(name)?, prepared)
                     .await
                     .map_err(service_error)?;
-                serialize_response(name, execute::finish(prepared, response))?
+                serialize_response(name, response)?
             }
             "solve_constraints" => {
                 let request = parse_request::<SolveConstraintsRequest>(name, args)?;
@@ -201,7 +199,7 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "solve_rules".to_owned(),
-            description: "Verify facts or synthesize bounded unknowns using one versioned rule family. Preserves raw solver status and adds a mode-specific domain outcome.".to_owned(),
+            description: "Verify a complete model or synthesize explicitly bounded unknowns using one versioned rule family. Preserves raw solver status and adds mode-specific rule outcomes.".to_owned(),
             input_schema: solve_rules_schema(),
         },
         ToolDefinition {
@@ -223,12 +221,24 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
 }
 
 fn solve_rules_schema() -> Value {
+    let registry = crate::rules::builtin_registry();
+    let families = registry
+        .families()
+        .iter()
+        .map(|family| family.id())
+        .collect::<Vec<_>>();
+    let rule_ids = registry
+        .rules()
+        .iter()
+        .map(|rule| rule.id())
+        .collect::<Vec<_>>();
+
     json!({
         "type": "object",
         "properties": {
             "family": {
                 "type": "string",
-                "enum": ["design"],
+                "enum": families,
                 "description": "Rule-family compiler selected for this request."
             },
             "mode": {
@@ -244,16 +254,12 @@ fn solve_rules_schema() -> Value {
                     "properties": {
                         "rule_id": {
                             "type": "string",
-                            "enum": [
-                                "layout.containment",
-                                "layout.non_overlap",
-                                "media.aspect_ratio"
-                            ]
+                            "enum": rule_ids
                         },
                         "subjects": {
                             "type": "array",
                             "minItems": 1,
-                            "maxItems": 2,
+                            "maxItems": MAX_DESIGN_NODES,
                             "items": {"type": "string"}
                         },
                         "parameters": design_rule_parameters_schema()
@@ -295,6 +301,10 @@ fn design_rule_parameters_schema() -> Value {
     json!({
         "type": "object",
         "properties": {
+            "axis": {"type": "string", "enum": ["horizontal", "vertical"]},
+            "gap": {"type": "integer", "minimum": 0},
+            "inset_start": {"type": "integer", "minimum": 0},
+            "inset_end": {"type": "integer", "minimum": 0},
             "padding": {"type": "integer", "minimum": 0},
             "minimum_gap": {"type": "integer", "minimum": 0},
             "source_width": {"type": "integer", "minimum": 1},

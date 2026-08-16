@@ -76,7 +76,7 @@ async fn empty_rule_spec_request_lists_bounded_family_cards_without_a_live_solve
     assert_eq!(result["families"][0]["id"], "design");
     assert_eq!(
         result["families"][0]["profiles"],
-        json!(["geometric_integrity"])
+        json!(["geometric_integrity", "layout_capacity"])
     );
     assert!(result.get("rules").is_none());
     assert_eq!(

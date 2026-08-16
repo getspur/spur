@@ -130,9 +130,9 @@ fn synthesis_compiles_all_seed_rules_to_named_b_prime_predicates() {
             .map(|constraint| constraint.id())
             .collect::<Vec<_>>(),
         [
-            Some("design_rule_0"),
-            Some("design_rule_1"),
-            Some("design_rule_2")
+            Some("design_rule_0_layout_containment"),
+            Some("design_rule_1_layout_non_overlap"),
+            Some("design_rule_2_media_aspect_ratio")
         ]
     );
 
@@ -169,7 +169,7 @@ fn synthesis_compiles_all_seed_rules_to_named_b_prime_predicates() {
 }
 
 #[test]
-fn verification_searches_for_a_violation_of_the_complete_rule_set() {
+fn verification_compiles_direct_identity_preserving_rule_predicates() {
     let compiled = compile(request(
         DesignSolveMode::Verify,
         vec![
@@ -187,28 +187,61 @@ fn verification_searches_for_a_violation_of_the_complete_rule_set() {
     ))
     .expect("compile verification query");
 
-    assert_eq!(compiled.request.constraints.len(), 1);
+    assert_eq!(compiled.request.constraints.len(), 2);
     assert_eq!(
-        compiled.request.constraints[0].id(),
-        Some("design_rule_violation")
+        compiled
+            .request
+            .constraints
+            .iter()
+            .map(|constraint| constraint.id())
+            .collect::<Vec<_>>(),
+        [
+            Some("design_rule_0_layout_containment"),
+            Some("design_rule_1_layout_non_overlap")
+        ]
     );
     let expr = compiled.request.constraints[0].expr();
     let spur_solver::types::ConstraintExpr::Op {
-        op: ConstraintOp::Not,
+        op: ConstraintOp::And,
         args,
     } = expr
     else {
-        panic!("verification must negate the full hard-rule conjunction");
+        panic!("verification must assert the containment predicate directly");
     };
-    let [spur_solver::types::ConstraintExpr::Op {
-        op: ConstraintOp::And,
-        args: rules,
-    }] = args.as_slice()
-    else {
-        panic!("verification negation must contain one conjunction");
-    };
-    assert_eq!(rules.len(), 2);
+    assert_eq!(args.len(), 4);
+    assert!(matches!(
+        compiled.request.constraints[1].expr(),
+        spur_solver::types::ConstraintExpr::Op {
+            op: ConstraintOp::Or,
+            ..
+        }
+    ));
     compiled.request.validate().expect("valid B-prime request");
+}
+
+#[test]
+fn verification_rejects_declared_unknowns() {
+    let mut input = request(
+        DesignSolveMode::Verify,
+        vec![binding(
+            "layout.containment",
+            &["child", "panel"],
+            DesignRuleParameters::default(),
+        )],
+    );
+    input.scene.nodes.get_mut("child").unwrap().rect.x = None;
+    input.unknowns = vec![DesignUnknown {
+        node: "child".to_owned(),
+        field: DesignField::X,
+        min: 0,
+        max: 276,
+    }];
+
+    let error = compile(input).expect_err("verify must require a complete model");
+    assert_eq!(
+        error.to_string(),
+        "verification requires a complete model; remove 1 unknown declaration"
+    );
 }
 
 #[test]
@@ -247,6 +280,51 @@ fn bounded_unknowns_use_deterministic_variables_and_model_paths() {
         &value["constraints"],
         &json!({"kind": "var", "name": "design_u_0"})
     ));
+}
+
+#[test]
+fn axis_capacity_compiles_horizontal_and_vertical_extent_sums() {
+    let horizontal = serde_json::from_value::<DesignRuleBinding>(json!({
+        "rule_id": "layout.axis_capacity",
+        "subjects": ["panel", "child", "second"],
+        "parameters": {
+            "axis": "horizontal",
+            "gap": 20,
+            "inset_start": 10,
+            "inset_end": 10
+        }
+    }))
+    .expect("horizontal axis-capacity binding");
+    let vertical = serde_json::from_value::<DesignRuleBinding>(json!({
+        "rule_id": "layout.axis_capacity",
+        "subjects": ["panel", "child", "second"],
+        "parameters": {
+            "axis": "vertical",
+            "gap": 20,
+            "inset_start": 10,
+            "inset_end": 10
+        }
+    }))
+    .expect("vertical axis-capacity binding");
+
+    let horizontal = compile(request(DesignSolveMode::Verify, vec![horizontal]))
+        .expect("compile horizontal capacity");
+    let vertical = compile(request(DesignSolveMode::Verify, vec![vertical]))
+        .expect("compile vertical capacity");
+    let horizontal = serde_json::to_value(horizontal.request.constraints[0].expr())
+        .expect("serialize horizontal predicate");
+    let vertical = serde_json::to_value(vertical.request.constraints[0].expr())
+        .expect("serialize vertical predicate");
+
+    assert_eq!(horizontal["op"], "le");
+    assert_eq!(horizontal["args"][0]["op"], "add");
+    assert!(contains_value(
+        &horizontal["args"][0],
+        &json!({"kind": "int", "value": 44})
+    ));
+    assert_eq!(horizontal["args"][1], json!({"kind": "int", "value": 320}));
+    assert_eq!(vertical["op"], "le");
+    assert_eq!(vertical["args"][1], json!({"kind": "int", "value": 200}));
 }
 
 #[test]

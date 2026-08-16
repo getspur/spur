@@ -18,19 +18,32 @@ static BUILTIN_REGISTRY: LazyLock<RuleRegistry> = LazyLock::new(|| {
         vec![RuleFamily::new(
             "design",
             "Mathematically enforceable UI layout and graphic-design rules.",
-            ["geometric_integrity"],
+            ["geometric_integrity", "layout_capacity"],
         )],
-        vec![RuleProfile::new(
-            "geometric_integrity",
-            "design",
-            "Containment, separation, and media-shape invariants.",
-            [
-                "layout.containment",
-                "layout.non_overlap",
-                "media.aspect_ratio",
-            ],
-        )],
-        vec![containment_rule(), non_overlap_rule(), aspect_ratio_rule()],
+        vec![
+            RuleProfile::new(
+                "geometric_integrity",
+                "design",
+                "Containment, separation, and media-shape invariants.",
+                [
+                    "layout.containment",
+                    "layout.non_overlap",
+                    "media.aspect_ratio",
+                ],
+            ),
+            RuleProfile::new(
+                "layout_capacity",
+                "design",
+                "One-dimensional capacity constraints over declared extents.",
+                ["layout.axis_capacity"],
+            ),
+        ],
+        vec![
+            axis_capacity_rule(),
+            containment_rule(),
+            non_overlap_rule(),
+            aspect_ratio_rule(),
+        ],
     )
     .unwrap_or_else(|error| panic!("built-in design rule registry is invalid: {error}"))
 });
@@ -39,6 +52,77 @@ static BUILTIN_REGISTRY: LazyLock<RuleRegistry> = LazyLock::new(|| {
 #[must_use]
 pub fn builtin_registry() -> &'static RuleRegistry {
     &BUILTIN_REGISTRY
+}
+
+fn axis_capacity_rule() -> RuleDefinition {
+    RuleDefinition::new(
+        "layout.axis_capacity",
+        "design",
+        "layout_capacity",
+        "axis_capacity",
+        "Fit declared item extents, gaps, and insets inside one available axis extent.",
+    )
+    .with_guidance(RuleGuidance::implemented_hard(
+        vec![css_visual_formatting_authority()],
+        [
+            "container.rect",
+            "item.rect[]",
+            "axis",
+            "gap",
+            "inset_start",
+            "inset_end",
+        ],
+        LlmEncoding::new(
+            "high",
+            [
+                "declared items must fit one horizontal or vertical extent",
+                "fixed columns or rows must fit their available axis",
+            ],
+            [
+                "Select the declared horizontal or vertical axis",
+                "Read the container extent and each item extent on that axis",
+                "Add one gap between adjacent items and both insets",
+                "Require total used extent to be at most the available extent",
+            ],
+            [
+                "Do not infer item membership from visual proximity",
+                "Do not mix coordinate units in one binding",
+            ],
+            ["Wrapping, flexing, or weighted tracks require separate rules"],
+        ),
+        SolverEncoding::new(
+            "QF_LIA",
+            "assert the capacity inequality over a complete model",
+            "assert the capacity inequality over explicitly bounded unknowns",
+            [
+                "sum(item extents) + gap * (item count - 1) + inset_start + inset_end <= available extent",
+            ],
+        ),
+        RuleExamples::new(
+            RuleExample::new(
+                json!({
+                    "available_extent": 100,
+                    "item_extents": [30, 30],
+                    "gap": 20,
+                    "inset_start": 10,
+                    "inset_end": 10
+                }),
+                "pass",
+                None::<String>,
+            ),
+            RuleExample::new(
+                json!({
+                    "available_extent": 100,
+                    "item_extents": [30, 31],
+                    "gap": 20,
+                    "inset_start": 10,
+                    "inset_end": 10
+                }),
+                "counterexample",
+                Some("design.axis_capacity_exceeded"),
+            ),
+        ),
+    ))
 }
 
 fn containment_rule() -> RuleDefinition {
@@ -71,8 +155,8 @@ fn containment_rule() -> RuleDefinition {
         ),
         SolverEncoding::new(
             "QF_LIA",
-            "assert a disjunction of boundary violations",
-            "assert all four containment inequalities",
+            "assert all four containment inequalities over a complete model",
+            "assert all four containment inequalities over bounded unknowns",
             [
                 "parent.left + padding <= child.left",
                 "parent.top + padding <= child.top",
@@ -130,8 +214,8 @@ fn non_overlap_rule() -> RuleDefinition {
         ),
         SolverEncoding::new(
             "QF_LIA",
-            "assert that all four separating relations are false",
-            "assert at least one separating relation",
+            "assert at least one separating relation over a complete model",
+            "assert at least one separating relation over bounded unknowns",
             [
                 "first.right + minimum_gap <= second.left OR second.right + minimum_gap <= first.left OR first.bottom + minimum_gap <= second.top OR second.bottom + minimum_gap <= first.top",
             ],
@@ -190,8 +274,8 @@ fn aspect_ratio_rule() -> RuleDefinition {
         ),
         SolverEncoding::new(
             "QF_NIA",
-            "assert cross products are unequal",
-            "assert cross products are equal",
+            "assert equal cross products over a complete model",
+            "assert equal cross products over bounded unknowns",
             ["render.width * source.height = render.height * source.width"],
         ),
         RuleExamples::new(

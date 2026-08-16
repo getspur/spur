@@ -1,22 +1,31 @@
 # Design Rule Solver Catalog
 
-**Status:** Approved for implementation
+**Status:** Implemented
 **Beads issue:** `bd-2bx`
 **Solver ranking artifact:** `sol_b9b7c440375f4915`
 **Post-implementation ordering proof:** `sol_21eddfc43e2147a3`
+**Solver-only task ranking:** `sol_3430e4c7c5d74c73`
+**Axis-capacity proof artifacts:** `sol_2367ba362d8a462e`,
+`sol_168998e1847e448e`, `sol_37ec96b05dea413c`, `sol_49ed76c5de1e4e95`
 
 ## Problem
 
-UI layout and graphic-design rules are commonly stated as prose even when the
-load-bearing part is geometric: containment, separation, target dimensions,
-alignment, aspect ratios, and responsive bounds. Agents need a code-owned rule
-catalog and a deterministic compiler so those predicates can be checked or
-synthesized with the existing Z3 service.
+Layout and graphic-design rules are commonly stated as prose even when their
+load-bearing part is mathematical: containment, separation, capacity, aspect
+ratios, and responsive bounds. Agents need a code-owned rule catalog and a
+deterministic compiler so declared facts can be evaluated or completed with the
+existing Z3 service.
 
 The generic model-finding service remains domain-neutral. A multi-family rule
 catalog lives under `spur_solver::rules` and lowers family-specific predicates
 to the existing typed B-prime request model. `design` is the first rule family,
 not a one-off solver product.
+
+The rule subsystem is a mathematical workbench, not an observation system. It
+does not inspect DOM, Ratatui, Figma, screenshots, or framework objects. Callers
+own conversion of external state into declared facts. A solver result therefore
+describes only the supplied model under the selected rules; it does not claim
+subjective UI quality or completeness of an external observation process.
 
 ## Public MCP Surface
 
@@ -38,9 +47,11 @@ solve_rule_spec -> static versioned registry
 
 solve_rules -> select family compiler
             -> validate family facts and selected rules
-            -> compile predicates to SolveConstraintsRequest
+            -> preserve rule identity while compiling predicates
+            -> compile one aggregate SolveConstraintsRequest
             -> SolverService::solve_constraints
-            -> preserve solver status and add domain outcome
+            -> preserve solver status and add mode-specific outcome
+            -> attribute invalid complete models to individual rules
 ```
 
 `crates/spur-solver/src/rules` owns generic registry types, family routing,
@@ -80,12 +91,13 @@ profiles. Exact selectors return stable errors for unknown IDs. Responses includ
 ## Initial Family and Catalog
 
 The first family is `design`; its first profile is `geometric_integrity`. It
-contains three representative rules rather than an unverified broad catalog:
+contains four representative rules rather than an unverified broad catalog:
 
 | Rule | Primitive | Encoding shape |
 |---|---|---|
 | `layout.containment` | `inside` | Four linear boundary inequalities |
 | `layout.non_overlap` | `disjoint` | Four-way Boolean separation |
+| `layout.axis_capacity` | `axis_capacity` | Item extents, gaps, and insets fit one available extent |
 | `media.aspect_ratio` | `aspect_ratio` | Integer cross multiplication |
 
 Accessibility and subjective visual-rhythm profiles are deferred until their
@@ -108,7 +120,9 @@ The scene is normalized and typed:
 Coordinates and dimensions are integers. Width and height must be positive;
 coordinates may be negative for off-canvas counterexamples. Node IDs are
 unique map keys and parent references must resolve. Synthesis unknowns identify
-one geometry field and provide a closed integer range.
+one geometry field and provide a closed integer range. Verification rejects
+unknown geometry and requires a complete model. Synthesis rejects implicit or
+unbounded unknowns.
 
 Rules are applied explicitly through bindings. Contextual rules such as
 non-overlap are never inferred for every pair of nodes.
@@ -132,13 +146,13 @@ non-overlap are never inferred for every pair of nodes.
 
 ### Verification
 
-Verification searches for a violation. The compiler asserts the negation of
-the conjunction of selected hard rules over fixed facts and bounded unknowns.
+Verification evaluates one complete supplied model. The compiler asserts every
+selected hard rule directly. Unknown declarations are invalid in this mode.
 
 | Solver status | Domain outcome |
 |---|---|
-| `unsat` | `pass` -- no violating assignment exists |
-| `sat` | `fail` -- model is a counterexample |
+| `sat` | `pass` -- the complete model satisfies every selected rule |
+| `unsat` | `fail` -- at least one selected rule rejects the complete model |
 | `unknown` | `unknown` |
 | `timeout` | `timeout` |
 | `error` | `error` |
@@ -146,8 +160,11 @@ the conjunction of selected hard rules over fixed facts and bounded unknowns.
 
 ### Synthesis
 
-Synthesis asserts all selected hard rules. Preference optimization is deferred
-until a separate catalog profile defines its semantics and weighting contract.
+Synthesis asserts all selected hard rules over complete facts and explicitly
+declared bounded unknowns. A satisfiable result proves that at least one valid
+completion exists; it does not prove that an arbitrary external UI passes.
+Preference optimization is deferred until a separate catalog profile defines
+its semantics and weighting contract.
 
 | Solver status | Domain outcome |
 |---|---|
@@ -169,10 +186,12 @@ The raw `status` is always returned unchanged. `unknown`, `timeout`, and
   non-negative minimum gap.
 - Aspect ratio avoids division: `render_width * source_height =
   render_height * source_width`.
-- Verification wraps the selected hard-rule conjunction in `not`.
-- Synthesis sends the hard-rule conjunction directly.
-- Rule binding IDs become named constraints where the solver mode supports
-  unsat cores.
+- Axis capacity uses `sum(item extents) + gap * (item count - 1) + start inset
+  + end inset <= available extent` for either declared axis.
+- Verification and synthesis both assert selected predicates directly.
+- Every compiled predicate retains its stable rule ID and binding index.
+- Aggregate constraints use stable per-binding IDs. Invalid verification can
+  run bounded per-rule queries for exact attribution.
 
 Raw SMT is not used by the initial catalog.
 
@@ -184,9 +203,9 @@ validation tests. These limits prevent schema and generated-AST blowups; they
 are operational safety bounds rather than design recommendations.
 
 Invalid selectors, missing nodes, duplicate unknown paths, invalid ranges,
-unsupported binding arity, and invalid dimensions return MCP invalid-params
-errors. Solver availability and process failures retain existing solver error
-semantics.
+unknowns in verification, implicit unknowns in synthesis, unsupported binding
+arity, and invalid dimensions return MCP invalid-params errors. Solver
+availability and process failures retain existing solver error semantics.
 
 ## Testing
 
@@ -196,9 +215,11 @@ Every behavior follows red-green-refactor:
 2. seed rule detail and examples;
 3. `solve_rule_spec` schemas and dispatch;
 4. scene validation;
-5. each compiler predicate;
-6. verification and synthesis status mapping;
-7. brain, worker, and catalog registry exposure.
+5. identity-preserving compiler predicates and catalog/compiler conformance;
+6. complete-model verification and bounded synthesis status mapping;
+7. per-rule attribution for invalid complete models;
+8. registry-derived MCP schemas and brain/worker exposure.
 
 Tests assert feasibility predicates and status semantics, not incidental Z3
-model uniqueness.
+model uniqueness. Test models are pure solver inputs; no renderer or UI
+integration fixtures are part of this crate.

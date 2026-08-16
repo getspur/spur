@@ -18,7 +18,7 @@ fn design_family_lists_geometric_integrity_rules_in_stable_order() {
             .iter()
             .map(|profile| profile.id())
             .collect::<Vec<_>>(),
-        ["geometric_integrity"]
+        ["geometric_integrity", "layout_capacity"]
     );
     assert_eq!(
         registry
@@ -27,6 +27,7 @@ fn design_family_lists_geometric_integrity_rules_in_stable_order() {
             .map(RuleDefinition::id)
             .collect::<Vec<_>>(),
         [
+            "layout.axis_capacity",
             "layout.containment",
             "layout.non_overlap",
             "media.aspect_ratio"
@@ -103,9 +104,27 @@ fn invalid_examples_name_stable_diagnostics() {
     assert_eq!(
         diagnostics,
         [
+            "design.axis_capacity_exceeded",
             "design.outside_parent",
             "design.overlap",
             "design.aspect_ratio_mismatch"
         ]
+    );
+}
+
+#[test]
+fn axis_capacity_guidance_exposes_the_framework_neutral_equation() {
+    let rule = builtin_registry()
+        .rule("layout.axis_capacity")
+        .expect("axis-capacity rule");
+    let value = serde_json::to_value(rule).expect("rule must serialize");
+
+    assert_eq!(rule.profile(), "layout_capacity");
+    assert_eq!(rule.primitive(), "axis_capacity");
+    assert_eq!(
+        value["solver_encoding"]["formula"],
+        serde_json::json!([
+            "sum(item extents) + gap * (item count - 1) + inset_start + inset_end <= available extent"
+        ])
     );
 }

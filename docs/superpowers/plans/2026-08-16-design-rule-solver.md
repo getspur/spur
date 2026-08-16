@@ -4,70 +4,67 @@
 **Issue:** `bd-2bx`
 **Method:** TDD, one RED -> GREEN -> REFACTOR cycle per behavior
 **Post-implementation ordering proof:** `sol_21eddfc43e2147a3`
+**Axis-capacity SOLVE PRE:** `sol_2367ba362d8a462e`, `sol_168998e1847e448e`
+**Axis-capacity SOLVE POST:** `sol_37ec96b05dea413c`, `sol_49ed76c5de1e4e95`
 
-## Task 1: Contract and module boundary
+## Task 1: Solver and model contract
 
-**Files:**
-- Modify `crates/spur-solver/src/lib.rs`
-- Create `crates/spur-solver/src/rules/mod.rs`
-- Create `crates/spur-solver/src/rules/families/mod.rs`
+**RED:** Tests require `verify` to reject unknowns and incomplete facts, and
+require `synthesize` to accept only explicitly bounded unknowns. Status tests
+require `verify/sat -> pass` and `verify/unsat -> fail` without collapsing
+`unknown` or `timeout`.
 
-**Acceptance:** `spur-solver` exposes a multi-family rule subsystem while the
-generic `SolverService` execution path remains unchanged.
+**GREEN:** Tighten the shared mode and outcome contract while leaving the
+generic `SolverService` unchanged.
 
-## Task 2: Registry types and validation
+## Task 2: Identity-preserving compiled rule IR
 
-**RED:** Tests require deterministic profile listing, exact rule lookup,
-selector exclusivity, unique IDs, and valid profile membership.
+**RED:** Compiler tests require every selected binding to retain its stable
+rule ID, binding index, predicate, and required variables.
 
-**GREEN:** Add versioned registry types and validation with no solver calls.
+**GREEN:** Compile family bindings to `CompiledRule` values, then lower them to
+the aggregate B-prime request without erasing identity.
 
-## Task 3: Seed geometric rules
+## Task 3: Verification and synthesis executor
 
-**RED:** Tests request complete details for containment, non-overlap, and aspect
-ratio, including authority, examples, LLM encoding, and solver encoding.
+**RED:** Real-Z3 tests require complete valid models to pass, invalid models to
+fail with exact per-rule attribution, bounded synthesis to return a valid model,
+and infeasible synthesis to remain `unsat`.
 
-**GREEN:** Add the `design` family and its `geometric_integrity` static catalog entries.
+**GREEN:** Execute the aggregate request through `SolverService`; only on
+verification `unsat`, execute bounded per-rule requests for attribution. Keep
+the aggregate raw solver envelope unchanged.
 
-## Task 4: `solve_rule_spec` vertical slice
+## Task 4: Catalog conformance
 
-**RED:** MCP tests require the schema, empty listing, each selector mode,
-progressive `include`, unknown-selector errors, and catalog-only dispatch.
+**RED:** Tests require every implemented catalog rule to have a compiler,
+compile a satisfiable positive model, reject a bound negative model, and cover
+its exact boundary.
 
-**GREEN:** Add `solve_rule_spec` to the shared `SolverMcpModule` and preserve
-brain/worker/catalog registry composition. Keep the guide independent from live
-Z3 state.
+**GREEN:** Add pure mathematical conformance helpers and fixtures under
+`spur-solver`; do not add UI integration fixtures.
 
-## Task 5: Scene IR
+## Task 5: Existing MCP surface
 
-**RED:** Tests reject invalid dimensions, missing parents, missing binding
-subjects, duplicate unknown paths, and invalid ranges.
+**RED:** Schema tests require exactly `solve_rule_spec` and `solve_rules`, keep
+`verify|synthesize`, and require family/rule enums to match the registry.
 
-**GREEN:** Add typed scene and unknown request types with deterministic
-validation. Rule bindings are compiled in the following task.
+**GREEN:** Derive catalog-facing schema values from the built-in registry and
+return structured per-rule verification results without adding a tool or mode.
 
-## Task 6: B-prime compiler
+## Task 6: Generic `layout.axis_capacity`
 
-**RED:** Tests assert the exact predicate shape for containment, non-overlap,
-and aspect ratio, plus assert-negation for verification.
+**SOLVE PRE:** Prove the boundary equation admits exact-fit models and rejects
+one-unit overflow for horizontal and vertical axes.
 
-**GREEN:** Compile to public `spur_solver::types` without raw SMT.
+**RED:** Catalog, compiler, boundary, schema, and real-Z3 tests cover
+`sum(item extents) + gaps + insets <= available extent` on both axes.
 
-## Task 7: `solve_rules`
+**GREEN:** Add an axis enum and non-negative gap/inset parameters. The first
+subject supplies available extent; remaining subjects supply item extents. No
+framework object or observation type enters `spur-solver`.
 
-**RED:** Tests require verify/synthesize request parsing and preservation of all
-solver statuses. Real-Z3 integration covers `pass`, `fail`, `solution`, and
-`infeasible`; a pure status table covers inconclusive states.
-
-**GREEN:** Delegate compiled requests to the shared `SolverService`; add domain
-outcome without changing the raw status, model, core, persistence, or SMT echo.
-
-## Task 8: Integration and verification
-
-**RED:** Core registry tests require both new tools in brain, worker, and
-catalog listings and callable through live registries.
-
-**GREEN:** Finish composition, docs, and symbolic ordering verification.
+**SOLVE POST:** Re-check the implemented exact-fit and overflow predicates.
 
 **Verification:**
 

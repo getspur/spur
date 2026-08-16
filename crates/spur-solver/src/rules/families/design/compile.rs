@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    rules::{builtin_registry, RuleSolveMode},
+    rules::{builtin_registry, CompiledRule, RuleSolveMode},
     types::{
         ConstraintDecl, ConstraintExpr, ConstraintItem, ConstraintOp, ObjectivePriority, SessionOp,
         SolveConstraintsRequest, Variable, DEFAULT_TIMEOUT_MS, MAX_CONSTRAINTS,
@@ -66,6 +66,18 @@ pub struct DesignRuleBinding {
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct DesignRuleParameters {
+    /// Axis selected by `layout.axis_capacity`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub axis: Option<DesignAxis>,
+    /// Non-negative spacing between adjacent capacity items.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gap: Option<i64>,
+    /// Non-negative inset before the first capacity item.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inset_start: Option<i64>,
+    /// Non-negative inset after the last capacity item.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inset_end: Option<i64>,
     /// Non-negative inset for `layout.containment`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub padding: Option<i64>,
@@ -80,11 +92,23 @@ pub struct DesignRuleParameters {
     pub source_height: Option<i64>,
 }
 
+/// One-dimensional extent selected by `layout.axis_capacity`.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DesignAxis {
+    /// Use rectangle widths.
+    Horizontal,
+    /// Use rectangle heights.
+    Vertical,
+}
+
 /// Typed solver request plus model-to-scene metadata.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CompiledDesignRules {
     /// Request consumed by the shared [`crate::service::SolverService`].
     pub request: SolveConstraintsRequest,
+    /// Identity-preserving predicates in caller binding order.
+    pub rules: Vec<CompiledRule>,
     /// Stable mapping from backend variables to geometry paths.
     pub unknowns: Vec<CompiledDesignUnknown>,
 }
@@ -111,29 +135,29 @@ pub fn compile(input: DesignCompileRequest) -> Result<CompiledDesignRules, Desig
             max: MAX_DESIGN_RULE_BINDINGS,
         });
     }
+    if input.mode == DesignSolveMode::Verify && !input.unknowns.is_empty() {
+        return Err(DesignCompileError::VerificationUnknowns {
+            count: input.unknowns.len(),
+        });
+    }
     input.scene.validate(&input.unknowns)?;
 
     let resolver = GeometryResolver::new(&input.scene, &input.unknowns);
-    let predicates = input
+    let rules = input
         .rules
         .iter()
-        .map(|binding| compile_binding(binding, &input.scene, &resolver))
+        .enumerate()
+        .map(|(binding_index, binding)| {
+            compile_binding(binding, &input.scene, &resolver).map(|predicate| {
+                CompiledRule::new(binding.rule_id.clone(), binding_index, predicate)
+            })
+        })
         .collect::<Result<Vec<_>, _>>()?;
 
-    let constraints = match input.mode {
-        DesignSolveMode::Verify => vec![declared(
-            "design_rule_violation",
-            operation(
-                ConstraintOp::Not,
-                vec![operation(ConstraintOp::And, predicates)],
-            ),
-        )],
-        DesignSolveMode::Synthesize => predicates
-            .into_iter()
-            .enumerate()
-            .map(|(index, predicate)| declared(&format!("design_rule_{index}"), predicate))
-            .collect(),
-    };
+    let constraints = rules
+        .iter()
+        .map(|rule| declared(&rule.constraint_id("design"), rule.predicate.clone()))
+        .collect();
 
     let request = SolveConstraintsRequest {
         vars: resolver.variables,
@@ -155,6 +179,7 @@ pub fn compile(input: DesignCompileRequest) -> Result<CompiledDesignRules, Desig
 
     Ok(CompiledDesignRules {
         request,
+        rules,
         unknowns: resolver.unknowns,
     })
 }
@@ -171,8 +196,47 @@ fn compile_binding(
     }
 
     match binding.rule_id.as_str() {
+        "layout.axis_capacity" => {
+            validate_minimum_subjects(binding, scene, 2)?;
+            reject_parameter(binding, "padding", binding.parameters.padding)?;
+            reject_parameter(binding, "minimum_gap", binding.parameters.minimum_gap)?;
+            reject_parameter(binding, "source_width", binding.parameters.source_width)?;
+            reject_parameter(binding, "source_height", binding.parameters.source_height)?;
+            let axis =
+                binding
+                    .parameters
+                    .axis
+                    .ok_or_else(|| DesignCompileError::MissingParameter {
+                        rule_id: binding.rule_id.clone(),
+                        parameter: "axis",
+                    })?;
+            let gap = non_negative_parameter(
+                &binding.rule_id,
+                "gap",
+                binding.parameters.gap.unwrap_or(0),
+            )?;
+            let inset_start = non_negative_parameter(
+                &binding.rule_id,
+                "inset_start",
+                binding.parameters.inset_start.unwrap_or(0),
+            )?;
+            let inset_end = non_negative_parameter(
+                &binding.rule_id,
+                "inset_end",
+                binding.parameters.inset_end.unwrap_or(0),
+            )?;
+            Ok(axis_capacity(
+                resolver,
+                &binding.subjects,
+                axis,
+                gap,
+                inset_start,
+                inset_end,
+            ))
+        }
         "layout.containment" => {
             validate_subjects(binding, scene, 2)?;
+            reject_capacity_parameters(binding)?;
             reject_parameter(binding, "minimum_gap", binding.parameters.minimum_gap)?;
             reject_parameter(binding, "source_width", binding.parameters.source_width)?;
             reject_parameter(binding, "source_height", binding.parameters.source_height)?;
@@ -190,6 +254,7 @@ fn compile_binding(
         }
         "layout.non_overlap" => {
             validate_subjects(binding, scene, 2)?;
+            reject_capacity_parameters(binding)?;
             reject_parameter(binding, "padding", binding.parameters.padding)?;
             reject_parameter(binding, "source_width", binding.parameters.source_width)?;
             reject_parameter(binding, "source_height", binding.parameters.source_height)?;
@@ -207,6 +272,7 @@ fn compile_binding(
         }
         "media.aspect_ratio" => {
             validate_subjects(binding, scene, 1)?;
+            reject_capacity_parameters(binding)?;
             reject_parameter(binding, "padding", binding.parameters.padding)?;
             reject_parameter(binding, "minimum_gap", binding.parameters.minimum_gap)?;
             let source_width = positive_required_parameter(
@@ -232,6 +298,21 @@ fn compile_binding(
     }
 }
 
+fn validate_minimum_subjects(
+    binding: &DesignRuleBinding,
+    scene: &DesignScene,
+    minimum: usize,
+) -> Result<(), DesignCompileError> {
+    if binding.subjects.len() < minimum {
+        return Err(DesignCompileError::TooFewSubjects {
+            rule_id: binding.rule_id.clone(),
+            minimum,
+            actual: binding.subjects.len(),
+        });
+    }
+    validate_subject_ids(binding, scene)
+}
+
 fn validate_subjects(
     binding: &DesignRuleBinding,
     scene: &DesignScene,
@@ -244,6 +325,13 @@ fn validate_subjects(
             actual: binding.subjects.len(),
         });
     }
+    validate_subject_ids(binding, scene)
+}
+
+fn validate_subject_ids(
+    binding: &DesignRuleBinding,
+    scene: &DesignScene,
+) -> Result<(), DesignCompileError> {
     for subject in &binding.subjects {
         if !scene.nodes.contains_key(subject) {
             return Err(DesignCompileError::UnknownSubject {
@@ -253,6 +341,18 @@ fn validate_subjects(
         }
     }
     Ok(())
+}
+
+fn reject_capacity_parameters(binding: &DesignRuleBinding) -> Result<(), DesignCompileError> {
+    if binding.parameters.axis.is_some() {
+        return Err(DesignCompileError::UnexpectedParameter {
+            rule_id: binding.rule_id.clone(),
+            parameter: "axis",
+        });
+    }
+    reject_parameter(binding, "gap", binding.parameters.gap)?;
+    reject_parameter(binding, "inset_start", binding.parameters.inset_start)?;
+    reject_parameter(binding, "inset_end", binding.parameters.inset_end)
 }
 
 fn reject_parameter(
@@ -344,6 +444,30 @@ fn containment(
             ),
         ],
     )
+}
+
+fn axis_capacity(
+    resolver: &GeometryResolver,
+    subjects: &[String],
+    axis: DesignAxis,
+    gap: i64,
+    inset_start: i64,
+    inset_end: i64,
+) -> ConstraintExpr {
+    let extent = match axis {
+        DesignAxis::Horizontal => DesignField::Width,
+        DesignAxis::Vertical => DesignField::Height,
+    };
+    let mut used = vec![int(inset_start)];
+    for (index, item) in subjects[1..].iter().enumerate() {
+        used.push(resolver.field(item, extent));
+        if index + 1 < subjects.len() - 1 {
+            used.push(int(gap));
+        }
+    }
+    used.push(int(inset_end));
+
+    le(add(used), resolver.field(&subjects[0], extent))
 }
 
 fn non_overlap(
@@ -518,6 +642,9 @@ pub enum DesignCompileError {
     /// Binding count exceeds the generic constraint budget.
     #[error("request has {count} design rule bindings; maximum is {max}")]
     TooManyRuleBindings { count: usize, max: usize },
+    /// Verification accepts only complete supplied models.
+    #[error("verification requires a complete model; remove {count} unknown declaration")]
+    VerificationUnknowns { count: usize },
     /// Scene validation failed.
     #[error(transparent)]
     InvalidScene(#[from] DesignSceneError),
@@ -529,6 +656,13 @@ pub enum DesignCompileError {
     InvalidSubjectArity {
         rule_id: String,
         expected: usize,
+        actual: usize,
+    },
+    /// A variadic rule received fewer subjects than its minimum.
+    #[error("rule `{rule_id}` requires at least {minimum} subjects, got {actual}")]
+    TooFewSubjects {
+        rule_id: String,
+        minimum: usize,
         actual: usize,
     },
     /// A subject ID does not resolve in the scene.

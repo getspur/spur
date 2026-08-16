@@ -60,6 +60,84 @@ fn containment_request(mode: &str, child_x: Value, unknowns: Value) -> Value {
     })
 }
 
+fn mixed_verification_request() -> Value {
+    json!({
+        "family": "design",
+        "mode": "verify",
+        "rules": [
+            {
+                "rule_id": "layout.containment",
+                "subjects": ["child", "panel"],
+                "parameters": {"padding": 0}
+            },
+            {
+                "rule_id": "media.aspect_ratio",
+                "subjects": ["media"],
+                "parameters": {"source_width": 16, "source_height": 9}
+            }
+        ],
+        "scene": {
+            "viewport": {"width": 390, "height": 844},
+            "nodes": {
+                "panel": {"rect": {"x": 0, "y": 0, "width": 320, "height": 200}},
+                "child": {
+                    "parent": "panel",
+                    "rect": {"x": 300, "y": 16, "width": 44, "height": 44}
+                },
+                "media": {"rect": {"x": 0, "y": 240, "width": 320, "height": 180}}
+            }
+        },
+        "unknowns": [],
+        "timeout_ms": 30_000,
+        "persist": false,
+        "include_smt": false
+    })
+}
+
+fn axis_capacity_request(axis: &str, second_extent: i64) -> Value {
+    let (container_width, container_height) = (100, 100);
+    let (first_width, first_height, second_width, second_height) = match axis {
+        "horizontal" => (30, 1, second_extent, 1),
+        "vertical" => (1, 30, 1, second_extent),
+        other => panic!("unexpected test axis {other}"),
+    };
+    json!({
+        "family": "design",
+        "mode": "verify",
+        "rules": [{
+            "rule_id": "layout.axis_capacity",
+            "subjects": ["container", "first", "second"],
+            "parameters": {
+                "axis": axis,
+                "gap": 20,
+                "inset_start": 10,
+                "inset_end": 10
+            }
+        }],
+        "scene": {
+            "viewport": {"width": 100, "height": 100},
+            "nodes": {
+                "container": {"rect": {
+                    "x": 0, "y": 0,
+                    "width": container_width, "height": container_height
+                }},
+                "first": {"rect": {
+                    "x": 0, "y": 0,
+                    "width": first_width, "height": first_height
+                }},
+                "second": {"rect": {
+                    "x": 0, "y": 0,
+                    "width": second_width, "height": second_height
+                }}
+            }
+        },
+        "unknowns": [],
+        "timeout_ms": 30_000,
+        "persist": false,
+        "include_smt": false
+    })
+}
+
 #[test]
 fn solve_rules_schema_keeps_one_generic_family_execution_tool() {
     let tools = spur_solver::mcp::tool_definitions();
@@ -82,15 +160,29 @@ fn solve_rules_schema_keeps_one_generic_family_execution_tool() {
         tool.input_schema["properties"]["mode"]["enum"],
         json!(["verify", "synthesize"])
     );
+    assert_eq!(
+        tool.input_schema["properties"]["rules"]["items"]["properties"]["rule_id"]["enum"],
+        json!([
+            "layout.axis_capacity",
+            "layout.containment",
+            "layout.non_overlap",
+            "media.aspect_ratio"
+        ])
+    );
+    assert_eq!(
+        tool.input_schema["properties"]["rules"]["items"]["properties"]["parameters"]["properties"]
+            ["axis"]["enum"],
+        json!(["horizontal", "vertical"])
+    );
 }
 
 #[test]
 fn every_solver_status_has_an_explicit_mode_specific_outcome() {
     for (status, verify, synthesize) in [
-        (SolveStatus::Sat, RuleOutcome::Fail, RuleOutcome::Solution),
+        (SolveStatus::Sat, RuleOutcome::Pass, RuleOutcome::Solution),
         (
             SolveStatus::Unsat,
-            RuleOutcome::Pass,
+            RuleOutcome::Fail,
             RuleOutcome::Infeasible,
         ),
         (
@@ -126,20 +218,27 @@ async fn solve_rules_evaluates_verification_and_synthesis_with_z3() {
     );
     assert_eq!(valid["family"], "design");
     assert_eq!(valid["mode"], "verify");
-    assert_eq!(valid["status"], "unsat");
+    assert_eq!(valid["status"], "sat");
     assert_eq!(valid["outcome"], "pass");
+    assert_eq!(valid["rule_results"][0]["rule_id"], "layout.containment");
+    assert_eq!(valid["rule_results"][0]["binding_index"], 0);
+    assert_eq!(valid["rule_results"][0]["status"], "sat");
+    assert_eq!(valid["rule_results"][0]["outcome"], "pass");
 
     let invalid = result_json(
         &registry
-            .call_json_tool(
-                context(),
-                "solve_rules",
-                containment_request("verify", json!(300), json!([])),
-            )
+            .call_json_tool(context(), "solve_rules", mixed_verification_request())
             .await,
     );
-    assert_eq!(invalid["status"], "sat");
+    assert_eq!(invalid["status"], "unsat");
     assert_eq!(invalid["outcome"], "fail");
+    assert_eq!(invalid["rule_results"].as_array().map(Vec::len), Some(2));
+    assert_eq!(invalid["rule_results"][0]["rule_id"], "layout.containment");
+    assert_eq!(invalid["rule_results"][0]["status"], "unsat");
+    assert_eq!(invalid["rule_results"][0]["outcome"], "fail");
+    assert_eq!(invalid["rule_results"][1]["rule_id"], "media.aspect_ratio");
+    assert_eq!(invalid["rule_results"][1]["status"], "sat");
+    assert_eq!(invalid["rule_results"][1]["outcome"], "pass");
 
     let solution = result_json(
         &registry
@@ -208,4 +307,30 @@ async fn solve_rules_rejects_unknown_families_and_invalid_design_facts() {
     assert!(invalid_error
         .message
         .contains("missing and has no unknown declaration"));
+}
+
+#[tokio::test]
+async fn solve_rules_verifies_axis_capacity_exact_fit_and_one_unit_overflow() {
+    let registry = live_registry();
+    for axis in ["horizontal", "vertical"] {
+        let exact = result_json(
+            &registry
+                .call_json_tool(context(), "solve_rules", axis_capacity_request(axis, 30))
+                .await,
+        );
+        assert_eq!(exact["status"], "sat", "{axis} exact fit");
+        assert_eq!(exact["outcome"], "pass", "{axis} exact fit");
+
+        let overflow = result_json(
+            &registry
+                .call_json_tool(context(), "solve_rules", axis_capacity_request(axis, 31))
+                .await,
+        );
+        assert_eq!(overflow["status"], "unsat", "{axis} overflow");
+        assert_eq!(overflow["outcome"], "fail", "{axis} overflow");
+        assert_eq!(
+            overflow["rule_results"][0]["rule_id"],
+            "layout.axis_capacity"
+        );
+    }
 }
