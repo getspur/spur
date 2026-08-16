@@ -1,8 +1,10 @@
 //! Versioned rule families that compile domain predicates to solver requests.
 
 pub mod catalog;
+pub mod compiler;
 pub mod execute;
 pub mod families;
+pub mod primitives;
 pub mod spec;
 
 use catalog::RuleRegistry;
@@ -108,5 +110,5 @@ pub enum RuleOutcome {
 /// Returns the process-wide registry containing every built-in rule family.
 #[must_use]
 pub fn builtin_registry() -> &'static RuleRegistry {
-    families::design::builtin_registry()
+    families::builtin_registry()
 }

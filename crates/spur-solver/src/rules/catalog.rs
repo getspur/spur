@@ -184,6 +184,8 @@ pub enum RuleStrength {
     Hard,
     /// The predicate is an optimization preference.
     Soft,
+    /// The catalog can guide evaluation, but violation is not solver proof of invalidity.
+    Advisory,
 }
 
 /// A normative or explanatory source for a rule.
@@ -333,6 +335,26 @@ impl RuleGuidance {
             examples,
         }
     }
+
+    /// Creates guidance for a documented rule that this runtime cannot prove.
+    pub fn capability_unavailable(
+        reason: impl Into<String>,
+        default_strength: RuleStrength,
+        authorities: Vec<RuleAuthority>,
+        requires: impl IntoIterator<Item = impl Into<String>>,
+        llm_encoding: LlmEncoding,
+    ) -> Self {
+        Self {
+            availability: Availability::CapabilityUnavailable,
+            availability_reason: Some(reason.into()),
+            default_strength,
+            authorities,
+            requires: strings(requires),
+            llm_encoding,
+            solver_encoding: SolverEncoding::default(),
+            examples: RuleExamples::default(),
+        }
+    }
 }
 
 impl Default for RuleGuidance {
@@ -442,6 +464,22 @@ impl RuleRegistry {
             profiles,
             rules,
         })
+    }
+
+    /// Merges validated family-owned registries into one deterministic catalog.
+    pub fn merge(
+        schema_version: u32,
+        registries: impl IntoIterator<Item = &'static Self>,
+    ) -> Result<Self, RegistryError> {
+        let mut families = Vec::new();
+        let mut profiles = Vec::new();
+        let mut rules = Vec::new();
+        for registry in registries {
+            families.extend_from_slice(registry.families());
+            profiles.extend_from_slice(registry.profiles());
+            rules.extend_from_slice(registry.rules());
+        }
+        Self::new(schema_version, families, profiles, rules)
     }
 
     /// Returns the registry schema version.

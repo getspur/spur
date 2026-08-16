@@ -146,22 +146,25 @@ fn solve_rules_schema_keeps_one_generic_family_execution_tool() {
         .find(|tool| tool.name == "solve_rules")
         .expect("solve_rules tool definition");
 
-    assert_eq!(tool.input_schema["type"], "object");
+    let design = tool.input_schema["oneOf"]
+        .as_array()
+        .expect("family schemas")
+        .iter()
+        .find(|schema| schema["properties"]["family"]["const"] == "design")
+        .expect("design schema");
+    assert_eq!(design["type"], "object");
     assert_eq!(
-        tool.input_schema["required"],
+        design["required"],
         json!(["family", "mode", "rules", "scene"])
     );
-    assert_eq!(tool.input_schema["additionalProperties"], false);
+    assert_eq!(design["additionalProperties"], false);
+    assert_eq!(design["properties"]["family"]["const"], "design");
     assert_eq!(
-        tool.input_schema["properties"]["family"]["enum"],
-        json!(["design"])
-    );
-    assert_eq!(
-        tool.input_schema["properties"]["mode"]["enum"],
+        design["properties"]["mode"]["enum"],
         json!(["verify", "synthesize"])
     );
     assert_eq!(
-        tool.input_schema["properties"]["rules"]["items"]["properties"]["rule_id"]["enum"],
+        design["properties"]["rules"]["items"]["properties"]["rule_id"]["enum"],
         json!([
             "layout.axis_capacity",
             "layout.containment",
@@ -170,8 +173,8 @@ fn solve_rules_schema_keeps_one_generic_family_execution_tool() {
         ])
     );
     assert_eq!(
-        tool.input_schema["properties"]["rules"]["items"]["properties"]["parameters"]["properties"]
-            ["axis"]["enum"],
+        design["properties"]["rules"]["items"]["properties"]["parameters"]["properties"]["axis"]
+            ["enum"],
         json!(["horizontal", "vertical"])
     );
 }

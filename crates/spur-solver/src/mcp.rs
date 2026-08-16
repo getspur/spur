@@ -10,10 +10,6 @@ use spur_mcp::{ErrorCode, McpError, ToolCallContext, ToolDefinition, ToolModule,
 use crate::{
     persist::PersistError,
     rules::execute::{self, PrepareRulesError},
-    rules::families::design::{
-        compile::MAX_DESIGN_RULE_BINDINGS,
-        scene::{MAX_DESIGN_NODES, MAX_DESIGN_UNKNOWNS},
-    },
     rules::spec::{self, RuleSpecError, RuleSpecRequest},
     service::{SolverService, SolverServiceError},
     types::{
@@ -221,137 +217,11 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
 }
 
 fn solve_rules_schema() -> Value {
-    let registry = crate::rules::builtin_registry();
-    let families = registry
-        .families()
-        .iter()
-        .map(|family| family.id())
-        .collect::<Vec<_>>();
-    let rule_ids = registry
-        .rules()
-        .iter()
-        .map(|rule| rule.id())
-        .collect::<Vec<_>>();
-
     json!({
-        "type": "object",
-        "properties": {
-            "family": {
-                "type": "string",
-                "enum": families,
-                "description": "Rule-family compiler selected for this request."
-            },
-            "mode": {
-                "type": "string",
-                "enum": ["verify", "synthesize"]
-            },
-            "rules": {
-                "type": "array",
-                "minItems": 1,
-                "maxItems": MAX_DESIGN_RULE_BINDINGS,
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "rule_id": {
-                            "type": "string",
-                            "enum": rule_ids
-                        },
-                        "subjects": {
-                            "type": "array",
-                            "minItems": 1,
-                            "maxItems": MAX_DESIGN_NODES,
-                            "items": {"type": "string"}
-                        },
-                        "parameters": design_rule_parameters_schema()
-                    },
-                    "required": ["rule_id", "subjects"],
-                    "additionalProperties": false
-                }
-            },
-            "scene": design_scene_schema(),
-            "unknowns": {
-                "type": "array",
-                "maxItems": MAX_DESIGN_UNKNOWNS,
-                "default": [],
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "node": {"type": "string"},
-                        "field": {
-                            "type": "string",
-                            "enum": ["x", "y", "width", "height"]
-                        },
-                        "min": {"type": "integer"},
-                        "max": {"type": "integer"}
-                    },
-                    "required": ["node", "field", "min", "max"],
-                    "additionalProperties": false
-                }
-            },
-            "timeout_ms": timeout_schema(),
-            "persist": {"type": "boolean", "default": false},
-            "include_smt": {"type": "boolean", "default": false}
-        },
-        "required": ["family", "mode", "rules", "scene"],
-        "additionalProperties": false
-    })
-}
-
-fn design_rule_parameters_schema() -> Value {
-    json!({
-        "type": "object",
-        "properties": {
-            "axis": {"type": "string", "enum": ["horizontal", "vertical"]},
-            "gap": {"type": "integer", "minimum": 0},
-            "inset_start": {"type": "integer", "minimum": 0},
-            "inset_end": {"type": "integer", "minimum": 0},
-            "padding": {"type": "integer", "minimum": 0},
-            "minimum_gap": {"type": "integer", "minimum": 0},
-            "source_width": {"type": "integer", "minimum": 1},
-            "source_height": {"type": "integer", "minimum": 1}
-        },
-        "additionalProperties": false
-    })
-}
-
-fn design_scene_schema() -> Value {
-    json!({
-        "type": "object",
-        "properties": {
-            "viewport": {
-                "type": "object",
-                "properties": {
-                    "width": {"type": "integer", "minimum": 1},
-                    "height": {"type": "integer", "minimum": 1}
-                },
-                "required": ["width", "height"],
-                "additionalProperties": false
-            },
-            "nodes": {
-                "type": "object",
-                "maxProperties": MAX_DESIGN_NODES,
-                "additionalProperties": {
-                    "type": "object",
-                    "properties": {
-                        "parent": {"type": "string"},
-                        "rect": {
-                            "type": "object",
-                            "properties": {
-                                "x": {"type": ["integer", "null"]},
-                                "y": {"type": ["integer", "null"]},
-                                "width": {"type": ["integer", "null"]},
-                                "height": {"type": ["integer", "null"]}
-                            },
-                            "additionalProperties": false
-                        }
-                    },
-                    "required": ["rect"],
-                    "additionalProperties": false
-                }
-            }
-        },
-        "required": ["viewport", "nodes"],
-        "additionalProperties": false
+        "oneOf": crate::rules::families::compilers()
+            .iter()
+            .map(|compiler| compiler.input_schema())
+            .collect::<Vec<_>>()
     })
 }
 

@@ -1,15 +1,12 @@
 use std::collections::BTreeMap;
 
 use spur_solver::{
-    rules::{
+    rules::families::design::{
         builtin_registry,
-        families::design::{
-            compile::{
-                compile, DesignCompileRequest, DesignRuleBinding, DesignRuleParameters,
-                DesignSolveMode,
-            },
-            scene::{DesignNode, DesignRect, DesignScene, DesignSize},
+        compile::{
+            compile, DesignCompileRequest, DesignRuleBinding, DesignRuleParameters, DesignSolveMode,
         },
+        scene::{DesignNode, DesignRect, DesignScene, DesignSize},
     },
     service::SolverService,
     types::SolveStatus,

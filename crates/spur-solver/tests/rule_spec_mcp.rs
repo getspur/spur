@@ -63,7 +63,7 @@ fn rule_spec_schema_exposes_one_bounded_guide_tool() {
 }
 
 #[tokio::test]
-async fn empty_rule_spec_request_lists_bounded_family_cards_without_a_live_solver() {
+async fn empty_rule_spec_request_lists_all_bounded_family_cards_without_a_live_solver() {
     let response = registry()
         .call_json_tool(context(), "solve_rule_spec", json!({}))
         .await;
@@ -72,10 +72,13 @@ async fn empty_rule_spec_request_lists_bounded_family_cards_without_a_live_solve
     assert_eq!(result["registry_schema_version"], 1);
     assert_eq!(result["query"]["selector"], "catalog");
     assert_eq!(result["query"]["include"], "summary");
-    assert_eq!(result["families"].as_array().map(Vec::len), Some(1));
-    assert_eq!(result["families"][0]["id"], "design");
+    assert_eq!(result["families"].as_array().map(Vec::len), Some(4));
+    assert_eq!(result["families"][0]["id"], "accessibility");
+    assert_eq!(result["families"][1]["id"], "design");
+    assert_eq!(result["families"][2]["id"], "policy");
+    assert_eq!(result["families"][3]["id"], "resource");
     assert_eq!(
-        result["families"][0]["profiles"],
+        result["families"][1]["profiles"],
         json!(["geometric_integrity", "layout_capacity"])
     );
     assert!(result.get("rules").is_none());

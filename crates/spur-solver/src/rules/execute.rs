@@ -7,20 +7,14 @@ use thiserror::Error;
 use crate::{
     service::{SolverService, SolverServiceError},
     types::{
-        ConstraintDecl, ConstraintItem, ModelValue, SolveConstraintsRequest,
-        SolveConstraintsResponse, SolveStatus,
+        ConstraintDecl, ConstraintItem, SolveConstraintsRequest, SolveConstraintsResponse,
+        SolveStatus,
     },
 };
 
 use super::{
-    families::design::{
-        compile::{
-            compile, CompiledDesignUnknown, DesignCompileError, DesignCompileRequest,
-            DesignRuleBinding,
-        },
-        scene::{DesignScene, DesignUnknown},
-    },
-    CompiledRule, RuleOutcome, RuleSolveMode,
+    compiler::{FamilyCompileError, ModelProjection, RuleAssignment},
+    families, CompiledRule, RuleOutcome, RuleSolveMode,
 };
 
 /// A compiled family request ready for the shared solver service.
@@ -34,8 +28,8 @@ pub struct PreparedRuleSolve {
     pub request: SolveConstraintsRequest,
     /// Identity-preserving predicates used for verification attribution.
     pub rules: Vec<CompiledRule>,
-    /// Design-family model projection metadata.
-    pub design_unknowns: Vec<CompiledDesignUnknown>,
+    /// Family-neutral model projection metadata.
+    pub projections: Vec<ModelProjection>,
 }
 
 /// Parses and compiles one family-specific request from the generic MCP envelope.
@@ -46,35 +40,18 @@ pub fn prepare(args: Value) -> Result<PreparedRuleSolve, PrepareRulesError> {
         }
     })?;
 
-    match selector.family.as_str() {
-        "design" => prepare_design(args),
-        family => Err(PrepareRulesError::UnknownFamily {
-            family: family.to_owned(),
-        }),
-    }
-}
-
-fn prepare_design(args: Value) -> Result<PreparedRuleSolve, PrepareRulesError> {
-    let input: DesignToolRequest =
-        serde_json::from_value(args).map_err(|error| PrepareRulesError::InvalidRequest {
-            message: error.to_string(),
+    let compiler =
+        families::compiler(&selector.family).ok_or_else(|| PrepareRulesError::UnknownFamily {
+            family: selector.family.clone(),
         })?;
-    let compiled = compile(DesignCompileRequest {
-        mode: input.mode,
-        rules: input.rules,
-        scene: input.scene,
-        unknowns: input.unknowns,
-        timeout_ms: input.timeout_ms,
-        persist: input.persist,
-        include_smt: input.include_smt,
-    })?;
+    let compiled = compiler.compile(args)?;
 
     Ok(PreparedRuleSolve {
-        family: input.family,
-        mode: input.mode,
+        family: selector.family,
+        mode: compiled.mode,
         request: compiled.request,
         rules: compiled.rules,
-        design_unknowns: compiled.unknowns,
+        projections: compiled.projections,
     })
 }
 
@@ -134,26 +111,11 @@ pub fn finish(
     solver: SolveConstraintsResponse,
     rule_results: Vec<RuleResult>,
 ) -> SolveRulesResponse {
-    let assignments = solver
-        .model
-        .as_ref()
-        .map(|model| {
-            prepared
-                .design_unknowns
-                .iter()
-                .filter_map(|unknown| {
-                    model
-                        .get(&unknown.variable)
-                        .cloned()
-                        .map(|value| RuleAssignment {
-                            node: unknown.node.clone(),
-                            field: unknown.field,
-                            value,
-                        })
-                })
-                .collect()
+    let assignments = solver.model.as_ref().map_or_else(Vec::new, |model| {
+        families::compiler(&prepared.family).map_or_else(Vec::new, |compiler| {
+            compiler.project_model(&prepared.projections, model)
         })
-        .unwrap_or_default();
+    });
 
     SolveRulesResponse {
         family: prepared.family,
@@ -224,41 +186,9 @@ impl RuleResult {
     }
 }
 
-/// One solved design geometry field.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-pub struct RuleAssignment {
-    /// Scene node ID.
-    pub node: String,
-    /// Rectangle field.
-    pub field: super::families::design::scene::DesignField,
-    /// Scalar value returned by the generic model parser.
-    pub value: ModelValue,
-}
-
 #[derive(Deserialize)]
 struct FamilySelector {
     family: String,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct DesignToolRequest {
-    family: String,
-    mode: RuleSolveMode,
-    rules: Vec<DesignRuleBinding>,
-    scene: DesignScene,
-    #[serde(default)]
-    unknowns: Vec<DesignUnknown>,
-    #[serde(default = "default_timeout_ms")]
-    timeout_ms: u64,
-    #[serde(default)]
-    persist: bool,
-    #[serde(default)]
-    include_smt: bool,
-}
-
-const fn default_timeout_ms() -> u64 {
-    crate::types::DEFAULT_TIMEOUT_MS
 }
 
 /// Family selection, typed parsing, and compilation errors.
@@ -270,7 +200,7 @@ pub enum PrepareRulesError {
     /// No compiler is registered for the requested family.
     #[error("unknown rule family `{family}`")]
     UnknownFamily { family: String },
-    /// Design-family validation or lowering failed.
+    /// Family-specific validation or lowering failed.
     #[error(transparent)]
-    Design(#[from] DesignCompileError),
+    Family(#[from] FamilyCompileError),
 }
