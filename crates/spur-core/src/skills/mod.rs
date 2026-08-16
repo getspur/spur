@@ -1084,9 +1084,11 @@ mod tests {
             .unwrap();
         assert!(matches!(tdd.source, SkillSource::Bundled));
         assert_eq!(tdd.role, SkillRole::Worker);
-        assert_eq!(
-            tdd.description,
-            "Use when implementing any feature or bugfix, before writing implementation code"
+        assert!(
+            tdd.description
+                .contains("implementing any feature or bugfix"),
+            "bundled TDD description must retain its trigger phrase, got: {}",
+            tdd.description
         );
     }
 
@@ -1363,6 +1365,122 @@ mod tests {
         assert!(
             desc.contains("plan") || desc.contains("tasks"),
             "description should contain trigger phrases for matching, got: {desc}"
+        );
+    }
+
+    #[test]
+    fn solve_description_routes_catalog_and_generic_constraint_work() {
+        let raw = all_bundled_raw()
+            .get("solve")
+            .expect("solve skill must exist");
+        let parsed = frontmatter::parse_source(raw);
+        let desc = parsed.description.as_deref().unwrap_or("");
+        for marker in [
+            "rule catalog",
+            "solve_rule_spec",
+            "solve_rules",
+            "invariant",
+        ] {
+            assert!(
+                desc.contains(marker),
+                "solve description must trigger catalog and generic work via `{marker}`, got: {desc}"
+            );
+        }
+    }
+
+    #[test]
+    fn solve_skill_navigates_catalog_before_generic_encoding() {
+        let fake = PathBuf::from("/nonexistent");
+        let body = load_skill("solve", &fake).expect("solve skill must be bundled");
+        let catalog = body
+            .find("solve_rule_spec")
+            .expect("solve skill must navigate the rule catalog");
+        let domain = body
+            .find("solve_rules")
+            .expect("solve skill must execute catalog rules");
+        let generic = body
+            .find("solve_constraints")
+            .expect("solve skill must retain the generic fallback");
+
+        assert!(
+            catalog < domain && domain < generic,
+            "catalog discovery and execution must precede generic hand encoding"
+        );
+        for marker in [
+            "family",
+            "profile",
+            "rule_id",
+            "primitive",
+            "summary",
+            "valid_example",
+            "invalid_example",
+            "llm_encoding",
+            "solver_encoding",
+        ] {
+            assert!(
+                body.contains(marker),
+                "solve skill must document progressive catalog selector/detail `{marker}`"
+            );
+        }
+    }
+
+    #[test]
+    fn solve_skill_distinguishes_rule_modes_from_generic_proofs() {
+        let fake = PathBuf::from("/nonexistent");
+        let body = load_skill("solve", &fake).expect("solve skill must be bundled");
+        for marker in [
+            "`sat` + `pass`",
+            "`unsat` + `fail`",
+            "`sat` + `solution`",
+            "`unsat` + `infeasible`",
+            "assert the counterexample",
+            "unknown",
+            "timeout",
+        ] {
+            assert!(
+                body.contains(marker),
+                "solve skill must preserve solver semantics via `{marker}`"
+            );
+        }
+    }
+
+    #[test]
+    fn solve_skill_defers_rule_details_to_the_catalog() {
+        let fake = PathBuf::from("/nonexistent");
+        let body = load_skill("solve", &fake).expect("solve skill must be bundled");
+        for obsolete_section in [
+            "## Canonical examples",
+            "## Pattern catalog",
+            "### Template A",
+            "### Template B",
+            "### Template C",
+        ] {
+            assert!(
+                !body.contains(obsolete_section),
+                "foundation solve skill must not duplicate `{obsolete_section}`"
+            );
+        }
+    }
+
+    #[test]
+    fn tdd_skill_uses_catalog_first_solve_routing() {
+        let fake = PathBuf::from("/nonexistent");
+        let body = load_skill("test-driven-development", &fake)
+            .expect("test-driven-development skill must be bundled");
+        let catalog = body
+            .find("solve_rule_spec")
+            .expect("TDD solve preflight must discover catalog rules");
+        let generic = body
+            .find("solve_constraints")
+            .expect("TDD solve preflight must retain generic fallback");
+
+        assert!(
+            catalog < generic,
+            "TDD must try catalog-backed rules before generic hand encoding"
+        );
+        assert!(
+            !body.contains("Full encoding rules, anti-patterns, and tool surface live in"),
+            "TDD must not claim the navigator duplicates the full solver reference"
         );
     }
 

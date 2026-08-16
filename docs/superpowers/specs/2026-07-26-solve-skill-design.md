@@ -1,6 +1,6 @@
 # `solve` Skill — Design
 
-**Status:** Approved (brainstorming)  
+**Status:** Superseded by [2026-08-16 Solve Skill Catalog Navigator](./2026-08-16-solve-skill-catalog-navigator.md)
 **Date:** 2026-07-26  
 **Skill (proposed):** `assets/skills/solve/SKILL.md`  
 **Tool surface documented:** `crates/spur-solver` MCP module (`solve_constraints`, `solve_smt`, `get_solve_result`)

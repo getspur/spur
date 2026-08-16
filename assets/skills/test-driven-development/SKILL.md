@@ -23,8 +23,9 @@ Write the test first. Watch it fail. Write minimal code to pass.
 counterexample). Tests and solve are complements — never substitutes.
 
 **REQUIRED SUB-SKILL (when constraint-shaped):** Use `solve` for pre-implement
-feasibility / invariant discharge, then post-implement re-check. Full encoding
-rules, anti-patterns, and tool surface live in the `solve` skill — do not invent
+feasibility / invariant discharge, then post-implement re-check. Navigate
+catalog rules with `solve_rule_spec`, execute matches with `solve_rules`, and
+fall back to `solve_constraints` for uncatalogued invariants. Do not invent
 constants or collapse `unknown`/`timeout` into `unsat`.
 
 ## When to Use
@@ -113,8 +114,9 @@ digraph tdd_cycle {
 **Do this before writing the failing test** (and before any production code):
 
 1. Strip to **hard** constraints only (budgets, safety bounds, identity equations). Soft prefs wait for ratchet.
-2. Call `solve_constraints` (default) or `solve_smt` when B′ cannot express the theory.
-3. Act on status:
+2. Call `solve_rule_spec` first when the facts may match a catalog family; execute an implemented match with `solve_rules`.
+3. When no catalog rule applies, call `solve_constraints`; use `solve_smt` only when B′ cannot express the theory.
+4. Interpret catalog requests by their mode outcome. For generic queries, act on status:
 
 | status | TDD action |
 |---|---|
