@@ -1,7 +1,10 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{backend::TestBackend, layout::Rect, Terminal};
-use spur_acp::SessionInfo;
+use spur_acp::{SessionId, SessionInfo};
 use spur_tui::action::Action;
+use spur_tui::components::palette::PalettePayload;
+use spur_tui::components::palette_sources::{PaletteSource, SessionSource};
+use spur_tui::session_metadata::SessionEntry;
 use spur_tui::views::session_picker::SessionPickerView;
 use spur_tui::views::View;
 
@@ -25,6 +28,12 @@ fn session(id: &str, title: &str) -> SessionInfo {
         std::path::PathBuf::from("/tmp"),
     )
     .title(title.to_string())
+}
+
+fn local_session_id(acp_session_id: &str) -> String {
+    spur_core::plan::labels::derive_brain_session_id(&SessionId(acp_session_id.to_owned()))
+        .into_session_id()
+        .0
 }
 
 fn session_updated(id: &str, title: &str, updated_at: &str) -> SessionInfo {
@@ -58,7 +67,7 @@ fn highlighted_session_id(picker: &SessionPickerView) -> Option<&str> {
 fn cursor_default_lands_on_last_active_when_present() {
     let mut picker = SessionPickerView::new();
     let meta = spur_tui::session_metadata::SessionMetadata {
-        last_active_session_id: Some("a2".to_string()),
+        last_active_session_id: Some(local_session_id("a2")),
         ..Default::default()
     };
     picker.set_metadata(meta);
@@ -163,7 +172,7 @@ fn cursor_preserved_by_session_id_after_set_sessions_reorders_list() {
 fn cursor_preserves_new_session_row_across_refresh() {
     let mut picker = SessionPickerView::new();
     picker.set_metadata(spur_tui::session_metadata::SessionMetadata {
-        last_active_session_id: Some("a1".to_string()),
+        last_active_session_id: Some(local_session_id("a1")),
         ..Default::default()
     });
     picker.set_sessions("t".into(), vec![session("a1", "alpha")], synopsis());
@@ -185,7 +194,7 @@ fn cursor_preserves_new_session_row_across_refresh() {
 fn cursor_falls_through_to_p1_when_highlighted_session_disappears() {
     let mut picker = SessionPickerView::new();
     picker.set_metadata(spur_tui::session_metadata::SessionMetadata {
-        last_active_session_id: Some("a1".to_string()),
+        last_active_session_id: Some(local_session_id("a1")),
         ..Default::default()
     });
     picker.set_sessions(
@@ -231,8 +240,8 @@ fn n_key_with_current_draft_shows_confirm_switch() {
     let mut picker = SessionPickerView::new();
     picker.set_metadata(spur_tui::session_metadata::SessionMetadata::default());
     picker.set_sessions("t".into(), vec![session("a1", "alpha")], synopsis());
-    picker.set_current_session_id(Some("a1".to_string()));
-    picker.set_current_session_has_draft(Some("a1".to_string()));
+    picker.set_current_session_id(Some(local_session_id("a1")));
+    picker.set_current_session_has_draft(Some(local_session_id("a1")));
 
     let _ = picker.handle_key(
         KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
@@ -355,6 +364,164 @@ fn p_key_emits_toggle_pin_for_highlighted_session() {
 }
 
 #[test]
+fn p_key_uses_canonical_metadata_key_once_mapping_exists() {
+    let mut metadata = spur_tui::session_metadata::SessionMetadata::default();
+    let spur_id = local_session_id("a1");
+    metadata.sessions.insert(
+        spur_id.clone(),
+        SessionEntry {
+            acp_session_id: Some("a1".into()),
+            ..SessionEntry::default()
+        },
+    );
+
+    let mut picker = SessionPickerView::new();
+    picker.set_metadata(metadata.clone());
+    picker.set_sessions("t".into(), vec![session("a1", "x")], synopsis());
+
+    match picker.handle_key(key('p'), &test_ctx()) {
+        Some(Action::ToggleSessionPin { session_id }) => assert_eq!(session_id, spur_id),
+        other => panic!("expected ToggleSessionPin for canonical metadata, got {other:?}"),
+    }
+}
+
+#[test]
+fn mapped_raw_key_collision_does_not_leak_or_mutate_foreign_metadata() {
+    let raw_acp_id = "0123456789abcdef";
+    let spur_id = local_session_id(raw_acp_id);
+    let mut metadata = spur_tui::session_metadata::SessionMetadata::default();
+    metadata.sessions.insert(
+        raw_acp_id.into(),
+        SessionEntry {
+            title_override: Some("foreign title".into()),
+            acp_session_id: Some("other-raw-acp-id".into()),
+            pinned: true,
+            ..SessionEntry::default()
+        },
+    );
+
+    let mut picker = SessionPickerView::new();
+    picker.set_metadata(metadata.clone());
+    picker.set_sessions(
+        "t".into(),
+        vec![session(raw_acp_id, "row title")],
+        synopsis(),
+    );
+
+    assert!(
+        picker.handle_key(key('p'), &test_ctx()).is_none(),
+        "ambiguous mapped collision must not mutate either metadata key"
+    );
+
+    let palette = SessionSource::from_metadata(&metadata).collect();
+    assert!(palette.iter().all(|result| {
+        !matches!(
+            &result.payload,
+            PalettePayload::Session { session_id } if session_id == &spur_id
+        )
+    }));
+
+    let backend = TestBackend::new(100, 24);
+    let mut term = Terminal::new(backend).unwrap();
+    term.draw(|frame| picker.render(frame, Rect::new(0, 0, 100, 24), &test_ctx()))
+        .unwrap();
+    let rendered = {
+        let buf = term.backend().buffer();
+        let mut text = String::new();
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                text.push_str(buf[(x, y)].symbol());
+            }
+            text.push('\n');
+        }
+        text
+    };
+    assert!(rendered.contains("row title"));
+    assert!(!rendered.contains("foreign title"));
+}
+
+#[test]
+fn unmapped_raw_key_collision_is_hidden_and_metadata_actions_are_suppressed() {
+    let raw_acp_id = "0123456789abcdef";
+    let mut metadata = spur_tui::session_metadata::SessionMetadata::default();
+    metadata.sessions.insert(
+        raw_acp_id.into(),
+        SessionEntry {
+            title_override: Some("unproven foreign title".into()),
+            pinned: true,
+            ..SessionEntry::default()
+        },
+    );
+
+    let mut picker = SessionPickerView::new();
+    picker.set_metadata(metadata.clone());
+    picker.set_sessions(
+        "t".into(),
+        vec![session(raw_acp_id, "row title")],
+        synopsis(),
+    );
+
+    assert!(picker.handle_key(key('p'), &test_ctx()).is_none());
+    assert!(SessionSource::from_metadata(&metadata).collect().is_empty());
+
+    let backend = TestBackend::new(100, 24);
+    let mut term = Terminal::new(backend).unwrap();
+    term.draw(|frame| picker.render(frame, Rect::new(0, 0, 100, 24), &test_ctx()))
+        .unwrap();
+    let buf = term.backend().buffer();
+    let mut rendered = String::new();
+    for y in 0..buf.area.height {
+        for x in 0..buf.area.width {
+            rendered.push_str(buf[(x, y)].symbol());
+        }
+        rendered.push('\n');
+    }
+    assert!(rendered.contains("row title"));
+    assert!(!rendered.contains("unproven foreign title"));
+}
+
+#[test]
+fn unmapped_canonical_destination_is_hidden_and_metadata_actions_are_suppressed() {
+    let raw_acp_id = "row-acp-session";
+    let spur_id = local_session_id(raw_acp_id);
+    let mut metadata = spur_tui::session_metadata::SessionMetadata::default();
+    metadata.sessions.insert(
+        spur_id,
+        SessionEntry {
+            title_override: Some("unproven destination title".into()),
+            pinned: true,
+            ..SessionEntry::default()
+        },
+    );
+
+    let mut picker = SessionPickerView::new();
+    picker.set_metadata(metadata.clone());
+    picker.set_sessions(
+        "t".into(),
+        vec![session(raw_acp_id, "row title")],
+        synopsis(),
+    );
+
+    assert!(picker.handle_key(key('p'), &test_ctx()).is_none());
+    assert!(SessionSource::from_metadata(&metadata).collect().is_empty());
+
+    let backend = TestBackend::new(100, 24);
+    let mut term = Terminal::new(backend).unwrap();
+    term.draw(|frame| picker.render(frame, Rect::new(0, 0, 100, 24), &test_ctx()))
+        .unwrap();
+    let buf = term.backend().buffer();
+    let mut rendered = String::new();
+    for y in 0..buf.area.height {
+        for x in 0..buf.area.width {
+            rendered.push_str(buf[(x, y)].symbol());
+        }
+        rendered.push('\n');
+    }
+    assert!(rendered.contains("row title"));
+    assert!(!rendered.contains("unproven destination title"));
+}
+
+#[test]
 fn p_key_on_new_session_row_is_noop() {
     let mut picker = SessionPickerView::new();
     picker.set_sessions("t".into(), vec![session("a1", "x")], synopsis());
@@ -397,7 +564,7 @@ fn d_key_on_new_session_row_is_noop() {
 fn y_emits_copy_session_id_for_highlighted_row() {
     let mut picker = SessionPickerView::new();
     picker.set_metadata(spur_tui::session_metadata::SessionMetadata {
-        last_active_session_id: Some("a1".to_string()),
+        last_active_session_id: Some(local_session_id("a1")),
         ..Default::default()
     });
     picker.set_sessions(
@@ -619,7 +786,7 @@ fn enter_switching_session_with_current_draft_shows_confirm() {
     );
     // Tell picker that session a1 has an unsent draft (simulates the App's
     // coordination — picker doesn't look up metadata itself).
-    picker.set_current_session_has_draft(Some("a1".to_string()));
+    picker.set_current_session_has_draft(Some(local_session_id("a1")));
 
     // Move cursor to a2 (cursor 2 in virtual layout: [+ New]=0, a1=1, a2=2).
     let _ = picker.handle_key(
@@ -656,7 +823,7 @@ fn esc_cancels_confirm_switch() {
         vec![session("a1", "alpha"), session("a2", "beta")],
         synopsis(),
     );
-    picker.set_current_session_has_draft(Some("a1".to_string()));
+    picker.set_current_session_has_draft(Some(local_session_id("a1")));
     let _ = picker.handle_key(
         KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
         &test_ctx(),
@@ -683,7 +850,7 @@ fn enter_on_same_session_id_does_not_show_confirm() {
         vec![session("a1", "alpha"), session("a2", "beta")],
         synopsis(),
     );
-    picker.set_current_session_has_draft(Some("a1".to_string()));
+    picker.set_current_session_has_draft(Some(local_session_id("a1")));
     // Cursor on a1 (cursor=1).
     let action = picker.handle_key(
         KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
@@ -698,7 +865,7 @@ fn enter_on_same_session_id_does_not_show_confirm() {
 fn enter_on_new_session_row_with_draft_shows_confirm() {
     let mut picker = SessionPickerView::new();
     picker.set_sessions("t".into(), vec![session("a1", "alpha")], synopsis());
-    picker.set_current_session_has_draft(Some("a1".to_string()));
+    picker.set_current_session_has_draft(Some(local_session_id("a1")));
     let _ = picker.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), &test_ctx());
     // Cursor is at [+ New session] (cursor=0).
     let action = picker.handle_key(
@@ -755,7 +922,9 @@ fn populated_list_footer_hint_advertises_p_pin() {
     // a no-regression guard.
     let action = picker.handle_key(key('p'), &test_ctx());
     match action {
-        Some(Action::ToggleSessionPin { session_id }) => assert_eq!(session_id, "a1"),
+        Some(Action::ToggleSessionPin { session_id }) => {
+            assert_eq!(session_id, "a1")
+        }
         other => panic!("expected ToggleSessionPin(a1), got {other:?}"),
     }
 }

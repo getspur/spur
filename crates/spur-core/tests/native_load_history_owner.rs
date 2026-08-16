@@ -83,11 +83,24 @@ async fn wire_history_excludes_disk_replay_and_precedes_load_milestones() {
         .await
         .expect("resume input should be accepted");
 
+    let expected_local = spur_core::plan::labels::derive_brain_session_id(&spur_acp::SessionId(
+        "sequencing-session".into(),
+    ))
+    .into_session_id();
+
     let order = tokio::time::timeout(Duration::from_secs(10), async {
         let mut order = Vec::new();
         while !(order.contains(&"wire") && order.contains(&"turn_complete")) {
             match events.recv().await {
                 Ok(event) => match event.body {
+                    SpurEventBody::BrainConnecting { session, .. } => {
+                        assert_eq!(session, expected_local);
+                        order.push("brain_connecting");
+                    }
+                    SpurEventBody::SessionLoading { session } => {
+                        assert_eq!(session, expected_local);
+                        order.push("session_loading");
+                    }
                     SpurEventBody::AgentNotification { notification, .. }
                         if format!("{notification:?}").contains("wire-history") =>
                     {
@@ -98,9 +111,16 @@ async fn wire_history_excludes_disk_replay_and_precedes_load_milestones() {
                     {
                         order.push("disk");
                     }
-                    SpurEventBody::SessionLoaded { .. } => order.push("session_loaded"),
-                    SpurEventBody::TurnComplete { .. } => order.push("turn_complete"),
-                    SpurEventBody::BrainError { message, .. } => {
+                    SpurEventBody::SessionLoaded { session } => {
+                        assert_eq!(session, expected_local);
+                        order.push("session_loaded");
+                    }
+                    SpurEventBody::TurnComplete { session } => {
+                        assert_eq!(session, expected_local);
+                        order.push("turn_complete");
+                    }
+                    SpurEventBody::BrainError { session, message } => {
+                        assert_eq!(session, expected_local);
                         panic!("load failed unexpectedly: {message}")
                     }
                     _ => {}
@@ -127,7 +147,13 @@ async fn wire_history_excludes_disk_replay_and_precedes_load_milestones() {
 
     assert_eq!(
         order,
-        vec!["wire", "session_loaded", "turn_complete"],
+        vec![
+            "brain_connecting",
+            "session_loading",
+            "wire",
+            "session_loaded",
+            "turn_complete",
+        ],
         "wire replay must own history exclusively and finish before load milestones"
     );
 }

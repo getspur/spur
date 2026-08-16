@@ -111,18 +111,32 @@ pub struct SessionSource {
     /// Tie-break for entries with identical timestamps is `BTreeMap` key
     /// order (lexicographic on `session_id`), inherited from
     /// `SessionMetadata::sessions` iteration order plus stable sort.
-    entries: Vec<(String, String)>, // (session_id, display_label)
+    entries: Vec<(String, String)>, // (raw ACP session_id, display_label)
 }
 
 impl SessionSource {
     pub fn from_metadata(meta: &SessionMetadata) -> Self {
-        // Capture (session_id, label, last_opened_at) so we can sort.
+        // A collision-safe migration can leave an old raw-keyed entry beside
+        // its canonical mapped entry. Hide that duplicate from the palette;
+        // the mapped entry carries the authoritative ACP resume id.
+        let mapped_acp_ids: std::collections::HashSet<&str> = meta
+            .sessions
+            .values()
+            .filter_map(|entry| entry.acp_session_id.as_deref())
+            .collect();
+
+        // Capture (raw ACP session_id, label, last_opened_at) so we can sort.
         let mut ranked: Vec<(String, String, String)> = meta
             .sessions
             .iter()
+            .filter(|(id, entry)| {
+                entry.acp_session_id.is_some()
+                    || (!is_derived_spur_id(id) && !mapped_acp_ids.contains(id.as_str()))
+            })
             .map(|(id, entry)| {
                 let label = entry.title_override.clone().unwrap_or_else(|| id.clone());
-                (id.clone(), label, entry.last_opened_at.clone())
+                let acp_session_id = entry.acp_session_id.clone().unwrap_or_else(|| id.clone());
+                (acp_session_id, label, entry.last_opened_at.clone())
             })
             .collect();
         // ISO-8601 timestamps sort correctly via lexicographic order.
@@ -134,6 +148,13 @@ impl SessionSource {
             .collect();
         Self { entries }
     }
+}
+
+fn is_derived_spur_id(id: &str) -> bool {
+    id.len() == 16
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
 }
 
 impl PaletteSource for SessionSource {

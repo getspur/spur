@@ -3,7 +3,7 @@ use spur_tui::components::palette::{PaletteKind, PalettePayload};
 use spur_tui::components::palette_sources::{
     CommandSource, PaletteSource, SessionSource, WorkerSource,
 };
-use spur_tui::session_metadata::{SessionEntry, SessionMetadata};
+use spur_tui::session_metadata::{SessionEntry, SessionMetadata, SessionMetadataStore};
 
 #[test]
 fn command_source_yields_all_registered_commands_as_command_kind() {
@@ -58,6 +58,70 @@ fn session_source_yields_session_kind_rows_with_title_as_label() {
             spur_tui::components::palette::PaletteKind::Session
         ));
     }
+}
+
+#[test]
+fn session_source_uses_raw_acp_id_for_canonical_metadata_entry() {
+    let mut meta = SessionMetadata::default();
+    meta.sessions.insert(
+        "0123456789abcdef".into(),
+        SessionEntry {
+            title_override: Some("mapped session".into()),
+            acp_session_id: Some("raw-acp-session-id".into()),
+            ..SessionEntry::default()
+        },
+    );
+
+    let results = SessionSource::from_metadata(&meta).collect();
+
+    assert_eq!(results.len(), 1);
+    assert!(matches!(
+        &results[0].payload,
+        PalettePayload::Session { session_id } if session_id == "raw-acp-session-id"
+    ));
+}
+
+#[test]
+fn migrated_draft_remains_resumable_before_agent_session_ready() {
+    let raw_acp_id = "raw-acp-before-ready";
+    let spur_id =
+        spur_core::plan::labels::derive_brain_session_id(&spur_acp::SessionId(raw_acp_id.into()))
+            .into_session_id();
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let mut store = SessionMetadataStore::load(tmp.path());
+    store.upsert_entry(
+        raw_acp_id.into(),
+        SessionEntry {
+            title_override: Some("retry me".into()),
+            draft: "keep draft".into(),
+            ..SessionEntry::default()
+        },
+    );
+
+    assert!(store.migrate_acp_entry(&spur_id.0, raw_acp_id));
+    let migrated = store.entry(&spur_id.0).expect("canonical entry created");
+    assert_eq!(migrated.acp_session_id.as_deref(), Some(raw_acp_id));
+
+    let results = SessionSource::from_metadata(store.metadata()).collect();
+    assert_eq!(results.len(), 1);
+    assert!(matches!(
+        &results[0].payload,
+        PalettePayload::Session { session_id } if session_id == raw_acp_id
+    ));
+}
+
+#[test]
+fn session_source_excludes_unmapped_derived_shaped_key() {
+    let mut meta = SessionMetadata::default();
+    meta.sessions.insert(
+        "0123456789abcdef".into(),
+        SessionEntry {
+            title_override: Some("ambiguous identity".into()),
+            ..SessionEntry::default()
+        },
+    );
+
+    assert!(SessionSource::from_metadata(&meta).collect().is_empty());
 }
 
 use spur_core::lineage::projection::ExecutorLineage;

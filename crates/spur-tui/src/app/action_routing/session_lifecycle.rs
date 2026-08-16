@@ -200,15 +200,36 @@ impl App {
 
             Action::ResumeSession { session_id } => {
                 self.pending_first_user_message = None;
+                // Session-list actions carry the raw ACP id, but the
+                // BrainSpawned detail view is keyed by the derived SPUR id.
+                // Move any list-only draft before BrainSpawned restores it;
+                // AgentSessionReady arrives later and completes the mapping.
+                let acp_session_id = SessionId(session_id.clone());
+                let spur_session_id =
+                    spur_core::plan::labels::derive_brain_session_id(&acp_session_id)
+                        .into_session_id();
+                if self
+                    .metadata_store
+                    .migrate_acp_entry(&spur_session_id.0, &session_id)
+                {
+                    self.persist_metadata("resume metadata migration");
+                }
                 // Optimistic navigation: move to SessionDetail immediately so
                 // the picker dismisses in the same tick (FP-6). Lazy-construct
                 // a pre-ready SessionDetailView so LoadState renders correctly
                 // while the resume pipeline is in flight (Tranche 2 Task 5).
-                let sid = SessionId(session_id.clone());
-                let view =
-                    crate::views::session_detail::SessionDetailView::for_session(sid.clone());
+                let mut view = crate::views::session_detail::SessionDetailView::for_session(
+                    spur_session_id.clone(),
+                );
+                if let Some(entry) = self
+                    .metadata_store
+                    .entry(&spur_session_id.0)
+                    .filter(|entry| entry.acp_session_id.as_deref() == Some(session_id.as_str()))
+                {
+                    view.restore_draft(&entry.draft);
+                }
                 self.session_detail = Some(view);
-                self.navigate_to(ViewId::SessionDetail(sid));
+                self.navigate_to(ViewId::SessionDetail(spur_session_id));
                 if let Some(ref tx) = self.user_input_tx {
                     let _ = tx.try_send(UserInput::ResumeSession { session_id });
                 }

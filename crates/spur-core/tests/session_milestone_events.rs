@@ -143,6 +143,7 @@ async fn cold_resume_emits_no_retire_events() {
 async fn resume_emits_brain_connecting_before_connect_fails() {
     let target_str = "milestone-brain-connecting";
     let target = SessionId(target_str.to_string());
+    let local_target = spur_core::plan::labels::derive_brain_session_id(&target).into_session_id();
 
     // The default SpurConfig uses "claude-code" as the default brain name.
     let expected_brain_name = SpurConfig::default().brain.default.clone();
@@ -177,8 +178,8 @@ async fn resume_emits_brain_connecting_before_connect_fails() {
         } = &ev.body
         {
             assert_eq!(
-                *session, target,
-                "BrainConnecting.session must match the resume target"
+                *session, local_target,
+                "BrainConnecting.session must use the derived local resume target"
             );
             assert_eq!(
                 *brain_name, expected_brain_name,

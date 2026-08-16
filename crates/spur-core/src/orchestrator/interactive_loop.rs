@@ -387,7 +387,9 @@ impl Orchestrator {
 
     fn emit_session_synopsis_seeds(&mut self, sessions: &[spur_acp::SessionInfo]) {
         for session in sessions {
-            let spur_session_id = SessionId(session.session_id.0.to_string());
+            let acp_session_id = SessionId(session.session_id.0.to_string());
+            let spur_session_id =
+                crate::plan::labels::derive_brain_session_id(&acp_session_id).into_session_id();
             if !self.seeded_session_ids.insert(spur_session_id.clone()) {
                 continue;
             }
@@ -769,13 +771,17 @@ impl Orchestrator {
 
                     // ── ResumeSession ─────────────────────────────────────
                     InteractiveInput::ResumeSession { session_id } => {
+                        let local_session_id = crate::plan::labels::derive_brain_session_id(
+                            &spur_acp::SessionId(session_id.clone()),
+                        )
+                        .into_session_id();
                         self.retire_active_brain(
                             &mut brain,
                             &mut agent_connection,
                             &mut scheduler,
                             &overflow_continuations,
                             spur_acp::domain::events::BrainRetireReason::ResumeSwitch,
-                            Some(SessionId(session_id.clone())),
+                            Some(local_session_id.clone()),
                         )
                         .await;
 
@@ -791,7 +797,7 @@ impl Orchestrator {
                                 // Emit BrainConnecting before attempting spawn so the
                                 // UI can transition to a "connecting" loading state.
                                 self.emit(SpurEvent::now(SpurEventBody::BrainConnecting {
-                                    session: SessionId(session_id.clone()),
+                                    session: local_session_id.clone(),
                                     brain_name: self
                                         .selected_brain_name(Some(active_brain_name.as_str())),
                                 }));
@@ -815,7 +821,7 @@ impl Orchestrator {
                                         let error_message = format_error_chain(&e);
                                         error!(error = %error_message, "Failed to connect brain for resume");
                                         self.emit(SpurEvent::now(SpurEventBody::BrainError {
-                                            session: SessionId(session_id.clone()),
+                                            session: local_session_id.clone(),
                                             message: error_message,
                                         }));
                                         continue;
@@ -825,15 +831,10 @@ impl Orchestrator {
                         };
 
                         let original_session_id = session_id.clone();
-                        let loading_session_id = crate::plan::labels::derive_brain_session_id(
-                            &spur_acp::SessionId(session_id.clone()),
-                        )
-                        .as_session_id()
-                        .clone();
                         // Emit SessionLoading before the RPC so the UI can show a
                         // "loading session" state while the brain retrieves history.
                         self.emit(SpurEvent::now(SpurEventBody::SessionLoading {
-                            session: loading_session_id,
+                            session: local_session_id.clone(),
                         }));
                         match self
                             .load_brain_session(
@@ -926,7 +927,7 @@ impl Orchestrator {
                                 let error_message = format_error_chain(&e);
                                 error!(error = %error_message, "Failed to load brain session");
                                 self.emit(SpurEvent::now(SpurEventBody::BrainError {
-                                    session: SessionId(original_session_id.clone()),
+                                    session: local_session_id,
                                     message: error_message,
                                 }));
                             }
@@ -2613,12 +2614,20 @@ mod list_sessions_tests {
         }
 
         assert_eq!(seeds.len(), 2);
+        let seed_a = crate::plan::labels::derive_brain_session_id(&SessionId("seed-a".into()))
+            .as_session_id()
+            .0
+            .clone();
+        let seed_b = crate::plan::labels::derive_brain_session_id(&SessionId("seed-b".into()))
+            .as_session_id()
+            .0
+            .clone();
         assert_eq!(
-            seeds.get("seed-a"),
+            seeds.get(&seed_a),
             Some(&(Some("first a".to_string()), Some("/last-a".to_string())))
         );
         assert_eq!(
-            seeds.get("seed-b"),
+            seeds.get(&seed_b),
             Some(&(Some("hello b".to_string()), Some("last b".to_string())))
         );
     }

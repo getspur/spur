@@ -308,10 +308,17 @@ impl SessionMetadataStore {
     }
 
     /// Persist the `(spur_id → acp_id, brain)` mapping on the per-entry
-    /// record AND unconditionally promote to the top-level `last_active_*`
-    /// pointers. See design doc: `AgentSessionReady` is the "newest live
-    /// target to resume" signal, so mirroring is always correct.
-    pub fn set_acp_mapping(&mut self, spur_id: &str, acp_id: &str, brain: &str) {
+    /// record and promote it to the top-level `last_active_*` pointers.
+    /// Returns `false` without mutating either location when `spur_id` is
+    /// already occupied by metadata whose ownership is not proven by the
+    /// same ACP mapping.
+    pub fn set_acp_mapping(&mut self, spur_id: &str, acp_id: &str, brain: &str) -> bool {
+        self.migrate_acp_entry(spur_id, acp_id);
+        if let Some(entry) = self.metadata.sessions.get(spur_id) {
+            if entry.acp_session_id.as_deref() != Some(acp_id) {
+                return false;
+            }
+        }
         let entry = self
             .metadata
             .sessions
@@ -323,6 +330,55 @@ impl SessionMetadataStore {
         self.metadata.last_active_session_id = Some(spur_id.to_string());
         self.metadata.last_active_acp_session_id = Some(acp_id.to_string());
         self.metadata.last_active_brain = Some(brain.to_string());
+        true
+    }
+
+    /// Establish the canonical SPUR-keyed entry before `BrainSpawned` restores
+    /// the detail view. Unambiguous legacy picker metadata is moved from its
+    /// raw ACP key; otherwise an empty, explicitly-owned placeholder is made
+    /// so foreign state cannot be adopted.
+    ///
+    /// ACP ids are opaque and share the map namespace with 16-hex derived
+    /// ids. A raw key that could be a canonical id is retained unless its
+    /// embedded mapping proves it belongs to this ACP session.
+    pub fn migrate_acp_entry(&mut self, spur_id: &str, acp_id: &str) -> bool {
+        if spur_id == acp_id || self.metadata.sessions.contains_key(spur_id) {
+            return false;
+        }
+        let Some(legacy) = self.metadata.sessions.get(acp_id).cloned() else {
+            self.metadata.sessions.insert(
+                spur_id.to_string(),
+                SessionEntry {
+                    acp_session_id: Some(acp_id.to_string()),
+                    ..SessionEntry::default()
+                },
+            );
+            return true;
+        };
+
+        let mapping_proves_same_session = legacy.acp_session_id.as_deref() == Some(acp_id);
+        let raw_key_cannot_be_derived = !is_derived_spur_id(acp_id);
+        let unambiguous_unmapped_raw = legacy.acp_session_id.is_none() && raw_key_cannot_be_derived;
+        if !mapping_proves_same_session && !unambiguous_unmapped_raw {
+            self.metadata.sessions.insert(
+                spur_id.to_string(),
+                SessionEntry {
+                    acp_session_id: Some(acp_id.to_string()),
+                    ..SessionEntry::default()
+                },
+            );
+            return true;
+        }
+
+        let mut canonical = legacy;
+        canonical.acp_session_id = Some(acp_id.to_string());
+        self.metadata
+            .sessions
+            .insert(spur_id.to_string(), canonical);
+        if mapping_proves_same_session || unambiguous_unmapped_raw {
+            self.metadata.sessions.remove(acp_id);
+        }
+        true
     }
 
     /// Return the top-level `(acp_session_id, brain_name)` pair if both
@@ -381,6 +437,13 @@ impl SessionMetadataStore {
     }
 }
 
+fn is_derived_spur_id(id: &str) -> bool {
+    id.len() == 16
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+}
+
 #[cfg(test)]
 mod acp_mapping_tests {
     use super::*;
@@ -400,6 +463,125 @@ mod acp_mapping_tests {
         let (acp, brain) = store.last_active_acp().expect("top-level populated");
         assert_eq!(acp, "acp-xyz");
         assert_eq!(brain, "claude-code-acp");
+    }
+
+    #[test]
+    fn set_acp_mapping_migrates_raw_acp_metadata_to_spur_key() {
+        let tmp = NamedTempFile::new().unwrap();
+        let mut store = SessionMetadataStore::load(tmp.path());
+        store.upsert_entry(
+            "acp-xyz".into(),
+            SessionEntry {
+                title_override: Some("Remember me".into()),
+                draft: "legacy draft".into(),
+                pinned: true,
+                ..SessionEntry::default()
+            },
+        );
+
+        store.set_acp_mapping("spur-abc", "acp-xyz", "claude-code-acp");
+
+        assert!(store.entry("acp-xyz").is_none());
+        let entry = store.entry("spur-abc").expect("metadata migrated");
+        assert_eq!(entry.title_override.as_deref(), Some("Remember me"));
+        assert_eq!(entry.draft, "legacy draft");
+        assert!(entry.pinned);
+        assert_eq!(entry.acp_session_id.as_deref(), Some("acp-xyz"));
+        assert_eq!(entry.brain_name.as_deref(), Some("claude-code-acp"));
+    }
+
+    #[test]
+    fn set_acp_mapping_preserves_colliding_canonical_entry() {
+        let tmp = NamedTempFile::new().unwrap();
+        let mut store = SessionMetadataStore::load(tmp.path());
+        let colliding_acp_id = "0123456789abcdef";
+        store.upsert_entry(
+            colliding_acp_id.into(),
+            SessionEntry {
+                draft: "belongs to another session".into(),
+                acp_session_id: Some("other-raw-acp-id".into()),
+                ..SessionEntry::default()
+            },
+        );
+
+        store.set_acp_mapping("fedcba9876543210", colliding_acp_id, "claude");
+
+        assert_eq!(
+            store
+                .entry(colliding_acp_id)
+                .map(|entry| entry.draft.as_str()),
+            Some("belongs to another session")
+        );
+        let mapped = store.entry("fedcba9876543210").expect("mapping created");
+        assert!(mapped.draft.is_empty());
+        assert_eq!(mapped.acp_session_id.as_deref(), Some(colliding_acp_id));
+    }
+
+    #[test]
+    fn set_acp_mapping_refuses_destination_owned_by_another_acp_session() {
+        let tmp = NamedTempFile::new().unwrap();
+        let mut store = SessionMetadataStore::load(tmp.path());
+        store.upsert_entry(
+            "fedcba9876543210".into(),
+            SessionEntry {
+                draft: "do not overwrite".into(),
+                acp_session_id: Some("other-raw-acp-id".into()),
+                brain_name: Some("other-brain".into()),
+                ..SessionEntry::default()
+            },
+        );
+
+        store.set_acp_mapping("fedcba9876543210", "new-raw-acp-id", "new-brain");
+
+        let entry = store
+            .entry("fedcba9876543210")
+            .expect("colliding destination retained");
+        assert_eq!(entry.draft, "do not overwrite");
+        assert_eq!(entry.acp_session_id.as_deref(), Some("other-raw-acp-id"));
+        assert_eq!(entry.brain_name.as_deref(), Some("other-brain"));
+        assert!(
+            store.last_active_acp().is_none(),
+            "rejected mapping must not publish inconsistent top-level pointers"
+        );
+    }
+
+    #[test]
+    fn set_acp_mapping_refuses_unproven_destination_payload() {
+        let tmp = NamedTempFile::new().unwrap();
+        let mut store = SessionMetadataStore::load(tmp.path());
+        store.upsert_entry(
+            "fedcba9876543210".into(),
+            SessionEntry {
+                draft: "unproven draft".into(),
+                title_override: Some("unproven title".into()),
+                pinned: true,
+                ..SessionEntry::default()
+            },
+        );
+
+        assert!(!store.set_acp_mapping("fedcba9876543210", "new-raw-acp-id", "new-brain"));
+
+        let entry = store
+            .entry("fedcba9876543210")
+            .expect("unproven destination retained without adoption");
+        assert_eq!(entry.acp_session_id, None);
+        assert_eq!(entry.draft, "unproven draft");
+        assert_eq!(entry.title_override.as_deref(), Some("unproven title"));
+        assert!(entry.pinned);
+        assert!(store.last_active_acp().is_none());
+    }
+
+    #[test]
+    fn migrate_acp_entry_stamps_mapping_when_no_legacy_metadata_exists() {
+        let tmp = NamedTempFile::new().unwrap();
+        let mut store = SessionMetadataStore::load(tmp.path());
+
+        assert!(store.migrate_acp_entry("fedcba9876543210", "raw-acp-id"));
+
+        let entry = store
+            .entry("fedcba9876543210")
+            .expect("canonical placeholder created");
+        assert_eq!(entry.acp_session_id.as_deref(), Some("raw-acp-id"));
     }
 
     #[test]

@@ -318,6 +318,12 @@ impl SessionDetailView {
         &self.load_state
     }
 
+    /// Whether this is the lightweight view created before `BrainSpawned`
+    /// supplies the real agent configuration.
+    pub fn is_optimistic_placeholder(&self) -> bool {
+        self.agent_name.is_empty()
+    }
+
     /// Show the resume banner for an auto-resumed session. Called by App on
     /// startup after reading session metadata.
     pub fn show_resume_banner(&mut self, title: String, quit_ago: String) {

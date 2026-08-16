@@ -165,7 +165,9 @@ impl SessionSynopsisProjection {
                 self.flush_pending_agent(session);
             }
             SpurEventBody::SessionAttachRejected { acp_session_id, .. } => {
-                let key = SessionId(acp_session_id.clone());
+                let acp_session_id = SessionId(acp_session_id.clone());
+                let key =
+                    crate::plan::labels::derive_brain_session_id(&acp_session_id).into_session_id();
                 self.flush_pending(&key);
                 self.flush_pending_agent(&key);
             }
@@ -516,6 +518,28 @@ mod tests {
         let s = proj.get(&SessionId("S1".into())).unwrap();
         assert_eq!(s.first_user_msg.as_deref(), Some("abandoned partial msg"));
         assert_eq!(s.last_user_msg.as_deref(), Some("abandoned partial msg"));
+    }
+
+    #[test]
+    fn attach_rejected_flushes_pending_under_derived_spur_id() {
+        let acp_id = SessionId("raw-acp-session".into());
+        let spur_id = crate::plan::labels::derive_brain_session_id(&acp_id).into_session_id();
+        let mut proj = SessionSynopsisProjection::new();
+        proj.apply(&user_chunk_event(&spur_id.0, "pending before rejection"));
+
+        proj.apply(&SpurEvent::now(SpurEventBody::SessionAttachRejected {
+            acp_session_id: acp_id.0,
+            holder: spur_acp::session_lock::HolderInfo::default(),
+            fs_unsafe: false,
+        }));
+
+        assert!(!proj.pending.contains_key(&spur_id));
+        assert!(proj.by_session.contains_key(&spur_id));
+        assert_eq!(
+            proj.get(&spur_id)
+                .and_then(|synopsis| synopsis.last_user_msg),
+            Some("pending before rejection".into())
+        );
     }
 
     #[test]

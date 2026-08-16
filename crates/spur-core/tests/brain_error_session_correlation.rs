@@ -1,5 +1,5 @@
-//! Regression test — FP-5: BrainError.session must equal the session the user
-//! asked to resume, not a freshly generated SessionId::new().
+//! Regression test — FP-5: BrainError.session must equal the derived local id
+//! for the ACP session the user asked to resume, not a fresh or raw id.
 //!
 //! ## Bug (guard against regression)
 //!
@@ -15,13 +15,13 @@
 //! When a user picks a session to resume and `connect_brain` (or
 //! `load_brain_session`) fails, consumers that correlate events on
 //! `session` never match because the emitted id is a fresh UUID,
-//! not the target session id the user requested.
+//! not the local target session id derived from the ACP id the user requested.
 //!
 //! ## What this test pins
 //!
 //! Drive the orchestrator through a `ResumeSession` where `connect_brain`
 //! fails (empty registry → "Brain agent 'claude-code' not found"), capture
-//! the `BrainError` event, and assert `session == SessionId(TARGET)`.
+//! the `BrainError` event, and assert `session == derive(TARGET)`.
 //!
 //! Expected state:
 //! - Current HEAD (pre-fix): FAILS — `session` is a random UUID.
@@ -127,15 +127,14 @@ async fn brain_error_on_resume_connect_failure_carries_requested_session_id() {
     .await
     .expect("BrainError event never emitted within 2 s");
 
-    // 5. The fix lives here: session must equal what the user requested.
+    // 5. Local SpurEvents use the stable derived SPUR id. Only the ACP RPC
+    //    carries the opaque raw id the user selected.
+    let expected = spur_core::plan::labels::derive_brain_session_id(&SessionId(target.into()))
+        .into_session_id();
     assert_eq!(
-        result.0,
-        SessionId(target.to_string()),
-        "BrainError.session must carry the resume target SessionId(\"{target}\"), \
-         not a fresh SessionId::new() UUID. \
-         Got: {:?}. \
-         This test is expected to FAIL on current HEAD (pre-fix). \
-         Task 2 fixes orchestrator.rs:1358.",
+        result.0, expected,
+        "BrainError.session must carry the derived local id for ACP target \
+         SessionId(\"{target}\"). Got: {:?}.",
         result.0,
     );
 }

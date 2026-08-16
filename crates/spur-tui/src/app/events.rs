@@ -457,11 +457,15 @@ impl App {
                 self.brain_name = Some(agent.clone());
                 self.sync_dashboard_workers();
 
-                // Only create a new SessionDetailView if none exists or the
-                // session ID changed. Replacing unconditionally would wipe any
-                // user message that was just pushed to the trace.
+                // Replace the lightweight optimistic resume view even though
+                // it already carries the same derived session id: BrainSpawned
+                // supplies the real agent configuration. Otherwise, only
+                // replace when the session changed; replacing unconditionally
+                // would wipe a user message just pushed to the trace.
                 let needs_new = match &self.session_detail {
-                    Some(detail) => detail.session_id() != session,
+                    Some(detail) => {
+                        detail.session_id() != session || detail.is_optimistic_placeholder()
+                    }
                     None => true,
                 };
                 if needs_new {
@@ -495,7 +499,15 @@ impl App {
                     #[cfg(feature = "markdown")]
                     view.set_render_picker(self.mermaid_picker.clone());
                     view.seed_input_history(self.metadata_store.metadata().input_history.clone());
-                    if let Some(entry) = self.metadata_store.entry(&session.0) {
+                    if let Some(entry) = self.metadata_store.entry(&session.0).filter(|entry| {
+                        entry.acp_session_id.as_deref().is_some_and(|acp_id| {
+                            spur_core::plan::labels::derive_brain_session_id(&SessionId(
+                                acp_id.to_string(),
+                            ))
+                            .as_session_id()
+                                == session
+                        })
+                    }) {
                         view.restore_draft(&entry.draft);
                     }
                     // Carry-over wins over any metadata draft (which is normally
@@ -565,9 +577,18 @@ impl App {
                         detail.set_spur_agent_caps(caps.clone());
                     }
                 }
-                self.metadata_store
-                    .set_acp_mapping(&session.0, acp_session_id, brain);
-                self.persist_metadata("AgentSessionReady metadata");
+                if self
+                    .metadata_store
+                    .set_acp_mapping(&session.0, acp_session_id, brain)
+                {
+                    self.persist_metadata("AgentSessionReady metadata");
+                } else {
+                    tracing::warn!(
+                        spur_session_id = %session.0,
+                        acp_session_id,
+                        "refusing conflicting session metadata mapping"
+                    );
+                }
             }
             SpurEventBody::NotebookSocketReady {
                 session: _,

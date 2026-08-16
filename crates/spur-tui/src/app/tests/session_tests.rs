@@ -1449,6 +1449,210 @@ mod crossterm_stream_tests {
 }
 
 #[cfg(test)]
+mod session_identity_tests {
+    use super::super::super::*;
+
+    #[test]
+    fn resume_migrates_raw_draft_before_brain_spawned_restores_detail() {
+        let acp_id = "legacy-acp-session";
+        let spur_id = spur_core::plan::labels::derive_brain_session_id(&SessionId(acp_id.into()))
+            .into_session_id();
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let mut store = SessionMetadataStore::load(tmp.path());
+        store.upsert_entry(
+            acp_id.into(),
+            crate::session_metadata::SessionEntry {
+                draft: "keep this draft".into(),
+                ..Default::default()
+            },
+        );
+
+        let mut app = App::new_for_tests();
+        app.set_metadata_store_for_test(store);
+        app.process_action(Action::ResumeSession {
+            session_id: acp_id.into(),
+        });
+
+        assert_eq!(
+            app.current_view_for_test(),
+            &ViewId::SessionDetail(spur_id.clone()),
+            "optimistic resume view must use the local SPUR id"
+        );
+        let detail = app
+            .session_detail_for_test()
+            .expect("optimistic session detail created");
+        assert_eq!(detail.session_id(), &spur_id);
+
+        app.handle_spur_event(SpurEvent::now(SpurEventBody::SessionLoading {
+            session: spur_id.clone(),
+        }));
+        assert!(matches!(
+            app.session_detail_for_test()
+                .expect("optimistic session detail retained")
+                .load_state(),
+            crate::views::session_detail::LoadState::Loading
+        ));
+
+        app.handle_spur_event(SpurEvent::now(SpurEventBody::BrainSpawned {
+            agent: "claude".into(),
+            session: spur_id.clone(),
+        }));
+        app.handle_spur_event(SpurEvent::now(SpurEventBody::AgentSessionReady {
+            session: spur_id.clone(),
+            acp_session_id: acp_id.into(),
+            brain: "claude".into(),
+            resumed: true,
+            cancel_mode: spur_acp::CancelMode::AcpSoft,
+            fs_unsafe: false,
+            caps: None,
+        }));
+
+        let detail = app
+            .session_detail
+            .as_ref()
+            .expect("session detail restored");
+        assert_eq!(detail.session_id(), &spur_id);
+        assert_eq!(detail.input_bar_text_for_test(), "keep this draft");
+        assert_eq!(
+            app.metadata_store_for_test()
+                .entry(&spur_id.0)
+                .and_then(|entry| entry.acp_session_id.as_deref()),
+            Some(acp_id)
+        );
+    }
+
+    #[test]
+    fn resume_does_not_restore_draft_from_foreign_destination_mapping() {
+        let acp_id = "target-acp-session";
+        let spur_id = spur_core::plan::labels::derive_brain_session_id(&SessionId(acp_id.into()))
+            .into_session_id();
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let mut store = SessionMetadataStore::load(tmp.path());
+        store.upsert_entry(
+            spur_id.0.clone(),
+            crate::session_metadata::SessionEntry {
+                draft: "foreign draft".into(),
+                acp_session_id: Some("different-acp-session".into()),
+                ..Default::default()
+            },
+        );
+
+        let mut app = App::new_for_tests();
+        app.set_metadata_store_for_test(store);
+        app.process_action(Action::ResumeSession {
+            session_id: acp_id.into(),
+        });
+
+        let detail = app
+            .session_detail_for_test()
+            .expect("optimistic session detail created");
+        assert_eq!(detail.session_id(), &spur_id);
+        assert!(
+            detail.input_bar_text_for_test().is_empty(),
+            "foreign destination metadata must not leak into the resumed session"
+        );
+
+        app.handle_spur_event(SpurEvent::now(SpurEventBody::BrainSpawned {
+            agent: "claude".into(),
+            session: spur_id.clone(),
+        }));
+        assert!(
+            app.session_detail_for_test()
+                .expect("configured detail replaces optimistic placeholder")
+                .input_bar_text_for_test()
+                .is_empty(),
+            "BrainSpawned must not bypass destination ownership"
+        );
+        app.handle_spur_event(SpurEvent::now(SpurEventBody::AgentSessionReady {
+            session: spur_id.clone(),
+            acp_session_id: acp_id.into(),
+            brain: "claude".into(),
+            resumed: true,
+            cancel_mode: spur_acp::CancelMode::AcpSoft,
+            fs_unsafe: false,
+            caps: None,
+        }));
+        let entry = app
+            .metadata_store_for_test()
+            .entry(&spur_id.0)
+            .expect("foreign destination retained");
+        assert_eq!(
+            entry.acp_session_id.as_deref(),
+            Some("different-acp-session")
+        );
+        assert_eq!(entry.draft, "foreign draft");
+    }
+
+    #[test]
+    fn resume_does_not_restore_draft_from_unproven_destination_entry() {
+        let acp_id = "target-acp-session";
+        let spur_id = spur_core::plan::labels::derive_brain_session_id(&SessionId(acp_id.into()))
+            .into_session_id();
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let mut store = SessionMetadataStore::load(tmp.path());
+        store.upsert_entry(
+            spur_id.0.clone(),
+            crate::session_metadata::SessionEntry {
+                draft: "unproven draft".into(),
+                ..Default::default()
+            },
+        );
+
+        let mut app = App::new_for_tests();
+        app.set_metadata_store_for_test(store);
+        app.process_action(Action::ResumeSession {
+            session_id: acp_id.into(),
+        });
+
+        assert!(
+            app.session_detail_for_test()
+                .expect("optimistic session detail created")
+                .input_bar_text_for_test()
+                .is_empty(),
+            "unmapped destination metadata must not be assumed to belong to the ACP row"
+        );
+
+        app.handle_spur_event(SpurEvent::now(SpurEventBody::BrainSpawned {
+            agent: "claude".into(),
+            session: spur_id.clone(),
+        }));
+        assert!(
+            app.session_detail_for_test()
+                .expect("configured detail replaces optimistic placeholder")
+                .input_bar_text_for_test()
+                .is_empty(),
+            "BrainSpawned must not restore unproven destination metadata"
+        );
+        app.handle_spur_event(SpurEvent::now(SpurEventBody::AgentSessionReady {
+            session: spur_id.clone(),
+            acp_session_id: acp_id.into(),
+            brain: "claude".into(),
+            resumed: true,
+            cancel_mode: spur_acp::CancelMode::AcpSoft,
+            fs_unsafe: false,
+            caps: None,
+        }));
+        let entry = app
+            .metadata_store_for_test()
+            .entry(&spur_id.0)
+            .expect("unproven destination retained");
+        assert_eq!(entry.acp_session_id, None);
+        assert_eq!(entry.draft, "unproven draft");
+
+        app.process_action(Action::ResumeSession {
+            session_id: acp_id.into(),
+        });
+        assert!(
+            app.session_detail_for_test()
+                .expect("subsequent optimistic detail created")
+                .input_bar_text_for_test()
+                .is_empty(),
+            "a rejected AgentSessionReady mapping must not become trusted later"
+        );
+    }
+}
+
+#[cfg(test)]
 mod synopsis_wire_tests {
     use super::super::super::*;
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
@@ -1514,13 +1718,18 @@ mod synopsis_wire_tests {
 
     #[test]
     fn picker_filter_picks_up_late_synopsis_updates_without_refresh() {
+        let acp_id = "acp-session-S1";
+        let spur_id = spur_core::plan::labels::derive_brain_session_id(&SessionId(acp_id.into()))
+            .as_session_id()
+            .0
+            .clone();
         let mut app = app_in_picker_with_empty_metadata();
         app.handle_spur_event(wrap(SpurEventBody::SessionsListed {
             agent: "claude".into(),
-            sessions: vec![session("S1", "Build fix")],
+            sessions: vec![session(acp_id, "Build fix")],
         }));
 
-        app.handle_spur_event(user_message("S1", "late synopsis needle"));
+        app.handle_spur_event(user_message(&spur_id, "late synopsis needle"));
         type_picker_search(&mut app, "needle");
 
         let picker = app.session_picker_for_test().expect("picker open");

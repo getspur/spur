@@ -14,13 +14,112 @@ use spur_acp::{SessionInfo, SpurEvent};
 use crate::action::{Action, ViewId};
 use crate::components::status_bar::{HintOverride, StatusBar, StatusBarProps};
 use crate::components::tombstone::Tombstone;
-use crate::session_metadata::SessionMetadata;
+use crate::session_metadata::{SessionEntry, SessionMetadata};
 use crate::theme::{resolve_token, ColorDepth, Theme};
 
 use super::View;
 
 fn token(theme: &Theme, name: &str) -> Color {
     resolve_token(theme, name, ColorDepth::Truecolor)
+}
+
+/// Session-list rows carry the agent-authoritative ACP id, while local
+/// `SpurEvent`s and TUI state are keyed by the stable derived SPUR id.
+fn local_session_id(acp_session_id: &str) -> spur_acp::SessionId {
+    spur_core::plan::labels::derive_brain_session_id(&spur_acp::SessionId(
+        acp_session_id.to_owned(),
+    ))
+    .into_session_id()
+}
+
+fn metadata_entry_for_session<'a>(
+    metadata: &'a SessionMetadata,
+    session: &SessionInfo,
+) -> Option<&'a SessionEntry> {
+    let raw_id = session.session_id.0.as_ref();
+    let local_id = local_session_id(raw_id);
+    metadata
+        .sessions
+        .get(local_id.0.as_str())
+        .filter(|entry| {
+            if local_id.0 == raw_id {
+                raw_entry_matches_acp(entry, raw_id)
+            } else {
+                canonical_entry_matches_acp(entry, raw_id)
+            }
+        })
+        .or_else(|| {
+            metadata
+                .sessions
+                .get(raw_id)
+                .filter(|entry| raw_entry_matches_acp(entry, raw_id))
+        })
+}
+
+fn canonical_entry_matches_acp(entry: &SessionEntry, raw_acp_id: &str) -> bool {
+    entry.acp_session_id.as_deref() == Some(raw_acp_id)
+}
+
+fn raw_entry_matches_acp(entry: &SessionEntry, raw_acp_id: &str) -> bool {
+    match entry.acp_session_id.as_deref() {
+        Some(mapped) => mapped == raw_acp_id,
+        None => !is_derived_spur_id(raw_acp_id),
+    }
+}
+
+/// Use a metadata key only when its ownership is unambiguous. A derived-shaped
+/// raw ACP id shares the namespace with canonical keys, so metadata actions
+/// are suppressed until an explicit mapping proves which session owns it.
+fn metadata_key_for_session(metadata: &SessionMetadata, session: &SessionInfo) -> Option<String> {
+    let raw_id = session.session_id.0.as_ref();
+    let local_id = local_session_id(raw_id);
+    match metadata.sessions.get(local_id.0.as_str()) {
+        Some(entry)
+            if if local_id.0 == raw_id {
+                raw_entry_matches_acp(entry, raw_id)
+            } else {
+                canonical_entry_matches_acp(entry, raw_id)
+            } =>
+        {
+            return Some(local_id.0);
+        }
+        Some(_) => {
+            return metadata
+                .sessions
+                .get(raw_id)
+                .filter(|entry| raw_entry_matches_acp(entry, raw_id))
+                .map(|_| raw_id.to_owned());
+        }
+        None => {}
+    }
+
+    match metadata.sessions.get(raw_id) {
+        Some(entry) if raw_entry_matches_acp(entry, raw_id) => Some(raw_id.to_owned()),
+        Some(_) => None,
+        None if is_derived_spur_id(raw_id) => None,
+        None => Some(raw_id.to_owned()),
+    }
+}
+
+fn synopsis_for_session(
+    synopsis: &spur_core::SessionSynopsisProjection,
+    session: &SessionInfo,
+) -> Option<spur_core::SessionSynopsis> {
+    let raw_id = spur_acp::SessionId(session.session_id.0.as_ref().to_owned());
+    synopsis
+        .get(&local_session_id(raw_id.0.as_str()))
+        .or_else(|| {
+            (!is_derived_spur_id(&raw_id.0))
+                .then(|| synopsis.get(&raw_id))
+                .flatten()
+        })
+}
+
+fn is_derived_spur_id(id: &str) -> bool {
+    id.len() == 16
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
 }
 
 /// Minimum height (rows) of the preview pane; also the height used when
@@ -209,10 +308,8 @@ fn build_filter_haystack(
     metadata: &SessionMetadata,
     synopsis: &spur_core::SessionSynopsisProjection,
 ) -> String {
-    let entry = metadata.sessions.get(session.session_id.0.as_ref());
-    let synopsis_for = synopsis.get(&spur_acp::SessionId(
-        session.session_id.0.as_ref().to_string(),
-    ));
+    let entry = metadata_entry_for_session(metadata, session);
+    let synopsis_for = synopsis_for_session(synopsis, session);
     let label = resolve_label(session, entry, synopsis_for.as_ref(), false, usize::MAX);
     let first = synopsis_for
         .as_ref()
@@ -236,9 +333,7 @@ fn filtered_indices(
 ) -> Vec<usize> {
     let candidates: Vec<usize> = (0..sessions.len())
         .filter(|&i| {
-            let archived = metadata
-                .sessions
-                .get(sessions[i].session_id.0.as_ref())
+            let archived = metadata_entry_for_session(metadata, &sessions[i])
                 .map(|e| e.archived)
                 .unwrap_or(false);
             if archived {
@@ -252,8 +347,8 @@ fn filtered_indices(
     if filter.is_empty() {
         let mut all = candidates;
         all.sort_by(|&a, &b| {
-            let ea = metadata.sessions.get(sessions[a].session_id.0.as_ref());
-            let eb = metadata.sessions.get(sessions[b].session_id.0.as_ref());
+            let ea = metadata_entry_for_session(metadata, &sessions[a]);
+            let eb = metadata_entry_for_session(metadata, &sessions[b]);
             let pa = ea.map(|e| e.pinned).unwrap_or(false);
             let pb = eb.map(|e| e.pinned).unwrap_or(false);
             match (pa, pb) {
@@ -602,7 +697,7 @@ impl SessionPickerView {
         if let Some(id) = metadata.last_active_session_id.as_deref() {
             if let Some(p) = indices
                 .iter()
-                .position(|&i| sessions[i].session_id.0.as_ref() == id)
+                .position(|&i| local_session_id(sessions[i].session_id.0.as_ref()).0 == id)
             {
                 return p + 1;
             }
@@ -707,15 +802,10 @@ impl SessionPickerView {
         if sessions.len() <= 1 {
             return false;
         }
-        let first = metadata
-            .sessions
-            .get(sessions[0].session_id.0.as_ref())
+        let first = metadata_entry_for_session(metadata, &sessions[0])
             .and_then(|e| e.brain_name.as_deref());
         sessions.iter().any(|s| {
-            let b = metadata
-                .sessions
-                .get(s.session_id.0.as_ref())
-                .and_then(|e| e.brain_name.as_deref());
+            let b = metadata_entry_for_session(metadata, s).and_then(|e| e.brain_name.as_deref());
             b != first
         })
     }
@@ -810,11 +900,10 @@ impl SessionPickerView {
     ) -> Line<'static> {
         if let PickerState::Populated { sessions, .. } = &self.state {
             if let Some(session) = sessions.iter().find(|s| s.session_id.0.as_ref() == acp_id) {
-                let synopsis_key = spur_acp::SessionId(session.session_id.0.as_ref().to_string());
-                let synopsis_data = synopsis.get(&synopsis_key);
+                let synopsis_data = synopsis_for_session(synopsis, session);
                 let label = resolve_label(
                     session,
-                    self.metadata.sessions.get(session.session_id.0.as_ref()),
+                    metadata_entry_for_session(&self.metadata, session),
                     synopsis_data.as_ref(),
                     false,
                     usize::MAX,
@@ -958,10 +1047,7 @@ impl SessionPickerView {
             sessions
                 .iter()
                 .filter(|s| {
-                    let archived = self
-                        .metadata
-                        .sessions
-                        .get(s.session_id.0.as_ref())
+                    let archived = metadata_entry_for_session(&self.metadata, s)
                         .map(|e| e.archived)
                         .unwrap_or(false);
                     if archived {
@@ -975,9 +1061,7 @@ impl SessionPickerView {
         let pinned_count = sessions
             .iter()
             .filter(|s| {
-                self.metadata
-                    .sessions
-                    .get(s.session_id.0.as_ref())
+                metadata_entry_for_session(&self.metadata, s)
                     .map(|e| e.pinned)
                     .unwrap_or(false)
             })
@@ -1101,11 +1185,10 @@ impl SessionPickerView {
             let session = &sessions[*real_i];
             let is_selected = cursor == display_i + 1;
             let prefix = if is_selected { "\u{25b8} " } else { "  " };
-            let synopsis_key = spur_acp::SessionId(session.session_id.0.as_ref().to_string());
-            let synopsis = ctx.synopsis.get(&synopsis_key);
+            let synopsis = synopsis_for_session(ctx.synopsis, session);
             let display = resolve_label(
                 session,
-                self.metadata.sessions.get(session.session_id.0.as_ref()),
+                metadata_entry_for_session(&self.metadata, session),
                 synopsis.as_ref(),
                 show_cwd,
                 label_budget,
@@ -1116,7 +1199,7 @@ impl SessionPickerView {
                 .map(Self::relative_time)
                 .unwrap_or_default();
 
-            let entry = self.metadata.sessions.get(session.session_id.0.as_ref());
+            let entry = metadata_entry_for_session(&self.metadata, session);
             let archived = entry.map(|e| e.archived).unwrap_or(false);
             let pinned = entry.map(|e| e.pinned).unwrap_or(false);
             let brain = entry.and_then(|e| e.brain_name.as_deref()).unwrap_or("");
@@ -1351,10 +1434,8 @@ impl SessionPickerView {
                 let real_idx = indices.get(cursor - 1).copied();
                 if let Some(i) = real_idx {
                     let session = &sessions[i];
-                    let entry = self.metadata.sessions.get(session.session_id.0.as_ref());
-                    let synopsis_key =
-                        spur_acp::SessionId(session.session_id.0.as_ref().to_string());
-                    let synopsis = ctx.synopsis.get(&synopsis_key);
+                    let entry = metadata_entry_for_session(&self.metadata, session);
+                    let synopsis = synopsis_for_session(ctx.synopsis, session);
                     let draft = entry.map(|e| e.draft.clone()).unwrap_or_default();
                     let brain = entry.and_then(|e| e.brain_name.clone()).unwrap_or_default();
                     let cwd = session.cwd.display().to_string();
@@ -2139,30 +2220,36 @@ impl View for SessionPickerView {
                                         *show_archived,
                                     );
                                     let real_idx = indices.get(*cursor - 1).copied()?;
-                                    let sid = sessions[real_idx].session_id.0.to_string();
+                                    let acp_session_id =
+                                        sessions[real_idx].session_id.0.to_string();
+                                    let spur_session_id = local_session_id(&acp_session_id);
 
-                                    if current_session_id.as_deref() == Some(sid.as_str()) {
+                                    if current_session_id.as_deref()
+                                        == Some(spur_session_id.0.as_str())
+                                    {
                                         // Short-circuit: the selected row IS the currently-active session.
                                         // Don't re-resume — just navigate back to its detail view. No
                                         // backend traffic; no confirm-switch banner (there's nothing to
                                         // switch away from).
                                         Some(Action::NavigateTo(ViewId::SessionDetail(
-                                            spur_acp::SessionId(sid),
+                                            spur_session_id,
                                         )))
                                     } else {
                                         // Confirm only when the draft belongs to a DIFFERENT session than
                                         // the one being resumed.
                                         let draft_elsewhere = current_session_with_draft
                                             .as_ref()
-                                            .map(|cur| cur != &sid)
+                                            .map(|cur| cur != &spur_session_id.0)
                                             .unwrap_or(false);
                                         if draft_elsewhere {
                                             post = Post::StartConfirmSwitch(
-                                                ConfirmSwitchTarget::Resume(sid),
+                                                ConfirmSwitchTarget::Resume(acp_session_id),
                                             );
                                             None
                                         } else {
-                                            Some(Action::ResumeSession { session_id: sid })
+                                            Some(Action::ResumeSession {
+                                                session_id: acp_session_id,
+                                            })
                                         }
                                     }
                                 }
@@ -2177,46 +2264,72 @@ impl View for SessionPickerView {
                                 }
                             }
                             KeyCode::Char('p') => hl_session_id
-                                .clone()
-                                .map(|session_id| Action::ToggleSessionPin { session_id }),
-                            KeyCode::Char('x') => hl_session_id.clone().map(|session_id| {
-                                Action::ToggleSessionArchive {
-                                    session_id,
-                                    via_legacy_key: false,
-                                }
-                            }),
-                            KeyCode::Char('d') => hl_session_id.clone().map(|session_id| {
-                                Action::ToggleSessionArchive {
-                                    session_id,
-                                    via_legacy_key: true,
-                                }
-                            }),
+                                .as_deref()
+                                .and_then(|id| {
+                                    sessions.iter().find(|s| s.session_id.0.as_ref() == id)
+                                })
+                                .and_then(|session| {
+                                    metadata_key_for_session(metadata, session)
+                                        .map(|session_id| Action::ToggleSessionPin { session_id })
+                                }),
+                            KeyCode::Char('x') => hl_session_id
+                                .as_deref()
+                                .and_then(|id| {
+                                    sessions.iter().find(|s| s.session_id.0.as_ref() == id)
+                                })
+                                .and_then(|session| {
+                                    metadata_key_for_session(metadata, session).map(|session_id| {
+                                        Action::ToggleSessionArchive {
+                                            session_id,
+                                            via_legacy_key: false,
+                                        }
+                                    })
+                                }),
+                            KeyCode::Char('d') => hl_session_id
+                                .as_deref()
+                                .and_then(|id| {
+                                    sessions.iter().find(|s| s.session_id.0.as_ref() == id)
+                                })
+                                .and_then(|session| {
+                                    metadata_key_for_session(metadata, session).map(|session_id| {
+                                        Action::ToggleSessionArchive {
+                                            session_id,
+                                            via_legacy_key: true,
+                                        }
+                                    })
+                                }),
                             KeyCode::Char('a') => Some(Action::ToggleShowArchived),
                             KeyCode::Char('r') => Some(Action::RefreshSessions),
                             KeyCode::Char('R') => {
                                 if let Some(ref sid) = hl_session_id {
-                                    let buffer = sessions
+                                    let selected = sessions
                                         .iter()
-                                        .find(|s| s.session_id.0.as_ref() == sid.as_str())
-                                        .map(|s| {
-                                            let synopsis_key = spur_acp::SessionId(
-                                                s.session_id.0.as_ref().to_string(),
-                                            );
-                                            let synopsis = ctx.synopsis.get(&synopsis_key);
+                                        .find(|s| s.session_id.0.as_ref() == sid.as_str());
+                                    let buffer = selected
+                                        .map(|session| {
+                                            let synopsis =
+                                                synopsis_for_session(ctx.synopsis, session);
                                             resolve_label(
-                                                s,
-                                                metadata.sessions.get(s.session_id.0.as_ref()),
+                                                session,
+                                                metadata_entry_for_session(metadata, session),
                                                 synopsis.as_ref(),
                                                 false,
                                                 usize::MAX,
                                             )
                                         })
                                         .unwrap_or_default();
-                                    post = Post::StartRename {
-                                        session_id: sid.clone(),
-                                        original_title: buffer.clone(),
-                                        buffer,
-                                    };
+                                    if let Some((session_id, _session)) =
+                                        selected.and_then(|session| {
+                                            metadata_key_for_session(metadata, session)
+                                                .map(|session_id| (session_id, session))
+                                        })
+                                    {
+                                        post = Post::StartRename {
+                                            session_id,
+                                            original_title: buffer.clone(),
+                                            buffer,
+                                        };
+                                    }
                                 }
                                 None
                             }
@@ -2349,13 +2462,19 @@ mod current_session_shortcut_tests {
 
     #[test]
     fn enter_on_current_session_row_navigates_back() {
+        let acp_id = "acp-current-session";
+        let spur_id =
+            spur_core::plan::labels::derive_brain_session_id(&spur_acp::SessionId(acp_id.into()))
+                .as_session_id()
+                .0
+                .clone();
         let mut picker = SessionPickerView::new();
         picker.set_sessions(
             "test-brain".into(),
-            vec![make_session("A")],
+            vec![make_session(acp_id)],
             test_ctx().synopsis,
         );
-        picker.set_current_session_id(Some("A".into()));
+        picker.set_current_session_id(Some(spur_id.clone()));
 
         // Cursor starts at 0 ([+ New session]); move to 1 (the A row).
         picker.handle_key(
@@ -2369,9 +2488,9 @@ mod current_session_shortcut_tests {
         );
         match action {
             Some(Action::NavigateTo(ViewId::SessionDetail(sid))) => {
-                assert_eq!(sid.0, "A");
+                assert_eq!(sid.0, spur_id);
             }
-            other => panic!("expected NavigateTo(SessionDetail(A)), got {:?}", other),
+            other => panic!("expected NavigateTo for current SPUR session, got {other:?}"),
         }
     }
 
@@ -2726,9 +2845,14 @@ mod preview_render_tests {
 
     #[test]
     fn preview_prioritizes_state_then_intent_then_footer() {
+        let acp_id = "a1xxxxxx";
+        let spur_id =
+            spur_core::plan::labels::derive_brain_session_id(&spur_acp::SessionId(acp_id.into()))
+                .as_session_id()
+                .clone();
         let mut synopsis = spur_core::SessionSynopsisProjection::new();
         synopsis.apply(&SpurEvent::now(SpurEventBody::SessionHistory {
-            session: SessionId("a1xxxxxx".into()),
+            session: spur_id.clone(),
             entries: vec![
                 HistoryEntry {
                     role: "user".into(),
@@ -2762,9 +2886,10 @@ mod preview_render_tests {
 
         let mut metadata = SessionMetadata::default();
         metadata.sessions.insert(
-            "a1xxxxxx".into(),
+            spur_id.0,
             SessionEntry {
                 draft: "unsent edit".into(),
+                acp_session_id: Some(acp_id.into()),
                 brain_name: Some("claude".into()),
                 ..SessionEntry::default()
             },
@@ -2775,7 +2900,7 @@ mod preview_render_tests {
         picker.set_sessions(
             "claude".into(),
             vec![SessionInfo::new(
-                "a1xxxxxx".to_string(),
+                acp_id.to_string(),
                 PathBuf::from("/work/spur"),
             )],
             ctx.synopsis,
@@ -3723,6 +3848,22 @@ mod filter_haystack_tests {
             vec![0],
             "filter 'auth' should match synopsis content"
         );
+    }
+
+    #[test]
+    fn raw_derived_shaped_id_does_not_read_another_sessions_synopsis() {
+        let raw_acp_id = "0123456789abcdef";
+        let session = make_session(raw_acp_id, Some("own title"));
+        let mut synopsis = SessionSynopsisProjection::new();
+        synopsis.insert_for_test(
+            spur_acp::SessionId(raw_acp_id.into()),
+            SessionSynopsis {
+                first_user_msg: Some("belongs to another local session".into()),
+                ..SessionSynopsis::default()
+            },
+        );
+
+        assert!(synopsis_for_session(&synopsis, &session).is_none());
     }
 
     #[test]
