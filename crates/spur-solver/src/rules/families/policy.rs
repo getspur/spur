@@ -149,14 +149,102 @@ fn rule(
                 "leave only explicitly declared membership unknowns free",
                 formula,
             ),
-            RuleExamples::new(
-                RuleExample::new(json!({"result": "boundary"}), "pass", None::<String>),
-                RuleExample::new(
-                    json!({"result": "violation"}),
-                    "counterexample",
-                    Some(format!("{id}.violation")),
-                ),
-            ),
+            policy_examples(id),
+        ),
+    )
+}
+
+fn policy_examples(id: &str) -> RuleExamples {
+    let (subjects, parameters, valid_facts, invalid_facts) = match id {
+        "rbac.permission_reachable" => (
+            json!(["alice", "read"]),
+            json!({}),
+            json!({
+                "roles": {"viewer": {"inherits": [], "permissions": ["read"]}},
+                "principals": {"alice": {"roles": ["viewer"]}},
+                "sessions": {}
+            }),
+            json!({
+                "roles": {"viewer": {"inherits": [], "permissions": ["read"]}},
+                "principals": {"alice": {"roles": []}},
+                "sessions": {}
+            }),
+        ),
+        "rbac.role_hierarchy_acyclic" => (
+            json!([]),
+            json!({}),
+            json!({
+                "roles": {
+                    "admin": {"inherits": ["viewer"], "permissions": []},
+                    "viewer": {"inherits": [], "permissions": []}
+                },
+                "principals": {}, "sessions": {}
+            }),
+            json!({
+                "roles": {
+                    "admin": {"inherits": ["viewer"], "permissions": []},
+                    "viewer": {"inherits": ["admin"], "permissions": []}
+                },
+                "principals": {}, "sessions": {}
+            }),
+        ),
+        "rbac.static_separation_of_duty" => (
+            json!(["alice"]),
+            json!({"roles": ["admin", "auditor"], "max_assigned": 1}),
+            json!({
+                "roles": {
+                    "admin": {"inherits": [], "permissions": []},
+                    "auditor": {"inherits": [], "permissions": []}
+                },
+                "principals": {"alice": {"roles": ["admin"]}},
+                "sessions": {}
+            }),
+            json!({
+                "roles": {
+                    "admin": {"inherits": [], "permissions": []},
+                    "auditor": {"inherits": [], "permissions": []}
+                },
+                "principals": {"alice": {"roles": ["admin", "auditor"]}},
+                "sessions": {}
+            }),
+        ),
+        "rbac.dynamic_separation_of_duty" => (
+            json!(["alice-session"]),
+            json!({"roles": ["admin", "auditor"], "max_active": 1}),
+            json!({
+                "roles": {
+                    "admin": {"inherits": [], "permissions": []},
+                    "auditor": {"inherits": [], "permissions": []}
+                },
+                "principals": {"alice": {"roles": ["admin", "auditor"]}},
+                "sessions": {"alice-session": {"principal": "alice", "active_roles": ["admin"]}}
+            }),
+            json!({
+                "roles": {
+                    "admin": {"inherits": [], "permissions": []},
+                    "auditor": {"inherits": [], "permissions": []}
+                },
+                "principals": {"alice": {"roles": ["admin", "auditor"]}},
+                "sessions": {"alice-session": {"principal": "alice", "active_roles": ["admin", "auditor"]}}
+            }),
+        ),
+        _ => unreachable!("implemented policy rule has examples"),
+    };
+    let request = |facts: serde_json::Value| {
+        json!({
+            "family": "policy",
+            "mode": "verify",
+            "rules": [{"rule_id": id, "subjects": subjects, "parameters": parameters}],
+            "facts": facts,
+            "unknowns": []
+        })
+    };
+    RuleExamples::new(
+        RuleExample::new(request(valid_facts), "pass", None::<String>),
+        RuleExample::new(
+            request(invalid_facts),
+            "counterexample",
+            Some(format!("{id}.violation")),
         ),
     )
 }

@@ -283,7 +283,7 @@ fn compile_binding(
             require_subjects(binding, 1, None)?;
             reject_resources(binding)?;
             reject_minimum_domains(binding)?;
-            let max_skew = non_negative("max_skew", binding.parameters.max_skew.unwrap_or(1))?;
+            let max_skew = positive("max_skew", binding.parameters.max_skew.unwrap_or(1))?;
             let workload = &binding.subjects[0];
             resolver.require_workload(workload)?;
             let domains = resolver.facts.workloads[workload]
@@ -291,7 +291,7 @@ fn compile_binding(
                 .keys()
                 .cloned()
                 .collect::<Vec<_>>();
-            let mut predicates = Vec::new();
+            let mut predicates = vec![placement_conservation(resolver, workload)?];
             for left in 0..domains.len() {
                 for right in left + 1..domains.len() {
                     let left_count = resolver
@@ -322,7 +322,7 @@ fn compile_binding(
                 .keys()
                 .cloned()
                 .collect::<Vec<_>>();
-            let mut links = Vec::new();
+            let mut links = vec![placement_conservation(resolver, workload)?];
             let mut present = Vec::new();
             for domain in domains {
                 let count =
@@ -356,22 +356,35 @@ fn compile_capacity(
     kind: CapacityKind,
 ) -> Result<ConstraintExpr, String> {
     let capacity_id = &binding.subjects[0];
-    let capacity = match kind {
-        CapacityKind::Pool => resolver
-            .facts
-            .pools
-            .get(capacity_id)
-            .ok_or_else(|| format!("unknown resource pool `{capacity_id}`"))?,
-        CapacityKind::Quota => resolver
-            .facts
-            .quotas
-            .get(capacity_id)
-            .ok_or_else(|| format!("unknown resource quota `{capacity_id}`"))?,
+    let (capacity, capacity_kind) = match kind {
+        CapacityKind::Pool => (
+            resolver
+                .facts
+                .pools
+                .get(capacity_id)
+                .ok_or_else(|| format!("unknown resource pool `{capacity_id}`"))?,
+            "pool",
+        ),
+        CapacityKind::Quota => (
+            resolver
+                .facts
+                .quotas
+                .get(capacity_id)
+                .ok_or_else(|| format!("unknown resource quota `{capacity_id}`"))?,
+            "quota",
+        ),
     };
     for workload in &binding.subjects[1..] {
         resolver.require_workload(workload)?;
     }
     let resources = selected_resources(&binding.parameters.resources, capacity.resources.keys())?;
+    for resource in &resources {
+        if !capacity.resources.contains_key(resource) {
+            return Err(format!(
+                "{capacity_kind} `{capacity_id}` does not declare resource `{resource}`"
+            ));
+        }
+    }
     let predicates = resources
         .iter()
         .map(|resource| {
@@ -388,6 +401,21 @@ fn compile_capacity(
         })
         .collect::<Result<Vec<_>, String>>()?;
     Ok(conjunction(predicates))
+}
+
+fn placement_conservation(
+    resolver: &ResourceResolver,
+    workload: &str,
+) -> Result<ConstraintExpr, String> {
+    let domain_counts = resolver.facts.workloads[workload]
+        .domain_counts
+        .keys()
+        .map(|domain| resolver.workload_field(workload, &format!("domain_counts.{domain}")))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(eq(
+        sum(domain_counts),
+        resolver.workload_field(workload, "replicas")?,
+    ))
 }
 
 fn selected_resources<'a>(
@@ -459,13 +487,6 @@ fn reject_minimum_domains(binding: &ResourceRuleBinding) -> Result<(), String> {
         ));
     }
     Ok(())
-}
-
-fn non_negative(parameter: &str, value: i64) -> Result<i64, String> {
-    if value < 0 {
-        return Err(format!("`{parameter}` must be non-negative"));
-    }
-    Ok(value)
 }
 
 fn positive(parameter: &str, value: i64) -> Result<i64, String> {
@@ -606,7 +627,7 @@ fn input_schema() -> Value {
                             "type": "object",
                             "properties": {
                                 "resources": {"type": "array", "maxItems": MAX_CONSTRAINTS, "items": {"type": "string"}},
-                                "max_skew": {"type": "integer", "minimum": 0},
+                                "max_skew": {"type": "integer", "minimum": 1},
                                 "minimum_domains": {"type": "integer", "minimum": 1}
                             },
                             "additionalProperties": false

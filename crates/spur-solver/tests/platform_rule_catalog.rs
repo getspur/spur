@@ -85,6 +85,26 @@ fn solve_rules_schema_is_closed_and_family_discriminated() {
         .all(|branch| branch["additionalProperties"] == false));
 }
 
+#[test]
+fn topology_guidance_distinguishes_normalized_model_from_scheduler_semantics() {
+    let rule = builtin_registry()
+        .rule("placement.topology_max_skew")
+        .expect("topology rule");
+    let guidance = serde_json::to_value(rule).expect("serialize topology guidance");
+
+    assert_eq!(guidance["authorities"][0]["kind"], "derived_reference");
+    assert!(guidance["solver_encoding"]["formula"]
+        .as_array()
+        .is_some_and(|items| items
+            .iter()
+            .any(|item| item == "sum count(domain) = workload.replicas")));
+    assert!(guidance["llm_encoding"]["anti_patterns"]
+        .as_array()
+        .is_some_and(|items| items.iter().any(|item| item
+            .as_str()
+            .is_some_and(|item| item.contains("scheduler global-min")))));
+}
+
 #[tokio::test]
 async fn rule_spec_lists_platform_families_and_exposes_authority_and_capability() {
     let list = result_json(

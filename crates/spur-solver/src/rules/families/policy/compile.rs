@@ -129,9 +129,13 @@ fn compile(input: Value) -> Result<FamilyCompilation, String> {
     }
     validate_facts(&input.facts, &input.unknowns)?;
     let mut resolver = PolicyResolver::new(input.facts, &input.unknowns);
+    let session_authorization = resolver.session_authorization();
     let mut rules = Vec::with_capacity(input.rules.len());
     for (index, binding) in input.rules.iter().enumerate() {
-        let predicate = compile_binding(binding, &mut resolver)?;
+        let predicate = and(vec![
+            session_authorization.clone(),
+            compile_binding(binding, &mut resolver)?,
+        ]);
         rules.push(CompiledRule::new(binding.rule_id.clone(), index, predicate));
     }
     let solver_request = request(
@@ -205,6 +209,11 @@ fn validate_facts(facts: &PolicyFacts, unknowns: &[PolicyUnknown]) -> Result<(),
             if !facts.roles.contains_key(role) {
                 return Err(format!("session `{session}` has unknown role `{role}`"));
             }
+            if !session_role_can_be_authorized(facts, unknowns, session_facts, role) {
+                return Err(format!(
+                    "session `{session}` activates unauthorized role `{role}`"
+                ));
+            }
         }
     }
 
@@ -243,6 +252,52 @@ fn validate_facts(facts: &PolicyFacts, unknowns: &[PolicyUnknown]) -> Result<(),
         }
     }
     Ok(())
+}
+
+fn session_role_can_be_authorized(
+    facts: &PolicyFacts,
+    unknowns: &[PolicyUnknown],
+    session: &SessionFacts,
+    active_role: &str,
+) -> bool {
+    principal_has_fixed_authorization(facts, &session.principal, active_role)
+        || unknowns.iter().any(|unknown| match unknown {
+            PolicyUnknown::PrincipalRole { principal, role }
+                if principal == &session.principal && facts.roles.contains_key(role) =>
+            {
+                role_authorizes(facts, role, active_role, &mut BTreeSet::new())
+            }
+            _ => false,
+        })
+}
+
+fn principal_has_fixed_authorization(
+    facts: &PolicyFacts,
+    principal: &str,
+    active_role: &str,
+) -> bool {
+    facts.principals[principal]
+        .roles
+        .iter()
+        .any(|assigned| role_authorizes(facts, assigned, active_role, &mut BTreeSet::new()))
+}
+
+fn role_authorizes(
+    facts: &PolicyFacts,
+    assigned_role: &str,
+    active_role: &str,
+    visited: &mut BTreeSet<String>,
+) -> bool {
+    if assigned_role == active_role {
+        return true;
+    }
+    if !visited.insert(assigned_role.to_owned()) {
+        return false;
+    }
+    facts.roles[assigned_role]
+        .inherits
+        .iter()
+        .any(|inherited| role_authorizes(facts, inherited, active_role, visited))
 }
 
 fn reject_duplicates(items: &[String], context: &str) -> Result<(), String> {
@@ -507,6 +562,55 @@ impl PolicyResolver {
                 },
                 var,
             )
+    }
+
+    fn session_authorization(&self) -> ConstraintExpr {
+        let mut predicates = Vec::new();
+        for ((session, active_role), variable) in &self.session_unknowns {
+            let principal = &self.facts.sessions[session].principal;
+            if !principal_has_fixed_authorization(&self.facts, principal, active_role) {
+                predicates.push(le(
+                    var(variable.clone()),
+                    self.unknown_authorizations(principal, active_role),
+                ));
+            }
+        }
+        for session_facts in self.facts.sessions.values() {
+            for active_role in &session_facts.active_roles {
+                if !principal_has_fixed_authorization(
+                    &self.facts,
+                    &session_facts.principal,
+                    active_role,
+                ) {
+                    predicates.push(le(
+                        int(1),
+                        self.unknown_authorizations(&session_facts.principal, active_role),
+                    ));
+                }
+            }
+        }
+        if predicates.is_empty() {
+            boolean(true)
+        } else {
+            and(predicates)
+        }
+    }
+
+    fn unknown_authorizations(&self, principal: &str, active_role: &str) -> ConstraintExpr {
+        sum(self
+            .principal_unknowns
+            .iter()
+            .filter(|((unknown_principal, assigned_role), _variable)| {
+                unknown_principal == principal
+                    && role_authorizes(
+                        &self.facts,
+                        assigned_role,
+                        active_role,
+                        &mut BTreeSet::new(),
+                    )
+            })
+            .map(|(_membership, variable)| var(variable.clone()))
+            .collect())
     }
 
     fn roles_reaching_permission(&self, permission: &str) -> Vec<String> {

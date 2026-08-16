@@ -87,6 +87,7 @@ struct AccessibilityException {
 #[derive(Clone, Copy, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum AccessibilityExceptionKind {
+    Spacing,
     Inline,
     Equivalent,
     UserAgent,
@@ -261,6 +262,13 @@ fn validate_scene(
                 unknown.field.path()
             ));
         }
+        if accessibility_value(&scene.elements[&unknown.subject], unknown.field).is_some() {
+            return Err(format!(
+                "{}.{} is already fixed",
+                unknown.subject,
+                unknown.field.path()
+            ));
+        }
         if !paths.insert((unknown.subject.clone(), unknown.field)) {
             return Err(format!(
                 "duplicate accessibility unknown {}.{}",
@@ -330,6 +338,7 @@ fn compile_binding(
             let exception = exception_applies(
                 binding,
                 &[
+                    AccessibilityExceptionKind::Spacing,
                     AccessibilityExceptionKind::Inline,
                     AccessibilityExceptionKind::Equivalent,
                     AccessibilityExceptionKind::UserAgent,
@@ -391,19 +400,19 @@ fn compile_binding(
             require_subjects(binding, resolver, 1)?;
             reject_target_parameters(binding)?;
             reject_ratio(binding)?;
-            let exception = exception_applies(
-                binding,
-                &[
-                    AccessibilityExceptionKind::TwoDimensional,
-                    AccessibilityExceptionKind::Essential,
-                ],
-            )?;
+            let exception =
+                exception_applies(binding, &[AccessibilityExceptionKind::TwoDimensional])?;
+            let subject = &binding.subjects[0];
+            let x = resolver.field(subject, AccessibilityField::X)?;
             Ok(or(vec![
                 boolean(exception),
-                le(
-                    resolver.field(&binding.subjects[0], AccessibilityField::Width)?,
-                    int(resolver.scene.viewport.width),
-                ),
+                and(vec![
+                    ge(x.clone(), int(0)),
+                    le(
+                        add(vec![x, resolver.field(subject, AccessibilityField::Width)?]),
+                        int(resolver.scene.viewport.width),
+                    ),
+                ]),
             ]))
         }
         "a11y.text_contrast" => {
@@ -543,6 +552,17 @@ struct AccessibilityResolver {
     projections: Vec<ModelProjection>,
 }
 
+fn accessibility_value(element: &AccessibilityElement, field: AccessibilityField) -> Option<i64> {
+    match field {
+        AccessibilityField::X => element.rect.as_ref()?.x,
+        AccessibilityField::Y => element.rect.as_ref()?.y,
+        AccessibilityField::Width => element.rect.as_ref()?.width,
+        AccessibilityField::Height => element.rect.as_ref()?.height,
+        AccessibilityField::ForegroundLuminance => element.foreground_luminance,
+        AccessibilityField::BackgroundLuminance => element.background_luminance,
+    }
+}
+
 impl AccessibilityResolver {
     fn new(scene: AccessibilityScene, unknowns: &[AccessibilityUnknown]) -> Self {
         let mut sorted = unknowns.iter().collect::<Vec<_>>();
@@ -583,14 +603,7 @@ impl AccessibilityResolver {
             .elements
             .get(subject)
             .ok_or_else(|| format!("unknown accessibility subject `{subject}`"))?;
-        let value = match field {
-            AccessibilityField::X => element.rect.as_ref().and_then(|rect| rect.x),
-            AccessibilityField::Y => element.rect.as_ref().and_then(|rect| rect.y),
-            AccessibilityField::Width => element.rect.as_ref().and_then(|rect| rect.width),
-            AccessibilityField::Height => element.rect.as_ref().and_then(|rect| rect.height),
-            AccessibilityField::ForegroundLuminance => element.foreground_luminance,
-            AccessibilityField::BackgroundLuminance => element.background_luminance,
-        };
+        let value = accessibility_value(element, field);
         if let Some(value) = value {
             return Ok(int(value));
         }
@@ -636,7 +649,7 @@ fn input_schema() -> Value {
                                 "exception": {
                                     "type": "object",
                                     "properties": {
-                                        "kind": {"type": "string", "enum": ["inline", "equivalent", "user_agent", "essential", "two_dimensional"]},
+                                        "kind": {"type": "string", "enum": ["spacing", "inline", "equivalent", "user_agent", "essential", "two_dimensional"]},
                                         "evidence": {"type": "string", "minLength": 1}
                                     },
                                     "required": ["kind", "evidence"],

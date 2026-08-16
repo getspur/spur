@@ -1,8 +1,11 @@
 //! Multi-family routing and domain result projection for `solve_rules`.
 
+use std::time::Duration;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
+use tokio::time::Instant;
 
 use crate::{
     service::{SolverService, SolverServiceError},
@@ -60,6 +63,8 @@ pub async fn run(
     service: &SolverService,
     prepared: PreparedRuleSolve,
 ) -> Result<SolveRulesResponse, SolverServiceError> {
+    let started = Instant::now();
+    let deadline = started + Duration::from_millis(prepared.request.timeout_ms);
     let solver = service.solve_constraints(prepared.request.clone()).await?;
     let rule_results = match (prepared.mode, solver.status) {
         (RuleSolveMode::Verify, SolveStatus::Sat) => prepared
@@ -70,11 +75,16 @@ pub async fn run(
         (RuleSolveMode::Verify, SolveStatus::Unsat) => {
             let mut results = Vec::with_capacity(prepared.rules.len());
             for rule in &prepared.rules {
+                let Some(timeout_ms) = remaining_timeout_ms(deadline) else {
+                    results.push(RuleResult::new(rule, SolveStatus::Timeout));
+                    continue;
+                };
                 let response = service
                     .solve_constraints(single_rule_request(
                         &prepared.request,
                         &prepared.family,
                         rule,
+                        timeout_ms,
                     ))
                     .await?;
                 results.push(RuleResult::new(rule, response.status));
@@ -84,13 +94,30 @@ pub async fn run(
         _ => Vec::new(),
     };
 
-    Ok(finish(prepared, solver, rule_results))
+    let mut response = finish(prepared, solver, rule_results);
+    response.total_duration_ms = elapsed_ms(started);
+    Ok(response)
+}
+
+fn remaining_timeout_ms(deadline: Instant) -> Option<u64> {
+    let now = Instant::now();
+    if now >= deadline {
+        return None;
+    }
+    u64::try_from((deadline - now).as_millis())
+        .ok()
+        .filter(|remaining| *remaining > 0)
+}
+
+fn elapsed_ms(started: Instant) -> u64 {
+    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
 fn single_rule_request(
     base: &SolveConstraintsRequest,
     family: &str,
     rule: &CompiledRule,
+    timeout_ms: u64,
 ) -> SolveConstraintsRequest {
     let mut request = base.clone();
     request.constraints = vec![ConstraintItem::Declared(ConstraintDecl {
@@ -101,6 +128,7 @@ fn single_rule_request(
     })];
     request.persist = false;
     request.include_smt = false;
+    request.timeout_ms = timeout_ms;
     request
 }
 
@@ -111,6 +139,7 @@ pub fn finish(
     solver: SolveConstraintsResponse,
     rule_results: Vec<RuleResult>,
 ) -> SolveRulesResponse {
+    let total_duration_ms = solver.duration_ms;
     let assignments = solver.model.as_ref().map_or_else(Vec::new, |model| {
         families::compiler(&prepared.family).map_or_else(Vec::new, |compiler| {
             compiler.project_model(&prepared.projections, model)
@@ -123,6 +152,7 @@ pub fn finish(
         outcome: outcome_for(prepared.mode, solver.status),
         assignments,
         rule_results,
+        total_duration_ms,
         solver,
     }
 }
@@ -157,6 +187,8 @@ pub struct SolveRulesResponse {
     /// Per-binding verification results in caller order.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub rule_results: Vec<RuleResult>,
+    /// Aggregate solve plus serial failure-attribution wall time.
+    pub total_duration_ms: u64,
     /// Raw solver status, model, duration, persistence, and diagnostics.
     #[serde(flatten)]
     pub solver: SolveConstraintsResponse,

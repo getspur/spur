@@ -52,7 +52,7 @@ fn target_size_rule() -> RuleDefinition {
     rule(
         "a11y.target_size",
         "minimum_target_size",
-        "Require a target to meet its minimum width and height unless a typed exception applies.",
+        "Require a target to meet its minimum width and height unless a WCAG typed exception, including spacing, applies.",
         ["target.rect", "exception.kind", "exception.evidence"],
         [
             "exception OR target.width >= minimum_width",
@@ -79,11 +79,14 @@ fn reflow_rule() -> RuleDefinition {
     rule(
         "a11y.reflow",
         "viewport_fit",
-        "Require content width to fit the supplied reflow viewport unless a typed exception applies.",
+        "Require the full horizontal content extent to fit the supplied reflow viewport unless a typed exception applies.",
         ["content.rect", "viewport.width", "exception.kind", "exception.evidence"],
-        ["exception OR content.width <= viewport.width"],
-        json!({"viewport_width": 320, "content_width": 320}),
-        json!({"viewport_width": 320, "content_width": 321}),
+        [
+            "exception OR content.x >= 0",
+            "exception OR content.x + content.width <= viewport.width",
+        ],
+        json!({"viewport_width": 320, "content_x": 0, "content_width": 320}),
+        json!({"viewport_width": 320, "content_x": 1, "content_width": 320}),
     )
 }
 
