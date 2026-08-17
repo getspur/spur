@@ -63,7 +63,7 @@ Keep narration on its own track and lower ambience beneath it. Create all produc
 Create the reference manifest defined in the handoff contract. Run exactly:
 
 ```sh
-assets/skills/explainer-video-editor/scripts/validate-delivery.sh MANIFEST.json VIDEO.mp4
+crates/spur-cli/assets/skills/explainer-video-editor/scripts/validate-delivery.sh MANIFEST.json VIDEO.mp4
 ```
 
 Deliver the verified H264/AAC MP4, editable PalmierPro project, notebook, and manifest. Report duration, width, height, frame rate, audio codec, `checksum_sha256`, voice, models, subtitle status, and sources. Do not assume captions, ProRes, music, alternate ratios, or extra exports.

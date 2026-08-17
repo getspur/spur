@@ -25,7 +25,7 @@ Default projection is **foundation only** (`skills.projection_mode = "catalog_on
 2. **`skill_read`** — full `SKILL.md` / approved resource; use exact `skill_id` from a hit
 3. **`skill_search`** — optional name/description cards; prefer navigate
 
-Do not treat ledes as full instructions or request task-specific materialization. Catalog down → continue with foundation only. Rollback: `projection_mode = "all_active"`. Details: `assets/skills/skills-catalog/SKILL.md`.
+Do not treat ledes as full instructions or request task-specific materialization. Catalog down → continue with foundation only. Rollback: `projection_mode = "all_active"`. Details: `crates/spur-cli/assets/skills/skills-catalog/SKILL.md`.
 
 ## Code retrieval
 
