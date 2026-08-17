@@ -1697,6 +1697,18 @@ mod tests {
     }
 
     #[test]
+    fn spur_cli_cargo_package_includes_build_script_and_skill_assets() {
+        let raw = fs::read_to_string(workspace_root().join("crates/spur-cli/Cargo.toml")).unwrap();
+
+        assert!(
+            raw.contains(
+                "include = [\"src/**\", \"tests/**\", \"build.rs\", \"assets/skills/**\"]"
+            ),
+            "spur-cli's Cargo package whitelist must preserve build.rs and bundled skills"
+        );
+    }
+
+    #[test]
     fn dist_skills_archive_name_is_versioned_and_platform_independent() {
         assert_eq!(
             dist_skills_archive_name("1.15.0"),
