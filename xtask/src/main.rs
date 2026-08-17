@@ -8,6 +8,12 @@ use std::{
 
 mod coverage;
 
+const CLI_SKILL_ASSETS: &str = "crates/spur-cli/assets/skills";
+
+fn bundled_skill_assets_source(workspace_root: &Path) -> PathBuf {
+    workspace_root.join(CLI_SKILL_ASSETS)
+}
+
 fn main() -> ExitCode {
     let mut args = env::args().skip(1);
     let subcommand = args.next().unwrap_or_default();
@@ -66,7 +72,7 @@ fn print_help() {
     eprintln!("      build release spur binaries for every supported platform on the");
     eprintln!("      build VM (linux native, macOS universal2 via zigbuild, windows");
     eprintln!("      x86_64 via xwin), fetch them into <dir> (default dist/) with");
-    eprintln!("      triple-suffixed names, package assets/skills as");
+    eprintln!("      triple-suffixed names, package crates/spur-cli/assets/skills as");
     eprintln!("      spur-skills-<version>.tar.gz (share/spur/skills layout for the");
     eprintln!("      runtime SkillCatalog resolver), and write SHA256SUMS");
     eprintln!("      --parallel: run the platform legs concurrently, each in its own");
@@ -655,7 +661,8 @@ fn dist_skills_archive_name(version: &str) -> String {
     format!("spur-skills-{version}.tar.gz")
 }
 
-/// Package `assets/skills` into `dist/spur-skills-<version>.tar.gz` with
+/// Package `crates/spur-cli/assets/skills` into
+/// `dist/spur-skills-<version>.tar.gz` with
 /// archive-internal paths `share/spur/skills/<id>/...`.
 ///
 /// That layout matches:
@@ -667,7 +674,7 @@ fn package_dist_skill_assets(
     out_dir: &Path,
     version: &str,
 ) -> Result<PathBuf, String> {
-    let source = workspace_root.join("assets/skills");
+    let source = bundled_skill_assets_source(workspace_root);
     if !source.is_dir() {
         return Err(format!(
             "expected bundled skill assets at {}",
@@ -1250,7 +1257,7 @@ fn install_binary_from(
 }
 
 fn install_bundled_skill_assets(workspace_root: &Path, bin_dir: &Path) -> Result<(), String> {
-    let source = workspace_root.join("assets/skills");
+    let source = bundled_skill_assets_source(workspace_root);
     if !source.is_dir() {
         return Err(format!(
             "expected bundled skill assets at {}",
@@ -1592,7 +1599,7 @@ mod tests {
         )
         .unwrap();
         make_executable(&fetch_script);
-        let asset = workspace.join("assets/skills/package-skill/SKILL.md");
+        let asset = workspace.join("crates/spur-cli/assets/skills/package-skill/SKILL.md");
         fs::create_dir_all(asset.parent().unwrap()).unwrap();
         fs::write(
             &asset,
@@ -1629,7 +1636,7 @@ mod tests {
         let built = workspace.join("target/debug/spur");
         fs::create_dir_all(built.parent().unwrap()).unwrap();
         fs::write(&built, "fake spur binary").unwrap();
-        let asset = workspace.join("assets/skills/package-skill/SKILL.md");
+        let asset = workspace.join("crates/spur-cli/assets/skills/package-skill/SKILL.md");
         fs::create_dir_all(asset.parent().unwrap()).unwrap();
         fs::write(
             &asset,
@@ -1684,8 +1691,8 @@ mod tests {
         let raw = fs::read_to_string(workspace_root().join("dist-workspace.toml")).unwrap();
 
         assert!(
-            raw.contains("include = [") && raw.contains("\"assets\""),
-            "dist-workspace.toml must include the asset tree so cargo-dist archives/installers ship assets/skills"
+            raw.contains("include = [\"crates/spur-cli/assets\"]"),
+            "dist-workspace.toml must include the spur-cli asset tree"
         );
     }
 
@@ -1701,7 +1708,7 @@ mod tests {
     fn package_dist_skill_assets_ships_share_spur_skills_layout() {
         let workspace = temp_test_dir("dist-skills-workspace");
         let out_dir = temp_test_dir("dist-skills-out");
-        let asset = workspace.join("assets/skills/package-skill/SKILL.md");
+        let asset = workspace.join("crates/spur-cli/assets/skills/package-skill/SKILL.md");
         fs::create_dir_all(asset.parent().unwrap()).unwrap();
         fs::write(
             &asset,

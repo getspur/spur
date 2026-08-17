@@ -36,7 +36,7 @@ installers = ["shell", "powershell", "npm"]
 # Note: tag releases use release-dist.yml + `cargo xtask dist`, which packages
 # skills as spur-skills-<ver>.tar.gz (share/spur/skills layout) separately —
 # keep both paths aligned with SkillCatalog package_asset_candidates.
-include = ["assets"]
+include = ["crates/spur-cli/assets"]
 # Generate and dist a source tarball
 source-tarball = false
 # A namespace to use when publishing this package to the npm registry
