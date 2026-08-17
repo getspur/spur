@@ -28,7 +28,7 @@ use spur_core::{
 };
 use spur_mcp::{ServerKind, ToolAuthority, ToolCallContext, ToolRegistry};
 
-const BOOTSTRAP_SKILL: &str = include_str!("../../../assets/skills/skills-catalog/SKILL.md");
+const BOOTSTRAP_SKILL: &str = include_str!("../../spur-cli/assets/skills/skills-catalog/SKILL.md");
 const RETRIEVAL_FIXTURE: &str = include_str!("fixtures/skills_catalog_queries.json");
 const NAVIGATE_FIXTURE: &str = include_str!("fixtures/skills_navigate_queries.json");
 
