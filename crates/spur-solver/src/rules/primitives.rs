@@ -2,7 +2,7 @@
 
 use crate::types::{
     ConstraintDecl, ConstraintExpr, ConstraintItem, ConstraintOp, ObjectivePriority, SessionOp,
-    SolveConstraintsRequest, Variable,
+    SolveConstraintsRequest, Variable, DEFAULT_MAX_SOLUTIONS,
 };
 
 use super::CompiledRule;
@@ -114,6 +114,7 @@ pub fn request(
             .map(|rule| {
                 ConstraintItem::Declared(ConstraintDecl {
                     id: Some(rule.constraint_id(family)),
+                    group: None,
                     soft: false,
                     weight: None,
                     expr: rule.predicate.clone(),
@@ -122,6 +123,7 @@ pub fn request(
             .collect(),
         objectives: Vec::new(),
         objective_priority: ObjectivePriority::Lex,
+        max_solutions: DEFAULT_MAX_SOLUTIONS,
         timeout_ms,
         persist,
         include_smt,

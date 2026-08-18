@@ -122,6 +122,7 @@ fn single_rule_request(
     let mut request = base.clone();
     request.constraints = vec![ConstraintItem::Declared(ConstraintDecl {
         id: Some(rule.constraint_id(family)),
+        group: None,
         soft: false,
         weight: None,
         expr: rule.predicate.clone(),

@@ -22,6 +22,10 @@ pub const MAX_EXPRESSION_DEPTH: usize = 32;
 pub const DEFAULT_SOFT_WEIGHT: i64 = 1;
 /// Maximum number of νZ objectives in one typed solve.
 pub const MAX_OBJECTIVES: usize = 4;
+/// Default number of Pareto solutions collected before the terminal probe.
+pub const DEFAULT_MAX_SOLUTIONS: usize = 16;
+/// Maximum number of optimization solutions collected in one typed solve.
+pub const MAX_SOLUTIONS: usize = 64;
 /// Maximum BitVec width accepted by the typed surface.
 pub const MAX_BITVEC_WIDTH: u32 = 64;
 /// Maximum concurrent incremental sessions per process.
@@ -43,6 +47,10 @@ const fn default_true() -> bool {
 
 const fn default_objective_priority() -> ObjectivePriority {
     ObjectivePriority::Lex
+}
+
+const fn default_max_solutions() -> usize {
+    DEFAULT_MAX_SOLUTIONS
 }
 
 const fn default_session_op() -> SessionOp {
@@ -352,6 +360,15 @@ impl ConstraintItem {
         }
     }
 
+    /// Returns the optional repeatable Z3 soft-objective group.
+    #[must_use]
+    pub fn group(&self) -> Option<&str> {
+        match self {
+            Self::Declared(decl) => decl.group.as_deref(),
+            Self::Bare(_) => None,
+        }
+    }
+
     /// Returns whether this entry is a soft (preference) constraint.
     #[must_use]
     pub fn is_soft(&self) -> bool {
@@ -381,9 +398,12 @@ impl From<ConstraintExpr> for ConstraintItem {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConstraintDecl {
-    /// Optional surface identifier for unsat-core reporting or soft grouping.
+    /// Optional unique diagnostic identifier for cores and soft-result rows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
+    /// Optional repeatable Z3 objective group, valid only for soft constraints.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
     /// When true, encode as `assert-soft` (preference), not a hard `assert`.
     #[serde(default = "default_false")]
     pub soft: bool,
@@ -464,6 +484,7 @@ pub struct Objective {
 ///     .into()],
 ///     objectives: vec![],
 ///     objective_priority: spur_solver::types::ObjectivePriority::Lex,
+///     max_solutions: spur_solver::types::DEFAULT_MAX_SOLUTIONS,
 ///     timeout_ms: DEFAULT_TIMEOUT_MS,
 ///     persist: false,
 ///     include_smt: false,
@@ -487,6 +508,9 @@ pub struct SolveConstraintsRequest {
     /// How multiple objectives are combined (lex / pareto / box).
     #[serde(default = "default_objective_priority")]
     pub objective_priority: ObjectivePriority,
+    /// Maximum Pareto solutions to collect before a terminal status probe.
+    #[serde(default = "default_max_solutions")]
+    pub max_solutions: usize,
     /// Wall-clock budget in milliseconds.
     #[serde(default = "default_timeout_ms")]
     pub timeout_ms: u64,
@@ -547,6 +571,16 @@ impl SolveConstraintsRequest {
                 ),
             ));
         }
+        if self.max_solutions == 0 || self.max_solutions > MAX_SOLUTIONS {
+            return Err(ValidationError::new(
+                ValidationErrorKind::InvalidMaxSolutions,
+                "max_solutions",
+                format!(
+                    "max_solutions must be in 1..={MAX_SOLUTIONS}, found {}",
+                    self.max_solutions
+                ),
+            ));
+        }
         if self.timeout_ms > MAX_TIMEOUT_MS {
             return Err(ValidationError::new(
                 ValidationErrorKind::TimeoutTooLarge,
@@ -575,6 +609,22 @@ impl SolveConstraintsRequest {
                             ValidationErrorKind::DuplicateConstraintId,
                             format!("constraints[{constraint_index}].id"),
                             format!("constraint id {id:?} is declared more than once"),
+                        ));
+                    }
+                }
+                if let Some(group) = decl.group.as_deref() {
+                    if !is_valid_surface_name(group) {
+                        return Err(ValidationError::new(
+                            ValidationErrorKind::InvalidConstraintGroup,
+                            format!("constraints[{constraint_index}].group"),
+                            format!("constraint group {group:?} must match [A-Za-z_][A-Za-z0-9_]*"),
+                        ));
+                    }
+                    if !decl.soft {
+                        return Err(ValidationError::new(
+                            ValidationErrorKind::GroupWithoutSoft,
+                            format!("constraints[{constraint_index}].group"),
+                            "group is only valid when soft is true",
                         ));
                     }
                 }
@@ -778,6 +828,113 @@ pub enum ModelValue {
 /// Surface-name-to-value mapping returned for a satisfiable solve.
 pub type SolveModel = BTreeMap<String, ModelValue>;
 
+/// Lossless classification of one Z3 Optimize objective bound.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ObjectiveBound {
+    /// A closed, finite optimum.
+    Finite {
+        /// Exact SMT arithmetic text returned by Z3.
+        exact: String,
+    },
+    /// An unbounded optimum containing positive or negative `oo`.
+    Infinite {
+        /// Exact SMT arithmetic text returned by Z3.
+        exact: String,
+    },
+    /// An open optimum containing an infinitesimal `epsilon` term.
+    Strict {
+        /// Exact SMT arithmetic text returned by Z3.
+        exact: String,
+    },
+}
+
+/// Value and exact bound for one explicit objective.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ObjectiveResult {
+    /// Objective direction, unknown for raw SMT objective output.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub op: Option<ObjectiveOp>,
+    /// Objective expression value in this solution's model.
+    pub value: ModelValue,
+    /// Exact finite, infinite, or strict optimum reported by Z3.
+    pub bound: ObjectiveBound,
+}
+
+/// Satisfaction diagnostics for one declared soft constraint.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SoftConstraintResult {
+    /// Constraint position in the request.
+    pub index: usize,
+    /// Unique diagnostic identifier, when declared.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    /// Repeatable Z3 soft-objective group, when declared.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
+    /// Effective positive weight, including the default weight of one.
+    pub weight: i64,
+    /// Whether this solution satisfies the soft expression.
+    pub satisfied: bool,
+}
+
+/// Aggregate satisfied and violated weights for one soft-objective group.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SoftGroupResult {
+    /// Repeatable group name, or `None` for the aggregate anonymous group.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
+    /// Total weight of satisfied soft constraints in this group.
+    pub satisfied_weight: i64,
+    /// Total weight of violated soft constraints in this group.
+    pub violated_weight: i64,
+}
+
+/// One model and its exact optimization diagnostics.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct OptimizationSolution {
+    /// Concrete variable model for this optimization point.
+    pub model: SolveModel,
+    /// Explicit objective results in request order.
+    #[serde(default)]
+    pub objectives: Vec<ObjectiveResult>,
+    /// Soft-constraint diagnostics in request declaration order.
+    #[serde(default)]
+    pub soft_constraints: Vec<SoftConstraintResult>,
+    /// Soft-group totals in first-declaration order.
+    #[serde(default)]
+    pub groups: Vec<SoftGroupResult>,
+}
+
+/// Why optimization enumeration stopped.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OptimizationTermination {
+    /// Z3 reported that enumeration was complete.
+    Complete,
+    /// Pareto enumeration reached the request's `max_solutions` bound.
+    SolutionLimit,
+    /// Z3 returned unknown after at least one solution.
+    Unknown,
+}
+
+/// Additive typed results for a satisfiable optimization request.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct OptimizationResult {
+    /// Objective priority, unknown for raw SMT objective output.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<ObjectivePriority>,
+    /// One or more model points in solver-returned order.
+    pub solutions: Vec<OptimizationSolution>,
+    /// Why solution collection stopped.
+    pub termination: OptimizationTermination,
+}
+
 /// Result envelope returned by `solve_constraints`.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -809,6 +966,12 @@ pub struct SolveConstraintsResponse {
     /// Incremental session identifier when begin/push/pop produced or used one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
+    /// Exact typed optimization results for satisfiable optimize requests.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub optimization: Option<OptimizationResult>,
+    /// Solver version string probed from the runner, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub solver_version: Option<String>,
 }
 
 impl SolveConstraintsResponse {
@@ -842,6 +1005,29 @@ impl SolveConstraintsResponse {
                 "unsat_core",
                 "unsat_core may only be present when status is unsat",
             ));
+        }
+        if let Some(optimization) = &self.optimization {
+            if self.status != SolveStatus::Sat {
+                return Err(ValidationError::new(
+                    ValidationErrorKind::ResponseOptimizationMismatch,
+                    "optimization",
+                    "optimization may only be present when status is sat",
+                ));
+            }
+            let Some(first_solution) = optimization.solutions.first() else {
+                return Err(ValidationError::new(
+                    ValidationErrorKind::ResponseOptimizationMismatch,
+                    "optimization.solutions",
+                    "optimization must contain at least one solution",
+                ));
+            };
+            if self.model.as_ref() != Some(&first_solution.model) {
+                return Err(ValidationError::new(
+                    ValidationErrorKind::ResponseOptimizationMismatch,
+                    "optimization.solutions[0].model",
+                    "the first optimization model must equal the top-level model",
+                ));
+            }
         }
 
         Ok(())
@@ -883,14 +1069,20 @@ pub enum ValidationErrorKind {
     TopLevelNotBoolean,
     /// A constraint id violates `[A-Za-z_][A-Za-z0-9_]*`.
     InvalidConstraintId,
+    /// A soft group violates `[A-Za-z_][A-Za-z0-9_]*`.
+    InvalidConstraintGroup,
     /// Two constraint declarations share the same surface id.
     DuplicateConstraintId,
     /// A soft constraint weight is missing positivity.
     InvalidSoftWeight,
     /// `weight` was set on a non-soft constraint.
     WeightWithoutSoft,
+    /// `group` was set on a non-soft constraint.
+    GroupWithoutSoft,
     /// More than [`MAX_OBJECTIVES`] objectives were declared.
     TooManyObjectives,
+    /// `max_solutions` is zero or exceeds [`MAX_SOLUTIONS`].
+    InvalidMaxSolutions,
     /// An objective expression is not Int/Real/BitVec.
     ObjectiveNotNumeric,
     /// BitVec width is zero or exceeds [`MAX_BITVEC_WIDTH`].
@@ -907,6 +1099,8 @@ pub enum ValidationErrorKind {
     ResponseModelMismatch,
     /// A response's unsat core presence does not match its status.
     ResponseCoreMismatch,
+    /// A response's optimization envelope is inconsistent with its status/model.
+    ResponseOptimizationMismatch,
 }
 
 impl fmt::Display for ValidationErrorKind {
@@ -928,10 +1122,13 @@ impl fmt::Display for ValidationErrorKind {
             Self::TypeMismatch => "type_mismatch",
             Self::TopLevelNotBoolean => "top_level_not_boolean",
             Self::InvalidConstraintId => "invalid_constraint_id",
+            Self::InvalidConstraintGroup => "invalid_constraint_group",
             Self::DuplicateConstraintId => "duplicate_constraint_id",
             Self::InvalidSoftWeight => "invalid_soft_weight",
             Self::WeightWithoutSoft => "weight_without_soft",
+            Self::GroupWithoutSoft => "group_without_soft",
             Self::TooManyObjectives => "too_many_objectives",
+            Self::InvalidMaxSolutions => "invalid_max_solutions",
             Self::ObjectiveNotNumeric => "objective_not_numeric",
             Self::InvalidBitVecWidth => "invalid_bitvec_width",
             Self::BitVecValueTooWide => "bitvec_value_too_wide",
@@ -940,6 +1137,7 @@ impl fmt::Display for ValidationErrorKind {
             Self::InvalidSessionId => "invalid_session_id",
             Self::ResponseModelMismatch => "response_model_mismatch",
             Self::ResponseCoreMismatch => "response_core_mismatch",
+            Self::ResponseOptimizationMismatch => "response_optimization_mismatch",
         };
         formatter.write_str(name)
     }
@@ -1573,8 +1771,9 @@ mod tests {
 
     use super::{
         ConstraintExpr, ConstraintItem, ConstraintOp, ModelValue, SolveConstraintsRequest,
-        SolveConstraintsResponse, SolveStatus, ValidationErrorKind, Variable, DEFAULT_TIMEOUT_MS,
-        MAX_CONSTRAINTS, MAX_EXPRESSION_DEPTH, MAX_TIMEOUT_MS, MAX_VARIABLES,
+        SolveConstraintsResponse, SolveStatus, ValidationErrorKind, Variable,
+        DEFAULT_MAX_SOLUTIONS, DEFAULT_TIMEOUT_MS, MAX_CONSTRAINTS, MAX_EXPRESSION_DEPTH,
+        MAX_TIMEOUT_MS, MAX_VARIABLES,
     };
 
     fn request(vars: Vec<Variable>, constraints: Vec<ConstraintExpr>) -> SolveConstraintsRequest {
@@ -1583,6 +1782,7 @@ mod tests {
             constraints: constraints.into_iter().map(ConstraintItem::from).collect(),
             objectives: vec![],
             objective_priority: Default::default(),
+            max_solutions: DEFAULT_MAX_SOLUTIONS,
             use_cache: true,
             session_id: None,
             session_op: Default::default(),
@@ -1884,6 +2084,7 @@ mod tests {
                 })
                 .collect(),
             objective_priority: Default::default(),
+            max_solutions: DEFAULT_MAX_SOLUTIONS,
             use_cache: true,
             session_id: None,
             session_op: Default::default(),
@@ -1938,6 +2139,91 @@ mod tests {
     }
 
     #[test]
+    fn soft_groups_repeat_while_diagnostic_ids_remain_unique() {
+        let request: SolveConstraintsRequest = serde_json::from_value(json!({
+            "vars": [],
+            "constraints": [
+                {
+                    "id": "prefer_a",
+                    "group": "preferences",
+                    "soft": true,
+                    "weight": 2,
+                    "expr": {"kind": "bool", "value": true}
+                },
+                {
+                    "id": "prefer_b",
+                    "group": "preferences",
+                    "soft": true,
+                    "expr": {"kind": "bool", "value": false}
+                }
+            ]
+        }))
+        .expect("soft groups must deserialize");
+
+        assert_eq!(request.validate(), Ok(()));
+        assert_eq!(request.constraints[0].id(), Some("prefer_a"));
+        let serialized = serde_json::to_value(&request).unwrap();
+        assert_eq!(serialized["constraints"][0]["group"], "preferences");
+        assert_eq!(serialized["constraints"][1]["group"], "preferences");
+
+        for (group, expected_kind) in [
+            ("9bad", "invalid_constraint_group"),
+            ("valid", "group_without_soft"),
+        ] {
+            let soft = group == "9bad";
+            let invalid: SolveConstraintsRequest = serde_json::from_value(json!({
+                "vars": [],
+                "constraints": [{
+                    "group": group,
+                    "soft": soft,
+                    "expr": {"kind": "bool", "value": true}
+                }]
+            }))
+            .expect("group shape must deserialize before semantic validation");
+            assert_eq!(
+                invalid.validate().unwrap_err().kind.to_string(),
+                expected_kind
+            );
+        }
+    }
+
+    #[test]
+    fn max_solutions_defaults_to_16_and_validates_one_through_64() {
+        let defaulted: SolveConstraintsRequest = serde_json::from_value(json!({
+            "vars": [],
+            "constraints": []
+        }))
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(&defaulted).unwrap()["max_solutions"],
+            16
+        );
+        assert_eq!(defaulted.validate(), Ok(()));
+
+        for value in [1, 64] {
+            let request: SolveConstraintsRequest = serde_json::from_value(json!({
+                "vars": [],
+                "constraints": [],
+                "max_solutions": value
+            }))
+            .unwrap();
+            assert_eq!(request.validate(), Ok(()));
+        }
+
+        for value in [0, 65] {
+            let request: SolveConstraintsRequest = serde_json::from_value(json!({
+                "vars": [],
+                "constraints": [],
+                "max_solutions": value
+            }))
+            .expect("max_solutions shape must deserialize before semantic validation");
+            let error = request.validate().unwrap_err();
+            assert_eq!(error.kind.to_string(), "invalid_max_solutions");
+            assert_eq!(error.path, "max_solutions");
+        }
+    }
+
+    #[test]
     fn response_model_values_use_plain_json_scalars() {
         let response = SolveConstraintsResponse {
             status: SolveStatus::Sat,
@@ -1953,6 +2239,8 @@ mod tests {
             unsat_core: None,
             cached: false,
             session_id: None,
+            optimization: None,
+            solver_version: None,
         };
         let value = serde_json::to_value(&response).unwrap();
 
@@ -1978,13 +2266,119 @@ mod tests {
             unsat_core: None,
             cached: false,
             session_id: None,
+            optimization: None,
+            solver_version: None,
         })
         .unwrap();
 
         assert!(value.get("model").is_none());
         assert!(value.get("solve_id").is_none());
+        assert!(value.get("optimization").is_none());
+        assert!(value.get("solver_version").is_none());
         assert_eq!(value["reason"], Value::Null);
         assert_eq!(value["smt"], Value::Null);
+    }
+
+    #[test]
+    fn exact_optimization_response_round_trips_and_validates() {
+        let value = json!({
+            "status": "sat",
+            "model": {"x": 1},
+            "duration_ms": 3,
+            "reason": null,
+            "optimization": {
+                "priority": "pareto",
+                "solutions": [{
+                    "model": {"x": 1},
+                    "objectives": [{
+                        "op": "maximize",
+                        "value": 1,
+                        "bound": {"kind": "strict", "exact": "(+ 1.0 (* -1.0 epsilon))"}
+                    }],
+                    "soft_constraints": [{
+                        "index": 0,
+                        "id": "prefer_x",
+                        "group": "preferences",
+                        "weight": 2,
+                        "satisfied": true
+                    }],
+                    "groups": [{
+                        "group": "preferences",
+                        "satisfied_weight": 2,
+                        "violated_weight": 0
+                    }]
+                }],
+                "termination": "complete"
+            },
+            "solver_version": "Z3 version 4.16.0 - 64 bit"
+        });
+
+        let response: SolveConstraintsResponse = serde_json::from_value(value.clone())
+            .expect("additive optimization response must deserialize");
+        assert_eq!(response.validate(), Ok(()));
+        assert_eq!(serde_json::to_value(response).unwrap(), value);
+    }
+
+    #[test]
+    fn response_validation_rejects_invalid_optimization_envelopes() {
+        let base = json!({
+            "status": "sat",
+            "model": {"x": 1},
+            "duration_ms": 1,
+            "solve_id": null,
+            "reason": null,
+            "smt": null,
+            "unsat_core": null,
+            "cached": false,
+            "session_id": null,
+            "solver_version": null
+        });
+
+        let mut empty = base.clone();
+        empty["optimization"] = json!({
+            "priority": "lex",
+            "solutions": [],
+            "termination": "complete"
+        });
+        let error = serde_json::from_value::<SolveConstraintsResponse>(empty)
+            .unwrap()
+            .validate()
+            .unwrap_err();
+        assert_eq!(error.kind.to_string(), "response_optimization_mismatch");
+        assert_eq!(error.path, "optimization.solutions");
+
+        let mut non_sat = base.clone();
+        non_sat["status"] = json!("unsat");
+        non_sat["model"] = Value::Null;
+        non_sat["optimization"] = json!({
+            "priority": "lex",
+            "solutions": [{"model": {}}],
+            "termination": "complete"
+        });
+        let error = serde_json::from_value::<SolveConstraintsResponse>(non_sat)
+            .unwrap()
+            .validate()
+            .unwrap_err();
+        assert_eq!(error.kind.to_string(), "response_optimization_mismatch");
+        assert_eq!(error.path, "optimization");
+
+        let mut mismatched = base;
+        mismatched["optimization"] = json!({
+            "priority": "lex",
+            "solutions": [{
+                "model": {"x": 2},
+                "objectives": [],
+                "soft_constraints": [],
+                "groups": []
+            }],
+            "termination": "complete"
+        });
+        let error = serde_json::from_value::<SolveConstraintsResponse>(mismatched)
+            .unwrap()
+            .validate()
+            .unwrap_err();
+        assert_eq!(error.kind.to_string(), "response_optimization_mismatch");
+        assert_eq!(error.path, "optimization.solutions[0].model");
     }
 
     #[test]
@@ -2044,6 +2438,7 @@ mod tests {
                 .collect(),
             objectives: vec![],
             objective_priority: Default::default(),
+            max_solutions: DEFAULT_MAX_SOLUTIONS,
             use_cache: true,
             session_id: None,
             session_op: Default::default(),
@@ -2078,6 +2473,7 @@ mod tests {
         let timeout = SolveConstraintsRequest {
             objectives: vec![],
             objective_priority: Default::default(),
+            max_solutions: DEFAULT_MAX_SOLUTIONS,
             use_cache: true,
             session_id: None,
             session_op: Default::default(),
@@ -2385,6 +2781,8 @@ mod tests {
             unsat_core: None,
             cached: false,
             session_id: None,
+            optimization: None,
+            solver_version: None,
         }
         .validate()
         .unwrap_err();
@@ -2404,6 +2802,8 @@ mod tests {
             unsat_core: None,
             cached: false,
             session_id: None,
+            optimization: None,
+            solver_version: None,
         }
         .validate()
         .unwrap_err();
@@ -2422,6 +2822,8 @@ mod tests {
             unsat_core: None,
             cached: false,
             session_id: None,
+            optimization: None,
+            solver_version: None,
         };
         assert_eq!(sat.validate(), Ok(()));
 
@@ -2435,6 +2837,8 @@ mod tests {
             unsat_core: None,
             cached: false,
             session_id: Some("sess_0123456789abcdef".to_owned()),
+            optimization: None,
+            solver_version: None,
         };
         assert_eq!(ended.validate(), Ok(()));
 
@@ -2448,6 +2852,8 @@ mod tests {
             unsat_core: None,
             cached: false,
             session_id: None,
+            optimization: None,
+            solver_version: None,
         }
         .validate()
         .unwrap_err();

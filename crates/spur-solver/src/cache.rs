@@ -100,7 +100,7 @@ mod tests {
     use super::{fingerprint_request, SolveCache, MAX_CACHE_ENTRIES};
     use crate::types::{
         ConstraintExpr, ObjectivePriority, SessionOp, SolveConstraintsRequest,
-        SolveConstraintsResponse, SolveStatus, Variable, DEFAULT_TIMEOUT_MS,
+        SolveConstraintsResponse, SolveStatus, Variable, DEFAULT_MAX_SOLUTIONS, DEFAULT_TIMEOUT_MS,
     };
 
     fn sample_request(timeout_ms: u64) -> SolveConstraintsRequest {
@@ -111,6 +111,7 @@ mod tests {
             constraints: vec![ConstraintExpr::Bool { value: true }.into()],
             objectives: vec![],
             objective_priority: ObjectivePriority::Lex,
+            max_solutions: DEFAULT_MAX_SOLUTIONS,
             timeout_ms,
             persist: false,
             include_smt: false,
@@ -149,6 +150,8 @@ mod tests {
                     unsat_core: None,
                     cached: false,
                     session_id: None,
+                    optimization: None,
+                    solver_version: None,
                 },
             );
         }

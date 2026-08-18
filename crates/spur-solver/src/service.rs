@@ -579,6 +579,8 @@ fn response(
         unsat_core,
         cached: false,
         session_id: None,
+        optimization: None,
+        solver_version: None,
     }
 }
 

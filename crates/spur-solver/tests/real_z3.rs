@@ -15,7 +15,7 @@ use spur_solver::{
     types::{
         ConstraintDecl, ConstraintExpr, ConstraintItem, ConstraintOp, ModelValue, Objective,
         ObjectiveOp, SolveConstraintsRequest, SolveConstraintsResponse, SolveStatus, Variable,
-        DEFAULT_TIMEOUT_MS,
+        DEFAULT_MAX_SOLUTIONS, DEFAULT_TIMEOUT_MS,
     },
 };
 
@@ -117,6 +117,7 @@ async fn trivial_sat_model_satisfies_declared_constraints() {
             .collect(),
             objectives: vec![],
             objective_priority: Default::default(),
+            max_solutions: DEFAULT_MAX_SOLUTIONS,
             use_cache: true,
             session_id: None,
             session_op: Default::default(),
@@ -161,6 +162,7 @@ async fn unsat_protocol_has_no_model() {
                 .collect(),
             objectives: vec![],
             objective_priority: Default::default(),
+            max_solutions: DEFAULT_MAX_SOLUTIONS,
             use_cache: true,
             session_id: None,
             session_op: Default::default(),
@@ -196,6 +198,7 @@ async fn named_hard_conflict_returns_unsat_core() {
             constraints: vec![
                 ConstraintItem::Declared(ConstraintDecl {
                     id: Some("lower".to_owned()),
+                    group: None,
                     soft: false,
                     weight: None,
                     expr: ConstraintExpr::Op {
@@ -210,6 +213,7 @@ async fn named_hard_conflict_returns_unsat_core() {
                 }),
                 ConstraintItem::Declared(ConstraintDecl {
                     id: Some("upper".to_owned()),
+                    group: None,
                     soft: false,
                     weight: None,
                     expr: ConstraintExpr::Op {
@@ -225,6 +229,7 @@ async fn named_hard_conflict_returns_unsat_core() {
             ],
             objectives: vec![],
             objective_priority: Default::default(),
+            max_solutions: DEFAULT_MAX_SOLUTIONS,
             use_cache: true,
             session_id: None,
             session_op: Default::default(),
@@ -261,6 +266,7 @@ async fn soft_preference_and_maximize_prefer_high_values() {
             constraints: vec![
                 ConstraintItem::Declared(ConstraintDecl {
                     id: Some("max_sidebar".to_owned()),
+                    group: None,
                     soft: false,
                     weight: None,
                     expr: ConstraintExpr::Op {
@@ -275,6 +281,7 @@ async fn soft_preference_and_maximize_prefer_high_values() {
                 }),
                 ConstraintItem::Declared(ConstraintDecl {
                     id: Some("prefer_wide".to_owned()),
+                    group: None,
                     soft: true,
                     weight: Some(5),
                     expr: ConstraintExpr::Op {
@@ -290,6 +297,7 @@ async fn soft_preference_and_maximize_prefer_high_values() {
             ],
             objectives: vec![],
             objective_priority: Default::default(),
+            max_solutions: DEFAULT_MAX_SOLUTIONS,
             use_cache: true,
             session_id: None,
             session_op: Default::default(),
@@ -353,6 +361,7 @@ async fn soft_preference_and_maximize_prefer_high_values() {
                 },
             }],
             objective_priority: Default::default(),
+            max_solutions: DEFAULT_MAX_SOLUTIONS,
             use_cache: true,
             session_id: None,
             session_op: Default::default(),

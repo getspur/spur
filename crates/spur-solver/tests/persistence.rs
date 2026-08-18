@@ -11,7 +11,10 @@ use spur_solver::{
     },
     process::{ProcessFuture, ProcessOutcome, ProcessOutput, ProcessRequest, ProcessRunner},
     service::{SolverService, SolverServiceError},
-    types::{SolveConstraintsRequest, SolveConstraintsResponse, SolveStatus, DEFAULT_TIMEOUT_MS},
+    types::{
+        SolveConstraintsRequest, SolveConstraintsResponse, SolveStatus, DEFAULT_MAX_SOLUTIONS,
+        DEFAULT_TIMEOUT_MS,
+    },
 };
 use tempfile::tempdir;
 
@@ -346,6 +349,8 @@ fn persist_rejects_single_artifact_larger_than_byte_budget() -> Result<(), Box<d
         unsat_core: None,
         cached: false,
         session_id: None,
+        optimization: None,
+        solver_version: None,
     };
 
     let error = service
@@ -367,6 +372,7 @@ fn request(persist: bool) -> SolveConstraintsRequest {
         constraints: Vec::new(),
         objectives: vec![],
         objective_priority: Default::default(),
+        max_solutions: DEFAULT_MAX_SOLUTIONS,
         use_cache: true,
         session_id: None,
         session_op: Default::default(),
@@ -387,6 +393,8 @@ fn unsat_response() -> SolveConstraintsResponse {
         unsat_core: None,
         cached: false,
         session_id: None,
+        optimization: None,
+        solver_version: None,
     }
 }
 

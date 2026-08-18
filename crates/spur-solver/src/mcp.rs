@@ -13,8 +13,8 @@ use crate::{
     rules::spec::{self, RuleSpecError, RuleSpecRequest},
     service::{SolverService, SolverServiceError},
     types::{
-        SolveConstraintsRequest, SolveSmtRequest, DEFAULT_TIMEOUT_MS, MAX_CONSTRAINTS,
-        MAX_OBJECTIVES, MAX_TIMEOUT_MS, MAX_VARIABLES,
+        SolveConstraintsRequest, SolveSmtRequest, DEFAULT_MAX_SOLUTIONS, DEFAULT_TIMEOUT_MS,
+        MAX_CONSTRAINTS, MAX_OBJECTIVES, MAX_SOLUTIONS, MAX_TIMEOUT_MS, MAX_VARIABLES,
     },
 };
 
@@ -360,7 +360,7 @@ fn solve_constraints_schema() -> Value {
                 "type": "array",
                 "maxItems": MAX_CONSTRAINTS,
                 "items": constraint_item_schema(),
-                "description": "Hard or soft constraints. Bare ConstraintExpr remains accepted; named/soft use {id?, soft?, weight?, expr}."
+                "description": "Hard or soft constraints. Bare ConstraintExpr remains accepted; wrapped constraints use diagnostic id?, repeatable soft-only group?, soft?, weight?, and expr."
             },
             "objectives": {
                 "type": "array",
@@ -385,6 +385,13 @@ fn solve_constraints_schema() -> Value {
                 "enum": ["lex", "pareto", "box"],
                 "default": "lex",
                 "description": "Multi-objective combination (Z3 :opt.priority)."
+            },
+            "max_solutions": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": MAX_SOLUTIONS,
+                "default": DEFAULT_MAX_SOLUTIONS,
+                "description": "Maximum Pareto solutions to collect before a terminal status probe."
             },
             "timeout_ms": timeout_schema(),
             "persist": {
@@ -452,6 +459,14 @@ fn constraint_item_schema() -> Value {
         .expect("constraint expression properties");
     properties.insert("id".to_owned(), identifier_schema());
     properties.insert(
+        "group".to_owned(),
+        json!({
+            "type": "string",
+            "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
+            "description": "Repeatable Z3 soft-objective group. Valid only when soft is true; id remains diagnostic-only."
+        }),
+    );
+    properties.insert(
         "soft".to_owned(),
         json!({
             "type": "boolean",
@@ -471,7 +486,7 @@ fn constraint_item_schema() -> Value {
 
     json!({
         "type": "object",
-        "description": "Either a bare tagged ConstraintExpr (kind plus its fields) or a wrapper with expr and optional id/soft/weight. Runtime validation enforces the selected shape.",
+        "description": "Either a bare tagged ConstraintExpr (kind plus its fields) or a wrapper with expr and optional diagnostic id, repeatable soft group, soft flag, and weight. Runtime validation enforces the selected shape.",
         "properties": properties,
         "additionalProperties": false
     })
@@ -653,12 +668,19 @@ mod tests {
         assert!(expression_kinds.iter().any(|kind| kind == "real"));
         assert!(expression_kinds.iter().any(|kind| kind == "bv"));
         assert_eq!(typed["properties"]["objective_priority"]["default"], "lex");
+        assert_eq!(typed["properties"]["max_solutions"]["default"], 16);
+        assert_eq!(typed["properties"]["max_solutions"]["minimum"], 1);
+        assert_eq!(typed["properties"]["max_solutions"]["maximum"], 64);
         assert_eq!(typed["properties"]["use_cache"]["default"], true);
         assert_eq!(
             typed["properties"]["constraints"]["items"]["properties"]["expr"]["type"],
             "object"
         );
         assert_eq!(typed["properties"]["include_smt"]["default"], false);
+        assert_eq!(
+            typed["properties"]["constraints"]["items"]["properties"]["group"]["pattern"],
+            "^[A-Za-z_][A-Za-z0-9_]*$"
+        );
 
         let raw = schema(&tools, "solve_smt");
         assert_eq!(raw["required"], json!(["smt_lib"]));
@@ -716,6 +738,8 @@ mod tests {
                     unsat_core: None,
                     cached: false,
                     session_id: None,
+                    optimization: None,
+                    solver_version: None,
                 },
             )
             .expect("solver result status must serialize");

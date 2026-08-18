@@ -206,7 +206,8 @@ fn allocate_session_id(existing: &HashMap<String, Session>) -> Result<String, Se
 mod tests {
     use super::*;
     use crate::types::{
-        ConstraintExpr, ConstraintOp, ObjectivePriority, Variable, DEFAULT_TIMEOUT_MS,
+        ConstraintExpr, ConstraintOp, ObjectivePriority, Variable, DEFAULT_MAX_SOLUTIONS,
+        DEFAULT_TIMEOUT_MS,
     };
 
     fn request(op: SessionOp, session_id: Option<String>) -> SolveConstraintsRequest {
@@ -228,6 +229,7 @@ mod tests {
             .into()],
             objectives: vec![],
             objective_priority: ObjectivePriority::Lex,
+            max_solutions: DEFAULT_MAX_SOLUTIONS,
             timeout_ms: DEFAULT_TIMEOUT_MS,
             persist: false,
             include_smt: false,

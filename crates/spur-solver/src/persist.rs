@@ -193,6 +193,8 @@ impl SolveArtifactResult {
             unsat_core: self.unsat_core.clone(),
             cached: false,
             session_id: None,
+            optimization: None,
+            solver_version: None,
         }
         .validate()
         .map_err(|source| PersistError::InvalidResult { source })

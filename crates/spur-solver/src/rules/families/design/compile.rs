@@ -9,7 +9,8 @@ use crate::{
     rules::{builtin_registry, CompiledRule, RuleSolveMode},
     types::{
         ConstraintDecl, ConstraintExpr, ConstraintItem, ConstraintOp, ObjectivePriority, SessionOp,
-        SolveConstraintsRequest, Variable, DEFAULT_TIMEOUT_MS, MAX_CONSTRAINTS,
+        SolveConstraintsRequest, Variable, DEFAULT_MAX_SOLUTIONS, DEFAULT_TIMEOUT_MS,
+        MAX_CONSTRAINTS,
     },
 };
 
@@ -164,6 +165,7 @@ pub fn compile(input: DesignCompileRequest) -> Result<CompiledDesignRules, Desig
         constraints,
         objectives: Vec::new(),
         objective_priority: ObjectivePriority::Lex,
+        max_solutions: DEFAULT_MAX_SOLUTIONS,
         timeout_ms: input.timeout_ms,
         persist: input.persist,
         include_smt: input.include_smt,
@@ -579,6 +581,7 @@ const fn int(value: i64) -> ConstraintExpr {
 fn declared(id: &str, expr: ConstraintExpr) -> ConstraintItem {
     ConstraintItem::Declared(ConstraintDecl {
         id: Some(id.to_owned()),
+        group: None,
         soft: false,
         weight: None,
         expr,

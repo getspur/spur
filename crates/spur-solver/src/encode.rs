@@ -113,6 +113,7 @@ impl From<ValidationError> for EncodeError {
 ///     }].into_iter().map(Into::into).collect(),
 ///     objectives: vec![],
 ///     objective_priority: spur_solver::types::ObjectivePriority::Lex,
+///     max_solutions: spur_solver::types::DEFAULT_MAX_SOLUTIONS,
 ///     timeout_ms: 30_000,
 ///     persist: false,
 ///     include_smt: false,
@@ -512,7 +513,7 @@ impl SmtBuilder {
 mod tests {
     use crate::types::{
         ConstraintExpr, ConstraintOp, SolveConstraintsRequest, ValidationErrorKind, Variable,
-        DEFAULT_TIMEOUT_MS,
+        DEFAULT_MAX_SOLUTIONS, DEFAULT_TIMEOUT_MS,
     };
 
     use super::{
@@ -593,6 +594,7 @@ mod tests {
             .collect(),
             objectives: vec![],
             objective_priority: Default::default(),
+            max_solutions: DEFAULT_MAX_SOLUTIONS,
             use_cache: true,
             session_id: None,
             session_op: Default::default(),
@@ -650,6 +652,7 @@ mod tests {
             .collect(),
             objectives: vec![],
             objective_priority: Default::default(),
+            max_solutions: DEFAULT_MAX_SOLUTIONS,
             use_cache: true,
             session_id: None,
             session_op: Default::default(),
@@ -691,6 +694,7 @@ mod tests {
             .collect(),
             objectives: vec![],
             objective_priority: Default::default(),
+            max_solutions: DEFAULT_MAX_SOLUTIONS,
             use_cache: true,
             session_id: None,
             session_op: Default::default(),
@@ -755,6 +759,7 @@ mod tests {
             .collect(),
             objectives: vec![],
             objective_priority: Default::default(),
+            max_solutions: DEFAULT_MAX_SOLUTIONS,
             use_cache: true,
             session_id: None,
             session_op: Default::default(),
@@ -779,6 +784,7 @@ mod tests {
             constraints: Vec::new(),
             objectives: vec![],
             objective_priority: Default::default(),
+            max_solutions: DEFAULT_MAX_SOLUTIONS,
             use_cache: true,
             session_id: None,
             session_op: Default::default(),
@@ -843,6 +849,7 @@ mod tests {
             .collect(),
             objectives: vec![],
             objective_priority: Default::default(),
+            max_solutions: DEFAULT_MAX_SOLUTIONS,
             use_cache: true,
             session_id: None,
             session_op: Default::default(),
@@ -881,6 +888,7 @@ mod tests {
             .collect(),
             objectives: vec![],
             objective_priority: Default::default(),
+            max_solutions: DEFAULT_MAX_SOLUTIONS,
             use_cache: true,
             session_id: None,
             session_op: Default::default(),
@@ -906,6 +914,7 @@ mod tests {
             }],
             constraints: vec![
                 ConstraintItem::Declared(ConstraintDecl {
+                    group: None,
                     id: Some("lower".to_owned()),
                     soft: false,
                     weight: None,
@@ -916,6 +925,7 @@ mod tests {
                 }),
                 ConstraintItem::Declared(ConstraintDecl {
                     id: Some("upper".to_owned()),
+                    group: None,
                     soft: false,
                     weight: None,
                     expr: op(
@@ -926,6 +936,7 @@ mod tests {
             ],
             objectives: vec![],
             objective_priority: Default::default(),
+            max_solutions: DEFAULT_MAX_SOLUTIONS,
             use_cache: true,
             session_id: None,
             session_op: Default::default(),
@@ -959,6 +970,7 @@ mod tests {
                 .into(),
                 ConstraintItem::Declared(ConstraintDecl {
                     id: Some("prefer_wide".to_owned()),
+                    group: None,
                     soft: true,
                     weight: Some(5),
                     expr: op(
@@ -969,6 +981,7 @@ mod tests {
             ],
             objectives: vec![],
             objective_priority: Default::default(),
+            max_solutions: DEFAULT_MAX_SOLUTIONS,
             use_cache: true,
             session_id: None,
             session_op: Default::default(),
@@ -996,6 +1009,7 @@ mod tests {
             }],
             constraints: vec![ConstraintItem::Declared(ConstraintDecl {
                 id: Some("floor".to_owned()),
+                group: None,
                 soft: false,
                 weight: None,
                 expr: op(
@@ -1017,6 +1031,7 @@ mod tests {
                 },
             ],
             objective_priority: Default::default(),
+            max_solutions: DEFAULT_MAX_SOLUTIONS,
             use_cache: true,
             session_id: None,
             session_op: Default::default(),
@@ -1043,6 +1058,7 @@ mod tests {
                 .collect(),
             objectives: vec![],
             objective_priority: Default::default(),
+            max_solutions: DEFAULT_MAX_SOLUTIONS,
             use_cache: true,
             session_id: None,
             session_op: Default::default(),
@@ -1073,6 +1089,7 @@ mod tests {
             constraints: Vec::new(),
             objectives: vec![],
             objective_priority: Default::default(),
+            max_solutions: DEFAULT_MAX_SOLUTIONS,
             use_cache: true,
             session_id: None,
             session_op: Default::default(),

@@ -10,7 +10,7 @@ use std::{
 use spur_solver::{
     process::{ProcessFuture, ProcessOutcome, ProcessOutput, ProcessRequest, ProcessRunner},
     service::SolverService,
-    types::{SolveConstraintsRequest, SolveStatus},
+    types::{SolveConstraintsRequest, SolveStatus, DEFAULT_MAX_SOLUTIONS},
 };
 use tokio::sync::{Notify, Semaphore};
 
@@ -161,6 +161,7 @@ fn empty_request(timeout_ms: u64) -> SolveConstraintsRequest {
         constraints: Vec::new(),
         objectives: vec![],
         objective_priority: Default::default(),
+        max_solutions: DEFAULT_MAX_SOLUTIONS,
         timeout_ms,
         persist: false,
         include_smt: false,
@@ -183,7 +184,10 @@ mod unix {
     use spur_solver::{
         process::{Z3Process, MAX_STDERR_BYTES, MAX_STDOUT_BYTES},
         service::{SolverService, SolverServiceError},
-        types::{ModelValue, SolveConstraintsRequest, SolveStatus, Variable, DEFAULT_TIMEOUT_MS},
+        types::{
+            ModelValue, SolveConstraintsRequest, SolveStatus, Variable, DEFAULT_MAX_SOLUTIONS,
+            DEFAULT_TIMEOUT_MS,
+        },
     };
     use tempfile::TempDir;
     use tokio::process::Command;
@@ -424,6 +428,7 @@ mod unix {
             constraints: Vec::new(),
             objectives: vec![],
             objective_priority: Default::default(),
+            max_solutions: DEFAULT_MAX_SOLUTIONS,
             timeout_ms,
             persist: false,
             include_smt: false,
@@ -439,6 +444,7 @@ mod unix {
             constraints: Vec::new(),
             objectives: vec![],
             objective_priority: Default::default(),
+            max_solutions: DEFAULT_MAX_SOLUTIONS,
             timeout_ms,
             persist: false,
             include_smt: false,
