@@ -110,6 +110,12 @@ fn allows_soft_optimize_and_unsat_core_commands() {
 }
 
 #[test]
+fn allows_get_objectives_after_an_optimization_check() {
+    validate_smt_script("(check-sat)\n(get-objectives)")
+        .expect("get-objectives is a read-only optimization query");
+}
+
+#[test]
 fn comments_strings_and_quoted_symbols_cannot_smuggle_commands() {
     let script = r#"
 ; (exit)

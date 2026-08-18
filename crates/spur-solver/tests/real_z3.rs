@@ -5,16 +5,89 @@
 //! run the smoke target explicitly:
 //!
 //! ```text
-//! SPUR_TEST_Z3=1 scripts/spur-cargo test -p spur-solver --test real_z3 -- --ignored
+//! SPUR_REMOTE=0 SPUR_TEST_Z3=1 scripts/spur-cargo test -p spur-solver --test real_z3 -- --ignored
 //! ```
+
+use std::collections::{BTreeMap, BTreeSet};
 
 use spur_solver::{
     service::SolverService,
     types::{
         ConstraintDecl, ConstraintExpr, ConstraintItem, ConstraintOp, ModelValue, Objective,
-        ObjectiveOp, SolveConstraintsRequest, SolveStatus, Variable, DEFAULT_TIMEOUT_MS,
+        ObjectiveOp, SolveConstraintsRequest, SolveConstraintsResponse, SolveStatus, Variable,
+        DEFAULT_TIMEOUT_MS,
     },
 };
+
+fn request_from_json(value: serde_json::Value) -> SolveConstraintsRequest {
+    serde_json::from_value(value).expect("real-Z3 optimization request JSON must deserialize")
+}
+
+fn model_bool(model: &BTreeMap<String, ModelValue>, name: &str) -> bool {
+    match model.get(name) {
+        Some(ModelValue::Bool(value)) => *value,
+        other => panic!("expected Boolean {name} in real-Z3 model, got {other:?}"),
+    }
+}
+
+fn model_int(model: &BTreeMap<String, ModelValue>, name: &str) -> i64 {
+    match model.get(name) {
+        Some(ModelValue::Int(value)) => *value,
+        other => panic!("expected integer {name} in real-Z3 model, got {other:?}"),
+    }
+}
+
+fn optimization_json(response: &SolveConstraintsResponse) -> serde_json::Value {
+    serde_json::to_value(response)
+        .expect("solver response must serialize")
+        .get("optimization")
+        .cloned()
+        .expect("optimization request must return an optimization envelope")
+}
+
+fn optimization_model_set(response: &SolveConstraintsResponse) -> BTreeSet<(i64, i64)> {
+    optimization_json(response)
+        .get("solutions")
+        .and_then(serde_json::Value::as_array)
+        .expect("optimization envelope must contain solutions")
+        .iter()
+        .map(|solution| {
+            let model: BTreeMap<String, ModelValue> = serde_json::from_value(
+                solution
+                    .get("model")
+                    .cloned()
+                    .expect("optimization solution must contain a model"),
+            )
+            .expect("optimization solution model must deserialize");
+            (model_int(&model, "x"), model_int(&model, "y"))
+        })
+        .collect()
+}
+
+fn assert_complete_optimization(response: &SolveConstraintsResponse) {
+    assert_eq!(
+        optimization_json(response)
+            .get("termination")
+            .and_then(serde_json::Value::as_str),
+        Some("complete")
+    );
+}
+
+fn assert_first_objective_bound_kind(response: &SolveConstraintsResponse, expected: &str) {
+    let optimization = optimization_json(response);
+    let bound_kind = optimization
+        .get("solutions")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|solutions| solutions.first())
+        .and_then(|solution| solution.get("objectives"))
+        .and_then(serde_json::Value::as_array)
+        .and_then(|objectives| objectives.first())
+        .and_then(|objective| objective.get("bound"))
+        .and_then(|bound| bound.get("kind"))
+        .and_then(serde_json::Value::as_str);
+
+    assert_eq!(bound_kind, Some(expected), "response: {response:?}");
+}
 
 #[tokio::test]
 #[ignore = "requires SPUR_TEST_Z3=1 and an installed Z3 binary"]
@@ -300,6 +373,183 @@ async fn soft_preference_and_maximize_prefer_high_values() {
     let smt = optimized.smt.expect("include_smt should echo script");
     assert!(smt.contains("(maximize v_batch)"));
     assert!(!smt.contains("produce-unsat-cores"));
+}
+
+#[tokio::test]
+#[ignore = "requires SPUR_TEST_Z3=1 and an installed Z3 binary"]
+async fn anonymous_weighted_soft_constraints_use_one_maxsmt_objective() {
+    if !real_z3_enabled() {
+        return;
+    }
+
+    let response = SolverService::new()
+        .solve_constraints(request_from_json(serde_json::json!({
+            "vars": [
+                {"type":"bool","name":"a"},
+                {"type":"bool","name":"b"}
+            ],
+            "constraints": [
+                {
+                    "kind":"op",
+                    "op":"not",
+                    "args":[{
+                        "kind":"op",
+                        "op":"and",
+                        "args":[
+                            {"kind":"var","name":"a"},
+                            {"kind":"var","name":"b"}
+                        ]
+                    }]
+                },
+                {
+                    "id":"prefer_a",
+                    "soft":true,
+                    "weight":1,
+                    "expr":{"kind":"var","name":"a"}
+                },
+                {
+                    "id":"prefer_b",
+                    "soft":true,
+                    "weight":100,
+                    "expr":{"kind":"var","name":"b"}
+                }
+            ],
+            "use_cache":false
+        })))
+        .await
+        .expect("weighted MaxSMT solve should start");
+
+    assert_eq!(response.status, SolveStatus::Sat, "{response:?}");
+    let model = response.model.as_ref().expect("sat must include a model");
+    assert!(!model_bool(model, "a"), "response: {response:?}");
+    assert!(model_bool(model, "b"), "response: {response:?}");
+}
+
+#[tokio::test]
+#[ignore = "requires SPUR_TEST_Z3=1 and an installed Z3 binary"]
+async fn unconstrained_real_maximum_reports_infinite_bound() {
+    if !real_z3_enabled() {
+        return;
+    }
+
+    let response = SolverService::new()
+        .solve_constraints(request_from_json(serde_json::json!({
+            "vars": [{"type":"real","name":"x"}],
+            "constraints": [],
+            "objectives": [{
+                "op":"maximize",
+                "expr":{"kind":"var","name":"x"}
+            }],
+            "use_cache":false
+        })))
+        .await
+        .expect("unbounded optimization should start");
+
+    assert_eq!(response.status, SolveStatus::Sat, "{response:?}");
+    assert_first_objective_bound_kind(&response, "infinite");
+}
+
+#[tokio::test]
+#[ignore = "requires SPUR_TEST_Z3=1 and an installed Z3 binary"]
+async fn open_real_maximum_reports_strict_bound() {
+    if !real_z3_enabled() {
+        return;
+    }
+
+    let response = SolverService::new()
+        .solve_constraints(request_from_json(serde_json::json!({
+            "vars": [{"type":"real","name":"x"}],
+            "constraints": [{
+                "kind":"op",
+                "op":"lt",
+                "args":[
+                    {"kind":"var","name":"x"},
+                    {"kind":"real","num":1,"den":1}
+                ]
+            }],
+            "objectives": [{
+                "op":"maximize",
+                "expr":{"kind":"var","name":"x"}
+            }],
+            "use_cache":false
+        })))
+        .await
+        .expect("strict optimization should start");
+
+    assert_eq!(response.status, SolveStatus::Sat, "{response:?}");
+    assert_first_objective_bound_kind(&response, "strict");
+}
+
+#[tokio::test]
+#[ignore = "requires SPUR_TEST_Z3=1 and an installed Z3 binary"]
+async fn pareto_enumeration_returns_the_complete_bounded_frontier() {
+    if !real_z3_enabled() {
+        return;
+    }
+
+    let response = SolverService::new()
+        .solve_constraints(frontier_request("pareto"))
+        .await
+        .expect("Pareto optimization should start");
+
+    assert_eq!(response.status, SolveStatus::Sat, "{response:?}");
+    assert_eq!(
+        optimization_model_set(&response),
+        BTreeSet::from([(0, 3), (1, 2), (2, 1), (3, 0)]),
+        "response: {response:?}"
+    );
+    assert_complete_optimization(&response);
+}
+
+#[tokio::test]
+#[ignore = "requires SPUR_TEST_Z3=1 and an installed Z3 binary"]
+async fn box_enumeration_returns_one_model_per_independent_objective() {
+    if !real_z3_enabled() {
+        return;
+    }
+
+    let response = SolverService::new()
+        .solve_constraints(frontier_request("box"))
+        .await
+        .expect("box optimization should start");
+
+    assert_eq!(response.status, SolveStatus::Sat, "{response:?}");
+    assert_eq!(
+        optimization_model_set(&response),
+        BTreeSet::from([(0, 3), (3, 0)]),
+        "response: {response:?}"
+    );
+    assert_complete_optimization(&response);
+}
+
+fn frontier_request(priority: &str) -> SolveConstraintsRequest {
+    request_from_json(serde_json::json!({
+        "vars": [
+            {"type":"int_range","name":"x","min":0,"max":3},
+            {"type":"int_range","name":"y","min":0,"max":3}
+        ],
+        "constraints": [{
+            "kind":"op",
+            "op":"le",
+            "args":[
+                {
+                    "kind":"op",
+                    "op":"add",
+                    "args":[
+                        {"kind":"var","name":"x"},
+                        {"kind":"var","name":"y"}
+                    ]
+                },
+                {"kind":"int","value":3}
+            ]
+        }],
+        "objectives": [
+            {"op":"maximize","expr":{"kind":"var","name":"x"}},
+            {"op":"maximize","expr":{"kind":"var","name":"y"}}
+        ],
+        "objective_priority":priority,
+        "use_cache":false
+    }))
 }
 
 #[tokio::test]
