@@ -426,6 +426,25 @@ fn probe_z3_version(binary: &Path) -> String {
     }
 }
 
+const MINIMUM_OPTIMIZE_Z3_VERSION: (u64, u64, u64) = (4, 8, 12);
+
+pub(crate) fn parse_z3_version(version: &str) -> Option<(u64, u64, u64)> {
+    let version = version.strip_prefix("Z3 version ")?;
+    let numeric = version.split_ascii_whitespace().next()?;
+    let mut components = numeric.split('.');
+    let major = components.next()?.parse().ok()?;
+    let minor = components.next()?.parse().ok()?;
+    let patch = components.next()?.parse().ok()?;
+    if components.next().is_some() {
+        return None;
+    }
+    Some((major, minor, patch))
+}
+
+pub(crate) fn z3_version_is_supported(version: &str) -> bool {
+    parse_z3_version(version).is_none_or(|parsed| parsed >= MINIMUM_OPTIMIZE_Z3_VERSION)
+}
+
 fn discover_z3_binary() -> Result<PathBuf, String> {
     let configured = env::var_os("SPUR_Z3_BIN");
     let path = env::var_os("PATH");
@@ -676,7 +695,10 @@ mod tests {
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt as _;
 
-    use super::{discover_z3_binary_from, find_binary_on_path, z3_backstop_seconds};
+    use super::{
+        discover_z3_binary_from, find_binary_on_path, parse_z3_version, z3_backstop_seconds,
+        z3_version_is_supported,
+    };
     use tempfile::TempDir;
     use tokio::time::{Duration, Instant};
 
@@ -744,5 +766,19 @@ mod tests {
         let deadline = Instant::now() + Duration::from_millis(1_500);
 
         assert_eq!(z3_backstop_seconds(deadline), 2);
+    }
+
+    #[test]
+    fn parses_and_checks_supported_z3_versions() {
+        assert_eq!(
+            parse_z3_version("Z3 version 4.16.0 - 64 bit"),
+            Some((4, 16, 0))
+        );
+        assert_eq!(parse_z3_version("unknown"), None);
+        assert_eq!(parse_z3_version("Z3 version 4.8"), None);
+        assert!(!z3_version_is_supported("Z3 version 4.8.11 - 64 bit"));
+        assert!(z3_version_is_supported("Z3 version 4.8.12 - 64 bit"));
+        assert!(z3_version_is_supported("Z3 version 5.0.0"));
+        assert!(z3_version_is_supported("unknown"));
     }
 }

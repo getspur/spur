@@ -23,12 +23,15 @@ use crate::{
         validate_solve_id, ArtifactStore, GetSolveResultResponse, PersistError, SolveArtifact,
     },
     process::{
-        ProcessError, ProcessOutcome, ProcessOutput, ProcessRequest, ProcessRunner, Z3Process,
+        z3_version_is_supported, ProcessError, ProcessOutcome, ProcessOutput, ProcessRequest,
+        ProcessRunner, Z3Process,
     },
     session::{SessionApply, SessionError, SessionStore},
     smt_gate::{validate_smt_script, SmtGateError},
     types::{
-        ModelValue, SessionOp, SolveConstraintsRequest, SolveConstraintsResponse, SolveModel,
+        ModelValue, ObjectiveBound, ObjectivePriority, ObjectiveResult, OptimizationResult,
+        OptimizationSolution, OptimizationTermination, SessionOp, SoftConstraintResult,
+        SoftGroupResult, SolveConstraintsRequest, SolveConstraintsResponse, SolveModel,
         SolveSmtRequest, SolveStatus, Variable, MAX_TIMEOUT_MS,
     },
 };
@@ -261,6 +264,17 @@ impl SolverService {
             }
         }
 
+        if is_optimization_request(&request) {
+            let version = self.runner.solver_version();
+            if !z3_version_is_supported(&version) {
+                return Err(SolverServiceError::SolverUnavailable {
+                    message: format!(
+                        "{version} is unsupported for optimization; install Z3 4.8.12 or newer"
+                    ),
+                });
+            }
+        }
+
         let cacheable = request.use_cache
             && matches!(request.session_op, SessionOp::None)
             && request.session_id.is_none();
@@ -298,9 +312,15 @@ impl SolverService {
         };
         response.session_id = response_session_id;
 
-        // Cache only decisive feasibility outcomes. Never cache unknown/timeout
-        // (incompleteness must not sticky-replay across later solves).
-        if cacheable && matches!(response.status, SolveStatus::Sat | SolveStatus::Unsat) {
+        // Cache only decisive outcomes. Never cache top-level or optimization
+        // incompleteness because it must not sticky-replay across later solves.
+        let optimization_is_decisive = response.optimization.as_ref().is_none_or(|optimization| {
+            optimization.termination != OptimizationTermination::Unknown
+        });
+        if cacheable
+            && matches!(response.status, SolveStatus::Sat | SolveStatus::Unsat)
+            && optimization_is_decisive
+        {
             if let Ok(key) = fingerprint_request(&request) {
                 let mut to_store = response.clone();
                 to_store.cached = false;
@@ -413,6 +433,9 @@ impl SolverService {
         smt: Option<String>,
         mut response: SolveConstraintsResponse,
     ) -> Result<SolveConstraintsResponse, SolverServiceError> {
+        let version = self.runner.solver_version();
+        response.solver_version =
+            (version != crate::persist::UNKNOWN_Z3_VERSION).then_some(version);
         if include_smt {
             response.smt = smt;
         }
@@ -452,8 +475,7 @@ fn response_from_output(
             );
         }
     };
-    let want_cores = request.wants_unsat_cores();
-    let parsed = parse_solver_output(stdout, &request.vars, want_cores);
+    let parsed = parse_typed_solver_output(stdout, request);
     let expected_get_value_failure = output.exit_code == Some(1)
         && parsed
             .as_ref()
@@ -478,8 +500,13 @@ fn response_from_output(
     match parsed {
         Ok(ParsedSolverOutput {
             solve: ParsedSolve::Sat(model),
+            optimization,
             ..
-        }) => response(SolveStatus::Sat, Some(model), started, None, None),
+        }) => {
+            let mut response = response(SolveStatus::Sat, Some(model), started, None, None);
+            response.optimization = optimization;
+            response
+        }
         Ok(ParsedSolverOutput {
             solve: ParsedSolve::Unsat { unsat_core },
             ..
@@ -536,8 +563,13 @@ fn response_from_raw_output(output: ProcessOutput, started: Instant) -> SolveCon
     match parsed {
         Ok(ParsedSolverOutput {
             solve: ParsedSolve::Sat(model),
+            optimization,
             ..
-        }) => response(SolveStatus::Sat, Some(model), started, None, None),
+        }) => {
+            let mut response = response(SolveStatus::Sat, Some(model), started, None, None);
+            response.optimization = optimization;
+            response
+        }
         Ok(ParsedSolverOutput {
             solve: ParsedSolve::Unsat { unsat_core },
             ..
@@ -634,7 +666,23 @@ enum ParsedSolve {
 #[derive(Debug, Eq, PartialEq)]
 struct ParsedSolverOutput {
     solve: ParsedSolve,
+    optimization: Option<OptimizationResult>,
     expected_get_value_failure: bool,
+}
+
+fn is_optimization_request(request: &SolveConstraintsRequest) -> bool {
+    request.has_soft_constraints() || request.has_objectives()
+}
+
+fn parse_typed_solver_output(
+    stdout: &str,
+    request: &SolveConstraintsRequest,
+) -> Result<ParsedSolverOutput, ParseError> {
+    if is_optimization_request(request) {
+        parse_optimization_output(stdout, request)
+    } else {
+        parse_solver_output(stdout, &request.vars, request.wants_unsat_cores())
+    }
 }
 
 fn parse_solver_output(
@@ -651,6 +699,7 @@ fn parse_solver_output(
     match status {
         "sat" => Ok(ParsedSolverOutput {
             solve: parse_sat_output(&forms, variables, want_cores)?,
+            optimization: None,
             expected_get_value_failure: false,
         }),
         "unsat" => {
@@ -658,6 +707,7 @@ fn parse_solver_output(
                 parse_unsat_output(&forms, variables, want_cores)?;
             Ok(ParsedSolverOutput {
                 solve: ParsedSolve::Unsat { unsat_core },
+                optimization: None,
                 expected_get_value_failure,
             })
         }
@@ -665,12 +715,471 @@ fn parse_solver_output(
             let expected_get_value_failure = require_non_sat_output(&forms, variables, "unknown")?;
             Ok(ParsedSolverOutput {
                 solve: ParsedSolve::Unknown,
+                optimization: None,
                 expected_get_value_failure,
             })
         }
         other => Err(ParseError::new(format!(
             "unexpected solver status `{other}`"
         ))),
+    }
+}
+
+fn parse_optimization_output(
+    stdout: &str,
+    request: &SolveConstraintsRequest,
+) -> Result<ParsedSolverOutput, ParseError> {
+    let forms = SExpressionParser::new(stdout).parse_all()?;
+    let cycle_count = optimization_cycle_count(request);
+    let objective_count = optimization_objective_count(request);
+    let mut cursor = 0;
+    let mut solutions = Vec::new();
+    let mut semantic_termination = None;
+    let mut expected_get_value_failure = false;
+
+    for cycle_index in 0..cycle_count {
+        if cursor >= forms.len() {
+            if semantic_termination.is_some() {
+                break;
+            }
+            return Err(ParseError::new(format!(
+                "missing status for optimization cycle {}",
+                cycle_index + 1
+            )));
+        }
+        let status = optimization_status_at(&forms, cursor, "optimization cycle")?;
+        cursor += 1;
+
+        if semantic_termination.is_none() {
+            match status {
+                "sat" => {
+                    let objectives = forms.get(cursor).ok_or_else(|| {
+                        ParseError::new("sat optimization cycle missing objectives response")
+                    })?;
+                    cursor += 1;
+                    let values = forms.get(cursor).ok_or_else(|| {
+                        ParseError::new(
+                            "sat optimization cycle missing combined get-value response",
+                        )
+                    })?;
+                    cursor += 1;
+                    solutions.push(parse_optimization_solution(
+                        request,
+                        objectives,
+                        values,
+                        objective_count,
+                    )?);
+                    continue;
+                }
+                "unsat" => semantic_termination = Some(OptimizationTermination::Complete),
+                "unknown" => semantic_termination = Some(OptimizationTermination::Unknown),
+                other => {
+                    return Err(ParseError::new(format!(
+                        "unexpected solver status `{other}` in optimization cycle"
+                    )))
+                }
+            }
+        }
+
+        // Every `sat` status denotes a complete optimization cycle, even after
+        // an earlier non-sat status has already established termination.
+        if status == "sat" || cursor < forms.len() && forms[cursor].as_atom().is_none() {
+            consume_ignored_optimization_payload(
+                &forms,
+                &mut cursor,
+                status,
+                request,
+                objective_count,
+                &mut expected_get_value_failure,
+            )?;
+        }
+    }
+
+    let mut termination = semantic_termination;
+    if cursor < forms.len() {
+        let terminal = optimization_status_at(&forms, cursor, "optimization terminal probe")?;
+        cursor += 1;
+        if termination.is_none() {
+            termination = Some(match (request.objective_priority, terminal) {
+                (ObjectivePriority::Pareto, "sat") => OptimizationTermination::SolutionLimit,
+                (ObjectivePriority::Pareto | ObjectivePriority::Box, "unsat") => {
+                    OptimizationTermination::Complete
+                }
+                (ObjectivePriority::Pareto | ObjectivePriority::Box, "unknown") => {
+                    OptimizationTermination::Unknown
+                }
+                (ObjectivePriority::Box, "sat") => {
+                    return Err(ParseError::new(
+                        "box terminal probe unexpectedly returned sat",
+                    ))
+                }
+                (ObjectivePriority::Lex, _) => {
+                    return Err(ParseError::new(
+                        "unexpected terminal status after lex cycle",
+                    ))
+                }
+                (_, other) => {
+                    return Err(ParseError::new(format!(
+                        "unexpected optimization terminal status `{other}`"
+                    )))
+                }
+            });
+        }
+    }
+
+    if cursor != forms.len() {
+        return Err(ParseError::new("unexpected extra optimization output form"));
+    }
+
+    if solutions.is_empty() {
+        return match termination {
+            Some(OptimizationTermination::Unknown) => Ok(ParsedSolverOutput {
+                solve: ParsedSolve::Unknown,
+                optimization: None,
+                expected_get_value_failure,
+            }),
+            Some(OptimizationTermination::Complete) => Ok(ParsedSolverOutput {
+                solve: ParsedSolve::Unsat { unsat_core: None },
+                optimization: None,
+                expected_get_value_failure,
+            }),
+            Some(OptimizationTermination::SolutionLimit) | None => Err(ParseError::new(
+                "optimization completed without a satisfiable solution",
+            )),
+        };
+    }
+
+    let termination = termination.unwrap_or(OptimizationTermination::Complete);
+    let model = solutions[0].model.clone();
+    Ok(ParsedSolverOutput {
+        solve: ParsedSolve::Sat(model),
+        optimization: Some(OptimizationResult {
+            priority: Some(request.objective_priority),
+            solutions,
+            termination,
+        }),
+        expected_get_value_failure,
+    })
+}
+
+fn status_at(forms: &[SExpression], cursor: usize) -> Result<&str, ParseError> {
+    forms
+        .get(cursor)
+        .and_then(SExpression::as_atom)
+        .ok_or_else(|| ParseError::new(format!("expected status atom at output form {cursor}")))
+}
+
+fn optimization_status_at<'a>(
+    forms: &'a [SExpression],
+    cursor: usize,
+    context: &str,
+) -> Result<&'a str, ParseError> {
+    let status = status_at(forms, cursor)?;
+    if matches!(status, "sat" | "unsat" | "unknown") {
+        Ok(status)
+    } else {
+        Err(ParseError::new(format!(
+            "unexpected solver status `{status}` in {context}"
+        )))
+    }
+}
+
+fn consume_ignored_optimization_payload(
+    forms: &[SExpression],
+    cursor: &mut usize,
+    status: &str,
+    request: &SolveConstraintsRequest,
+    objective_count: usize,
+    expected_get_value_failure: &mut bool,
+) -> Result<(), ParseError> {
+    let objectives = forms
+        .get(*cursor)
+        .ok_or_else(|| ParseError::new("missing ignored objectives response"))?;
+    objective_entries(objectives, Some(objective_count))?;
+    *cursor += 1;
+
+    let values = forms
+        .get(*cursor)
+        .ok_or_else(|| ParseError::new("missing ignored combined get-value response"))?;
+    if values.is_model_unavailable_error() {
+        if status == "sat" {
+            return Err(ParseError::new(
+                "sat optimization cycle returned a model-unavailable error",
+            ));
+        }
+        *expected_get_value_failure = true;
+    } else {
+        if status != "sat" {
+            return Err(ParseError::new(format!(
+                "{status} optimization cycle unexpectedly returned model values"
+            )));
+        }
+        let expected_values = request.vars.len()
+            + request
+                .constraints
+                .iter()
+                .filter(|constraint| constraint.is_soft())
+                .count()
+            + request.objectives.len();
+        combined_value_bindings(values, expected_values)?;
+    }
+    *cursor += 1;
+    Ok(())
+}
+
+fn optimization_cycle_count(request: &SolveConstraintsRequest) -> usize {
+    match request.objective_priority {
+        ObjectivePriority::Lex => 1,
+        ObjectivePriority::Pareto => request.max_solutions,
+        ObjectivePriority::Box => optimization_objective_count(request),
+    }
+}
+
+fn optimization_objective_count(request: &SolveConstraintsRequest) -> usize {
+    soft_group_order(request).len() + request.objectives.len()
+}
+
+fn soft_group_order(request: &SolveConstraintsRequest) -> Vec<Option<&str>> {
+    let mut groups = Vec::new();
+    for constraint in request
+        .constraints
+        .iter()
+        .filter(|constraint| constraint.is_soft())
+    {
+        let group = constraint.group();
+        if !groups.contains(&group) {
+            groups.push(group);
+        }
+    }
+    groups
+}
+
+fn parse_optimization_solution(
+    request: &SolveConstraintsRequest,
+    objectives_form: &SExpression,
+    values_form: &SExpression,
+    objective_count: usize,
+) -> Result<OptimizationSolution, ParseError> {
+    let entries = objective_entries(objectives_form, Some(objective_count))?;
+    let soft_groups = soft_group_order(request);
+    validate_soft_objective_entries(entries, &soft_groups)?;
+
+    let soft_constraints: Vec<_> = request
+        .constraints
+        .iter()
+        .enumerate()
+        .filter(|(_, constraint)| constraint.is_soft())
+        .collect();
+    let expected_values = request.vars.len() + soft_constraints.len() + request.objectives.len();
+    let bindings = combined_value_bindings(values_form, expected_values)?;
+
+    let mut model = BTreeMap::new();
+    for (variable, binding) in request.vars.iter().zip(bindings.iter()) {
+        let symbol = binding[0]
+            .as_atom()
+            .ok_or_else(|| ParseError::new("declared-variable binding must use a symbol"))?;
+        let expected = mangled_symbol(variable.name());
+        if symbol != expected {
+            return Err(ParseError::new(format!(
+                "expected declared-variable symbol `{expected}`, found `{symbol}`"
+            )));
+        }
+        if model
+            .insert(
+                variable.name().to_owned(),
+                parse_model_value(variable, &binding[1])?,
+            )
+            .is_some()
+        {
+            return Err(ParseError::new(format!(
+                "duplicate declared-variable binding `{symbol}`"
+            )));
+        }
+    }
+
+    let soft_start = request.vars.len();
+    let mut soft_results = Vec::with_capacity(soft_constraints.len());
+    for ((index, constraint), binding) in soft_constraints.iter().zip(bindings[soft_start..].iter())
+    {
+        let satisfied = match binding[1].as_atom() {
+            Some("true") => true,
+            Some("false") => false,
+            _ => {
+                return Err(ParseError::new(format!(
+                    "soft constraint {index} returned a non-Boolean value"
+                )))
+            }
+        };
+        soft_results.push(SoftConstraintResult {
+            index: *index,
+            id: constraint.id().map(str::to_owned),
+            group: constraint.group().map(str::to_owned),
+            weight: constraint.soft_weight().ok_or_else(|| {
+                ParseError::new(format!("soft constraint {index} is missing a weight"))
+            })?,
+            satisfied,
+        });
+    }
+
+    let objective_start = soft_start + soft_constraints.len();
+    let explicit_entries = &entries[soft_groups.len()..];
+    let mut objective_results = Vec::with_capacity(request.objectives.len());
+    for ((objective, entry), binding) in request
+        .objectives
+        .iter()
+        .zip(explicit_entries)
+        .zip(bindings[objective_start..].iter())
+    {
+        let fields = entry
+            .as_list()
+            .ok_or_else(|| ParseError::new("explicit objective entry must be a list"))?;
+        if fields.len() != 2 {
+            return Err(ParseError::new(
+                "explicit objective entry must contain expression and bound",
+            ));
+        }
+        if fields[0] != binding[0] {
+            return Err(ParseError::new(
+                "objective response expression does not match get-value expression",
+            ));
+        }
+        objective_results.push(ObjectiveResult {
+            op: Some(objective.op),
+            value: parse_raw_model_value(&binding[1]),
+            bound: classify_bound(&fields[1]),
+        });
+    }
+
+    Ok(OptimizationSolution {
+        model,
+        objectives: objective_results,
+        soft_constraints: soft_results.clone(),
+        groups: aggregate_soft_groups(&soft_results)?,
+    })
+}
+
+fn objective_entries(
+    form: &SExpression,
+    expected_count: Option<usize>,
+) -> Result<&[SExpression], ParseError> {
+    let values = form
+        .as_list()
+        .ok_or_else(|| ParseError::new("objectives response must be a list"))?;
+    if values.first().and_then(SExpression::as_atom) != Some("objectives") {
+        return Err(ParseError::new(
+            "expected objectives response before combined get-value response",
+        ));
+    }
+    let entries = &values[1..];
+    if let Some(expected_count) = expected_count {
+        if entries.len() != expected_count {
+            return Err(ParseError::new(format!(
+                "objectives response returned {} entries, expected {expected_count}",
+                entries.len()
+            )));
+        }
+    }
+    Ok(entries)
+}
+
+fn is_objectives_form(form: &SExpression) -> bool {
+    form.as_list()
+        .and_then(|values| values.first())
+        .and_then(SExpression::as_atom)
+        == Some("objectives")
+}
+
+fn validate_soft_objective_entries(
+    entries: &[SExpression],
+    groups: &[Option<&str>],
+) -> Result<(), ParseError> {
+    for (entry, group) in entries.iter().zip(groups) {
+        let fields = entry
+            .as_list()
+            .ok_or_else(|| ParseError::new("soft objective entry must be a list"))?;
+        match group {
+            None if fields.len() == 1 => {}
+            Some(expected) if fields.len() == 2 && fields[0].as_atom() == Some(*expected) => {}
+            None => {
+                return Err(ParseError::new(
+                    "anonymous soft objective entry must contain exactly one bound",
+                ))
+            }
+            Some(expected) => {
+                return Err(ParseError::new(format!(
+                    "expected soft objective group `{expected}`"
+                )))
+            }
+        }
+    }
+    Ok(())
+}
+
+fn combined_value_bindings(
+    form: &SExpression,
+    expected_count: usize,
+) -> Result<Vec<&[SExpression]>, ParseError> {
+    let values = form
+        .as_list()
+        .ok_or_else(|| ParseError::new("combined get-value response must be a list"))?;
+    if values.len() != expected_count {
+        return Err(ParseError::new(format!(
+            "combined get-value returned {} bindings, expected {expected_count}",
+            values.len()
+        )));
+    }
+    values
+        .iter()
+        .map(|binding| {
+            let pair = binding
+                .as_list()
+                .ok_or_else(|| ParseError::new("combined get-value binding must be a pair"))?;
+            if pair.len() != 2 {
+                return Err(ParseError::new(
+                    "combined get-value binding must contain expression and value",
+                ));
+            }
+            Ok(pair)
+        })
+        .collect()
+}
+
+fn aggregate_soft_groups(
+    soft_constraints: &[SoftConstraintResult],
+) -> Result<Vec<SoftGroupResult>, ParseError> {
+    let mut groups: Vec<SoftGroupResult> = Vec::new();
+    for constraint in soft_constraints {
+        let position = groups
+            .iter()
+            .position(|group| group.group == constraint.group)
+            .unwrap_or_else(|| {
+                groups.push(SoftGroupResult {
+                    group: constraint.group.clone(),
+                    satisfied_weight: 0,
+                    violated_weight: 0,
+                });
+                groups.len() - 1
+            });
+        let total = if constraint.satisfied {
+            &mut groups[position].satisfied_weight
+        } else {
+            &mut groups[position].violated_weight
+        };
+        *total = total.checked_add(constraint.weight).ok_or_else(|| {
+            ParseError::new("soft group weight total exceeds signed 64-bit range")
+        })?;
+    }
+    Ok(groups)
+}
+
+fn classify_bound(expression: &SExpression) -> ObjectiveBound {
+    let exact = render_s_expression(expression);
+    if expression.contains_atom("oo") {
+        ObjectiveBound::Infinite { exact }
+    } else if expression.contains_atom("epsilon") {
+        ObjectiveBound::Strict { exact }
+    } else {
+        ObjectiveBound::Finite { exact }
     }
 }
 
@@ -682,18 +1191,24 @@ fn parse_raw_solver_output(stdout: &str) -> Result<ParsedSolverOutput, ParseErro
         .ok_or_else(|| ParseError::new("expected status atom as first output form"))?;
 
     match status {
-        "sat" => Ok(ParsedSolverOutput {
-            solve: parse_raw_sat_output(&forms)?,
-            expected_get_value_failure: false,
-        }),
+        "sat" => {
+            let (solve, optimization) = parse_raw_sat_output(&forms)?;
+            Ok(ParsedSolverOutput {
+                solve,
+                optimization,
+                expected_get_value_failure: false,
+            })
+        }
         "unsat" => Ok(ParsedSolverOutput {
             solve: ParsedSolve::Unsat {
                 unsat_core: extract_raw_unsat_core(&forms),
             },
+            optimization: None,
             expected_get_value_failure: require_raw_non_sat_output(&forms, "unsat")?,
         }),
         "unknown" => Ok(ParsedSolverOutput {
             solve: ParsedSolve::Unknown,
+            optimization: None,
             expected_get_value_failure: require_raw_non_sat_output(&forms, "unknown")?,
         }),
         other => Err(ParseError::new(format!(
@@ -704,6 +1219,9 @@ fn parse_raw_solver_output(stdout: &str) -> Result<ParsedSolverOutput, ParseErro
 
 fn extract_raw_unsat_core(forms: &[SExpression]) -> Option<Vec<String>> {
     forms.iter().skip(1).find_map(|form| {
+        if is_objectives_form(form) {
+            return None;
+        }
         let values = form.as_list()?;
         // A core is a list of atoms (assertion names). Skip error forms and models.
         if values.iter().all(|item| item.as_atom().is_some()) {
@@ -720,14 +1238,66 @@ fn extract_raw_unsat_core(forms: &[SExpression]) -> Option<Vec<String>> {
     })
 }
 
-fn parse_raw_sat_output(forms: &[SExpression]) -> Result<ParsedSolve, ParseError> {
-    match forms {
-        [_status] => Ok(ParsedSolve::Sat(BTreeMap::new())),
-        [_status, model] => Ok(ParsedSolve::Sat(parse_raw_model(model)?)),
-        _ => Err(ParseError::new(
-            "sat output must contain at most one model or get-value response",
-        )),
+fn parse_raw_sat_output(
+    forms: &[SExpression],
+) -> Result<(ParsedSolve, Option<OptimizationResult>), ParseError> {
+    let mut model_form = None;
+    let mut objectives_form = None;
+    for form in forms.iter().skip(1) {
+        if is_objectives_form(form) {
+            if objectives_form.replace(form).is_some() {
+                return Err(ParseError::new(
+                    "raw sat output must contain at most one objectives response",
+                ));
+            }
+        } else if model_form.replace(form).is_some() {
+            return Err(ParseError::new(
+                "raw sat output must contain at most one model or get-value response",
+            ));
+        }
     }
+
+    let model = model_form
+        .map(parse_raw_model)
+        .transpose()?
+        .unwrap_or_default();
+    let optimization = if let Some(objectives_form) = objectives_form {
+        let objectives = raw_objective_results(objectives_form)?;
+        let solution = OptimizationSolution {
+            model: model.clone(),
+            objectives,
+            soft_constraints: Vec::new(),
+            groups: Vec::new(),
+        };
+        Some(OptimizationResult {
+            priority: None,
+            solutions: vec![solution],
+            termination: OptimizationTermination::Complete,
+        })
+    } else {
+        None
+    };
+
+    Ok((ParsedSolve::Sat(model), optimization))
+}
+
+fn raw_objective_results(form: &SExpression) -> Result<Vec<ObjectiveResult>, ParseError> {
+    objective_entries(form, None)?
+        .iter()
+        .map(|entry| {
+            let values = entry
+                .as_list()
+                .ok_or_else(|| ParseError::new("objective entry must be a list"))?;
+            let bound = values
+                .last()
+                .ok_or_else(|| ParseError::new("objective entry must contain a bound"))?;
+            Ok(ObjectiveResult {
+                op: None,
+                value: parse_raw_model_value(bound),
+                bound: classify_bound(bound),
+            })
+        })
+        .collect()
 }
 
 fn parse_raw_model(form: &SExpression) -> Result<SolveModel, ParseError> {
@@ -856,9 +1426,20 @@ fn require_raw_non_sat_output(forms: &[SExpression], status: &str) -> Result<boo
     }
     // Accept model-unavailable errors and optional unsat-core atom lists.
     let mut saw_model_error = false;
+    let mut saw_objectives = false;
     for form in forms.iter().skip(1) {
         if form.is_model_unavailable_error() || form.is_unsat_core_unavailable_error() {
             saw_model_error = true;
+            continue;
+        }
+        if is_objectives_form(form) {
+            if saw_objectives {
+                return Err(ParseError::new(format!(
+                    "multiple objectives responses after `{status}` status"
+                )));
+            }
+            raw_objective_results(form)?;
+            saw_objectives = true;
             continue;
         }
         if form
@@ -1143,6 +1724,14 @@ impl SExpression {
         }
     }
 
+    fn contains_atom(&self, needle: &str) -> bool {
+        match self {
+            Self::Atom(atom) => atom == needle,
+            Self::String(_) => false,
+            Self::List(values) => values.iter().any(|value| value.contains_atom(needle)),
+        }
+    }
+
     fn is_model_unavailable_error(&self) -> bool {
         self.is_error_containing("model is not available")
     }
@@ -1309,8 +1898,40 @@ impl ParseError {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_solver_output, ParsedSolve, SExpressionParser};
-    use crate::types::{ModelValue, Variable};
+    use std::{
+        future,
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        },
+    };
+
+    use super::{
+        classify_bound, parse_solver_output, response_from_output, response_from_raw_output,
+        ParsedSolve, SExpressionParser, SolverService, SolverServiceError,
+    };
+    use crate::{
+        persist::UNKNOWN_Z3_VERSION,
+        process::{ProcessFuture, ProcessOutcome, ProcessOutput, ProcessRequest, ProcessRunner},
+        types::{
+            ModelValue, ObjectiveBound, OptimizationTermination, SolveConstraintsRequest,
+            SolveStatus, Variable,
+        },
+    };
+    use tokio::time::Instant;
+
+    fn request(value: serde_json::Value) -> SolveConstraintsRequest {
+        serde_json::from_value(value).expect("request fixture must deserialize")
+    }
+
+    fn completed(stdout: &str) -> ProcessOutput {
+        ProcessOutput {
+            success: true,
+            exit_code: Some(0),
+            stdout: stdout.as_bytes().to_vec(),
+            stderr: Vec::new(),
+        }
+    }
 
     #[test]
     fn parses_minimum_integer_from_z3_unary_minus_form() {
@@ -1387,5 +2008,411 @@ mod tests {
             .expect_err("deep solver output must fail before exhausting the stack");
 
         assert!(error.to_string().contains("nesting"));
+    }
+
+    #[test]
+    fn classifies_finite_infinite_negative_infinite_and_strict_bounds_losslessly() {
+        let forms = SExpressionParser::new("3 oo (* (- 1) oo) (+ 1.0 (* (- 1.0) epsilon))")
+            .parse_all()
+            .expect("bound fixtures must parse");
+
+        assert_eq!(
+            classify_bound(&forms[0]),
+            ObjectiveBound::Finite {
+                exact: "3".to_owned()
+            }
+        );
+        assert_eq!(
+            classify_bound(&forms[1]),
+            ObjectiveBound::Infinite {
+                exact: "oo".to_owned()
+            }
+        );
+        assert_eq!(
+            classify_bound(&forms[2]),
+            ObjectiveBound::Infinite {
+                exact: "(* (- 1) oo)".to_owned()
+            }
+        );
+        assert_eq!(
+            classify_bound(&forms[3]),
+            ObjectiveBound::Strict {
+                exact: "(+ 1.0 (* (- 1.0) epsilon))".to_owned()
+            }
+        );
+    }
+
+    #[test]
+    fn parses_typed_lex_cycle_and_derives_soft_group_diagnostics() {
+        let request = request(serde_json::json!({
+            "vars": [
+                {"type":"int","name":"x"},
+                {"type":"bool","name":"a"},
+                {"type":"bool","name":"b"}
+            ],
+            "constraints": [
+                {"kind":"bool","value":true},
+                {"id":"prefer_a","group":"preferences","soft":true,"weight":2,
+                 "expr":{"kind":"var","name":"a"}},
+                {"id":"prefer_b","group":"preferences","soft":true,"weight":3,
+                 "expr":{"kind":"var","name":"b"}}
+            ],
+            "objectives": [{"op":"maximize","expr":{"kind":"var","name":"x"}}],
+            "use_cache": false
+        }));
+        let response = response_from_output(
+            &request,
+            completed(
+                "sat\n(objectives (preferences 3) (v_x (+ 4 epsilon)))\n\
+                 ((v_x 4) (v_a true) (v_b false) (v_a true) (v_b false) (v_x 4))\n",
+            ),
+            Instant::now(),
+        );
+
+        assert_eq!(response.status, SolveStatus::Sat, "{response:?}");
+        let optimization = response.optimization.expect("optimization payload");
+        assert_eq!(optimization.termination, OptimizationTermination::Complete);
+        let solution = &optimization.solutions[0];
+        assert_eq!(solution.objectives[0].value, ModelValue::Int(4));
+        assert!(matches!(
+            &solution.objectives[0].bound,
+            ObjectiveBound::Strict { exact } if exact == "(+ 4 epsilon)"
+        ));
+        assert_eq!(solution.soft_constraints[0].index, 1);
+        assert!(solution.soft_constraints[0].satisfied);
+        assert_eq!(solution.soft_constraints[1].index, 2);
+        assert!(!solution.soft_constraints[1].satisfied);
+        assert_eq!(solution.groups[0].group.as_deref(), Some("preferences"));
+        assert_eq!(solution.groups[0].satisfied_weight, 2);
+        assert_eq!(solution.groups[0].violated_weight, 3);
+    }
+
+    #[test]
+    fn classifies_pareto_terminal_statuses_after_solutions() {
+        let complete_request = request(serde_json::json!({
+            "vars": [{"type":"int","name":"x"}],
+            "constraints": [],
+            "objectives": [{"op":"maximize","expr":{"kind":"var","name":"x"}}],
+            "objective_priority": "pareto",
+            "max_solutions": 2,
+            "use_cache": false
+        }));
+        let one_solution = "sat\n(objectives (v_x 1))\n((v_x 1) (v_x 1))\n";
+        let complete = response_from_output(
+            &complete_request,
+            completed(&format!("{one_solution}unsat\n")),
+            Instant::now(),
+        );
+        assert_eq!(
+            complete.optimization.unwrap().termination,
+            OptimizationTermination::Complete
+        );
+
+        let limited = response_from_output(
+            &complete_request,
+            completed(&format!(
+                "{one_solution}sat\n(objectives (v_x 2))\n((v_x 2) (v_x 2))\nsat\n"
+            )),
+            Instant::now(),
+        );
+        assert_eq!(
+            limited.optimization.unwrap().termination,
+            OptimizationTermination::SolutionLimit
+        );
+
+        let partial = response_from_output(
+            &complete_request,
+            completed(&format!("{one_solution}unknown\n")),
+            Instant::now(),
+        );
+        assert_eq!(partial.status, SolveStatus::Sat);
+        assert_eq!(
+            partial.optimization.unwrap().termination,
+            OptimizationTermination::Unknown
+        );
+
+        let initial_unknown =
+            response_from_output(&complete_request, completed("unknown\n"), Instant::now());
+        assert_eq!(initial_unknown.status, SolveStatus::Unknown);
+        assert!(initial_unknown.optimization.is_none());
+    }
+
+    #[test]
+    fn rejects_invalid_status_atoms_after_semantic_termination() {
+        let one_solution = "sat\n(objectives (v_x 1))\n((v_x 1) (v_x 1))\n";
+        for max_solutions in [2, 3] {
+            let request = request(serde_json::json!({
+                "vars": [{"type":"int","name":"x"}],
+                "constraints": [],
+                "objectives": [{"op":"maximize","expr":{"kind":"var","name":"x"}}],
+                "objective_priority": "pareto",
+                "max_solutions": max_solutions,
+                "use_cache": false
+            }));
+            let response = response_from_output(
+                &request,
+                completed(&format!("{one_solution}unsat\nbogus\n")),
+                Instant::now(),
+            );
+
+            assert_eq!(response.status, SolveStatus::Error, "{response:?}");
+            assert!(response
+                .reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("bogus")));
+        }
+    }
+
+    #[test]
+    fn rejects_payloadless_sat_cycle_after_semantic_termination() {
+        let request = request(serde_json::json!({
+            "vars": [{"type":"int","name":"x"}],
+            "constraints": [],
+            "objectives": [{"op":"maximize","expr":{"kind":"var","name":"x"}}],
+            "objective_priority": "pareto",
+            "max_solutions": 3,
+            "use_cache": false
+        }));
+        let response = response_from_output(
+            &request,
+            completed(
+                "sat\n(objectives (v_x 1))\n((v_x 1) (v_x 1))\n\
+                 unsat\nsat\nunsat\n",
+            ),
+            Instant::now(),
+        );
+
+        assert_eq!(response.status, SolveStatus::Error, "{response:?}");
+    }
+
+    #[test]
+    fn parses_box_cycles_positionally_and_rejects_missing_payload() {
+        let request = request(serde_json::json!({
+            "vars": [{"type":"int","name":"x"},{"type":"int","name":"y"}],
+            "constraints": [],
+            "objectives": [
+                {"op":"maximize","expr":{"kind":"var","name":"x"}},
+                {"op":"maximize","expr":{"kind":"var","name":"y"}}
+            ],
+            "objective_priority": "box",
+            "use_cache": false
+        }));
+        let response = response_from_output(
+            &request,
+            completed(
+                "sat\n(objectives (v_x 3) (v_y 3))\n\
+                 ((v_x 3) (v_y 0) (v_x 3) (v_y 0))\n\
+                 sat\n(objectives (v_x 3) (v_y 3))\n\
+                 ((v_x 0) (v_y 3) (v_x 0) (v_y 3))\nunsat\n",
+            ),
+            Instant::now(),
+        );
+        assert_eq!(response.status, SolveStatus::Sat, "{response:?}");
+        assert_eq!(response.optimization.unwrap().solutions.len(), 2);
+
+        let malformed = response_from_output(
+            &request,
+            completed("sat\n(objectives (v_x 3) (v_y 3))\n"),
+            Instant::now(),
+        );
+        assert_eq!(malformed.status, SolveStatus::Error);
+        assert!(malformed.reason.unwrap().contains("combined get-value"));
+    }
+
+    #[test]
+    fn raw_objective_output_is_exposed_with_unknown_metadata() {
+        let response = response_from_raw_output(
+            completed("sat\n(objectives (v_x (* (- 1) oo)))\n"),
+            Instant::now(),
+        );
+
+        assert_eq!(response.status, SolveStatus::Sat, "{response:?}");
+        let optimization = response.optimization.expect("raw objective payload");
+        assert_eq!(optimization.priority, None);
+        assert_eq!(optimization.solutions[0].objectives[0].op, None);
+        assert_eq!(
+            optimization.solutions[0].objectives[0].value,
+            ModelValue::Enum("(* (- 1) oo)".to_owned())
+        );
+        assert!(matches!(
+            optimization.solutions[0].objectives[0].bound,
+            ObjectiveBound::Infinite { .. }
+        ));
+    }
+
+    #[test]
+    fn raw_sat_objectives_and_model_are_order_independent() {
+        for stdout in [
+            "sat\n((x 0))\n(objectives (x (* (- 1) oo)))\n",
+            "sat\n(objectives (x (* (- 1) oo)))\n((x 0))\n",
+        ] {
+            let response = response_from_raw_output(completed(stdout), Instant::now());
+
+            assert_eq!(response.status, SolveStatus::Sat, "{response:?}");
+            assert_eq!(
+                response.model.as_ref().and_then(|model| model.get("x")),
+                Some(&ModelValue::Int(0))
+            );
+            assert!(response.optimization.is_some());
+        }
+
+        for stdout in [
+            "sat\n((x 0))\n((x 1))\n",
+            "sat\n(objectives (x 0))\n(objectives (x 1))\n",
+        ] {
+            let response = response_from_raw_output(completed(stdout), Instant::now());
+
+            assert_eq!(response.status, SolveStatus::Error, "{response:?}");
+        }
+    }
+
+    #[test]
+    fn raw_non_sat_objectives_are_validated_and_ignored() {
+        for (stdout, expected_status) in [
+            ("unsat\n(objectives (x 0))\n", SolveStatus::Unsat),
+            ("unknown\n(objectives (x 0))\n", SolveStatus::Unknown),
+        ] {
+            let response = response_from_raw_output(completed(stdout), Instant::now());
+
+            assert_eq!(response.status, expected_status, "{response:?}");
+            assert!(response.optimization.is_none());
+        }
+
+        let malformed =
+            response_from_raw_output(completed("unsat\n(objectives malformed)\n"), Instant::now());
+        assert_eq!(malformed.status, SolveStatus::Error, "{malformed:?}");
+    }
+
+    #[test]
+    fn raw_empty_objectives_after_unsat_are_not_an_unsat_core() {
+        let response =
+            response_from_raw_output(completed("unsat\n(objectives\n)\n"), Instant::now());
+
+        assert_eq!(response.status, SolveStatus::Unsat, "{response:?}");
+        assert!(response.optimization.is_none());
+        assert!(response.unsat_core.is_none());
+    }
+
+    #[derive(Debug)]
+    struct VersionRunner {
+        version: &'static str,
+        runs: AtomicUsize,
+    }
+
+    impl VersionRunner {
+        const fn new(version: &'static str) -> Self {
+            Self {
+                version,
+                runs: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl ProcessRunner for VersionRunner {
+        fn run(&self, _request: ProcessRequest) -> ProcessFuture<'_> {
+            self.runs.fetch_add(1, Ordering::SeqCst);
+            Box::pin(future::ready(Ok(ProcessOutcome::Completed(completed(
+                "sat\n(objectives (v_x 1))\n((v_x 1) (v_x 1))\n",
+            )))))
+        }
+
+        fn solver_version(&self) -> String {
+            self.version.to_owned()
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct SequentialOptimizationRunner {
+        runs: AtomicUsize,
+    }
+
+    impl ProcessRunner for SequentialOptimizationRunner {
+        fn run(&self, _request: ProcessRequest) -> ProcessFuture<'_> {
+            let run = self.runs.fetch_add(1, Ordering::SeqCst);
+            let terminal = if run == 0 { "unknown" } else { "unsat" };
+            Box::pin(future::ready(Ok(ProcessOutcome::Completed(completed(
+                &format!("sat\n(objectives (v_x 1))\n((v_x 1) (v_x 1))\n{terminal}\n"),
+            )))))
+        }
+
+        fn solver_version(&self) -> String {
+            UNKNOWN_Z3_VERSION.to_owned()
+        }
+    }
+
+    #[tokio::test]
+    async fn partial_unknown_optimization_results_are_not_cached() {
+        let runner = Arc::new(SequentialOptimizationRunner::default());
+        let service_runner: Arc<dyn ProcessRunner> = Arc::clone(&runner) as Arc<dyn ProcessRunner>;
+        let service = SolverService::with_runner(service_runner);
+        let request = request(serde_json::json!({
+            "vars": [{"type":"int","name":"x"}],
+            "constraints": [],
+            "objectives": [{"op":"maximize","expr":{"kind":"var","name":"x"}}],
+            "objective_priority": "pareto",
+            "max_solutions": 1,
+            "use_cache": true
+        }));
+
+        let first = service
+            .solve_constraints(request.clone())
+            .await
+            .expect("partial solve must succeed");
+        assert_eq!(
+            first.optimization.as_ref().unwrap().termination,
+            OptimizationTermination::Unknown
+        );
+
+        let second = service
+            .solve_constraints(request)
+            .await
+            .expect("later solve must execute again");
+        assert_eq!(
+            second.optimization.as_ref().unwrap().termination,
+            OptimizationTermination::Complete
+        );
+        assert_eq!(runner.runs.load(Ordering::SeqCst), 2);
+        assert!(!second.cached);
+    }
+
+    fn version_request() -> SolveConstraintsRequest {
+        request(serde_json::json!({
+            "vars": [{"type":"int","name":"x"}],
+            "constraints": [],
+            "objectives": [{"op":"maximize","expr":{"kind":"var","name":"x"}}],
+            "use_cache": false
+        }))
+    }
+
+    #[tokio::test]
+    async fn optimization_rejects_old_z3_before_execution_and_exposes_accepted_version() {
+        let old_runner = Arc::new(VersionRunner::new("Z3 version 4.8.11 - 64 bit"));
+        let service_runner: Arc<dyn ProcessRunner> = Arc::<VersionRunner>::clone(&old_runner);
+        let error = SolverService::with_runner(service_runner)
+            .solve_constraints(version_request())
+            .await
+            .expect_err("old production Z3 must be rejected");
+        assert!(matches!(
+            error,
+            SolverServiceError::SolverUnavailable { .. }
+        ));
+        assert_eq!(old_runner.runs.load(Ordering::SeqCst), 0);
+
+        let current_runner = Arc::new(VersionRunner::new("Z3 version 4.16.0 - 64 bit"));
+        let response = SolverService::with_runner(current_runner)
+            .solve_constraints(version_request())
+            .await
+            .expect("supported Z3 must run");
+        assert_eq!(
+            response.solver_version.as_deref(),
+            Some("Z3 version 4.16.0 - 64 bit")
+        );
+
+        let unknown_runner = Arc::new(VersionRunner::new(UNKNOWN_Z3_VERSION));
+        let response = SolverService::with_runner(unknown_runner)
+            .solve_constraints(version_request())
+            .await
+            .expect("unknown injected runner versions stay allowed");
+        assert_eq!(response.status, SolveStatus::Sat);
     }
 }
