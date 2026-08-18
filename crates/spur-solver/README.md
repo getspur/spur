@@ -10,7 +10,7 @@ Constraint **model-finding** for SPUR coding agents.
 | Silent rule violations ship | **`unsat`** surfaces impossibility before code |
 | Brain→worker drift on “reasonable” numbers | Shared `solve_id` / model map |
 
-**v1.x scope:** model-finding plus named hard unsat cores, soft (`assert-soft`) preferences, and typed νZ `maximize`/`minimize` objectives over integer expressions.
+**v1.x scope:** model-finding plus named hard unsat cores, weighted soft (`assert-soft`) preferences, typed Int/Real/BitVec νZ objectives, and lex, bounded Pareto, or box result collection.
 
 Design: [`docs/superpowers/specs/2026-07-25-z3-constraint-solver-design.md`](../../docs/superpowers/specs/2026-07-25-z3-constraint-solver-design.md)
 
@@ -347,14 +347,18 @@ src/
 | `int` | `name` | Int (prefer `int_range` when bounds known) |
 | `int_range` | `name`, `min`, `max` | Int + bound asserts |
 | `enum` | `name`, `values[]` | Int indices; model maps back to labels |
+| `real` | `name` | Real; model values preserve decimal/fraction text |
+| `bit_vec` | `name`, `width` | `(_ BitVec width)`; `width` is in `1..=64` |
 
 | Op class | Ops | Notes |
 |---|---|---|
-| Compare | `eq`, `ne`, `lt`, `le`, `gt`, `ge` | Enums: only `eq` / `ne` vs labels |
-| Arith | `add`, `sub`, `mul` | No `div` in v1 |
+| Compare | `eq`, `ne`, `lt`, `le`, `gt`, `ge` | Numeric expressions; enums use `eq` / `ne` vs labels |
+| Arith | `add`, `sub`, `mul` | Int/Real arithmetic; no `div` in v1 |
 | Bool | `and`, `or`, `not` | Top-level constraints must be Bool |
+| Bit-vector | `bv_and`, `bv_or`, `bv_xor`, `bv_not`, `bv_add`, `bv_sub`, `bv_mul` | Operands must have the same width |
+| Bit-vector compare | `bv_ult`, `bv_ule`, `bv_ugt`, `bv_uge` | Unsigned comparisons |
 
-Every expression node is tagged (`kind`: `var` | `int` | `bool` | `enum_label` | `op`). Bare strings/numbers are rejected.
+Every expression node is tagged (`kind`: `var` | `int` | `bool` | `enum_label` | `real` | `bv` | `op`). Bare strings/numbers are rejected.
 
 **Top-level constraint entries** may be:
 
@@ -362,9 +366,75 @@ Every expression node is tagged (`kind`: `var` | `int` | `bool` | `enum_label` |
 |---|---|---|
 | Bare (compat) | `{kind:"op",…}` | `(assert …)` |
 | Named hard | `{id:"budget", expr:{…}}` | `(assert (! … :named budget))` + cores on unsat |
-| Soft | `{id:"prefer", soft:true, weight:5, expr:{…}}` | `(assert-soft … :weight 5 :id prefer)` |
+| Soft | `{id:"prefer", soft:true, weight:5, expr:{…}}` | `(assert-soft … :weight 5)`; only `group` emits `:id` |
 
 Request flags: `persist`, `include_smt` (echo generated SMT).
+
+For soft constraints, `id` and `group` have deliberately different meanings:
+
+- `id` is a unique diagnostic identity returned in `soft_constraints`; it never creates a Z3 objective group.
+- `group` is an optional, repeatable soft-only name encoded as Z3 `assert-soft :id`. Constraints with the same `group` share one weighted objective.
+- Soft constraints without `group` all belong to one anonymous aggregate weighted objective. Their diagnostic IDs do not split that objective.
+
+For example, these uniquely identified preferences are still optimized together. If a hard rule forbids `a && b`, the weight-100 preference wins:
+
+```json
+{
+  "vars": [
+    { "type": "bool", "name": "a" },
+    { "type": "bool", "name": "b" }
+  ],
+  "constraints": [
+    {
+      "kind": "op",
+      "op": "not",
+      "args": [{
+        "kind": "op",
+        "op": "and",
+        "args": [
+          { "kind": "var", "name": "a" },
+          { "kind": "var", "name": "b" }
+        ]
+      }]
+    },
+    {
+      "id": "prefer_a",
+      "soft": true,
+      "weight": 1,
+      "expr": { "kind": "var", "name": "a" }
+    },
+    {
+      "id": "prefer_b",
+      "soft": true,
+      "weight": 100,
+      "expr": { "kind": "var", "name": "b" }
+    }
+  ]
+}
+```
+
+Use a repeated `group` only when the preferences intentionally share a named Z3 objective:
+
+```json
+{
+  "constraints": [
+    {
+      "id": "prefer_compact",
+      "group": "preferences",
+      "soft": true,
+      "weight": 2,
+      "expr": { "kind": "var", "name": "compact" }
+    },
+    {
+      "id": "prefer_cached",
+      "group": "preferences",
+      "soft": true,
+      "weight": 5,
+      "expr": { "kind": "var", "name": "cached" }
+    }
+  ]
+}
+```
 
 **Objectives** (optional, max 4):
 
@@ -376,7 +446,105 @@ Request flags: `persist`, `include_smt` (echo generated SMT).
 
 Soft constraints, νZ objectives, and unsat cores are mutually exclusive in one call (optimize path vs cores).
 
-**Also:** `objective_priority` (`lex`/`pareto`/`box`), `use_cache` (default true; only sat/unsat cached), incremental `session_op`/`session_id`, domains `real` + `bit_vec`.
+`objective_priority` defaults to `lex`. Pareto collection is bounded by `max_solutions`, which defaults to 16 and must be in `1..=64`; box collection is bounded by the request's finite generated-objective count. `use_cache` defaults to true (only sat/unsat results are cached); incremental solves use `session_op`/`session_id`.
+
+### Optimize results
+
+Every satisfiable optimization request adds an `optimization` envelope. The top-level `model` remains the first solution's model for backward compatibility. Each solution contains:
+
+- `model`
+- explicit `objectives` in request order, each with its model `value` and exact `bound`
+- `soft_constraints` in declaration order, including diagnostic `id`, optional `group`, effective `weight`, and `satisfied`
+- `groups` in first-declaration order, with aggregate `satisfied_weight` and `violated_weight`; `group` is omitted for the anonymous aggregate
+
+Objective bounds preserve Z3's arithmetic text in `exact` and use this total classification, in priority order:
+
+| Bound `kind` | Classification |
+|---|---|
+| `infinite` | `exact` contains positive or negative `oo` |
+| `strict` | no `oo`, and `exact` contains `epsilon` |
+| `finite` | neither `oo` nor `epsilon` |
+
+For lex priority, one solution is collected. Pareto collects at most `max_solutions` frontier points. Box collects one model per generated independent objective; explicit objectives are capped at four. Collection order is solver-defined; consumers should compare solution sets when order is not part of their domain.
+
+`optimization.termination` explains why collection stopped:
+
+| Termination | Meaning |
+|---|---|
+| `complete` | Lex completed its single successful cycle, or the Pareto/box terminal probe was `unsat` after all available points were collected |
+| `solution_limit` | Pareto reached `max_solutions` and its terminal probe was still `sat` |
+| `unknown` | Z3 returned `unknown` after at least one point; the response remains partial `sat` |
+
+An initial `unknown` stays a top-level `unknown`. A terminal `unsat` after Pareto/box solutions completes enumeration and does not replace the top-level `sat` status.
+
+This bounded Pareto request asks for at most two points from the frontier `x + y <= 3`:
+
+```json
+{
+  "vars": [
+    { "type": "int_range", "name": "x", "min": 0, "max": 3 },
+    { "type": "int_range", "name": "y", "min": 0, "max": 3 }
+  ],
+  "constraints": [{
+    "kind": "op",
+    "op": "le",
+    "args": [
+      {
+        "kind": "op",
+        "op": "add",
+        "args": [
+          { "kind": "var", "name": "x" },
+          { "kind": "var", "name": "y" }
+        ]
+      },
+      { "kind": "int", "value": 3 }
+    ]
+  }],
+  "objectives": [
+    { "op": "maximize", "expr": { "kind": "var", "name": "x" } },
+    { "op": "maximize", "expr": { "kind": "var", "name": "y" } }
+  ],
+  "objective_priority": "pareto",
+  "max_solutions": 2,
+  "use_cache": false
+}
+```
+
+An illustrative response shape is below. The actual two-point prefix and order are solver-defined:
+
+```json
+{
+  "status": "sat",
+  "model": { "x": 0, "y": 3 },
+  "duration_ms": 7,
+  "reason": null,
+  "optimization": {
+    "priority": "pareto",
+    "solutions": [
+      {
+        "model": { "x": 0, "y": 3 },
+        "objectives": [
+          { "op": "maximize", "value": 0, "bound": { "kind": "finite", "exact": "0" } },
+          { "op": "maximize", "value": 3, "bound": { "kind": "finite", "exact": "3" } }
+        ],
+        "soft_constraints": [],
+        "groups": []
+      },
+      {
+        "model": { "x": 1, "y": 2 },
+        "objectives": [
+          { "op": "maximize", "value": 1, "bound": { "kind": "finite", "exact": "1" } },
+          { "op": "maximize", "value": 2, "bound": { "kind": "finite", "exact": "2" } }
+        ],
+        "soft_constraints": [],
+        "groups": []
+      }
+    ],
+    "termination": "solution_limit"
+  },
+  "solver_version": "Z3 version 4.16.0 - 64 bit"
+}
+```
 
 **Status `ended`:** returned for `session_op: end` only. No model. Agents must not treat it as a feasible assignment.
 
@@ -396,7 +564,7 @@ Soft constraints, νZ objectives, and unsat cores are mutually exclusive in one 
 
 Z3 is **operator-installed**, not agent-supplied:
 
-1. Install Z3 so `z3` is on `PATH`, **or** set `SPUR_Z3_BIN` to the binary.
+1. Install Z3 so `z3` is on `PATH`, **or** set `SPUR_Z3_BIN` to the binary. Optimization requires Z3 4.8.12 or newer; the final compatibility matrix uses Z3 4.16.0.
 2. Agents never pass executable paths or custom Z3 argv.
 3. Missing binary → structured `solver_unavailable` (no silent download in v1).
 
@@ -406,8 +574,8 @@ Z3 is **operator-installed**, not agent-supplied:
 # Unit / fake-runner tests (no Z3 required)
 scripts/spur-cargo test -p spur-solver
 
-# Real Z3 path (binary required)
-SPUR_TEST_Z3=1 scripts/spur-cargo test -p spur-solver --test real_z3
+# Real Z3 path (binary required; ignored tests must be selected explicitly)
+SPUR_REMOTE=0 SPUR_TEST_Z3=1 scripts/spur-cargo test -p spur-solver --test real_z3 -- --ignored
 ```
 
 ---
@@ -482,8 +650,8 @@ Illustrative success envelope:
 
 - Full program verification / typechecking replacement
 - Proof certificates / interpolants (named unsat cores ship; full proofs do not)
-- Multi-objective Pareto / box priorities beyond default lex order
-- JSON theories: Real, BitVec, String, Array, Float, quantifiers (use `solve_smt` if needed)
+- Typed String, Array, Float, and quantified expressions (use `solve_smt` if needed)
+- Unbounded Pareto result streams (`max_solutions` is capped at 64)
 - Bundling Z3 into dist artifacts / auto-download
 - TUI surface for solves
 

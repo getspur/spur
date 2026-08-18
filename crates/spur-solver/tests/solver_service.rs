@@ -209,7 +209,7 @@ mod unix {
             let pids_path = directory.path().join("pids");
             let body = body.replace("__PIDS_PATH__", &pids_path.display().to_string());
             let script = format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"{}\"\n{body}\n",
+                "#!/bin/sh\nif [ \"$#\" -eq 1 ] && [ \"$1\" = \"--version\" ]; then\n  printf 'Z3 version 4.16.0\\n'\n  exit 0\nfi\nprintf '%s\\n' \"$@\" > \"{}\"\n{body}\n",
                 args_path.display()
             );
             fs::write(&binary, script).expect("write fake solver");
