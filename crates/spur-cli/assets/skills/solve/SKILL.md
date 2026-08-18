@@ -3,9 +3,10 @@ name: solve
 description: >
   Use for constraint-shaped work: navigate the mathematical rule catalog with
   solve_rule_spec, verify or synthesize catalog models with solve_rules, derive
-  constrained constants, prove an invariant or bound for all inputs, diagnose
-  conflicting policy rules, or find a branch-triggering counterexample with the
-  generic solver.
+  constrained constants, prove an invariant or bound for all inputs, optimize
+  competing preferences with Z3 Optimize or MaxSMT using weighted soft
+  constraints or minimize/maximize objectives, diagnose conflicting policy
+  rules, or find a branch-triggering counterexample with the generic solver.
 ---
 
 # solve - Catalog-First Constraint Workbench
@@ -103,17 +104,57 @@ counterexample for a failing test.
 For unsatisfiable named hard constraints, inspect `unsat_core`. Do not combine
 core diagnosis with soft constraints or objectives in the same request.
 
-## Preferences And Search
+## Preferences And Optimization
 
 Any satisfiable model proves feasibility, not uniqueness or global optimality.
-When preference matters:
+First obtain a hard-satisfiable baseline. Then choose the optimization encoding
+by intent:
 
-1. Obtain a hard-satisfiable baseline.
-2. Use typed objectives, or ratchet one preference bound at a time.
-3. Keep the last satisfiable candidate.
-4. Back off on `unsat`; simplify on `unknown` or `timeout`.
-5. Prefer fewer variables, tighter ranges, and fewer operations among equally
-   valid models.
+| Intent | Typed encoding |
+|---|---|
+| Rule must always hold | Named hard constraint |
+| Preference may be violated at a cost | Soft constraint with a positive `weight`; repeat `group` only when preferences intentionally share one Z3 objective |
+| Optimize a numeric or bit-vector expression | Explicit `minimize` / `maximize` objective |
+
+Diagnostic soft `id` values identify results; they do not create objective
+groups. Ungrouped soft constraints share one anonymous weighted MaxSMT
+objective. Keep core diagnosis separate: do not combine unsat-core analysis with
+soft constraints or explicit objectives in the same request.
+
+Choose `objective_priority` from the question:
+
+| Priority | Meaning and collection bound |
+|---|---|
+| `lex` | Default. Optimize objectives in declaration order and collect one solution. |
+| `pareto` | Enumerate a solver-defined Pareto-front prefix, bounded by `max_solutions`. |
+| `box` | Optimize generated objectives independently and collect one model per generated objective. |
+
+Use the live tool schema for current numeric caps. Collection order is
+solver-defined; compare solution sets unless the domain itself makes order
+meaningful. Ratcheting remains a fallback when a preference cannot be expressed
+by the typed objective surface.
+
+### Retrieve Optimize Results
+
+For a satisfiable typed optimization request, the top-level `model` is only the
+first solution's compatibility view. Retrieve the complete result from
+`optimization.solutions`:
+
+- each solution's `model` is the optimized assignment for that point;
+- `objectives[].value` is the expression's value in that model;
+- `objectives[].bound` contains `kind` (`finite`, `infinite`, or `strict`) and
+  lossless Z3 arithmetic text in `exact`;
+- `soft_constraints` is in declaration order and reports `index`, optional `id`
+  and `group`, effective `weight`, and `satisfied`;
+- `groups` contains one aggregate per encountered group. Group rows use
+  first-declaration order. An anonymous row appears only when ungrouped soft
+  constraints exist;
+- `termination` is `complete`, `solution_limit`, or `unknown`.
+
+`solution_limit` means a Pareto prefix hit `max_solutions`, not that the frontier
+is complete. A terminal `unknown` after at least one point leaves a partial
+top-level `sat`; an initial `unknown` remains inconclusive. Never claim an
+optimum or complete frontier from the top-level model alone.
 
 Describe the result as feasible and optimized or ratcheted under the encoded
 preferences. Claim uniqueness only when hard constraints force it or the
@@ -126,6 +167,11 @@ must remain within the allowlisted command and size guards, use fixed solver
 arguments, and end in `check-sat`. Do not use raw SMT merely because it is
 familiar.
 
+Raw scripts that call `get-objectives` expose each exact bound, but omit `op` and `value`.
+Z3's objectives response does not evaluate the expression in the returned model.
+Prefer typed solves when the handoff needs operation identity, model values,
+soft diagnostics, priority, or bounded-enumeration termination.
+
 ## Persistence And Handoff
 
 For brain-to-worker handoff:
@@ -134,7 +180,10 @@ For brain-to-worker handoff:
 2. Put the `solve_id`, selected catalog rule IDs, mode, and key interpretation
    in task context.
 3. Reload with `get_solve_result`; never read `.spur/solver/` directly.
-4. Treat the artifact as authoritative evidence, while still checking that the
+4. Persisted results retain the complete `optimization` envelope; after reload,
+   use the same `optimization.solutions`, diagnostics, bounds, and `termination`
+   paths described above.
+5. Treat the artifact as authoritative evidence, while still checking that the
    implementation matches the encoded facts.
 
 ## Proof Discipline

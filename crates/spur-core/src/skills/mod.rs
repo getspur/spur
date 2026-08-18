@@ -1472,6 +1472,21 @@ mod tests {
     }
 
     #[test]
+    fn solve_description_is_discoverable_for_optimization_work() {
+        let raw = all_bundled_raw()
+            .get("solve")
+            .expect("solve skill must exist");
+        let parsed = frontmatter::parse_source(raw);
+        let desc = parsed.description.as_deref().unwrap_or("");
+        for marker in ["Z3 Optimize", "MaxSMT", "soft constraints", "objectives"] {
+            assert!(
+                desc.contains(marker),
+                "solve description must trigger optimization work via `{marker}`, got: {desc}"
+            );
+        }
+    }
+
+    #[test]
     fn solve_skill_navigates_catalog_before_generic_encoding() {
         let fake = PathBuf::from("/nonexistent");
         let body = load_skill("solve", &fake).expect("solve skill must be bundled");
@@ -1523,6 +1538,38 @@ mod tests {
             assert!(
                 body.contains(marker),
                 "solve skill must preserve solver semantics via `{marker}`"
+            );
+        }
+    }
+
+    #[test]
+    fn solve_skill_explains_optimization_selection_and_retrieval() {
+        let fake = PathBuf::from("/nonexistent");
+        let body = load_skill("solve", &fake).expect("solve skill must be bundled");
+        for marker in [
+            "`objective_priority`",
+            "`lex`",
+            "`pareto`",
+            "`box`",
+            "`max_solutions`",
+            "`optimization.solutions`",
+            "`objectives[].value`",
+            "`objectives[].bound`",
+            "`soft_constraints` is in declaration order",
+            "reports `index`, optional `id`",
+            "and `group`, effective `weight`, and `satisfied`",
+            "`groups` contains one aggregate per encountered group",
+            "first-declaration order",
+            "anonymous row appears only when ungrouped soft",
+            "`termination`",
+            "`solution_limit`",
+            "`get-objectives`",
+            "omit `op` and `value`",
+            "complete `optimization` envelope",
+        ] {
+            assert!(
+                body.contains(marker),
+                "solve skill must document Optimize selection/retrieval via `{marker}`"
             );
         }
     }

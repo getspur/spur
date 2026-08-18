@@ -3969,6 +3969,7 @@ mod tests {
             constraints: Vec::new(),
             objectives: vec![],
             objective_priority: Default::default(),
+            max_solutions: spur_solver::types::DEFAULT_MAX_SOLUTIONS,
             timeout_ms: spur_solver::types::DEFAULT_TIMEOUT_MS,
             persist: false,
             include_smt: false,
@@ -3986,6 +3987,8 @@ mod tests {
             unsat_core: None,
             cached: false,
             session_id: None,
+            optimization: None,
+            solver_version: None,
         };
         let artifact = writer
             .persist(&request, &result)

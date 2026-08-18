@@ -200,7 +200,7 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "solve_constraints".to_owned(),
-            description: "Find one concrete model for typed B-prime constraints. Prefer this over raw SMT-LIB2; sat, unsat, unknown, and timeout are successful result statuses.".to_owned(),
+            description: "Find feasible models or use Z3 Optimize for weighted soft constraints and minimize/maximize objectives over typed B-prime constraints. Satisfiable optimization requests return an optimization envelope. Prefer this over raw SMT-LIB2; sat, unsat, unknown, and timeout are successful result statuses.".to_owned(),
             input_schema: solve_constraints_schema(),
         },
         ToolDefinition {
@@ -210,7 +210,7 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "get_solve_result".to_owned(),
-            description: "Reload a repository-local persisted solver result by its traversal-safe solve_id. Workers use this tool instead of reading .spur/solver files directly.".to_owned(),
+            description: "Reload a repository-local persisted solver result, including its complete optimization envelope, by traversal-safe solve_id. Workers use this tool instead of reading .spur/solver files directly.".to_owned(),
             input_schema: get_solve_result_schema(),
         },
     ]
@@ -698,6 +698,37 @@ mod tests {
         assert_eq!(
             lookup["properties"]["solve_id"]["pattern"],
             "^sol_[0-9a-f]{16}$"
+        );
+    }
+
+    #[test]
+    fn solver_tool_descriptions_advertise_optimization_and_retrieval() {
+        let tools = tool_definitions();
+        let typed = tools
+            .iter()
+            .find(|tool| tool.name == "solve_constraints")
+            .expect("solve_constraints definition");
+        for marker in [
+            "Z3 Optimize",
+            "weighted soft",
+            "minimize/maximize",
+            "optimization",
+        ] {
+            assert!(
+                typed.description.contains(marker),
+                "solve_constraints description must advertise `{marker}`"
+            );
+        }
+
+        let lookup = tools
+            .iter()
+            .find(|tool| tool.name == "get_solve_result")
+            .expect("get_solve_result definition");
+        assert!(
+            lookup
+                .description
+                .contains("complete optimization envelope"),
+            "get_solve_result must advertise persisted Optimize retrieval"
         );
     }
 
