@@ -657,10 +657,9 @@ fn run_dist(workspace_root: &Path, options: &DistOptions) -> Result<(), String> 
         artifacts
     };
 
-    // Skills are filesystem assets (not embedded). Ship them with the same
-    // share/spur/skills layout install_bundled_skill_assets uses so a release
-    // consumer can extract next to the binary prefix and `spur skills init`
-    // resolves via package_asset_candidates.
+    // spur-cli embeds the skill tree, but retain the standalone archive for
+    // npm and filesystem-package compatibility. Its share/spur/skills layout
+    // matches install_bundled_skill_assets and package_asset_candidates.
     let skills_archive = package_dist_skill_assets(workspace_root, &out_dir, &version)?;
     artifacts.push(skills_archive);
 

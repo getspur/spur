@@ -217,32 +217,102 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
 }
 
 fn solve_rules_schema() -> Value {
-    json!({
-        "oneOf": crate::rules::families::compilers()
-            .iter()
-            .map(|compiler| compiler.input_schema())
-            .collect::<Vec<_>>()
-    })
-}
-
-fn solve_rule_spec_schema() -> Value {
-    let selectors = ["family", "profile", "rule_id", "primitive"];
-    let exclusions = selectors
+    let compilers = crate::rules::families::compilers();
+    let family_ids = compilers
         .iter()
-        .enumerate()
-        .flat_map(|(index, left)| {
-            selectors[index + 1..].iter().map(move |right| {
-                json!({
-                    "not": {
-                        "required": [left, right]
-                    }
-                })
-            })
+        .map(|compiler| compiler.id())
+        .collect::<Vec<_>>();
+    let rule_ids = compilers
+        .iter()
+        .flat_map(|compiler| {
+            let schema = compiler.input_schema();
+            schema
+                .pointer("/properties/rules/items/properties/rule_id/enum")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
         })
         .collect::<Vec<_>>();
 
     json!({
         "type": "object",
+        "description": "Common Bedrock-compatible request shape. Call solve_rule_spec for the exact family-specific scene/facts, rule parameter, and unknown contracts; the selected family compiler validates them at runtime.",
+        "properties": {
+            "family": {
+                "type": "string",
+                "enum": family_ids,
+                "description": "Versioned rule-family discriminator."
+            },
+            "mode": {
+                "type": "string",
+                "enum": ["verify", "synthesize"]
+            },
+            "rules": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": MAX_CONSTRAINTS,
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "rule_id": {"type": "string", "enum": rule_ids},
+                        "subjects": {
+                            "type": "array",
+                            "minItems": 1,
+                            "maxItems": MAX_CONSTRAINTS,
+                            "items": {"type": "string"}
+                        },
+                        "parameters": {
+                            "type": "object",
+                            "description": "Family- and rule-specific parameters returned by solve_rule_spec.",
+                            "additionalProperties": true
+                        }
+                    },
+                    "required": ["rule_id", "subjects"],
+                    "additionalProperties": false
+                }
+            },
+            "scene": {
+                "type": "object",
+                "description": "Family-specific scene returned by solve_rule_spec; required by scene-based families.",
+                "additionalProperties": true
+            },
+            "facts": {
+                "type": "object",
+                "description": "Family-specific facts returned by solve_rule_spec; required by fact-based families.",
+                "additionalProperties": true
+            },
+            "unknowns": {
+                "type": "array",
+                "maxItems": MAX_VARIABLES,
+                "default": [],
+                "items": {
+                    "type": "object",
+                    "description": "Family-specific bounded unknown returned by solve_rule_spec.",
+                    "additionalProperties": true
+                }
+            },
+            "timeout_ms": timeout_schema(),
+            "persist": {
+                "type": "boolean",
+                "default": false
+            },
+            "include_smt": {
+                "type": "boolean",
+                "default": false
+            }
+        },
+        "required": ["family", "mode", "rules"],
+        "additionalProperties": false
+    })
+}
+
+fn solve_rule_spec_schema() -> Value {
+    json!({
+        "type": "object",
+        "description": "Provide at most one of family, profile, rule_id, or primitive. Runtime validation rejects selector combinations.",
         "properties": {
             "family": {
                 "type": "string",
@@ -273,7 +343,6 @@ fn solve_rule_spec_schema() -> Value {
                 "default": "summary"
             }
         },
-        "allOf": exclusions,
         "additionalProperties": false
     })
 }
@@ -377,29 +446,34 @@ fn solve_smt_schema() -> Value {
 }
 
 fn constraint_item_schema() -> Value {
+    let mut properties = constraint_expression_schema()["properties"]
+        .as_object()
+        .cloned()
+        .expect("constraint expression properties");
+    properties.insert("id".to_owned(), identifier_schema());
+    properties.insert(
+        "soft".to_owned(),
+        json!({
+            "type": "boolean",
+            "default": false,
+            "description": "When true, encode as assert-soft (preference), not a hard assert."
+        }),
+    );
+    properties.insert(
+        "weight".to_owned(),
+        json!({
+            "type": "integer",
+            "exclusiveMinimum": 0,
+            "description": "Soft weight; defaults to 1 when soft and omitted. Forbidden when soft is false."
+        }),
+    );
+    properties.insert("expr".to_owned(), constraint_expression_schema());
+
     json!({
-        "oneOf": [
-            constraint_expression_schema(),
-            {
-                "type": "object",
-                "properties": {
-                    "id": identifier_schema(),
-                    "soft": {
-                        "type": "boolean",
-                        "default": false,
-                        "description": "When true, encode as assert-soft (preference), not a hard assert."
-                    },
-                    "weight": {
-                        "type": "integer",
-                        "exclusiveMinimum": 0,
-                        "description": "Soft weight; defaults to 1 when soft and omitted. Forbidden when soft is false."
-                    },
-                    "expr": constraint_expression_schema()
-                },
-                "required": ["expr"],
-                "additionalProperties": false
-            }
-        ]
+        "type": "object",
+        "description": "Either a bare tagged ConstraintExpr (kind plus its fields) or a wrapper with expr and optional id/soft/weight. Runtime validation enforces the selected shape.",
+        "properties": properties,
+        "additionalProperties": false
     })
 }
 
@@ -430,161 +504,69 @@ fn timeout_schema() -> Value {
 
 fn variable_schema() -> Value {
     json!({
-        "oneOf": [
-            {
-                "type": "object",
-                "properties": {
-                    "type": { "const": "bool" },
-                    "name": identifier_schema()
-                },
-                "required": ["type", "name"],
-                "additionalProperties": false
+        "type": "object",
+        "description": "Tagged variable. int_range requires min/max, enum requires values, and bit_vec requires width; runtime validation enforces conditional fields.",
+        "properties": {
+            "type": {
+                "type": "string",
+                "enum": ["bool", "int", "int_range", "enum", "real", "bit_vec"]
             },
-            {
-                "type": "object",
-                "properties": {
-                    "type": { "const": "int" },
-                    "name": identifier_schema()
-                },
-                "required": ["type", "name"],
-                "additionalProperties": false
+            "name": identifier_schema(),
+            "min": { "type": "integer" },
+            "max": { "type": "integer" },
+            "values": {
+                "type": "array",
+                "minItems": 1,
+                "uniqueItems": true,
+                "items": { "type": "string" }
             },
-            {
-                "type": "object",
-                "properties": {
-                    "type": { "const": "int_range" },
-                    "name": identifier_schema(),
-                    "min": { "type": "integer" },
-                    "max": { "type": "integer" }
-                },
-                "required": ["type", "name", "min", "max"],
-                "additionalProperties": false
-            },
-            {
-                "type": "object",
-                "properties": {
-                    "type": { "const": "enum" },
-                    "name": identifier_schema(),
-                    "values": {
-                        "type": "array",
-                        "minItems": 1,
-                        "uniqueItems": true,
-                        "items": { "type": "string" }
-                    }
-                },
-                "required": ["type", "name", "values"],
-                "additionalProperties": false
-            },
-            {
-                "type": "object",
-                "properties": {
-                    "type": { "const": "real" },
-                    "name": identifier_schema()
-                },
-                "required": ["type", "name"],
-                "additionalProperties": false
-            },
-            {
-                "type": "object",
-                "properties": {
-                    "type": { "const": "bit_vec" },
-                    "name": identifier_schema(),
-                    "width": { "type": "integer", "minimum": 1, "maximum": 64 }
-                },
-                "required": ["type", "name", "width"],
-                "additionalProperties": false
-            }
-        ]
+            "width": { "type": "integer", "minimum": 1, "maximum": 64 }
+        },
+        "required": ["type", "name"],
+        "additionalProperties": false
     })
 }
 
 fn constraint_expression_schema() -> Value {
     json!({
-        "oneOf": [
-            {
-                "type": "object",
-                "properties": {
-                    "kind": { "const": "var" },
-                    "name": identifier_schema()
-                },
-                "required": ["kind", "name"],
-                "additionalProperties": false
+        "type": "object",
+        "description": "Tagged constraint expression. Runtime validation enforces the fields required by each kind.",
+        "properties": {
+            "kind": {
+                "type": "string",
+                "enum": ["var", "int", "bool", "enum_label", "real", "bv", "op"]
             },
-            {
-                "type": "object",
-                "properties": {
-                    "kind": { "const": "int" },
-                    "value": { "type": "integer" }
-                },
-                "required": ["kind", "value"],
-                "additionalProperties": false
+            "name": identifier_schema(),
+            "value": {
+                "type": ["integer", "boolean"],
+                "description": "Integer value for int/bv expressions or boolean value for bool expressions."
             },
-            {
-                "type": "object",
-                "properties": {
-                    "kind": { "const": "bool" },
-                    "value": { "type": "boolean" }
-                },
-                "required": ["kind", "value"],
-                "additionalProperties": false
+            "var": identifier_schema(),
+            "label": { "type": "string" },
+            "num": { "type": "integer" },
+            "den": { "type": "integer", "exclusiveMinimum": 0 },
+            "width": { "type": "integer", "minimum": 1, "maximum": 64 },
+            "op": {
+                "type": "string",
+                "enum": [
+                    "eq", "ne", "lt", "le", "gt", "ge",
+                    "add", "sub", "mul", "and", "or", "not",
+                    "bv_and", "bv_or", "bv_xor", "bv_not",
+                    "bv_add", "bv_sub", "bv_mul",
+                    "bv_ult", "bv_ule", "bv_ugt", "bv_uge"
+                ]
             },
-            {
-                "type": "object",
-                "properties": {
-                    "kind": { "const": "enum_label" },
-                    "var": identifier_schema(),
-                    "label": { "type": "string" }
-                },
-                "required": ["kind", "var", "label"],
-                "additionalProperties": false
-            },
-            {
-                "type": "object",
-                "properties": {
-                    "kind": { "const": "real" },
-                    "num": { "type": "integer" },
-                    "den": { "type": "integer", "exclusiveMinimum": 0 }
-                },
-                "required": ["kind", "num", "den"],
-                "additionalProperties": false
-            },
-            {
-                "type": "object",
-                "properties": {
-                    "kind": { "const": "bv" },
-                    "width": { "type": "integer", "minimum": 1, "maximum": 64 },
-                    "value": { "type": "integer", "minimum": 0 }
-                },
-                "required": ["kind", "width", "value"],
-                "additionalProperties": false
-            },
-            {
-                "type": "object",
-                "properties": {
-                    "kind": { "const": "op" },
-                    "op": {
-                        "type": "string",
-                        "enum": [
-                            "eq", "ne", "lt", "le", "gt", "ge",
-                            "add", "sub", "mul", "and", "or", "not",
-                            "bv_and", "bv_or", "bv_xor", "bv_not",
-                            "bv_add", "bv_sub", "bv_mul",
-                            "bv_ult", "bv_ule", "bv_ugt", "bv_uge"
-                        ]
-                    },
-                    "args": {
-                        "type": "array",
-                        "minItems": 1,
-                        "items": {
-                            "type": "object",
-                            "description": "Nested tagged ConstraintExpr; recursive arity and type rules are enforced by the solver service."
-                        }
-                    }
-                },
-                "required": ["kind", "op", "args"],
-                "additionalProperties": false
+            "args": {
+                "type": "array",
+                "minItems": 1,
+                "items": {
+                    "type": "object",
+                    "description": "Nested tagged ConstraintExpr; recursive arity and type rules are enforced by the solver service."
+                }
             }
-        ]
+        },
+        "required": ["kind"],
+        "additionalProperties": false
     })
 }
 
@@ -649,54 +631,33 @@ mod tests {
         assert_timeout_schema(&typed["properties"]["timeout_ms"]);
         assert_eq!(typed["properties"]["persist"]["default"], false);
 
-        let variable_variants = typed["properties"]["vars"]["items"]["oneOf"]
-            .as_array()
-            .expect("variable schema must use oneOf");
-        let variable_types: Vec<_> = variable_variants
-            .iter()
-            .map(|variant| {
-                variant["properties"]["type"]["const"]
-                    .as_str()
-                    .expect("variable variant must have a type tag")
-            })
-            .collect();
         assert_eq!(
-            variable_types,
-            ["bool", "int", "int_range", "enum", "real", "bit_vec"]
+            typed["properties"]["vars"]["items"]["properties"]["type"]["enum"],
+            json!(["bool", "int", "int_range", "enum", "real", "bit_vec"])
         );
-        for variant in variable_variants {
-            assert_eq!(
-                variant["properties"]["name"]["pattern"],
-                "^[A-Za-z_][A-Za-z0-9_]*$"
-            );
-        }
         assert_eq!(
-            variable_variants[3]["properties"]["values"]["uniqueItems"],
+            typed["properties"]["vars"]["items"]["properties"]["name"]["pattern"],
+            "^[A-Za-z_][A-Za-z0-9_]*$"
+        );
+        assert_eq!(
+            typed["properties"]["vars"]["items"]["properties"]["values"]["uniqueItems"],
             true
         );
 
-        // Constraint items: bare ConstraintExpr oneOf + named/soft wrapper.
-        let item_variants = typed["properties"]["constraints"]["items"]["oneOf"]
+        let expression_kinds = typed["properties"]["constraints"]["items"]["properties"]["kind"]
+            ["enum"]
             .as_array()
-            .expect("constraint item schema must use oneOf");
-        assert_eq!(item_variants.len(), 2);
-        let expression_variants = item_variants[0]["oneOf"]
-            .as_array()
-            .expect("bare expression schema must use oneOf");
-        let expression_kinds: Vec<_> = expression_variants
-            .iter()
-            .map(|variant| {
-                variant["properties"]["kind"]["const"]
-                    .as_str()
-                    .expect("constraint variant must have a kind tag")
-            })
-            .collect();
-        assert!(expression_kinds.contains(&"var"));
-        assert!(expression_kinds.contains(&"op"));
-        assert!(expression_kinds.contains(&"real") || expression_kinds.contains(&"bv") || true);
+            .expect("constraint kind enum");
+        assert!(expression_kinds.iter().any(|kind| kind == "var"));
+        assert!(expression_kinds.iter().any(|kind| kind == "op"));
+        assert!(expression_kinds.iter().any(|kind| kind == "real"));
+        assert!(expression_kinds.iter().any(|kind| kind == "bv"));
         assert_eq!(typed["properties"]["objective_priority"]["default"], "lex");
         assert_eq!(typed["properties"]["use_cache"]["default"], true);
-        assert_eq!(item_variants[1]["required"], json!(["expr"]));
+        assert_eq!(
+            typed["properties"]["constraints"]["items"]["properties"]["expr"]["type"],
+            "object"
+        );
         assert_eq!(typed["properties"]["include_smt"]["default"], false);
 
         let raw = schema(&tools, "solve_smt");

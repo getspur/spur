@@ -52,14 +52,10 @@ fn rule_spec_schema_exposes_one_bounded_guide_tool() {
         tool.input_schema["properties"]["include"]["default"],
         "summary"
     );
-    assert_eq!(
-        tool.input_schema["allOf"]
-            .as_array()
-            .expect("selector exclusions")
-            .len(),
-        6,
-        "four selectors require six pairwise exclusions"
-    );
+    assert!(tool.input_schema.get("allOf").is_none());
+    assert!(tool.input_schema["description"]
+        .as_str()
+        .is_some_and(|description| description.contains("at most one")));
 }
 
 #[tokio::test]

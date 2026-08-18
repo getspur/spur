@@ -11161,6 +11161,7 @@ dependencies = [
  "semver",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "spur-acp",
  "spur-analyst",
  "spur-blob-store",
