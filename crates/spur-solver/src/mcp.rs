@@ -538,8 +538,8 @@ fn constraint_expression_schema() -> Value {
             },
             "name": identifier_schema(),
             "value": {
-                "type": ["integer", "boolean"],
-                "description": "Integer value for int/bv expressions or boolean value for bool expressions."
+                "type": "integer",
+                "description": "Integer value for int/bv expressions. Boolean ConstraintExpr values use kind=bool."
             },
             "var": identifier_schema(),
             "label": { "type": "string" },

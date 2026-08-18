@@ -362,7 +362,7 @@ mod tests {
                     "maximum": 5,
                     "default": 5
                 },
-                "source": { "type": ["string", "null"] }
+                "source": { "type": "string" }
             },
             "required": ["query"],
             "additionalProperties": false
@@ -374,7 +374,7 @@ mod tests {
             "type": "object",
             "properties": {
                 "skill_id": { "type": "string", "minLength": 1 },
-                "resource": { "type": ["string", "null"] }
+                "resource": { "type": "string" }
             },
             "required": ["skill_id"],
             "additionalProperties": false
@@ -399,7 +399,7 @@ mod tests {
                     "maximum": 5,
                     "default": 5
                 },
-                "source": { "type": ["string", "null"] },
+                "source": { "type": "string" },
                 "include_lede": {
                     "type": "boolean",
                     "default": true,
@@ -880,6 +880,11 @@ mod tests {
                             return Some(format!("{path}.{keyword}"));
                         }
                     }
+                    if let Some(type_value) = map.get("type") {
+                        if type_value.is_array() {
+                            return Some(format!("{path}.type (union array)"));
+                        }
+                    }
                     map.iter().find_map(|(key, value)| {
                         find_forbidden_keyword(value, &format!("{path}.{key}"))
                     })
@@ -906,7 +911,7 @@ mod tests {
 
         assert!(
             offenders.is_empty(),
-            "Kiro Bedrock requires object roots and rejects oneOf/allOf in worker tool schemas: {}",
+            "Kiro Bedrock requires object roots and rejects oneOf/allOf/type-unions in worker tool schemas: {}",
             offenders.join(", ")
         );
     }

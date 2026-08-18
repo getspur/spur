@@ -102,7 +102,7 @@ fn report_signal_def() -> ToolDefinition {
                         "signal_id": { "type": "string", "format": "uuid" },
                         "severity": { "type": "number", "minimum": 0, "maximum": 1 },
                         "reason": { "type": "string" },
-                        "estimated_subtasks": { "type": ["integer", "null"], "minimum": 1 },
+                        "estimated_subtasks": { "type": "integer", "minimum": 1 },
                         "task_id": { "type": "string" },
                         "attempt": { "type": "integer", "minimum": 0 },
                         "last_error": { "type": "string" }
@@ -122,7 +122,7 @@ fn report_progress_def() -> ToolDefinition {
             "required": ["message"],
             "properties": {
                 "message": { "type": "string" },
-                "percent": { "type": ["number", "null"] }
+                "percent": { "type": "number" }
             }
         }),
     }

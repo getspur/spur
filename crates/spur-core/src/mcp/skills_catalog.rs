@@ -378,7 +378,7 @@ fn skill_search_schema() -> Value {
                 "maximum": 5,
                 "default": 5
             },
-            "source": { "type": ["string", "null"] }
+            "source": { "type": "string" }
         },
         "required": ["query"],
         "additionalProperties": false
@@ -390,7 +390,7 @@ fn skill_read_schema() -> Value {
         "type": "object",
         "properties": {
             "skill_id": { "type": "string", "minLength": 1 },
-            "resource": { "type": ["string", "null"] }
+            "resource": { "type": "string" }
         },
         "required": ["skill_id"],
         "additionalProperties": false
@@ -415,7 +415,7 @@ fn skill_navigate_schema() -> Value {
                 "maximum": 5,
                 "default": 5
             },
-            "source": { "type": ["string", "null"] },
+            "source": { "type": "string" },
             "include_lede": {
                 "type": "boolean",
                 "default": true,

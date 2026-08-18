@@ -1,4 +1,0 @@
-[mcp_servers.spur-analyst]
-command = "spur"
-args = ["analyst", "mcp"]
-startup_timeout_sec = 120
