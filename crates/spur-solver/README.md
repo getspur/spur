@@ -274,6 +274,8 @@ sequenceDiagram
   Note over Worker: Workers use the tool,<br/>not ad-hoc file IO
 ```
 
+Persisted `solve_id` results retain the complete `optimization` envelope, including every collected solution and exact bound.
+
 ---
 
 ## What this crate provides
@@ -457,6 +459,8 @@ Every satisfiable optimization request adds an `optimization` envelope. The top-
 - `soft_constraints` in declaration order, including diagnostic `id`, optional `group`, effective `weight`, and `satisfied`
 - `groups` in first-declaration order, with aggregate `satisfied_weight` and `violated_weight`; `group` is omitted for the anonymous aggregate
 
+Typed objectives always include `op`, model `value`, and `bound`. Raw `solve_smt` scripts that call `get-objectives` expose the exact bound but omit `op` and `value`, because Z3's objectives response does not evaluate that expression in the returned model.
+
 Objective bounds preserve Z3's arithmetic text in `exact` and use this total classification, in priority order:
 
 | Bound `kind` | Classification |
@@ -471,7 +475,7 @@ For lex priority, one solution is collected. Pareto collects at most `max_soluti
 
 | Termination | Meaning |
 |---|---|
-| `complete` | Lex completed its single successful cycle, or the Pareto/box terminal probe was `unsat` after all available points were collected |
+| `complete` | Lex completed its single cycle; Pareto exhausted the frontier; or box collected its finite objective count (Z3 may restart a single-objective box with a terminal `sat`) |
 | `solution_limit` | Pareto reached `max_solutions` and its terminal probe was still `sat` |
 | `unknown` | Z3 returned `unknown` after at least one point; the response remains partial `sat` |
 

@@ -22,7 +22,9 @@ use serde_json::Value;
 use thiserror::Error;
 use uuid::Uuid;
 
-use crate::types::{SolveConstraintsResponse, SolveModel, SolveStatus, ValidationError};
+use crate::types::{
+    OptimizationResult, SolveConstraintsResponse, SolveModel, SolveStatus, ValidationError,
+};
 
 /// Version of the on-disk solve artifact schema.
 pub const ARTIFACT_SCHEMA_VERSION: u32 = 1;
@@ -166,6 +168,9 @@ pub struct SolveArtifactResult {
     /// Named hard unsat core surface ids when recorded with the solve.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unsat_core: Option<Vec<String>>,
+    /// Exact optimization solutions, bounds, and soft diagnostics when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub optimization: Option<OptimizationResult>,
 }
 
 impl SolveArtifactResult {
@@ -179,6 +184,7 @@ impl SolveArtifactResult {
             duration_ms: response.duration_ms,
             reason: response.reason.clone(),
             unsat_core: response.unsat_core.clone(),
+            optimization: response.optimization.clone(),
         })
     }
 
@@ -193,7 +199,7 @@ impl SolveArtifactResult {
             unsat_core: self.unsat_core.clone(),
             cached: false,
             session_id: None,
-            optimization: None,
+            optimization: self.optimization.clone(),
             solver_version: None,
         }
         .validate()

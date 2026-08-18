@@ -594,6 +594,7 @@ impl SolveConstraintsRequest {
 
         let variables = VariableTable::build(&self.vars)?;
         let mut seen_ids = HashSet::new();
+        let mut soft_group_weights: HashMap<Option<&str>, i64> = HashMap::new();
         for (constraint_index, constraint) in self.constraints.iter().enumerate() {
             if let ConstraintItem::Declared(decl) = constraint {
                 if let Some(id) = decl.id.as_deref() {
@@ -638,6 +639,18 @@ impl SolveConstraintsRequest {
                             ));
                         }
                     }
+                    let weight = decl.weight.unwrap_or(DEFAULT_SOFT_WEIGHT);
+                    let total = soft_group_weights.entry(decl.group.as_deref()).or_default();
+                    *total = total.checked_add(weight).ok_or_else(|| {
+                        let group = decl.group.as_deref().unwrap_or("<anonymous>");
+                        ValidationError::new(
+                            ValidationErrorKind::SoftGroupWeightOverflow,
+                            format!("constraints[{constraint_index}].weight"),
+                            format!(
+                                "soft objective group {group:?} total exceeds signed 64-bit range"
+                            ),
+                        )
+                    })?;
                 } else if decl.weight.is_some() {
                     return Err(ValidationError::new(
                         ValidationErrorKind::WeightWithoutSoft,
@@ -857,7 +870,11 @@ pub struct ObjectiveResult {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub op: Option<ObjectiveOp>,
     /// Objective expression value in this solution's model.
-    pub value: ModelValue,
+    ///
+    /// Raw `get-objectives` output omits this field because it reports bounds,
+    /// not model evaluations. Typed solves always populate it from `get-value`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<ModelValue>,
     /// Exact finite, infinite, or strict optimum reported by Z3.
     pub bound: ObjectiveBound,
 }
@@ -1075,6 +1092,8 @@ pub enum ValidationErrorKind {
     DuplicateConstraintId,
     /// A soft constraint weight is missing positivity.
     InvalidSoftWeight,
+    /// A soft objective group's aggregate weight exceeds signed 64-bit range.
+    SoftGroupWeightOverflow,
     /// `weight` was set on a non-soft constraint.
     WeightWithoutSoft,
     /// `group` was set on a non-soft constraint.
@@ -1125,6 +1144,7 @@ impl fmt::Display for ValidationErrorKind {
             Self::InvalidConstraintGroup => "invalid_constraint_group",
             Self::DuplicateConstraintId => "duplicate_constraint_id",
             Self::InvalidSoftWeight => "invalid_soft_weight",
+            Self::SoftGroupWeightOverflow => "soft_group_weight_overflow",
             Self::WeightWithoutSoft => "weight_without_soft",
             Self::GroupWithoutSoft => "group_without_soft",
             Self::TooManyObjectives => "too_many_objectives",
@@ -2135,6 +2155,29 @@ mod tests {
         assert_eq!(
             weight_without_soft.validate().unwrap_err().kind,
             ValidationErrorKind::WeightWithoutSoft
+        );
+
+        let overflowing_group: SolveConstraintsRequest = serde_json::from_value(json!({
+            "vars": [],
+            "constraints": [
+                {
+                    "group": "preferences",
+                    "soft": true,
+                    "weight": i64::MAX,
+                    "expr": {"kind": "bool", "value": true}
+                },
+                {
+                    "group": "preferences",
+                    "soft": true,
+                    "weight": i64::MAX,
+                    "expr": {"kind": "bool", "value": false}
+                }
+            ]
+        }))
+        .unwrap();
+        assert_eq!(
+            overflowing_group.validate().unwrap_err().kind.to_string(),
+            "soft_group_weight_overflow"
         );
     }
 

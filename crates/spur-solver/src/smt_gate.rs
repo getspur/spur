@@ -87,6 +87,28 @@ pub enum SmtGateError {
 /// assert!(validate_smt_script("(assert-soft true :weight 1)").is_ok());
 /// ```
 pub fn validate_smt_script(script: &str) -> Result<(), SmtGateError> {
+    validate_smt_script_with_responses(script).map(|_responses| ())
+}
+
+/// One response-producing command in an already validated raw SMT script.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RawResponseCommand {
+    /// `check-sat` produces a status atom.
+    CheckSat,
+    /// `get-model` produces a model or an error form.
+    GetModel,
+    /// `get-value` produces bindings or an error form.
+    GetValue,
+    /// `get-objectives` produces an objectives form.
+    GetObjectives,
+    /// `get-unsat-core` produces assertion names or an error form.
+    GetUnsatCore,
+}
+
+/// Validates a raw script and records its response-producing commands in order.
+pub(crate) fn validate_smt_script_with_responses(
+    script: &str,
+) -> Result<Vec<RawResponseCommand>, SmtGateError> {
     let actual_bytes = script.len();
     if actual_bytes > MAX_RAW_SMT_BYTES {
         return Err(SmtGateError::ScriptTooLarge {
@@ -97,6 +119,7 @@ pub fn validate_smt_script(script: &str) -> Result<(), SmtGateError> {
 
     let mut lexer = Lexer::new(script);
     let mut form_count = 0_usize;
+    let mut responses = Vec::new();
     while let Some(token) = lexer.next_token()? {
         let open_offset = match token {
             Token::Open { offset } => offset,
@@ -134,6 +157,16 @@ pub fn validate_smt_script(script: &str) -> Result<(), SmtGateError> {
                 offset: command_offset,
             });
         }
+        if let Some(response) = match command {
+            "check-sat" => Some(RawResponseCommand::CheckSat),
+            "get-model" => Some(RawResponseCommand::GetModel),
+            "get-value" => Some(RawResponseCommand::GetValue),
+            "get-objectives" => Some(RawResponseCommand::GetObjectives),
+            "get-unsat-core" => Some(RawResponseCommand::GetUnsatCore),
+            _ => None,
+        } {
+            responses.push(response);
+        }
         form_count += 1;
     }
 
@@ -144,7 +177,7 @@ pub fn validate_smt_script(script: &str) -> Result<(), SmtGateError> {
         });
     }
 
-    Ok(())
+    Ok(responses)
 }
 
 fn is_allowed_command(command: &str) -> bool {

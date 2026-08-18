@@ -73,6 +73,44 @@ fn persisted_artifact_round_trips_across_service_instances() -> Result<(), Box<d
 }
 
 #[test]
+fn persisted_optimization_envelope_round_trips() -> Result<(), Box<dyn Error>> {
+    let repo = tempdir()?;
+    let service = SolverService::new().with_repo_root(repo.path());
+    let response: SolveConstraintsResponse = serde_json::from_value(serde_json::json!({
+        "status": "sat",
+        "model": {"x": 1},
+        "duration_ms": 4,
+        "reason": null,
+        "optimization": {
+            "priority": "lex",
+            "solutions": [{
+                "model": {"x": 1},
+                "objectives": [{
+                    "op": "maximize",
+                    "value": 1,
+                    "bound": {"kind": "finite", "exact": "1"}
+                }],
+                "soft_constraints": [],
+                "groups": []
+            }],
+            "termination": "complete"
+        }
+    }))?;
+
+    let expected = serde_json::to_value(&response.optimization)?;
+    let persisted = service.persist(&request(false), &response)?;
+    assert_eq!(
+        serde_json::to_value(&persisted)?["result"]["optimization"],
+        expected
+    );
+
+    let loaded = service.get_solve_result(&persisted.solve_id)?;
+    assert_eq!(serde_json::to_value(&loaded)?["optimization"], expected);
+
+    Ok(())
+}
+
+#[test]
 fn get_solve_result_rejects_traversal_before_filesystem_access() -> Result<(), Box<dyn Error>> {
     let repo = tempdir()?;
     let service = SolverService::new().with_repo_root(repo.path());

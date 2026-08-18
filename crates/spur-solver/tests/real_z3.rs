@@ -14,8 +14,8 @@ use spur_solver::{
     service::SolverService,
     types::{
         ConstraintDecl, ConstraintExpr, ConstraintItem, ConstraintOp, ModelValue, Objective,
-        ObjectiveOp, SolveConstraintsRequest, SolveConstraintsResponse, SolveStatus, Variable,
-        DEFAULT_MAX_SOLUTIONS, DEFAULT_TIMEOUT_MS,
+        ObjectiveOp, SolveConstraintsRequest, SolveConstraintsResponse, SolveSmtRequest,
+        SolveStatus, Variable, DEFAULT_MAX_SOLUTIONS, DEFAULT_TIMEOUT_MS,
     },
 };
 
@@ -487,6 +487,103 @@ async fn open_real_maximum_reports_strict_bound() {
 
     assert_eq!(response.status, SolveStatus::Sat, "{response:?}");
     assert_first_objective_bound_kind(&response, "strict");
+}
+
+#[tokio::test]
+#[ignore = "requires SPUR_TEST_Z3=1 and an installed Z3 binary"]
+async fn compound_real_objective_accepts_z3_normalization() {
+    if !real_z3_enabled() {
+        return;
+    }
+
+    let response = SolverService::new()
+        .solve_constraints(request_from_json(serde_json::json!({
+            "vars": [{"type":"real","name":"x"}],
+            "constraints": [{
+                "kind":"op",
+                "op":"eq",
+                "args":[
+                    {"kind":"var","name":"x"},
+                    {"kind":"real","num":1,"den":2}
+                ]
+            }],
+            "objectives": [{
+                "op":"maximize",
+                "expr":{
+                    "kind":"op",
+                    "op":"add",
+                    "args":[
+                        {"kind":"var","name":"x"},
+                        {"kind":"real","num":1,"den":2}
+                    ]
+                }
+            }],
+            "use_cache":false
+        })))
+        .await
+        .expect("compound Real optimization should start");
+
+    assert_eq!(response.status, SolveStatus::Sat, "{response:?}");
+    assert_first_objective_bound_kind(&response, "finite");
+}
+
+#[tokio::test]
+#[ignore = "requires SPUR_TEST_Z3=1 and an installed Z3 binary"]
+async fn single_objective_box_completes_after_z3_restarts() {
+    if !real_z3_enabled() {
+        return;
+    }
+
+    let response = SolverService::new()
+        .solve_constraints(request_from_json(serde_json::json!({
+            "vars": [{"type":"int_range","name":"x","min":0,"max":3}],
+            "constraints": [],
+            "objectives": [{
+                "op":"maximize",
+                "expr":{"kind":"var","name":"x"}
+            }],
+            "objective_priority":"box",
+            "use_cache":false
+        })))
+        .await
+        .expect("single-objective box optimization should start");
+
+    assert_eq!(response.status, SolveStatus::Sat, "{response:?}");
+    assert_complete_optimization(&response);
+    assert_eq!(
+        response
+            .optimization
+            .as_ref()
+            .expect("optimization payload")
+            .solutions
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires SPUR_TEST_Z3=1 and an installed Z3 binary"]
+async fn raw_unsat_core_named_objectives_is_preserved() {
+    if !real_z3_enabled() {
+        return;
+    }
+
+    let response = SolverService::new()
+        .solve_smt(SolveSmtRequest {
+            smt_lib: "(set-option :produce-unsat-cores true)\n\
+                      (assert (! false :named objectives))\n\
+                      (check-sat)\n\
+                      (get-unsat-core)\n"
+                .to_owned(),
+            timeout_ms: DEFAULT_TIMEOUT_MS,
+            persist: false,
+            include_smt: false,
+        })
+        .await
+        .expect("raw unsat-core solve should start");
+
+    assert_eq!(response.status, SolveStatus::Unsat, "{response:?}");
+    assert_eq!(response.unsat_core, Some(vec!["objectives".to_owned()]));
 }
 
 #[tokio::test]

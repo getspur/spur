@@ -27,7 +27,7 @@ use crate::{
         ProcessRunner, Z3Process,
     },
     session::{SessionApply, SessionError, SessionStore},
-    smt_gate::{validate_smt_script, SmtGateError},
+    smt_gate::{validate_smt_script_with_responses, RawResponseCommand, SmtGateError},
     types::{
         ModelValue, ObjectiveBound, ObjectivePriority, ObjectiveResult, OptimizationResult,
         OptimizationSolution, OptimizationTermination, SessionOp, SoftConstraintResult,
@@ -366,11 +366,12 @@ impl SolverService {
                 },
             });
         }
-        validate_smt_script(&request.smt_lib).map_err(|source| {
-            SolverServiceError::InvalidParams {
-                source: source.into(),
-            }
-        })?;
+        let raw_responses =
+            validate_smt_script_with_responses(&request.smt_lib).map_err(|source| {
+                SolverServiceError::InvalidParams {
+                    source: source.into(),
+                }
+            })?;
 
         let deadline = started + Duration::from_millis(request.timeout_ms);
         let include_smt = request.include_smt;
@@ -381,7 +382,9 @@ impl SolverService {
         };
         let response = match self.run_script(request.smt_lib.clone(), deadline).await? {
             ServiceRunOutcome::TimedOut => timeout_response(started),
-            ServiceRunOutcome::Completed(output) => response_from_raw_output(output, started),
+            ServiceRunOutcome::Completed(output) => {
+                response_from_raw_output(output, &raw_responses, started)
+            }
             ServiceRunOutcome::Error(message) => error_response(started, message),
         };
         self.finish_response(
@@ -531,7 +534,11 @@ fn response_from_output(
     }
 }
 
-fn response_from_raw_output(output: ProcessOutput, started: Instant) -> SolveConstraintsResponse {
+fn response_from_raw_output(
+    output: ProcessOutput,
+    response_commands: &[RawResponseCommand],
+    started: Instant,
+) -> SolveConstraintsResponse {
     let stderr = String::from_utf8_lossy(&output.stderr);
     let stdout = match str::from_utf8(&output.stdout) {
         Ok(stdout) => stdout,
@@ -542,7 +549,7 @@ fn response_from_raw_output(output: ProcessOutput, started: Instant) -> SolveCon
             );
         }
     };
-    let parsed = parse_raw_solver_output(stdout);
+    let parsed = parse_raw_solver_output(stdout, response_commands);
     let expected_model_failure = output.exit_code == Some(1)
         && parsed
             .as_ref()
@@ -808,11 +815,11 @@ fn parse_optimization_output(
                 (ObjectivePriority::Pareto | ObjectivePriority::Box, "unknown") => {
                     OptimizationTermination::Unknown
                 }
-                (ObjectivePriority::Box, "sat") => {
-                    return Err(ParseError::new(
-                        "box terminal probe unexpectedly returned sat",
-                    ))
-                }
+                // Z3 restarts box enumeration immediately when there is only
+                // one generated objective, so the terminal probe is `sat`
+                // instead of the `unsat` seen after multi-objective boxes.
+                // The finite objective count has already been collected.
+                (ObjectivePriority::Box, "sat") => OptimizationTermination::Complete,
                 (ObjectivePriority::Lex, _) => {
                     return Err(ParseError::new(
                         "unexpected terminal status after lex cycle",
@@ -1038,14 +1045,12 @@ fn parse_optimization_solution(
                 "explicit objective entry must contain expression and bound",
             ));
         }
-        if fields[0] != binding[0] {
-            return Err(ParseError::new(
-                "objective response expression does not match get-value expression",
-            ));
-        }
+        // Pair by request position. Z3 may normalize the objective expression
+        // only in `get-objectives` (for example `/ 1 2` becomes `/ 1.0 2.0`)
+        // while echoing the original term in `get-value`.
         objective_results.push(ObjectiveResult {
             op: Some(objective.op),
-            value: parse_raw_model_value(&binding[1]),
+            value: Some(parse_raw_model_value(&binding[1])),
             bound: classify_bound(&fields[1]),
         });
     }
@@ -1080,13 +1085,6 @@ fn objective_entries(
         }
     }
     Ok(entries)
-}
-
-fn is_objectives_form(form: &SExpression) -> bool {
-    form.as_list()
-        .and_then(|values| values.first())
-        .and_then(SExpression::as_atom)
-        == Some("objectives")
 }
 
 fn validate_soft_objective_entries(
@@ -1183,80 +1181,149 @@ fn classify_bound(expression: &SExpression) -> ObjectiveBound {
     }
 }
 
-fn parse_raw_solver_output(stdout: &str) -> Result<ParsedSolverOutput, ParseError> {
+fn parse_raw_solver_output(
+    stdout: &str,
+    response_commands: &[RawResponseCommand],
+) -> Result<ParsedSolverOutput, ParseError> {
     let forms = SExpressionParser::new(stdout).parse_all()?;
-    let status = forms
-        .first()
-        .and_then(SExpression::as_atom)
+    if response_commands.first() != Some(&RawResponseCommand::CheckSat) {
+        return Err(ParseError::new(
+            "raw script must produce check-sat before query responses",
+        ));
+    }
+    if response_commands
+        .iter()
+        .filter(|command| **command == RawResponseCommand::CheckSat)
+        .count()
+        != 1
+    {
+        return Err(ParseError::new(
+            "raw result envelopes support exactly one check-sat response",
+        ));
+    }
+    if forms.len() != response_commands.len() {
+        return Err(ParseError::new(format!(
+            "raw solver returned {} response forms, expected {}",
+            forms.len(),
+            response_commands.len()
+        )));
+    }
+
+    let status = forms[0]
+        .as_atom()
         .ok_or_else(|| ParseError::new("expected status atom as first output form"))?;
+    if !matches!(status, "sat" | "unsat" | "unknown") {
+        return Err(ParseError::new(format!(
+            "unexpected solver status `{status}`"
+        )));
+    }
+
+    let mut model_form = None;
+    let mut objectives_form = None;
+    let mut unsat_core_form = None;
+    let mut model_unavailable = false;
+    let mut core_unavailable = false;
+    for (command, form) in response_commands.iter().zip(&forms).skip(1) {
+        match command {
+            RawResponseCommand::CheckSat => unreachable!("checked exactly once above"),
+            RawResponseCommand::GetModel | RawResponseCommand::GetValue => {
+                if form.is_model_unavailable_error() {
+                    model_unavailable = true;
+                } else if model_form.replace(form).is_some() {
+                    return Err(ParseError::new(
+                        "raw output must contain at most one model or get-value response",
+                    ));
+                }
+            }
+            RawResponseCommand::GetObjectives => {
+                raw_objective_results(form)?;
+                if objectives_form.replace(form).is_some() {
+                    return Err(ParseError::new(
+                        "raw output must contain at most one objectives response",
+                    ));
+                }
+            }
+            RawResponseCommand::GetUnsatCore => {
+                if form.is_unsat_core_unavailable_error() {
+                    core_unavailable = true;
+                } else if unsat_core_form.replace(form).is_some() {
+                    return Err(ParseError::new(
+                        "raw output must contain at most one unsat-core response",
+                    ));
+                }
+            }
+        }
+    }
 
     match status {
         "sat" => {
-            let (solve, optimization) = parse_raw_sat_output(&forms)?;
+            if model_unavailable {
+                return Err(ParseError::new(
+                    "sat raw result returned a model-unavailable error",
+                ));
+            }
+            if unsat_core_form.is_some() {
+                return Err(ParseError::new(
+                    "sat raw result unexpectedly returned an unsat core",
+                ));
+            }
+            let (solve, optimization) = parse_raw_sat_output(model_form, objectives_form)?;
             Ok(ParsedSolverOutput {
                 solve,
                 optimization,
-                expected_get_value_failure: false,
+                expected_get_value_failure: core_unavailable,
             })
         }
-        "unsat" => Ok(ParsedSolverOutput {
-            solve: ParsedSolve::Unsat {
-                unsat_core: extract_raw_unsat_core(&forms),
-            },
-            optimization: None,
-            expected_get_value_failure: require_raw_non_sat_output(&forms, "unsat")?,
-        }),
-        "unknown" => Ok(ParsedSolverOutput {
-            solve: ParsedSolve::Unknown,
-            optimization: None,
-            expected_get_value_failure: require_raw_non_sat_output(&forms, "unknown")?,
-        }),
-        other => Err(ParseError::new(format!(
-            "unexpected solver status `{other}`"
-        ))),
+        "unsat" | "unknown" => {
+            if model_form.is_some() {
+                return Err(ParseError::new(format!(
+                    "{status} raw result unexpectedly returned model values"
+                )));
+            }
+            if status == "unknown" && unsat_core_form.is_some() {
+                return Err(ParseError::new(
+                    "unknown raw result unexpectedly returned an unsat core",
+                ));
+            }
+            let unsat_core = if status == "unsat" {
+                unsat_core_form.map(parse_raw_unsat_core).transpose()?
+            } else {
+                None
+            };
+            Ok(ParsedSolverOutput {
+                solve: if status == "unsat" {
+                    ParsedSolve::Unsat { unsat_core }
+                } else {
+                    ParsedSolve::Unknown
+                },
+                optimization: None,
+                expected_get_value_failure: model_unavailable || core_unavailable,
+            })
+        }
+        _ => unreachable!("status validated above"),
     }
 }
 
-fn extract_raw_unsat_core(forms: &[SExpression]) -> Option<Vec<String>> {
-    forms.iter().skip(1).find_map(|form| {
-        if is_objectives_form(form) {
-            return None;
-        }
-        let values = form.as_list()?;
-        // A core is a list of atoms (assertion names). Skip error forms and models.
-        if values.iter().all(|item| item.as_atom().is_some()) {
-            Some(
-                values
-                    .iter()
-                    .filter_map(SExpression::as_atom)
-                    .map(str::to_owned)
-                    .collect(),
-            )
-        } else {
-            None
-        }
-    })
+fn parse_raw_unsat_core(form: &SExpression) -> Result<Vec<String>, ParseError> {
+    let values = form
+        .as_list()
+        .ok_or_else(|| ParseError::new("raw unsat-core response must be a list"))?;
+    if !values.iter().all(|item| item.as_atom().is_some()) {
+        return Err(ParseError::new(
+            "raw unsat-core response must contain only assertion-name atoms",
+        ));
+    }
+    Ok(values
+        .iter()
+        .filter_map(SExpression::as_atom)
+        .map(str::to_owned)
+        .collect())
 }
 
 fn parse_raw_sat_output(
-    forms: &[SExpression],
+    model_form: Option<&SExpression>,
+    objectives_form: Option<&SExpression>,
 ) -> Result<(ParsedSolve, Option<OptimizationResult>), ParseError> {
-    let mut model_form = None;
-    let mut objectives_form = None;
-    for form in forms.iter().skip(1) {
-        if is_objectives_form(form) {
-            if objectives_form.replace(form).is_some() {
-                return Err(ParseError::new(
-                    "raw sat output must contain at most one objectives response",
-                ));
-            }
-        } else if model_form.replace(form).is_some() {
-            return Err(ParseError::new(
-                "raw sat output must contain at most one model or get-value response",
-            ));
-        }
-    }
-
     let model = model_form
         .map(parse_raw_model)
         .transpose()?
@@ -1293,7 +1360,7 @@ fn raw_objective_results(form: &SExpression) -> Result<Vec<ObjectiveResult>, Par
                 .ok_or_else(|| ParseError::new("objective entry must contain a bound"))?;
             Ok(ObjectiveResult {
                 op: None,
-                value: parse_raw_model_value(bound),
+                value: None,
                 bound: classify_bound(bound),
             })
         })
@@ -1418,42 +1485,6 @@ fn render_s_expression(expression: &SExpression) -> String {
             rendered
         }
     }
-}
-
-fn require_raw_non_sat_output(forms: &[SExpression], status: &str) -> Result<bool, ParseError> {
-    if forms.len() == 1 {
-        return Ok(false);
-    }
-    // Accept model-unavailable errors and optional unsat-core atom lists.
-    let mut saw_model_error = false;
-    let mut saw_objectives = false;
-    for form in forms.iter().skip(1) {
-        if form.is_model_unavailable_error() || form.is_unsat_core_unavailable_error() {
-            saw_model_error = true;
-            continue;
-        }
-        if is_objectives_form(form) {
-            if saw_objectives {
-                return Err(ParseError::new(format!(
-                    "multiple objectives responses after `{status}` status"
-                )));
-            }
-            raw_objective_results(form)?;
-            saw_objectives = true;
-            continue;
-        }
-        if form
-            .as_list()
-            .is_some_and(|values| values.iter().all(|item| item.as_atom().is_some()))
-        {
-            // bare unsat core list (optional on raw scripts)
-            continue;
-        }
-        return Err(ParseError::new(format!(
-            "unexpected output after `{status}` status"
-        )));
-    }
-    Ok(saw_model_error)
 }
 
 fn require_non_sat_output(
@@ -1908,7 +1939,7 @@ mod tests {
 
     use super::{
         classify_bound, parse_solver_output, response_from_output, response_from_raw_output,
-        ParsedSolve, SExpressionParser, SolverService, SolverServiceError,
+        ParsedSolve, RawResponseCommand, SExpressionParser, SolverService, SolverServiceError,
     };
     use crate::{
         persist::UNKNOWN_Z3_VERSION,
@@ -1931,6 +1962,13 @@ mod tests {
             stdout: stdout.as_bytes().to_vec(),
             stderr: Vec::new(),
         }
+    }
+
+    fn raw_response(
+        stdout: &str,
+        response_commands: &[RawResponseCommand],
+    ) -> super::SolveConstraintsResponse {
+        response_from_raw_output(completed(stdout), response_commands, Instant::now())
     }
 
     #[test]
@@ -2073,7 +2111,7 @@ mod tests {
         let optimization = response.optimization.expect("optimization payload");
         assert_eq!(optimization.termination, OptimizationTermination::Complete);
         let solution = &optimization.solutions[0];
-        assert_eq!(solution.objectives[0].value, ModelValue::Int(4));
+        assert_eq!(solution.objectives[0].value, Some(ModelValue::Int(4)));
         assert!(matches!(
             &solution.objectives[0].bound,
             ObjectiveBound::Strict { exact } if exact == "(+ 4 epsilon)"
@@ -2085,6 +2123,55 @@ mod tests {
         assert_eq!(solution.groups[0].group.as_deref(), Some("preferences"));
         assert_eq!(solution.groups[0].satisfied_weight, 2);
         assert_eq!(solution.groups[0].violated_weight, 3);
+    }
+
+    #[test]
+    fn accepts_z3_real_normalization_between_objectives_and_values() {
+        let request = request(serde_json::json!({
+            "vars": [{"type":"real","name":"x"}],
+            "constraints": [{
+                "kind":"op",
+                "op":"eq",
+                "args":[
+                    {"kind":"var","name":"x"},
+                    {"kind":"real","num":1,"den":2}
+                ]
+            }],
+            "objectives": [{
+                "op":"maximize",
+                "expr":{
+                    "kind":"op",
+                    "op":"add",
+                    "args":[
+                        {"kind":"var","name":"x"},
+                        {"kind":"real","num":1,"den":2}
+                    ]
+                }
+            }],
+            "use_cache": false
+        }));
+        let response = response_from_output(
+            &request,
+            completed(
+                "sat\n(objectives ((+ v_x (/ 1.0 2.0)) 1))\n\
+                 ((v_x (/ 1.0 2.0)) ((+ v_x (/ 1 2)) 1.0))\n",
+            ),
+            Instant::now(),
+        );
+
+        assert_eq!(response.status, SolveStatus::Sat, "{response:?}");
+        let objective = &response
+            .optimization
+            .expect("optimization payload")
+            .solutions[0]
+            .objectives[0];
+        assert_eq!(objective.value, Some(ModelValue::Enum("1.0".to_owned())));
+        assert_eq!(
+            objective.bound,
+            ObjectiveBound::Finite {
+                exact: "1".to_owned()
+            }
+        );
     }
 
     #[test]
@@ -2220,19 +2307,46 @@ mod tests {
     }
 
     #[test]
-    fn raw_objective_output_is_exposed_with_unknown_metadata() {
-        let response = response_from_raw_output(
-            completed("sat\n(objectives (v_x (* (- 1) oo)))\n"),
+    fn single_objective_box_accepts_sat_terminal_restart() {
+        let request = request(serde_json::json!({
+            "vars": [{"type":"int","name":"x"}],
+            "constraints": [],
+            "objectives": [{"op":"maximize","expr":{"kind":"var","name":"x"}}],
+            "objective_priority": "box",
+            "use_cache": false
+        }));
+        let response = response_from_output(
+            &request,
+            completed("sat\n(objectives (v_x 3))\n((v_x 3) (v_x 3))\nsat\n"),
             Instant::now(),
+        );
+
+        assert_eq!(response.status, SolveStatus::Sat, "{response:?}");
+        let optimization = response.optimization.expect("optimization payload");
+        assert_eq!(optimization.solutions.len(), 1);
+        assert_eq!(optimization.termination, OptimizationTermination::Complete);
+    }
+
+    #[test]
+    fn raw_objective_output_is_exposed_with_unknown_metadata() {
+        let response = raw_response(
+            "sat\n(objectives (v_x (* (- 1) oo)))\n",
+            &[
+                RawResponseCommand::CheckSat,
+                RawResponseCommand::GetObjectives,
+            ],
         );
 
         assert_eq!(response.status, SolveStatus::Sat, "{response:?}");
         let optimization = response.optimization.expect("raw objective payload");
         assert_eq!(optimization.priority, None);
         assert_eq!(optimization.solutions[0].objectives[0].op, None);
-        assert_eq!(
-            optimization.solutions[0].objectives[0].value,
-            ModelValue::Enum("(* (- 1) oo)".to_owned())
+        assert!(
+            serde_json::to_value(&optimization.solutions[0].objectives[0])
+                .expect("raw objective result must serialize")
+                .get("value")
+                .is_none(),
+            "get-objectives reports a bound, not a model value"
         );
         assert!(matches!(
             optimization.solutions[0].objectives[0].bound,
@@ -2241,12 +2355,26 @@ mod tests {
     }
 
     #[test]
-    fn raw_sat_objectives_and_model_are_order_independent() {
-        for stdout in [
-            "sat\n((x 0))\n(objectives (x (* (- 1) oo)))\n",
-            "sat\n(objectives (x (* (- 1) oo)))\n((x 0))\n",
+    fn raw_sat_objectives_and_model_follow_command_positions() {
+        for (stdout, response_commands) in [
+            (
+                "sat\n((x 0))\n(objectives (x (* (- 1) oo)))\n",
+                [
+                    RawResponseCommand::CheckSat,
+                    RawResponseCommand::GetValue,
+                    RawResponseCommand::GetObjectives,
+                ],
+            ),
+            (
+                "sat\n(objectives (x (* (- 1) oo)))\n((x 0))\n",
+                [
+                    RawResponseCommand::CheckSat,
+                    RawResponseCommand::GetObjectives,
+                    RawResponseCommand::GetValue,
+                ],
+            ),
         ] {
-            let response = response_from_raw_output(completed(stdout), Instant::now());
+            let response = raw_response(stdout, &response_commands);
 
             assert_eq!(response.status, SolveStatus::Sat, "{response:?}");
             assert_eq!(
@@ -2256,11 +2384,25 @@ mod tests {
             assert!(response.optimization.is_some());
         }
 
-        for stdout in [
-            "sat\n((x 0))\n((x 1))\n",
-            "sat\n(objectives (x 0))\n(objectives (x 1))\n",
+        for (stdout, response_commands) in [
+            (
+                "sat\n((x 0))\n((x 1))\n",
+                [
+                    RawResponseCommand::CheckSat,
+                    RawResponseCommand::GetValue,
+                    RawResponseCommand::GetValue,
+                ],
+            ),
+            (
+                "sat\n(objectives (x 0))\n(objectives (x 1))\n",
+                [
+                    RawResponseCommand::CheckSat,
+                    RawResponseCommand::GetObjectives,
+                    RawResponseCommand::GetObjectives,
+                ],
+            ),
         ] {
-            let response = response_from_raw_output(completed(stdout), Instant::now());
+            let response = raw_response(stdout, &response_commands);
 
             assert_eq!(response.status, SolveStatus::Error, "{response:?}");
         }
@@ -2272,25 +2414,50 @@ mod tests {
             ("unsat\n(objectives (x 0))\n", SolveStatus::Unsat),
             ("unknown\n(objectives (x 0))\n", SolveStatus::Unknown),
         ] {
-            let response = response_from_raw_output(completed(stdout), Instant::now());
+            let response = raw_response(
+                stdout,
+                &[
+                    RawResponseCommand::CheckSat,
+                    RawResponseCommand::GetObjectives,
+                ],
+            );
 
             assert_eq!(response.status, expected_status, "{response:?}");
             assert!(response.optimization.is_none());
         }
 
-        let malformed =
-            response_from_raw_output(completed("unsat\n(objectives malformed)\n"), Instant::now());
+        let malformed = raw_response(
+            "unsat\n(objectives malformed)\n",
+            &[
+                RawResponseCommand::CheckSat,
+                RawResponseCommand::GetObjectives,
+            ],
+        );
         assert_eq!(malformed.status, SolveStatus::Error, "{malformed:?}");
     }
 
     #[test]
     fn raw_empty_objectives_after_unsat_are_not_an_unsat_core() {
-        let response =
-            response_from_raw_output(completed("unsat\n(objectives\n)\n"), Instant::now());
+        let response = raw_response(
+            "unsat\n(objectives\n)\n",
+            &[
+                RawResponseCommand::CheckSat,
+                RawResponseCommand::GetObjectives,
+            ],
+        );
 
         assert_eq!(response.status, SolveStatus::Unsat, "{response:?}");
         assert!(response.optimization.is_none());
         assert!(response.unsat_core.is_none());
+
+        let named_core = raw_response(
+            "unsat\n(objectives)\n",
+            &[
+                RawResponseCommand::CheckSat,
+                RawResponseCommand::GetUnsatCore,
+            ],
+        );
+        assert_eq!(named_core.unsat_core, Some(vec!["objectives".to_owned()]));
     }
 
     #[derive(Debug)]
