@@ -12,8 +12,8 @@
 use std::{collections::HashMap, error::Error, fmt};
 
 use crate::types::{
-    ConstraintExpr, ConstraintItem, ConstraintOp, Objective, SolveConstraintsRequest,
-    ValidationError, Variable,
+    ConstraintExpr, ConstraintItem, ConstraintOp, Objective, ObjectivePriority,
+    SolveConstraintsRequest, ValidationError, Variable,
 };
 
 /// Prefix applied to every validated surface variable name in generated SMT.
@@ -76,10 +76,12 @@ impl From<ValidationError> for EncodeError {
 
 /// Encodes a validated B′ request as a complete SMT-LIB2 model-finding script.
 ///
-/// Declarations retain request order, followed by domain bounds, caller
-/// constraints, `(check-sat)`, and one `(get-value ...)` query containing every
-/// declared variable. An empty variable list omits `get-value`, whose SMT-LIB2
-/// grammar requires at least one term.
+/// Declarations retain request order, followed by domain bounds and caller
+/// constraints. Feasibility requests emit one `(check-sat)` and a variable-only
+/// `(get-value ...)` when variables exist. Optimization requests emit complete
+/// positional cycles containing `(check-sat)`, `(get-objectives)`, and one
+/// combined value query for variables, soft expressions, and explicit objective
+/// expressions.
 ///
 /// # Errors
 ///
@@ -146,7 +148,8 @@ pub fn encode_solve_constraints(request: &SolveConstraintsRequest) -> Result<Str
             .output
             .push_line("(set-option :produce-unsat-cores true)")?;
     }
-    if request.has_objectives() {
+    let optimization_active = optimization_active(request);
+    if optimization_active {
         encoder.output.push("(set-option :opt.priority ")?;
         encoder.output.push(request.objective_priority.as_smt())?;
         encoder.output.push_line(")")?;
@@ -165,13 +168,22 @@ pub fn encode_solve_constraints(request: &SolveConstraintsRequest) -> Result<Str
         encoder.write_objective(objective)?;
     }
 
-    encoder.output.push_line("(check-sat)")?;
-    if want_cores {
-        // Emitted before get-value so unsat scripts still surface a core when
-        // the subsequent get-value errors with "model is not available".
-        encoder.output.push_line("(get-unsat-core)")?;
+    if optimization_active {
+        for _ in 0..optimization_cycle_count(request) {
+            encoder.write_optimization_cycle()?;
+        }
+        if !matches!(request.objective_priority, ObjectivePriority::Lex) {
+            encoder.output.push_line("(check-sat)")?;
+        }
+    } else {
+        encoder.output.push_line("(check-sat)")?;
+        if want_cores {
+            // Emitted before get-value so unsat scripts still surface a core when
+            // the subsequent get-value errors with "model is not available".
+            encoder.output.push_line("(get-unsat-core)")?;
+        }
+        encoder.write_get_value()?;
     }
-    encoder.write_get_value()?;
     Ok(encoder.output.finish())
 }
 
@@ -207,6 +219,33 @@ fn select_logic(request: &SolveConstraintsRequest) -> &'static str {
         (false, true, false) => "QF_NRA",
         (false, false, _) => "QF_NIA",
     }
+}
+
+fn optimization_active(request: &SolveConstraintsRequest) -> bool {
+    request.has_soft_constraints() || request.has_objectives()
+}
+
+fn optimization_cycle_count(request: &SolveConstraintsRequest) -> usize {
+    match request.objective_priority {
+        ObjectivePriority::Lex => 1,
+        ObjectivePriority::Pareto => request.max_solutions,
+        ObjectivePriority::Box => optimization_objective_count(request),
+    }
+}
+
+fn optimization_objective_count(request: &SolveConstraintsRequest) -> usize {
+    let mut soft_groups = Vec::new();
+    for constraint in request
+        .constraints
+        .iter()
+        .filter(|constraint| constraint.is_soft())
+    {
+        let group = constraint.group();
+        if !soft_groups.contains(&group) {
+            soft_groups.push(group);
+        }
+    }
+    soft_groups.len() + request.objectives.len()
 }
 
 struct Encoder<'a> {
@@ -281,9 +320,9 @@ impl<'a> Encoder<'a> {
             self.write_expression(constraint.expr())?;
             self.output.push(" :weight ")?;
             self.write_integer(weight)?;
-            if let Some(id) = constraint.id() {
+            if let Some(group) = constraint.group() {
                 self.output.push(" :id ")?;
-                self.output.push(id)?;
+                self.output.push(group)?;
             }
             return self.output.push_line(")");
         }
@@ -439,6 +478,51 @@ impl<'a> Encoder<'a> {
         }
         self.output.push_line("))")
     }
+
+    fn write_optimization_cycle(&mut self) -> Result<(), EncodeError> {
+        self.output.push_line("(check-sat)")?;
+        self.output.push_line("(get-objectives)")?;
+        self.write_optimization_get_value()
+    }
+
+    fn write_optimization_get_value(&mut self) -> Result<(), EncodeError> {
+        let request = self.request;
+        self.output.push("(get-value (")?;
+        let mut term_count = 0;
+
+        for variable in &request.vars {
+            if term_count > 0 {
+                self.output.push(" ")?;
+            }
+            self.write_identifier(variable.name())?;
+            term_count += 1;
+        }
+        for constraint in request
+            .constraints
+            .iter()
+            .filter(|constraint| constraint.is_soft())
+        {
+            if term_count > 0 {
+                self.output.push(" ")?;
+            }
+            self.write_expression(constraint.expr())?;
+            term_count += 1;
+        }
+        for objective in &request.objectives {
+            if term_count > 0 {
+                self.output.push(" ")?;
+            }
+            self.write_expression(&objective.expr)?;
+            term_count += 1;
+        }
+
+        if term_count == 0 {
+            return Err(EncodeError::InternalInvariant(
+                "optimization query missing value terms",
+            ));
+        }
+        self.output.push_line("))")
+    }
 }
 
 const fn operation_token(operation: ConstraintOp) -> &'static str {
@@ -512,7 +596,8 @@ impl SmtBuilder {
 #[cfg(test)]
 mod tests {
     use crate::types::{
-        ConstraintExpr, ConstraintOp, SolveConstraintsRequest, ValidationErrorKind, Variable,
+        ConstraintDecl, ConstraintExpr, ConstraintItem, ConstraintOp, Objective, ObjectiveOp,
+        ObjectivePriority, SolveConstraintsRequest, ValidationErrorKind, Variable,
         DEFAULT_MAX_SOLUTIONS, DEFAULT_TIMEOUT_MS,
     };
 
@@ -993,14 +1078,17 @@ mod tests {
         let smt = encode_solve_constraints(&request).expect("valid request should encode");
         assert!(!smt.contains(":produce-unsat-cores"));
         assert!(!smt.contains("(get-unsat-core)"));
-        assert!(smt.contains("(assert-soft (>= v_sidebar 320) :weight 5 :id prefer_wide)"));
+        assert!(smt.contains("(set-option :opt.priority lex)"));
+        assert!(smt.contains("(assert-soft (>= v_sidebar 320) :weight 5)"));
+        assert!(!smt.contains(":id prefer_wide"));
         assert!(smt.contains("(assert (>= v_sidebar 200))"));
+        assert!(smt.contains(
+            "(check-sat)\n(get-objectives)\n(get-value (v_sidebar (>= v_sidebar 320)))\n"
+        ));
     }
 
     #[test]
     fn encodes_maximize_minimize_objectives_and_disables_cores() {
-        use crate::types::{ConstraintDecl, ConstraintItem, Objective, ObjectiveOp};
-
         let request = SolveConstraintsRequest {
             vars: vec![Variable::IntRange {
                 name: "batch".to_owned(),
@@ -1046,6 +1134,91 @@ mod tests {
         assert!(!smt.contains(":produce-unsat-cores"));
         assert!(!smt.contains("(get-unsat-core)"));
         assert!(smt.contains("(assert (! (>= v_batch 16) :named floor))"));
+    }
+
+    #[test]
+    fn optimization_get_value_combines_variables_soft_and_objective_expressions() {
+        let request = SolveConstraintsRequest {
+            vars: vec![
+                Variable::IntRange {
+                    name: "x".to_owned(),
+                    min: 0,
+                    max: 3,
+                },
+                Variable::Bool {
+                    name: "preferred".to_owned(),
+                },
+            ],
+            constraints: vec![ConstraintItem::Declared(ConstraintDecl {
+                id: Some("prefer_value".to_owned()),
+                group: None,
+                soft: true,
+                weight: Some(5),
+                expr: variable("preferred"),
+            })],
+            objectives: vec![Objective {
+                op: ObjectiveOp::Maximize,
+                expr: variable("x"),
+            }],
+            objective_priority: ObjectivePriority::Lex,
+            max_solutions: DEFAULT_MAX_SOLUTIONS,
+            use_cache: true,
+            session_id: None,
+            session_op: Default::default(),
+            timeout_ms: DEFAULT_TIMEOUT_MS,
+            persist: false,
+            include_smt: false,
+        };
+
+        let smt = encode_solve_constraints(&request).expect("valid request should encode");
+
+        assert!(smt.contains(
+            "(check-sat)\n(get-objectives)\n(get-value (v_x v_preferred v_preferred v_x))\n"
+        ));
+    }
+
+    #[test]
+    fn lex_emits_one_optimization_cycle_without_terminal_probe() {
+        let request = explicit_objective_request(ObjectivePriority::Lex, 3, 2);
+
+        let smt = encode_solve_constraints(&request).expect("valid request should encode");
+
+        assert_eq!(smt.matches("(check-sat)").count(), 1, "SMT:\n{smt}");
+        assert_eq!(smt.matches("(get-objectives)").count(), 1, "SMT:\n{smt}");
+        assert_eq!(smt.matches("(get-value").count(), 1, "SMT:\n{smt}");
+    }
+
+    #[test]
+    fn pareto_emits_max_solution_cycles_and_terminal_probe() {
+        let request = explicit_objective_request(ObjectivePriority::Pareto, 3, 2);
+
+        let smt = encode_solve_constraints(&request).expect("valid request should encode");
+
+        assert_eq!(smt.matches("(check-sat)").count(), 4, "SMT:\n{smt}");
+        assert_eq!(smt.matches("(get-objectives)").count(), 3, "SMT:\n{smt}");
+        assert_eq!(smt.matches("(get-value").count(), 3, "SMT:\n{smt}");
+        assert!(smt.ends_with("(check-sat)\n"), "SMT:\n{smt}");
+    }
+
+    #[test]
+    fn box_emits_one_cycle_per_soft_group_and_objective_plus_terminal_probe() {
+        let mut request = explicit_objective_request(ObjectivePriority::Box, 3, 2);
+        request.constraints = vec![
+            soft_constraint("anonymous_a", None),
+            soft_constraint("anonymous_b", None),
+            soft_constraint("shared_a", Some("shared")),
+            soft_constraint("shared_b", Some("shared")),
+            soft_constraint("separate", Some("separate")),
+        ];
+
+        let smt = encode_solve_constraints(&request).expect("valid request should encode");
+
+        // Three generated soft objectives (anonymous/shared/separate) plus two
+        // explicit objectives produce five box cycles, then a terminal probe.
+        assert_eq!(smt.matches("(check-sat)").count(), 6, "SMT:\n{smt}");
+        assert_eq!(smt.matches("(get-objectives)").count(), 5, "SMT:\n{smt}");
+        assert_eq!(smt.matches("(get-value").count(), 5, "SMT:\n{smt}");
+        assert!(smt.ends_with("(check-sat)\n"), "SMT:\n{smt}");
     }
 
     #[test]
@@ -1113,6 +1286,45 @@ mod tests {
         ConstraintExpr::Var {
             name: name.to_owned(),
         }
+    }
+
+    fn explicit_objective_request(
+        priority: ObjectivePriority,
+        max_solutions: usize,
+        objective_count: usize,
+    ) -> SolveConstraintsRequest {
+        SolveConstraintsRequest {
+            vars: vec![Variable::IntRange {
+                name: "x".to_owned(),
+                min: 0,
+                max: 3,
+            }],
+            constraints: Vec::new(),
+            objectives: (0..objective_count)
+                .map(|_| Objective {
+                    op: ObjectiveOp::Maximize,
+                    expr: variable("x"),
+                })
+                .collect(),
+            objective_priority: priority,
+            max_solutions,
+            use_cache: true,
+            session_id: None,
+            session_op: Default::default(),
+            timeout_ms: DEFAULT_TIMEOUT_MS,
+            persist: false,
+            include_smt: false,
+        }
+    }
+
+    fn soft_constraint(id: &str, group: Option<&str>) -> ConstraintItem {
+        ConstraintItem::Declared(ConstraintDecl {
+            id: Some(id.to_owned()),
+            group: group.map(str::to_owned),
+            soft: true,
+            weight: Some(1),
+            expr: ConstraintExpr::Bool { value: true },
+        })
     }
 
     fn op(op: ConstraintOp, args: Vec<ConstraintExpr>) -> ConstraintExpr {
