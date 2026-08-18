@@ -61,7 +61,8 @@ pub enum SmtGateError {
 /// `:produce-models` and `:produce-unsat-cores`.
 /// Commands beginning with `declare-` are accepted alongside `set-logic`,
 /// `assert`, `assert-soft`, `check-sat`, `get-model`, `get-value`,
-/// `get-unsat-core`, `maximize`, `minimize`, `push`, and `pop`.
+/// `get-objectives`, `get-unsat-core`, `maximize`, `minimize`, `push`, and
+/// `pop`.
 ///
 /// # Errors
 ///
@@ -155,6 +156,7 @@ fn is_allowed_command(command: &str) -> bool {
             | "check-sat"
             | "get-model"
             | "get-value"
+            | "get-objectives"
             | "get-unsat-core"
             | "maximize"
             | "minimize"
