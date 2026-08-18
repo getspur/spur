@@ -112,7 +112,7 @@ git commit -m "test(spur-solver): z3opt-tests capture optimization regressions"
 - [ ] MCP JSON schema advertises the complete new request contract.
 - [ ] Existing request JSON and non-optimization response JSON remain valid.
 
-**Suggested Worker:** claude-code-acp
+**Suggested Worker:** claude-code
 
 **Scope Boundary:**
 - IN scope: public types, validation, serde defaults/invariants, MCP input schema, and their existing inline unit tests.
@@ -267,7 +267,7 @@ git commit -m "fix(spur-solver): z3opt-encode preserve Optimize semantics"
 - [ ] Response includes the probed solver version; parseable production versions below 4.8.12 fail before optimization execution.
 - [ ] Raw stdout containing `get-objectives` is tolerated and exposed in an optimization envelope with unknown typed metadata.
 
-**Suggested Worker:** claude-code-acp
+**Suggested Worker:** claude-code
 
 **Scope Boundary:**
 - IN scope: service response construction/parsing, S-expression rendering helpers, production version parsing/checking, and inline tests in these two files.
@@ -379,7 +379,7 @@ git commit -m "fix(spur-solver): z3opt-raw-gate allow objective retrieval"
 - [ ] Full crate tests and all six-plus ignored real-Z3 tests pass on Z3 4.16.0.
 - [ ] `cargo fmt` check is clean through `scripts/spur-cargo`.
 
-**Suggested Worker:** claude-code-acp
+**Suggested Worker:** claude-code
 
 **Scope Boundary:**
 - IN scope: README and verification commands.
