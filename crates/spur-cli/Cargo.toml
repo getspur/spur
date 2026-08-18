@@ -6,6 +6,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository = "https://github.com/getspur/spur-releases"
+include = ["src/**", "tests/**", "build.rs", "assets/skills/**"]
 
 [[bin]]
 name = "spur"

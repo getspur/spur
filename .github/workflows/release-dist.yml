@@ -4,9 +4,10 @@
 #
 # Flow: OIDC → AWS credentials → resume the shared Spot pool
 # (`spur-builder` through `spur-builder-3`) → `cargo xtask dist` (linux aarch64 native,
-# linux x86_64 + macOS universal2 via zigbuild, windows x86_64 via xwin — all
+# linux x86_64 + per-architecture macOS via zigbuild, windows x86_64 via xwin — all
 # compiled ON the VM and fetched back through the sccache S3 bucket; also packages
-# assets/skills as spur-skills-<ver>.tar.gz for SkillCatalog package discovery)
+# crates/spur-cli/assets/skills as spur-skills-<ver>.tar.gz for SkillCatalog
+# package discovery)
 # → upload dist/ as a workflow artifact (optionally publish a GitHub release on
 # getspur/spur-releases) → VM-side idle shutdown after 15 minutes.
 #
@@ -45,9 +46,9 @@ on:
   workflow_dispatch:
     inputs:
       platforms:
-        description: "Platforms to build (comma-separated: linux,linux-x64,macos,windows)"
+        description: "Platforms to build (comma-separated: linux,linux-x64,macos-arm64,macos-x64,windows)"
         type: string
-        default: "linux,linux-x64,macos,windows"
+        default: "linux,linux-x64,macos-arm64,macos-x64,windows"
       publish:
         description: "Publish a GitHub release on getspur/spur-releases"
         type: boolean
@@ -152,7 +153,7 @@ jobs:
       - name: Build platform matrix (cargo xtask dist)
         env:
           # Empty on tag pushes (inputs only exist for workflow_dispatch).
-          PLATFORMS: ${{ inputs.platforms || 'linux,linux-x64,macos,windows' }}
+          PLATFORMS: ${{ inputs.platforms || 'linux,linux-x64,macos-arm64,macos-x64,windows' }}
         # --parallel runs the legs concurrently in per-platform remote
         # namespaces; the VM is already up from the spin step, so the
         # concurrent --auto-spin dispatches cannot race a create.
@@ -176,7 +177,7 @@ jobs:
             "${bins[0]}" --version
           fi
           if [[ ${#skills[@]} -eq 0 ]]; then
-            echo "missing dist/spur-skills-*.tar.gz — xtask dist must package assets/skills" >&2
+            echo "missing dist/spur-skills-*.tar.gz — xtask dist must package crates/spur-cli/assets/skills" >&2
             ls -la dist/ >&2 || true
             exit 1
           fi
@@ -233,7 +234,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GH_RELEASES_TOKEN }}
           INPUT_TAG: ${{ inputs.tag }}
-          PLATFORMS: ${{ inputs.platforms || 'linux,linux-x64,macos,windows' }}
+          PLATFORMS: ${{ inputs.platforms || 'linux,linux-x64,macos-arm64,macos-x64,windows' }}
         run: |
           tag="$INPUT_TAG"
           if [[ -z "$tag" && "$GITHUB_REF_TYPE" == "tag" ]]; then

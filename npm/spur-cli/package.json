@@ -17,6 +17,7 @@
     "platform.js"
   ],
   "scripts": {
+    "test": "node --test platform.test.js",
     "postinstall": "node install.js"
   },
   "engines": {

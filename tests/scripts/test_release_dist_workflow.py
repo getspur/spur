@@ -18,3 +18,12 @@ def test_skills_archive_validation_does_not_sigpipe_tar_under_pipefail():
     )[1]
     assert "| grep -q" not in smoke_step
     assert "| head" not in smoke_step
+
+
+def test_release_builds_architecture_specific_macos_artifacts():
+    workflow = RELEASE_DIST_WORKFLOW.read_text()
+    platform_list = "linux,linux-x64,macos-arm64,macos-x64,windows"
+
+    assert f'default: "{platform_list}"' in workflow
+    assert workflow.count(f"inputs.platforms || '{platform_list}'") == 2
+    assert "universal2" not in workflow

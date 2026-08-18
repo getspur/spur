@@ -1,6 +1,6 @@
 # Release CD on the Shared AWS Spot Pool (`release-dist.yml` + `cargo xtask dist`)
 
-Status: implemented (workflow_dispatch-only rollout)
+Status: implemented (tag-triggered releases + manual dispatch)
 Owner surface: `.github/workflows/release-dist.yml`, `scripts/spur-cargo`
 (`SPUR_NO_LOCAL_FALLBACK`), `scripts/cloud-build/`, `xtask dist`
 
@@ -9,12 +9,12 @@ Owner surface: `.github/workflows/release-dist.yml`, `scripts/spur-cargo`
 The existing `release.yml` is a cargo-dist–generated flow that compiles every
 platform natively on GitHub-hosted matrix runners. That duplicates the build
 infrastructure this repo already standardizes on: the `scripts/cloud-build`
-Spot builder compiles the full platform matrix (linux native aarch64, macOS
-universal2 via zigbuild, windows x86_64 via xwin) behind one entry point,
-`cargo xtask dist`, with a warm region-local S3 sccache L2. GitHub macOS/Windows
-runners are slow, their caches are cold relative to the shared sccache bucket,
-and the zigbuild/xwin toolchain contracts (system-libc++ Mach-O link, clang-cl
-PE link) live on the VM, not on runners.
+Spot builder compiles the full platform matrix (linux aarch64 + x86_64,
+macOS aarch64 + x86_64 via zigbuild, windows x86_64 via xwin) behind one
+entry point, `cargo xtask dist`, with a warm region-local S3 sccache L2.
+GitHub macOS/Windows runners are slow, their caches are cold relative to the
+shared sccache bucket, and the zigbuild/xwin toolchain contracts
+(system-libc++ Mach-O link, clang-cl PE link) live on the VM, not on runners.
 
 ## Design
 
@@ -151,8 +151,10 @@ tag pushes were **cut over to `release-dist.yml`**:
   `spur skills init` against the linux-x64 binary with the skills extracted
   beside it. npm `postinstall` downloads and extracts the same tarball next
   to the package so `@getspur/spur-cli` installs work out of the box.
-- **The platform matrix is now four legs** — npm parity forced a linux
-  x86_64 artifact back into existence. That leg compiles with Debian's real
+- **The platform matrix is now five legs.** npm parity forced a linux
+  x86_64 artifact back into existence, and v1.20.0 split the macOS universal2
+  artifact into native `aarch64-apple-darwin` and `x86_64-apple-darwin`
+  artifacts. The Linux x86_64 leg compiles with Debian's real
   cross GCC (`g++-x86-64-linux-gnu`), NOT zig: pyke's prebuilt GCC
   onnxruntime needs libstdc++ symbols zig's bundled libc++ cannot provide
   (the linux twin of the darwin system-libc++ story). Supporting cast, all
@@ -197,9 +199,10 @@ scripts (see spur-notebook history around 2026-07-07):
    `build.sh` now runs a `flock`-serialized `rustc --version` before cargo.
 6. `build.sh`'s client-side FIFO admission queue now separates per-VM slots from
    fleet width. On `aws-my`, the default pool is **3 builders × 3 slots**:
-   four-leg release matrices place the fourth leg on `spur-builder-2`
-   instead of overloading one VM or waiting behind the first three. An explicit
-   `SPUR_BUILD_MAX_CONCURRENT` override still wins as the fleet-wide cap.
+   five-leg release matrices place the fourth and fifth legs on
+   `spur-builder-2` instead of overloading one VM or waiting behind the first
+   three. An explicit `SPUR_BUILD_MAX_CONCURRENT` override still wins as the
+   fleet-wide cap.
 
 ## Measured runs (2026-07-07, version-bump-cold caches)
 
@@ -220,8 +223,8 @@ cc-rs, never set by cargo-xwin) pointing at `/usr/local/bin/sccache-clang-cl`
 (pinned to clang-cl-19). Isolated fresh-VM measurement: the full windows
 build dropped 10m19s → **3m45s** with 430/435 C/C++ cache hits; in the
 v1.11.0 release the leg ran 2m03s. The macOS universal2 leg (double
-arch compile + lipo) is now the critical path; splitting its two arches into
-parallel legs is the next lever if sub-12-min releases matter.
+arch compile + lipo) was then the critical path; v1.20.0 replaces it with
+parallel architecture-specific legs and assets.
 
 ## Known limits
 
@@ -238,5 +241,5 @@ parallel legs is the next lever if sub-12-min releases matter.
   re-spin (`ensure_vm_up` after a failed remote step); a second reclaim in
   one run fails the job.
 - The first release on a fresh sccache bucket/prefix is a full cold compile
-  of all three targets (~the sum of the three local cold builds); subsequent
-  releases ride the shared warm L2 that dev builds keep hot.
+  of all five platform legs; subsequent releases ride the shared warm L2
+  that dev builds keep hot.

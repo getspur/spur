@@ -150,7 +150,7 @@ Optional asset metadata may include `duration_seconds`, `aspect_ratio`, `width`,
 Run:
 
 ```sh
-assets/skills/explainer-video-editor/scripts/validate-delivery.sh MANIFEST.json VIDEO.mp4
+crates/spur-cli/assets/skills/explainer-video-editor/scripts/validate-delivery.sh MANIFEST.json VIDEO.mp4
 ```
 
 The supplied `VIDEO.mp4` path must exactly equal `delivery.path`. The matching file must also satisfy the declared duration, width, height, frame rate, and `checksum_sha256`, contain H.264 video and AAC audio streams, and pass strict full-decode validation.

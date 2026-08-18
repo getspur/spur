@@ -34,7 +34,7 @@ impl BundledRootSource {
             BundledRootSource::Env => SPUR_SKILLS_DIR_ENV,
             BundledRootSource::Config => "[skills].bundled_dir",
             BundledRootSource::Package => "package asset path",
-            BundledRootSource::Workspace => "workspace assets/skills",
+            BundledRootSource::Workspace => "workspace crates/spur-cli/assets/skills",
         }
     }
 }
@@ -328,7 +328,10 @@ fn package_asset_candidates() -> Vec<PathBuf> {
 }
 
 fn manifest_workspace_asset_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/skills")
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("spur-core manifest directory should have a workspace parent")
+        .join("spur-cli/assets/skills")
 }
 
 fn read_valid_override(repo_root: &Path, id: &str) -> Option<String> {
@@ -608,6 +611,17 @@ mod tests {
 
     fn workspace_asset_skill_dir(id: &str) -> PathBuf {
         manifest_workspace_asset_root().join(id)
+    }
+
+    #[test]
+    fn manifest_workspace_asset_root_is_cli_owned() {
+        let root = manifest_workspace_asset_root();
+        assert!(
+            root.ends_with("crates/spur-cli/assets/skills"),
+            "expected CLI-owned bundled root, got {}",
+            root.display()
+        );
+        assert!(root.join("spur-way/SKILL.md").is_file());
     }
 
     fn toml_basic_string(path: &Path) -> String {
@@ -1546,7 +1560,7 @@ mod tests {
             "Artifact step must route kind:deck to the native deck guide"
         );
         let refs = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../assets/skills/open-design/references/deck-mode.md");
+            .join("../spur-cli/assets/skills/open-design/references/deck-mode.md");
         let text = std::fs::read_to_string(&refs).expect("deck-mode.md must exist");
         for marker in [
             "jute_deck",
@@ -1566,7 +1580,7 @@ mod tests {
     #[test]
     fn open_design_deck_mode_lists_ported_themes() {
         let refs = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../assets/skills/open-design/references/deck-mode.md");
+            .join("../spur-cli/assets/skills/open-design/references/deck-mode.md");
         let text = std::fs::read_to_string(&refs).expect("deck-mode.md must exist");
         for id in [
             "editorial-monocle",
@@ -1591,7 +1605,7 @@ mod tests {
             "SKILL.md must route polished/branded decks to the artifact track"
         );
         let refs = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../assets/skills/open-design/references/deck-artifact.md");
+            .join("../spur-cli/assets/skills/open-design/references/deck-artifact.md");
         let text = std::fs::read_to_string(&refs).expect("deck-artifact.md must exist");
         for marker in [
             "deck-skeleton.html",
@@ -1651,7 +1665,7 @@ mod tests {
         );
         // The reference doc itself ships beside the skill source.
         let refs = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../assets/skills/open-design/references/design-systems.md");
+            .join("../spur-cli/assets/skills/open-design/references/design-systems.md");
         let text = std::fs::read_to_string(&refs).expect("design-systems.md must exist");
         assert!(
             text.contains("index.json") && text.contains("swatches"),

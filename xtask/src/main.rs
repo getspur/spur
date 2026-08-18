@@ -8,6 +8,12 @@ use std::{
 
 mod coverage;
 
+const CLI_SKILL_ASSETS: &str = "crates/spur-cli/assets/skills";
+
+fn bundled_skill_assets_source(workspace_root: &Path) -> PathBuf {
+    workspace_root.join(CLI_SKILL_ASSETS)
+}
+
 fn main() -> ExitCode {
     let mut args = env::args().skip(1);
     let subcommand = args.next().unwrap_or_default();
@@ -62,11 +68,13 @@ fn print_help() {
     }
     eprintln!("  --force    with --remote on a non-Linux host, overwrite $CARGO_HOME/bin anyway");
     eprintln!();
-    eprintln!("  dist [--platforms linux,macos,windows] [--out <dir>] [--parallel]");
+    eprintln!(
+        "  dist [--platforms linux,linux-x64,macos-arm64,macos-x64,windows] [--out <dir>] [--parallel]"
+    );
     eprintln!("      build release spur binaries for every supported platform on the");
-    eprintln!("      build VM (linux native, macOS universal2 via zigbuild, windows");
+    eprintln!("      build VM (linux native, macOS per-arch via zigbuild, windows");
     eprintln!("      x86_64 via xwin), fetch them into <dir> (default dist/) with");
-    eprintln!("      triple-suffixed names, package assets/skills as");
+    eprintln!("      triple-suffixed names, package crates/spur-cli/assets/skills as");
     eprintln!("      spur-skills-<version>.tar.gz (share/spur/skills layout for the");
     eprintln!("      runtime SkillCatalog resolver), and write SHA256SUMS");
     eprintln!("      --parallel: run the platform legs concurrently, each in its own");
@@ -460,28 +468,37 @@ enum DistPlatform {
     /// `x86_64` ELF via `spur-cargo zigbuild` (zig cross C/C++ + ELF link).
     /// Exists for npm parity: @getspur/spur-cli must serve linux x64.
     LinuxX64Gnu,
-    /// Fat arm64 + `x86_64` Mach-O via `spur-cargo zigbuild`.
-    MacUniversal2,
+    /// arm64 Mach-O via `spur-cargo zigbuild`.
+    MacAarch64,
+    /// `x86_64` Mach-O via `spur-cargo zigbuild`.
+    MacX64,
     /// PE32+ via `spur-cargo xwin`.
     WindowsX64,
 }
 
 impl DistPlatform {
-    const ALL: [Self; 4] = [
+    const ALL: [Self; 5] = [
         Self::LinuxAarch64,
         Self::LinuxX64Gnu,
-        Self::MacUniversal2,
+        Self::MacAarch64,
+        Self::MacX64,
         Self::WindowsX64,
     ];
 
-    fn parse(value: &str) -> Result<Self, String> {
+    fn parse(value: &str) -> Result<Vec<Self>, String> {
         match value {
-            "linux" => Ok(Self::LinuxAarch64),
-            "linux-x64" | "linux-x86_64" => Ok(Self::LinuxX64Gnu),
-            "macos" | "mac" | "darwin" => Ok(Self::MacUniversal2),
-            "windows" | "win" => Ok(Self::WindowsX64),
+            "linux" => Ok(vec![Self::LinuxAarch64]),
+            "linux-x64" | "linux-x86_64" => Ok(vec![Self::LinuxX64Gnu]),
+            "macos" | "mac" | "darwin" => Ok(vec![Self::MacAarch64, Self::MacX64]),
+            "macos-arm64" | "macos-aarch64" | "darwin-arm64" | "darwin-aarch64" => {
+                Ok(vec![Self::MacAarch64])
+            }
+            "macos-x64" | "macos-x86_64" | "darwin-x64" | "darwin-x86_64" => {
+                Ok(vec![Self::MacX64])
+            }
+            "windows" | "win" => Ok(vec![Self::WindowsX64]),
             other => Err(format!(
-                "unknown dist platform {other:?}; expected linux, linux-x64, macos, or windows"
+                "unknown dist platform {other:?}; expected linux, linux-x64, macos-arm64, macos-x64, macos, or windows"
             )),
         }
     }
@@ -492,7 +509,8 @@ impl DistPlatform {
         match self {
             Self::LinuxAarch64 => "target/release/spur",
             Self::LinuxX64Gnu => "target/x86_64-unknown-linux-gnu/release/spur",
-            Self::MacUniversal2 => "target/universal2-apple-darwin/release/spur",
+            Self::MacAarch64 => "target/aarch64-apple-darwin/release/spur",
+            Self::MacX64 => "target/x86_64-apple-darwin/release/spur",
             Self::WindowsX64 => "target/x86_64-pc-windows-msvc/release/spur.exe",
         }
     }
@@ -502,7 +520,8 @@ impl DistPlatform {
         match self {
             Self::LinuxAarch64 => format!("spur-{version}-aarch64-unknown-linux-gnu"),
             Self::LinuxX64Gnu => format!("spur-{version}-x86_64-unknown-linux-gnu"),
-            Self::MacUniversal2 => format!("spur-{version}-universal2-apple-darwin"),
+            Self::MacAarch64 => format!("spur-{version}-aarch64-apple-darwin"),
+            Self::MacX64 => format!("spur-{version}-x86_64-apple-darwin"),
             Self::WindowsX64 => format!("spur-{version}-x86_64-pc-windows-msvc.exe"),
         }
     }
@@ -511,7 +530,8 @@ impl DistPlatform {
         match self {
             Self::LinuxAarch64 => "spur-cargo build --release -p spur-cli (linux native)",
             Self::LinuxX64Gnu => "spur-cargo zigbuild --release -p spur-cli (linux x86_64)",
-            Self::MacUniversal2 => "spur-cargo zigbuild --release -p spur-cli (macOS universal2)",
+            Self::MacAarch64 => "spur-cargo zigbuild --release -p spur-cli (macOS arm64)",
+            Self::MacX64 => "spur-cargo zigbuild --release -p spur-cli (macOS x86_64)",
             Self::WindowsX64 => "spur-cargo xwin build --release -p spur-cli (windows x86_64)",
         }
     }
@@ -522,7 +542,8 @@ impl DistPlatform {
         match self {
             Self::LinuxAarch64 => "linux",
             Self::LinuxX64Gnu => "linux-x64",
-            Self::MacUniversal2 => "macos",
+            Self::MacAarch64 => "macos-arm64",
+            Self::MacX64 => "macos-x64",
             Self::WindowsX64 => "windows",
         }
     }
@@ -577,13 +598,17 @@ fn parse_dist_options(extra: Vec<String>) -> Result<DistOptions, String> {
 fn parse_dist_platform_list(value: &str) -> Result<Vec<DistPlatform>, String> {
     let mut platforms = Vec::new();
     for token in value.split(',').filter(|token| !token.is_empty()) {
-        let platform = DistPlatform::parse(token.trim())?;
-        if !platforms.contains(&platform) {
-            platforms.push(platform);
+        for platform in DistPlatform::parse(token.trim())? {
+            if !platforms.contains(&platform) {
+                platforms.push(platform);
+            }
         }
     }
     if platforms.is_empty() {
-        return Err("--platforms requires at least one of linux, macos, windows".to_owned());
+        return Err(
+            "--platforms requires at least one of linux, linux-x64, macos-arm64, macos-x64, macos, or windows"
+                .to_owned(),
+        );
     }
     Ok(platforms)
 }
@@ -655,7 +680,8 @@ fn dist_skills_archive_name(version: &str) -> String {
     format!("spur-skills-{version}.tar.gz")
 }
 
-/// Package `assets/skills` into `dist/spur-skills-<version>.tar.gz` with
+/// Package `crates/spur-cli/assets/skills` into
+/// `dist/spur-skills-<version>.tar.gz` with
 /// archive-internal paths `share/spur/skills/<id>/...`.
 ///
 /// That layout matches:
@@ -667,7 +693,7 @@ fn package_dist_skill_assets(
     out_dir: &Path,
     version: &str,
 ) -> Result<PathBuf, String> {
-    let source = workspace_root.join("assets/skills");
+    let source = bundled_skill_assets_source(workspace_root);
     if !source.is_dir() {
         return Err(format!(
             "expected bundled skill assets at {}",
@@ -890,14 +916,24 @@ fn dist_build_command(workspace_root: &Path, platform: DistPlatform) -> Command 
                 "x86_64-unknown-linux-gnu",
             ]);
         }
-        DistPlatform::MacUniversal2 => {
+        DistPlatform::MacAarch64 => {
             cmd.args([
                 "zigbuild",
                 "--release",
                 "-p",
                 "spur-cli",
                 "--target",
-                "universal2-apple-darwin",
+                "aarch64-apple-darwin",
+            ]);
+        }
+        DistPlatform::MacX64 => {
+            cmd.args([
+                "zigbuild",
+                "--release",
+                "-p",
+                "spur-cli",
+                "--target",
+                "x86_64-apple-darwin",
             ]);
         }
         DistPlatform::WindowsX64 => {
@@ -1250,7 +1286,7 @@ fn install_binary_from(
 }
 
 fn install_bundled_skill_assets(workspace_root: &Path, bin_dir: &Path) -> Result<(), String> {
-    let source = workspace_root.join("assets/skills");
+    let source = bundled_skill_assets_source(workspace_root);
     if !source.is_dir() {
         return Err(format!(
             "expected bundled skill assets at {}",
@@ -1592,7 +1628,7 @@ mod tests {
         )
         .unwrap();
         make_executable(&fetch_script);
-        let asset = workspace.join("assets/skills/package-skill/SKILL.md");
+        let asset = workspace.join("crates/spur-cli/assets/skills/package-skill/SKILL.md");
         fs::create_dir_all(asset.parent().unwrap()).unwrap();
         fs::write(
             &asset,
@@ -1629,7 +1665,7 @@ mod tests {
         let built = workspace.join("target/debug/spur");
         fs::create_dir_all(built.parent().unwrap()).unwrap();
         fs::write(&built, "fake spur binary").unwrap();
-        let asset = workspace.join("assets/skills/package-skill/SKILL.md");
+        let asset = workspace.join("crates/spur-cli/assets/skills/package-skill/SKILL.md");
         fs::create_dir_all(asset.parent().unwrap()).unwrap();
         fs::write(
             &asset,
@@ -1684,8 +1720,20 @@ mod tests {
         let raw = fs::read_to_string(workspace_root().join("dist-workspace.toml")).unwrap();
 
         assert!(
-            raw.contains("include = [") && raw.contains("\"assets\""),
-            "dist-workspace.toml must include the asset tree so cargo-dist archives/installers ship assets/skills"
+            raw.contains("include = [\"crates/spur-cli/assets\"]"),
+            "dist-workspace.toml must include the spur-cli asset tree"
+        );
+    }
+
+    #[test]
+    fn spur_cli_cargo_package_includes_build_script_and_skill_assets() {
+        let raw = fs::read_to_string(workspace_root().join("crates/spur-cli/Cargo.toml")).unwrap();
+
+        assert!(
+            raw.contains(
+                "include = [\"src/**\", \"tests/**\", \"build.rs\", \"assets/skills/**\"]"
+            ),
+            "spur-cli's Cargo package whitelist must preserve build.rs and bundled skills"
         );
     }
 
@@ -1701,7 +1749,7 @@ mod tests {
     fn package_dist_skill_assets_ships_share_spur_skills_layout() {
         let workspace = temp_test_dir("dist-skills-workspace");
         let out_dir = temp_test_dir("dist-skills-out");
-        let asset = workspace.join("assets/skills/package-skill/SKILL.md");
+        let asset = workspace.join("crates/spur-cli/assets/skills/package-skill/SKILL.md");
         fs::create_dir_all(asset.parent().unwrap()).unwrap();
         fs::write(
             &asset,
@@ -1938,7 +1986,16 @@ mod tests {
     #[test]
     fn dist_options_default_to_all_platforms() {
         let options = parse_dist_options(Vec::new()).expect("no args parse");
-        assert_eq!(options.platforms, DistPlatform::ALL.to_vec());
+        assert_eq!(
+            options.platforms,
+            vec![
+                DistPlatform::LinuxAarch64,
+                DistPlatform::LinuxX64Gnu,
+                DistPlatform::MacAarch64,
+                DistPlatform::MacX64,
+                DistPlatform::WindowsX64,
+            ]
+        );
         assert!(options.out_dir.is_none());
         assert!(!options.parallel);
     }
@@ -1965,8 +2022,12 @@ mod tests {
             "spur-dist-linux"
         );
         assert_eq!(
-            DistPlatform::MacUniversal2.remote_namespace(),
-            "spur-dist-macos"
+            DistPlatform::MacAarch64.remote_namespace(),
+            "spur-dist-macos-arm64"
+        );
+        assert_eq!(
+            DistPlatform::MacX64.remote_namespace(),
+            "spur-dist-macos-x64"
         );
         assert_eq!(
             DistPlatform::WindowsX64.remote_namespace(),
@@ -2016,13 +2077,27 @@ mod tests {
         .expect("subset parses");
         assert_eq!(
             options.platforms,
-            vec![DistPlatform::WindowsX64, DistPlatform::MacUniversal2]
+            vec![
+                DistPlatform::WindowsX64,
+                DistPlatform::MacAarch64,
+                DistPlatform::MacX64,
+            ]
         );
         assert_eq!(options.out_dir, Some(PathBuf::from("/tmp/spur-dist")));
 
         let options = parse_dist_options(vec!["--platforms".to_owned(), "linux-x64".to_owned()])
             .expect("linux-x64 parses");
         assert_eq!(options.platforms, vec![DistPlatform::LinuxX64Gnu]);
+
+        let options = parse_dist_options(vec![
+            "--platforms".to_owned(),
+            "macos-x64,macos-arm64".to_owned(),
+        ])
+        .expect("architecture-specific macOS platforms parse");
+        assert_eq!(
+            options.platforms,
+            vec![DistPlatform::MacX64, DistPlatform::MacAarch64]
+        );
 
         assert!(parse_dist_options(vec!["--platforms".to_owned(), "beos".to_owned()]).is_err());
         assert!(parse_dist_options(vec!["--platforms".to_owned(), ",".to_owned()]).is_err());
@@ -2050,14 +2125,25 @@ mod tests {
                 ],
             ),
             (
-                DistPlatform::MacUniversal2,
+                DistPlatform::MacAarch64,
                 vec![
                     "zigbuild",
                     "--release",
                     "-p",
                     "spur-cli",
                     "--target",
-                    "universal2-apple-darwin",
+                    "aarch64-apple-darwin",
+                ],
+            ),
+            (
+                DistPlatform::MacX64,
+                vec![
+                    "zigbuild",
+                    "--release",
+                    "-p",
+                    "spur-cli",
+                    "--target",
+                    "x86_64-apple-darwin",
                 ],
             ),
             (
@@ -2122,8 +2208,12 @@ mod tests {
             "spur-1.7.0-x86_64-unknown-linux-gnu"
         );
         assert_eq!(
-            DistPlatform::MacUniversal2.artifact_name("1.7.0"),
-            "spur-1.7.0-universal2-apple-darwin"
+            DistPlatform::MacAarch64.artifact_name("1.7.0"),
+            "spur-1.7.0-aarch64-apple-darwin"
+        );
+        assert_eq!(
+            DistPlatform::MacX64.artifact_name("1.7.0"),
+            "spur-1.7.0-x86_64-apple-darwin"
         );
         assert_eq!(
             DistPlatform::WindowsX64.artifact_name("1.7.0"),

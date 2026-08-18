@@ -13,7 +13,7 @@ Notebook UI: external `getspur/spur-notebook`. Specs/plans: `docs/superpowers/{s
 
 Foundation only by default (`catalog_only`): `skills-catalog`, `spur-way`, `code-explore`, `solve`, `brain-delegation`, `brain-review-gate`, `plan-task-discipline`, `worker-signals`, `beads-lifecycle`, `spur-analyst`.
 
-Other skills: **`skill_navigate`** → **`skill_read`**. Prefer navigate over `skill_search`. No skill-dir walks, no task-specific materialization. Rollback: `projection_mode = "all_active"`. See `assets/skills/skills-catalog/SKILL.md`.
+Other skills: **`skill_navigate`** → **`skill_read`**. Prefer navigate over `skill_search`. No skill-dir walks, no task-specific materialization. Rollback: `projection_mode = "all_active"`. See `crates/spur-cli/assets/skills/skills-catalog/SKILL.md`.
 
 ## Code retrieval
 

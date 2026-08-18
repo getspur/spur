@@ -2,7 +2,7 @@
 name: spurpower-test-driven-development
 description: "Use when implementing any feature or bugfix, before writing implementation code; also when the change is constraint-shaped (constants, bounds, quotas, clamps, ring buffers, invariants, flag matrices) and needs symbolic pre/post evaluation with solve."
 ---
-<!-- SPUR-MANAGED v=1 skill=spurpower-test-driven-development sha256=b98107e8c2a383cfd78f79e61ec52a584ee9303ab4e3c1b24ba15fe578ab5200 -->
+<!-- SPUR-MANAGED v=1 skill=spurpower-test-driven-development sha256=f3d6e6364bef3356e981c666fddf7aa1453e8a3017257e10e6f99225c3c74d95 -->
 
 # Test-Driven Development (TDD)
 
@@ -19,8 +19,9 @@ Write the test first. Watch it fail. Write minimal code to pass.
 counterexample). Tests and solve are complements — never substitutes.
 
 **REQUIRED SUB-SKILL (when constraint-shaped):** Use `solve` for pre-implement
-feasibility / invariant discharge, then post-implement re-check. Full encoding
-rules, anti-patterns, and tool surface live in the `solve` skill — do not invent
+feasibility / invariant discharge, then post-implement re-check. Navigate
+catalog rules with `solve_rule_spec`, execute matches with `solve_rules`, and
+fall back to `solve_constraints` for uncatalogued invariants. Do not invent
 constants or collapse `unknown`/`timeout` into `unsat`.
 
 ## When to Use
@@ -109,8 +110,9 @@ digraph tdd_cycle {
 **Do this before writing the failing test** (and before any production code):
 
 1. Strip to **hard** constraints only (budgets, safety bounds, identity equations). Soft prefs wait for ratchet.
-2. Call `solve_constraints` (default) or `solve_smt` when B′ cannot express the theory.
-3. Act on status:
+2. Call `solve_rule_spec` first when the facts may match a catalog family; execute an implemented match with `solve_rules`.
+3. When no catalog rule applies, call `solve_constraints`; use `solve_smt` only when B′ cannot express the theory.
+4. Interpret catalog requests by their mode outcome. For generic queries, act on status:
 
 | status | TDD action |
 |---|---|
