@@ -83,6 +83,7 @@
 )]
 
 pub mod commands;
+pub mod embedded_skills;
 pub mod log_writer;
 pub mod upgrade_check;
 

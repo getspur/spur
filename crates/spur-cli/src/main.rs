@@ -998,6 +998,7 @@ enum BotCommands {
 }
 
 fn main() -> ExitCode {
+    spur_cli::embedded_skills::register();
     raise_nofile_soft_limit();
 
     // rustls 0.23 requires an explicit default CryptoProvider before any TLS

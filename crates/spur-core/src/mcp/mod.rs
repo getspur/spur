@@ -322,7 +322,7 @@ pub(crate) fn worker_mcp_claude_tool_names_for_registry(
 mod tests {
     use super::*;
     use rmcp::model::ErrorCode;
-    use serde_json::json;
+    use serde_json::{json, Value};
     use spur_mcp::{ServerKind, ToolAuthority, ToolCallContext};
 
     fn snapshot_files(root: &Path) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
@@ -868,6 +868,47 @@ mod tests {
         }
         // …and brain-only tools must not leak in.
         assert!(!names.iter().any(|name| name.contains("delegate_to_worker")));
+    }
+
+    #[test]
+    fn worker_tool_schemas_meet_bedrock_shape_requirements() {
+        fn find_forbidden_keyword(value: &Value, path: &str) -> Option<String> {
+            match value {
+                Value::Object(map) => {
+                    for keyword in ["oneOf", "allOf"] {
+                        if map.contains_key(keyword) {
+                            return Some(format!("{path}.{keyword}"));
+                        }
+                    }
+                    map.iter().find_map(|(key, value)| {
+                        find_forbidden_keyword(value, &format!("{path}.{key}"))
+                    })
+                }
+                Value::Array(values) => values.iter().enumerate().find_map(|(index, value)| {
+                    find_forbidden_keyword(value, &format!("{path}[{index}]"))
+                }),
+                _ => None,
+            }
+        }
+
+        let registry = worker_tool_registry().expect("worker registry");
+        let offenders = registry
+            .list_tools()
+            .into_iter()
+            .filter_map(|tool| {
+                if tool.input_schema["type"] != "object" {
+                    return Some(format!("{} has a non-object root", tool.name));
+                }
+                find_forbidden_keyword(&tool.input_schema, "$")
+                    .map(|path| format!("{} at {path}", tool.name))
+            })
+            .collect::<Vec<_>>();
+
+        assert!(
+            offenders.is_empty(),
+            "Kiro Bedrock requires object roots and rejects oneOf/allOf in worker tool schemas: {}",
+            offenders.join(", ")
+        );
     }
 
     #[tokio::test]

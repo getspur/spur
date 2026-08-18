@@ -61,7 +61,7 @@ fn builtin_registry_composes_all_platform_families_in_stable_order() {
 }
 
 #[test]
-fn solve_rules_schema_is_closed_and_family_discriminated() {
+fn solve_rules_schema_is_bedrock_compatible_and_family_discriminated() {
     let tools = spur_solver::mcp::tool_definitions();
     let schema = &tools
         .iter()
@@ -69,20 +69,49 @@ fn solve_rules_schema_is_closed_and_family_discriminated() {
         .expect("solve_rules tool definition")
         .input_schema;
 
-    let branches = schema["oneOf"].as_array().expect("family schema branches");
-    assert_eq!(branches.len(), 4);
     assert_eq!(
-        branches
-            .iter()
-            .map(|branch| branch["properties"]["family"]["const"]
-                .as_str()
-                .expect("family const"))
-            .collect::<Vec<_>>(),
-        vec!["accessibility", "design", "policy", "resource"]
+        schema["properties"]["family"]["enum"],
+        json!(["accessibility", "design", "policy", "resource"])
     );
-    assert!(branches
-        .iter()
-        .all(|branch| branch["additionalProperties"] == false));
+    assert_eq!(schema["type"], "object");
+    assert_eq!(schema["required"], json!(["family", "mode", "rules"]));
+    assert_eq!(schema["additionalProperties"], false);
+}
+
+#[test]
+fn bedrock_requires_simple_object_for_every_solver_tool_schema() {
+    fn find_unsupported_keyword(value: &Value, path: &str) -> Option<String> {
+        match value {
+            Value::Object(map) => {
+                for keyword in ["oneOf", "allOf"] {
+                    if map.contains_key(keyword) {
+                        return Some(format!("{path}.{keyword}"));
+                    }
+                }
+                map.iter().find_map(|(key, value)| {
+                    find_unsupported_keyword(value, &format!("{path}.{key}"))
+                })
+            }
+            Value::Array(values) => values.iter().enumerate().find_map(|(index, value)| {
+                find_unsupported_keyword(value, &format!("{path}[{index}]"))
+            }),
+            _ => None,
+        }
+    }
+
+    for tool in spur_solver::mcp::tool_definitions() {
+        assert_eq!(
+            tool.input_schema["type"], "object",
+            "Bedrock requires a top-level object schema for {}",
+            tool.name
+        );
+        assert_eq!(
+            find_unsupported_keyword(&tool.input_schema, "$"),
+            None,
+            "Bedrock rejects oneOf/allOf in {}",
+            tool.name
+        );
+    }
 }
 
 #[test]

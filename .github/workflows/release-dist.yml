@@ -5,9 +5,9 @@
 # Flow: OIDC → AWS credentials → resume the shared Spot pool
 # (`spur-builder` through `spur-builder-3`) → `cargo xtask dist` (linux aarch64 native,
 # linux x86_64 + per-architecture macOS via zigbuild, windows x86_64 via xwin — all
-# compiled ON the VM and fetched back through the sccache S3 bucket; also packages
-# crates/spur-cli/assets/skills as spur-skills-<ver>.tar.gz for SkillCatalog
-# package discovery)
+# compiled ON the VM and fetched back through the sccache S3 bucket; embeds
+# crates/spur-cli/assets/skills in every binary and also packages the tree as
+# spur-skills-<ver>.tar.gz for npm/filesystem compatibility)
 # → upload dist/ as a workflow artifact (optionally publish a GitHub release on
 # getspur/spur-releases) → VM-side idle shutdown after 15 minutes.
 #
@@ -159,12 +159,13 @@ jobs:
         # concurrent --auto-spin dispatches cannot race a create.
         run: cargo xtask dist --parallel --platforms "$PLATFORMS"
 
-      - name: Smoke-test linux x86_64 binary + skills bundle
+      - name: Smoke-test linux x86_64 embedded skills + compatibility bundle
         # The runner itself is linux x86_64 — the one dist platform we can
         # actually execute here. The zigbuild cross leg is the least battle-
         # tested, so refuse to publish a binary that cannot even --version.
-        # Also require spur-skills-*.tar.gz and verify the share/spur/skills
-        # layout resolves for `spur skills init` (release-dist cutover gap).
+        # Run `spur skills init` before extracting any adjacent assets to prove
+        # the binary is self-contained. Then require spur-skills-*.tar.gz and
+        # verify the compatibility share/spur/skills layout resolves too.
         run: |
           set -euo pipefail
           shopt -s nullglob
@@ -194,9 +195,22 @@ jobs:
             exit 0
           fi
           smoke="$(mktemp -d)"
-          mkdir -p "$smoke/prefix/bin" "$smoke/home" "$smoke/repo"
+          mkdir -p "$smoke/prefix/bin" "$smoke/embedded-home" \
+            "$smoke/embedded-repo" "$smoke/home" "$smoke/repo"
           cp "${bins[0]}" "$smoke/prefix/bin/spur"
           chmod +x "$smoke/prefix/bin/spur"
+          (
+            cd "$smoke/embedded-repo"
+            HOME="$smoke/embedded-home" XDG_CONFIG_HOME="$smoke/embedded-home/xdg" \
+              "$smoke/prefix/bin/spur" skills init
+          )
+          embedded=( "$smoke/embedded-home"/.spur/cache/embedded-skills/*/skills/spur-way/SKILL.md )
+          if [[ ${#embedded[@]} -ne 1 ]]; then
+            echo "binary-only skills init did not materialize embedded spur-way" >&2
+            find "$smoke/embedded-home" -maxdepth 8 -type f >&2 || true
+            exit 1
+          fi
+
           tar -xzf "${skills[0]}" -C "$smoke/prefix"
           test -f "$smoke/prefix/share/spur/skills/spur-way/SKILL.md"
           # Isolated HOME avoids host config breaking catalog discovery.

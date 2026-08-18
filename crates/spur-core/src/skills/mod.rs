@@ -1,8 +1,9 @@
 //! Skill-based brain prompt resources (Amendment A1).
 //!
 //! Loads SKILL.md files for brain prompt assembly. Bundled defaults are
-//! filesystem assets; per-project overrides in `.spur/skills/` take
-//! precedence.
+//! filesystem-backed; spur-cli can lazily materialize its embedded copy when
+//! no external asset tree exists. Per-project overrides in `.spur/skills/`
+//! take precedence.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -19,6 +20,8 @@ const CLAUDE_CODE_ACP_SKILL: &str = "brain-delegation-claude-code-acp";
 const BUNDLED_ALIASES: &[(&str, &str)] = &[("brain-delegation-claude-code", CLAUDE_CODE_ACP_SKILL)];
 
 static WORKSPACE_BUNDLED_RAW: OnceLock<HashMap<&'static str, &'static str>> = OnceLock::new();
+pub type EmbeddedRootMaterializer = fn() -> Result<PathBuf, String>;
+static EMBEDDED_ROOT_MATERIALIZER: OnceLock<EmbeddedRootMaterializer> = OnceLock::new();
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BundledRootSource {
@@ -26,6 +29,7 @@ enum BundledRootSource {
     Config,
     Package,
     Workspace,
+    Embedded,
 }
 
 impl BundledRootSource {
@@ -35,6 +39,7 @@ impl BundledRootSource {
             BundledRootSource::Config => "[skills].bundled_dir",
             BundledRootSource::Package => "package asset path",
             BundledRootSource::Workspace => "workspace crates/spur-cli/assets/skills",
+            BundledRootSource::Embedded => "embedded spur-cli assets",
         }
     }
 }
@@ -97,6 +102,9 @@ pub enum SkillCatalogError {
         source: std::io::Error,
     },
 
+    #[error("failed to materialize embedded bundled skills: {reason}")]
+    EmbeddedMaterialization { reason: String },
+
     #[error("invalid skill id `{id}`: {reason}")]
     InvalidSkillId { id: String, reason: String },
 }
@@ -120,8 +128,18 @@ impl SkillCatalog {
             }
         });
         let config_dir = configured_bundled_dir(repo_root)?;
+        let has_explicit_root = env_dir.is_some() || config_dir.is_some();
         let selected =
-            select_bundled_root(repo_root, env_dir, config_dir, package_asset_candidates())?;
+            match select_bundled_root(repo_root, env_dir, config_dir, package_asset_candidates()) {
+                Ok(selected) => selected,
+                Err(SkillCatalogError::MissingBundledRoot { checked }) if !has_explicit_root => {
+                    let Some(materialize) = EMBEDDED_ROOT_MATERIALIZER.get() else {
+                        return Err(SkillCatalogError::MissingBundledRoot { checked });
+                    };
+                    select_materialized_embedded_root(materialize())?
+                }
+                Err(error) => return Err(error),
+            };
         Ok(Self {
             bundled_root: selected.path,
             source: selected.source,
@@ -207,6 +225,33 @@ impl SkillCatalog {
         add_bundled_aliases(&mut by_id);
         Ok(by_id)
     }
+}
+
+/// Register a lazy fallback for binaries that compile bundled skill assets in.
+///
+/// Explicit environment/configuration roots and adjacent package assets retain
+/// priority. The callback runs only when none of those filesystem roots exist.
+pub fn register_embedded_skill_root(materializer: EmbeddedRootMaterializer) {
+    let _ = EMBEDDED_ROOT_MATERIALIZER.set(materializer);
+}
+
+fn select_materialized_embedded_root(
+    materialized: Result<PathBuf, String>,
+) -> Result<SelectedBundledRoot, SkillCatalogError> {
+    let path =
+        materialized.map_err(|reason| SkillCatalogError::EmbeddedMaterialization { reason })?;
+    if !path.is_dir() {
+        return Err(SkillCatalogError::EmbeddedMaterialization {
+            reason: format!(
+                "materializer returned a missing directory: {}",
+                path.display()
+            ),
+        });
+    }
+    Ok(SelectedBundledRoot {
+        path,
+        source: BundledRootSource::Embedded,
+    })
 }
 
 fn configured_bundled_dir(repo_root: &Path) -> Result<Option<PathBuf>, SkillCatalogError> {
@@ -865,6 +910,30 @@ mod tests {
             assert!(candidates.contains(&prefix.join("share/spur/skills")));
             assert!(candidates.contains(&prefix.join("assets/skills")));
         }
+    }
+
+    #[test]
+    fn embedded_materializer_result_is_a_valid_bundled_root() {
+        let root = tempfile::tempdir().unwrap();
+
+        let selected = select_materialized_embedded_root(Ok(root.path().to_path_buf())).unwrap();
+
+        assert_eq!(selected.path, root.path());
+        assert_eq!(selected.source, BundledRootSource::Embedded);
+    }
+
+    #[test]
+    fn embedded_materializer_must_return_an_existing_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let missing = root.path().join("missing");
+
+        let error = select_materialized_embedded_root(Ok(missing.clone())).unwrap_err();
+
+        assert!(matches!(
+            error,
+            SkillCatalogError::EmbeddedMaterialization { reason }
+                if reason.contains(&missing.display().to_string())
+        ));
     }
 
     #[test]

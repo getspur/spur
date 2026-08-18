@@ -139,43 +139,43 @@ fn axis_capacity_request(axis: &str, second_extent: i64) -> Value {
 }
 
 #[test]
-fn solve_rules_schema_keeps_one_generic_family_execution_tool() {
+fn solve_rules_schema_keeps_one_bedrock_compatible_family_execution_tool() {
     let tools = spur_solver::mcp::tool_definitions();
     let tool = tools
         .iter()
         .find(|tool| tool.name == "solve_rules")
         .expect("solve_rules tool definition");
 
-    let design = tool.input_schema["oneOf"]
-        .as_array()
-        .expect("family schemas")
-        .iter()
-        .find(|schema| schema["properties"]["family"]["const"] == "design")
-        .expect("design schema");
-    assert_eq!(design["type"], "object");
+    let schema = &tool.input_schema;
+    assert_eq!(schema["type"], "object");
+    assert_eq!(schema["required"], json!(["family", "mode", "rules"]));
+    assert_eq!(schema["additionalProperties"], false);
     assert_eq!(
-        design["required"],
-        json!(["family", "mode", "rules", "scene"])
+        schema["properties"]["family"]["enum"],
+        json!(["accessibility", "design", "policy", "resource"])
     );
-    assert_eq!(design["additionalProperties"], false);
-    assert_eq!(design["properties"]["family"]["const"], "design");
     assert_eq!(
-        design["properties"]["mode"]["enum"],
+        schema["properties"]["mode"]["enum"],
         json!(["verify", "synthesize"])
     );
-    assert_eq!(
-        design["properties"]["rules"]["items"]["properties"]["rule_id"]["enum"],
-        json!([
-            "layout.axis_capacity",
-            "layout.containment",
-            "layout.non_overlap",
-            "media.aspect_ratio"
-        ])
-    );
-    assert_eq!(
-        design["properties"]["rules"]["items"]["properties"]["parameters"]["properties"]["axis"]
-            ["enum"],
-        json!(["horizontal", "vertical"])
+    let rule_ids = schema["properties"]["rules"]["items"]["properties"]["rule_id"]["enum"]
+        .as_array()
+        .expect("platform rule ids");
+    assert!(rule_ids
+        .iter()
+        .any(|rule_id| rule_id == "layout.axis_capacity"));
+    assert!(rule_ids.iter().any(|rule_id| rule_id == "a11y.target_size"));
+    assert!(rule_ids
+        .iter()
+        .any(|rule_id| rule_id == "rbac.permission_reachable"));
+    assert!(rule_ids
+        .iter()
+        .any(|rule_id| rule_id == "resource.quota_capacity"));
+    assert!(
+        !rule_ids
+            .iter()
+            .any(|rule_id| rule_id == "rbac.minimum_privilege"),
+        "capability-unavailable rules must not be advertised as executable"
     );
 }
 
