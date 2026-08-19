@@ -2944,7 +2944,7 @@ mod profile_override_tests {
         std::fs::write(
             dir.path().join(".spur/config.toml"),
             format!(
-                "[skills]\nbundled_dir = {:?}\n",
+                "[skills]\nbundled_dir = {:?}\nprojection_mode = \"all_active\"\n",
                 bundled_dir.display().to_string()
             ),
         )

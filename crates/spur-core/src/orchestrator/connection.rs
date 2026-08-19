@@ -1049,7 +1049,7 @@ done
         String::from_utf8_lossy(&output.stdout).trim().to_string()
     }
 
-    fn initialize_projection_repo(repo: &Path, bundled_dir: &Path) {
+    fn initialize_projection_repo(repo: &Path, bundled_dir: &Path, projection_mode: &str) {
         git(repo, &["init", "-q", "-b", "main"]);
         git(repo, &["config", "user.email", "t@t"]);
         git(repo, &["config", "user.name", "t"]);
@@ -1057,8 +1057,9 @@ done
         std::fs::write(
             repo.join(".spur/config.toml"),
             format!(
-                "[skills]\nbundled_dir = {:?}\n",
-                bundled_dir.display().to_string()
+                "[skills]\nbundled_dir = {:?}\nprojection_mode = {:?}\n",
+                bundled_dir.display().to_string(),
+                projection_mode,
             ),
         )
         .expect("write bundled skill configuration");
@@ -1197,7 +1198,7 @@ done
         let repo = tempfile::tempdir().expect("repo tempdir");
         let bundled_dir = repo.path().join("test-bundled-skills");
         std::fs::create_dir_all(&bundled_dir).expect("create bundled source root");
-        initialize_projection_repo(repo.path(), &bundled_dir);
+        initialize_projection_repo(repo.path(), &bundled_dir, "all_active");
         write_projection_skill(&bundled_dir, "brain-builtin", "brain", "brain bundled body");
         write_projection_pool_skill(repo.path(), "pool-active");
         let initialize_marker = repo.path().join("initialize-observed");
@@ -1254,7 +1255,7 @@ done
         let _global_root = crate::explore::store::force_global_root_for_tests(None);
         let repo = tempfile::tempdir().expect("repo tempdir");
         let missing_bundled_dir = repo.path().join("missing-bundled-skills");
-        initialize_projection_repo(repo.path(), &missing_bundled_dir);
+        initialize_projection_repo(repo.path(), &missing_bundled_dir, "catalog_only");
         let connection_marker = repo.path().join("connection-started");
         let script = write_failing_brain_script(repo.path());
 
@@ -1296,7 +1297,7 @@ done
         let cost_dir = tempfile::tempdir().expect("cost tempdir");
         let bundled_dir = repo.path().join("test-bundled-skills");
         std::fs::create_dir_all(&bundled_dir).expect("create bundled source root");
-        initialize_projection_repo(repo.path(), &bundled_dir);
+        initialize_projection_repo(repo.path(), &bundled_dir, "all_active");
         write_projection_skill(&bundled_dir, "brain-builtin", "brain", "brain bundled body");
         write_projection_pool_skill(repo.path(), "pool-active");
         let initialize_marker = repo.path().join("initialize-observed");
@@ -1355,7 +1356,7 @@ done
         let repo = tempfile::tempdir().expect("repo tempdir");
         let cost_dir = tempfile::tempdir().expect("cost tempdir");
         let missing_bundled_dir = repo.path().join("missing-bundled-skills");
-        initialize_projection_repo(repo.path(), &missing_bundled_dir);
+        initialize_projection_repo(repo.path(), &missing_bundled_dir, "catalog_only");
         let connection_marker = repo.path().join("connection-started");
         let script = write_failing_brain_script(repo.path());
 
