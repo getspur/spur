@@ -35,6 +35,8 @@ fn action_kind(action: &UserInput) -> &'static str {
         UserInput::Message { .. } => "Message",
         UserInput::NewSessionWithMessage { .. } => "NewSessionWithMessage",
         UserInput::ListSessions => "ListSessions",
+        UserInput::SwitchBrain { .. } => "SwitchBrain",
+        UserInput::ListBrains => "ListBrains",
         UserInput::ResumeSession { .. } => "ResumeSession",
         UserInput::SetSessionMode { .. } => "SetSessionMode",
         UserInput::SubmitReview { .. } => "SubmitReview",
