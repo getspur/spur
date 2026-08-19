@@ -29,6 +29,14 @@ impl TestBeadsWorkspace {
         self.create_with_type(title, IssueType::Task)
     }
 
+    pub fn create_issue_with_id(&mut self, id: &str, title: &str) -> String {
+        let issue = build_issue(id.to_string(), title.to_string(), IssueType::Task);
+        self.storage
+            .create_issue(&issue, "test")
+            .expect("create test issue with explicit id");
+        id.to_string()
+    }
+
     pub fn create_epic(&mut self, title: &str) -> String {
         self.create_with_type(title, IssueType::Epic)
     }

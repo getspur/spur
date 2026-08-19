@@ -12,9 +12,9 @@ type IdMap = Vec<(String, String)>;
 
 async fn canonical_engine() -> (GraphEngine, TestBeadsWorkspace, String, IdMap) {
     let mut ws = TestBeadsWorkspace::init();
-    let top = ws.create_issue("Top task");
-    let blocked = ws.create_issue("Blocked task");
-    let parent = ws.create_issue("Closed parent");
+    let top = ws.create_issue_with_id("bd-1", "Top task");
+    let parent = ws.create_issue_with_id("bd-2", "Closed parent");
+    let blocked = ws.create_issue_with_id("bd-3", "Blocked task");
     ws.close_issue(&parent);
     ws.add_dep(&top, &parent);
     ws.add_dep(&blocked, &top);
