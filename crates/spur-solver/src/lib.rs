@@ -1,6 +1,7 @@
 //! Constraint model-finding for SPUR coding agents.
 
 pub mod cache;
+pub mod constraint_spec;
 pub mod encode;
 pub mod mcp;
 pub mod persist;

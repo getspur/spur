@@ -67,6 +67,8 @@ const EXPECTED_BRAIN_TOOLS: &[&str] = &[
     "report_progress",
     "solve_rule_spec",
     "solve_rules",
+    "solve_constraint_spec",
+    "solve_constraint_check",
     "solve_constraints",
     "solve_smt",
     "get_solve_result",
@@ -211,8 +213,23 @@ async fn core_brain_registry_dispatches_solver_tools() {
         .await;
     assert!(guide.is_ok(), "rule guide must dispatch without Z3");
 
+    let language = registry
+        .call_tool(
+            spur_mcp::ToolCallContext::new(
+                spur_mcp::ServerKind::Brain,
+                spur_mcp::ToolAuthority::Brain,
+                None,
+                None,
+            ),
+            "solve_constraint_spec",
+            json!({}),
+        )
+        .await;
+    assert!(language.is_ok(), "language guide must dispatch without Z3");
+
     for tool_name in [
         "solve_rules",
+        "solve_constraint_check",
         "solve_constraints",
         "solve_smt",
         "get_solve_result",

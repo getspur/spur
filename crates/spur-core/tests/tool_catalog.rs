@@ -64,6 +64,10 @@ const EXPECTED: &[&str] = &[
     "submit_plan_mutation",
     "report_signal",
     "report_progress",
+    "solve_rule_spec",
+    "solve_rules",
+    "solve_constraint_spec",
+    "solve_constraint_check",
     "solve_constraints",
     "solve_smt",
     "get_solve_result",
@@ -102,7 +106,15 @@ fn solver_tools_are_advertised_to_catalog_and_workers() {
         ("tools_list", tools_list()),
         ("worker_tools_list", worker_tools_list()),
     ] {
-        for tool_name in ["solve_constraints", "solve_smt", "get_solve_result"] {
+        for tool_name in [
+            "solve_rule_spec",
+            "solve_rules",
+            "solve_constraint_spec",
+            "solve_constraint_check",
+            "solve_constraints",
+            "solve_smt",
+            "get_solve_result",
+        ] {
             assert!(
                 tools.iter().any(|tool| tool.name == tool_name),
                 "{catalog_name} missing {tool_name}"

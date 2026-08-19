@@ -857,6 +857,8 @@ mod tests {
             "mcp__spur-worker-mcp__query",
             "mcp__spur-worker-mcp__solve_rule_spec",
             "mcp__spur-worker-mcp__solve_rules",
+            "mcp__spur-worker-mcp__solve_constraint_spec",
+            "mcp__spur-worker-mcp__solve_constraint_check",
             "mcp__spur-worker-mcp__solve_constraints",
             "mcp__spur-worker-mcp__solve_smt",
             "mcp__spur-worker-mcp__get_solve_result",
@@ -929,8 +931,18 @@ mod tests {
             .await;
         assert!(guide.is_ok(), "rule guide must dispatch without Z3");
 
+        let language = registry
+            .call_tool(
+                ToolCallContext::new(ServerKind::Worker, ToolAuthority::Worker, None, None),
+                "solve_constraint_spec",
+                json!({}),
+            )
+            .await;
+        assert!(language.is_ok(), "language guide must dispatch without Z3");
+
         for tool_name in [
             "solve_rules",
+            "solve_constraint_check",
             "solve_constraints",
             "solve_smt",
             "get_solve_result",

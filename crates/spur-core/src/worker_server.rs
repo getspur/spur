@@ -1181,8 +1181,53 @@ impl WorkerToolHandler {
     }
 
     #[tool(
+        name = "solve_rule_spec",
+        description = "Discover versioned solver rule families and exact rule guidance without running Z3."
+    )]
+    async fn solve_rule_spec_tool(
+        &self,
+        arguments: JsonObject,
+    ) -> Result<CallToolResult, McpError> {
+        self.call_worker_registry_tool("solve_rule_spec", arguments)
+            .await
+    }
+
+    #[tool(
+        name = "solve_rules",
+        description = "Verify or synthesize a bounded model with one versioned solver rule family."
+    )]
+    async fn solve_rules_tool(&self, arguments: JsonObject) -> Result<CallToolResult, McpError> {
+        self.call_worker_registry_tool("solve_rules", arguments)
+            .await
+    }
+
+    #[tool(
+        name = "solve_constraint_spec",
+        description = "Discover the generic B-prime request, variable, expression, operator, limit, and example contracts without running Z3."
+    )]
+    async fn solve_constraint_spec_tool(
+        &self,
+        arguments: JsonObject,
+    ) -> Result<CallToolResult, McpError> {
+        self.call_worker_registry_tool("solve_constraint_spec", arguments)
+            .await
+    }
+
+    #[tool(
+        name = "solve_constraint_check",
+        description = "Validate generic constraint arguments and return path-aware repair diagnostics without running Z3."
+    )]
+    async fn solve_constraint_check_tool(
+        &self,
+        arguments: JsonObject,
+    ) -> Result<CallToolResult, McpError> {
+        self.call_worker_registry_tool("solve_constraint_check", arguments)
+            .await
+    }
+
+    #[tool(
         name = "solve_constraints",
-        description = "Find one concrete model for typed B-prime constraints."
+        description = "Find feasible or optimized models for preflighted typed B-prime constraints."
     )]
     async fn solve_constraints_tool(
         &self,
@@ -3860,7 +3905,19 @@ mod tests {
                 .await
                 .expect("rmcp client initialize");
 
-        for tool_name in ["solve_constraints", "solve_smt", "get_solve_result"] {
+        for tool_name in ["solve_rule_spec", "solve_constraint_spec"] {
+            client
+                .call_tool(CallToolRequestParams::new(tool_name))
+                .await
+                .unwrap_or_else(|error| panic!("{tool_name} must work without Z3: {error}"));
+        }
+
+        for tool_name in [
+            "solve_constraint_check",
+            "solve_constraints",
+            "solve_smt",
+            "get_solve_result",
+        ] {
             let error = client
                 .call_tool(CallToolRequestParams::new(tool_name))
                 .await

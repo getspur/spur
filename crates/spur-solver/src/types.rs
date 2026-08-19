@@ -172,6 +172,33 @@ pub enum ConstraintOp {
 }
 
 impl ConstraintOp {
+    /// Every operation in stable wire-catalog order.
+    pub const ALL: [Self; 23] = [
+        Self::Eq,
+        Self::Ne,
+        Self::Lt,
+        Self::Le,
+        Self::Gt,
+        Self::Ge,
+        Self::Add,
+        Self::Sub,
+        Self::Mul,
+        Self::And,
+        Self::Or,
+        Self::Not,
+        Self::BvAnd,
+        Self::BvOr,
+        Self::BvXor,
+        Self::BvNot,
+        Self::BvAdd,
+        Self::BvSub,
+        Self::BvMul,
+        Self::BvUlt,
+        Self::BvUle,
+        Self::BvUgt,
+        Self::BvUge,
+    ];
+
     /// Returns the operation's canonical wire name.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
@@ -199,6 +226,15 @@ impl ConstraintOp {
             Self::BvUle => "bv_ule",
             Self::BvUgt => "bv_ugt",
             Self::BvUge => "bv_uge",
+        }
+    }
+
+    /// Returns the inclusive minimum and optional maximum argument counts.
+    #[must_use]
+    pub const fn arity_bounds(self) -> (usize, Option<usize>) {
+        match self.arity() {
+            Arity::Exact(count) => (count, Some(count)),
+            Arity::AtLeast(count) => (count, None),
         }
     }
 

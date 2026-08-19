@@ -8,13 +8,16 @@ use serde_json::{json, Value};
 use spur_mcp::{ErrorCode, McpError, ToolCallContext, ToolDefinition, ToolModule, ToolResponse};
 
 use crate::{
+    constraint_spec::{
+        self, ConstraintSpecError, ConstraintSpecRequest, DiagnosticPhase, RequestDiagnostic,
+    },
     persist::PersistError,
     rules::execute::{self, PrepareRulesError},
     rules::spec::{self, RuleSpecError, RuleSpecRequest},
     service::{SolverService, SolverServiceError},
     types::{
-        SolveConstraintsRequest, SolveSmtRequest, DEFAULT_MAX_SOLUTIONS, DEFAULT_TIMEOUT_MS,
-        MAX_CONSTRAINTS, MAX_OBJECTIVES, MAX_SOLUTIONS, MAX_TIMEOUT_MS, MAX_VARIABLES,
+        SolveSmtRequest, DEFAULT_MAX_SOLUTIONS, DEFAULT_TIMEOUT_MS, MAX_CONSTRAINTS,
+        MAX_OBJECTIVES, MAX_SOLUTIONS, MAX_TIMEOUT_MS, MAX_VARIABLES,
     },
 };
 
@@ -45,7 +48,7 @@ impl SolverMcpModule {
     /// use spur_solver::{mcp::SolverMcpModule, service::SolverService};
     ///
     /// let module = SolverMcpModule::new(Arc::new(SolverService::new()));
-    /// assert_eq!(module.tools().len(), 5);
+    /// assert_eq!(module.tools().len(), 7);
     /// ```
     #[must_use]
     pub const fn new(service: Arc<SolverService>) -> Self {
@@ -94,8 +97,15 @@ impl ToolModule for SolverMcpModule {
                     .map_err(service_error)?;
                 serialize_response(name, response)?
             }
+            "solve_constraint_spec" => {
+                let request = parse_constraint_spec_request(name, args)?;
+                constraint_spec::query(request).map_err(constraint_spec_error)?
+            }
+            "solve_constraint_check" => constraint_spec::check(args)
+                .map_err(|diagnostic| constraint_diagnostic_error(name, diagnostic))?,
             "solve_constraints" => {
-                let request = parse_request::<SolveConstraintsRequest>(name, args)?;
+                let request = constraint_spec::parse_and_validate(args)
+                    .map_err(|diagnostic| constraint_diagnostic_error(name, diagnostic))?;
                 let response = self
                     .live_service(name)?
                     .solve_constraints(request)
@@ -149,6 +159,23 @@ fn parse_request<T: DeserializeOwned>(tool_name: &str, args: Value) -> Result<T,
     })
 }
 
+fn parse_constraint_spec_request(
+    tool_name: &str,
+    args: Value,
+) -> Result<ConstraintSpecRequest, McpError> {
+    serde_json::from_value(args).map_err(|error| {
+        constraint_diagnostic_error(
+            tool_name,
+            RequestDiagnostic::new(
+                "invalid_selector_request",
+                DiagnosticPhase::Selector,
+                "$",
+                error.to_string(),
+            ),
+        )
+    })
+}
+
 fn serialize_response<T: Serialize>(tool_name: &str, response: T) -> Result<Value, McpError> {
     serde_json::to_value(response).map_err(|error| {
         McpError::internal_error(
@@ -180,6 +207,17 @@ fn rule_spec_error(error: RuleSpecError) -> McpError {
     }
 }
 
+fn constraint_spec_error(error: ConstraintSpecError) -> McpError {
+    let diagnostic = constraint_spec::selector_diagnostic(&error);
+    constraint_diagnostic_error("solve_constraint_spec", diagnostic)
+}
+
+fn constraint_diagnostic_error(tool_name: &str, diagnostic: RequestDiagnostic) -> McpError {
+    let message = format!("invalid `{tool_name}` request: {}", diagnostic.message);
+    let data = serde_json::to_value(diagnostic).ok();
+    McpError::new(ErrorCode(INVALID_PARAMS_CODE), message, data)
+}
+
 fn rule_execution_error(error: PrepareRulesError) -> McpError {
     McpError::new(ErrorCode(INVALID_PARAMS_CODE), error.to_string(), None)
 }
@@ -197,6 +235,16 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
             name: "solve_rules".to_owned(),
             description: "Verify a complete model or synthesize explicitly bounded unknowns using one versioned rule family. Preserves raw solver status and adds mode-specific rule outcomes.".to_owned(),
             input_schema: solve_rules_schema(),
+        },
+        ToolDefinition {
+            name: "solve_constraint_spec".to_owned(),
+            description: "Discover the versioned generic B-prime request language progressively: canonical request shape, variable and expression variants, operator arity/sorts, limits, and examples. This read-only tool does not run Z3.".to_owned(),
+            input_schema: solve_constraint_spec_schema(),
+        },
+        ToolDefinition {
+            name: "solve_constraint_check".to_owned(),
+            description: "Deserialize and semantically validate a generic constraint request without launching Z3. Returns path-aware repair diagnostics for malformed variants, arity, types, names, and limits.".to_owned(),
+            input_schema: solve_constraints_schema(),
         },
         ToolDefinition {
             name: "solve_constraints".to_owned(),
@@ -347,6 +395,40 @@ fn solve_rule_spec_schema() -> Value {
     })
 }
 
+fn solve_constraint_spec_schema() -> Value {
+    json!({
+        "type": "object",
+        "description": "Provide at most one selector. Omit every selector for a bounded language summary, then narrow only the unfamiliar entry.",
+        "properties": {
+            "section": {
+                "type": "string",
+                "enum": ["request", "limits", "examples"]
+            },
+            "variable": {
+                "type": "string",
+                "enum": constraint_spec::VARIABLE_KINDS
+            },
+            "expression": {
+                "type": "string",
+                "enum": constraint_spec::EXPRESSION_KINDS
+            },
+            "operator": {
+                "type": "string",
+                "enum": crate::types::ConstraintOp::ALL
+                    .iter()
+                    .map(|op| op.as_str())
+                    .collect::<Vec<_>>()
+            },
+            "include": {
+                "type": "string",
+                "enum": ["summary", "valid_example", "invalid_example", "all"],
+                "default": "summary"
+            }
+        },
+        "additionalProperties": false
+    })
+}
+
 fn solve_constraints_schema() -> Value {
     json!({
         "type": "object",
@@ -360,7 +442,7 @@ fn solve_constraints_schema() -> Value {
                 "type": "array",
                 "maxItems": MAX_CONSTRAINTS,
                 "items": constraint_item_schema(),
-                "description": "Hard or soft constraints. Bare ConstraintExpr remains accepted; wrapped constraints use diagnostic id?, repeatable soft-only group?, soft?, weight?, and expr."
+                "description": "Canonical wrapped hard or soft constraints. Each entry requires expr and may add diagnostic id, repeatable soft-only group, soft, and weight. Query solve_constraint_spec before authoring; legacy bare expressions remain runtime-compatible only."
             },
             "objectives": {
                 "type": "array",
@@ -453,41 +535,29 @@ fn solve_smt_schema() -> Value {
 }
 
 fn constraint_item_schema() -> Value {
-    let mut properties = constraint_expression_schema()["properties"]
-        .as_object()
-        .cloned()
-        .expect("constraint expression properties");
-    properties.insert("id".to_owned(), identifier_schema());
-    properties.insert(
-        "group".to_owned(),
-        json!({
-            "type": "string",
-            "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
-            "description": "Repeatable Z3 soft-objective group. Valid only when soft is true; id remains diagnostic-only."
-        }),
-    );
-    properties.insert(
-        "soft".to_owned(),
-        json!({
-            "type": "boolean",
-            "default": false,
-            "description": "When true, encode as assert-soft (preference), not a hard assert."
-        }),
-    );
-    properties.insert(
-        "weight".to_owned(),
-        json!({
-            "type": "integer",
-            "exclusiveMinimum": 0,
-            "description": "Soft weight; defaults to 1 when soft and omitted. Forbidden when soft is false."
-        }),
-    );
-    properties.insert("expr".to_owned(), constraint_expression_schema());
-
     json!({
         "type": "object",
-        "description": "Either a bare tagged ConstraintExpr (kind plus its fields) or a wrapper with expr and optional diagnostic id, repeatable soft group, soft flag, and weight. Runtime validation enforces the selected shape.",
-        "properties": properties,
+        "description": "Canonical constraint wrapper. Runtime still accepts legacy bare expressions for compatibility, but agents should always author this wrapped form and preflight it with solve_constraint_check.",
+        "properties": {
+            "id": identifier_schema(),
+            "group": {
+                "type": "string",
+                "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
+                "description": "Repeatable Z3 soft-objective group. Valid only when soft is true; id remains diagnostic-only."
+            },
+            "soft": {
+                "type": "boolean",
+                "default": false,
+                "description": "When true, encode as assert-soft (preference), not a hard assert."
+            },
+            "weight": {
+                "type": "integer",
+                "exclusiveMinimum": 0,
+                "description": "Soft weight; defaults to 1 when soft and omitted. Forbidden when soft is false."
+            },
+            "expr": constraint_expression_schema()
+        },
+        "required": ["expr"],
         "additionalProperties": false
     })
 }
@@ -553,8 +623,7 @@ fn constraint_expression_schema() -> Value {
             },
             "name": identifier_schema(),
             "value": {
-                "type": "integer",
-                "description": "Integer value for int/bv expressions. Boolean ConstraintExpr values use kind=bool."
+                "description": "Kind-specific JSON scalar: signed integer for int, boolean for bool, unsigned integer for bv. Query solve_constraint_spec for the selected kind; a single provider-compatible JSON Schema type would be incorrect."
             },
             "var": identifier_schema(),
             "label": { "type": "string" },
@@ -598,9 +667,10 @@ mod tests {
     use std::collections::BTreeMap;
 
     use serde_json::{json, Value};
+    use spur_mcp::{ServerKind, ToolAuthority, ToolCallContext, ToolModule};
 
     use super::{
-        serialize_response, service_error, tool_definitions, INVALID_PARAMS_CODE,
+        serialize_response, service_error, tool_definitions, SolverMcpModule, INVALID_PARAMS_CODE,
         RESOURCE_NOT_FOUND_CODE,
     };
     use crate::{
@@ -622,6 +692,8 @@ mod tests {
             [
                 "solve_rule_spec",
                 "solve_rules",
+                "solve_constraint_spec",
+                "solve_constraint_check",
                 "solve_constraints",
                 "solve_smt",
                 "get_solve_result"
@@ -632,7 +704,20 @@ mod tests {
         assert_eq!(rule_spec["additionalProperties"], false);
         assert_eq!(rule_spec["properties"]["include"]["default"], "summary");
 
+        let constraint_spec = schema(&tools, "solve_constraint_spec");
+        assert_eq!(constraint_spec["additionalProperties"], false);
+        assert_eq!(
+            constraint_spec["properties"]["section"]["enum"],
+            json!(["request", "limits", "examples"])
+        );
+        assert_eq!(
+            constraint_spec["properties"]["include"]["default"],
+            "summary"
+        );
+
         let typed = schema(&tools, "solve_constraints");
+        let check = schema(&tools, "solve_constraint_check");
+        assert_eq!(check, typed, "preflight and execution schemas must match");
         assert_eq!(typed["required"], json!(["vars", "constraints"]));
         assert_eq!(typed["additionalProperties"], false);
         assert_eq!(
@@ -659,8 +744,12 @@ mod tests {
             true
         );
 
-        let expression_kinds = typed["properties"]["constraints"]["items"]["properties"]["kind"]
-            ["enum"]
+        let constraint_item = &typed["properties"]["constraints"]["items"];
+        assert_eq!(constraint_item["required"], json!(["expr"]));
+        assert!(constraint_item["properties"].get("kind").is_none());
+
+        let expression = &constraint_item["properties"]["expr"];
+        let expression_kinds = expression["properties"]["kind"]["enum"]
             .as_array()
             .expect("constraint kind enum");
         assert!(expression_kinds.iter().any(|kind| kind == "var"));
@@ -672,9 +761,10 @@ mod tests {
         assert_eq!(typed["properties"]["max_solutions"]["minimum"], 1);
         assert_eq!(typed["properties"]["max_solutions"]["maximum"], 64);
         assert_eq!(typed["properties"]["use_cache"]["default"], true);
-        assert_eq!(
-            typed["properties"]["constraints"]["items"]["properties"]["expr"]["type"],
-            "object"
+        assert_eq!(expression["type"], "object");
+        assert!(
+            expression["properties"]["value"].get("type").is_none(),
+            "the shared value field must not lie about bool versus integer literals"
         );
         assert_eq!(typed["properties"]["include_smt"]["default"], false);
         assert_eq!(
@@ -729,6 +819,82 @@ mod tests {
                 .description
                 .contains("complete optimization envelope"),
             "get_solve_result must advertise persisted Optimize retrieval"
+        );
+    }
+
+    #[tokio::test]
+    async fn constraint_authoring_tools_run_without_a_live_solver_service() {
+        let module = SolverMcpModule::catalog_only();
+        let context =
+            || ToolCallContext::new(ServerKind::Worker, ToolAuthority::Worker, None, None);
+
+        assert!(
+            module
+                .call(context(), "solve_constraint_spec", json!({}))
+                .await
+                .is_ok(),
+            "language discovery must work in catalog-only mode"
+        );
+        assert!(
+            module
+                .call(
+                    context(),
+                    "solve_constraint_check",
+                    json!({
+                        "vars": [{"type": "int_range", "name": "x", "min": 0, "max": 10}],
+                        "constraints": [{
+                            "id": "minimum",
+                            "expr": {"kind": "op", "op": "ge", "args": [
+                                {"kind": "var", "name": "x"},
+                                {"kind": "int", "value": 3}
+                            ]}
+                        }]
+                    })
+                )
+                .await
+                .is_ok(),
+            "preflight must not acquire a live service"
+        );
+    }
+
+    #[tokio::test]
+    async fn malformed_generic_requests_return_structured_diagnostics_before_execution() {
+        let module = SolverMcpModule::catalog_only();
+        let context = ToolCallContext::new(ServerKind::Worker, ToolAuthority::Worker, None, None);
+        let error = match module
+            .call(
+                context,
+                "solve_constraints",
+                json!({
+                    "vars": [{"type": "int_range", "name": "x", "min": 0, "max": 10}],
+                    "constraints": [{
+                        "id": "minimum",
+                        "expr": {"kind": "op", "op": "ge", "args": [
+                            {"kind": "var", "var": "x"},
+                            {"kind": "int", "value": 3}
+                        ]}
+                    }]
+                }),
+            )
+            .await
+        {
+            Ok(_) => panic!("malformed variable reference must fail before service lookup"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.code.0, INVALID_PARAMS_CODE);
+        assert_eq!(
+            error.data,
+            Some(json!({
+                "code": "missing_variant_field",
+                "phase": "deserialize",
+                "path": "constraints[0].expr.args[0].name",
+                "message": "kind=var requires field name",
+                "expected": "name: kind-specific value",
+                "found": "var",
+                "hint": "Use name for a variable reference; var is used by enum_label.",
+                "example": {"kind": "var", "name": "x"}
+            }))
         );
     }
 

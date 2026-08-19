@@ -19,8 +19,10 @@ selects rules, and interprets the returned proof status.
 Before hand-encoding a domain rule, navigate the catalog with
 `solve_rule_spec`. If an implemented rule applies, execute it with
 `solve_rules`. Use `solve_constraints` only when the catalog has no suitable
-rule, and use `solve_smt` only when the typed constraint surface cannot express
-the theory.
+rule. Before a generic solve, discover the typed language with
+`solve_constraint_spec` and pass the exact request through
+`solve_constraint_check`. Use `solve_smt` only when the typed constraint
+surface cannot express the theory.
 
 Never invent a multi-rule constant or treat `unknown` / `timeout` as `unsat`.
 </HARD-GATE>
@@ -31,7 +33,9 @@ Never invent a multi-rule constant or treat `unknown` / `timeout` as `unsat`.
 |---|---|
 | Discover whether a mathematical rule already exists | `solve_rule_spec` |
 | Verify a complete domain model or fill bounded domain unknowns | `solve_rules` |
-| Model an uncatalogued constant, invariant, policy, or branch condition | `solve_constraints` |
+| Discover the generic request, variant, operator, limit, or example contract | `solve_constraint_spec` |
+| Validate generic arguments without launching Z3 | `solve_constraint_check` |
+| Execute a preflighted uncatalogued constant, invariant, policy, or branch condition | `solve_constraints` |
 | Use arrays, strings, datatypes, quantifiers, shifts, or another unsupported theory | `solve_smt` |
 | Reload a persisted result across delegation | `get_solve_result` |
 
@@ -77,18 +81,31 @@ The family compiler already owns its verification semantics.
 
 ## Generic Fallback
 
-Use `solve_constraints` when no catalog rule expresses the actual invariant.
-Keep the model minimal:
+When no catalog rule expresses the actual invariant, do not infer the recursive
+grammar from the flat execution schema. Its provider-compatible shape cannot
+encode every tagged-union condition. Use this authoring loop:
 
-1. Declare only necessary variables and prefer bounded domains.
-2. Encode one named hard constraint per real rule.
-3. Keep preferences soft or express them as objectives after feasibility.
-4. Solve hard constraints first.
-5. Test predicates, not one arbitrary model as a golden value.
+1. Call `solve_constraint_spec({})` for the bounded language summary.
+2. Narrow only unfamiliar entries with exactly one selector: `section`,
+   `variable`, `expression`, or `operator`. Load a valid example when field
+   placement or scalar type is uncertain.
+3. Declare only necessary variables and prefer bounded domains.
+4. Author every top-level constraint in the canonical wrapper:
+   `{"id":"rule_name","expr":{...}}`. Put one named hard constraint per
+   real rule.
+5. Call `solve_constraint_check` with the exact intended execution arguments.
+   On `-32602`, repair the field at `data.path` using `data.hint` and
+   `data.example`, then check again. Never guess between similarly named fields;
+   for example, a `kind=var` reference uses `name`, while `var` belongs to
+   `kind=enum_label`.
+6. Call `solve_constraints` only after preflight returns `valid: true`.
+7. Establish hard feasibility first. Then add soft preferences or objectives,
+   preflight the revised request, and solve again.
+8. Test predicates, not one arbitrary model as a golden value.
 
-Typed domains are `bool`, `int`, `int_range`, `enum`, `real`, and `bit_vec`.
-Every expression node is tagged JSON. Prefer the tool schema as the current
-grammar rather than copying a static grammar into this skill.
+The code-owned language catalog is the source of truth for current variants,
+operators, arity, sorts, limits, and examples. Do not copy an exhaustive grammar
+into prompts or agent policy.
 
 ### Generic status semantics
 
@@ -205,7 +222,11 @@ For brain-to-worker handoff:
 recognize constraint-shaped work
   -> navigate solve_rule_spec
   -> catalog match? solve_rules
-  -> otherwise solve_constraints
+  -> otherwise solve_constraint_spec
+  -> author canonical wrapped constraints
+  -> solve_constraint_check until valid
+  -> solve_constraints hard feasibility
+  -> add preferences/objectives only after feasibility, then re-check
   -> unsupported theory only: solve_smt
   -> preserve raw status and mode semantics
   -> implement with tests
