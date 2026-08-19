@@ -3,9 +3,11 @@ use petgraph::graph::{Graph, NodeIndex};
 use petgraph::visit::EdgeRef;
 use petgraph::{Directed, Direction};
 use sha2::{Digest, Sha256};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::beads_crate::dependency_compat::get_dependencies_full_for_issues;
+
+const MAX_PARENT_CHILD_BLOCKING_DEPTH: usize = 50;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DependencyKind {
@@ -113,38 +115,42 @@ impl GraphSnapshot {
         ix: NodeIndex,
         closing: Option<NodeIndex>,
     ) -> bool {
-        self.is_blocked_inner(ix, closing, &mut HashSet::new())
+        self.is_blocked_from(ix, closing, 0)
     }
 
-    fn is_blocked_inner(
+    fn is_blocked_from(
         &self,
         ix: NodeIndex,
         closing: Option<NodeIndex>,
-        visiting: &mut HashSet<NodeIndex>,
+        initial_parent_child_depth: usize,
     ) -> bool {
-        if closing == Some(ix) {
-            return false;
-        }
-        if !visiting.insert(ix) {
-            return false;
-        }
+        let mut queue = VecDeque::from([(ix, initial_parent_child_depth)]);
+        let mut visited = HashSet::new();
 
-        let blocked = self
-            .graph
-            .edges_directed(ix, Direction::Incoming)
-            .any(|edge| {
+        while let Some((current, parent_child_depth)) = queue.pop_front() {
+            if closing == Some(current) || !visited.insert(current) {
+                continue;
+            }
+
+            for edge in self.graph.edges_directed(current, Direction::Incoming) {
                 let source = edge.source();
                 match edge.weight().kind {
-                    DependencyKind::ParentChild => self.is_blocked_inner(source, closing, visiting),
-                    kind if kind.is_direct_blocking() => {
-                        closing != Some(source) && self.graph[source].status != "closed"
+                    DependencyKind::ParentChild
+                        if parent_child_depth < MAX_PARENT_CHILD_BLOCKING_DEPTH =>
+                    {
+                        queue.push_back((source, parent_child_depth + 1));
                     }
-                    _ => false,
+                    kind if kind.is_direct_blocking() => {
+                        if closing != Some(source) && self.graph[source].status != "closed" {
+                            return true;
+                        }
+                    }
+                    _ => {}
                 }
-            });
+            }
+        }
 
-        visiting.remove(&ix);
-        blocked
+        false
     }
 
     pub(crate) fn dependency_blocks(&self, source: NodeIndex, kind: DependencyKind) -> bool {
@@ -158,7 +164,7 @@ impl GraphSnapshot {
         closing: Option<NodeIndex>,
     ) -> bool {
         match kind {
-            DependencyKind::ParentChild => self.is_blocked_after_closing(source, closing),
+            DependencyKind::ParentChild => self.is_blocked_from(source, closing, 1),
             kind if kind.is_direct_blocking() => {
                 closing != Some(source) && self.graph[source].status != "closed"
             }
@@ -292,6 +298,7 @@ fn dependency_kind_from_beads(dep_type: &beads_rust::model::DependencyType) -> D
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::graph_engine::score::is_actionable;
 
     fn node(id: &str) -> NodeData {
         NodeData {
@@ -336,6 +343,36 @@ mod tests {
         assert!(!DependencyKind::parse("related-to").is_blocking());
         assert!(!DependencyKind::parse("discovered").is_blocking());
         assert!(!DependencyKind::parse("garbage").is_blocking());
+    }
+
+    #[test]
+    fn parent_blocking_stops_after_fifty_hops() {
+        let mut snap = GraphSnapshot::new(None);
+        let blocker = snap.add_node(node("blocker"));
+        let root = snap.add_node(node("root"));
+        snap.graph.add_edge(
+            blocker,
+            root,
+            EdgeData {
+                kind: DependencyKind::Blocks,
+            },
+        );
+
+        let mut chain = vec![root];
+        for hop in 1..=51 {
+            let child = snap.add_node(node(&format!("child-{hop}")));
+            snap.graph.add_edge(
+                *chain.last().expect("chain has a parent"),
+                child,
+                EdgeData {
+                    kind: DependencyKind::ParentChild,
+                },
+            );
+            chain.push(child);
+        }
+
+        assert!(!is_actionable(&snap, chain[50]));
+        assert!(is_actionable(&snap, chain[51]));
     }
 
     #[test]

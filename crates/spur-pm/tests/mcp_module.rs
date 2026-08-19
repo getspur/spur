@@ -133,6 +133,62 @@ async fn get_issue_reports_only_effective_parent_child_blockers() {
 }
 
 #[tokio::test]
+async fn get_issue_parent_blocking_stops_after_fifty_hops() {
+    let dir = TempDir::new().expect("tempdir");
+    attach_beads_workspace(dir.path(), &TestBeadsWorkspace::init());
+
+    let pm = pm_service_fixture(dir.path()).await;
+    let blocker = create_issue(&pm, "Blocker", "blocks root").await;
+    let root = create_issue(&pm, "Blocked root", "root issue").await;
+    let mut chain = vec![root.clone()];
+
+    for hop in 1..=51 {
+        let child = pm
+            .create_issue(IssueCreate {
+                title: format!("Child at hop {hop}"),
+                description: Some(format!("child at hop {hop}")),
+                issue_type: Some("task".to_string()),
+                parent: chain.last().cloned(),
+                ..Default::default()
+            })
+            .await
+            .expect("create child issue");
+        chain.push(child);
+    }
+    pm.add_dependency(&root, &blocker)
+        .await
+        .expect("block root");
+
+    let module = PmMcpModule::new(PmMcpDeps {
+        pm_service: Some(Arc::clone(&pm)),
+        ..Default::default()
+    });
+    let at_limit_response = module
+        .call("get_issue", json!({ "id": chain[50].clone() }))
+        .await
+        .expect("get 50-hop child");
+    let at_limit: serde_json::Value = serde_json::from_str(
+        at_limit_response["content"][0]["text"]
+            .as_str()
+            .expect("50-hop child text"),
+    )
+    .expect("50-hop child json");
+    assert_eq!(at_limit["blocked_by"], json!([chain[49]]));
+
+    let beyond_limit_response = module
+        .call("get_issue", json!({ "id": chain[51].clone() }))
+        .await
+        .expect("get 51-hop child");
+    let beyond_limit: serde_json::Value = serde_json::from_str(
+        beyond_limit_response["content"][0]["text"]
+            .as_str()
+            .expect("51-hop child text"),
+    )
+    .expect("51-hop child json");
+    assert!(beyond_limit.get("blocked_by").is_none());
+}
+
+#[tokio::test]
 async fn pm_mcp_module_update_issue_missing_id_is_invalid_params() {
     let dir = TempDir::new().expect("tempdir");
     attach_beads_workspace(dir.path(), &TestBeadsWorkspace::init());

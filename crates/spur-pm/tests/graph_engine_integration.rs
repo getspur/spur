@@ -194,6 +194,37 @@ async fn child_inherits_parent_blocker_until_blocker_closes() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn parent_blocking_matches_beads_fifty_hop_cap() {
+    let mut w = TestBeadsWorkspace::init();
+    let blocker = w.create_issue("External blocker");
+    let root = w.create_issue("Blocked root");
+    let mut chain = vec![root.clone()];
+
+    for hop in 1..=51 {
+        let child = w.create_issue(&format!("Child at hop {hop}"));
+        w.storage
+            .add_dependency(
+                &child,
+                chain.last().expect("chain has a parent"),
+                "parent-child",
+                "test",
+            )
+            .expect("add parent-child dependency");
+        chain.push(child);
+    }
+    w.add_dep(&root, &blocker);
+
+    let engine = open_engine(&w).await;
+    let triage = engine.triage(None).await.expect("triage report");
+    assert_eq!(triage.triage.quick_ref.actionable_count, 2);
+    assert_eq!(triage.triage.quick_ref.blocked_count, 51);
+
+    let plan = engine.plan(None).await.expect("execution plan");
+    assert_eq!(plan.plan.total_actionable, 2);
+    assert_eq!(plan.plan.total_blocked, 51);
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn insights_and_alerts_report_cycles_from_sqlite_workspace() {
     let mut w = TestBeadsWorkspace::init();
     let first = w.create_issue("Cycle first");
