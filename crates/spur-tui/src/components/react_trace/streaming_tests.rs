@@ -1816,7 +1816,7 @@ fn completed_status_with_no_raw_output_stops_spinner() {
 
 #[cfg(feature = "markdown")]
 #[test]
-fn in_progress_with_partial_raw_output_keeps_spinner() {
+fn in_progress_with_partial_raw_output_renders_output_and_keeps_spinner() {
     use spur_acp::adapter::{ToolFamily, ToolInputDisplay};
     use spur_acp::ToolCallId;
     use std::sync::Arc;
@@ -1848,6 +1848,37 @@ fn in_progress_with_partial_raw_output_keeps_spinner() {
         *status = new;
     }
     assert_eq!(trace.first_active_spinner(), Some(0));
+
+    trace.toggle_observe_collapsed();
+    let lines = trace.build_display_lines_for_tests(spinner::BRAILLE[0], None);
+    let rendered = lines
+        .iter()
+        .flat_map(|line| line.spans.iter().map(|span| span.content.as_ref()))
+        .collect::<String>();
+    assert!(
+        rendered.contains("partial output"),
+        "expanded trace must render streamed command output, got: {rendered}"
+    );
+
+    let (rows, _, _) =
+        trace.build_virtual_rows_for_tests(0, 80, &std::collections::HashMap::new(), None);
+    let virtual_rendered = rows
+        .iter()
+        .filter_map(|row| match row {
+            super::VirtualRow::Text(line) => Some(
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>(),
+            ),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        virtual_rendered.contains("partial output"),
+        "virtual rows must render streamed command output, got:\n{virtual_rendered}"
+    );
 }
 
 #[cfg(feature = "markdown")]
