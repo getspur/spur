@@ -207,7 +207,7 @@ fn blocking_targets(snap: &GraphSnapshot, ix: NodeIndex) -> Vec<String> {
     let mut targets: Vec<String> = snap
         .graph
         .edges(ix)
-        .filter(|edge| edge.weight().kind.is_blocking())
+        .filter(|edge| snap.dependency_blocks(ix, edge.weight().kind))
         .map(|edge| snap.graph[edge.target()].id.clone())
         .collect();
     targets.sort();
@@ -218,7 +218,7 @@ fn blocking_sources(snap: &GraphSnapshot, ix: NodeIndex) -> Vec<String> {
     let mut sources: Vec<String> = snap
         .graph
         .edges_directed(ix, petgraph::Direction::Incoming)
-        .filter(|edge| edge.weight().kind.is_blocking())
+        .filter(|edge| snap.dependency_blocks(edge.source(), edge.weight().kind))
         .map(|edge| snap.graph[edge.source()].id.clone())
         .collect();
     sources.sort();

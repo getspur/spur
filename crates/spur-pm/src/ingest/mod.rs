@@ -751,7 +751,10 @@ fn apply_node_under_lock(
             let id = br.id.clone();
             let mut labels_map = s.get_labels_for_issues(std::slice::from_ref(&id))?;
             br.labels = labels_map.remove(&id).unwrap_or_default();
-            Some(crate::beads_crate::issue_tracker::br_to_pm_issue(br))
+            let blocked_by = s.get_blockers(&id)?;
+            Some(crate::beads_crate::issue_tracker::br_to_pm_issue(
+                br, blocked_by,
+            ))
         }
         None => None,
     };

@@ -1,4 +1,4 @@
-//! Direct-linkage adapter to the `beads_rust` 0.2.1 crate.
+//! Direct-linkage adapter to the pinned `beads_rust` 0.1.15 crate.
 //!
 //! See `docs/superpowers/specs/2026-05-05-beads_rust-direct-crate-dep-design.md`
 //! for the full design.

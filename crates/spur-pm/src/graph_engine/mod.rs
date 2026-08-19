@@ -221,7 +221,7 @@ pub fn compute_alerts(snap: &GraphSnapshot, cfg: &AlertConfig) -> AlertReport {
         }
 
         for edge in snap.graph.edges(ix) {
-            if !edge.weight().kind.is_blocking() {
+            if !snap.dependency_blocks(ix, edge.weight().kind) {
                 continue;
             }
             let blocked = &snap.graph[edge.target()];

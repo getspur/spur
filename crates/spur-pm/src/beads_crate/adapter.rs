@@ -1,4 +1,4 @@
-//! `BeadsCrateAdapter` — direct-linkage adapter to `beads_rust` 0.2.1.
+//! `BeadsCrateAdapter` — direct-linkage adapter to pinned `beads_rust` 0.1.15.
 //!
 //! Persistent connection actor shape: the `SqliteStorage` handles are pinned to
 //! dedicated OS threads and reached through channels. Public async signatures
@@ -16,7 +16,7 @@ use crate::beads_crate::snapshot::{Conflict, Snapshot};
 use crate::beads_crate::write_lock;
 use crate::poll_cursor::PollCursor;
 
-/// Coarse `data_version` proxy. `beads_rust` 0.2.1 does not expose
+/// Coarse `data_version` proxy. `beads_rust` 0.1.15 does not expose
 /// `PRAGMA data_version`; until it does, we use `count_issues()`. This
 /// detects net add/delete between snapshot and commit, which covers
 /// the `IssueTracker` CAS use cases (e.g. "delete iff still present").

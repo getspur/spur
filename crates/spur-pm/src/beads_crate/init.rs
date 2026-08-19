@@ -341,7 +341,7 @@ mod tests {
 }
 
 /// Pattern matching the temp files `beads_rust` creates during atomic JSONL writes.
-/// Per `beads_rust` 0.2.1 `sync::export_temp_path`:
+/// Per `beads_rust` 0.1.15 `sync::export_temp_path`:
 ///
 /// ```ignore
 /// pub(crate) fn export_temp_path(output_path: &Path) -> PathBuf {

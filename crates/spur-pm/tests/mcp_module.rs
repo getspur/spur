@@ -82,6 +82,57 @@ async fn pm_mcp_module_get_issue_returns_same_text_content_shape_without_server(
 }
 
 #[tokio::test]
+async fn get_issue_reports_only_effective_parent_child_blockers() {
+    let dir = TempDir::new().expect("tempdir");
+    attach_beads_workspace(dir.path(), &TestBeadsWorkspace::init());
+
+    let pm = pm_service_fixture(dir.path()).await;
+    let blocker = create_issue(&pm, "Blocker", "blocks parent").await;
+    let parent = create_issue(&pm, "Parent", "parent issue").await;
+    let child = pm
+        .create_issue(IssueCreate {
+            title: "Child".to_string(),
+            description: Some("child issue".to_string()),
+            issue_type: Some("task".to_string()),
+            parent: Some(parent.clone()),
+            ..Default::default()
+        })
+        .await
+        .expect("create child issue");
+    let module = PmMcpModule::new(PmMcpDeps {
+        pm_service: Some(Arc::clone(&pm)),
+        ..Default::default()
+    });
+
+    let ready_response = module
+        .call("get_issue", json!({ "id": child.clone() }))
+        .await
+        .expect("get ready child");
+    let ready_issue: serde_json::Value = serde_json::from_str(
+        ready_response["content"][0]["text"]
+            .as_str()
+            .expect("ready child text"),
+    )
+    .expect("ready child json");
+    assert!(ready_issue.get("blocked_by").is_none());
+
+    pm.add_dependency(&parent, &blocker)
+        .await
+        .expect("block parent");
+    let blocked_response = module
+        .call("get_issue", json!({ "id": child }))
+        .await
+        .expect("get inherited-blocked child");
+    let blocked_issue: serde_json::Value = serde_json::from_str(
+        blocked_response["content"][0]["text"]
+            .as_str()
+            .expect("blocked child text"),
+    )
+    .expect("blocked child json");
+    assert_eq!(blocked_issue["blocked_by"], json!([parent]));
+}
+
+#[tokio::test]
 async fn pm_mcp_module_update_issue_missing_id_is_invalid_params() {
     let dir = TempDir::new().expect("tempdir");
     attach_beads_workspace(dir.path(), &TestBeadsWorkspace::init());

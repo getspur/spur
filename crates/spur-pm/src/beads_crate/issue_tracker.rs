@@ -247,14 +247,8 @@ fn is_retryable_issue_id_collision(error: &anyhow::Error) -> bool {
     })
 }
 
-pub(crate) fn br_to_pm_issue(br: beads_rust::model::Issue) -> Issue {
+pub(crate) fn br_to_pm_issue(br: beads_rust::model::Issue, blocked_by: Vec<String>) -> Issue {
     let url = format!("beads://{}", br.id);
-    let blocked_by = br
-        .dependencies
-        .iter()
-        .filter(|dependency| dependency.dep_type.is_blocking())
-        .map(|dependency| dependency.depends_on_id.clone())
-        .collect();
     Issue {
         id: br.id,
         source: PmSource::Beads,
@@ -428,7 +422,8 @@ impl IssueTracker for BeadsCrateAdapter {
                 n_deps = br.dependencies.len(),
                 "per-query timings inside get_issue closure",
             );
-            Ok(br_to_pm_issue(br))
+            let blocked_by = s.get_blockers(&id)?;
+            Ok(br_to_pm_issue(br, blocked_by))
         })
         .await
     }
@@ -508,8 +503,14 @@ impl IssueTracker for BeadsCrateAdapter {
 
     async fn find_by_external_ref(&self, external_ref: &str) -> anyhow::Result<Option<Issue>> {
         let external_ref = external_ref.to_string();
-        self.read(move |s| Ok(s.find_by_external_ref(&external_ref)?.map(br_to_pm_issue)))
-            .await
+        self.read(move |s| {
+            let Some(issue) = s.find_by_external_ref(&external_ref)? else {
+                return Ok(None);
+            };
+            let blocked_by = s.get_blockers(&issue.id)?;
+            Ok(Some(br_to_pm_issue(issue, blocked_by)))
+        })
+        .await
     }
 
     async fn update_issue(&self, id: &str, update: IssueUpdate) -> anyhow::Result<()> {

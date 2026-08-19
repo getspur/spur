@@ -339,7 +339,7 @@ fn highest_impact_node(snap: &GraphSnapshot) -> Option<(NodeIndex, usize)> {
 fn direct_unblocks(snap: &GraphSnapshot, ix: NodeIndex) -> usize {
     snap.graph
         .edges(ix)
-        .filter(|edge| edge.weight().kind.is_blocking())
+        .filter(|edge| snap.dependency_blocks(ix, edge.weight().kind))
         .filter(|edge| snap.graph[edge.target()].status != "closed")
         .count()
 }
@@ -361,10 +361,7 @@ fn is_blocked_after_closing(
         return false;
     }
 
-    snap.graph
-        .edges_directed(ix, petgraph::Direction::Incoming)
-        .filter(|edge| edge.weight().kind.is_blocking())
-        .any(|edge| closing != Some(edge.source()) && snap.graph[edge.source()].status != "closed")
+    snap.is_blocked_after_closing(ix, closing)
 }
 
 fn depth_reduction_after_closing(snap: &GraphSnapshot, closing: NodeIndex) -> f64 {
@@ -387,7 +384,7 @@ fn dependency_depth_sum(snap: &GraphSnapshot, closing: Option<NodeIndex>) -> u32
         .into_iter()
         .map(|ix| {
             let mut visiting = HashSet::new();
-            dependency_depth_for(snap, ix, &open, &mut memo, &mut visiting)
+            dependency_depth_for(snap, ix, closing, &open, &mut memo, &mut visiting)
         })
         .sum()
 }
@@ -395,6 +392,7 @@ fn dependency_depth_sum(snap: &GraphSnapshot, closing: Option<NodeIndex>) -> u32
 fn dependency_depth_for(
     snap: &GraphSnapshot,
     ix: NodeIndex,
+    closing: Option<NodeIndex>,
     open: &HashSet<NodeIndex>,
     memo: &mut HashMap<NodeIndex, u32>,
     visiting: &mut HashSet<NodeIndex>,
@@ -408,16 +406,15 @@ fn dependency_depth_for(
 
     let mut max_parent_depth = 0;
     for edge in snap.graph.edges_directed(ix, petgraph::Direction::Incoming) {
-        if !edge.weight().kind.is_blocking() {
+        let source = edge.source();
+        if !snap.dependency_blocks_after_closing(source, edge.weight().kind, closing) {
             continue;
         }
-
-        let source = edge.source();
         if !open.contains(&source) || visiting.contains(&source) {
             continue;
         }
 
-        let depth = 1 + dependency_depth_for(snap, source, open, memo, visiting);
+        let depth = 1 + dependency_depth_for(snap, source, closing, open, memo, visiting);
         max_parent_depth = max_parent_depth.max(depth);
     }
 

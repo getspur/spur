@@ -3,7 +3,7 @@ use petgraph::graph::{Graph, NodeIndex};
 use petgraph::visit::EdgeRef;
 use petgraph::{Directed, Direction};
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::beads_crate::dependency_compat::get_dependencies_full_for_issues;
 
@@ -35,6 +35,13 @@ impl DependencyKind {
         matches!(
             self,
             Self::Blocks | Self::ParentChild | Self::ConditionalBlocks | Self::WaitsFor
+        )
+    }
+
+    fn is_direct_blocking(self) -> bool {
+        matches!(
+            self,
+            Self::Blocks | Self::ConditionalBlocks | Self::WaitsFor
         )
     }
 }
@@ -99,6 +106,64 @@ impl GraphSnapshot {
 
     pub fn edge_count(&self) -> usize {
         self.graph.edge_count()
+    }
+
+    pub(crate) fn is_blocked_after_closing(
+        &self,
+        ix: NodeIndex,
+        closing: Option<NodeIndex>,
+    ) -> bool {
+        self.is_blocked_inner(ix, closing, &mut HashSet::new())
+    }
+
+    fn is_blocked_inner(
+        &self,
+        ix: NodeIndex,
+        closing: Option<NodeIndex>,
+        visiting: &mut HashSet<NodeIndex>,
+    ) -> bool {
+        if closing == Some(ix) {
+            return false;
+        }
+        if !visiting.insert(ix) {
+            return false;
+        }
+
+        let blocked = self
+            .graph
+            .edges_directed(ix, Direction::Incoming)
+            .any(|edge| {
+                let source = edge.source();
+                match edge.weight().kind {
+                    DependencyKind::ParentChild => self.is_blocked_inner(source, closing, visiting),
+                    kind if kind.is_direct_blocking() => {
+                        closing != Some(source) && self.graph[source].status != "closed"
+                    }
+                    _ => false,
+                }
+            });
+
+        visiting.remove(&ix);
+        blocked
+    }
+
+    pub(crate) fn dependency_blocks(&self, source: NodeIndex, kind: DependencyKind) -> bool {
+        self.dependency_blocks_after_closing(source, kind, None)
+    }
+
+    pub(crate) fn dependency_blocks_after_closing(
+        &self,
+        source: NodeIndex,
+        kind: DependencyKind,
+        closing: Option<NodeIndex>,
+    ) -> bool {
+        match kind {
+            DependencyKind::ParentChild => self.is_blocked_after_closing(source, closing),
+            kind if kind.is_direct_blocking() => {
+                closing != Some(source) && self.graph[source].status != "closed"
+            }
+            _ => false,
+        }
     }
 
     pub fn compute_data_hash(&self) -> String {

@@ -47,7 +47,7 @@ pub fn is_actionable(snap: &GraphSnapshot, ix: NodeIndex) -> bool {
     }
 
     for edge in snap.graph.edges_directed(ix, petgraph::Direction::Incoming) {
-        if edge.weight().kind.is_blocking() && snap.graph[edge.source()].status != "closed" {
+        if snap.dependency_blocks(edge.source(), edge.weight().kind) {
             return false;
         }
     }
@@ -61,7 +61,7 @@ pub fn transitive_unblocks(snap: &GraphSnapshot, ix: NodeIndex) -> usize {
 
     while let Some(cur) = stack.pop() {
         for edge in snap.graph.edges(cur) {
-            if !edge.weight().kind.is_blocking() {
+            if !snap.dependency_blocks(cur, edge.weight().kind) {
                 continue;
             }
 

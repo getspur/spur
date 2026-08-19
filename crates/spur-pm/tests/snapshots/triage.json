@@ -26,12 +26,11 @@
         {
           "id": "<id-3>",
           "title": "Closed parent",
-          "score": 0.717941563651,
+          "score": 0.502243231149,
           "reasons": [
-            "unblocks 2 downstream",
             "recently updated"
           ],
-          "unblocks": 2
+          "unblocks": 0
         },
         {
           "id": "<id-2>",
@@ -70,9 +69,7 @@
         "unblocks_ids": [
           "<id-2>"
         ],
-        "blocked_by": [
-          "<id-3>"
-        ]
+        "blocked_by": []
       },
       {
         "id": "<id-3>",
@@ -81,23 +78,20 @@
         "status": "closed",
         "priority": 2,
         "labels": [],
-        "score": 0.717941563651,
+        "score": 0.502243231149,
         "breakdown": {
           "priority": 0.6,
-          "unblocks": 0.47712125472,
+          "unblocks": 0.0,
           "actionable": 0.0,
           "freshness": 0.73105857863,
           "age_penalty": 0.119202922022,
-          "raw": 0.397018808272
+          "raw": 0.277738494592
         },
         "action": "wait",
         "reasons": [
-          "unblocks 2 downstream",
           "recently updated"
         ],
-        "unblocks_ids": [
-          "<id-1>"
-        ],
+        "unblocks_ids": [],
         "blocked_by": []
       },
       {
@@ -146,9 +140,7 @@
           "<id-2>"
         ],
         "actionable": true,
-        "blocked_by": [
-          "<id-3>"
-        ]
+        "blocked_by": []
       }
     ],
     "project_health": {

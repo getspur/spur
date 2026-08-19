@@ -48,7 +48,7 @@ pub fn compute_plan(snap: &GraphSnapshot, _cfg: &ScoreConfig) -> ExecutionPlan {
                 let mut unblocks: Vec<String> = snap
                     .graph
                     .edges(ix)
-                    .filter(|edge| edge.weight().kind.is_blocking())
+                    .filter(|edge| snap.dependency_blocks(ix, edge.weight().kind))
                     .map(|edge| snap.graph[edge.target()].id.clone())
                     .collect();
                 unblocks.sort_unstable();
@@ -130,11 +130,10 @@ fn depth_for(
 
     let mut max_pred = 0;
     for edge in snap.graph.edges_directed(ix, petgraph::Direction::Incoming) {
-        if !edge.weight().kind.is_blocking() {
+        let pred = edge.source();
+        if !snap.dependency_blocks(pred, edge.weight().kind) {
             continue;
         }
-
-        let pred = edge.source();
         if !open.contains(&pred) {
             continue;
         }

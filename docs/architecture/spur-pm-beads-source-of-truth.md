@@ -106,7 +106,7 @@ The methods are intentionally Beads-only:
 - It lists issues from `beads_rust`.
 - It loads labels and dependencies.
 - It represents edges from blocker to blocked issue.
-- It treats `blocks`, `parent-child`, `conditional-blocks`, and `waits-for` as blocking dependency kinds.
+- It treats `blocks`, `conditional-blocks`, and `waits-for` as direct blockers; `parent-child` inherits a parent's blocked state without making an open, unblocked parent block its child.
 - It computes a deterministic `data_hash` from content hash, labels, and blocking dependencies.
 
 `crates/spur-pm/src/graph_engine/mod.rs` then runs pure analyzers over that snapshot:

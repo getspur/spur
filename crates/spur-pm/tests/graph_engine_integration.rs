@@ -79,6 +79,121 @@ async fn triage_and_plan_observe_blocker_to_blocked_direction() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn open_unblocked_parent_does_not_block_child() {
+    let mut w = TestBeadsWorkspace::init();
+    let parent = w.create_issue("Open parent");
+    let child = w.create_issue("Ready child");
+    w.storage
+        .update_issue(
+            &parent,
+            &beads_rust::storage::sqlite::IssueUpdate {
+                priority: Some(beads_rust::model::Priority(4)),
+                ..Default::default()
+            },
+            "test",
+        )
+        .expect("lower parent priority");
+    w.storage
+        .update_issue(
+            &child,
+            &beads_rust::storage::sqlite::IssueUpdate {
+                priority: Some(beads_rust::model::Priority(0)),
+                ..Default::default()
+            },
+            "test",
+        )
+        .expect("raise child priority");
+    w.storage
+        .add_dependency(&child, &parent, "parent-child", "test")
+        .expect("add parent-child dependency");
+
+    let engine = open_engine(&w).await;
+
+    let triage = engine.triage(None).await.expect("triage report");
+    assert_eq!(triage.triage.quick_ref.actionable_count, 2);
+    assert_eq!(triage.triage.quick_ref.blocked_count, 0);
+    let child_recommendation = triage
+        .triage
+        .recommendations
+        .iter()
+        .find(|item| item.id == child)
+        .expect("child appears in recommendations");
+    assert_eq!(child_recommendation.action.as_deref(), Some("start"));
+    assert!(child_recommendation.blocked_by.is_empty());
+
+    let plan = engine.plan(None).await.expect("execution plan");
+    assert_eq!(plan.plan.total_actionable, 2);
+    assert_eq!(plan.plan.total_blocked, 0);
+    assert_eq!(plan.plan.tracks.len(), 1);
+    let mut planned_ids: Vec<&str> = plan.plan.tracks[0]
+        .items
+        .iter()
+        .map(|item| item.id.as_str())
+        .collect();
+    planned_ids.sort_unstable();
+    let mut expected_ids = vec![parent.as_str(), child.as_str()];
+    expected_ids.sort_unstable();
+    assert_eq!(planned_ids, expected_ids);
+
+    let alerts = engine.alerts().await.expect("alert report");
+    assert!(!alerts.alerts.iter().any(|alert| {
+        alert.alert_type == "priority_inversion"
+            && alert.issue_ids == vec![parent.clone(), child.clone()]
+    }));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn child_inherits_parent_blocker_until_blocker_closes() {
+    let mut w = TestBeadsWorkspace::init();
+    let blocker = w.create_issue("External blocker");
+    let parent = w.create_issue("Blocked parent");
+    let child = w.create_issue("Inherited blocked child");
+    w.add_dep(&parent, &blocker);
+    w.storage
+        .add_dependency(&child, &parent, "parent-child", "test")
+        .expect("add parent-child dependency");
+
+    let engine = open_engine(&w).await;
+
+    let triage = engine.triage(None).await.expect("triage report");
+    assert_eq!(triage.triage.quick_ref.actionable_count, 1);
+    assert_eq!(triage.triage.quick_ref.blocked_count, 2);
+    assert_eq!(triage.triage.quick_ref.top_picks[0].id, blocker);
+    assert_eq!(triage.triage.quick_ref.top_picks[0].unblocks, 2);
+    let child_recommendation = triage
+        .triage
+        .recommendations
+        .iter()
+        .find(|item| item.id == child)
+        .expect("child appears in recommendations");
+    assert_eq!(child_recommendation.action.as_deref(), Some("wait"));
+    assert_eq!(child_recommendation.blocked_by, vec![parent.clone()]);
+
+    let plan = engine.plan(None).await.expect("execution plan");
+    assert_eq!(plan.plan.total_actionable, 1);
+    assert_eq!(plan.plan.total_blocked, 2);
+    assert_eq!(plan.plan.tracks.len(), 3);
+    assert_eq!(plan.plan.tracks[0].items[0].id, blocker);
+    assert_eq!(plan.plan.tracks[1].items[0].id, parent);
+    assert_eq!(plan.plan.tracks[2].items[0].id, child);
+
+    let insights = engine.insights(None).await.expect("graph insights");
+    assert_eq!(insights.top_what_ifs[0].issue_id, blocker);
+    let delta = insights.top_what_ifs[0]
+        .delta
+        .as_ref()
+        .expect("what-if delta");
+    assert_eq!(delta.direct_unblocks, 1);
+    assert_eq!(delta.transitive_unblocks, 2);
+    assert_eq!(delta.blocked_reduction, 2);
+
+    w.close_issue(&blocker);
+    let unblocked_triage = engine.triage(None).await.expect("unblocked triage report");
+    assert_eq!(unblocked_triage.triage.quick_ref.actionable_count, 2);
+    assert_eq!(unblocked_triage.triage.quick_ref.blocked_count, 0);
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn insights_and_alerts_report_cycles_from_sqlite_workspace() {
     let mut w = TestBeadsWorkspace::init();
     let first = w.create_issue("Cycle first");
