@@ -1,6 +1,33 @@
 use serde_json::{Map, Value};
 use std::borrow::Cow;
 
+/// Borrow the payload from an envelope containing exactly one non-error text block.
+///
+/// This is the allocation-free recognition step used by `extract_observe` before
+/// the general envelope path materializes an intermediate `Value::String`.
+/// Returning `None` keeps all multi-block, error, mixed-media, and JSON behavior
+/// on [`unwrap_envelope`].
+pub(super) fn single_text(v: &Value) -> Option<&str> {
+    if let Some(items) = v.get("items").and_then(Value::as_array) {
+        let [item] = items.as_slice() else {
+            return None;
+        };
+        return item.get("Text").and_then(Value::as_str);
+    }
+
+    if v.get("isError").and_then(Value::as_bool) == Some(true) {
+        return None;
+    }
+
+    let content = v.get("content").and_then(Value::as_array)?;
+    let [block] = content.as_slice() else {
+        return None;
+    };
+    (block.get("type").and_then(Value::as_str) == Some("text"))
+        .then(|| block.get("text").and_then(Value::as_str))
+        .flatten()
+}
+
 /// Unwrap MCP / ACP tool-result envelopes into a single Value for observe extractors.
 ///
 /// Strategy (deterministic, documented):
@@ -264,5 +291,57 @@ mod tests {
         let result = unwrap_envelope(&v);
         assert!(matches!(result, Cow::Borrowed(_)));
         assert_eq!(*result, v);
+    }
+
+    #[test]
+    fn single_text_borrows_acp_item() {
+        let v = json!({"items": [{"Text": "hello world"}]});
+        let expected = v["items"][0]["Text"].as_str().unwrap();
+
+        let actual = single_text(&v).unwrap();
+
+        assert_eq!(actual, expected);
+        assert_eq!(actual.as_ptr(), expected.as_ptr());
+    }
+
+    #[test]
+    fn single_text_borrows_standard_mcp_content() {
+        let v = json!({"content": [{"type": "text", "text": "hello world"}]});
+        let expected = v["content"][0]["text"].as_str().unwrap();
+
+        let actual = single_text(&v).unwrap();
+
+        assert_eq!(actual, expected);
+        assert_eq!(actual.as_ptr(), expected.as_ptr());
+    }
+
+    #[test]
+    fn single_text_rejects_shapes_that_need_existing_unwrap_semantics() {
+        let cases = [
+            json!({
+                "content": [{"type": "text", "text": "permission denied"}],
+                "isError": true
+            }),
+            json!({
+                "content": [
+                    {"type": "text", "text": "one"},
+                    {"type": "text", "text": "two"}
+                ]
+            }),
+            json!({
+                "content": [
+                    {"type": "text", "text": "caption"},
+                    {"type": "image", "data": "abc", "mimeType": "image/png"}
+                ]
+            }),
+            json!({
+                "items": [],
+                "content": [{"type": "text", "text": "items takes precedence"}]
+            }),
+        ];
+
+        for case in cases {
+            assert!(single_text(&case).is_none(), "unexpected fast path: {case}");
+        }
     }
 }

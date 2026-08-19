@@ -173,6 +173,12 @@ pub fn format_input(raw_input: &Value, kind: AgentKind) -> ToolInputDisplay {
 
 /// Pipeline: MCP-envelope unwrap (shared) → per-kind extraction → generic fallback.
 pub fn extract_observe(raw_output: &Value, kind: AgentKind) -> ObservePayload {
+    if let Some(body) = mcp::single_text(raw_output) {
+        return ObservePayload::Text {
+            body: body.to_owned(),
+        };
+    }
+
     let unwrapped = mcp::unwrap_envelope(raw_output);
     let per_kind = match kind {
         AgentKind::ClaudeCodeAcp | AgentKind::ClaudeStreamJson => {
@@ -185,6 +191,42 @@ pub fn extract_observe(raw_output: &Value, kind: AgentKind) -> ObservePayload {
         AgentKind::OpenCode | AgentKind::Grok | AgentKind::Generic => None,
     };
     per_kind.unwrap_or_else(|| generic::extract_observe(&unwrapped))
+}
+
+#[cfg(test)]
+mod extract_observe_tests {
+    use super::{extract_observe, ObservePayload};
+    use crate::types::AgentKind;
+    use serde_json::json;
+
+    #[test]
+    fn single_text_envelopes_match_direct_text_for_every_agent_kind() {
+        let kinds = [
+            AgentKind::ClaudeStreamJson,
+            AgentKind::ClaudeCodeAcp,
+            AgentKind::CodexAcp,
+            AgentKind::Kiro,
+            AgentKind::Kimi,
+            AgentKind::Gemini,
+            AgentKind::OpenCode,
+            AgentKind::Grok,
+            AgentKind::Generic,
+        ];
+        let values = [
+            json!("hello world"),
+            json!({"items": [{"Text": "hello world"}]}),
+            json!({"content": [{"type": "text", "text": "hello world"}]}),
+        ];
+
+        for kind in kinds {
+            for value in &values {
+                let ObservePayload::Text { body } = extract_observe(value, kind) else {
+                    panic!("expected Text for {kind:?} from {value}");
+                };
+                assert_eq!(body, "hello world", "agent kind: {kind:?}");
+            }
+        }
+    }
 }
 
 /// Translate `CurrentModeUpdate::current_mode_id` into a short badge.
