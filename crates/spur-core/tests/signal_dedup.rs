@@ -371,14 +371,11 @@ async fn duplicate_signal_comments_with_same_signal_id_commit_once() {
         .await
         .expect("list comments after signal watcher tick");
     let audits = audit_sentinels(&comments);
-    let escalation_count = audits
-        .iter()
-        .filter(|sentinel| matches!(sentinel, AuditSentinelKind::EscalationRequested { .. }))
-        .count();
-
-    assert_eq!(
-        escalation_count, 1,
-        "duplicate signal_id must produce exactly one EscalationRequested sentinel; audits={audits:?}"
+    assert!(
+        !audits
+            .iter()
+            .any(|sentinel| matches!(sentinel, AuditSentinelKind::EscalationRequested { .. })),
+        "worker escalation must not produce a retry-exhaustion sentinel; audits={audits:?}"
     );
     assert!(
         !audits.iter().any(|sentinel| {
@@ -390,16 +387,17 @@ async fn duplicate_signal_comments_with_same_signal_id_commit_once() {
         "scope_drift must not invoke the proposer/mutation path; audits={audits:?}"
     );
     let issue = pm.get_issue(&task_id).await.expect("get issue");
-    assert!(issue.labels.contains(&SIGNAL_ESCALATED_LABEL.to_string()));
+    assert!(!issue.labels.contains(&SIGNAL_ESCALATED_LABEL.to_string()));
     assert!(issue
         .labels
         .contains(&labels::signal_processed_label(&signal_id)));
+    assert!(issue.labels.contains(&labels::signal_kind("scope-drift")));
     assert!(
-        !issue
+        issue
             .labels
             .iter()
             .any(|label| label == labels::READY_FOR_REVIEW || label == "ready-for-review"),
-        "escalation must remove ready-for-review labels; labels={:?}",
+        "worker escalation must remain available for brain review; labels={:?}",
         issue.labels
     );
 }
@@ -527,19 +525,6 @@ async fn watcher_processes_only_one_signal_per_task_per_tick() {
     );
     watcher.tick_once().await.expect("tick_once");
 
-    let comments = advanced
-        .list_comments(&task_id)
-        .await
-        .expect("list comments after watcher tick");
-    let audits = audit_sentinels(&comments);
-    let escalations = audits
-        .iter()
-        .filter(|sentinel| matches!(sentinel, AuditSentinelKind::EscalationRequested { .. }))
-        .count();
-    assert_eq!(
-        escalations, 1,
-        "watcher must commit at most one signal decision per task per tick; audits={audits:?}"
-    );
     let issue = pm.get_issue(&task_id).await.expect("get issue");
     assert!(issue
         .labels
@@ -550,6 +535,8 @@ async fn watcher_processes_only_one_signal_per_task_per_tick() {
             .contains(&labels::signal_processed_label(&second_signal_id)),
         "second signal must wait behind the first per-task signal decision"
     );
+    assert!(issue.labels.contains(&labels::READY_FOR_REVIEW.to_string()));
+    assert!(!issue.labels.contains(&SIGNAL_ESCALATED_LABEL.to_string()));
 }
 
 #[tokio::test]
@@ -741,14 +728,11 @@ async fn distinct_signal_on_task_with_prior_processed_label_is_not_skipped() {
         .await
         .expect("list comments after watcher tick");
     let audits = audit_sentinels(&comments);
-    let escalation_count = audits
-        .iter()
-        .filter(|sentinel| matches!(sentinel, AuditSentinelKind::EscalationRequested { .. }))
-        .count();
-
-    assert_eq!(
-        escalation_count, 1,
-        "a distinct signal must be escalated even when the task already carries a different signal-processed label; audits={audits:?}"
+    assert!(
+        !audits
+            .iter()
+            .any(|sentinel| matches!(sentinel, AuditSentinelKind::EscalationRequested { .. })),
+        "a distinct worker signal must not be projected as retry exhaustion; audits={audits:?}"
     );
     let issue = pm.get_issue(&task_id).await.expect("get issue");
     assert!(issue
@@ -757,4 +741,6 @@ async fn distinct_signal_on_task_with_prior_processed_label_is_not_skipped() {
     assert!(issue
         .labels
         .contains(&labels::signal_processed_label(&new_signal_id)));
+    assert!(issue.labels.contains(&labels::READY_FOR_REVIEW.to_string()));
+    assert!(!issue.labels.contains(&SIGNAL_ESCALATED_LABEL.to_string()));
 }

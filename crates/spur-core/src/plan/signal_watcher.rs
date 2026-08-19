@@ -15,7 +15,6 @@ use parking_lot::Mutex;
 use spur_pm::{IssueFilter, IssueUpdate, PmService};
 use uuid::Uuid;
 
-use super::audit_sentinel::{self, AuditSentinelKind};
 use super::mutation_executor::apply_mutation;
 use super::proposers::{MutationProposer, MutationScorer};
 use super::signals::{parse_comment, WorkerSignal, SENTINEL_PREFIX};
@@ -163,60 +162,20 @@ impl<P: MutationProposer, S: MutationScorer> SignalWatcher<P, S> {
                     continue;
                 }
 
-                let plan_id = issue
-                    .labels
-                    .iter()
-                    .find_map(|label| crate::plan::labels::parse_plan_id(label))
-                    .ok_or_else(|| {
-                        anyhow::anyhow!("signal task {} missing spur:plan-id label", issue.id)
-                    })?;
-                let escalation_last_error = match &signal {
-                    WorkerSignal::Escalate { reason, .. } => Some(reason.clone()),
-                    WorkerSignal::ScopeDrift {
-                        severity,
-                        reason,
-                        estimated_subtasks,
-                        ..
-                    } => {
-                        let estimated_subtasks = estimated_subtasks
-                            .map(|count| count.to_string())
-                            .unwrap_or_else(|| "unknown".to_string());
-                        Some(format!(
-                            "scope_drift severity={severity:.2}: {reason} (estimated_subtasks={estimated_subtasks})"
-                        ))
-                    }
-                    _ => None,
-                };
-                if let Some(last_error) = escalation_last_error {
-                    let (attempt, delegation_id, worker_branch) = escalation_audit_context(&audits);
-                    let task_id = issue
-                        .labels
-                        .iter()
-                        .find_map(|label| crate::plan::labels::parse_plan_task_id(label))
-                        .unwrap_or_else(|| issue.id.clone());
-                    let audit = AuditSentinelKind::EscalationRequested {
-                        plan_id: plan_id.to_string(),
-                        task_id,
-                        attempt,
-                        last_error,
-                        worker_branch,
-                        delegation_id,
-                    };
+                // Worker-requested brain attention is not retry exhaustion.
+                // Keep the completed task awaiting review so the brain can
+                // inspect the durable signal and choose approve, re-plan,
+                // retry, or abandon explicitly. The processed label prevents
+                // watcher re-entry without hiding the original signal label.
+                if matches!(
+                    &signal,
+                    WorkerSignal::Escalate { .. } | WorkerSignal::ScopeDrift { .. }
+                ) {
                     self.pm
                         .update_issue(
                             &issue.id,
                             IssueUpdate {
-                                status: Some("open".to_string()),
-                                comment: Some(audit_sentinel::encode_comment(&audit)),
-                                add_labels: vec![
-                                    crate::plan::mutation_executor::SIGNAL_ESCALATED_LABEL
-                                        .to_string(),
-                                    processed_label,
-                                ],
-                                remove_labels: vec![
-                                    crate::plan::labels::READY_FOR_REVIEW.to_string(),
-                                    "ready-for-review".to_string(),
-                                ],
+                                add_labels: vec![processed_label],
                                 ..Default::default()
                             },
                         )
@@ -224,6 +183,13 @@ impl<P: MutationProposer, S: MutationScorer> SignalWatcher<P, S> {
                     self.seen.lock().insert(signal_id);
                     break;
                 }
+                let plan_id = issue
+                    .labels
+                    .iter()
+                    .find_map(|label| crate::plan::labels::parse_plan_id(label))
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("signal task {} missing spur:plan-id label", issue.id)
+                    })?;
                 let state = crate::plan::projector::project_plan_from_beads(
                     self.pm.as_ref(),
                     plan_id,
@@ -278,39 +244,6 @@ impl<P: MutationProposer, S: MutationScorer> SignalWatcher<P, S> {
     }
 }
 
-fn escalation_audit_context(audits: &[AuditSentinelKind]) -> (u32, Option<String>, Option<String>) {
-    let mut attempt = 0;
-    let mut delegation_id = None;
-    let mut worker_branch = None;
-
-    for audit in audits {
-        match audit {
-            AuditSentinelKind::Dispatch {
-                delegation_id: current_delegation_id,
-                attempt: current_attempt,
-                ..
-            } => {
-                attempt = *current_attempt;
-                delegation_id = Some(current_delegation_id.clone());
-                worker_branch = None;
-            }
-            AuditSentinelKind::Completion {
-                delegation_id: current_delegation_id,
-                worker_branch: current_worker_branch,
-                ..
-            } => {
-                delegation_id = Some(current_delegation_id.clone());
-                if current_worker_branch.is_some() {
-                    worker_branch = current_worker_branch.clone();
-                }
-            }
-            _ => {}
-        }
-    }
-
-    (attempt, delegation_id, worker_branch)
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -346,7 +279,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn escalate_signal_routes_to_brain_escalation_without_proposer() {
+    async fn escalate_signal_stays_awaiting_brain_review_without_proposer() {
         let dir = tempfile::TempDir::new().expect("tempdir");
         std::fs::create_dir(dir.path().join(".beads")).expect("create .beads");
         let pm = Arc::new(
@@ -435,17 +368,17 @@ mod tests {
 
         let issue = pm.get_issue(&task_id).await.expect("updated issue");
         assert!(
-            !issue
+            issue
                 .labels
                 .contains(&crate::plan::labels::READY_FOR_REVIEW.to_string()),
-            "escalation must remove ready-for-review label; labels={:?}",
+            "worker escalation must stay ready for brain review; labels={:?}",
             issue.labels
         );
         assert!(
-            issue
+            !issue
                 .labels
                 .contains(&crate::plan::mutation_executor::SIGNAL_ESCALATED_LABEL.to_string()),
-            "escalation must add signal:escalated label; labels={:?}",
+            "worker escalation is not retry exhaustion; labels={:?}",
             issue.labels
         );
         assert!(
@@ -453,6 +386,13 @@ mod tests {
                 .labels
                 .contains(&crate::plan::labels::signal_processed_label(&signal_id)),
             "escalation must mark signal processed; labels={:?}",
+            issue.labels
+        );
+        assert!(
+            issue
+                .labels
+                .contains(&crate::plan::labels::signal_kind("escalate")),
+            "brain review must retain the original escalation signal; labels={:?}",
             issue.labels
         );
 
@@ -463,28 +403,19 @@ mod tests {
             .filter_map(Result::ok)
             .collect::<Vec<_>>();
         assert!(
-            audits.iter().any(|audit| matches!(
-                audit,
-                AuditSentinelKind::EscalationRequested {
-                    plan_id,
-                    task_id,
-                    attempt,
-                    last_error,
-                    worker_branch,
-                    delegation_id,
-                } if plan_id == "plan-watch"
-                    && task_id == "task-escalate"
-                    && *attempt == 2
-                    && last_error == &reason
-                    && worker_branch.as_deref() == Some("spur/worker-watch")
-                    && delegation_id.as_deref() == Some("del-watch")
-            )),
-            "watcher must emit EscalationRequested audit; audits={audits:?}"
+            crate::plan::projector::awaiting_review_from_audits(&audits),
+            "worker escalation must preserve awaiting-review projection; audits={audits:?}"
+        );
+        assert!(
+            !audits
+                .iter()
+                .any(|audit| matches!(audit, AuditSentinelKind::EscalationRequested { .. })),
+            "worker escalation must not emit retry-exhaustion audit; audits={audits:?}"
         );
     }
 
     #[tokio::test]
-    async fn scope_drift_routes_to_brain_escalation_without_proposer() {
+    async fn scope_drift_stays_awaiting_brain_review_without_proposer() {
         let dir = tempfile::TempDir::new().expect("tempdir");
         std::fs::create_dir(dir.path().join(".beads")).expect("create .beads");
         let pm = Arc::new(
@@ -552,9 +483,6 @@ mod tests {
         .expect("completion audit");
         let signal_id = Uuid::new_v4();
         let reason = "auth refactor pulls in token store".to_string();
-        let expected_last_error =
-            "scope_drift severity=0.82: auth refactor pulls in token store (estimated_subtasks=3)"
-                .to_string();
         adv.add_comment(
             &task_id,
             &encode_signal(&WorkerSignal::ScopeDrift {
@@ -578,17 +506,17 @@ mod tests {
 
         let issue = pm.get_issue(&task_id).await.expect("updated issue");
         assert!(
-            !issue
+            issue
                 .labels
                 .contains(&crate::plan::labels::READY_FOR_REVIEW.to_string()),
-            "escalation must remove ready-for-review label; labels={:?}",
+            "scope drift must stay ready for brain review; labels={:?}",
             issue.labels
         );
         assert!(
-            issue
+            !issue
                 .labels
                 .contains(&crate::plan::mutation_executor::SIGNAL_ESCALATED_LABEL.to_string()),
-            "escalation must add signal:escalated label; labels={:?}",
+            "scope drift is not retry exhaustion; labels={:?}",
             issue.labels
         );
         assert!(
@@ -596,6 +524,13 @@ mod tests {
                 .labels
                 .contains(&crate::plan::labels::signal_processed_label(&signal_id)),
             "escalation must mark signal processed; labels={:?}",
+            issue.labels
+        );
+        assert!(
+            issue
+                .labels
+                .contains(&crate::plan::labels::signal_kind("scope-drift")),
+            "brain review must retain the original scope-drift signal; labels={:?}",
             issue.labels
         );
 
@@ -606,23 +541,14 @@ mod tests {
             .filter_map(Result::ok)
             .collect::<Vec<_>>();
         assert!(
-            audits.iter().any(|audit| matches!(
-                audit,
-                AuditSentinelKind::EscalationRequested {
-                    plan_id,
-                    task_id,
-                    attempt,
-                    last_error,
-                    worker_branch,
-                    delegation_id,
-                } if plan_id == "plan-watch"
-                    && task_id == "task-scope-drift"
-                    && *attempt == 2
-                    && last_error == &expected_last_error
-                    && worker_branch.as_deref() == Some("spur/worker-watch")
-                    && delegation_id.as_deref() == Some("del-watch")
-            )),
-            "watcher must emit EscalationRequested audit; audits={audits:?}"
+            crate::plan::projector::awaiting_review_from_audits(&audits),
+            "scope drift must preserve awaiting-review projection; audits={audits:?}"
+        );
+        assert!(
+            !audits
+                .iter()
+                .any(|audit| matches!(audit, AuditSentinelKind::EscalationRequested { .. })),
+            "scope drift must not emit retry-exhaustion audit; audits={audits:?}"
         );
     }
 }
