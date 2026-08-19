@@ -371,8 +371,43 @@ mod tests {
             chain.push(child);
         }
 
+        assert!(snap.is_blocked_after_closing(chain[50], None));
+        assert!(!snap.is_blocked_after_closing(chain[51], None));
         assert!(!is_actionable(&snap, chain[50]));
         assert!(is_actionable(&snap, chain[51]));
+    }
+
+    #[test]
+    fn parent_blocking_cycle_terminates_when_closing_cuts_the_blocker() {
+        let mut snap = GraphSnapshot::new(None);
+        let blocker = snap.add_node(node("blocker"));
+        let parent = snap.add_node(node("parent"));
+        let child = snap.add_node(node("child"));
+
+        snap.graph.add_edge(
+            blocker,
+            parent,
+            EdgeData {
+                kind: DependencyKind::Blocks,
+            },
+        );
+        snap.graph.add_edge(
+            parent,
+            child,
+            EdgeData {
+                kind: DependencyKind::ParentChild,
+            },
+        );
+        snap.graph.add_edge(
+            child,
+            parent,
+            EdgeData {
+                kind: DependencyKind::ParentChild,
+            },
+        );
+
+        assert!(snap.is_blocked_after_closing(child, None));
+        assert!(!snap.is_blocked_after_closing(child, Some(blocker)));
     }
 
     #[test]
