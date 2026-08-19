@@ -66,6 +66,17 @@ fn action_kind(action: &UserInput) -> &'static str {
 }
 
 #[test]
+fn action_kind_names_brain_control_actions() {
+    assert_eq!(
+        action_kind(&UserInput::SwitchBrain {
+            name: Some("codex".to_string()),
+        }),
+        "SwitchBrain"
+    );
+    assert_eq!(action_kind(&UserInput::ListBrains), "ListBrains");
+}
+
+#[test]
 fn f3_u1_multiline_paste_atomizes_in_input_bar() {
     let mut h = TestHarness::new(80, 24);
 
