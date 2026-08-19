@@ -247,9 +247,13 @@ impl ReactTrace {
                     } else {
                         lines.extend(input_display_lines(theme, input));
                     }
-                    // Render outcome body inline from `status` — no paired
-                    // Observe entry exists in the new model.
+                    // Render output inline from `status` — no paired Observe
+                    // entry exists in the new model. In-progress tools keep
+                    // their spinner while exposing the latest partial output.
                     match status {
+                        ActStatus::InProgress { partial: Some(p) } => {
+                            lines.extend(observe_payload_lines(theme, p, collapsed));
+                        }
                         ActStatus::Completed(Some(p)) => {
                             let (og, oc) = outcome_glyph(theme, p);
                             let verb = observe_verb(p);
@@ -297,7 +301,7 @@ impl ReactTrace {
                                 ),
                             ]));
                         }
-                        ActStatus::Pending | ActStatus::InProgress { .. } => {}
+                        ActStatus::Pending | ActStatus::InProgress { partial: None } => {}
                     }
                 }
 
@@ -895,6 +899,11 @@ impl ReactTrace {
                         }
                     }
                     match status {
+                        ActStatus::InProgress { partial: Some(p) } => {
+                            for l in observe_payload_lines(theme, p, collapsed) {
+                                push_wrapped(&mut rows, &mut byte_ranges, content_range.clone(), l);
+                            }
+                        }
                         ActStatus::Completed(Some(p)) => {
                             let (og, oc) = outcome_glyph(theme, p);
                             let verb = observe_verb(p);
@@ -966,7 +975,7 @@ impl ReactTrace {
                                 ]),
                             );
                         }
-                        ActStatus::Pending | ActStatus::InProgress { .. } => {}
+                        ActStatus::Pending | ActStatus::InProgress { partial: None } => {}
                     }
                 }
 

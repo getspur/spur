@@ -1213,9 +1213,17 @@ impl ReactTrace {
                             lines.push(joined);
                         }
                     }
-                    // Terminal states in expanded mode also render the outcome
-                    // body inline from `status` (there is no paired Observe).
+                    // Expanded mode renders output inline from `status` (there
+                    // is no paired Observe), including the latest partial
+                    // payload while a command is still running.
                     match status {
+                        ActStatus::InProgress { partial: Some(p) } => {
+                            for l in observe_payload_lines(&self.theme, p, self.observe_collapsed) {
+                                let joined: String =
+                                    l.spans.iter().map(|s| s.content.as_ref()).collect();
+                                lines.push(joined);
+                            }
+                        }
                         ActStatus::Completed(Some(p)) => {
                             let verb = observe_verb(p);
                             let (glyph, _) = outcome_glyph(&self.theme, p);
@@ -1241,7 +1249,7 @@ impl ReactTrace {
                         ActStatus::Failed(None) => {
                             lines.push(format!("{} ✗ failed", entry.timestamp));
                         }
-                        ActStatus::Pending | ActStatus::InProgress { .. } => {}
+                        ActStatus::Pending | ActStatus::InProgress { partial: None } => {}
                     }
                 }
 

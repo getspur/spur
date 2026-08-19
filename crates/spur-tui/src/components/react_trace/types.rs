@@ -25,7 +25,7 @@ pub struct TraceImage {
 pub enum ActStatus {
     Pending,
     InProgress {
-        /// Streamed partial output. Stored but NOT rendered in Phase 1.
+        /// Streamed partial output shown while the tool remains active.
         partial: Option<ObservePayload>,
     },
     Completed(Option<ObservePayload>),
