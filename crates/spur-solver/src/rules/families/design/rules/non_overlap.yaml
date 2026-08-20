@@ -1,0 +1,98 @@
+schema_version: 1
+id: "layout.non_overlap"
+rule_version: 1
+family: "design"
+profile: "geometric_integrity"
+primitive: "disjoint"
+summary: "Separate two axis-aligned rectangles by an optional minimum gap."
+availability: "implemented"
+strength: "hard"
+authorities:
+  - kind: "css_spec"
+    title: "CSS 2.2 Visual Formatting Model"
+    url: "https://www.w3.org/TR/CSS22/visuren.html"
+requires:
+  - "first.rect"
+  - "second.rect"
+  - "minimum_gap"
+llm_encoding:
+  effectiveness: "high"
+  problem_shapes:
+    - "siblings must not overlap"
+    - "reserved regions must remain separate"
+  encode_steps:
+    - "Resolve both rectangle edge sets"
+    - "Apply the non-negative minimum gap"
+    - "Emit left, right, above, or below as a four-way disjunction"
+  anti_patterns:
+    - "Do not apply to intentional overlays or badges"
+    - "Do not require separation for hidden elements"
+  escalate_when:
+    - "Rotated or curved shapes require a geometry preprocessor"
+solver_encoding:
+  theory: "QF_LIA"
+  verification: "assert at least one separating relation over a complete model"
+  synthesis: "assert at least one separating relation over bounded unknowns"
+  formula:
+    - "first.right + minimum_gap <= second.left OR second.right + minimum_gap <= first.left OR first.bottom + minimum_gap <= second.top OR second.bottom + minimum_gap <= first.top"
+subjects:
+  cardinality:
+    kind: "exact"
+    count: 2
+parameters:
+  - name: "minimum_gap"
+    default: 0
+    kind: "integer"
+    minimum: 0
+handler: "layout_non_overlap"
+examples:
+  valid:
+    facts:
+      first: {x: 0, y: 0, width: 100, height: 100}
+      second: {x: 124, y: 0, width: 100, height: 100}
+      minimum_gap: 24
+    expectation: "pass"
+  invalid:
+    facts:
+      first: {x: 0, y: 0, width: 100, height: 100}
+      second: {x: 80, y: 0, width: 100, height: 100}
+      minimum_gap: 0
+    expectation: "counterexample"
+    expected_diagnostic: "design.overlap"
+conformance:
+  valid:
+    - name: "non-overlap exact boundary"
+      request:
+        family: "design"
+        mode: "verify"
+        rules:
+          - rule_id: "layout.non_overlap"
+            subjects: ["first", "second"]
+            parameters:
+              minimum_gap: 24
+        scene:
+          viewport: {width: 390, height: 844}
+          nodes:
+            first:
+              rect: {x: 0, y: 0, width: 24, height: 24}
+            second:
+              rect: {x: 48, y: 0, width: 24, height: 24}
+        unknowns: []
+  invalid:
+    - name: "non-overlap one-unit gap violation"
+      request:
+        family: "design"
+        mode: "verify"
+        rules:
+          - rule_id: "layout.non_overlap"
+            subjects: ["first", "second"]
+            parameters:
+              minimum_gap: 24
+        scene:
+          viewport: {width: 390, height: 844}
+          nodes:
+            first:
+              rect: {x: 0, y: 0, width: 24, height: 24}
+            second:
+              rect: {x: 47, y: 0, width: 24, height: 24}
+        unknowns: []

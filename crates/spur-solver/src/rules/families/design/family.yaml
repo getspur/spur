@@ -1,0 +1,11 @@
+schema_version: 1
+id: "design"
+family_version: 1
+summary: "Mathematically enforceable UI layout and graphic-design rules."
+profiles:
+  - id: "geometric_integrity"
+    profile_version: 1
+    summary: "Containment, separation, and media-shape invariants."
+  - id: "layout_capacity"
+    profile_version: 1
+    summary: "One-dimensional capacity constraints over declared extents."
