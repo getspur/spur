@@ -32,7 +32,7 @@ pub fn conformance_fixture() -> ConformanceVectorsV1 {
         invalid: vec![ConformanceVectorV1 {
             name: "rejects invalid input".to_owned(),
             request: json!({"subjects": []}),
-            expected_diagnostic: Some("requires 1 subject".to_owned()),
+            expected_diagnostic: Some("invalid demo".to_owned()),
         }],
     }
 }
@@ -93,13 +93,20 @@ pub fn rule_fixture(
 }
 
 pub fn bundle_fixture() -> ManifestBundleV1 {
+    let mut family = family_fixture();
+    family.id = "accessibility".to_owned();
+    family.profiles[0].id = "wcag_geometry_color".to_owned();
+    let mut rule = rule_fixture(
+        AvailabilityV1::Implemented,
+        RuleStrengthV1::Hard,
+        Some(NativeHandlerV1::A11yFocusNotObscured),
+    );
+    rule.family = family.id.clone();
+    rule.profile = family.profiles[0].id.clone();
+
     ManifestBundleV1 {
         schema_version: SchemaVersionV1,
-        families: vec![family_fixture()],
-        rules: vec![rule_fixture(
-            AvailabilityV1::Implemented,
-            RuleStrengthV1::Hard,
-            Some(NativeHandlerV1::A11yTargetSize),
-        )],
+        families: vec![family],
+        rules: vec![rule],
     }
 }

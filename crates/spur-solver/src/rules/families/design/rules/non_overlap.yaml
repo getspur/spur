@@ -96,3 +96,4 @@ conformance:
             second:
               rect: {x: 47, y: 0, width: 24, height: 24}
         unknowns: []
+      expected_diagnostic: "design.overlap"

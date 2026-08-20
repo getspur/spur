@@ -95,3 +95,4 @@ conformance:
             child:
               rect: {x: 77, y: 0, width: 24, height: 24}
         unknowns: []
+      expected_diagnostic: "design.outside_parent"

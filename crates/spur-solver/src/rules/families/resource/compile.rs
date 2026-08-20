@@ -342,21 +342,20 @@ fn compile_binding(
     let source = binding.source;
     match binding.handler {
         NativeHandlerV1::ResourceRequestWithinLimit => {
-            let workload = &source.subjects[0];
-            resolver.require_workload(workload)?;
-            let resources = selected_resources(
-                &binding.parameters.resources,
-                resolver.facts.workloads[workload].requests.keys(),
-            )?;
-            let predicates = resources
-                .iter()
-                .map(|resource| {
-                    Ok(le(
+            let mut predicates = Vec::new();
+            for workload in distinct_subjects(&source.subjects) {
+                resolver.require_workload(workload)?;
+                let resources = selected_resources(
+                    &binding.parameters.resources,
+                    resolver.facts.workloads[workload].requests.keys(),
+                )?;
+                for resource in resources {
+                    predicates.push(le(
                         resolver.workload_field(workload, &format!("requests.{resource}"))?,
                         resolver.workload_field(workload, &format!("limits.{resource}"))?,
-                    ))
-                })
-                .collect::<Result<Vec<_>, String>>()?;
+                    ));
+                }
+            }
             Ok(conjunction(predicates))
         }
         NativeHandlerV1::ResourceAggregateCapacity => {
@@ -370,26 +369,9 @@ fn compile_binding(
                 .parameters
                 .max_skew
                 .expect("manifest defaults max_skew");
-            let workload = &source.subjects[0];
-            resolver.require_workload(workload)?;
-            let domains = resolver.facts.workloads[workload]
-                .domain_counts
-                .keys()
-                .cloned()
-                .collect::<Vec<_>>();
-            let mut predicates = vec![placement_conservation(resolver, workload)?];
-            for left in 0..domains.len() {
-                for right in left + 1..domains.len() {
-                    let left_count = resolver
-                        .workload_field(workload, &format!("domain_counts.{}", domains[left]))?;
-                    let right_count = resolver
-                        .workload_field(workload, &format!("domain_counts.{}", domains[right]))?;
-                    predicates.push(le(
-                        sub(left_count.clone(), right_count.clone()),
-                        int(max_skew),
-                    ));
-                    predicates.push(le(sub(right_count, left_count), int(max_skew)));
-                }
+            let mut predicates = Vec::new();
+            for workload in distinct_subjects(&source.subjects) {
+                predicates.extend(topology_max_skew(resolver, workload, max_skew)?);
             }
             Ok(conjunction(predicates))
         }
@@ -398,30 +380,32 @@ fn compile_binding(
                 .parameters
                 .minimum_domains
                 .expect("manifest defaults minimum_domains");
-            let workload = &source.subjects[0];
-            resolver.require_workload(workload)?;
-            let domains = resolver.facts.workloads[workload]
-                .domain_counts
-                .keys()
-                .cloned()
-                .collect::<Vec<_>>();
-            let mut links = vec![placement_conservation(resolver, workload)?];
-            let mut present = Vec::new();
-            for domain in domains {
-                let count =
-                    resolver.workload_field(workload, &format!("domain_counts.{domain}"))?;
-                if let Some(value) = resolver.facts.workloads[workload].domain_counts[&domain] {
-                    present.push(int(i64::from(value > 0)));
-                } else {
-                    let flag = resolver.presence(workload, &domain)?;
-                    links.push(or(vec![
-                        and(vec![eq(count.clone(), int(0)), eq(flag.clone(), int(0))]),
-                        and(vec![gt(count, int(0)), eq(flag.clone(), int(1))]),
-                    ]));
-                    present.push(flag);
+            let mut links = Vec::new();
+            for workload in distinct_subjects(&source.subjects) {
+                resolver.require_workload(workload)?;
+                let domains = resolver.facts.workloads[workload]
+                    .domain_counts
+                    .keys()
+                    .cloned()
+                    .collect::<Vec<_>>();
+                links.push(placement_conservation(resolver, workload)?);
+                let mut present = Vec::new();
+                for domain in domains {
+                    let count =
+                        resolver.workload_field(workload, &format!("domain_counts.{domain}"))?;
+                    if let Some(value) = resolver.facts.workloads[workload].domain_counts[&domain] {
+                        present.push(int(i64::from(value > 0)));
+                    } else {
+                        let flag = resolver.presence(workload, &domain)?;
+                        links.push(or(vec![
+                            and(vec![eq(count.clone(), int(0)), eq(flag.clone(), int(0))]),
+                            and(vec![gt(count, int(0)), eq(flag.clone(), int(1))]),
+                        ]));
+                        present.push(flag);
+                    }
                 }
+                links.push(ge(sum(present), int(minimum)));
             }
-            links.push(ge(sum(present), int(minimum)));
             Ok(conjunction(links))
         }
         NativeHandlerV1::A11yFocusNotObscured
@@ -439,6 +423,61 @@ fn compile_binding(
             Err(format!("unsupported resource rule `{}`", source.rule_id))
         }
     }
+}
+
+fn distinct_subjects(subjects: &[String]) -> Vec<&str> {
+    let mut seen = BTreeSet::new();
+    subjects
+        .iter()
+        .filter_map(|subject| seen.insert(subject.as_str()).then_some(subject.as_str()))
+        .collect()
+}
+
+fn topology_max_skew(
+    resolver: &ResourceResolver,
+    workload: &str,
+    max_skew: i64,
+) -> Result<Vec<ConstraintExpr>, String> {
+    resolver.require_workload(workload)?;
+    let domains = resolver.facts.workloads[workload]
+        .domain_counts
+        .iter()
+        .map(|(domain, value)| (domain.clone(), *value))
+        .collect::<Vec<_>>();
+    let mut fixed_minimum = None;
+    let mut fixed_maximum = None;
+    let mut unknown_counts = Vec::new();
+    for (domain, value) in domains {
+        if let Some(value) = value {
+            fixed_minimum = Some(fixed_minimum.map_or(value, |minimum: i64| minimum.min(value)));
+            fixed_maximum = Some(fixed_maximum.map_or(value, |maximum: i64| maximum.max(value)));
+        } else {
+            unknown_counts
+                .push(resolver.workload_field(workload, &format!("domain_counts.{domain}"))?);
+        }
+    }
+
+    let mut predicates = vec![placement_conservation(resolver, workload)?];
+    if let (Some(minimum), Some(maximum)) = (fixed_minimum, fixed_maximum) {
+        predicates.push(le(int(maximum - minimum), int(max_skew)));
+        for count in &unknown_counts {
+            predicates.push(le(sub(count.clone(), int(minimum)), int(max_skew)));
+            predicates.push(le(sub(int(maximum), count.clone()), int(max_skew)));
+        }
+    }
+    for left in 0..unknown_counts.len() {
+        for right in left + 1..unknown_counts.len() {
+            predicates.push(le(
+                sub(unknown_counts[left].clone(), unknown_counts[right].clone()),
+                int(max_skew),
+            ));
+            predicates.push(le(
+                sub(unknown_counts[right].clone(), unknown_counts[left].clone()),
+                int(max_skew),
+            ));
+        }
+    }
+    Ok(predicates)
 }
 
 enum CapacityKind {
@@ -770,4 +809,65 @@ fn input_schema() -> Value {
         },
         "required": ["family", "mode", "rules", "facts"], "additionalProperties": false
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn expression_nodes(expression: &ConstraintExpr) -> usize {
+        match expression {
+            ConstraintExpr::Op { args, .. } => 1 + args.iter().map(expression_nodes).sum::<usize>(),
+            ConstraintExpr::Var { .. }
+            | ConstraintExpr::Int { .. }
+            | ConstraintExpr::Bool { .. }
+            | ConstraintExpr::EnumLabel { .. }
+            | ConstraintExpr::Real { .. }
+            | ConstraintExpr::Bv { .. } => 1,
+        }
+    }
+
+    #[test]
+    fn fixed_topology_skew_compiles_linearly_at_the_domain_limit() {
+        let rule_id = manifest_family_executable_rule_ids("resource")
+            .expect("resource rules")
+            .iter()
+            .find(|rule_id| {
+                manifest_rule_handler(rule_id.as_str())
+                    == Some(NativeHandlerV1::PlacementTopologyMaxSkew)
+            })
+            .expect("topology max-skew rule");
+        let domains = (0..MAX_CONSTRAINTS)
+            .map(|index| (format!("zone-{index}"), json!(1)))
+            .collect::<serde_json::Map<_, _>>();
+        let compilation = compile(json!({
+            "family": "resource",
+            "mode": "verify",
+            "rules": [{
+                "rule_id": rule_id,
+                "subjects": ["workload"],
+                "parameters": {"max_skew": 1}
+            }],
+            "facts": {
+                "workloads": {
+                    "workload": {
+                        "replicas": MAX_CONSTRAINTS,
+                        "requests": {},
+                        "limits": {},
+                        "domain_counts": Value::Object(domains)
+                    }
+                },
+                "pools": {},
+                "quotas": {}
+            },
+            "unknowns": []
+        }))
+        .expect("boundary topology fixture compiles");
+
+        let nodes = expression_nodes(&compilation.rules[0].predicate);
+        assert!(
+            nodes <= MAX_CONSTRAINTS * 2,
+            "fixed topology compilation must be linear, found {nodes} nodes"
+        );
+    }
 }

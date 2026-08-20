@@ -48,6 +48,14 @@ fn copy_repository_sources(destination: &Path) -> PathBuf {
     destination_root
 }
 
+fn replace_source(root: &Path, relative: &str, from: &str, to: &str) {
+    let path = root.join(relative);
+    let source = fs::read_to_string(&path).expect("read copied manifest source");
+    let changed = source.replacen(from, to, 1);
+    assert_ne!(changed, source, "replacement must modify {relative}");
+    fs::write(path, changed).expect("write modified manifest source");
+}
+
 #[test]
 fn approved_sources_load_in_deterministic_canonical_order() {
     let root = repository_manifest_root();
@@ -190,6 +198,84 @@ fn implemented_handlers_must_form_a_bijection_with_native_handler_all() {
         "{diagnostic}"
     );
     assert!(diagnostic.contains("missing"), "{diagnostic}");
+}
+
+#[test]
+fn native_handlers_must_belong_to_the_declared_rule_family() {
+    let temp = tempfile::tempdir().expect("temporary manifest root");
+    let root = copy_repository_sources(temp.path());
+    replace_source(
+        &root,
+        "accessibility/rules/focus_not_obscured.yaml",
+        "handler: \"a11y_focus_not_obscured\"",
+        "handler: \"rbac_role_hierarchy_acyclic\"",
+    );
+    replace_source(
+        &root,
+        "policy/rules/role_hierarchy_acyclic.yaml",
+        "handler: rbac_role_hierarchy_acyclic",
+        "handler: a11y_focus_not_obscured",
+    );
+
+    let diagnostic = load_manifest_sources(&root)
+        .expect_err("cross-family native handlers must fail")
+        .to_string();
+    assert!(diagnostic.contains("handler"), "{diagnostic}");
+    assert!(diagnostic.contains("family"), "{diagnostic}");
+}
+
+#[test]
+fn native_handler_defaulted_parameters_must_keep_a_default() {
+    let temp = tempfile::tempdir().expect("temporary manifest root");
+    let root = copy_repository_sources(temp.path());
+    replace_source(
+        &root,
+        "resource/rules/topology_max_skew.yaml",
+        "    default: 1\n",
+        "",
+    );
+
+    let diagnostic = load_manifest_sources(&root)
+        .expect_err("native handler default drift must fail")
+        .to_string();
+    assert!(diagnostic.contains("max_skew"), "{diagnostic}");
+    assert!(diagnostic.contains("default"), "{diagnostic}");
+}
+
+#[test]
+fn native_handler_required_parameters_must_remain_required() {
+    let temp = tempfile::tempdir().expect("temporary manifest root");
+    let root = copy_repository_sources(temp.path());
+    replace_source(
+        &root,
+        "design/rules/axis_capacity.yaml",
+        "    required: true\n    kind: \"string_enum\"",
+        "    required: false\n    kind: \"string_enum\"",
+    );
+
+    let diagnostic = load_manifest_sources(&root)
+        .expect_err("native handler required-parameter drift must fail")
+        .to_string();
+    assert!(diagnostic.contains("axis"), "{diagnostic}");
+    assert!(diagnostic.contains("required"), "{diagnostic}");
+}
+
+#[test]
+fn conformance_diagnostics_must_match_the_rule_violation_diagnostic() {
+    let temp = tempfile::tempdir().expect("temporary manifest root");
+    let root = copy_repository_sources(temp.path());
+    replace_source(
+        &root,
+        "resource/rules/request_within_limit.yaml",
+        "      expected_diagnostic: resource.request_within_limit.violation",
+        "      expected_diagnostic: wrong.violation",
+    );
+
+    let diagnostic = load_manifest_sources(&root)
+        .expect_err("conformance diagnostic drift must fail")
+        .to_string();
+    assert!(diagnostic.contains("expected_diagnostic"), "{diagnostic}");
+    assert!(diagnostic.contains("wrong.violation"), "{diagnostic}");
 }
 
 #[test]

@@ -242,6 +242,33 @@ pub enum NativeHandlerV1 {
     ResourceRequestWithinLimit,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum NativeParameterModeV1 {
+    Required,
+    Defaulted,
+    Optional,
+}
+
+impl NativeParameterModeV1 {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Required => "required",
+            Self::Defaulted => "defaulted",
+            Self::Optional => "optional",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct NativeParameterAbiV1 {
+    name: &'static str,
+    mode: NativeParameterModeV1,
+}
+
+const fn native_parameter(name: &'static str, mode: NativeParameterModeV1) -> NativeParameterAbiV1 {
+    NativeParameterAbiV1 { name, mode }
+}
+
 impl NativeHandlerV1 {
     pub const ALL: &'static [Self] = &[
         Self::A11yFocusNotObscured,
@@ -262,6 +289,74 @@ impl NativeHandlerV1 {
         Self::ResourceQuotaCapacity,
         Self::ResourceRequestWithinLimit,
     ];
+
+    const fn family(self) -> &'static str {
+        match self {
+            Self::A11yFocusNotObscured
+            | Self::A11yReflow
+            | Self::A11yTargetSize
+            | Self::A11yTextContrast => "accessibility",
+            Self::LayoutAxisCapacity
+            | Self::LayoutContainment
+            | Self::LayoutNonOverlap
+            | Self::MediaAspectRatio => "design",
+            Self::RbacDynamicSeparationOfDuty
+            | Self::RbacPermissionReachable
+            | Self::RbacRoleHierarchyAcyclic
+            | Self::RbacStaticSeparationOfDuty => "policy",
+            Self::PlacementMinimumFailureDomains
+            | Self::PlacementTopologyMaxSkew
+            | Self::ResourceAggregateCapacity
+            | Self::ResourceQuotaCapacity
+            | Self::ResourceRequestWithinLimit => "resource",
+        }
+    }
+
+    fn parameter_abi(self) -> Vec<NativeParameterAbiV1> {
+        use NativeParameterModeV1::{Defaulted, Optional, Required};
+
+        match self {
+            Self::A11yFocusNotObscured
+            | Self::RbacPermissionReachable
+            | Self::RbacRoleHierarchyAcyclic => vec![],
+            Self::A11yReflow => vec![native_parameter("exception", Optional)],
+            Self::A11yTargetSize => vec![
+                native_parameter("minimum_width", Defaulted),
+                native_parameter("minimum_height", Defaulted),
+                native_parameter("exception", Optional),
+            ],
+            Self::A11yTextContrast => vec![native_parameter("minimum_ratio_hundredths", Defaulted)],
+            Self::LayoutAxisCapacity => vec![
+                native_parameter("axis", Required),
+                native_parameter("gap", Defaulted),
+                native_parameter("inset_start", Defaulted),
+                native_parameter("inset_end", Defaulted),
+            ],
+            Self::LayoutContainment => vec![native_parameter("padding", Defaulted)],
+            Self::LayoutNonOverlap => vec![native_parameter("minimum_gap", Defaulted)],
+            Self::MediaAspectRatio => vec![
+                native_parameter("source_width", Required),
+                native_parameter("source_height", Required),
+            ],
+            Self::RbacDynamicSeparationOfDuty => vec![
+                native_parameter("roles", Required),
+                native_parameter("max_active", Defaulted),
+            ],
+            Self::RbacStaticSeparationOfDuty => vec![
+                native_parameter("roles", Required),
+                native_parameter("max_assigned", Defaulted),
+            ],
+            Self::PlacementMinimumFailureDomains => {
+                vec![native_parameter("minimum_domains", Defaulted)]
+            }
+            Self::PlacementTopologyMaxSkew => vec![native_parameter("max_skew", Defaulted)],
+            Self::ResourceAggregateCapacity
+            | Self::ResourceQuotaCapacity
+            | Self::ResourceRequestWithinLimit => {
+                vec![native_parameter("resources", Defaulted)]
+            }
+        }
+    }
 }
 
 /// One public catalog example.
@@ -335,6 +430,11 @@ pub enum ManifestValidationError {
         implemented_hard: bool,
         handler_present: bool,
     },
+    InvalidNativeHandlerContract {
+        rule_id: String,
+        handler: NativeHandlerV1,
+        message: String,
+    },
 }
 
 impl fmt::Display for ManifestValidationError {
@@ -379,6 +479,14 @@ impl fmt::Display for ManifestValidationError {
             } => write!(
                 formatter,
                 "rule `{rule_id}` has invalid routing: implemented_hard={implemented_hard}, handler_present={handler_present}"
+            ),
+            Self::InvalidNativeHandlerContract {
+                rule_id,
+                handler,
+                message,
+            } => write!(
+                formatter,
+                "rule `{rule_id}` has invalid native handler `{handler:?}` contract: {message}"
             ),
         }
     }
@@ -462,12 +570,12 @@ pub fn validate_rule_manifest(
             handler_present,
         });
     }
-
     if implemented_hard {
         let Some(conformance) = &rule.conformance else {
             return invalid("rule.conformance", "is required for implemented-hard rules");
         };
         validate_conformance_vectors(conformance)?;
+        validate_violation_diagnostics(rule, conformance)?;
         Ok(ManifestRouteV1::Executable)
     } else {
         if rule.conformance.is_some() {
@@ -475,6 +583,118 @@ pub fn validate_rule_manifest(
         }
         Ok(ManifestRouteV1::CatalogOnly)
     }
+}
+
+fn validate_native_handler_family(
+    rule: &RuleManifestV1,
+    handler: NativeHandlerV1,
+) -> Result<(), ManifestValidationError> {
+    if rule.family != handler.family() {
+        return Err(ManifestValidationError::InvalidNativeHandlerContract {
+            rule_id: rule.id.clone(),
+            handler,
+            message: format!(
+                "handler family `{}` does not match declared rule family `{}`",
+                handler.family(),
+                rule.family
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn validate_native_handler_parameter_contract(
+    rule: &RuleManifestV1,
+    handler: NativeHandlerV1,
+) -> Result<(), ManifestValidationError> {
+    let expected = handler.parameter_abi();
+    for abi in &expected {
+        let Some(parameter) = rule
+            .parameters
+            .iter()
+            .find(|parameter| parameter.name == abi.name)
+        else {
+            return Err(ManifestValidationError::InvalidNativeHandlerContract {
+                rule_id: rule.id.clone(),
+                handler,
+                message: format!(
+                    "parameter `{}` is missing; native handler requires it to be {}",
+                    abi.name,
+                    abi.mode.label()
+                ),
+            });
+        };
+        let actual = if parameter.required {
+            NativeParameterModeV1::Required
+        } else if parameter.default.is_some() {
+            NativeParameterModeV1::Defaulted
+        } else {
+            NativeParameterModeV1::Optional
+        };
+        if actual != abi.mode {
+            return Err(ManifestValidationError::InvalidNativeHandlerContract {
+                rule_id: rule.id.clone(),
+                handler,
+                message: format!(
+                    "parameter `{}` must be {}, found {}",
+                    abi.name,
+                    abi.mode.label(),
+                    actual.label()
+                ),
+            });
+        }
+    }
+    if let Some(parameter) = rule.parameters.iter().find(|parameter| {
+        !expected
+            .iter()
+            .any(|abi| abi.name == parameter.name.as_str())
+    }) {
+        return Err(ManifestValidationError::InvalidNativeHandlerContract {
+            rule_id: rule.id.clone(),
+            handler,
+            message: format!(
+                "parameter `{}` is not accepted by the native handler ABI",
+                parameter.name
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn validate_violation_diagnostics(
+    rule: &RuleManifestV1,
+    conformance: &ConformanceVectorsV1,
+) -> Result<(), ManifestValidationError> {
+    let Some(expected) = rule
+        .examples
+        .invalid
+        .expected_diagnostic
+        .as_deref()
+        .filter(|diagnostic| !diagnostic.trim().is_empty())
+    else {
+        return invalid(
+            "rule.examples.invalid.expected_diagnostic",
+            "is required for implemented-hard rules",
+        );
+    };
+    for (index, vector) in conformance.invalid.iter().enumerate() {
+        match vector.expected_diagnostic.as_deref() {
+            Some(actual) if actual == expected => {}
+            Some(actual) => {
+                return invalid(
+                    format!("rule.conformance.invalid[{index}].expected_diagnostic"),
+                    format!("must match `{expected}`, found `{actual}`"),
+                );
+            }
+            None => {
+                return invalid(
+                    format!("rule.conformance.invalid[{index}].expected_diagnostic"),
+                    format!("is required and must match `{expected}`"),
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Validates bundle-wide identity, ownership, routing, and handler uniqueness.
@@ -533,6 +753,8 @@ pub fn validate_manifest_bundle(bundle: &ManifestBundleV1) -> Result<(), Manifes
             });
         }
         if let Some(handler) = rule.handler {
+            validate_native_handler_family(rule, handler)?;
+            validate_native_handler_parameter_contract(rule, handler)?;
             if let Some(first_rule) = handler_owners.insert(handler, rule.id.clone()) {
                 return Err(ManifestValidationError::DuplicateHandler {
                     handler,

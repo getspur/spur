@@ -127,6 +127,38 @@ fn resource_request(replicas: Value, unknowns: Value) -> Value {
     })
 }
 
+fn multi_subject_resource_request(rule_id: &str, parameters: Value) -> Value {
+    json!({
+        "family": "resource",
+        "mode": "verify",
+        "rules": [{
+            "rule_id": rule_id,
+            "subjects": ["good", "bad"],
+            "parameters": parameters
+        }],
+        "facts": {
+            "workloads": {
+                "good": {
+                    "replicas": 2,
+                    "requests": {"cpu": 500},
+                    "limits": {"cpu": 500},
+                    "domain_counts": {"zone-a": 1, "zone-b": 1}
+                },
+                "bad": {
+                    "replicas": 2,
+                    "requests": {"cpu": 501},
+                    "limits": {"cpu": 500},
+                    "domain_counts": {"zone-a": 2, "zone-b": 0}
+                }
+            },
+            "pools": {},
+            "quotas": {}
+        },
+        "unknowns": [],
+        "timeout_ms": 30000
+    })
+}
+
 #[tokio::test]
 async fn accessibility_verifies_boundaries_attributes_failures_and_synthesizes() {
     let registry = registry();
@@ -363,4 +395,33 @@ async fn resource_verifies_capacity_and_placement_and_synthesizes_replicas() {
     assert!(solution["assignments"][0]["value"]
         .as_i64()
         .is_some_and(|replicas| (1..=3).contains(&replicas)));
+}
+
+#[tokio::test]
+async fn resource_rules_apply_to_every_declared_subject() {
+    let registry = registry();
+    for (rule_id, parameters) in [
+        (
+            "resource.request_within_limit",
+            json!({"resources": ["cpu"]}),
+        ),
+        ("placement.topology_max_skew", json!({"max_skew": 1})),
+        (
+            "placement.minimum_failure_domains",
+            json!({"minimum_domains": 2}),
+        ),
+    ] {
+        let result = result_json(
+            &registry
+                .call_json_tool(
+                    context(),
+                    "solve_rules",
+                    multi_subject_resource_request(rule_id, parameters),
+                )
+                .await,
+        );
+        assert_eq!(result["status"], "unsat", "{rule_id}");
+        assert_eq!(result["outcome"], "fail", "{rule_id}");
+        assert_eq!(result["rule_results"][0]["status"], "unsat", "{rule_id}");
+    }
 }

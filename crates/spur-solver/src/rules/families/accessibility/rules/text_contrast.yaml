@@ -96,3 +96,4 @@ conformance:
               foreground_luminance: 17499
               background_luminance: 0
         unknowns: []
+      expected_diagnostic: "a11y.text_contrast.violation"

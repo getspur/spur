@@ -286,6 +286,10 @@ fn contextual_bundle_error(
         | ManifestValidationError::InvalidRouting {
             rule_id: second_rule,
             ..
+        }
+        | ManifestValidationError::InvalidNativeHandlerContract {
+            rule_id: second_rule,
+            ..
         } => rules
             .iter()
             .find(|source| source.manifest.id == *second_rule)

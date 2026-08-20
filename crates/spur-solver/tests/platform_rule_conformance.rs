@@ -116,30 +116,54 @@ async fn every_manifest_valid_vector_passes_and_invalid_vector_is_rejected() {
         }
 
         for vector in case.invalid {
-            let Ok(prepared) = prepare(vector.request.clone()) else {
-                continue;
-            };
-            let Ok(result) = run(&service, prepared).await else {
-                continue;
-            };
+            let prepared = prepare(vector.request.clone()).unwrap_or_else(|error| {
+                panic!(
+                    "{} invalid vector `{}` must compile before rejection: {error}",
+                    case.rule_id, vector.name
+                )
+            });
+            let result = run(&service, prepared).await.unwrap_or_else(|error| {
+                panic!(
+                    "{} invalid vector `{}` must run before rejection: {error}",
+                    case.rule_id, vector.name
+                )
+            });
 
-            assert_ne!(
+            assert_eq!(
                 result.solver.status,
-                SolveStatus::Sat,
-                "{} invalid vector `{}` was accepted",
+                SolveStatus::Unsat,
+                "{} invalid vector `{}` must be proved unsatisfiable",
                 case.rule_id,
                 vector.name
             );
-            if result.solver.status == SolveStatus::Unsat {
-                assert!(
-                    result.rule_results.iter().any(|rule| {
-                        rule.rule_id == case.rule_id && rule.status == SolveStatus::Unsat
-                    }),
-                    "{} invalid vector `{}` lacked per-rule rejection attribution",
-                    case.rule_id,
-                    vector.name
-                );
-            }
+            let rejection = result
+                .rule_results
+                .iter()
+                .find(|rule| rule.rule_id == case.rule_id)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "{} invalid vector `{}` lacked per-rule rejection attribution",
+                        case.rule_id, vector.name
+                    )
+                });
+            assert_eq!(
+                rejection.status,
+                SolveStatus::Unsat,
+                "{} invalid vector `{}` must have an unsatisfiable rule result",
+                case.rule_id,
+                vector.name
+            );
+            let expected = vector
+                .expected_diagnostic
+                .as_deref()
+                .expect("validated invalid vector diagnostic");
+            assert_eq!(
+                rejection.diagnostic.as_deref(),
+                Some(expected),
+                "{} invalid vector `{}` diagnostic",
+                case.rule_id,
+                vector.name
+            );
         }
     }
 }

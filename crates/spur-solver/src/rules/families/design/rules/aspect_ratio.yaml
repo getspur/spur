@@ -95,3 +95,4 @@ conformance:
             media:
               rect: {x: 0, y: 0, width: 320, height: 181}
         unknowns: []
+      expected_diagnostic: "design.aspect_ratio_mismatch"

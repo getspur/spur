@@ -94,3 +94,4 @@ conformance:
             content:
               rect: {x: 0, y: 0, width: 321, height: 568}
         unknowns: []
+      expected_diagnostic: "a11y.reflow.violation"

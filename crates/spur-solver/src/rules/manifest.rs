@@ -105,6 +105,14 @@ pub fn manifest_conformance_vectors(rule_id: &str) -> Option<&'static Conformanc
     rule.conformance.as_ref()
 }
 
+pub(super) fn manifest_rule_violation_diagnostic(rule_id: &str) -> Option<&'static str> {
+    rule_manifest(rule_id)?
+        .examples
+        .invalid
+        .expected_diagnostic
+        .as_deref()
+}
+
 /// Validates manifest-representable binding shape and applies declared defaults.
 ///
 /// Fact-dependent, graph, geometry, cross-field, and solver semantics remain the

@@ -206,6 +206,9 @@ pub struct RuleResult {
     pub status: SolveStatus,
     /// Verification interpretation of `status`.
     pub outcome: RuleOutcome,
+    /// Stable manifest-owned violation diagnostic for a proved rule rejection.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diagnostic: Option<String>,
 }
 
 impl RuleResult {
@@ -215,6 +218,12 @@ impl RuleResult {
             binding_index: rule.binding_index,
             status,
             outcome: outcome_for(RuleSolveMode::Verify, status),
+            diagnostic: if status == SolveStatus::Unsat {
+                super::manifest::manifest_rule_violation_diagnostic(&rule.rule_id)
+                    .map(str::to_owned)
+            } else {
+                None
+            },
         }
     }
 }

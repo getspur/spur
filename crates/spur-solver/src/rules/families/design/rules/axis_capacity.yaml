@@ -128,3 +128,4 @@ conformance:
             second:
               rect: {x: 0, y: 0, width: 31, height: 1}
         unknowns: []
+      expected_diagnostic: "design.axis_capacity_exceeded"
