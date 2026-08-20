@@ -73,7 +73,7 @@ examples:
   invalid:
     facts:
       family: scheduling
-      mode: verify
+      mode: synthesize
       rules:
         - rule_id: scheduling.assignment_exactly_once
           subjects: [a]
@@ -84,15 +84,16 @@ examples:
           a:
             release: 0
             deadline: 4
-            durations: {m1: 2}
+            durations: {m1: 5}
             eligible_machines: [m1]
             demands: {cpu: 1}
             assignment: null
         machines:
           m1: {capacities: {cpu: 1}}
         precedence: []
-      unknowns: []
-    expectation: counterexample
+      unknowns:
+        - {kind: assignment, job: a}
+    expectation: no exactly-once placement exists within the declared horizon
     expected_diagnostic: scheduling.assignment_exactly_once.violation
 conformance:
   valid:
@@ -120,10 +121,10 @@ conformance:
           precedence: []
         unknowns: []
   invalid:
-    - name: required job has no observed placement
+    - name: required job has no feasible placement inside the declared horizon
       request:
         family: scheduling
-        mode: verify
+        mode: synthesize
         rules:
           - rule_id: scheduling.assignment_exactly_once
             subjects: [a]
@@ -134,12 +135,13 @@ conformance:
             a:
               release: 0
               deadline: 4
-              durations: {m1: 2}
+              durations: {m1: 5}
               eligible_machines: [m1]
               demands: {cpu: 1}
               assignment: null
           machines:
             m1: {capacities: {cpu: 1}}
           precedence: []
-        unknowns: []
+        unknowns:
+          - {kind: assignment, job: a}
       expected_diagnostic: scheduling.assignment_exactly_once.violation

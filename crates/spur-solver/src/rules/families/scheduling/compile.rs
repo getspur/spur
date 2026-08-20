@@ -666,6 +666,46 @@ fn validate_facts(facts: &SchedulingFacts, unknowns: &[SchedulingUnknown]) -> Re
             return Err(format!("duplicate scheduling assignment unknown `{job}`"));
         }
     }
+
+    for (job, job_facts) in &facts.jobs {
+        let Some(assignment) = &job_facts.assignment else {
+            if !unknown_jobs.contains(job) {
+                return Err(format!(
+                    "jobs.{job}.assignment requires either a fixed assignment or a declared assignment unknown"
+                ));
+            }
+            continue;
+        };
+
+        if !facts.machines.contains_key(&assignment.machine) {
+            return Err(format!(
+                "jobs.{job}.assignment references unknown machine `{}`",
+                assignment.machine
+            ));
+        }
+        let duration = job_facts
+            .durations
+            .get(&assignment.machine)
+            .ok_or_else(|| {
+                format!(
+                    "jobs.{job}.assignment machine `{}` has no declared duration",
+                    assignment.machine
+                )
+            })?;
+        if assignment.start < 0 || assignment.start > facts.horizon {
+            return Err(format!(
+                "jobs.{job}.assignment start must be within the scheduling horizon"
+            ));
+        }
+        let completion = assignment.start.checked_add(*duration).ok_or_else(|| {
+            format!("jobs.{job}.assignment completion overflows the integer domain")
+        })?;
+        if completion > facts.horizon {
+            return Err(format!(
+                "jobs.{job}.assignment completion must be within the scheduling horizon"
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -1013,9 +1053,80 @@ mod tests {
         let mut facts = fixed_facts([("a", "m1", 0), ("b", "m2", 2)]);
         facts["jobs"]["b"]["durations"] = json!({"m2": 2});
         facts["jobs"]["b"]["eligible_machines"] = json!(["m2"]);
-        facts["jobs"]["b"]["assignment"] = Value::Null;
         let input = verify("scheduling.cumulative_capacity", &["m1"], facts);
         assert_eq!(status(input).await, SolveStatus::Sat);
+    }
+
+    #[test]
+    fn verification_rejects_a_job_without_a_fixed_assignment() {
+        let mut facts = fixed_facts([("a", "m1", 0), ("b", "m2", 2)]);
+        facts["jobs"]["b"]["assignment"] = Value::Null;
+
+        let error = COMPILER
+            .compile(verify("scheduling.cumulative_capacity", &["m1"], facts))
+            .expect_err("verification facts must assign every job");
+        assert!(error.message.contains(
+            "jobs.b.assignment requires either a fixed assignment or a declared assignment unknown"
+        ));
+    }
+
+    #[test]
+    fn synthesis_rejects_a_null_assignment_without_a_declared_unknown() {
+        let mut input = optimum_request();
+        input["unknowns"] = json!([
+            {"kind": "assignment", "job": "a"},
+            {"kind": "assignment", "job": "b"}
+        ]);
+
+        let error = COMPILER
+            .compile(input)
+            .expect_err("every null assignment must have a matching unknown");
+        assert!(error.message.contains(
+            "jobs.c.assignment requires either a fixed assignment or a declared assignment unknown"
+        ));
+    }
+
+    #[test]
+    fn malformed_fixed_assignments_are_rejected_before_lowering() {
+        let cases = [
+            (
+                "unknown machine",
+                json!({"machine": "m3", "start": 0}),
+                "references unknown machine `m3`",
+            ),
+            (
+                "machine without a duration",
+                json!({"machine": "m2", "start": 0}),
+                "machine `m2` has no declared duration",
+            ),
+            (
+                "negative start",
+                json!({"machine": "m1", "start": -1}),
+                "start must be within the scheduling horizon",
+            ),
+            (
+                "completion after horizon",
+                json!({"machine": "m1", "start": 4}),
+                "completion must be within the scheduling horizon",
+            ),
+        ];
+
+        for (case, assignment, expected) in cases {
+            let mut facts = fixed_facts([("a", "m1", 0), ("b", "m2", 2)]);
+            facts["jobs"]["a"]["assignment"] = assignment;
+            if case == "machine without a duration" {
+                facts["jobs"]["a"]["durations"] = json!({"m1": 2});
+            }
+
+            let error = COMPILER
+                .compile(verify("scheduling.assignment_exactly_once", &["b"], facts))
+                .expect_err(case);
+            assert!(
+                error.message.contains(expected),
+                "{case}: expected `{expected}`, got `{}`",
+                error.message
+            );
+        }
     }
 
     #[tokio::test]
