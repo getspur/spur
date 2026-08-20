@@ -3,12 +3,14 @@
 use super::{catalog::RuleRegistry, compiler::RuleFamilyCompiler};
 
 pub mod accessibility;
+pub mod configuration;
 pub mod design;
 pub mod policy;
 pub mod resource;
 
-static COMPILERS: [&dyn RuleFamilyCompiler; 4] = [
+static COMPILERS: [&dyn RuleFamilyCompiler; 5] = [
     &accessibility::COMPILER,
+    &configuration::COMPILER,
     &design::COMPILER,
     &policy::COMPILER,
     &resource::COMPILER,

@@ -1,6 +1,10 @@
 //! Finite configuration compatibility rules over caller-supplied facts.
 
+pub mod compile;
+
 use crate::rules::catalog::RuleRegistry;
+
+pub use compile::COMPILER;
 
 /// Returns the validated configuration catalog contribution.
 #[must_use]
