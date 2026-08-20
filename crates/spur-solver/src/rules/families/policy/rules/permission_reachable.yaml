@@ -1,0 +1,134 @@
+schema_version: 1
+id: rbac.permission_reachable
+rule_version: 1
+family: policy
+profile: nist_rbac
+primitive: permission_reachability
+summary: Require a principal to hold a role that reaches the requested permission.
+availability: implemented
+strength: hard
+authorities:
+  - kind: nist_standard_model
+    title: NIST Role Based Access Control
+    url: https://csrc.nist.gov/Projects/role-based-access-control/faqs
+requires:
+  - principal.roles
+  - roles.inherits
+  - roles.permissions
+llm_encoding:
+  effectiveness: high
+  problem_shapes:
+    - Require a principal to hold a role that reaches the requested permission.
+  encode_steps:
+    - Validate finite RBAC facts
+    - Normalize graph closure
+    - Compile membership and rank predicates
+  anti_patterns:
+    - Do not infer assignments from an external IAM service
+  escalate_when:
+    - Escalate attribute-based or conditional policies to a richer policy family
+solver_encoding:
+  theory: QF_LIA
+  verification: assert the RBAC predicate over complete memberships
+  synthesis: leave only explicitly declared membership unknowns free
+  formula:
+    - OR assigned(principal, role) for every role whose closure grants permission
+subjects:
+  cardinality:
+    kind: exact
+    count: 2
+handler: rbac_permission_reachable
+examples:
+  valid:
+    facts:
+      family: policy
+      mode: verify
+      rules:
+        - rule_id: rbac.permission_reachable
+          subjects:
+            - alice
+            - read
+          parameters: {}
+      facts:
+        roles:
+          viewer:
+            inherits: []
+            permissions:
+              - read
+        principals:
+          alice:
+            roles:
+              - viewer
+        sessions: {}
+      unknowns: []
+    expectation: pass
+  invalid:
+    facts:
+      family: policy
+      mode: verify
+      rules:
+        - rule_id: rbac.permission_reachable
+          subjects:
+            - alice
+            - read
+          parameters: {}
+      facts:
+        roles:
+          viewer:
+            inherits: []
+            permissions:
+              - read
+        principals:
+          alice:
+            roles: []
+        sessions: {}
+      unknowns: []
+    expectation: counterexample
+    expected_diagnostic: rbac.permission_reachable.violation
+conformance:
+  valid:
+    - name: permission reachability accepts an assigned granting role
+      request:
+        family: policy
+        mode: verify
+        rules:
+          - rule_id: rbac.permission_reachable
+            subjects:
+              - alice
+              - read
+            parameters: {}
+        facts:
+          roles:
+            viewer:
+              inherits: []
+              permissions:
+                - read
+          principals:
+            alice:
+              roles:
+                - viewer
+          sessions: {}
+        unknowns: []
+  invalid:
+    - name: permission reachability rejects a missing assignment
+      request:
+        family: policy
+        mode: verify
+        rules:
+          - rule_id: rbac.permission_reachable
+            subjects:
+              - alice
+              - read
+            parameters: {}
+        facts:
+          roles:
+            viewer:
+              inherits: []
+              permissions:
+                - read
+          principals:
+            alice:
+              roles: []
+          sessions: {}
+        unknowns: []
+      expected_diagnostic: rbac.permission_reachable.violation

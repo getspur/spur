@@ -1,0 +1,45 @@
+schema_version: 1
+id: rbac.minimum_privilege
+rule_version: 1
+family: policy
+profile: nist_rbac
+primitive: minimum_privilege
+summary: Prefer fewer grants while preserving explicitly declared required permissions.
+availability: capability_unavailable
+availability_reason: minimum privilege requires caller-owned utility requirements and an optimization objective
+strength: advisory
+authorities:
+  - kind: nist_standard_model
+    title: NIST Role Based Access Control
+    url: https://csrc.nist.gov/Projects/role-based-access-control/faqs
+requires:
+  - required_permissions
+  - grant_costs
+llm_encoding:
+  effectiveness: conditional
+  problem_shapes:
+    - rank feasible policies after requirements are explicit
+  encode_steps:
+    - Declare required permissions
+    - Declare grant costs
+    - Use an optimization objective
+  anti_patterns:
+    - Do not infer business-required permissions
+  escalate_when:
+    - Escalate until utility requirements are explicit
+solver_encoding:
+  theory: ''
+  verification: ''
+  synthesis: ''
+  formula: []
+subjects:
+  cardinality:
+    kind: exact
+    count: 0
+examples:
+  valid:
+    facts: null
+    expectation: ''
+  invalid:
+    facts: null
+    expectation: ''

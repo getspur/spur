@@ -1,0 +1,188 @@
+schema_version: 1
+id: rbac.dynamic_separation_of_duty
+rule_version: 1
+family: policy
+profile: nist_rbac
+primitive: active_role_cardinality
+summary: Limit mutually exclusive active roles in one session.
+availability: implemented
+strength: hard
+authorities:
+  - kind: nist_standard_model
+    title: NIST Role Based Access Control
+    url: https://csrc.nist.gov/Projects/role-based-access-control/faqs
+requires:
+  - session.active_roles
+  - parameters.roles
+  - parameters.max_active
+llm_encoding:
+  effectiveness: high
+  problem_shapes:
+    - Limit mutually exclusive active roles in one session.
+  encode_steps:
+    - Validate finite RBAC facts
+    - Normalize graph closure
+    - Compile membership and rank predicates
+  anti_patterns:
+    - Do not infer assignments from an external IAM service
+  escalate_when:
+    - Escalate attribute-based or conditional policies to a richer policy family
+solver_encoding:
+  theory: QF_LIA
+  verification: assert the RBAC predicate over complete memberships
+  synthesis: leave only explicitly declared membership unknowns free
+  formula:
+    - sum active(session, selected_role) <= max_active
+subjects:
+  cardinality:
+    kind: exact
+    count: 1
+parameters:
+  - name: roles
+    required: true
+    kind: string_array
+    min_items: 1
+    max_items: 64
+  - name: max_active
+    default: 1
+    kind: integer
+    minimum: 1
+handler: rbac_dynamic_separation_of_duty
+examples:
+  valid:
+    facts:
+      family: policy
+      mode: verify
+      rules:
+        - rule_id: rbac.dynamic_separation_of_duty
+          subjects:
+            - alice-session
+          parameters:
+            roles:
+              - admin
+              - auditor
+            max_active: 1
+      facts:
+        roles:
+          admin:
+            inherits: []
+            permissions: []
+          auditor:
+            inherits: []
+            permissions: []
+        principals:
+          alice:
+            roles:
+              - admin
+              - auditor
+        sessions:
+          alice-session:
+            principal: alice
+            active_roles:
+              - admin
+      unknowns: []
+    expectation: pass
+  invalid:
+    facts:
+      family: policy
+      mode: verify
+      rules:
+        - rule_id: rbac.dynamic_separation_of_duty
+          subjects:
+            - alice-session
+          parameters:
+            roles:
+              - admin
+              - auditor
+            max_active: 1
+      facts:
+        roles:
+          admin:
+            inherits: []
+            permissions: []
+          auditor:
+            inherits: []
+            permissions: []
+        principals:
+          alice:
+            roles:
+              - admin
+              - auditor
+        sessions:
+          alice-session:
+            principal: alice
+            active_roles:
+              - admin
+              - auditor
+      unknowns: []
+    expectation: counterexample
+    expected_diagnostic: rbac.dynamic_separation_of_duty.violation
+conformance:
+  valid:
+    - name: dynamic separation accepts one active role
+      request:
+        family: policy
+        mode: verify
+        rules:
+          - rule_id: rbac.dynamic_separation_of_duty
+            subjects:
+              - alice-session
+            parameters:
+              roles:
+                - admin
+                - auditor
+              max_active: 1
+        facts:
+          roles:
+            admin:
+              inherits: []
+              permissions: []
+            auditor:
+              inherits: []
+              permissions: []
+          principals:
+            alice:
+              roles:
+                - admin
+                - auditor
+          sessions:
+            alice-session:
+              principal: alice
+              active_roles:
+                - admin
+        unknowns: []
+  invalid:
+    - name: dynamic separation rejects mutually exclusive active roles
+      request:
+        family: policy
+        mode: verify
+        rules:
+          - rule_id: rbac.dynamic_separation_of_duty
+            subjects:
+              - alice-session
+            parameters:
+              roles:
+                - admin
+                - auditor
+              max_active: 1
+        facts:
+          roles:
+            admin:
+              inherits: []
+              permissions: []
+            auditor:
+              inherits: []
+              permissions: []
+          principals:
+            alice:
+              roles:
+                - admin
+                - auditor
+          sessions:
+            alice-session:
+              principal: alice
+              active_roles:
+                - admin
+                - auditor
+        unknowns: []
+      expected_diagnostic: rbac.dynamic_separation_of_duty.violation

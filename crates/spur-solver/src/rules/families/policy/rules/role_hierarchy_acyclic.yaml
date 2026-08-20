@@ -1,0 +1,128 @@
+schema_version: 1
+id: rbac.role_hierarchy_acyclic
+rule_version: 1
+family: policy
+profile: nist_rbac
+primitive: strict_role_rank
+summary: Require every inheritance edge to admit a strict bounded rank order.
+availability: implemented
+strength: hard
+authorities:
+  - kind: nist_standard_model
+    title: NIST Role Based Access Control
+    url: https://csrc.nist.gov/Projects/role-based-access-control/faqs
+requires:
+  - roles.inherits
+llm_encoding:
+  effectiveness: high
+  problem_shapes:
+    - Require every inheritance edge to admit a strict bounded rank order.
+  encode_steps:
+    - Validate finite RBAC facts
+    - Normalize graph closure
+    - Compile membership and rank predicates
+  anti_patterns:
+    - Do not infer assignments from an external IAM service
+  escalate_when:
+    - Escalate attribute-based or conditional policies to a richer policy family
+solver_encoding:
+  theory: QF_LIA
+  verification: assert the RBAC predicate over complete memberships
+  synthesis: leave only explicitly declared membership unknowns free
+  formula:
+    - rank(inherited_role) < rank(role) for every inheritance edge
+subjects:
+  cardinality:
+    kind: exact
+    count: 0
+handler: rbac_role_hierarchy_acyclic
+examples:
+  valid:
+    facts:
+      family: policy
+      mode: verify
+      rules:
+        - rule_id: rbac.role_hierarchy_acyclic
+          subjects: []
+          parameters: {}
+      facts:
+        roles:
+          admin:
+            inherits:
+              - viewer
+            permissions: []
+          viewer:
+            inherits: []
+            permissions: []
+        principals: {}
+        sessions: {}
+      unknowns: []
+    expectation: pass
+  invalid:
+    facts:
+      family: policy
+      mode: verify
+      rules:
+        - rule_id: rbac.role_hierarchy_acyclic
+          subjects: []
+          parameters: {}
+      facts:
+        roles:
+          admin:
+            inherits:
+              - viewer
+            permissions: []
+          viewer:
+            inherits:
+              - admin
+            permissions: []
+        principals: {}
+        sessions: {}
+      unknowns: []
+    expectation: counterexample
+    expected_diagnostic: rbac.role_hierarchy_acyclic.violation
+conformance:
+  valid:
+    - name: role hierarchy accepts an acyclic inheritance graph
+      request:
+        family: policy
+        mode: verify
+        rules:
+          - rule_id: rbac.role_hierarchy_acyclic
+            subjects: []
+            parameters: {}
+        facts:
+          roles:
+            admin:
+              inherits:
+                - viewer
+              permissions: []
+            viewer:
+              inherits: []
+              permissions: []
+          principals: {}
+          sessions: {}
+        unknowns: []
+  invalid:
+    - name: role hierarchy rejects an inheritance cycle
+      request:
+        family: policy
+        mode: verify
+        rules:
+          - rule_id: rbac.role_hierarchy_acyclic
+            subjects: []
+            parameters: {}
+        facts:
+          roles:
+            admin:
+              inherits:
+                - viewer
+              permissions: []
+            viewer:
+              inherits:
+                - admin
+              permissions: []
+          principals: {}
+          sessions: {}
+        unknowns: []
+      expected_diagnostic: rbac.role_hierarchy_acyclic.violation
