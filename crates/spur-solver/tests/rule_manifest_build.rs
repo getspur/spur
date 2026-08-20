@@ -68,6 +68,12 @@ fn approved_sources_load_in_deterministic_canonical_order() {
         "accessibility/rules/reflow.yaml",
         "accessibility/rules/target_size.yaml",
         "accessibility/rules/text_contrast.yaml",
+        "configuration/family.yaml",
+        "configuration/rules/attribute_allowed_pair.yaml",
+        "configuration/rules/excludes.yaml",
+        "configuration/rules/requires_any.yaml",
+        "configuration/rules/selection_cardinality.yaml",
+        "configuration/rules/version_interval.yaml",
         "design/family.yaml",
         "design/rules/aspect_ratio.yaml",
         "design/rules/axis_capacity.yaml",
@@ -97,7 +103,13 @@ fn approved_sources_load_in_deterministic_canonical_order() {
         .collect::<Vec<_>>();
     assert_eq!(
         family_ids,
-        ["accessibility", "design", "policy", "resource"]
+        [
+            "accessibility",
+            "configuration",
+            "design",
+            "policy",
+            "resource"
+        ]
     );
     assert!(first
         .bundle

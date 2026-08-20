@@ -29,13 +29,13 @@ fn native_handler_and_object_validator_enums_are_closed() {
         .iter()
         .map(|handler| serde_yml::to_string(handler).expect("serialize handler"))
         .collect::<Vec<_>>();
-    assert_eq!(handler_names.len(), 17);
+    assert_eq!(handler_names.len(), 22);
     assert_eq!(
         handler_names
             .iter()
             .collect::<std::collections::BTreeSet<_>>()
             .len(),
-        17
+        22
     );
     assert!(handler_names
         .iter()

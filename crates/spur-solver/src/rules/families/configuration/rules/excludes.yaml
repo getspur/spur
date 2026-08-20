@@ -1,0 +1,113 @@
+schema_version: 1
+id: configuration.excludes
+rule_version: 1
+family: configuration
+profile: finite_compatibility
+primitive: excludes
+summary: Forbid two declared components from being selected together.
+availability: implemented
+strength: hard
+authorities:
+  - kind: debian_policy
+    title: Debian Policy Manual - Conflicting Binary Packages
+    url: https://www.debian.org/doc/debian-policy/ch-relationships.html
+  - kind: feature_model_reference
+    title: Feature-Oriented Domain Analysis
+    url: https://resources.sei.cmu.edu/asset_files/TechnicalReport/1990_005_001_15872.pdf
+requires:
+  - components[].selected
+  - rule.subjects[0].component
+  - rule.subjects[1].component
+llm_encoding:
+  effectiveness: high
+  problem_shapes:
+    - Two packages, features, or implementations are mutually incompatible.
+  encode_steps:
+    - Bind exactly two distinct declared component IDs.
+    - Resolve both selection bits before lowering the pair exclusion.
+    - Assert that at least one of the two selections is false.
+  anti_patterns:
+    - Do not infer conflicts from version names or external package metadata.
+    - Do not encode a directional replacement relation as symmetric exclusion.
+  escalate_when:
+    - Escalate conditional or many-way conflicts to explicit guarded rules.
+solver_encoding:
+  theory: QF_LIA
+  verification: assert pairwise exclusion over complete component selections
+  synthesis: leave only explicitly declared component selection bits free
+  formula:
+    - not selected(component_a) or not selected(component_b)
+subjects:
+  cardinality:
+    kind: exact
+    count: 2
+parameters: []
+handler: configuration_excludes
+examples:
+  valid:
+    facts:
+      family: configuration
+      mode: verify
+      rules:
+        - rule_id: configuration.excludes
+          subjects: [mysql, postgres]
+      facts:
+        components:
+          mysql: {selected: false, attributes: {}}
+          postgres: {selected: true, attributes: {}}
+        selection_groups: {}
+        allowed_attribute_pairs: []
+        version_orderings: {}
+      unknowns: []
+    expectation: pass
+  invalid:
+    facts:
+      family: configuration
+      mode: verify
+      rules:
+        - rule_id: configuration.excludes
+          subjects: [mysql, postgres]
+      facts:
+        components:
+          mysql: {selected: true, attributes: {}}
+          postgres: {selected: true, attributes: {}}
+        selection_groups: {}
+        allowed_attribute_pairs: []
+        version_orderings: {}
+      unknowns: []
+    expectation: counterexample
+    expected_diagnostic: configuration.excludes.violation
+conformance:
+  valid:
+    - name: mutually exclusive components are not selected together
+      request:
+        family: configuration
+        mode: verify
+        rules:
+          - rule_id: configuration.excludes
+            subjects: [mysql, postgres]
+        facts:
+          components:
+            mysql: {selected: false, attributes: {}}
+            postgres: {selected: true, attributes: {}}
+          selection_groups: {}
+          allowed_attribute_pairs: []
+          version_orderings: {}
+        unknowns: []
+  invalid:
+    - name: mutually exclusive components are selected together
+      request:
+        family: configuration
+        mode: verify
+        rules:
+          - rule_id: configuration.excludes
+            subjects: [mysql, postgres]
+        facts:
+          components:
+            mysql: {selected: true, attributes: {}}
+            postgres: {selected: true, attributes: {}}
+          selection_groups: {}
+          allowed_attribute_pairs: []
+          version_orderings: {}
+        unknowns: []
+      expected_diagnostic: configuration.excludes.violation

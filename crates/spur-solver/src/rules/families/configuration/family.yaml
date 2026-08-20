@@ -1,0 +1,8 @@
+schema_version: 1
+id: configuration
+family_version: 1
+summary: Finite component selection, attribute compatibility, and ranked-version constraints.
+profiles:
+  - id: finite_compatibility
+    profile_version: 1
+    summary: Closed-world compatibility over declared components, groups, enum attributes, and version ranks.

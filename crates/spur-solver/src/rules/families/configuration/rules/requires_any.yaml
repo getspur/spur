@@ -1,0 +1,117 @@
+schema_version: 1
+id: configuration.requires_any
+rule_version: 1
+family: configuration
+profile: finite_compatibility
+primitive: requires_any
+summary: Require a selected consumer to select at least one declared provider.
+availability: implemented
+strength: hard
+authorities:
+  - kind: debian_policy
+    title: Debian Policy Manual - Binary Dependencies
+    url: https://www.debian.org/doc/debian-policy/ch-relationships.html
+  - kind: linux_kernel_documentation
+    title: Kconfig Language
+    url: https://docs.kernel.org/kbuild/kconfig-language.html
+requires:
+  - components[].selected
+  - rule.subjects[0].consumer
+  - rule.subjects[1..].providers
+llm_encoding:
+  effectiveness: high
+  problem_shapes:
+    - A selected feature, package, or component needs one provider from an explicit finite alternative set.
+  encode_steps:
+    - Put the consumer first and every admissible provider after it in subjects.
+    - Resolve every subject against declared component facts before allocating variables.
+    - Guard the provider disjunction with the consumer selection bit.
+  anti_patterns:
+    - Do not infer providers from names, package repositories, or undeclared capabilities.
+    - Do not use this rule for a requirement that needs every provider.
+  escalate_when:
+    - Escalate ordered, weighted, or cardinality-constrained provider choices to separate primitives.
+solver_encoding:
+  theory: QF_LIA
+  verification: assert the guarded disjunction over complete component selections
+  synthesis: leave only explicitly declared component selection bits free
+  formula:
+    - not selected(consumer) or selected(provider_1) or ... or selected(provider_n)
+subjects:
+  cardinality:
+    kind: at_least
+    count: 2
+parameters: []
+handler: configuration_requires_any
+examples:
+  valid:
+    facts:
+      family: configuration
+      mode: verify
+      rules:
+        - rule_id: configuration.requires_any
+          subjects: [application, postgres, sqlite]
+      facts:
+        components:
+          application: {selected: true, attributes: {}}
+          postgres: {selected: false, attributes: {}}
+          sqlite: {selected: true, attributes: {}}
+        selection_groups: {}
+        allowed_attribute_pairs: []
+        version_orderings: {}
+      unknowns: []
+    expectation: pass
+  invalid:
+    facts:
+      family: configuration
+      mode: verify
+      rules:
+        - rule_id: configuration.requires_any
+          subjects: [application, postgres, sqlite]
+      facts:
+        components:
+          application: {selected: true, attributes: {}}
+          postgres: {selected: false, attributes: {}}
+          sqlite: {selected: false, attributes: {}}
+        selection_groups: {}
+        allowed_attribute_pairs: []
+        version_orderings: {}
+      unknowns: []
+    expectation: counterexample
+    expected_diagnostic: configuration.requires_any.violation
+conformance:
+  valid:
+    - name: selected consumer has one selected provider
+      request:
+        family: configuration
+        mode: verify
+        rules:
+          - rule_id: configuration.requires_any
+            subjects: [application, postgres, sqlite]
+        facts:
+          components:
+            application: {selected: true, attributes: {}}
+            postgres: {selected: false, attributes: {}}
+            sqlite: {selected: true, attributes: {}}
+          selection_groups: {}
+          allowed_attribute_pairs: []
+          version_orderings: {}
+        unknowns: []
+  invalid:
+    - name: selected consumer has no selected provider
+      request:
+        family: configuration
+        mode: verify
+        rules:
+          - rule_id: configuration.requires_any
+            subjects: [application, postgres, sqlite]
+        facts:
+          components:
+            application: {selected: true, attributes: {}}
+            postgres: {selected: false, attributes: {}}
+            sqlite: {selected: false, attributes: {}}
+          selection_groups: {}
+          allowed_attribute_pairs: []
+          version_orderings: {}
+        unknowns: []
+      expected_diagnostic: configuration.requires_any.violation

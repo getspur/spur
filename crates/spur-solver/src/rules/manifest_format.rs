@@ -302,6 +302,11 @@ impl NativeHandlerV1 {
         Self::ResourceAggregateCapacity,
         Self::ResourceQuotaCapacity,
         Self::ResourceRequestWithinLimit,
+        Self::ConfigurationRequiresAny,
+        Self::ConfigurationExcludes,
+        Self::ConfigurationSelectionCardinality,
+        Self::ConfigurationAttributeAllowedPair,
+        Self::ConfigurationVersionInterval,
     ];
 
     const fn family(self) -> &'static str {
@@ -1114,5 +1119,46 @@ mod tests {
             assert_eq!(handler.family(), *family, "handler {name}");
             assert_eq!(handler.parameter_abi(), *parameter_abi, "handler {name}");
         }
+    }
+
+    #[test]
+    fn configuration_manifest_handlers_match_all_slice() {
+        let expected = [
+            NativeHandlerV1::ConfigurationRequiresAny,
+            NativeHandlerV1::ConfigurationExcludes,
+            NativeHandlerV1::ConfigurationSelectionCardinality,
+            NativeHandlerV1::ConfigurationAttributeAllowedPair,
+            NativeHandlerV1::ConfigurationVersionInterval,
+        ];
+        let manifest_paths = [
+            "requires_any.yaml",
+            "excludes.yaml",
+            "selection_cardinality.yaml",
+            "attribute_allowed_pair.yaml",
+            "version_interval.yaml",
+        ];
+        let manifest_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("src/rules/families/configuration/rules");
+        let manifest_handlers = manifest_paths
+            .iter()
+            .map(|path| {
+                let source = std::fs::read_to_string(manifest_root.join(path))
+                    .expect("read configuration rule manifest");
+                serde_yml::from_str::<RuleManifestV1>(&source)
+                    .expect("parse configuration rule manifest")
+                    .handler
+                    .expect("configuration rule manifest handler")
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(manifest_handlers, expected);
+        assert_eq!(NativeHandlerV1::ALL.get(17..22), Some(expected.as_slice()));
+        assert_eq!(
+            NativeHandlerV1::ALL
+                .iter()
+                .filter(|handler| handler.family() == "configuration")
+                .count(),
+            expected.len()
+        );
     }
 }

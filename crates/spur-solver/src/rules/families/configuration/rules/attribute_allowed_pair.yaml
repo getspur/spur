@@ -1,0 +1,124 @@
+schema_version: 1
+id: configuration.attribute_allowed_pair
+rule_version: 1
+family: configuration
+profile: finite_compatibility
+primitive: attribute_allowed_pair
+summary: Require active component attributes to match one explicitly declared allowed tuple.
+availability: implemented
+strength: hard
+authorities:
+  - kind: oasis_standard
+    title: OASIS TOSCA Version 2.0 - Requirements and Capabilities
+    url: https://docs.oasis-open.org/tosca/TOSCA/v2.0/TOSCA-v2.0.html
+requires:
+  - components[].selected
+  - components[].attributes
+  - allowed_attribute_pairs[].left
+  - allowed_attribute_pairs[].right
+  - allowed_attribute_pairs[].allowed
+llm_encoding:
+  effectiveness: high
+  problem_shapes:
+    - Two selected components are compatible only for an explicit finite set of attribute-value pairs.
+  encode_steps:
+    - Bind the left and right component IDs in subject order.
+    - Resolve one explicit allowed-pair declaration and both finite attribute domains.
+    - Guard the allowed-tuple disjunction by conjunction of the two component selection bits.
+  anti_patterns:
+    - Do not infer compatibility from equal labels unless that tuple is explicitly allowed.
+    - Do not create enum labels or wildcard tuples outside the declared finite domains.
+  escalate_when:
+    - Escalate arithmetic, regex, or open-world attribute matching to a richer primitive.
+solver_encoding:
+  theory: QF_UFLIA with finite enums
+  verification: assert the guarded allowed-tuple disjunction over complete attributes
+  synthesis: leave only explicitly declared finite attribute or selection fields free
+  formula:
+    - not (selected(left) and selected(right)) or any((left_attribute = u) and (right_attribute = v) for (u, v) in allowed)
+subjects:
+  cardinality:
+    kind: exact
+    count: 2
+parameters: []
+handler: configuration_attribute_allowed_pair
+examples:
+  valid:
+    facts:
+      family: configuration
+      mode: verify
+      rules:
+        - rule_id: configuration.attribute_allowed_pair
+          subjects: [application, database]
+      facts:
+        components:
+          application: {selected: true, attributes: {os: linux}}
+          database: {selected: true, attributes: {os: linux}}
+        selection_groups: {}
+        allowed_attribute_pairs:
+          - left: {component: application, attribute: os, values: [linux, windows]}
+            right: {component: database, attribute: os, values: [linux, windows]}
+            allowed: [[linux, linux], [windows, windows]]
+        version_orderings: {}
+      unknowns: []
+    expectation: pass
+  invalid:
+    facts:
+      family: configuration
+      mode: verify
+      rules:
+        - rule_id: configuration.attribute_allowed_pair
+          subjects: [application, database]
+      facts:
+        components:
+          application: {selected: true, attributes: {os: linux}}
+          database: {selected: true, attributes: {os: windows}}
+        selection_groups: {}
+        allowed_attribute_pairs:
+          - left: {component: application, attribute: os, values: [linux, windows]}
+            right: {component: database, attribute: os, values: [linux, windows]}
+            allowed: [[linux, linux], [windows, windows]]
+        version_orderings: {}
+      unknowns: []
+    expectation: counterexample
+    expected_diagnostic: configuration.attribute_allowed_pair.violation
+conformance:
+  valid:
+    - name: selected component attributes form an allowed pair
+      request:
+        family: configuration
+        mode: verify
+        rules:
+          - rule_id: configuration.attribute_allowed_pair
+            subjects: [application, database]
+        facts:
+          components:
+            application: {selected: true, attributes: {os: linux}}
+            database: {selected: true, attributes: {os: linux}}
+          selection_groups: {}
+          allowed_attribute_pairs:
+            - left: {component: application, attribute: os, values: [linux, windows]}
+              right: {component: database, attribute: os, values: [linux, windows]}
+              allowed: [[linux, linux], [windows, windows]]
+          version_orderings: {}
+        unknowns: []
+  invalid:
+    - name: selected component attributes do not form an allowed pair
+      request:
+        family: configuration
+        mode: verify
+        rules:
+          - rule_id: configuration.attribute_allowed_pair
+            subjects: [application, database]
+        facts:
+          components:
+            application: {selected: true, attributes: {os: linux}}
+            database: {selected: true, attributes: {os: windows}}
+          selection_groups: {}
+          allowed_attribute_pairs:
+            - left: {component: application, attribute: os, values: [linux, windows]}
+              right: {component: database, attribute: os, values: [linux, windows]}
+              allowed: [[linux, linux], [windows, windows]]
+          version_orderings: {}
+        unknowns: []
+      expected_diagnostic: configuration.attribute_allowed_pair.violation

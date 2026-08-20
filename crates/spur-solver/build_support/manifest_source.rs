@@ -9,7 +9,13 @@ use crate::manifest_format::{
     ManifestBundleV1, ManifestValidationError, NativeHandlerV1, RuleManifestV1, SchemaVersionV1,
 };
 
-const APPROVED_FAMILIES: [&str; 4] = ["accessibility", "design", "policy", "resource"];
+const APPROVED_FAMILIES: [&str; 5] = [
+    "accessibility",
+    "configuration",
+    "design",
+    "policy",
+    "resource",
+];
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LoadedManifestSources {
