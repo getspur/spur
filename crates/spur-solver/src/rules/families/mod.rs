@@ -1,7 +1,5 @@
 //! Built-in rule-family implementations.
 
-use std::sync::LazyLock;
-
 use super::{catalog::RuleRegistry, compiler::RuleFamilyCompiler};
 
 pub mod accessibility;
@@ -16,23 +14,10 @@ static COMPILERS: [&dyn RuleFamilyCompiler; 4] = [
     &resource::COMPILER,
 ];
 
-static BUILTIN_REGISTRY: LazyLock<RuleRegistry> = LazyLock::new(|| {
-    RuleRegistry::merge(
-        1,
-        [
-            accessibility::builtin_registry(),
-            design::builtin_registry(),
-            policy::builtin_registry(),
-            resource::builtin_registry(),
-        ],
-    )
-    .unwrap_or_else(|error| panic!("built-in rule registry is invalid: {error}"))
-});
-
 /// Returns the validated registry containing every built-in family.
 #[must_use]
 pub fn builtin_registry() -> &'static RuleRegistry {
-    &BUILTIN_REGISTRY
+    super::manifest::manifest_registry()
 }
 
 /// Returns family compilers in stable family-ID order.
