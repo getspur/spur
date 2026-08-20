@@ -1,0 +1,151 @@
+schema_version: 1
+id: workflow.transition_allowed
+rule_version: 1
+family: workflow
+profile: bounded_trace
+primitive: finite_enabled_transition
+summary: Require every adjacent state-event-state step in one finite trace to appear in that step's caller-resolved enabled relation.
+availability: implemented
+strength: hard
+authorities:
+  - kind: formal_methods_reference
+    title: TLA+ High-Level View - Initial Conditions and Next-State Relations
+    url: https://lamport.azurewebsites.net/tla/high-level-view.html
+  - kind: w3c_recommendation
+    title: State Chart XML (SCXML) - Selecting and Executing Transitions
+    url: https://www.w3.org/TR/scxml/#SelectingTransitions
+requires:
+  - horizon
+  - state_domain
+  - event_domain
+  - enabled_transitions[]
+  - traces[subject].states
+  - traces[subject].events
+llm_encoding:
+  effectiveness: high
+  problem_shapes:
+    - Every step of a complete finite workflow trace must follow an enabled transition after caller-side guard and priority resolution.
+  encode_steps:
+    - Bind exactly one declared trace ID as the subject and require L events plus L+1 states.
+    - Resolve every trace label and enabled-transition tuple against the finite domains before allocating variables.
+    - For each index i, emit a disjunction matching q_i, a_i, and q_(i+1) against only enabled tuples declared for i.
+  anti_patterns:
+    - Do not evaluate arbitrary guard expressions or SCXML priority inside the solver; callers must normalize them into the per-step relation.
+    - Do not silently allow stuttering, termination, or no-op events unless an explicit tuple represents them.
+    - Do not generalize finite-step validity into unbounded liveness or fairness.
+  escalate_when:
+    - Escalate hierarchical or parallel state machines that have not been flattened into finite configuration IDs.
+    - Escalate quantified, dynamically generated, or infinite transition systems.
+solver_encoding:
+  theory: QF_LIA with finite enum labels
+  verification: fix every complete observed slot and assert each adjacent triple belongs to its indexed enabled relation
+  synthesis: constrain only explicitly unknown state or event slots through the finite per-step transition disjunctions
+  formula:
+    - "for every i in 0..L-1: (q_i, a_i, q_(i+1)) in R_i"
+    - "R_i is supplied after caller-side guard, hierarchy, conflict, and priority resolution"
+subjects:
+  cardinality:
+    kind: exact
+    count: 1
+parameters: []
+handler: workflow_transition_allowed
+examples:
+  valid:
+    facts:
+      family: workflow
+      mode: verify
+      rules:
+        - rule_id: workflow.transition_allowed
+          subjects: [approval]
+          parameters: {}
+      facts:
+        horizon: 2
+        state_domain: [Draft, Review, Approved, Rejected]
+        event_domain: [submit, approve, reject]
+        initial_states: [Draft]
+        safe_states: [Draft, Review, Approved]
+        target_states: [Approved]
+        enabled_transitions:
+          - {step: 0, from: Draft, event: submit, to: Review}
+          - {step: 1, from: Review, event: approve, to: Approved}
+          - {step: 1, from: Review, event: reject, to: Rejected}
+        traces:
+          approval:
+            states: [Draft, Review, Approved]
+            events: [submit, approve]
+      unknowns: []
+    expectation: pass for both observed steps at declared horizon 2
+  invalid:
+    facts:
+      family: workflow
+      mode: verify
+      rules:
+        - rule_id: workflow.transition_allowed
+          subjects: [approval]
+          parameters: {}
+      facts:
+        horizon: 1
+        state_domain: [Draft, Review, Approved, Rejected]
+        event_domain: [submit, approve, reject]
+        initial_states: [Draft]
+        safe_states: [Draft, Review, Approved]
+        target_states: [Approved]
+        enabled_transitions:
+          - {step: 0, from: Draft, event: submit, to: Review}
+        traces:
+          approval:
+            states: [Draft, Approved]
+            events: [approve]
+      unknowns: []
+    expectation: counterexample at transition index 0
+    expected_diagnostic: workflow.transition_allowed.violation
+conformance:
+  valid:
+    - name: observed submit then approve steps are enabled
+      request:
+        family: workflow
+        mode: verify
+        rules:
+          - rule_id: workflow.transition_allowed
+            subjects: [approval]
+            parameters: {}
+        facts:
+          horizon: 2
+          state_domain: [Draft, Review, Approved, Rejected]
+          event_domain: [submit, approve, reject]
+          initial_states: [Draft]
+          safe_states: [Draft, Review, Approved]
+          target_states: [Approved]
+          enabled_transitions:
+            - {step: 0, from: Draft, event: submit, to: Review}
+            - {step: 1, from: Review, event: approve, to: Approved}
+            - {step: 1, from: Review, event: reject, to: Rejected}
+          traces:
+            approval:
+              states: [Draft, Review, Approved]
+              events: [submit, approve]
+        unknowns: []
+  invalid:
+    - name: observed Draft approve Approved step is not enabled
+      request:
+        family: workflow
+        mode: verify
+        rules:
+          - rule_id: workflow.transition_allowed
+            subjects: [approval]
+            parameters: {}
+        facts:
+          horizon: 1
+          state_domain: [Draft, Review, Approved, Rejected]
+          event_domain: [submit, approve, reject]
+          initial_states: [Draft]
+          safe_states: [Draft, Review, Approved]
+          target_states: [Approved]
+          enabled_transitions:
+            - {step: 0, from: Draft, event: submit, to: Review}
+          traces:
+            approval:
+              states: [Draft, Approved]
+              events: [approve]
+        unknowns: []
+      expected_diagnostic: workflow.transition_allowed.violation

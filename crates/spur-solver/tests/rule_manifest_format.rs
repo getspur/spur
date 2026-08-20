@@ -29,13 +29,13 @@ fn native_handler_and_object_validator_enums_are_closed() {
         .iter()
         .map(|handler| serde_yml::to_string(handler).expect("serialize handler"))
         .collect::<Vec<_>>();
-    assert_eq!(handler_names.len(), 27);
+    assert_eq!(handler_names.len(), 31);
     assert_eq!(
         handler_names
             .iter()
             .collect::<std::collections::BTreeSet<_>>()
             .len(),
-        27
+        31
     );
     assert!(handler_names
         .iter()
@@ -46,6 +46,9 @@ fn native_handler_and_object_validator_enums_are_closed() {
     assert!(handler_names
         .iter()
         .any(|name| name.trim() == "scheduling_minimize_makespan"));
+    assert!(handler_names
+        .iter()
+        .any(|name| name.trim() == "workflow_bounded_reachability"));
     assert!(serde_yml::from_str::<NativeHandlerV1>("crate::rules::compile").is_err());
 
     assert_eq!(
@@ -71,6 +74,18 @@ fn scheduling_handlers_follow_configuration_in_stable_order() {
     ];
 
     assert_eq!(NativeHandlerV1::ALL.get(17..27), Some(expected.as_slice()));
+}
+
+#[test]
+fn workflow_handlers_follow_scheduling_in_stable_order() {
+    let expected = [
+        NativeHandlerV1::WorkflowInitialStateAllowed,
+        NativeHandlerV1::WorkflowTransitionAllowed,
+        NativeHandlerV1::WorkflowSafetyInvariant,
+        NativeHandlerV1::WorkflowBoundedReachability,
+    ];
+
+    assert_eq!(NativeHandlerV1::ALL.get(27..31), Some(expected.as_slice()));
 }
 
 #[test]

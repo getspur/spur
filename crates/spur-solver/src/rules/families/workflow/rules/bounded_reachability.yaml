@@ -1,0 +1,197 @@
+schema_version: 1
+id: workflow.bounded_reachability
+rule_version: 1
+family: workflow
+profile: bounded_trace
+primitive: bounded_existential_reachability
+summary: Require one target state to occur within an explicit finite trace bound, supporting bounded witness or unsafe-target counterexample synthesis.
+availability: implemented
+strength: hard
+authorities:
+  - kind: official_model_checker_documentation
+    title: Apalache - Symbolic Bounded Model Checking
+    url: https://apalache-mc.org/docs/tutorials/symbmc.html
+  - kind: official_language_specification
+    title: Alloy Language Reference - Commands, Scopes, and Bounded Traces
+    url: https://alloytools.org/spec.html
+  - kind: formal_methods_reference
+    title: TLA+ High-Level View - Safety, Liveness, and Fairness
+    url: https://lamport.azurewebsites.net/tla/high-level-view.html
+requires:
+  - horizon
+  - state_domain
+  - target_states
+  - traces[subject].states
+  - parameters.bound or facts.horizon
+llm_encoding:
+  effectiveness: high
+  problem_shapes:
+    - Find or verify one finite trace that reaches a declared target state no later than an explicit bound.
+    - Treat unsafe states as targets to synthesize a concrete bounded counterexample under separately declared initial and transition rules.
+  encode_steps:
+    - Bind exactly one declared trace ID as the subject.
+    - Resolve target labels and all trace slots against the finite state domain.
+    - Derive the effective bound from parameters.bound when present, otherwise from facts.horizon, and reject bounds outside the declared trace horizon.
+    - Emit a finite disjunction of target membership from index zero through min(bound, trace length).
+  anti_patterns:
+    - Do not interpret satisfiable reachability as inevitability on every execution.
+    - Do not interpret bounded UNSAT as unbounded unreachability.
+    - Do not claim eventual progress, fairness, termination, or absence of infinite cycles from a finite trace.
+    - Do not omit explicit stuttering or termination slots when shorter deadlocked traces must participate in exact-horizon analysis.
+  escalate_when:
+    - Escalate unbounded eventuality, fairness, lasso-cycle detection, or quantified dynamic state creation to a temporal model checker.
+    - Escalate all-executions reachability unless every finite branch and termination encoding is explicitly represented.
+solver_encoding:
+  theory: QF_LIA with finite enum labels
+  verification: fix a complete observed trace and assert target membership at some index no greater than the effective bound
+  synthesis: fill only explicitly unknown bounded slots; SAT is one witness and UNSAT excludes witnesses only for the declared domains and bound
+  formula:
+    - "effective_bound = parameters.bound when present, otherwise facts.horizon"
+    - "0 <= effective_bound <= facts.horizon"
+    - "exists i in 0..min(effective_bound,L): q_i in G"
+subjects:
+  cardinality:
+    kind: exact
+    count: 1
+parameters:
+  - name: bound
+    required: false
+    kind: integer
+    minimum: 0
+handler: workflow_bounded_reachability
+examples:
+  valid:
+    facts:
+      family: workflow
+      mode: synthesize
+      rules:
+        - rule_id: workflow.initial_state_allowed
+          subjects: [unsafe_witness]
+          parameters: {}
+        - rule_id: workflow.transition_allowed
+          subjects: [unsafe_witness]
+          parameters: {}
+        - rule_id: workflow.bounded_reachability
+          subjects: [unsafe_witness]
+          parameters: {bound: 2}
+      facts:
+        horizon: 2
+        state_domain: [Draft, Review, Approved, Rejected]
+        event_domain: [submit, approve, reject]
+        initial_states: [Draft]
+        safe_states: [Draft, Review, Approved]
+        target_states: [Rejected]
+        enabled_transitions:
+          - {step: 0, from: Draft, event: submit, to: Review}
+          - {step: 1, from: Review, event: approve, to: Approved}
+          - {step: 1, from: Review, event: reject, to: Rejected}
+        traces:
+          unsafe_witness:
+            states: [Draft, null, null]
+            events: [null, null]
+      unknowns:
+        - {kind: trace_state, trace: unsafe_witness, index: 1}
+        - {kind: trace_state, trace: unsafe_witness, index: 2}
+        - {kind: trace_event, trace: unsafe_witness, index: 0}
+        - {kind: trace_event, trace: unsafe_witness, index: 1}
+    expectation: bounded unsafe-target witness Draft submit Review reject Rejected with effective bound 2
+  invalid:
+    facts:
+      family: workflow
+      mode: synthesize
+      rules:
+        - rule_id: workflow.initial_state_allowed
+          subjects: [unsafe_witness]
+          parameters: {}
+        - rule_id: workflow.transition_allowed
+          subjects: [unsafe_witness]
+          parameters: {}
+        - rule_id: workflow.bounded_reachability
+          subjects: [unsafe_witness]
+          parameters: {bound: 1}
+      facts:
+        horizon: 1
+        state_domain: [Draft, Review, Approved, Rejected]
+        event_domain: [submit, approve, reject]
+        initial_states: [Draft]
+        safe_states: [Draft, Review, Approved]
+        target_states: [Rejected]
+        enabled_transitions:
+          - {step: 0, from: Draft, event: submit, to: Review}
+        traces:
+          unsafe_witness:
+            states: [Draft, null]
+            events: [null]
+      unknowns:
+        - {kind: trace_state, trace: unsafe_witness, index: 1}
+        - {kind: trace_event, trace: unsafe_witness, index: 0}
+    expectation: no unsafe target witness exists within effective bound 1; this is not an unbounded proof
+    expected_diagnostic: workflow.bounded_reachability.violation
+conformance:
+  valid:
+    - name: synthesize a reachable unsafe rejection witness within bound two
+      request:
+        family: workflow
+        mode: synthesize
+        rules:
+          - rule_id: workflow.initial_state_allowed
+            subjects: [unsafe_witness]
+            parameters: {}
+          - rule_id: workflow.transition_allowed
+            subjects: [unsafe_witness]
+            parameters: {}
+          - rule_id: workflow.bounded_reachability
+            subjects: [unsafe_witness]
+            parameters: {bound: 2}
+        facts:
+          horizon: 2
+          state_domain: [Draft, Review, Approved, Rejected]
+          event_domain: [submit, approve, reject]
+          initial_states: [Draft]
+          safe_states: [Draft, Review, Approved]
+          target_states: [Rejected]
+          enabled_transitions:
+            - {step: 0, from: Draft, event: submit, to: Review}
+            - {step: 1, from: Review, event: approve, to: Approved}
+            - {step: 1, from: Review, event: reject, to: Rejected}
+          traces:
+            unsafe_witness:
+              states: [Draft, null, null]
+              events: [null, null]
+        unknowns:
+          - {kind: trace_state, trace: unsafe_witness, index: 1}
+          - {kind: trace_state, trace: unsafe_witness, index: 2}
+          - {kind: trace_event, trace: unsafe_witness, index: 0}
+          - {kind: trace_event, trace: unsafe_witness, index: 1}
+  invalid:
+    - name: unsafe rejection target is unreachable inside bound one
+      request:
+        family: workflow
+        mode: synthesize
+        rules:
+          - rule_id: workflow.initial_state_allowed
+            subjects: [unsafe_witness]
+            parameters: {}
+          - rule_id: workflow.transition_allowed
+            subjects: [unsafe_witness]
+            parameters: {}
+          - rule_id: workflow.bounded_reachability
+            subjects: [unsafe_witness]
+            parameters: {bound: 1}
+        facts:
+          horizon: 1
+          state_domain: [Draft, Review, Approved, Rejected]
+          event_domain: [submit, approve, reject]
+          initial_states: [Draft]
+          safe_states: [Draft, Review, Approved]
+          target_states: [Rejected]
+          enabled_transitions:
+            - {step: 0, from: Draft, event: submit, to: Review}
+          traces:
+            unsafe_witness:
+              states: [Draft, null]
+              events: [null]
+        unknowns:
+          - {kind: trace_state, trace: unsafe_witness, index: 1}
+          - {kind: trace_event, trace: unsafe_witness, index: 0}
+      expected_diagnostic: workflow.bounded_reachability.violation

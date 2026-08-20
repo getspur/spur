@@ -312,6 +312,10 @@ impl NativeHandlerV1 {
         Self::SchedulingPrecedenceFinishStart,
         Self::SchedulingCumulativeCapacity,
         Self::SchedulingMinimizeMakespan,
+        Self::WorkflowInitialStateAllowed,
+        Self::WorkflowTransitionAllowed,
+        Self::WorkflowSafetyInvariant,
+        Self::WorkflowBoundedReachability,
     ];
 
     const fn family(self) -> &'static str {

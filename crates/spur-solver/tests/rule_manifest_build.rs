@@ -97,6 +97,11 @@ fn approved_sources_load_in_deterministic_canonical_order() {
         "scheduling/rules/minimize_makespan.yaml",
         "scheduling/rules/placement_allowed.yaml",
         "scheduling/rules/precedence_finish_start.yaml",
+        "workflow/family.yaml",
+        "workflow/rules/bounded_reachability.yaml",
+        "workflow/rules/initial_state_allowed.yaml",
+        "workflow/rules/safety_invariant.yaml",
+        "workflow/rules/transition_allowed.yaml",
     ];
     assert_eq!(relative_paths(&root, &first.source_paths), expected_paths);
     assert_eq!(first, second);
@@ -115,7 +120,8 @@ fn approved_sources_load_in_deterministic_canonical_order() {
             "design",
             "policy",
             "resource",
-            "scheduling"
+            "scheduling",
+            "workflow"
         ]
     );
     assert!(first
@@ -130,6 +136,41 @@ fn approved_sources_load_in_deterministic_canonical_order() {
     let round_trip: ManifestBundleV1 =
         serde_json::from_str(&json).expect("canonical JSON must deserialize");
     assert_eq!(round_trip, first.bundle);
+}
+
+#[test]
+fn workflow_catalog_uses_approved_profile_and_rule_order() {
+    let root = repository_manifest_root();
+    let loaded = load_manifest_sources(&root).expect("repository manifests must load");
+    let family = loaded
+        .bundle
+        .families
+        .iter()
+        .find(|family| family.id == "workflow")
+        .expect("workflow family must be discovered");
+    let profile_ids = family
+        .profiles
+        .iter()
+        .map(|profile| profile.id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(profile_ids, ["bounded_trace"]);
+
+    let rule_ids = loaded
+        .bundle
+        .rules
+        .iter()
+        .filter(|rule| rule.family == "workflow")
+        .map(|rule| rule.id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        rule_ids,
+        [
+            "workflow.bounded_reachability",
+            "workflow.initial_state_allowed",
+            "workflow.safety_invariant",
+            "workflow.transition_allowed",
+        ]
+    );
 }
 
 #[test]
@@ -309,7 +350,15 @@ fn canonical_output_and_rerun_paths_cover_every_source() {
             source.display()
         );
     }
-    for family in ["accessibility", "design", "policy", "resource"] {
+    for family in [
+        "accessibility",
+        "configuration",
+        "design",
+        "policy",
+        "resource",
+        "scheduling",
+        "workflow",
+    ] {
         assert!(rerun_paths.contains(&root.join(family)));
         assert!(rerun_paths.contains(&root.join(family).join("rules")));
     }
