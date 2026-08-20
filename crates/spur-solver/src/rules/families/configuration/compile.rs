@@ -20,6 +20,8 @@ use crate::{
     },
 };
 
+const MAX_CONFIGURATION_EXPRESSION_NODES: usize = MAX_CONSTRAINTS * MAX_VARIABLES;
+
 /// Configuration compiler registered behind `solve_rules`.
 pub static COMPILER: ConfigurationCompiler = ConfigurationCompiler;
 
@@ -61,6 +63,7 @@ fn compile(input: Value) -> Result<FamilyCompilation, String> {
         .map(validate_manifest_binding)
         .collect::<Result<Vec<_>, _>>()?;
     validate_facts(&input.facts, &input.unknowns)?;
+    validate_expression_budget(&bindings, &input.facts)?;
     let mut resolver = ConfigurationResolver::new(input.facts, &input.unknowns)?;
     let mut rules = Vec::with_capacity(bindings.len());
     for (index, binding) in bindings.iter().enumerate() {
@@ -553,6 +556,138 @@ fn reject_duplicates(items: &[String], context: &str) -> Result<(), String> {
         return Err(format!("{context} contains duplicates"));
     }
     Ok(())
+}
+
+fn validate_expression_budget(
+    bindings: &[ValidatedConfigurationBinding<'_>],
+    facts: &ConfigurationFacts,
+) -> Result<(), String> {
+    let mut total = 0usize;
+    for binding in bindings {
+        total = total
+            .checked_add(binding_expression_node_count(binding, facts)?)
+            .ok_or_else(expression_size_overflow)?;
+        if total > MAX_CONFIGURATION_EXPRESSION_NODES {
+            return Err(format!(
+                "configuration expressions exceed the checked node budget {MAX_CONFIGURATION_EXPRESSION_NODES}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn binding_expression_node_count(
+    binding: &ValidatedConfigurationBinding<'_>,
+    facts: &ConfigurationFacts,
+) -> Result<usize, String> {
+    let subjects = &binding.source.subjects;
+    match binding.handler {
+        NativeHandlerV1::ConfigurationRequiresAny => subjects
+            .len()
+            .checked_add(2)
+            .ok_or_else(expression_size_overflow),
+        NativeHandlerV1::ConfigurationExcludes => Ok(5),
+        NativeHandlerV1::ConfigurationSelectionCardinality => {
+            let group_id = &subjects[0];
+            let group = facts
+                .selection_groups
+                .get(group_id)
+                .ok_or_else(|| format!("unknown configuration selection group `{group_id}`"))?;
+            let active_link_nodes = indicator_link_node_count(group.active);
+            let mut member_link_nodes = 0usize;
+            for member in &group.members {
+                member_link_nodes = member_link_nodes
+                    .checked_add(indicator_link_node_count(
+                        require_component(facts, member)?.selected,
+                    ))
+                    .ok_or_else(expression_size_overflow)?;
+            }
+            let member_comparison_nodes = group
+                .members
+                .len()
+                .checked_mul(3)
+                .ok_or_else(expression_size_overflow)?;
+            let selected_nodes =
+                grouped_expression_node_count(group.members.len(), group.members.len())?;
+            let bound_nodes = selected_nodes
+                .checked_mul(2)
+                .and_then(|nodes| nodes.checked_add(8))
+                .ok_or_else(expression_size_overflow)?;
+            active_link_nodes
+                .checked_add(member_link_nodes)
+                .and_then(|nodes| nodes.checked_add(member_comparison_nodes))
+                .and_then(|nodes| nodes.checked_add(bound_nodes))
+                .and_then(|nodes| nodes.checked_add(1))
+                .ok_or_else(expression_size_overflow)
+        }
+        NativeHandlerV1::ConfigurationAttributeAllowedPair => {
+            let matches = facts
+                .allowed_attribute_pairs
+                .iter()
+                .filter(|pair| {
+                    pair.left.component == subjects[0] && pair.right.component == subjects[1]
+                })
+                .collect::<Vec<_>>();
+            let [pair] = matches.as_slice() else {
+                return Err(format!(
+                    "configuration.attribute_allowed_pair requires exactly one relation for `{}` and `{}`",
+                    subjects[0], subjects[1]
+                ));
+            };
+            let left_nodes = attribute_match_node_count(facts, &pair.left)?;
+            let right_nodes = attribute_match_node_count(facts, &pair.right)?;
+            let tuple_nodes = 1usize
+                .checked_add(left_nodes)
+                .and_then(|nodes| nodes.checked_add(right_nodes))
+                .ok_or_else(expression_size_overflow)?;
+            let allowed_children = pair
+                .allowed
+                .len()
+                .checked_mul(tuple_nodes)
+                .ok_or_else(expression_size_overflow)?;
+            grouped_expression_node_count(allowed_children, pair.allowed.len())?
+                .checked_add(5)
+                .ok_or_else(expression_size_overflow)
+        }
+        NativeHandlerV1::ConfigurationVersionInterval => Ok(11),
+        _ => Err(format!(
+            "unsupported configuration rule `{}`",
+            binding.source.rule_id
+        )),
+    }
+}
+
+fn indicator_link_node_count(fixed: Option<bool>) -> usize {
+    // `or(and(source, eq(value, 1)), and(not(source), eq(value, 0)))`.
+    usize::from(fixed.is_none()) * 12
+}
+
+fn attribute_match_node_count(
+    facts: &ConfigurationFacts,
+    endpoint: &AttributeEndpointFacts,
+) -> Result<usize, String> {
+    let value = require_component(facts, &endpoint.component)?
+        .attributes
+        .get(&endpoint.attribute)
+        .ok_or_else(|| {
+            format!(
+                "components.{}.attributes.{} is not declared",
+                endpoint.component, endpoint.attribute
+            )
+        })?;
+    Ok(if value.is_some() { 1 } else { 3 })
+}
+
+fn grouped_expression_node_count(children: usize, child_count: usize) -> Result<usize, String> {
+    match child_count {
+        0 => Ok(1),
+        1 => Ok(children),
+        _ => children.checked_add(1).ok_or_else(expression_size_overflow),
+    }
+}
+
+fn expression_size_overflow() -> String {
+    "configuration expression size overflowed".to_owned()
 }
 
 fn compile_binding(
@@ -1265,6 +1400,57 @@ mod tests {
             }),
         );
         assert_eq!(status(input).await, SolveStatus::Unsat);
+    }
+
+    #[test]
+    fn checked_model_size_guard_rejects_repeated_allowed_pair_expansions() {
+        let left_values = (0..MAX_CONSTRAINTS)
+            .map(|index| format!("left-{index}"))
+            .collect::<Vec<_>>();
+        let right_values = (0..MAX_CONSTRAINTS)
+            .map(|index| format!("right-{index}"))
+            .collect::<Vec<_>>();
+        let allowed = left_values
+            .iter()
+            .zip(&right_values)
+            .map(|(left, right)| vec![left.clone(), right.clone()])
+            .collect::<Vec<_>>();
+        let rule = json!({
+            "rule_id": "configuration.attribute_allowed_pair",
+            "subjects": ["left", "right"]
+        });
+        let mut input = json!({
+            "family": "configuration",
+            "mode": "synthesize",
+            "rules": [rule.clone()],
+            "facts": {
+                "components": {
+                    "left": {"selected": true, "attributes": {"value": null}},
+                    "right": {"selected": true, "attributes": {"value": null}}
+                },
+                "selection_groups": {},
+                "allowed_attribute_pairs": [{
+                    "left": {"component": "left", "attribute": "value", "values": left_values},
+                    "right": {"component": "right", "attribute": "value", "values": right_values},
+                    "allowed": allowed
+                }],
+                "version_orderings": {}
+            },
+            "unknowns": [
+                {"kind": "component_attribute", "component": "left", "attribute": "value", "values": left_values},
+                {"kind": "component_attribute", "component": "right", "attribute": "value", "values": right_values}
+            ]
+        });
+
+        COMPILER
+            .compile(input.clone())
+            .expect("one maximum-sized finite relation must remain valid");
+        input["rules"] = Value::Array(vec![rule; 10]);
+        assert!(COMPILER
+            .compile(input)
+            .expect_err("repeated allowed-pair AST expansion must be bounded")
+            .message
+            .contains("checked node budget"));
     }
 
     #[tokio::test]
