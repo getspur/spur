@@ -1877,7 +1877,11 @@ fn write_table(
     let schema = Arc::new(parse_message_type(schema).context("failed to parse Parquet schema")?);
     let file =
         File::create(path).with_context(|| format!("failed to create `{}`", path.display()))?;
-    let props = Arc::new(writer_properties(dictionary_columns, bloom_filter_columns)?);
+    let props = Arc::new(writer_properties(
+        dictionary_columns,
+        bloom_filter_columns,
+        row_count,
+    )?);
     let mut writer =
         SerializedFileWriter::new(file, schema, props).context("failed to create writer")?;
 
@@ -1950,6 +1954,7 @@ fn fsync_dir(path: &Path) -> anyhow::Result<()> {
 fn writer_properties(
     dictionary_columns: &[&str],
     bloom_filter_columns: &[&str],
+    row_count: usize,
 ) -> anyhow::Result<WriterProperties> {
     let mut builder = WriterProperties::builder()
         .set_compression(Compression::ZSTD(
@@ -1966,6 +1971,7 @@ fn writer_properties(
     {
         builder = builder.set_column_dictionary_enabled(ColumnPath::from(column), true);
     }
+    let bloom_ndv = u64::try_from(row_count.max(1)).expect("row count fits u64");
     for column in bloom_filter_columns
         .iter()
         .copied()
@@ -1973,7 +1979,8 @@ fn writer_properties(
     {
         builder = builder
             .set_column_bloom_filter_enabled(ColumnPath::from(column), true)
-            .set_column_bloom_filter_fpp(ColumnPath::from(column), 0.01);
+            .set_column_bloom_filter_fpp(ColumnPath::from(column), 0.01)
+            .set_column_bloom_filter_ndv(ColumnPath::from(column), bloom_ndv);
     }
     Ok(builder.build())
 }
@@ -3577,6 +3584,28 @@ mod parquet_temporal_test {
             .any(|tombstone| tombstone.path == "src/a.rs"));
 
         assert_eq!(snapshot_directory_bytes(&base_dir)?, base_before);
+        Ok(())
+    }
+
+    #[test]
+    fn write_worktree_delta_sizes_bloom_filters_to_row_count() -> anyhow::Result<()> {
+        let repo = tempfile::tempdir()?;
+        let root = repo.path();
+        fs::create_dir_all(root.join("src"))?;
+        fs::write(root.join("src/a.rs"), "pub fn alpha() {}\n")?;
+
+        let prev = artifact_from_facts(&build_facts(root, None)?.0, root)?;
+        fs::write(root.join("src/a.rs"), "pub fn alpha_changed() {}\n")?;
+
+        let artifacts = tempfile::tempdir()?;
+        let delta_dir = artifacts.path().join("delta");
+        write_worktree_delta(&prev, root, &delta_dir)?;
+
+        let nodes_len = fs::metadata(delta_dir.join("nodes.parquet"))?.len();
+        assert!(
+            nodes_len < 200_000,
+            "delta nodes.parquet was {nodes_len} bytes; bloom NDV should follow row count so a one-file delta stays payload-sized"
+        );
         Ok(())
     }
 

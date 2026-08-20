@@ -117,6 +117,15 @@ fn bench_search_symbols_parquet_vs_inmemory(c: &mut Criterion) {
             black_box(result);
         });
     });
+    group.bench_function("parquet_cached_open_then_search", |b| {
+        let parquet = ParquetClient::open(parquet_dir.as_path()).expect("open parquet client");
+        b.iter(|| {
+            let result = parquet
+                .search_symbols(black_box(&options))
+                .expect("cached parquet search symbols");
+            black_box(result);
+        });
+    });
     group.finish();
 }
 

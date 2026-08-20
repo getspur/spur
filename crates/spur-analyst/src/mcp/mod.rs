@@ -270,6 +270,7 @@ fn knowledge_context_pack_2_properties_schema() -> serde_json::Value {
         "include_tests": include_tests_property_schema(),
         "max_symbol_bodies": max_symbol_bodies_property_schema(),
         "graph_reasoning": graph_reasoning_property_schema(),
+        "response_format": response_format_property_schema(),
     })
 }
 
@@ -302,7 +303,16 @@ fn include_tests_property_schema() -> serde_json::Value {
 }
 
 fn max_symbol_bodies_property_schema() -> serde_json::Value {
-    json!({ "type": "integer", "minimum": 0, "maximum": 5, "default": 3 })
+    json!({ "type": "integer", "minimum": 0, "maximum": 5, "default": 0 })
+}
+
+fn response_format_property_schema() -> serde_json::Value {
+    json!({
+        "type": "string",
+        "enum": ["full", "compact"],
+        "default": "compact",
+        "description": "Output shape. compact (default) folds graph-reasoning onto primary_evidence and omits empty/healthy sections; full keeps the verbose v2 arrays."
+    })
 }
 
 fn graph_reasoning_property_schema() -> serde_json::Value {

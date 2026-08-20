@@ -272,7 +272,13 @@ pub fn build_with_embedding_overrides(
                     section_sidecar_progress,
                 );
                 if !uses_output_override {
-                    spur_graph::write_current_pointer(&root, &written_dir)?;
+                    let ctx = spur_graph::git::detect(&root);
+                    spur_graph::store::cache::publish_worktree_rebuild(
+                        &artifact,
+                        &root,
+                        ctx.as_ref(),
+                        &written_dir,
+                    )?;
                 }
                 Ok::<_, anyhow::Error>(written_dir)
             })();
@@ -418,7 +424,13 @@ pub fn build_with_embedding_overrides(
                     section_sidecar_progress,
                 );
                 if !uses_output_override {
-                    spur_graph::write_current_pointer(&root, &written_dir)?;
+                    let ctx = spur_graph::git::detect(&root);
+                    spur_graph::store::cache::publish_worktree_rebuild(
+                        &artifact,
+                        &root,
+                        ctx.as_ref(),
+                        &written_dir,
+                    )?;
                 }
                 Ok::<_, anyhow::Error>(written_dir)
             })();

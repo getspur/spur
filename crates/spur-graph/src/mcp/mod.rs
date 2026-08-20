@@ -1,12 +1,14 @@
+use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fs;
+use std::hash::{Hash, Hasher as _};
 use std::io::ErrorKind;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 #[cfg(any(test, feature = "test-support"))]
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
@@ -192,6 +194,7 @@ impl spur_mcp::ToolModule for GraphMcpModule {
 }
 
 #[allow(dead_code)]
+mod request_cache;
 mod file_oid_cache {
     use std::collections::{BTreeMap, HashMap, VecDeque};
     use std::fs::{self, Metadata};
@@ -1060,6 +1063,7 @@ async fn code_graph_backend_response(
         handler,
         GraphRefreshStrategy::OverlayThenRebuild,
         false,
+        ResponseFormat::Full,
     )
     .await
 }
@@ -1078,6 +1082,7 @@ async fn code_graph_backend_response_allowing_source(
         handler,
         GraphRefreshStrategy::OverlayThenRebuild,
         true,
+        ResponseFormat::Full,
     )
     .await
 }
@@ -1093,6 +1098,7 @@ async fn code_graph_backend_response_rebuild_only(
         handler,
         GraphRefreshStrategy::RebuildOnly,
         false,
+        ResponseFormat::Full,
     )
     .await
 }
@@ -1207,8 +1213,9 @@ async fn code_graph_backend_response_with_refresh(
     handler: impl Fn(&Value, &dyn GraphQueryClient) -> CodeGraphResult + Send + Sync,
     refresh_strategy: GraphRefreshStrategy,
     allow_source: bool,
+    default_format: ResponseFormat,
 ) -> CodeGraphResult {
-    let response_format = ResponseFormat::parse_inner(args, allow_source)
+    let response_format = ResponseFormat::parse_or_inner(args, allow_source, default_format)
         .map_err(CodeGraphError::without_metadata)?;
     let backend = open_code_search_backend_for_request(Some(Arc::clone(&rebuild_coordinator)))
         .await
@@ -1220,16 +1227,22 @@ async fn code_graph_backend_response_with_refresh(
             let files = backend
                 .response_file_set_from_body(&body)
                 .map_err(CodeGraphError::from)?;
-            let analysis =
-                GraphResponseMetadata::analyze_source_inner(source.clone(), Some(&files), None)
-                    .await;
+            // The overlay cache key must cover every tracked change that
+            // changed_paths_for_overlay may extract, not only response files.
+            let indexed_files = backend.base_file_set().ok();
+            let analysis = GraphResponseMetadata::analyze_source_inner(
+                source.clone(),
+                Some(&files),
+                indexed_files.as_deref(),
+            )
+            .await;
             (body, analysis)
         }
         Err(mut original_error) => {
             if original_error.metadata.is_none() && original_error.temporal_code.is_none() {
                 original_error.metadata = Some(Box::new(source.clone()));
             }
-            // The worktree-dirty check is cheap (git rev-parse + git status)
+            // The worktree-dirty check uses cached git metadata (5s TTL)
             // and doesn't need a successful body to run, so a "not found"
             // response still deserves a chance against the overlay before we
             // give up -- otherwise a brand-new or renamed symbol that only
@@ -1326,13 +1339,15 @@ fn overlay_client_for_backend<'a>(
     backend: &'a CodeSearchBackend,
     rebuild_candidate: &RebuildCandidate,
 ) -> anyhow::Result<OverlayClient<&'a dyn GraphQueryClient>> {
+    let worktree = rebuild_candidate.worktree.clone();
     let base_files = backend.base_file_set()?;
-    let changed_paths = changed_paths_for_overlay(&rebuild_candidate.worktree, base_files)?;
-    OverlayClient::new(
-        backend.client(),
-        &rebuild_candidate.worktree,
-        &changed_paths,
-    )
+    let changed = changed_paths_for_overlay(&worktree, base_files)?;
+    let cached = request_cache::overlay_delta(&worktree, changed.fingerprint, || {
+        let (artifact, shadowed) =
+            OverlayClient::<&dyn GraphQueryClient>::extract_delta(&worktree, &changed.paths)?;
+        Ok(request_cache::CachedOverlayDelta { artifact, shadowed })
+    })?;
+    OverlayClient::from_artifacts(backend.client(), cached.artifact, cached.shadowed)
 }
 
 struct CodeSearchBody {
@@ -1351,16 +1366,20 @@ enum ResponseFormat {
 
 impl ResponseFormat {
     fn parse(args: &Value) -> Result<Self, McpHandlerError> {
-        Self::parse_inner(args, false)
+        Self::parse_or_inner(args, false, Self::Full)
     }
 
     fn parse_allowing_source(args: &Value) -> Result<Self, McpHandlerError> {
-        Self::parse_inner(args, true)
+        Self::parse_or_inner(args, true, Self::Full)
     }
 
-    fn parse_inner(args: &Value, allow_source: bool) -> Result<Self, McpHandlerError> {
+    fn parse_or_inner(
+        args: &Value,
+        allow_source: bool,
+        default: Self,
+    ) -> Result<Self, McpHandlerError> {
         let Some(value) = args.get("response_format") else {
-            return Ok(Self::Full);
+            return Ok(default);
         };
         let expected = if allow_source {
             "`full`, `compact`, `table`, or `source`"
@@ -1383,7 +1402,7 @@ impl ResponseFormat {
 }
 
 enum CodeSearchBackend {
-    Parquet(Box<ParquetClient>),
+    Parquet(Arc<ParquetClient>),
     InMemory {
         artifact: Arc<GraphIndexArtifact>,
         client: InMemoryClient,
@@ -3527,7 +3546,7 @@ pub fn ensure_graph_artifact_ready(worktree_root: &Path) -> anyhow::Result<()> {
             worktree_root.display()
         )
     })?;
-    ParquetClient::open(&resolved.path).map_err(|error| {
+    request_cache::parquet_client(&resolved.path).map_err(|error| {
         anyhow::anyhow!(
             "graph artifact `{}` is unreadable: {error}",
             resolved.path.display()
@@ -3568,8 +3587,8 @@ fn open_resolved_code_search_backend(
 ) -> Result<CodeSearchBackend, McpHandlerError> {
     let artifact_path = resolved.path;
 
-    ParquetClient::open(&artifact_path)
-        .map(|client| CodeSearchBackend::Parquet(Box::new(client)))
+    request_cache::parquet_client(&artifact_path)
+        .map(CodeSearchBackend::Parquet)
         .map_err(|error| {
             if !artifact_path.exists() {
                 graph_artifact_missing(worktree)
@@ -5289,17 +5308,22 @@ fn indexed_file_oid_for_path<'a>(artifact: &'a GraphIndexArtifact, path: &str) -
         .map(|entry| entry.content_oid.as_str())
 }
 
+struct OverlayChangedPaths {
+    paths: Vec<PathBuf>,
+    fingerprint: u64,
+}
+
 fn changed_paths_for_overlay(
     worktree: &Path,
     base_files: Vec<(String, String)>,
-) -> anyhow::Result<Vec<PathBuf>> {
+) -> anyhow::Result<OverlayChangedPaths> {
     let worktree = worktree.canonicalize().map_err(|error| {
         anyhow::anyhow!("failed to canonicalize `{}`: {error}", worktree.display())
     })?;
     let allowed_extensions = crate::extract::languages::all_supported_extensions();
     let current_files = discover_files(&worktree, &allowed_extensions)?;
     let base_oids = base_files.into_iter().collect::<BTreeMap<_, _>>();
-    let mut changed = BTreeMap::new();
+    let mut changed = BTreeMap::<String, Option<String>>::new();
 
     for path in current_files {
         let rel_path = worktree_relative_slash_path(&worktree, &path);
@@ -5310,17 +5334,22 @@ fn changed_paths_for_overlay(
             .get(&rel_path)
             .is_none_or(|base_oid| base_oid != &content_oid)
         {
-            changed.insert(rel_path.clone(), PathBuf::from(rel_path));
+            changed.insert(rel_path, Some(content_oid));
         }
     }
 
     for base_path in base_oids.keys() {
         if !worktree.join(base_path).is_file() {
-            changed.insert(base_path.clone(), PathBuf::from(base_path));
+            changed.insert(base_path.clone(), None);
         }
     }
 
-    Ok(changed.into_values().collect())
+    let mut hasher = DefaultHasher::new();
+    changed.hash(&mut hasher);
+    Ok(OverlayChangedPaths {
+        paths: changed.keys().map(PathBuf::from).collect(),
+        fingerprint: hasher.finish(),
+    })
 }
 
 fn worktree_relative_slash_path(worktree: &Path, path: &Path) -> String {
@@ -5372,7 +5401,7 @@ fn non_empty_string(value: Option<String>) -> Option<String> {
     value.and_then(|value| (!value.trim().is_empty()).then_some(value))
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct WorktreeGitMetadata {
     head_oid: String,
     has_uncommitted_changes: bool,
@@ -5394,7 +5423,14 @@ async fn worktree_git_metadata_with_extensions(
     allowed_extensions: &[&str],
     include_tracked_supplemental_paths: bool,
 ) -> Option<WorktreeGitMetadata> {
-    tokio::time::timeout(GRAPH_GIT_METADATA_TIMEOUT, async {
+    let now = Instant::now();
+    if !include_tracked_supplemental_paths {
+        if let Some(cached) = request_cache::git_metadata_get(worktree, indexed_head_oid, now) {
+            return Some(cached);
+        }
+    }
+
+    let fetched = tokio::time::timeout(GRAPH_GIT_METADATA_TIMEOUT, async {
         let head_oid = run_git_stdout(worktree, &["rev-parse", "HEAD"]).await?;
         let status = run_git_stdout(
             worktree,
@@ -5429,7 +5465,19 @@ async fn worktree_git_metadata_with_extensions(
     })
     .await
     .ok()
-    .flatten()
+    .flatten();
+
+    if !include_tracked_supplemental_paths {
+        if let Some(metadata) = fetched.as_ref() {
+            request_cache::git_metadata_insert(
+                worktree,
+                indexed_head_oid,
+                Instant::now(),
+                metadata.clone(),
+            );
+        }
+    }
+    fetched
 }
 
 struct GitStatusOverlayReport {
@@ -6267,6 +6315,34 @@ mod tests {
 
     const ESCALATION_THRESHOLD: usize = 3;
     static REBUILD_TEST_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+
+    #[test]
+    fn overlay_changed_paths_fingerprint_tracks_all_changed_content() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let root = tempdir.path();
+        fs::create_dir_all(root.join("src")).expect("src dir");
+        let old_a = b"pub fn alpha() {}\n";
+        let old_b = b"pub fn beta() {}\n";
+        fs::write(root.join("src/a.rs"), old_a).expect("a.rs");
+        fs::write(root.join("src/b.rs"), old_b).expect("b.rs");
+        let base_files = vec![
+            ("src/a.rs".to_owned(), git_blob_oid(old_a)),
+            ("src/b.rs".to_owned(), git_blob_oid(old_b)),
+        ];
+
+        fs::write(root.join("src/a.rs"), "pub fn alpha_v2() {}\n").expect("edit a.rs");
+        fs::write(root.join("src/b.rs"), "pub fn beta_v2() {}\n").expect("edit b.rs");
+        let first = changed_paths_for_overlay(root, base_files.clone()).expect("first changes");
+
+        fs::write(root.join("src/b.rs"), "pub fn beta_v3() {}\n").expect("re-edit b.rs");
+        let second = changed_paths_for_overlay(root, base_files).expect("second changes");
+
+        assert_eq!(first.paths, second.paths, "the changed path set is stable");
+        assert_ne!(
+            first.fingerprint, second.fingerprint,
+            "content changes in any tracked overlay path must invalidate the cached delta"
+        );
+    }
 
     #[derive(Clone)]
     struct ReadyLocalProjectValidator;

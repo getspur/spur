@@ -20,8 +20,8 @@ use crate::{
 use serde_json::{json, Value};
 
 use crate::pack::{
-    base_pack, caveat_value, exact_graph_context_for_result,
-    graph_reasoning_sections_for_pack_with_conn, insert_v2_sections,
+    apply_v2_response_format, base_pack, caveat_value, exact_graph_context_for_result,
+    graph_reasoning_sections_for_pack_with_conn,
     pack_query_result_v2_with_graph_sections_and_staleness, pack_query_result_with_exact_context,
     GraphReasoningSections, KnowledgeContextPackRequest, KnowledgeContextPackV2Request,
     PackErrorExt as _, PackStaleness,
@@ -233,7 +233,8 @@ async fn overlay_session_for_current_worktree(
 ) -> Option<Arc<OverlayMergeSession>> {
     let worktree = current_repo_root().ok()?;
     let seed = spur_graph::cache::load_base_seed_for_worktree(&worktree)?;
-    let rebuild_key = overlay_rebuild_key_for_dirty_worktree(&worktree)?;
+    let rebuild_key =
+        overlay_rebuild_key_for_dirty_worktree(&worktree, &seed.artifact.graph_content_hash)?;
     let coordinator = shared_overlay_session_coordinator();
     let artifact = Arc::clone(&seed.artifact);
     let build_worktree = worktree.clone();
@@ -335,7 +336,8 @@ fn unavailable_pack(request: &KnowledgeContextPackRequest, db_path: &Path) -> Va
 
 fn unavailable_pack_v2(request: &KnowledgeContextPackV2Request, db_path: &Path) -> Value {
     let mut pack = unavailable_pack(&request.base, db_path);
-    insert_v2_sections(
+    apply_v2_response_format(
+        request,
         &mut pack,
         GraphReasoningSections {
             caveats: vec![caveat_value(

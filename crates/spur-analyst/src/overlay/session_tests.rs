@@ -1,7 +1,9 @@
-use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, UNIX_EPOCH};
 
 use anyhow::anyhow;
 
@@ -10,7 +12,19 @@ use super::*;
 fn rebuild_key(head_oid: &str, dirty_byte: u8) -> OverlayRebuildKey {
     let mut dirty = BTreeMap::new();
     dirty.insert(PathBuf::from("src/lib.rs"), [dirty_byte; 20]);
-    OverlayRebuildKey::from(head_oid, &dirty)
+    OverlayRebuildKey::from(head_oid, "base-hash", &dirty)
+}
+
+#[test]
+fn overlay_rebuild_key_changes_when_base_graph_changes() {
+    let mut dirty = BTreeMap::new();
+    dirty.insert(PathBuf::from("src/lib.rs"), [1; 20]);
+
+    let first = OverlayRebuildKey::from("head-a", "base-a", &dirty);
+    let second = OverlayRebuildKey::from("head-a", "base-b", &dirty);
+
+    assert_ne!(first, second);
+    assert_ne!(first.cache_dir_name(), second.cache_dir_name());
 }
 
 #[tokio::test]
@@ -155,4 +169,260 @@ async fn persistent_delta_failures_escalate_to_clean_rediff_attempt() {
         OverlayBuildMode::CleanRediff,
         "the call after the threshold should force a clean re-diff attempt"
     );
+}
+
+fn overlay_candidate(root: &Path, name: &str, modified_secs: u64) -> OverlayDeltaCandidate {
+    OverlayDeltaCandidate {
+        path: root.join(name),
+        modified: UNIX_EPOCH + Duration::from_secs(modified_secs),
+    }
+}
+
+fn write_complete_overlay_dir(root: &Path, name: &str, modified_secs: u64) -> PathBuf {
+    let path = root.join(name);
+    fs::create_dir_all(&path).expect("overlay dir");
+    fs::write(path.join("manifest.json"), "{}").expect("manifest");
+    let file = fs::File::open(&path).expect("open overlay dir");
+    file.set_modified(UNIX_EPOCH + Duration::from_secs(modified_secs))
+        .expect("set overlay mtime");
+    path
+}
+
+#[test]
+fn stale_overlay_deltas_keeps_current_and_two_rollback_generations() {
+    assert_eq!(RETAINED_OVERLAY_DELTAS, 3);
+    let root = PathBuf::from("/overlays");
+    let candidates = (1..=4)
+        .map(|generation| overlay_candidate(&root, &format!("gen-{generation}"), generation))
+        .collect();
+    let protected = BTreeSet::from([root.join("gen-4")]);
+
+    let stale = stale_overlay_deltas(candidates, &protected);
+
+    assert_eq!(stale, vec![root.join("gen-1")]);
+}
+
+#[test]
+fn stale_overlay_deltas_breaks_equal_modification_times_by_full_path() {
+    let root = PathBuf::from("/overlays");
+    let candidates = ["gen-d", "gen-b", "gen-a", "gen-c"]
+        .map(|name| overlay_candidate(&root, name, 1))
+        .into();
+
+    let stale = stale_overlay_deltas(candidates, &BTreeSet::new());
+
+    assert_eq!(stale, vec![root.join("gen-d")]);
+}
+
+#[test]
+fn stale_overlay_deltas_keeps_an_older_protected_generation() {
+    let root = PathBuf::from("/overlays");
+    let candidates = (1..=5)
+        .map(|generation| overlay_candidate(&root, &format!("gen-{generation}"), generation))
+        .collect();
+    let protected = BTreeSet::from([root.join("gen-1")]);
+
+    let stale = stale_overlay_deltas(candidates, &protected);
+
+    assert_eq!(stale, vec![root.join("gen-2")]);
+}
+
+#[test]
+fn prune_overlay_deltas_skips_the_whole_pass_when_written_dir_is_outside_root() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let overlay_root = tempdir.path().join("analyst-overlays");
+    fs::create_dir_all(&overlay_root).expect("overlay root");
+    let completed: Vec<_> = (1..=4)
+        .map(|generation| {
+            write_complete_overlay_dir(&overlay_root, &format!("gen-{generation}"), generation)
+        })
+        .collect();
+    let outside = tempdir.path().join("outside");
+    fs::create_dir_all(&outside).expect("outside written dir");
+    fs::write(outside.join("manifest.json"), "{}").expect("outside manifest");
+
+    prune_overlay_deltas_best_effort(&overlay_root, &outside, &BTreeSet::new());
+
+    assert!(completed.iter().all(|path| path.exists()));
+}
+
+#[test]
+fn delete_stale_overlay_deltas_continues_after_an_individual_deletion_failure() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let missing = tempdir.path().join("missing");
+    let stale = write_complete_overlay_dir(tempdir.path(), "stale", 1);
+
+    delete_stale_overlay_deltas(vec![missing, stale.clone()]);
+
+    assert!(!stale.exists());
+}
+
+fn complete_manifest_json() -> String {
+    serde_json::to_string(&spur_graph::GraphArtifactManifest {
+        graph_index_version: spur_graph::GRAPH_INDEX_VERSION_TEMPORAL.to_owned(),
+        schema_version: "test".to_owned(),
+        manifest_version: spur_graph::store::current_manifest_version(),
+        graph_content_hash: "reuse-test".to_owned(),
+        indexed_commit_oid: None,
+        extractor_version: "test".to_owned(),
+        complete: true,
+        row_counts: spur_graph::store::parquet::GraphArtifactRowCounts {
+            nodes: 0,
+            edges: 0,
+            edges_by_dst: None,
+            edges_unresolved: 0,
+            files: 0,
+            file_manifests: 0,
+            tombstones: 0,
+            commits: 0,
+            symbol_snapshots: 0,
+            temporal_edges: 0,
+            diagnostics: 0,
+        },
+        sidecar_complete: false,
+        sidecar_row_counts: Default::default(),
+        parquet_writer: spur_graph::store::parquet::GraphArtifactParquetWriter {
+            compression: "zstd-3".to_owned(),
+            row_group_size: 16_384,
+        },
+        edges_by_dst_present: false,
+        temporal_shards: Vec::new(),
+    })
+    .expect("encode complete overlay manifest")
+}
+
+fn empty_previous_artifact() -> spur_graph::GraphIndexArtifact {
+    spur_graph::GraphIndexArtifact {
+        header: spur_graph::GraphIndexHeader {
+            graph_index_version: spur_graph::GRAPH_INDEX_VERSION_TEMPORAL.to_owned(),
+            content_hash_blake3: None,
+        },
+        manifest_version: spur_graph::store::current_manifest_version(),
+        graph_content_hash: "reuse-test".to_owned(),
+        file_manifests: Vec::new(),
+        files: Vec::new(),
+        file_node_ids: Vec::new(),
+        symbols: Vec::new(),
+        symbol_node_ids: Vec::new(),
+        edges: Vec::new(),
+        tombstones: Vec::new(),
+        diagnostics: Vec::new(),
+        commits: Vec::new(),
+        symbol_snapshots: Vec::new(),
+        temporal_edges: Vec::new(),
+    }
+}
+
+#[test]
+fn write_delta_for_session_reuses_complete_dir_for_the_same_key() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let worktree = tempdir.path();
+    let key = rebuild_key("abc123def4567890", 1);
+    let delta_dir = worktree
+        .join(".spur")
+        .join("analyst-overlays")
+        .join(key.cache_dir_name());
+    fs::create_dir_all(&delta_dir).expect("delta dir");
+    fs::write(delta_dir.join("manifest.json"), complete_manifest_json()).expect("manifest");
+    fs::write(delta_dir.join("sentinel"), "keep-me").expect("sentinel");
+
+    let written = write_delta_for_session(
+        worktree,
+        &key,
+        &empty_previous_artifact(),
+        OverlayBuildMode::IncrementalDelta,
+    )
+    .expect("reuse complete overlay dir");
+
+    assert_eq!(written, delta_dir);
+    assert_eq!(
+        fs::read_to_string(delta_dir.join("sentinel")).expect("read sentinel"),
+        "keep-me",
+        "a complete overlay dir for the same dirty key must not be rewritten"
+    );
+}
+
+#[test]
+fn write_delta_for_session_rewrites_incomplete_dir_for_the_same_key() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let worktree = tempdir.path();
+    let key = rebuild_key("abc123def4567890", 1);
+    let delta_dir = worktree
+        .join(".spur")
+        .join("analyst-overlays")
+        .join(key.cache_dir_name());
+    fs::create_dir_all(&delta_dir).expect("delta dir");
+    fs::write(delta_dir.join("sentinel"), "stale").expect("sentinel");
+
+    let result = write_delta_for_session(
+        worktree,
+        &key,
+        &empty_previous_artifact(),
+        OverlayBuildMode::IncrementalDelta,
+    );
+
+    assert!(
+        result.is_err() || !delta_dir.join("sentinel").exists(),
+        "an incomplete overlay dir should be cleared before a rebuild"
+    );
+}
+
+#[test]
+fn write_delta_for_session_rewrites_complete_dir_when_manifest_is_incompatible() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let worktree = tempdir.path();
+    let key = rebuild_key("abc123def4567890", 1);
+    let delta_dir = worktree
+        .join(".spur")
+        .join("analyst-overlays")
+        .join(key.cache_dir_name());
+    fs::create_dir_all(&delta_dir).expect("delta dir");
+    let mut manifest: spur_graph::GraphArtifactManifest =
+        serde_json::from_str(&complete_manifest_json()).expect("manifest");
+    manifest.manifest_version = "legacy-manifest".to_owned();
+    fs::write(
+        delta_dir.join("manifest.json"),
+        serde_json::to_vec(&manifest).expect("encode manifest"),
+    )
+    .expect("manifest");
+    fs::write(delta_dir.join("sentinel"), "stale").expect("sentinel");
+
+    let result = write_delta_for_session(
+        worktree,
+        &key,
+        &empty_previous_artifact(),
+        OverlayBuildMode::IncrementalDelta,
+    );
+
+    assert!(result.is_ok(), "compatible delta rewrite should succeed");
+    assert!(
+        !delta_dir.join("sentinel").exists(),
+        "a complete but incompatible overlay dir must be rebuilt"
+    );
+}
+
+#[test]
+fn prune_overlay_deltas_ignores_incomplete_dirs_and_keeps_newest_complete() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let overlay_root = tempdir.path().join("analyst-overlays");
+    fs::create_dir_all(&overlay_root).expect("overlay root");
+    let incomplete = overlay_root.join("incomplete");
+    fs::create_dir_all(&incomplete).expect("incomplete dir");
+    let completed: Vec<_> = (1..=4)
+        .map(|generation| {
+            write_complete_overlay_dir(&overlay_root, &format!("gen-{generation}"), generation)
+        })
+        .collect();
+    let written = completed.last().expect("written").clone();
+
+    prune_overlay_deltas_best_effort(&overlay_root, &written, &BTreeSet::from([written.clone()]));
+
+    assert!(
+        incomplete.exists(),
+        "dirs without manifest.json are not prune candidates"
+    );
+    assert!(!completed[0].exists());
+    assert!(completed[1].exists());
+    assert!(completed[2].exists());
+    assert!(completed[3].exists());
 }

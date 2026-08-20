@@ -16,7 +16,7 @@ pub(crate) use graph_paths::{collect_graph_paths, path_budget_plan};
 #[cfg(test)]
 pub(crate) use graph_reasoning::graph_reasoning_sections_for_pack;
 pub(crate) use graph_reasoning::{
-    graph_reasoning_sections_for_pack_with_conn, insert_v2_sections, GraphReasoningSections,
+    graph_reasoning_sections_for_pack_with_conn, GraphReasoningSections,
 };
 pub(crate) use impact::{exact_graph_context_for_result, raw_stable_symbol_id, ExactGraphContext};
 #[cfg(test)]
@@ -28,7 +28,7 @@ pub(crate) use request::{
     KnowledgeContextPackRequest, KnowledgeContextPackV2Request, KnowledgeIntent,
 };
 pub(crate) use response::{
-    base_pack, pack_query_result_v2_with_graph_sections_and_staleness,
+    apply_v2_response_format, base_pack, pack_query_result_v2_with_graph_sections_and_staleness,
     pack_query_result_with_exact_context, PackErrorExt,
 };
 #[cfg(test)]

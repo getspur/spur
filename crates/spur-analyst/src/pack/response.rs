@@ -6,7 +6,9 @@ use crate::KnowledgeQueryResult;
 
 use super::evidence::split_evidence;
 use super::graph_reasoning::{insert_v2_sections, GraphReasoningSections};
-use super::impact::{aggregate_impact_value, primary_evidence_with_impact, ExactGraphContext};
+use super::impact::{
+    aggregate_impact_value, primary_evidence_with_impact, raw_stable_symbol_id, ExactGraphContext,
+};
 use super::next_tools::recommended_next_tools;
 use super::staleness::{staleness_value, PackStaleness};
 use super::{KnowledgeContextPackRequest, KnowledgeContextPackV2Request};
@@ -175,8 +177,166 @@ pub(crate) async fn pack_query_result_v2_with_graph_sections_and_staleness(
         staleness,
     )
     .await;
-    insert_v2_sections(&mut pack, graph_sections);
+    apply_v2_response_format(request, &mut pack, graph_sections);
     pack
+}
+
+pub(crate) fn apply_v2_response_format(
+    request: &KnowledgeContextPackV2Request,
+    pack: &mut Value,
+    graph_sections: GraphReasoningSections,
+) {
+    if request.response_format.is_compact() {
+        apply_compact_pack(pack, graph_sections);
+    } else {
+        insert_v2_sections(pack, graph_sections);
+    }
+}
+
+fn apply_compact_pack(pack: &mut Value, sections: GraphReasoningSections) {
+    compact_primary_evidence(pack);
+    fold_graph_sections_into_primary(pack, &sections);
+    compact_impact(pack);
+    compact_staleness(pack);
+    omit_empty_array(pack, "supporting_docs");
+    insert_nonempty_array(pack, "graph_paths", sections.graph_paths);
+    insert_nonempty_array(pack, "caveats", sections.caveats);
+}
+
+fn compact_primary_evidence(pack: &mut Value) {
+    let Some(Value::Array(evidence)) = pack.get_mut("primary_evidence") else {
+        return;
+    };
+    for row in evidence {
+        let Some(object) = row.as_object_mut() else {
+            continue;
+        };
+        object.remove("why_relevant");
+        object.remove("next");
+        object.remove("neighbor_kind");
+        object.remove("edge_bind_method");
+    }
+}
+
+fn fold_graph_sections_into_primary(pack: &mut Value, sections: &GraphReasoningSections) {
+    let Some(Value::Array(evidence)) = pack.get_mut("primary_evidence") else {
+        return;
+    };
+    for row in evidence {
+        let Some(id) = row
+            .get("stable_symbol_id")
+            .and_then(Value::as_str)
+            .map(raw_stable_symbol_id)
+            .map(str::to_owned)
+        else {
+            continue;
+        };
+        let Some(object) = row.as_object_mut() else {
+            continue;
+        };
+        if let Some(risk) = find_section_row(&sections.risk_scorecard, &id) {
+            copy_if_present(object, risk, "posture");
+            copy_if_present(object, risk, "churn_90d");
+            copy_if_present(object, risk, "last_touched");
+            copy_if_present(object, risk, "blast_radius_score");
+        }
+        if let Some(community) = find_section_row(&sections.community_context, &id) {
+            copy_if_present(object, community, "community_id");
+            copy_if_present(object, community, "component_size");
+        }
+        if let Some(temporal) = find_section_row(&sections.temporal_context, &id) {
+            copy_if_present(object, temporal, "churn_90d");
+            copy_if_present(object, temporal, "last_touched");
+            copy_if_present(object, temporal, "posture");
+        }
+    }
+}
+
+fn find_section_row<'a>(rows: &'a [Value], stable_symbol_id: &str) -> Option<&'a Value> {
+    rows.iter().find(|row| {
+        row.get("stable_symbol_id")
+            .and_then(Value::as_str)
+            .map(raw_stable_symbol_id)
+            == Some(stable_symbol_id)
+    })
+}
+
+fn copy_if_present(dest: &mut serde_json::Map<String, Value>, source: &Value, key: &str) {
+    if let Some(value) = source.get(key) {
+        if !value.is_null() {
+            dest.insert(key.to_owned(), value.clone());
+        }
+    }
+}
+
+fn compact_impact(pack: &mut Value) {
+    let Some(object) = pack.get_mut("impact").and_then(Value::as_object_mut) else {
+        return;
+    };
+    object.remove("caller_neighbors");
+    object.remove("callee_neighbors");
+}
+
+fn compact_staleness(pack: &mut Value) {
+    let Some(staleness) = pack.get("staleness").cloned() else {
+        return;
+    };
+    let mut compact = serde_json::Map::new();
+    if staleness.get("available") == Some(&Value::Bool(false)) {
+        compact.insert("available".into(), json!(false));
+    }
+    if staleness.get("exact_graph_verified") == Some(&Value::Bool(false)) {
+        compact.insert("exact_graph_verified".into(), json!(false));
+    }
+    if staleness.get("delta_applied") == Some(&Value::Bool(true)) {
+        compact.insert("delta_applied".into(), json!(true));
+        if let Some(as_of) = staleness.get("algo_as_of") {
+            compact.insert("algo_as_of".into(), as_of.clone());
+        }
+    }
+    if staleness.get("analyst_matches_exact_graph") == Some(&Value::Bool(false)) {
+        for key in [
+            "analyst_matches_exact_graph",
+            "analyst_graph_content_hash",
+            "exact_graph_hash",
+        ] {
+            if let Some(value) = staleness.get(key) {
+                compact.insert(key.to_owned(), value.clone());
+            }
+        }
+    }
+    if staleness.get("response_file_oids_match") == Some(&Value::Bool(false)) {
+        compact.insert("response_file_oids_match".into(), json!(false));
+    }
+    let Some(object) = pack.as_object_mut() else {
+        return;
+    };
+    if compact.is_empty() {
+        object.remove("staleness");
+    } else {
+        object.insert("staleness".into(), Value::Object(compact));
+    }
+}
+
+fn omit_empty_array(pack: &mut Value, key: &str) {
+    let empty = pack
+        .get(key)
+        .and_then(Value::as_array)
+        .is_some_and(Vec::is_empty);
+    if empty {
+        if let Some(object) = pack.as_object_mut() {
+            object.remove(key);
+        }
+    }
+}
+
+fn insert_nonempty_array(pack: &mut Value, key: &str, values: Vec<Value>) {
+    if values.is_empty() {
+        return;
+    }
+    if let Some(object) = pack.as_object_mut() {
+        object.insert(key.to_owned(), Value::Array(values));
+    }
 }
 
 pub(crate) fn base_pack(
@@ -219,3 +379,7 @@ impl PackErrorExt for Value {
         self
     }
 }
+
+#[cfg(test)]
+#[path = "response_tests.rs"]
+mod tests;

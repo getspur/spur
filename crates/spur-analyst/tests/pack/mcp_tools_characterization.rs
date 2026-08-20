@@ -131,6 +131,26 @@ impl Drop for EnvGuard {
 }
 
 #[test]
+fn knowledge_context_pack_2_schema_defaults_compact_format_and_zero_bodies() {
+    let tool = tool_definitions()
+        .into_iter()
+        .find(|tool| tool.name == "knowledge_context_pack_2")
+        .expect("kcp2 tool");
+    assert_eq!(
+        tool.input_schema["properties"]["response_format"]["default"],
+        json!("compact")
+    );
+    assert_eq!(
+        tool.input_schema["properties"]["response_format"]["enum"],
+        json!(["full", "compact"])
+    );
+    assert_eq!(
+        tool.input_schema["properties"]["max_symbol_bodies"]["default"],
+        json!(0)
+    );
+}
+
+#[test]
 fn analyst_mcp_module_advertises_exact_public_tool_names() {
     let module = AnalystMcpModule::new();
     let names = module
@@ -340,6 +360,7 @@ async fn knowledge_context_pack_v2_response_shape_matches_snapshot() {
             "scope": "all",
             "limit": 5,
             "max_symbol_bodies": 0,
+            "response_format": "full",
             "graph_reasoning": {
                 "paths": true,
                 "communities": true,

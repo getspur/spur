@@ -1,9 +1,12 @@
 use std::collections::hash_map::DefaultHasher;
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::fs;
 use std::future::Future;
 use std::hash::{Hash, Hasher as _};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock, Weak};
+use std::time::SystemTime;
 
 use anyhow::{Context as _, Result};
 use tokio::sync::{Mutex, OnceCell};
@@ -19,20 +22,27 @@ pub(crate) const DELTA_FAILURE_ESCALATION_THRESHOLD: u32 =
     spur_graph::mcp::INCREMENTAL_FAILURES_BEFORE_FULL_REBUILD;
 
 const SESSION_CACHE_CAPACITY: usize = 1;
+const RETAINED_OVERLAY_DELTAS: usize = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct OverlayRebuildKey {
     head_oid: String,
+    base_graph_content_hash: String,
     dirty_oid_set_hash: u64,
 }
 
 impl OverlayRebuildKey {
-    pub(crate) fn from(head_oid: &str, dirty: &BTreeMap<PathBuf, [u8; 20]>) -> Self {
+    pub(crate) fn from(
+        head_oid: &str,
+        base_graph_content_hash: &str,
+        dirty: &BTreeMap<PathBuf, [u8; 20]>,
+    ) -> Self {
         let mut hasher = DefaultHasher::new();
         dirty.hash(&mut hasher);
 
         Self {
             head_oid: head_oid.to_owned(),
+            base_graph_content_hash: base_graph_content_hash.to_owned(),
             dirty_oid_set_hash: hasher.finish(),
         }
     }
@@ -49,7 +59,18 @@ impl OverlayRebuildKey {
         } else {
             head
         };
-        format!("{head}-{:016x}", self.dirty_oid_set_hash)
+        let base = self
+            .base_graph_content_hash
+            .chars()
+            .filter(|ch| ch.is_ascii_hexdigit())
+            .take(16)
+            .collect::<String>();
+        let base = if base.is_empty() {
+            "unknown".to_owned()
+        } else {
+            base
+        };
+        format!("{head}-{base}-{:016x}", self.dirty_oid_set_hash)
     }
 }
 
@@ -302,6 +323,17 @@ impl OverlaySessionCoordinator {
         }
         Some(session)
     }
+
+    fn retained_delta_dirs(&self) -> BTreeSet<PathBuf> {
+        let Ok(cache) = self.cache.lock() else {
+            return BTreeSet::new();
+        };
+        cache
+            .retained
+            .iter()
+            .filter_map(|(_, session)| session.delta_dir().map(Path::to_path_buf))
+            .collect()
+    }
 }
 
 impl Default for OverlaySessionCoordinator {
@@ -320,10 +352,14 @@ pub(crate) fn shared_overlay_session_coordinator() -> Arc<OverlaySessionCoordina
     )
 }
 
-pub(crate) fn overlay_rebuild_key_for_dirty_worktree(worktree: &Path) -> Option<OverlayRebuildKey> {
+pub(crate) fn overlay_rebuild_key_for_dirty_worktree(
+    worktree: &Path,
+    base_graph_content_hash: &str,
+) -> Option<OverlayRebuildKey> {
     let git = spur_graph::git::detect(worktree)?;
     let dirty = dirty_worktree_oids(worktree).ok()?;
-    (!dirty.is_empty()).then(|| OverlayRebuildKey::from(&git.head_oid, &dirty))
+    (!dirty.is_empty())
+        .then(|| OverlayRebuildKey::from(&git.head_oid, base_graph_content_hash, &dirty))
 }
 
 pub(crate) fn write_delta_for_session(
@@ -336,6 +372,16 @@ pub(crate) fn write_delta_for_session(
     std::fs::create_dir_all(&root)
         .with_context(|| format!("failed to create `{}`", root.display()))?;
     let delta_dir = root.join(key.cache_dir_name());
+
+    if overlay_delta_dir_is_reusable(&delta_dir, previous) {
+        tracing::debug!(
+            mode = ?mode,
+            delta_dir = %delta_dir.display(),
+            "reusing complete analyst worktree overlay delta"
+        );
+        retain_and_prune_overlay_delta(&root, &delta_dir);
+        return Ok(delta_dir);
+    }
 
     if delta_dir.exists() {
         std::fs::remove_dir_all(&delta_dir).with_context(|| {
@@ -352,7 +398,181 @@ pub(crate) fn write_delta_for_session(
         "building analyst worktree overlay delta"
     );
     spur_graph::store::write_worktree_delta(previous, worktree, &delta_dir)?;
+    retain_and_prune_overlay_delta(&root, &delta_dir);
     Ok(delta_dir)
+}
+
+fn retain_and_prune_overlay_delta(root: &Path, delta_dir: &Path) {
+    let mut protected = BTreeSet::from([delta_dir.to_path_buf()]);
+    protected.extend(shared_overlay_session_coordinator().retained_delta_dirs());
+    prune_overlay_deltas_best_effort(root, delta_dir, &protected);
+}
+
+fn overlay_delta_dir_is_reusable(
+    delta_dir: &Path,
+    previous: &spur_graph::GraphIndexArtifact,
+) -> bool {
+    let manifest_path = delta_dir.join("manifest.json");
+    let Ok(bytes) = fs::read(&manifest_path) else {
+        return false;
+    };
+    serde_json::from_slice::<spur_graph::GraphArtifactManifest>(&bytes)
+        .map(|manifest| {
+            manifest.complete
+                && manifest.manifest_version == spur_graph::store::current_manifest_version()
+                && manifest.graph_index_version == spur_graph::GRAPH_INDEX_VERSION_TEMPORAL
+                && manifest.manifest_version == previous.manifest_version
+                && manifest.graph_index_version == previous.header.graph_index_version
+        })
+        .unwrap_or(false)
+}
+
+struct OverlayDeltaCandidate {
+    path: PathBuf,
+    modified: SystemTime,
+}
+
+fn overlay_direct_child(overlay_root: &Path, target: &Path) -> Result<Option<PathBuf>> {
+    let target = target.canonicalize().with_context(|| {
+        format!(
+            "failed to canonicalize overlay delta `{}`",
+            target.display()
+        )
+    })?;
+    Ok((target.parent() == Some(overlay_root)).then_some(target))
+}
+
+fn overlay_delta_candidates(overlay_root: &Path) -> Result<Vec<OverlayDeltaCandidate>> {
+    let overlay_root = overlay_root.canonicalize().with_context(|| {
+        format!(
+            "failed to canonicalize overlay directory `{}`",
+            overlay_root.display()
+        )
+    })?;
+    let entries = fs::read_dir(&overlay_root)
+        .with_context(|| format!("failed to scan `{}`", overlay_root.display()))?;
+    let mut candidates = Vec::new();
+
+    for entry in entries {
+        let entry =
+            entry.with_context(|| format!("failed to scan `{}`", overlay_root.display()))?;
+        let file_type = entry
+            .file_type()
+            .with_context(|| format!("failed to inspect `{}`", entry.path().display()))?;
+        if !file_type.is_dir() {
+            continue;
+        }
+
+        let path = entry.path();
+        match fs::metadata(path.join("manifest.json")) {
+            Ok(metadata) if metadata.is_file() => {}
+            Ok(_) => continue,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("failed to inspect `{}`", path.display()));
+            }
+        }
+
+        let modified = entry
+            .metadata()
+            .with_context(|| format!("failed to inspect `{}`", path.display()))?
+            .modified()
+            .with_context(|| {
+                format!("failed to read modification time for `{}`", path.display())
+            })?;
+        candidates.push(OverlayDeltaCandidate { path, modified });
+    }
+
+    Ok(candidates)
+}
+
+fn stale_overlay_deltas(
+    mut candidates: Vec<OverlayDeltaCandidate>,
+    protected: &BTreeSet<PathBuf>,
+) -> Vec<PathBuf> {
+    candidates.sort_by(|left, right| {
+        right
+            .modified
+            .cmp(&left.modified)
+            .then_with(|| left.path.cmp(&right.path))
+    });
+    candidates
+        .into_iter()
+        .enumerate()
+        .filter_map(|(rank, candidate)| {
+            (rank >= RETAINED_OVERLAY_DELTAS && !protected.contains(&candidate.path))
+                .then_some(candidate.path)
+        })
+        .collect()
+}
+
+fn delete_stale_overlay_deltas(stale: Vec<PathBuf>) {
+    for path in stale {
+        if let Err(error) = fs::remove_dir_all(&path) {
+            tracing::warn!(
+                path = %path.display(),
+                error = %error,
+                "failed to prune stale analyst overlay delta"
+            );
+        }
+    }
+}
+
+fn prune_overlay_deltas_best_effort(
+    overlay_root: &Path,
+    written_dir: &Path,
+    extra_protected: &BTreeSet<PathBuf>,
+) {
+    let overlay_root = match overlay_root.canonicalize() {
+        Ok(path) => path,
+        Err(error) => {
+            tracing::warn!(
+                path = %overlay_root.display(),
+                error = %error,
+                "skipping analyst overlay pruning; directory is not canonicalizable"
+            );
+            return;
+        }
+    };
+    let written_dir = match overlay_direct_child(&overlay_root, written_dir) {
+        Ok(Some(path)) => path,
+        Ok(None) => {
+            tracing::warn!(
+                path = %written_dir.display(),
+                overlay_root = %overlay_root.display(),
+                "skipping analyst overlay pruning; written delta is outside the overlay cache"
+            );
+            return;
+        }
+        Err(error) => {
+            tracing::warn!(
+                path = %written_dir.display(),
+                error = %error,
+                "skipping analyst overlay pruning; written delta is uncertain"
+            );
+            return;
+        }
+    };
+    let candidates = match overlay_delta_candidates(&overlay_root) {
+        Ok(candidates) => candidates,
+        Err(error) => {
+            tracing::warn!(
+                overlay_root = %overlay_root.display(),
+                error = %error,
+                "skipping analyst overlay pruning; candidate discovery failed"
+            );
+            return;
+        }
+    };
+    let mut protected = BTreeSet::from([written_dir]);
+    for path in extra_protected {
+        if let Ok(Some(path)) = overlay_direct_child(&overlay_root, path) {
+            protected.insert(path);
+        }
+    }
+    let stale = stale_overlay_deltas(candidates, &protected);
+    delete_stale_overlay_deltas(stale);
 }
 
 fn dirty_worktree_oids(worktree: &Path) -> Result<BTreeMap<PathBuf, [u8; 20]>> {

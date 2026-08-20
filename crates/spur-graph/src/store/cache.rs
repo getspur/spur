@@ -138,9 +138,7 @@ pub fn write_with_dedup_with_section_sidecar_options(
             section_sidecar_options,
             section_sidecar_progress,
         )?;
-        write_current_pointer(worktree_root, &written_dir)?;
-        // No canonical was written, so any prior pointer is stale; remove it.
-        remove_if_exists(&worktree_root.join(POINTER_PATH))?;
+        publish_worktree_rebuild(artifact, worktree_root, Some(ctx), &written_dir)?;
         return Ok(());
     }
 
@@ -731,6 +729,22 @@ fn write_artifact_to_worktree(
     Ok(final_path)
 }
 
+/// Point CURRENT (and the graph-index pointer, when git context is available)
+/// at `written_dir`.
+pub fn publish_worktree_rebuild(
+    artifact: &GraphIndexArtifact,
+    worktree_root: &Path,
+    ctx: Option<&GitCtx>,
+    written_dir: &Path,
+) -> Result<()> {
+    write_current_pointer(worktree_root, written_dir)?;
+    match ctx {
+        Some(ctx) => write_pointer(artifact, worktree_root, ctx, written_dir)?,
+        None => remove_if_exists(&worktree_root.join(POINTER_PATH))?,
+    }
+    Ok(())
+}
+
 pub fn write_sidecar_and_stamp_best_effort(
     artifact: &GraphIndexArtifact,
     worktree_root: &Path,
@@ -1302,10 +1316,11 @@ mod tests {
             fs::canonicalize(env.worktree.path().join(".spur/graph")).expect("graph dir");
         assert!(current.starts_with(worktree_graph_dir));
         assert!(lookup_canonical(env.common.path(), "manifest-a", "hash-a").is_none());
-        assert!(
-            !pointer_path.exists(),
-            "lock timeout fallback must not leave a pointer to an unwritten canonical artifact"
-        );
+        let pointer: GraphIndexPointer =
+            serde_json::from_slice(&fs::read(&pointer_path).expect("read retargeted pointer"))
+                .expect("parse retargeted pointer");
+        assert_eq!(pointer.graph_content_hash, "hash-a");
+        assert_eq!(pointer.canonical_artifact_path, current);
         lock_file.unlock().unwrap();
         super::LOCK_TIMEOUT_MS_OVERRIDE.store(5_000, Ordering::SeqCst);
     }

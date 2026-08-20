@@ -1842,6 +1842,7 @@ async fn run_overlay_pack(worktree: &Path, query: &str, anchors: &[&str]) -> any
         "scope": "code",
         "limit": 1,
         "max_symbol_bodies": 0,
+        "response_format": "full",
         "graph_reasoning": {
             "paths": true,
             "communities": false,
@@ -1866,6 +1867,7 @@ async fn run_overlay_risk_pack(worktree: &Path, query: &str) -> anyhow::Result<V
         "scope": "code",
         "limit": 1,
         "max_symbol_bodies": 0,
+        "response_format": "full",
         "graph_reasoning": {
             "paths": false,
             "communities": true,

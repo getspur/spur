@@ -1550,6 +1550,27 @@ async fn knowledge_context_pack_missing_analyst_db_returns_structured_unavailabl
         .contains(".spur/analyst.duckdb"));
 }
 
+#[tokio::test]
+async fn knowledge_context_pack_2_missing_analyst_db_respects_compact_format() {
+    let _lock = async_env_lock().await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let repo = dir.path().join("repo");
+    std::fs::create_dir_all(repo.join(".spur")).expect("create .spur");
+
+    let result = spur_graph::mcp::with_worktree_root_for_request(repo, async {
+        run_knowledge_context_pack_2(&json!({ "query": "semantic search" })).await
+    })
+    .await
+    .expect("structured unavailable response");
+
+    assert_eq!(result["staleness"]["available"], false);
+    assert_eq!(result["error"]["code"], "analyst_unavailable");
+    assert!(result.get("risk_scorecard").is_none());
+    assert!(result.get("community_context").is_none());
+    assert!(result.get("temporal_context").is_none());
+    assert_eq!(result["caveats"][0]["code"], "analyst_unavailable");
+}
+
 #[test]
 fn path_budget_plan_caps_targets_without_shrinking_per_target_limit() {
     const MAX_PATHS: usize = 4;
@@ -1793,6 +1814,7 @@ async fn knowledge_context_pack_2_preserves_v1_fields_and_adds_empty_v2_sections
     let (_temp_dir, db_path) = minimal_analyst_db_with_meta();
     let request = KnowledgeContextPackV2Request::parse(&json!({
         "query": "semantic search",
+        "response_format": "full",
         "intent": "change",
         "scope": "code",
         "limit": 4,
@@ -1860,6 +1882,7 @@ async fn knowledge_context_pack_2_staleness_reports_overlay_session_state() {
     let (_temp_dir, db_path) = minimal_analyst_db_with_meta();
     let request = KnowledgeContextPackV2Request::parse(&json!({
         "query": "semantic search",
+        "response_format": "full",
         "intent": "review",
         "scope": "code",
         "graph_reasoning": {
@@ -1920,6 +1943,7 @@ async fn knowledge_context_pack_2_reports_overlay_staleness_end_to_end() {
     let happy_pack = spur_graph::mcp::with_worktree_root_for_request(happy.repo.clone(), async {
         run_knowledge_context_pack_2(&json!({
             "query": "dispatch approval evidence",
+            "response_format": "full",
             "intent": "review",
             "scope": "code",
             "limit": 5,
@@ -1944,6 +1968,7 @@ async fn knowledge_context_pack_2_reports_overlay_staleness_end_to_end() {
         spur_graph::mcp::with_worktree_root_for_request(degraded.repo.clone(), async {
             run_knowledge_context_pack_2(&json!({
                 "query": "dispatch approval evidence",
+                "response_format": "full",
                 "intent": "review",
                 "scope": "code",
                 "limit": 5,
@@ -1969,6 +1994,7 @@ async fn knowledge_context_pack_2_missing_graph_views_return_caveats_not_error()
     let (_temp_dir, db_path) = minimal_analyst_db_with_meta();
     let request = KnowledgeContextPackV2Request::parse(&json!({
         "query": "semantic search",
+        "response_format": "full",
         "intent": "review",
         "scope": "code",
         "limit": 2,
@@ -2020,6 +2046,7 @@ async fn knowledge_context_pack_2_returns_temporal_context_from_scorecard_when_a
     let (_temp_dir, db_path) = analyst_db_with_graph_reasoning_views();
     let request = KnowledgeContextPackV2Request::parse(&json!({
         "query": "semantic search",
+        "response_format": "full",
         "intent": "review",
         "scope": "code",
         "limit": 2,
@@ -2064,6 +2091,7 @@ async fn knowledge_context_pack_2_suppresses_graph_reasoning_when_analyst_hash_i
     let (_temp_dir, db_path) = analyst_db_with_graph_reasoning_views();
     let request = KnowledgeContextPackV2Request::parse(&json!({
         "query": "semantic search",
+        "response_format": "full",
         "intent": "review",
         "scope": "code",
         "limit": 2,
@@ -2146,6 +2174,7 @@ async fn knowledge_context_pack_2_staleness_uses_rebuilt_graph_hash() {
     let (_db_dir, db_path) = minimal_analyst_db_with_meta();
     let request = KnowledgeContextPackV2Request::parse(&json!({
         "query": "stable symbol",
+        "response_format": "full",
         "intent": "review",
         "scope": "code",
         "graph_reasoning": {
@@ -2186,6 +2215,7 @@ async fn knowledge_context_pack_2_bounds_path_and_risk_output() {
     let (_temp_dir, db_path) = minimal_analyst_db_with_meta();
     let request = KnowledgeContextPackV2Request::parse(&json!({
         "query": "semantic search",
+        "response_format": "full",
         "intent": "review",
         "scope": "code",
         "limit": 3,
@@ -2243,6 +2273,7 @@ async fn knowledge_context_pack_2_reads_fixture_db_end_to_end() {
     let pack = spur_graph::mcp::with_worktree_root_for_request(repo, async {
         run_knowledge_context_pack_2(&json!({
             "query": "dispatch approval evidence",
+            "response_format": "full",
             "intent": "review",
             "scope": "all",
             "limit": 5,
@@ -2316,6 +2347,7 @@ async fn knowledge_context_pack_2_missing_graph_views_keeps_candidates_and_retur
     let pack = spur_graph::mcp::with_worktree_root_for_request(repo, async {
         run_knowledge_context_pack_2(&json!({
             "query": "dispatch approval evidence",
+            "response_format": "full",
             "intent": "review",
             "scope": "all",
             "limit": 5,
@@ -2366,6 +2398,7 @@ async fn knowledge_context_pack_2_preserves_popular_sink_impact_boundary() {
     let (_temp_dir, db_path) = minimal_analyst_db_with_meta();
     let request = KnowledgeContextPackV2Request::parse(&json!({
         "query": "popular impact",
+        "response_format": "full",
         "intent": "change",
         "scope": "code",
         "graph_reasoning": {

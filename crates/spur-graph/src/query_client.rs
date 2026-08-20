@@ -296,14 +296,22 @@ pub struct OverlayClient<B: GraphQueryClient> {
 }
 
 impl<B: GraphQueryClient> OverlayClient<B> {
-    pub fn new(base: B, root: &Path, changed_files: &[PathBuf]) -> anyhow::Result<Self> {
+    pub fn extract_delta(
+        root: &Path,
+        changed_files: &[PathBuf],
+    ) -> anyhow::Result<(Arc<GraphIndexArtifact>, HashSet<String>)> {
         let facts = build_facts_for_paths(root, changed_files)?;
         let artifact = artifact_from_facts(&facts, root)?;
         let shadowed = changed_files
             .iter()
             .filter_map(|path| normalize_worktree_path(root, path).ok())
             .collect::<HashSet<_>>();
-        Self::from_artifacts(base, Arc::new(artifact), shadowed)
+        Ok((Arc::new(artifact), shadowed))
+    }
+
+    pub fn new(base: B, root: &Path, changed_files: &[PathBuf]) -> anyhow::Result<Self> {
+        let (artifact, shadowed) = Self::extract_delta(root, changed_files)?;
+        Self::from_artifacts(base, artifact, shadowed)
     }
 
     pub fn from_artifacts(

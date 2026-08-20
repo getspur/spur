@@ -66,10 +66,12 @@ async fn impact_summary_for_selector(selector: &str) -> Option<SymbolImpactSumma
     let callers_args = json!({
         "selector": selector,
         "include_unresolved": true,
+        "response_format": "compact",
     });
     let callees_args = json!({
         "selector": selector,
         "include_unresolved": true,
+        "response_format": "compact",
     });
     let (callers, callees) = tokio::join!(
         spur_graph::mcp::code_callers(&callers_args),
@@ -107,10 +109,21 @@ fn representative_neighbors(body: &Value, field: &str, suppress: bool) -> Vec<Va
             values
                 .iter()
                 .take(MAX_IMPACT_NEIGHBORS)
-                .cloned()
+                .map(compact_neighbor_row)
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default()
+}
+
+fn compact_neighbor_row(value: &Value) -> Value {
+    json!({
+        "uri": value.get("uri").cloned().unwrap_or(Value::Null),
+        "entity_name": value
+            .get("entity_name")
+            .cloned()
+            .or_else(|| value.get("target_label").cloned())
+            .unwrap_or(Value::Null),
+    })
 }
 
 fn top_n_code_selectors(
@@ -227,6 +240,34 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn representative_neighbors_keep_uri_and_name_only() {
+        let body = json!({
+            "callers": [
+                {
+                    "uri": "graph://symbol/abc",
+                    "entity_name": "caller_fn",
+                    "enclosing_scope": "impl Foo",
+                    "file_path": "crates/foo/src/lib.rs",
+                    "line_range": [10, 20],
+                    "symbol_kind": "function",
+                    "resolved": true,
+                    "edge_kind": "calls",
+                    "bind_method": "singleton",
+                    "confidence": "syntax_exact"
+                }
+            ]
+        });
+        let neighbors = representative_neighbors(&body, "callers", false);
+        assert_eq!(
+            neighbors,
+            vec![json!({
+                "uri": "graph://symbol/abc",
+                "entity_name": "caller_fn"
+            })]
+        );
+    }
 
     #[test]
     fn aggregate_impact_suppresses_neighbors_when_any_symbol_is_popular_sink() {

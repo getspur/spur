@@ -33,7 +33,7 @@ impl KnowledgeContextPackRequest {
         )?);
         let limit = parse_u64(args, "limit", 8, 1, 20)?;
         let include_tests = parse_include_tests(args)?;
-        let max_symbol_bodies = parse_u64(args, "max_symbol_bodies", 3, 0, 5)?;
+        let max_symbol_bodies = parse_u64(args, "max_symbol_bodies", 0, 0, 5)?;
 
         Ok(Self {
             query,
@@ -81,19 +81,41 @@ fn parse_include_tests(args: &Value) -> Result<bool, McpHandlerError> {
         .map(|value| value.unwrap_or(true))
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PackResponseFormat {
+    Compact,
+    Full,
+}
+
+impl PackResponseFormat {
+    fn parse(args: &Value) -> Result<Self, McpHandlerError> {
+        match parse_enum(args, "response_format", &["full", "compact"], "compact")?.as_str() {
+            "full" => Ok(Self::Full),
+            _ => Ok(Self::Compact),
+        }
+    }
+
+    pub(crate) fn is_compact(self) -> bool {
+        matches!(self, Self::Compact)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct KnowledgeContextPackV2Request {
     pub(crate) base: KnowledgeContextPackRequest,
     pub(crate) graph_reasoning: GraphReasoningOptions,
+    pub(crate) response_format: PackResponseFormat,
 }
 
 impl KnowledgeContextPackV2Request {
     pub(crate) fn parse(args: &Value) -> Result<Self, McpHandlerError> {
         let base = KnowledgeContextPackRequest::parse(args)?;
         let graph_reasoning = GraphReasoningOptions::parse(args, base.intent, base.scope)?;
+        let response_format = PackResponseFormat::parse(args)?;
         Ok(Self {
             base,
             graph_reasoning,
+            response_format,
         })
     }
 }
@@ -142,18 +164,21 @@ impl GraphReasoningOptions {
 struct GraphReasoningDefaults {
     paths: bool,
     risk: bool,
+    communities: bool,
     max_path_hops: usize,
     max_paths: usize,
 }
 
 impl GraphReasoningDefaults {
     fn from(intent: KnowledgeIntent, scope: KnowledgeScope) -> Self {
+        let investigative = matches!(
+            intent,
+            KnowledgeIntent::Change | KnowledgeIntent::Review | KnowledgeIntent::Debug
+        );
         Self {
-            paths: matches!(
-                intent,
-                KnowledgeIntent::Change | KnowledgeIntent::Review | KnowledgeIntent::Debug
-            ),
-            risk: !matches!(scope, KnowledgeScope::Docs),
+            paths: investigative,
+            risk: investigative && !matches!(scope, KnowledgeScope::Docs),
+            communities: investigative,
             max_path_hops: KnowledgePathOptions::default().max_hops,
             max_paths: KnowledgePathOptions::default().max_paths,
         }
@@ -162,7 +187,7 @@ impl GraphReasoningDefaults {
     fn into_options(self) -> GraphReasoningOptions {
         GraphReasoningOptions {
             paths: self.paths,
-            communities: true,
+            communities: self.communities,
             communities_explicit: false,
             risk: self.risk,
             max_path_hops: self.max_path_hops,
@@ -179,7 +204,7 @@ fn parse_graph_reasoning_object(
     let communities = parse_optional_bool_v2(object, "communities")?;
     Ok(GraphReasoningOptions {
         paths: parse_optional_bool_v2(object, "paths")?.unwrap_or(defaults.paths),
-        communities: communities.unwrap_or(true),
+        communities: communities.unwrap_or(defaults.communities),
         communities_explicit: communities.is_some(),
         risk: parse_optional_bool_v2(object, "risk")?.unwrap_or(defaults.risk),
         max_path_hops: parse_clamped_usize_v2(
@@ -388,107 +413,5 @@ fn parse_anchor_array_v2(
 }
 
 #[cfg(test)]
-mod tests {
-    use serde_json::json;
-
-    use super::*;
-
-    #[test]
-    fn knowledge_context_pack_rejects_empty_query() {
-        let error = KnowledgeContextPackRequest::parse(&json!({ "query": "   " }))
-            .expect_err("empty query must be rejected");
-
-        assert_eq!(error.json_rpc_code(), -32602);
-        assert!(
-            error.to_string().contains("non-empty string field 'query'"),
-            "unexpected error: {error}"
-        );
-    }
-
-    #[test]
-    fn knowledge_context_pack_queries_graph_for_graph_scope_or_change_debug_all_scope() {
-        for (scope, intent, expected) in [
-            ("graph", "explain", true),
-            ("all", "debug", true),
-            ("all", "change", true),
-            ("all", "explain", false),
-            ("code", "debug", false),
-            ("docs", "change", false),
-        ] {
-            let request = KnowledgeContextPackRequest::parse(&json!({
-                "query": "semantic search",
-                "scope": scope,
-                "intent": intent
-            }))
-            .expect("request");
-
-            assert_eq!(
-                request.should_query_graph_candidates(),
-                expected,
-                "scope={scope} intent={intent}"
-            );
-        }
-    }
-
-    #[test]
-    fn knowledge_context_pack_2_parser_clamps_graph_reasoning_budgets() {
-        let high = KnowledgeContextPackV2Request::parse(&json!({
-            "query": "semantic search",
-            "intent": "review",
-            "graph_reasoning": {
-                "paths": true,
-                "communities": true,
-                "risk": true,
-                "max_path_hops": 999,
-                "max_paths": 999,
-                "anchors": ["graph://symbol/anchor-one"]
-            }
-        }))
-        .expect("high budget request");
-
-        assert_eq!(high.base.intent.as_str(), "review");
-        assert!(high.graph_reasoning.paths);
-        assert!(high.graph_reasoning.communities);
-        assert!(high.graph_reasoning.risk);
-        assert_eq!(
-            high.graph_reasoning.max_path_hops,
-            crate::MAX_CONTEXT_PATH_HOPS
-        );
-        assert_eq!(high.graph_reasoning.max_paths, crate::MAX_CONTEXT_PATHS);
-        assert_eq!(
-            high.graph_reasoning.anchors,
-            vec!["graph://symbol/anchor-one".to_owned()]
-        );
-
-        let low = KnowledgeContextPackV2Request::parse(&json!({
-            "query": "semantic search",
-            "graph_reasoning": {
-                "max_path_hops": 0,
-                "max_paths": 0
-            }
-        }))
-        .expect("low budget request");
-        assert_eq!(low.graph_reasoning.max_path_hops, 1);
-        assert_eq!(low.graph_reasoning.max_paths, 1);
-    }
-
-    #[test]
-    fn knowledge_context_pack_2_parser_defaults_graph_reasoning_by_intent_and_scope() {
-        let change = KnowledgeContextPackV2Request::parse(&json!({
-            "query": "semantic search",
-            "intent": "change"
-        }))
-        .expect("change request");
-        assert!(change.graph_reasoning.paths);
-        assert!(change.graph_reasoning.risk);
-
-        let explain_docs = KnowledgeContextPackV2Request::parse(&json!({
-            "query": "semantic search",
-            "intent": "explain",
-            "scope": "docs"
-        }))
-        .expect("docs request");
-        assert!(!explain_docs.graph_reasoning.paths);
-        assert!(!explain_docs.graph_reasoning.risk);
-    }
-}
+#[path = "request_tests.rs"]
+mod tests;
