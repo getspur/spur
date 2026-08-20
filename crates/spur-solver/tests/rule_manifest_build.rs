@@ -3,7 +3,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-#[allow(dead_code)]
+#[expect(dead_code)]
 #[path = "../src/rules/manifest_format.rs"]
 mod manifest_format;
 #[path = "../build_support/manifest_source.rs"]

@@ -182,9 +182,7 @@ fn solve_rules_schema_keeps_one_bedrock_compatible_family_execution_tool() {
         );
     }
     assert!(
-        !rule_ids
-            .iter()
-            .any(|rule_id| *rule_id == "rbac.minimum_privilege"),
+        !rule_ids.contains(&"rbac.minimum_privilege"),
         "capability-unavailable rules must not be advertised as executable"
     );
 }
