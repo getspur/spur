@@ -240,6 +240,20 @@ pub enum NativeHandlerV1 {
     ResourceAggregateCapacity,
     ResourceQuotaCapacity,
     ResourceRequestWithinLimit,
+    ConfigurationRequiresAny,
+    ConfigurationExcludes,
+    ConfigurationSelectionCardinality,
+    ConfigurationAttributeAllowedPair,
+    ConfigurationVersionInterval,
+    SchedulingAssignmentExactlyOnce,
+    SchedulingPlacementAllowed,
+    SchedulingPrecedenceFinishStart,
+    SchedulingCumulativeCapacity,
+    SchedulingMinimizeMakespan,
+    WorkflowInitialStateAllowed,
+    WorkflowTransitionAllowed,
+    WorkflowSafetyInvariant,
+    WorkflowBoundedReachability,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -309,6 +323,20 @@ impl NativeHandlerV1 {
             | Self::ResourceAggregateCapacity
             | Self::ResourceQuotaCapacity
             | Self::ResourceRequestWithinLimit => "resource",
+            Self::ConfigurationRequiresAny
+            | Self::ConfigurationExcludes
+            | Self::ConfigurationSelectionCardinality
+            | Self::ConfigurationAttributeAllowedPair
+            | Self::ConfigurationVersionInterval => "configuration",
+            Self::SchedulingAssignmentExactlyOnce
+            | Self::SchedulingPlacementAllowed
+            | Self::SchedulingPrecedenceFinishStart
+            | Self::SchedulingCumulativeCapacity
+            | Self::SchedulingMinimizeMakespan => "scheduling",
+            Self::WorkflowInitialStateAllowed
+            | Self::WorkflowTransitionAllowed
+            | Self::WorkflowSafetyInvariant
+            | Self::WorkflowBoundedReachability => "workflow",
         }
     }
 
@@ -355,6 +383,22 @@ impl NativeHandlerV1 {
             | Self::ResourceRequestWithinLimit => {
                 vec![native_parameter("resources", Defaulted)]
             }
+            Self::ConfigurationRequiresAny
+            | Self::ConfigurationExcludes
+            | Self::ConfigurationSelectionCardinality
+            | Self::ConfigurationAttributeAllowedPair
+            | Self::ConfigurationVersionInterval
+            | Self::SchedulingAssignmentExactlyOnce
+            | Self::SchedulingPlacementAllowed
+            | Self::SchedulingPrecedenceFinishStart
+            | Self::SchedulingCumulativeCapacity
+            | Self::WorkflowInitialStateAllowed
+            | Self::WorkflowTransitionAllowed
+            | Self::WorkflowSafetyInvariant => vec![],
+            Self::SchedulingMinimizeMakespan => {
+                vec![native_parameter("maximum_makespan", Optional)]
+            }
+            Self::WorkflowBoundedReachability => vec![native_parameter("bound", Optional)],
         }
     }
 }
@@ -1021,4 +1065,54 @@ fn invalid_parameter<T>(
     message: impl Into<String>,
 ) -> Result<T, ManifestValidationError> {
     invalid(format!("rule.parameters.{}", parameter.name), message)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn generic_rule_handlers_have_closed_family_and_parameter_abis() {
+        use NativeParameterModeV1::Optional;
+
+        let expected = vec![
+            ("configuration_requires_any", "configuration", vec![]),
+            ("configuration_excludes", "configuration", vec![]),
+            (
+                "configuration_selection_cardinality",
+                "configuration",
+                vec![],
+            ),
+            (
+                "configuration_attribute_allowed_pair",
+                "configuration",
+                vec![],
+            ),
+            ("configuration_version_interval", "configuration", vec![]),
+            ("scheduling_assignment_exactly_once", "scheduling", vec![]),
+            ("scheduling_placement_allowed", "scheduling", vec![]),
+            ("scheduling_precedence_finish_start", "scheduling", vec![]),
+            ("scheduling_cumulative_capacity", "scheduling", vec![]),
+            (
+                "scheduling_minimize_makespan",
+                "scheduling",
+                vec![native_parameter("maximum_makespan", Optional)],
+            ),
+            ("workflow_initial_state_allowed", "workflow", vec![]),
+            ("workflow_transition_allowed", "workflow", vec![]),
+            ("workflow_safety_invariant", "workflow", vec![]),
+            (
+                "workflow_bounded_reachability",
+                "workflow",
+                vec![native_parameter("bound", Optional)],
+            ),
+        ];
+
+        for (name, family, parameter_abi) in &expected {
+            let handler: NativeHandlerV1 =
+                serde_yml::from_str(name).expect("new handler must deserialize");
+            assert_eq!(handler.family(), *family, "handler {name}");
+            assert_eq!(handler.parameter_abi(), *parameter_abi, "handler {name}");
+        }
+    }
 }

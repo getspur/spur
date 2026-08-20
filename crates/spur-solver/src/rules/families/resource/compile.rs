@@ -239,7 +239,21 @@ fn validate_legacy_static_contract(binding: &ResourceRuleBinding) -> Result<(), 
             | NativeHandlerV1::RbacDynamicSeparationOfDuty
             | NativeHandlerV1::RbacPermissionReachable
             | NativeHandlerV1::RbacRoleHierarchyAcyclic
-            | NativeHandlerV1::RbacStaticSeparationOfDuty,
+            | NativeHandlerV1::RbacStaticSeparationOfDuty
+            | NativeHandlerV1::ConfigurationRequiresAny
+            | NativeHandlerV1::ConfigurationExcludes
+            | NativeHandlerV1::ConfigurationSelectionCardinality
+            | NativeHandlerV1::ConfigurationAttributeAllowedPair
+            | NativeHandlerV1::ConfigurationVersionInterval
+            | NativeHandlerV1::SchedulingAssignmentExactlyOnce
+            | NativeHandlerV1::SchedulingPlacementAllowed
+            | NativeHandlerV1::SchedulingPrecedenceFinishStart
+            | NativeHandlerV1::SchedulingCumulativeCapacity
+            | NativeHandlerV1::SchedulingMinimizeMakespan
+            | NativeHandlerV1::WorkflowInitialStateAllowed
+            | NativeHandlerV1::WorkflowTransitionAllowed
+            | NativeHandlerV1::WorkflowSafetyInvariant
+            | NativeHandlerV1::WorkflowBoundedReachability,
         )
         | None => Err(format!("unsupported resource rule `{}`", binding.rule_id)),
     }
@@ -419,7 +433,21 @@ fn compile_binding(
         | NativeHandlerV1::RbacDynamicSeparationOfDuty
         | NativeHandlerV1::RbacPermissionReachable
         | NativeHandlerV1::RbacRoleHierarchyAcyclic
-        | NativeHandlerV1::RbacStaticSeparationOfDuty => {
+        | NativeHandlerV1::RbacStaticSeparationOfDuty
+        | NativeHandlerV1::ConfigurationRequiresAny
+        | NativeHandlerV1::ConfigurationExcludes
+        | NativeHandlerV1::ConfigurationSelectionCardinality
+        | NativeHandlerV1::ConfigurationAttributeAllowedPair
+        | NativeHandlerV1::ConfigurationVersionInterval
+        | NativeHandlerV1::SchedulingAssignmentExactlyOnce
+        | NativeHandlerV1::SchedulingPlacementAllowed
+        | NativeHandlerV1::SchedulingPrecedenceFinishStart
+        | NativeHandlerV1::SchedulingCumulativeCapacity
+        | NativeHandlerV1::SchedulingMinimizeMakespan
+        | NativeHandlerV1::WorkflowInitialStateAllowed
+        | NativeHandlerV1::WorkflowTransitionAllowed
+        | NativeHandlerV1::WorkflowSafetyInvariant
+        | NativeHandlerV1::WorkflowBoundedReachability => {
             Err(format!("unsupported resource rule `{}`", source.rule_id))
         }
     }

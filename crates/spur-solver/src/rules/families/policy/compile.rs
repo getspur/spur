@@ -482,7 +482,21 @@ fn compile_binding(
         | NativeHandlerV1::PlacementTopologyMaxSkew
         | NativeHandlerV1::ResourceAggregateCapacity
         | NativeHandlerV1::ResourceQuotaCapacity
-        | NativeHandlerV1::ResourceRequestWithinLimit => {
+        | NativeHandlerV1::ResourceRequestWithinLimit
+        | NativeHandlerV1::ConfigurationRequiresAny
+        | NativeHandlerV1::ConfigurationExcludes
+        | NativeHandlerV1::ConfigurationSelectionCardinality
+        | NativeHandlerV1::ConfigurationAttributeAllowedPair
+        | NativeHandlerV1::ConfigurationVersionInterval
+        | NativeHandlerV1::SchedulingAssignmentExactlyOnce
+        | NativeHandlerV1::SchedulingPlacementAllowed
+        | NativeHandlerV1::SchedulingPrecedenceFinishStart
+        | NativeHandlerV1::SchedulingCumulativeCapacity
+        | NativeHandlerV1::SchedulingMinimizeMakespan
+        | NativeHandlerV1::WorkflowInitialStateAllowed
+        | NativeHandlerV1::WorkflowTransitionAllowed
+        | NativeHandlerV1::WorkflowSafetyInvariant
+        | NativeHandlerV1::WorkflowBoundedReachability => {
             Err(format!("unsupported policy rule `{}`", source.rule_id))
         }
     }
