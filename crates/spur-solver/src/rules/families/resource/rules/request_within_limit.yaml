@@ -1,0 +1,128 @@
+schema_version: 1
+id: resource.request_within_limit
+rule_version: 1
+family: resource
+profile: capacity
+primitive: request_limit
+summary: Require each selected per-replica request to be at most its matching limit.
+availability: implemented
+strength: hard
+authorities:
+  - kind: kubernetes_documentation
+    title: Resource Management for Pods and Containers
+    url: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+requires:
+  - workload.requests
+  - workload.limits
+llm_encoding:
+  effectiveness: high
+  problem_shapes:
+    - Require each selected per-replica request to be at most its matching limit.
+  encode_steps:
+    - Bind explicit workloads and resources
+    - Declare bounded unknown numeric facts
+    - Compile capacity or placement predicates
+  anti_patterns:
+    - Do not query or infer live scheduler state
+  escalate_when:
+    - Escalate affinity, taints, or priority to separate rule primitives
+solver_encoding:
+  theory: QF_NIA
+  verification: assert the predicate over complete demand and placement facts
+  synthesis: leave only explicitly bounded numeric facts free
+  formula:
+    - request(resource) <= limit(resource)
+subjects:
+  cardinality:
+    kind: at_least
+    count: 1
+parameters:
+  - name: resources
+    required: false
+    default: []
+    kind: string_array
+handler: resource_request_within_limit
+examples:
+  valid:
+    facts:
+      family: resource
+      mode: verify
+      rules:
+        - rule_id: resource.request_within_limit
+          subjects: [api]
+          parameters:
+            resources: [cpu]
+      facts:
+        workloads:
+          api:
+            replicas: 1
+            requests: {cpu: 500}
+            limits: {cpu: 500}
+            domain_counts: {}
+        pools: {}
+        quotas: {}
+      unknowns: []
+    expectation: pass
+  invalid:
+    facts:
+      family: resource
+      mode: verify
+      rules:
+        - rule_id: resource.request_within_limit
+          subjects: [api]
+          parameters:
+            resources: [cpu]
+      facts:
+        workloads:
+          api:
+            replicas: 1
+            requests: {cpu: 501}
+            limits: {cpu: 500}
+            domain_counts: {}
+        pools: {}
+        quotas: {}
+      unknowns: []
+    expectation: counterexample
+    expected_diagnostic: resource.request_within_limit.violation
+conformance:
+  valid:
+    - name: request equals matching limit
+      request:
+        family: resource
+        mode: verify
+        rules:
+          - rule_id: resource.request_within_limit
+            subjects: [api]
+            parameters:
+              resources: [cpu]
+        facts:
+          workloads:
+            api:
+              replicas: 1
+              requests: {cpu: 500}
+              limits: {cpu: 500}
+              domain_counts: {}
+          pools: {}
+          quotas: {}
+        unknowns: []
+  invalid:
+    - name: request exceeds matching limit
+      request:
+        family: resource
+        mode: verify
+        rules:
+          - rule_id: resource.request_within_limit
+            subjects: [api]
+            parameters:
+              resources: [cpu]
+        facts:
+          workloads:
+            api:
+              replicas: 1
+              requests: {cpu: 501}
+              limits: {cpu: 500}
+              domain_counts: {}
+          pools: {}
+          quotas: {}
+        unknowns: []
+      expected_diagnostic: resource.request_within_limit.violation
