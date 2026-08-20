@@ -27,6 +27,11 @@ uuid.workspace = true
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+[build-dependencies]
+serde.workspace = true
+serde_json.workspace = true
+serde_yml = "0.0.12"
+
 [dev-dependencies]
 serde_json.workspace = true
 serde_yml = "0.0.12"
