@@ -8,6 +8,7 @@ use serde_json::{json, Value};
 use crate::{
     rules::{
         compiler::{FamilyCompilation, FamilyCompileError, ModelProjection, RuleFamilyCompiler},
+        manifest_family_executable_rule_ids,
         primitives::{add, and, boolean, eq, int, le, lt, or, request, var},
         CompiledRule, RuleSolveMode,
     },
@@ -676,6 +677,8 @@ const fn default_timeout_ms() -> u64 {
 }
 
 fn input_schema() -> Value {
+    let rule_ids =
+        manifest_family_executable_rule_ids("policy").expect("policy manifest executable rule IDs");
     let role_array =
         json!({"type": "array", "maxItems": MAX_VARIABLES, "items": {"type": "string"}});
     json!({
@@ -688,10 +691,7 @@ fn input_schema() -> Value {
                 "items": {
                     "type": "object",
                     "properties": {
-                        "rule_id": {"type": "string", "enum": [
-                            "rbac.dynamic_separation_of_duty", "rbac.permission_reachable",
-                            "rbac.role_hierarchy_acyclic", "rbac.static_separation_of_duty"
-                        ]},
+                        "rule_id": {"type": "string", "enum": rule_ids},
                         "subjects": {"type": "array", "maxItems": 2, "items": {"type": "string"}},
                         "parameters": {
                             "type": "object",

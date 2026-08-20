@@ -8,6 +8,7 @@ use serde_json::{json, Value};
 use crate::{
     rules::{
         compiler::{FamilyCompilation, FamilyCompileError, ModelProjection, RuleFamilyCompiler},
+        manifest_family_executable_rule_ids,
         primitives::{add, and, boolean, ge, int, le, mul, not, or, request, var},
         CompiledRule, RuleSolveMode,
     },
@@ -626,6 +627,8 @@ const fn default_timeout_ms() -> u64 {
 }
 
 fn input_schema() -> Value {
+    let rule_ids = manifest_family_executable_rule_ids("accessibility")
+        .expect("accessibility manifest executable rule IDs");
     json!({
         "type": "object",
         "properties": {
@@ -636,9 +639,7 @@ fn input_schema() -> Value {
                 "items": {
                     "type": "object",
                     "properties": {
-                        "rule_id": {"type": "string", "enum": [
-                            "a11y.focus_not_obscured", "a11y.reflow", "a11y.target_size", "a11y.text_contrast"
-                        ]},
+                        "rule_id": {"type": "string", "enum": rule_ids},
                         "subjects": {"type": "array", "maxItems": 2, "items": {"type": "string"}},
                         "parameters": {
                             "type": "object",

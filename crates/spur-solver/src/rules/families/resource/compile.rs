@@ -8,6 +8,7 @@ use serde_json::{json, Value};
 use crate::{
     rules::{
         compiler::{FamilyCompilation, FamilyCompileError, ModelProjection, RuleFamilyCompiler},
+        manifest_family_executable_rule_ids,
         primitives::{add, and, boolean, eq, ge, gt, int, le, mul, or, request, sub, var},
         CompiledRule, RuleSolveMode,
     },
@@ -598,6 +599,8 @@ const fn default_timeout_ms() -> u64 {
 }
 
 fn input_schema() -> Value {
+    let rule_ids = manifest_family_executable_rule_ids("resource")
+        .expect("resource manifest executable rule IDs");
     let nullable_non_negative = json!({"type": ["integer", "null"], "minimum": 0});
     let nullable_resource_map = json!({"type": "object", "maxProperties": MAX_CONSTRAINTS, "additionalProperties": nullable_non_negative});
     let capacity_map = json!({
@@ -618,10 +621,7 @@ fn input_schema() -> Value {
                 "items": {
                     "type": "object",
                     "properties": {
-                        "rule_id": {"type": "string", "enum": [
-                            "placement.minimum_failure_domains", "placement.topology_max_skew",
-                            "resource.aggregate_capacity", "resource.quota_capacity", "resource.request_within_limit"
-                        ]},
+                        "rule_id": {"type": "string", "enum": rule_ids},
                         "subjects": {"type": "array", "minItems": 1, "maxItems": MAX_CONSTRAINTS, "items": {"type": "string"}},
                         "parameters": {
                             "type": "object",
