@@ -2,13 +2,15 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::{
     rules::{
         compiler::{FamilyCompilation, FamilyCompileError, ModelProjection, RuleFamilyCompiler},
+        manifest::validate_binding_contract,
         manifest_family_executable_rule_ids,
+        manifest_format::NativeHandlerV1,
         primitives::{add, and, boolean, eq, int, le, lt, or, request, var},
         CompiledRule, RuleSolveMode,
     },
@@ -17,8 +19,6 @@ use crate::{
         MAX_VARIABLES,
     },
 };
-
-use super::builtin_registry;
 
 /// Policy compiler registered behind `solve_rules`.
 pub static COMPILER: PolicyCompiler = PolicyCompiler;
@@ -67,13 +67,21 @@ struct PolicyRuleBinding {
     parameters: PolicyParameters,
 }
 
-#[derive(Default, Deserialize)]
+#[derive(Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct PolicyParameters {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     roles: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     max_assigned: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     max_active: Option<i64>,
+}
+
+struct ValidatedPolicyBinding<'a> {
+    source: &'a PolicyRuleBinding,
+    handler: NativeHandlerV1,
+    parameters: PolicyParameters,
 }
 
 #[derive(Clone, Deserialize)]
@@ -128,16 +136,26 @@ fn compile(input: Value) -> Result<FamilyCompilation, String> {
     if input.mode == RuleSolveMode::Verify && !input.unknowns.is_empty() {
         return Err("verification requires complete policy memberships".to_owned());
     }
+
+    let bindings = input
+        .rules
+        .iter()
+        .map(validate_manifest_binding)
+        .collect::<Result<Vec<_>, _>>()?;
     validate_facts(&input.facts, &input.unknowns)?;
     let mut resolver = PolicyResolver::new(input.facts, &input.unknowns);
     let session_authorization = resolver.session_authorization();
     let mut rules = Vec::with_capacity(input.rules.len());
-    for (index, binding) in input.rules.iter().enumerate() {
+    for (index, binding) in bindings.iter().enumerate() {
         let predicate = and(vec![
             session_authorization.clone(),
             compile_binding(binding, &mut resolver)?,
         ]);
-        rules.push(CompiledRule::new(binding.rule_id.clone(), index, predicate));
+        rules.push(CompiledRule::new(
+            binding.source.rule_id.clone(),
+            index,
+            predicate,
+        ));
     }
     let solver_request = request(
         "policy",
@@ -157,6 +175,63 @@ fn compile(input: Value) -> Result<FamilyCompilation, String> {
         rules,
         projections: resolver.projections,
     })
+}
+
+fn validate_manifest_binding(
+    binding: &PolicyRuleBinding,
+) -> Result<ValidatedPolicyBinding<'_>, String> {
+    let parameters =
+        serde_json::to_value(&binding.parameters).map_err(|error| error.to_string())?;
+    let Value::Object(parameters) = parameters else {
+        return Err("policy parameters did not serialize as an object".to_owned());
+    };
+    let validated = validate_binding_contract(&binding.rule_id, &binding.subjects, &parameters)
+        .map_err(|message| stable_contract_error(binding, message))?;
+    let parameters = serde_json::from_value(Value::Object(validated.parameters))
+        .map_err(|error| error.to_string())?;
+
+    Ok(ValidatedPolicyBinding {
+        source: binding,
+        handler: validated.handler,
+        parameters,
+    })
+}
+
+fn stable_contract_error(binding: &PolicyRuleBinding, message: String) -> String {
+    match validate_legacy_static_contract(binding) {
+        Err(error) => error,
+        Ok(()) => message,
+    }
+}
+
+// The shared manifest validator owns acceptance. This error-only replay keeps the
+// established policy diagnostics while static contract failures move before facts.
+fn validate_legacy_static_contract(binding: &PolicyRuleBinding) -> Result<(), String> {
+    match binding.rule_id.as_str() {
+        "rbac.permission_reachable" => {
+            require_subjects(binding, 2)?;
+            reject_parameters(binding)
+        }
+        "rbac.role_hierarchy_acyclic" => {
+            require_subjects(binding, 0)?;
+            reject_parameters(binding)
+        }
+        "rbac.static_separation_of_duty" => {
+            require_subjects(binding, 1)?;
+            reject_max_active(binding)?;
+            require_parameter_roles(binding)?;
+            positive_limit("max_assigned", binding.parameters.max_assigned.unwrap_or(1))?;
+            Ok(())
+        }
+        "rbac.dynamic_separation_of_duty" => {
+            require_subjects(binding, 1)?;
+            reject_max_assigned(binding)?;
+            require_parameter_roles(binding)?;
+            positive_limit("max_active", binding.parameters.max_active.unwrap_or(1))?;
+            Ok(())
+        }
+        _ => Err(format!("unsupported policy rule `{}`", binding.rule_id)),
+    }
 }
 
 fn validate_facts(facts: &PolicyFacts, unknowns: &[PolicyUnknown]) -> Result<(), String> {
@@ -310,23 +385,17 @@ fn reject_duplicates(items: &[String], context: &str) -> Result<(), String> {
 }
 
 fn compile_binding(
-    binding: &PolicyRuleBinding,
+    binding: &ValidatedPolicyBinding<'_>,
     resolver: &mut PolicyResolver,
 ) -> Result<ConstraintExpr, String> {
-    if builtin_registry().rule(&binding.rule_id).is_none()
-        || binding.rule_id == "rbac.minimum_privilege"
-    {
-        return Err(format!("unsupported policy rule `{}`", binding.rule_id));
-    }
-    match binding.rule_id.as_str() {
-        "rbac.permission_reachable" => {
-            require_subjects(binding, 2)?;
-            reject_parameters(binding)?;
-            let principal = &binding.subjects[0];
+    let source = binding.source;
+    match binding.handler {
+        NativeHandlerV1::RbacPermissionReachable => {
+            let principal = &source.subjects[0];
             if !resolver.facts.principals.contains_key(principal) {
                 return Err(format!("unknown policy principal `{principal}`"));
             }
-            let permission = &binding.subjects[1];
+            let permission = &source.subjects[1];
             let granting_roles = resolver.roles_reaching_permission(permission);
             let assignments = granting_roles
                 .into_iter()
@@ -338,9 +407,7 @@ fn compile_binding(
                 or(assignments)
             })
         }
-        "rbac.role_hierarchy_acyclic" => {
-            require_subjects(binding, 0)?;
-            reject_parameters(binding)?;
+        NativeHandlerV1::RbacRoleHierarchyAcyclic => {
             let edges = resolver
                 .facts
                 .roles
@@ -363,15 +430,16 @@ fn compile_binding(
                 and(predicates)
             })
         }
-        "rbac.static_separation_of_duty" => {
-            require_subjects(binding, 1)?;
-            reject_max_active(binding)?;
-            let principal = &binding.subjects[0];
+        NativeHandlerV1::RbacStaticSeparationOfDuty => {
+            let principal = &source.subjects[0];
             if !resolver.facts.principals.contains_key(principal) {
                 return Err(format!("unknown policy principal `{principal}`"));
             }
-            validate_parameter_roles(binding, &resolver.facts)?;
-            let max = positive_limit("max_assigned", binding.parameters.max_assigned.unwrap_or(1))?;
+            validate_parameter_roles(&binding.parameters.roles, &resolver.facts)?;
+            let max = binding
+                .parameters
+                .max_assigned
+                .expect("manifest defaults max_assigned");
             Ok(le(
                 sum(binding
                     .parameters
@@ -382,15 +450,16 @@ fn compile_binding(
                 int(max),
             ))
         }
-        "rbac.dynamic_separation_of_duty" => {
-            require_subjects(binding, 1)?;
-            reject_max_assigned(binding)?;
-            let session = &binding.subjects[0];
+        NativeHandlerV1::RbacDynamicSeparationOfDuty => {
+            let session = &source.subjects[0];
             if !resolver.facts.sessions.contains_key(session) {
                 return Err(format!("unknown policy session `{session}`"));
             }
-            validate_parameter_roles(binding, &resolver.facts)?;
-            let max = positive_limit("max_active", binding.parameters.max_active.unwrap_or(1))?;
+            validate_parameter_roles(&binding.parameters.roles, &resolver.facts)?;
+            let max = binding
+                .parameters
+                .max_active
+                .expect("manifest defaults max_active");
             Ok(le(
                 sum(binding
                     .parameters
@@ -401,7 +470,21 @@ fn compile_binding(
                 int(max),
             ))
         }
-        _ => Err(format!("unsupported policy rule `{}`", binding.rule_id)),
+        NativeHandlerV1::A11yFocusNotObscured
+        | NativeHandlerV1::A11yReflow
+        | NativeHandlerV1::A11yTargetSize
+        | NativeHandlerV1::A11yTextContrast
+        | NativeHandlerV1::LayoutAxisCapacity
+        | NativeHandlerV1::LayoutContainment
+        | NativeHandlerV1::LayoutNonOverlap
+        | NativeHandlerV1::MediaAspectRatio
+        | NativeHandlerV1::PlacementMinimumFailureDomains
+        | NativeHandlerV1::PlacementTopologyMaxSkew
+        | NativeHandlerV1::ResourceAggregateCapacity
+        | NativeHandlerV1::ResourceQuotaCapacity
+        | NativeHandlerV1::ResourceRequestWithinLimit => {
+            Err(format!("unsupported policy rule `{}`", source.rule_id))
+        }
     }
 }
 
@@ -416,18 +499,19 @@ fn require_subjects(binding: &PolicyRuleBinding, expected: usize) -> Result<(), 
     Ok(())
 }
 
-fn validate_parameter_roles(
-    binding: &PolicyRuleBinding,
-    facts: &PolicyFacts,
-) -> Result<(), String> {
-    if binding.parameters.roles.is_empty() {
-        return Err(format!("rule `{}` requires `roles`", binding.rule_id));
-    }
-    reject_duplicates(&binding.parameters.roles, "separation roles")?;
-    for role in &binding.parameters.roles {
+fn validate_parameter_roles(roles: &[String], facts: &PolicyFacts) -> Result<(), String> {
+    reject_duplicates(roles, "separation roles")?;
+    for role in roles {
         if !facts.roles.contains_key(role) {
             return Err(format!("separation rule references unknown role `{role}`"));
         }
+    }
+    Ok(())
+}
+
+fn require_parameter_roles(binding: &PolicyRuleBinding) -> Result<(), String> {
+    if binding.parameters.roles.is_empty() {
+        return Err(format!("rule `{}` requires `roles`", binding.rule_id));
     }
     Ok(())
 }
