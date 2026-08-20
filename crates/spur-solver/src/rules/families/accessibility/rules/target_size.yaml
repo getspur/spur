@@ -1,0 +1,101 @@
+schema_version: 1
+id: "a11y.target_size"
+rule_version: 1
+family: "accessibility"
+profile: "wcag_geometry_color"
+primitive: "minimum_target_size"
+summary: "Require a target to meet its minimum width and height unless a WCAG typed exception, including spacing, applies."
+availability: "implemented"
+strength: "hard"
+authorities:
+  - kind: "w3c_recommendation"
+    title: "Web Content Accessibility Guidelines (WCAG) 2.2"
+    url: "https://www.w3.org/TR/WCAG22/"
+requires:
+  - "target.rect"
+  - "exception.kind"
+  - "exception.evidence"
+llm_encoding:
+  effectiveness: "high"
+  problem_shapes:
+    - "Require a target to meet its minimum width and height unless a WCAG typed exception, including spacing, applies."
+  encode_steps:
+    - "Normalize caller facts"
+    - "Bind explicit subjects"
+    - "Compile the hard predicate"
+  anti_patterns:
+    - "Do not infer facts from pixels inside the solver"
+    - "Do not treat an evidence string as solver-proven evidence"
+  escalate_when:
+    - "Escalate unions of obscurers or transformed geometry to a geometry preprocessor"
+solver_encoding:
+  theory: "QF_LIA"
+  verification: "assert the predicate over complete normalized facts"
+  synthesis: "assert the predicate over explicitly bounded numeric unknowns"
+  formula:
+    - "exception OR target.width >= minimum_width"
+    - "exception OR target.height >= minimum_height"
+subjects:
+  cardinality:
+    kind: "exact"
+    count: 1
+parameters:
+  - name: "minimum_width"
+    default: 24
+    kind: "integer"
+    minimum: 1
+  - name: "minimum_height"
+    default: 24
+    kind: "integer"
+    minimum: 1
+  - name: "exception"
+    kind: "native_object"
+    validator: "accessibility_exception"
+handler: "a11y_target_size"
+examples:
+  valid:
+    facts:
+      width: 24
+      height: 24
+    expectation: "pass"
+  invalid:
+    facts:
+      width: 23
+      height: 24
+    expectation: "counterexample"
+    expected_diagnostic: "a11y.target_size.violation"
+conformance:
+  valid:
+    - name: "accepts a target at the minimum size"
+      request:
+        family: "accessibility"
+        mode: "verify"
+        rules:
+          - rule_id: "a11y.target_size"
+            subjects: ["target"]
+            parameters: {}
+        scene:
+          viewport:
+            width: 320
+            height: 568
+          elements:
+            target:
+              rect: {x: 0, y: 0, width: 24, height: 24}
+        unknowns: []
+  invalid:
+    - name: "rejects a target below the minimum width"
+      request:
+        family: "accessibility"
+        mode: "verify"
+        rules:
+          - rule_id: "a11y.target_size"
+            subjects: ["target"]
+            parameters: {}
+        scene:
+          viewport:
+            width: 320
+            height: 568
+          elements:
+            target:
+              rect: {x: 0, y: 0, width: 23, height: 24}
+        unknowns: []

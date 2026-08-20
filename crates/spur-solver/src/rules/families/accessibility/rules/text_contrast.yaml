@@ -1,0 +1,98 @@
+schema_version: 1
+id: "a11y.text_contrast"
+rule_version: 1
+family: "accessibility"
+profile: "wcag_geometry_color"
+primitive: "contrast_ratio"
+summary: "Require normalized foreground and background luminance to meet a minimum contrast ratio."
+availability: "implemented"
+strength: "hard"
+authorities:
+  - kind: "w3c_recommendation"
+    title: "Web Content Accessibility Guidelines (WCAG) 2.2"
+    url: "https://www.w3.org/TR/WCAG22/"
+requires:
+  - "foreground_luminance"
+  - "background_luminance"
+  - "minimum_ratio_hundredths"
+llm_encoding:
+  effectiveness: "high"
+  problem_shapes:
+    - "Require normalized foreground and background luminance to meet a minimum contrast ratio."
+  encode_steps:
+    - "Normalize caller facts"
+    - "Bind explicit subjects"
+    - "Compile the hard predicate"
+  anti_patterns:
+    - "Do not infer facts from pixels inside the solver"
+    - "Do not treat an evidence string as solver-proven evidence"
+  escalate_when:
+    - "Escalate unions of obscurers or transformed geometry to a geometry preprocessor"
+solver_encoding:
+  theory: "QF_LIA"
+  verification: "assert the predicate over complete normalized facts"
+  synthesis: "assert the predicate over explicitly bounded numeric unknowns"
+  formula:
+    - "(lighter + 0.05) * 100 >= (darker + 0.05) * minimum_ratio_hundredths"
+    - "relative luminance is normalized upstream to 0..=100000"
+subjects:
+  cardinality:
+    kind: "exact"
+    count: 1
+parameters:
+  - name: "minimum_ratio_hundredths"
+    default: 450
+    kind: "integer"
+    minimum: 1
+handler: "a11y_text_contrast"
+examples:
+  valid:
+    facts:
+      foreground_luminance: 17500
+      background_luminance: 0
+      ratio: 450
+    expectation: "pass"
+  invalid:
+    facts:
+      foreground_luminance: 17499
+      background_luminance: 0
+      ratio: 450
+    expectation: "counterexample"
+    expected_diagnostic: "a11y.text_contrast.violation"
+conformance:
+  valid:
+    - name: "accepts text at the minimum contrast ratio"
+      request:
+        family: "accessibility"
+        mode: "verify"
+        rules:
+          - rule_id: "a11y.text_contrast"
+            subjects: ["text"]
+            parameters: {}
+        scene:
+          viewport:
+            width: 320
+            height: 568
+          elements:
+            text:
+              foreground_luminance: 17500
+              background_luminance: 0
+        unknowns: []
+  invalid:
+    - name: "rejects text below the minimum contrast ratio"
+      request:
+        family: "accessibility"
+        mode: "verify"
+        rules:
+          - rule_id: "a11y.text_contrast"
+            subjects: ["text"]
+            parameters: {}
+        scene:
+          viewport:
+            width: 320
+            height: 568
+          elements:
+            text:
+              foreground_luminance: 17499
+              background_luminance: 0
+        unknowns: []
