@@ -45,7 +45,7 @@ fn family_registry_is_a_narrow_owned_projection() {
 fn executable_rule_ids_exclude_catalog_only_rules() {
     let executable = manifest_executable_rule_ids();
 
-    assert_eq!(executable.len(), 17);
+    assert_eq!(executable.len(), 31);
     assert!(executable.windows(2).all(|ids| ids[0] < ids[1]));
     assert!(!executable.iter().any(|id| id == "rbac.minimum_privilege"));
     assert_eq!(

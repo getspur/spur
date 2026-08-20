@@ -7,6 +7,7 @@ use spur_solver::{
             manifest_conformance_vectors, manifest_executable_rule_ids, manifest_rule_handler,
         },
         manifest_format::{ConformanceVectorV1, NativeHandlerV1},
+        RuleOutcome, RuleSolveMode,
     },
     service::SolverService,
     types::SolveStatus,
@@ -113,6 +114,16 @@ async fn every_manifest_valid_vector_passes_and_invalid_vector_is_rejected() {
                 case.rule_id,
                 vector.name
             );
+            assert_eq!(
+                result.outcome,
+                match result.mode {
+                    RuleSolveMode::Verify => RuleOutcome::Pass,
+                    RuleSolveMode::Synthesize => RuleOutcome::Solution,
+                },
+                "{} valid vector `{}` outcome",
+                case.rule_id,
+                vector.name
+            );
         }
 
         for vector in case.invalid {
@@ -136,34 +147,64 @@ async fn every_manifest_valid_vector_passes_and_invalid_vector_is_rejected() {
                 case.rule_id,
                 vector.name
             );
-            let rejection = result
-                .rule_results
-                .iter()
-                .find(|rule| rule.rule_id == case.rule_id)
-                .unwrap_or_else(|| {
-                    panic!(
-                        "{} invalid vector `{}` lacked per-rule rejection attribution",
-                        case.rule_id, vector.name
-                    )
-                });
-            assert_eq!(
-                rejection.status,
-                SolveStatus::Unsat,
-                "{} invalid vector `{}` must have an unsatisfiable rule result",
-                case.rule_id,
-                vector.name
-            );
-            let expected = vector
-                .expected_diagnostic
-                .as_deref()
-                .expect("validated invalid vector diagnostic");
-            assert_eq!(
-                rejection.diagnostic.as_deref(),
-                Some(expected),
-                "{} invalid vector `{}` diagnostic",
-                case.rule_id,
-                vector.name
-            );
+            match result.mode {
+                RuleSolveMode::Verify => {
+                    assert_eq!(result.outcome, RuleOutcome::Fail);
+                    let rejection = result
+                        .rule_results
+                        .iter()
+                        .find(|rule| rule.rule_id == case.rule_id)
+                        .unwrap_or_else(|| {
+                            panic!(
+                                "{} invalid vector `{}` lacked per-rule rejection attribution",
+                                case.rule_id, vector.name
+                            )
+                        });
+                    assert_eq!(
+                        rejection.status,
+                        SolveStatus::Unsat,
+                        "{} invalid vector `{}` must have an unsatisfiable rule result",
+                        case.rule_id,
+                        vector.name
+                    );
+                    let expected = vector
+                        .expected_diagnostic
+                        .as_deref()
+                        .expect("validated invalid vector diagnostic");
+                    assert_eq!(
+                        rejection.diagnostic.as_deref(),
+                        Some(expected),
+                        "{} invalid vector `{}` diagnostic",
+                        case.rule_id,
+                        vector.name
+                    );
+                }
+                RuleSolveMode::Synthesize => {
+                    assert_eq!(result.outcome, RuleOutcome::Infeasible);
+                    assert!(
+                        result.rule_results.is_empty(),
+                        "{} invalid synthesis vector `{}` must not fabricate verification attribution",
+                        case.rule_id,
+                        vector.name
+                    );
+                }
+            }
         }
     }
+}
+
+#[tokio::test]
+async fn synthesis_unsat_is_infeasible_without_verification_attribution() {
+    let vector = &manifest_conformance_vectors("workflow.bounded_reachability")
+        .expect("bounded-reachability conformance vectors")
+        .invalid[0];
+    let prepared = prepare(vector.request.clone()).expect("compile bounded unreachable witness");
+    let result = run(&SolverService::new(), prepared)
+        .await
+        .expect("prove bounded witness infeasible");
+
+    assert_eq!(result.mode, RuleSolveMode::Synthesize);
+    assert_eq!(result.solver.status, SolveStatus::Unsat);
+    assert_eq!(result.outcome, RuleOutcome::Infeasible);
+    assert!(result.rule_results.is_empty());
 }

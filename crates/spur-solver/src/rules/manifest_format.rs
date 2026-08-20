@@ -360,7 +360,19 @@ impl NativeHandlerV1 {
         match self {
             Self::A11yFocusNotObscured
             | Self::RbacPermissionReachable
-            | Self::RbacRoleHierarchyAcyclic => vec![],
+            | Self::RbacRoleHierarchyAcyclic
+            | Self::ConfigurationRequiresAny
+            | Self::ConfigurationExcludes
+            | Self::ConfigurationSelectionCardinality
+            | Self::ConfigurationAttributeAllowedPair
+            | Self::ConfigurationVersionInterval
+            | Self::SchedulingAssignmentExactlyOnce
+            | Self::SchedulingPlacementAllowed
+            | Self::SchedulingPrecedenceFinishStart
+            | Self::SchedulingCumulativeCapacity
+            | Self::WorkflowInitialStateAllowed
+            | Self::WorkflowTransitionAllowed
+            | Self::WorkflowSafetyInvariant => vec![],
             Self::A11yReflow => vec![native_parameter("exception", Optional)],
             Self::A11yTargetSize => vec![
                 native_parameter("minimum_width", Defaulted),
@@ -397,18 +409,6 @@ impl NativeHandlerV1 {
             | Self::ResourceRequestWithinLimit => {
                 vec![native_parameter("resources", Defaulted)]
             }
-            Self::ConfigurationRequiresAny
-            | Self::ConfigurationExcludes
-            | Self::ConfigurationSelectionCardinality
-            | Self::ConfigurationAttributeAllowedPair
-            | Self::ConfigurationVersionInterval
-            | Self::SchedulingAssignmentExactlyOnce
-            | Self::SchedulingPlacementAllowed
-            | Self::SchedulingPrecedenceFinishStart
-            | Self::SchedulingCumulativeCapacity
-            | Self::WorkflowInitialStateAllowed
-            | Self::WorkflowTransitionAllowed
-            | Self::WorkflowSafetyInvariant => vec![],
             Self::SchedulingMinimizeMakespan => {
                 vec![native_parameter("maximum_makespan", Optional)]
             }

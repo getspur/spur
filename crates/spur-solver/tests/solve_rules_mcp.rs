@@ -152,7 +152,15 @@ fn solve_rules_schema_keeps_one_bedrock_compatible_family_execution_tool() {
     assert_eq!(schema["additionalProperties"], false);
     assert_eq!(
         schema["properties"]["family"]["enum"],
-        json!(["accessibility", "design", "policy", "resource"])
+        json!([
+            "accessibility",
+            "configuration",
+            "design",
+            "policy",
+            "resource",
+            "scheduling",
+            "workflow"
+        ])
     );
     assert_eq!(
         schema["properties"]["mode"]["enum"],
@@ -170,7 +178,7 @@ fn solve_rules_schema_keeps_one_bedrock_compatible_family_execution_tool() {
         .collect::<Vec<_>>();
 
     assert_eq!(rule_ids, manifest_rule_ids);
-    assert_eq!(rule_ids.len(), 17);
+    assert_eq!(rule_ids.len(), 31);
     for expected_rule_id in manifest_executable_rule_ids() {
         assert_eq!(
             rule_ids

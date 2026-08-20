@@ -1,15 +1,32 @@
+use std::collections::BTreeSet;
+
 use serde_json::{json, Value};
 use spur_mcp::{ServerKind, ToolAuthority, ToolCallContext, ToolRegistry};
 use spur_solver::{
     mcp::SolverMcpModule,
-    rules::{builtin_registry, manifest_executable_rule_ids},
+    rules::{builtin_registry, families, manifest_executable_rule_ids},
 };
 
-const EXPECTED_EXECUTABLE_RULE_IDS: [&str; 17] = [
+const EXPECTED_FAMILY_IDS: [&str; 7] = [
+    "accessibility",
+    "configuration",
+    "design",
+    "policy",
+    "resource",
+    "scheduling",
+    "workflow",
+];
+
+const EXPECTED_EXECUTABLE_RULE_IDS: [&str; 31] = [
     "a11y.focus_not_obscured",
     "a11y.reflow",
     "a11y.target_size",
     "a11y.text_contrast",
+    "configuration.attribute_allowed_pair",
+    "configuration.excludes",
+    "configuration.requires_any",
+    "configuration.selection_cardinality",
+    "configuration.version_interval",
     "layout.axis_capacity",
     "layout.containment",
     "layout.non_overlap",
@@ -23,6 +40,15 @@ const EXPECTED_EXECUTABLE_RULE_IDS: [&str; 17] = [
     "resource.aggregate_capacity",
     "resource.quota_capacity",
     "resource.request_within_limit",
+    "scheduling.assignment_exactly_once",
+    "scheduling.cumulative_capacity",
+    "scheduling.minimize_makespan",
+    "scheduling.placement_allowed",
+    "scheduling.precedence_finish_start",
+    "workflow.bounded_reachability",
+    "workflow.initial_state_allowed",
+    "workflow.safety_invariant",
+    "workflow.transition_allowed",
 ];
 
 fn registry() -> ToolRegistry {
@@ -51,14 +77,22 @@ fn result_json(response: &spur_mcp::response::JsonRpcResponse) -> Value {
 }
 
 #[test]
-fn builtin_registry_composes_all_platform_families_in_stable_order() {
+fn generic_family_registry_composes_all_platform_families_in_stable_order() {
     assert_eq!(
         builtin_registry()
             .families()
             .iter()
             .map(|family| family.id())
             .collect::<Vec<_>>(),
-        vec!["accessibility", "design", "policy", "resource"]
+        EXPECTED_FAMILY_IDS
+    );
+    assert_eq!(
+        families::compilers()
+            .iter()
+            .map(|compiler| compiler.id())
+            .collect::<Vec<_>>(),
+        EXPECTED_FAMILY_IDS,
+        "every discoverable family must have one executable compiler in the same stable order"
     );
 
     assert_eq!(
@@ -81,7 +115,7 @@ fn builtin_registry_composes_all_platform_families_in_stable_order() {
 }
 
 #[test]
-fn solve_rules_schema_is_bedrock_compatible_and_family_discriminated() {
+fn generic_family_solve_rules_schema_has_exact_global_enums() {
     let tools = spur_solver::mcp::tool_definitions();
     let schema = &tools
         .iter()
@@ -91,7 +125,11 @@ fn solve_rules_schema_is_bedrock_compatible_and_family_discriminated() {
 
     assert_eq!(
         schema["properties"]["family"]["enum"],
-        json!(["accessibility", "design", "policy", "resource"])
+        json!(EXPECTED_FAMILY_IDS)
+    );
+    assert_eq!(
+        schema["properties"]["rules"]["items"]["properties"]["rule_id"]["enum"],
+        json!(EXPECTED_EXECUTABLE_RULE_IDS)
     );
     assert_eq!(schema["type"], "object");
     assert_eq!(schema["required"], json!(["family", "mode", "rules"]));
@@ -99,7 +137,7 @@ fn solve_rules_schema_is_bedrock_compatible_and_family_discriminated() {
 }
 
 #[test]
-fn bedrock_requires_simple_object_for_every_solver_tool_schema() {
+fn generic_family_bedrock_schema_remains_a_simple_object_without_unions() {
     fn find_unsupported_keyword(value: &Value, path: &str) -> Option<String> {
         match value {
             Value::Object(map) => {
@@ -155,17 +193,73 @@ fn topology_guidance_distinguishes_normalized_model_from_scheduler_semantics() {
 }
 
 #[tokio::test]
-async fn rule_spec_lists_platform_families_and_exposes_authority_and_capability() {
+async fn generic_family_rule_spec_progressively_discovers_all_rules() {
     let list = result_json(
         &registry()
             .call_json_tool(context(), "solve_rule_spec", json!({}))
             .await,
     );
-    assert_eq!(list["families"].as_array().map(Vec::len), Some(4));
-    assert_eq!(list["families"][0]["id"], "accessibility");
-    assert_eq!(list["families"][1]["id"], "design");
-    assert_eq!(list["families"][2]["id"], "policy");
-    assert_eq!(list["families"][3]["id"], "resource");
+    assert_eq!(
+        list["families"]
+            .as_array()
+            .expect("family cards")
+            .iter()
+            .map(|family| family["id"].as_str().expect("family ID"))
+            .collect::<Vec<_>>(),
+        EXPECTED_FAMILY_IDS
+    );
+
+    let mut discovered_executable_rule_ids = BTreeSet::new();
+    let mut discovered_advisory_rule_ids = BTreeSet::new();
+    for family_id in EXPECTED_FAMILY_IDS {
+        let family = result_json(
+            &registry()
+                .call_json_tool(context(), "solve_rule_spec", json!({"family": family_id}))
+                .await,
+        );
+        assert_eq!(family["family"]["id"], family_id);
+        for profile in family["profiles"].as_array().expect("family profiles") {
+            let profile_id = profile["id"].as_str().expect("profile ID");
+            let profile = result_json(
+                &registry()
+                    .call_json_tool(context(), "solve_rule_spec", json!({"profile": profile_id}))
+                    .await,
+            );
+            for rule in profile["rules"].as_array().expect("profile rules") {
+                assert_eq!(rule["family"], family_id);
+                let rule_id = rule["id"].as_str().expect("discovered rule ID");
+                let discovered_rule_ids = if rule["availability"] == "implemented" {
+                    &mut discovered_executable_rule_ids
+                } else {
+                    &mut discovered_advisory_rule_ids
+                };
+                assert!(
+                    discovered_rule_ids.insert(rule_id.to_owned()),
+                    "rule IDs must appear in exactly one profile"
+                );
+            }
+        }
+    }
+    assert_eq!(
+        discovered_executable_rule_ids
+            .into_iter()
+            .collect::<Vec<_>>(),
+        EXPECTED_EXECUTABLE_RULE_IDS
+    );
+    assert_eq!(
+        discovered_advisory_rule_ids.into_iter().collect::<Vec<_>>(),
+        ["rbac.minimum_privilege"]
+    );
+
+    for rule_id in EXPECTED_EXECUTABLE_RULE_IDS {
+        let direct = result_json(
+            &registry()
+                .call_json_tool(context(), "solve_rule_spec", json!({"rule_id": rule_id}))
+                .await,
+        );
+        assert_eq!(direct["rule"]["id"], rule_id);
+        assert_eq!(direct["rule"]["availability"], "implemented");
+    }
 
     let target_size = result_json(
         &registry()

@@ -46,7 +46,7 @@ fn frozen_catalog_contains_every_rule_in_stable_order() {
     assert_strictly_sorted(&rule_ids, "rules");
     assert_eq!(
         rule_ids.len(),
-        18,
+        32,
         "fixture must contain every built-in rule"
     );
     assert!(

@@ -7,7 +7,15 @@ const RESOURCE_COMPILE: &str = include_str!("../src/rules/families/resource/comp
 
 #[test]
 fn family_rule_enums_equal_manifest_executable_ids() {
-    for family in ["accessibility", "design", "policy", "resource"] {
+    for family in [
+        "accessibility",
+        "configuration",
+        "design",
+        "policy",
+        "resource",
+        "scheduling",
+        "workflow",
+    ] {
         let expected = manifest_family_executable_rule_ids(family)
             .unwrap_or_else(|| panic!("missing manifest executable IDs for {family}"));
         let actual = schema_rule_ids(family);
