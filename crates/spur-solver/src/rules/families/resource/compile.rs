@@ -204,8 +204,9 @@ fn validate_legacy_static_contract(binding: &ResourceRuleBinding) -> Result<(), 
             require_subjects(binding, 1, None)?;
             reject_placement_parameters(binding)
         }
-        Some(NativeHandlerV1::ResourceAggregateCapacity)
-        | Some(NativeHandlerV1::ResourceQuotaCapacity) => {
+        Some(
+            NativeHandlerV1::ResourceAggregateCapacity | NativeHandlerV1::ResourceQuotaCapacity,
+        ) => {
             require_subjects(binding, 2, Some(usize::MAX))?;
             reject_placement_parameters(binding)
         }

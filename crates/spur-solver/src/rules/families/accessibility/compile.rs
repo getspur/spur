@@ -637,8 +637,7 @@ fn exception_applies_parameters(
         .any(|accepted| std::mem::discriminant(accepted) == std::mem::discriminant(&exception.kind))
     {
         return Err(format!(
-            "rule `{}` does not accept this exception kind",
-            rule_id
+            "rule `{rule_id}` does not accept this exception kind"
         ));
     }
     Ok(true)
