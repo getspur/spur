@@ -1323,9 +1323,21 @@ async fn overlay_response_for_backend(
                 "failed to construct code graph overlay: {error}"
             )))
         })?;
-        let fresh_body = handler(args, &overlay)?;
-        let fresh_files = response_file_set_from_client(&overlay, &fresh_body)?;
-        (fresh_body, fresh_files)
+        match overlay {
+            Some(overlay) => {
+                let fresh_body = handler(args, &overlay)?;
+                let fresh_files = response_file_set_from_client(&overlay, &fresh_body)?;
+                (fresh_body, fresh_files)
+            }
+            None => {
+                // No changed paths → identity overlay. Serve the base client
+                // directly and skip extract_delta / remap construction.
+                let client = backend.client();
+                let fresh_body = handler(args, client)?;
+                let fresh_files = response_file_set_from_client(client, &fresh_body)?;
+                (fresh_body, fresh_files)
+            }
+        }
     };
     GraphResponseMetadata::analyze_source_inner(source, Some(&fresh_files), None)
         .await
@@ -1338,16 +1350,23 @@ async fn overlay_response_for_backend(
 fn overlay_client_for_backend<'a>(
     backend: &'a CodeSearchBackend,
     rebuild_candidate: &RebuildCandidate,
-) -> anyhow::Result<OverlayClient<&'a dyn GraphQueryClient>> {
+) -> anyhow::Result<Option<OverlayClient<&'a dyn GraphQueryClient>>> {
     let worktree = rebuild_candidate.worktree.clone();
     let base_files = backend.base_file_set()?;
     let changed = changed_paths_for_overlay(&worktree, base_files)?;
+    if changed.paths.is_empty() {
+        return Ok(None);
+    }
     let cached = request_cache::overlay_delta(&worktree, changed.fingerprint, || {
         let (artifact, shadowed) =
             OverlayClient::<&dyn GraphQueryClient>::extract_delta(&worktree, &changed.paths)?;
         Ok(request_cache::CachedOverlayDelta { artifact, shadowed })
     })?;
-    OverlayClient::from_artifacts(backend.client(), cached.artifact, cached.shadowed)
+    Ok(Some(OverlayClient::from_artifacts(
+        backend.client(),
+        cached.artifact,
+        cached.shadowed,
+    )?))
 }
 
 struct CodeSearchBody {
@@ -6303,7 +6322,8 @@ mod tests {
     use std::time::Duration;
 
     use crate::{
-        ChangeKind, CommitArtifact, Confidence, EdgeEndpoint, RelationKind, RenamePrev,
+        ChangeKind, CommitArtifact, Confidence, EdgeEndpoint, GraphFileArtifact,
+        GraphFileManifestEntry, GraphIndexHeader, NodeId, RelationKind, RenamePrev,
         SymbolSnapshotArtifact, TemporalEdgeArtifact, WalkStrategy,
     };
     use spur_mcp::local_projects::{
@@ -6341,6 +6361,59 @@ mod tests {
         assert_ne!(
             first.fingerprint, second.fingerprint,
             "content changes in any tracked overlay path must invalidate the cached delta"
+        );
+    }
+
+    #[test]
+    fn overlay_client_for_backend_skips_wrap_when_worktree_matches_index() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let root = tempdir.path();
+        fs::create_dir_all(root.join("src")).expect("src dir");
+        let src = b"pub fn alpha() {}\n";
+        fs::write(root.join("src/a.rs"), src).expect("a.rs");
+        let oid = git_blob_oid(src);
+
+        let artifact = Arc::new(GraphIndexArtifact {
+            header: GraphIndexHeader {
+                graph_index_version: "test".to_owned(),
+                content_hash_blake3: None,
+            },
+            manifest_version: "test".to_owned(),
+            graph_content_hash: "overlay-skip-wrap".to_owned(),
+            file_manifests: vec![GraphFileManifestEntry {
+                stable_file_id: "file:src/a.rs".to_owned(),
+                path: "src/a.rs".to_owned(),
+                content_oid: oid,
+                node_ids: vec![NodeId(1)],
+            }],
+            files: vec![GraphFileArtifact {
+                stable_file_id: "file:src/a.rs".to_owned(),
+                file_path: "src/a.rs".to_owned(),
+            }],
+            file_node_ids: vec![NodeId(1)],
+            symbols: Vec::new(),
+            symbol_node_ids: Vec::new(),
+            edges: Vec::new(),
+            tombstones: Vec::new(),
+            diagnostics: Vec::new(),
+            commits: Vec::new(),
+            symbol_snapshots: Vec::new(),
+            temporal_edges: Vec::new(),
+        });
+        let backend = CodeSearchBackend::InMemory {
+            client: InMemoryClient::new(Arc::clone(&artifact)),
+            artifact,
+        };
+        let candidate = RebuildCandidate {
+            worktree: root.to_path_buf(),
+            key: RebuildKey::from("deadbeef", &BTreeMap::new()),
+        };
+
+        let overlay =
+            overlay_client_for_backend(&backend, &candidate).expect("overlay client construction");
+        assert!(
+            overlay.is_none(),
+            "matching worktree content must skip OverlayClient construction"
         );
     }
 
