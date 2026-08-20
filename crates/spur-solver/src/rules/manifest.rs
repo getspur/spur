@@ -6,6 +6,8 @@ use std::{
     sync::LazyLock,
 };
 
+use serde_json::{Map, Value};
+
 use super::{
     catalog::{
         LlmEncoding, RegistryError, RuleAuthority, RuleDefinition, RuleExample, RuleExamples,
@@ -13,8 +15,8 @@ use super::{
     },
     manifest_format::{
         validate_manifest_bundle, AvailabilityV1, ConformanceVectorsV1, ManifestBundleV1,
-        ManifestValidationError, NativeHandlerV1, ParameterContractV1, RuleManifestV1,
-        RuleStrengthV1, SubjectContractV1,
+        ManifestValidationError, NativeHandlerV1, NativeObjectValidatorV1, ParameterContractV1,
+        ParameterKindV1, RuleManifestV1, RuleStrengthV1, SubjectCardinalityV1, SubjectContractV1,
     },
 };
 
@@ -42,6 +44,15 @@ pub struct ManifestRuleContract<'a> {
     pub subjects: &'a SubjectContractV1,
     /// Accepted parameter names, kinds, defaults, and static bounds.
     pub parameters: &'a [ParameterContractV1],
+}
+
+/// A manifest-validated rule binding ready for closed native dispatch.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ValidatedBinding {
+    /// Caller parameters after manifest defaults have been applied.
+    pub parameters: Map<String, Value>,
+    /// Exhaustive native handler selected by the executable manifest.
+    pub handler: NativeHandlerV1,
 }
 
 /// Returns the process-wide catalog converted from the embedded manifest bundle.
@@ -92,6 +103,230 @@ pub fn manifest_rule_handler(rule_id: &str) -> Option<NativeHandlerV1> {
 pub fn manifest_conformance_vectors(rule_id: &str) -> Option<&'static ConformanceVectorsV1> {
     let rule = rule_manifest(rule_id)?;
     rule.conformance.as_ref()
+}
+
+/// Validates manifest-representable binding shape and applies declared defaults.
+///
+/// Fact-dependent, graph, geometry, cross-field, and solver semantics remain the
+/// responsibility of the selected native family handler.
+pub fn validate_binding_contract(
+    rule_id: &str,
+    subjects: &[String],
+    parameters: &Map<String, Value>,
+) -> Result<ValidatedBinding, String> {
+    let rule =
+        rule_manifest(rule_id).ok_or_else(|| format!("unknown manifest rule `{rule_id}`"))?;
+    let (AvailabilityV1::Implemented, RuleStrengthV1::Hard, Some(handler)) =
+        (rule.availability, rule.strength, rule.handler)
+    else {
+        return Err(format!("manifest rule `{rule_id}` is not executable"));
+    };
+
+    validate_subject_count(rule_id, &rule.subjects, subjects.len())?;
+
+    for name in parameters.keys() {
+        if !rule
+            .parameters
+            .iter()
+            .any(|parameter| parameter.name == *name)
+        {
+            return Err(format!(
+                "rule `{rule_id}` does not accept parameter `{name}`"
+            ));
+        }
+    }
+
+    let mut normalized = Map::new();
+    for parameter in &rule.parameters {
+        let value = match parameters.get(&parameter.name) {
+            Some(value) => Some(value),
+            None => parameter.default.as_ref(),
+        };
+        let Some(value) = value else {
+            if parameter.required {
+                return Err(format!(
+                    "rule `{rule_id}` requires parameter `{}`",
+                    parameter.name
+                ));
+            }
+            continue;
+        };
+
+        validate_parameter_value(rule_id, parameter, value)?;
+        normalized.insert(parameter.name.clone(), value.clone());
+    }
+
+    Ok(ValidatedBinding {
+        parameters: normalized,
+        handler,
+    })
+}
+
+fn validate_subject_count(
+    rule_id: &str,
+    contract: &SubjectContractV1,
+    actual: usize,
+) -> Result<(), String> {
+    match contract.cardinality {
+        SubjectCardinalityV1::Exact { count } if actual != count => Err(format!(
+            "rule `{rule_id}` requires {count} subjects, got {actual}"
+        )),
+        SubjectCardinalityV1::AtLeast { count } if actual < count => Err(format!(
+            "rule `{rule_id}` requires at least {count} subjects, got {actual}"
+        )),
+        SubjectCardinalityV1::Range { minimum, maximum }
+            if !(minimum..=maximum).contains(&actual) =>
+        {
+            Err(format!(
+                "rule `{rule_id}` requires between {minimum} and {maximum} subjects, got {actual}"
+            ))
+        }
+        SubjectCardinalityV1::Exact { .. }
+        | SubjectCardinalityV1::AtLeast { .. }
+        | SubjectCardinalityV1::Range { .. } => Ok(()),
+    }
+}
+
+fn validate_parameter_value(
+    rule_id: &str,
+    parameter: &ParameterContractV1,
+    value: &Value,
+) -> Result<(), String> {
+    let name = &parameter.name;
+    match parameter.kind {
+        ParameterKindV1::Integer => {
+            let integer = value
+                .as_i64()
+                .ok_or_else(|| format!("rule `{rule_id}` parameter `{name}` must be an integer"))?;
+            if let Some(minimum) = parameter.minimum {
+                if integer < minimum {
+                    return Err(format!(
+                        "rule `{rule_id}` parameter `{name}` must be at least {minimum}"
+                    ));
+                }
+            }
+            if let Some(maximum) = parameter.maximum {
+                if integer > maximum {
+                    return Err(format!(
+                        "rule `{rule_id}` parameter `{name}` must be at most {maximum}"
+                    ));
+                }
+            }
+        }
+        ParameterKindV1::Boolean if !value.is_boolean() => {
+            return Err(format!(
+                "rule `{rule_id}` parameter `{name}` must be a boolean"
+            ));
+        }
+        ParameterKindV1::String if !value.is_string() => {
+            return Err(format!(
+                "rule `{rule_id}` parameter `{name}` must be a string"
+            ));
+        }
+        ParameterKindV1::StringEnum => {
+            let string = value
+                .as_str()
+                .ok_or_else(|| format!("rule `{rule_id}` parameter `{name}` must be a string"))?;
+            if !parameter.values.iter().any(|allowed| allowed == string) {
+                return Err(format!(
+                    "rule `{rule_id}` parameter `{name}` must be one of {:?}",
+                    parameter.values
+                ));
+            }
+        }
+        ParameterKindV1::StringArray => {
+            let values = value.as_array().ok_or_else(|| {
+                format!("rule `{rule_id}` parameter `{name}` must be an array of strings")
+            })?;
+            if values.iter().any(|value| !value.is_string()) {
+                return Err(format!(
+                    "rule `{rule_id}` parameter `{name}` must be an array of strings"
+                ));
+            }
+            if let Some(minimum) = parameter.min_items {
+                if values.len() < minimum {
+                    return Err(format!(
+                        "rule `{rule_id}` parameter `{name}` must contain at least {minimum} items"
+                    ));
+                }
+            }
+            if let Some(maximum) = parameter.max_items {
+                if values.len() > maximum {
+                    return Err(format!(
+                        "rule `{rule_id}` parameter `{name}` must contain at most {maximum} items"
+                    ));
+                }
+            }
+        }
+        ParameterKindV1::NativeObject => {
+            let validator = parameter.validator.ok_or_else(|| {
+                format!("rule `{rule_id}` parameter `{name}` has no native object validator")
+            })?;
+            validate_native_object(rule_id, name, validator, value)?;
+        }
+        ParameterKindV1::Boolean | ParameterKindV1::String => {}
+    }
+    Ok(())
+}
+
+fn validate_native_object(
+    rule_id: &str,
+    parameter_name: &str,
+    validator: NativeObjectValidatorV1,
+    value: &Value,
+) -> Result<(), String> {
+    match validator {
+        NativeObjectValidatorV1::AccessibilityException => {
+            validate_accessibility_exception(rule_id, parameter_name, value)
+        }
+    }
+}
+
+fn validate_accessibility_exception(
+    rule_id: &str,
+    parameter_name: &str,
+    value: &Value,
+) -> Result<(), String> {
+    let object = value.as_object().ok_or_else(|| {
+        format!("rule `{rule_id}` parameter `{parameter_name}` must be an object")
+    })?;
+    for field in object.keys() {
+        if !matches!(field.as_str(), "kind" | "evidence") {
+            return Err(format!(
+                "rule `{rule_id}` parameter `{parameter_name}` does not accept field `{field}`"
+            ));
+        }
+    }
+
+    let kind = object
+        .get("kind")
+        .ok_or_else(|| {
+            format!("rule `{rule_id}` parameter `{parameter_name}` requires field `kind`")
+        })?
+        .as_str()
+        .ok_or_else(|| {
+            format!("rule `{rule_id}` parameter `{parameter_name}.kind` must be a string")
+        })?;
+    if !matches!(
+        kind,
+        "spacing" | "inline" | "equivalent" | "user_agent" | "essential" | "two_dimensional"
+    ) {
+        return Err(format!(
+            "rule `{rule_id}` parameter `{parameter_name}.kind` is not a supported accessibility exception kind"
+        ));
+    }
+
+    object
+        .get("evidence")
+        .ok_or_else(|| {
+            format!("rule `{rule_id}` parameter `{parameter_name}` requires field `evidence`")
+        })?
+        .as_str()
+        .ok_or_else(|| {
+            format!("rule `{rule_id}` parameter `{parameter_name}.evidence` must be a string")
+        })?;
+
+    Ok(())
 }
 
 fn rule_manifest(rule_id: &str) -> Option<&'static RuleManifestV1> {
@@ -395,6 +630,13 @@ impl std::error::Error for ManifestLoadError {}
 
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
+
+    use super::super::manifest_format::{
+        NativeObjectValidatorV1, ParameterContractV1, ParameterKindV1, SubjectCardinalityV1,
+        SubjectContractV1,
+    };
+
     #[test]
     fn strict_json_failures_are_deterministic() {
         let source = super::EMBEDDED_RULE_MANIFESTS
@@ -430,5 +672,105 @@ mod tests {
             error,
             "embedded rule manifest catalog conversion failed: family `accessibility` uses family_version `2`; the runtime catalog supports only `1`"
         );
+    }
+
+    #[test]
+    fn every_parameter_kind_and_inclusive_bound_is_validated() {
+        let mut integer = parameter("integer", ParameterKindV1::Integer);
+        integer.minimum = Some(1);
+        integer.maximum = Some(3);
+        for value in [json!(1), json!(3)] {
+            super::validate_parameter_value("test.rule", &integer, &value)
+                .expect("inclusive integer boundary");
+        }
+        for value in [json!(0), json!(4), json!(1.5), json!("1")] {
+            assert!(super::validate_parameter_value("test.rule", &integer, &value).is_err());
+        }
+
+        let boolean = parameter("boolean", ParameterKindV1::Boolean);
+        super::validate_parameter_value("test.rule", &boolean, &json!(true))
+            .expect("boolean value");
+        assert!(super::validate_parameter_value("test.rule", &boolean, &json!("true")).is_err());
+
+        let string = parameter("string", ParameterKindV1::String);
+        super::validate_parameter_value("test.rule", &string, &json!("value"))
+            .expect("string value");
+        assert!(super::validate_parameter_value("test.rule", &string, &json!(true)).is_err());
+
+        let mut enumeration = parameter("enum", ParameterKindV1::StringEnum);
+        enumeration.values = vec!["first".to_owned(), "second".to_owned()];
+        super::validate_parameter_value("test.rule", &enumeration, &json!("first"))
+            .expect("enum member");
+        assert!(
+            super::validate_parameter_value("test.rule", &enumeration, &json!("third")).is_err()
+        );
+
+        let mut array = parameter("array", ParameterKindV1::StringArray);
+        array.min_items = Some(1);
+        array.max_items = Some(2);
+        for value in [json!(["one"]), json!(["one", "two"])] {
+            super::validate_parameter_value("test.rule", &array, &value)
+                .expect("inclusive array boundary");
+        }
+        for value in [json!([]), json!(["one", "two", "three"]), json!([1])] {
+            assert!(super::validate_parameter_value("test.rule", &array, &value).is_err());
+        }
+
+        let mut native = parameter("native", ParameterKindV1::NativeObject);
+        native.validator = Some(NativeObjectValidatorV1::AccessibilityException);
+        super::validate_parameter_value(
+            "test.rule",
+            &native,
+            &json!({"kind": "spacing", "evidence": "documented"}),
+        )
+        .expect("native accessibility exception");
+        assert!(
+            super::validate_parameter_value("test.rule", &native, &json!({"kind": "spacing"}),)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn every_subject_cardinality_variant_uses_inclusive_boundaries() {
+        let exact = SubjectContractV1 {
+            cardinality: SubjectCardinalityV1::Exact { count: 2 },
+        };
+        assert!(super::validate_subject_count("test.rule", &exact, 2).is_ok());
+        assert!(super::validate_subject_count("test.rule", &exact, 1).is_err());
+
+        let at_least = SubjectContractV1 {
+            cardinality: SubjectCardinalityV1::AtLeast { count: 2 },
+        };
+        assert!(super::validate_subject_count("test.rule", &at_least, 2).is_ok());
+        assert!(super::validate_subject_count("test.rule", &at_least, 1).is_err());
+
+        let range = SubjectContractV1 {
+            cardinality: SubjectCardinalityV1::Range {
+                minimum: 2,
+                maximum: 4,
+            },
+        };
+        for count in [2, 4] {
+            super::validate_subject_count("test.rule", &range, count)
+                .expect("inclusive subject boundary");
+        }
+        for count in [1, 5] {
+            assert!(super::validate_subject_count("test.rule", &range, count).is_err());
+        }
+    }
+
+    fn parameter(name: &str, kind: ParameterKindV1) -> ParameterContractV1 {
+        ParameterContractV1 {
+            name: name.to_owned(),
+            required: false,
+            default: None,
+            kind,
+            minimum: None,
+            maximum: None,
+            values: Vec::new(),
+            min_items: None,
+            max_items: None,
+            validator: None,
+        }
     }
 }
