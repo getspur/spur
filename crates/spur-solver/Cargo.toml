@@ -29,6 +29,7 @@ libc = "0.2"
 
 [dev-dependencies]
 serde_json.workspace = true
+serde_yml = "0.0.12"
 tempfile = "3"
 
 [lints]

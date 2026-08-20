@@ -4,6 +4,7 @@ pub mod catalog;
 pub mod compiler;
 pub mod execute;
 pub mod families;
+pub mod manifest_format;
 pub mod primitives;
 pub mod spec;
 
