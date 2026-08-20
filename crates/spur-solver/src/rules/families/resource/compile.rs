@@ -2,13 +2,15 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::{
     rules::{
         compiler::{FamilyCompilation, FamilyCompileError, ModelProjection, RuleFamilyCompiler},
+        manifest::{manifest_rule_handler, validate_binding_contract},
         manifest_family_executable_rule_ids,
+        manifest_format::NativeHandlerV1,
         primitives::{add, and, boolean, eq, ge, gt, int, le, mul, or, request, sub, var},
         CompiledRule, RuleSolveMode,
     },
@@ -17,8 +19,6 @@ use crate::{
         MAX_VARIABLES,
     },
 };
-
-use super::builtin_registry;
 
 /// Resource compiler registered behind `solve_rules`.
 pub static COMPILER: ResourceCompiler = ResourceCompiler;
@@ -67,13 +67,21 @@ struct ResourceRuleBinding {
     parameters: ResourceParameters,
 }
 
-#[derive(Default, Deserialize)]
+#[derive(Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct ResourceParameters {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     resources: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     max_skew: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     minimum_domains: Option<i64>,
+}
+
+struct ValidatedResourceBinding<'a> {
+    source: &'a ResourceRuleBinding,
+    handler: NativeHandlerV1,
+    parameters: ResourceParameters,
 }
 
 #[derive(Clone, Deserialize)]
@@ -125,12 +133,21 @@ fn compile(input: Value) -> Result<FamilyCompilation, String> {
     if input.mode == RuleSolveMode::Verify && !input.unknowns.is_empty() {
         return Err("verification requires complete resource facts".to_owned());
     }
+    let bindings = input
+        .rules
+        .iter()
+        .map(validate_manifest_binding)
+        .collect::<Result<Vec<_>, _>>()?;
     validate_facts(&input.facts, &input.unknowns)?;
     let mut resolver = ResourceResolver::new(input.facts, &input.unknowns);
     let mut rules = Vec::with_capacity(input.rules.len());
-    for (index, binding) in input.rules.iter().enumerate() {
+    for (index, binding) in bindings.iter().enumerate() {
         let predicate = compile_binding(binding, &mut resolver)?;
-        rules.push(CompiledRule::new(binding.rule_id.clone(), index, predicate));
+        rules.push(CompiledRule::new(
+            binding.source.rule_id.clone(),
+            index,
+            predicate,
+        ));
     }
     let solver_request = request(
         "resource",
@@ -150,6 +167,81 @@ fn compile(input: Value) -> Result<FamilyCompilation, String> {
         rules,
         projections: resolver.projections,
     })
+}
+
+fn validate_manifest_binding(
+    binding: &ResourceRuleBinding,
+) -> Result<ValidatedResourceBinding<'_>, String> {
+    let parameters =
+        serde_json::to_value(&binding.parameters).map_err(|error| error.to_string())?;
+    let Value::Object(parameters) = parameters else {
+        return Err("resource parameters did not serialize as an object".to_owned());
+    };
+    let validated = validate_binding_contract(&binding.rule_id, &binding.subjects, &parameters)
+        .map_err(|message| stable_contract_error(binding, message))?;
+    let parameters = serde_json::from_value(Value::Object(validated.parameters))
+        .map_err(|error| error.to_string())?;
+
+    Ok(ValidatedResourceBinding {
+        source: binding,
+        handler: validated.handler,
+        parameters,
+    })
+}
+
+fn stable_contract_error(binding: &ResourceRuleBinding, message: String) -> String {
+    match validate_legacy_static_contract(binding) {
+        Err(error) => error,
+        Ok(()) => message,
+    }
+}
+
+// The shared manifest validator owns acceptance. This error-only replay keeps the
+// established resource diagnostics while the shared contract returns strings.
+fn validate_legacy_static_contract(binding: &ResourceRuleBinding) -> Result<(), String> {
+    match manifest_rule_handler(&binding.rule_id) {
+        Some(NativeHandlerV1::ResourceRequestWithinLimit) => {
+            require_subjects(binding, 1, None)?;
+            reject_placement_parameters(binding)
+        }
+        Some(NativeHandlerV1::ResourceAggregateCapacity)
+        | Some(NativeHandlerV1::ResourceQuotaCapacity) => {
+            require_subjects(binding, 2, Some(usize::MAX))?;
+            reject_placement_parameters(binding)
+        }
+        Some(NativeHandlerV1::PlacementTopologyMaxSkew) => {
+            require_subjects(binding, 1, None)?;
+            reject_resources(binding)?;
+            reject_minimum_domains(binding)?;
+            positive("max_skew", binding.parameters.max_skew.unwrap_or(1))?;
+            Ok(())
+        }
+        Some(NativeHandlerV1::PlacementMinimumFailureDomains) => {
+            require_subjects(binding, 1, None)?;
+            reject_resources(binding)?;
+            reject_max_skew(binding)?;
+            positive(
+                "minimum_domains",
+                binding.parameters.minimum_domains.unwrap_or(1),
+            )?;
+            Ok(())
+        }
+        Some(
+            NativeHandlerV1::A11yFocusNotObscured
+            | NativeHandlerV1::A11yReflow
+            | NativeHandlerV1::A11yTargetSize
+            | NativeHandlerV1::A11yTextContrast
+            | NativeHandlerV1::LayoutAxisCapacity
+            | NativeHandlerV1::LayoutContainment
+            | NativeHandlerV1::LayoutNonOverlap
+            | NativeHandlerV1::MediaAspectRatio
+            | NativeHandlerV1::RbacDynamicSeparationOfDuty
+            | NativeHandlerV1::RbacPermissionReachable
+            | NativeHandlerV1::RbacRoleHierarchyAcyclic
+            | NativeHandlerV1::RbacStaticSeparationOfDuty,
+        )
+        | None => Err(format!("unsupported resource rule `{}`", binding.rule_id)),
+    }
 }
 
 fn validate_facts(facts: &ResourceFacts, unknowns: &[ResourceUnknown]) -> Result<(), String> {
@@ -243,17 +335,13 @@ fn workload_value(workload: &WorkloadFacts, field: &str) -> Result<Option<i64>, 
 }
 
 fn compile_binding(
-    binding: &ResourceRuleBinding,
+    binding: &ValidatedResourceBinding<'_>,
     resolver: &mut ResourceResolver,
 ) -> Result<ConstraintExpr, String> {
-    if builtin_registry().rule(&binding.rule_id).is_none() {
-        return Err(format!("unsupported resource rule `{}`", binding.rule_id));
-    }
-    match binding.rule_id.as_str() {
-        "resource.request_within_limit" => {
-            require_subjects(binding, 1, None)?;
-            reject_placement_parameters(binding)?;
-            let workload = &binding.subjects[0];
+    let source = binding.source;
+    match binding.handler {
+        NativeHandlerV1::ResourceRequestWithinLimit => {
+            let workload = &source.subjects[0];
             resolver.require_workload(workload)?;
             let resources = selected_resources(
                 &binding.parameters.resources,
@@ -270,22 +358,18 @@ fn compile_binding(
                 .collect::<Result<Vec<_>, String>>()?;
             Ok(conjunction(predicates))
         }
-        "resource.aggregate_capacity" => {
-            require_subjects(binding, 2, Some(usize::MAX))?;
-            reject_placement_parameters(binding)?;
+        NativeHandlerV1::ResourceAggregateCapacity => {
             compile_capacity(binding, resolver, CapacityKind::Pool)
         }
-        "resource.quota_capacity" => {
-            require_subjects(binding, 2, Some(usize::MAX))?;
-            reject_placement_parameters(binding)?;
+        NativeHandlerV1::ResourceQuotaCapacity => {
             compile_capacity(binding, resolver, CapacityKind::Quota)
         }
-        "placement.topology_max_skew" => {
-            require_subjects(binding, 1, None)?;
-            reject_resources(binding)?;
-            reject_minimum_domains(binding)?;
-            let max_skew = positive("max_skew", binding.parameters.max_skew.unwrap_or(1))?;
-            let workload = &binding.subjects[0];
+        NativeHandlerV1::PlacementTopologyMaxSkew => {
+            let max_skew = binding
+                .parameters
+                .max_skew
+                .expect("manifest defaults max_skew");
+            let workload = &source.subjects[0];
             resolver.require_workload(workload)?;
             let domains = resolver.facts.workloads[workload]
                 .domain_counts
@@ -308,15 +392,12 @@ fn compile_binding(
             }
             Ok(conjunction(predicates))
         }
-        "placement.minimum_failure_domains" => {
-            require_subjects(binding, 1, None)?;
-            reject_resources(binding)?;
-            reject_max_skew(binding)?;
-            let minimum = positive(
-                "minimum_domains",
-                binding.parameters.minimum_domains.unwrap_or(1),
-            )?;
-            let workload = &binding.subjects[0];
+        NativeHandlerV1::PlacementMinimumFailureDomains => {
+            let minimum = binding
+                .parameters
+                .minimum_domains
+                .expect("manifest defaults minimum_domains");
+            let workload = &source.subjects[0];
             resolver.require_workload(workload)?;
             let domains = resolver.facts.workloads[workload]
                 .domain_counts
@@ -342,7 +423,20 @@ fn compile_binding(
             links.push(ge(sum(present), int(minimum)));
             Ok(conjunction(links))
         }
-        _ => Err(format!("unsupported resource rule `{}`", binding.rule_id)),
+        NativeHandlerV1::A11yFocusNotObscured
+        | NativeHandlerV1::A11yReflow
+        | NativeHandlerV1::A11yTargetSize
+        | NativeHandlerV1::A11yTextContrast
+        | NativeHandlerV1::LayoutAxisCapacity
+        | NativeHandlerV1::LayoutContainment
+        | NativeHandlerV1::LayoutNonOverlap
+        | NativeHandlerV1::MediaAspectRatio
+        | NativeHandlerV1::RbacDynamicSeparationOfDuty
+        | NativeHandlerV1::RbacPermissionReachable
+        | NativeHandlerV1::RbacRoleHierarchyAcyclic
+        | NativeHandlerV1::RbacStaticSeparationOfDuty => {
+            Err(format!("unsupported resource rule `{}`", source.rule_id))
+        }
     }
 }
 
@@ -352,11 +446,12 @@ enum CapacityKind {
 }
 
 fn compile_capacity(
-    binding: &ResourceRuleBinding,
+    binding: &ValidatedResourceBinding<'_>,
     resolver: &ResourceResolver,
     kind: CapacityKind,
 ) -> Result<ConstraintExpr, String> {
-    let capacity_id = &binding.subjects[0];
+    let source = binding.source;
+    let capacity_id = &source.subjects[0];
     let (capacity, capacity_kind) = match kind {
         CapacityKind::Pool => (
             resolver
@@ -375,7 +470,7 @@ fn compile_capacity(
             "quota",
         ),
     };
-    for workload in &binding.subjects[1..] {
+    for workload in &source.subjects[1..] {
         resolver.require_workload(workload)?;
     }
     let resources = selected_resources(&binding.parameters.resources, capacity.resources.keys())?;
@@ -389,7 +484,7 @@ fn compile_capacity(
     let predicates = resources
         .iter()
         .map(|resource| {
-            let demand = binding.subjects[1..]
+            let demand = source.subjects[1..]
                 .iter()
                 .map(|workload| {
                     Ok(mul(vec![
