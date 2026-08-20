@@ -4,9 +4,16 @@ pub mod catalog;
 pub mod compiler;
 pub mod execute;
 pub mod families;
+pub mod manifest;
 pub mod manifest_format;
 pub mod primitives;
 pub mod spec;
+
+pub use manifest::{
+    manifest_conformance_vectors, manifest_executable_rule_ids,
+    manifest_family_executable_rule_ids, manifest_family_registry, manifest_registry,
+    manifest_rule_contract, manifest_rule_handler, ManifestRuleContract,
+};
 
 use catalog::RuleRegistry;
 use serde::{Deserialize, Serialize};
