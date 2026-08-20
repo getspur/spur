@@ -7,7 +7,10 @@ use serde_json::{json, Value};
 
 use crate::{
     rules::{
-        compiler::{FamilyCompilation, FamilyCompileError, ModelProjection, RuleFamilyCompiler},
+        compiler::{
+            BoundedReachabilityScope, FamilyCompilation, FamilyCompileError, ModelProjection,
+            RuleEvaluationScope, RuleFamilyCompiler,
+        },
         manifest::validate_binding_contract,
         manifest_family_executable_rule_ids,
         manifest_format::NativeHandlerV1,
@@ -40,11 +43,24 @@ impl RuleFamilyCompiler for WorkflowCompiler {
     }
 
     fn compile(&self, input: Value) -> Result<FamilyCompilation, FamilyCompileError> {
-        compile(input).map_err(|message| FamilyCompileError::new(self.id(), message))
+        compile_with_evaluation_scope(input)
+            .map(|(compiled, _)| compiled)
+            .map_err(|message| FamilyCompileError::new(self.id(), message))
+    }
+
+    fn compile_with_evaluation_scope(
+        &self,
+        input: Value,
+    ) -> Result<(FamilyCompilation, Option<RuleEvaluationScope>), FamilyCompileError> {
+        compile_with_evaluation_scope(input)
+            .map(|(compiled, scope)| (compiled, Some(scope)))
+            .map_err(|message| FamilyCompileError::new(self.id(), message))
     }
 }
 
-fn compile(input: Value) -> Result<FamilyCompilation, String> {
+fn compile_with_evaluation_scope(
+    input: Value,
+) -> Result<(FamilyCompilation, RuleEvaluationScope), String> {
     let input: WorkflowRequest =
         serde_json::from_value(input).map_err(|error| error.to_string())?;
     if input.family != "workflow" {
@@ -88,6 +104,30 @@ fn compile(input: Value) -> Result<FamilyCompilation, String> {
             })
         })
         .collect::<Result<Vec<_>, _>>()?;
+    let reachability = bindings
+        .iter()
+        .enumerate()
+        .filter(|(_, binding)| {
+            matches!(
+                binding.handler,
+                NativeHandlerV1::WorkflowBoundedReachability
+            )
+        })
+        .map(|(binding_index, binding)| {
+            let effective_bound = effective_reachability_bound(binding, horizon)?;
+            Ok(BoundedReachabilityScope {
+                rule_id: binding.source.rule_id.clone(),
+                binding_index,
+                effective_bound: u64::try_from(effective_bound)
+                    .map_err(|_| "workflow reachability bound conversion overflow".to_owned())?,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let evaluation_scope = RuleEvaluationScope::BoundedTrace {
+        horizon: u64::try_from(horizon)
+            .map_err(|_| "workflow horizon conversion overflow".to_owned())?,
+        reachability,
+    };
 
     let solver_request = request(
         "workflow",
@@ -101,12 +141,15 @@ fn compile(input: Value) -> Result<FamilyCompilation, String> {
         .validate()
         .map_err(|error| format!("compiled workflow rules are invalid: {error}"))?;
 
-    Ok(FamilyCompilation {
-        mode: input.mode,
-        request: solver_request,
-        rules,
-        projections: resolver.projections,
-    })
+    Ok((
+        FamilyCompilation {
+            mode: input.mode,
+            request: solver_request,
+            rules,
+            projections: resolver.projections,
+        },
+        evaluation_scope,
+    ))
 }
 
 #[derive(Deserialize)]
@@ -922,7 +965,9 @@ mod tests {
     use serde_json::{json, Value};
 
     use super::COMPILER;
-    use crate::rules::compiler::RuleFamilyCompiler;
+    use crate::rules::compiler::{
+        BoundedReachabilityScope, RuleEvaluationScope, RuleFamilyCompiler,
+    };
     use crate::{
         service::SolverService,
         types::{ModelValue, SolveStatus, MAX_VARIABLES},
@@ -1119,6 +1164,38 @@ mod tests {
     async fn workflow_bound_override_makes_later_target_unsatisfiable() {
         let (_, response) = solve(unsafe_witness_request(1)).await;
         assert_eq!(response.status, SolveStatus::Unsat);
+    }
+
+    #[test]
+    fn workflow_scope_preserves_reachability_binding_order_and_horizon_default() {
+        let mut input = unsafe_witness_request(1);
+        input["rules"]
+            .as_array_mut()
+            .expect("workflow rules")
+            .push(rule("workflow.bounded_reachability"));
+
+        let (_, scope) = COMPILER
+            .compile_with_evaluation_scope(input)
+            .expect("workflow request must compile with scope");
+
+        assert_eq!(
+            scope,
+            Some(RuleEvaluationScope::BoundedTrace {
+                horizon: 2,
+                reachability: vec![
+                    BoundedReachabilityScope {
+                        rule_id: "workflow.bounded_reachability".to_owned(),
+                        binding_index: 2,
+                        effective_bound: 1,
+                    },
+                    BoundedReachabilityScope {
+                        rule_id: "workflow.bounded_reachability".to_owned(),
+                        binding_index: 3,
+                        effective_bound: 2,
+                    },
+                ],
+            })
+        );
     }
 
     #[test]

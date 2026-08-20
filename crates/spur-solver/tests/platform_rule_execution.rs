@@ -430,6 +430,19 @@ async fn generic_family_workflow_preserves_verification_and_bounded_witness_sema
     );
     assert_eq!(witness["status"], "sat");
     assert_eq!(witness["outcome"], "solution");
+    assert_eq!(
+        witness["evaluation_scope"],
+        json!({
+            "kind": "bounded_trace",
+            "horizon": 2,
+            "reachability": [{
+                "rule_id": "workflow.bounded_reachability",
+                "binding_index": 2,
+                "effective_bound": 2
+            }]
+        }),
+        "a bounded witness must expose the finite scope that produced it"
+    );
     assert!(witness["assignments"]
         .as_array()
         .expect("bounded workflow witness")
@@ -451,6 +464,19 @@ async fn generic_family_workflow_preserves_verification_and_bounded_witness_sema
     );
     assert_eq!(bounded_unsat["status"], "unsat");
     assert_eq!(bounded_unsat["outcome"], "infeasible");
+    assert_eq!(
+        bounded_unsat["evaluation_scope"],
+        json!({
+            "kind": "bounded_trace",
+            "horizon": 1,
+            "reachability": [{
+                "rule_id": "workflow.bounded_reachability",
+                "binding_index": 2,
+                "effective_bound": 1
+            }]
+        }),
+        "bounded infeasibility must expose the finite scope of the proof"
+    );
     assert!(bounded_unsat.get("assignments").is_none());
     assert!(bounded_unsat.get("rule_results").is_none());
 }
