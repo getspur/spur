@@ -65,16 +65,16 @@ fn status_bar_renders_repo_branch_and_hash_in_full_mode() {
 }
 
 #[test]
-fn status_bar_compact_mode_drops_repo_name() {
+fn status_bar_compact_mode_keeps_repo_name() {
     let info = sample();
     let text = render_to_text(80, Some(&info));
     assert!(
-        text.contains("main@abc1234"),
-        "expected compact git segment, got: {text}"
+        text.contains("myrepo"),
+        "expected repo identity in compact git segment, got: {text}"
     );
     assert!(
-        !text.contains("myrepo"),
-        "expected repo name omitted in compact mode, got: {text}"
+        !text.contains("main@abc1234"),
+        "expected branch and hash omitted in compact mode, got: {text}"
     );
 }
 

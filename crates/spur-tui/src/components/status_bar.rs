@@ -7,6 +7,8 @@ use ratatui::{
 };
 #[cfg(feature = "analytics")]
 use std::sync::atomic::{AtomicBool, Ordering};
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
 use crate::action::ViewId;
 use crate::components::tombstone::{Tombstone, TombstoneKind};
@@ -18,11 +20,28 @@ fn token(theme: &Theme, name: &str) -> Color {
 }
 
 fn truncate_with_ellipsis(label: &str, cap: usize) -> std::borrow::Cow<'_, str> {
-    if label.chars().count() <= cap {
+    if UnicodeWidthStr::width(label) <= cap {
         return std::borrow::Cow::Borrowed(label);
     }
-    let mut out: String = label.chars().take(cap.saturating_sub(1)).collect();
-    out.push('…');
+
+    const ELLIPSIS: &str = "…";
+    let ellipsis_width = UnicodeWidthStr::width(ELLIPSIS);
+    if cap < ellipsis_width {
+        return std::borrow::Cow::Owned(String::new());
+    }
+
+    let content_cap = cap - ellipsis_width;
+    let mut width = 0;
+    let mut out = String::new();
+    for grapheme in label.graphemes(true) {
+        let grapheme_width = UnicodeWidthStr::width(grapheme);
+        if width + grapheme_width > content_cap {
+            break;
+        }
+        out.push_str(grapheme);
+        width += grapheme_width;
+    }
+    out.push_str(ELLIPSIS);
     std::borrow::Cow::Owned(out)
 }
 
@@ -385,18 +404,21 @@ impl StatusBar {
         let mut spans: Vec<Span<'a>> = Vec::new();
 
         if let Some(git) = props.git_info {
-            let branch = git.branch.as_deref().unwrap_or("detached");
-            let branch = truncate_with_ellipsis(branch, if compact { 14 } else { 20 });
-            let mut label = String::new();
-            if !compact {
+            let label = if compact {
+                truncate_with_ellipsis(&git.repo_name, 14).into_owned()
+            } else {
+                let branch = git.branch.as_deref().unwrap_or("detached");
+                let branch = truncate_with_ellipsis(branch, 20);
+                let mut label = String::new();
                 label.push_str(&git.repo_name);
                 label.push(' ');
-            }
-            label.push_str(&branch);
-            if let Some(hash) = git.short_hash.as_deref() {
-                label.push('@');
-                label.push_str(hash);
-            }
+                label.push_str(&branch);
+                if let Some(hash) = git.short_hash.as_deref() {
+                    label.push('@');
+                    label.push_str(hash);
+                }
+                label
+            };
             spans.push(Span::styled(label, Style::default().fg(sep_fg)));
             spans.push(Span::styled(sep, Style::default().fg(sep_fg)));
         }
@@ -564,6 +586,7 @@ mod status_bar_hint_tests {
         hint_for_session_detail, hint_for_session_detail_compact, StatusBar, StatusBarProps,
     };
     use crate::action::ViewId;
+    use crate::git_info::GitInfo;
     use ratatui::style::Style;
     use ratatui::text::Span;
 
@@ -571,6 +594,15 @@ mod status_bar_hint_tests {
         view: &ViewId,
         notebook_ready: bool,
         compact: bool,
+    ) -> Vec<String> {
+        status_bar_metric_contents_with_git(view, notebook_ready, compact, None)
+    }
+
+    fn status_bar_metric_contents_with_git(
+        view: &ViewId,
+        notebook_ready: bool,
+        compact: bool,
+        git_info: Option<&GitInfo>,
     ) -> Vec<String> {
         let theme = crate::theme::fallback_theme();
         let props = StatusBarProps {
@@ -593,7 +625,7 @@ mod status_bar_hint_tests {
             issue_count: 0,
             alert_summary: None,
             flag_summary: None,
-            git_info: None,
+            git_info,
             view_hint_override: None,
         };
 
@@ -608,6 +640,43 @@ mod status_bar_hint_tests {
         .into_iter()
         .map(|span| span.content.into_owned())
         .collect()
+    }
+
+    #[test]
+    fn compact_git_metrics_identify_the_repository() {
+        let git_info = GitInfo {
+            repo_name: "my-workspace".to_string(),
+            branch: Some("feature/status-bar-project".to_string()),
+            short_hash: Some("abc1234".to_string()),
+        };
+
+        let contents =
+            status_bar_metric_contents_with_git(&ViewId::Dashboard, false, true, Some(&git_info));
+        let rendered = contents.concat();
+
+        assert!(rendered.contains("my-workspace"), "got: {rendered}");
+        assert!(!rendered.contains("feature/status-bar-project"));
+        assert!(!rendered.contains("abc1234"));
+    }
+
+    #[test]
+    fn compact_git_metrics_cap_wide_repository_to_14_columns() {
+        let git_info = GitInfo {
+            repo_name: "工作区👩‍💻工作区工".to_string(),
+            branch: Some("main".to_string()),
+            short_hash: Some("abc1234".to_string()),
+        };
+
+        let contents =
+            status_bar_metric_contents_with_git(&ViewId::Dashboard, false, true, Some(&git_info));
+        let repo_segment = &contents[0];
+
+        assert!(
+            Span::raw(repo_segment.as_str()).width() <= 14,
+            "compact repo segment exceeded 14 columns: {repo_segment}"
+        );
+        assert!(repo_segment.ends_with('…'), "got: {repo_segment}");
+        assert!(repo_segment.contains("👩‍💻"), "got: {repo_segment}");
     }
 
     #[test]
