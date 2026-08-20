@@ -13,6 +13,7 @@ use crate::{
     },
     persist::PersistError,
     rules::execute::{self, PrepareRulesError},
+    rules::manifest_executable_rule_ids,
     rules::spec::{self, RuleSpecError, RuleSpecRequest},
     service::{SolverService, SolverServiceError},
     types::{
@@ -270,20 +271,7 @@ fn solve_rules_schema() -> Value {
         .iter()
         .map(|compiler| compiler.id())
         .collect::<Vec<_>>();
-    let rule_ids = compilers
-        .iter()
-        .flat_map(|compiler| {
-            let schema = compiler.input_schema();
-            schema
-                .pointer("/properties/rules/items/properties/rule_id/enum")
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-                .filter_map(Value::as_str)
-                .map(str::to_owned)
-                .collect::<Vec<_>>()
-        })
-        .collect::<Vec<_>>();
+    let rule_ids = manifest_executable_rule_ids();
 
     json!({
         "type": "object",

@@ -1,6 +1,29 @@
 use serde_json::{json, Value};
 use spur_mcp::{ServerKind, ToolAuthority, ToolCallContext, ToolRegistry};
-use spur_solver::{mcp::SolverMcpModule, rules::builtin_registry};
+use spur_solver::{
+    mcp::SolverMcpModule,
+    rules::{builtin_registry, manifest_executable_rule_ids},
+};
+
+const EXPECTED_EXECUTABLE_RULE_IDS: [&str; 17] = [
+    "a11y.focus_not_obscured",
+    "a11y.reflow",
+    "a11y.target_size",
+    "a11y.text_contrast",
+    "layout.axis_capacity",
+    "layout.containment",
+    "layout.non_overlap",
+    "media.aspect_ratio",
+    "placement.minimum_failure_domains",
+    "placement.topology_max_skew",
+    "rbac.dynamic_separation_of_duty",
+    "rbac.permission_reachable",
+    "rbac.role_hierarchy_acyclic",
+    "rbac.static_separation_of_duty",
+    "resource.aggregate_capacity",
+    "resource.quota_capacity",
+    "resource.request_within_limit",
+];
 
 fn registry() -> ToolRegistry {
     ToolRegistry::builder()
@@ -38,21 +61,18 @@ fn builtin_registry_composes_all_platform_families_in_stable_order() {
         vec!["accessibility", "design", "policy", "resource"]
     );
 
-    for rule_id in [
-        "a11y.focus_not_obscured",
-        "a11y.reflow",
-        "a11y.target_size",
-        "a11y.text_contrast",
-        "rbac.dynamic_separation_of_duty",
-        "rbac.permission_reachable",
-        "rbac.role_hierarchy_acyclic",
-        "rbac.static_separation_of_duty",
-        "resource.aggregate_capacity",
-        "resource.quota_capacity",
-        "resource.request_within_limit",
-        "placement.minimum_failure_domains",
-        "placement.topology_max_skew",
-    ] {
+    assert_eq!(
+        manifest_executable_rule_ids()
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        EXPECTED_EXECUTABLE_RULE_IDS
+    );
+    assert!(!manifest_executable_rule_ids()
+        .iter()
+        .any(|rule_id| rule_id == "rbac.minimum_privilege"));
+
+    for rule_id in EXPECTED_EXECUTABLE_RULE_IDS {
         assert!(
             builtin_registry().rule(rule_id).is_some(),
             "missing implemented rule {rule_id}"
