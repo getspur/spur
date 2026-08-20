@@ -8,14 +8,16 @@ pub mod design;
 pub mod policy;
 pub mod resource;
 pub mod scheduling;
+pub mod workflow;
 
-static COMPILERS: [&dyn RuleFamilyCompiler; 6] = [
+static COMPILERS: [&dyn RuleFamilyCompiler; 7] = [
     &accessibility::COMPILER,
     &configuration::COMPILER,
     &design::COMPILER,
     &policy::COMPILER,
     &resource::COMPILER,
     &scheduling::COMPILER,
+    &workflow::COMPILER,
 ];
 
 /// Returns the validated registry containing every built-in family.

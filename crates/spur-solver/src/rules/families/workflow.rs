@@ -2,6 +2,9 @@
 
 use crate::rules::catalog::RuleRegistry;
 
+pub mod compile;
+pub use compile::COMPILER;
+
 /// Returns the validated workflow catalog contribution.
 #[must_use]
 pub fn builtin_registry() -> &'static RuleRegistry {
