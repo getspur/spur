@@ -30,6 +30,34 @@ fn empty_delta_matches_base_across_query_surface() {
 }
 
 #[test]
+fn empty_overlay_callees_do_not_resolve_unresolved_labels_against_base() {
+    let base = CountingClient::new(InMemoryClient::new(Arc::new(base_artifact())));
+    let overlay = OverlayClient::from_artifacts(
+        base.clone(),
+        Arc::new(empty_delta_artifact()),
+        HashSet::new(),
+    )
+    .expect("overlay");
+
+    let records = overlay.find_callee_edges("unchanged-caller-id");
+    assert!(
+        records.iter().any(|record| matches!(
+            record,
+            OwnedCalleeRecord::Unresolved {
+                target_label,
+                ..
+            } if target_label == "fresh"
+        )),
+        "base unresolved callee `fresh` must stay unresolved under an empty overlay"
+    );
+    assert_eq!(
+        base.resolve_selector_calls(),
+        0,
+        "empty overlay must not probe the base for unresolved callee labels"
+    );
+}
+
+#[test]
 fn stable_changed_file_edit_matches_full_rebuild() {
     let overlay = overlay_from_parts(
         base_artifact(),
@@ -510,6 +538,7 @@ struct CountingClient {
     inner: InMemoryClient,
     symbols_by_file_calls: Arc<AtomicUsize>,
     symbols_by_path_name_calls: Arc<AtomicUsize>,
+    resolve_selector_calls: Arc<AtomicUsize>,
 }
 
 impl CountingClient {
@@ -518,6 +547,7 @@ impl CountingClient {
             inner,
             symbols_by_file_calls: Arc::new(AtomicUsize::new(0)),
             symbols_by_path_name_calls: Arc::new(AtomicUsize::new(0)),
+            resolve_selector_calls: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -527,6 +557,10 @@ impl CountingClient {
 
     fn symbols_by_path_name_calls(&self) -> usize {
         self.symbols_by_path_name_calls.load(Ordering::SeqCst)
+    }
+
+    fn resolve_selector_calls(&self) -> usize {
+        self.resolve_selector_calls.load(Ordering::SeqCst)
     }
 }
 
@@ -552,6 +586,7 @@ impl GraphQueryClient for CountingClient {
     }
 
     fn resolve_selector(&self, selector: &str) -> anyhow::Result<CodeSelectorResolution> {
+        self.resolve_selector_calls.fetch_add(1, Ordering::SeqCst);
         self.inner.resolve_selector(selector)
     }
 

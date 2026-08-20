@@ -1323,9 +1323,21 @@ async fn overlay_response_for_backend(
                 "failed to construct code graph overlay: {error}"
             )))
         })?;
-        let fresh_body = handler(args, &overlay)?;
-        let fresh_files = response_file_set_from_client(&overlay, &fresh_body)?;
-        (fresh_body, fresh_files)
+        match overlay {
+            Some(overlay) => {
+                let fresh_body = handler(args, &overlay)?;
+                let fresh_files = response_file_set_from_client(&overlay, &fresh_body)?;
+                (fresh_body, fresh_files)
+            }
+            None => {
+                // No changed paths → identity overlay. Serve the base client
+                // directly and skip extract_delta / remap construction.
+                let client = backend.client();
+                let fresh_body = handler(args, client)?;
+                let fresh_files = response_file_set_from_client(client, &fresh_body)?;
+                (fresh_body, fresh_files)
+            }
+        }
     };
     GraphResponseMetadata::analyze_source_inner(source, Some(&fresh_files), None)
         .await
@@ -1338,16 +1350,23 @@ async fn overlay_response_for_backend(
 fn overlay_client_for_backend<'a>(
     backend: &'a CodeSearchBackend,
     rebuild_candidate: &RebuildCandidate,
-) -> anyhow::Result<OverlayClient<&'a dyn GraphQueryClient>> {
+) -> anyhow::Result<Option<OverlayClient<&'a dyn GraphQueryClient>>> {
     let worktree = rebuild_candidate.worktree.clone();
     let base_files = backend.base_file_set()?;
     let changed = changed_paths_for_overlay(&worktree, base_files)?;
+    if changed.paths.is_empty() {
+        return Ok(None);
+    }
     let cached = request_cache::overlay_delta(&worktree, changed.fingerprint, || {
         let (artifact, shadowed) =
             OverlayClient::<&dyn GraphQueryClient>::extract_delta(&worktree, &changed.paths)?;
         Ok(request_cache::CachedOverlayDelta { artifact, shadowed })
     })?;
-    OverlayClient::from_artifacts(backend.client(), cached.artifact, cached.shadowed)
+    Ok(Some(OverlayClient::from_artifacts(
+        backend.client(),
+        cached.artifact,
+        cached.shadowed,
+    )?))
 }
 
 struct CodeSearchBody {
@@ -5308,12 +5327,12 @@ fn indexed_file_oid_for_path<'a>(artifact: &'a GraphIndexArtifact, path: &str) -
         .map(|entry| entry.content_oid.as_str())
 }
 
-struct OverlayChangedPaths {
-    paths: Vec<PathBuf>,
-    fingerprint: u64,
+pub(crate) struct OverlayChangedPaths {
+    pub(crate) paths: Vec<PathBuf>,
+    pub(crate) fingerprint: u64,
 }
 
-fn changed_paths_for_overlay(
+pub(crate) fn changed_paths_for_overlay(
     worktree: &Path,
     base_files: Vec<(String, String)>,
 ) -> anyhow::Result<OverlayChangedPaths> {
@@ -5321,25 +5340,34 @@ fn changed_paths_for_overlay(
         anyhow::anyhow!("failed to canonicalize `{}`: {error}", worktree.display())
     })?;
     let allowed_extensions = crate::extract::languages::all_supported_extensions();
-    let current_files = discover_files(&worktree, &allowed_extensions)?;
     let base_oids = base_files.into_iter().collect::<BTreeMap<_, _>>();
+    let current_oids = if crate::git::detect(&worktree).is_some() {
+        // Git dirty set + index oids: avoid full-tree read/hash while still
+        // catching clean-tree HEAD lag vs stale graph index content oids.
+        current_file_oids_via_git(&worktree, &allowed_extensions)?
+    } else {
+        current_file_oids_via_fs(&worktree, &allowed_extensions)?
+    };
+    overlay_changed_paths_from_oids(base_oids, current_oids)
+}
+
+fn overlay_changed_paths_from_oids(
+    base_oids: BTreeMap<String, String>,
+    current_oids: BTreeMap<String, String>,
+) -> anyhow::Result<OverlayChangedPaths> {
     let mut changed = BTreeMap::<String, Option<String>>::new();
 
-    for path in current_files {
-        let rel_path = worktree_relative_slash_path(&worktree, &path);
-        let bytes = fs::read(&path)
-            .map_err(|error| anyhow::anyhow!("failed to read `{}`: {error}", path.display()))?;
-        let content_oid = git_blob_oid(&bytes);
+    for (rel_path, content_oid) in &current_oids {
         if base_oids
-            .get(&rel_path)
-            .is_none_or(|base_oid| base_oid != &content_oid)
+            .get(rel_path)
+            .is_none_or(|base_oid| base_oid != content_oid)
         {
-            changed.insert(rel_path, Some(content_oid));
+            changed.insert(rel_path.clone(), Some(content_oid.clone()));
         }
     }
 
     for base_path in base_oids.keys() {
-        if !worktree.join(base_path).is_file() {
+        if !current_oids.contains_key(base_path) {
             changed.insert(base_path.clone(), None);
         }
     }
@@ -5350,6 +5378,93 @@ fn changed_paths_for_overlay(
         paths: changed.keys().map(PathBuf::from).collect(),
         fingerprint: hasher.finish(),
     })
+}
+
+fn current_file_oids_via_fs(
+    worktree: &Path,
+    allowed_extensions: &[&str],
+) -> anyhow::Result<BTreeMap<String, String>> {
+    let current_files = discover_files(worktree, allowed_extensions)?;
+    let mut current_oids = BTreeMap::new();
+    for path in current_files {
+        let rel_path = worktree_relative_slash_path(worktree, &path);
+        let bytes = fs::read(&path)
+            .map_err(|error| anyhow::anyhow!("failed to read `{}`: {error}", path.display()))?;
+        current_oids.insert(rel_path, git_blob_oid(&bytes));
+    }
+    Ok(current_oids)
+}
+
+fn current_file_oids_via_git(
+    worktree: &Path,
+    allowed_extensions: &[&str],
+) -> anyhow::Result<BTreeMap<String, String>> {
+    let dirty_paths: BTreeSet<String> = crate::git::status_dirty_paths(worktree)?
+        .into_iter()
+        .filter(|entry| overlay_path_has_supported_extension(&entry.path, allowed_extensions))
+        .map(|entry| entry.path)
+        .collect();
+
+    let mut current_oids = BTreeMap::new();
+    for tracked in crate::git::ls_files_with_oids(worktree)? {
+        if tracked.is_gitlink
+            || !overlay_path_has_supported_extension(&tracked.path, allowed_extensions)
+        {
+            continue;
+        }
+        let content_oid = if dirty_paths.contains(&tracked.path) {
+            match read_overlay_worktree_content_oid(worktree, &tracked.path)? {
+                Some(content_oid) => content_oid,
+                // Deleted in the worktree (or replaced by a directory): omit so
+                // the base-path pass can record a tombstone.
+                None => continue,
+            }
+        } else {
+            // Clean tracked file: index blob oid matches worktree bytes and is
+            // enough to detect divergence from a stale graph index.
+            tracked.content_oid
+        };
+        current_oids.insert(tracked.path, content_oid);
+    }
+
+    for path in &dirty_paths {
+        if current_oids.contains_key(path) {
+            continue;
+        }
+        if let Some(content_oid) = read_overlay_worktree_content_oid(worktree, path)? {
+            current_oids.insert(path.clone(), content_oid);
+        }
+    }
+
+    Ok(current_oids)
+}
+
+fn read_overlay_worktree_content_oid(
+    worktree: &Path,
+    path: &str,
+) -> anyhow::Result<Option<String>> {
+    let abs = worktree.join(path);
+    match fs::read(&abs) {
+        Ok(bytes) => Ok(Some(git_blob_oid(&bytes))),
+        Err(error) if matches!(error.kind(), ErrorKind::NotFound | ErrorKind::IsADirectory) => {
+            Ok(None)
+        }
+        Err(error) => Err(anyhow::anyhow!(
+            "failed to read `{}`: {error}",
+            abs.display()
+        )),
+    }
+}
+
+fn overlay_path_has_supported_extension(path: &str, allowed_extensions: &[&str]) -> bool {
+    Path::new(path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            allowed_extensions
+                .iter()
+                .any(|allowed| extension.eq_ignore_ascii_case(allowed))
+        })
 }
 
 fn worktree_relative_slash_path(worktree: &Path, path: &Path) -> String {
@@ -6297,13 +6412,14 @@ fn escape_mermaid_label(label: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
-    use std::path::Path;
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::path::{Path, PathBuf};
     use std::sync::{Arc, OnceLock};
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use crate::{
-        ChangeKind, CommitArtifact, Confidence, EdgeEndpoint, RelationKind, RenamePrev,
+        ChangeKind, CommitArtifact, Confidence, EdgeEndpoint, GraphFileArtifact,
+        GraphFileManifestEntry, GraphIndexHeader, NodeId, RelationKind, RenamePrev,
         SymbolSnapshotArtifact, TemporalEdgeArtifact, WalkStrategy,
     };
     use spur_mcp::local_projects::{
@@ -6341,6 +6457,180 @@ mod tests {
         assert_ne!(
             first.fingerprint, second.fingerprint,
             "content changes in any tracked overlay path must invalidate the cached delta"
+        );
+    }
+
+    /// Overlay compares disk/index content to *graph* oids, not to HEAD. A clean
+    /// `git status` after commits past the indexed HEAD must still surface those
+    /// paths — status-only dirty detection would incorrectly return empty.
+    #[test]
+    fn changed_paths_for_overlay_detects_head_lag_with_clean_status() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let root = tempdir.path();
+        init_git_repo(root);
+        fs::create_dir_all(root.join("src")).expect("src dir");
+
+        let v1 = b"pub fn alpha_v1() {}\n";
+        fs::write(root.join("src/a.rs"), v1).expect("write v1");
+        run_git_test(root, &["add", "src/a.rs"]);
+        run_git_test(root, &["commit", "-qm", "v1"]);
+        let base_files = vec![("src/a.rs".to_owned(), git_blob_oid(v1))];
+
+        let v2 = b"pub fn alpha_v2() {}\n";
+        fs::write(root.join("src/a.rs"), v2).expect("write v2");
+        run_git_test(root, &["add", "src/a.rs"]);
+        run_git_test(root, &["commit", "-qm", "v2"]);
+
+        let dirty = crate::git::status_dirty_paths(root).expect("status");
+        assert!(
+            dirty.is_empty(),
+            "fixture must be status-clean so HEAD-lag is the only signal"
+        );
+
+        let changed = changed_paths_for_overlay(root, base_files).expect("changed paths");
+        assert_eq!(
+            changed.paths,
+            vec![PathBuf::from("src/a.rs")],
+            "committed divergence from graph index oids must be detected even when status is clean"
+        );
+
+        // Fingerprint must reflect *content* change (Some(oid)), not a false deletion.
+        // A status-only dirty set would miss the path entirely or mark it deleted.
+        let mut expected = BTreeMap::<String, Option<String>>::new();
+        expected.insert("src/a.rs".to_owned(), Some(git_blob_oid(v2)));
+        let mut hasher = DefaultHasher::new();
+        expected.hash(&mut hasher);
+        assert_eq!(
+            changed.fingerprint,
+            hasher.finish(),
+            "HEAD-lag must surface the live blob oid, not a tombstone"
+        );
+    }
+
+    /// Perf smoke for the git dirty-set path. Enable with `SPUR_PERF_SMOKE=1`.
+    /// Baseline before this change was ~1.0–1.3s full-tree discover+hash on this repo.
+    #[test]
+    fn changed_paths_for_overlay_git_dirty_set_perf_smoke() {
+        if std::env::var_os("SPUR_PERF_SMOKE").is_none() {
+            return;
+        }
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()
+            .expect("repo root");
+        let allowed = crate::extract::languages::all_supported_extensions();
+        let base_files: Vec<(String, String)> = crate::git::ls_files_with_oids(&root)
+            .expect("ls-files")
+            .into_iter()
+            .filter(|entry| {
+                !entry.is_gitlink && overlay_path_has_supported_extension(&entry.path, &allowed)
+            })
+            .map(|entry| (entry.path, entry.content_oid))
+            .collect();
+        let base_len = base_files.len();
+
+        // Warmup
+        let _ = changed_paths_for_overlay(&root, base_files.clone()).expect("warmup");
+
+        let iterations = 5_u32;
+        let started = Instant::now();
+        let mut last_paths = 0_usize;
+        for _ in 0..iterations {
+            let changed = changed_paths_for_overlay(&root, base_files.clone()).expect("changed");
+            last_paths = changed.paths.len();
+        }
+        let avg = started.elapsed() / iterations;
+        eprintln!(
+            "changed_paths_for_overlay git dirty-set: avg={avg:?} over {iterations} iters \
+             (base_files={base_len}, changed_paths={last_paths})"
+        );
+        assert!(
+            avg < Duration::from_millis(400),
+            "git dirty-set path should stay well under the old ~1s full-tree scan; got {avg:?}"
+        );
+    }
+
+    #[test]
+    fn changed_paths_for_overlay_includes_untracked_and_deleted_in_git_repo() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let root = tempdir.path();
+        init_git_repo(root);
+        fs::create_dir_all(root.join("src")).expect("src dir");
+
+        let kept = b"pub fn kept() {}\n";
+        let doomed = b"pub fn doomed() {}\n";
+        fs::write(root.join("src/kept.rs"), kept).expect("kept");
+        fs::write(root.join("src/doomed.rs"), doomed).expect("doomed");
+        run_git_test(root, &["add", "src/kept.rs", "src/doomed.rs"]);
+        run_git_test(root, &["commit", "-qm", "base"]);
+
+        let base_files = vec![
+            ("src/kept.rs".to_owned(), git_blob_oid(kept)),
+            ("src/doomed.rs".to_owned(), git_blob_oid(doomed)),
+        ];
+
+        fs::remove_file(root.join("src/doomed.rs")).expect("delete doomed");
+        fs::write(root.join("src/new.rs"), b"pub fn newborn() {}\n").expect("untracked");
+
+        let changed = changed_paths_for_overlay(root, base_files).expect("changed paths");
+        let paths: BTreeSet<_> = changed.paths.into_iter().collect();
+        assert_eq!(
+            paths,
+            BTreeSet::from([PathBuf::from("src/doomed.rs"), PathBuf::from("src/new.rs")]),
+            "git overlay discovery must include deletions and untracked supported sources"
+        );
+    }
+
+    #[test]
+    fn overlay_client_for_backend_skips_wrap_when_worktree_matches_index() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let root = tempdir.path();
+        fs::create_dir_all(root.join("src")).expect("src dir");
+        let src = b"pub fn alpha() {}\n";
+        fs::write(root.join("src/a.rs"), src).expect("a.rs");
+        let oid = git_blob_oid(src);
+
+        let artifact = Arc::new(GraphIndexArtifact {
+            header: GraphIndexHeader {
+                graph_index_version: "test".to_owned(),
+                content_hash_blake3: None,
+            },
+            manifest_version: "test".to_owned(),
+            graph_content_hash: "overlay-skip-wrap".to_owned(),
+            file_manifests: vec![GraphFileManifestEntry {
+                stable_file_id: "file:src/a.rs".to_owned(),
+                path: "src/a.rs".to_owned(),
+                content_oid: oid,
+                node_ids: vec![NodeId(1)],
+            }],
+            files: vec![GraphFileArtifact {
+                stable_file_id: "file:src/a.rs".to_owned(),
+                file_path: "src/a.rs".to_owned(),
+            }],
+            file_node_ids: vec![NodeId(1)],
+            symbols: Vec::new(),
+            symbol_node_ids: Vec::new(),
+            edges: Vec::new(),
+            tombstones: Vec::new(),
+            diagnostics: Vec::new(),
+            commits: Vec::new(),
+            symbol_snapshots: Vec::new(),
+            temporal_edges: Vec::new(),
+        });
+        let backend = CodeSearchBackend::InMemory {
+            client: InMemoryClient::new(Arc::clone(&artifact)),
+            artifact,
+        };
+        let candidate = RebuildCandidate {
+            worktree: root.to_path_buf(),
+            key: RebuildKey::from("deadbeef", &BTreeMap::new()),
+        };
+
+        let overlay =
+            overlay_client_for_backend(&backend, &candidate).expect("overlay client construction");
+        assert!(
+            overlay.is_none(),
+            "matching worktree content must skip OverlayClient construction"
         );
     }
 

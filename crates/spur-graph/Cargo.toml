@@ -80,6 +80,10 @@ harness = false
 name = "parquet"
 harness = false
 
+[[bench]]
+name = "overlay"
+harness = false
+
 [[bin]]
 name = "capture-baselines"
 path = "benches/capture_baselines.rs"

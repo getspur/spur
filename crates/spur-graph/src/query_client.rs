@@ -25,6 +25,7 @@ use parquet::arrow::arrow_reader::{
 use parquet::arrow::ProjectionMask;
 use parquet::schema::types::SchemaDescriptor;
 
+use crate::schema::GRAPH_INDEX_VERSION_TEMPORAL;
 use crate::store::parquet::{
     confidence_from_str, edge_kind_from_str, read_temporal_artifact_parquet,
     read_temporal_artifact_parquet_for_symbol_history, relation_from_str, PARQUET_ROW_GROUP_SIZE,
@@ -34,9 +35,9 @@ use crate::{
     artifact_from_facts, build_facts_for_paths, compare_symbols, find_callee_edges,
     find_caller_edges, read_artifact_header_parquet, resolve_selector, search_symbols, ChangeKind,
     CommitIndexArtifact, GraphArtifactManifest, GraphEdgeArtifact, GraphFileManifestEntry,
-    GraphIndexArtifact, GraphSymbolArtifact, OwnedCalleeRecord, OwnedCallerRecord, RelationKind,
-    SearchOptions, SearchResult, SearchSymbol, SelectorResolution, SnapshotKey,
-    CODE_SYMBOL_URI_PREFIX,
+    GraphIndexArtifact, GraphIndexHeader, GraphSymbolArtifact, OwnedCalleeRecord,
+    OwnedCallerRecord, RelationKind, SearchOptions, SearchResult, SearchSymbol, SelectorResolution,
+    SnapshotKey, CODE_SYMBOL_URI_PREFIX,
 };
 use crate::{CandidateRow, NodeId, ResolvedSymbol, SearchFilters, SearchMode};
 
@@ -295,6 +296,28 @@ pub struct OverlayClient<B: GraphQueryClient> {
     remap: HashMap<String, String>,
 }
 
+fn empty_overlay_delta_artifact() -> GraphIndexArtifact {
+    GraphIndexArtifact {
+        header: GraphIndexHeader {
+            graph_index_version: GRAPH_INDEX_VERSION_TEMPORAL.to_owned(),
+            content_hash_blake3: None,
+        },
+        manifest_version: "overlay-empty".to_owned(),
+        graph_content_hash: "overlay-empty".to_owned(),
+        file_manifests: Vec::new(),
+        files: Vec::new(),
+        file_node_ids: Vec::new(),
+        symbols: Vec::new(),
+        symbol_node_ids: Vec::new(),
+        edges: Vec::new(),
+        tombstones: Vec::new(),
+        diagnostics: Vec::new(),
+        commits: Vec::new(),
+        symbol_snapshots: Vec::new(),
+        temporal_edges: Vec::new(),
+    }
+}
+
 impl<B: GraphQueryClient> OverlayClient<B> {
     pub fn extract_delta(
         root: &Path,
@@ -310,6 +333,13 @@ impl<B: GraphQueryClient> OverlayClient<B> {
     }
 
     pub fn new(base: B, root: &Path, changed_files: &[PathBuf]) -> anyhow::Result<Self> {
+        if changed_files.is_empty() {
+            return Self::from_artifacts(
+                base,
+                Arc::new(empty_overlay_delta_artifact()),
+                HashSet::new(),
+            );
+        }
         let (artifact, shadowed) = Self::extract_delta(root, changed_files)?;
         Self::from_artifacts(base, artifact, shadowed)
     }
@@ -328,8 +358,19 @@ impl<B: GraphQueryClient> OverlayClient<B> {
         })
     }
 
+    fn is_identity_overlay(&self) -> bool {
+        self.shadowed.is_empty() && self.remap.is_empty()
+    }
+
     fn is_shadowed_path(&self, path: &str) -> bool {
         self.shadowed.contains(path)
+    }
+
+    fn delta_defines_label(&self, label: &str) -> bool {
+        matches!(
+            self.delta.resolve_selector(label),
+            Ok(SelectorResolution::Resolved(_)) | Ok(SelectorResolution::Ambiguous { .. })
+        )
     }
 
     fn is_delta_symbol(&self, sid: &str) -> bool {
@@ -448,6 +489,12 @@ impl<B: GraphQueryClient> OverlayClient<B> {
                 mut edge,
                 target_label,
             } => {
+                // Unresolved base rows are overwhelmingly std/iterator noise. Only
+                // probe labels the delta actually defines — otherwise we fall through
+                // to the base Parquet resolve on every `map`/`clone`/`get`.
+                if !self.delta_defines_label(&target_label) {
+                    return OwnedCalleeRecord::Unresolved { edge, target_label };
+                }
                 if let Some(symbol) = self.resolve_label_to_symbol(&target_label) {
                     edge.target_stable_symbol_id = Some(symbol.stable_symbol_id.clone());
                     OwnedCalleeRecord::Resolved { symbol, edge }
@@ -494,6 +541,9 @@ impl<B: GraphQueryClient> OverlayClient<B> {
 
 impl<B: GraphQueryClient> GraphQueryClient for OverlayClient<B> {
     fn search_symbols(&self, opts: &SearchOptions) -> anyhow::Result<SearchResult> {
+        if self.is_identity_overlay() {
+            return self.base.search_symbols(opts);
+        }
         let mut unbounded = opts.clone();
         unbounded.limit = 200;
         let mut candidates = self
@@ -519,6 +569,9 @@ impl<B: GraphQueryClient> GraphQueryClient for OverlayClient<B> {
     }
 
     fn find_caller_edges(&self, sid: &str) -> Vec<OwnedCallerRecord> {
+        if self.is_identity_overlay() {
+            return self.base.find_caller_edges(sid);
+        }
         let Some(target_symbol) = self.symbol_by_id(sid).ok().flatten() else {
             return Vec::new();
         };
@@ -577,6 +630,9 @@ impl<B: GraphQueryClient> GraphQueryClient for OverlayClient<B> {
     }
 
     fn find_callee_edges(&self, sid: &str) -> Vec<OwnedCalleeRecord> {
+        if self.is_identity_overlay() {
+            return self.base.find_callee_edges(sid);
+        }
         if self.is_delta_symbol(sid) {
             return self
                 .delta
@@ -596,6 +652,9 @@ impl<B: GraphQueryClient> GraphQueryClient for OverlayClient<B> {
     }
 
     fn resolve_selector(&self, selector: &str) -> anyhow::Result<CodeSelectorResolution> {
+        if self.is_identity_overlay() {
+            return self.base.resolve_selector(selector);
+        }
         let delta_resolution = self.delta.resolve_selector(selector)?;
         if !matches!(delta_resolution, SelectorResolution::NotFound) {
             return Ok(delta_resolution);
