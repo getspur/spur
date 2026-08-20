@@ -81,6 +81,14 @@ WITH RECURSIVE walk AS (
 )
 SELECT * FROM walk;
 
+-- Snapshot the init_views scorecard. That VIEW joins v_blast_radius + churn on
+-- every search; search macros then JOIN it per BM25 hit (~800 ms). Materialize
+-- once at appliance build and keep the public view name as a thin wrapper.
+CREATE OR REPLACE TABLE symbol_scorecard AS
+SELECT * FROM v_symbol_scorecard;
+CREATE OR REPLACE VIEW v_symbol_scorecard AS
+SELECT * FROM symbol_scorecard;
+
 -- ── Search macros — one call, ranked + fused with high-value graph signals ───
 
 -- Prose-only: BM25 over documentation/skill/plan section bodies.

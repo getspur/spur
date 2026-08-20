@@ -1189,6 +1189,26 @@ mod tests {
     }
 
     #[test]
+    fn init_search_sql_materializes_symbol_scorecard() {
+        // search_code / search_context_candidates join v_symbol_scorecard. The
+        // init_views definition recomputes v_blast_radius + churn per query
+        // (~800 ms). Snapshot it before the macros so those joins hit a table.
+        let snapshot_at = INIT_SEARCH_SQL
+            .find("CREATE OR REPLACE TABLE symbol_scorecard AS\nSELECT * FROM v_symbol_scorecard;")
+            .expect("init_search.sql must snapshot v_symbol_scorecard into symbol_scorecard");
+        let wrap_at = INIT_SEARCH_SQL
+            .find("CREATE OR REPLACE VIEW v_symbol_scorecard AS\nSELECT * FROM symbol_scorecard;")
+            .expect("init_search.sql must re-point v_symbol_scorecard at the snapshot table");
+        let search_code_at = INIT_SEARCH_SQL
+            .find("CREATE OR REPLACE MACRO search_code(q) AS TABLE")
+            .expect("search_code macro should be present");
+        assert!(
+            snapshot_at < wrap_at && wrap_at < search_code_at,
+            "scorecard snapshot must replace the view before search macros"
+        );
+    }
+
+    #[test]
     fn init_search_sql_context_candidates_macro_present() {
         assert!(
             INIT_SEARCH_SQL.contains(
