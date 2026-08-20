@@ -9,12 +9,13 @@ use crate::manifest_format::{
     ManifestBundleV1, ManifestValidationError, NativeHandlerV1, RuleManifestV1, SchemaVersionV1,
 };
 
-const APPROVED_FAMILIES: [&str; 5] = [
+const APPROVED_FAMILIES: [&str; 6] = [
     "accessibility",
     "configuration",
     "design",
     "policy",
     "resource",
+    "scheduling",
 ];
 
 #[derive(Clone, Debug, Eq, PartialEq)]

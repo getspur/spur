@@ -307,6 +307,11 @@ impl NativeHandlerV1 {
         Self::ConfigurationSelectionCardinality,
         Self::ConfigurationAttributeAllowedPair,
         Self::ConfigurationVersionInterval,
+        Self::SchedulingAssignmentExactlyOnce,
+        Self::SchedulingPlacementAllowed,
+        Self::SchedulingPrecedenceFinishStart,
+        Self::SchedulingCumulativeCapacity,
+        Self::SchedulingMinimizeMakespan,
     ];
 
     const fn family(self) -> &'static str {
@@ -1157,6 +1162,47 @@ mod tests {
             NativeHandlerV1::ALL
                 .iter()
                 .filter(|handler| handler.family() == "configuration")
+                .count(),
+            expected.len()
+        );
+    }
+
+    #[test]
+    fn scheduling_manifest_handlers_match_all_slice() {
+        let expected = [
+            NativeHandlerV1::SchedulingAssignmentExactlyOnce,
+            NativeHandlerV1::SchedulingPlacementAllowed,
+            NativeHandlerV1::SchedulingPrecedenceFinishStart,
+            NativeHandlerV1::SchedulingCumulativeCapacity,
+            NativeHandlerV1::SchedulingMinimizeMakespan,
+        ];
+        let manifest_paths = [
+            "assignment_exactly_once.yaml",
+            "placement_allowed.yaml",
+            "precedence_finish_start.yaml",
+            "cumulative_capacity.yaml",
+            "minimize_makespan.yaml",
+        ];
+        let manifest_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("src/rules/families/scheduling/rules");
+        let manifest_handlers = manifest_paths
+            .iter()
+            .map(|path| {
+                let source = std::fs::read_to_string(manifest_root.join(path))
+                    .expect("read scheduling rule manifest");
+                serde_yml::from_str::<RuleManifestV1>(&source)
+                    .expect("parse scheduling rule manifest")
+                    .handler
+                    .expect("scheduling rule manifest handler")
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(manifest_handlers, expected);
+        assert_eq!(NativeHandlerV1::ALL.get(22..27), Some(expected.as_slice()));
+        assert_eq!(
+            NativeHandlerV1::ALL
+                .iter()
+                .filter(|handler| handler.family() == "scheduling")
                 .count(),
             expected.len()
         );

@@ -29,13 +29,13 @@ fn native_handler_and_object_validator_enums_are_closed() {
         .iter()
         .map(|handler| serde_yml::to_string(handler).expect("serialize handler"))
         .collect::<Vec<_>>();
-    assert_eq!(handler_names.len(), 22);
+    assert_eq!(handler_names.len(), 27);
     assert_eq!(
         handler_names
             .iter()
             .collect::<std::collections::BTreeSet<_>>()
             .len(),
-        22
+        27
     );
     assert!(handler_names
         .iter()
@@ -43,6 +43,9 @@ fn native_handler_and_object_validator_enums_are_closed() {
     assert!(handler_names
         .iter()
         .any(|name| name.trim() == "placement_topology_max_skew"));
+    assert!(handler_names
+        .iter()
+        .any(|name| name.trim() == "scheduling_minimize_makespan"));
     assert!(serde_yml::from_str::<NativeHandlerV1>("crate::rules::compile").is_err());
 
     assert_eq!(
@@ -50,6 +53,24 @@ fn native_handler_and_object_validator_enums_are_closed() {
         &[NativeObjectValidatorV1::AccessibilityException]
     );
     assert!(serde_yml::from_str::<NativeObjectValidatorV1>("rust_path").is_err());
+}
+
+#[test]
+fn scheduling_handlers_follow_configuration_in_stable_order() {
+    let expected = [
+        NativeHandlerV1::ConfigurationRequiresAny,
+        NativeHandlerV1::ConfigurationExcludes,
+        NativeHandlerV1::ConfigurationSelectionCardinality,
+        NativeHandlerV1::ConfigurationAttributeAllowedPair,
+        NativeHandlerV1::ConfigurationVersionInterval,
+        NativeHandlerV1::SchedulingAssignmentExactlyOnce,
+        NativeHandlerV1::SchedulingPlacementAllowed,
+        NativeHandlerV1::SchedulingPrecedenceFinishStart,
+        NativeHandlerV1::SchedulingCumulativeCapacity,
+        NativeHandlerV1::SchedulingMinimizeMakespan,
+    ];
+
+    assert_eq!(NativeHandlerV1::ALL.get(17..27), Some(expected.as_slice()));
 }
 
 #[test]

@@ -1,0 +1,8 @@
+schema_version: 1
+id: scheduling
+family_version: 1
+summary: Discrete finite-horizon, non-preemptive job assignment, placement, capacity, precedence, and makespan rules.
+profiles:
+  - id: finite_horizon
+    profile_version: 1
+    summary: Bounded integer-tick scheduling over declared jobs, machines, resources, and observed or synthesized assignments.

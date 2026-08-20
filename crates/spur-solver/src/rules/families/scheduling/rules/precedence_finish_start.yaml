@@ -1,0 +1,180 @@
+schema_version: 1
+id: scheduling.precedence_finish_start
+rule_version: 1
+family: scheduling
+profile: finite_horizon
+primitive: finish_start_precedence
+summary: Require a predecessor to finish plus its declared nonnegative lag before its successor starts.
+availability: implemented
+strength: hard
+authorities:
+  - kind: official_optimization_documentation
+    title: OR-Tools Job Shop Problem
+    url: https://developers.google.com/optimization/scheduling/job_shop
+  - kind: operations_research_paper
+    title: "Multiproject Scheduling with Limited Resources: A Zero-One Programming Approach"
+    url: https://doi.org/10.1287/mnsc.16.1.93
+requires:
+  - horizon
+  - jobs[].durations
+  - jobs[].assignment
+  - precedence[].before
+  - precedence[].after
+  - precedence[].minimum_lag
+llm_encoding:
+  effectiveness: high
+  problem_shapes:
+    - One finite non-preemptive job must finish before another starts, optionally after a nonnegative lag.
+  encode_steps:
+    - Bind the predecessor first and successor second.
+    - Resolve exactly one matching declared precedence edge and both bounded assignments.
+    - Require predecessor completion plus minimum lag to be at most successor start.
+  anti_patterns:
+    - Do not reverse subject order or infer precedence from input ordering.
+    - Do not claim unbounded temporal correctness from one finite horizon.
+  escalate_when:
+    - Escalate negative lag, start-start, finish-finish, or cyclic temporal semantics to separate primitives.
+solver_encoding:
+  theory: QF_LIA
+  verification: assert the finish-to-start inequality over complete observed assignments
+  synthesis: enforce the inequality over explicitly declared bounded assignment unknowns
+  formula:
+    - "completion(before) + minimum_lag(before,after) <= start(after)"
+subjects:
+  cardinality:
+    kind: exact
+    count: 2
+parameters: []
+handler: scheduling_precedence_finish_start
+examples:
+  valid:
+    facts:
+      family: scheduling
+      mode: verify
+      rules:
+        - rule_id: scheduling.precedence_finish_start
+          subjects: [a, b]
+          parameters: {}
+      facts:
+        horizon: 5
+        jobs:
+          a:
+            release: 0
+            deadline: 5
+            durations: {m1: 2}
+            eligible_machines: [m1]
+            demands: {cpu: 1}
+            assignment: {machine: m1, start: 0}
+          b:
+            release: 0
+            deadline: 5
+            durations: {m2: 2}
+            eligible_machines: [m2]
+            demands: {cpu: 1}
+            assignment: {machine: m2, start: 2}
+        machines:
+          m1: {capacities: {cpu: 1}}
+          m2: {capacities: {cpu: 1}}
+        precedence:
+          - {before: a, after: b, minimum_lag: 0}
+      unknowns: []
+    expectation: pass
+  invalid:
+    facts:
+      family: scheduling
+      mode: verify
+      rules:
+        - rule_id: scheduling.precedence_finish_start
+          subjects: [a, b]
+          parameters: {}
+      facts:
+        horizon: 5
+        jobs:
+          a:
+            release: 0
+            deadline: 5
+            durations: {m1: 2}
+            eligible_machines: [m1]
+            demands: {cpu: 1}
+            assignment: {machine: m1, start: 0}
+          b:
+            release: 0
+            deadline: 5
+            durations: {m2: 2}
+            eligible_machines: [m2]
+            demands: {cpu: 1}
+            assignment: {machine: m2, start: 1}
+        machines:
+          m1: {capacities: {cpu: 1}}
+          m2: {capacities: {cpu: 1}}
+        precedence:
+          - {before: a, after: b, minimum_lag: 0}
+      unknowns: []
+    expectation: counterexample
+    expected_diagnostic: scheduling.precedence_finish_start.violation
+conformance:
+  valid:
+    - name: successor starts when predecessor completes
+      request:
+        family: scheduling
+        mode: verify
+        rules:
+          - rule_id: scheduling.precedence_finish_start
+            subjects: [a, b]
+            parameters: {}
+        facts:
+          horizon: 5
+          jobs:
+            a:
+              release: 0
+              deadline: 5
+              durations: {m1: 2}
+              eligible_machines: [m1]
+              demands: {cpu: 1}
+              assignment: {machine: m1, start: 0}
+            b:
+              release: 0
+              deadline: 5
+              durations: {m2: 2}
+              eligible_machines: [m2]
+              demands: {cpu: 1}
+              assignment: {machine: m2, start: 2}
+          machines:
+            m1: {capacities: {cpu: 1}}
+            m2: {capacities: {cpu: 1}}
+          precedence:
+            - {before: a, after: b, minimum_lag: 0}
+        unknowns: []
+  invalid:
+    - name: successor starts before predecessor completes
+      request:
+        family: scheduling
+        mode: verify
+        rules:
+          - rule_id: scheduling.precedence_finish_start
+            subjects: [a, b]
+            parameters: {}
+        facts:
+          horizon: 5
+          jobs:
+            a:
+              release: 0
+              deadline: 5
+              durations: {m1: 2}
+              eligible_machines: [m1]
+              demands: {cpu: 1}
+              assignment: {machine: m1, start: 0}
+            b:
+              release: 0
+              deadline: 5
+              durations: {m2: 2}
+              eligible_machines: [m2]
+              demands: {cpu: 1}
+              assignment: {machine: m2, start: 1}
+          machines:
+            m1: {capacities: {cpu: 1}}
+            m2: {capacities: {cpu: 1}}
+          precedence:
+            - {before: a, after: b, minimum_lag: 0}
+        unknowns: []
+      expected_diagnostic: scheduling.precedence_finish_start.violation

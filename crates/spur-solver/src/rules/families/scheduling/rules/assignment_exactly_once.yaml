@@ -1,0 +1,145 @@
+schema_version: 1
+id: scheduling.assignment_exactly_once
+rule_version: 1
+family: scheduling
+profile: finite_horizon
+primitive: time_indexed_exactly_once
+summary: Assign one declared job to exactly one machine and integer start tick inside the finite horizon.
+availability: implemented
+strength: hard
+authorities:
+  - kind: operations_research_paper
+    title: "Multiproject Scheduling with Limited Resources: A Zero-One Programming Approach"
+    url: https://doi.org/10.1287/mnsc.16.1.93
+  - kind: official_optimization_documentation
+    title: OR-Tools Assignment
+    url: https://developers.google.com/optimization/assignment
+requires:
+  - horizon
+  - jobs[].durations
+  - jobs[].assignment
+  - machines[]
+llm_encoding:
+  effectiveness: high
+  problem_shapes:
+    - Every required finite job must receive one machine and one non-preemptive start tick.
+  encode_steps:
+    - Bind exactly one declared job ID as the subject.
+    - Enumerate only machine/start pairs whose positive duration completes within the integer horizon.
+    - Require the sum of the job's bounded zero-one placement variables to equal one.
+  anti_patterns:
+    - Do not treat a feasible assignment as proof of optimality.
+    - Do not infer machines, durations, or continuous-time placements outside caller facts.
+  escalate_when:
+    - Escalate preemption, continuous time, or optional jobs to a different scheduling model.
+solver_encoding:
+  theory: QF_LIA
+  verification: fix the observed assignment and assert exactly one active bounded placement
+  synthesis: leave only explicitly declared assignment unknowns free over the finite placement domain
+  formula:
+    - "D_j = {(m,t) | 0 <= t and t + duration(j,m) <= horizon}"
+    - "sum placement(j,m,t) for (m,t) in D_j = 1"
+subjects:
+  cardinality:
+    kind: exact
+    count: 1
+parameters: []
+handler: scheduling_assignment_exactly_once
+examples:
+  valid:
+    facts:
+      family: scheduling
+      mode: verify
+      rules:
+        - rule_id: scheduling.assignment_exactly_once
+          subjects: [a]
+          parameters: {}
+      facts:
+        horizon: 4
+        jobs:
+          a:
+            release: 0
+            deadline: 4
+            durations: {m1: 2, m2: 2}
+            eligible_machines: [m1, m2]
+            demands: {cpu: 1}
+            assignment: {machine: m1, start: 0}
+        machines:
+          m1: {capacities: {cpu: 1}}
+          m2: {capacities: {cpu: 1}}
+        precedence: []
+      unknowns: []
+    expectation: pass
+  invalid:
+    facts:
+      family: scheduling
+      mode: verify
+      rules:
+        - rule_id: scheduling.assignment_exactly_once
+          subjects: [a]
+          parameters: {}
+      facts:
+        horizon: 4
+        jobs:
+          a:
+            release: 0
+            deadline: 4
+            durations: {m1: 2}
+            eligible_machines: [m1]
+            demands: {cpu: 1}
+            assignment: null
+        machines:
+          m1: {capacities: {cpu: 1}}
+        precedence: []
+      unknowns: []
+    expectation: counterexample
+    expected_diagnostic: scheduling.assignment_exactly_once.violation
+conformance:
+  valid:
+    - name: one job has exactly one bounded observed placement
+      request:
+        family: scheduling
+        mode: verify
+        rules:
+          - rule_id: scheduling.assignment_exactly_once
+            subjects: [a]
+            parameters: {}
+        facts:
+          horizon: 4
+          jobs:
+            a:
+              release: 0
+              deadline: 4
+              durations: {m1: 2, m2: 2}
+              eligible_machines: [m1, m2]
+              demands: {cpu: 1}
+              assignment: {machine: m1, start: 0}
+          machines:
+            m1: {capacities: {cpu: 1}}
+            m2: {capacities: {cpu: 1}}
+          precedence: []
+        unknowns: []
+  invalid:
+    - name: required job has no observed placement
+      request:
+        family: scheduling
+        mode: verify
+        rules:
+          - rule_id: scheduling.assignment_exactly_once
+            subjects: [a]
+            parameters: {}
+        facts:
+          horizon: 4
+          jobs:
+            a:
+              release: 0
+              deadline: 4
+              durations: {m1: 2}
+              eligible_machines: [m1]
+              demands: {cpu: 1}
+              assignment: null
+          machines:
+            m1: {capacities: {cpu: 1}}
+          precedence: []
+        unknowns: []
+      expected_diagnostic: scheduling.assignment_exactly_once.violation

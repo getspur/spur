@@ -91,6 +91,12 @@ fn approved_sources_load_in_deterministic_canonical_order() {
         "resource/rules/quota_capacity.yaml",
         "resource/rules/request_within_limit.yaml",
         "resource/rules/topology_max_skew.yaml",
+        "scheduling/family.yaml",
+        "scheduling/rules/assignment_exactly_once.yaml",
+        "scheduling/rules/cumulative_capacity.yaml",
+        "scheduling/rules/minimize_makespan.yaml",
+        "scheduling/rules/placement_allowed.yaml",
+        "scheduling/rules/precedence_finish_start.yaml",
     ];
     assert_eq!(relative_paths(&root, &first.source_paths), expected_paths);
     assert_eq!(first, second);
@@ -108,7 +114,8 @@ fn approved_sources_load_in_deterministic_canonical_order() {
             "configuration",
             "design",
             "policy",
-            "resource"
+            "resource",
+            "scheduling"
         ]
     );
     assert!(first
