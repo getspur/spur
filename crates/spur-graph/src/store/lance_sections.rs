@@ -95,6 +95,7 @@ impl EmbeddingModelSelection {
         std::env::var(EMBED_MODEL_ENV)
             .ok()
             .and_then(|value| Self::parse(&value))
+            .or_else(|| embedding_model_from_spur_config().and_then(|value| Self::parse(&value)))
             .unwrap_or(Self::NomicEmbedTextV15)
     }
 
@@ -4139,6 +4140,42 @@ fn sql_string_literal(value: &str) -> String {
     value.replace('\'', "''")
 }
 
+fn embedding_model_from_spur_config() -> Option<String> {
+    if let Some(model) = std::env::current_dir()
+        .ok()
+        .and_then(|cwd| find_project_config_toml(&cwd))
+        .and_then(|path| graph_embedding_model_in_toml(&path))
+    {
+        return Some(model);
+    }
+
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .map(|home| home.join(".spur").join("config.toml"))
+        .and_then(|path| graph_embedding_model_in_toml(&path))
+}
+
+fn find_project_config_toml(start: &Path) -> Option<PathBuf> {
+    let mut current = start;
+    loop {
+        let candidate = current.join(".spur").join("config.toml");
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+        current = current.parent()?;
+    }
+}
+
+fn graph_embedding_model_in_toml(path: &Path) -> Option<String> {
+    let raw = std::fs::read_to_string(path).ok()?;
+    let value = raw.parse::<toml::Value>().ok()?;
+    value
+        .get("graph")?
+        .get("embedding_model")?
+        .as_str()
+        .map(str::to_owned)
+}
+
 pub fn fastembed_cache_dir() -> Option<PathBuf> {
     if let Some(home) = std::env::var_os("HOME") {
         return Some(
@@ -5089,6 +5126,66 @@ mod tests {
         assert_eq!(
             EmbeddingModelSelection::NomicEmbedTextV15.fastembed_model(),
             Some(EmbeddingModel::NomicEmbedTextV15)
+        );
+    }
+
+    struct CwdGuard {
+        previous: PathBuf,
+    }
+
+    impl CwdGuard {
+        fn set(path: &Path) -> Self {
+            let previous = std::env::current_dir().expect("cwd");
+            std::env::set_current_dir(path).expect("set cwd");
+            Self { previous }
+        }
+    }
+
+    impl Drop for CwdGuard {
+        fn drop(&mut self) {
+            let _ = std::env::set_current_dir(&self.previous);
+        }
+    }
+
+    #[test]
+    fn embedding_model_from_env_uses_project_config_toml_when_env_unset() {
+        let _guard = env_lock();
+        let _env = EnvGuard::remove(EMBED_MODEL_ENV);
+        let repo = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(repo.path().join(".spur")).unwrap();
+        std::fs::write(
+            repo.path().join(".spur/config.toml"),
+            "[graph]\nembedding_model = \"coderank\"\n",
+        )
+        .unwrap();
+        let _home = EnvGuard::set("HOME", home.path().to_str().expect("utf8 home"));
+        let _cwd = CwdGuard::set(repo.path());
+
+        assert_eq!(
+            EmbeddingModelSelection::from_env(),
+            EmbeddingModelSelection::CodeRankEmbed
+        );
+    }
+
+    #[test]
+    fn embedding_model_from_env_prefers_env_over_config_toml() {
+        let _guard = env_lock();
+        let repo = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(repo.path().join(".spur")).unwrap();
+        std::fs::write(
+            repo.path().join(".spur/config.toml"),
+            "[graph]\nembedding_model = \"coderank\"\n",
+        )
+        .unwrap();
+        let _home = EnvGuard::set("HOME", home.path().to_str().expect("utf8 home"));
+        let _env = EnvGuard::set(EMBED_MODEL_ENV, "jina-code");
+        let _cwd = CwdGuard::set(repo.path());
+
+        assert_eq!(
+            EmbeddingModelSelection::from_env(),
+            EmbeddingModelSelection::JinaEmbeddingsV2BaseCode
         );
     }
 

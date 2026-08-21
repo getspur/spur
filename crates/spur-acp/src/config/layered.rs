@@ -403,6 +403,21 @@ mod tests {
     }
 
     #[test]
+    fn load_layered_reads_graph_embedding_model_from_project_config() {
+        let repo = tempfile::tempdir().unwrap();
+        fs::create_dir_all(repo.path().join(".spur")).unwrap();
+        fs::write(
+            repo.path().join(".spur/config.toml"),
+            "[graph]\nembedding_model = \"coderank\"\n",
+        )
+        .unwrap();
+
+        let cfg = load_layered_from_paths(repo.path(), None).unwrap();
+
+        assert_eq!(cfg.graph.embedding_model.as_deref(), Some("coderank"));
+    }
+
+    #[test]
     fn load_layered_merges_skills_bundled_dir() {
         let repo = tempfile::tempdir().unwrap();
         fs::create_dir_all(repo.path().join(".spur")).unwrap();

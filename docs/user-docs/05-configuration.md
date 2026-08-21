@@ -89,6 +89,18 @@ avoid_for = ["Complex architectural changes", "Database migrations"]
 ```
 *(If omitted, Spur uses built-in defaults for known agents).*
 
+## Graph embedding model
+
+Code-graph and analyst hybrid search use a selectable FP32/768 embedding model. Set it in config instead of exporting `SPUR_EMBEDDING_MODEL`:
+
+```toml
+[graph]
+# nomic (default), coderank, or jina-code
+embedding_model = "nomic"
+```
+
+Repository `.spur/config.toml` wins over `~/.spur/config.toml`. If `SPUR_EMBEDDING_MODEL` is set in the environment, that value still overrides the config file.
+
 ## Brain Skills
 
 Spur ships with built-in `SKILL.md` files that instruct the Brain on how to delegate, review, and coordinate tasks. 

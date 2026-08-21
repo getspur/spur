@@ -339,8 +339,13 @@ Env override: `SPUR_CODE_GRAPH_INDEX`.
 
 ### Embedding model selection
 
-Set `SPUR_EMBEDDING_MODEL` before building or querying an index. Changing the model changes the
-stored model lineage and automatically invalidates incompatible vectors.
+Set the model in `.spur/config.toml` (repository) or `~/.spur/config.toml` (user). Changing the model
+changes the stored model lineage and automatically invalidates incompatible vectors.
+
+```toml
+[graph]
+embedding_model = "nomic"
+```
 
 | Value | Model | Input contract |
 |---|---|---|
@@ -348,9 +353,10 @@ stored model lineage and automatically invalidates incompatible vectors.
 | `coderank`, `nomic-coderank`, `nomic-ai/CodeRankEmbed` | CodeRankEmbed, FP32/768 | Required code-search instruction on queries; raw documents |
 | `jina-code`, `jina-embeddings-v2-base-code`, `jinaai/jina-embeddings-v2-base-code` | Jina Embeddings v2 Base Code, FP32/768 | Symmetric raw query/document text |
 
+`SPUR_EMBEDDING_MODEL` still overrides the config file when set:
+
 ```bash
 SPUR_EMBEDDING_MODEL=coderank spur explore sync
-SPUR_EMBEDDING_MODEL=jina-code spur explore sync
 ```
 
 ---

@@ -49,6 +49,7 @@ sha2 = { workspace = true }
 spur-mcp = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
+toml = { workspace = true }
 tree-sitter = "0.25"
 tree-sitter-bash = "0.25.1"
 tree-sitter-c = "0.24.2"

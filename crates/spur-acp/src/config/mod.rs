@@ -578,8 +578,26 @@ pub struct SpurConfig {
     /// configs visually unchanged.
     #[serde(default, skip_serializing_if = "TuiConfig::is_default")]
     pub tui: TuiConfig,
+    /// Code-graph / embedding sidecar knobs.
+    #[serde(default, skip_serializing_if = "GraphConfig::is_default")]
+    pub graph: GraphConfig,
     #[serde(default)]
     pub log: LogConfig,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GraphConfig {
+    /// Embedding model alias or Hugging Face id (`nomic`, `coderank`, `jina-code`).
+    /// `SPUR_EMBEDDING_MODEL` still overrides when set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embedding_model: Option<String>,
+}
+
+impl GraphConfig {
+    fn is_default(&self) -> bool {
+        self.embedding_model.is_none()
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
