@@ -1129,6 +1129,59 @@ mod tests {
     }
 
     #[test]
+    fn init_sql_unions_file_and_stub_vertices_into_duckpgq_nodes() {
+        let duckpgq_nodes_sql = INIT_SQL
+            .split("CREATE OR REPLACE TABLE duckpgq_nodes AS")
+            .nth(1)
+            .and_then(|rest| {
+                rest.split("CREATE OR REPLACE TABLE duckpgq_external_nodes")
+                    .next()
+            })
+            .expect("duckpgq_nodes table should be present");
+        assert!(
+            duckpgq_nodes_sql.contains("FROM files")
+                && duckpgq_nodes_sql.contains("stable_file_id")
+                && duckpgq_nodes_sql.contains("'file'"),
+            "duckpgq_nodes must union file vertices so contains/imports FKs MATCH SIMPLE"
+        );
+        assert!(
+            duckpgq_nodes_sql.contains("node_dense_id_map")
+                && duckpgq_nodes_sql.contains("'stub'"),
+            "duckpgq_nodes must materialize stub vertices for edge endpoints missing from nodes.parquet"
+        );
+    }
+
+    #[test]
+    fn init_sql_excludes_contains_from_onager_dep_edges() {
+        let dep_sql = INIT_SQL
+            .split("CREATE OR REPLACE VIEW onager_dep_edges AS")
+            .nth(1)
+            .and_then(|rest| rest.split("CREATE OR REPLACE PROPERTY GRAPH").next())
+            .expect("onager_dep_edges view should be present");
+        assert!(
+            dep_sql.contains("relation <> 'contains'")
+                || dep_sql.contains("relation != 'contains'"),
+            "onager_dep_edges must exclude structural contains edges from connectivity algorithms"
+        );
+    }
+
+    #[test]
+    fn analyst_sql_leaves_missing_pagerank_null() {
+        assert!(
+            !INIT_ALGORITHMS_SQL.contains("COALESCE(pr.pagerank, 0.0)"),
+            "v_symbol_centrality must not zero-fill missing PageRank"
+        );
+        assert!(
+            !INIT_VIEWS_SQL.contains("COALESCE(ct.pagerank, 0.0)"),
+            "temporal scorecard/risk must not zero-fill missing PageRank"
+        );
+        assert!(
+            !INIT_STATIC_SEARCH_VIEWS_SQL.contains("COALESCE(ct.pagerank, 0.0)"),
+            "structural scorecard/risk must not zero-fill missing PageRank"
+        );
+    }
+
+    #[test]
     fn init_search_sql_ranks_code_with_graph_signals() {
         // search_code/search must fold centrality + kind/test weighting into the ORDER BY,
         // not order by bare bm25 (which let a leaf constant outrank a load-bearing impl).

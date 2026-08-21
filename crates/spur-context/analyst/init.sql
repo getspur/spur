@@ -22,7 +22,7 @@
 --   _meta                      — manifest metadata and row counts
 --   PROPERTY GRAPH code        — DuckPGQ surface
 --   onager_edges(src, dst)     — calls-only Onager surface (BIGINT-keyed, globally unique)
---   onager_dep_edges(src, dst) — all resolved dependency edges for connectivity algorithms
+--   onager_dep_edges(src, dst) — resolved dependency edges (excludes contains) algorithms
 --
 -- Why the re-key: the upstream Parquet's `node_id` column is NOT globally unique —
 -- empirically (artifact 3744e65c…) 28543 rows have only 27868 distinct `node_id`s,
@@ -318,14 +318,58 @@ WHERE NOT witness_backed
 -- DuckPGQ currently rejects property graphs over views, so keep a small
 -- compatibility surface sourced from the Parquet views. Analytical SQL and
 -- Onager paths use the views directly.
+--
+-- File vertices live in files.parquet (not nodes.parquet). Edge endpoints can
+-- also name stable ids that appear in neither table (std/external danglers).
+-- DuckPGQ MATCH SIMPLE requires every complete duckpgq_edges key to match an
+-- active parent row, so union those missing parents here without expanding the
+-- public `nodes` symbol surface.
 CREATE OR REPLACE TABLE duckpgq_nodes AS
-SELECT stable_symbol_id,
-       node_id,
-       qualified_name,
-       entity_name,
-       symbol_kind,
-       file_path
-FROM nodes;
+WITH symbol_nodes AS (
+  SELECT stable_symbol_id,
+         node_id,
+         qualified_name,
+         entity_name,
+         symbol_kind,
+         file_path
+  FROM nodes
+),
+file_nodes AS (
+  SELECT
+    f.stable_file_id AS stable_symbol_id,
+    m.dense_id AS node_id,
+    f.file_path AS qualified_name,
+    regexp_extract(f.file_path, '[^/]+$', 0) AS entity_name,
+    'file' AS symbol_kind,
+    f.file_path
+  FROM files f
+  JOIN node_dense_id_map m
+    ON m.stable_symbol_id = f.stable_file_id
+  WHERE NOT EXISTS (
+    SELECT 1 FROM symbol_nodes s WHERE s.stable_symbol_id = f.stable_file_id
+  )
+),
+stub_nodes AS (
+  SELECT
+    m.stable_symbol_id,
+    m.dense_id AS node_id,
+    m.stable_symbol_id AS qualified_name,
+    m.stable_symbol_id AS entity_name,
+    'stub' AS symbol_kind,
+    CAST(NULL AS VARCHAR) AS file_path
+  FROM node_dense_id_map m
+  WHERE NOT EXISTS (
+    SELECT 1 FROM symbol_nodes s WHERE s.stable_symbol_id = m.stable_symbol_id
+  )
+    AND NOT EXISTS (
+      SELECT 1 FROM file_nodes f WHERE f.stable_symbol_id = m.stable_symbol_id
+    )
+)
+SELECT * FROM symbol_nodes
+UNION ALL
+SELECT * FROM file_nodes
+UNION ALL
+SELECT * FROM stub_nodes;
 
 CREATE OR REPLACE TABLE duckpgq_external_nodes AS
 SELECT stable_symbol_id,
@@ -369,7 +413,8 @@ WHERE  edge_kind = 'calls';
 
 CREATE OR REPLACE VIEW onager_dep_edges AS
 SELECT src_id AS src, dst_id AS dst
-FROM   edges;
+FROM   edges
+WHERE  relation <> 'contains';
 
 CREATE OR REPLACE PROPERTY GRAPH code
   VERTEX TABLES (

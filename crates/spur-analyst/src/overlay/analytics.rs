@@ -24,9 +24,9 @@ pub(super) fn create_overlay_analytical_views(conn: &duckdb::Connection) -> Resu
         ""
     };
     let pagerank_expr = if has_base_centrality {
-        "COALESCE(base_ct.pagerank, 0.0)"
+        "base_ct.pagerank"
     } else {
-        "0.0"
+        "NULL"
     };
 
     let component_join = if has_base_component {
@@ -432,7 +432,7 @@ pub(super) fn create_overlay_analytical_views(conn: &duckdb::Connection) -> Resu
           n.entity_name,
           n.symbol_kind,
           n.file_path,
-          COALESCE(ct.pagerank, 0.0) AS pagerank,
+          ct.pagerank,
           COALESCE(ct.in_degree, 0) AS in_degree,
           COALESCE(ct.out_degree, 0) AS out_degree,
           COALESCE(ch.events, 0) AS churn_90d,
@@ -454,7 +454,7 @@ pub(super) fn create_overlay_analytical_views(conn: &duckdb::Connection) -> Resu
           n.qualified_name,
           n.symbol_kind,
           n.file_path,
-          COALESCE(ct.pagerank, 0.0) AS pagerank,
+          ct.pagerank,
           COALESCE(ct.in_degree, 0) AS in_degree,
           COALESCE(ct.out_degree, 0) AS out_degree,
           cmp.component_id,

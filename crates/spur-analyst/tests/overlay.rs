@@ -170,6 +170,98 @@ fn worktree_overlay_keeps_base_edges_to_reemitted_delta_targets() -> anyhow::Res
 }
 
 #[test]
+fn worktree_overlay_leaves_pagerank_null_without_base_centrality() -> anyhow::Result<()> {
+    let tempdir = tempfile::tempdir()?;
+    let root = tempdir.path().join("repo");
+    fs::create_dir_all(root.join("src"))?;
+    fs::write(root.join("src/a.rs"), "pub fn alpha() {}\n")?;
+
+    let prev = artifact_from_facts(&build_facts(&root, None)?.0, &root)?;
+    let base_artifact_dir = tempdir.path().join("base-artifact");
+    write_artifact_parquet(
+        &prev,
+        &base_artifact_dir,
+        WriteOptions::default(),
+        Vec::new(),
+    )?;
+
+    let base_db_path = tempdir.path().join("analyst.duckdb");
+    seed_base_analyst_db(&base_db_path, &base_artifact_dir)?;
+
+    let delta_dir = tempdir.path().join("delta");
+    write_worktree_delta(&prev, &root, &delta_dir)?;
+    let overlay = open_worktree_overlay(&base_db_path, &delta_dir)?;
+    let filled: i64 = overlay.query_row(
+        "SELECT COUNT(*) FROM v_symbol_scorecard WHERE pagerank IS NOT NULL",
+        [],
+        |row| row.get(0),
+    )?;
+    assert_eq!(
+        filled, 0,
+        "overlay must not invent 0.0 PageRank when base centrality is absent"
+    );
+    Ok(())
+}
+
+#[test]
+fn worktree_overlay_preserves_base_pagerank_without_zero_fill() -> anyhow::Result<()> {
+    let tempdir = tempfile::tempdir()?;
+    let root = tempdir.path().join("repo");
+    fs::create_dir_all(root.join("src"))?;
+    fs::write(
+        root.join("src/a.rs"),
+        "pub fn alpha() {}\npub fn beta() {}\n",
+    )?;
+
+    let prev = artifact_from_facts(&build_facts(&root, None)?.0, &root)?;
+    let base_artifact_dir = tempdir.path().join("base-artifact");
+    write_artifact_parquet(
+        &prev,
+        &base_artifact_dir,
+        WriteOptions::default(),
+        Vec::new(),
+    )?;
+
+    let base_db_path = tempdir.path().join("analyst.duckdb");
+    seed_base_analyst_db(&base_db_path, &base_artifact_dir)?;
+    {
+        let conn = duckdb::Connection::open(&base_db_path)?;
+        conn.execute_batch(
+            r#"
+            CREATE OR REPLACE TABLE v_symbol_centrality AS
+            SELECT
+              n.stable_symbol_id,
+              n.node_id,
+              CASE
+                WHEN n.entity_name = 'alpha' THEN CAST(0.42 AS DOUBLE)
+                ELSE CAST(NULL AS DOUBLE)
+              END AS pagerank,
+              CAST(0 AS BIGINT) AS in_degree,
+              CAST(0 AS BIGINT) AS out_degree
+            FROM nodes n;
+            "#,
+        )?;
+    }
+
+    let delta_dir = tempdir.path().join("delta");
+    write_worktree_delta(&prev, &root, &delta_dir)?;
+    let overlay = open_worktree_overlay(&base_db_path, &delta_dir)?;
+    let alpha: Option<f64> = overlay.query_row(
+        "SELECT pagerank FROM v_symbol_scorecard WHERE entity_name = 'alpha'",
+        [],
+        |row| row.get(0),
+    )?;
+    let beta: Option<f64> = overlay.query_row(
+        "SELECT pagerank FROM v_symbol_scorecard WHERE entity_name = 'beta'",
+        [],
+        |row| row.get(0),
+    )?;
+    assert_eq!(alpha, Some(0.42));
+    assert_eq!(beta, None, "inapplicable PageRank must stay NULL, not 0.0");
+    Ok(())
+}
+
+#[test]
 fn worktree_overlay_hides_symbols_and_edges_from_removed_files() -> anyhow::Result<()> {
     let tempdir = tempfile::tempdir()?;
     let root = tempdir.path().join("repo");
