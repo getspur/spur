@@ -11,9 +11,10 @@ pub mod resource;
 pub mod scheduling;
 pub mod workflow;
 
-static COMPILERS: [&dyn RuleFamilyCompiler; 7] = [
+static COMPILERS: [&dyn RuleFamilyCompiler; 8] = [
     &accessibility::COMPILER,
     &configuration::COMPILER,
+    &data_integrity::COMPILER,
     &design::COMPILER,
     &policy::COMPILER,
     &resource::COMPILER,
