@@ -62,7 +62,7 @@ flowchart LR
 | `tree-sitter` 0.25 + 11 grammars (`tree-sitter-{rust,python,typescript,c,cpp,go,hcl,lua,md,bash,sequel}`) | Parse source into syntax trees; per-language queries live in `queries/` |
 | `gix` 0.77 (`max-performance-safe`, `revision`, `blob-diff`) | Git history walking, refs, blob OIDs, worktree introspection |
 | `blake3`, `sha2`, `sha1` | Content addressing: graph content hash, stable IDs, git blob OIDs |
-| `fastembed` 5.8.0 + `lancedb`/`lance-index` + `parquet` | Embeddings sidecar (EmbeddingGemma300M) and columnar persistence |
+| `fastembed` 5.8.0 + `hf-hub` + `lancedb`/`lance-index` + `parquet` | Selectable FP32/768 embedding sidecars (Nomic v1.5, CodeRankEmbed, Jina code) and columnar persistence |
 | `petgraph` | In-memory subgraph traversal |
 | `ignore` | `.gitignore`-aware file discovery |
 | `spur-mcp` | `ToolModule` trait the MCP surface implements |
@@ -413,7 +413,7 @@ impl RebuildCoordinator {
 
 | Feature | Default | Effect |
 |---|---|---|
-| `embed` | yes | Pulls `fastembed` (EmbeddingGemma300M) + LanceDB; enables the sections/symbols embedding datasets (`store/lance_sections.rs`). Disabled builds skip the embedding sidecar. |
+| `embed` | yes | Pulls the selectable FP32/768 embedding backends + LanceDB; enables the sections/symbols embedding datasets (`store/lance_sections.rs`). Disabled builds skip the embedding sidecar. |
 | `perf-gates` | no | Compile-time performance gates (assertions/budgets in hot paths). |
 | `test-support` | no | Test instrumentation: build-invocation counters in `RebuildCoordinator` (`mcp/rebuild_singleflight.rs:69-72`), test-only hooks. |
 

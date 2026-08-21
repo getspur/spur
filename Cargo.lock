@@ -11353,6 +11353,7 @@ dependencies = [
  "futures",
  "gix",
  "globset",
+ "hf-hub",
  "ignore",
  "indicatif 0.18.4",
  "insta",

@@ -8,8 +8,8 @@ use serde_json::{json, Value};
 use std::collections::{BTreeSet, HashMap};
 
 const EMBEDDING_VECTOR_DIMENSIONS: usize = 768;
-const EMBEDDING_MODEL: &str = "EmbeddingGemma300M";
-const EMBED_TEXT_VERSION: &str = "v4-embeddinggemma-300m-titled";
+const EMBEDDING_MODEL: &str = "NomicEmbedTextV15";
+const EMBED_TEXT_VERSION: &str = "v5-nomic-embed-text-v1.5-search-document";
 const MAX_KNOWLEDGE_LIMIT: usize = 20;
 const BM25_HIGH_CONFIDENCE_SCORE: f64 = 8.0;
 const BM25_MEDIUM_CONFIDENCE_SCORE: f64 = 3.0;

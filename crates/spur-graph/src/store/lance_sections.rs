@@ -16,7 +16,12 @@ use arrow_array::{
 use arrow_buffer::NullBuffer;
 use arrow_schema::{DataType, Field, Schema};
 #[cfg(feature = "embed")]
-use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
+use fastembed::{
+    EmbeddingModel, InitOptions, InitOptionsUserDefined, Pooling, TextEmbedding, TokenizerFiles,
+    UserDefinedEmbeddingModel,
+};
+#[cfg(feature = "embed")]
+use hf_hub::{api::sync::ApiBuilder as HfApiBuilder, Repo, RepoType};
 use lancedb::index::{scalar::FtsIndexBuilder, Index, IndexConfig, IndexType};
 use lancedb::query::{ExecutableQuery as _, QueryBase as _, Select};
 use lancedb::table::OptimizeAction;
@@ -29,8 +34,12 @@ use crate::{
 };
 
 pub const EMBED_MODEL_ENV: &str = "SPUR_EMBEDDING_MODEL";
-pub const EMBEDDING_GEMMA_EMBED_MODEL_NAME: &str = "EmbeddingGemma300M";
-pub const EMBEDDING_GEMMA_EMBED_MODEL_APPROX_SIZE_MB: usize = 1200;
+pub const NOMIC_EMBED_TEXT_V15_MODEL_NAME: &str = "NomicEmbedTextV15";
+pub const NOMIC_EMBED_TEXT_V15_APPROX_SIZE_MB: usize = 550;
+pub const CODE_RANK_EMBED_MODEL_NAME: &str = "CodeRankEmbed";
+pub const CODE_RANK_EMBED_APPROX_SIZE_MB: usize = 548;
+pub const JINA_EMBEDDINGS_V2_BASE_CODE_MODEL_NAME: &str = "JinaEmbeddingsV2BaseCode";
+pub const JINA_EMBEDDINGS_V2_BASE_CODE_APPROX_SIZE_MB: usize = 642;
 pub const SECTIONS_DATASET_DIR: &str = "sections.lancedb";
 pub const SECTIONS_TABLE: &str = "section_bodies";
 pub const CODE_SYMBOLS_DATASET_DIR: &str = "code_symbols.lance";
@@ -43,8 +52,22 @@ pub const SECTION_EMBED_SKIP_ENV: &str = "SPUR_GRAPH_SKIP_SECTION_EMBEDDINGS";
 pub const CODE_SYMBOL_EMBED_SKIP_ENV: &str = "SPUR_GRAPH_SKIP_CODE_SYMBOL_EMBEDDINGS";
 const SECTION_WRITE_BATCH_SIZE_DEFAULT: usize = 512;
 const SECTION_WRITE_BATCH_SIZE_ENV: &str = "SPUR_GRAPH_SECTION_WRITE_BATCH_SIZE";
-const EMBEDDING_GEMMA_EMBED_TEXT_VERSION: &str = "v4-embeddinggemma-300m-titled";
-const EMBEDDING_GEMMA_SYMBOL_EMBED_TEXT_VERSION: &str = "v3-embeddinggemma-300m";
+const NOMIC_EMBED_TEXT_V15_SECTION_TEXT_VERSION: &str = "v5-nomic-embed-text-v1.5-search-document";
+const NOMIC_EMBED_TEXT_V15_SYMBOL_TEXT_VERSION: &str = "v4-nomic-embed-text-v1.5-search-document";
+const CODE_RANK_EMBED_SECTION_TEXT_VERSION: &str =
+    "v1-coderank-embed-query-instruction-document-raw";
+const CODE_RANK_EMBED_SYMBOL_TEXT_VERSION: &str =
+    "v1-coderank-embed-query-instruction-document-raw";
+const JINA_EMBEDDINGS_V2_BASE_CODE_SECTION_TEXT_VERSION: &str =
+    "v1-jina-embeddings-v2-base-code-raw";
+const JINA_EMBEDDINGS_V2_BASE_CODE_SYMBOL_TEXT_VERSION: &str =
+    "v1-jina-embeddings-v2-base-code-raw";
+#[cfg(feature = "embed")]
+const CODE_RANK_EMBED_ONNX_REPO: &str = "jamie8johnson/CodeRankEmbed-onnx";
+#[cfg(feature = "embed")]
+const CODE_RANK_EMBED_ONNX_REVISION: &str = "151669b173750250e611e1be00c812f112ea6020";
+#[cfg(feature = "embed")]
+const CODE_RANK_EMBED_ONNX_FILE: &str = "onnx/model.onnx";
 const EMBEDDING_INPUT_HASH_COLUMN: &str = "embedding_input_hash";
 const EMBEDDING_MODEL_COLUMN: &str = "embedding_model";
 const INDEX_REBUILD_MIN_ROWS: usize = 50;
@@ -54,11 +77,17 @@ const INDEX_REBUILD_MIN_PCT: f64 = 0.1;
 const SECTION_SIDECAR_TEST_FAIL_ENV: &str = "SPUR_GRAPH_TEST_FAIL_SECTION_SIDECAR";
 
 #[cfg(feature = "embed")]
-static EMBEDDING_GEMMA_EMBED_MODEL: OnceLock<Option<Mutex<TextEmbedding>>> = OnceLock::new();
+static NOMIC_EMBED_TEXT_V15_MODEL: OnceLock<Option<Mutex<TextEmbedding>>> = OnceLock::new();
+#[cfg(feature = "embed")]
+static CODE_RANK_EMBED_MODEL: OnceLock<Option<Mutex<TextEmbedding>>> = OnceLock::new();
+#[cfg(feature = "embed")]
+static JINA_EMBEDDINGS_V2_BASE_CODE_MODEL: OnceLock<Option<Mutex<TextEmbedding>>> = OnceLock::new();
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EmbeddingModelSelection {
-    EmbeddingGemma300M,
+    NomicEmbedTextV15,
+    CodeRankEmbed,
+    JinaEmbeddingsV2BaseCode,
 }
 
 impl EmbeddingModelSelection {
@@ -66,7 +95,7 @@ impl EmbeddingModelSelection {
         std::env::var(EMBED_MODEL_ENV)
             .ok()
             .and_then(|value| Self::parse(&value))
-            .unwrap_or(Self::EmbeddingGemma300M)
+            .unwrap_or(Self::NomicEmbedTextV15)
     }
 
     pub fn parse(value: &str) -> Option<Self> {
@@ -77,38 +106,80 @@ impl EmbeddingModelSelection {
             .flat_map(char::to_lowercase)
             .collect::<String>();
         match normalized.as_str() {
-            ""
-            | "embeddinggemma"
-            | "embeddinggemma300"
-            | "embeddinggemma300m"
-            | "googleembeddinggemma300m" => Some(Self::EmbeddingGemma300M),
+            "" | "nomic" | "nomicembedtext" | "nomicembedtextv15" | "nomicainomicembedtextv15" => {
+                Some(Self::NomicEmbedTextV15)
+            }
+            "coderank" | "coderankembed" | "nomiccoderank" | "nomicaicoderankembed" => {
+                Some(Self::CodeRankEmbed)
+            }
+            "jina" | "jinacode" | "jinaembeddingsv2basecode" | "jinaaijinaembeddingsv2basecode" => {
+                Some(Self::JinaEmbeddingsV2BaseCode)
+            }
             _ => None,
         }
     }
 
     pub fn model_name(self) -> &'static str {
-        EMBEDDING_GEMMA_EMBED_MODEL_NAME
+        match self {
+            Self::NomicEmbedTextV15 => NOMIC_EMBED_TEXT_V15_MODEL_NAME,
+            Self::CodeRankEmbed => CODE_RANK_EMBED_MODEL_NAME,
+            Self::JinaEmbeddingsV2BaseCode => JINA_EMBEDDINGS_V2_BASE_CODE_MODEL_NAME,
+        }
     }
 
     pub fn approximate_size_mb(self) -> usize {
-        EMBEDDING_GEMMA_EMBED_MODEL_APPROX_SIZE_MB
+        match self {
+            Self::NomicEmbedTextV15 => NOMIC_EMBED_TEXT_V15_APPROX_SIZE_MB,
+            Self::CodeRankEmbed => CODE_RANK_EMBED_APPROX_SIZE_MB,
+            Self::JinaEmbeddingsV2BaseCode => JINA_EMBEDDINGS_V2_BASE_CODE_APPROX_SIZE_MB,
+        }
     }
 
     pub fn dimensions(self) -> usize {
         EMBEDDING_VECTOR_DIMENSIONS
     }
 
+    pub fn max_length(self) -> usize {
+        8192
+    }
+
     #[cfg(feature = "embed")]
-    pub fn fastembed_model(self) -> EmbeddingModel {
-        EmbeddingModel::EmbeddingGemma300M
+    pub fn fastembed_model(self) -> Option<EmbeddingModel> {
+        match self {
+            Self::NomicEmbedTextV15 => Some(EmbeddingModel::NomicEmbedTextV15),
+            Self::CodeRankEmbed => None,
+            Self::JinaEmbeddingsV2BaseCode => Some(EmbeddingModel::JinaEmbeddingsV2BaseCode),
+        }
+    }
+
+    fn section_text_version(self) -> &'static str {
+        match self {
+            Self::NomicEmbedTextV15 => NOMIC_EMBED_TEXT_V15_SECTION_TEXT_VERSION,
+            Self::CodeRankEmbed => CODE_RANK_EMBED_SECTION_TEXT_VERSION,
+            Self::JinaEmbeddingsV2BaseCode => JINA_EMBEDDINGS_V2_BASE_CODE_SECTION_TEXT_VERSION,
+        }
+    }
+
+    fn symbol_text_version(self) -> &'static str {
+        match self {
+            Self::NomicEmbedTextV15 => NOMIC_EMBED_TEXT_V15_SYMBOL_TEXT_VERSION,
+            Self::CodeRankEmbed => CODE_RANK_EMBED_SYMBOL_TEXT_VERSION,
+            Self::JinaEmbeddingsV2BaseCode => JINA_EMBEDDINGS_V2_BASE_CODE_SYMBOL_TEXT_VERSION,
+        }
     }
 }
 
 pub fn embedding_query_text_for_model(
     query: &str,
-    _embedding_model: EmbeddingModelSelection,
+    embedding_model: EmbeddingModelSelection,
 ) -> Cow<'_, str> {
-    Cow::Owned(format!("task: code retrieval | query: {query}"))
+    match embedding_model {
+        EmbeddingModelSelection::NomicEmbedTextV15 => Cow::Owned(format!("search_query: {query}")),
+        EmbeddingModelSelection::CodeRankEmbed => Cow::Owned(format!(
+            "Represent this query for searching relevant code: {query}"
+        )),
+        EmbeddingModelSelection::JinaEmbeddingsV2BaseCode => Cow::Borrowed(query),
+    }
 }
 
 fn embedding_document_title(title: &str) -> &str {
@@ -120,15 +191,19 @@ fn embedding_document_title(title: &str) -> &str {
     }
 }
 
-fn embedding_document_text_for_model(
-    title: &str,
-    text: &str,
-    _embedding_model: EmbeddingModelSelection,
-) -> Cow<'static, str> {
-    Cow::Owned(format!(
-        "title: {} | text: {text}",
-        embedding_document_title(title)
-    ))
+fn embedding_document_text_for_model<'a>(
+    title: &'a str,
+    text: &'a str,
+    embedding_model: EmbeddingModelSelection,
+) -> Cow<'a, str> {
+    match embedding_model {
+        EmbeddingModelSelection::NomicEmbedTextV15 => Cow::Owned(format!(
+            "search_document: title: {} | text: {text}",
+            embedding_document_title(title)
+        )),
+        EmbeddingModelSelection::CodeRankEmbed
+        | EmbeddingModelSelection::JinaEmbeddingsV2BaseCode => Cow::Borrowed(text),
+    }
 }
 
 // Vector reuse is intentionally split across two scopes: in-place incremental
@@ -2120,10 +2195,14 @@ fn first_source_line_for_symbol<'a>(
 
 fn section_embed_content_hash_for_model(
     source_content_hash: &str,
-    _embedding_model: EmbeddingModelSelection,
+    embedding_model: EmbeddingModelSelection,
 ) -> String {
     blake3_hex(
-        format!("{EMBEDDING_GEMMA_EMBED_TEXT_VERSION}:section\0{source_content_hash}").as_bytes(),
+        format!(
+            "{}:section\0{source_content_hash}",
+            embedding_model.section_text_version()
+        )
+        .as_bytes(),
     )
 }
 
@@ -2132,24 +2211,22 @@ fn section_embedding_input_hash_for_model(
     body_text: &str,
     embedding_model: EmbeddingModelSelection,
 ) -> String {
-    let input_hash = blake3_hex(
-        format!(
-            "title\0{}\0text\0{body_text}",
-            embedding_document_title(title)
-        )
-        .as_bytes(),
-    );
+    let input = embedding_document_text_for_model(title, body_text, embedding_model);
+    let input_hash = blake3_hex(input.as_bytes());
     section_embed_content_hash_for_model(&input_hash, embedding_model)
 }
 
 fn symbol_embed_content_hash_for_model(
     source_content_hash: &str,
     _has_significant_body: bool,
-    _embedding_model: EmbeddingModelSelection,
+    embedding_model: EmbeddingModelSelection,
 ) -> String {
     blake3_hex(
-        format!("{EMBEDDING_GEMMA_SYMBOL_EMBED_TEXT_VERSION}:symbol\0{source_content_hash}")
-            .as_bytes(),
+        format!(
+            "{}:symbol\0{source_content_hash}",
+            embedding_model.symbol_text_version()
+        )
+        .as_bytes(),
     )
 }
 
@@ -2254,7 +2331,7 @@ fn embed_eligible_rows(
     rows: &[SectionRow],
     options: SectionEmbeddingOptions,
 ) -> Vec<Option<Vec<f32>>> {
-    let mut embedder = SectionEmbedder::new(options, EmbeddingModelSelection::EmbeddingGemma300M);
+    let mut embedder = SectionEmbedder::new(options, EmbeddingModelSelection::NomicEmbedTextV15);
     embedder.embed_row_vectors(rows)
 }
 
@@ -2648,7 +2725,7 @@ where
 {
     embed_text_inputs_with(
         rows.len(),
-        section_embedding_inputs(rows, EmbeddingModelSelection::EmbeddingGemma300M),
+        section_embedding_inputs(rows, EmbeddingModelSelection::NomicEmbedTextV15),
         options,
         options.skip_section_embeddings,
         on_chunk_started,
@@ -2669,7 +2746,7 @@ where
 {
     embed_text_inputs_with(
         rows.len(),
-        symbol_embedding_inputs(rows, EmbeddingModelSelection::EmbeddingGemma300M),
+        symbol_embedding_inputs(rows, EmbeddingModelSelection::NomicEmbedTextV15),
         options,
         options.skip_code_symbol_embeddings,
         on_chunk_started,
@@ -2789,21 +2866,85 @@ where
 
 #[cfg(feature = "embed")]
 fn embed_model_cell(
-    _embedding_model: EmbeddingModelSelection,
+    embedding_model: EmbeddingModelSelection,
 ) -> &'static OnceLock<Option<Mutex<TextEmbedding>>> {
-    &EMBEDDING_GEMMA_EMBED_MODEL
+    match embedding_model {
+        EmbeddingModelSelection::NomicEmbedTextV15 => &NOMIC_EMBED_TEXT_V15_MODEL,
+        EmbeddingModelSelection::CodeRankEmbed => &CODE_RANK_EMBED_MODEL,
+        EmbeddingModelSelection::JinaEmbeddingsV2BaseCode => &JINA_EMBEDDINGS_V2_BASE_CODE_MODEL,
+    }
 }
 
 #[cfg(feature = "embed")]
-fn fastembed_init_options(embedding_model: EmbeddingModelSelection) -> InitOptions {
-    let mut init_options =
-        InitOptions::new(embedding_model.fastembed_model()).with_show_download_progress(true);
+pub fn load_embedding_model(
+    embedding_model: EmbeddingModelSelection,
+    show_download_progress: bool,
+) -> Result<TextEmbedding> {
+    if embedding_model == EmbeddingModelSelection::CodeRankEmbed {
+        return load_code_rank_embed_model(show_download_progress);
+    }
+
+    let registered_model = embedding_model
+        .fastembed_model()
+        .context("registered FastEmbed model missing")?;
+    let mut init_options = InitOptions::new(registered_model)
+        .with_max_length(embedding_model.max_length())
+        .with_show_download_progress(show_download_progress);
 
     if let Some(cache_dir) = fastembed_cache_dir() {
         init_options = init_options.with_cache_dir(cache_dir);
     }
 
-    init_options
+    TextEmbedding::try_new(init_options)
+}
+
+#[cfg(feature = "embed")]
+fn load_code_rank_embed_model(show_download_progress: bool) -> Result<TextEmbedding> {
+    let mut api_builder = HfApiBuilder::from_env()
+        .with_progress(show_download_progress)
+        .with_retries(3);
+    if let Some(cache_dir) = fastembed_cache_dir() {
+        api_builder = api_builder.with_cache_dir(cache_dir);
+    }
+    let model_repo = api_builder
+        .build()
+        .context("build Hugging Face client for CodeRankEmbed")?
+        .repo(Repo::with_revision(
+            CODE_RANK_EMBED_ONNX_REPO.to_owned(),
+            RepoType::Model,
+            CODE_RANK_EMBED_ONNX_REVISION.to_owned(),
+        ));
+
+    let read_model_file = |file_name: &str| -> Result<Vec<u8>> {
+        let file_path = model_repo
+            .get(file_name)
+            .with_context(|| format!("download CodeRankEmbed file `{file_name}`"))?;
+        fs::read(&file_path).with_context(|| {
+            format!(
+                "read CodeRankEmbed file `{}` from `{}`",
+                file_name,
+                file_path.display()
+            )
+        })
+    };
+    let tokenizer_files = TokenizerFiles {
+        tokenizer_file: read_model_file("tokenizer.json")?,
+        config_file: read_model_file("config.json")?,
+        special_tokens_map_file: read_model_file("special_tokens_map.json")?,
+        tokenizer_config_file: read_model_file("tokenizer_config.json")?,
+    };
+    let model = UserDefinedEmbeddingModel::new(
+        read_model_file(CODE_RANK_EMBED_ONNX_FILE)?,
+        tokenizer_files,
+    )
+    .with_pooling(Pooling::Mean);
+
+    TextEmbedding::try_new_from_user_defined(
+        model,
+        InitOptionsUserDefined::new()
+            .with_max_length(EmbeddingModelSelection::CodeRankEmbed.max_length()),
+    )
+    .context("initialize revision-pinned CodeRankEmbed FP32 ONNX model")
 }
 
 #[cfg(feature = "embed")]
@@ -2812,20 +2953,16 @@ fn shared_embed_model(
     embedding_kind: &'static str,
 ) -> Option<&'static Mutex<TextEmbedding>> {
     embed_model_cell(embedding_model)
-        .get_or_init(|| {
-            let init_options = fastembed_init_options(embedding_model);
-
-            match TextEmbedding::try_new(init_options) {
-                Ok(model) => Some(Mutex::new(model)),
-                Err(error) => {
-                    tracing::warn!(
-                        error = %error,
-                        embedding_kind,
-                        model = embedding_model.model_name(),
-                        "fastembed model unavailable; skipping embeddings"
-                    );
-                    None
-                }
+        .get_or_init(|| match load_embedding_model(embedding_model, true) {
+            Ok(model) => Some(Mutex::new(model)),
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    embedding_kind,
+                    model = embedding_model.model_name(),
+                    "fastembed model unavailable; skipping embeddings"
+                );
+                None
             }
         })
         .as_ref()
@@ -2961,7 +3098,7 @@ where
     backfill_missing_vectors_async_with_embedding_model_and_embedder(
         artifact_dir,
         options,
-        EmbeddingModelSelection::EmbeddingGemma300M,
+        EmbeddingModelSelection::NomicEmbedTextV15,
         embed_batch,
     )
     .await
@@ -4030,7 +4167,7 @@ mod tests {
         let embedding_input_hash = section_embedding_input_hash_for_model(
             &qualified_name,
             &body_text,
-            EmbeddingModelSelection::EmbeddingGemma300M,
+            EmbeddingModelSelection::NomicEmbedTextV15,
         );
         SectionRow {
             stable_symbol_id: "symbol".to_owned(),
@@ -4044,7 +4181,7 @@ mod tests {
             parent_stable_id: None,
             content_hash: "hash".to_owned(),
             embedding_input_hash,
-            embedding_model: EMBEDDING_GEMMA_EMBED_MODEL_NAME.to_owned(),
+            embedding_model: NOMIC_EMBED_TEXT_V15_MODEL_NAME.to_owned(),
             vector: None,
         }
     }
@@ -4059,7 +4196,7 @@ mod tests {
         let embedding_input_hash = section_embedding_input_hash_for_model(
             &qualified_name,
             &body_text,
-            EmbeddingModelSelection::EmbeddingGemma300M,
+            EmbeddingModelSelection::NomicEmbedTextV15,
         );
         SectionRow {
             stable_symbol_id: stable_symbol_id.to_owned(),
@@ -4073,7 +4210,7 @@ mod tests {
             parent_stable_id: None,
             content_hash: content_hash.to_owned(),
             embedding_input_hash,
-            embedding_model: EMBEDDING_GEMMA_EMBED_MODEL_NAME.to_owned(),
+            embedding_model: NOMIC_EMBED_TEXT_V15_MODEL_NAME.to_owned(),
             vector: None,
         }
     }
@@ -4082,7 +4219,7 @@ mod tests {
         let embedding_input_hash = symbol_embedding_input_hash_for_model(
             embed_text,
             false,
-            EmbeddingModelSelection::EmbeddingGemma300M,
+            EmbeddingModelSelection::NomicEmbedTextV15,
         );
         SymbolRow {
             stable_symbol_id: stable_symbol_id.to_owned(),
@@ -4094,7 +4231,7 @@ mod tests {
             vector: None,
             content_hash: "hash".to_owned(),
             embedding_input_hash,
-            embedding_model: EMBEDDING_GEMMA_EMBED_MODEL_NAME.to_owned(),
+            embedding_model: NOMIC_EMBED_TEXT_V15_MODEL_NAME.to_owned(),
         }
     }
 
@@ -4292,7 +4429,7 @@ mod tests {
             root,
             4096,
             None,
-            EmbeddingModelSelection::EmbeddingGemma300M,
+            EmbeddingModelSelection::NomicEmbedTextV15,
         );
         let mut rows = Vec::new();
         while let Some(batch) = batcher.next_batch().expect("symbol row batch") {
@@ -4307,7 +4444,7 @@ mod tests {
             root,
             4096,
             None,
-            EmbeddingModelSelection::EmbeddingGemma300M,
+            EmbeddingModelSelection::NomicEmbedTextV15,
         );
         let mut rows = Vec::new();
         while let Some(batch) = batcher.next_batch().expect("section row batch") {
@@ -4837,13 +4974,31 @@ mod tests {
     }
 
     #[test]
-    fn embedding_migration_uses_gemma_contract() {
-        assert_eq!(EMBEDDING_GEMMA_EMBED_MODEL_NAME, "EmbeddingGemma300M");
+    fn embedding_migration_uses_nomic_v15_contract() {
+        assert_eq!(NOMIC_EMBED_TEXT_V15_MODEL_NAME, "NomicEmbedTextV15");
         assert_eq!(EMBEDDING_VECTOR_DIMENSIONS, 768);
         assert_eq!(
-            EMBEDDING_GEMMA_EMBED_TEXT_VERSION,
-            "v4-embeddinggemma-300m-titled"
+            NOMIC_EMBED_TEXT_V15_SECTION_TEXT_VERSION,
+            "v5-nomic-embed-text-v1.5-search-document"
         );
+        assert_eq!(
+            NOMIC_EMBED_TEXT_V15_SYMBOL_TEXT_VERSION,
+            "v4-nomic-embed-text-v1.5-search-document"
+        );
+    }
+
+    #[test]
+    fn coderank_loader_is_revision_pinned_to_fp32_onnx() {
+        assert_eq!(
+            CODE_RANK_EMBED_ONNX_REPO,
+            "jamie8johnson/CodeRankEmbed-onnx"
+        );
+        assert_eq!(
+            CODE_RANK_EMBED_ONNX_REVISION,
+            "151669b173750250e611e1be00c812f112ea6020"
+        );
+        assert_eq!(CODE_RANK_EMBED_ONNX_FILE, "onnx/model.onnx");
+        assert_eq!(EmbeddingModelSelection::CodeRankEmbed.max_length(), 8192);
     }
 
     #[test]
@@ -4910,51 +5065,95 @@ mod tests {
     }
 
     #[test]
-    fn embedding_model_defaults_to_embeddinggemma_and_accepts_aliases() {
+    fn embedding_model_defaults_to_nomic_v15_and_accepts_aliases() {
         let _guard = env_lock();
         let _env = EnvGuard::remove(EMBED_MODEL_ENV);
 
         assert_eq!(
             EmbeddingModelSelection::from_env(),
-            EmbeddingModelSelection::EmbeddingGemma300M
+            EmbeddingModelSelection::NomicEmbedTextV15
         );
 
         drop(_env);
-        let _env = EnvGuard::set(EMBED_MODEL_ENV, "google/embeddinggemma-300m");
+        let _env = EnvGuard::set(EMBED_MODEL_ENV, "nomic-ai/nomic-embed-text-v1.5");
 
         assert_eq!(
             EmbeddingModelSelection::from_env(),
-            EmbeddingModelSelection::EmbeddingGemma300M
+            EmbeddingModelSelection::NomicEmbedTextV15
         );
         assert_eq!(
             EmbeddingModelSelection::from_env().model_name(),
-            EMBEDDING_GEMMA_EMBED_MODEL_NAME
+            NOMIC_EMBED_TEXT_V15_MODEL_NAME
         );
+        assert_eq!(EmbeddingModelSelection::NomicEmbedTextV15.dimensions(), 768);
         assert_eq!(
-            EmbeddingModelSelection::EmbeddingGemma300M.dimensions(),
-            768
-        );
-        assert_eq!(
-            EmbeddingModelSelection::EmbeddingGemma300M.fastembed_model(),
-            EmbeddingModel::EmbeddingGemma300M
+            EmbeddingModelSelection::NomicEmbedTextV15.fastembed_model(),
+            Some(EmbeddingModel::NomicEmbedTextV15)
         );
     }
 
     #[test]
-    #[ignore = "downloads and loads the large EmbeddingGemma300M FastEmbed model"]
+    fn optional_embedding_models_accept_aliases_and_use_distinct_contracts() {
+        for alias in ["coderank", "nomic-coderank", "nomic-ai/CodeRankEmbed"] {
+            assert_eq!(
+                EmbeddingModelSelection::parse(alias),
+                Some(EmbeddingModelSelection::CodeRankEmbed)
+            );
+        }
+        for alias in [
+            "jina-code",
+            "jina-embeddings-v2-base-code",
+            "jinaai/jina-embeddings-v2-base-code",
+        ] {
+            assert_eq!(
+                EmbeddingModelSelection::parse(alias),
+                Some(EmbeddingModelSelection::JinaEmbeddingsV2BaseCode)
+            );
+        }
+
+        assert_eq!(
+            EmbeddingModelSelection::NomicEmbedTextV15.fastembed_model(),
+            Some(EmbeddingModel::NomicEmbedTextV15)
+        );
+        assert_eq!(
+            EmbeddingModelSelection::CodeRankEmbed.fastembed_model(),
+            None,
+            "CodeRankEmbed uses the revision-pinned user-defined ONNX path"
+        );
+        assert_eq!(
+            EmbeddingModelSelection::JinaEmbeddingsV2BaseCode.fastembed_model(),
+            Some(EmbeddingModel::JinaEmbeddingsV2BaseCode)
+        );
+    }
+
+    #[test]
+    #[ignore = "downloads and loads the NomicEmbedTextV15 FastEmbed model"]
     fn fastembed_smoke_constructs_model_and_returns_expected_dimensions() {
+        assert_embedding_model_smoke(EmbeddingModelSelection::NomicEmbedTextV15);
+    }
+
+    #[test]
+    #[ignore = "downloads and loads the CodeRankEmbed FP32 ONNX model"]
+    fn coderank_embed_smoke_constructs_model_and_returns_expected_dimensions() {
+        assert_embedding_model_smoke(EmbeddingModelSelection::CodeRankEmbed);
+    }
+
+    #[test]
+    #[ignore = "downloads and loads the JinaEmbeddingsV2BaseCode FP32 ONNX model"]
+    fn jina_code_smoke_constructs_model_and_returns_expected_dimensions() {
+        assert_embedding_model_smoke(EmbeddingModelSelection::JinaEmbeddingsV2BaseCode);
+    }
+
+    fn assert_embedding_model_smoke(embedding_model: EmbeddingModelSelection) {
         let mut service = TextEmbeddingService::new(
             SectionEmbeddingOptions {
                 batch_size: 1,
                 ..SectionEmbeddingOptions::default()
             },
             false,
-            EmbeddingModelSelection::EmbeddingGemma300M,
+            embedding_model,
         );
-        let text = embedding_query_text_for_model(
-            "default logger smoke",
-            EmbeddingModelSelection::EmbeddingGemma300M,
-        );
+        let text = embedding_query_text_for_model("default logger smoke", embedding_model);
 
         let embeddings = service
             .embed_texts_locally(&[text.as_ref()], "fastembed smoke")
@@ -4965,43 +5164,43 @@ mod tests {
     }
 
     #[test]
-    fn text_embedding_service_requires_local_gemma_model_initialization() {
+    fn text_embedding_service_requires_local_nomic_model_initialization() {
         let service = TextEmbeddingService::new(
             SectionEmbeddingOptions::default(),
             false,
-            EmbeddingModelSelection::EmbeddingGemma300M,
+            EmbeddingModelSelection::NomicEmbedTextV15,
         );
 
         assert!(service.needs_model_init());
     }
 
     #[test]
-    fn embedding_model_from_env_ignores_legacy_jina_code_alias() {
+    fn embedding_model_from_env_selects_jina_code_alias() {
         let _guard = env_lock();
         let _model = EnvGuard::set(EMBED_MODEL_ENV, "jina-code");
 
         assert_eq!(
             EmbeddingModelSelection::from_env(),
-            EmbeddingModelSelection::EmbeddingGemma300M
+            EmbeddingModelSelection::JinaEmbeddingsV2BaseCode
         );
         assert_eq!(
             EmbeddingModelSelection::from_env().model_name(),
-            EMBEDDING_GEMMA_EMBED_MODEL_NAME
+            JINA_EMBEDDINGS_V2_BASE_CODE_MODEL_NAME
         );
         assert_eq!(
-            EmbeddingModelSelection::EmbeddingGemma300M.dimensions(),
+            EmbeddingModelSelection::JinaEmbeddingsV2BaseCode.dimensions(),
             768
         );
     }
 
     #[test]
-    fn gemma_embedding_text_version_is_part_of_vector_content_hash() {
+    fn nomic_embedding_text_version_is_part_of_vector_content_hash() {
         let source_hash = "source-content";
 
         assert_ne!(
             section_embed_content_hash_for_model(
                 source_hash,
-                EmbeddingModelSelection::EmbeddingGemma300M
+                EmbeddingModelSelection::NomicEmbedTextV15
             ),
             source_hash
         );
@@ -5009,7 +5208,7 @@ mod tests {
             symbol_embed_content_hash_for_model(
                 source_hash,
                 false,
-                EmbeddingModelSelection::EmbeddingGemma300M
+                EmbeddingModelSelection::NomicEmbedTextV15
             ),
             source_hash
         );
@@ -5017,7 +5216,7 @@ mod tests {
             section_embedding_input_hash_for_model(
                 "same title",
                 "same body",
-                EmbeddingModelSelection::EmbeddingGemma300M
+                EmbeddingModelSelection::NomicEmbedTextV15
             ),
             blake3_hex("same body".as_bytes())
         );
@@ -5025,13 +5224,13 @@ mod tests {
             symbol_embedding_input_hash_for_model(
                 "same embed text",
                 false,
-                EmbeddingModelSelection::EmbeddingGemma300M
+                EmbeddingModelSelection::NomicEmbedTextV15
             ),
             blake3_hex("same embed text".as_bytes())
         );
-        let legacy_symbol_input_hash = blake3_hex(
+        let expected_symbol_input_hash = blake3_hex(
             format!(
-                "v3-embeddinggemma-300m:symbol\0{}",
+                "v4-nomic-embed-text-v1.5-search-document:symbol\0{}",
                 blake3_hex("same embed text".as_bytes())
             )
             .as_bytes(),
@@ -5040,15 +5239,15 @@ mod tests {
             symbol_embedding_input_hash_for_model(
                 "same embed text",
                 false,
-                EmbeddingModelSelection::EmbeddingGemma300M
+                EmbeddingModelSelection::NomicEmbedTextV15
             ),
-            legacy_symbol_input_hash,
-            "symbol embedding hashes must not change for the section title prompt update"
+            expected_symbol_input_hash,
+            "symbol embedding hashes must include the Nomic prompt contract version"
         );
     }
 
     #[test]
-    fn embeddinggemma_formats_query_and_document_inputs() {
+    fn nomic_formats_query_and_document_inputs() {
         let section_rows = vec![section_row_fixture(
             2,
             "## Install\n\nInstall body.".to_owned(),
@@ -5058,22 +5257,93 @@ mod tests {
         assert_eq!(
             embedding_query_text_for_model(
                 "find task spawner",
-                EmbeddingModelSelection::EmbeddingGemma300M
+                EmbeddingModelSelection::NomicEmbedTextV15
             )
             .as_ref(),
-            "task: code retrieval | query: find task spawner"
+            "search_query: find task spawner"
         );
         assert_eq!(
-            section_embedding_inputs(&section_rows, EmbeddingModelSelection::EmbeddingGemma300M)[0]
+            section_embedding_inputs(&section_rows, EmbeddingModelSelection::NomicEmbedTextV15)[0]
                 .text
                 .as_ref(),
-            "title: docs/example.md::Section | text: ## Install\n\nInstall body."
+            "search_document: title: docs/example.md::Section | text: ## Install\n\nInstall body."
         );
         assert_eq!(
-            symbol_embedding_inputs(&symbol_rows, EmbeddingModelSelection::EmbeddingGemma300M)[0]
+            symbol_embedding_inputs(&symbol_rows, EmbeddingModelSelection::NomicEmbedTextV15)[0]
                 .text
                 .as_ref(),
-            "title: none | text: one embed text"
+            "search_document: title: none | text: one embed text"
+        );
+    }
+
+    #[test]
+    fn code_models_apply_their_model_specific_query_and_document_contracts() {
+        let section_rows = vec![section_row_fixture(
+            2,
+            "## Install\n\nInstall body.".to_owned(),
+        )];
+        let symbol_rows = vec![symbol_row_fixture("symbol-one", "one embed text")];
+
+        assert_eq!(
+            embedding_query_text_for_model(
+                "find task spawner",
+                EmbeddingModelSelection::CodeRankEmbed
+            ),
+            "Represent this query for searching relevant code: find task spawner"
+        );
+        assert_eq!(
+            section_embedding_inputs(&section_rows, EmbeddingModelSelection::CodeRankEmbed)[0].text,
+            "## Install\n\nInstall body."
+        );
+        assert_eq!(
+            symbol_embedding_inputs(&symbol_rows, EmbeddingModelSelection::CodeRankEmbed)[0].text,
+            "one embed text"
+        );
+
+        assert_eq!(
+            embedding_query_text_for_model(
+                "find task spawner",
+                EmbeddingModelSelection::JinaEmbeddingsV2BaseCode
+            ),
+            "find task spawner"
+        );
+        assert_eq!(
+            section_embedding_inputs(
+                &section_rows,
+                EmbeddingModelSelection::JinaEmbeddingsV2BaseCode
+            )[0]
+            .text,
+            "## Install\n\nInstall body."
+        );
+        assert_eq!(
+            symbol_embedding_inputs(
+                &symbol_rows,
+                EmbeddingModelSelection::JinaEmbeddingsV2BaseCode
+            )[0]
+            .text,
+            "one embed text"
+        );
+
+        let source_hash = "same-source";
+        assert_ne!(
+            section_embed_content_hash_for_model(
+                source_hash,
+                EmbeddingModelSelection::NomicEmbedTextV15
+            ),
+            section_embed_content_hash_for_model(
+                source_hash,
+                EmbeddingModelSelection::CodeRankEmbed
+            )
+        );
+        assert_ne!(
+            section_embed_content_hash_for_model(
+                source_hash,
+                EmbeddingModelSelection::CodeRankEmbed
+            ),
+            section_embed_content_hash_for_model(
+                source_hash,
+                EmbeddingModelSelection::JinaEmbeddingsV2BaseCode
+            )
         );
     }
 
@@ -5096,7 +5366,7 @@ mod tests {
             &section("section-one", "Guide::Install"),
             source,
             "content-hash",
-            EmbeddingModelSelection::EmbeddingGemma300M,
+            EmbeddingModelSelection::NomicEmbedTextV15,
             &HashMap::new(),
             &HashMap::new(),
         )
@@ -5106,7 +5376,7 @@ mod tests {
             &section("section-two", "Guide::Usage"),
             source,
             "content-hash",
-            EmbeddingModelSelection::EmbeddingGemma300M,
+            EmbeddingModelSelection::NomicEmbedTextV15,
             &HashMap::new(),
             &HashMap::new(),
         )
@@ -5336,7 +5606,7 @@ mod tests {
             root,
             2,
             None,
-            EmbeddingModelSelection::EmbeddingGemma300M,
+            EmbeddingModelSelection::NomicEmbedTextV15,
         );
         let mut lengths = Vec::new();
 
@@ -5394,7 +5664,7 @@ mod tests {
             root,
             16,
             None,
-            EmbeddingModelSelection::EmbeddingGemma300M,
+            EmbeddingModelSelection::NomicEmbedTextV15,
         );
         let rows = batcher
             .next_batch()
@@ -5485,7 +5755,7 @@ mod tests {
             root,
             16,
             None,
-            EmbeddingModelSelection::EmbeddingGemma300M,
+            EmbeddingModelSelection::NomicEmbedTextV15,
         );
         let rows = batcher
             .next_batch()
@@ -5566,7 +5836,7 @@ mod tests {
             root,
             16,
             None,
-            EmbeddingModelSelection::EmbeddingGemma300M,
+            EmbeddingModelSelection::NomicEmbedTextV15,
         );
         let rows = batcher
             .next_batch()
@@ -5814,16 +6084,16 @@ mod tests {
 
     fn assert_skipped_options_do_not_request_fastembed_model(options: SectionEmbeddingOptions) {
         let mut section_embedder =
-            SectionEmbedder::new(options, EmbeddingModelSelection::EmbeddingGemma300M);
+            SectionEmbedder::new(options, EmbeddingModelSelection::NomicEmbedTextV15);
         let mut symbol_embedder =
-            SymbolEmbedder::new(options, EmbeddingModelSelection::EmbeddingGemma300M);
+            SymbolEmbedder::new(options, EmbeddingModelSelection::NomicEmbedTextV15);
 
         assert!(!section_embedder.prepare_model_for_eligible_rows(1));
         assert!(!symbol_embedder.prepare_model_for_eligible_rows(1));
         assert!(!section_embedder.service.model_requested);
         assert!(!symbol_embedder.service.model_requested);
         assert!(
-            embed_model_cell(EmbeddingModelSelection::EmbeddingGemma300M)
+            embed_model_cell(EmbeddingModelSelection::NomicEmbedTextV15)
                 .get()
                 .is_none(),
             "skipped embeddings must not initialize the shared FastEmbed model"
@@ -5839,7 +6109,7 @@ mod tests {
                 skip_code_symbol_embeddings: false,
                 batch_size: 1,
             },
-            EmbeddingModelSelection::EmbeddingGemma300M,
+            EmbeddingModelSelection::NomicEmbedTextV15,
         );
 
         assert_eq!(embedder.embed_row_vectors(&rows), vec![None]);
@@ -5855,7 +6125,7 @@ mod tests {
                 skip_code_symbol_embeddings: false,
                 batch_size: 1,
             },
-            EmbeddingModelSelection::EmbeddingGemma300M,
+            EmbeddingModelSelection::NomicEmbedTextV15,
         );
 
         assert_eq!(embedder.embed_row_vectors(&rows), vec![None]);
@@ -5927,10 +6197,10 @@ mod tests {
             batch_texts,
             vec![
                 vec![
-                    "title: none | text: one embed text".to_owned(),
-                    "title: none | text: two embed text".to_owned(),
+                    "search_document: title: none | text: one embed text".to_owned(),
+                    "search_document: title: none | text: two embed text".to_owned(),
                 ],
-                vec!["title: none | text: three embed text".to_owned()],
+                vec!["search_document: title: none | text: three embed text".to_owned()],
             ]
         );
         assert!(vectors.iter().all(Option::is_some));
@@ -5976,7 +6246,7 @@ mod tests {
             embedding_input_hash: section_embedding_input_hash_for_model(
                 "changed",
                 old_changed_body,
-                EmbeddingModelSelection::EmbeddingGemma300M,
+                EmbeddingModelSelection::NomicEmbedTextV15,
             ),
             ..versioned_section_row("changed", "docs/b.md", "hash-old")
         };
@@ -5998,7 +6268,7 @@ mod tests {
                 embedding_input_hash: section_embedding_input_hash_for_model(
                     "changed",
                     new_changed_body,
-                    EmbeddingModelSelection::EmbeddingGemma300M,
+                    EmbeddingModelSelection::NomicEmbedTextV15,
                 ),
                 ..versioned_section_row("changed", "docs/b.md", "hash-new")
             },
@@ -6104,17 +6374,17 @@ mod tests {
         let unchanged_input_hash = symbol_embedding_input_hash_for_model(
             "unchanged embed text",
             false,
-            EmbeddingModelSelection::EmbeddingGemma300M,
+            EmbeddingModelSelection::NomicEmbedTextV15,
         );
         let old_changed_input_hash = symbol_embedding_input_hash_for_model(
             "old changed embed text",
             false,
-            EmbeddingModelSelection::EmbeddingGemma300M,
+            EmbeddingModelSelection::NomicEmbedTextV15,
         );
         let new_changed_input_hash = symbol_embedding_input_hash_for_model(
             "new changed embed text",
             false,
-            EmbeddingModelSelection::EmbeddingGemma300M,
+            EmbeddingModelSelection::NomicEmbedTextV15,
         );
 
         let row_unchanged = SymbolRow {
@@ -6127,7 +6397,7 @@ mod tests {
             vector: Some(fake_vec.clone()),
             content_hash: "hash-old".to_owned(),
             embedding_input_hash: unchanged_input_hash.clone(),
-            embedding_model: EMBEDDING_GEMMA_EMBED_MODEL_NAME.to_owned(),
+            embedding_model: NOMIC_EMBED_TEXT_V15_MODEL_NAME.to_owned(),
         };
         let row_changed = SymbolRow {
             stable_symbol_id: "sym-changed".to_owned(),
@@ -6139,7 +6409,7 @@ mod tests {
             vector: Some(fake_vec.clone()),
             content_hash: "hash-old".to_owned(),
             embedding_input_hash: old_changed_input_hash,
-            embedding_model: EMBEDDING_GEMMA_EMBED_MODEL_NAME.to_owned(),
+            embedding_model: NOMIC_EMBED_TEXT_V15_MODEL_NAME.to_owned(),
         };
         db_a.create_table(
             CODE_SYMBOLS_TABLE,
@@ -6160,7 +6430,7 @@ mod tests {
                 vector: None,
                 content_hash: "hash-new".to_owned(),
                 embedding_input_hash: unchanged_input_hash,
-                embedding_model: EMBEDDING_GEMMA_EMBED_MODEL_NAME.to_owned(),
+                embedding_model: NOMIC_EMBED_TEXT_V15_MODEL_NAME.to_owned(),
             },
             SymbolRow {
                 stable_symbol_id: "sym-changed".to_owned(),
@@ -6172,7 +6442,7 @@ mod tests {
                 vector: None,
                 content_hash: "hash-new".to_owned(),
                 embedding_input_hash: new_changed_input_hash,
-                embedding_model: EMBEDDING_GEMMA_EMBED_MODEL_NAME.to_owned(),
+                embedding_model: NOMIC_EMBED_TEXT_V15_MODEL_NAME.to_owned(),
             },
         ];
         let carried = carry_forward_symbol_vectors(rows_v2, dir_a.path()).await;
@@ -6220,17 +6490,17 @@ mod tests {
         let unchanged_input_hash = section_embedding_input_hash_for_model(
             "section-unchanged",
             "## Stable\n\nUnchanged body.",
-            EmbeddingModelSelection::EmbeddingGemma300M,
+            EmbeddingModelSelection::NomicEmbedTextV15,
         );
         let old_changed_input_hash = section_embedding_input_hash_for_model(
             "section-changed",
             "## Changed\n\nOld body.",
-            EmbeddingModelSelection::EmbeddingGemma300M,
+            EmbeddingModelSelection::NomicEmbedTextV15,
         );
         let new_changed_input_hash = section_embedding_input_hash_for_model(
             "section-changed",
             "## Changed\n\nNew body.",
-            EmbeddingModelSelection::EmbeddingGemma300M,
+            EmbeddingModelSelection::NomicEmbedTextV15,
         );
 
         let row_unchanged = SectionRow {
@@ -6947,7 +7217,7 @@ mod tests {
                 &["src/changed.rs"],
                 &["src/deleted.rs"],
             ),
-            EmbeddingModelSelection::EmbeddingGemma300M,
+            EmbeddingModelSelection::NomicEmbedTextV15,
             Some(&progress),
         )
         .await
@@ -7075,7 +7345,7 @@ mod tests {
 
         let changed_markdown_new = "## Changed Section\n\nNew markdown body.\n";
         let changed_source_new = concat!(
-            "/// New changed function documentation long enough to be embedded with the Gemma sidecar model.\n",
+            "/// New changed function documentation long enough to be embedded with the Nomic sidecar model.\n",
             "pub fn changed_symbol() {}\n",
         );
         write_source(root.path(), "docs/changed.md", changed_markdown_new);
@@ -7133,11 +7403,11 @@ mod tests {
                 &["docs/changed.md", "src/changed.rs"],
                 &[],
             ),
-            EmbeddingModelSelection::EmbeddingGemma300M,
+            EmbeddingModelSelection::NomicEmbedTextV15,
             None,
         )
         .await
-        .expect("write Gemma delta from incompatible sidecar seed");
+        .expect("write Nomic delta from incompatible sidecar seed");
 
         assert_eq!(row_counts.section_bodies, 2);
         assert_eq!(row_counts.code_symbols, 2);
@@ -7146,16 +7416,16 @@ mod tests {
         assert!(
             section_rows
                 .iter()
-                .all(|row| row.embedding_model == EMBEDDING_GEMMA_EMBED_MODEL_NAME),
-            "section sidecar should fall back to a full Gemma rewrite instead of retaining legacy rows: {section_rows:?}"
+                .all(|row| row.embedding_model == NOMIC_EMBED_TEXT_V15_MODEL_NAME),
+            "section sidecar should fall back to a full Nomic rewrite instead of retaining legacy rows: {section_rows:?}"
         );
         let symbol_rows = read_stored_symbol_rows(next_dir.path()).await;
         assert_eq!(symbol_rows.len(), 2);
         assert!(
             symbol_rows
                 .iter()
-                .all(|row| row.embedding_model == EMBEDDING_GEMMA_EMBED_MODEL_NAME),
-            "code symbol sidecar should fall back to a full Gemma rewrite instead of retaining legacy rows: {symbol_rows:?}"
+                .all(|row| row.embedding_model == NOMIC_EMBED_TEXT_V15_MODEL_NAME),
+            "code symbol sidecar should fall back to a full Nomic rewrite instead of retaining legacy rows: {symbol_rows:?}"
         );
     }
 
@@ -7225,7 +7495,7 @@ mod tests {
         let expected_missing_input = embedding_document_text_for_model(
             missing.qualified_name.as_str(),
             missing.body_text.as_str(),
-            EmbeddingModelSelection::EmbeddingGemma300M,
+            EmbeddingModelSelection::NomicEmbedTextV15,
         )
         .into_owned();
         let mut stale_hash = versioned_section_row("section:stale", "docs/stale.md", "hash-stale");
@@ -7233,7 +7503,7 @@ mod tests {
         stale_hash.embedding_input_hash = section_embedding_input_hash_for_model(
             stale_hash.qualified_name.as_str(),
             "## Old\n\nOld body.",
-            EmbeddingModelSelection::EmbeddingGemma300M,
+            EmbeddingModelSelection::NomicEmbedTextV15,
         );
         let h1 = SectionRow {
             heading_level: 1,
@@ -7341,7 +7611,7 @@ mod tests {
         stale_hash.embedding_input_hash = symbol_embedding_input_hash_for_model(
             "old stale text",
             false,
-            EmbeddingModelSelection::EmbeddingGemma300M,
+            EmbeddingModelSelection::NomicEmbedTextV15,
         );
         write_previous_symbol_sidecar_rows(
             sidecar_dir.path(),
@@ -7380,11 +7650,11 @@ mod tests {
             vec![
                 (
                     SidecarPhase::CodeSymbols,
-                    vec!["title: none | text: first missing text".to_owned()]
+                    vec!["search_document: title: none | text: first missing text".to_owned()]
                 ),
                 (
                     SidecarPhase::CodeSymbols,
-                    vec!["title: none | text: second missing text".to_owned()]
+                    vec!["search_document: title: none | text: second missing text".to_owned()]
                 ),
             ]
         );
@@ -7409,7 +7679,7 @@ mod tests {
             second_run_calls,
             vec![(
                 SidecarPhase::CodeSymbols,
-                vec!["title: none | text: second missing text".to_owned()]
+                vec!["search_document: title: none | text: second missing text".to_owned()]
             )]
         );
 
@@ -7434,7 +7704,7 @@ mod tests {
         let row_without = section_row_fixture(2, "## Empty\n\nBody.".to_owned());
 
         let rows = [row_with_vector, row_without];
-        let inputs = section_embedding_inputs(&rows, EmbeddingModelSelection::EmbeddingGemma300M);
+        let inputs = section_embedding_inputs(&rows, EmbeddingModelSelection::NomicEmbedTextV15);
         assert_eq!(
             inputs.len(),
             1,
@@ -7451,7 +7721,7 @@ mod tests {
         let row_without = symbol_row_fixture("sym-b", "other embed text");
 
         let rows = [row_with_vector, row_without];
-        let inputs = symbol_embedding_inputs(&rows, EmbeddingModelSelection::EmbeddingGemma300M);
+        let inputs = symbol_embedding_inputs(&rows, EmbeddingModelSelection::NomicEmbedTextV15);
         assert_eq!(
             inputs.len(),
             1,

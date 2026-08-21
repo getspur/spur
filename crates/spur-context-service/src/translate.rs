@@ -17,8 +17,8 @@ use crate::catalog::{
 };
 use crate::medallion::SilverManifest;
 
-const DEFAULT_EMBEDDING_MODEL: &str = "EmbeddingGemma300M";
-pub const DEFAULT_EMBED_TEXT_VERSION: &str = "v4-embeddinggemma-300m-titled";
+const DEFAULT_EMBEDDING_MODEL: &str = "NomicEmbedTextV15";
+pub const DEFAULT_EMBED_TEXT_VERSION: &str = "v5-nomic-embed-text-v1.5-search-document";
 pub const DEFAULT_TRANSLATE_SCHEMA_VERSION: &str = "translate-v1";
 pub(crate) const CATALOG_TABLES_SQL: &str = include_str!("../sql/catalog_tables.sql");
 

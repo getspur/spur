@@ -381,7 +381,10 @@ async fn reprocess_from_silver_downloads_registered_silver_without_fetch_or_buil
     assert_eq!(lineage.silver_graph_content_hash, "graph-hash-123");
     assert_eq!(lineage.builder_version, "builder-v1");
     assert_eq!(lineage.translate_schema_version, "translate-v1");
-    assert_eq!(lineage.embed_text_version, "v4-embeddinggemma-300m-titled");
+    assert_eq!(
+        lineage.embed_text_version,
+        "v5-nomic-embed-text-v1.5-search-document"
+    );
 
     drop(prepared);
     fs::remove_dir_all(root).ok();

@@ -34,8 +34,8 @@ const SOURCE_URL: &str = "https://1.1.1.1/example/demo";
 const CRATES_IO_SOURCE_URL: &str = "https://crates.io/api/v1/crates/demo/1.0.0/download";
 const GIT_SOURCE: &str = "git:github.com/example/demo";
 const DIMENSIONS: usize = 768;
-const EMBEDDING_MODEL: &str = "EmbeddingGemma300M";
-const EMBED_TEXT_VERSION: &str = "v4-embeddinggemma-300m-titled";
+const EMBEDDING_MODEL: &str = "NomicEmbedTextV15";
+const EMBED_TEXT_VERSION: &str = "v5-nomic-embed-text-v1.5-search-document";
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 #[test]

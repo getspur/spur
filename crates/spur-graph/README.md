@@ -316,7 +316,7 @@ Env override: `SPUR_CODE_GRAPH_INDEX`.
 
 | Feature | Default | Effect |
 |---|---|---|
-| `embed` | **on** | `fastembed` (EmbeddingGemma300M) + LanceDB section/symbol sidecars |
+| `embed` | **on** | Selectable FP32/768 embedding models + LanceDB section/symbol sidecars |
 | `perf-gates` | off | Compile-time performance budgets / assertions |
 | `test-support` | off | Rebuild counters and test-only hooks |
 
@@ -336,6 +336,22 @@ Env override: `SPUR_CODE_GRAPH_INDEX`.
 | `fastembed` + Lance (optional) | Embedding sidecars |
 | `spur-mcp` | `ToolModule` for the MCP surface |
 | `ignore` | `.gitignore`-aware discovery |
+
+### Embedding model selection
+
+Set `SPUR_EMBEDDING_MODEL` before building or querying an index. Changing the model changes the
+stored model lineage and automatically invalidates incompatible vectors.
+
+| Value | Model | Input contract |
+|---|---|---|
+| `nomic` (default), `nomic-ai/nomic-embed-text-v1.5` | Nomic Embed Text v1.5, FP32/768 | `search_query:` / `search_document:` prefixes |
+| `coderank`, `nomic-coderank`, `nomic-ai/CodeRankEmbed` | CodeRankEmbed, FP32/768 | Required code-search instruction on queries; raw documents |
+| `jina-code`, `jina-embeddings-v2-base-code`, `jinaai/jina-embeddings-v2-base-code` | Jina Embeddings v2 Base Code, FP32/768 | Symmetric raw query/document text |
+
+```bash
+SPUR_EMBEDDING_MODEL=coderank spur explore sync
+SPUR_EMBEDDING_MODEL=jina-code spur explore sync
+```
 
 ---
 
