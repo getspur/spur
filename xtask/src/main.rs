@@ -548,6 +548,17 @@ impl DistPlatform {
         }
     }
 
+    /// DuckDB community/core extension CDN platform directory name.
+    fn duckdb_platform(self) -> &'static str {
+        match self {
+            Self::LinuxAarch64 => "linux_arm64",
+            Self::LinuxX64Gnu => "linux_amd64",
+            Self::MacAarch64 => "osx_arm64",
+            Self::MacX64 => "osx_amd64",
+            Self::WindowsX64 => "windows_amd64",
+        }
+    }
+
     /// Remote namespace isolating this platform's parallel leg on the VM.
     /// Cargo takes an exclusive lock on the whole target dir, so parallel
     /// legs sharing /mnt/cargo/targets/spur/main would serialize on it;
@@ -663,6 +674,14 @@ fn run_dist(workspace_root: &Path, options: &DistOptions) -> Result<(), String> 
     let skills_archive = package_dist_skill_assets(workspace_root, &out_dir, &version)?;
     artifacts.push(skills_archive);
 
+    if env::var_os("SPUR_DIST_SKIP_DUCKDB_EXTENSIONS").is_none() {
+        artifacts.push(package_dist_duckdb_extensions(
+            workspace_root,
+            &out_dir,
+            &options.platforms,
+        )?);
+    }
+
     let sums_path = out_dir.join("SHA256SUMS");
     write_sha256sums(&dist_artifacts_in(&out_dir)?, &sums_path)?;
 
@@ -677,6 +696,37 @@ fn run_dist(workspace_root: &Path, options: &DistOptions) -> Result<(), String> 
 /// Archive name for the platform-independent skill asset bundle.
 fn dist_skills_archive_name(version: &str) -> String {
     format!("spur-skills-{version}.tar.gz")
+}
+
+fn dist_duckdb_extensions_dir_name() -> &'static str {
+    "duckdb-extensions"
+}
+
+fn package_dist_duckdb_extensions(
+    workspace_root: &Path,
+    out_dir: &Path,
+    platforms: &[DistPlatform],
+) -> Result<PathBuf, String> {
+    let dest = out_dir.join(dist_duckdb_extensions_dir_name());
+    let script = workspace_root.join("scripts/vendor-duckdb-extensions.sh");
+    if !script.is_file() {
+        return Err(format!("missing {}", script.display()));
+    }
+    let mut command = Command::new("bash");
+    command.arg(&script).arg("--out").arg(&dest);
+    for platform in platforms {
+        command.arg("--platform").arg(platform.duckdb_platform());
+    }
+    let status = command
+        .status()
+        .map_err(|err| format!("failed to run {}: {err}", script.display()))?;
+    if !status.success() {
+        return Err(format!(
+            "{} failed with {status}; set SPUR_DIST_SKIP_DUCKDB_EXTENSIONS=1 to skip",
+            script.display()
+        ));
+    }
+    Ok(dest)
 }
 
 /// Package `crates/spur-cli/assets/skills` into
@@ -1742,6 +1792,27 @@ mod tests {
             dist_skills_archive_name("1.15.0"),
             "spur-skills-1.15.0.tar.gz"
         );
+    }
+
+    #[test]
+    fn dist_platforms_map_to_duckdb_extension_cdn_names() {
+        assert_eq!(DistPlatform::MacAarch64.duckdb_platform(), "osx_arm64");
+        assert_eq!(DistPlatform::MacX64.duckdb_platform(), "osx_amd64");
+        assert_eq!(DistPlatform::LinuxAarch64.duckdb_platform(), "linux_arm64");
+        assert_eq!(DistPlatform::LinuxX64Gnu.duckdb_platform(), "linux_amd64");
+        assert_eq!(DistPlatform::WindowsX64.duckdb_platform(), "windows_amd64");
+    }
+
+    #[test]
+    fn vendor_duckdb_extensions_script_fetches_community_and_core() {
+        let script =
+            fs::read_to_string(workspace_root().join("scripts/vendor-duckdb-extensions.sh"))
+                .unwrap();
+        assert!(script.contains("community-extensions.duckdb.org"));
+        assert!(script.contains("extensions.duckdb.org"));
+        assert!(script.contains("onager"));
+        assert!(script.contains("duckpgq"));
+        assert!(script.contains("SPUR_DUCKDB_EXTENSION_DIR"));
     }
 
     #[test]

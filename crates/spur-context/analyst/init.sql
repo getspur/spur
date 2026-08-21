@@ -32,10 +32,10 @@
 -- `stable_symbol_id` column and re-key edges accordingly so all downstream queries
 -- can rely on `node_id` being a primary key.
 
-INSTALL duckpgq FROM community;
-INSTALL onager  FROM community;
--- TODO: pin lance once DuckDB exposes a stable SQL pin syntax for community extension builds.
-INSTALL lance;
+-- Extensions are LOADed by spur-cli analyst bootstrap (offline when
+-- SPUR_DUCKDB_EXTENSION_DIR or a dist sidecar is present). Standalone
+-- runners should LOAD duckpgq/onager/lance after INSTALL, without repeating
+-- INSTALL FROM community here (that hits the CDN on every init).
 LOAD duckpgq;
 LOAD onager;
 LOAD lance;

@@ -11,6 +11,10 @@ pub mod paths;
 pub mod search;
 
 pub use api::*;
+pub use db::extensions::{
+    analyst_extension_bootstrap_sql, analyst_extension_directory, analyst_extension_load_sql,
+    ANALYST_EXTENSION_DIR_ENV,
+};
 pub use paths::{
     query_context_paths, query_context_paths_with_conn, query_symbol_risk_community,
     query_symbol_risk_community_with_conn, MAX_CONTEXT_PATHS, MAX_CONTEXT_PATH_HOPS,

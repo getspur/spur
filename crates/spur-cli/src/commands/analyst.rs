@@ -29,18 +29,6 @@ const LANCE_ATTACH_PLACEHOLDER: &str = "__SPUR_LANCE_ATTACH_SQL__";
 const SECTIONS_SOURCE_PLACEHOLDER: &str = "__SPUR_SECTIONS_SOURCE_SQL__";
 const LANCE_HYBRID_START: &str = "-- __SPUR_LANCE_HYBRID_START__";
 const LANCE_HYBRID_END: &str = "-- __SPUR_LANCE_HYBRID_END__";
-const BUILD_EXTENSION_BOOTSTRAP_SQL: &str = "\
-INSTALL duckpgq FROM community;
-INSTALL onager FROM community;
-INSTALL lance;
-INSTALL fts;
-INSTALL icu;
-LOAD duckpgq;
-LOAD onager;
-LOAD lance;
-LOAD fts;
-LOAD icu;
-";
 
 /// Compiled-in parquet schema version this analyst build understands.
 ///
@@ -174,7 +162,8 @@ pub fn build(root: &Path, options: AnalystBuildOptions) -> Result<()> {
 
     let lance_attach_sql = if lance_available {
         format!(
-            "INSTALL lance; LOAD lance;\nATTACH '{}' AS lance_ns (TYPE LANCE);\n",
+            "{}\nATTACH '{}' AS lance_ns (TYPE LANCE);\n",
+            spur_analyst::analyst_extension_load_sql("lance"),
             sql_escape_path(&sections_dataset_dir)
         )
     } else {
@@ -267,7 +256,7 @@ fn execute_build_script(db_path: &Path, sql: &str) -> Result<()> {
     })?;
     // Bootstrap first so extension parser hooks are registered before parsing
     // init SQL statements such as CREATE PROPERTY GRAPH.
-    conn.execute_batch(BUILD_EXTENSION_BOOTSTRAP_SQL)
+    conn.execute_batch(&spur_analyst::analyst_extension_bootstrap_sql())
         .context("failed to initialize duckdb analyst extensions")?;
     execute_duckdb_script(&conn, sql)
 }
@@ -544,8 +533,8 @@ fn lance_table_has_rows(
 fn lance_dataset_row_count(dataset_dir: &Path, table_name: &str) -> Result<usize> {
     let dataset_dir_sql = sql_escape_path(dataset_dir);
     let sql = format!(
-        "INSTALL lance; LOAD lance;\n\
-         ATTACH '{dataset_dir_sql}' AS lance_probe (TYPE LANCE);"
+        "{}\nATTACH '{dataset_dir_sql}' AS lance_probe (TYPE LANCE);",
+        spur_analyst::analyst_extension_load_sql("lance")
     );
     let conn = duckdb::Connection::open_in_memory()
         .context("failed to open in-memory duckdb Lance sidecar probe")?;
@@ -757,7 +746,8 @@ pub(crate) fn diagnostics_present(artifact_dir: &Path) -> bool {
 
 fn lance_extension_version() -> Option<String> {
     let conn = duckdb::Connection::open_in_memory().ok()?;
-    conn.execute_batch("INSTALL lance; LOAD lance;").ok()?;
+    conn.execute_batch(&spur_analyst::analyst_extension_load_sql("lance"))
+        .ok()?;
     conn.query_row(
         "SELECT COALESCE(extension_version, '<unknown>')
          FROM duckdb_extensions()
@@ -1089,6 +1079,43 @@ mod tests {
         assert!(
             INIT_VIEWS_SQL.contains("NOT IN ('section', 'mcp_tool')"),
             "coverage guard must exclude non-temporally-trackable kinds"
+        );
+    }
+
+    #[test]
+    fn analyst_bootstrap_sql_skips_cdn_when_extension_dir_is_set() {
+        let _guard = env_lock();
+        let previous = std::env::var_os(spur_analyst::ANALYST_EXTENSION_DIR_ENV);
+        std::env::set_var(
+            spur_analyst::ANALYST_EXTENSION_DIR_ENV,
+            "/opt/duckdb/extensions",
+        );
+        let sql = spur_analyst::analyst_extension_bootstrap_sql();
+        match previous {
+            Some(value) => std::env::set_var(spur_analyst::ANALYST_EXTENSION_DIR_ENV, value),
+            None => std::env::remove_var(spur_analyst::ANALYST_EXTENSION_DIR_ENV),
+        }
+        assert!(
+            !sql.contains("INSTALL "),
+            "vendored extension dir must not INSTALL from the CDN: {sql}"
+        );
+        assert!(sql.contains("LOAD onager;"));
+        assert!(sql.contains("LOAD duckpgq;"));
+    }
+
+    #[test]
+    fn init_sql_does_not_network_install_community_extensions() {
+        assert!(
+            !INIT_SQL.contains("INSTALL duckpgq FROM community"),
+            "init.sql must not INSTALL duckpgq from the community CDN; analyst bootstrap LOADs it"
+        );
+        assert!(
+            !INIT_SQL.contains("INSTALL onager"),
+            "init.sql must not INSTALL onager from the network; analyst bootstrap LOADs it"
+        );
+        assert!(
+            !INIT_SEARCH_SQL.contains("INSTALL fts"),
+            "init_search.sql must not INSTALL fts from the network after bootstrap LOAD"
         );
     }
 

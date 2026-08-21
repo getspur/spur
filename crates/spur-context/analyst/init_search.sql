@@ -10,7 +10,7 @@
 --     (search_code joins v_symbol_scorecard; symbol_text reads v_search_symbol_tokens)
 --   * analyst.rs injects either Lance-backed sections or an empty fallback table.
 
-INSTALL fts; LOAD fts;
+LOAD fts;
 
 -- ── Prose corpus: section bodies + persistent FTS ────────────────────────────
 __SPUR_SECTIONS_SOURCE_SQL__
