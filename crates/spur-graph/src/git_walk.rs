@@ -140,6 +140,160 @@ pub enum IncrementalPlan {
     },
 }
 
+#[derive(Debug, Clone)]
+struct CommitWalkResult {
+    ordinal: usize,
+    commit: CommitArtifact,
+    temporal_edges: Vec<TemporalEdgeArtifact>,
+    symbol_snapshots: Vec<SymbolSnapshotArtifact>,
+    diagnostics: Vec<String>,
+}
+
+struct CommitResultReducer<'a> {
+    graph: &'a mut GraphIndexArtifact,
+    commits: &'a mut CommitIndexArtifact,
+    progress: Option<ProgressBar>,
+    sink: Option<&'a mut TemporalShardSink>,
+    next_ordinal: usize,
+    pending: BTreeMap<usize, CommitWalkResult>,
+}
+
+impl<'a> CommitResultReducer<'a> {
+    fn new(
+        graph: &'a mut GraphIndexArtifact,
+        commits: &'a mut CommitIndexArtifact,
+        progress: Option<ProgressBar>,
+        sink: Option<&'a mut TemporalShardSink>,
+    ) -> Self {
+        Self {
+            graph,
+            commits,
+            progress,
+            sink,
+            next_ordinal: 0,
+            pending: BTreeMap::new(),
+        }
+    }
+
+    fn push(&mut self, result: CommitWalkResult) -> Result<()> {
+        if result.ordinal < self.next_ordinal || self.pending.contains_key(&result.ordinal) {
+            bail!(
+                "commit walk reducer received duplicate or stale ordinal {} while waiting for {}",
+                result.ordinal,
+                self.next_ordinal
+            );
+        }
+        let ordinal = result.ordinal;
+        self.pending.insert(ordinal, result);
+
+        while let Some(result) = self.pending.remove(&self.next_ordinal) {
+            self.apply(result)?;
+            self.next_ordinal = self
+                .next_ordinal
+                .checked_add(1)
+                .context("commit walk ordinal overflow")?;
+        }
+        Ok(())
+    }
+
+    fn apply(&mut self, mut result: CommitWalkResult) -> Result<()> {
+        self.graph.commits.push(result.commit.clone());
+        self.commits.commits.push(result.commit.clone());
+        self.graph.temporal_edges.append(&mut result.temporal_edges);
+        self.graph
+            .symbol_snapshots
+            .append(&mut result.symbol_snapshots);
+        self.graph.diagnostics.append(&mut result.diagnostics);
+        if let Some(progress) = self.progress.as_ref() {
+            progress.inc(1);
+        }
+        if let Some(sink) = self.sink.as_deref_mut() {
+            sink.append_commit(
+                &result.commit,
+                &mut self.graph.temporal_edges,
+                &mut self.graph.symbol_snapshots,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn finish(self) -> Result<()> {
+        if self.pending.is_empty() {
+            return Ok(());
+        }
+        bail!(
+            "commit walk reducer is missing ordinal {} before buffered ordinals {:?}",
+            self.next_ordinal,
+            self.pending.keys().collect::<Vec<_>>()
+        )
+    }
+}
+
+fn compute_commit_walk_result(
+    ordinal: usize,
+    worktree: &Path,
+    sha: &str,
+    gix_repo: Option<&gix::Repository>,
+    ctx: &mut SymbolDiffCtx,
+) -> Result<CommitWalkResult> {
+    let diagnostics_start = ctx.diagnostics().len();
+    let commit = match gix_repo {
+        Some(repo) => read_commit_gix(repo, sha)?,
+        None => read_commit(worktree, sha)?,
+    };
+    let file_changes = match gix_repo {
+        Some(repo) => file_changes_for_commit_gix(repo, sha)?,
+        None => file_changes_for_commit(worktree, sha)?,
+    };
+    let symbol_changes = symbol_changes_for_commit(worktree, sha, &file_changes, ctx)?;
+    let mut temporal_edges = Vec::with_capacity(file_changes.len() + symbol_changes.len() * 2);
+    let mut symbol_snapshots = Vec::with_capacity(symbol_changes.len());
+
+    temporal_edges.extend(
+        file_changes
+            .iter()
+            .map(|file_change| file_change_to_temporal_edge(sha, file_change)),
+    );
+    for symbol_change in symbol_changes {
+        let snapshot_key = symbol_change.snapshot.key.clone();
+        let parent_sha = symbol_change.parent_sha;
+        let change_kind = symbol_change.change_kind;
+
+        symbol_snapshots.push(symbol_change.snapshot);
+        temporal_edges.push(TemporalEdgeArtifact {
+            source: EdgeEndpoint::Commit {
+                sha: sha.to_owned(),
+            },
+            target: EdgeEndpoint::Snapshot {
+                key: snapshot_key.clone(),
+            },
+            relation: RelationKind::Touches,
+            parent: parent_sha.clone(),
+            change_kind: Some(change_kind.clone()),
+        });
+
+        if let ChangeKind::RenamedFrom(RenamePrev::Symbol(previous_key)) = change_kind {
+            temporal_edges.push(TemporalEdgeArtifact {
+                source: EdgeEndpoint::Snapshot {
+                    key: previous_key.clone(),
+                },
+                target: EdgeEndpoint::Snapshot { key: snapshot_key },
+                relation: RelationKind::Touches,
+                parent: parent_sha,
+                change_kind: Some(ChangeKind::RenamedFrom(RenamePrev::Symbol(previous_key))),
+            });
+        }
+    }
+
+    Ok(CommitWalkResult {
+        ordinal,
+        commit,
+        temporal_edges,
+        symbol_snapshots,
+        diagnostics: ctx.diagnostics()[diagnostics_start..].to_vec(),
+    })
+}
+
 pub fn plan_incremental_walk(
     worktree: &Path,
     stored_tip: Option<&str>,
@@ -253,66 +407,14 @@ pub fn run_full_walk_into(
         )
     };
     let mut ctx = SymbolDiffCtx::new();
-
-    for sha in commit_shas {
-        let commit = match &gix_repo {
-            Some(repo) => read_commit_gix(repo, &sha)?,
-            None => read_commit(worktree, &sha)?,
-        };
-        graph.commits.push(commit.clone());
-        commits.commits.push(commit.clone());
-
-        let file_changes = match &gix_repo {
-            Some(repo) => file_changes_for_commit_gix(repo, &sha)?,
-            None => file_changes_for_commit(worktree, &sha)?,
-        };
-        for file_change in &file_changes {
-            graph
-                .temporal_edges
-                .push(file_change_to_temporal_edge(&sha, file_change));
-        }
-
-        for symbol_change in symbol_changes_for_commit(worktree, &sha, &file_changes, &mut ctx)? {
-            let snapshot_key = symbol_change.snapshot.key.clone();
-            let parent_sha = symbol_change.parent_sha.clone();
-            let change_kind = symbol_change.change_kind.clone();
-
-            graph.symbol_snapshots.push(symbol_change.snapshot.clone());
-            graph.temporal_edges.push(TemporalEdgeArtifact {
-                source: EdgeEndpoint::Commit { sha: sha.clone() },
-                target: EdgeEndpoint::Snapshot {
-                    key: snapshot_key.clone(),
-                },
-                relation: RelationKind::Touches,
-                parent: parent_sha.clone(),
-                change_kind: Some(change_kind.clone()),
-            });
-
-            if let ChangeKind::RenamedFrom(RenamePrev::Symbol(previous_key)) = change_kind {
-                graph.temporal_edges.push(TemporalEdgeArtifact {
-                    source: EdgeEndpoint::Snapshot {
-                        key: previous_key.clone(),
-                    },
-                    target: EdgeEndpoint::Snapshot { key: snapshot_key },
-                    relation: RelationKind::Touches,
-                    parent: parent_sha,
-                    change_kind: Some(ChangeKind::RenamedFrom(RenamePrev::Symbol(previous_key))),
-                });
-            }
-        }
-        if let Some(progress) = progress.as_ref() {
-            progress.inc(1);
-        }
-        if let Some(sink) = sink.as_deref_mut() {
-            sink.append_commit(
-                &commit,
-                &mut graph.temporal_edges,
-                &mut graph.symbol_snapshots,
-            )?;
-        }
+    let mut reducer = CommitResultReducer::new(&mut graph, &mut commits, progress, sink);
+    for (ordinal, sha) in commit_shas.into_iter().enumerate() {
+        let result =
+            compute_commit_walk_result(ordinal, worktree, &sha, gix_repo.as_ref(), &mut ctx)?;
+        reducer.push(result)?;
     }
+    reducer.finish()?;
 
-    graph.diagnostics.extend(ctx.diagnostics().iter().cloned());
     Ok((graph, commits))
 }
 
@@ -2142,6 +2244,151 @@ mod tests {
             .unwrap()
             .trim()
             .to_owned()
+    }
+
+    fn commit_walk_result(ordinal: usize) -> CommitWalkResult {
+        let sha = format!("commit-{ordinal}");
+        let parent_sha = ordinal
+            .checked_sub(1)
+            .map(|parent| format!("commit-{parent}"));
+        let snapshot_key = SnapshotKey {
+            stable_symbol_id: format!("symbol-{ordinal}"),
+            commit: sha.clone(),
+        };
+        let change_kind = match ordinal.checked_sub(1) {
+            Some(parent) => ChangeKind::RenamedFrom(RenamePrev::Symbol(SnapshotKey {
+                stable_symbol_id: format!("symbol-{parent}"),
+                commit: format!("commit-{parent}"),
+            })),
+            None => ChangeKind::Added,
+        };
+        let snapshot = SymbolSnapshotArtifact {
+            key: snapshot_key.clone(),
+            file_path: GitPath::from("lib.rs"),
+            entity_name: format!("symbol_{ordinal}"),
+            symbol_kind: "function".into(),
+            enclosing_scope: None,
+            byte_range: [ordinal, ordinal + 1],
+            line_range: [ordinal + 1, ordinal + 1],
+            anchor_hash: format!("anchor-{ordinal}"),
+            tokens: vec![format!("token-{ordinal}")],
+        };
+        let mut temporal_edges = vec![TemporalEdgeArtifact {
+            source: EdgeEndpoint::Commit { sha: sha.clone() },
+            target: EdgeEndpoint::Snapshot {
+                key: snapshot_key.clone(),
+            },
+            relation: RelationKind::Touches,
+            parent: parent_sha.clone(),
+            change_kind: Some(change_kind.clone()),
+        }];
+        if let ChangeKind::RenamedFrom(RenamePrev::Symbol(previous_key)) = &change_kind {
+            temporal_edges.push(TemporalEdgeArtifact {
+                source: EdgeEndpoint::Snapshot {
+                    key: previous_key.clone(),
+                },
+                target: EdgeEndpoint::Snapshot { key: snapshot_key },
+                relation: RelationKind::Touches,
+                parent: parent_sha.clone(),
+                change_kind: Some(change_kind),
+            });
+        }
+
+        CommitWalkResult {
+            ordinal,
+            commit: CommitArtifact {
+                sha,
+                parents: parent_sha.iter().cloned().collect(),
+                author_time: ordinal as i64,
+                author_name: "Test Author".into(),
+                author_email: "test@example.com".into(),
+                summary: format!("commit {ordinal}"),
+            },
+            temporal_edges,
+            symbol_snapshots: vec![snapshot],
+            diagnostics: vec![format!("diagnostic-{ordinal}")],
+        }
+    }
+
+    fn commit_index(indexed_at: &str) -> CommitIndexArtifact {
+        CommitIndexArtifact {
+            schema_version: GRAPH_INDEX_VERSION_TEMPORAL.parse().unwrap(),
+            commits: Vec::new(),
+            refs: BTreeMap::new(),
+            indexed_at: indexed_at.into(),
+            walk_strategy: WalkStrategy::Reachable,
+        }
+    }
+
+    fn apply_serial_reference(
+        results: Vec<CommitWalkResult>,
+    ) -> (GraphIndexArtifact, CommitIndexArtifact) {
+        let mut graph = empty_graph_artifact();
+        let mut commits = commit_index("serial-indexed-at");
+        for mut result in results {
+            graph.commits.push(result.commit.clone());
+            commits.commits.push(result.commit);
+            graph.temporal_edges.append(&mut result.temporal_edges);
+            graph.symbol_snapshots.append(&mut result.symbol_snapshots);
+            graph.diagnostics.append(&mut result.diagnostics);
+        }
+        (graph, commits)
+    }
+
+    fn normalize_walk_output(
+        mut output: (GraphIndexArtifact, CommitIndexArtifact),
+    ) -> (GraphIndexArtifact, CommitIndexArtifact) {
+        output.1.indexed_at.clear();
+        output
+    }
+
+    #[test]
+    fn ordinal_reducer_buffers_out_of_order_results_until_gap_closes() {
+        let mut graph = empty_graph_artifact();
+        let mut commits = commit_index("reducer-indexed-at");
+        let progress = ProgressBar::hidden();
+        let progress_observer = progress.clone();
+        let mut reducer = CommitResultReducer::new(&mut graph, &mut commits, Some(progress), None);
+
+        reducer.push(commit_walk_result(1)).unwrap();
+
+        assert_eq!(reducer.next_ordinal, 0);
+        assert_eq!(reducer.pending.keys().copied().collect::<Vec<_>>(), [1]);
+        assert_eq!(progress_observer.position(), 0);
+
+        reducer.push(commit_walk_result(0)).unwrap();
+        reducer.finish().unwrap();
+
+        assert_eq!(
+            graph
+                .commits
+                .iter()
+                .map(|commit| commit.sha.as_str())
+                .collect::<Vec<_>>(),
+            ["commit-0", "commit-1"]
+        );
+        assert_eq!(graph.commits, commits.commits);
+        assert_eq!(graph.diagnostics, ["diagnostic-0", "diagnostic-1"]);
+        assert_eq!(progress_observer.position(), 2);
+    }
+
+    #[test]
+    fn ordinal_reducer_matches_normalized_serial_application() {
+        let serial_results = (0..3).map(commit_walk_result).collect::<Vec<_>>();
+        let expected = apply_serial_reference(serial_results.clone());
+        let mut graph = empty_graph_artifact();
+        let mut commits = commit_index("reducer-indexed-at");
+        let mut reducer = CommitResultReducer::new(&mut graph, &mut commits, None, None);
+
+        for ordinal in [2, 0, 1] {
+            reducer.push(serial_results[ordinal].clone()).unwrap();
+        }
+        reducer.finish().unwrap();
+
+        assert_eq!(
+            normalize_walk_output((graph, commits)),
+            normalize_walk_output(expected)
+        );
     }
 
     #[test]
