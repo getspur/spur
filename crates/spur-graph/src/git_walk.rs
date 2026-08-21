@@ -13,10 +13,13 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::OsString;
 use std::io::{self, BufRead as _, BufReader, Read as _, Write as _};
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
 use std::sync::{Arc, Mutex};
-use std::thread::JoinHandle;
+use std::thread::{self, JoinHandle};
 
 use anyhow::{anyhow, bail, Context as _, Result};
 use gix::object::tree::diff::{Action, Change};
@@ -45,6 +48,7 @@ pub struct GitWalkConfig {
     pub walk_strategy: WalkStrategy,
     pub allow_replace_refs: bool,
     pub use_gix_diff: bool,
+    pub temporal_jobs: NonZeroUsize,
 }
 
 impl Default for GitWalkConfig {
@@ -54,6 +58,7 @@ impl Default for GitWalkConfig {
             walk_strategy: WalkStrategy::Reachable,
             allow_replace_refs: false,
             use_gix_diff: true,
+            temporal_jobs: NonZeroUsize::MIN,
         }
     }
 }
@@ -157,6 +162,393 @@ struct CommitResultReducer<'a> {
     sink: Option<&'a mut TemporalShardSink>,
     next_ordinal: usize,
     pending: BTreeMap<usize, CommitWalkResult>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct WorkerPoolStats {
+    max_in_flight: usize,
+    max_queued_work: usize,
+    max_active_work: usize,
+    max_result_occupancy: usize,
+    max_reducer_pending: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ReductionProgress {
+    next_ordinal: usize,
+    pending_results: usize,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct TemporalWalkStats {
+    pool: WorkerPoolStats,
+    shared_parse_cache_entries: usize,
+}
+
+#[derive(Default)]
+struct OccupancyCounter {
+    current: AtomicUsize,
+    maximum: AtomicUsize,
+}
+
+impl OccupancyCounter {
+    fn increment(&self) {
+        let current = self.current.fetch_add(1, Ordering::SeqCst) + 1;
+        self.maximum.fetch_max(current, Ordering::SeqCst);
+    }
+
+    fn decrement(&self, count: usize) {
+        let previous = self.current.fetch_sub(count, Ordering::SeqCst);
+        debug_assert!(previous >= count, "worker-pool occupancy underflow");
+    }
+
+    fn maximum(&self) -> usize {
+        self.maximum.load(Ordering::SeqCst)
+    }
+}
+
+#[derive(Default)]
+struct ConcurrentOccupancy {
+    queued_work: OccupancyCounter,
+    active_work: OccupancyCounter,
+    /// Completed results in worker hands, the result channel, or reducer pending storage.
+    results: OccupancyCounter,
+}
+
+/// Bounds admitted ordinals independently of the channel capacities.
+///
+/// An ordinal keeps its slot until the reducer advances past it, so a stalled
+/// low ordinal bounds queued work, active work, and every form of buffered result.
+struct OrdinalAdmissionWindow {
+    capacity: usize,
+    next_dispatch: usize,
+    next_reduced: usize,
+    max_in_flight: usize,
+}
+
+impl OrdinalAdmissionWindow {
+    fn new(capacity: NonZeroUsize) -> Self {
+        Self {
+            capacity: capacity.get(),
+            next_dispatch: 0,
+            next_reduced: 0,
+            max_in_flight: 0,
+        }
+    }
+
+    fn in_flight(&self) -> usize {
+        self.next_dispatch - self.next_reduced
+    }
+
+    fn has_capacity(&self) -> bool {
+        self.in_flight() < self.capacity
+    }
+
+    fn admit(&mut self, ordinal: usize) -> Result<()> {
+        if ordinal != self.next_dispatch {
+            bail!(
+                "worker-pool admission expected ordinal {} but received {ordinal}",
+                self.next_dispatch
+            );
+        }
+        if !self.has_capacity() {
+            bail!(
+                "worker-pool admission window exceeded {} in-flight ordinals",
+                self.capacity
+            );
+        }
+        self.next_dispatch = self
+            .next_dispatch
+            .checked_add(1)
+            .context("worker-pool dispatch ordinal overflow")?;
+        self.max_in_flight = self.max_in_flight.max(self.in_flight());
+        Ok(())
+    }
+
+    fn note_reduced(&mut self, next_ordinal: usize) -> Result<usize> {
+        if !(self.next_reduced..=self.next_dispatch).contains(&next_ordinal) {
+            bail!(
+                "worker-pool reducer advanced from {} to invalid ordinal {next_ordinal} with {} dispatched",
+                self.next_reduced,
+                self.next_dispatch
+            );
+        }
+        let reduced = next_ordinal - self.next_reduced;
+        self.next_reduced = next_ordinal;
+        Ok(reduced)
+    }
+}
+
+enum WorkerEvent<Output> {
+    Ready {
+        worker_id: usize,
+    },
+    Completed {
+        ordinal: usize,
+        output: Output,
+    },
+    Failed {
+        worker_id: usize,
+        ordinal: Option<usize>,
+        error: anyhow::Error,
+    },
+}
+
+fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
+    if let Some(message) = payload.downcast_ref::<&str>() {
+        (*message).to_owned()
+    } else if let Some(message) = payload.downcast_ref::<String>() {
+        message.clone()
+    } else {
+        "non-string panic payload".to_owned()
+    }
+}
+
+fn join_worker_threads(handles: Vec<JoinHandle<()>>) -> Result<()> {
+    let mut panicked = Vec::new();
+    for (worker_id, handle) in handles.into_iter().enumerate() {
+        if let Err(payload) = handle.join() {
+            panicked.push(format!("worker {worker_id}: {}", panic_message(payload)));
+        }
+    }
+    if panicked.is_empty() {
+        Ok(())
+    } else {
+        bail!("failed to join temporal workers: {}", panicked.join("; "))
+    }
+}
+
+fn drain_worker_events<Output>(
+    receiver: &Receiver<WorkerEvent<Output>>,
+    occupancy: &ConcurrentOccupancy,
+) {
+    while let Ok(event) = receiver.recv() {
+        if matches!(event, WorkerEvent::Completed { .. }) {
+            occupancy.results.decrement(1);
+        }
+    }
+}
+
+fn run_bounded_worker_pool<State, Work, Output, Initialize, Compute, Reduce>(
+    jobs: NonZeroUsize,
+    work_items: Vec<Work>,
+    initialize: Initialize,
+    compute: Compute,
+    reduce: Reduce,
+) -> Result<WorkerPoolStats>
+where
+    Work: Send + 'static,
+    Output: Send + 'static,
+    Initialize: Fn(usize) -> Result<State> + Send + Sync + 'static,
+    Compute: Fn(&mut State, usize, Work) -> Result<Output> + Send + Sync + 'static,
+    Reduce: FnMut(Output) -> Result<ReductionProgress>,
+{
+    let total_work = work_items.len();
+    if total_work == 0 {
+        return Ok(WorkerPoolStats::default());
+    }
+    let worker_count = jobs.get().min(total_work);
+    let initialize = Arc::new(initialize);
+    let compute = Arc::new(compute);
+    let occupancy = Arc::new(ConcurrentOccupancy::default());
+    let (event_sender, event_receiver) = sync_channel(worker_count);
+    let mut work_senders: Vec<SyncSender<(usize, Work)>> = Vec::with_capacity(worker_count);
+    let mut handles = Vec::with_capacity(worker_count);
+
+    for worker_id in 0..worker_count {
+        let (work_sender, work_receiver) = sync_channel(1);
+        let worker_events = event_sender.clone();
+        let worker_initialize = Arc::clone(&initialize);
+        let worker_compute = Arc::clone(&compute);
+        let worker_occupancy = Arc::clone(&occupancy);
+        let spawn = thread::Builder::new()
+            .name(format!("spur-temporal-{worker_id}"))
+            .spawn(move || {
+                let mut current_ordinal = None;
+                let worker_run =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<()> {
+                        let mut state = worker_initialize(worker_id)
+                            .with_context(|| format!("initialize temporal worker {worker_id}"))?;
+                        worker_events
+                            .send(WorkerEvent::Ready { worker_id })
+                            .map_err(|_| {
+                                anyhow!("temporal result channel closed during startup")
+                            })?;
+
+                        while let Ok((ordinal, work)) = work_receiver.recv() {
+                            current_ordinal = Some(ordinal);
+                            worker_occupancy.queued_work.decrement(1);
+                            worker_occupancy.active_work.increment();
+                            let computed =
+                                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                    worker_compute(&mut state, ordinal, work)
+                                }));
+                            worker_occupancy.active_work.decrement(1);
+                            let output = match computed {
+                                Ok(result) => result,
+                                Err(payload) => bail!(
+                                    "temporal worker {worker_id} panicked at ordinal {ordinal}: {}",
+                                    panic_message(payload)
+                                ),
+                            }?;
+                            worker_occupancy.results.increment();
+                            if worker_events
+                                .send(WorkerEvent::Completed { ordinal, output })
+                                .is_err()
+                            {
+                                worker_occupancy.results.decrement(1);
+                                return Ok(());
+                            }
+                            current_ordinal = None;
+                        }
+                        Ok(())
+                    }));
+
+                let failure = match worker_run {
+                    Ok(Ok(())) => None,
+                    Ok(Err(error)) => Some(error),
+                    Err(payload) => Some(anyhow!(
+                        "temporal worker {worker_id} panicked: {}",
+                        panic_message(payload)
+                    )),
+                };
+                if let Some(error) = failure {
+                    let _ = worker_events.send(WorkerEvent::Failed {
+                        worker_id,
+                        ordinal: current_ordinal,
+                        error,
+                    });
+                }
+            });
+
+        match spawn {
+            Ok(handle) => {
+                work_senders.push(work_sender);
+                handles.push(handle);
+            }
+            Err(error) => {
+                drop(work_sender);
+                drop(work_senders);
+                drop(event_sender);
+                drain_worker_events(&event_receiver, &occupancy);
+                let join_result = join_worker_threads(handles);
+                let error = anyhow!(error).context(format!("spawn temporal worker {worker_id}"));
+                return match join_result {
+                    Ok(()) => Err(error),
+                    Err(join_error) => Err(error.context(join_error.to_string())),
+                };
+            }
+        }
+    }
+    drop(event_sender);
+
+    let mut reduce = reduce;
+    let coordinator = (|| -> Result<WorkerPoolStats> {
+        let mut ready = vec![false; worker_count];
+        let mut ready_count = 0;
+        while ready_count < worker_count {
+            match event_receiver.recv() {
+                Ok(WorkerEvent::Ready { worker_id }) => {
+                    let was_ready = ready
+                        .get_mut(worker_id)
+                        .with_context(|| format!("unknown temporal worker {worker_id}"))?;
+                    if std::mem::replace(was_ready, true) {
+                        bail!("temporal worker {worker_id} reported ready twice");
+                    }
+                    ready_count += 1;
+                }
+                Ok(WorkerEvent::Failed {
+                    worker_id,
+                    ordinal,
+                    error,
+                }) => {
+                    let location = ordinal
+                        .map(|ordinal| format!(" at ordinal {ordinal}"))
+                        .unwrap_or_default();
+                    return Err(error)
+                        .with_context(|| format!("temporal worker {worker_id} failed{location}"));
+                }
+                Ok(WorkerEvent::Completed { .. }) => {
+                    bail!("temporal worker completed work before startup finished")
+                }
+                Err(_) => bail!("temporal worker result channel closed during startup"),
+            }
+        }
+
+        let mut work = work_items.into_iter().enumerate();
+        let mut window = OrdinalAdmissionWindow::new(jobs);
+        let mut max_reducer_pending = 0;
+
+        while window.next_reduced < total_work {
+            while window.next_dispatch < total_work && window.has_capacity() {
+                let (ordinal, item) = work
+                    .next()
+                    .context("temporal worker input ended before its declared length")?;
+                let worker_id = ordinal % worker_count;
+                occupancy.queued_work.increment();
+                if work_senders[worker_id].send((ordinal, item)).is_err() {
+                    occupancy.queued_work.decrement(1);
+                    bail!("temporal worker {worker_id} stopped before accepting ordinal {ordinal}");
+                }
+                window.admit(ordinal)?;
+            }
+
+            match event_receiver.recv() {
+                Ok(WorkerEvent::Completed { ordinal, output }) => {
+                    if !(window.next_reduced..window.next_dispatch).contains(&ordinal) {
+                        bail!(
+                            "temporal worker returned ordinal {ordinal} outside admitted window {}..{}",
+                            window.next_reduced,
+                            window.next_dispatch
+                        );
+                    }
+                    let progress = reduce(output)
+                        .with_context(|| format!("reduce temporal commit ordinal {ordinal}"))?;
+                    let reduced = window.note_reduced(progress.next_ordinal)?;
+                    occupancy.results.decrement(reduced);
+                    max_reducer_pending = max_reducer_pending.max(progress.pending_results);
+                }
+                Ok(WorkerEvent::Failed {
+                    worker_id,
+                    ordinal,
+                    error,
+                }) => {
+                    let location = ordinal
+                        .map(|ordinal| format!(" at ordinal {ordinal}"))
+                        .unwrap_or_default();
+                    return Err(error)
+                        .with_context(|| format!("temporal worker {worker_id} failed{location}"));
+                }
+                Ok(WorkerEvent::Ready { worker_id }) => {
+                    bail!("temporal worker {worker_id} reported ready twice")
+                }
+                Err(_) => bail!(
+                    "temporal worker result channel closed while waiting for ordinal {}",
+                    window.next_reduced
+                ),
+            }
+        }
+
+        Ok(WorkerPoolStats {
+            max_in_flight: window.max_in_flight,
+            max_queued_work: occupancy.queued_work.maximum(),
+            max_active_work: occupancy.active_work.maximum(),
+            max_result_occupancy: occupancy.results.maximum(),
+            max_reducer_pending,
+        })
+    })();
+
+    drop(work_senders);
+    if coordinator.is_err() {
+        drain_worker_events(&event_receiver, &occupancy);
+    }
+    let join_result = join_worker_threads(handles);
+    match (coordinator, join_result) {
+        (Ok(stats), Ok(())) => Ok(stats),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(_), Err(join_error)) => Err(join_error),
+        (Err(error), Err(join_error)) => Err(error.context(join_error.to_string())),
+    }
 }
 
 impl<'a> CommitResultReducer<'a> {
@@ -295,6 +687,11 @@ fn compute_commit_walk_result(
     })
 }
 
+struct CommitWorkerState {
+    repo: gix::Repository,
+    symbol_diff: SymbolDiffCtx,
+}
+
 pub fn plan_incremental_walk(
     worktree: &Path,
     stored_tip: Option<&str>,
@@ -351,15 +748,20 @@ pub fn run_full_walk_into(
     worktree: &Path,
     config: &GitWalkConfig,
     progress: Option<ProgressBar>,
-    mut sink: Option<&mut TemporalShardSink>,
+    sink: Option<&mut TemporalShardSink>,
 ) -> Result<(GraphIndexArtifact, CommitIndexArtifact)> {
+    let (graph, commits, _) = run_full_walk_into_with_stats(worktree, config, progress, sink)?;
+    Ok((graph, commits))
+}
+
+fn run_full_walk_into_with_stats(
+    worktree: &Path,
+    config: &GitWalkConfig,
+    progress: Option<ProgressBar>,
+    mut sink: Option<&mut TemporalShardSink>,
+) -> Result<(GraphIndexArtifact, CommitIndexArtifact, TemporalWalkStats)> {
     ensure_not_shallow(worktree)?;
     check_replace_refs(worktree, config.allow_replace_refs)?;
-    let gix_repo = if config.use_gix_diff {
-        Some(open_gix_repo_without_replace_refs(worktree)?)
-    } else {
-        None
-    };
 
     let first_ref = config
         .target_refs
@@ -408,16 +810,50 @@ pub fn run_full_walk_into(
         )
     };
     let shared_parse_cache = Arc::new(SharedParseCache::default());
-    let mut ctx = SymbolDiffCtx::with_parse_cache(Arc::clone(&shared_parse_cache));
+    let worker_root = Arc::new(worktree.to_path_buf());
+    let initialize_root = Arc::clone(&worker_root);
+    let compute_root = Arc::clone(&worker_root);
+    let worker_parse_cache = Arc::clone(&shared_parse_cache);
+    let use_gix_diff = config.use_gix_diff;
     let mut reducer = CommitResultReducer::new(&mut graph, &mut commits, progress, sink);
-    for (ordinal, sha) in commit_shas.into_iter().enumerate() {
-        let result =
-            compute_commit_walk_result(ordinal, worktree, &sha, gix_repo.as_ref(), &mut ctx)?;
-        reducer.push(result)?;
-    }
+    let pool = run_bounded_worker_pool(
+        config.temporal_jobs,
+        commit_shas,
+        move |_| {
+            let repo = open_gix_repo_without_replace_refs(&initialize_root)?;
+            let mut symbol_diff = SymbolDiffCtx::with_parse_cache(Arc::clone(&worker_parse_cache));
+            symbol_diff.cat_file_batch(&initialize_root)?;
+            Ok(CommitWorkerState { repo, symbol_diff })
+        },
+        move |worker, ordinal, sha| {
+            let repo = use_gix_diff.then_some(&worker.repo);
+            compute_commit_walk_result(ordinal, &compute_root, &sha, repo, &mut worker.symbol_diff)
+        },
+        |result| {
+            reducer.push(result)?;
+            Ok(ReductionProgress {
+                next_ordinal: reducer.next_ordinal,
+                pending_results: reducer.pending.len(),
+            })
+        },
+    )?;
     reducer.finish()?;
+    let stats = TemporalWalkStats {
+        pool,
+        shared_parse_cache_entries: shared_parse_cache.len(),
+    };
+    tracing::debug!(
+        temporal_jobs = config.temporal_jobs.get(),
+        max_in_flight = stats.pool.max_in_flight,
+        max_queued_work = stats.pool.max_queued_work,
+        max_active_work = stats.pool.max_active_work,
+        max_result_occupancy = stats.pool.max_result_occupancy,
+        max_reducer_pending = stats.pool.max_reducer_pending,
+        shared_parse_cache_entries = stats.shared_parse_cache_entries,
+        "spur-graph: temporal worker-pool occupancy"
+    );
 
-    Ok((graph, commits))
+    Ok((graph, commits, stats))
 }
 
 struct IncrementalBase {
@@ -1021,7 +1457,6 @@ impl SharedParseCache {
         }
     }
 
-    #[cfg(test)]
     fn len(&self) -> usize {
         self.entries
             .lock()
@@ -2482,6 +2917,256 @@ mod tests {
             normalize_walk_output((graph, commits)),
             normalize_walk_output(expected)
         );
+    }
+
+    #[test]
+    fn worker_pool_forces_out_of_order_completion_but_reduces_deterministically() {
+        let gate = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+        let worker_gate = Arc::clone(&gate);
+        let reducer_gate = Arc::clone(&gate);
+        let progress = ProgressBar::hidden();
+        let progress_observer = progress.clone();
+        let mut graph = empty_graph_artifact();
+        let mut commits = commit_index("worker-pool-indexed-at");
+        let mut reducer = CommitResultReducer::new(&mut graph, &mut commits, Some(progress), None);
+
+        let stats = run_bounded_worker_pool(
+            std::num::NonZeroUsize::new(2).unwrap(),
+            vec![(), ()],
+            |_| Ok(()),
+            move |_, ordinal, ()| {
+                if ordinal == 0 {
+                    let (released, condvar) = &*worker_gate;
+                    let mut released = released.lock().unwrap();
+                    while !*released {
+                        released = condvar.wait(released).unwrap();
+                    }
+                }
+                Ok(commit_walk_result(ordinal))
+            },
+            |result| {
+                let ordinal = result.ordinal;
+                reducer.push(result)?;
+                if ordinal == 1 {
+                    assert_eq!(reducer.next_ordinal, 0);
+                    assert_eq!(reducer.pending.keys().copied().collect::<Vec<_>>(), [1]);
+                    let (released, condvar) = &*reducer_gate;
+                    *released.lock().unwrap() = true;
+                    condvar.notify_one();
+                }
+                Ok(ReductionProgress {
+                    next_ordinal: reducer.next_ordinal,
+                    pending_results: reducer.pending.len(),
+                })
+            },
+        )
+        .unwrap();
+        reducer.finish().unwrap();
+
+        assert_eq!(
+            graph
+                .commits
+                .iter()
+                .map(|commit| commit.sha.as_str())
+                .collect::<Vec<_>>(),
+            ["commit-0", "commit-1"]
+        );
+        assert_eq!(graph.commits, commits.commits);
+        assert_eq!(graph.diagnostics, ["diagnostic-0", "diagnostic-1"]);
+        assert_eq!(progress_observer.position(), 2);
+        assert_eq!(stats.max_in_flight, 2);
+        assert_eq!(stats.max_reducer_pending, 1);
+    }
+
+    #[test]
+    fn worker_failure_cancels_queued_work_and_joins_every_worker() {
+        struct WorkerLifetime {
+            live: Arc<std::sync::atomic::AtomicUsize>,
+            dropped: Arc<std::sync::atomic::AtomicUsize>,
+        }
+
+        impl Drop for WorkerLifetime {
+            fn drop(&mut self) {
+                self.live.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                self.dropped
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+
+        let jobs = std::num::NonZeroUsize::new(4).unwrap();
+        let live = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let dropped = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let started = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let initializer_live = Arc::clone(&live);
+        let initializer_dropped = Arc::clone(&dropped);
+        let compute_started = Arc::clone(&started);
+        let mut graph = empty_graph_artifact();
+        let mut commits = commit_index("worker-failure-indexed-at");
+        let mut reducer = CommitResultReducer::new(&mut graph, &mut commits, None, None);
+
+        let error = run_bounded_worker_pool(
+            jobs,
+            vec![(); 32],
+            move |_| {
+                initializer_live.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(WorkerLifetime {
+                    live: Arc::clone(&initializer_live),
+                    dropped: Arc::clone(&initializer_dropped),
+                })
+            },
+            move |_, ordinal, ()| {
+                compute_started.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if ordinal == 0 {
+                    bail!("forced worker failure");
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                Ok(commit_walk_result(ordinal))
+            },
+            |result| {
+                reducer.push(result)?;
+                Ok(ReductionProgress {
+                    next_ordinal: reducer.next_ordinal,
+                    pending_results: reducer.pending.len(),
+                })
+            },
+        )
+        .unwrap_err();
+        drop(reducer);
+
+        let message = format!("{error:#}");
+        assert!(message.contains("ordinal 0"), "{message}");
+        assert!(message.contains("forced worker failure"), "{message}");
+        assert!(started.load(std::sync::atomic::Ordering::SeqCst) <= jobs.get());
+        assert_eq!(live.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(
+            dropped.load(std::sync::atomic::Ordering::SeqCst),
+            jobs.get()
+        );
+        assert!(graph.commits.is_empty());
+        assert!(commits.commits.is_empty());
+        assert!(graph.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn sliding_window_bounds_every_occupancy_class_when_ordinal_zero_stalls() {
+        for jobs in [1, 2, 4, 8].map(|jobs| std::num::NonZeroUsize::new(jobs).unwrap()) {
+            let gate = Arc::new((Mutex::new(jobs.get() == 1), std::sync::Condvar::new()));
+            let worker_gate = Arc::clone(&gate);
+            let reducer_gate = Arc::clone(&gate);
+            let mut graph = empty_graph_artifact();
+            let mut commits = commit_index("occupancy-indexed-at");
+            let mut reducer = CommitResultReducer::new(&mut graph, &mut commits, None, None);
+
+            let stats = run_bounded_worker_pool(
+                jobs,
+                vec![(); jobs.get() * 3],
+                |_| Ok(()),
+                move |_, ordinal, ()| {
+                    if ordinal == 0 {
+                        let (released, condvar) = &*worker_gate;
+                        let mut released = released.lock().unwrap();
+                        while !*released {
+                            released = condvar.wait(released).unwrap();
+                        }
+                    }
+                    Ok(commit_walk_result(ordinal))
+                },
+                |result| {
+                    reducer.push(result)?;
+                    if reducer.next_ordinal == 0
+                        && reducer.pending.len() == jobs.get().saturating_sub(1)
+                    {
+                        let (released, condvar) = &*reducer_gate;
+                        *released.lock().unwrap() = true;
+                        condvar.notify_one();
+                    }
+                    Ok(ReductionProgress {
+                        next_ordinal: reducer.next_ordinal,
+                        pending_results: reducer.pending.len(),
+                    })
+                },
+            )
+            .unwrap();
+            reducer.finish().unwrap();
+
+            eprintln!(
+                "temporal worker occupancy jobs={}: in_flight={} queued={} active={} results={} reducer_pending={}",
+                jobs,
+                stats.max_in_flight,
+                stats.max_queued_work,
+                stats.max_active_work,
+                stats.max_result_occupancy,
+                stats.max_reducer_pending,
+            );
+            assert_eq!(stats.max_in_flight, jobs.get());
+            assert!(stats.max_queued_work <= jobs.get());
+            assert!(stats.max_active_work <= jobs.get());
+            assert_eq!(stats.max_result_occupancy, jobs.get());
+            assert_eq!(stats.max_reducer_pending, jobs.get().saturating_sub(1));
+            assert_eq!(graph.commits.len(), jobs.get() * 3);
+            assert_eq!(graph.commits, commits.commits);
+        }
+    }
+
+    #[test]
+    fn temporal_jobs_1_2_4_8_match_reference_for_every_walk_strategy() {
+        let dir = TempDir::new().unwrap();
+        init_repo(dir.path());
+        std::fs::write(dir.path().join("lib.rs"), b"pub fn root() -> u8 { 1 }\n").unwrap();
+        commit(dir.path(), "root");
+        run_git(dir.path(), &["checkout", "-q", "-b", "side"]).unwrap();
+        std::fs::write(dir.path().join("side.py"), b"def side():\n    return 2\n").unwrap();
+        commit(dir.path(), "side");
+        run_git(dir.path(), &["checkout", "-q", "main"]).unwrap();
+        std::fs::write(dir.path().join("lib.rs"), b"pub fn root() -> u8 { 3 }\n").unwrap();
+        commit(dir.path(), "main");
+        run_git(
+            dir.path(),
+            &["merge", "-q", "--no-ff", "-m", "merge side", "side"],
+        )
+        .unwrap();
+        std::fs::rename(dir.path().join("lib.rs"), dir.path().join("core.rs")).unwrap();
+        commit(dir.path(), "rename");
+
+        for strategy in [WalkStrategy::Reachable, WalkStrategy::FirstParent] {
+            let (reference_graph, reference_commits, reference_stats) =
+                run_full_walk_into_with_stats(
+                    dir.path(),
+                    &GitWalkConfig {
+                        walk_strategy: strategy,
+                        temporal_jobs: std::num::NonZeroUsize::new(1).unwrap(),
+                        ..GitWalkConfig::default()
+                    },
+                    None,
+                    None,
+                )
+                .unwrap();
+            let expected = normalize_walk_output((reference_graph, reference_commits));
+            assert!(reference_stats.shared_parse_cache_entries > 0);
+
+            for jobs in [2, 4, 8].map(|jobs| std::num::NonZeroUsize::new(jobs).unwrap()) {
+                let (graph, commits, stats) = run_full_walk_into_with_stats(
+                    dir.path(),
+                    &GitWalkConfig {
+                        walk_strategy: strategy,
+                        temporal_jobs: jobs,
+                        ..GitWalkConfig::default()
+                    },
+                    None,
+                    None,
+                )
+                .unwrap();
+
+                assert_eq!(normalize_walk_output((graph, commits)), expected);
+                assert_eq!(
+                    stats.shared_parse_cache_entries,
+                    reference_stats.shared_parse_cache_entries,
+                    "shared cache entry count must not multiply at jobs={jobs} strategy={strategy:?}"
+                );
+                assert!(stats.pool.max_in_flight <= jobs.get());
+                assert!(stats.pool.max_result_occupancy <= jobs.get());
+            }
+        }
     }
 
     #[test]
