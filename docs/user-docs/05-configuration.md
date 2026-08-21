@@ -101,6 +101,21 @@ embedding_model = "nomic"
 
 Repository `.spur/config.toml` wins over `~/.spur/config.toml`. If `SPUR_EMBEDDING_MODEL` is set in the environment, that value still overrides the config file.
 
+## In-TUI settings (`/configure`)
+
+`/configure` opens a settings browser (exclusive TUI command). Sections:
+
+| Arg | Section | What it edits | When it applies |
+|---|---|---|---|
+| (none) or an agent name | Agents | curated worker fields (not name/command/transport/kind) | next delegation |
+| `graph` | Graph | `embedding_model` = `nomic` \| `coderank` \| `jina-code` | next embedding load (restart) |
+| `tui` | TUI | `edit_mode`, `theme`, `disable_paste_burst` | immediately after a successful save |
+| `skills` | Skills | `projection_mode` = `catalog_only` \| `all_active` | newly reconciled sessions |
+
+Saves write the repository `.spur/config.toml` via the same `update_config` helper as `/theme`. If the write fails, memory is not updated. `/theme` remains a shortcut. `/vim` now persists `tui.edit_mode` as well as toggling the current session.
+
+`SPUR_EMBEDDING_MODEL` still overrides `graph.embedding_model` when set.
+
 ## Brain Skills
 
 Spur ships with built-in `SKILL.md` files that instruct the Brain on how to delegate, review, and coordinate tasks. 
