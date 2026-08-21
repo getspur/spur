@@ -4,12 +4,13 @@ use std::collections::BTreeMap;
 use std::env;
 use std::fs;
 use std::io::{BufWriter, Write};
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use spur_graph::temporal::{
     resolve_symbol_at, resolve_symbol_at_indexed, symbol_history, Resolution, TemporalIndex,
 };
@@ -572,7 +573,8 @@ fn benchmark_incremental(c: &mut Criterion) {
 
 fn bench_full_walk_1k(c: &mut Criterion) {
     const BENCH_NAME: &str = "git_walk full 1k linear";
-    if !criterion_filter_allows(&[BENCH_NAME]) {
+    const BENCH_FILTER: &str = "bench_full_walk_1k";
+    if !criterion_filter_allows(&[BENCH_FILTER, BENCH_NAME]) {
         return;
     }
 
@@ -584,23 +586,32 @@ fn bench_full_walk_1k(c: &mut Criterion) {
     );
     eprintln!("{BENCH_NAME} synthetic commits={commit_count}");
     let shas = build_synthetic_repo(dir.path(), commit_count, 0.0);
-    c.bench_function(BENCH_NAME, |b| {
-        b.iter(|| {
-            let (graph, commits) = spur_graph::git_walk::run_full_walk_into(
-                dir.path(),
-                &spur_graph::git_walk::GitWalkConfig::default(),
-                None,
-                None,
-            )
-            .unwrap();
-            black_box((
-                graph.symbol_snapshots.len(),
-                graph.temporal_edges.len(),
-                commits.commits.len(),
-                shas.len(),
-            ));
-        });
-    });
+    let mut group = c.benchmark_group(BENCH_FILTER);
+    group.throughput(Throughput::Elements(commit_count as u64));
+    for jobs in [1, 2, 4, 8] {
+        let config = spur_graph::git_walk::GitWalkConfig {
+            temporal_jobs: NonZeroUsize::new(jobs).unwrap(),
+            ..spur_graph::git_walk::GitWalkConfig::default()
+        };
+        group.bench_with_input(
+            BenchmarkId::new(BENCH_NAME, format!("jobs={jobs}")),
+            &config,
+            |b, config| {
+                b.iter(|| {
+                    let (graph, commits) =
+                        spur_graph::git_walk::run_full_walk_into(dir.path(), config, None, None)
+                            .unwrap();
+                    black_box((
+                        graph.symbol_snapshots.len(),
+                        graph.temporal_edges.len(),
+                        commits.commits.len(),
+                        shas.len(),
+                    ));
+                });
+            },
+        );
+    }
+    group.finish();
 }
 
 fn bench_full_walk_20k_merges(c: &mut Criterion) {
