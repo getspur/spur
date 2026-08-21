@@ -4003,13 +4003,18 @@ fn sql_string_literal(value: &str) -> String {
 }
 
 pub fn fastembed_cache_dir() -> Option<PathBuf> {
-    if let Some(xdg_cache) = std::env::var_os("XDG_CACHE_HOME") {
-        return Some(PathBuf::from(xdg_cache).join("spur").join("fastembed"));
+    if let Some(home) = std::env::var_os("HOME") {
+        return Some(
+            PathBuf::from(home)
+                .join(".spur")
+                .join("cache")
+                .join("fastembed"),
+        );
     }
 
-    std::env::var_os("HOME")
+    std::env::var_os("XDG_CACHE_HOME")
         .map(PathBuf::from)
-        .map(|home| home.join(".spur").join("cache").join("fastembed"))
+        .map(|xdg_cache| xdg_cache.join("spur").join("fastembed"))
 }
 
 #[cfg(test)]
@@ -4842,7 +4847,7 @@ mod tests {
     }
 
     #[test]
-    fn fastembed_cache_dir_prefers_xdg_cache_home() {
+    fn fastembed_cache_dir_prefers_user_spur_over_xdg() {
         let actual = {
             let _guard = env_lock();
             let _xdg = EnvGuard::set("XDG_CACHE_HOME", "/tmp/spur-xdg-cache");
@@ -4853,13 +4858,13 @@ mod tests {
         assert_eq!(
             actual,
             Some(std::path::PathBuf::from(
-                "/tmp/spur-xdg-cache/spur/fastembed"
+                "/tmp/spur-home/.spur/cache/fastembed"
             ))
         );
     }
 
     #[test]
-    fn fastembed_cache_dir_falls_back_to_user_spur_cache() {
+    fn fastembed_cache_dir_uses_user_spur_when_xdg_unset() {
         let actual = {
             let _guard = env_lock();
             let _xdg = EnvGuard::remove("XDG_CACHE_HOME");
@@ -4871,6 +4876,23 @@ mod tests {
             actual,
             Some(std::path::PathBuf::from(
                 "/tmp/spur-home/.spur/cache/fastembed"
+            ))
+        );
+    }
+
+    #[test]
+    fn fastembed_cache_dir_uses_xdg_when_home_is_unset() {
+        let actual = {
+            let _guard = env_lock();
+            let _xdg = EnvGuard::set("XDG_CACHE_HOME", "/tmp/spur-xdg-cache");
+            let _home = EnvGuard::remove("HOME");
+            fastembed_cache_dir()
+        };
+
+        assert_eq!(
+            actual,
+            Some(std::path::PathBuf::from(
+                "/tmp/spur-xdg-cache/spur/fastembed"
             ))
         );
     }
