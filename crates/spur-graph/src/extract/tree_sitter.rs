@@ -3548,13 +3548,18 @@ pub(crate) fn run_query<'tree>(
     let mut matches = cursor.matches(query, root_node, source.as_bytes());
     let mut hits = Vec::new();
     let mut match_index = 0usize;
+    let mut string_context_by_node_id = HashMap::new();
+    let mut string_context_ancestor_path = Vec::new();
     while let Some(query_match) = matches.next() {
         let current_match_index = match_index;
         match_index += 1;
         for capture in query_match.captures {
             let name = capture_names[capture.index as usize];
-            if is_string_literal_context(capture.node)
-                && !is_string_content_import_capture(name, capture.node)
+            if is_string_literal_context(
+                capture.node,
+                &mut string_context_by_node_id,
+                &mut string_context_ancestor_path,
+            ) && !is_string_content_import_capture(name, capture.node)
             {
                 continue;
             }
@@ -3581,9 +3586,21 @@ fn is_string_content_import_capture(name: &str, node: Node<'_>) -> bool {
         )
 }
 
-fn is_string_literal_context(node: Node<'_>) -> bool {
+fn is_string_literal_context(
+    node: Node<'_>,
+    by_node_id: &mut HashMap<usize, bool>,
+    ancestor_path: &mut Vec<usize>,
+) -> bool {
+    ancestor_path.clear();
     let mut current = Some(node);
-    while let Some(node) = current {
+    let is_string_literal_context = loop {
+        let Some(node) = current else {
+            break false;
+        };
+        if let Some(&cached) = by_node_id.get(&node.id()) {
+            break cached;
+        }
+        ancestor_path.push(node.id());
         if matches!(
             node.kind(),
             "string_literal"
@@ -3592,11 +3609,23 @@ fn is_string_literal_context(node: Node<'_>) -> bool {
                 | "interpreted_string_literal"
                 | "raw_string_literal_content"
         ) {
-            return true;
+            break true;
         }
+        #[cfg(test)]
+        STRING_CONTEXT_PARENT_WALKS.with(|walks| walks.set(walks.get() + 1));
         current = node.parent();
+    };
+    for node_id in ancestor_path.drain(..) {
+        by_node_id.insert(node_id, is_string_literal_context);
     }
-    false
+    is_string_literal_context
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static STRING_CONTEXT_PARENT_WALKS: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
 }
 
 fn impl_identity_fqn(fqn: &str) -> String {
@@ -3728,6 +3757,42 @@ pub(crate) fn relative_path(root: &Path, path: &Path) -> anyhow::Result<String> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn run_query_compresses_shared_string_context_ancestor_paths() {
+        let source = "fn shared() { let tuple = (alpha, beta, gamma); }\n";
+        let mut parser = Parser::new();
+        let language: tree_sitter::Language = tree_sitter_rust::LANGUAGE.into();
+        parser.set_language(&language).expect("configure parser");
+        let tree = parser.parse(source, None).expect("parse source");
+        let query = Query::new(&language, "(identifier) @identifier").expect("compile query");
+
+        let mut cursor = QueryCursor::new();
+        let mut matches = cursor.matches(&query, tree.root_node(), source.as_bytes());
+        let mut captures = Vec::new();
+        while let Some(query_match) = matches.next() {
+            captures.extend(query_match.captures.iter().map(|capture| capture.node));
+        }
+
+        let mut unique_ancestor_ids = HashSet::new();
+        let mut uncached_parent_walks = 0usize;
+        for capture in &captures {
+            let mut current = Some(*capture);
+            while let Some(node) = current {
+                unique_ancestor_ids.insert(node.id());
+                uncached_parent_walks += 1;
+                current = node.parent();
+            }
+        }
+        assert!(uncached_parent_walks > unique_ancestor_ids.len());
+
+        STRING_CONTEXT_PARENT_WALKS.with(|walks| walks.set(0));
+        let hits = run_query(&query, tree.root_node(), source);
+        let cached_parent_walks = STRING_CONTEXT_PARENT_WALKS.with(std::cell::Cell::get);
+
+        assert_eq!(hits.len(), captures.len());
+        assert_eq!(cached_parent_walks, unique_ancestor_ids.len());
+    }
 
     #[test]
     fn import_resolution_fallback_candidate_kind_is_total_for_node_kinds() {
