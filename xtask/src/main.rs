@@ -1815,6 +1815,101 @@ mod tests {
         assert!(script.contains("SPUR_DUCKDB_EXTENSION_DIR"));
     }
 
+    /// Dist ships macos-x64, but DuckDB 1.4.4 does not publish every extension
+    /// for `osx_amd64` (lance and onager 404). Vendoring must skip those files
+    /// instead of failing the whole `xtask dist` job.
+    #[cfg(unix)]
+    #[test]
+    fn vendor_duckdb_extensions_skips_cdn_404_and_keeps_available_files() {
+        let bin = temp_test_dir("fake-curl-bin");
+        let out = temp_test_dir("duckdb-ext-out");
+        let curl = bin.join("curl");
+        fs::write(
+            &curl,
+            r#"#!/usr/bin/env bash
+set -euo pipefail
+out=""
+url=""
+write_http=0
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -o|--output) out="$2"; shift 2 ;;
+    -w|--write-out) write_http=1; shift 2 ;;
+    -s|-S|-f|-L|-sS|-fsSL|-sSL|-fsS|--fail|--location|--silent|--show-error) shift ;;
+    http*) url="$1"; shift ;;
+    *) shift ;;
+  esac
+done
+if [[ -z "$url" ]]; then
+  echo "fake curl: missing url" >&2
+  exit 2
+fi
+missing=0
+case "$url" in
+  *osx_amd64/lance.duckdb_extension.gz*|*osx_amd64/onager.duckdb_extension.gz*) missing=1 ;;
+esac
+if [[ "$missing" -eq 1 ]]; then
+  if [[ "$write_http" -eq 1 ]]; then
+    echo -n 404
+    exit 0
+  fi
+  echo "curl: (22) The requested URL returned error: 404" >&2
+  exit 22
+fi
+payload=$'FAKE-EXT\n'
+if [[ -n "$out" ]]; then
+  printf '%s' "$payload" | gzip > "$out"
+else
+  printf '%s' "$payload" | gzip
+fi
+if [[ "$write_http" -eq 1 ]]; then
+  echo -n 200
+fi
+"#,
+        )
+        .unwrap();
+        make_executable(&curl);
+
+        let script = workspace_root().join("scripts/vendor-duckdb-extensions.sh");
+        let path = format!("{}:{}", bin.display(), env::var("PATH").unwrap());
+        let output = Command::new("bash")
+            .arg(&script)
+            .arg("--out")
+            .arg(&out)
+            .arg("--platform")
+            .arg("osx_amd64")
+            .env("PATH", path)
+            .output()
+            .expect("vendor script should run");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success(),
+            "vendor script should skip CDN 404s\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        );
+
+        let plat = out.join("v1.4.4/osx_amd64");
+        assert!(
+            !plat.join("lance.duckdb_extension").exists(),
+            "missing CDN file must not be vendored"
+        );
+        assert!(
+            !plat.join("onager.duckdb_extension").exists(),
+            "missing CDN file must not be vendored"
+        );
+        for name in ["fts", "icu", "duckpgq"] {
+            assert!(
+                plat.join(format!("{name}.duckdb_extension")).is_file(),
+                "{name} should still be vendored"
+            );
+        }
+        let combined = format!("{stdout}{stderr}");
+        assert!(
+            combined.contains("skip 404"),
+            "expected skip 404 log, got:\n{combined}"
+        );
+    }
+
     #[test]
     fn package_dist_skill_assets_ships_share_spur_skills_layout() {
         let workspace = temp_test_dir("dist-skills-workspace");

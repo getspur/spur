@@ -98,14 +98,34 @@ download_one() {
   local dest_dir="${OUT_DIR}/v${DUCKDB_VERSION}/${platform}"
   local dest="${dest_dir}/${name}.duckdb_extension"
   local url="https://${repo}/v${DUCKDB_VERSION}/${platform}/${name}.duckdb_extension.gz"
+  local gz_tmp dest_tmp http
   mkdir -p "${dest_dir}"
   if [[ -f "${dest}" ]]; then
     echo "exists ${dest}"
     return 0
   fi
   echo "download ${url}"
-  curl -fsSL "${url}" | gunzip > "${dest}.tmp"
-  mv "${dest}.tmp" "${dest}"
+  gz_tmp="${dest}.gz.tmp"
+  dest_tmp="${dest}.tmp"
+  # Do not pass curl -f: HTTP 404 is a per-extension gap (osx_amd64 lance/onager
+  # on DuckDB 1.4.4), not a dist failure. Transport errors still fail the job.
+  http="$(curl -sS -L -o "${gz_tmp}" -w "%{http_code}" "${url}")"
+  case "${http}" in
+    200)
+      gunzip -c "${gz_tmp}" > "${dest_tmp}"
+      rm -f "${gz_tmp}"
+      mv "${dest_tmp}" "${dest}"
+      ;;
+    404)
+      echo "skip 404 ${url}"
+      rm -f "${gz_tmp}" "${dest_tmp}"
+      ;;
+    *)
+      echo "download failed HTTP ${http} ${url}" >&2
+      rm -f "${gz_tmp}" "${dest_tmp}"
+      return 1
+      ;;
+  esac
 }
 
 for platform in "${PLATFORMS[@]}"; do
@@ -116,6 +136,13 @@ for platform in "${PLATFORMS[@]}"; do
     download_one "community-extensions.duckdb.org" "${platform}" "${name}"
   done
 done
+
+shopt -s nullglob
+vendored=("${OUT_DIR}/v${DUCKDB_VERSION}"/*/*.duckdb_extension)
+if [[ ${#vendored[@]} -eq 0 ]]; then
+  echo "no DuckDB extensions vendored into ${OUT_DIR}" >&2
+  exit 1
+fi
 
 echo "vendored into ${OUT_DIR}"
 echo "Set SPUR_DUCKDB_EXTENSION_DIR=${OUT_DIR} or copy this tree next to the spur binary as duckdb-extensions/"
