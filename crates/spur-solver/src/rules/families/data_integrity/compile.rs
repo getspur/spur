@@ -11,7 +11,7 @@ use crate::{
         manifest::{validate_binding_contract, ValidatedBinding},
         manifest_family_executable_rule_ids,
         manifest_format::NativeHandlerV1,
-        primitives::{add, and, boolean, eq, ge, int, le, not, or, request, var},
+        primitives::{add, and, boolean, eq, ge, int, le, lt, mul, not, or, request, var},
         CompiledRule, RuleSolveMode,
     },
     types::{
@@ -495,13 +495,18 @@ fn compile_binding(
         NativeHandlerV1::DataIntegrityValueRange => {
             compile_value_range(&binding.subject, facts, variable_names)
         }
-        NativeHandlerV1::DataIntegrityConditionalRequired
-        | NativeHandlerV1::DataIntegrityAggregateBalance
-        | NativeHandlerV1::DataIntegrityMutuallyConsistent
-        | NativeHandlerV1::DataIntegrityTemporalConsistency => Err(format!(
-            "data integrity semantic handler for rule `{}` and definition `{}` is not implemented",
-            binding.rule_id, binding.subject
-        )),
+        NativeHandlerV1::DataIntegrityConditionalRequired => {
+            compile_conditional_required(&binding.subject, facts, variable_names)
+        }
+        NativeHandlerV1::DataIntegrityAggregateBalance => {
+            compile_aggregate_balance(&binding.subject, facts, variable_names)
+        }
+        NativeHandlerV1::DataIntegrityMutuallyConsistent => {
+            compile_mutually_consistent(&binding.subject, facts, variable_names)
+        }
+        NativeHandlerV1::DataIntegrityTemporalConsistency => {
+            compile_temporal_consistency(&binding.subject, facts, variable_names)
+        }
         NativeHandlerV1::A11yFocusNotObscured
         | NativeHandlerV1::A11yReflow
         | NativeHandlerV1::A11yTargetSize
@@ -708,6 +713,215 @@ fn compile_value_range(
         ));
     }
     Ok(conjunction(rows))
+}
+
+fn compile_conditional_required(
+    subject: &str,
+    facts: &DataIntegrityFacts,
+    variable_names: &BTreeMap<UnknownTarget, String>,
+) -> Result<ConstraintExpr, String> {
+    let definition = facts
+        .conditional_requirements
+        .get(subject)
+        .ok_or_else(|| format!("unknown conditional requirement `{subject}`"))?;
+    let relation = require_relation(facts, &definition.relation)?;
+    let mut rows = Vec::with_capacity(relation.rows.len());
+    for row in relation.rows.keys() {
+        let trigger = and(vec![
+            is_one(row_active(variable_names, &definition.relation, row)?),
+            is_one(cell_present(
+                variable_names,
+                &definition.relation,
+                row,
+                &definition.trigger_field,
+            )?),
+            typed_cell_equals(
+                variable_names,
+                &definition.relation,
+                row,
+                &definition.trigger_field,
+                &definition.expected,
+            )?,
+        ]);
+        rows.push(implies(
+            trigger,
+            is_one(cell_present(
+                variable_names,
+                &definition.relation,
+                row,
+                &definition.required_field,
+            )?),
+        ));
+    }
+    Ok(conjunction(rows))
+}
+
+fn compile_aggregate_balance(
+    subject: &str,
+    facts: &DataIntegrityFacts,
+    variable_names: &BTreeMap<UnknownTarget, String>,
+) -> Result<ConstraintExpr, String> {
+    let definition = facts
+        .aggregate_balances
+        .get(subject)
+        .ok_or_else(|| format!("unknown aggregate balance `{subject}`"))?;
+    let mut present = Vec::with_capacity(definition.terms.len());
+    let mut terms = Vec::with_capacity(definition.terms.len());
+    for term in &definition.terms {
+        present.push(is_one(cell_present(
+            variable_names,
+            &term.relation,
+            &term.row,
+            &term.field,
+        )?));
+        terms.push(mul(vec![
+            int(term.coefficient),
+            cell_value(variable_names, &term.relation, &term.row, &term.field)?,
+        ]));
+    }
+    Ok(and(vec![
+        conjunction(present),
+        eq(linear_sum(terms), int(definition.target)),
+    ]))
+}
+
+fn compile_mutually_consistent(
+    subject: &str,
+    facts: &DataIntegrityFacts,
+    variable_names: &BTreeMap<UnknownTarget, String>,
+) -> Result<ConstraintExpr, String> {
+    let definition = facts
+        .consistency_relations
+        .get(subject)
+        .ok_or_else(|| format!("unknown consistency relation `{subject}`"))?;
+    let relation = require_relation(facts, &definition.relation)?;
+    let mut rows = Vec::with_capacity(relation.rows.len());
+    for row in relation.rows.keys() {
+        let present = definition
+            .fields
+            .iter()
+            .map(|field| cell_present(variable_names, &definition.relation, row, field).map(is_one))
+            .collect::<Result<Vec<_>, _>>()?;
+        let allowed = definition
+            .allowed
+            .iter()
+            .map(|tuple| {
+                definition
+                    .fields
+                    .iter()
+                    .zip(tuple)
+                    .map(|(field, value)| {
+                        typed_cell_equals(variable_names, &definition.relation, row, field, value)
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+                    .map(conjunction)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        rows.push(implies(
+            is_one(row_active(variable_names, &definition.relation, row)?),
+            and(vec![conjunction(present), disjunction(allowed)]),
+        ));
+    }
+    Ok(conjunction(rows))
+}
+
+fn compile_temporal_consistency(
+    subject: &str,
+    facts: &DataIntegrityFacts,
+    variable_names: &BTreeMap<UnknownTarget, String>,
+) -> Result<ConstraintExpr, String> {
+    let definition = facts
+        .temporal_constraints
+        .get(subject)
+        .ok_or_else(|| format!("unknown temporal constraint `{subject}`"))?;
+    let relation = require_relation(facts, &definition.relation)?;
+    let mut requirements = Vec::with_capacity(
+        relation
+            .rows
+            .len()
+            .saturating_add(definition.predecessors.len()),
+    );
+    for row in relation.rows.keys() {
+        requirements.push(implies(
+            is_one(row_active(variable_names, &definition.relation, row)?),
+            and(vec![
+                is_one(cell_present(
+                    variable_names,
+                    &definition.relation,
+                    row,
+                    &definition.start_field,
+                )?),
+                is_one(cell_present(
+                    variable_names,
+                    &definition.relation,
+                    row,
+                    &definition.end_field,
+                )?),
+                lt(
+                    cell_value(
+                        variable_names,
+                        &definition.relation,
+                        row,
+                        &definition.start_field,
+                    )?,
+                    cell_value(
+                        variable_names,
+                        &definition.relation,
+                        row,
+                        &definition.end_field,
+                    )?,
+                ),
+            ]),
+        ));
+    }
+    for edge in &definition.predecessors {
+        requirements.push(implies(
+            is_one(row_active(
+                variable_names,
+                &definition.relation,
+                &edge.after,
+            )?),
+            and(vec![
+                is_one(row_active(
+                    variable_names,
+                    &definition.relation,
+                    &edge.before,
+                )?),
+                le(
+                    cell_value(
+                        variable_names,
+                        &definition.relation,
+                        &edge.before,
+                        &definition.end_field,
+                    )?,
+                    cell_value(
+                        variable_names,
+                        &definition.relation,
+                        &edge.after,
+                        &definition.start_field,
+                    )?,
+                ),
+            ]),
+        ));
+    }
+    Ok(conjunction(requirements))
+}
+
+fn typed_cell_equals(
+    variable_names: &BTreeMap<UnknownTarget, String>,
+    relation: &str,
+    row: &str,
+    field: &str,
+    expected: &CellValueFacts,
+) -> Result<ConstraintExpr, String> {
+    let target = UnknownTarget::CellValue(relation.to_owned(), row.to_owned(), field.to_owned());
+    let variable = variable_names
+        .get(&target)
+        .ok_or_else(|| format!("validated data integrity target `{target:?}` has no variable"))?;
+    Ok(eq(
+        var(variable.clone()),
+        literal_for_value(variable, expected),
+    ))
 }
 
 fn row_active(
@@ -1837,6 +2051,181 @@ mod tests {
         )
     }
 
+    fn conditional_request(
+        trigger_domain: Value,
+        expected: Value,
+        trigger_value: Value,
+        required_present: Option<bool>,
+    ) -> Value {
+        let mut facts = empty_facts();
+        let required_value = if required_present == Some(false) {
+            Value::Null
+        } else {
+            json!(true)
+        };
+        facts["relations"] = json!({
+            "records": {
+                "fields": {
+                    "trigger": trigger_domain,
+                    "required": {"kind": "boolean"}
+                },
+                "rows": {"first": {
+                    "active": true,
+                    "cells": {
+                        "trigger": {"present": true, "value": trigger_value},
+                        "required": {"present": required_present, "value": required_value}
+                    }
+                }}
+            }
+        });
+        facts["conditional_requirements"] = json!({
+            "required_when_triggered": {
+                "relation": "records",
+                "trigger_field": "trigger",
+                "expected": expected,
+                "required_field": "required"
+            }
+        });
+        request(
+            "verify",
+            "data_integrity.conditional_required",
+            "required_when_triggered",
+            facts,
+        )
+    }
+
+    fn balance_request(
+        left: i64,
+        delta: Option<i64>,
+        target: i64,
+        delta_active: bool,
+        delta_present: bool,
+    ) -> Value {
+        let mut facts = empty_facts();
+        facts["relations"] = json!({
+            "ledger": {
+                "fields": {"amount": {"kind": "integer", "minimum": -200, "maximum": 200}},
+                "rows": {
+                    "left": {
+                        "active": true,
+                        "cells": {"amount": {"present": true, "value": left}}
+                    },
+                    "delta": {
+                        "active": delta_active,
+                        "cells": {"amount": {
+                            "present": delta_present,
+                            "value": if delta_present { json!(delta) } else { Value::Null }
+                        }}
+                    }
+                }
+            }
+        });
+        facts["aggregate_balances"] = json!({
+            "ledger_total": {
+                "terms": [
+                    {"relation": "ledger", "row": "left", "field": "amount", "coefficient": 1},
+                    {"relation": "ledger", "row": "delta", "field": "amount", "coefficient": 1}
+                ],
+                "target": target
+            }
+        });
+        request(
+            "verify",
+            "data_integrity.aggregate_balance",
+            "ledger_total",
+            facts,
+        )
+    }
+
+    fn consistency_request(
+        active: bool,
+        state_present: bool,
+        state: &str,
+        enabled: Option<bool>,
+    ) -> Value {
+        let mut facts = empty_facts();
+        facts["relations"] = json!({
+            "configurations": {
+                "fields": {
+                    "state": {"kind": "enum", "values": ["draft", "live"]},
+                    "enabled": {"kind": "boolean"}
+                },
+                "rows": {"config": {
+                    "active": active,
+                    "cells": {
+                        "state": {
+                            "present": state_present,
+                            "value": if state_present { json!(state) } else { Value::Null }
+                        },
+                        "enabled": {"present": true, "value": enabled}
+                    }
+                }}
+            }
+        });
+        facts["consistency_relations"] = json!({
+            "state_enabled": {
+                "relation": "configurations",
+                "fields": ["state", "enabled"],
+                "allowed": [["draft", false], ["live", true]]
+            }
+        });
+        request(
+            "verify",
+            "data_integrity.mutually_consistent",
+            "state_enabled",
+            facts,
+        )
+    }
+
+    fn temporal_request(
+        before_active: bool,
+        before_start: i64,
+        before_end: i64,
+        after_active: bool,
+        after_start: Option<i64>,
+        after_end: i64,
+    ) -> Value {
+        let mut facts = empty_facts();
+        facts["relations"] = json!({
+            "intervals": {
+                "fields": {
+                    "start": {"kind": "integer", "minimum": 0, "maximum": 20},
+                    "end": {"kind": "integer", "minimum": 0, "maximum": 20}
+                },
+                "rows": {
+                    "before": {
+                        "active": before_active,
+                        "cells": {
+                            "start": {"present": true, "value": before_start},
+                            "end": {"present": true, "value": before_end}
+                        }
+                    },
+                    "after": {
+                        "active": after_active,
+                        "cells": {
+                            "start": {"present": true, "value": after_start},
+                            "end": {"present": true, "value": after_end}
+                        }
+                    }
+                }
+            }
+        });
+        facts["temporal_constraints"] = json!({
+            "ordered_intervals": {
+                "relation": "intervals",
+                "start_field": "start",
+                "end_field": "end",
+                "predecessors": [{"before": "before", "after": "after"}]
+            }
+        });
+        request(
+            "verify",
+            "data_integrity.temporal_consistency",
+            "ordered_intervals",
+            facts,
+        )
+    }
+
     async fn status(input: Value) -> SolveStatus {
         let compiled = compile(input).expect("data integrity request must compile");
         SolverService::new()
@@ -1844,6 +2233,182 @@ mod tests {
             .await
             .expect("data integrity request must solve")
             .status
+    }
+
+    #[tokio::test]
+    async fn conditional_required_uses_typed_enum_and_boolean_trigger_equality() {
+        let enum_domain = json!({"kind": "enum", "values": ["open", "closed"]});
+        assert_eq!(
+            status(conditional_request(
+                enum_domain.clone(),
+                json!("open"),
+                json!("open"),
+                Some(true),
+            ))
+            .await,
+            SolveStatus::Sat
+        );
+        assert_eq!(
+            status(conditional_request(
+                enum_domain.clone(),
+                json!("open"),
+                json!("open"),
+                Some(false),
+            ))
+            .await,
+            SolveStatus::Unsat
+        );
+        assert_eq!(
+            status(conditional_request(
+                enum_domain,
+                json!("open"),
+                json!("closed"),
+                Some(false),
+            ))
+            .await,
+            SolveStatus::Sat
+        );
+        assert_eq!(
+            status(conditional_request(
+                json!({"kind": "boolean"}),
+                json!(true),
+                json!(true),
+                Some(false),
+            ))
+            .await,
+            SolveStatus::Unsat
+        );
+    }
+
+    #[tokio::test]
+    async fn conditional_required_synthesizes_required_presence() {
+        let mut input =
+            conditional_request(json!({"kind": "boolean"}), json!(true), json!(true), None);
+        input["mode"] = json!("synthesize");
+        input["unknowns"] = json!([
+            {"kind": "cell_present", "relation": "records", "row": "first", "field": "required"}
+        ]);
+        let compiled = compile(input).expect("conditional synthesis must compile");
+        assert_eq!(
+            compiled.projections[0].field,
+            "rows.first.cells.required.present"
+        );
+        assert_eq!(
+            SolverService::new()
+                .solve_constraints(compiled.request)
+                .await
+                .expect("conditional synthesis must solve")
+                .status,
+            SolveStatus::Sat
+        );
+    }
+
+    #[tokio::test]
+    async fn aggregate_balance_counts_inactive_explicit_terms_and_rejects_off_by_one() {
+        assert_eq!(
+            status(balance_request(100, Some(-30), 70, false, true)).await,
+            SolveStatus::Sat
+        );
+        assert_eq!(
+            status(balance_request(100, Some(-30), 69, false, true)).await,
+            SolveStatus::Unsat
+        );
+    }
+
+    #[tokio::test]
+    async fn aggregate_balance_requires_every_explicit_term_present() {
+        assert_eq!(
+            status(balance_request(100, None, 100, false, false)).await,
+            SolveStatus::Unsat
+        );
+    }
+
+    #[tokio::test]
+    async fn aggregate_balance_synthesizes_an_inactive_integer_term() {
+        let mut input = balance_request(100, Some(-30), 70, false, true);
+        input["mode"] = json!("synthesize");
+        input["facts"]["relations"]["ledger"]["rows"]["delta"]["cells"]["amount"]["value"] =
+            Value::Null;
+        input["unknowns"] = json!([
+            {"kind": "cell_value", "relation": "ledger", "row": "delta", "field": "amount"}
+        ]);
+        let compiled = compile(input).expect("aggregate synthesis must compile");
+        assert_eq!(
+            compiled.projections[0].field,
+            "rows.delta.cells.amount.value"
+        );
+        assert_eq!(
+            SolverService::new()
+                .solve_constraints(compiled.request)
+                .await
+                .expect("aggregate synthesis must solve")
+                .status,
+            SolveStatus::Sat
+        );
+    }
+
+    #[tokio::test]
+    async fn mutually_consistent_requires_present_finite_enum_boolean_tuple() {
+        assert_eq!(
+            status(consistency_request(true, true, "live", Some(true))).await,
+            SolveStatus::Sat
+        );
+        assert_eq!(
+            status(consistency_request(true, true, "live", Some(false))).await,
+            SolveStatus::Unsat
+        );
+        assert_eq!(
+            status(consistency_request(true, false, "live", Some(true))).await,
+            SolveStatus::Unsat
+        );
+        assert_eq!(
+            status(consistency_request(false, true, "live", Some(false))).await,
+            SolveStatus::Sat
+        );
+    }
+
+    #[tokio::test]
+    async fn mutually_consistent_synthesizes_a_boolean_tuple_member() {
+        let mut input = consistency_request(true, true, "live", Some(true));
+        input["mode"] = json!("synthesize");
+        input["facts"]["relations"]["configurations"]["rows"]["config"]["cells"]["enabled"]
+            ["value"] = Value::Null;
+        input["unknowns"] = json!([
+            {"kind": "cell_value", "relation": "configurations", "row": "config", "field": "enabled"}
+        ]);
+        assert_eq!(status(input).await, SolveStatus::Sat);
+    }
+
+    #[tokio::test]
+    async fn temporal_consistency_rejects_interval_and_predecessor_counterexamples() {
+        assert_eq!(
+            status(temporal_request(true, 0, 4, true, Some(4), 6)).await,
+            SolveStatus::Sat
+        );
+        assert_eq!(
+            status(temporal_request(true, 0, 4, true, Some(5), 4)).await,
+            SolveStatus::Unsat
+        );
+        assert_eq!(
+            status(temporal_request(true, 0, 6, true, Some(5), 7)).await,
+            SolveStatus::Unsat
+        );
+        assert_eq!(
+            status(temporal_request(false, 0, 4, true, Some(4), 6)).await,
+            SolveStatus::Unsat
+        );
+    }
+
+    #[tokio::test]
+    async fn temporal_consistency_synthesizes_a_bounded_integer_endpoint() {
+        let mut input = temporal_request(true, 0, 4, true, Some(4), 6);
+        input["mode"] = json!("synthesize");
+        input["facts"]["relations"]["intervals"]["rows"]["after"]["cells"]["start"]["value"] =
+            Value::Null;
+        input["unknowns"] = json!([
+            {"kind": "cell_value", "relation": "intervals", "row": "after", "field": "start"}
+        ]);
+        assert_eq!(status(input).await, SolveStatus::Sat);
     }
 
     #[tokio::test]
