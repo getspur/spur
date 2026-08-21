@@ -16,7 +16,7 @@ use std::io::{self, BufRead as _, BufReader, Read as _, Write as _};
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -304,7 +304,7 @@ fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
     }
 }
 
-fn join_worker_threads(handles: Vec<JoinHandle<()>>) -> Result<()> {
+fn join_worker_threads(handles: Vec<thread::ScopedJoinHandle<'_, ()>>) -> Result<()> {
     let mut panicked = Vec::new();
     for (worker_id, handle) in handles.into_iter().enumerate() {
         if let Err(payload) = handle.join() {
@@ -315,6 +315,32 @@ fn join_worker_threads(handles: Vec<JoinHandle<()>>) -> Result<()> {
         Ok(())
     } else {
         bail!("failed to join temporal workers: {}", panicked.join("; "))
+    }
+}
+
+struct CancelOnFailure<'a> {
+    cancellation: &'a AtomicBool,
+    armed: bool,
+}
+
+impl<'a> CancelOnFailure<'a> {
+    fn new(cancellation: &'a AtomicBool) -> Self {
+        Self {
+            cancellation,
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for CancelOnFailure<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            self.cancellation.store(true, Ordering::Release);
+        }
     }
 }
 
@@ -347,208 +373,247 @@ where
     if total_work == 0 {
         return Ok(WorkerPoolStats::default());
     }
-    let worker_count = jobs.get().min(total_work);
-    let initialize = Arc::new(initialize);
-    let compute = Arc::new(compute);
-    let occupancy = Arc::new(ConcurrentOccupancy::default());
-    let (event_sender, event_receiver) = sync_channel(worker_count);
-    let mut work_senders: Vec<SyncSender<(usize, Work)>> = Vec::with_capacity(worker_count);
-    let mut handles = Vec::with_capacity(worker_count);
+    thread::scope(move |scope| {
+        let worker_count = jobs.get().min(total_work);
+        let initialize = Arc::new(initialize);
+        let compute = Arc::new(compute);
+        let cancellation = Arc::new(AtomicBool::new(false));
+        let occupancy = Arc::new(ConcurrentOccupancy::default());
+        let (event_sender, event_receiver) = sync_channel(worker_count);
+        let mut work_senders: Vec<SyncSender<(usize, Work)>> = Vec::with_capacity(worker_count);
+        let mut handles = Vec::with_capacity(worker_count);
 
-    for worker_id in 0..worker_count {
-        let (work_sender, work_receiver) = sync_channel(1);
-        let worker_events = event_sender.clone();
-        let worker_initialize = Arc::clone(&initialize);
-        let worker_compute = Arc::clone(&compute);
-        let worker_occupancy = Arc::clone(&occupancy);
-        let spawn = thread::Builder::new()
-            .name(format!("spur-temporal-{worker_id}"))
-            .spawn(move || {
-                let mut current_ordinal = None;
-                let worker_run =
-                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<()> {
-                        let mut state = worker_initialize(worker_id)
-                            .with_context(|| format!("initialize temporal worker {worker_id}"))?;
-                        worker_events
-                            .send(WorkerEvent::Ready { worker_id })
-                            .map_err(|_| {
-                                anyhow!("temporal result channel closed during startup")
+        for worker_id in 0..worker_count {
+            let (work_sender, work_receiver) = sync_channel(1);
+            let worker_events = event_sender.clone();
+            let worker_initialize = Arc::clone(&initialize);
+            let worker_compute = Arc::clone(&compute);
+            let worker_cancellation = Arc::clone(&cancellation);
+            let worker_occupancy = Arc::clone(&occupancy);
+            let spawn = thread::Builder::new()
+                .name(format!("spur-temporal-{worker_id}"))
+                .spawn_scoped(scope, move || {
+                    let mut current_ordinal = None;
+                    let worker_run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+                        || -> Result<()> {
+                            let mut state = worker_initialize(worker_id).with_context(|| {
+                                format!("initialize temporal worker {worker_id}")
                             })?;
+                            worker_events
+                                .send(WorkerEvent::Ready { worker_id })
+                                .map_err(|_| {
+                                    anyhow!("temporal result channel closed during startup")
+                                })?;
 
-                        while let Ok((ordinal, work)) = work_receiver.recv() {
-                            current_ordinal = Some(ordinal);
-                            worker_occupancy.queued_work.decrement(1);
-                            worker_occupancy.active_work.increment();
-                            let computed =
-                                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                    worker_compute(&mut state, ordinal, work)
-                                }));
-                            worker_occupancy.active_work.decrement(1);
-                            let output = match computed {
-                                Ok(result) => result,
-                                Err(payload) => bail!(
-                                    "temporal worker {worker_id} panicked at ordinal {ordinal}: {}",
-                                    panic_message(payload)
-                                ),
-                            }?;
-                            worker_occupancy.results.increment();
-                            if worker_events
-                                .send(WorkerEvent::Completed { ordinal, output })
-                                .is_err()
-                            {
-                                worker_occupancy.results.decrement(1);
-                                return Ok(());
+                            while let Ok((ordinal, work)) = work_receiver.recv() {
+                                current_ordinal = Some(ordinal);
+                                worker_occupancy.queued_work.decrement(1);
+                                if worker_cancellation.load(Ordering::Acquire) {
+                                    current_ordinal = None;
+                                    drop(work);
+                                    continue;
+                                }
+
+                                worker_occupancy.active_work.increment();
+                                let computed = std::panic::catch_unwind(
+                                    std::panic::AssertUnwindSafe(|| {
+                                        worker_compute(&mut state, ordinal, work)
+                                    }),
+                                );
+                                worker_occupancy.active_work.decrement(1);
+                                let output = match computed {
+                                    Ok(result) => result,
+                                    Err(payload) => bail!(
+                                        "temporal worker {worker_id} panicked at ordinal {ordinal}: {}",
+                                        panic_message(payload)
+                                    ),
+                                }?;
+                                worker_occupancy.results.increment();
+                                if worker_events
+                                    .send(WorkerEvent::Completed { ordinal, output })
+                                    .is_err()
+                                {
+                                    worker_occupancy.results.decrement(1);
+                                    return Ok(());
+                                }
+                                current_ordinal = None;
                             }
-                            current_ordinal = None;
+                            Ok(())
+                        },
+                    ));
+
+                    let failure = match worker_run {
+                        Ok(Ok(())) => None,
+                        Ok(Err(error)) => Some(error),
+                        Err(payload) => Some(anyhow!(
+                            "temporal worker {worker_id} panicked: {}",
+                            panic_message(payload)
+                        )),
+                    };
+                    if let Some(error) = failure {
+                        worker_cancellation.store(true, Ordering::Release);
+                        let _ = worker_events.send(WorkerEvent::Failed {
+                            worker_id,
+                            ordinal: current_ordinal,
+                            error,
+                        });
+                    }
+                });
+
+            match spawn {
+                Ok(handle) => {
+                    work_senders.push(work_sender);
+                    handles.push(handle);
+                }
+                Err(error) => {
+                    cancellation.store(true, Ordering::Release);
+                    drop(work_sender);
+                    drop(work_senders);
+                    drop(event_sender);
+                    drain_worker_events(&event_receiver, &occupancy);
+                    let join_result = join_worker_threads(handles);
+                    let error =
+                        anyhow!(error).context(format!("spawn temporal worker {worker_id}"));
+                    return match join_result {
+                        Ok(()) => Err(error),
+                        Err(join_error) => Err(error.context(join_error.to_string())),
+                    };
+                }
+            }
+        }
+        drop(event_sender);
+
+        let mut reduce = reduce;
+        let coordinator = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+            || -> Result<WorkerPoolStats> {
+                let mut cancel_on_failure = CancelOnFailure::new(&cancellation);
+                let mut ready = vec![false; worker_count];
+                let mut ready_count = 0;
+                while ready_count < worker_count {
+                    match event_receiver.recv() {
+                        Ok(WorkerEvent::Ready { worker_id }) => {
+                            let was_ready = ready
+                                .get_mut(worker_id)
+                                .with_context(|| format!("unknown temporal worker {worker_id}"))?;
+                            if std::mem::replace(was_ready, true) {
+                                bail!("temporal worker {worker_id} reported ready twice");
+                            }
+                            ready_count += 1;
                         }
-                        Ok(())
-                    }));
-
-                let failure = match worker_run {
-                    Ok(Ok(())) => None,
-                    Ok(Err(error)) => Some(error),
-                    Err(payload) => Some(anyhow!(
-                        "temporal worker {worker_id} panicked: {}",
-                        panic_message(payload)
-                    )),
-                };
-                if let Some(error) = failure {
-                    let _ = worker_events.send(WorkerEvent::Failed {
-                        worker_id,
-                        ordinal: current_ordinal,
-                        error,
-                    });
-                }
-            });
-
-        match spawn {
-            Ok(handle) => {
-                work_senders.push(work_sender);
-                handles.push(handle);
-            }
-            Err(error) => {
-                drop(work_sender);
-                drop(work_senders);
-                drop(event_sender);
-                drain_worker_events(&event_receiver, &occupancy);
-                let join_result = join_worker_threads(handles);
-                let error = anyhow!(error).context(format!("spawn temporal worker {worker_id}"));
-                return match join_result {
-                    Ok(()) => Err(error),
-                    Err(join_error) => Err(error.context(join_error.to_string())),
-                };
-            }
-        }
-    }
-    drop(event_sender);
-
-    let mut reduce = reduce;
-    let coordinator = (|| -> Result<WorkerPoolStats> {
-        let mut ready = vec![false; worker_count];
-        let mut ready_count = 0;
-        while ready_count < worker_count {
-            match event_receiver.recv() {
-                Ok(WorkerEvent::Ready { worker_id }) => {
-                    let was_ready = ready
-                        .get_mut(worker_id)
-                        .with_context(|| format!("unknown temporal worker {worker_id}"))?;
-                    if std::mem::replace(was_ready, true) {
-                        bail!("temporal worker {worker_id} reported ready twice");
+                        Ok(WorkerEvent::Failed {
+                            worker_id,
+                            ordinal,
+                            error,
+                        }) => {
+                            let location = ordinal
+                                .map(|ordinal| format!(" at ordinal {ordinal}"))
+                                .unwrap_or_default();
+                            return Err(error).with_context(|| {
+                                format!("temporal worker {worker_id} failed{location}")
+                            });
+                        }
+                        Ok(WorkerEvent::Completed { .. }) => {
+                            bail!("temporal worker completed work before startup finished")
+                        }
+                        Err(_) => bail!("temporal worker result channel closed during startup"),
                     }
-                    ready_count += 1;
                 }
-                Ok(WorkerEvent::Failed {
-                    worker_id,
-                    ordinal,
-                    error,
-                }) => {
-                    let location = ordinal
-                        .map(|ordinal| format!(" at ordinal {ordinal}"))
-                        .unwrap_or_default();
-                    return Err(error)
-                        .with_context(|| format!("temporal worker {worker_id} failed{location}"));
-                }
-                Ok(WorkerEvent::Completed { .. }) => {
-                    bail!("temporal worker completed work before startup finished")
-                }
-                Err(_) => bail!("temporal worker result channel closed during startup"),
-            }
-        }
 
-        let mut work = work_items.into_iter().enumerate();
-        let mut window = OrdinalAdmissionWindow::new(jobs);
-        let mut max_reducer_pending = 0;
+                let mut work = work_items.into_iter().enumerate();
+                let mut window = OrdinalAdmissionWindow::new(jobs);
+                let mut max_reducer_pending = 0;
 
-        while window.next_reduced < total_work {
-            while window.next_dispatch < total_work && window.has_capacity() {
-                let (ordinal, item) = work
-                    .next()
-                    .context("temporal worker input ended before its declared length")?;
-                let worker_id = ordinal % worker_count;
-                occupancy.queued_work.increment();
-                if work_senders[worker_id].send((ordinal, item)).is_err() {
-                    occupancy.queued_work.decrement(1);
-                    bail!("temporal worker {worker_id} stopped before accepting ordinal {ordinal}");
-                }
-                window.admit(ordinal)?;
-            }
-
-            match event_receiver.recv() {
-                Ok(WorkerEvent::Completed { ordinal, output }) => {
-                    if !(window.next_reduced..window.next_dispatch).contains(&ordinal) {
-                        bail!(
-                            "temporal worker returned ordinal {ordinal} outside admitted window {}..{}",
-                            window.next_reduced,
-                            window.next_dispatch
-                        );
+                while window.next_reduced < total_work {
+                    while window.next_dispatch < total_work
+                        && window.has_capacity()
+                        && !cancellation.load(Ordering::Acquire)
+                    {
+                        let (ordinal, item) = work
+                            .next()
+                            .context("temporal worker input ended before its declared length")?;
+                        let worker_id = ordinal % worker_count;
+                        occupancy.queued_work.increment();
+                        if work_senders[worker_id].send((ordinal, item)).is_err() {
+                            occupancy.queued_work.decrement(1);
+                            bail!(
+                                "temporal worker {worker_id} stopped before accepting ordinal {ordinal}"
+                            );
+                        }
+                        window.admit(ordinal)?;
                     }
-                    let progress = reduce(output)
-                        .with_context(|| format!("reduce temporal commit ordinal {ordinal}"))?;
-                    let reduced = window.note_reduced(progress.next_ordinal)?;
-                    occupancy.results.decrement(reduced);
-                    max_reducer_pending = max_reducer_pending.max(progress.pending_results);
+
+                    match event_receiver.recv() {
+                        Ok(WorkerEvent::Completed { ordinal, output }) => {
+                            if !(window.next_reduced..window.next_dispatch).contains(&ordinal) {
+                                bail!(
+                                    "temporal worker returned ordinal {ordinal} outside admitted window {}..{}",
+                                    window.next_reduced,
+                                    window.next_dispatch
+                                );
+                            }
+                            let progress = reduce(output).with_context(|| {
+                                format!("reduce temporal commit ordinal {ordinal}")
+                            })?;
+                            let reduced = window.note_reduced(progress.next_ordinal)?;
+                            occupancy.results.decrement(reduced);
+                            max_reducer_pending = max_reducer_pending.max(progress.pending_results);
+                        }
+                        Ok(WorkerEvent::Failed {
+                            worker_id,
+                            ordinal,
+                            error,
+                        }) => {
+                            let location = ordinal
+                                .map(|ordinal| format!(" at ordinal {ordinal}"))
+                                .unwrap_or_default();
+                            return Err(error).with_context(|| {
+                                format!("temporal worker {worker_id} failed{location}")
+                            });
+                        }
+                        Ok(WorkerEvent::Ready { worker_id }) => {
+                            bail!("temporal worker {worker_id} reported ready twice")
+                        }
+                        Err(_) => bail!(
+                            "temporal worker result channel closed while waiting for ordinal {}",
+                            window.next_reduced
+                        ),
+                    }
                 }
-                Ok(WorkerEvent::Failed {
-                    worker_id,
-                    ordinal,
-                    error,
-                }) => {
-                    let location = ordinal
-                        .map(|ordinal| format!(" at ordinal {ordinal}"))
-                        .unwrap_or_default();
-                    return Err(error)
-                        .with_context(|| format!("temporal worker {worker_id} failed{location}"));
-                }
-                Ok(WorkerEvent::Ready { worker_id }) => {
-                    bail!("temporal worker {worker_id} reported ready twice")
-                }
-                Err(_) => bail!(
-                    "temporal worker result channel closed while waiting for ordinal {}",
-                    window.next_reduced
-                ),
-            }
+
+                let stats = WorkerPoolStats {
+                    max_in_flight: window.max_in_flight,
+                    max_queued_work: occupancy.queued_work.maximum(),
+                    max_active_work: occupancy.active_work.maximum(),
+                    max_result_occupancy: occupancy.results.maximum(),
+                    max_reducer_pending,
+                };
+                cancel_on_failure.disarm();
+                Ok(stats)
+            },
+        ));
+
+        if !matches!(&coordinator, Ok(Ok(_))) {
+            cancellation.store(true, Ordering::Release);
         }
+        drop(work_senders);
+        if !matches!(&coordinator, Ok(Ok(_))) {
+            drain_worker_events(&event_receiver, &occupancy);
+        }
+        let join_result = join_worker_threads(handles);
 
-        Ok(WorkerPoolStats {
-            max_in_flight: window.max_in_flight,
-            max_queued_work: occupancy.queued_work.maximum(),
-            max_active_work: occupancy.active_work.maximum(),
-            max_result_occupancy: occupancy.results.maximum(),
-            max_reducer_pending,
-        })
-    })();
-
-    drop(work_senders);
-    if coordinator.is_err() {
-        drain_worker_events(&event_receiver, &occupancy);
-    }
-    let join_result = join_worker_threads(handles);
-    match (coordinator, join_result) {
-        (Ok(stats), Ok(())) => Ok(stats),
-        (Err(error), Ok(())) => Err(error),
-        (Ok(_), Err(join_error)) => Err(join_error),
-        (Err(error), Err(join_error)) => Err(error.context(join_error.to_string())),
-    }
+        match coordinator {
+            Err(payload) => {
+                drop(join_result);
+                std::panic::resume_unwind(payload)
+            }
+            Ok(coordinator) => match (coordinator, join_result) {
+                (Ok(stats), Ok(())) => Ok(stats),
+                (Err(error), Ok(())) => Err(error),
+                (Ok(_), Err(join_error)) => Err(join_error),
+                (Err(error), Err(join_error)) => Err(error.context(join_error.to_string())),
+            },
+        }
+    })
 }
 
 impl<'a> CommitResultReducer<'a> {
@@ -2979,6 +3044,62 @@ mod tests {
     }
 
     #[test]
+    fn worker_pool_joins_workers_before_reducer_panic_escapes() {
+        struct WorkerLifetime {
+            live: Option<Arc<std::sync::atomic::AtomicUsize>>,
+        }
+
+        impl Drop for WorkerLifetime {
+            fn drop(&mut self) {
+                if let Some(live) = &self.live {
+                    live.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                }
+            }
+        }
+
+        let live = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let started = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let initializer_live = Arc::clone(&live);
+        let compute_started = Arc::clone(&started);
+
+        let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = run_bounded_worker_pool(
+                std::num::NonZeroUsize::new(2).unwrap(),
+                vec![(), ()],
+                move |worker_id| {
+                    let live = (worker_id == 1).then(|| {
+                        initializer_live.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        Arc::clone(&initializer_live)
+                    });
+                    Ok(WorkerLifetime { live })
+                },
+                move |_, ordinal, ()| {
+                    compute_started.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    if ordinal == 1 {
+                        std::thread::sleep(std::time::Duration::from_millis(250));
+                    }
+                    Ok(ordinal)
+                },
+                |ordinal| {
+                    if ordinal == 0 {
+                        while started.load(std::sync::atomic::Ordering::SeqCst) < 2 {
+                            std::thread::yield_now();
+                        }
+                        panic!("forced reducer panic");
+                    }
+                    Ok(ReductionProgress {
+                        next_ordinal: 0,
+                        pending_results: 0,
+                    })
+                },
+            );
+        }));
+
+        assert!(unwind.is_err());
+        assert_eq!(live.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[test]
     fn worker_failure_cancels_queued_work_and_joins_every_worker() {
         struct WorkerLifetime {
             live: Arc<std::sync::atomic::AtomicUsize>,
@@ -2993,20 +3114,22 @@ mod tests {
             }
         }
 
-        let jobs = std::num::NonZeroUsize::new(4).unwrap();
+        let jobs = std::num::NonZeroUsize::new(3).unwrap();
         let live = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let dropped = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let started = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let started = Arc::new(Mutex::new(Vec::new()));
+        let ordinal_zero_gate = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
         let initializer_live = Arc::clone(&live);
         let initializer_dropped = Arc::clone(&dropped);
         let compute_started = Arc::clone(&started);
+        let compute_gate = Arc::clone(&ordinal_zero_gate);
         let mut graph = empty_graph_artifact();
         let mut commits = commit_index("worker-failure-indexed-at");
         let mut reducer = CommitResultReducer::new(&mut graph, &mut commits, None, None);
 
         let error = run_bounded_worker_pool(
             jobs,
-            vec![(); 32],
+            vec![(); 4],
             move |_| {
                 initializer_live.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 Ok(WorkerLifetime {
@@ -3015,17 +3138,40 @@ mod tests {
                 })
             },
             move |_, ordinal, ()| {
-                compute_started.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                if ordinal == 0 {
-                    bail!("forced worker failure");
+                compute_started.lock().unwrap().push(ordinal);
+                match ordinal {
+                    0 => {
+                        let (released, condvar) = &*compute_gate;
+                        let mut released = released.lock().unwrap();
+                        while !*released {
+                            released = condvar.wait(released).unwrap();
+                        }
+                        drop(released);
+                        std::thread::sleep(std::time::Duration::from_millis(300));
+                    }
+                    1 => {
+                        let (released, condvar) = &*compute_gate;
+                        let mut released = released.lock().unwrap();
+                        while !*released {
+                            released = condvar.wait(released).unwrap();
+                        }
+                        drop(released);
+                        std::thread::sleep(std::time::Duration::from_millis(100));
+                        bail!("forced late worker failure");
+                    }
+                    _ => {}
                 }
-                std::thread::sleep(std::time::Duration::from_millis(10));
                 Ok(commit_walk_result(ordinal))
             },
             |result| {
+                assert_eq!(result.ordinal, 2);
                 reducer.push(result)?;
+                let (released, condvar) = &*ordinal_zero_gate;
+                *released.lock().unwrap() = true;
+                condvar.notify_all();
+                // Release one slot so ordinal 3 is buffered behind the still-active ordinal 0.
                 Ok(ReductionProgress {
-                    next_ordinal: reducer.next_ordinal,
+                    next_ordinal: 1,
                     pending_results: reducer.pending.len(),
                 })
             },
@@ -3034,9 +3180,11 @@ mod tests {
         drop(reducer);
 
         let message = format!("{error:#}");
-        assert!(message.contains("ordinal 0"), "{message}");
-        assert!(message.contains("forced worker failure"), "{message}");
-        assert!(started.load(std::sync::atomic::Ordering::SeqCst) <= jobs.get());
+        assert!(message.contains("ordinal 1"), "{message}");
+        assert!(message.contains("forced late worker failure"), "{message}");
+        let mut started = started.lock().unwrap().clone();
+        started.sort_unstable();
+        assert_eq!(started, [0, 1, 2]);
         assert_eq!(live.load(std::sync::atomic::Ordering::SeqCst), 0);
         assert_eq!(
             dropped.load(std::sync::atomic::Ordering::SeqCst),
