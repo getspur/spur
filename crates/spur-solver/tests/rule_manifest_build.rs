@@ -387,6 +387,48 @@ fn data_integrity_catalog_and_conformance_match_the_approved_contract() {
 
     let aggregate = rule("data_integrity.aggregate_balance");
     assert_eq!(
+        aggregate.summary,
+        "Require every declared integer term cell to be present and resolvable and every checked linear term to contribute to one exact integer target."
+    );
+    assert_eq!(
+        aggregate.llm_encoding.encode_steps,
+        [
+            "Bind exactly one aggregate-balance definition ID as the subject.",
+            "Resolve every explicitly listed term to a present integer cell and validate each checked integer coefficient.",
+            "Include every explicitly listed term in the exact weighted sum and equate it to the target.",
+        ]
+    );
+    assert_eq!(
+        aggregate.solver_encoding.verification,
+        "fix every listed integer cell and assert unconditional presence plus exact weighted equality"
+    );
+    assert_eq!(
+        aggregate.solver_encoding.formula,
+        [
+            "for every listed term t: present(t)",
+            "sum over every listed term t of coefficient(t) * value(t) = target",
+        ]
+    );
+    assert!(
+        aggregate
+            .llm_encoding
+            .anti_patterns
+            .iter()
+            .any(|pattern| pattern
+                == "Do not condition term presence or arithmetic contribution on row activity."),
+        "aggregate guidance must explicitly reject activity filtering"
+    );
+    let positive_semantics = format!(
+        "{} {} {}",
+        aggregate.summary,
+        aggregate.llm_encoding.encode_steps.join(" "),
+        aggregate.solver_encoding.formula.join(" ")
+    );
+    assert!(
+        !positive_semantics.contains("active") && !positive_semantics.contains("activity"),
+        "aggregate presence and contribution semantics must be unconditional"
+    );
+    assert_eq!(
         aggregate
             .examples
             .valid
@@ -401,6 +443,72 @@ fn data_integrity_catalog_and_conformance_match_the_approved_contract() {
             "target": 0
         })),
         "aggregate terms and coefficients must remain exact"
+    );
+    assert_eq!(
+        aggregate
+            .examples
+            .valid
+            .facts
+            .pointer("/facts/relations/ledger/rows/delta"),
+        Some(&serde_json::json!({
+            "active": false,
+            "cells": {"amount": {"present": true, "value": -30}}
+        })),
+        "an inactive row's present value must witness unconditional contribution"
+    );
+    let valid_request = &aggregate.examples.valid.facts;
+    let balance = valid_request
+        .pointer("/facts/aggregate_balances/ledger_balance")
+        .expect("aggregate balance definition");
+    let target = balance["target"].as_i64().expect("integer target");
+    let terms = balance["terms"].as_array().expect("aggregate terms");
+    let exact_sum = terms
+        .iter()
+        .map(|term| {
+            let relation = term["relation"].as_str().expect("term relation");
+            let row = term["row"].as_str().expect("term row");
+            let field = term["field"].as_str().expect("term field");
+            let coefficient = term["coefficient"].as_i64().expect("term coefficient");
+            let value = valid_request
+                .pointer(&format!(
+                    "/facts/relations/{relation}/rows/{row}/cells/{field}/value"
+                ))
+                .and_then(serde_json::Value::as_i64)
+                .expect("listed term integer value");
+            coefficient * value
+        })
+        .sum::<i64>();
+    let activity_filtered_sum = terms
+        .iter()
+        .filter(|term| {
+            let relation = term["relation"].as_str().expect("term relation");
+            let row = term["row"].as_str().expect("term row");
+            valid_request
+                .pointer(&format!("/facts/relations/{relation}/rows/{row}/active"))
+                .and_then(serde_json::Value::as_bool)
+                .expect("row activity")
+        })
+        .map(|term| {
+            let relation = term["relation"].as_str().expect("term relation");
+            let row = term["row"].as_str().expect("term row");
+            let field = term["field"].as_str().expect("term field");
+            let coefficient = term["coefficient"].as_i64().expect("term coefficient");
+            let value = valid_request
+                .pointer(&format!(
+                    "/facts/relations/{relation}/rows/{row}/cells/{field}/value"
+                ))
+                .and_then(serde_json::Value::as_i64)
+                .expect("listed term integer value");
+            coefficient * value
+        })
+        .sum::<i64>();
+    assert_eq!(
+        exact_sum, target,
+        "every explicitly listed term contributes"
+    );
+    assert_ne!(
+        activity_filtered_sum, target,
+        "the valid witness must fail if row activity is reintroduced as a filter"
     );
 
     let consistency = rule("data_integrity.mutually_consistent");

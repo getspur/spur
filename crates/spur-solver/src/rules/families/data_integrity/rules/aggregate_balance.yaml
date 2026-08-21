@@ -4,7 +4,7 @@ rule_version: 1
 family: data_integrity
 profile: finite_relational_snapshot
 primitive: exact_integer_aggregate_balance
-summary: Require all declared integer term cells to be present when their rows are active and their checked linear combination to equal one exact integer target.
+summary: Require every declared integer term cell to be present and resolvable and every checked linear term to contribute to one exact integer target.
 availability: implemented
 strength: hard
 authorities:
@@ -21,21 +21,21 @@ llm_encoding:
     - A finite explicitly listed set of integer facts must satisfy one exact weighted balance.
   encode_steps:
     - Bind exactly one aggregate-balance definition ID as the subject.
-    - Resolve every term to an integer cell and validate each checked integer coefficient.
-    - Require each listed cell to be present when its row is active and equate the exact weighted sum to the target.
+    - Resolve every explicitly listed term to a present integer cell and validate each checked integer coefficient.
+    - Include every explicitly listed term in the exact weighted sum and equate it to the target.
   anti_patterns:
     - Do not infer decimal tolerance, rounding, units, or undeclared contributing rows.
-    - Do not silently filter the explicit term list by row activity when constructing the arithmetic equality.
+    - Do not condition term presence or arithmetic contribution on row activity.
     - Do not accept coefficient overflow or nonlinear multiplication.
   escalate_when:
     - Escalate decimal arithmetic, tolerance bands, currency conversion, dynamic term discovery, or nonlinear formulas outside this primitive.
 solver_encoding:
   theory: QF_LIA
-  verification: fix every listed integer cell and assert presence plus exact weighted equality
+  verification: fix every listed integer cell and assert unconditional presence plus exact weighted equality
   synthesis: constrain only explicitly unknown listed cell presence or integer values within their field domains
   formula:
-    - "for every listed term t: active(row(t)) implies present(t)"
-    - "sum over listed terms t of coefficient(t) * value(t) = target"
+    - "for every listed term t: present(t)"
+    - "sum over every listed term t of coefficient(t) * value(t) = target"
 subjects:
   cardinality: {kind: exact, count: 1}
 parameters: []
@@ -53,7 +53,7 @@ examples:
             fields: {amount: {kind: integer, minimum: -2000, maximum: 2000}}
             rows:
               left: {active: true, cells: {amount: {present: true, value: 100}}}
-              delta: {active: true, cells: {amount: {present: true, value: -30}}}
+              delta: {active: false, cells: {amount: {present: true, value: -30}}}
               right: {active: true, cells: {amount: {present: true, value: 70}}}
         unique_constraints: {}
         foreign_keys: {}
@@ -116,7 +116,7 @@ conformance:
               fields: {amount: {kind: integer, minimum: -2000, maximum: 2000}}
               rows:
                 left: {active: true, cells: {amount: {present: true, value: 100}}}
-                delta: {active: true, cells: {amount: {present: true, value: -30}}}
+                delta: {active: false, cells: {amount: {present: true, value: -30}}}
                 right: {active: true, cells: {amount: {present: true, value: 70}}}
           unique_constraints: {}
           foreign_keys: {}
