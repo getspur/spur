@@ -360,9 +360,25 @@ impl App {
             }
             SpurEventBody::AgentConfigUpdateResult { name, ok, message } => {
                 if *ok {
+                    self.apply_pending_config_on_ok();
                     self.flash_hint_short(format!("agent config `{name}`: {message}"));
                 } else {
+                    self.discard_pending_config_patch();
                     self.flash_hint_short(format!("agent config `{name}` failed: {message}"));
+                }
+                return;
+            }
+            SpurEventBody::ConfigUpdateResult {
+                section,
+                ok,
+                message,
+            } => {
+                if *ok {
+                    self.apply_pending_config_on_ok();
+                    self.flash_hint_short(format!("{section}: {message}"));
+                } else {
+                    self.discard_pending_config_patch();
+                    self.flash_hint_short(format!("{section} failed: {message}"));
                 }
                 return;
             }

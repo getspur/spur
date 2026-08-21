@@ -154,6 +154,11 @@ pub enum UserInput {
         name: String,
         updated_entry: spur_acp::AgentConfig,
     },
+    /// Persist one `/configure` section then live-apply on success.
+    /// Maps 1:1 to `spur_core::InteractiveInput::UpdateConfig`.
+    UpdateConfig {
+        patch: spur_acp::config::ConfigPatch,
+    },
     /// Dedicated `session/set_model` dispatch (M9 F-C). Maps 1:1 to
     /// `spur_core::InteractiveInput::SetSessionModel`. The orchestrator
     /// delegates to `AgentConnection::set_session_model`, which owns the
@@ -444,6 +449,9 @@ pub struct App {
     /// at session-creation time (see `resolve_agent_config`). Defaults to
     /// `SpurConfig::default()` when no config is supplied.
     config: std::sync::Arc<spur_acp::SpurConfig>,
+    /// Last config patch sent to the orchestrator, applied locally only
+    /// after `ConfigUpdateResult` / `AgentConfigUpdateResult` reports ok.
+    pending_config_patch: Option<spur_acp::config::ConfigPatch>,
     /// Path to the project-local `.spur/config.toml` that seeded `config`.
     /// When `Some`, `/theme <name>` persists the theme choice back to this
     /// file via `update_config`. `None` in test fixtures and when the TUI

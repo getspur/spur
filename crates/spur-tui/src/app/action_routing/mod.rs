@@ -81,6 +81,7 @@ impl App {
             action @ (Action::VendorExec { .. }
             | Action::SetSessionConfigOption { .. }
             | Action::AgentConfigSaveRequested { .. }
+            | Action::ConfigSaveRequested { .. }
             | Action::SetSessionModel { .. }
             | Action::SetSessionEffort { .. }
             | Action::TogglePlanMode

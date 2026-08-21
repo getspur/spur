@@ -133,6 +133,11 @@ pub enum Action {
         name: String,
         updated_entry: spur_acp::AgentConfig,
     },
+    /// Persist one `/configure` section (`SAVE-APPLY`). Memory is updated
+    /// only after the orchestrator reports persist ok.
+    ConfigSaveRequested {
+        patch: spur_acp::config::ConfigPatch,
+    },
     /// Dedicated `session/set_model` dispatch (M9 F-C). Emitted by
     /// the submit-router consumer when caps advertise
     /// `supports_set_model()` so the orchestrator can route through
