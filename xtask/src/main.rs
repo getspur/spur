@@ -76,7 +76,8 @@ fn print_help() {
     eprintln!("      x86_64 via xwin), fetch them into <dir> (default dist/) with");
     eprintln!("      triple-suffixed names, package crates/spur-cli/assets/skills as");
     eprintln!("      spur-skills-<version>.tar.gz (share/spur/skills layout for the");
-    eprintln!("      runtime SkillCatalog resolver), and write SHA256SUMS");
+    eprintln!("      runtime SkillCatalog resolver), vendor DuckDB extensions as");
+    eprintln!("      spur-duckdb-extensions-<version>.tar.gz, and write SHA256SUMS");
     eprintln!("      --parallel: run the platform legs concurrently, each in its own");
     eprintln!("        remote namespace (cargo's exclusive target-dir lock would");
     eprintln!("        serialize a shared dir; sccache still dedupes host compiles");
@@ -678,6 +679,7 @@ fn run_dist(workspace_root: &Path, options: &DistOptions) -> Result<(), String> 
         artifacts.push(package_dist_duckdb_extensions(
             workspace_root,
             &out_dir,
+            &version,
             &options.platforms,
         )?);
     }
@@ -702,16 +704,32 @@ fn dist_duckdb_extensions_dir_name() -> &'static str {
     "duckdb-extensions"
 }
 
+/// Archive name for the platform-independent DuckDB extension sidecar.
+/// GitHub release assets must be files; `gh release create dist/*` cannot
+/// upload the unpacked `duckdb-extensions/` directory.
+fn dist_duckdb_extensions_archive_name(version: &str) -> String {
+    format!("spur-duckdb-extensions-{version}.tar.gz")
+}
+
 fn package_dist_duckdb_extensions(
     workspace_root: &Path,
     out_dir: &Path,
+    version: &str,
     platforms: &[DistPlatform],
 ) -> Result<PathBuf, String> {
-    let dest = out_dir.join(dist_duckdb_extensions_dir_name());
     let script = workspace_root.join("scripts/vendor-duckdb-extensions.sh");
     if !script.is_file() {
         return Err(format!("missing {}", script.display()));
     }
+
+    let stage = out_dir.join(".duckdb-extensions-stage");
+    remove_existing_path(&stage)?;
+    // Runtime looks up `<prefix>/share/spur/duckdb-extensions` (next to
+    // `share/spur/skills`) and `exe/duckdb-extensions`.
+    let dest = stage
+        .join("share")
+        .join("spur")
+        .join(dist_duckdb_extensions_dir_name());
     let mut command = Command::new("bash");
     command.arg(&script).arg("--out").arg(&dest);
     for platform in platforms {
@@ -721,12 +739,45 @@ fn package_dist_duckdb_extensions(
         .status()
         .map_err(|err| format!("failed to run {}: {err}", script.display()))?;
     if !status.success() {
+        let _ = remove_existing_path(&stage);
         return Err(format!(
             "{} failed with {status}; set SPUR_DIST_SKIP_DUCKDB_EXTENSIONS=1 to skip",
             script.display()
         ));
     }
-    Ok(dest)
+
+    let archive_name = dist_duckdb_extensions_archive_name(version);
+    let archive_path = out_dir.join(&archive_name);
+    let stage_str = stage
+        .to_str()
+        .ok_or_else(|| format!("non-UTF8 stage path: {}", stage.display()))?;
+    let archive_str = archive_path
+        .to_str()
+        .ok_or_else(|| format!("non-UTF8 archive path: {}", archive_path.display()))?;
+    let tar_status = Command::new("tar")
+        .args(["-czf", archive_str, "-C", stage_str, "share"])
+        .status()
+        .map_err(|err| format!("failed to spawn tar for duckdb extensions: {err}"))?;
+    if !tar_status.success() {
+        let _ = remove_existing_path(&stage);
+        return Err(format!(
+            "tar failed packaging duckdb extensions into {} (status {tar_status})",
+            archive_path.display()
+        ));
+    }
+    remove_existing_path(&stage)?;
+    // Previous dist runs left an unpacked directory that `gh release create
+    // dist/*` then tried to upload as a GitHub asset.
+    remove_existing_path(&out_dir.join(dist_duckdb_extensions_dir_name()))?;
+
+    if !archive_path.is_file() {
+        return Err(format!(
+            "duckdb extension archive missing after tar: {}",
+            archive_path.display()
+        ));
+    }
+    eprintln!("packaged duckdb extensions: {}", archive_path.display());
+    Ok(archive_path)
 }
 
 /// Package `crates/spur-cli/assets/skills` into
@@ -1795,6 +1846,14 @@ mod tests {
     }
 
     #[test]
+    fn dist_duckdb_extensions_archive_name_is_versioned_and_platform_independent() {
+        assert_eq!(
+            dist_duckdb_extensions_archive_name("1.21.0"),
+            "spur-duckdb-extensions-1.21.0.tar.gz"
+        );
+    }
+
+    #[test]
     fn dist_platforms_map_to_duckdb_extension_cdn_names() {
         assert_eq!(DistPlatform::MacAarch64.duckdb_platform(), "osx_arm64");
         assert_eq!(DistPlatform::MacX64.duckdb_platform(), "osx_amd64");
@@ -1813,6 +1872,79 @@ mod tests {
         assert!(script.contains("onager"));
         assert!(script.contains("duckpgq"));
         assert!(script.contains("SPUR_DUCKDB_EXTENSION_DIR"));
+    }
+
+    /// GitHub `gh release create dist/*` can only upload files. The vendor
+    /// tree must land as `spur-duckdb-extensions-<ver>.tar.gz`, not a directory.
+    #[cfg(unix)]
+    #[test]
+    fn package_dist_duckdb_extensions_ships_tarball_not_directory() {
+        let workspace = temp_test_dir("dist-duckdb-workspace");
+        let out_dir = temp_test_dir("dist-duckdb-out");
+        let script = workspace.join("scripts/vendor-duckdb-extensions.sh");
+        fs::create_dir_all(script.parent().unwrap()).unwrap();
+        fs::write(
+            &script,
+            r#"#!/usr/bin/env bash
+set -euo pipefail
+OUT=""
+PLATFORMS=()
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --out) OUT="$2"; shift 2 ;;
+    --platform) PLATFORMS+=("$2"); shift 2 ;;
+    --version) shift 2 ;;
+    *) shift ;;
+  esac
+done
+mkdir -p "${OUT}/v1.4.4/${PLATFORMS[0]}"
+printf 'dummy-ext\n' > "${OUT}/v1.4.4/${PLATFORMS[0]}/lance.duckdb_extension"
+"#,
+        )
+        .unwrap();
+        make_executable(&script);
+
+        let archive = package_dist_duckdb_extensions(
+            &workspace,
+            &out_dir,
+            "9.9.9",
+            &[DistPlatform::LinuxX64Gnu],
+        )
+        .expect("package duckdb extensions");
+        assert_eq!(
+            archive.file_name().and_then(|n| n.to_str()),
+            Some("spur-duckdb-extensions-9.9.9.tar.gz")
+        );
+        assert!(
+            archive.is_file(),
+            "GitHub release upload requires a file, got {}",
+            archive.display()
+        );
+        assert!(
+            !out_dir.join("duckdb-extensions").exists(),
+            "unpacked duckdb-extensions dir must not remain in dist/"
+        );
+        assert!(
+            !out_dir.join(".duckdb-extensions-stage").exists(),
+            "stage dir should be removed after packaging"
+        );
+
+        let listing = Command::new("tar")
+            .args(["-tzf"])
+            .arg(&archive)
+            .output()
+            .expect("tar -tzf");
+        assert!(
+            listing.status.success(),
+            "tar -tzf failed: {}",
+            String::from_utf8_lossy(&listing.stderr)
+        );
+        let listing = String::from_utf8_lossy(&listing.stdout);
+        assert!(
+            listing
+                .contains("share/spur/duckdb-extensions/v1.4.4/linux_amd64/lance.duckdb_extension"),
+            "archive must use share/spur/duckdb-extensions layout; got:\n{listing}"
+        );
     }
 
     /// Dist ships macos-x64, but DuckDB 1.4.4 does not publish every extension
@@ -1977,8 +2109,14 @@ fi
         let out_dir = temp_test_dir("dist-artifacts-skills");
         fs::write(out_dir.join("spur-1.0.0-aarch64-unknown-linux-gnu"), b"bin").unwrap();
         fs::write(out_dir.join("spur-skills-1.0.0.tar.gz"), b"skills").unwrap();
+        fs::write(
+            out_dir.join("spur-duckdb-extensions-1.0.0.tar.gz"),
+            b"duckdb",
+        )
+        .unwrap();
         fs::write(out_dir.join("SHA256SUMS"), b"ignore").unwrap();
         fs::write(out_dir.join("notes.txt"), b"ignore").unwrap();
+        fs::create_dir(out_dir.join("duckdb-extensions")).unwrap();
 
         let names: Vec<String> = dist_artifacts_in(&out_dir)
             .unwrap()
@@ -1989,6 +2127,7 @@ fi
             names,
             vec![
                 "spur-1.0.0-aarch64-unknown-linux-gnu".to_owned(),
+                "spur-duckdb-extensions-1.0.0.tar.gz".to_owned(),
                 "spur-skills-1.0.0.tar.gz".to_owned(),
             ]
         );
