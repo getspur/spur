@@ -11,7 +11,7 @@ use crate::{
         manifest::{validate_binding_contract, ValidatedBinding},
         manifest_family_executable_rule_ids,
         manifest_format::NativeHandlerV1,
-        primitives::{and, boolean, eq, int, request, var},
+        primitives::{add, and, boolean, eq, ge, int, le, not, or, request, var},
         CompiledRule, RuleSolveMode,
     },
     types::{
@@ -49,7 +49,7 @@ fn compile(input: Value) -> Result<FamilyCompilation, String> {
         .iter()
         .enumerate()
         .map(|(index, binding)| {
-            compile_binding(binding).map(|predicate| {
+            compile_binding(binding, &prepared.facts, &prepared.variable_names).map(|predicate| {
                 CompiledRule::new(
                     binding.rule_id.clone(),
                     index,
@@ -58,10 +58,21 @@ fn compile(input: Value) -> Result<FamilyCompilation, String> {
             })
         })
         .collect::<Result<Vec<_>, _>>()?;
+    let attributable_rules = rules
+        .iter()
+        .zip(&prepared.bindings)
+        .map(|(rule, binding)| {
+            CompiledRule::new(
+                format!("{}__subject_{}", rule.rule_id, binding.subject),
+                rule.binding_index,
+                rule.predicate.clone(),
+            )
+        })
+        .collect::<Vec<_>>();
     let solver_request = request(
         "data_integrity",
         prepared.variables,
-        &rules,
+        &attributable_rules,
         prepared.timeout_ms,
         prepared.persist,
         prepared.include_smt,
@@ -81,6 +92,8 @@ fn compile(input: Value) -> Result<FamilyCompilation, String> {
 struct PreparedDataIntegrity {
     mode: RuleSolveMode,
     bindings: Vec<ValidatedDataIntegrityBinding>,
+    facts: DataIntegrityFacts,
+    variable_names: BTreeMap<UnknownTarget, String>,
     variables: Vec<Variable>,
     projections: Vec<ModelProjection>,
     fixed_facts: ConstraintExpr,
@@ -132,13 +145,21 @@ fn prepare(input: Value) -> Result<PreparedDataIntegrity, String> {
         .map(|binding| validate_manifest_binding(binding, &input.facts))
         .collect::<Result<Vec<_>, _>>()?;
     let resolver = SnapshotResolver::new(&input.facts, &input.unknowns)?;
+    let SnapshotResolver {
+        variables,
+        projections,
+        fixed_facts,
+        names,
+    } = resolver;
 
     Ok(PreparedDataIntegrity {
         mode: input.mode,
         bindings,
-        variables: resolver.variables,
-        projections: resolver.projections,
-        fixed_facts: conjunction(resolver.fixed_facts),
+        facts: input.facts,
+        variable_names: names,
+        variables,
+        projections,
+        fixed_facts: conjunction(fixed_facts),
         timeout_ms: input.timeout_ms,
         persist: input.persist,
         include_smt: input.include_smt,
@@ -456,13 +477,25 @@ fn validate_binding_subject(
     Ok(())
 }
 
-fn compile_binding(binding: &ValidatedDataIntegrityBinding) -> Result<ConstraintExpr, String> {
+fn compile_binding(
+    binding: &ValidatedDataIntegrityBinding,
+    facts: &DataIntegrityFacts,
+    variable_names: &BTreeMap<UnknownTarget, String>,
+) -> Result<ConstraintExpr, String> {
     match binding.handler {
-        NativeHandlerV1::DataIntegrityUnique
-        | NativeHandlerV1::DataIntegrityForeignKey
-        | NativeHandlerV1::DataIntegrityCardinality
-        | NativeHandlerV1::DataIntegrityValueRange
-        | NativeHandlerV1::DataIntegrityConditionalRequired
+        NativeHandlerV1::DataIntegrityUnique => {
+            compile_unique(&binding.subject, facts, variable_names)
+        }
+        NativeHandlerV1::DataIntegrityForeignKey => {
+            compile_foreign_key(&binding.subject, facts, variable_names)
+        }
+        NativeHandlerV1::DataIntegrityCardinality => {
+            compile_cardinality(&binding.subject, facts, variable_names)
+        }
+        NativeHandlerV1::DataIntegrityValueRange => {
+            compile_value_range(&binding.subject, facts, variable_names)
+        }
+        NativeHandlerV1::DataIntegrityConditionalRequired
         | NativeHandlerV1::DataIntegrityAggregateBalance
         | NativeHandlerV1::DataIntegrityMutuallyConsistent
         | NativeHandlerV1::DataIntegrityTemporalConsistency => Err(format!(
@@ -503,6 +536,247 @@ fn compile_binding(binding: &ValidatedDataIntegrityBinding) -> Result<Constraint
             "mismatched data integrity handler `{:?}`",
             binding.handler
         )),
+    }
+}
+
+fn compile_unique(
+    subject: &str,
+    facts: &DataIntegrityFacts,
+    variable_names: &BTreeMap<UnknownTarget, String>,
+) -> Result<ConstraintExpr, String> {
+    let definition = facts
+        .unique_constraints
+        .get(subject)
+        .ok_or_else(|| format!("unknown unique constraint `{subject}`"))?;
+    let relation = require_relation(facts, &definition.relation)?;
+    let rows = relation.rows.keys().collect::<Vec<_>>();
+    let mut pairs = Vec::new();
+    for (left_index, left_row) in rows.iter().enumerate() {
+        for right_row in rows.iter().skip(left_index + 1) {
+            let mut antecedent = vec![
+                is_one(row_active(variable_names, &definition.relation, left_row)?),
+                is_one(row_active(variable_names, &definition.relation, right_row)?),
+            ];
+            let mut distinct = Vec::with_capacity(definition.fields.len());
+            for field in &definition.fields {
+                antecedent.push(is_one(cell_present(
+                    variable_names,
+                    &definition.relation,
+                    left_row,
+                    field,
+                )?));
+                antecedent.push(is_one(cell_present(
+                    variable_names,
+                    &definition.relation,
+                    right_row,
+                    field,
+                )?));
+                distinct.push(not(eq(
+                    cell_value(variable_names, &definition.relation, left_row, field)?,
+                    cell_value(variable_names, &definition.relation, right_row, field)?,
+                )));
+            }
+            pairs.push(implies(conjunction(antecedent), disjunction(distinct)));
+        }
+    }
+    Ok(conjunction(pairs))
+}
+
+fn compile_foreign_key(
+    subject: &str,
+    facts: &DataIntegrityFacts,
+    variable_names: &BTreeMap<UnknownTarget, String>,
+) -> Result<ConstraintExpr, String> {
+    let definition = facts
+        .foreign_keys
+        .get(subject)
+        .ok_or_else(|| format!("unknown foreign key `{subject}`"))?;
+    let children = require_relation(facts, &definition.child_relation)?;
+    let parents = require_relation(facts, &definition.parent_relation)?;
+    let mut child_requirements = Vec::with_capacity(children.rows.len());
+    for child_row in children.rows.keys() {
+        let mut antecedent = vec![is_one(row_active(
+            variable_names,
+            &definition.child_relation,
+            child_row,
+        )?)];
+        for child_field in &definition.child_fields {
+            antecedent.push(is_one(cell_present(
+                variable_names,
+                &definition.child_relation,
+                child_row,
+                child_field,
+            )?));
+        }
+
+        let mut candidates = Vec::with_capacity(parents.rows.len());
+        for parent_row in parents.rows.keys() {
+            let mut candidate = vec![is_one(row_active(
+                variable_names,
+                &definition.parent_relation,
+                parent_row,
+            )?)];
+            for (child_field, parent_field) in definition
+                .child_fields
+                .iter()
+                .zip(&definition.parent_fields)
+            {
+                candidate.push(is_one(cell_present(
+                    variable_names,
+                    &definition.parent_relation,
+                    parent_row,
+                    parent_field,
+                )?));
+                candidate.push(eq(
+                    cell_value(
+                        variable_names,
+                        &definition.child_relation,
+                        child_row,
+                        child_field,
+                    )?,
+                    cell_value(
+                        variable_names,
+                        &definition.parent_relation,
+                        parent_row,
+                        parent_field,
+                    )?,
+                ));
+            }
+            candidates.push(conjunction(candidate));
+        }
+        child_requirements.push(implies(conjunction(antecedent), disjunction(candidates)));
+    }
+    Ok(conjunction(child_requirements))
+}
+
+fn compile_cardinality(
+    subject: &str,
+    facts: &DataIntegrityFacts,
+    variable_names: &BTreeMap<UnknownTarget, String>,
+) -> Result<ConstraintExpr, String> {
+    let definition = facts
+        .cardinality_constraints
+        .get(subject)
+        .ok_or_else(|| format!("unknown cardinality constraint `{subject}`"))?;
+    let relation = require_relation(facts, &definition.relation)?;
+    let active = match &definition.rows {
+        Some(rows) => rows
+            .iter()
+            .map(|row| row_active(variable_names, &definition.relation, row))
+            .collect::<Result<Vec<_>, _>>()?,
+        None => relation
+            .rows
+            .keys()
+            .map(|row| row_active(variable_names, &definition.relation, row))
+            .collect::<Result<Vec<_>, _>>()?,
+    };
+    let count = linear_sum(active);
+    Ok(and(vec![
+        ge(count.clone(), int(definition.minimum)),
+        le(count, int(definition.maximum)),
+    ]))
+}
+
+fn compile_value_range(
+    subject: &str,
+    facts: &DataIntegrityFacts,
+    variable_names: &BTreeMap<UnknownTarget, String>,
+) -> Result<ConstraintExpr, String> {
+    let definition = facts
+        .value_ranges
+        .get(subject)
+        .ok_or_else(|| format!("unknown value range `{subject}`"))?;
+    let relation = require_relation(facts, &definition.relation)?;
+    let mut rows = Vec::with_capacity(relation.rows.len());
+    for row in relation.rows.keys() {
+        let antecedent = and(vec![
+            is_one(row_active(variable_names, &definition.relation, row)?),
+            is_one(cell_present(
+                variable_names,
+                &definition.relation,
+                row,
+                &definition.field,
+            )?),
+        ]);
+        let value = cell_value(variable_names, &definition.relation, row, &definition.field)?;
+        rows.push(implies(
+            antecedent,
+            and(vec![
+                ge(value.clone(), int(definition.minimum)),
+                le(value, int(definition.maximum)),
+            ]),
+        ));
+    }
+    Ok(conjunction(rows))
+}
+
+fn row_active(
+    variable_names: &BTreeMap<UnknownTarget, String>,
+    relation: &str,
+    row: &str,
+) -> Result<ConstraintExpr, String> {
+    snapshot_variable(
+        variable_names,
+        &UnknownTarget::RowActive(relation.to_owned(), row.to_owned()),
+    )
+}
+
+fn cell_present(
+    variable_names: &BTreeMap<UnknownTarget, String>,
+    relation: &str,
+    row: &str,
+    field: &str,
+) -> Result<ConstraintExpr, String> {
+    snapshot_variable(
+        variable_names,
+        &UnknownTarget::CellPresent(relation.to_owned(), row.to_owned(), field.to_owned()),
+    )
+}
+
+fn cell_value(
+    variable_names: &BTreeMap<UnknownTarget, String>,
+    relation: &str,
+    row: &str,
+    field: &str,
+) -> Result<ConstraintExpr, String> {
+    snapshot_variable(
+        variable_names,
+        &UnknownTarget::CellValue(relation.to_owned(), row.to_owned(), field.to_owned()),
+    )
+}
+
+fn snapshot_variable(
+    variable_names: &BTreeMap<UnknownTarget, String>,
+    target: &UnknownTarget,
+) -> Result<ConstraintExpr, String> {
+    variable_names
+        .get(target)
+        .cloned()
+        .map(var)
+        .ok_or_else(|| format!("validated data integrity target `{target:?}` has no variable"))
+}
+
+fn is_one(expression: ConstraintExpr) -> ConstraintExpr {
+    eq(expression, int(1))
+}
+
+fn implies(antecedent: ConstraintExpr, consequent: ConstraintExpr) -> ConstraintExpr {
+    or(vec![not(antecedent), consequent])
+}
+
+fn disjunction(items: Vec<ConstraintExpr>) -> ConstraintExpr {
+    match items.len() {
+        0 => boolean(false),
+        1 => items.into_iter().next().expect("one item"),
+        _ => or(items),
+    }
+}
+
+fn linear_sum(items: Vec<ConstraintExpr>) -> ConstraintExpr {
+    match items.len() {
+        0 => int(0),
+        1 => items.into_iter().next().expect("one item"),
+        _ => add(items),
     }
 }
 
@@ -988,6 +1262,7 @@ struct SnapshotResolver {
     variables: Vec<Variable>,
     projections: Vec<ModelProjection>,
     fixed_facts: Vec<ConstraintExpr>,
+    names: BTreeMap<UnknownTarget, String>,
 }
 
 impl SnapshotResolver {
@@ -1101,6 +1376,7 @@ impl SnapshotResolver {
             variables,
             projections,
             fixed_facts,
+            names,
         })
     }
 }
@@ -1407,6 +1683,7 @@ mod tests {
     use serde_json::{json, Value};
 
     use super::{compile, estimate_expression_nodes, prepare};
+    use crate::{service::SolverService, types::SolveStatus};
 
     fn empty_facts() -> Value {
         json!({
@@ -1443,6 +1720,294 @@ mod tests {
         facts["unique_constraints"] =
             json!({"record_key": {"relation": "records", "fields": ["key"]}});
         facts
+    }
+
+    fn unique_request(duplicate_complete_key: bool) -> Value {
+        let mut facts = empty_facts();
+        facts["relations"] = json!({
+            "records": {
+                "fields": {"key": {"kind": "integer", "minimum": 0, "maximum": 9}},
+                "rows": {
+                    "first": {"active": true, "cells": {"key": {"present": true, "value": 1}}},
+                    "second": {
+                        "active": true,
+                        "cells": {"key": if duplicate_complete_key {
+                            json!({"present": true, "value": 1})
+                        } else {
+                            json!({"present": false, "value": null})
+                        }}
+                    }
+                }
+            }
+        });
+        facts["unique_constraints"] =
+            json!({"record_key": {"relation": "records", "fields": ["key"]}});
+        request("verify", "data_integrity.unique", "record_key", facts)
+    }
+
+    fn foreign_key_request(child_key_present: bool, parent_match: bool) -> Value {
+        let mut facts = empty_facts();
+        facts["relations"] = json!({
+            "children": {
+                "fields": {"parent_id": {"kind": "integer", "minimum": 0, "maximum": 9}},
+                "rows": {"child": {
+                    "active": true,
+                    "cells": {"parent_id": if child_key_present {
+                        json!({"present": true, "value": 1})
+                    } else {
+                        json!({"present": false, "value": null})
+                    }}
+                }}
+            },
+            "parents": {
+                "fields": {"id": {"kind": "integer", "minimum": 0, "maximum": 9}},
+                "rows": {"parent": {
+                    "active": true,
+                    "cells": {"id": {"present": true, "value": if parent_match { 1 } else { 2 }}}
+                }}
+            }
+        });
+        facts["foreign_keys"] = json!({
+            "child_parent": {
+                "child_relation": "children",
+                "child_fields": ["parent_id"],
+                "parent_relation": "parents",
+                "parent_fields": ["id"]
+            }
+        });
+        request(
+            "verify",
+            "data_integrity.foreign_key",
+            "child_parent",
+            facts,
+        )
+    }
+
+    fn cardinality_request(active: &[bool], minimum: i64, maximum: i64) -> Value {
+        let mut facts = empty_facts();
+        let rows = active
+            .iter()
+            .enumerate()
+            .map(|(index, active)| {
+                (
+                    format!("row_{index}"),
+                    json!({
+                        "active": active,
+                        "cells": {"marker": {"present": false, "value": null}}
+                    }),
+                )
+            })
+            .collect::<serde_json::Map<_, _>>();
+        facts["relations"] = json!({
+            "records": {
+                "fields": {"marker": {"kind": "boolean"}},
+                "rows": rows
+            }
+        });
+        facts["cardinality_constraints"] = json!({
+            "record_count": {"relation": "records", "minimum": minimum, "maximum": maximum}
+        });
+        request(
+            "verify",
+            "data_integrity.cardinality",
+            "record_count",
+            facts,
+        )
+    }
+
+    fn value_range_request(active: bool, present: bool, value: Option<i64>) -> Value {
+        let mut facts = empty_facts();
+        facts["relations"] = json!({
+            "measurements": {
+                "fields": {"reading": {"kind": "integer", "minimum": 0, "maximum": 20}},
+                "rows": {"sample": {
+                    "active": active,
+                    "cells": {"reading": {"present": present, "value": value}}
+                }}
+            }
+        });
+        facts["value_ranges"] = json!({
+            "reading_range": {"relation": "measurements", "field": "reading", "minimum": 5, "maximum": 10}
+        });
+        request(
+            "verify",
+            "data_integrity.value_range",
+            "reading_range",
+            facts,
+        )
+    }
+
+    async fn status(input: Value) -> SolveStatus {
+        let compiled = compile(input).expect("data integrity request must compile");
+        SolverService::new()
+            .solve_constraints(compiled.request)
+            .await
+            .expect("data integrity request must solve")
+            .status
+    }
+
+    #[tokio::test]
+    async fn unique_ignores_incomplete_keys_but_rejects_equal_complete_keys() {
+        assert_eq!(status(unique_request(false)).await, SolveStatus::Sat);
+        assert_eq!(status(unique_request(true)).await, SolveStatus::Unsat);
+        let mut inactive_duplicate = unique_request(true);
+        inactive_duplicate["facts"]["relations"]["records"]["rows"]["second"]["active"] =
+            json!(false);
+        assert_eq!(status(inactive_duplicate).await, SolveStatus::Sat);
+    }
+
+    #[tokio::test]
+    async fn unique_synthesizes_a_distinct_complete_key() {
+        let mut input = unique_request(true);
+        input["mode"] = json!("synthesize");
+        input["facts"]["relations"]["records"]["rows"]["second"]["cells"]["key"]["value"] =
+            Value::Null;
+        input["unknowns"] = json!([
+            {"kind": "cell_value", "relation": "records", "row": "second", "field": "key"}
+        ]);
+        let compiled = compile(input).expect("bounded unique synthesis must compile");
+        assert_eq!(compiled.projections[0].field, "rows.second.cells.key.value");
+        assert_eq!(
+            SolverService::new()
+                .solve_constraints(compiled.request)
+                .await
+                .expect("bounded unique synthesis must solve")
+                .status,
+            SolveStatus::Sat
+        );
+    }
+
+    #[tokio::test]
+    async fn foreign_key_match_simple_accepts_absent_child_key() {
+        assert_eq!(
+            status(foreign_key_request(false, false)).await,
+            SolveStatus::Sat
+        );
+    }
+
+    #[tokio::test]
+    async fn foreign_key_requires_an_active_complete_matching_parent() {
+        assert_eq!(
+            status(foreign_key_request(true, true)).await,
+            SolveStatus::Sat
+        );
+        assert_eq!(
+            status(foreign_key_request(true, false)).await,
+            SolveStatus::Unsat
+        );
+        let mut inactive_parent = foreign_key_request(true, true);
+        inactive_parent["facts"]["relations"]["parents"]["rows"]["parent"]["active"] = json!(false);
+        assert_eq!(status(inactive_parent).await, SolveStatus::Unsat);
+    }
+
+    #[tokio::test]
+    async fn foreign_key_synthesizes_a_bounded_parent_match() {
+        let mut input = foreign_key_request(true, true);
+        input["mode"] = json!("synthesize");
+        input["facts"]["relations"]["children"]["rows"]["child"]["cells"]["parent_id"]["value"] =
+            Value::Null;
+        input["unknowns"] = json!([
+            {"kind": "cell_value", "relation": "children", "row": "child", "field": "parent_id"}
+        ]);
+        assert_eq!(status(input).await, SolveStatus::Sat);
+    }
+
+    #[tokio::test]
+    async fn cardinality_bounds_are_inclusive() {
+        assert_eq!(
+            status(cardinality_request(&[true, false], 1, 2)).await,
+            SolveStatus::Sat
+        );
+        assert_eq!(
+            status(cardinality_request(&[true, true], 1, 2)).await,
+            SolveStatus::Sat
+        );
+        assert_eq!(
+            status(cardinality_request(&[false, false], 1, 2)).await,
+            SolveStatus::Unsat
+        );
+        let mut subset = cardinality_request(&[true, true], 1, 1);
+        subset["facts"]["cardinality_constraints"]["record_count"]["rows"] = json!(["row_1"]);
+        assert_eq!(status(subset).await, SolveStatus::Sat);
+    }
+
+    #[tokio::test]
+    async fn cardinality_synthesizes_only_within_the_declared_bounds() {
+        let mut input = cardinality_request(&[false, false], 1, 1);
+        input["mode"] = json!("synthesize");
+        for row in ["row_0", "row_1"] {
+            input["facts"]["relations"]["records"]["rows"][row]["active"] = Value::Null;
+        }
+        input["unknowns"] = json!([
+            {"kind": "row_active", "relation": "records", "row": "row_1"},
+            {"kind": "row_active", "relation": "records", "row": "row_0"}
+        ]);
+        let compiled = compile(input).expect("bounded cardinality synthesis must compile");
+        assert_eq!(
+            compiled
+                .projections
+                .iter()
+                .map(|projection| projection.field.as_str())
+                .collect::<Vec<_>>(),
+            ["rows.row_1.active", "rows.row_0.active"]
+        );
+        assert_eq!(
+            SolverService::new()
+                .solve_constraints(compiled.request)
+                .await
+                .expect("bounded cardinality synthesis must solve")
+                .status,
+            SolveStatus::Sat
+        );
+    }
+
+    #[tokio::test]
+    async fn value_range_is_inclusive_and_guarded_by_active_presence() {
+        assert_eq!(
+            status(value_range_request(true, true, Some(5))).await,
+            SolveStatus::Sat
+        );
+        assert_eq!(
+            status(value_range_request(true, true, Some(10))).await,
+            SolveStatus::Sat
+        );
+        assert_eq!(
+            status(value_range_request(false, true, Some(20))).await,
+            SolveStatus::Sat
+        );
+        assert_eq!(
+            status(value_range_request(true, false, None)).await,
+            SolveStatus::Sat
+        );
+        assert_eq!(
+            status(value_range_request(true, true, Some(11))).await,
+            SolveStatus::Unsat
+        );
+    }
+
+    #[tokio::test]
+    async fn value_range_synthesizes_a_bounded_integer_value() {
+        let mut input = value_range_request(true, true, Some(5));
+        input["mode"] = json!("synthesize");
+        input["facts"]["relations"]["measurements"]["rows"]["sample"]["cells"]["reading"]
+            ["value"] = Value::Null;
+        input["unknowns"] = json!([
+            {"kind": "cell_value", "relation": "measurements", "row": "sample", "field": "reading"}
+        ]);
+        assert_eq!(status(input).await, SolveStatus::Sat);
+    }
+
+    #[test]
+    fn compiled_constraint_names_include_binding_and_definition_subject() {
+        let compiled = compile(unique_request(false)).expect("unique request must compile");
+        let encoded = serde_json::to_value(compiled.request).expect("request must serialize");
+        let id = encoded["constraints"][0]["id"]
+            .as_str()
+            .expect("compiled constraint ID");
+        assert!(id.contains("rule_0_data_integrity_unique"));
+        assert!(id.contains("record_key"));
+        assert_eq!(compiled.rules[0].rule_id, "data_integrity.unique");
+        assert_eq!(compiled.rules[0].binding_index, 0);
     }
 
     #[test]
