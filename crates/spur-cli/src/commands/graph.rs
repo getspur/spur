@@ -530,7 +530,7 @@ fn resolve_temporal_jobs_if_enabled<Env, Parallelism>(
     use_temporal: bool,
     cli_value: Option<&str>,
     env_value: Env,
-    available_parallelism: Parallelism,
+    _available_parallelism: Parallelism,
 ) -> anyhow::Result<Option<NonZeroUsize>>
 where
     Env: FnOnce() -> Option<OsString>,
@@ -553,13 +553,7 @@ where
         return parse_temporal_jobs(&value, "SPUR_GRAPH_TEMPORAL_JOBS").map(Some);
     }
 
-    let logical_cpus = available_parallelism().context(
-        "failed to determine available parallelism for temporal graph build; set --temporal-jobs N or SPUR_GRAPH_TEMPORAL_JOBS=N",
-    )?;
-    let jobs = (logical_cpus.get() - 1).clamp(1, 8);
-    Ok(Some(
-        NonZeroUsize::new(jobs).expect("automatic temporal jobs must be nonzero"),
-    ))
+    Ok(Some(NonZeroUsize::MIN))
 }
 
 fn parse_temporal_jobs(value: &str, source: &str) -> anyhow::Result<NonZeroUsize> {
@@ -1261,11 +1255,11 @@ mod tests {
     }
 
     #[test]
-    fn temporal_jobs_automatic_fallback_reserves_one_cpu_and_caps_at_eight() {
-        for (logical_cpus, expected_jobs) in [(1, 1), (2, 1), (16, 8)] {
+    fn temporal_jobs_automatic_fallback_is_serial_on_every_host_size() {
+        for logical_cpus in [1, 2, 8, 16] {
             assert_eq!(
                 resolve_temporal_jobs(None, None, logical_cpus).unwrap(),
-                NonZeroUsize::new(expected_jobs).unwrap(),
+                NonZeroUsize::MIN,
                 "logical_cpus={logical_cpus}"
             );
         }

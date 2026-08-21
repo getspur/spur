@@ -923,7 +923,7 @@ enum GraphCommands {
         #[arg(long)]
         with_temporal: bool,
         /// Number of temporal commit workers. Also honored via SPUR_GRAPH_TEMPORAL_JOBS.
-        /// Defaults to min(8, max(1, available parallelism minus one)).
+        /// Defaults to 1; higher values explicitly opt in to parallelism.
         #[arg(long, value_name = "N")]
         temporal_jobs: Option<String>,
         /// Maximum temporal rows per shard.
