@@ -155,8 +155,8 @@ impl SpurLocalSource {
             },
             CommandEntry {
                 name: "configure".into(),
-                description: "Open agent settings browser".into(),
-                hint: Some("[agent-name]".into()),
+                description: "Open settings browser".into(),
+                hint: Some("[section|agent-name]".into()),
                 source: CommandSource::Spur,
                 dispatch: Dispatch::SpurLocal(Action::NavigateTo(
                     crate::action::ViewId::AgentConfigBrowser { preselect: None },
@@ -191,6 +191,17 @@ impl SpurLocalSource {
 mod tests {
     use super::*;
     use crate::action::ViewId;
+
+    #[test]
+    fn slash_configure_describes_settings_browser() {
+        let entry = SpurLocalSource::entries()
+            .into_iter()
+            .find(|entry| entry.name == "configure")
+            .expect("configure command entry should exist");
+
+        assert_eq!(entry.description, "Open settings browser");
+        assert_eq!(entry.hint.as_deref(), Some("[section|agent-name]"));
+    }
 
     #[test]
     fn slash_explore_routes_to_navigate() {

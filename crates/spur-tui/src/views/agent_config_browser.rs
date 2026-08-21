@@ -11,7 +11,11 @@ use ratatui::{
 use spur_acp::{AgentConfig, ProfileConfig, SpurEvent};
 
 use crate::action::Action;
+use crate::configure_section::{parse_configure_arg, ConfigureSection};
 
+use super::settings_graph::GraphPane;
+use super::settings_skills::SkillsPane;
+use super::settings_tui::TuiPane;
 use super::{View, ViewContext};
 
 const FIELD_ORDER: [EditableAgentField; 8] = [
@@ -27,6 +31,7 @@ const FIELD_ORDER: [EditableAgentField; 8] = [
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BrowserPane {
+    Sections,
     Agents,
     Fields,
 }
@@ -219,7 +224,12 @@ pub struct AgentConfigBrowserView {
     entries: Vec<AgentConfig>,
     selected_agent: usize,
     selected_field: usize,
+    selected_section: usize,
     pane: BrowserPane,
+    section: ConfigureSection,
+    graph_pane: GraphPane,
+    tui_pane: TuiPane,
+    skills_pane: SkillsPane,
     draft: Option<AgentConfigDraft>,
     edit_buffer: Option<String>,
     validation_error: Option<DraftValidationError>,
@@ -231,12 +241,17 @@ impl AgentConfigBrowserView {
             entries,
             selected_agent: 0,
             selected_field: 0,
+            selected_section: 0,
             pane: BrowserPane::Agents,
+            section: ConfigureSection::Agents,
+            graph_pane: GraphPane::new(None),
+            tui_pane: TuiPane::new(),
+            skills_pane: SkillsPane::new(),
             draft: None,
             edit_buffer: None,
             validation_error: None,
         };
-        view.apply_preselect(preselect.as_deref());
+        view.apply_configure_arg(preselect.as_deref().unwrap_or(""));
         view.rebuild_draft();
         view
     }
@@ -246,7 +261,7 @@ impl AgentConfigBrowserView {
         self.entries = entries;
         self.selected_agent = 0;
         if let Some(preselect) = preselect.as_deref() {
-            self.apply_preselect(Some(preselect));
+            self.apply_configure_arg(preselect);
         } else if let Some(previous_name) = previous_name {
             self.apply_preselect(Some(&previous_name));
         }
@@ -265,6 +280,16 @@ impl AgentConfigBrowserView {
     #[cfg(any(test, debug_assertions))]
     pub fn selected_agent_name_for_test(&self) -> Option<&str> {
         self.selected_agent_name()
+    }
+
+    #[cfg(any(test, debug_assertions))]
+    pub fn section_for_test(&self) -> ConfigureSection {
+        self.section
+    }
+
+    #[cfg(any(test, debug_assertions))]
+    pub fn selected_field_index_for_test(&self) -> usize {
+        self.selected_field
     }
 
     pub fn editing_active(&self) -> bool {
@@ -295,6 +320,61 @@ impl AgentConfigBrowserView {
                 self.selected_agent = index;
             }
         }
+    }
+
+    fn apply_configure_arg(&mut self, raw: &str) {
+        let (section, agent) = parse_configure_arg(raw);
+        self.section = section;
+        self.selected_section = ConfigureSection::ALL
+            .iter()
+            .position(|candidate| *candidate == section)
+            .unwrap_or(0);
+        self.pane = match section {
+            ConfigureSection::Agents => BrowserPane::Agents,
+            _ => BrowserPane::Fields,
+        };
+        self.apply_preselect(agent.as_deref());
+    }
+
+    fn move_section(&mut self, delta: isize) {
+        self.selected_section =
+            offset_index(self.selected_section, ConfigureSection::ALL.len(), delta);
+    }
+
+    fn activate_selected_section(&mut self) {
+        self.section = ConfigureSection::ALL[self.selected_section];
+        self.pane = match self.section {
+            ConfigureSection::Agents => BrowserPane::Agents,
+            _ => BrowserPane::Fields,
+        };
+    }
+
+    fn cycle_pane(&mut self) {
+        if self.section == ConfigureSection::Agents {
+            self.pane = match self.pane {
+                BrowserPane::Sections => BrowserPane::Agents,
+                BrowserPane::Agents => BrowserPane::Fields,
+                BrowserPane::Fields => BrowserPane::Sections,
+            };
+        } else {
+            self.pane = match self.pane {
+                BrowserPane::Sections => BrowserPane::Fields,
+                _ => BrowserPane::Sections,
+            };
+        }
+    }
+
+    fn handle_active_section_key(&mut self, key: KeyEvent) -> Option<Action> {
+        match self.section {
+            ConfigureSection::Agents => None,
+            ConfigureSection::Graph => self.graph_pane.handle_key(key),
+            ConfigureSection::Tui => self.tui_pane.handle_key(key),
+            ConfigureSection::Skills => self.skills_pane.handle_key(key),
+        }
+    }
+
+    fn agents_section_active(&self) -> bool {
+        self.section == ConfigureSection::Agents
     }
 
     fn rebuild_draft(&mut self) {
@@ -402,14 +482,65 @@ impl AgentConfigBrowserView {
             .direction(Direction::Vertical)
             .constraints([Constraint::Min(3), Constraint::Length(1)])
             .split(area);
-        let columns = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(32), Constraint::Percentage(68)])
-            .split(chunks[0]);
-
-        self.render_agents(frame, columns[0]);
-        self.render_fields(frame, columns[1]);
+        if self.agents_section_active() {
+            let columns = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([
+                    Constraint::Percentage(18),
+                    Constraint::Percentage(28),
+                    Constraint::Percentage(54),
+                ])
+                .split(chunks[0]);
+            self.render_sections(frame, columns[0]);
+            self.render_agents(frame, columns[1]);
+            self.render_fields(frame, columns[2]);
+        } else {
+            let columns = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Percentage(18), Constraint::Percentage(82)])
+                .split(chunks[0]);
+            self.render_sections(frame, columns[0]);
+            match self.section {
+                ConfigureSection::Graph => self.graph_pane.render(frame, columns[1]),
+                ConfigureSection::Tui => self.tui_pane.render(frame, columns[1]),
+                ConfigureSection::Skills => self.skills_pane.render(frame, columns[1]),
+                ConfigureSection::Agents => {}
+            }
+        }
         self.render_status(frame, chunks[1]);
+    }
+
+    fn render_sections(&self, frame: &mut Frame, area: Rect) {
+        let border_style = if self.pane == BrowserPane::Sections {
+            Style::default().fg(Color::Cyan)
+        } else {
+            Style::default()
+        };
+        let block = Block::default()
+            .title("Sections")
+            .borders(Borders::ALL)
+            .border_style(border_style);
+        let lines: Vec<Line> = ConfigureSection::ALL
+            .iter()
+            .enumerate()
+            .map(|(index, section)| {
+                let marker = if index == self.selected_section {
+                    "> "
+                } else {
+                    "  "
+                };
+                let style = if index == self.selected_section {
+                    Style::default().add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                };
+                Line::from(vec![
+                    Span::raw(marker),
+                    Span::styled(section.as_str(), style),
+                ])
+            })
+            .collect();
+        frame.render_widget(Paragraph::new(lines).block(block), area);
     }
 
     fn render_agents(&self, frame: &mut Frame, area: Rect) {
@@ -527,37 +658,67 @@ impl View for AgentConfigBrowserView {
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => Some(Action::NavigateBack),
             KeyCode::Tab => {
-                self.pane = match self.pane {
-                    BrowserPane::Agents => BrowserPane::Fields,
-                    BrowserPane::Fields => BrowserPane::Agents,
-                };
+                self.cycle_pane();
+                None
+            }
+            KeyCode::Right if self.pane == BrowserPane::Sections => {
+                self.activate_selected_section();
                 None
             }
             KeyCode::Down | KeyCode::Char('j') => {
-                if self.pane == BrowserPane::Agents {
+                if self.pane == BrowserPane::Sections {
+                    self.move_section(1);
+                    None
+                } else if !self.agents_section_active() {
+                    self.handle_active_section_key(key)
+                } else if self.pane == BrowserPane::Agents {
                     self.move_agent(1);
+                    None
                 } else {
                     self.move_field(1);
+                    None
                 }
-                None
             }
             KeyCode::Up | KeyCode::Char('k') => {
-                if self.pane == BrowserPane::Agents {
+                if self.pane == BrowserPane::Sections {
+                    self.move_section(-1);
+                    None
+                } else if !self.agents_section_active() {
+                    self.handle_active_section_key(key)
+                } else if self.pane == BrowserPane::Agents {
                     self.move_agent(-1);
+                    None
                 } else {
                     self.move_field(-1);
+                    None
                 }
-                None
             }
             KeyCode::Enter | KeyCode::Char('e') | KeyCode::Char(' ') => {
-                if self.pane == BrowserPane::Agents {
+                if self.pane == BrowserPane::Sections {
+                    self.activate_selected_section();
+                    None
+                } else if !self.agents_section_active() {
+                    self.handle_active_section_key(key)
+                } else if self.pane == BrowserPane::Agents {
                     self.pane = BrowserPane::Fields;
+                    None
                 } else {
                     self.toggle_current_field();
+                    None
                 }
-                None
             }
-            KeyCode::Char('s') => self.save_action(),
+            KeyCode::Char('s') => {
+                if self.pane == BrowserPane::Sections {
+                    None
+                } else if !self.agents_section_active() {
+                    self.handle_active_section_key(key)
+                } else {
+                    self.save_action()
+                }
+            }
+            _ if self.pane != BrowserPane::Sections && !self.agents_section_active() => {
+                self.handle_active_section_key(key)
+            }
             _ => None,
         }
     }
@@ -733,5 +894,115 @@ mod tests {
             AgentConfigBrowserView::new(vec![configured_agent(), second], Some("kiro".into()));
 
         assert_eq!(view.selected_agent_name_for_test(), Some("kiro"));
+    }
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn test_ctx(lineage: &spur_core::ExecutorLineage) -> ViewContext<'_> {
+        ViewContext::test_ctx(lineage)
+    }
+
+    #[test]
+    fn graph_token_focuses_graph_section() {
+        let view = AgentConfigBrowserView::new(vec![configured_agent()], Some("graph".into()));
+        assert_eq!(
+            view.section_for_test(),
+            crate::configure_section::ConfigureSection::Graph
+        );
+    }
+
+    #[test]
+    fn agent_token_still_preselects_agent() {
+        let mut second = configured_agent();
+        second.name = "kiro".into();
+        let view =
+            AgentConfigBrowserView::new(vec![configured_agent(), second], Some("kiro".into()));
+        assert_eq!(
+            view.section_for_test(),
+            crate::configure_section::ConfigureSection::Agents
+        );
+        assert_eq!(view.selected_agent_name_for_test(), Some("kiro"));
+    }
+
+    #[test]
+    fn graph_section_down_does_not_move_agent_field() {
+        let lineage = spur_core::ExecutorLineage::new();
+        let ctx = test_ctx(&lineage);
+        let mut view = AgentConfigBrowserView::new(vec![configured_agent()], Some("graph".into()));
+        let field_before = view.selected_field_index_for_test();
+
+        view.handle_key(key(KeyCode::Down), &ctx);
+
+        assert_eq!(view.selected_field_index_for_test(), field_before);
+        assert_eq!(
+            view.section_for_test(),
+            crate::configure_section::ConfigureSection::Graph
+        );
+        assert!(!view.editing_active());
+    }
+
+    #[test]
+    fn graph_section_keys_go_to_pane_not_agent_draft() {
+        let lineage = spur_core::ExecutorLineage::new();
+        let ctx = test_ctx(&lineage);
+        let mut view = AgentConfigBrowserView::new(vec![configured_agent()], Some("graph".into()));
+        let field_before = view.selected_field_index_for_test();
+        let agent_before = view.selected_agent_name_for_test().map(str::to_string);
+
+        for code in [
+            KeyCode::Char('j'),
+            KeyCode::Enter,
+            KeyCode::Char('s'),
+            KeyCode::Char('x'),
+        ] {
+            let action = view.handle_key(key(code), &ctx);
+            assert!(
+                !matches!(action, Some(Action::AgentConfigSaveRequested { .. })),
+                "graph pane must not save agent config on {code:?}"
+            );
+        }
+
+        assert_eq!(view.selected_field_index_for_test(), field_before);
+        assert_eq!(view.selected_agent_name_for_test(), agent_before.as_deref());
+        assert!(!view.editing_active());
+    }
+
+    #[test]
+    fn enter_on_sections_activates_highlighted_section() {
+        let lineage = spur_core::ExecutorLineage::new();
+        let ctx = test_ctx(&lineage);
+        let mut view = AgentConfigBrowserView::new(vec![configured_agent()], None);
+
+        view.handle_key(key(KeyCode::Tab), &ctx);
+        view.handle_key(key(KeyCode::Tab), &ctx);
+        view.handle_key(key(KeyCode::Down), &ctx);
+        view.handle_key(key(KeyCode::Enter), &ctx);
+
+        assert_eq!(
+            view.section_for_test(),
+            crate::configure_section::ConfigureSection::Graph
+        );
+        let field_before = view.selected_field_index_for_test();
+        view.handle_key(key(KeyCode::Down), &ctx);
+        assert_eq!(view.selected_field_index_for_test(), field_before);
+        assert!(!view.editing_active());
+    }
+
+    #[test]
+    fn agents_tab_then_down_still_moves_fields() {
+        let lineage = spur_core::ExecutorLineage::new();
+        let ctx = test_ctx(&lineage);
+        let mut view = AgentConfigBrowserView::new(vec![configured_agent()], None);
+
+        view.handle_key(key(KeyCode::Tab), &ctx);
+        view.handle_key(key(KeyCode::Down), &ctx);
+
+        assert_eq!(
+            view.section_for_test(),
+            crate::configure_section::ConfigureSection::Agents
+        );
+        assert_eq!(view.selected_field_index_for_test(), 1);
     }
 }
