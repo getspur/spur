@@ -182,7 +182,8 @@ struct ReductionProgress {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct TemporalWalkStats {
     pool: WorkerPoolStats,
-    shared_parse_cache_entries: usize,
+    shared_parse_cache_current_entries: usize,
+    shared_parse_cache_peak_entries: usize,
 }
 
 #[derive(Default)]
@@ -879,6 +880,7 @@ fn run_full_walk_into_with_stats(
     let initialize_root = Arc::clone(&worker_root);
     let compute_root = Arc::clone(&worker_root);
     let worker_parse_cache = Arc::clone(&shared_parse_cache);
+    let reducer_parse_cache = Arc::clone(&shared_parse_cache);
     let use_gix_diff = config.use_gix_diff;
     let mut reducer = CommitResultReducer::new(&mut graph, &mut commits, progress, sink);
     let pool = run_bounded_worker_pool(
@@ -891,11 +893,13 @@ fn run_full_walk_into_with_stats(
             Ok(CommitWorkerState { repo, symbol_diff })
         },
         move |worker, ordinal, sha| {
+            worker.symbol_diff.set_parse_cache_ordinal(ordinal);
             let repo = use_gix_diff.then_some(&worker.repo);
             compute_commit_walk_result(ordinal, &compute_root, &sha, repo, &mut worker.symbol_diff)
         },
         |result| {
             reducer.push(result)?;
+            reducer_parse_cache.evict_before(reducer.next_ordinal);
             Ok(ReductionProgress {
                 next_ordinal: reducer.next_ordinal,
                 pending_results: reducer.pending.len(),
@@ -905,7 +909,8 @@ fn run_full_walk_into_with_stats(
     reducer.finish()?;
     let stats = TemporalWalkStats {
         pool,
-        shared_parse_cache_entries: shared_parse_cache.len(),
+        shared_parse_cache_current_entries: shared_parse_cache.len(),
+        shared_parse_cache_peak_entries: shared_parse_cache.peak_len(),
     };
     tracing::debug!(
         temporal_jobs = config.temporal_jobs.get(),
@@ -914,7 +919,8 @@ fn run_full_walk_into_with_stats(
         max_active_work = stats.pool.max_active_work,
         max_result_occupancy = stats.pool.max_result_occupancy,
         max_reducer_pending = stats.pool.max_reducer_pending,
-        shared_parse_cache_entries = stats.shared_parse_cache_entries,
+        shared_parse_cache_current_entries = stats.shared_parse_cache_current_entries,
+        shared_parse_cache_peak_entries = stats.shared_parse_cache_peak_entries,
         "spur-graph: temporal worker-pool occupancy"
     );
 
@@ -1445,11 +1451,18 @@ type BlobOid = String;
 type ParseCacheKey = (Language, BlobOid);
 type SharedExtractedSymbols = Arc<[ExtractedSymbol]>;
 
-/// Successful entries live for the full walk and are shared by every extraction state.
+struct SharedParseCacheEntry {
+    initialization: Arc<Mutex<Option<SharedExtractedSymbols>>>,
+    /// `None` marks persistent access from a standalone `SymbolDiffCtx`.
+    greatest_using_ordinal: Option<usize>,
+}
+
+/// Successful entries are shared by every extraction state while their users are active.
 /// Failed initializations are removed once no same-key caller is waiting to retry them.
 #[derive(Default)]
 struct SharedParseCache {
-    entries: Mutex<HashMap<ParseCacheKey, Arc<Mutex<Option<SharedExtractedSymbols>>>>>,
+    entries: Mutex<HashMap<ParseCacheKey, SharedParseCacheEntry>>,
+    peak_entries: AtomicUsize,
 }
 
 impl SharedParseCache {
@@ -1461,16 +1474,56 @@ impl SharedParseCache {
     where
         F: FnOnce() -> Result<std::result::Result<Vec<ExtractedSymbol>, ExtractError>>,
     {
+        self.get_or_init_with_ordinal(None, key, initialize)
+    }
+
+    fn get_or_init_at<F>(
+        &self,
+        ordinal: usize,
+        key: ParseCacheKey,
+        initialize: F,
+    ) -> Result<std::result::Result<SharedExtractedSymbols, ExtractError>>
+    where
+        F: FnOnce() -> Result<std::result::Result<Vec<ExtractedSymbol>, ExtractError>>,
+    {
+        self.get_or_init_with_ordinal(Some(ordinal), key, initialize)
+    }
+
+    fn get_or_init_with_ordinal<F>(
+        &self,
+        ordinal: Option<usize>,
+        key: ParseCacheKey,
+        initialize: F,
+    ) -> Result<std::result::Result<SharedExtractedSymbols, ExtractError>>
+    where
+        F: FnOnce() -> Result<std::result::Result<Vec<ExtractedSymbol>, ExtractError>>,
+    {
         let entry = {
             let mut entries = self
                 .entries
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            Arc::clone(
-                entries
-                    .entry(key.clone())
-                    .or_insert_with(|| Arc::new(Mutex::new(None))),
-            )
+            let entry = match entries.entry(key.clone()) {
+                std::collections::hash_map::Entry::Occupied(mut occupied) => {
+                    let entry = occupied.get_mut();
+                    entry.greatest_using_ordinal = match (entry.greatest_using_ordinal, ordinal) {
+                        (Some(previous), Some(current)) => Some(previous.max(current)),
+                        _ => None,
+                    };
+                    Arc::clone(&entry.initialization)
+                }
+                std::collections::hash_map::Entry::Vacant(vacant) => {
+                    let initialization = Arc::new(Mutex::new(None));
+                    vacant.insert(SharedParseCacheEntry {
+                        initialization: Arc::clone(&initialization),
+                        greatest_using_ordinal: ordinal,
+                    });
+                    self.peak_entries
+                        .fetch_max(entries.len(), Ordering::Relaxed);
+                    initialization
+                }
+            };
+            entry
         };
         let mut cached = entry
             .lock()
@@ -1516,10 +1569,21 @@ impl SharedParseCache {
         if Arc::strong_count(entry) == 2
             && entries
                 .get(key)
-                .is_some_and(|registered| Arc::ptr_eq(registered, entry))
+                .is_some_and(|registered| Arc::ptr_eq(&registered.initialization, entry))
         {
             entries.remove(key);
         }
+    }
+
+    fn evict_before(&self, next_unreduced_ordinal: usize) {
+        self.entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|_, entry| {
+                entry
+                    .greatest_using_ordinal
+                    .is_none_or(|ordinal| ordinal >= next_unreduced_ordinal)
+            });
     }
 
     fn len(&self) -> usize {
@@ -1527,6 +1591,27 @@ impl SharedParseCache {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .len()
+    }
+
+    fn peak_len(&self) -> usize {
+        self.peak_entries.load(Ordering::Relaxed)
+    }
+
+    #[cfg(test)]
+    fn contains(&self, key: &ParseCacheKey) -> bool {
+        self.entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains_key(key)
+    }
+
+    #[cfg(test)]
+    fn greatest_using_ordinal(&self, key: &ParseCacheKey) -> Option<Option<usize>> {
+        self.entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(key)
+            .map(|entry| entry.greatest_using_ordinal)
     }
 }
 
@@ -1540,6 +1625,7 @@ struct SymbolExtractionState {
 pub struct SymbolDiffCtx {
     local: SymbolExtractionState,
     parse_cache: Arc<SharedParseCache>,
+    parse_cache_ordinal: Option<usize>,
 }
 
 impl SymbolDiffCtx {
@@ -1551,7 +1637,12 @@ impl SymbolDiffCtx {
         Self {
             local: SymbolExtractionState::default(),
             parse_cache,
+            parse_cache_ordinal: None,
         }
+    }
+
+    fn set_parse_cache_ordinal(&mut self, ordinal: usize) {
+        self.parse_cache_ordinal = Some(ordinal);
     }
 
     pub fn diagnostics(&self) -> &[String] {
@@ -2549,10 +2640,15 @@ fn cached_extract(
 ) -> Result<std::result::Result<SharedExtractedSymbols, ExtractError>> {
     let key = (language, oid.to_owned());
     let parse_cache = Arc::clone(&ctx.parse_cache);
-    parse_cache.get_or_init(key, || {
+    let ordinal = ctx.parse_cache_ordinal;
+    let initialize = || {
         let extractor = ctx.for_language(language)?;
         Ok(extractor.extract(path, bytes))
-    })
+    };
+    match ordinal {
+        Some(ordinal) => parse_cache.get_or_init_at(ordinal, key, initialize),
+        None => parse_cache.get_or_init(key, initialize),
+    }
 }
 
 fn parse_failed_diagnostic(
@@ -3290,7 +3386,8 @@ mod tests {
                 )
                 .unwrap();
             let expected = normalize_walk_output((reference_graph, reference_commits));
-            assert!(reference_stats.shared_parse_cache_entries > 0);
+            assert_eq!(reference_stats.shared_parse_cache_current_entries, 0);
+            assert!(reference_stats.shared_parse_cache_peak_entries > 0);
 
             for jobs in [2, 4, 8].map(|jobs| std::num::NonZeroUsize::new(jobs).unwrap()) {
                 let (graph, commits, stats) = run_full_walk_into_with_stats(
@@ -3306,15 +3403,53 @@ mod tests {
                 .unwrap();
 
                 assert_eq!(normalize_walk_output((graph, commits)), expected);
-                assert_eq!(
-                    stats.shared_parse_cache_entries,
-                    reference_stats.shared_parse_cache_entries,
-                    "shared cache entry count must not multiply at jobs={jobs} strategy={strategy:?}"
-                );
+                assert_eq!(stats.shared_parse_cache_current_entries, 0);
+                assert!(stats.shared_parse_cache_peak_entries > 0);
                 assert!(stats.pool.max_in_flight <= jobs.get());
                 assert!(stats.pool.max_result_occupancy <= jobs.get());
             }
         }
+    }
+
+    #[test]
+    fn full_walk_parse_cache_peak_is_bounded_by_admitted_active_work() {
+        let dir = TempDir::new().unwrap();
+        init_repo(dir.path());
+        let commit_count = 24;
+        for ordinal in 0..commit_count {
+            std::fs::write(
+                dir.path().join("lib.rs"),
+                format!("pub fn version_{ordinal}() -> usize {{ {ordinal} }}\n"),
+            )
+            .unwrap();
+            commit(dir.path(), &format!("version {ordinal}"));
+        }
+        let jobs = std::num::NonZeroUsize::new(4).unwrap();
+
+        let (_, commits, stats) = run_full_walk_into_with_stats(
+            dir.path(),
+            &GitWalkConfig {
+                temporal_jobs: jobs,
+                ..GitWalkConfig::default()
+            },
+            None,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(commits.commits.len(), commit_count);
+        assert_eq!(stats.shared_parse_cache_current_entries, 0);
+        assert!(stats.shared_parse_cache_peak_entries > 0);
+        eprintln!(
+            "parse cache telemetry: current={} peak={} jobs={} commits={commit_count}",
+            stats.shared_parse_cache_current_entries,
+            stats.shared_parse_cache_peak_entries,
+            jobs.get(),
+        );
+        assert!(
+            stats.shared_parse_cache_peak_entries <= jobs.get() * 2,
+            "parse cache telemetry was not bounded by admitted work: {stats:?}"
+        );
     }
 
     #[test]
@@ -3865,6 +4000,94 @@ mod tests {
             .iter()
             .skip(1)
             .all(|symbols| Arc::ptr_eq(first, symbols)));
+    }
+
+    #[test]
+    fn shared_parse_cache_evicts_only_fully_reduced_ordinals() {
+        let cache = SharedParseCache::default();
+        let old_key = (Language::Rust, "old".to_owned());
+        let active_key = (Language::Rust, "active".to_owned());
+        cache
+            .get_or_init_at(2, old_key.clone(), || {
+                Ok(Ok(vec![cache_test_symbol("old")]))
+            })
+            .unwrap()
+            .unwrap();
+        cache
+            .get_or_init_at(5, active_key.clone(), || {
+                Ok(Ok(vec![cache_test_symbol("active")]))
+            })
+            .unwrap()
+            .unwrap();
+
+        cache.evict_before(4);
+
+        assert!(!cache.contains(&old_key));
+        assert!(cache.contains(&active_key));
+    }
+
+    #[test]
+    fn shared_parse_cache_keeps_unreduced_concurrent_access() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        let cache = Arc::new(SharedParseCache::default());
+        let initializations = Arc::new(AtomicUsize::new(0));
+        let key = (Language::Rust, "same-blob".to_owned());
+        let (initialization_started_tx, initialization_started_rx) =
+            std::sync::mpsc::sync_channel(0);
+        let (release_initialization_tx, release_initialization_rx) =
+            std::sync::mpsc::sync_channel(0);
+        let old_cache = Arc::clone(&cache);
+        let old_key = key.clone();
+        let old_initializations = Arc::clone(&initializations);
+        let old = std::thread::spawn(move || {
+            old_cache
+                .get_or_init_at(2, old_key, || {
+                    old_initializations.fetch_add(1, Ordering::SeqCst);
+                    initialization_started_tx.send(()).unwrap();
+                    release_initialization_rx.recv().unwrap();
+                    Ok(Ok(vec![cache_test_symbol("shared")]))
+                })
+                .unwrap()
+                .unwrap()
+        });
+        initialization_started_rx.recv().unwrap();
+
+        let active_cache = Arc::clone(&cache);
+        let active_key = key.clone();
+        let active_initializations = Arc::clone(&initializations);
+        let active = std::thread::spawn(move || {
+            active_cache
+                .get_or_init_at(5, active_key, || {
+                    active_initializations.fetch_add(1, Ordering::SeqCst);
+                    Ok(Ok(vec![cache_test_symbol("unexpected")]))
+                })
+                .unwrap()
+                .unwrap()
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        let recorded_before_eviction = loop {
+            if cache.greatest_using_ordinal(&key) == Some(Some(5)) {
+                break true;
+            }
+            if std::time::Instant::now() >= deadline {
+                break false;
+            }
+            std::thread::yield_now();
+        };
+
+        cache.evict_before(4);
+        let retained_before_release = cache.contains(&key);
+        release_initialization_tx.send(()).unwrap();
+        let old_symbols = old.join().unwrap();
+        let active_symbols = active.join().unwrap();
+
+        assert!(recorded_before_eviction);
+        assert!(retained_before_release);
+        assert_eq!(initializations.load(Ordering::SeqCst), 1);
+        assert!(Arc::ptr_eq(&old_symbols, &active_symbols));
+        assert!(cache.contains(&key));
     }
 
     #[test]
