@@ -578,8 +578,91 @@ pub struct SpurConfig {
     /// configs visually unchanged.
     #[serde(default, skip_serializing_if = "TuiConfig::is_default")]
     pub tui: TuiConfig,
+    /// Code-graph / embedding sidecar knobs.
+    #[serde(default, skip_serializing_if = "GraphConfig::is_default")]
+    pub graph: GraphConfig,
     #[serde(default)]
     pub log: LogConfig,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GraphConfig {
+    /// Embedding model alias or Hugging Face id (`nomic`, `coderank`, `jina-code`).
+    /// `SPUR_EMBEDDING_MODEL` still overrides when set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embedding_model: Option<String>,
+}
+
+impl GraphConfig {
+    fn is_default(&self) -> bool {
+        self.embedding_model.is_none()
+    }
+}
+
+/// Canonical `/configure graph` embedding aliases. TUI writes only these.
+pub const GRAPH_EMBEDDING_ALIASES: &[&str] = &["nomic", "coderank", "jina-code"];
+
+/// One-section mutation for persist-then-apply `/configure` saves (`SAVE-APPLY`).
+#[derive(Debug, Clone)]
+pub enum ConfigPatch {
+    Agent {
+        name: String,
+        updated_entry: AgentConfig,
+    },
+    GraphEmbeddingModel {
+        alias: String,
+    },
+    TuiEditMode(EditorMode),
+    TuiTheme(String),
+    TuiDisablePasteBurst(bool),
+    SkillsProjectionMode(SkillsProjectionMode),
+}
+
+impl ConfigPatch {
+    pub fn section_id(&self) -> &'static str {
+        match self {
+            Self::Agent { .. } => "agents",
+            Self::GraphEmbeddingModel { .. } => "graph",
+            Self::TuiEditMode(_) | Self::TuiTheme(_) | Self::TuiDisablePasteBurst(_) => "tui",
+            Self::SkillsProjectionMode(_) => "skills",
+        }
+    }
+
+    pub fn apply(&self, cfg: &mut SpurConfig) -> anyhow::Result<()> {
+        match self {
+            Self::GraphEmbeddingModel { alias } => {
+                if !GRAPH_EMBEDDING_ALIASES.contains(&alias.as_str()) {
+                    anyhow::bail!("unsupported embedding model alias '{alias}'");
+                }
+                cfg.graph.embedding_model = Some(alias.clone());
+            }
+            Self::TuiEditMode(mode) => cfg.tui.edit_mode = *mode,
+            Self::TuiTheme(name) => cfg.tui.theme = name.clone(),
+            Self::TuiDisablePasteBurst(v) => cfg.tui.disable_paste_burst = *v,
+            Self::SkillsProjectionMode(mode) => cfg.skills.projection_mode = *mode,
+            Self::Agent {
+                name,
+                updated_entry,
+            } => {
+                let slot = cfg
+                    .agents
+                    .entries
+                    .iter_mut()
+                    .find(|e| e.name == *name)
+                    .ok_or_else(|| anyhow::anyhow!("agent '{name}' is not configured"))?;
+                slot.args = updated_entry.args.clone();
+                slot.additional_directories = updated_entry.additional_directories.clone();
+                slot.capabilities = updated_entry.capabilities.clone();
+                slot.skip_permissions = updated_entry.skip_permissions;
+                slot.skip_permissions_args = updated_entry.skip_permissions_args.clone();
+                slot.skip_permissions_session_mode =
+                    updated_entry.skip_permissions_session_mode.clone();
+                slot.profile = updated_entry.profile.clone();
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -1109,6 +1192,18 @@ pub fn update_config<F>(path: &std::path::Path, mutate: F) -> anyhow::Result<()>
 where
     F: FnOnce(&mut SpurConfig),
 {
+    try_update_config(path, |cfg| {
+        mutate(cfg);
+        Ok(())
+    })
+}
+
+/// Atomically read-modify-write a `SpurConfig` on disk, propagating mutate errors
+/// without writing. `update_config` is the infallible-mutate wrapper.
+pub fn try_update_config<F>(path: &std::path::Path, mutate: F) -> anyhow::Result<()>
+where
+    F: FnOnce(&mut SpurConfig) -> anyhow::Result<()>,
+{
     use anyhow::Context;
     use std::io::Write;
 
@@ -1116,7 +1211,7 @@ where
         .with_context(|| format!("read config at {}", path.display()))?;
     let mut cfg: SpurConfig =
         toml::from_str(&raw).with_context(|| format!("parse config at {}", path.display()))?;
-    mutate(&mut cfg);
+    mutate(&mut cfg)?;
     let serialized = toml::to_string_pretty(&cfg).context("serialize SpurConfig to TOML")?;
 
     let dir = path

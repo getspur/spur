@@ -19,6 +19,18 @@ pub trait RuleFamilyCompiler: Send + Sync {
     /// Parses, validates, and lowers one family request.
     fn compile(&self, input: Value) -> Result<FamilyCompilation, FamilyCompileError>;
 
+    /// Compiles one request and returns optional family-owned proof scope.
+    ///
+    /// Most families do not need response-level scope metadata. Bounded
+    /// analyses can override this hook so the metadata is derived in the same
+    /// validated compilation pass as the solver request.
+    fn compile_with_evaluation_scope(
+        &self,
+        input: Value,
+    ) -> Result<(FamilyCompilation, Option<RuleEvaluationScope>), FamilyCompileError> {
+        self.compile(input).map(|compiled| (compiled, None))
+    }
+
     /// Projects only caller-declared unknowns from a satisfiable backend model.
     fn project_model(
         &self,
@@ -74,6 +86,30 @@ pub struct RuleAssignment {
     pub field: String,
     /// Scalar value returned by the generic model parser.
     pub value: ModelValue,
+}
+
+/// Finite domain in which a catalog result was established.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RuleEvaluationScope {
+    /// One exact finite workflow trace unrolling.
+    BoundedTrace {
+        /// Number of transition steps represented by the trace.
+        horizon: u64,
+        /// Effective bound for every selected reachability binding.
+        reachability: Vec<BoundedReachabilityScope>,
+    },
+}
+
+/// Effective bound for one caller-ordered bounded-reachability binding.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct BoundedReachabilityScope {
+    /// Stable catalog rule ID.
+    pub rule_id: String,
+    /// Caller-order binding index.
+    pub binding_index: usize,
+    /// Inclusive last state index searched by this binding.
+    pub effective_bound: u64,
 }
 
 /// Family compilation failure normalized for the shared MCP handler.

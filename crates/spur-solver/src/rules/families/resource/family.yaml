@@ -1,0 +1,11 @@
+schema_version: 1
+id: resource
+family_version: 1
+summary: Resource demand, capacity, quota, and topology placement constraints.
+profiles:
+  - id: capacity
+    profile_version: 1
+    summary: Per-workload and aggregate resource capacity constraints.
+  - id: topology_placement
+    profile_version: 1
+    summary: Finite failure-domain count and skew constraints.

@@ -233,8 +233,7 @@ async fn overlay_session_for_current_worktree(
 ) -> Option<Arc<OverlayMergeSession>> {
     let worktree = current_repo_root().ok()?;
     let seed = spur_graph::cache::load_base_seed_for_worktree(&worktree)?;
-    let rebuild_key =
-        overlay_rebuild_key_for_dirty_worktree(&worktree, &seed.artifact.graph_content_hash)?;
+    let rebuild_key = overlay_rebuild_key_for_dirty_worktree(&worktree, &seed.artifact)?;
     let coordinator = shared_overlay_session_coordinator();
     let artifact = Arc::clone(&seed.artifact);
     let build_worktree = worktree.clone();

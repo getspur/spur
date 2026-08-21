@@ -1,0 +1,150 @@
+schema_version: 1
+id: scheduling.placement_allowed
+rule_version: 1
+family: scheduling
+profile: finite_horizon
+primitive: eligible_window_placement
+summary: Forbid job placements on ineligible machines or outside declared release and deadline windows.
+availability: implemented
+strength: hard
+authorities:
+  - kind: operations_research_paper
+    title: "Multiproject Scheduling with Limited Resources: A Zero-One Programming Approach"
+    url: https://doi.org/10.1287/mnsc.16.1.93
+  - kind: official_optimization_documentation
+    title: OR-Tools Assignment
+    url: https://developers.google.com/optimization/assignment
+requires:
+  - horizon
+  - jobs[].release
+  - jobs[].deadline
+  - jobs[].durations
+  - jobs[].eligible_machines
+  - jobs[].assignment
+  - machines[]
+llm_encoding:
+  effectiveness: high
+  problem_shapes:
+    - A finite non-preemptive job may run only on declared machines and inside an inclusive-release, exclusive-completion window.
+  encode_steps:
+    - Bind exactly one declared job ID as the subject.
+    - Resolve its eligible machine set, positive per-machine durations, release tick, and deadline tick.
+    - Force every placement outside that declared set or time window to zero.
+  anti_patterns:
+    - Do not infer eligibility from machine names, capacity, or prior schedules.
+    - Do not silently clamp release dates, deadlines, or durations to the horizon.
+  escalate_when:
+    - Escalate sequence-dependent setup, travel time, or calendar exceptions to separate primitives.
+solver_encoding:
+  theory: QF_LIA
+  verification: fix the observed assignment and reject any ineligible or out-of-window placement
+  synthesis: restrict explicitly declared assignment unknowns to eligible bounded placements
+  formula:
+    - "allowed(j,m,t) iff m is eligible(j) and release(j) <= t and t + duration(j,m) <= deadline(j)"
+    - "not allowed(j,m,t) implies placement(j,m,t) = 0"
+subjects:
+  cardinality:
+    kind: exact
+    count: 1
+parameters: []
+handler: scheduling_placement_allowed
+examples:
+  valid:
+    facts:
+      family: scheduling
+      mode: verify
+      rules:
+        - rule_id: scheduling.placement_allowed
+          subjects: [a]
+          parameters: {}
+      facts:
+        horizon: 6
+        jobs:
+          a:
+            release: 1
+            deadline: 5
+            durations: {m1: 2, m2: 2}
+            eligible_machines: [m1]
+            demands: {cpu: 1}
+            assignment: {machine: m1, start: 2}
+        machines:
+          m1: {capacities: {cpu: 1}}
+          m2: {capacities: {cpu: 1}}
+        precedence: []
+      unknowns: []
+    expectation: pass
+  invalid:
+    facts:
+      family: scheduling
+      mode: verify
+      rules:
+        - rule_id: scheduling.placement_allowed
+          subjects: [a]
+          parameters: {}
+      facts:
+        horizon: 6
+        jobs:
+          a:
+            release: 1
+            deadline: 5
+            durations: {m1: 2, m2: 2}
+            eligible_machines: [m1]
+            demands: {cpu: 1}
+            assignment: {machine: m2, start: 2}
+        machines:
+          m1: {capacities: {cpu: 1}}
+          m2: {capacities: {cpu: 1}}
+        precedence: []
+      unknowns: []
+    expectation: counterexample
+    expected_diagnostic: scheduling.placement_allowed.violation
+conformance:
+  valid:
+    - name: observed placement uses an eligible machine inside its window
+      request:
+        family: scheduling
+        mode: verify
+        rules:
+          - rule_id: scheduling.placement_allowed
+            subjects: [a]
+            parameters: {}
+        facts:
+          horizon: 6
+          jobs:
+            a:
+              release: 1
+              deadline: 5
+              durations: {m1: 2, m2: 2}
+              eligible_machines: [m1]
+              demands: {cpu: 1}
+              assignment: {machine: m1, start: 2}
+          machines:
+            m1: {capacities: {cpu: 1}}
+            m2: {capacities: {cpu: 1}}
+          precedence: []
+        unknowns: []
+  invalid:
+    - name: observed placement uses an ineligible machine
+      request:
+        family: scheduling
+        mode: verify
+        rules:
+          - rule_id: scheduling.placement_allowed
+            subjects: [a]
+            parameters: {}
+        facts:
+          horizon: 6
+          jobs:
+            a:
+              release: 1
+              deadline: 5
+              durations: {m1: 2, m2: 2}
+              eligible_machines: [m1]
+              demands: {cpu: 1}
+              assignment: {machine: m2, start: 2}
+          machines:
+            m1: {capacities: {cpu: 1}}
+            m2: {capacities: {cpu: 1}}
+          precedence: []
+        unknowns: []
+      expected_diagnostic: scheduling.placement_allowed.violation

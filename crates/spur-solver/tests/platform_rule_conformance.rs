@@ -1,376 +1,210 @@
 use std::collections::BTreeSet;
 
-use serde_json::{json, Value};
 use spur_solver::{
     rules::{
-        builtin_registry,
         execute::{prepare, run},
+        manifest::{
+            manifest_conformance_vectors, manifest_executable_rule_ids, manifest_rule_handler,
+        },
+        manifest_format::{ConformanceVectorV1, NativeHandlerV1},
+        RuleOutcome, RuleSolveMode,
     },
     service::SolverService,
     types::SolveStatus,
 };
 
-struct ConformanceCase {
-    rule_id: &'static str,
-    valid: Value,
-    invalid: Value,
+struct ConformanceCase<'a> {
+    rule_id: &'a str,
+    handler: NativeHandlerV1,
+    valid: &'a [ConformanceVectorV1],
+    invalid: &'a [ConformanceVectorV1],
 }
 
-fn design_case(
-    rule_id: &'static str,
-    rule: Value,
-    valid_nodes: Value,
-    invalid_nodes: Value,
-) -> ConformanceCase {
-    let request = |nodes| {
-        json!({
-            "family": "design",
-            "mode": "verify",
-            "rules": [rule],
-            "scene": {"viewport": {"width": 390, "height": 844}, "nodes": nodes},
-            "unknowns": []
+fn cases() -> Vec<ConformanceCase<'static>> {
+    manifest_executable_rule_ids()
+        .iter()
+        .map(|rule_id| {
+            let handler = manifest_rule_handler(rule_id)
+                .unwrap_or_else(|| panic!("executable rule `{rule_id}` has no native handler"));
+            let vectors = manifest_conformance_vectors(rule_id).unwrap_or_else(|| {
+                panic!("executable rule `{rule_id}` has no conformance vectors")
+            });
+
+            ConformanceCase {
+                rule_id,
+                handler,
+                valid: &vectors.valid,
+                invalid: &vectors.invalid,
+            }
         })
-    };
-    ConformanceCase {
-        rule_id,
-        valid: request(valid_nodes),
-        invalid: request(invalid_nodes),
-    }
-}
-
-fn accessibility_case(
-    rule_id: &'static str,
-    subjects: Value,
-    parameters: Value,
-    valid_elements: Value,
-    invalid_elements: Value,
-) -> ConformanceCase {
-    let request = |elements| {
-        json!({
-            "family": "accessibility",
-            "mode": "verify",
-            "rules": [{"rule_id": rule_id, "subjects": subjects, "parameters": parameters}],
-            "scene": {"viewport": {"width": 320, "height": 568}, "elements": elements},
-            "unknowns": []
-        })
-    };
-    ConformanceCase {
-        rule_id,
-        valid: request(valid_elements),
-        invalid: request(invalid_elements),
-    }
-}
-
-fn policy_case(
-    rule_id: &'static str,
-    subjects: Value,
-    parameters: Value,
-    valid_facts: Value,
-    invalid_facts: Value,
-) -> ConformanceCase {
-    let request = |facts| {
-        json!({
-            "family": "policy",
-            "mode": "verify",
-            "rules": [{"rule_id": rule_id, "subjects": subjects, "parameters": parameters}],
-            "facts": facts,
-            "unknowns": []
-        })
-    };
-    ConformanceCase {
-        rule_id,
-        valid: request(valid_facts),
-        invalid: request(invalid_facts),
-    }
-}
-
-fn resource_case(
-    rule_id: &'static str,
-    subjects: Value,
-    parameters: Value,
-    valid_facts: Value,
-    invalid_facts: Value,
-) -> ConformanceCase {
-    let request = |facts| {
-        json!({
-            "family": "resource",
-            "mode": "verify",
-            "rules": [{"rule_id": rule_id, "subjects": subjects, "parameters": parameters}],
-            "facts": facts,
-            "unknowns": []
-        })
-    };
-    ConformanceCase {
-        rule_id,
-        valid: request(valid_facts),
-        invalid: request(invalid_facts),
-    }
-}
-
-fn design_cases() -> Vec<ConformanceCase> {
-    vec![
-        design_case(
-            "layout.axis_capacity",
-            json!({
-                "rule_id": "layout.axis_capacity",
-                "subjects": ["container", "first", "second"],
-                "parameters": {"axis": "horizontal", "gap": 20, "inset_start": 10, "inset_end": 10}
-            }),
-            json!({
-                "container": {"rect": {"x": 0, "y": 0, "width": 100, "height": 1}},
-                "first": {"rect": {"x": 0, "y": 0, "width": 30, "height": 1}},
-                "second": {"rect": {"x": 0, "y": 0, "width": 30, "height": 1}}
-            }),
-            json!({
-                "container": {"rect": {"x": 0, "y": 0, "width": 100, "height": 1}},
-                "first": {"rect": {"x": 0, "y": 0, "width": 30, "height": 1}},
-                "second": {"rect": {"x": 0, "y": 0, "width": 31, "height": 1}}
-            }),
-        ),
-        design_case(
-            "layout.containment",
-            json!({"rule_id": "layout.containment", "subjects": ["child", "parent"]}),
-            json!({
-                "parent": {"rect": {"x": 0, "y": 0, "width": 100, "height": 100}},
-                "child": {"rect": {"x": 76, "y": 0, "width": 24, "height": 24}}
-            }),
-            json!({
-                "parent": {"rect": {"x": 0, "y": 0, "width": 100, "height": 100}},
-                "child": {"rect": {"x": 77, "y": 0, "width": 24, "height": 24}}
-            }),
-        ),
-        design_case(
-            "layout.non_overlap",
-            json!({"rule_id": "layout.non_overlap", "subjects": ["first", "second"], "parameters": {"minimum_gap": 24}}),
-            json!({
-                "first": {"rect": {"x": 0, "y": 0, "width": 24, "height": 24}},
-                "second": {"rect": {"x": 48, "y": 0, "width": 24, "height": 24}}
-            }),
-            json!({
-                "first": {"rect": {"x": 0, "y": 0, "width": 24, "height": 24}},
-                "second": {"rect": {"x": 47, "y": 0, "width": 24, "height": 24}}
-            }),
-        ),
-        design_case(
-            "media.aspect_ratio",
-            json!({"rule_id": "media.aspect_ratio", "subjects": ["media"], "parameters": {"source_width": 16, "source_height": 9}}),
-            json!({"media": {"rect": {"x": 0, "y": 0, "width": 320, "height": 180}}}),
-            json!({"media": {"rect": {"x": 0, "y": 0, "width": 320, "height": 181}}}),
-        ),
-    ]
-}
-
-fn accessibility_cases() -> Vec<ConformanceCase> {
-    vec![
-        accessibility_case(
-            "a11y.target_size",
-            json!(["target"]),
-            json!({}),
-            json!({"target": {"rect": {"x": 0, "y": 0, "width": 24, "height": 24}}}),
-            json!({"target": {"rect": {"x": 0, "y": 0, "width": 23, "height": 24}}}),
-        ),
-        accessibility_case(
-            "a11y.focus_not_obscured",
-            json!(["focused", "obscurer"]),
-            json!({}),
-            json!({
-                "focused": {"rect": {"x": 0, "y": 0, "width": 24, "height": 24}},
-                "obscurer": {"rect": {"x": 12, "y": 0, "width": 24, "height": 24}}
-            }),
-            json!({
-                "focused": {"rect": {"x": 0, "y": 0, "width": 24, "height": 24}},
-                "obscurer": {"rect": {"x": 0, "y": 0, "width": 24, "height": 24}}
-            }),
-        ),
-        accessibility_case(
-            "a11y.reflow",
-            json!(["content"]),
-            json!({}),
-            json!({"content": {"rect": {"x": 0, "y": 0, "width": 320, "height": 568}}}),
-            json!({"content": {"rect": {"x": 0, "y": 0, "width": 321, "height": 568}}}),
-        ),
-        accessibility_case(
-            "a11y.text_contrast",
-            json!(["text"]),
-            json!({}),
-            json!({"text": {"foreground_luminance": 17500, "background_luminance": 0}}),
-            json!({"text": {"foreground_luminance": 17499, "background_luminance": 0}}),
-        ),
-    ]
-}
-
-fn policy_cases() -> Vec<ConformanceCase> {
-    let base_roles = json!({
-        "admin": {"inherits": ["viewer"], "permissions": ["write"]},
-        "viewer": {"inherits": [], "permissions": ["read"]},
-        "auditor": {"inherits": [], "permissions": ["audit"]}
-    });
-    vec![
-        policy_case(
-            "rbac.permission_reachable",
-            json!(["alice", "read"]),
-            json!({}),
-            json!({"roles": base_roles, "principals": {"alice": {"roles": ["admin"]}}, "sessions": {}}),
-            json!({"roles": base_roles, "principals": {"alice": {"roles": []}}, "sessions": {}}),
-        ),
-        policy_case(
-            "rbac.role_hierarchy_acyclic",
-            json!([]),
-            json!({}),
-            json!({"roles": base_roles, "principals": {}, "sessions": {}}),
-            json!({
-                "roles": {
-                    "admin": {"inherits": ["viewer"], "permissions": []},
-                    "viewer": {"inherits": ["admin"], "permissions": []}
-                },
-                "principals": {}, "sessions": {}
-            }),
-        ),
-        policy_case(
-            "rbac.static_separation_of_duty",
-            json!(["alice"]),
-            json!({"roles": ["admin", "auditor"], "max_assigned": 1}),
-            json!({"roles": base_roles, "principals": {"alice": {"roles": ["admin"]}}, "sessions": {}}),
-            json!({"roles": base_roles, "principals": {"alice": {"roles": ["admin", "auditor"]}}, "sessions": {}}),
-        ),
-        policy_case(
-            "rbac.dynamic_separation_of_duty",
-            json!(["session"]),
-            json!({"roles": ["admin", "auditor"], "max_active": 1}),
-            json!({
-                "roles": base_roles,
-                "principals": {"alice": {"roles": ["admin", "auditor"]}},
-                "sessions": {"session": {"principal": "alice", "active_roles": ["admin"]}}
-            }),
-            json!({
-                "roles": base_roles,
-                "principals": {"alice": {"roles": ["admin", "auditor"]}},
-                "sessions": {"session": {"principal": "alice", "active_roles": ["admin", "auditor"]}}
-            }),
-        ),
-    ]
-}
-
-fn resource_facts(replicas: i64, request: i64, domains: Value) -> Value {
-    json!({
-        "workloads": {"api": {
-            "replicas": replicas,
-            "requests": {"cpu": request},
-            "limits": {"cpu": 500},
-            "domain_counts": domains
-        }},
-        "pools": {"cluster": {"resources": {"cpu": 1500}}},
-        "quotas": {"team": {"resources": {"cpu": 1500}}}
-    })
-}
-
-fn resource_cases() -> Vec<ConformanceCase> {
-    vec![
-        resource_case(
-            "resource.request_within_limit",
-            json!(["api"]),
-            json!({"resources": ["cpu"]}),
-            resource_facts(1, 500, json!({"a": 1})),
-            resource_facts(1, 501, json!({"a": 1})),
-        ),
-        resource_case(
-            "resource.aggregate_capacity",
-            json!(["cluster", "api"]),
-            json!({"resources": ["cpu"]}),
-            resource_facts(3, 500, json!({"a": 2, "b": 1})),
-            resource_facts(4, 500, json!({"a": 2, "b": 2})),
-        ),
-        resource_case(
-            "resource.quota_capacity",
-            json!(["team", "api"]),
-            json!({"resources": ["cpu"]}),
-            resource_facts(3, 500, json!({"a": 2, "b": 1})),
-            resource_facts(4, 500, json!({"a": 2, "b": 2})),
-        ),
-        resource_case(
-            "placement.topology_max_skew",
-            json!(["api"]),
-            json!({"max_skew": 1}),
-            resource_facts(3, 500, json!({"a": 2, "b": 1})),
-            resource_facts(4, 500, json!({"a": 3, "b": 1})),
-        ),
-        resource_case(
-            "placement.minimum_failure_domains",
-            json!(["api"]),
-            json!({"minimum_domains": 2}),
-            resource_facts(2, 500, json!({"a": 1, "b": 1})),
-            resource_facts(1, 500, json!({"a": 1, "b": 0})),
-        ),
-    ]
-}
-
-fn cases() -> Vec<ConformanceCase> {
-    design_cases()
-        .into_iter()
-        .chain(accessibility_cases())
-        .chain(policy_cases())
-        .chain(resource_cases())
         .collect()
 }
 
-#[tokio::test]
-async fn every_implemented_hard_rule_accepts_a_boundary_and_rejects_a_counterexample() {
+#[test]
+fn manifest_vectors_cover_every_executable_rule_and_native_handler_exactly_once() {
     let cases = cases();
-    let tested = cases
+    let expected_rule_ids = manifest_executable_rule_ids()
         .iter()
-        .map(|case| case.rule_id)
+        .map(String::as_str)
         .collect::<BTreeSet<_>>();
-    let registry = serde_json::to_value(builtin_registry()).expect("serialize rule registry");
-    let implemented = registry["rules"]
-        .as_array()
-        .expect("registry rules")
-        .iter()
-        .filter(|rule| rule["availability"] == "implemented" && rule["default_strength"] == "hard")
-        .map(|rule| rule["id"].as_str().expect("rule id"))
-        .collect::<BTreeSet<_>>();
+    let mut tested_rule_ids = BTreeSet::new();
+    let mut tested_handlers = BTreeSet::new();
+
     assert_eq!(
-        tested, implemented,
-        "conformance cases must cover the catalog"
+        cases.len(),
+        expected_rule_ids.len(),
+        "conformance must contain one vector set per executable rule"
     );
-
-    let service = SolverService::new();
-    for case in cases {
-        let valid = run(
-            &service,
-            prepare(case.valid).unwrap_or_else(|error| {
-                panic!("{} valid fixture must compile: {error}", case.rule_id)
-            }),
-        )
-        .await
-        .unwrap_or_else(|error| panic!("{} valid fixture must run: {error}", case.rule_id));
-        assert_eq!(
-            valid.solver.status,
-            SolveStatus::Sat,
-            "{} boundary",
+    for case in &cases {
+        assert!(
+            tested_rule_ids.insert(case.rule_id),
+            "duplicate conformance vector set for `{}`",
             case.rule_id
         );
-
-        let invalid = run(
-            &service,
-            prepare(case.invalid).unwrap_or_else(|error| {
-                panic!("{} invalid fixture must compile: {error}", case.rule_id)
-            }),
-        )
-        .await
-        .unwrap_or_else(|error| panic!("{} invalid fixture must run: {error}", case.rule_id));
-        assert_eq!(
-            invalid.solver.status,
-            SolveStatus::Unsat,
-            "{} counterexample",
+        assert!(
+            tested_handlers.insert(case.handler),
+            "native handler `{:?}` is shared by multiple conformance rule sets",
+            case.handler
+        );
+        assert!(
+            !case.valid.is_empty(),
+            "`{}` must declare at least one valid conformance vector",
             case.rule_id
         );
-        assert_eq!(
-            invalid.rule_results.len(),
-            1,
-            "{} attribution",
+        assert!(
+            !case.invalid.is_empty(),
+            "`{}` must declare at least one invalid conformance vector",
             case.rule_id
         );
-        assert_eq!(invalid.rule_results[0].rule_id, case.rule_id);
-        assert_eq!(invalid.rule_results[0].status, SolveStatus::Unsat);
     }
+
+    assert_eq!(
+        tested_rule_ids, expected_rule_ids,
+        "conformance rule IDs must exactly match the executable manifest registry"
+    );
+    assert_eq!(
+        tested_handlers,
+        NativeHandlerV1::ALL.iter().copied().collect(),
+        "conformance must cover every closed native handler exactly once"
+    );
+}
+
+#[tokio::test]
+async fn every_manifest_valid_vector_passes_and_invalid_vector_is_rejected() {
+    let service = SolverService::new();
+
+    for case in cases() {
+        for vector in case.valid {
+            let prepared = prepare(vector.request.clone()).unwrap_or_else(|error| {
+                panic!(
+                    "{} valid vector `{}` must compile: {error}",
+                    case.rule_id, vector.name
+                )
+            });
+            let result = run(&service, prepared).await.unwrap_or_else(|error| {
+                panic!(
+                    "{} valid vector `{}` must run: {error}",
+                    case.rule_id, vector.name
+                )
+            });
+            assert_eq!(
+                result.solver.status,
+                SolveStatus::Sat,
+                "{} valid vector `{}`",
+                case.rule_id,
+                vector.name
+            );
+            assert_eq!(
+                result.outcome,
+                match result.mode {
+                    RuleSolveMode::Verify => RuleOutcome::Pass,
+                    RuleSolveMode::Synthesize => RuleOutcome::Solution,
+                },
+                "{} valid vector `{}` outcome",
+                case.rule_id,
+                vector.name
+            );
+        }
+
+        for vector in case.invalid {
+            let prepared = prepare(vector.request.clone()).unwrap_or_else(|error| {
+                panic!(
+                    "{} invalid vector `{}` must compile before rejection: {error}",
+                    case.rule_id, vector.name
+                )
+            });
+            let result = run(&service, prepared).await.unwrap_or_else(|error| {
+                panic!(
+                    "{} invalid vector `{}` must run before rejection: {error}",
+                    case.rule_id, vector.name
+                )
+            });
+
+            assert_eq!(
+                result.solver.status,
+                SolveStatus::Unsat,
+                "{} invalid vector `{}` must be proved unsatisfiable",
+                case.rule_id,
+                vector.name
+            );
+            match result.mode {
+                RuleSolveMode::Verify => {
+                    assert_eq!(result.outcome, RuleOutcome::Fail);
+                    let rejection = result
+                        .rule_results
+                        .iter()
+                        .find(|rule| rule.rule_id == case.rule_id)
+                        .unwrap_or_else(|| {
+                            panic!(
+                                "{} invalid vector `{}` lacked per-rule rejection attribution",
+                                case.rule_id, vector.name
+                            )
+                        });
+                    assert_eq!(
+                        rejection.status,
+                        SolveStatus::Unsat,
+                        "{} invalid vector `{}` must have an unsatisfiable rule result",
+                        case.rule_id,
+                        vector.name
+                    );
+                    let expected = vector
+                        .expected_diagnostic
+                        .as_deref()
+                        .expect("validated invalid vector diagnostic");
+                    assert_eq!(
+                        rejection.diagnostic.as_deref(),
+                        Some(expected),
+                        "{} invalid vector `{}` diagnostic",
+                        case.rule_id,
+                        vector.name
+                    );
+                }
+                RuleSolveMode::Synthesize => {
+                    assert_eq!(result.outcome, RuleOutcome::Infeasible);
+                    assert!(
+                        result.rule_results.is_empty(),
+                        "{} invalid synthesis vector `{}` must not fabricate verification attribution",
+                        case.rule_id,
+                        vector.name
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn synthesis_unsat_is_infeasible_without_verification_attribution() {
+    let vector = &manifest_conformance_vectors("workflow.bounded_reachability")
+        .expect("bounded-reachability conformance vectors")
+        .invalid[0];
+    let prepared = prepare(vector.request.clone()).expect("compile bounded unreachable witness");
+    let result = run(&SolverService::new(), prepared)
+        .await
+        .expect("prove bounded witness infeasible");
+
+    assert_eq!(result.mode, RuleSolveMode::Synthesize);
+    assert_eq!(result.solver.status, SolveStatus::Unsat);
+    assert_eq!(result.outcome, RuleOutcome::Infeasible);
+    assert!(result.rule_results.is_empty());
 }

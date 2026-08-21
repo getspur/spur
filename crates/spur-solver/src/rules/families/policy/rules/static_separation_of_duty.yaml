@@ -1,0 +1,168 @@
+schema_version: 1
+id: rbac.static_separation_of_duty
+rule_version: 1
+family: policy
+profile: nist_rbac
+primitive: assigned_role_cardinality
+summary: Limit mutually exclusive role assignments for one principal.
+availability: implemented
+strength: hard
+authorities:
+  - kind: nist_standard_model
+    title: NIST Role Based Access Control
+    url: https://csrc.nist.gov/Projects/role-based-access-control/faqs
+requires:
+  - principal.roles
+  - parameters.roles
+  - parameters.max_assigned
+llm_encoding:
+  effectiveness: high
+  problem_shapes:
+    - Limit mutually exclusive role assignments for one principal.
+  encode_steps:
+    - Validate finite RBAC facts
+    - Normalize graph closure
+    - Compile membership and rank predicates
+  anti_patterns:
+    - Do not infer assignments from an external IAM service
+  escalate_when:
+    - Escalate attribute-based or conditional policies to a richer policy family
+solver_encoding:
+  theory: QF_LIA
+  verification: assert the RBAC predicate over complete memberships
+  synthesis: leave only explicitly declared membership unknowns free
+  formula:
+    - sum assigned(principal, selected_role) <= max_assigned
+subjects:
+  cardinality:
+    kind: exact
+    count: 1
+parameters:
+  - name: roles
+    required: true
+    kind: string_array
+    min_items: 1
+    max_items: 64
+  - name: max_assigned
+    default: 1
+    kind: integer
+    minimum: 1
+handler: rbac_static_separation_of_duty
+examples:
+  valid:
+    facts:
+      family: policy
+      mode: verify
+      rules:
+        - rule_id: rbac.static_separation_of_duty
+          subjects:
+            - alice
+          parameters:
+            roles:
+              - admin
+              - auditor
+            max_assigned: 1
+      facts:
+        roles:
+          admin:
+            inherits: []
+            permissions: []
+          auditor:
+            inherits: []
+            permissions: []
+        principals:
+          alice:
+            roles:
+              - admin
+        sessions: {}
+      unknowns: []
+    expectation: pass
+  invalid:
+    facts:
+      family: policy
+      mode: verify
+      rules:
+        - rule_id: rbac.static_separation_of_duty
+          subjects:
+            - alice
+          parameters:
+            roles:
+              - admin
+              - auditor
+            max_assigned: 1
+      facts:
+        roles:
+          admin:
+            inherits: []
+            permissions: []
+          auditor:
+            inherits: []
+            permissions: []
+        principals:
+          alice:
+            roles:
+              - admin
+              - auditor
+        sessions: {}
+      unknowns: []
+    expectation: counterexample
+    expected_diagnostic: rbac.static_separation_of_duty.violation
+conformance:
+  valid:
+    - name: static separation accepts one assigned role
+      request:
+        family: policy
+        mode: verify
+        rules:
+          - rule_id: rbac.static_separation_of_duty
+            subjects:
+              - alice
+            parameters:
+              roles:
+                - admin
+                - auditor
+              max_assigned: 1
+        facts:
+          roles:
+            admin:
+              inherits: []
+              permissions: []
+            auditor:
+              inherits: []
+              permissions: []
+          principals:
+            alice:
+              roles:
+                - admin
+          sessions: {}
+        unknowns: []
+  invalid:
+    - name: static separation rejects mutually exclusive assignments
+      request:
+        family: policy
+        mode: verify
+        rules:
+          - rule_id: rbac.static_separation_of_duty
+            subjects:
+              - alice
+            parameters:
+              roles:
+                - admin
+                - auditor
+              max_assigned: 1
+        facts:
+          roles:
+            admin:
+              inherits: []
+              permissions: []
+            auditor:
+              inherits: []
+              permissions: []
+          principals:
+            alice:
+              roles:
+                - admin
+                - auditor
+          sessions: {}
+        unknowns: []
+      expected_diagnostic: rbac.static_separation_of_duty.violation

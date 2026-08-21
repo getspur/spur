@@ -259,6 +259,110 @@ fn analyst_build_skips_temporal_and_diagnostics_views_without_optional_parquets(
 }
 
 #[test]
+fn analyst_duckpgq_nodes_include_file_and_stub_endpoints() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let artifact = identity_integrity_artifact("analyst-identity-fk");
+    let artifact_dir = spur_graph::store::parquet::write_artifact_parquet(
+        &artifact,
+        tempdir.path(),
+        WriteOptions::default(),
+        Vec::new(),
+    )
+    .expect("write artifact");
+    let db_path = tempdir.path().join("analyst.duckdb");
+
+    build_analyst(tempdir.path(), &artifact_dir, &db_path);
+
+    let kinds = query_csv(
+        &db_path,
+        "SELECT stable_symbol_id, symbol_kind
+         FROM duckpgq_nodes
+         WHERE stable_symbol_id IN ('file-src-lib', 'fn-main', 'external-foo')
+         ORDER BY stable_symbol_id;",
+    );
+    assert_eq!(
+        kinds.trim(),
+        "external-foo,external\nfile-src-lib,file\nfn-main,function"
+    );
+
+    let orphans = query_csv(
+        &db_path,
+        "SELECT count(*)
+         FROM duckpgq_edges e
+         WHERE e.source_stable_id NOT IN (SELECT stable_symbol_id FROM duckpgq_nodes)
+            OR e.target_stable_id NOT IN (SELECT stable_symbol_id FROM duckpgq_nodes);",
+    );
+    assert_eq!(orphans.trim(), "0");
+}
+
+#[test]
+fn analyst_onager_dep_edges_exclude_contains() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let artifact = identity_integrity_artifact("analyst-identity-dep");
+    let artifact_dir = spur_graph::store::parquet::write_artifact_parquet(
+        &artifact,
+        tempdir.path(),
+        WriteOptions::default(),
+        Vec::new(),
+    )
+    .expect("write artifact");
+    let db_path = tempdir.path().join("analyst.duckdb");
+
+    build_analyst(tempdir.path(), &artifact_dir, &db_path);
+
+    let contains_in_dep = query_csv(
+        &db_path,
+        "SELECT count(*)
+         FROM onager_dep_edges d
+         JOIN edges e ON e.src_id = d.src AND e.dst_id = d.dst
+         WHERE e.relation = 'contains';",
+    );
+    assert_eq!(contains_in_dep.trim(), "0");
+
+    let dep_relations = query_csv(
+        &db_path,
+        "SELECT DISTINCT e.relation
+         FROM onager_dep_edges d
+         JOIN edges e ON e.src_id = d.src AND e.dst_id = d.dst
+         ORDER BY e.relation;",
+    );
+    assert_eq!(dep_relations.trim(), "calls\nimports");
+}
+
+#[test]
+fn analyst_pagerank_is_null_outside_calls_graph() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let artifact = identity_integrity_artifact("analyst-identity-pagerank");
+    let artifact_dir = spur_graph::store::parquet::write_artifact_parquet(
+        &artifact,
+        tempdir.path(),
+        WriteOptions::default(),
+        Vec::new(),
+    )
+    .expect("write artifact");
+    let db_path = tempdir.path().join("analyst.duckdb");
+
+    build_analyst(tempdir.path(), &artifact_dir, &db_path);
+
+    let unused = query_csv(
+        &db_path,
+        "SELECT pagerank IS NULL
+         FROM v_symbol_centrality
+         WHERE stable_symbol_id = 'fn-unused';",
+    );
+    assert_eq!(unused.trim(), "true");
+
+    let in_calls = query_csv(
+        &db_path,
+        "SELECT pagerank IS NOT NULL
+         FROM v_symbol_centrality
+         WHERE stable_symbol_id IN ('fn-main', 'fn-helper')
+         ORDER BY stable_symbol_id;",
+    );
+    assert_eq!(in_calls.trim(), "true\ntrue");
+}
+
+#[test]
 fn analyst_build_emits_external_dependency_surface_views() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     let artifact = external_dependency_artifact("analyst-external-dependencies");
@@ -1052,6 +1156,102 @@ fn write_section_fixture_source(root: &Path) {
     std::fs::write(root.join("docs/guide.md"), SECTION_FIXTURE_BODY).expect("write guide");
     std::fs::create_dir_all(root.join("src")).expect("create src");
     std::fs::write(root.join("src/lib.rs"), "pub fn main() -> u32 { 42 }\n").expect("write lib");
+}
+
+fn identity_integrity_artifact(graph_content_hash: &str) -> GraphIndexArtifact {
+    let mut artifact = structural_artifact(graph_content_hash);
+    artifact.symbols = vec![
+        GraphSymbolArtifact {
+            stable_symbol_id: "fn-main".to_string(),
+            file_path: "src/lib.rs".to_string(),
+            byte_range: [0, 20],
+            line_range: [1, 2],
+            entity_name: "main".to_string(),
+            qualified_name: "main".to_string(),
+            symbol_kind: "function".to_string(),
+            anchor_hash: "anchor-main".to_string(),
+            enclosing_scope: None,
+        },
+        GraphSymbolArtifact {
+            stable_symbol_id: "fn-helper".to_string(),
+            file_path: "src/lib.rs".to_string(),
+            byte_range: [30, 50],
+            line_range: [4, 5],
+            entity_name: "helper".to_string(),
+            qualified_name: "helper".to_string(),
+            symbol_kind: "function".to_string(),
+            anchor_hash: "anchor-helper".to_string(),
+            enclosing_scope: None,
+        },
+        GraphSymbolArtifact {
+            stable_symbol_id: "fn-unused".to_string(),
+            file_path: "src/lib.rs".to_string(),
+            byte_range: [60, 80],
+            line_range: [7, 8],
+            entity_name: "unused".to_string(),
+            qualified_name: "unused".to_string(),
+            symbol_kind: "function".to_string(),
+            anchor_hash: "anchor-unused".to_string(),
+            enclosing_scope: None,
+        },
+        GraphSymbolArtifact {
+            stable_symbol_id: "external-foo".to_string(),
+            file_path: "foo".to_string(),
+            byte_range: [0, 0],
+            line_range: [0, 0],
+            entity_name: "foo".to_string(),
+            qualified_name: "foo::foo".to_string(),
+            symbol_kind: "external".to_string(),
+            anchor_hash: "anchor-external-foo".to_string(),
+            enclosing_scope: None,
+        },
+    ];
+    artifact.symbol_node_ids = vec![NodeId(2), NodeId(3), NodeId(4), NodeId(5)];
+    artifact.edges = vec![
+        GraphEdgeArtifact {
+            source_stable_symbol_id: "file-src-lib".to_string(),
+            target_stable_symbol_id: Some("fn-main".to_string()),
+            target_label: None,
+            relation: RelationKind::Contains,
+            confidence: Confidence::SyntaxExact,
+            confidence_score: 1.0,
+            change_kind: None,
+            edge_kind: Some(GraphEdgeKind::ReferencesOther),
+            bind_method: None,
+            import_path: None,
+            receiver_text: None,
+            scope_text: None,
+        },
+        GraphEdgeArtifact {
+            source_stable_symbol_id: "fn-main".to_string(),
+            target_stable_symbol_id: Some("fn-helper".to_string()),
+            target_label: Some("helper".to_string()),
+            relation: RelationKind::Calls,
+            confidence: Confidence::SyntaxExact,
+            confidence_score: 1.0,
+            change_kind: None,
+            edge_kind: Some(GraphEdgeKind::Calls),
+            bind_method: None,
+            import_path: None,
+            receiver_text: None,
+            scope_text: None,
+        },
+        GraphEdgeArtifact {
+            source_stable_symbol_id: "fn-main".to_string(),
+            target_stable_symbol_id: Some("external-foo".to_string()),
+            target_label: Some("foo".to_string()),
+            relation: RelationKind::Imports,
+            confidence: Confidence::SyntaxExact,
+            confidence_score: 1.0,
+            change_kind: None,
+            edge_kind: Some(GraphEdgeKind::ReferencesOther),
+            bind_method: Some("external_import".to_string()),
+            import_path: Some("foo".to_string()),
+            receiver_text: None,
+            scope_text: None,
+        },
+    ];
+    artifact
 }
 
 fn structural_artifact(graph_content_hash: &str) -> GraphIndexArtifact {

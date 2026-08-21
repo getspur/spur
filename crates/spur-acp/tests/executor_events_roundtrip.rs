@@ -660,6 +660,31 @@ fn agent_config_update_result_roundtrips() {
 }
 
 #[test]
+fn config_update_result_roundtrips() {
+    let ev = SpurEvent::now(SpurEventBody::ConfigUpdateResult {
+        section: "graph".into(),
+        ok: false,
+        message: "unsupported embedding model alias 'not-a-model'".into(),
+    });
+
+    let json = serde_json::to_string(&ev).unwrap();
+    let round: SpurEvent = serde_json::from_str(&json).unwrap();
+
+    match round.body {
+        SpurEventBody::ConfigUpdateResult {
+            section,
+            ok,
+            message,
+        } => {
+            assert_eq!(section, "graph");
+            assert!(!ok);
+            assert_eq!(message, "unsupported embedding model alias 'not-a-model'");
+        }
+        other => panic!("expected ConfigUpdateResult, got {other:?}"),
+    }
+}
+
+#[test]
 fn loop_observability_events_roundtrip_with_bounded_payloads() {
     let loops_loaded = SpurEvent::now(SpurEventBody::LoopsLoaded {
         loops: vec![LoopSummaryEvent {

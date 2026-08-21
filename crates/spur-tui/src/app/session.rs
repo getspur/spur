@@ -195,6 +195,7 @@ impl App {
             tombstones: crate::components::tombstone::TombstoneSlots::new(),
             tombstone_undo_replay: false,
             config,
+            pending_config_patch: None,
             config_path,
             theme,
             active_theme_name,

@@ -16,7 +16,7 @@ use crate::{
 };
 
 use super::{
-    compiler::{FamilyCompileError, ModelProjection, RuleAssignment},
+    compiler::{FamilyCompileError, ModelProjection, RuleAssignment, RuleEvaluationScope},
     families, CompiledRule, RuleOutcome, RuleSolveMode,
 };
 
@@ -33,6 +33,8 @@ pub struct PreparedRuleSolve {
     pub rules: Vec<CompiledRule>,
     /// Family-neutral model projection metadata.
     pub projections: Vec<ModelProjection>,
+    /// Optional finite evaluation scope supplied by the family compiler.
+    pub evaluation_scope: Option<RuleEvaluationScope>,
 }
 
 /// Parses and compiles one family-specific request from the generic MCP envelope.
@@ -47,7 +49,7 @@ pub fn prepare(args: Value) -> Result<PreparedRuleSolve, PrepareRulesError> {
         families::compiler(&selector.family).ok_or_else(|| PrepareRulesError::UnknownFamily {
             family: selector.family.clone(),
         })?;
-    let compiled = compiler.compile(args)?;
+    let (compiled, evaluation_scope) = compiler.compile_with_evaluation_scope(args)?;
 
     Ok(PreparedRuleSolve {
         family: selector.family,
@@ -55,6 +57,7 @@ pub fn prepare(args: Value) -> Result<PreparedRuleSolve, PrepareRulesError> {
         request: compiled.request,
         rules: compiled.rules,
         projections: compiled.projections,
+        evaluation_scope,
     })
 }
 
@@ -153,6 +156,7 @@ pub fn finish(
         outcome: outcome_for(prepared.mode, solver.status),
         assignments,
         rule_results,
+        evaluation_scope: prepared.evaluation_scope,
         total_duration_ms,
         solver,
     }
@@ -188,6 +192,9 @@ pub struct SolveRulesResponse {
     /// Per-binding verification results in caller order.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub rule_results: Vec<RuleResult>,
+    /// Finite domain in which this result was established, when applicable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub evaluation_scope: Option<RuleEvaluationScope>,
     /// Aggregate solve plus serial failure-attribution wall time.
     pub total_duration_ms: u64,
     /// Raw solver status, model, duration, persistence, and diagnostics.
@@ -206,6 +213,9 @@ pub struct RuleResult {
     pub status: SolveStatus,
     /// Verification interpretation of `status`.
     pub outcome: RuleOutcome,
+    /// Stable manifest-owned violation diagnostic for a proved rule rejection.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diagnostic: Option<String>,
 }
 
 impl RuleResult {
@@ -215,6 +225,12 @@ impl RuleResult {
             binding_index: rule.binding_index,
             status,
             outcome: outcome_for(RuleSolveMode::Verify, status),
+            diagnostic: if status == SolveStatus::Unsat {
+                super::manifest::manifest_rule_violation_diagnostic(&rule.rule_id)
+                    .map(str::to_owned)
+            } else {
+                None
+            },
         }
     }
 }

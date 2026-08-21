@@ -1,0 +1,133 @@
+schema_version: 1
+id: placement.topology_max_skew
+rule_version: 1
+family: resource
+profile: topology_placement
+primitive: pairwise_max_skew
+summary: Conserve replicas and limit the pairwise difference between declared topology-domain counts using a positive maximum skew.
+availability: implemented
+strength: hard
+authorities:
+  - kind: derived_reference
+    title: Finite declared-domain model derived from Kubernetes topology spread concepts
+    url: https://kubernetes.io/docs/concepts/scheduling-eviction/topology-spread-constraints/
+requires:
+  - workload.replicas
+  - workload.domain_counts
+  - parameters.max_skew
+llm_encoding:
+  effectiveness: high
+  problem_shapes:
+    - Conserve replicas and limit the pairwise difference between declared topology-domain counts using a positive maximum skew.
+  encode_steps:
+    - Bind explicit workloads and resources
+    - Declare bounded unknown numeric facts
+    - Compile capacity or placement predicates
+  anti_patterns:
+    - Do not query or infer live scheduler state
+    - Do not treat declared-domain pairwise skew as scheduler global-min or minDomains evaluation
+  escalate_when:
+    - Escalate affinity, taints, or priority to separate rule primitives
+solver_encoding:
+  theory: QF_NIA
+  verification: assert the predicate over complete demand and placement facts
+  synthesis: leave only explicitly bounded numeric facts free
+  formula:
+    - sum count(domain) = workload.replicas
+    - count(a) - count(b) <= max_skew
+    - count(b) - count(a) <= max_skew
+subjects:
+  cardinality:
+    kind: at_least
+    count: 1
+parameters:
+  - name: max_skew
+    required: false
+    default: 1
+    kind: integer
+    minimum: 1
+handler: placement_topology_max_skew
+examples:
+  valid:
+    facts:
+      family: resource
+      mode: verify
+      rules:
+        - rule_id: placement.topology_max_skew
+          subjects: [api]
+          parameters:
+            max_skew: 1
+      facts:
+        workloads:
+          api:
+            replicas: 3
+            requests: {}
+            limits: {}
+            domain_counts: {zone-a: 2, zone-b: 1}
+        pools: {}
+        quotas: {}
+      unknowns: []
+    expectation: pass
+  invalid:
+    facts:
+      family: resource
+      mode: verify
+      rules:
+        - rule_id: placement.topology_max_skew
+          subjects: [api]
+          parameters:
+            max_skew: 1
+      facts:
+        workloads:
+          api:
+            replicas: 4
+            requests: {}
+            limits: {}
+            domain_counts: {zone-a: 3, zone-b: 1}
+        pools: {}
+        quotas: {}
+      unknowns: []
+    expectation: counterexample
+    expected_diagnostic: placement.topology_max_skew.violation
+conformance:
+  valid:
+    - name: placement respects maximum skew
+      request:
+        family: resource
+        mode: verify
+        rules:
+          - rule_id: placement.topology_max_skew
+            subjects: [api]
+            parameters:
+              max_skew: 1
+        facts:
+          workloads:
+            api:
+              replicas: 3
+              requests: {}
+              limits: {}
+              domain_counts: {zone-a: 2, zone-b: 1}
+          pools: {}
+          quotas: {}
+        unknowns: []
+  invalid:
+    - name: placement exceeds maximum skew
+      request:
+        family: resource
+        mode: verify
+        rules:
+          - rule_id: placement.topology_max_skew
+            subjects: [api]
+            parameters:
+              max_skew: 1
+        facts:
+          workloads:
+            api:
+              replicas: 4
+              requests: {}
+              limits: {}
+              domain_counts: {zone-a: 3, zone-b: 1}
+          pools: {}
+          quotas: {}
+        unknowns: []
+      expected_diagnostic: placement.topology_max_skew.violation

@@ -1,0 +1,131 @@
+schema_version: 1
+id: "layout.axis_capacity"
+rule_version: 1
+family: "design"
+profile: "layout_capacity"
+primitive: "axis_capacity"
+summary: "Fit declared item extents, gaps, and insets inside one available axis extent."
+availability: "implemented"
+strength: "hard"
+authorities:
+  - kind: "css_spec"
+    title: "CSS 2.2 Visual Formatting Model"
+    url: "https://www.w3.org/TR/CSS22/visuren.html"
+requires:
+  - "container.rect"
+  - "item.rect[]"
+  - "axis"
+  - "gap"
+  - "inset_start"
+  - "inset_end"
+llm_encoding:
+  effectiveness: "high"
+  problem_shapes:
+    - "declared items must fit one horizontal or vertical extent"
+    - "fixed columns or rows must fit their available axis"
+  encode_steps:
+    - "Select the declared horizontal or vertical axis"
+    - "Read the container extent and each item extent on that axis"
+    - "Add one gap between adjacent items and both insets"
+    - "Require total used extent to be at most the available extent"
+  anti_patterns:
+    - "Do not infer item membership from visual proximity"
+    - "Do not mix coordinate units in one binding"
+  escalate_when:
+    - "Wrapping, flexing, or weighted tracks require separate rules"
+solver_encoding:
+  theory: "QF_LIA"
+  verification: "assert the capacity inequality over a complete model"
+  synthesis: "assert the capacity inequality over explicitly bounded unknowns"
+  formula:
+    - "sum(item extents) + gap * (item count - 1) + inset_start + inset_end <= available extent"
+subjects:
+  cardinality:
+    kind: "at_least"
+    count: 2
+parameters:
+  - name: "axis"
+    required: true
+    kind: "string_enum"
+    values:
+      - "horizontal"
+      - "vertical"
+  - name: "gap"
+    default: 0
+    kind: "integer"
+    minimum: 0
+  - name: "inset_start"
+    default: 0
+    kind: "integer"
+    minimum: 0
+  - name: "inset_end"
+    default: 0
+    kind: "integer"
+    minimum: 0
+handler: "layout_axis_capacity"
+examples:
+  valid:
+    facts:
+      available_extent: 100
+      item_extents: [30, 30]
+      gap: 20
+      inset_start: 10
+      inset_end: 10
+    expectation: "pass"
+  invalid:
+    facts:
+      available_extent: 100
+      item_extents: [30, 31]
+      gap: 20
+      inset_start: 10
+      inset_end: 10
+    expectation: "counterexample"
+    expected_diagnostic: "design.axis_capacity_exceeded"
+conformance:
+  valid:
+    - name: "axis capacity exact boundary"
+      request:
+        family: "design"
+        mode: "verify"
+        rules:
+          - rule_id: "layout.axis_capacity"
+            subjects: ["container", "first", "second"]
+            parameters:
+              axis: "horizontal"
+              gap: 20
+              inset_start: 10
+              inset_end: 10
+        scene:
+          viewport: {width: 390, height: 844}
+          nodes:
+            container:
+              rect: {x: 0, y: 0, width: 100, height: 1}
+            first:
+              rect: {x: 0, y: 0, width: 30, height: 1}
+            second:
+              rect: {x: 0, y: 0, width: 30, height: 1}
+        unknowns: []
+  invalid:
+    - name: "axis capacity one-unit overflow"
+      request:
+        family: "design"
+        mode: "verify"
+        rules:
+          - rule_id: "layout.axis_capacity"
+            subjects: ["container", "first", "second"]
+            parameters:
+              axis: "horizontal"
+              gap: 20
+              inset_start: 10
+              inset_end: 10
+        scene:
+          viewport: {width: 390, height: 844}
+          nodes:
+            container:
+              rect: {x: 0, y: 0, width: 100, height: 1}
+            first:
+              rect: {x: 0, y: 0, width: 30, height: 1}
+            second:
+              rect: {x: 0, y: 0, width: 31, height: 1}
+        unknowns: []
+      expected_diagnostic: "design.axis_capacity_exceeded"

@@ -35,6 +35,12 @@ const POINTER_PATH: &str = ".spur/graph-index.pointer.json";
 pub const COMMIT_INDEX_POINTER_PATH: &str = ".spur/commit-index.pointer.json";
 const POINTER_SCHEMA: &str = "spur-graph-pointer-v1";
 const RETAINED_CANONICAL_ARTIFACTS: usize = 3;
+// Solved (`sol_5b58d5c40d014afc`): keep three facts generations, but only CURRENT
+// needs Lance sidecars for hybrid search. Rollback gens stay facts-only.
+#[allow(dead_code)] // asserted in tests; live sidecars follow the protected CURRENT set
+const RETAINED_EMBED_SIDECARS: usize = 1;
+// Solved (`sol_b930ad3d58a24301`): designed quota has no slack for a local copy.
+const RETAINED_WORKTREE_LOCAL_ARTIFACTS: usize = 0;
 // LRU cap for in-process GraphIndexArtifact reuse. Bumped from 4 to 64 when the
 // Lance section sidecar landed (s1): write_sections_dataset re-loads the artifact
 // per finalization to compute incremental row diffs, and the prior cap evicted
@@ -139,6 +145,7 @@ pub fn write_with_dedup_with_section_sidecar_options(
             section_sidecar_progress,
         )?;
         publish_worktree_rebuild(artifact, worktree_root, Some(ctx), &written_dir)?;
+        prune_worktree_local_artifacts_best_effort(worktree_root);
         return Ok(());
     }
 
@@ -244,8 +251,22 @@ fn protected_canonical_artifacts(
             canonical_dir.display()
         )
     })?;
-    let mut protected = BTreeSet::from([written_dir]);
+    let mut protected = registered_worktree_protected_artifacts(worktree_root, &canonical_dir)?;
+    protected.insert(written_dir);
+    Ok(protected)
+}
 
+fn registered_worktree_protected_artifacts(
+    worktree_root: &Path,
+    canonical_dir: &Path,
+) -> Result<BTreeSet<PathBuf>> {
+    let canonical_dir = canonical_dir.canonicalize().with_context(|| {
+        format!(
+            "failed to canonicalize graph artifact directory `{}`",
+            canonical_dir.display()
+        )
+    })?;
+    let mut protected = BTreeSet::new();
     let worktrees = git::registered_worktree_roots(worktree_root)
         .context("failed to enumerate registered worktrees for graph artifact pruning")?;
     for worktree in worktrees {
@@ -260,7 +281,6 @@ fn protected_canonical_artifacts(
             }
         }
     }
-
     Ok(protected)
 }
 
@@ -446,19 +466,176 @@ fn delete_stale_canonical_artifacts(stale: Vec<PathBuf>) {
     }
 }
 
+/// Unpin canonical graph generations after a worktree is removed or detached.
+///
+/// Unlike [`prune_after_success_best_effort`], this does not require a newly
+/// written artifact and does not scrub live worktree-local leftover copies.
+/// Pins are taken from `git worktree list`, not an in-process manager map.
+pub fn prune_after_worktree_change(worktree_root: &Path) {
+    let Some(git) = git::detect(worktree_root) else {
+        return;
+    };
+    let artifacts_root = git
+        .git_common_dir
+        .join(CACHE_DIR_NAME)
+        .join(ARTIFACTS_DIR_NAME);
+    let Ok(entries) = fs::read_dir(&artifacts_root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if !file_type.is_dir() {
+            continue;
+        }
+        let canonical_dir = entry.path();
+        match registered_worktree_protected_artifacts(worktree_root, &canonical_dir) {
+            Ok(protected) => {
+                prune_canonical_store_best_effort(&canonical_dir, &protected);
+                prune_rollback_embed_sidecars_best_effort(&canonical_dir, &protected);
+            }
+            Err(error) => {
+                tracing::warn!(
+                    canonical_dir = %canonical_dir.display(),
+                    error = %error,
+                    "spur-graph: skipping canonical artifact pruning after worktree change; protected-target discovery failed"
+                );
+            }
+        }
+    }
+}
+
+fn prune_canonical_store_best_effort(canonical_dir: &Path, protected: &BTreeSet<PathBuf>) {
+    let canonical_dir = match canonical_dir.canonicalize() {
+        Ok(path) => path,
+        Err(error) => {
+            tracing::warn!(
+                path = %canonical_dir.display(),
+                error = %error,
+                "spur-graph: skipping canonical artifact pruning; directory is not canonicalizable"
+            );
+            return;
+        }
+    };
+    let candidates = match canonical_artifact_candidates(&canonical_dir) {
+        Ok(candidates) => candidates,
+        Err(error) => {
+            tracing::warn!(
+                canonical_dir = %canonical_dir.display(),
+                error = %error,
+                "spur-graph: skipping canonical artifact pruning; candidate discovery failed"
+            );
+            return;
+        }
+    };
+    let stale = stale_canonical_artifacts(candidates, protected);
+    delete_stale_canonical_artifacts(stale);
+}
+
 fn prune_after_success_best_effort(worktree_root: &Path, canonical_dir: &Path, written_dir: &Path) {
-    let protected = match protected_canonical_artifacts(worktree_root, canonical_dir, written_dir) {
-        Ok(protected) => protected,
+    match protected_canonical_artifacts(worktree_root, canonical_dir, written_dir) {
+        Ok(protected) => {
+            prune_canonical_artifacts_best_effort(canonical_dir, written_dir, &protected);
+            prune_rollback_embed_sidecars_best_effort(canonical_dir, &protected);
+        }
         Err(error) => {
             tracing::warn!(
                 canonical_dir = %canonical_dir.display(),
                 error = %error,
                 "spur-graph: skipping canonical artifact pruning; protected-target discovery failed"
             );
-            return;
         }
+    }
+    prune_worktree_local_artifacts_best_effort(worktree_root);
+}
+
+fn prune_rollback_embed_sidecars_best_effort(canonical_dir: &Path, protected: &BTreeSet<PathBuf>) {
+    let canonical_dir = match canonical_dir.canonicalize() {
+        Ok(path) => path,
+        Err(_) => return,
     };
-    prune_canonical_artifacts_best_effort(canonical_dir, written_dir, &protected);
+    let Ok(candidates) = canonical_artifact_candidates(&canonical_dir) else {
+        return;
+    };
+    for candidate in candidates {
+        let Ok(Some(path)) = canonical_direct_child(&canonical_dir, &candidate.path) else {
+            continue;
+        };
+        if protected.contains(&path) {
+            continue;
+        }
+        remove_embed_sidecars(&path);
+    }
+}
+
+fn remove_embed_sidecars(artifact_dir: &Path) {
+    for name in [SECTIONS_DATASET_DIR, CODE_SYMBOLS_DATASET_DIR] {
+        let sidecar = artifact_dir.join(name);
+        if sidecar.exists() {
+            if let Err(error) = fs::remove_dir_all(&sidecar) {
+                tracing::warn!(
+                    path = %sidecar.display(),
+                    error = %error,
+                    "spur-graph: failed to prune rollback embedding sidecar"
+                );
+            }
+        }
+    }
+}
+
+fn prune_worktree_local_artifacts_best_effort(worktree_root: &Path) {
+    let graph_dir = worktree_root.join(WORKTREE_ARTIFACT_PATH);
+    let Ok(graph_dir) = graph_dir.canonicalize() else {
+        return;
+    };
+    let current_local = current_pointer_target(worktree_root)
+        .ok()
+        .flatten()
+        .and_then(|target| canonical_direct_child(&graph_dir, &target).ok().flatten());
+
+    let Ok(entries) = fs::read_dir(&graph_dir) else {
+        return;
+    };
+    let mut extras = Vec::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        if name == OsStr::new("CURRENT") {
+            continue;
+        }
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if !file_type.is_dir() {
+            continue;
+        }
+        let path = entry.path();
+        let name = name.to_string_lossy();
+        if name.contains(".parquet.tmp.") {
+            let _ = fs::remove_dir_all(&path);
+            continue;
+        }
+        if !name.ends_with(".parquet") {
+            continue;
+        }
+        if let Some(keep) = current_local.as_ref() {
+            if path.canonicalize().ok().as_ref() == Some(keep) {
+                continue;
+            }
+        }
+        let modified = entry.metadata().ok().and_then(|meta| meta.modified().ok());
+        extras.push((modified, path));
+    }
+    extras.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| left.1.cmp(&right.1)));
+    for (_, path) in extras.into_iter().skip(RETAINED_WORKTREE_LOCAL_ARTIFACTS) {
+        if let Err(error) = fs::remove_dir_all(&path) {
+            tracing::warn!(
+                path = %path.display(),
+                error = %error,
+                "spur-graph: failed to prune worktree-local graph artifact"
+            );
+        }
+    }
 }
 
 fn write_canonical_atomically(
@@ -983,12 +1160,17 @@ mod tests {
 
     use super::{
         delete_stale_canonical_artifacts, lookup_canonical, protected_canonical_artifacts,
-        prune_after_success_best_effort, prune_canonical_artifacts_best_effort,
-        stale_canonical_artifacts, write_with_dedup, write_with_dedup_with_section_sidecar_options,
-        CanonicalArtifactCandidate, POINTER_PUBLICATION_FAILURE, RETAINED_CANONICAL_ARTIFACTS,
+        prune_after_success_best_effort, prune_after_worktree_change,
+        prune_canonical_artifacts_best_effort, stale_canonical_artifacts, write_with_dedup,
+        write_with_dedup_with_section_sidecar_options, CanonicalArtifactCandidate,
+        POINTER_PUBLICATION_FAILURE, RETAINED_CANONICAL_ARTIFACTS, RETAINED_EMBED_SIDECARS,
+        RETAINED_WORKTREE_LOCAL_ARTIFACTS, WORKTREE_ARTIFACT_PATH,
     };
     use crate::git::GitCtx;
-    use crate::store::lance_sections::{SectionEmbeddingOptions, SectionSidecarOptions};
+    use crate::store::lance_sections::{
+        SectionEmbeddingOptions, SectionSidecarOptions, CODE_SYMBOLS_DATASET_DIR,
+        SECTIONS_DATASET_DIR,
+    };
     use crate::store::{
         read_artifact_header_parquet, read_artifact_parquet, read_current_pointer,
         stamp_sidecar_status, write_current_pointer, GraphArtifactSidecarRowCounts,
@@ -1005,6 +1187,137 @@ mod tests {
         const ROLLBACKS: usize = 2;
 
         assert_eq!(RETAINED_CANONICAL_ARTIFACTS, CURRENT + ROLLBACKS);
+        assert_eq!(RETAINED_EMBED_SIDECARS, CURRENT);
+        assert_eq!(RETAINED_WORKTREE_LOCAL_ARTIFACTS, 0);
+    }
+
+    #[test]
+    fn prune_deletes_worktree_local_parquet_leftovers_and_tmp_dirs() {
+        let env = GitCacheEnv::new();
+        write_with_dedup(&artifact("live", "src/lib.rs"), env.repo.path(), &env.ctx).unwrap();
+        let graph_dir = env.repo.path().join(WORKTREE_ARTIFACT_PATH);
+        fs::create_dir_all(&graph_dir).unwrap();
+        let leftover = completed_candidate(&graph_dir, "leftover.parquet");
+        let tmp = graph_dir.join("leftover.parquet.tmp.1.2");
+        fs::create_dir_all(&tmp).unwrap();
+        fs::write(tmp.join("partial"), b"tmp").unwrap();
+
+        prune_after_success_best_effort(
+            env.repo.path(),
+            &env.canonical_dir(),
+            &env.canonical("live"),
+        );
+
+        assert!(
+            !leftover.exists(),
+            "worktree-local leftover parquet must be pruned when CURRENT points at git"
+        );
+        assert!(!tmp.exists(), "abandoned staging dirs must be pruned");
+        assert_eq!(
+            read_current_pointer(env.repo.path()).unwrap(),
+            fs::canonicalize(env.canonical("live")).unwrap()
+        );
+    }
+
+    #[test]
+    fn prune_keeps_lock_fallback_current_but_deletes_other_local_copies() {
+        let env = GitCacheEnv::new();
+        let graph_dir = env.repo.path().join(WORKTREE_ARTIFACT_PATH);
+        let current_local = completed_candidate(&graph_dir, "current.parquet");
+        let leftover = completed_candidate(&graph_dir, "stale.parquet");
+        let git_written = completed_candidate(&env.canonical_dir(), "git-written.parquet");
+        write_current_pointer(env.repo.path(), &current_local).unwrap();
+
+        prune_after_success_best_effort(env.repo.path(), &env.canonical_dir(), &git_written);
+
+        assert!(
+            current_local.exists(),
+            "lock-fallback CURRENT local copy must be kept"
+        );
+        assert!(
+            !leftover.exists(),
+            "extra worktree-local parquet copies must be pruned"
+        );
+    }
+
+    #[test]
+    fn prune_strips_embed_sidecars_from_facts_only_rollback_generations() {
+        let env = GitCacheEnv::new();
+        let canonical_dir = env.canonical_dir();
+        let oldest = completed_candidate_with_sidecars(&canonical_dir, "z-oldest.parquet");
+        let rollback_two =
+            completed_candidate_with_sidecars(&canonical_dir, "c-rollback-two.parquet");
+        let rollback = completed_candidate_with_sidecars(&canonical_dir, "b-rollback.parquet");
+        let current = completed_candidate_with_sidecars(&canonical_dir, "a-current.parquet");
+        write_current_pointer(env.repo.path(), &current).unwrap();
+
+        prune_after_success_best_effort(env.repo.path(), &canonical_dir, &current);
+
+        assert!(
+            !oldest.exists(),
+            "facts prune still drops the 4th generation"
+        );
+        assert!(
+            rollback_two.exists(),
+            "older rollback facts generation is retained"
+        );
+        assert!(rollback.exists(), "rollback facts generation is retained");
+        assert!(current.exists(), "current facts generation is retained");
+        assert!(
+            !has_embed_sidecars(&rollback_two),
+            "older rollback generation must not keep Lance sidecars"
+        );
+        assert!(
+            !has_embed_sidecars(&rollback),
+            "rollback generation must not keep Lance sidecars"
+        );
+        assert!(
+            has_embed_sidecars(&current),
+            "CURRENT must keep Lance sidecars for hybrid search"
+        );
+    }
+
+    #[test]
+    fn prune_after_worktree_change_unpins_generation_only_referenced_by_removed_worktree() {
+        let env = GitCacheEnv::new();
+        let linked_parent = TempDir::new().unwrap();
+        let linked = add_linked_worktree(env.repo.path(), linked_parent.path());
+        let canonical_dir = env.canonical_dir();
+        let oldest = completed_candidate_with_sidecars(&canonical_dir, "z-oldest.parquet");
+        let worker_pin = completed_candidate_with_sidecars(&canonical_dir, "w-worker.parquet");
+        let rollback = completed_candidate_with_sidecars(&canonical_dir, "b-rollback.parquet");
+        let current = completed_candidate_with_sidecars(&canonical_dir, "a-current.parquet");
+        write_current_pointer(env.repo.path(), &current).unwrap();
+        write_current_pointer(&linked, &worker_pin).unwrap();
+
+        run_git(
+            env.repo.path(),
+            &[
+                "worktree",
+                "remove",
+                "--force",
+                linked.to_str().expect("linked utf-8"),
+            ],
+        );
+
+        prune_after_worktree_change(env.repo.path());
+
+        assert!(
+            !oldest.exists(),
+            "a generation no longer pinned by any registered worktree must prune without a graph write"
+        );
+        assert!(
+            current.exists() && has_embed_sidecars(&current),
+            "remaining worktree CURRENT must keep facts and Lance sidecars"
+        );
+        assert!(
+            rollback.exists() && !has_embed_sidecars(&rollback),
+            "facts rollback is retained; Lance sidecars stay on CURRENT only"
+        );
+        assert!(
+            worker_pin.exists() && !has_embed_sidecars(&worker_pin),
+            "the unpinned worker generation may remain as facts-only within the retention window"
+        );
     }
 
     #[test]
@@ -1557,6 +1870,18 @@ mod tests {
         fs::create_dir_all(&candidate).unwrap();
         fs::write(candidate.join("manifest.json"), b"{}").unwrap();
         candidate
+    }
+
+    fn completed_candidate_with_sidecars(canonical_dir: &Path, name: &str) -> PathBuf {
+        let candidate = completed_candidate(canonical_dir, name);
+        fs::create_dir_all(candidate.join(SECTIONS_DATASET_DIR)).unwrap();
+        fs::create_dir_all(candidate.join(CODE_SYMBOLS_DATASET_DIR)).unwrap();
+        candidate
+    }
+
+    fn has_embed_sidecars(artifact_dir: &Path) -> bool {
+        artifact_dir.join(SECTIONS_DATASET_DIR).is_dir()
+            || artifact_dir.join(CODE_SYMBOLS_DATASET_DIR).is_dir()
     }
 
     fn write_test_pointer(worktree: &Path, target: &Path) {

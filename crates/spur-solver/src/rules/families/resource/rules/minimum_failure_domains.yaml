@@ -1,0 +1,133 @@
+schema_version: 1
+id: placement.minimum_failure_domains
+rule_version: 1
+family: resource
+profile: topology_placement
+primitive: positive_domain_cardinality
+summary: Require positive placement counts in at least the minimum number of declared domains.
+availability: implemented
+strength: hard
+authorities:
+  - kind: derived_reference
+    title: Finite declared-domain model derived from Kubernetes topology spread concepts
+    url: https://kubernetes.io/docs/concepts/scheduling-eviction/topology-spread-constraints/
+requires:
+  - workload.replicas
+  - workload.domain_counts
+  - parameters.minimum_domains
+llm_encoding:
+  effectiveness: high
+  problem_shapes:
+    - Require positive placement counts in at least the minimum number of declared domains.
+  encode_steps:
+    - Bind explicit workloads and resources
+    - Declare bounded unknown numeric facts
+    - Compile capacity or placement predicates
+  anti_patterns:
+    - Do not query or infer live scheduler state
+    - Do not treat declared-domain pairwise skew as scheduler global-min or minDomains evaluation
+  escalate_when:
+    - Escalate affinity, taints, or priority to separate rule primitives
+solver_encoding:
+  theory: QF_NIA
+  verification: assert the predicate over complete demand and placement facts
+  synthesis: leave only explicitly bounded numeric facts free
+  formula:
+    - sum count(domain) = workload.replicas
+    - sum present(domain) >= minimum_domains
+    - present(domain) iff count(domain) > 0
+subjects:
+  cardinality:
+    kind: at_least
+    count: 1
+parameters:
+  - name: minimum_domains
+    required: false
+    default: 1
+    kind: integer
+    minimum: 1
+handler: placement_minimum_failure_domains
+examples:
+  valid:
+    facts:
+      family: resource
+      mode: verify
+      rules:
+        - rule_id: placement.minimum_failure_domains
+          subjects: [api]
+          parameters:
+            minimum_domains: 2
+      facts:
+        workloads:
+          api:
+            replicas: 2
+            requests: {}
+            limits: {}
+            domain_counts: {zone-a: 1, zone-b: 1}
+        pools: {}
+        quotas: {}
+      unknowns: []
+    expectation: pass
+  invalid:
+    facts:
+      family: resource
+      mode: verify
+      rules:
+        - rule_id: placement.minimum_failure_domains
+          subjects: [api]
+          parameters:
+            minimum_domains: 2
+      facts:
+        workloads:
+          api:
+            replicas: 2
+            requests: {}
+            limits: {}
+            domain_counts: {zone-a: 2, zone-b: 0}
+        pools: {}
+        quotas: {}
+      unknowns: []
+    expectation: counterexample
+    expected_diagnostic: placement.minimum_failure_domains.violation
+conformance:
+  valid:
+    - name: placement spans the required failure domains
+      request:
+        family: resource
+        mode: verify
+        rules:
+          - rule_id: placement.minimum_failure_domains
+            subjects: [api]
+            parameters:
+              minimum_domains: 2
+        facts:
+          workloads:
+            api:
+              replicas: 2
+              requests: {}
+              limits: {}
+              domain_counts: {zone-a: 1, zone-b: 1}
+          pools: {}
+          quotas: {}
+        unknowns: []
+  invalid:
+    - name: placement uses too few failure domains
+      request:
+        family: resource
+        mode: verify
+        rules:
+          - rule_id: placement.minimum_failure_domains
+            subjects: [api]
+            parameters:
+              minimum_domains: 2
+        facts:
+          workloads:
+            api:
+              replicas: 2
+              requests: {}
+              limits: {}
+              domain_counts: {zone-a: 2, zone-b: 0}
+          pools: {}
+          quotas: {}
+        unknowns: []
+      expected_diagnostic: placement.minimum_failure_domains.violation

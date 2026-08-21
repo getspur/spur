@@ -1,0 +1,8 @@
+schema_version: 1
+id: "accessibility"
+family_version: 1
+summary: "WCAG-backed geometry and contrast rules over normalized UI facts."
+profiles:
+  - id: "wcag_geometry_color"
+    profile_version: 1
+    summary: "Target, focus visibility, reflow, and text contrast constraints."

@@ -27,6 +27,53 @@ fn overlay_rebuild_key_changes_when_base_graph_changes() {
     assert_ne!(first.cache_dir_name(), second.cache_dir_name());
 }
 
+#[test]
+fn overlay_rebuild_key_is_none_when_worktree_matches_indexed_oids() {
+    let repo = tempfile::tempdir().expect("tempdir");
+    let root = repo.path();
+    init_git_repo(root);
+    fs::create_dir_all(root.join("src")).expect("src");
+    let v1 = b"pub fn alpha_v1() {}\n";
+    fs::write(root.join("src/lib.rs"), v1).expect("write");
+    run_git(root, &["add", "src/lib.rs"]);
+    run_git(root, &["commit", "--no-gpg-sign", "-m", "v1"]);
+
+    let artifact = artifact_with_file("src/lib.rs", &spur_graph::git_blob_oid(v1));
+    let key = overlay_rebuild_key_for_dirty_worktree(root, &artifact);
+
+    assert!(
+        key.is_none(),
+        "matching graph oids and a clean tree must not build an analyst overlay"
+    );
+}
+
+#[test]
+fn overlay_rebuild_key_detects_clean_head_lag() {
+    let repo = tempfile::tempdir().expect("tempdir");
+    let root = repo.path();
+    init_git_repo(root);
+    fs::create_dir_all(root.join("src")).expect("src");
+    let v1 = b"pub fn alpha_v1() {}\n";
+    fs::write(root.join("src/lib.rs"), v1).expect("write v1");
+    run_git(root, &["add", "src/lib.rs"]);
+    run_git(root, &["commit", "--no-gpg-sign", "-m", "v1"]);
+    let artifact = artifact_with_file("src/lib.rs", &spur_graph::git_blob_oid(v1));
+
+    let v2 = b"pub fn alpha_v2() {}\n";
+    fs::write(root.join("src/lib.rs"), v2).expect("write v2");
+    run_git(root, &["add", "src/lib.rs"]);
+    run_git(root, &["commit", "--no-gpg-sign", "-m", "v2"]);
+
+    let dirty = spur_graph::git::status_dirty_paths(root).expect("status");
+    assert!(dirty.is_empty(), "HEAD lag fixture must be status-clean");
+
+    let key = overlay_rebuild_key_for_dirty_worktree(root, &artifact);
+    assert!(
+        key.is_some(),
+        "committed divergence from indexed oids must overlay even when git status is clean"
+    );
+}
+
 #[tokio::test]
 async fn merge_session_reuses_cached_delta_for_same_dirty_key() {
     let tempdir = tempfile::tempdir().expect("tempdir");
@@ -292,6 +339,10 @@ fn complete_manifest_json() -> String {
 }
 
 fn empty_previous_artifact() -> spur_graph::GraphIndexArtifact {
+    artifact_with_file("src/lib.rs", "oid-unused")
+}
+
+fn artifact_with_file(path: &str, content_oid: &str) -> spur_graph::GraphIndexArtifact {
     spur_graph::GraphIndexArtifact {
         header: spur_graph::GraphIndexHeader {
             graph_index_version: spur_graph::GRAPH_INDEX_VERSION_TEMPORAL.to_owned(),
@@ -299,7 +350,12 @@ fn empty_previous_artifact() -> spur_graph::GraphIndexArtifact {
         },
         manifest_version: spur_graph::store::current_manifest_version(),
         graph_content_hash: "reuse-test".to_owned(),
-        file_manifests: Vec::new(),
+        file_manifests: vec![spur_graph::GraphFileManifestEntry {
+            stable_file_id: format!("file:{path}"),
+            path: path.to_owned(),
+            content_oid: content_oid.to_owned(),
+            node_ids: Vec::new(),
+        }],
         files: Vec::new(),
         file_node_ids: Vec::new(),
         symbols: Vec::new(),
@@ -311,6 +367,28 @@ fn empty_previous_artifact() -> spur_graph::GraphIndexArtifact {
         symbol_snapshots: Vec::new(),
         temporal_edges: Vec::new(),
     }
+}
+
+fn init_git_repo(root: &Path) {
+    run_git(root, &["init"]);
+    run_git(root, &["config", "user.name", "SPUR Test"]);
+    run_git(root, &["config", "user.email", "spur-test@example.invalid"]);
+}
+
+fn run_git(root: &Path, args: &[&str]) {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(args)
+        .output()
+        .expect("run git");
+    assert!(
+        output.status.success(),
+        "git {} failed\nstdout:\n{}\nstderr:\n{}",
+        args.join(" "),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]

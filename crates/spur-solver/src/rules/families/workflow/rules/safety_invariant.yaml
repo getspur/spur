@@ -1,0 +1,152 @@
+schema_version: 1
+id: workflow.safety_invariant
+rule_version: 1
+family: workflow
+profile: bounded_trace
+primitive: finite_state_invariant
+summary: Require every state slot in one finite workflow trace to belong to the caller-declared safe-state set.
+availability: implemented
+strength: hard
+authorities:
+  - kind: formal_methods_reference
+    title: TLA+ High-Level View - Invariance Properties
+    url: https://lamport.azurewebsites.net/tla/high-level-view.html
+  - kind: official_model_checker_documentation
+    title: Apalache - Bounded Model Checking
+    url: https://apalache-mc.org/docs/apalache/running.html#14-bounded-model-checking
+requires:
+  - horizon
+  - state_domain
+  - safe_states
+  - traces[subject].states
+llm_encoding:
+  effectiveness: high
+  problem_shapes:
+    - Every state in a finite observed or synthesized workflow trace must satisfy one caller-normalized safety classification.
+    - A symbolic finite trace may be searched for a concrete state that violates the classification.
+  encode_steps:
+    - Bind exactly one declared trace ID as the subject.
+    - Resolve safe-state labels and every trace state against the finite state domain.
+    - Emit one safe-set membership constraint for every state index from zero through the declared trace length.
+  anti_patterns:
+    - Do not infer safety from names or evaluate application predicates that the caller has not normalized into finite states.
+    - Do not report bounded UNSAT as proof for traces longer than the declared horizon.
+    - Do not claim unbounded liveness, fairness, or infinite-cycle safety from finite unrolling.
+  escalate_when:
+    - Escalate arbitrary data predicates that cannot be flattened into a finite safe-state classification.
+    - Escalate universal unbounded invariance to inductive proof or complete model checking.
+solver_encoding:
+  theory: QF_LIA with finite enum labels
+  verification: fix the complete observed trace and assert safe-set membership at every state index
+  synthesis: constrain explicitly unknown state slots to safe labels, or negate this predicate in a separate bounded counterexample query
+  formula:
+    - "for every i in 0..L: q_i in S"
+    - "bounded counterexample condition: exists i in 0..L such that q_i not in S"
+subjects:
+  cardinality:
+    kind: exact
+    count: 1
+parameters: []
+handler: workflow_safety_invariant
+examples:
+  valid:
+    facts:
+      family: workflow
+      mode: verify
+      rules:
+        - rule_id: workflow.safety_invariant
+          subjects: [approval]
+          parameters: {}
+      facts:
+        horizon: 2
+        state_domain: [Draft, Review, Approved, Rejected]
+        event_domain: [submit, approve, reject]
+        initial_states: [Draft]
+        safe_states: [Draft, Review, Approved]
+        target_states: [Approved]
+        enabled_transitions:
+          - {step: 0, from: Draft, event: submit, to: Review}
+          - {step: 1, from: Review, event: approve, to: Approved}
+          - {step: 1, from: Review, event: reject, to: Rejected}
+        traces:
+          approval:
+            states: [Draft, Review, Approved]
+            events: [submit, approve]
+      unknowns: []
+    expectation: pass for all three observed state slots at declared horizon 2
+  invalid:
+    facts:
+      family: workflow
+      mode: verify
+      rules:
+        - rule_id: workflow.safety_invariant
+          subjects: [approval]
+          parameters: {}
+      facts:
+        horizon: 2
+        state_domain: [Draft, Review, Approved, Rejected]
+        event_domain: [submit, approve, reject]
+        initial_states: [Draft]
+        safe_states: [Draft, Review, Approved]
+        target_states: [Approved]
+        enabled_transitions:
+          - {step: 0, from: Draft, event: submit, to: Review}
+          - {step: 1, from: Review, event: reject, to: Rejected}
+        traces:
+          approval:
+            states: [Draft, Review, Rejected]
+            events: [submit, reject]
+      unknowns: []
+    expectation: counterexample at state index 2 within declared horizon 2
+    expected_diagnostic: workflow.safety_invariant.violation
+conformance:
+  valid:
+    - name: observed approved path stays inside the safe set
+      request:
+        family: workflow
+        mode: verify
+        rules:
+          - rule_id: workflow.safety_invariant
+            subjects: [approval]
+            parameters: {}
+        facts:
+          horizon: 2
+          state_domain: [Draft, Review, Approved, Rejected]
+          event_domain: [submit, approve, reject]
+          initial_states: [Draft]
+          safe_states: [Draft, Review, Approved]
+          target_states: [Approved]
+          enabled_transitions:
+            - {step: 0, from: Draft, event: submit, to: Review}
+            - {step: 1, from: Review, event: approve, to: Approved}
+            - {step: 1, from: Review, event: reject, to: Rejected}
+          traces:
+            approval:
+              states: [Draft, Review, Approved]
+              events: [submit, approve]
+        unknowns: []
+  invalid:
+    - name: observed rejected path reaches an unsafe state within the bound
+      request:
+        family: workflow
+        mode: verify
+        rules:
+          - rule_id: workflow.safety_invariant
+            subjects: [approval]
+            parameters: {}
+        facts:
+          horizon: 2
+          state_domain: [Draft, Review, Approved, Rejected]
+          event_domain: [submit, approve, reject]
+          initial_states: [Draft]
+          safe_states: [Draft, Review, Approved]
+          target_states: [Approved]
+          enabled_transitions:
+            - {step: 0, from: Draft, event: submit, to: Review}
+            - {step: 1, from: Review, event: reject, to: Rejected}
+          traces:
+            approval:
+              states: [Draft, Review, Rejected]
+              events: [submit, reject]
+        unknowns: []
+      expected_diagnostic: workflow.safety_invariant.violation

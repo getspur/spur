@@ -1,0 +1,139 @@
+schema_version: 1
+id: workflow.initial_state_allowed
+rule_version: 1
+family: workflow
+profile: bounded_trace
+primitive: finite_initial_membership
+summary: Require the first state of one finite trace to belong to the caller-declared initial-state set.
+availability: implemented
+strength: hard
+authorities:
+  - kind: formal_methods_reference
+    title: TLA+ High-Level View - State Machines
+    url: https://lamport.azurewebsites.net/tla/high-level-view.html
+  - kind: w3c_recommendation
+    title: State Chart XML (SCXML) - Legal State Configurations and Specifications
+    url: https://www.w3.org/TR/scxml/#LegalStateConfigurations
+requires:
+  - horizon
+  - state_domain
+  - initial_states
+  - traces[subject].states[0]
+llm_encoding:
+  effectiveness: high
+  problem_shapes:
+    - A finite observed or synthesized workflow trace must begin in one explicitly allowed state.
+  encode_steps:
+    - Bind exactly one declared trace ID as the subject.
+    - Resolve the first trace slot and every initial-state label against the finite state domain.
+    - Encode membership as a finite disjunction over the declared initial-state set.
+  anti_patterns:
+    - Do not infer an initial state from naming, list order, or external runtime state.
+    - Do not treat a bounded trace check as an unbounded temporal proof.
+  escalate_when:
+    - Escalate dynamic state creation, quantified process populations, or unbounded initialization semantics outside this finite profile.
+solver_encoding:
+  theory: QF_LIA with finite enum labels
+  verification: fix the complete observed first state and assert membership in the declared initial-state set
+  synthesis: constrain an explicitly unknown first state to one declared initial label within the finite domain
+  formula:
+    - "q_0 in I"
+    - "I is a non-empty subset of the caller-declared finite state domain Q"
+subjects:
+  cardinality:
+    kind: exact
+    count: 1
+parameters: []
+handler: workflow_initial_state_allowed
+examples:
+  valid:
+    facts:
+      family: workflow
+      mode: verify
+      rules:
+        - rule_id: workflow.initial_state_allowed
+          subjects: [approval]
+          parameters: {}
+      facts:
+        horizon: 0
+        state_domain: [Draft, Review, Approved, Rejected]
+        event_domain: [submit, approve, reject]
+        initial_states: [Draft]
+        safe_states: [Draft, Review, Approved]
+        target_states: [Approved]
+        enabled_transitions: []
+        traces:
+          approval:
+            states: [Draft]
+            events: []
+      unknowns: []
+    expectation: pass at declared horizon 0
+  invalid:
+    facts:
+      family: workflow
+      mode: verify
+      rules:
+        - rule_id: workflow.initial_state_allowed
+          subjects: [approval]
+          parameters: {}
+      facts:
+        horizon: 0
+        state_domain: [Draft, Review, Approved, Rejected]
+        event_domain: [submit, approve, reject]
+        initial_states: [Draft]
+        safe_states: [Draft, Review, Approved]
+        target_states: [Approved]
+        enabled_transitions: []
+        traces:
+          approval:
+            states: [Review]
+            events: []
+      unknowns: []
+    expectation: counterexample at trace index 0
+    expected_diagnostic: workflow.initial_state_allowed.violation
+conformance:
+  valid:
+    - name: observed approval trace begins in Draft
+      request:
+        family: workflow
+        mode: verify
+        rules:
+          - rule_id: workflow.initial_state_allowed
+            subjects: [approval]
+            parameters: {}
+        facts:
+          horizon: 0
+          state_domain: [Draft, Review, Approved, Rejected]
+          event_domain: [submit, approve, reject]
+          initial_states: [Draft]
+          safe_states: [Draft, Review, Approved]
+          target_states: [Approved]
+          enabled_transitions: []
+          traces:
+            approval:
+              states: [Draft]
+              events: []
+        unknowns: []
+  invalid:
+    - name: observed approval trace begins in non-initial Review
+      request:
+        family: workflow
+        mode: verify
+        rules:
+          - rule_id: workflow.initial_state_allowed
+            subjects: [approval]
+            parameters: {}
+        facts:
+          horizon: 0
+          state_domain: [Draft, Review, Approved, Rejected]
+          event_domain: [submit, approve, reject]
+          initial_states: [Draft]
+          safe_states: [Draft, Review, Approved]
+          target_states: [Approved]
+          enabled_transitions: []
+          traces:
+            approval:
+              states: [Review]
+              events: []
+        unknowns: []
+      expected_diagnostic: workflow.initial_state_allowed.violation

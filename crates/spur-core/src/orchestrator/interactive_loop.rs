@@ -1092,6 +1092,32 @@ impl Orchestrator {
                         }
                     },
 
+                    InteractiveInput::UpdateConfig { patch } => {
+                        let section = patch.section_id().to_string();
+                        match self.apply_config_patch(patch) {
+                            Ok(()) => {
+                                self.funnel.emit(SpurEventBody::ConfigUpdateResult {
+                                    section,
+                                    ok: true,
+                                    message: "saved".into(),
+                                });
+                            }
+                            Err(e) => {
+                                let message = format_error_chain(&e);
+                                warn!(
+                                    section = %section,
+                                    error = %message,
+                                    "config update failed"
+                                );
+                                self.funnel.emit(SpurEventBody::ConfigUpdateResult {
+                                    section,
+                                    ok: false,
+                                    message,
+                                });
+                            }
+                        }
+                    }
+
                     // ── SetSessionModel (M9 F-C) ──────────────────────────
                     InteractiveInput::SetSessionModel { value } => {
                         if let Some(b) = brain.as_mut() {

@@ -1,6 +1,92 @@
 use super::*;
+use spur_acp::config::{ConfigPatch, EditorMode};
+
+/// SAVE-APPLY: agent saves must not write `App.config` before orchestrator ok.
+#[cfg(test)]
+pub(crate) fn agent_save_should_mutate_before_send() -> bool {
+    false
+}
+
+pub(crate) fn apply_config_patch_locally(cfg: &mut spur_acp::SpurConfig, patch: &ConfigPatch) {
+    let _ = patch.apply(cfg);
+}
 
 impl App {
+    fn queue_config_patch(&mut self, patch: ConfigPatch) -> Option<Action> {
+        let Some(tx) = self.user_input_tx.as_ref() else {
+            return Some(Action::FlashHint {
+                message: "config save failed: backend unavailable".into(),
+            });
+        };
+        if tx
+            .try_send(UserInput::UpdateConfig {
+                patch: patch.clone(),
+            })
+            .is_err()
+        {
+            return Some(Action::FlashHint {
+                message: "config save failed: backend queue full".into(),
+            });
+        }
+        self.pending_config_patch = Some(patch);
+        None
+    }
+
+    pub(crate) fn apply_pending_config_on_ok(&mut self) {
+        let Some(patch) = self.pending_config_patch.take() else {
+            return;
+        };
+        apply_config_patch_locally(std::sync::Arc::make_mut(&mut self.config), &patch);
+        self.apply_config_live_hooks(&patch);
+    }
+
+    pub(crate) fn discard_pending_config_patch(&mut self) {
+        self.pending_config_patch = None;
+    }
+
+    fn apply_config_live_hooks(&mut self, patch: &ConfigPatch) {
+        match patch {
+            ConfigPatch::Agent {
+                name,
+                updated_entry,
+            } => {
+                if let Some(browser) = self.agent_config_browser.as_mut() {
+                    browser.replace_agent_config(name, updated_entry.clone());
+                }
+                self.sync_dashboard_workers();
+            }
+            ConfigPatch::TuiEditMode(mode) => {
+                self.edit_mode = EditMode::from(*mode);
+                self.dashboard.set_edit_mode(self.edit_mode);
+                if let Some(detail) = self.session_detail.as_mut() {
+                    detail.set_edit_mode(self.edit_mode);
+                }
+            }
+            ConfigPatch::TuiTheme(name) => {
+                let (theme, outcome) = crate::theme::load_runtime_theme(name);
+                if let crate::theme::ThemeLoadOutcome::FellBackToDark { reason } = &outcome {
+                    tracing::warn!(
+                        target: "spur_tui::theme",
+                        target_name = %name,
+                        reason = %reason,
+                        "theme apply after persist fell back to dark"
+                    );
+                    self.flash_hint_short(format!("theme `{name}` not found"));
+                }
+                self.theme = std::sync::Arc::new(theme);
+                self.active_theme_name = name.clone();
+            }
+            ConfigPatch::TuiDisablePasteBurst(disabled) => {
+                self.dashboard.set_disable_paste_burst(*disabled);
+                if let Some(detail) = self.session_detail.as_mut() {
+                    detail.set_disable_paste_burst(*disabled);
+                }
+            }
+            ConfigPatch::GraphEmbeddingModel { .. } | ConfigPatch::SkillsProjectionMode(_) => {}
+        }
+        self.dirty = true;
+    }
+
     pub(super) fn process_session_config(&mut self, action: Action) -> Option<Action> {
         match action {
             Action::VendorExec {
@@ -29,31 +115,18 @@ impl App {
                 name,
                 updated_entry,
             } => {
-                let mut updated_app_config = false;
-                {
-                    let config = std::sync::Arc::make_mut(&mut self.config);
-                    if let Some(slot) = config
-                        .agents
-                        .entries
-                        .iter_mut()
-                        .find(|entry| entry.name == name)
-                    {
-                        *slot = updated_entry.clone();
-                        updated_app_config = true;
-                    }
-                }
-
-                if !updated_app_config {
+                // Do not write `self.config` until AgentConfigUpdateResult ok.
+                let exists = self
+                    .config
+                    .agents
+                    .entries
+                    .iter()
+                    .any(|entry| entry.name == name);
+                if !exists {
                     return Some(Action::FlashHint {
                         message: format!("agent config `{name}` is not configured"),
                     });
                 }
-
-                if let Some(browser) = self.agent_config_browser.as_mut() {
-                    browser.replace_agent_config(&name, updated_entry.clone());
-                }
-                self.sync_dashboard_workers();
-                self.dirty = true;
 
                 let Some(tx) = self.user_input_tx.as_ref() else {
                     return Some(Action::FlashHint {
@@ -61,6 +134,10 @@ impl App {
                     });
                 };
 
+                let patch = ConfigPatch::Agent {
+                    name: name.clone(),
+                    updated_entry: updated_entry.clone(),
+                };
                 if tx
                     .try_send(UserInput::UpdateAgentConfig {
                         name,
@@ -72,9 +149,11 @@ impl App {
                         message: "agent config save failed: backend queue full".into(),
                     });
                 }
-
+                self.pending_config_patch = Some(patch);
                 None
             }
+
+            Action::ConfigSaveRequested { patch } => self.queue_config_patch(patch),
 
             Action::SetSessionModel { session_id, value } => {
                 if let Some(tx) = self.user_input_tx.as_ref() {
@@ -116,10 +195,16 @@ impl App {
             }
 
             Action::ToggleVimMode => {
-                self.edit_mode = match self.edit_mode {
-                    EditMode::Emacs => EditMode::Vim(crate::components::input_bar::VimMode::Normal),
-                    EditMode::Vim(_) => EditMode::Emacs,
+                let next = match self.edit_mode {
+                    EditMode::Emacs => EditorMode::Vim,
+                    EditMode::Vim(_) => EditorMode::Emacs,
                 };
+                if self.user_input_tx.is_some() {
+                    return self.queue_config_patch(ConfigPatch::TuiEditMode(next));
+                }
+                // Tests and detached TUI: keep the in-memory toggle when
+                // there is no orchestrator channel.
+                self.edit_mode = EditMode::from(next);
                 self.dashboard.set_edit_mode(self.edit_mode);
                 if let Some(ref mut detail) = self.session_detail {
                     detail.set_edit_mode(self.edit_mode);
@@ -151,6 +236,29 @@ impl App {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use spur_acp::config::{ConfigPatch, EditorMode};
+    use tokio::sync::mpsc;
+
+    fn app_with_agent(tx: Option<mpsc::Sender<UserInput>>) -> App {
+        let mut config = spur_acp::SpurConfig::default();
+        let mut agent = spur_acp::AgentConfig::with_defaults("kiro");
+        agent.skip_permissions = false;
+        config.agents.entries = vec![agent];
+        App::new_with_config(
+            tx,
+            false,
+            std::sync::Arc::new(config),
+            crate::landing::LandingDecision::ShowDashboard,
+        )
+    }
+
+    fn updated_kiro() -> spur_acp::AgentConfig {
+        let mut agent = spur_acp::AgentConfig::with_defaults("kiro");
+        agent.skip_permissions = true;
+        agent
+    }
+
     #[test]
     fn notebook_command_helpers_live_in_slash_commands_module() {
         assert_eq!(
@@ -168,5 +276,177 @@ mod tests {
             )),
             "connection refused"
         );
+    }
+
+    #[test]
+    fn apply_config_patch_locally_writes_tui_edit_mode() {
+        let mut cfg = spur_acp::SpurConfig::default();
+        apply_config_patch_locally(&mut cfg, &ConfigPatch::TuiEditMode(EditorMode::Vim));
+        assert_eq!(cfg.tui.edit_mode, EditorMode::Vim);
+        assert_eq!(cfg.tui.theme, "dark");
+    }
+
+    #[test]
+    fn save_apply_is_persist_then_apply() {
+        assert!(!agent_save_should_mutate_before_send());
+    }
+
+    #[test]
+    fn agent_save_does_not_mutate_config_before_orchestrator_ok() {
+        let (tx, mut rx) = mpsc::channel(8);
+        let mut app = app_with_agent(Some(tx));
+        app.process_action(Action::AgentConfigSaveRequested {
+            name: "kiro".into(),
+            updated_entry: updated_kiro(),
+        });
+
+        assert!(
+            !app.config.agents.entries[0].skip_permissions,
+            "SAVE-APPLY: App.config must not change before orchestrator ok"
+        );
+        match rx.try_recv() {
+            Ok(UserInput::UpdateAgentConfig {
+                name,
+                updated_entry,
+            }) => {
+                assert_eq!(name, "kiro");
+                assert!(updated_entry.skip_permissions);
+            }
+            Ok(_) => panic!("expected UpdateAgentConfig"),
+            Err(err) => panic!("expected UpdateAgentConfig, got {err}"),
+        }
+    }
+
+    #[test]
+    fn agent_save_applies_on_update_result_ok() {
+        let (tx, _rx) = mpsc::channel(8);
+        let mut app = app_with_agent(Some(tx));
+        app.process_action(Action::AgentConfigSaveRequested {
+            name: "kiro".into(),
+            updated_entry: updated_kiro(),
+        });
+        assert!(!app.config.agents.entries[0].skip_permissions);
+
+        app.handle_spur_event(SpurEvent::now(SpurEventBody::AgentConfigUpdateResult {
+            name: "kiro".into(),
+            ok: true,
+            message: "saved - applies to next delegation".into(),
+        }));
+
+        assert!(app.config.agents.entries[0].skip_permissions);
+        let hint = app.transient_hint_text().unwrap_or("");
+        assert!(
+            hint.contains("kiro"),
+            "success flash should name the agent: {hint}"
+        );
+        assert!(
+            !hint.contains("failed"),
+            "ok result must not flash failure: {hint}"
+        );
+    }
+
+    #[test]
+    fn agent_save_failure_does_not_apply() {
+        let (tx, _rx) = mpsc::channel(8);
+        let mut app = app_with_agent(Some(tx));
+        app.process_action(Action::AgentConfigSaveRequested {
+            name: "kiro".into(),
+            updated_entry: updated_kiro(),
+        });
+
+        app.handle_spur_event(SpurEvent::now(SpurEventBody::AgentConfigUpdateResult {
+            name: "kiro".into(),
+            ok: false,
+            message: "disk full".into(),
+        }));
+
+        assert!(!app.config.agents.entries[0].skip_permissions);
+        let hint = app.transient_hint_text().unwrap_or("");
+        assert!(hint.contains("failed"), "failure flash missing: {hint}");
+        assert!(hint.contains("disk full"), "error message missing: {hint}");
+    }
+
+    #[test]
+    fn config_save_applies_tui_edit_mode_on_ok() {
+        let (tx, mut rx) = mpsc::channel(8);
+        let mut app = App::new(Some(tx), false);
+        assert_eq!(app.edit_mode, EditMode::Emacs);
+
+        app.process_action(Action::ConfigSaveRequested {
+            patch: ConfigPatch::TuiEditMode(EditorMode::Vim),
+        });
+        assert_eq!(app.edit_mode, EditMode::Emacs);
+        assert_eq!(app.config.tui.edit_mode, EditorMode::Emacs);
+        match rx.try_recv() {
+            Ok(UserInput::UpdateConfig { patch }) => {
+                assert!(matches!(patch, ConfigPatch::TuiEditMode(EditorMode::Vim)));
+            }
+            Ok(_) => panic!("expected UpdateConfig"),
+            Err(err) => panic!("expected UpdateConfig, got {err}"),
+        }
+
+        app.handle_spur_event(SpurEvent::now(SpurEventBody::ConfigUpdateResult {
+            section: "tui".into(),
+            ok: true,
+            message: "saved".into(),
+        }));
+        assert!(matches!(app.edit_mode, EditMode::Vim(_)));
+        assert_eq!(app.config.tui.edit_mode, EditorMode::Vim);
+    }
+
+    #[test]
+    fn config_save_failure_does_not_apply() {
+        let (tx, _rx) = mpsc::channel(8);
+        let mut app = App::new(Some(tx), false);
+        app.process_action(Action::ConfigSaveRequested {
+            patch: ConfigPatch::TuiEditMode(EditorMode::Vim),
+        });
+
+        app.handle_spur_event(SpurEvent::now(SpurEventBody::ConfigUpdateResult {
+            section: "tui".into(),
+            ok: false,
+            message: "permission denied".into(),
+        }));
+
+        assert_eq!(app.edit_mode, EditMode::Emacs);
+        assert_eq!(app.config.tui.edit_mode, EditorMode::Emacs);
+        let hint = app.transient_hint_text().unwrap_or("");
+        assert!(hint.contains("failed"), "failure flash missing: {hint}");
+    }
+
+    #[test]
+    fn vim_toggle_without_backend_still_flips_in_memory() {
+        let mut app = App::new(None, false);
+        assert_eq!(app.edit_mode, EditMode::Emacs);
+        app.process_action(Action::ToggleVimMode);
+        assert!(matches!(app.edit_mode, EditMode::Vim(_)));
+        assert_eq!(
+            app.config.tui.edit_mode,
+            EditorMode::Emacs,
+            "no-backend tests must not pretend persist succeeded"
+        );
+    }
+
+    #[test]
+    fn vim_toggle_with_backend_persists_then_applies_on_ok() {
+        let (tx, mut rx) = mpsc::channel(8);
+        let mut app = App::new(Some(tx), false);
+        app.process_action(Action::ToggleVimMode);
+        assert_eq!(app.edit_mode, EditMode::Emacs);
+        match rx.try_recv() {
+            Ok(UserInput::UpdateConfig { patch }) => {
+                assert!(matches!(patch, ConfigPatch::TuiEditMode(EditorMode::Vim)));
+            }
+            Ok(_) => panic!("expected UpdateConfig for /vim persist"),
+            Err(err) => panic!("expected UpdateConfig, got {err}"),
+        }
+
+        app.handle_spur_event(SpurEvent::now(SpurEventBody::ConfigUpdateResult {
+            section: "tui".into(),
+            ok: true,
+            message: "saved".into(),
+        }));
+        assert!(matches!(app.edit_mode, EditMode::Vim(_)));
+        assert_eq!(app.config.tui.edit_mode, EditorMode::Vim);
     }
 }

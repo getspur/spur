@@ -171,6 +171,7 @@ jobs:
           shopt -s nullglob
           bins=(dist/spur-*-x86_64-unknown-linux-gnu)
           skills=(dist/spur-skills-*.tar.gz)
+          duckdb_exts=(dist/spur-duckdb-extensions-*.tar.gz)
           if [[ ${#bins[@]} -eq 0 ]]; then
             echo "no linux-x64 artifact in dist/; skipping binary smoke test"
           else
@@ -182,12 +183,27 @@ jobs:
             ls -la dist/ >&2 || true
             exit 1
           fi
+          if [[ ${#duckdb_exts[@]} -eq 0 ]]; then
+            echo "missing dist/spur-duckdb-extensions-*.tar.gz — xtask dist must tar the DuckDB sidecar (GitHub cannot upload directories)" >&2
+            ls -la dist/ >&2 || true
+            exit 1
+          fi
+          if [[ -d dist/duckdb-extensions ]]; then
+            echo "dist/duckdb-extensions is a directory; gh release create dist/* cannot upload it" >&2
+            exit 1
+          fi
           # Layout contract: archive root is share/spur/skills (matches
           # package_asset_candidates + cargo xtask install).
           skill_entries="$(tar -tzf "${skills[0]}")"
           if ! grep -Eq 'share/spur/skills/.*/SKILL\.md' <<<"$skill_entries"; then
             echo "skills archive missing share/spur/skills/*/SKILL.md" >&2
             sed -n '1,10p' <<<"$skill_entries" >&2
+            exit 1
+          fi
+          duckdb_entries="$(tar -tzf "${duckdb_exts[0]}")"
+          if ! grep -Eq 'share/spur/duckdb-extensions/v[^/]+/[^/]+/[^/]+\.duckdb_extension' <<<"$duckdb_entries"; then
+            echo "duckdb archive missing share/spur/duckdb-extensions/v*/<platform>/*.duckdb_extension" >&2
+            sed -n '1,10p' <<<"$duckdb_entries" >&2
             exit 1
           fi
           if [[ ${#bins[@]} -eq 0 ]]; then
@@ -259,9 +275,17 @@ jobs:
             [[ -n "$version" ]] || { echo "could not resolve workspace version" >&2; exit 1; }
             tag="v${version}"
           fi
+          # GitHub release assets must be files. `dist/*` would also match
+          # leftover directories (the previous duckdb-extensions/ sidecar).
+          mapfile -t assets < <(find dist -maxdepth 1 -type f | sort)
+          if [[ ${#assets[@]} -eq 0 ]]; then
+            echo "no files in dist/ to publish" >&2
+            ls -la dist/ >&2 || true
+            exit 1
+          fi
           gh release create "$tag" --repo getspur/spur-releases \
             --title "$tag" --notes "spur $tag (xtask dist: $PLATFORMS)" \
-            dist/*
+            "${assets[@]}"
 
       - uses: actions/setup-node@v6
         if: ${{ github.ref_type == 'tag' || inputs.publish }}

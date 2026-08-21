@@ -12,6 +12,9 @@ pub mod plan_inspector;
 mod plan_provenance;
 pub mod session_detail;
 pub mod session_picker;
+pub mod settings_graph;
+pub mod settings_skills;
+pub mod settings_tui;
 
 #[cfg(not(feature = "analytics"))]
 pub mod insights {

@@ -8,7 +8,7 @@ use std::{
 use spur_graph::EMBEDDING_VECTOR_DIMENSIONS;
 #[cfg(feature = "embed")]
 use spur_graph::{
-    embedding_query_text_for_model, fastembed_cache_dir, EmbeddingModelSelection, EMBED_MODEL_ENV,
+    embedding_query_text_for_model, load_embedding_model, EmbeddingModelSelection, EMBED_MODEL_ENV,
 };
 
 #[cfg(feature = "embed")]
@@ -29,13 +29,7 @@ pub(crate) fn load_embed_model(
         model = embedding_model.model_name(),
         "Loading embedding model for knowledge_context_pack hybrid search"
     );
-    let mut init_options = fastembed::InitOptions::new(embedding_model.fastembed_model())
-        .with_show_download_progress(false);
-    if let Some(cache_dir) = fastembed_cache_dir() {
-        init_options = init_options.with_cache_dir(cache_dir);
-    }
-
-    fastembed::TextEmbedding::try_new(init_options).map_err(|error| error.to_string())
+    load_embedding_model(embedding_model, false).map_err(|error| error.to_string())
 }
 
 #[cfg(feature = "embed")]

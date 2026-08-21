@@ -1,0 +1,137 @@
+schema_version: 1
+id: resource.aggregate_capacity
+rule_version: 1
+family: resource
+profile: capacity
+primitive: aggregate_capacity
+summary: Require aggregate replica demand to fit each selected pool capacity.
+availability: implemented
+strength: hard
+authorities:
+  - kind: kubernetes_documentation
+    title: Resource Management for Pods and Containers
+    url: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+requires:
+  - workloads.replicas
+  - workloads.requests
+  - pool.resources
+llm_encoding:
+  effectiveness: high
+  problem_shapes:
+    - Require aggregate replica demand to fit each selected pool capacity.
+  encode_steps:
+    - Bind explicit workloads and resources
+    - Declare bounded unknown numeric facts
+    - Compile capacity or placement predicates
+  anti_patterns:
+    - Do not query or infer live scheduler state
+  escalate_when:
+    - Escalate affinity, taints, or priority to separate rule primitives
+solver_encoding:
+  theory: QF_NIA
+  verification: assert the predicate over complete demand and placement facts
+  synthesis: leave only explicitly bounded numeric facts free
+  formula:
+    - sum workload.replicas * workload.request(resource) <= pool.capacity(resource)
+subjects:
+  cardinality:
+    kind: at_least
+    count: 2
+parameters:
+  - name: resources
+    required: false
+    default: []
+    kind: string_array
+handler: resource_aggregate_capacity
+examples:
+  valid:
+    facts:
+      family: resource
+      mode: verify
+      rules:
+        - rule_id: resource.aggregate_capacity
+          subjects: [cluster, api]
+          parameters:
+            resources: [cpu]
+      facts:
+        workloads:
+          api:
+            replicas: 3
+            requests: {cpu: 500}
+            limits: {cpu: 500}
+            domain_counts: {}
+        pools:
+          cluster:
+            resources: {cpu: 1500}
+        quotas: {}
+      unknowns: []
+    expectation: pass
+  invalid:
+    facts:
+      family: resource
+      mode: verify
+      rules:
+        - rule_id: resource.aggregate_capacity
+          subjects: [cluster, api]
+          parameters:
+            resources: [cpu]
+      facts:
+        workloads:
+          api:
+            replicas: 4
+            requests: {cpu: 500}
+            limits: {cpu: 500}
+            domain_counts: {}
+        pools:
+          cluster:
+            resources: {cpu: 1500}
+        quotas: {}
+      unknowns: []
+    expectation: counterexample
+    expected_diagnostic: resource.aggregate_capacity.violation
+conformance:
+  valid:
+    - name: aggregate demand fits pool capacity
+      request:
+        family: resource
+        mode: verify
+        rules:
+          - rule_id: resource.aggregate_capacity
+            subjects: [cluster, api]
+            parameters:
+              resources: [cpu]
+        facts:
+          workloads:
+            api:
+              replicas: 3
+              requests: {cpu: 500}
+              limits: {cpu: 500}
+              domain_counts: {}
+          pools:
+            cluster:
+              resources: {cpu: 1500}
+          quotas: {}
+        unknowns: []
+  invalid:
+    - name: aggregate demand exceeds pool capacity
+      request:
+        family: resource
+        mode: verify
+        rules:
+          - rule_id: resource.aggregate_capacity
+            subjects: [cluster, api]
+            parameters:
+              resources: [cpu]
+        facts:
+          workloads:
+            api:
+              replicas: 4
+              requests: {cpu: 500}
+              limits: {cpu: 500}
+              domain_counts: {}
+          pools:
+            cluster:
+              resources: {cpu: 1500}
+          quotas: {}
+        unknowns: []
+      expected_diagnostic: resource.aggregate_capacity.violation

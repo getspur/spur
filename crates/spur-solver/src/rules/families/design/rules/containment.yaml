@@ -1,0 +1,98 @@
+schema_version: 1
+id: "layout.containment"
+rule_version: 1
+family: "design"
+profile: "geometric_integrity"
+primitive: "inside"
+summary: "Keep one axis-aligned rectangle inside another with optional padding."
+availability: "implemented"
+strength: "hard"
+authorities:
+  - kind: "css_spec"
+    title: "CSS 2.2 Visual Formatting Model"
+    url: "https://www.w3.org/TR/CSS22/visuren.html"
+requires:
+  - "child.rect"
+  - "parent.rect"
+  - "padding"
+llm_encoding:
+  effectiveness: "high"
+  problem_shapes:
+    - "child must remain inside parent"
+    - "content must remain inside viewport"
+  encode_steps:
+    - "Resolve child and parent rectangle edges"
+    - "Apply non-negative padding to all four boundaries"
+    - "Emit four linear inequalities"
+  anti_patterns:
+    - "Do not apply containment to intentional overlays"
+    - "Do not infer a parent binding from visual proximity"
+  escalate_when:
+    - "Rotated geometry requires transformed bounds"
+solver_encoding:
+  theory: "QF_LIA"
+  verification: "assert all four containment inequalities over a complete model"
+  synthesis: "assert all four containment inequalities over bounded unknowns"
+  formula:
+    - "parent.left + padding <= child.left"
+    - "parent.top + padding <= child.top"
+    - "child.right + padding <= parent.right"
+    - "child.bottom + padding <= parent.bottom"
+subjects:
+  cardinality:
+    kind: "exact"
+    count: 2
+parameters:
+  - name: "padding"
+    default: 0
+    kind: "integer"
+    minimum: 0
+handler: "layout_containment"
+examples:
+  valid:
+    facts:
+      parent: {x: 0, y: 0, width: 320, height: 200}
+      child: {x: 16, y: 16, width: 44, height: 44}
+      padding: 0
+    expectation: "pass"
+  invalid:
+    facts:
+      parent: {x: 0, y: 0, width: 320, height: 200}
+      child: {x: 300, y: 16, width: 44, height: 44}
+      padding: 0
+    expectation: "counterexample"
+    expected_diagnostic: "design.outside_parent"
+conformance:
+  valid:
+    - name: "containment exact boundary"
+      request:
+        family: "design"
+        mode: "verify"
+        rules:
+          - rule_id: "layout.containment"
+            subjects: ["child", "parent"]
+        scene:
+          viewport: {width: 390, height: 844}
+          nodes:
+            parent:
+              rect: {x: 0, y: 0, width: 100, height: 100}
+            child:
+              rect: {x: 76, y: 0, width: 24, height: 24}
+        unknowns: []
+  invalid:
+    - name: "containment one-unit overflow"
+      request:
+        family: "design"
+        mode: "verify"
+        rules:
+          - rule_id: "layout.containment"
+            subjects: ["child", "parent"]
+        scene:
+          viewport: {width: 390, height: 844}
+          nodes:
+            parent:
+              rect: {x: 0, y: 0, width: 100, height: 100}
+            child:
+              rect: {x: 77, y: 0, width: 24, height: 24}
+        unknowns: []
+      expected_diagnostic: "design.outside_parent"

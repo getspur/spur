@@ -1,0 +1,8 @@
+schema_version: 1
+id: workflow
+family_version: 1
+summary: Finite bounded-trace workflow verification and bounded witness or counterexample search over caller-normalized states, events, and enabled transitions.
+profiles:
+  - id: bounded_trace
+    profile_version: 1
+    summary: Observed-trace validation and existential bounded reachability with explicit finite domains and horizon provenance; excludes unbounded liveness and fairness claims.

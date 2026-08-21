@@ -43,7 +43,7 @@ const DEFAULT_GIT_SIZE_CAP_BYTES: usize = 2 * 1024 * 1024 * 1024;
 const DEFAULT_MAX_BUILD_SECONDS: u64 = 30 * 60;
 const HTTP_HEADER_CAP_BYTES: usize = 64 * 1024;
 const ECS_CREDENTIALS_CAP_BYTES: usize = 64 * 1024;
-const EMBEDDING_GEMMA_EMBED_MODEL_NAME: &str = "EmbeddingGemma300M";
+const NOMIC_EMBED_TEXT_V15_MODEL_NAME: &str = "NomicEmbedTextV15";
 const EMBED_MODEL_ENV: &str = "SPUR_EMBEDDING_MODEL";
 const GRAPH_SKIP_SECTION_EMBEDDINGS_ENV: &str = "SPUR_GRAPH_SKIP_SECTION_EMBEDDINGS";
 // Graviton2/neoverse-n1 Lambda cannot run the prebuilt ONNX Runtime's SVE/SME
@@ -2285,7 +2285,7 @@ pub fn build_graph(source_path: &Path, artifact_dir: &Path) -> Result<(), Worker
     // Call `spur graph build` as a subprocess. This decouples spur-context-service
     // from spur-cli, allowing duckdb v1.5.4 (for DuckLake) to coexist with
     // spur-cli's duckdb v1.4.4 (for DuckPGQ in spur-analyst) in the same Docker image.
-    let _embed_model = EnvVarGuard::set(EMBED_MODEL_ENV, EMBEDDING_GEMMA_EMBED_MODEL_NAME);
+    let _embed_model = EnvVarGuard::set(EMBED_MODEL_ENV, NOMIC_EMBED_TEXT_V15_MODEL_NAME);
 
     let started = Instant::now();
     eprintln!(

@@ -294,11 +294,16 @@ impl tracing::field::Visit for TraceFieldVisitor {
 
 #[cfg(feature = "embed")]
 #[test]
-fn embed_model_cell_selection_uses_single_gemma_cell() {
-    let first = embed_model_cell(EmbeddingModelSelection::EmbeddingGemma300M);
-    let second = embed_model_cell(EmbeddingModelSelection::EmbeddingGemma300M);
+fn embed_model_cell_selection_uses_one_distinct_cell_per_model() {
+    let nomic = embed_model_cell(EmbeddingModelSelection::NomicEmbedTextV15);
+    let nomic_again = embed_model_cell(EmbeddingModelSelection::NomicEmbedTextV15);
+    let coderank = embed_model_cell(EmbeddingModelSelection::CodeRankEmbed);
+    let jina = embed_model_cell(EmbeddingModelSelection::JinaEmbeddingsV2BaseCode);
 
-    assert!(std::ptr::eq(first, second));
+    assert!(std::ptr::eq(nomic, nomic_again));
+    assert!(!std::ptr::eq(nomic, coderank));
+    assert!(!std::ptr::eq(nomic, jina));
+    assert!(!std::ptr::eq(coderank, jina));
 }
 
 #[cfg(feature = "embed")]
@@ -321,7 +326,7 @@ async fn embedding_runtime_facade_can_embed_query() {
 async fn off_embed_mode_never_starts_in_process_model_load() {
     let _lock = async_env_lock().await;
     let _mode_guard = set_analyst_embed_mode_for_test(AnalystEmbedMode::Off);
-    let model_cell = embed_model_cell(EmbeddingModelSelection::EmbeddingGemma300M);
+    let model_cell = embed_model_cell(EmbeddingModelSelection::NomicEmbedTextV15);
 
     assert!(!model_cell.is_ready(), "test assumes model has not loaded");
     assert!(
@@ -377,7 +382,7 @@ async fn sidecar_embed_mode_returns_query_vector_without_double_transforming_tex
         texts.as_slice(),
         [embedding_query_text_for_model(
             "ranking beacon",
-            EmbeddingModelSelection::EmbeddingGemma300M
+            EmbeddingModelSelection::NomicEmbedTextV15
         )
         .into_owned()],
         "the client must send the raw query and let the sidecar apply the model transform once"
@@ -465,7 +470,7 @@ async fn auto_embed_mode_uses_reachable_sidecar_without_in_process_load() {
     let sidecar = start_stub_embed_sidecar(|| true, |_| Ok(vec![test_embedding_vec(0.5)])).await;
     let _socket_guard = set_env_var_for_test(SPUR_EMBED_SOCKET_ENV, &sidecar.socket_path);
     let _mode_guard = set_analyst_embed_mode_for_test(AnalystEmbedMode::Auto);
-    let model_cell = embed_model_cell(EmbeddingModelSelection::EmbeddingGemma300M);
+    let model_cell = embed_model_cell(EmbeddingModelSelection::NomicEmbedTextV15);
     let _permit = model_cell
         .begin_load()
         .expect("test should hold the in-process load gate");
@@ -502,7 +507,7 @@ async fn auto_warm_embed_model_pings_reachable_sidecar_without_starting_in_proce
     .await;
     let _socket_guard = set_env_var_for_test(SPUR_EMBED_SOCKET_ENV, &sidecar.socket_path);
     let _mode_guard = set_analyst_embed_mode_for_test(AnalystEmbedMode::Auto);
-    let model_cell = embed_model_cell(EmbeddingModelSelection::EmbeddingGemma300M);
+    let model_cell = embed_model_cell(EmbeddingModelSelection::NomicEmbedTextV15);
     let _permit = model_cell
         .begin_load()
         .expect("test should hold the in-process load gate");
@@ -538,7 +543,7 @@ async fn auto_embed_mode_without_sidecar_falls_back_to_in_process_gate() {
     let missing_socket = temp_dir.path().join("missing.sock");
     let _socket_guard = set_env_var_for_test(SPUR_EMBED_SOCKET_ENV, &missing_socket);
     let _mode_guard = set_analyst_embed_mode_for_test(AnalystEmbedMode::Auto);
-    let model_cell = embed_model_cell(EmbeddingModelSelection::EmbeddingGemma300M);
+    let model_cell = embed_model_cell(EmbeddingModelSelection::NomicEmbedTextV15);
     let _permit = model_cell
         .begin_load()
         .expect("test should hold the in-process load gate");

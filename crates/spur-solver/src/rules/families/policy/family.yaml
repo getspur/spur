@@ -1,0 +1,8 @@
+schema_version: 1
+id: policy
+family_version: 1
+summary: Finite RBAC reachability, hierarchy, and separation-of-duty rules.
+profiles:
+  - id: nist_rbac
+    profile_version: 1
+    summary: Core, hierarchical, static-separation, and dynamic-separation RBAC constraints.

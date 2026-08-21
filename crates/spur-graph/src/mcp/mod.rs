@@ -5332,10 +5332,49 @@ pub(crate) struct OverlayChangedPaths {
     pub(crate) fingerprint: u64,
 }
 
+pub fn overlay_changed_oids(
+    worktree: &Path,
+    base_files: Vec<(String, String)>,
+) -> anyhow::Result<BTreeMap<PathBuf, [u8; 20]>> {
+    let changed = overlay_changed_oid_hex(worktree, base_files)?;
+    Ok(changed
+        .into_iter()
+        .map(|(path, oid)| {
+            let bytes = oid.as_deref().and_then(parse_sha1_oid).unwrap_or([0; 20]);
+            (PathBuf::from(path), bytes)
+        })
+        .collect())
+}
+
+fn parse_sha1_oid(hex: &str) -> Option<[u8; 20]> {
+    if hex.len() != 40 {
+        return None;
+    }
+    let mut out = [0u8; 20];
+    for (index, chunk) in hex.as_bytes().chunks_exact(2).enumerate() {
+        let value = u8::from_str_radix(std::str::from_utf8(chunk).ok()?, 16).ok()?;
+        out[index] = value;
+    }
+    Some(out)
+}
+
 pub(crate) fn changed_paths_for_overlay(
     worktree: &Path,
     base_files: Vec<(String, String)>,
 ) -> anyhow::Result<OverlayChangedPaths> {
+    let changed = overlay_changed_oid_hex(worktree, base_files)?;
+    let mut hasher = DefaultHasher::new();
+    changed.hash(&mut hasher);
+    Ok(OverlayChangedPaths {
+        paths: changed.keys().map(PathBuf::from).collect(),
+        fingerprint: hasher.finish(),
+    })
+}
+
+fn overlay_changed_oid_hex(
+    worktree: &Path,
+    base_files: Vec<(String, String)>,
+) -> anyhow::Result<BTreeMap<String, Option<String>>> {
     let worktree = worktree.canonicalize().map_err(|error| {
         anyhow::anyhow!("failed to canonicalize `{}`: {error}", worktree.display())
     })?;
@@ -5348,13 +5387,13 @@ pub(crate) fn changed_paths_for_overlay(
     } else {
         current_file_oids_via_fs(&worktree, &allowed_extensions)?
     };
-    overlay_changed_paths_from_oids(base_oids, current_oids)
+    overlay_changed_oid_hex_from_maps(base_oids, current_oids)
 }
 
-fn overlay_changed_paths_from_oids(
+fn overlay_changed_oid_hex_from_maps(
     base_oids: BTreeMap<String, String>,
     current_oids: BTreeMap<String, String>,
-) -> anyhow::Result<OverlayChangedPaths> {
+) -> anyhow::Result<BTreeMap<String, Option<String>>> {
     let mut changed = BTreeMap::<String, Option<String>>::new();
 
     for (rel_path, content_oid) in &current_oids {
@@ -5372,12 +5411,7 @@ fn overlay_changed_paths_from_oids(
         }
     }
 
-    let mut hasher = DefaultHasher::new();
-    changed.hash(&mut hasher);
-    Ok(OverlayChangedPaths {
-        paths: changed.keys().map(PathBuf::from).collect(),
-        fingerprint: hasher.finish(),
-    })
+    Ok(changed)
 }
 
 fn current_file_oids_via_fs(

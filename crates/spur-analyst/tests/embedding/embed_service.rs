@@ -90,15 +90,12 @@ async fn embed_request_returns_vectors_from_normalized_text() {
         vectors[0].as_array().expect("first vector").len(),
         EMBEDDING_VECTOR_DIMENSIONS
     );
-    assert_eq!(
-        vectors[0][0],
-        "task: code retrieval | query: alpha".len() as f64
-    );
+    assert_eq!(vectors[0][0], "search_query: alpha".len() as f64);
     assert_eq!(
         captured.lock().expect("captured lock").as_slice(),
         &[vec![
-            "task: code retrieval | query: alpha".to_owned(),
-            "task: code retrieval | query: beta".to_owned(),
+            "search_query: alpha".to_owned(),
+            "search_query: beta".to_owned(),
         ]]
     );
 

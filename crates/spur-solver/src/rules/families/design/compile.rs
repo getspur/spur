@@ -6,7 +6,10 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    rules::{builtin_registry, CompiledRule, RuleSolveMode},
+    rules::{
+        manifest::validate_binding_contract, manifest_format::NativeHandlerV1, CompiledRule,
+        RuleSolveMode,
+    },
     types::{
         ConstraintDecl, ConstraintExpr, ConstraintItem, ConstraintOp, ObjectivePriority, SessionOp,
         SolveConstraintsRequest, Variable, DEFAULT_MAX_SOLUTIONS, DEFAULT_TIMEOUT_MS,
@@ -125,6 +128,12 @@ pub struct CompiledDesignUnknown {
     pub field: DesignField,
 }
 
+struct ValidatedDesignBinding<'a> {
+    source: &'a DesignRuleBinding,
+    handler: NativeHandlerV1,
+    parameters: DesignRuleParameters,
+}
+
 /// Compiles validated design facts and rule bindings to B-prime.
 pub fn compile(input: DesignCompileRequest) -> Result<CompiledDesignRules, DesignCompileError> {
     if input.rules.is_empty() {
@@ -141,16 +150,21 @@ pub fn compile(input: DesignCompileRequest) -> Result<CompiledDesignRules, Desig
             count: input.unknowns.len(),
         });
     }
+
+    let bindings = input
+        .rules
+        .iter()
+        .map(validate_manifest_binding)
+        .collect::<Result<Vec<_>, _>>()?;
     input.scene.validate(&input.unknowns)?;
 
     let resolver = GeometryResolver::new(&input.scene, &input.unknowns);
-    let rules = input
-        .rules
+    let rules = bindings
         .iter()
         .enumerate()
         .map(|(binding_index, binding)| {
             compile_binding(binding, &input.scene, &resolver).map(|predicate| {
-                CompiledRule::new(binding.rule_id.clone(), binding_index, predicate)
+                CompiledRule::new(binding.source.rule_id.clone(), binding_index, predicate)
             })
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -186,113 +200,118 @@ pub fn compile(input: DesignCompileRequest) -> Result<CompiledDesignRules, Desig
     })
 }
 
-fn compile_binding(
+fn validate_manifest_binding(
     binding: &DesignRuleBinding,
-    scene: &DesignScene,
-    resolver: &GeometryResolver,
-) -> Result<ConstraintExpr, DesignCompileError> {
-    if builtin_registry().rule(&binding.rule_id).is_none() {
-        return Err(DesignCompileError::UnknownRule {
+) -> Result<ValidatedDesignBinding<'_>, DesignCompileError> {
+    let parameters = serde_json::to_value(&binding.parameters).map_err(|error| {
+        DesignCompileError::InvalidManifestBinding {
             rule_id: binding.rule_id.clone(),
+            message: error.to_string(),
+        }
+    })?;
+    let serde_json::Value::Object(parameters) = parameters else {
+        return Err(DesignCompileError::InvalidManifestBinding {
+            rule_id: binding.rule_id.clone(),
+            message: "design parameters did not serialize as an object".to_owned(),
         });
-    }
+    };
+    let validated = validate_binding_contract(&binding.rule_id, &binding.subjects, &parameters)
+        .map_err(|message| stable_contract_error(binding, message))?;
+    let parameters = serde_json::from_value(serde_json::Value::Object(validated.parameters))
+        .map_err(|error| DesignCompileError::InvalidManifestBinding {
+            rule_id: binding.rule_id.clone(),
+            message: error.to_string(),
+        })?;
 
+    Ok(ValidatedDesignBinding {
+        source: binding,
+        handler: validated.handler,
+        parameters,
+    })
+}
+
+fn stable_contract_error(binding: &DesignRuleBinding, message: String) -> DesignCompileError {
+    match validate_legacy_static_contract(binding) {
+        Err(error) => error,
+        Ok(()) => DesignCompileError::InvalidManifestBinding {
+            rule_id: binding.rule_id.clone(),
+            message,
+        },
+    }
+}
+
+// The shared manifest validator owns acceptance. This error-only replay keeps the
+// established typed design diagnostics while the public contract still returns strings.
+fn validate_legacy_static_contract(binding: &DesignRuleBinding) -> Result<(), DesignCompileError> {
     match binding.rule_id.as_str() {
         "layout.axis_capacity" => {
-            validate_minimum_subjects(binding, scene, 2)?;
+            validate_minimum_subject_count(binding, 2)?;
             reject_parameter(binding, "padding", binding.parameters.padding)?;
             reject_parameter(binding, "minimum_gap", binding.parameters.minimum_gap)?;
             reject_parameter(binding, "source_width", binding.parameters.source_width)?;
             reject_parameter(binding, "source_height", binding.parameters.source_height)?;
-            let axis =
-                binding
-                    .parameters
-                    .axis
-                    .ok_or_else(|| DesignCompileError::MissingParameter {
-                        rule_id: binding.rule_id.clone(),
-                        parameter: "axis",
-                    })?;
-            let gap = non_negative_parameter(
-                &binding.rule_id,
-                "gap",
-                binding.parameters.gap.unwrap_or(0),
-            )?;
-            let inset_start = non_negative_parameter(
+            binding
+                .parameters
+                .axis
+                .ok_or_else(|| DesignCompileError::MissingParameter {
+                    rule_id: binding.rule_id.clone(),
+                    parameter: "axis",
+                })?;
+            non_negative_parameter(&binding.rule_id, "gap", binding.parameters.gap.unwrap_or(0))?;
+            non_negative_parameter(
                 &binding.rule_id,
                 "inset_start",
                 binding.parameters.inset_start.unwrap_or(0),
             )?;
-            let inset_end = non_negative_parameter(
+            non_negative_parameter(
                 &binding.rule_id,
                 "inset_end",
                 binding.parameters.inset_end.unwrap_or(0),
             )?;
-            Ok(axis_capacity(
-                resolver,
-                &binding.subjects,
-                axis,
-                gap,
-                inset_start,
-                inset_end,
-            ))
+            Ok(())
         }
         "layout.containment" => {
-            validate_subjects(binding, scene, 2)?;
+            validate_subject_count(binding, 2)?;
             reject_capacity_parameters(binding)?;
             reject_parameter(binding, "minimum_gap", binding.parameters.minimum_gap)?;
             reject_parameter(binding, "source_width", binding.parameters.source_width)?;
             reject_parameter(binding, "source_height", binding.parameters.source_height)?;
-            let padding = non_negative_parameter(
+            non_negative_parameter(
                 &binding.rule_id,
                 "padding",
                 binding.parameters.padding.unwrap_or(0),
             )?;
-            Ok(containment(
-                resolver,
-                &binding.subjects[0],
-                &binding.subjects[1],
-                padding,
-            ))
+            Ok(())
         }
         "layout.non_overlap" => {
-            validate_subjects(binding, scene, 2)?;
+            validate_subject_count(binding, 2)?;
             reject_capacity_parameters(binding)?;
             reject_parameter(binding, "padding", binding.parameters.padding)?;
             reject_parameter(binding, "source_width", binding.parameters.source_width)?;
             reject_parameter(binding, "source_height", binding.parameters.source_height)?;
-            let minimum_gap = non_negative_parameter(
+            non_negative_parameter(
                 &binding.rule_id,
                 "minimum_gap",
                 binding.parameters.minimum_gap.unwrap_or(0),
             )?;
-            Ok(non_overlap(
-                resolver,
-                &binding.subjects[0],
-                &binding.subjects[1],
-                minimum_gap,
-            ))
+            Ok(())
         }
         "media.aspect_ratio" => {
-            validate_subjects(binding, scene, 1)?;
+            validate_subject_count(binding, 1)?;
             reject_capacity_parameters(binding)?;
             reject_parameter(binding, "padding", binding.parameters.padding)?;
             reject_parameter(binding, "minimum_gap", binding.parameters.minimum_gap)?;
-            let source_width = positive_required_parameter(
+            positive_required_parameter(
                 &binding.rule_id,
                 "source_width",
                 binding.parameters.source_width,
             )?;
-            let source_height = positive_required_parameter(
+            positive_required_parameter(
                 &binding.rule_id,
                 "source_height",
                 binding.parameters.source_height,
             )?;
-            Ok(aspect_ratio(
-                resolver,
-                &binding.subjects[0],
-                source_width,
-                source_height,
-            ))
+            Ok(())
         }
         _ => Err(DesignCompileError::UnknownRule {
             rule_id: binding.rule_id.clone(),
@@ -300,9 +319,121 @@ fn compile_binding(
     }
 }
 
-fn validate_minimum_subjects(
-    binding: &DesignRuleBinding,
+fn compile_binding(
+    binding: &ValidatedDesignBinding<'_>,
     scene: &DesignScene,
+    resolver: &GeometryResolver,
+) -> Result<ConstraintExpr, DesignCompileError> {
+    let source = binding.source;
+    match binding.handler {
+        NativeHandlerV1::LayoutAxisCapacity => {
+            validate_minimum_subjects(source, scene, 2)?;
+            let axis = binding.parameters.axis.expect("manifest requires axis");
+            let gap = binding.parameters.gap.expect("manifest defaults gap");
+            let inset_start = binding
+                .parameters
+                .inset_start
+                .expect("manifest defaults inset_start");
+            let inset_end = binding
+                .parameters
+                .inset_end
+                .expect("manifest defaults inset_end");
+            Ok(axis_capacity(
+                resolver,
+                &source.subjects,
+                axis,
+                gap,
+                inset_start,
+                inset_end,
+            ))
+        }
+        NativeHandlerV1::LayoutContainment => {
+            validate_subjects(source, scene, 2)?;
+            let padding = binding
+                .parameters
+                .padding
+                .expect("manifest defaults padding");
+            Ok(containment(
+                resolver,
+                &source.subjects[0],
+                &source.subjects[1],
+                padding,
+            ))
+        }
+        NativeHandlerV1::LayoutNonOverlap => {
+            validate_subjects(source, scene, 2)?;
+            let minimum_gap = binding
+                .parameters
+                .minimum_gap
+                .expect("manifest defaults minimum_gap");
+            Ok(non_overlap(
+                resolver,
+                &source.subjects[0],
+                &source.subjects[1],
+                minimum_gap,
+            ))
+        }
+        NativeHandlerV1::MediaAspectRatio => {
+            validate_subjects(source, scene, 1)?;
+            let source_width = binding
+                .parameters
+                .source_width
+                .expect("manifest requires source_width");
+            let source_height = binding
+                .parameters
+                .source_height
+                .expect("manifest requires source_height");
+            Ok(aspect_ratio(
+                resolver,
+                &source.subjects[0],
+                source_width,
+                source_height,
+            ))
+        }
+        NativeHandlerV1::A11yFocusNotObscured
+        | NativeHandlerV1::A11yReflow
+        | NativeHandlerV1::A11yTargetSize
+        | NativeHandlerV1::A11yTextContrast
+        | NativeHandlerV1::RbacDynamicSeparationOfDuty
+        | NativeHandlerV1::RbacPermissionReachable
+        | NativeHandlerV1::RbacRoleHierarchyAcyclic
+        | NativeHandlerV1::RbacStaticSeparationOfDuty
+        | NativeHandlerV1::PlacementMinimumFailureDomains
+        | NativeHandlerV1::PlacementTopologyMaxSkew
+        | NativeHandlerV1::ResourceAggregateCapacity
+        | NativeHandlerV1::ResourceQuotaCapacity
+        | NativeHandlerV1::ResourceRequestWithinLimit
+        | NativeHandlerV1::ConfigurationRequiresAny
+        | NativeHandlerV1::ConfigurationExcludes
+        | NativeHandlerV1::ConfigurationSelectionCardinality
+        | NativeHandlerV1::ConfigurationAttributeAllowedPair
+        | NativeHandlerV1::ConfigurationVersionInterval
+        | NativeHandlerV1::SchedulingAssignmentExactlyOnce
+        | NativeHandlerV1::SchedulingPlacementAllowed
+        | NativeHandlerV1::SchedulingPrecedenceFinishStart
+        | NativeHandlerV1::SchedulingCumulativeCapacity
+        | NativeHandlerV1::SchedulingMinimizeMakespan
+        | NativeHandlerV1::WorkflowInitialStateAllowed
+        | NativeHandlerV1::WorkflowTransitionAllowed
+        | NativeHandlerV1::WorkflowSafetyInvariant
+        | NativeHandlerV1::WorkflowBoundedReachability
+        | NativeHandlerV1::DataIntegrityUnique
+        | NativeHandlerV1::DataIntegrityForeignKey
+        | NativeHandlerV1::DataIntegrityCardinality
+        | NativeHandlerV1::DataIntegrityValueRange
+        | NativeHandlerV1::DataIntegrityConditionalRequired
+        | NativeHandlerV1::DataIntegrityAggregateBalance
+        | NativeHandlerV1::DataIntegrityMutuallyConsistent
+        | NativeHandlerV1::DataIntegrityTemporalConsistency => {
+            Err(DesignCompileError::UnknownRule {
+                rule_id: source.rule_id.clone(),
+            })
+        }
+    }
+}
+
+fn validate_minimum_subject_count(
+    binding: &DesignRuleBinding,
     minimum: usize,
 ) -> Result<(), DesignCompileError> {
     if binding.subjects.len() < minimum {
@@ -312,12 +443,11 @@ fn validate_minimum_subjects(
             actual: binding.subjects.len(),
         });
     }
-    validate_subject_ids(binding, scene)
+    Ok(())
 }
 
-fn validate_subjects(
+fn validate_subject_count(
     binding: &DesignRuleBinding,
-    scene: &DesignScene,
     expected: usize,
 ) -> Result<(), DesignCompileError> {
     if binding.subjects.len() != expected {
@@ -327,6 +457,24 @@ fn validate_subjects(
             actual: binding.subjects.len(),
         });
     }
+    Ok(())
+}
+
+fn validate_minimum_subjects(
+    binding: &DesignRuleBinding,
+    scene: &DesignScene,
+    minimum: usize,
+) -> Result<(), DesignCompileError> {
+    validate_minimum_subject_count(binding, minimum)?;
+    validate_subject_ids(binding, scene)
+}
+
+fn validate_subjects(
+    binding: &DesignRuleBinding,
+    scene: &DesignScene,
+    expected: usize,
+) -> Result<(), DesignCompileError> {
+    validate_subject_count(binding, expected)?;
     validate_subject_ids(binding, scene)
 }
 
@@ -697,6 +845,9 @@ pub enum DesignCompileError {
         parameter: &'static str,
         value: i64,
     },
+    /// A validated manifest binding could not be projected to the native input type.
+    #[error("manifest binding for rule `{rule_id}` could not be normalized: {message}")]
+    InvalidManifestBinding { rule_id: String, message: String },
     /// The generated generic request violated a backend invariant.
     #[error("compiled design rules produced an invalid solver request: {message}")]
     InvalidSolverRequest { message: String },

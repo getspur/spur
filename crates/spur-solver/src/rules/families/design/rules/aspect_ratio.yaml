@@ -1,0 +1,98 @@
+schema_version: 1
+id: "media.aspect_ratio"
+rule_version: 1
+family: "design"
+profile: "geometric_integrity"
+primitive: "aspect_ratio"
+summary: "Preserve a source aspect ratio without division."
+availability: "implemented"
+strength: "hard"
+authorities:
+  - kind: "css_spec"
+    title: "CSS Box Sizing Module Level 4 - Aspect Ratios"
+    url: "https://www.w3.org/TR/css-sizing-4/#aspect-ratio"
+requires:
+  - "render.rect"
+  - "source.width"
+  - "source.height"
+llm_encoding:
+  effectiveness: "high"
+  problem_shapes:
+    - "media must preserve intrinsic proportions"
+    - "preview must fit without distortion"
+  encode_steps:
+    - "Require positive source dimensions"
+    - "Cross-multiply source and rendered dimensions"
+    - "Avoid integer or real division"
+  anti_patterns:
+    - "Do not use rounded decimal ratios as equality constraints"
+  escalate_when:
+    - "Cropped media requires a separate cover-policy rule"
+solver_encoding:
+  theory: "QF_NIA"
+  verification: "assert equal cross products over a complete model"
+  synthesis: "assert equal cross products over bounded unknowns"
+  formula:
+    - "render.width * source.height = render.height * source.width"
+subjects:
+  cardinality:
+    kind: "exact"
+    count: 1
+parameters:
+  - name: "source_width"
+    required: true
+    kind: "integer"
+    minimum: 1
+  - name: "source_height"
+    required: true
+    kind: "integer"
+    minimum: 1
+handler: "media_aspect_ratio"
+examples:
+  valid:
+    facts:
+      source: {width: 16, height: 9}
+      render: {width: 320, height: 180}
+    expectation: "pass"
+  invalid:
+    facts:
+      source: {width: 16, height: 9}
+      render: {width: 320, height: 200}
+    expectation: "counterexample"
+    expected_diagnostic: "design.aspect_ratio_mismatch"
+conformance:
+  valid:
+    - name: "aspect ratio exact match"
+      request:
+        family: "design"
+        mode: "verify"
+        rules:
+          - rule_id: "media.aspect_ratio"
+            subjects: ["media"]
+            parameters:
+              source_width: 16
+              source_height: 9
+        scene:
+          viewport: {width: 390, height: 844}
+          nodes:
+            media:
+              rect: {x: 0, y: 0, width: 320, height: 180}
+        unknowns: []
+  invalid:
+    - name: "aspect ratio one-unit mismatch"
+      request:
+        family: "design"
+        mode: "verify"
+        rules:
+          - rule_id: "media.aspect_ratio"
+            subjects: ["media"]
+            parameters:
+              source_width: 16
+              source_height: 9
+        scene:
+          viewport: {width: 390, height: 844}
+          nodes:
+            media:
+              rect: {x: 0, y: 0, width: 320, height: 181}
+        unknowns: []
+      expected_diagnostic: "design.aspect_ratio_mismatch"

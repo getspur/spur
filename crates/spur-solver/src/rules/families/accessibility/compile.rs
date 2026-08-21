@@ -8,13 +8,14 @@ use serde_json::{json, Value};
 use crate::{
     rules::{
         compiler::{FamilyCompilation, FamilyCompileError, ModelProjection, RuleFamilyCompiler},
+        manifest::{validate_binding_contract, ValidatedBinding},
+        manifest_family_executable_rule_ids,
+        manifest_format::NativeHandlerV1,
         primitives::{add, and, boolean, ge, int, le, mul, not, or, request, var},
         CompiledRule, RuleSolveMode,
     },
     types::{Variable, DEFAULT_TIMEOUT_MS, MAX_CONSTRAINTS, MAX_TIMEOUT_MS, MAX_VARIABLES},
 };
-
-use super::builtin_registry;
 
 const DEFAULT_TARGET_SIZE: i64 = 24;
 const DEFAULT_CONTRAST_HUNDREDTHS: i64 = 450;
@@ -68,23 +69,27 @@ struct AccessibilityRuleBinding {
     parameters: AccessibilityParameters,
 }
 
-#[derive(Default, Deserialize)]
+#[derive(Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct AccessibilityParameters {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     minimum_width: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     minimum_height: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     minimum_ratio_hundredths: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     exception: Option<AccessibilityException>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct AccessibilityException {
     kind: AccessibilityExceptionKind,
     evidence: String,
 }
 
-#[derive(Clone, Copy, Deserialize)]
+#[derive(Clone, Copy, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 enum AccessibilityExceptionKind {
     Spacing,
@@ -176,15 +181,20 @@ fn compile(input: Value) -> Result<FamilyCompilation, String> {
             "verification requires a complete model; remove unknown declarations".to_owned(),
         );
     }
+    let bindings = input
+        .rules
+        .iter()
+        .map(validate_manifest_binding)
+        .collect::<Result<Vec<_>, _>>()?;
     validate_scene(&input.scene, &input.unknowns)?;
     let resolver = AccessibilityResolver::new(input.scene, &input.unknowns);
-    let rules = input
-        .rules
+    let rules = bindings
         .iter()
         .enumerate()
         .map(|(index, binding)| {
-            compile_binding(binding, &resolver)
-                .map(|predicate| CompiledRule::new(binding.rule_id.clone(), index, predicate))
+            compile_binding(binding, &resolver).map(|predicate| {
+                CompiledRule::new(binding.source.rule_id.clone(), index, predicate)
+            })
         })
         .collect::<Result<Vec<_>, _>>()?;
     let solver_request = request(
@@ -205,6 +215,103 @@ fn compile(input: Value) -> Result<FamilyCompilation, String> {
         rules,
         projections: resolver.projections,
     })
+}
+
+struct ValidatedAccessibilityBinding<'a> {
+    source: &'a AccessibilityRuleBinding,
+    handler: NativeHandlerV1,
+    parameters: AccessibilityParameters,
+}
+
+fn validate_manifest_binding(
+    binding: &AccessibilityRuleBinding,
+) -> Result<ValidatedAccessibilityBinding<'_>, String> {
+    let parameters =
+        serde_json::to_value(&binding.parameters).map_err(|error| error.to_string())?;
+    let Value::Object(parameters) = parameters else {
+        return Err("accessibility parameters did not serialize as an object".to_owned());
+    };
+    let ValidatedBinding {
+        parameters,
+        handler,
+    } = validate_binding_contract(&binding.rule_id, &binding.subjects, &parameters)
+        .map_err(|message| stable_contract_error(binding, message))?;
+    let parameters =
+        serde_json::from_value(Value::Object(parameters)).map_err(|error| error.to_string())?;
+
+    Ok(ValidatedAccessibilityBinding {
+        source: binding,
+        handler,
+        parameters,
+    })
+}
+
+fn stable_contract_error(binding: &AccessibilityRuleBinding, message: String) -> String {
+    match validate_legacy_static_contract(binding) {
+        Err(error) => error,
+        Ok(()) => message,
+    }
+}
+
+// The shared manifest validator owns acceptance. This error-only replay keeps
+// the established accessibility diagnostics while the contract returns strings.
+fn validate_legacy_static_contract(binding: &AccessibilityRuleBinding) -> Result<(), String> {
+    match binding.rule_id.as_str() {
+        "a11y.target_size" => {
+            validate_subject_count(binding, 1)?;
+            reject_ratio(binding)?;
+            positive(
+                "minimum_width",
+                binding
+                    .parameters
+                    .minimum_width
+                    .unwrap_or(DEFAULT_TARGET_SIZE),
+            )?;
+            positive(
+                "minimum_height",
+                binding
+                    .parameters
+                    .minimum_height
+                    .unwrap_or(DEFAULT_TARGET_SIZE),
+            )?;
+            exception_applies(
+                binding,
+                &[
+                    AccessibilityExceptionKind::Spacing,
+                    AccessibilityExceptionKind::Inline,
+                    AccessibilityExceptionKind::Equivalent,
+                    AccessibilityExceptionKind::UserAgent,
+                    AccessibilityExceptionKind::Essential,
+                ],
+            )?;
+            Ok(())
+        }
+        "a11y.focus_not_obscured" => {
+            validate_subject_count(binding, 2)?;
+            reject_all_parameters(binding)
+        }
+        "a11y.reflow" => {
+            validate_subject_count(binding, 1)?;
+            reject_target_parameters(binding)?;
+            reject_ratio(binding)?;
+            exception_applies(binding, &[AccessibilityExceptionKind::TwoDimensional])?;
+            Ok(())
+        }
+        "a11y.text_contrast" => {
+            validate_subject_count(binding, 1)?;
+            reject_target_parameters(binding)?;
+            reject_exception(binding)?;
+            positive(
+                "minimum_ratio_hundredths",
+                binding
+                    .parameters
+                    .minimum_ratio_hundredths
+                    .unwrap_or(DEFAULT_CONTRAST_HUNDREDTHS),
+            )?;
+            Ok(())
+        }
+        _ => Err(format!("unknown accessibility rule `{}`", binding.rule_id)),
+    }
 }
 
 fn validate_scene(
@@ -311,32 +418,30 @@ fn validate_scene(
 }
 
 fn compile_binding(
-    binding: &AccessibilityRuleBinding,
+    binding: &ValidatedAccessibilityBinding<'_>,
     resolver: &AccessibilityResolver,
 ) -> Result<crate::types::ConstraintExpr, String> {
-    if builtin_registry().rule(&binding.rule_id).is_none() {
-        return Err(format!("unknown accessibility rule `{}`", binding.rule_id));
-    }
-    match binding.rule_id.as_str() {
-        "a11y.target_size" => {
-            require_subjects(binding, resolver, 1)?;
-            reject_ratio(binding)?;
+    let source = binding.source;
+    match binding.handler {
+        NativeHandlerV1::A11yTargetSize => {
+            require_subjects(source, resolver, 1)?;
             let minimum_width = positive(
                 "minimum_width",
                 binding
                     .parameters
                     .minimum_width
-                    .unwrap_or(DEFAULT_TARGET_SIZE),
+                    .expect("manifest defaults minimum_width"),
             )?;
             let minimum_height = positive(
                 "minimum_height",
                 binding
                     .parameters
                     .minimum_height
-                    .unwrap_or(DEFAULT_TARGET_SIZE),
+                    .expect("manifest defaults minimum_height"),
             )?;
-            let exception = exception_applies(
-                binding,
+            let exception = exception_applies_parameters(
+                &source.rule_id,
+                &binding.parameters,
                 &[
                     AccessibilityExceptionKind::Spacing,
                     AccessibilityExceptionKind::Inline,
@@ -345,7 +450,7 @@ fn compile_binding(
                     AccessibilityExceptionKind::Essential,
                 ],
             )?;
-            let subject = &binding.subjects[0];
+            let subject = &source.subjects[0];
             Ok(or(vec![
                 boolean(exception),
                 and(vec![
@@ -360,11 +465,10 @@ fn compile_binding(
                 ]),
             ]))
         }
-        "a11y.focus_not_obscured" => {
-            require_subjects(binding, resolver, 2)?;
-            reject_all_parameters(binding)?;
-            let focused = &binding.subjects[0];
-            let obscurer = &binding.subjects[1];
+        NativeHandlerV1::A11yFocusNotObscured => {
+            require_subjects(source, resolver, 2)?;
+            let focused = &source.subjects[0];
+            let obscurer = &source.subjects[1];
             Ok(not(and(vec![
                 le(
                     resolver.field(obscurer, AccessibilityField::X)?,
@@ -396,13 +500,14 @@ fn compile_binding(
                 ),
             ])))
         }
-        "a11y.reflow" => {
-            require_subjects(binding, resolver, 1)?;
-            reject_target_parameters(binding)?;
-            reject_ratio(binding)?;
-            let exception =
-                exception_applies(binding, &[AccessibilityExceptionKind::TwoDimensional])?;
-            let subject = &binding.subjects[0];
+        NativeHandlerV1::A11yReflow => {
+            require_subjects(source, resolver, 1)?;
+            let exception = exception_applies_parameters(
+                &source.rule_id,
+                &binding.parameters,
+                &[AccessibilityExceptionKind::TwoDimensional],
+            )?;
+            let subject = &source.subjects[0];
             let x = resolver.field(subject, AccessibilityField::X)?;
             Ok(or(vec![
                 boolean(exception),
@@ -415,31 +520,61 @@ fn compile_binding(
                 ]),
             ]))
         }
-        "a11y.text_contrast" => {
-            require_subjects(binding, resolver, 1)?;
-            reject_target_parameters(binding)?;
-            reject_exception(binding)?;
+        NativeHandlerV1::A11yTextContrast => {
+            require_subjects(source, resolver, 1)?;
             let ratio = positive(
                 "minimum_ratio_hundredths",
                 binding
                     .parameters
                     .minimum_ratio_hundredths
-                    .unwrap_or(DEFAULT_CONTRAST_HUNDREDTHS),
+                    .expect("manifest defaults minimum_ratio_hundredths"),
             )?;
-            let foreground = resolver.field(
-                &binding.subjects[0],
-                AccessibilityField::ForegroundLuminance,
-            )?;
-            let background = resolver.field(
-                &binding.subjects[0],
-                AccessibilityField::BackgroundLuminance,
-            )?;
+            let foreground =
+                resolver.field(&source.subjects[0], AccessibilityField::ForegroundLuminance)?;
+            let background =
+                resolver.field(&source.subjects[0], AccessibilityField::BackgroundLuminance)?;
             Ok(or(vec![
                 contrast_branch(foreground.clone(), background.clone(), ratio),
                 contrast_branch(background, foreground, ratio),
             ]))
         }
-        _ => Err(format!("unknown accessibility rule `{}`", binding.rule_id)),
+        NativeHandlerV1::LayoutAxisCapacity
+        | NativeHandlerV1::LayoutContainment
+        | NativeHandlerV1::LayoutNonOverlap
+        | NativeHandlerV1::MediaAspectRatio
+        | NativeHandlerV1::RbacDynamicSeparationOfDuty
+        | NativeHandlerV1::RbacPermissionReachable
+        | NativeHandlerV1::RbacRoleHierarchyAcyclic
+        | NativeHandlerV1::RbacStaticSeparationOfDuty
+        | NativeHandlerV1::PlacementMinimumFailureDomains
+        | NativeHandlerV1::PlacementTopologyMaxSkew
+        | NativeHandlerV1::ResourceAggregateCapacity
+        | NativeHandlerV1::ResourceQuotaCapacity
+        | NativeHandlerV1::ResourceRequestWithinLimit
+        | NativeHandlerV1::ConfigurationRequiresAny
+        | NativeHandlerV1::ConfigurationExcludes
+        | NativeHandlerV1::ConfigurationSelectionCardinality
+        | NativeHandlerV1::ConfigurationAttributeAllowedPair
+        | NativeHandlerV1::ConfigurationVersionInterval
+        | NativeHandlerV1::SchedulingAssignmentExactlyOnce
+        | NativeHandlerV1::SchedulingPlacementAllowed
+        | NativeHandlerV1::SchedulingPrecedenceFinishStart
+        | NativeHandlerV1::SchedulingCumulativeCapacity
+        | NativeHandlerV1::SchedulingMinimizeMakespan
+        | NativeHandlerV1::WorkflowInitialStateAllowed
+        | NativeHandlerV1::WorkflowTransitionAllowed
+        | NativeHandlerV1::WorkflowSafetyInvariant
+        | NativeHandlerV1::WorkflowBoundedReachability
+        | NativeHandlerV1::DataIntegrityUnique
+        | NativeHandlerV1::DataIntegrityForeignKey
+        | NativeHandlerV1::DataIntegrityCardinality
+        | NativeHandlerV1::DataIntegrityValueRange
+        | NativeHandlerV1::DataIntegrityConditionalRequired
+        | NativeHandlerV1::DataIntegrityAggregateBalance
+        | NativeHandlerV1::DataIntegrityMutuallyConsistent
+        | NativeHandlerV1::DataIntegrityTemporalConsistency => {
+            Err(format!("unknown accessibility rule `{}`", source.rule_id))
+        }
     }
 }
 
@@ -480,6 +615,20 @@ fn require_subjects(
     Ok(())
 }
 
+fn validate_subject_count(
+    binding: &AccessibilityRuleBinding,
+    expected: usize,
+) -> Result<(), String> {
+    if binding.subjects.len() != expected {
+        return Err(format!(
+            "rule `{}` requires {expected} subjects, got {}",
+            binding.rule_id,
+            binding.subjects.len()
+        ));
+    }
+    Ok(())
+}
+
 fn positive(parameter: &str, value: i64) -> Result<i64, String> {
     if value <= 0 {
         return Err(format!("parameter `{parameter}` must be positive"));
@@ -491,7 +640,15 @@ fn exception_applies(
     binding: &AccessibilityRuleBinding,
     accepted: &[AccessibilityExceptionKind],
 ) -> Result<bool, String> {
-    let Some(exception) = &binding.parameters.exception else {
+    exception_applies_parameters(&binding.rule_id, &binding.parameters, accepted)
+}
+
+fn exception_applies_parameters(
+    rule_id: &str,
+    parameters: &AccessibilityParameters,
+    accepted: &[AccessibilityExceptionKind],
+) -> Result<bool, String> {
+    let Some(exception) = &parameters.exception else {
         return Ok(false);
     };
     if exception.evidence.trim().is_empty() {
@@ -502,8 +659,7 @@ fn exception_applies(
         .any(|accepted| std::mem::discriminant(accepted) == std::mem::discriminant(&exception.kind))
     {
         return Err(format!(
-            "rule `{}` does not accept this exception kind",
-            binding.rule_id
+            "rule `{rule_id}` does not accept this exception kind"
         ));
     }
     Ok(true)
@@ -626,6 +782,8 @@ const fn default_timeout_ms() -> u64 {
 }
 
 fn input_schema() -> Value {
+    let rule_ids = manifest_family_executable_rule_ids("accessibility")
+        .expect("accessibility manifest executable rule IDs");
     json!({
         "type": "object",
         "properties": {
@@ -636,9 +794,7 @@ fn input_schema() -> Value {
                 "items": {
                     "type": "object",
                     "properties": {
-                        "rule_id": {"type": "string", "enum": [
-                            "a11y.focus_not_obscured", "a11y.reflow", "a11y.target_size", "a11y.text_contrast"
-                        ]},
+                        "rule_id": {"type": "string", "enum": rule_ids},
                         "subjects": {"type": "array", "maxItems": 2, "items": {"type": "string"}},
                         "parameters": {
                             "type": "object",

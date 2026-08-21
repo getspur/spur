@@ -171,6 +171,7 @@ SQL sources and schema documentation: [`crates/spur-context/analyst/README.md`](
 | `SPUR_ANALYST_DUCKDB_MEMORY_LIMIT` | `4GB` | Per-connection DuckDB memory cap |
 | `SPUR_ANALYST_DUCKDB_THREADS` | `4` | DuckDB threads |
 | `SPUR_GRAPH_SKIP_ANALYST` | unset | Skip analyst rebuild during graph build |
+| `SPUR_EMBEDDING_MODEL` | `nomic` | Query/index model: `nomic`, `coderank`, or `jina-code` (all FP32/768); rebuild after changing it |
 
 ---
 

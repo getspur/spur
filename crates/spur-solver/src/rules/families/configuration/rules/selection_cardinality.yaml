@@ -1,0 +1,137 @@
+schema_version: 1
+id: configuration.selection_cardinality
+rule_version: 1
+family: configuration
+profile: finite_compatibility
+primitive: selection_cardinality
+summary: Enforce declared inclusive selection bounds for an active finite component group.
+availability: implemented
+strength: hard
+authorities:
+  - kind: linux_kernel_documentation
+    title: Kconfig Language - Choice Definitions
+    url: https://docs.kernel.org/kbuild/kconfig-language.html
+  - kind: feature_model_reference
+    title: Feature-Oriented Domain Analysis
+    url: https://resources.sei.cmu.edu/asset_files/TechnicalReport/1990_005_001_15872.pdf
+requires:
+  - selection_groups[].active
+  - selection_groups[].members
+  - selection_groups[].minimum
+  - selection_groups[].maximum
+  - components[].selected
+llm_encoding:
+  effectiveness: high
+  problem_shapes:
+    - An optional or active finite group permits a bounded number of selected members.
+  encode_steps:
+    - Bind one declared selection-group ID as the subject.
+    - Validate non-empty unique membership and 0 <= minimum <= maximum <= member count.
+    - Force every member off when the group is inactive and apply both inclusive bounds when active.
+  anti_patterns:
+    - Do not count components that are not declared members of the group.
+    - Do not silently repair inverted or out-of-range bounds.
+  escalate_when:
+    - Escalate nested or weighted choices to separate explicit constraints.
+solver_encoding:
+  theory: QF_LIA
+  verification: assert the guarded lower and upper bounds over complete member selections
+  synthesis: leave only explicitly declared group or member selection fields free
+  formula:
+    - selected(member_i) <= active(group) for every member_i
+    - minimum(group) * active(group) <= sum selected(member_i)
+    - sum selected(member_i) <= maximum(group) * active(group)
+subjects:
+  cardinality:
+    kind: exact
+    count: 1
+parameters: []
+handler: configuration_selection_cardinality
+examples:
+  valid:
+    facts:
+      family: configuration
+      mode: verify
+      rules:
+        - rule_id: configuration.selection_cardinality
+          subjects: [database]
+      facts:
+        components:
+          postgres: {selected: true, attributes: {}}
+          sqlite: {selected: false, attributes: {}}
+        selection_groups:
+          database:
+            active: true
+            members: [postgres, sqlite]
+            minimum: 1
+            maximum: 1
+        allowed_attribute_pairs: []
+        version_orderings: {}
+      unknowns: []
+    expectation: pass
+  invalid:
+    facts:
+      family: configuration
+      mode: verify
+      rules:
+        - rule_id: configuration.selection_cardinality
+          subjects: [database]
+      facts:
+        components:
+          postgres: {selected: true, attributes: {}}
+          sqlite: {selected: true, attributes: {}}
+        selection_groups:
+          database:
+            active: true
+            members: [postgres, sqlite]
+            minimum: 1
+            maximum: 1
+        allowed_attribute_pairs: []
+        version_orderings: {}
+      unknowns: []
+    expectation: counterexample
+    expected_diagnostic: configuration.selection_cardinality.violation
+conformance:
+  valid:
+    - name: active group satisfies inclusive member bounds
+      request:
+        family: configuration
+        mode: verify
+        rules:
+          - rule_id: configuration.selection_cardinality
+            subjects: [database]
+        facts:
+          components:
+            postgres: {selected: true, attributes: {}}
+            sqlite: {selected: false, attributes: {}}
+          selection_groups:
+            database:
+              active: true
+              members: [postgres, sqlite]
+              minimum: 1
+              maximum: 1
+          allowed_attribute_pairs: []
+          version_orderings: {}
+        unknowns: []
+  invalid:
+    - name: active group exceeds its maximum selection count
+      request:
+        family: configuration
+        mode: verify
+        rules:
+          - rule_id: configuration.selection_cardinality
+            subjects: [database]
+        facts:
+          components:
+            postgres: {selected: true, attributes: {}}
+            sqlite: {selected: true, attributes: {}}
+          selection_groups:
+            database:
+              active: true
+              members: [postgres, sqlite]
+              minimum: 1
+              maximum: 1
+          allowed_attribute_pairs: []
+          version_orderings: {}
+        unknowns: []
+      expected_diagnostic: configuration.selection_cardinality.violation

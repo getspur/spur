@@ -1,0 +1,137 @@
+schema_version: 1
+id: resource.quota_capacity
+rule_version: 1
+family: resource
+profile: capacity
+primitive: quota_capacity
+summary: Require aggregate replica demand to fit each selected quota capacity.
+availability: implemented
+strength: hard
+authorities:
+  - kind: kubernetes_documentation
+    title: Resource Management for Pods and Containers
+    url: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+requires:
+  - workloads.replicas
+  - workloads.requests
+  - quota.resources
+llm_encoding:
+  effectiveness: high
+  problem_shapes:
+    - Require aggregate replica demand to fit each selected quota capacity.
+  encode_steps:
+    - Bind explicit workloads and resources
+    - Declare bounded unknown numeric facts
+    - Compile capacity or placement predicates
+  anti_patterns:
+    - Do not query or infer live scheduler state
+  escalate_when:
+    - Escalate affinity, taints, or priority to separate rule primitives
+solver_encoding:
+  theory: QF_NIA
+  verification: assert the predicate over complete demand and placement facts
+  synthesis: leave only explicitly bounded numeric facts free
+  formula:
+    - sum workload.replicas * workload.request(resource) <= quota.capacity(resource)
+subjects:
+  cardinality:
+    kind: at_least
+    count: 2
+parameters:
+  - name: resources
+    required: false
+    default: []
+    kind: string_array
+handler: resource_quota_capacity
+examples:
+  valid:
+    facts:
+      family: resource
+      mode: verify
+      rules:
+        - rule_id: resource.quota_capacity
+          subjects: [team, api]
+          parameters:
+            resources: [cpu]
+      facts:
+        workloads:
+          api:
+            replicas: 3
+            requests: {cpu: 500}
+            limits: {cpu: 500}
+            domain_counts: {}
+        pools: {}
+        quotas:
+          team:
+            resources: {cpu: 1500}
+      unknowns: []
+    expectation: pass
+  invalid:
+    facts:
+      family: resource
+      mode: verify
+      rules:
+        - rule_id: resource.quota_capacity
+          subjects: [team, api]
+          parameters:
+            resources: [cpu]
+      facts:
+        workloads:
+          api:
+            replicas: 4
+            requests: {cpu: 500}
+            limits: {cpu: 500}
+            domain_counts: {}
+        pools: {}
+        quotas:
+          team:
+            resources: {cpu: 1500}
+      unknowns: []
+    expectation: counterexample
+    expected_diagnostic: resource.quota_capacity.violation
+conformance:
+  valid:
+    - name: aggregate demand fits quota capacity
+      request:
+        family: resource
+        mode: verify
+        rules:
+          - rule_id: resource.quota_capacity
+            subjects: [team, api]
+            parameters:
+              resources: [cpu]
+        facts:
+          workloads:
+            api:
+              replicas: 3
+              requests: {cpu: 500}
+              limits: {cpu: 500}
+              domain_counts: {}
+          pools: {}
+          quotas:
+            team:
+              resources: {cpu: 1500}
+        unknowns: []
+  invalid:
+    - name: aggregate demand exceeds quota capacity
+      request:
+        family: resource
+        mode: verify
+        rules:
+          - rule_id: resource.quota_capacity
+            subjects: [team, api]
+            parameters:
+              resources: [cpu]
+        facts:
+          workloads:
+            api:
+              replicas: 4
+              requests: {cpu: 500}
+              limits: {cpu: 500}
+              domain_counts: {}
+          pools: {}
+          quotas:
+            team:
+              resources: {cpu: 1500}
+        unknowns: []
+      expected_diagnostic: resource.quota_capacity.violation

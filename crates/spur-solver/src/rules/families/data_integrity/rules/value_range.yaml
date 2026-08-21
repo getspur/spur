@@ -1,0 +1,139 @@
+schema_version: 1
+id: data_integrity.value_range
+rule_version: 1
+family: data_integrity
+profile: finite_relational_snapshot
+primitive: inclusive_integer_value_range
+summary: Require every present value of one integer field on an active row to lie within inclusive declared bounds.
+availability: implemented
+strength: hard
+authorities:
+  - kind: w3c_recommendation
+    title: SHACL 1.2 Core - Value Range Constraint Components
+    url: https://www.w3.org/TR/shacl12-core/
+requires:
+  - relations[definition.relation].rows
+  - relations[definition.relation].fields[definition.field]
+  - value_ranges[subject].minimum
+  - value_ranges[subject].maximum
+llm_encoding:
+  effectiveness: high
+  problem_shapes:
+    - Present integer cells on active rows must lie inside one inclusive interval.
+  encode_steps:
+    - Bind exactly one value-range definition ID as the subject.
+    - Resolve its relation and require an integer field with compatible declared domain.
+    - Guard inclusive lower and upper comparisons by row activity and cell presence.
+  anti_patterns:
+    - Do not reject absent values; conditional_required owns requiredness.
+    - Do not infer exclusive bounds, decimal tolerance, units, or schema coercion.
+  escalate_when:
+    - Escalate decimal rounding, cross-field arithmetic, open numeric domains, or unit conversion outside this exact-integer primitive.
+solver_encoding:
+  theory: QF_LIA
+  verification: fix active rows and complete cells, then assert inclusive bounds only when the target value is present
+  synthesis: constrain explicitly unknown cell presence or integer values within both schema and rule bounds
+  formula:
+    - "active(row) and present(row,field) implies minimum <= value(row,field) <= maximum"
+subjects:
+  cardinality: {kind: exact, count: 1}
+parameters: []
+handler: data_integrity_value_range
+examples:
+  valid:
+    facts:
+      family: data_integrity
+      mode: verify
+      rules:
+        - {rule_id: data_integrity.value_range, subjects: [measured_range], parameters: {}}
+      facts:
+        relations:
+          measurements:
+            fields: {measured: {kind: integer, minimum: 0, maximum: 1000}}
+            rows:
+              observed: {active: true, cells: {measured: {present: true, value: 100}}}
+              absent: {active: true, cells: {measured: {present: false, value: null}}}
+        unique_constraints: {}
+        foreign_keys: {}
+        cardinality_constraints: {}
+        value_ranges:
+          measured_range: {relation: measurements, field: measured, minimum: 0, maximum: 100}
+        conditional_requirements: {}
+        aggregate_balances: {}
+        consistency_relations: {}
+        temporal_constraints: {}
+      unknowns: []
+    expectation: present value 100 is accepted at the inclusive maximum and the absent value is ignored
+  invalid:
+    facts:
+      family: data_integrity
+      mode: verify
+      rules:
+        - {rule_id: data_integrity.value_range, subjects: [measured_range], parameters: {}}
+      facts:
+        relations:
+          measurements:
+            fields: {measured: {kind: integer, minimum: 0, maximum: 1000}}
+            rows:
+              observed: {active: true, cells: {measured: {present: true, value: 101}}}
+        unique_constraints: {}
+        foreign_keys: {}
+        cardinality_constraints: {}
+        value_ranges:
+          measured_range: {relation: measurements, field: measured, minimum: 0, maximum: 100}
+        conditional_requirements: {}
+        aggregate_balances: {}
+        consistency_relations: {}
+        temporal_constraints: {}
+      unknowns: []
+    expectation: counterexample because present value 101 exceeds inclusive maximum 100
+    expected_diagnostic: data_integrity.value_range.violation
+conformance:
+  valid:
+    - name: present one-hundred and an absent value satisfy the inclusive upper boundary
+      request:
+        family: data_integrity
+        mode: verify
+        rules:
+          - {rule_id: data_integrity.value_range, subjects: [measured_range], parameters: {}}
+        facts:
+          relations:
+            measurements:
+              fields: {measured: {kind: integer, minimum: 0, maximum: 1000}}
+              rows:
+                observed: {active: true, cells: {measured: {present: true, value: 100}}}
+                absent: {active: true, cells: {measured: {present: false, value: null}}}
+          unique_constraints: {}
+          foreign_keys: {}
+          cardinality_constraints: {}
+          value_ranges:
+            measured_range: {relation: measurements, field: measured, minimum: 0, maximum: 100}
+          conditional_requirements: {}
+          aggregate_balances: {}
+          consistency_relations: {}
+          temporal_constraints: {}
+        unknowns: []
+  invalid:
+    - name: present one-hundred-one exceeds the inclusive maximum
+      request:
+        family: data_integrity
+        mode: verify
+        rules:
+          - {rule_id: data_integrity.value_range, subjects: [measured_range], parameters: {}}
+        facts:
+          relations:
+            measurements:
+              fields: {measured: {kind: integer, minimum: 0, maximum: 1000}}
+              rows:
+                observed: {active: true, cells: {measured: {present: true, value: 101}}}
+          unique_constraints: {}
+          foreign_keys: {}
+          cardinality_constraints: {}
+          value_ranges:
+            measured_range: {relation: measurements, field: measured, minimum: 0, maximum: 100}
+          conditional_requirements: {}
+          aggregate_balances: {}
+          consistency_relations: {}
+          temporal_constraints: {}
+        unknowns: []
+      expected_diagnostic: data_integrity.value_range.violation

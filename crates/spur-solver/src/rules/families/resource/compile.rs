@@ -2,12 +2,15 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::{
     rules::{
         compiler::{FamilyCompilation, FamilyCompileError, ModelProjection, RuleFamilyCompiler},
+        manifest::{manifest_rule_handler, validate_binding_contract},
+        manifest_family_executable_rule_ids,
+        manifest_format::NativeHandlerV1,
         primitives::{add, and, boolean, eq, ge, gt, int, le, mul, or, request, sub, var},
         CompiledRule, RuleSolveMode,
     },
@@ -16,8 +19,6 @@ use crate::{
         MAX_VARIABLES,
     },
 };
-
-use super::builtin_registry;
 
 /// Resource compiler registered behind `solve_rules`.
 pub static COMPILER: ResourceCompiler = ResourceCompiler;
@@ -66,13 +67,21 @@ struct ResourceRuleBinding {
     parameters: ResourceParameters,
 }
 
-#[derive(Default, Deserialize)]
+#[derive(Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct ResourceParameters {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     resources: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     max_skew: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     minimum_domains: Option<i64>,
+}
+
+struct ValidatedResourceBinding<'a> {
+    source: &'a ResourceRuleBinding,
+    handler: NativeHandlerV1,
+    parameters: ResourceParameters,
 }
 
 #[derive(Clone, Deserialize)]
@@ -124,12 +133,21 @@ fn compile(input: Value) -> Result<FamilyCompilation, String> {
     if input.mode == RuleSolveMode::Verify && !input.unknowns.is_empty() {
         return Err("verification requires complete resource facts".to_owned());
     }
+    let bindings = input
+        .rules
+        .iter()
+        .map(validate_manifest_binding)
+        .collect::<Result<Vec<_>, _>>()?;
     validate_facts(&input.facts, &input.unknowns)?;
     let mut resolver = ResourceResolver::new(input.facts, &input.unknowns);
     let mut rules = Vec::with_capacity(input.rules.len());
-    for (index, binding) in input.rules.iter().enumerate() {
+    for (index, binding) in bindings.iter().enumerate() {
         let predicate = compile_binding(binding, &mut resolver)?;
-        rules.push(CompiledRule::new(binding.rule_id.clone(), index, predicate));
+        rules.push(CompiledRule::new(
+            binding.source.rule_id.clone(),
+            index,
+            predicate,
+        ));
     }
     let solver_request = request(
         "resource",
@@ -149,6 +167,104 @@ fn compile(input: Value) -> Result<FamilyCompilation, String> {
         rules,
         projections: resolver.projections,
     })
+}
+
+fn validate_manifest_binding(
+    binding: &ResourceRuleBinding,
+) -> Result<ValidatedResourceBinding<'_>, String> {
+    let parameters =
+        serde_json::to_value(&binding.parameters).map_err(|error| error.to_string())?;
+    let Value::Object(parameters) = parameters else {
+        return Err("resource parameters did not serialize as an object".to_owned());
+    };
+    let validated = validate_binding_contract(&binding.rule_id, &binding.subjects, &parameters)
+        .map_err(|message| stable_contract_error(binding, message))?;
+    let parameters = serde_json::from_value(Value::Object(validated.parameters))
+        .map_err(|error| error.to_string())?;
+
+    Ok(ValidatedResourceBinding {
+        source: binding,
+        handler: validated.handler,
+        parameters,
+    })
+}
+
+fn stable_contract_error(binding: &ResourceRuleBinding, message: String) -> String {
+    match validate_legacy_static_contract(binding) {
+        Err(error) => error,
+        Ok(()) => message,
+    }
+}
+
+// The shared manifest validator owns acceptance. This error-only replay keeps the
+// established resource diagnostics while the shared contract returns strings.
+fn validate_legacy_static_contract(binding: &ResourceRuleBinding) -> Result<(), String> {
+    match manifest_rule_handler(&binding.rule_id) {
+        Some(NativeHandlerV1::ResourceRequestWithinLimit) => {
+            require_subjects(binding, 1, None)?;
+            reject_placement_parameters(binding)
+        }
+        Some(
+            NativeHandlerV1::ResourceAggregateCapacity | NativeHandlerV1::ResourceQuotaCapacity,
+        ) => {
+            require_subjects(binding, 2, Some(usize::MAX))?;
+            reject_placement_parameters(binding)
+        }
+        Some(NativeHandlerV1::PlacementTopologyMaxSkew) => {
+            require_subjects(binding, 1, None)?;
+            reject_resources(binding)?;
+            reject_minimum_domains(binding)?;
+            positive("max_skew", binding.parameters.max_skew.unwrap_or(1))?;
+            Ok(())
+        }
+        Some(NativeHandlerV1::PlacementMinimumFailureDomains) => {
+            require_subjects(binding, 1, None)?;
+            reject_resources(binding)?;
+            reject_max_skew(binding)?;
+            positive(
+                "minimum_domains",
+                binding.parameters.minimum_domains.unwrap_or(1),
+            )?;
+            Ok(())
+        }
+        Some(
+            NativeHandlerV1::A11yFocusNotObscured
+            | NativeHandlerV1::A11yReflow
+            | NativeHandlerV1::A11yTargetSize
+            | NativeHandlerV1::A11yTextContrast
+            | NativeHandlerV1::LayoutAxisCapacity
+            | NativeHandlerV1::LayoutContainment
+            | NativeHandlerV1::LayoutNonOverlap
+            | NativeHandlerV1::MediaAspectRatio
+            | NativeHandlerV1::RbacDynamicSeparationOfDuty
+            | NativeHandlerV1::RbacPermissionReachable
+            | NativeHandlerV1::RbacRoleHierarchyAcyclic
+            | NativeHandlerV1::RbacStaticSeparationOfDuty
+            | NativeHandlerV1::ConfigurationRequiresAny
+            | NativeHandlerV1::ConfigurationExcludes
+            | NativeHandlerV1::ConfigurationSelectionCardinality
+            | NativeHandlerV1::ConfigurationAttributeAllowedPair
+            | NativeHandlerV1::ConfigurationVersionInterval
+            | NativeHandlerV1::SchedulingAssignmentExactlyOnce
+            | NativeHandlerV1::SchedulingPlacementAllowed
+            | NativeHandlerV1::SchedulingPrecedenceFinishStart
+            | NativeHandlerV1::SchedulingCumulativeCapacity
+            | NativeHandlerV1::SchedulingMinimizeMakespan
+            | NativeHandlerV1::WorkflowInitialStateAllowed
+            | NativeHandlerV1::WorkflowTransitionAllowed
+            | NativeHandlerV1::WorkflowSafetyInvariant
+            | NativeHandlerV1::WorkflowBoundedReachability
+            | NativeHandlerV1::DataIntegrityUnique
+            | NativeHandlerV1::DataIntegrityForeignKey
+            | NativeHandlerV1::DataIntegrityCardinality
+            | NativeHandlerV1::DataIntegrityValueRange
+            | NativeHandlerV1::DataIntegrityConditionalRequired
+            | NativeHandlerV1::DataIntegrityAggregateBalance
+            | NativeHandlerV1::DataIntegrityMutuallyConsistent
+            | NativeHandlerV1::DataIntegrityTemporalConsistency,
+        )
+        | None => Err(format!("unsupported resource rule `{}`", binding.rule_id)),
+    }
 }
 
 fn validate_facts(facts: &ResourceFacts, unknowns: &[ResourceUnknown]) -> Result<(), String> {
@@ -242,107 +358,170 @@ fn workload_value(workload: &WorkloadFacts, field: &str) -> Result<Option<i64>, 
 }
 
 fn compile_binding(
-    binding: &ResourceRuleBinding,
+    binding: &ValidatedResourceBinding<'_>,
     resolver: &mut ResourceResolver,
 ) -> Result<ConstraintExpr, String> {
-    if builtin_registry().rule(&binding.rule_id).is_none() {
-        return Err(format!("unsupported resource rule `{}`", binding.rule_id));
-    }
-    match binding.rule_id.as_str() {
-        "resource.request_within_limit" => {
-            require_subjects(binding, 1, None)?;
-            reject_placement_parameters(binding)?;
-            let workload = &binding.subjects[0];
-            resolver.require_workload(workload)?;
-            let resources = selected_resources(
-                &binding.parameters.resources,
-                resolver.facts.workloads[workload].requests.keys(),
-            )?;
-            let predicates = resources
-                .iter()
-                .map(|resource| {
-                    Ok(le(
+    let source = binding.source;
+    match binding.handler {
+        NativeHandlerV1::ResourceRequestWithinLimit => {
+            let mut predicates = Vec::new();
+            for workload in distinct_subjects(&source.subjects) {
+                resolver.require_workload(workload)?;
+                let resources = selected_resources(
+                    &binding.parameters.resources,
+                    resolver.facts.workloads[workload].requests.keys(),
+                )?;
+                for resource in resources {
+                    predicates.push(le(
                         resolver.workload_field(workload, &format!("requests.{resource}"))?,
                         resolver.workload_field(workload, &format!("limits.{resource}"))?,
-                    ))
-                })
-                .collect::<Result<Vec<_>, String>>()?;
+                    ));
+                }
+            }
             Ok(conjunction(predicates))
         }
-        "resource.aggregate_capacity" => {
-            require_subjects(binding, 2, Some(usize::MAX))?;
-            reject_placement_parameters(binding)?;
+        NativeHandlerV1::ResourceAggregateCapacity => {
             compile_capacity(binding, resolver, CapacityKind::Pool)
         }
-        "resource.quota_capacity" => {
-            require_subjects(binding, 2, Some(usize::MAX))?;
-            reject_placement_parameters(binding)?;
+        NativeHandlerV1::ResourceQuotaCapacity => {
             compile_capacity(binding, resolver, CapacityKind::Quota)
         }
-        "placement.topology_max_skew" => {
-            require_subjects(binding, 1, None)?;
-            reject_resources(binding)?;
-            reject_minimum_domains(binding)?;
-            let max_skew = positive("max_skew", binding.parameters.max_skew.unwrap_or(1))?;
-            let workload = &binding.subjects[0];
-            resolver.require_workload(workload)?;
-            let domains = resolver.facts.workloads[workload]
-                .domain_counts
-                .keys()
-                .cloned()
-                .collect::<Vec<_>>();
-            let mut predicates = vec![placement_conservation(resolver, workload)?];
-            for left in 0..domains.len() {
-                for right in left + 1..domains.len() {
-                    let left_count = resolver
-                        .workload_field(workload, &format!("domain_counts.{}", domains[left]))?;
-                    let right_count = resolver
-                        .workload_field(workload, &format!("domain_counts.{}", domains[right]))?;
-                    predicates.push(le(
-                        sub(left_count.clone(), right_count.clone()),
-                        int(max_skew),
-                    ));
-                    predicates.push(le(sub(right_count, left_count), int(max_skew)));
-                }
+        NativeHandlerV1::PlacementTopologyMaxSkew => {
+            let max_skew = binding
+                .parameters
+                .max_skew
+                .expect("manifest defaults max_skew");
+            let mut predicates = Vec::new();
+            for workload in distinct_subjects(&source.subjects) {
+                predicates.extend(topology_max_skew(resolver, workload, max_skew)?);
             }
             Ok(conjunction(predicates))
         }
-        "placement.minimum_failure_domains" => {
-            require_subjects(binding, 1, None)?;
-            reject_resources(binding)?;
-            reject_max_skew(binding)?;
-            let minimum = positive(
-                "minimum_domains",
-                binding.parameters.minimum_domains.unwrap_or(1),
-            )?;
-            let workload = &binding.subjects[0];
-            resolver.require_workload(workload)?;
-            let domains = resolver.facts.workloads[workload]
-                .domain_counts
-                .keys()
-                .cloned()
-                .collect::<Vec<_>>();
-            let mut links = vec![placement_conservation(resolver, workload)?];
-            let mut present = Vec::new();
-            for domain in domains {
-                let count =
-                    resolver.workload_field(workload, &format!("domain_counts.{domain}"))?;
-                if let Some(value) = resolver.facts.workloads[workload].domain_counts[&domain] {
-                    present.push(int(i64::from(value > 0)));
-                } else {
-                    let flag = resolver.presence(workload, &domain)?;
-                    links.push(or(vec![
-                        and(vec![eq(count.clone(), int(0)), eq(flag.clone(), int(0))]),
-                        and(vec![gt(count, int(0)), eq(flag.clone(), int(1))]),
-                    ]));
-                    present.push(flag);
+        NativeHandlerV1::PlacementMinimumFailureDomains => {
+            let minimum = binding
+                .parameters
+                .minimum_domains
+                .expect("manifest defaults minimum_domains");
+            let mut links = Vec::new();
+            for workload in distinct_subjects(&source.subjects) {
+                resolver.require_workload(workload)?;
+                let domains = resolver.facts.workloads[workload]
+                    .domain_counts
+                    .keys()
+                    .cloned()
+                    .collect::<Vec<_>>();
+                links.push(placement_conservation(resolver, workload)?);
+                let mut present = Vec::new();
+                for domain in domains {
+                    let count =
+                        resolver.workload_field(workload, &format!("domain_counts.{domain}"))?;
+                    if let Some(value) = resolver.facts.workloads[workload].domain_counts[&domain] {
+                        present.push(int(i64::from(value > 0)));
+                    } else {
+                        let flag = resolver.presence(workload, &domain)?;
+                        links.push(or(vec![
+                            and(vec![eq(count.clone(), int(0)), eq(flag.clone(), int(0))]),
+                            and(vec![gt(count, int(0)), eq(flag.clone(), int(1))]),
+                        ]));
+                        present.push(flag);
+                    }
                 }
+                links.push(ge(sum(present), int(minimum)));
             }
-            links.push(ge(sum(present), int(minimum)));
             Ok(conjunction(links))
         }
-        _ => Err(format!("unsupported resource rule `{}`", binding.rule_id)),
+        NativeHandlerV1::A11yFocusNotObscured
+        | NativeHandlerV1::A11yReflow
+        | NativeHandlerV1::A11yTargetSize
+        | NativeHandlerV1::A11yTextContrast
+        | NativeHandlerV1::LayoutAxisCapacity
+        | NativeHandlerV1::LayoutContainment
+        | NativeHandlerV1::LayoutNonOverlap
+        | NativeHandlerV1::MediaAspectRatio
+        | NativeHandlerV1::RbacDynamicSeparationOfDuty
+        | NativeHandlerV1::RbacPermissionReachable
+        | NativeHandlerV1::RbacRoleHierarchyAcyclic
+        | NativeHandlerV1::RbacStaticSeparationOfDuty
+        | NativeHandlerV1::ConfigurationRequiresAny
+        | NativeHandlerV1::ConfigurationExcludes
+        | NativeHandlerV1::ConfigurationSelectionCardinality
+        | NativeHandlerV1::ConfigurationAttributeAllowedPair
+        | NativeHandlerV1::ConfigurationVersionInterval
+        | NativeHandlerV1::SchedulingAssignmentExactlyOnce
+        | NativeHandlerV1::SchedulingPlacementAllowed
+        | NativeHandlerV1::SchedulingPrecedenceFinishStart
+        | NativeHandlerV1::SchedulingCumulativeCapacity
+        | NativeHandlerV1::SchedulingMinimizeMakespan
+        | NativeHandlerV1::WorkflowInitialStateAllowed
+        | NativeHandlerV1::WorkflowTransitionAllowed
+        | NativeHandlerV1::WorkflowSafetyInvariant
+        | NativeHandlerV1::WorkflowBoundedReachability
+        | NativeHandlerV1::DataIntegrityUnique
+        | NativeHandlerV1::DataIntegrityForeignKey
+        | NativeHandlerV1::DataIntegrityCardinality
+        | NativeHandlerV1::DataIntegrityValueRange
+        | NativeHandlerV1::DataIntegrityConditionalRequired
+        | NativeHandlerV1::DataIntegrityAggregateBalance
+        | NativeHandlerV1::DataIntegrityMutuallyConsistent
+        | NativeHandlerV1::DataIntegrityTemporalConsistency => {
+            Err(format!("unsupported resource rule `{}`", source.rule_id))
+        }
     }
+}
+
+fn distinct_subjects(subjects: &[String]) -> Vec<&str> {
+    let mut seen = BTreeSet::new();
+    subjects
+        .iter()
+        .filter_map(|subject| seen.insert(subject.as_str()).then_some(subject.as_str()))
+        .collect()
+}
+
+fn topology_max_skew(
+    resolver: &ResourceResolver,
+    workload: &str,
+    max_skew: i64,
+) -> Result<Vec<ConstraintExpr>, String> {
+    resolver.require_workload(workload)?;
+    let domains = resolver.facts.workloads[workload]
+        .domain_counts
+        .iter()
+        .map(|(domain, value)| (domain.clone(), *value))
+        .collect::<Vec<_>>();
+    let mut fixed_minimum = None;
+    let mut fixed_maximum = None;
+    let mut unknown_counts = Vec::new();
+    for (domain, value) in domains {
+        if let Some(value) = value {
+            fixed_minimum = Some(fixed_minimum.map_or(value, |minimum: i64| minimum.min(value)));
+            fixed_maximum = Some(fixed_maximum.map_or(value, |maximum: i64| maximum.max(value)));
+        } else {
+            unknown_counts
+                .push(resolver.workload_field(workload, &format!("domain_counts.{domain}"))?);
+        }
+    }
+
+    let mut predicates = vec![placement_conservation(resolver, workload)?];
+    if let (Some(minimum), Some(maximum)) = (fixed_minimum, fixed_maximum) {
+        predicates.push(le(int(maximum - minimum), int(max_skew)));
+        for count in &unknown_counts {
+            predicates.push(le(sub(count.clone(), int(minimum)), int(max_skew)));
+            predicates.push(le(sub(int(maximum), count.clone()), int(max_skew)));
+        }
+    }
+    for left in 0..unknown_counts.len() {
+        for right in left + 1..unknown_counts.len() {
+            predicates.push(le(
+                sub(unknown_counts[left].clone(), unknown_counts[right].clone()),
+                int(max_skew),
+            ));
+            predicates.push(le(
+                sub(unknown_counts[right].clone(), unknown_counts[left].clone()),
+                int(max_skew),
+            ));
+        }
+    }
+    Ok(predicates)
 }
 
 enum CapacityKind {
@@ -351,11 +530,12 @@ enum CapacityKind {
 }
 
 fn compile_capacity(
-    binding: &ResourceRuleBinding,
+    binding: &ValidatedResourceBinding<'_>,
     resolver: &ResourceResolver,
     kind: CapacityKind,
 ) -> Result<ConstraintExpr, String> {
-    let capacity_id = &binding.subjects[0];
+    let source = binding.source;
+    let capacity_id = &source.subjects[0];
     let (capacity, capacity_kind) = match kind {
         CapacityKind::Pool => (
             resolver
@@ -374,7 +554,7 @@ fn compile_capacity(
             "quota",
         ),
     };
-    for workload in &binding.subjects[1..] {
+    for workload in &source.subjects[1..] {
         resolver.require_workload(workload)?;
     }
     let resources = selected_resources(&binding.parameters.resources, capacity.resources.keys())?;
@@ -388,7 +568,7 @@ fn compile_capacity(
     let predicates = resources
         .iter()
         .map(|resource| {
-            let demand = binding.subjects[1..]
+            let demand = source.subjects[1..]
                 .iter()
                 .map(|workload| {
                     Ok(mul(vec![
@@ -598,6 +778,8 @@ const fn default_timeout_ms() -> u64 {
 }
 
 fn input_schema() -> Value {
+    let rule_ids = manifest_family_executable_rule_ids("resource")
+        .expect("resource manifest executable rule IDs");
     let nullable_non_negative = json!({"type": ["integer", "null"], "minimum": 0});
     let nullable_resource_map = json!({"type": "object", "maxProperties": MAX_CONSTRAINTS, "additionalProperties": nullable_non_negative});
     let capacity_map = json!({
@@ -618,10 +800,7 @@ fn input_schema() -> Value {
                 "items": {
                     "type": "object",
                     "properties": {
-                        "rule_id": {"type": "string", "enum": [
-                            "placement.minimum_failure_domains", "placement.topology_max_skew",
-                            "resource.aggregate_capacity", "resource.quota_capacity", "resource.request_within_limit"
-                        ]},
+                        "rule_id": {"type": "string", "enum": rule_ids},
                         "subjects": {"type": "array", "minItems": 1, "maxItems": MAX_CONSTRAINTS, "items": {"type": "string"}},
                         "parameters": {
                             "type": "object",
@@ -674,4 +853,65 @@ fn input_schema() -> Value {
         },
         "required": ["family", "mode", "rules", "facts"], "additionalProperties": false
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn expression_nodes(expression: &ConstraintExpr) -> usize {
+        match expression {
+            ConstraintExpr::Op { args, .. } => 1 + args.iter().map(expression_nodes).sum::<usize>(),
+            ConstraintExpr::Var { .. }
+            | ConstraintExpr::Int { .. }
+            | ConstraintExpr::Bool { .. }
+            | ConstraintExpr::EnumLabel { .. }
+            | ConstraintExpr::Real { .. }
+            | ConstraintExpr::Bv { .. } => 1,
+        }
+    }
+
+    #[test]
+    fn fixed_topology_skew_compiles_linearly_at_the_domain_limit() {
+        let rule_id = manifest_family_executable_rule_ids("resource")
+            .expect("resource rules")
+            .iter()
+            .find(|rule_id| {
+                manifest_rule_handler(rule_id.as_str())
+                    == Some(NativeHandlerV1::PlacementTopologyMaxSkew)
+            })
+            .expect("topology max-skew rule");
+        let domains = (0..MAX_CONSTRAINTS)
+            .map(|index| (format!("zone-{index}"), json!(1)))
+            .collect::<serde_json::Map<_, _>>();
+        let compilation = compile(json!({
+            "family": "resource",
+            "mode": "verify",
+            "rules": [{
+                "rule_id": rule_id,
+                "subjects": ["workload"],
+                "parameters": {"max_skew": 1}
+            }],
+            "facts": {
+                "workloads": {
+                    "workload": {
+                        "replicas": MAX_CONSTRAINTS,
+                        "requests": {},
+                        "limits": {},
+                        "domain_counts": Value::Object(domains)
+                    }
+                },
+                "pools": {},
+                "quotas": {}
+            },
+            "unknowns": []
+        }))
+        .expect("boundary topology fixture compiles");
+
+        let nodes = expression_nodes(&compilation.rules[0].predicate);
+        assert!(
+            nodes <= MAX_CONSTRAINTS * 2,
+            "fixed topology compilation must be linear, found {nodes} nodes"
+        );
+    }
 }

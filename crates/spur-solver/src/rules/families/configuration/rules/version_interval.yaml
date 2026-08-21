@@ -1,0 +1,147 @@
+schema_version: 1
+id: configuration.version_interval
+rule_version: 1
+family: configuration
+profile: finite_compatibility
+primitive: version_interval
+summary: Require a selected provider version rank to lie within a consumer's declared inclusive interval.
+availability: implemented
+strength: hard
+authorities:
+  - kind: debian_policy
+    title: Debian Policy Manual - Versioned Dependencies
+    url: https://www.debian.org/doc/debian-policy/ch-relationships.html
+  - kind: oasis_standard
+    title: OASIS TOSCA Version 2.0
+    url: https://docs.oasis-open.org/tosca/TOSCA/v2.0/TOSCA-v2.0.html
+requires:
+  - components[].selected
+  - components[].version.ordering
+  - components[].version.rank
+  - components[].version_requirements
+  - version_orderings[]
+llm_encoding:
+  effectiveness: high
+  problem_shapes:
+    - A selected consumer requires a selected provider from one caller-ranked inclusive version interval.
+  encode_steps:
+    - Bind the consumer first and provider second.
+    - Resolve the consumer requirement and require the same declared ordering on the provider rank.
+    - Guard provider selection and both inclusive rank comparisons with consumer selection.
+  anti_patterns:
+    - Do not parse SemVer or infer precedence from version strings.
+    - Do not compare ranks from different or undeclared ordering IDs.
+  escalate_when:
+    - Escalate disjoint ranges, prerelease policy, or semantic version parsing to separate preprocessing or primitives.
+solver_encoding:
+  theory: QF_LIA
+  verification: assert provider selection and inclusive rank bounds over complete ranked-version facts
+  synthesis: leave only explicitly declared provider selection or bounded rank fields free
+  formula:
+    - not selected(consumer) or (selected(provider) and minimum_rank <= rank(provider) and rank(provider) <= maximum_rank)
+subjects:
+  cardinality:
+    kind: exact
+    count: 2
+parameters: []
+handler: configuration_version_interval
+examples:
+  valid:
+    facts:
+      family: configuration
+      mode: verify
+      rules:
+        - rule_id: configuration.version_interval
+          subjects: [application, database]
+      facts:
+        components:
+          application:
+            selected: true
+            attributes: {}
+            version_requirements:
+              database: {ordering: database_releases, minimum_rank: 2, maximum_rank: 4}
+          database:
+            selected: true
+            attributes: {}
+            version: {ordering: database_releases, rank: 3}
+        selection_groups: {}
+        allowed_attribute_pairs: []
+        version_orderings:
+          database_releases: {minimum_rank: 0, maximum_rank: 6}
+      unknowns: []
+    expectation: pass
+  invalid:
+    facts:
+      family: configuration
+      mode: verify
+      rules:
+        - rule_id: configuration.version_interval
+          subjects: [application, database]
+      facts:
+        components:
+          application:
+            selected: true
+            attributes: {}
+            version_requirements:
+              database: {ordering: database_releases, minimum_rank: 2, maximum_rank: 4}
+          database:
+            selected: true
+            attributes: {}
+            version: {ordering: database_releases, rank: 5}
+        selection_groups: {}
+        allowed_attribute_pairs: []
+        version_orderings:
+          database_releases: {minimum_rank: 0, maximum_rank: 6}
+      unknowns: []
+    expectation: counterexample
+    expected_diagnostic: configuration.version_interval.violation
+conformance:
+  valid:
+    - name: selected provider rank is inside the inclusive interval
+      request:
+        family: configuration
+        mode: verify
+        rules:
+          - rule_id: configuration.version_interval
+            subjects: [application, database]
+        facts:
+          components:
+            application:
+              selected: true
+              attributes: {}
+              version_requirements:
+                database: {ordering: database_releases, minimum_rank: 2, maximum_rank: 4}
+            database:
+              selected: true
+              attributes: {}
+              version: {ordering: database_releases, rank: 3}
+          selection_groups: {}
+          allowed_attribute_pairs: []
+          version_orderings:
+            database_releases: {minimum_rank: 0, maximum_rank: 6}
+        unknowns: []
+  invalid:
+    - name: selected provider rank is outside the inclusive interval
+      request:
+        family: configuration
+        mode: verify
+        rules:
+          - rule_id: configuration.version_interval
+            subjects: [application, database]
+        facts:
+          components:
+            application:
+              selected: true
+              attributes: {}
+              version_requirements:
+                database: {ordering: database_releases, minimum_rank: 2, maximum_rank: 4}
+            database:
+              selected: true
+              attributes: {}
+              version: {ordering: database_releases, rank: 5}
+          selection_groups: {}
+          allowed_attribute_pairs: []
+          version_orderings:
+            database_releases: {minimum_rank: 0, maximum_rank: 6}
+        unknowns: []
+      expected_diagnostic: configuration.version_interval.violation

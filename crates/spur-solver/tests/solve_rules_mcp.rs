@@ -4,7 +4,7 @@ use serde_json::{json, Value};
 use spur_mcp::{ServerKind, ToolAuthority, ToolCallContext, ToolRegistry};
 use spur_solver::{
     mcp::SolverMcpModule,
-    rules::{execute::outcome_for, RuleOutcome, RuleSolveMode},
+    rules::{execute::outcome_for, manifest_executable_rule_ids, RuleOutcome, RuleSolveMode},
     service::SolverService,
     types::SolveStatus,
 };
@@ -152,7 +152,16 @@ fn solve_rules_schema_keeps_one_bedrock_compatible_family_execution_tool() {
     assert_eq!(schema["additionalProperties"], false);
     assert_eq!(
         schema["properties"]["family"]["enum"],
-        json!(["accessibility", "design", "policy", "resource"])
+        json!([
+            "accessibility",
+            "configuration",
+            "data_integrity",
+            "design",
+            "policy",
+            "resource",
+            "scheduling",
+            "workflow"
+        ])
     );
     assert_eq!(
         schema["properties"]["mode"]["enum"],
@@ -160,21 +169,29 @@ fn solve_rules_schema_keeps_one_bedrock_compatible_family_execution_tool() {
     );
     let rule_ids = schema["properties"]["rules"]["items"]["properties"]["rule_id"]["enum"]
         .as_array()
-        .expect("platform rule ids");
-    assert!(rule_ids
+        .expect("platform rule ids")
         .iter()
-        .any(|rule_id| rule_id == "layout.axis_capacity"));
-    assert!(rule_ids.iter().any(|rule_id| rule_id == "a11y.target_size"));
-    assert!(rule_ids
+        .map(|rule_id| rule_id.as_str().expect("string rule id"))
+        .collect::<Vec<_>>();
+    let manifest_rule_ids = manifest_executable_rule_ids()
         .iter()
-        .any(|rule_id| rule_id == "rbac.permission_reachable"));
-    assert!(rule_ids
-        .iter()
-        .any(|rule_id| rule_id == "resource.quota_capacity"));
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+
+    assert_eq!(rule_ids, manifest_rule_ids);
+    assert_eq!(rule_ids.len(), 39);
+    for expected_rule_id in manifest_executable_rule_ids() {
+        assert_eq!(
+            rule_ids
+                .iter()
+                .filter(|rule_id| **rule_id == expected_rule_id)
+                .count(),
+            1,
+            "{expected_rule_id} must appear exactly once"
+        );
+    }
     assert!(
-        !rule_ids
-            .iter()
-            .any(|rule_id| rule_id == "rbac.minimum_privilege"),
+        !rule_ids.contains(&"rbac.minimum_privilege"),
         "capability-unavailable rules must not be advertised as executable"
     );
 }

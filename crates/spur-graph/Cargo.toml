@@ -12,7 +12,7 @@ dist = false
 
 [features]
 default = ["embed"]
-embed = ["dep:fastembed"]
+embed = ["dep:fastembed", "dep:hf-hub"]
 perf-gates = []
 test-support = []
 
@@ -33,9 +33,11 @@ arrow-array = { workspace = true }
 arrow-buffer = { workspace = true }
 arrow-schema = { workspace = true }
 base64 = "0.22"
-# 5.8.0 already includes EmbeddingGemma300M. Newer 5.x releases pull ORT
+# 5.8.0 includes NomicEmbedTextV15 and JinaEmbeddingsV2BaseCode. CodeRankEmbed
+# uses the user-defined ONNX path. Newer 5.x releases pull ORT
 # rc.11/rc.12 binaries that require newer Linux runtime symbols on the build VM.
 fastembed = { version = "=5.8.0", default-features = false, features = ["hf-hub-native-tls", "ort-download-binaries"], optional = true }
+hf-hub = { version = "=0.4.3", default-features = false, features = ["native-tls", "ureq"], optional = true }
 lance-index = { workspace = true }
 lancedb = { workspace = true }
 parquet = { workspace = true, features = ["arrow"] }
@@ -47,6 +49,7 @@ sha2 = { workspace = true }
 spur-mcp = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
+toml = { workspace = true }
 tree-sitter = "0.25"
 tree-sitter-bash = "0.25.1"
 tree-sitter-c = "0.24.2"

@@ -354,12 +354,17 @@ pub(crate) fn shared_overlay_session_coordinator() -> Arc<OverlaySessionCoordina
 
 pub(crate) fn overlay_rebuild_key_for_dirty_worktree(
     worktree: &Path,
-    base_graph_content_hash: &str,
+    artifact: &spur_graph::GraphIndexArtifact,
 ) -> Option<OverlayRebuildKey> {
     let git = spur_graph::git::detect(worktree)?;
-    let dirty = dirty_worktree_oids(worktree).ok()?;
+    let base_files = artifact
+        .file_manifests
+        .iter()
+        .map(|entry| (entry.path.clone(), entry.content_oid.clone()))
+        .collect();
+    let dirty = spur_graph::overlay_changed_oids(worktree, base_files).ok()?;
     (!dirty.is_empty())
-        .then(|| OverlayRebuildKey::from(&git.head_oid, base_graph_content_hash, &dirty))
+        .then(|| OverlayRebuildKey::from(&git.head_oid, &artifact.graph_content_hash, &dirty))
 }
 
 pub(crate) fn write_delta_for_session(
@@ -573,45 +578,4 @@ fn prune_overlay_deltas_best_effort(
     }
     let stale = stale_overlay_deltas(candidates, &protected);
     delete_stale_overlay_deltas(stale);
-}
-
-fn dirty_worktree_oids(worktree: &Path) -> Result<BTreeMap<PathBuf, [u8; 20]>> {
-    let allowed_extensions = spur_graph::extract::languages::all_supported_extensions();
-    let mut dirty = BTreeMap::new();
-
-    for entry in spur_graph::git::status_dirty_paths(worktree)? {
-        if !is_supported_path(&entry.path, &allowed_extensions) {
-            continue;
-        }
-        let oid = std::fs::read(worktree.join(&entry.path))
-            .ok()
-            .and_then(|bytes| parse_git_oid(&spur_graph::git_blob_oid(&bytes)))
-            .unwrap_or([0; 20]);
-        dirty.insert(PathBuf::from(entry.path), oid);
-    }
-
-    Ok(dirty)
-}
-
-fn is_supported_path(path: &str, allowed_extensions: &[&str]) -> bool {
-    Path::new(path)
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| {
-            allowed_extensions
-                .iter()
-                .any(|allowed| extension.eq_ignore_ascii_case(allowed))
-        })
-}
-
-fn parse_git_oid(hex: &str) -> Option<[u8; 20]> {
-    if hex.len() != 40 {
-        return None;
-    }
-    let mut bytes = [0_u8; 20];
-    for (index, chunk) in hex.as_bytes().chunks_exact(2).enumerate() {
-        let chunk = std::str::from_utf8(chunk).ok()?;
-        bytes[index] = u8::from_str_radix(chunk, 16).ok()?;
-    }
-    Some(bytes)
 }

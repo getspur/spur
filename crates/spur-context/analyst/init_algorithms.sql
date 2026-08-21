@@ -13,11 +13,12 @@
 --
 -- `onager_edges` is the resolved calls subgraph (edge_kind='calls'), dense-keyed
 -- by node_id, and remains the basis for PageRank and degree. `onager_dep_edges`
--- is the full resolved dependency graph (calls + references + imports + ...)
--- used for components and communities. All _algo_* tables are keyed by the SAME
--- dense node_id the `nodes` view exposes, so the public v_symbol_* views join
--- cleanly; component/community views synthesize singleton rows for nodes Onager
--- does not return.
+-- is the resolved dependency graph (calls + references + imports + …, excluding
+-- structural `contains`) used for components and communities. All _algo_* tables
+-- are keyed by the SAME dense node_id the `nodes` view exposes, so the public
+-- v_symbol_* views join cleanly; component/community views synthesize singleton
+-- rows for nodes Onager does not return. PageRank is NULL when a node is not in
+-- the calls graph — callers must not treat missing rank as 0.
 --
 -- Note: Louvain community ids are not stable across rebuilds (the algorithm is
 -- randomized); only the grouping is meaningful, not the integer label.
@@ -57,7 +58,7 @@ FULL OUTER JOIN ind i ON i.node_id = o.node_id;
 CREATE OR REPLACE VIEW v_symbol_centrality AS
 SELECT n.stable_symbol_id,
        n.node_id,
-       COALESCE(pr.pagerank, 0.0) AS pagerank,
+       pr.pagerank,
        COALESCE(d.in_degree, 0)   AS in_degree,
        COALESCE(d.out_degree, 0)  AS out_degree
 FROM nodes n

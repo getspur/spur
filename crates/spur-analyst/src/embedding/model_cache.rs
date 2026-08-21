@@ -5,7 +5,11 @@ use std::sync::{Arc, Mutex, OnceLock};
 use spur_graph::EmbeddingModelSelection;
 
 #[cfg(feature = "embed")]
-static EMBEDDING_GEMMA_EMBED_MODEL: EmbedModelCell<fastembed::TextEmbedding> =
+static NOMIC_EMBED_TEXT_V15_MODEL: EmbedModelCell<fastembed::TextEmbedding> = EmbedModelCell::new();
+#[cfg(feature = "embed")]
+static CODE_RANK_EMBED_MODEL: EmbedModelCell<fastembed::TextEmbedding> = EmbedModelCell::new();
+#[cfg(feature = "embed")]
+static JINA_EMBEDDINGS_V2_BASE_CODE_MODEL: EmbedModelCell<fastembed::TextEmbedding> =
     EmbedModelCell::new();
 
 #[cfg(feature = "embed")]
@@ -107,7 +111,11 @@ impl<M> Drop for EmbedLoadPermit<'_, M> {
 
 #[cfg(feature = "embed")]
 pub(crate) fn embed_model_cell(
-    _embedding_model: EmbeddingModelSelection,
+    embedding_model: EmbeddingModelSelection,
 ) -> &'static EmbedModelCell<fastembed::TextEmbedding> {
-    &EMBEDDING_GEMMA_EMBED_MODEL
+    match embedding_model {
+        EmbeddingModelSelection::NomicEmbedTextV15 => &NOMIC_EMBED_TEXT_V15_MODEL,
+        EmbeddingModelSelection::CodeRankEmbed => &CODE_RANK_EMBED_MODEL,
+        EmbeddingModelSelection::JinaEmbeddingsV2BaseCode => &JINA_EMBEDDINGS_V2_BASE_CODE_MODEL,
+    }
 }

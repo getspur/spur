@@ -68,13 +68,26 @@ async fn empty_rule_spec_request_lists_all_bounded_family_cards_without_a_live_s
     assert_eq!(result["registry_schema_version"], 1);
     assert_eq!(result["query"]["selector"], "catalog");
     assert_eq!(result["query"]["include"], "summary");
-    assert_eq!(result["families"].as_array().map(Vec::len), Some(4));
-    assert_eq!(result["families"][0]["id"], "accessibility");
-    assert_eq!(result["families"][1]["id"], "design");
-    assert_eq!(result["families"][2]["id"], "policy");
-    assert_eq!(result["families"][3]["id"], "resource");
     assert_eq!(
-        result["families"][1]["profiles"],
+        result["families"]
+            .as_array()
+            .expect("family cards")
+            .iter()
+            .map(|family| family["id"].as_str().expect("family ID"))
+            .collect::<Vec<_>>(),
+        [
+            "accessibility",
+            "configuration",
+            "data_integrity",
+            "design",
+            "policy",
+            "resource",
+            "scheduling",
+            "workflow",
+        ]
+    );
+    assert_eq!(
+        result["families"][3]["profiles"],
         json!(["geometric_integrity", "layout_capacity"])
     );
     assert!(result.get("rules").is_none());

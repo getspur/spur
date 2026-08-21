@@ -2008,6 +2008,9 @@ fn tui_input_to_interactive(input: spur_tui::UserInput) -> spur_core::Interactiv
             name,
             updated_entry,
         },
+        spur_tui::UserInput::UpdateConfig { patch } => {
+            spur_core::InteractiveInput::UpdateConfig { patch }
+        }
         spur_tui::UserInput::SetSessionModel {
             session_id: _,
             value,
