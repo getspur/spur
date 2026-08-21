@@ -3,7 +3,7 @@ use ratatui::{
     layout::Rect,
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph},
+    widgets::{Block, Borders, Paragraph, Wrap},
     Frame,
 };
 use spur_acp::config::{ConfigPatch, SkillsProjectionMode};
@@ -44,7 +44,8 @@ impl SkillsPane {
     pub fn render(&self, f: &mut Frame, area: Rect) {
         f.render_widget(
             Paragraph::new(self.render_lines())
-                .block(Block::default().borders(Borders::ALL).title("skills")),
+                .wrap(Wrap { trim: false })
+                .block(Block::default().borders(Borders::ALL).title("Skills")),
             area,
         );
     }

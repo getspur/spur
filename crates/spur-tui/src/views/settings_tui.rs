@@ -2,7 +2,7 @@ use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
     layout::Rect,
     text::Line,
-    widgets::{Block, Borders, Paragraph},
+    widgets::{Block, Borders, Paragraph, Wrap},
     Frame,
 };
 use spur_acp::config::{ConfigPatch, EditorMode};
@@ -94,7 +94,9 @@ impl TuiPane {
             })
             .collect();
         f.render_widget(
-            Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title("tui")),
+            Paragraph::new(lines)
+                .wrap(Wrap { trim: false })
+                .block(Block::default().borders(Borders::ALL).title("TUI")),
             area,
         );
     }

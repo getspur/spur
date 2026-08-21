@@ -3,7 +3,7 @@ use ratatui::{
     layout::Rect,
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph},
+    widgets::{Block, Borders, Paragraph, Wrap},
     Frame,
 };
 use spur_acp::config::{ConfigPatch, GRAPH_EMBEDDING_ALIASES};
@@ -36,7 +36,12 @@ impl GraphPane {
     }
 
     pub fn cycle(&mut self) {
-        self.selected = (self.selected + 1) % self.aliases.len();
+        self.shift(1);
+    }
+
+    fn shift(&mut self, delta: isize) {
+        let n = self.aliases.len() as isize;
+        self.selected = (self.selected as isize + delta).rem_euclid(n) as usize;
     }
 
     pub fn save_patch(&self) -> ConfigPatch {
@@ -48,15 +53,20 @@ impl GraphPane {
     pub fn render(&self, f: &mut Frame, area: Rect) {
         f.render_widget(
             Paragraph::new(self.body_lines(env_override_set()))
-                .block(Block::default().borders(Borders::ALL).title("graph")),
+                .wrap(Wrap { trim: false })
+                .block(Block::default().borders(Borders::ALL).title("Graph")),
             area,
         );
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> Option<Action> {
         match key.code {
-            KeyCode::Left | KeyCode::Right | KeyCode::Enter => {
-                self.cycle();
+            KeyCode::Right | KeyCode::Enter => {
+                self.shift(1);
+                None
+            }
+            KeyCode::Left => {
+                self.shift(-1);
                 None
             }
             KeyCode::Char('s') => Some(Action::ConfigSaveRequested {
@@ -177,6 +187,8 @@ mod tests {
         assert_eq!(pane.selected_alias(), "coderank");
         pane.handle_key(key(KeyCode::Enter));
         assert_eq!(pane.selected_alias(), "jina-code");
+        pane.handle_key(key(KeyCode::Left));
+        assert_eq!(pane.selected_alias(), "coderank");
         pane.handle_key(key(KeyCode::Left));
         assert_eq!(pane.selected_alias(), "nomic");
     }

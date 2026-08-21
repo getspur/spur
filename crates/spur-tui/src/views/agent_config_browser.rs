@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph, Wrap},
@@ -17,6 +17,21 @@ use super::settings_graph::GraphPane;
 use super::settings_skills::SkillsPane;
 use super::settings_tui::TuiPane;
 use super::{View, ViewContext};
+
+/// Solver mins (`sol_151a6b1d3e5b409e`): sections 12, agents 16, fields 42, gutter 1.
+const MIN_SECTIONS_WIDTH: u16 = 12;
+const MIN_AGENTS_WIDTH: u16 = 16;
+const MIN_FIELDS_WIDTH: u16 = 42;
+const GUTTER: u16 = 1;
+const THREE_PANE_MIN_WIDTH: u16 =
+    MIN_SECTIONS_WIDTH + GUTTER + MIN_AGENTS_WIDTH + GUTTER + MIN_FIELDS_WIDTH;
+const TWO_PANE_MIN_WIDTH: u16 = MIN_SECTIONS_WIDTH + GUTTER + MIN_AGENTS_WIDTH;
+const SECTIONS_STACK_HEIGHT: u16 = 6;
+const STATUS_HEIGHT: u16 = 1;
+const STATUS_MAX_COLS: usize = 40;
+const STATUS_IDLE: &str = "Tab  j/k  Enter  s  Esc";
+const STATUS_EDITING: &str = "Enter save  Esc cancel";
+const ERROR_FG: Color = Color::LightRed;
 
 const FIELD_ORDER: [EditableAgentField; 8] = [
     EditableAgentField::AdditionalDirectories,
@@ -478,36 +493,22 @@ impl AgentConfigBrowserView {
     }
 
     fn render_inner(&self, frame: &mut Frame, area: Rect) {
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Min(3), Constraint::Length(1)])
-            .split(area);
+        let panes = split_configure(area, self.agents_section_active());
+        self.render_sections(frame, panes.sections);
         if self.agents_section_active() {
-            let columns = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([
-                    Constraint::Percentage(18),
-                    Constraint::Percentage(28),
-                    Constraint::Percentage(54),
-                ])
-                .split(chunks[0]);
-            self.render_sections(frame, columns[0]);
-            self.render_agents(frame, columns[1]);
-            self.render_fields(frame, columns[2]);
+            if let Some(agents) = panes.agents {
+                self.render_agents(frame, agents);
+            }
+            self.render_fields(frame, panes.detail);
         } else {
-            let columns = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([Constraint::Percentage(18), Constraint::Percentage(82)])
-                .split(chunks[0]);
-            self.render_sections(frame, columns[0]);
             match self.section {
-                ConfigureSection::Graph => self.graph_pane.render(frame, columns[1]),
-                ConfigureSection::Tui => self.tui_pane.render(frame, columns[1]),
-                ConfigureSection::Skills => self.skills_pane.render(frame, columns[1]),
+                ConfigureSection::Graph => self.graph_pane.render(frame, panes.detail),
+                ConfigureSection::Tui => self.tui_pane.render(frame, panes.detail),
+                ConfigureSection::Skills => self.skills_pane.render(frame, panes.detail),
                 ConfigureSection::Agents => {}
             }
         }
-        self.render_status(frame, chunks[1]);
+        self.render_status(frame, panes.status);
     }
 
     fn render_sections(&self, frame: &mut Frame, area: Rect) {
@@ -536,7 +537,7 @@ impl AgentConfigBrowserView {
                 };
                 Line::from(vec![
                     Span::raw(marker),
-                    Span::styled(section.as_str(), style),
+                    Span::styled(section.list_label(), style),
                 ])
             })
             .collect();
@@ -622,7 +623,7 @@ impl AgentConfigBrowserView {
                     if selected && error.field == *field {
                         lines.push(Line::from(Span::styled(
                             format!("  {}", error.message),
-                            Style::default().fg(Color::Red),
+                            Style::default().fg(ERROR_FG),
                         )));
                     }
                 }
@@ -641,11 +642,80 @@ impl AgentConfigBrowserView {
 
     fn render_status(&self, frame: &mut Frame, area: Rect) {
         let status = if self.edit_buffer.is_some() {
-            "Enter save field  Esc cancel"
+            STATUS_EDITING
         } else {
-            "Tab pane  j/k move  Enter edit/toggle  s save  Esc back"
+            STATUS_IDLE
         };
         frame.render_widget(Paragraph::new(status), area);
+    }
+}
+
+struct ConfigurePanes {
+    sections: Rect,
+    agents: Option<Rect>,
+    detail: Rect,
+    status: Rect,
+}
+
+fn split_configure(area: Rect, agents_section: bool) -> ConfigurePanes {
+    let chunks =
+        Layout::vertical([Constraint::Min(3), Constraint::Length(STATUS_HEIGHT)]).split(area);
+    let body = chunks[0];
+    let status = chunks[1];
+    if agents_section {
+        if body.width >= THREE_PANE_MIN_WIDTH {
+            let cols = Layout::horizontal([
+                Constraint::Length(MIN_SECTIONS_WIDTH),
+                Constraint::Length(MIN_AGENTS_WIDTH),
+                Constraint::Min(MIN_FIELDS_WIDTH),
+            ])
+            .spacing(GUTTER)
+            .split(body);
+            ConfigurePanes {
+                sections: cols[0],
+                agents: Some(cols[1]),
+                detail: cols[2],
+                status,
+            }
+        } else {
+            let rows = Layout::vertical([
+                Constraint::Length(SECTIONS_STACK_HEIGHT),
+                Constraint::Min(6),
+                Constraint::Min(10),
+            ])
+            .split(body);
+            ConfigurePanes {
+                sections: rows[0],
+                agents: Some(rows[1]),
+                detail: rows[2],
+                status,
+            }
+        }
+    } else if body.width >= TWO_PANE_MIN_WIDTH {
+        let cols = Layout::horizontal([
+            Constraint::Length(MIN_SECTIONS_WIDTH),
+            Constraint::Min(MIN_AGENTS_WIDTH),
+        ])
+        .spacing(GUTTER)
+        .split(body);
+        ConfigurePanes {
+            sections: cols[0],
+            agents: None,
+            detail: cols[1],
+            status,
+        }
+    } else {
+        let rows = Layout::vertical([
+            Constraint::Length(SECTIONS_STACK_HEIGHT),
+            Constraint::Min(10),
+        ])
+        .split(body);
+        ConfigurePanes {
+            sections: rows[0],
+            agents: None,
+            detail: rows[1],
+            status,
+        }
     }
 }
 
@@ -1004,5 +1074,108 @@ mod tests {
             crate::configure_section::ConfigureSection::Agents
         );
         assert_eq!(view.selected_field_index_for_test(), 1);
+    }
+
+    #[test]
+    fn status_chrome_fits_narrow_terminal() {
+        assert!(STATUS_IDLE.len() <= STATUS_MAX_COLS);
+        assert!(STATUS_EDITING.len() <= STATUS_MAX_COLS);
+    }
+
+    #[test]
+    fn three_pane_at_80_uses_solver_mins_and_gutters() {
+        let panes = split_configure(Rect::new(0, 0, 80, 24), true);
+        let agents = panes.agents.expect("agents column");
+        assert_eq!(panes.sections.width, MIN_SECTIONS_WIDTH);
+        assert_eq!(agents.width, MIN_AGENTS_WIDTH);
+        assert!(panes.detail.width >= MIN_FIELDS_WIDTH);
+        assert_eq!(agents.x, panes.sections.x + panes.sections.width + GUTTER);
+        assert_eq!(panes.detail.x, agents.x + agents.width + GUTTER);
+        assert_eq!(
+            panes.sections.width + GUTTER + agents.width + GUTTER + panes.detail.width,
+            80
+        );
+        assert_eq!(panes.status.height, STATUS_HEIGHT);
+        assert_eq!(panes.status.y, 23);
+    }
+
+    #[test]
+    fn three_pane_below_floor_stacks_vertically() {
+        let panes = split_configure(Rect::new(0, 0, 40, 24), true);
+        let agents = panes.agents.expect("agents row");
+        assert_eq!(panes.sections.width, 40);
+        assert_eq!(agents.width, 40);
+        assert_eq!(panes.detail.width, 40);
+        assert!(panes.sections.y < agents.y);
+        assert!(agents.y < panes.detail.y);
+        assert_eq!(panes.detail.x, panes.sections.x);
+        assert!(panes.detail.height >= 8);
+    }
+
+    #[test]
+    fn two_pane_at_80_keeps_section_floor_and_gutter() {
+        let panes = split_configure(Rect::new(0, 0, 80, 24), false);
+        assert!(panes.agents.is_none());
+        assert_eq!(panes.sections.width, MIN_SECTIONS_WIDTH);
+        assert_eq!(
+            panes.detail.x,
+            panes.sections.x + panes.sections.width + GUTTER
+        );
+        assert_eq!(panes.sections.width + GUTTER + panes.detail.width, 80);
+    }
+
+    fn rendered_configure(view: &mut AgentConfigBrowserView, width: u16, height: u16) -> String {
+        let lineage = spur_core::ExecutorLineage::new();
+        let ctx = test_ctx(&lineage);
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|frame| view.render(frame, frame.area(), &ctx))
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        let mut rendered = String::new();
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                rendered.push_str(buf[(x, y)].symbol());
+            }
+            rendered.push('\n');
+        }
+        rendered
+    }
+
+    #[test]
+    fn render_shows_title_case_pane_headers() {
+        let mut view = AgentConfigBrowserView::new(vec![configured_agent()], Some("graph".into()));
+        let text = rendered_configure(&mut view, 80, 24);
+        assert!(text.contains("Graph"), "{text}");
+        assert!(text.contains("Sections"), "{text}");
+    }
+
+    #[test]
+    fn validation_error_uses_light_red() {
+        let mut view = AgentConfigBrowserView::new(vec![configured_agent()], None);
+        view.pane = BrowserPane::Fields;
+        view.selected_field = 1;
+        view.validation_error = Some(DraftValidationError {
+            field: EditableAgentField::Args,
+            message: "bad-args".to_string(),
+        });
+        let lineage = spur_core::ExecutorLineage::new();
+        let ctx = test_ctx(&lineage);
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+        terminal
+            .draw(|frame| view.render(frame, frame.area(), &ctx))
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        let mut saw_light_red = false;
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                if buf[(x, y)].style().fg == Some(ERROR_FG) {
+                    saw_light_red = true;
+                }
+            }
+        }
+        assert!(saw_light_red, "expected LightRed error cells");
     }
 }

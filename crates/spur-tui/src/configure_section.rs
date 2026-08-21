@@ -29,6 +29,15 @@ impl ConfigureSection {
             Self::Skills => "skills",
         }
     }
+
+    pub fn list_label(self) -> &'static str {
+        match self {
+            Self::Agents => "Agents",
+            Self::Graph => "Graph",
+            Self::Tui => "TUI",
+            Self::Skills => "Skills",
+        }
+    }
 }
 
 /// Empty / omitted arg → agents. Reserved tokens → that section.
@@ -77,5 +86,13 @@ mod tests {
             parse_configure_arg("kiro"),
             (ConfigureSection::Agents, Some("kiro".into()))
         );
+    }
+
+    #[test]
+    fn list_labels_are_title_case() {
+        assert_eq!(ConfigureSection::Agents.list_label(), "Agents");
+        assert_eq!(ConfigureSection::Graph.list_label(), "Graph");
+        assert_eq!(ConfigureSection::Tui.list_label(), "TUI");
+        assert_eq!(ConfigureSection::Skills.list_label(), "Skills");
     }
 }
