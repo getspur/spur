@@ -1,20 +1,5 @@
 use super::*;
 
-fn with_editable_agent_config_fields(
-    existing: &spur_acp::config::AgentConfig,
-    updated: &spur_acp::config::AgentConfig,
-) -> spur_acp::config::AgentConfig {
-    let mut replacement = existing.clone();
-    replacement.args = updated.args.clone();
-    replacement.additional_directories = updated.additional_directories.clone();
-    replacement.capabilities = updated.capabilities.clone();
-    replacement.skip_permissions = updated.skip_permissions;
-    replacement.skip_permissions_args = updated.skip_permissions_args.clone();
-    replacement.skip_permissions_session_mode = updated.skip_permissions_session_mode.clone();
-    replacement.profile = updated.profile.clone();
-    replacement
-}
-
 impl Orchestrator {
     /// Phase 5 / Task 25/26 — return the existing per-`BrainSession`
     /// [`WorkerMcpServer`], booting one on first call. Concurrent callers
@@ -291,57 +276,51 @@ impl Orchestrator {
         self.funnel.emit(event.body);
     }
 
+    pub fn apply_config_patch(&mut self, patch: spur_acp::config::ConfigPatch) -> Result<()> {
+        if let spur_acp::config::ConfigPatch::Agent {
+            name,
+            updated_entry,
+        } = &patch
+        {
+            if updated_entry.name != *name {
+                anyhow::bail!(
+                    "agent config update name mismatch: requested '{name}', payload '{}'",
+                    updated_entry.name
+                );
+            }
+            spur_acp::config::validate_agent_additional_directories_absolute(
+                name,
+                &updated_entry.additional_directories,
+            )?;
+            let configured = self
+                .agent_configs
+                .read()
+                .iter()
+                .any(|entry| entry.name == *name);
+            if !configured {
+                anyhow::bail!("agent '{name}' is not configured");
+            }
+        }
+
+        let config_path = self.repo_root.join(".spur/config.toml");
+        spur_acp::config::try_update_config(&config_path, |config| patch.apply(config))?;
+
+        patch.apply(&mut self.config)?;
+        if matches!(&patch, spur_acp::config::ConfigPatch::Agent { .. }) {
+            *self.agent_configs.write() = self.config.agents.entries.clone();
+        }
+        Ok(())
+    }
+
     pub fn update_agent_config(
         &mut self,
         name: String,
         updated_entry: spur_acp::config::AgentConfig,
     ) -> Result<()> {
-        if updated_entry.name != name {
-            anyhow::bail!(
-                "agent config update name mismatch: requested '{name}', payload '{}'",
-                updated_entry.name
-            );
-        }
-        spur_acp::config::validate_agent_additional_directories_absolute(
-            &name,
-            &updated_entry.additional_directories,
-        )?;
-
-        let current_entries = self.agent_configs.read().clone();
-        let existing = current_entries
-            .iter()
-            .find(|entry| entry.name == name)
-            .ok_or_else(|| anyhow!("agent '{name}' is not configured"))?;
-        let replacement = with_editable_agent_config_fields(existing, &updated_entry);
-        let mut next_entries = current_entries;
-        let Some(slot) = next_entries.iter_mut().find(|entry| entry.name == name) else {
-            anyhow::bail!("agent '{name}' is not configured");
-        };
-        *slot = replacement.clone();
-
-        let config_path = self.repo_root.join(".spur/config.toml");
-        let mut persisted_replacement = false;
-        spur_acp::config::update_config(&config_path, |config| {
-            if let Some(slot) = config
-                .agents
-                .entries
-                .iter_mut()
-                .find(|entry| entry.name == name)
-            {
-                *slot = replacement;
-                persisted_replacement = true;
-            }
-        })?;
-        if !persisted_replacement {
-            anyhow::bail!(
-                "agent '{name}' is not configured in {}",
-                config_path.display()
-            );
-        }
-
-        self.config.agents.entries = next_entries.clone();
-        *self.agent_configs.write() = next_entries;
-        Ok(())
+        self.apply_config_patch(spur_acp::config::ConfigPatch::Agent {
+            name,
+            updated_entry,
+        })
     }
 
     /// Read the cached `config_options` for the active brain session.
@@ -425,5 +404,81 @@ impl Orchestrator {
             caps: brain.spur_agent_caps.clone(),
             config_options: opts,
         }));
+    }
+}
+
+#[cfg(test)]
+mod apply_config_patch_tests {
+    use super::*;
+    use spur_acp::config::{ConfigPatch, SpurConfig};
+    use tempfile::TempDir;
+
+    fn worker_entry(name: &str, args: &[&str]) -> spur_acp::config::AgentConfig {
+        let mut config = spur_acp::config::AgentConfig::with_defaults(name);
+        config.command = "test-worker".to_string();
+        config.args = args.iter().map(|arg| arg.to_string()).collect();
+        config
+    }
+
+    #[tokio::test]
+    async fn update_agent_config_persist_failure_does_not_write_agent_configs() {
+        let repo = TempDir::new().expect("temp repo");
+        let mut config = SpurConfig::default();
+        config.agents.entries = vec![worker_entry("worker", &["old-arg"])];
+        let mut orchestrator =
+            Orchestrator::new(repo.path().to_path_buf(), config, None).expect("orchestrator");
+
+        let err = orchestrator
+            .update_agent_config("worker".to_string(), worker_entry("worker", &["new-arg"]))
+            .expect_err("missing config.toml must fail persist");
+        assert!(
+            format!("{err:#}").to_lowercase().contains("read")
+                || format!("{err:#}").to_lowercase().contains("no such"),
+            "expected persist read error, got {err:#}"
+        );
+        assert_eq!(
+            orchestrator.agent_configs.read()[0].args,
+            vec!["old-arg".to_string()]
+        );
+        assert_eq!(
+            orchestrator.config.agents.entries[0].args,
+            vec!["old-arg".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_config_patch_graph_persists_then_applies() {
+        let repo = TempDir::new().expect("temp repo");
+        std::fs::create_dir_all(repo.path().join(".spur")).expect("create .spur");
+        let mut config = SpurConfig::default();
+        config.agents.entries = vec![worker_entry("worker", &["old-arg"])];
+        std::fs::write(
+            repo.path().join(".spur/config.toml"),
+            toml::to_string_pretty(&config).expect("serialize"),
+        )
+        .expect("write config");
+        let mut orchestrator =
+            Orchestrator::new(repo.path().to_path_buf(), config, None).expect("orchestrator");
+
+        orchestrator
+            .apply_config_patch(ConfigPatch::GraphEmbeddingModel {
+                alias: "jina-code".into(),
+            })
+            .expect("graph patch");
+
+        assert_eq!(
+            orchestrator.config.graph.embedding_model.as_deref(),
+            Some("jina-code")
+        );
+        assert_eq!(
+            orchestrator.agent_configs.read()[0].args,
+            vec!["old-arg".to_string()]
+        );
+        let disk: SpurConfig = toml::from_str(
+            &std::fs::read_to_string(repo.path().join(".spur/config.toml")).expect("read"),
+        )
+        .expect("parse");
+        assert_eq!(disk.graph.embedding_model.as_deref(), Some("jina-code"));
+        assert_eq!(disk.agents.entries[0].args, vec!["old-arg".to_string()]);
     }
 }

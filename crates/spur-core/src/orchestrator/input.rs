@@ -64,6 +64,10 @@ pub enum InteractiveInput {
         name: String,
         updated_entry: spur_acp::config::AgentConfig,
     },
+    /// Persist one `/configure` section then live-apply on success (`SAVE-APPLY`).
+    UpdateConfig {
+        patch: spur_acp::config::ConfigPatch,
+    },
     /// Dedicated `session/set_model` dispatch (M9 F-C). Fired when the
     /// caps-aware submit-router routes `/model <value>` for an agent that
     /// advertises `supports_set_model()` (e.g. claude-code-acp). The

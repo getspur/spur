@@ -1014,6 +1014,13 @@ pub enum SpurEventBody {
         message: String,
     },
 
+    /// Feedback for a sectioned `/configure` persist (`SAVE-APPLY`).
+    ConfigUpdateResult {
+        section: String,
+        ok: bool,
+        message: String,
+    },
+
     /// Feedback for a failed plan operation initiated from TUI.
     PlanCommandError {
         operation: String,

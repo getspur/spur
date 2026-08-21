@@ -91,9 +91,10 @@ pub mod usage_ingest;
 
 pub use config::{
     load_seed_template, validate_agent_config, AgentConfig, AgentReviewPolicy, AgentsConfig,
-    ArgsTemplateKind, BeadsPmConfig, CommandsConfig, ConfigError, DispatchKind, DisplayConfig,
-    EditorMode, IngestBinding, IngestParserKind, ItemSchemaKind, PermissionsConfig,
-    ResponseBinding, ResponseRenderKind, SpurConfig, StaticCommandDecl, TuiConfig,
+    ArgsTemplateKind, BeadsPmConfig, CommandsConfig, ConfigError, ConfigPatch, DispatchKind,
+    DisplayConfig, EditorMode, IngestBinding, IngestParserKind, ItemSchemaKind, PermissionsConfig,
+    ResponseBinding, ResponseRenderKind, SkillsProjectionMode, SpurConfig, StaticCommandDecl,
+    TuiConfig,
 };
 pub use connection::{
     AgentConnection, CliWrapAdapter, ExtNotificationPayload, NativeAcpConnection, StdioAdapter,
