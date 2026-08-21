@@ -251,8 +251,22 @@ fn protected_canonical_artifacts(
             canonical_dir.display()
         )
     })?;
-    let mut protected = BTreeSet::from([written_dir]);
+    let mut protected = registered_worktree_protected_artifacts(worktree_root, &canonical_dir)?;
+    protected.insert(written_dir);
+    Ok(protected)
+}
 
+fn registered_worktree_protected_artifacts(
+    worktree_root: &Path,
+    canonical_dir: &Path,
+) -> Result<BTreeSet<PathBuf>> {
+    let canonical_dir = canonical_dir.canonicalize().with_context(|| {
+        format!(
+            "failed to canonicalize graph artifact directory `{}`",
+            canonical_dir.display()
+        )
+    })?;
+    let mut protected = BTreeSet::new();
     let worktrees = git::registered_worktree_roots(worktree_root)
         .context("failed to enumerate registered worktrees for graph artifact pruning")?;
     for worktree in worktrees {
@@ -267,7 +281,6 @@ fn protected_canonical_artifacts(
             }
         }
     }
-
     Ok(protected)
 }
 
@@ -451,6 +464,73 @@ fn delete_stale_canonical_artifacts(stale: Vec<PathBuf>) {
             );
         }
     }
+}
+
+/// Unpin canonical graph generations after a worktree is removed or detached.
+///
+/// Unlike [`prune_after_success_best_effort`], this does not require a newly
+/// written artifact and does not scrub live worktree-local leftover copies.
+/// Pins are taken from `git worktree list`, not an in-process manager map.
+pub fn prune_after_worktree_change(worktree_root: &Path) {
+    let Some(git) = git::detect(worktree_root) else {
+        return;
+    };
+    let artifacts_root = git
+        .git_common_dir
+        .join(CACHE_DIR_NAME)
+        .join(ARTIFACTS_DIR_NAME);
+    let Ok(entries) = fs::read_dir(&artifacts_root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if !file_type.is_dir() {
+            continue;
+        }
+        let canonical_dir = entry.path();
+        match registered_worktree_protected_artifacts(worktree_root, &canonical_dir) {
+            Ok(protected) => {
+                prune_canonical_store_best_effort(&canonical_dir, &protected);
+                prune_rollback_embed_sidecars_best_effort(&canonical_dir, &protected);
+            }
+            Err(error) => {
+                tracing::warn!(
+                    canonical_dir = %canonical_dir.display(),
+                    error = %error,
+                    "spur-graph: skipping canonical artifact pruning after worktree change; protected-target discovery failed"
+                );
+            }
+        }
+    }
+}
+
+fn prune_canonical_store_best_effort(canonical_dir: &Path, protected: &BTreeSet<PathBuf>) {
+    let canonical_dir = match canonical_dir.canonicalize() {
+        Ok(path) => path,
+        Err(error) => {
+            tracing::warn!(
+                path = %canonical_dir.display(),
+                error = %error,
+                "spur-graph: skipping canonical artifact pruning; directory is not canonicalizable"
+            );
+            return;
+        }
+    };
+    let candidates = match canonical_artifact_candidates(&canonical_dir) {
+        Ok(candidates) => candidates,
+        Err(error) => {
+            tracing::warn!(
+                canonical_dir = %canonical_dir.display(),
+                error = %error,
+                "spur-graph: skipping canonical artifact pruning; candidate discovery failed"
+            );
+            return;
+        }
+    };
+    let stale = stale_canonical_artifacts(candidates, protected);
+    delete_stale_canonical_artifacts(stale);
 }
 
 fn prune_after_success_best_effort(worktree_root: &Path, canonical_dir: &Path, written_dir: &Path) {
@@ -1080,10 +1160,11 @@ mod tests {
 
     use super::{
         delete_stale_canonical_artifacts, lookup_canonical, protected_canonical_artifacts,
-        prune_after_success_best_effort, prune_canonical_artifacts_best_effort,
-        stale_canonical_artifacts, write_with_dedup, write_with_dedup_with_section_sidecar_options,
-        CanonicalArtifactCandidate, POINTER_PUBLICATION_FAILURE, RETAINED_CANONICAL_ARTIFACTS,
-        RETAINED_EMBED_SIDECARS, RETAINED_WORKTREE_LOCAL_ARTIFACTS, WORKTREE_ARTIFACT_PATH,
+        prune_after_success_best_effort, prune_after_worktree_change,
+        prune_canonical_artifacts_best_effort, stale_canonical_artifacts, write_with_dedup,
+        write_with_dedup_with_section_sidecar_options, CanonicalArtifactCandidate,
+        POINTER_PUBLICATION_FAILURE, RETAINED_CANONICAL_ARTIFACTS, RETAINED_EMBED_SIDECARS,
+        RETAINED_WORKTREE_LOCAL_ARTIFACTS, WORKTREE_ARTIFACT_PATH,
     };
     use crate::git::GitCtx;
     use crate::store::lance_sections::{
@@ -1193,6 +1274,49 @@ mod tests {
         assert!(
             has_embed_sidecars(&current),
             "CURRENT must keep Lance sidecars for hybrid search"
+        );
+    }
+
+    #[test]
+    fn prune_after_worktree_change_unpins_generation_only_referenced_by_removed_worktree() {
+        let env = GitCacheEnv::new();
+        let linked_parent = TempDir::new().unwrap();
+        let linked = add_linked_worktree(env.repo.path(), linked_parent.path());
+        let canonical_dir = env.canonical_dir();
+        let oldest = completed_candidate_with_sidecars(&canonical_dir, "z-oldest.parquet");
+        let worker_pin = completed_candidate_with_sidecars(&canonical_dir, "w-worker.parquet");
+        let rollback = completed_candidate_with_sidecars(&canonical_dir, "b-rollback.parquet");
+        let current = completed_candidate_with_sidecars(&canonical_dir, "a-current.parquet");
+        write_current_pointer(env.repo.path(), &current).unwrap();
+        write_current_pointer(&linked, &worker_pin).unwrap();
+
+        run_git(
+            env.repo.path(),
+            &[
+                "worktree",
+                "remove",
+                "--force",
+                linked.to_str().expect("linked utf-8"),
+            ],
+        );
+
+        prune_after_worktree_change(env.repo.path());
+
+        assert!(
+            !oldest.exists(),
+            "a generation no longer pinned by any registered worktree must prune without a graph write"
+        );
+        assert!(
+            current.exists() && has_embed_sidecars(&current),
+            "remaining worktree CURRENT must keep facts and Lance sidecars"
+        );
+        assert!(
+            rollback.exists() && !has_embed_sidecars(&rollback),
+            "facts rollback is retained; Lance sidecars stay on CURRENT only"
+        );
+        assert!(
+            worker_pin.exists() && !has_embed_sidecars(&worker_pin),
+            "the unpinned worker generation may remain as facts-only within the retention window"
         );
     }
 

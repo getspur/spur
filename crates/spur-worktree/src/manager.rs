@@ -159,6 +159,7 @@ pub struct WorktreeManager {
     pub repo_root: PathBuf,
     pub active: HashMap<String, WorktreeInfo>,
     git_mutex: Arc<tokio::sync::Mutex<()>>,
+    after_worktree_removed: Arc<dyn Fn(&Path) + Send + Sync>,
 }
 
 /// Info about an active worktree.
@@ -287,7 +288,14 @@ impl WorktreeManager {
             repo_root,
             active: HashMap::new(),
             git_mutex: Arc::new(tokio::sync::Mutex::new(())),
+            after_worktree_removed: Arc::new(|root| {
+                spur_graph::cache::prune_after_worktree_change(root);
+            }),
         }
+    }
+
+    fn notify_after_worktree_removed(&self) {
+        (self.after_worktree_removed)(&self.repo_root);
     }
 
     fn git_command(args: &[&str], work_dir: &Path) -> Command {
@@ -696,6 +704,7 @@ impl WorktreeManager {
         )
         .await
         .with_context(|| format!("failed to remove worktree at {path_str}"))?;
+        self.notify_after_worktree_removed();
         Ok(())
     }
 
@@ -1401,6 +1410,7 @@ impl WorktreeManager {
         )
         .await
         .with_context(|| format!("failed to remove worktree at {path_str}"))?;
+        self.notify_after_worktree_removed();
         self.run_git_bounded(&["branch", "-D", &branch], None, GIT_WORKTREE_OP_TIMEOUT)
             .await
             .with_context(|| format!("failed to delete branch '{branch}'"))?;
@@ -1436,6 +1446,7 @@ impl WorktreeManager {
         )
         .await
         .with_context(|| format!("failed to detach worktree at {path_str}"))?;
+        self.notify_after_worktree_removed();
 
         // Branch intentionally NOT deleted — preserved for brain review + merge.
         self.active.remove(&session_str);
@@ -1537,7 +1548,10 @@ impl WorktreeManager {
                             .output()
                             .await;
                         match rm {
-                            Ok(o) if o.status.success() => removed += 1,
+                            Ok(o) if o.status.success() => {
+                                removed += 1;
+                                self.notify_after_worktree_removed();
+                            }
                             Ok(o) => {
                                 let stderr = String::from_utf8_lossy(&o.stderr);
                                 tracing::warn!(path = %path, err = %stderr, "failed to remove orphaned worktree");
@@ -1633,6 +1647,19 @@ impl WorktreeManager {
             repo_root,
             active: std::collections::HashMap::new(),
             git_mutex: Arc::new(tokio::sync::Mutex::new(())),
+            after_worktree_removed: Arc::new(|_| {}),
+        }
+    }
+
+    pub fn new_for_test_with_hook(
+        repo_root: std::path::PathBuf,
+        after_worktree_removed: Arc<dyn Fn(&Path) + Send + Sync>,
+    ) -> Self {
+        Self {
+            repo_root,
+            active: std::collections::HashMap::new(),
+            git_mutex: Arc::new(tokio::sync::Mutex::new(())),
+            after_worktree_removed,
         }
     }
 
@@ -2885,6 +2912,163 @@ mod tests_option_e {
             manager.active_count(),
             1,
             "in-memory entry must NOT be removed when git detach fails"
+        );
+    }
+
+    #[tokio::test]
+    async fn remove_worktree_notifies_after_successful_git_remove() {
+        use spur_acp::SessionId;
+        let tmp = tempfile::TempDir::new().unwrap();
+        let _base_sha = seed_base_repo(tmp.path()).await;
+        let hits = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let hook_hits = std::sync::Arc::clone(&hits);
+        let sid = SessionId("s-remove-hook".into());
+        let mut manager = WorktreeManager::new_for_test_with_hook(
+            tmp.path().to_path_buf(),
+            std::sync::Arc::new(move |root| {
+                hook_hits.lock().unwrap().push(root.to_path_buf());
+            }),
+        );
+        let info = manager
+            .create_worktree_v2(
+                &spur_acp::BrainSessionId::new(SessionId(
+                    "550e8400-e29b-41d4-a716-446655440000".into(),
+                )),
+                &sid,
+                "codex",
+                "main",
+            )
+            .await
+            .expect("create worker worktree");
+        assert!(
+            info.path.exists(),
+            "worker worktree should exist before remove"
+        );
+
+        manager
+            .remove_worktree(&sid)
+            .await
+            .expect("remove worker worktree");
+
+        let notified = hits.lock().unwrap().clone();
+        assert_eq!(
+            notified,
+            vec![tmp.path().to_path_buf()],
+            "successful worktree remove must notify with the repo root so canonical graph gens can unpin"
+        );
+        assert!(
+            !info.path.exists(),
+            "git worktree remove deletes the worker dir"
+        );
+    }
+
+    #[tokio::test]
+    async fn detach_worktree_notifies_after_successful_git_remove() {
+        use spur_acp::SessionId;
+        let tmp = tempfile::TempDir::new().unwrap();
+        let _base_sha = seed_base_repo(tmp.path()).await;
+        let hits = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let hook_hits = std::sync::Arc::clone(&hits);
+        let sid = SessionId("s-detach-hook".into());
+        let mut manager = WorktreeManager::new_for_test_with_hook(
+            tmp.path().to_path_buf(),
+            std::sync::Arc::new(move |root| {
+                hook_hits.lock().unwrap().push(root.to_path_buf());
+            }),
+        );
+        manager
+            .create_worktree_v2(
+                &spur_acp::BrainSessionId::new(SessionId(
+                    "550e8400-e29b-41d4-a716-446655440000".into(),
+                )),
+                &sid,
+                "codex",
+                "main",
+            )
+            .await
+            .expect("create worker worktree");
+
+        manager
+            .detach_worktree(&sid)
+            .await
+            .expect("detach worker worktree");
+
+        let notified = hits.lock().unwrap().clone();
+        assert_eq!(
+            notified,
+            vec![tmp.path().to_path_buf()],
+            "successful detach must notify with the repo root so canonical graph gens can unpin"
+        );
+    }
+
+    #[tokio::test]
+    async fn remove_worktree_does_not_notify_when_git_fails() {
+        use spur_acp::SessionId;
+        let tmp = tempfile::TempDir::new().unwrap();
+        let _base_sha = seed_base_repo(tmp.path()).await;
+        let hits = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let hook_hits = std::sync::Arc::clone(&hits);
+        let sid = SessionId("s-fail-hook".into());
+        let mut manager = WorktreeManager::new_for_test_with_hook(
+            tmp.path().to_path_buf(),
+            std::sync::Arc::new(move |root| {
+                hook_hits.lock().unwrap().push(root.to_path_buf());
+            }),
+        );
+        manager.register_for_test(
+            sid.clone(),
+            tmp.path().join("nonexistent"),
+            "spur/worker/v2/x/x/x".to_string(),
+            "deadbeef".to_string(),
+            "test".to_string(),
+        );
+
+        let res = manager.remove_worktree(&sid).await;
+        assert!(res.is_err(), "git should have failed; {res:?}");
+        assert!(
+            hits.lock().unwrap().is_empty(),
+            "failed git remove must not unpin canonical graph generations"
+        );
+    }
+
+    #[tokio::test]
+    async fn cleanup_orphans_notifies_after_removing_orphaned_v2_worktree() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let _base_sha = seed_base_repo(tmp.path()).await;
+        let hits = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let hook_hits = std::sync::Arc::clone(&hits);
+        let manager = WorktreeManager::new_for_test_with_hook(
+            tmp.path().to_path_buf(),
+            std::sync::Arc::new(move |root| {
+                hook_hits.lock().unwrap().push(root.to_path_buf());
+            }),
+        );
+        let orphan = tmp.path().join(".spur/worktrees/orphan-session");
+        std::fs::create_dir_all(orphan.parent().unwrap()).unwrap();
+        manager
+            .run_git(
+                &[
+                    "worktree",
+                    "add",
+                    orphan.to_str().unwrap(),
+                    "-b",
+                    "spur/worker/v2/codex/550e8400-e29b-41d4-a716-446655440000/deadbeef-1111-2222-3333-444455556666",
+                    "main",
+                ],
+                None,
+            )
+            .await
+            .expect("create orphan v2 worktree");
+        assert!(orphan.exists());
+
+        let removed = manager.cleanup_orphans().await.expect("cleanup orphans");
+        assert!(removed >= 1, "orphaned v2 worktree must be removed");
+        assert!(!orphan.exists(), "orphan worktree dir is gone");
+        let notified = hits.lock().unwrap().clone();
+        assert_eq!(
+            notified,
+            vec![tmp.path().to_path_buf()],
+            "orphan removal must notify with the repo root so canonical graph gens can unpin"
         );
     }
 
