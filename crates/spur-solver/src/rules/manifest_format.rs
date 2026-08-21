@@ -254,6 +254,14 @@ pub enum NativeHandlerV1 {
     WorkflowTransitionAllowed,
     WorkflowSafetyInvariant,
     WorkflowBoundedReachability,
+    DataIntegrityUnique,
+    DataIntegrityForeignKey,
+    DataIntegrityCardinality,
+    DataIntegrityValueRange,
+    DataIntegrityConditionalRequired,
+    DataIntegrityAggregateBalance,
+    DataIntegrityMutuallyConsistent,
+    DataIntegrityTemporalConsistency,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -316,6 +324,14 @@ impl NativeHandlerV1 {
         Self::WorkflowTransitionAllowed,
         Self::WorkflowSafetyInvariant,
         Self::WorkflowBoundedReachability,
+        Self::DataIntegrityUnique,
+        Self::DataIntegrityForeignKey,
+        Self::DataIntegrityCardinality,
+        Self::DataIntegrityValueRange,
+        Self::DataIntegrityConditionalRequired,
+        Self::DataIntegrityAggregateBalance,
+        Self::DataIntegrityMutuallyConsistent,
+        Self::DataIntegrityTemporalConsistency,
     ];
 
     const fn family(self) -> &'static str {
@@ -351,6 +367,14 @@ impl NativeHandlerV1 {
             | Self::WorkflowTransitionAllowed
             | Self::WorkflowSafetyInvariant
             | Self::WorkflowBoundedReachability => "workflow",
+            Self::DataIntegrityUnique
+            | Self::DataIntegrityForeignKey
+            | Self::DataIntegrityCardinality
+            | Self::DataIntegrityValueRange
+            | Self::DataIntegrityConditionalRequired
+            | Self::DataIntegrityAggregateBalance
+            | Self::DataIntegrityMutuallyConsistent
+            | Self::DataIntegrityTemporalConsistency => "data_integrity",
         }
     }
 
@@ -372,7 +396,15 @@ impl NativeHandlerV1 {
             | Self::SchedulingCumulativeCapacity
             | Self::WorkflowInitialStateAllowed
             | Self::WorkflowTransitionAllowed
-            | Self::WorkflowSafetyInvariant => vec![],
+            | Self::WorkflowSafetyInvariant
+            | Self::DataIntegrityUnique
+            | Self::DataIntegrityForeignKey
+            | Self::DataIntegrityCardinality
+            | Self::DataIntegrityValueRange
+            | Self::DataIntegrityConditionalRequired
+            | Self::DataIntegrityAggregateBalance
+            | Self::DataIntegrityMutuallyConsistent
+            | Self::DataIntegrityTemporalConsistency => vec![],
             Self::A11yReflow => vec![native_parameter("exception", Optional)],
             Self::A11yTargetSize => vec![
                 native_parameter("minimum_width", Defaulted),
