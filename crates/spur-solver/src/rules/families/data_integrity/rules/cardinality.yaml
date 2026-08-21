@@ -1,0 +1,138 @@
+schema_version: 1
+id: data_integrity.cardinality
+rule_version: 1
+family: data_integrity
+profile: finite_relational_snapshot
+primitive: finite_active_row_cardinality
+summary: Keep the number of active rows in a relation or declared row subset within inclusive integer bounds.
+availability: implemented
+strength: hard
+authorities:
+  - kind: w3c_recommendation
+    title: SHACL 1.2 Core - Cardinality Constraint Components
+    url: https://www.w3.org/TR/shacl12-core/
+requires:
+  - relations[definition.relation].rows
+  - cardinality_constraints[subject].minimum
+  - cardinality_constraints[subject].maximum
+llm_encoding:
+  effectiveness: high
+  problem_shapes:
+    - A finite relation or explicitly declared row subset must contain between minimum and maximum active rows.
+  encode_steps:
+    - Bind exactly one cardinality definition ID as the subject.
+    - Resolve the whole relation or its declared row subset in caller order.
+    - Sum each row activity Boolean as a zero-one integer and constrain the inclusive lower and upper bounds.
+  anti_patterns:
+    - Do not count inactive rows or infer rows outside the declared finite relation.
+    - Do not use exclusive bounds or silently swap inverted bounds.
+  escalate_when:
+    - Escalate unbounded populations, grouped counts, or aggregate predicates beyond active-row membership outside this primitive.
+solver_encoding:
+  theory: QF_LIA
+  verification: fix row activity and assert the inclusive active-row count interval
+  synthesis: constrain explicitly unknown row activity bits while preserving the declared finite row set
+  formula:
+    - "minimum <= sum over declared rows of ite(active(row), 1, 0) <= maximum"
+subjects:
+  cardinality: {kind: exact, count: 1}
+parameters: []
+handler: data_integrity_cardinality
+examples:
+  valid:
+    facts:
+      family: data_integrity
+      mode: verify
+      rules:
+        - {rule_id: data_integrity.cardinality, subjects: [record_count], parameters: {}}
+      facts:
+        relations:
+          records:
+            fields: {marker: {kind: boolean}}
+            rows:
+              first: {active: true, cells: {marker: {present: true, value: true}}}
+              second: {active: false, cells: {marker: {present: true, value: false}}}
+        unique_constraints: {}
+        foreign_keys: {}
+        cardinality_constraints:
+          record_count: {relation: records, minimum: 1, maximum: 4}
+        value_ranges: {}
+        conditional_requirements: {}
+        aggregate_balances: {}
+        consistency_relations: {}
+        temporal_constraints: {}
+      unknowns: []
+    expectation: one active row satisfies the inclusive range 1 through 4
+  invalid:
+    facts:
+      family: data_integrity
+      mode: verify
+      rules:
+        - {rule_id: data_integrity.cardinality, subjects: [record_count], parameters: {}}
+      facts:
+        relations:
+          records:
+            fields: {marker: {kind: boolean}}
+            rows:
+              first: {active: false, cells: {marker: {present: true, value: true}}}
+        unique_constraints: {}
+        foreign_keys: {}
+        cardinality_constraints:
+          record_count: {relation: records, minimum: 1, maximum: 4}
+        value_ranges: {}
+        conditional_requirements: {}
+        aggregate_balances: {}
+        consistency_relations: {}
+        temporal_constraints: {}
+      unknowns: []
+    expectation: counterexample because zero active rows is below the inclusive minimum 1
+    expected_diagnostic: data_integrity.cardinality.violation
+conformance:
+  valid:
+    - name: one active row satisfies the declared one-through-four interval
+      request:
+        family: data_integrity
+        mode: verify
+        rules:
+          - {rule_id: data_integrity.cardinality, subjects: [record_count], parameters: {}}
+        facts:
+          relations:
+            records:
+              fields: {marker: {kind: boolean}}
+              rows:
+                first: {active: true, cells: {marker: {present: true, value: true}}}
+                second: {active: false, cells: {marker: {present: true, value: false}}}
+          unique_constraints: {}
+          foreign_keys: {}
+          cardinality_constraints:
+            record_count: {relation: records, minimum: 1, maximum: 4}
+          value_ranges: {}
+          conditional_requirements: {}
+          aggregate_balances: {}
+          consistency_relations: {}
+          temporal_constraints: {}
+        unknowns: []
+  invalid:
+    - name: zero active rows violates the declared minimum
+      request:
+        family: data_integrity
+        mode: verify
+        rules:
+          - {rule_id: data_integrity.cardinality, subjects: [record_count], parameters: {}}
+        facts:
+          relations:
+            records:
+              fields: {marker: {kind: boolean}}
+              rows:
+                first: {active: false, cells: {marker: {present: true, value: true}}}
+          unique_constraints: {}
+          foreign_keys: {}
+          cardinality_constraints:
+            record_count: {relation: records, minimum: 1, maximum: 4}
+          value_ranges: {}
+          conditional_requirements: {}
+          aggregate_balances: {}
+          consistency_relations: {}
+          temporal_constraints: {}
+        unknowns: []
+      expected_diagnostic: data_integrity.cardinality.violation

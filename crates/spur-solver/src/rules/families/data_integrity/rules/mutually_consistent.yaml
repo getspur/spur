@@ -1,0 +1,147 @@
+schema_version: 1
+id: data_integrity.mutually_consistent
+rule_version: 1
+family: data_integrity
+profile: finite_relational_snapshot
+primitive: finite_allowed_tuples
+summary: Require all participating fields on each active row to be present and equal one explicitly allowed schema-typed tuple.
+availability: implemented
+strength: hard
+authorities:
+  - kind: w3c_recommendation
+    title: SHACL 1.2 Core - Value and Logical Constraint Components
+    url: https://www.w3.org/TR/shacl12-core/
+  - kind: official_database_documentation
+    title: PostgreSQL DDL Constraints - Check Constraints
+    url: https://www.postgresql.org/docs/current/ddl-constraints.html
+requires:
+  - relations[definition.relation].rows
+  - consistency_relations[subject].fields
+  - consistency_relations[subject].allowed
+llm_encoding:
+  effectiveness: high
+  problem_shapes:
+    - A finite tuple of typed fields on every active row must belong to one explicit allowed relation.
+  encode_steps:
+    - Bind exactly one consistency-relation definition ID as the subject.
+    - Resolve the ordered fields and validate every allowed tuple for arity and schema-typed values.
+    - For each active row require all tuple fields to be present and finitely disjoin equality with each allowed tuple.
+  anti_patterns:
+    - Do not infer wildcard tuples, create enum labels, or accept partial active-row tuples.
+    - Do not coerce values across field domains or encode the finite relation with quantifiers.
+  escalate_when:
+    - Escalate open-world tuple sets, regex matching, computed tuple members, or relations too large for finite expansion outside this primitive.
+solver_encoding:
+  theory: QF_LIA with finite enum labels
+  verification: fix complete rows and assert active-row membership in the finite allowed tuple relation
+  synthesis: constrain explicitly unknown participating field presence or typed values to one allowed tuple
+  formula:
+    - "active(row) implies complete_F(row) and some allowed tuple equals value(row,F) componentwise"
+subjects:
+  cardinality: {kind: exact, count: 1}
+parameters: []
+handler: data_integrity_mutually_consistent
+examples:
+  valid:
+    facts:
+      family: data_integrity
+      mode: verify
+      rules:
+        - {rule_id: data_integrity.mutually_consistent, subjects: [plan_region], parameters: {}}
+      facts:
+        relations:
+          subscriptions:
+            fields:
+              plan: {kind: enum, values: [free, pro]}
+              region: {kind: enum, values: [us, eu]}
+            rows:
+              account: {active: true, cells: {plan: {present: true, value: pro}, region: {present: true, value: eu}}}
+        unique_constraints: {}
+        foreign_keys: {}
+        cardinality_constraints: {}
+        value_ranges: {}
+        conditional_requirements: {}
+        aggregate_balances: {}
+        consistency_relations:
+          plan_region: {relation: subscriptions, fields: [plan, region], allowed: [[free, us], [pro, us], [pro, eu]]}
+        temporal_constraints: {}
+      unknowns: []
+    expectation: the tuple pro and eu belongs to the finite allowed relation
+  invalid:
+    facts:
+      family: data_integrity
+      mode: verify
+      rules:
+        - {rule_id: data_integrity.mutually_consistent, subjects: [plan_region], parameters: {}}
+      facts:
+        relations:
+          subscriptions:
+            fields:
+              plan: {kind: enum, values: [free, pro]}
+              region: {kind: enum, values: [us, eu]}
+            rows:
+              account: {active: true, cells: {plan: {present: true, value: free}, region: {present: true, value: eu}}}
+        unique_constraints: {}
+        foreign_keys: {}
+        cardinality_constraints: {}
+        value_ranges: {}
+        conditional_requirements: {}
+        aggregate_balances: {}
+        consistency_relations:
+          plan_region: {relation: subscriptions, fields: [plan, region], allowed: [[free, us], [pro, us], [pro, eu]]}
+        temporal_constraints: {}
+      unknowns: []
+    expectation: counterexample because the tuple free and eu is not allowed
+    expected_diagnostic: data_integrity.mutually_consistent.violation
+conformance:
+  valid:
+    - name: pro and eu is one explicitly allowed typed tuple
+      request:
+        family: data_integrity
+        mode: verify
+        rules:
+          - {rule_id: data_integrity.mutually_consistent, subjects: [plan_region], parameters: {}}
+        facts:
+          relations:
+            subscriptions:
+              fields:
+                plan: {kind: enum, values: [free, pro]}
+                region: {kind: enum, values: [us, eu]}
+              rows:
+                account: {active: true, cells: {plan: {present: true, value: pro}, region: {present: true, value: eu}}}
+          unique_constraints: {}
+          foreign_keys: {}
+          cardinality_constraints: {}
+          value_ranges: {}
+          conditional_requirements: {}
+          aggregate_balances: {}
+          consistency_relations:
+            plan_region: {relation: subscriptions, fields: [plan, region], allowed: [[free, us], [pro, us], [pro, eu]]}
+          temporal_constraints: {}
+        unknowns: []
+  invalid:
+    - name: free and eu is outside the explicitly allowed tuple relation
+      request:
+        family: data_integrity
+        mode: verify
+        rules:
+          - {rule_id: data_integrity.mutually_consistent, subjects: [plan_region], parameters: {}}
+        facts:
+          relations:
+            subscriptions:
+              fields:
+                plan: {kind: enum, values: [free, pro]}
+                region: {kind: enum, values: [us, eu]}
+              rows:
+                account: {active: true, cells: {plan: {present: true, value: free}, region: {present: true, value: eu}}}
+          unique_constraints: {}
+          foreign_keys: {}
+          cardinality_constraints: {}
+          value_ranges: {}
+          conditional_requirements: {}
+          aggregate_balances: {}
+          consistency_relations:
+            plan_region: {relation: subscriptions, fields: [plan, region], allowed: [[free, us], [pro, us], [pro, eu]]}
+          temporal_constraints: {}
+        unknowns: []
+      expected_diagnostic: data_integrity.mutually_consistent.violation

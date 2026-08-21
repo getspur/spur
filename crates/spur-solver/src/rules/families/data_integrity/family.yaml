@@ -1,0 +1,8 @@
+schema_version: 1
+id: data_integrity
+family_version: 1
+summary: Finite relational snapshot verification and bounded synthesis for strict identity, reference, cardinality, value, aggregate, tuple, and temporal integrity rules.
+profiles:
+  - id: finite_relational_snapshot
+    profile_version: 1
+    summary: Strict bounded relations with typed fields, explicit row and cell presence, and explicitly declared synthesis unknowns; excludes unbounded inference, SQL transactions, and decimal tolerance.

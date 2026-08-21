@@ -4,15 +4,17 @@ use super::{catalog::RuleRegistry, compiler::RuleFamilyCompiler};
 
 pub mod accessibility;
 pub mod configuration;
+pub mod data_integrity;
 pub mod design;
 pub mod policy;
 pub mod resource;
 pub mod scheduling;
 pub mod workflow;
 
-static COMPILERS: [&dyn RuleFamilyCompiler; 7] = [
+static COMPILERS: [&dyn RuleFamilyCompiler; 8] = [
     &accessibility::COMPILER,
     &configuration::COMPILER,
+    &data_integrity::COMPILER,
     &design::COMPILER,
     &policy::COMPILER,
     &resource::COMPILER,

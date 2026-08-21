@@ -416,9 +416,19 @@ fn compile_binding(
         | NativeHandlerV1::WorkflowInitialStateAllowed
         | NativeHandlerV1::WorkflowTransitionAllowed
         | NativeHandlerV1::WorkflowSafetyInvariant
-        | NativeHandlerV1::WorkflowBoundedReachability => Err(DesignCompileError::UnknownRule {
-            rule_id: source.rule_id.clone(),
-        }),
+        | NativeHandlerV1::WorkflowBoundedReachability
+        | NativeHandlerV1::DataIntegrityUnique
+        | NativeHandlerV1::DataIntegrityForeignKey
+        | NativeHandlerV1::DataIntegrityCardinality
+        | NativeHandlerV1::DataIntegrityValueRange
+        | NativeHandlerV1::DataIntegrityConditionalRequired
+        | NativeHandlerV1::DataIntegrityAggregateBalance
+        | NativeHandlerV1::DataIntegrityMutuallyConsistent
+        | NativeHandlerV1::DataIntegrityTemporalConsistency => {
+            Err(DesignCompileError::UnknownRule {
+                rule_id: source.rule_id.clone(),
+            })
+        }
     }
 }
 

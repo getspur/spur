@@ -1070,6 +1070,7 @@ mod tests {
             [
                 "accessibility",
                 "configuration",
+                "data_integrity",
                 "design",
                 "policy",
                 "resource",

@@ -9,7 +9,9 @@ mod manifest_format;
 #[path = "../build_support/manifest_source.rs"]
 mod manifest_source;
 
-use manifest_format::ManifestBundleV1;
+use manifest_format::{
+    AvailabilityV1, ManifestBundleV1, NativeHandlerV1, RuleStrengthV1, SubjectCardinalityV1,
+};
 use manifest_source::{
     canonical_manifest_json, load_manifest_sources, manifest_rerun_paths, write_canonical_manifest,
 };
@@ -56,6 +58,71 @@ fn replace_source(root: &Path, relative: &str, from: &str, to: &str) {
     fs::write(path, changed).expect("write modified manifest source");
 }
 
+fn assert_complete_data_integrity_request(rule_id: &str, request: &serde_json::Value) {
+    let request = request
+        .as_object()
+        .unwrap_or_else(|| panic!("{rule_id} request must be an object"));
+    let request_keys = request
+        .keys()
+        .map(String::as_str)
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        request_keys,
+        ["facts", "family", "mode", "rules", "unknowns"]
+            .into_iter()
+            .collect(),
+        "{rule_id} request keys"
+    );
+    assert_eq!(request["family"], "data_integrity", "{rule_id} family");
+    assert_eq!(request["mode"], "verify", "{rule_id} mode");
+    assert_eq!(
+        request["unknowns"],
+        serde_json::json!([]),
+        "{rule_id} unknowns"
+    );
+
+    let bindings = request["rules"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{rule_id} rules must be an array"));
+    assert_eq!(bindings.len(), 1, "{rule_id} must bind exactly one rule");
+    assert_eq!(bindings[0]["rule_id"], rule_id, "{rule_id} binding");
+    assert_eq!(
+        bindings[0]["subjects"].as_array().map(Vec::len),
+        Some(1),
+        "{rule_id} must bind exactly one definition subject"
+    );
+    assert_eq!(
+        bindings[0]["parameters"],
+        serde_json::json!({}),
+        "{rule_id} caller parameters"
+    );
+
+    let facts = request["facts"]
+        .as_object()
+        .unwrap_or_else(|| panic!("{rule_id} facts must be an object"));
+    let fact_keys = facts
+        .keys()
+        .map(String::as_str)
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        fact_keys,
+        [
+            "aggregate_balances",
+            "cardinality_constraints",
+            "conditional_requirements",
+            "consistency_relations",
+            "foreign_keys",
+            "relations",
+            "temporal_constraints",
+            "unique_constraints",
+            "value_ranges",
+        ]
+        .into_iter()
+        .collect(),
+        "{rule_id} must provide the complete finite-snapshot fact shape"
+    );
+}
+
 #[test]
 fn approved_sources_load_in_deterministic_canonical_order() {
     let root = repository_manifest_root();
@@ -74,6 +141,15 @@ fn approved_sources_load_in_deterministic_canonical_order() {
         "configuration/rules/requires_any.yaml",
         "configuration/rules/selection_cardinality.yaml",
         "configuration/rules/version_interval.yaml",
+        "data_integrity/family.yaml",
+        "data_integrity/rules/aggregate_balance.yaml",
+        "data_integrity/rules/cardinality.yaml",
+        "data_integrity/rules/conditional_required.yaml",
+        "data_integrity/rules/foreign_key.yaml",
+        "data_integrity/rules/mutually_consistent.yaml",
+        "data_integrity/rules/temporal_consistency.yaml",
+        "data_integrity/rules/unique.yaml",
+        "data_integrity/rules/value_range.yaml",
         "design/family.yaml",
         "design/rules/aspect_ratio.yaml",
         "design/rules/axis_capacity.yaml",
@@ -117,6 +193,7 @@ fn approved_sources_load_in_deterministic_canonical_order() {
         [
             "accessibility",
             "configuration",
+            "data_integrity",
             "design",
             "policy",
             "resource",
@@ -136,6 +213,340 @@ fn approved_sources_load_in_deterministic_canonical_order() {
     let round_trip: ManifestBundleV1 =
         serde_json::from_str(&json).expect("canonical JSON must deserialize");
     assert_eq!(round_trip, first.bundle);
+}
+
+#[test]
+fn data_integrity_catalog_and_conformance_match_the_approved_contract() {
+    let loaded =
+        load_manifest_sources(&repository_manifest_root()).expect("repository manifests must load");
+    let family = loaded
+        .bundle
+        .families
+        .iter()
+        .find(|family| family.id == "data_integrity")
+        .expect("data_integrity family must be discovered");
+    let profiles = family
+        .profiles
+        .iter()
+        .map(|profile| (profile.id.as_str(), profile.profile_version))
+        .collect::<Vec<_>>();
+    assert_eq!(profiles, [("finite_relational_snapshot", 1)]);
+
+    let expected = [
+        (
+            "data_integrity.aggregate_balance",
+            NativeHandlerV1::DataIntegrityAggregateBalance,
+        ),
+        (
+            "data_integrity.cardinality",
+            NativeHandlerV1::DataIntegrityCardinality,
+        ),
+        (
+            "data_integrity.conditional_required",
+            NativeHandlerV1::DataIntegrityConditionalRequired,
+        ),
+        (
+            "data_integrity.foreign_key",
+            NativeHandlerV1::DataIntegrityForeignKey,
+        ),
+        (
+            "data_integrity.mutually_consistent",
+            NativeHandlerV1::DataIntegrityMutuallyConsistent,
+        ),
+        (
+            "data_integrity.temporal_consistency",
+            NativeHandlerV1::DataIntegrityTemporalConsistency,
+        ),
+        (
+            "data_integrity.unique",
+            NativeHandlerV1::DataIntegrityUnique,
+        ),
+        (
+            "data_integrity.value_range",
+            NativeHandlerV1::DataIntegrityValueRange,
+        ),
+    ];
+    let rules = loaded
+        .bundle
+        .rules
+        .iter()
+        .filter(|rule| rule.family == "data_integrity")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        rules
+            .iter()
+            .map(|rule| rule.id.as_str())
+            .collect::<Vec<_>>(),
+        expected.map(|(id, _)| id)
+    );
+
+    for (rule, (rule_id, handler)) in rules.iter().zip(expected) {
+        assert_eq!(rule.profile, "finite_relational_snapshot", "{rule_id}");
+        assert_eq!(rule.availability, AvailabilityV1::Implemented, "{rule_id}");
+        assert_eq!(rule.strength, RuleStrengthV1::Hard, "{rule_id}");
+        assert_eq!(
+            rule.subjects.cardinality,
+            SubjectCardinalityV1::Exact { count: 1 },
+            "{rule_id} subject ABI"
+        );
+        assert!(rule.parameters.is_empty(), "{rule_id} parameter ABI");
+        assert_eq!(rule.handler, Some(handler), "{rule_id} native handler");
+        assert!(
+            rule.solver_encoding
+                .synthesis
+                .contains("explicitly unknown"),
+            "{rule_id} must state explicit-only unknown behavior"
+        );
+
+        let diagnostic = format!("{rule_id}.violation");
+        assert_eq!(rule.examples.valid.expected_diagnostic, None, "{rule_id}");
+        assert_eq!(
+            rule.examples.invalid.expected_diagnostic.as_deref(),
+            Some(diagnostic.as_str()),
+            "{rule_id} invalid example diagnostic"
+        );
+        assert_complete_data_integrity_request(rule_id, &rule.examples.valid.facts);
+        assert_complete_data_integrity_request(rule_id, &rule.examples.invalid.facts);
+
+        let conformance = rule
+            .conformance
+            .as_ref()
+            .unwrap_or_else(|| panic!("{rule_id} conformance vectors"));
+        assert_eq!(conformance.valid.len(), 1, "{rule_id} valid vectors");
+        assert_eq!(conformance.invalid.len(), 1, "{rule_id} invalid vectors");
+        assert_eq!(conformance.valid[0].expected_diagnostic, None, "{rule_id}");
+        assert_eq!(
+            conformance.invalid[0].expected_diagnostic.as_deref(),
+            Some(diagnostic.as_str()),
+            "{rule_id} invalid conformance diagnostic"
+        );
+        assert_complete_data_integrity_request(rule_id, &conformance.valid[0].request);
+        assert_complete_data_integrity_request(rule_id, &conformance.invalid[0].request);
+        assert_eq!(
+            rule.examples.valid.facts, conformance.valid[0].request,
+            "{rule_id} valid catalog and executable requests must match"
+        );
+        assert_eq!(
+            rule.examples.invalid.facts, conformance.invalid[0].request,
+            "{rule_id} invalid catalog and executable requests must match"
+        );
+    }
+
+    let rule = |id: &str| {
+        rules
+            .iter()
+            .copied()
+            .find(|rule| rule.id == id)
+            .unwrap_or_else(|| panic!("missing {id}"))
+    };
+
+    let unique = rule("data_integrity.unique");
+    assert_eq!(unique.primitive, "finite_unique_nulls_distinct");
+    assert_eq!(
+        unique
+            .examples
+            .valid
+            .facts
+            .pointer("/facts/relations/records/rows/null_key/cells/key"),
+        Some(&serde_json::json!({"present": false, "value": null})),
+        "NULLS DISTINCT needs an absent-key witness"
+    );
+
+    let foreign_key = rule("data_integrity.foreign_key");
+    assert_eq!(foreign_key.primitive, "finite_foreign_key_match_simple");
+    assert_eq!(
+        foreign_key
+            .examples
+            .valid
+            .facts
+            .pointer("/facts/relations/children/rows/absent/cells/parent_key"),
+        Some(&serde_json::json!({"present": false, "value": null})),
+        "MATCH SIMPLE needs an incomplete-child-key witness"
+    );
+
+    let cardinality = rule("data_integrity.cardinality");
+    assert_eq!(
+        cardinality.solver_encoding.formula,
+        ["minimum <= sum over declared rows of ite(active(row), 1, 0) <= maximum"]
+    );
+
+    let value_range = rule("data_integrity.value_range");
+    assert_eq!(
+        value_range
+            .examples
+            .valid
+            .facts
+            .pointer("/facts/relations/measurements/rows/observed/cells/measured/value"),
+        Some(&serde_json::json!(100)),
+        "inclusive range needs an upper-bound witness"
+    );
+    assert_eq!(
+        value_range.solver_encoding.formula,
+        ["active(row) and present(row,field) implies minimum <= value(row,field) <= maximum"]
+    );
+
+    let aggregate = rule("data_integrity.aggregate_balance");
+    assert_eq!(
+        aggregate.summary,
+        "Require every declared integer term cell to be present and resolvable and every checked linear term to contribute to one exact integer target."
+    );
+    assert_eq!(
+        aggregate.llm_encoding.encode_steps,
+        [
+            "Bind exactly one aggregate-balance definition ID as the subject.",
+            "Resolve every explicitly listed term to a present integer cell and validate each checked integer coefficient.",
+            "Include every explicitly listed term in the exact weighted sum and equate it to the target.",
+        ]
+    );
+    assert_eq!(
+        aggregate.solver_encoding.verification,
+        "fix every listed integer cell and assert unconditional presence plus exact weighted equality"
+    );
+    assert_eq!(
+        aggregate.solver_encoding.formula,
+        [
+            "for every listed term t: present(t)",
+            "sum over every listed term t of coefficient(t) * value(t) = target",
+        ]
+    );
+    assert!(
+        aggregate
+            .llm_encoding
+            .anti_patterns
+            .iter()
+            .any(|pattern| pattern
+                == "Do not condition term presence or arithmetic contribution on row activity."),
+        "aggregate guidance must explicitly reject activity filtering"
+    );
+    let positive_semantics = format!(
+        "{} {} {}",
+        aggregate.summary,
+        aggregate.llm_encoding.encode_steps.join(" "),
+        aggregate.solver_encoding.formula.join(" ")
+    );
+    assert!(
+        !positive_semantics.contains("active") && !positive_semantics.contains("activity"),
+        "aggregate presence and contribution semantics must be unconditional"
+    );
+    assert_eq!(
+        aggregate
+            .examples
+            .valid
+            .facts
+            .pointer("/facts/aggregate_balances/ledger_balance"),
+        Some(&serde_json::json!({
+            "terms": [
+                {"relation": "ledger", "row": "left", "field": "amount", "coefficient": 1},
+                {"relation": "ledger", "row": "delta", "field": "amount", "coefficient": 1},
+                {"relation": "ledger", "row": "right", "field": "amount", "coefficient": -1}
+            ],
+            "target": 0
+        })),
+        "aggregate terms and coefficients must remain exact"
+    );
+    assert_eq!(
+        aggregate
+            .examples
+            .valid
+            .facts
+            .pointer("/facts/relations/ledger/rows/delta"),
+        Some(&serde_json::json!({
+            "active": false,
+            "cells": {"amount": {"present": true, "value": -30}}
+        })),
+        "an inactive row's present value must witness unconditional contribution"
+    );
+    let valid_request = &aggregate.examples.valid.facts;
+    let balance = valid_request
+        .pointer("/facts/aggregate_balances/ledger_balance")
+        .expect("aggregate balance definition");
+    let target = balance["target"].as_i64().expect("integer target");
+    let terms = balance["terms"].as_array().expect("aggregate terms");
+    let exact_sum = terms
+        .iter()
+        .map(|term| {
+            let relation = term["relation"].as_str().expect("term relation");
+            let row = term["row"].as_str().expect("term row");
+            let field = term["field"].as_str().expect("term field");
+            let coefficient = term["coefficient"].as_i64().expect("term coefficient");
+            let value = valid_request
+                .pointer(&format!(
+                    "/facts/relations/{relation}/rows/{row}/cells/{field}/value"
+                ))
+                .and_then(serde_json::Value::as_i64)
+                .expect("listed term integer value");
+            coefficient * value
+        })
+        .sum::<i64>();
+    let activity_filtered_sum = terms
+        .iter()
+        .filter(|term| {
+            let relation = term["relation"].as_str().expect("term relation");
+            let row = term["row"].as_str().expect("term row");
+            valid_request
+                .pointer(&format!("/facts/relations/{relation}/rows/{row}/active"))
+                .and_then(serde_json::Value::as_bool)
+                .expect("row activity")
+        })
+        .map(|term| {
+            let relation = term["relation"].as_str().expect("term relation");
+            let row = term["row"].as_str().expect("term row");
+            let field = term["field"].as_str().expect("term field");
+            let coefficient = term["coefficient"].as_i64().expect("term coefficient");
+            let value = valid_request
+                .pointer(&format!(
+                    "/facts/relations/{relation}/rows/{row}/cells/{field}/value"
+                ))
+                .and_then(serde_json::Value::as_i64)
+                .expect("listed term integer value");
+            coefficient * value
+        })
+        .sum::<i64>();
+    assert_eq!(
+        exact_sum, target,
+        "every explicitly listed term contributes"
+    );
+    assert_ne!(
+        activity_filtered_sum, target,
+        "the valid witness must fail if row activity is reintroduced as a filter"
+    );
+
+    let consistency = rule("data_integrity.mutually_consistent");
+    assert_eq!(
+        consistency
+            .examples
+            .valid
+            .facts
+            .pointer("/facts/consistency_relations/plan_region/allowed"),
+        Some(&serde_json::json!([
+            ["free", "us"],
+            ["pro", "us"],
+            ["pro", "eu"]
+        ])),
+        "the allowed finite tuple relation must remain closed and ordered"
+    );
+
+    let temporal = rule("data_integrity.temporal_consistency");
+    assert_eq!(
+        temporal.solver_encoding.formula,
+        [
+            "active(row) implies present(start) and present(end) and start < end",
+            "for every before -> after edge: active(after) implies active(before) and end(before) <= start(after)",
+        ]
+    );
+    assert_eq!(
+        temporal
+            .examples
+            .valid
+            .facts
+            .pointer("/facts/relations/tasks/rows/predecessor/cells/end/value"),
+        temporal
+            .examples
+            .valid
+            .facts
+            .pointer("/facts/relations/tasks/rows/successor/cells/start/value"),
+        "finish-start ordering must allow an inclusive meeting boundary"
+    );
 }
 
 #[test]
@@ -353,6 +764,7 @@ fn canonical_output_and_rerun_paths_cover_every_source() {
     for family in [
         "accessibility",
         "configuration",
+        "data_integrity",
         "design",
         "policy",
         "resource",

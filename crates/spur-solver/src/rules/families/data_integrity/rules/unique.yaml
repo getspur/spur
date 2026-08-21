@@ -1,0 +1,147 @@
+schema_version: 1
+id: data_integrity.unique
+rule_version: 1
+family: data_integrity
+profile: finite_relational_snapshot
+primitive: finite_unique_nulls_distinct
+summary: Require active rows with complete keys to differ on at least one key field, using SQL-like NULLS DISTINCT semantics.
+availability: implemented
+strength: hard
+authorities:
+  - kind: official_database_documentation
+    title: PostgreSQL DDL Constraints - Unique Constraints
+    url: https://www.postgresql.org/docs/current/ddl-constraints.html
+requires:
+  - relations[definition.relation].rows
+  - relations[definition.relation].fields
+  - unique_constraints[subject].fields
+llm_encoding:
+  effectiveness: high
+  problem_shapes:
+    - Active rows with complete scalar or composite keys must not duplicate another complete key.
+  encode_steps:
+    - Bind exactly one unique-constraint definition ID as the subject.
+    - Resolve its relation and ordered key fields against the strict finite snapshot.
+    - For each ordered active row pair with both keys complete, require at least one corresponding key value to differ.
+  anti_patterns:
+    - Do not treat absent key cells as equal; this profile uses NULLS DISTINCT.
+    - Do not add a synthetic sentinel for absence or coerce mismatched field domains.
+    - Do not infer uniqueness beyond the finite declared rows.
+  escalate_when:
+    - Escalate NULLS NOT DISTINCT, collation-sensitive strings, expression indexes, or unbounded relations outside this profile.
+solver_encoding:
+  theory: QF_LIA with finite enum labels
+  verification: fix the complete bounded snapshot and assert pairwise distinctness only for active rows with complete keys
+  synthesis: constrain only explicitly unknown row activity, key presence, or typed key values
+  formula:
+    - "for every ordered row pair r < s: active(r) and active(s) and complete_K(r) and complete_K(s) implies some f in K has value(r,f) != value(s,f)"
+subjects:
+  cardinality: {kind: exact, count: 1}
+parameters: []
+handler: data_integrity_unique
+examples:
+  valid:
+    facts:
+      family: data_integrity
+      mode: verify
+      rules:
+        - {rule_id: data_integrity.unique, subjects: [record_key], parameters: {}}
+      facts:
+        relations:
+          records:
+            fields:
+              key: {kind: integer, minimum: 0, maximum: 1000}
+            rows:
+              first: {active: true, cells: {key: {present: true, value: 1}}}
+              second: {active: true, cells: {key: {present: true, value: 2}}}
+              null_key: {active: true, cells: {key: {present: false, value: null}}}
+        unique_constraints:
+          record_key: {relation: records, fields: [key]}
+        foreign_keys: {}
+        cardinality_constraints: {}
+        value_ranges: {}
+        conditional_requirements: {}
+        aggregate_balances: {}
+        consistency_relations: {}
+        temporal_constraints: {}
+      unknowns: []
+    expectation: distinct complete keys pass and the absent key is ignored under NULLS DISTINCT
+  invalid:
+    facts:
+      family: data_integrity
+      mode: verify
+      rules:
+        - {rule_id: data_integrity.unique, subjects: [record_key], parameters: {}}
+      facts:
+        relations:
+          records:
+            fields:
+              key: {kind: integer, minimum: 0, maximum: 1000}
+            rows:
+              first: {active: true, cells: {key: {present: true, value: 1}}}
+              second: {active: true, cells: {key: {present: true, value: 1}}}
+        unique_constraints:
+          record_key: {relation: records, fields: [key]}
+        foreign_keys: {}
+        cardinality_constraints: {}
+        value_ranges: {}
+        conditional_requirements: {}
+        aggregate_balances: {}
+        consistency_relations: {}
+        temporal_constraints: {}
+      unknowns: []
+    expectation: counterexample from equal complete active keys
+    expected_diagnostic: data_integrity.unique.violation
+conformance:
+  valid:
+    - name: distinct complete keys coexist with one absent key
+      request:
+        family: data_integrity
+        mode: verify
+        rules:
+          - {rule_id: data_integrity.unique, subjects: [record_key], parameters: {}}
+        facts:
+          relations:
+            records:
+              fields:
+                key: {kind: integer, minimum: 0, maximum: 1000}
+              rows:
+                first: {active: true, cells: {key: {present: true, value: 1}}}
+                second: {active: true, cells: {key: {present: true, value: 2}}}
+                null_key: {active: true, cells: {key: {present: false, value: null}}}
+          unique_constraints:
+            record_key: {relation: records, fields: [key]}
+          foreign_keys: {}
+          cardinality_constraints: {}
+          value_ranges: {}
+          conditional_requirements: {}
+          aggregate_balances: {}
+          consistency_relations: {}
+          temporal_constraints: {}
+        unknowns: []
+  invalid:
+    - name: equal complete active keys violate uniqueness
+      request:
+        family: data_integrity
+        mode: verify
+        rules:
+          - {rule_id: data_integrity.unique, subjects: [record_key], parameters: {}}
+        facts:
+          relations:
+            records:
+              fields:
+                key: {kind: integer, minimum: 0, maximum: 1000}
+              rows:
+                first: {active: true, cells: {key: {present: true, value: 1}}}
+                second: {active: true, cells: {key: {present: true, value: 1}}}
+          unique_constraints:
+            record_key: {relation: records, fields: [key]}
+          foreign_keys: {}
+          cardinality_constraints: {}
+          value_ranges: {}
+          conditional_requirements: {}
+          aggregate_balances: {}
+          consistency_relations: {}
+          temporal_constraints: {}
+        unknowns: []
+      expected_diagnostic: data_integrity.unique.violation

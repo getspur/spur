@@ -253,7 +253,15 @@ fn validate_legacy_static_contract(binding: &ResourceRuleBinding) -> Result<(), 
             | NativeHandlerV1::WorkflowInitialStateAllowed
             | NativeHandlerV1::WorkflowTransitionAllowed
             | NativeHandlerV1::WorkflowSafetyInvariant
-            | NativeHandlerV1::WorkflowBoundedReachability,
+            | NativeHandlerV1::WorkflowBoundedReachability
+            | NativeHandlerV1::DataIntegrityUnique
+            | NativeHandlerV1::DataIntegrityForeignKey
+            | NativeHandlerV1::DataIntegrityCardinality
+            | NativeHandlerV1::DataIntegrityValueRange
+            | NativeHandlerV1::DataIntegrityConditionalRequired
+            | NativeHandlerV1::DataIntegrityAggregateBalance
+            | NativeHandlerV1::DataIntegrityMutuallyConsistent
+            | NativeHandlerV1::DataIntegrityTemporalConsistency,
         )
         | None => Err(format!("unsupported resource rule `{}`", binding.rule_id)),
     }
@@ -447,7 +455,15 @@ fn compile_binding(
         | NativeHandlerV1::WorkflowInitialStateAllowed
         | NativeHandlerV1::WorkflowTransitionAllowed
         | NativeHandlerV1::WorkflowSafetyInvariant
-        | NativeHandlerV1::WorkflowBoundedReachability => {
+        | NativeHandlerV1::WorkflowBoundedReachability
+        | NativeHandlerV1::DataIntegrityUnique
+        | NativeHandlerV1::DataIntegrityForeignKey
+        | NativeHandlerV1::DataIntegrityCardinality
+        | NativeHandlerV1::DataIntegrityValueRange
+        | NativeHandlerV1::DataIntegrityConditionalRequired
+        | NativeHandlerV1::DataIntegrityAggregateBalance
+        | NativeHandlerV1::DataIntegrityMutuallyConsistent
+        | NativeHandlerV1::DataIntegrityTemporalConsistency => {
             Err(format!("unsupported resource rule `{}`", source.rule_id))
         }
     }

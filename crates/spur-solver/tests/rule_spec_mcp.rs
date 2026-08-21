@@ -78,6 +78,7 @@ async fn empty_rule_spec_request_lists_all_bounded_family_cards_without_a_live_s
         [
             "accessibility",
             "configuration",
+            "data_integrity",
             "design",
             "policy",
             "resource",
@@ -86,7 +87,7 @@ async fn empty_rule_spec_request_lists_all_bounded_family_cards_without_a_live_s
         ]
     );
     assert_eq!(
-        result["families"][2]["profiles"],
+        result["families"][3]["profiles"],
         json!(["geometric_integrity", "layout_capacity"])
     );
     assert!(result.get("rules").is_none());

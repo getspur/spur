@@ -1,0 +1,156 @@
+schema_version: 1
+id: data_integrity.foreign_key
+rule_version: 1
+family: data_integrity
+profile: finite_relational_snapshot
+primitive: finite_foreign_key_match_simple
+summary: Require every active child row with a complete key to match one active parent row with a complete corresponding key, using MATCH SIMPLE semantics.
+availability: implemented
+strength: hard
+authorities:
+  - kind: official_database_documentation
+    title: PostgreSQL CREATE TABLE - Referential Actions and MATCH Types
+    url: https://www.postgresql.org/docs/current/sql-createtable.html
+requires:
+  - relations[definition.child_relation].rows
+  - relations[definition.parent_relation].rows
+  - foreign_keys[subject].child_fields
+  - foreign_keys[subject].parent_fields
+llm_encoding:
+  effectiveness: high
+  problem_shapes:
+    - Every complete finite child key must have one equal complete parent key.
+  encode_steps:
+    - Bind exactly one foreign-key definition ID as the subject.
+    - Resolve equal-arity, type-compatible child and parent fields before lowering.
+    - For each active child with a complete key, finitely disjoin all active complete parent-row matches.
+  anti_patterns:
+    - Do not require a match for an incomplete child key; this profile uses MATCH SIMPLE.
+    - Do not infer parents outside the declared finite relation or coerce key types.
+    - Do not encode the join with quantifiers or arrays.
+  escalate_when:
+    - Escalate MATCH FULL, cascading mutations, deferred transactions, or unbounded parent relations outside this profile.
+solver_encoding:
+  theory: QF_LIA with finite enum labels
+  verification: fix child and parent rows and assert a finite parent-match disjunction for each complete active child key
+  synthesis: constrain only explicitly unknown row activity, key presence, or typed key values
+  formula:
+    - "active(child) and complete_C(child) implies some parent row is active, complete_P(parent), and equal on every corresponding key field"
+subjects:
+  cardinality: {kind: exact, count: 1}
+parameters: []
+handler: data_integrity_foreign_key
+examples:
+  valid:
+    facts:
+      family: data_integrity
+      mode: verify
+      rules:
+        - {rule_id: data_integrity.foreign_key, subjects: [child_parent], parameters: {}}
+      facts:
+        relations:
+          parents:
+            fields: {key: {kind: integer, minimum: 0, maximum: 1000}}
+            rows:
+              parent: {active: true, cells: {key: {present: true, value: 7}}}
+          children:
+            fields: {parent_key: {kind: integer, minimum: 0, maximum: 1000}}
+            rows:
+              matched: {active: true, cells: {parent_key: {present: true, value: 7}}}
+              absent: {active: true, cells: {parent_key: {present: false, value: null}}}
+        unique_constraints: {}
+        foreign_keys:
+          child_parent: {child_relation: children, child_fields: [parent_key], parent_relation: parents, parent_fields: [key]}
+        cardinality_constraints: {}
+        value_ranges: {}
+        conditional_requirements: {}
+        aggregate_balances: {}
+        consistency_relations: {}
+        temporal_constraints: {}
+      unknowns: []
+    expectation: complete child key matches and absent child key is ignored under MATCH SIMPLE
+  invalid:
+    facts:
+      family: data_integrity
+      mode: verify
+      rules:
+        - {rule_id: data_integrity.foreign_key, subjects: [child_parent], parameters: {}}
+      facts:
+        relations:
+          parents:
+            fields: {key: {kind: integer, minimum: 0, maximum: 1000}}
+            rows:
+              parent: {active: true, cells: {key: {present: true, value: 7}}}
+          children:
+            fields: {parent_key: {kind: integer, minimum: 0, maximum: 1000}}
+            rows:
+              child: {active: true, cells: {parent_key: {present: true, value: 8}}}
+        unique_constraints: {}
+        foreign_keys:
+          child_parent: {child_relation: children, child_fields: [parent_key], parent_relation: parents, parent_fields: [key]}
+        cardinality_constraints: {}
+        value_ranges: {}
+        conditional_requirements: {}
+        aggregate_balances: {}
+        consistency_relations: {}
+        temporal_constraints: {}
+      unknowns: []
+    expectation: counterexample because complete child key 8 has no parent match
+    expected_diagnostic: data_integrity.foreign_key.violation
+conformance:
+  valid:
+    - name: complete child key matches while an absent child key is optional
+      request:
+        family: data_integrity
+        mode: verify
+        rules:
+          - {rule_id: data_integrity.foreign_key, subjects: [child_parent], parameters: {}}
+        facts:
+          relations:
+            parents:
+              fields: {key: {kind: integer, minimum: 0, maximum: 1000}}
+              rows:
+                parent: {active: true, cells: {key: {present: true, value: 7}}}
+            children:
+              fields: {parent_key: {kind: integer, minimum: 0, maximum: 1000}}
+              rows:
+                matched: {active: true, cells: {parent_key: {present: true, value: 7}}}
+                absent: {active: true, cells: {parent_key: {present: false, value: null}}}
+          unique_constraints: {}
+          foreign_keys:
+            child_parent: {child_relation: children, child_fields: [parent_key], parent_relation: parents, parent_fields: [key]}
+          cardinality_constraints: {}
+          value_ranges: {}
+          conditional_requirements: {}
+          aggregate_balances: {}
+          consistency_relations: {}
+          temporal_constraints: {}
+        unknowns: []
+  invalid:
+    - name: complete child key lacks an active complete parent match
+      request:
+        family: data_integrity
+        mode: verify
+        rules:
+          - {rule_id: data_integrity.foreign_key, subjects: [child_parent], parameters: {}}
+        facts:
+          relations:
+            parents:
+              fields: {key: {kind: integer, minimum: 0, maximum: 1000}}
+              rows:
+                parent: {active: true, cells: {key: {present: true, value: 7}}}
+            children:
+              fields: {parent_key: {kind: integer, minimum: 0, maximum: 1000}}
+              rows:
+                child: {active: true, cells: {parent_key: {present: true, value: 8}}}
+          unique_constraints: {}
+          foreign_keys:
+            child_parent: {child_relation: children, child_fields: [parent_key], parent_relation: parents, parent_fields: [key]}
+          cardinality_constraints: {}
+          value_ranges: {}
+          conditional_requirements: {}
+          aggregate_balances: {}
+          consistency_relations: {}
+          temporal_constraints: {}
+        unknowns: []
+      expected_diagnostic: data_integrity.foreign_key.violation

@@ -1,0 +1,146 @@
+schema_version: 1
+id: data_integrity.conditional_required
+rule_version: 1
+family: data_integrity
+profile: finite_relational_snapshot
+primitive: typed_conditional_required
+summary: Require one field to be present when an active row has a present trigger field equal to a schema-typed expected value.
+availability: implemented
+strength: hard
+authorities:
+  - kind: official_database_documentation
+    title: PostgreSQL DDL Constraints - Check Constraints
+    url: https://www.postgresql.org/docs/current/ddl-constraints.html
+requires:
+  - relations[definition.relation].rows
+  - relations[definition.relation].fields[definition.trigger_field]
+  - relations[definition.relation].fields[definition.required_field]
+  - conditional_requirements[subject].expected
+llm_encoding:
+  effectiveness: high
+  problem_shapes:
+    - A typed trigger value on an active row conditionally requires another field to be present.
+  encode_steps:
+    - Bind exactly one conditional-requirement definition ID as the subject.
+    - Resolve the trigger and required fields and validate the expected value against the trigger field domain.
+    - Guard required-field presence by row activity, trigger presence, and typed equality with the expected value.
+  anti_patterns:
+    - Do not fire the condition when the trigger field is absent.
+    - Do not coerce strings, integers, enums, or Booleans across field domains.
+    - Do not infer a required value; this rule owns only presence.
+  escalate_when:
+    - Escalate compound predicates, regex conditions, cross-row triggers, or value synthesis beyond conditional presence outside this primitive.
+solver_encoding:
+  theory: QF_LIA with finite enum labels
+  verification: fix the complete row and assert required-field presence whenever the typed trigger is present and equal to expected
+  synthesis: constrain explicitly unknown trigger values or required-field presence while preserving declared field domains
+  formula:
+    - "active(row) and present(row,trigger) and value(row,trigger) = expected implies present(row,required)"
+subjects:
+  cardinality: {kind: exact, count: 1}
+parameters: []
+handler: data_integrity_conditional_required
+examples:
+  valid:
+    facts:
+      family: data_integrity
+      mode: verify
+      rules:
+        - {rule_id: data_integrity.conditional_required, subjects: [pro_requires_region], parameters: {}}
+      facts:
+        relations:
+          subscriptions:
+            fields:
+              plan: {kind: enum, values: [free, pro]}
+              region: {kind: enum, values: [us, eu]}
+            rows:
+              account: {active: true, cells: {plan: {present: true, value: pro}, region: {present: true, value: us}}}
+        unique_constraints: {}
+        foreign_keys: {}
+        cardinality_constraints: {}
+        value_ranges: {}
+        conditional_requirements:
+          pro_requires_region: {relation: subscriptions, trigger_field: plan, expected: pro, required_field: region}
+        aggregate_balances: {}
+        consistency_relations: {}
+        temporal_constraints: {}
+      unknowns: []
+    expectation: the active pro row supplies its required region
+  invalid:
+    facts:
+      family: data_integrity
+      mode: verify
+      rules:
+        - {rule_id: data_integrity.conditional_required, subjects: [pro_requires_region], parameters: {}}
+      facts:
+        relations:
+          subscriptions:
+            fields:
+              plan: {kind: enum, values: [free, pro]}
+              region: {kind: enum, values: [us, eu]}
+            rows:
+              account: {active: true, cells: {plan: {present: true, value: pro}, region: {present: false, value: null}}}
+        unique_constraints: {}
+        foreign_keys: {}
+        cardinality_constraints: {}
+        value_ranges: {}
+        conditional_requirements:
+          pro_requires_region: {relation: subscriptions, trigger_field: plan, expected: pro, required_field: region}
+        aggregate_balances: {}
+        consistency_relations: {}
+        temporal_constraints: {}
+      unknowns: []
+    expectation: counterexample because the active pro row omits its required region
+    expected_diagnostic: data_integrity.conditional_required.violation
+conformance:
+  valid:
+    - name: active pro row supplies its required region
+      request:
+        family: data_integrity
+        mode: verify
+        rules:
+          - {rule_id: data_integrity.conditional_required, subjects: [pro_requires_region], parameters: {}}
+        facts:
+          relations:
+            subscriptions:
+              fields:
+                plan: {kind: enum, values: [free, pro]}
+                region: {kind: enum, values: [us, eu]}
+              rows:
+                account: {active: true, cells: {plan: {present: true, value: pro}, region: {present: true, value: us}}}
+          unique_constraints: {}
+          foreign_keys: {}
+          cardinality_constraints: {}
+          value_ranges: {}
+          conditional_requirements:
+            pro_requires_region: {relation: subscriptions, trigger_field: plan, expected: pro, required_field: region}
+          aggregate_balances: {}
+          consistency_relations: {}
+          temporal_constraints: {}
+        unknowns: []
+  invalid:
+    - name: active pro row omits its required region
+      request:
+        family: data_integrity
+        mode: verify
+        rules:
+          - {rule_id: data_integrity.conditional_required, subjects: [pro_requires_region], parameters: {}}
+        facts:
+          relations:
+            subscriptions:
+              fields:
+                plan: {kind: enum, values: [free, pro]}
+                region: {kind: enum, values: [us, eu]}
+              rows:
+                account: {active: true, cells: {plan: {present: true, value: pro}, region: {present: false, value: null}}}
+          unique_constraints: {}
+          foreign_keys: {}
+          cardinality_constraints: {}
+          value_ranges: {}
+          conditional_requirements:
+            pro_requires_region: {relation: subscriptions, trigger_field: plan, expected: pro, required_field: region}
+          aggregate_balances: {}
+          consistency_relations: {}
+          temporal_constraints: {}
+        unknowns: []
+      expected_diagnostic: data_integrity.conditional_required.violation

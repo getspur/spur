@@ -155,6 +155,7 @@ fn solve_rules_schema_keeps_one_bedrock_compatible_family_execution_tool() {
         json!([
             "accessibility",
             "configuration",
+            "data_integrity",
             "design",
             "policy",
             "resource",
@@ -178,7 +179,7 @@ fn solve_rules_schema_keeps_one_bedrock_compatible_family_execution_tool() {
         .collect::<Vec<_>>();
 
     assert_eq!(rule_ids, manifest_rule_ids);
-    assert_eq!(rule_ids.len(), 31);
+    assert_eq!(rule_ids.len(), 39);
     for expected_rule_id in manifest_executable_rule_ids() {
         assert_eq!(
             rule_ids

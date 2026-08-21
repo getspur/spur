@@ -29,13 +29,13 @@ fn native_handler_and_object_validator_enums_are_closed() {
         .iter()
         .map(|handler| serde_yml::to_string(handler).expect("serialize handler"))
         .collect::<Vec<_>>();
-    assert_eq!(handler_names.len(), 31);
+    assert_eq!(handler_names.len(), 39);
     assert_eq!(
         handler_names
             .iter()
             .collect::<std::collections::BTreeSet<_>>()
             .len(),
-        31
+        39
     );
     assert!(handler_names
         .iter()
@@ -49,6 +49,9 @@ fn native_handler_and_object_validator_enums_are_closed() {
     assert!(handler_names
         .iter()
         .any(|name| name.trim() == "workflow_bounded_reachability"));
+    assert!(handler_names
+        .iter()
+        .any(|name| name.trim() == "data_integrity_temporal_consistency"));
     assert!(serde_yml::from_str::<NativeHandlerV1>("crate::rules::compile").is_err());
 
     assert_eq!(
@@ -86,6 +89,22 @@ fn workflow_handlers_follow_scheduling_in_stable_order() {
     ];
 
     assert_eq!(NativeHandlerV1::ALL.get(27..31), Some(expected.as_slice()));
+}
+
+#[test]
+fn data_integrity_handlers_follow_workflow_in_stable_order() {
+    let expected = [
+        NativeHandlerV1::DataIntegrityUnique,
+        NativeHandlerV1::DataIntegrityForeignKey,
+        NativeHandlerV1::DataIntegrityCardinality,
+        NativeHandlerV1::DataIntegrityValueRange,
+        NativeHandlerV1::DataIntegrityConditionalRequired,
+        NativeHandlerV1::DataIntegrityAggregateBalance,
+        NativeHandlerV1::DataIntegrityMutuallyConsistent,
+        NativeHandlerV1::DataIntegrityTemporalConsistency,
+    ];
+
+    assert_eq!(NativeHandlerV1::ALL.get(31..39), Some(expected.as_slice()));
 }
 
 #[test]

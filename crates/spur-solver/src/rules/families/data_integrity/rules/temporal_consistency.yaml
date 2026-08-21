@@ -1,0 +1,155 @@
+schema_version: 1
+id: data_integrity.temporal_consistency
+rule_version: 1
+family: data_integrity
+profile: finite_relational_snapshot
+primitive: strict_intervals_with_predecessors
+summary: Require active rows to have present integer endpoints with start before end and every declared predecessor to finish no later than its active successor starts.
+availability: implemented
+strength: hard
+authorities:
+  - kind: official_database_documentation
+    title: PostgreSQL CREATE TABLE - Temporal Constraints
+    url: https://www.postgresql.org/docs/current/sql-createtable.html
+  - kind: formal_methods_paper
+    title: Maintaining Knowledge about Temporal Intervals
+    url: https://cse.unl.edu/~choueiry/Documents/Allen-CACM1983.pdf
+requires:
+  - relations[definition.relation].rows
+  - temporal_constraints[subject].start_field
+  - temporal_constraints[subject].end_field
+  - temporal_constraints[subject].predecessors
+llm_encoding:
+  effectiveness: high
+  problem_shapes:
+    - Active finite interval rows must be nonempty and declared predecessor edges must respect finish-start order.
+  encode_steps:
+    - Bind exactly one temporal-constraint definition ID as the subject.
+    - Resolve integer start and end fields plus every before and after row ID.
+    - Require present endpoints and strict start-before-end for each active row.
+    - For each edge require an active successor to have an active predecessor whose end is no later than the successor start.
+  anti_patterns:
+    - Do not permit zero-length or reversed active intervals.
+    - Do not infer predecessor edges, durations, time zones, or overlap relations beyond the declared finish-start ordering.
+    - Do not interpret finite integer order as wall-clock transaction semantics.
+  escalate_when:
+    - Escalate Allen relations beyond before or meets, calendar arithmetic, time zones, recurrence, or unbounded interval sets outside this primitive.
+solver_encoding:
+  theory: QF_LIA
+  verification: fix all finite rows and assert strict interval validity plus each declared predecessor implication
+  synthesis: constrain explicitly unknown activity, endpoint presence, or integer endpoint values within the finite schema bounds
+  formula:
+    - "active(row) implies present(start) and present(end) and start < end"
+    - "for every before -> after edge: active(after) implies active(before) and end(before) <= start(after)"
+subjects:
+  cardinality: {kind: exact, count: 1}
+parameters: []
+handler: data_integrity_temporal_consistency
+examples:
+  valid:
+    facts:
+      family: data_integrity
+      mode: verify
+      rules:
+        - {rule_id: data_integrity.temporal_consistency, subjects: [schedule], parameters: {}}
+      facts:
+        relations:
+          tasks:
+            fields:
+              start: {kind: integer, minimum: 0, maximum: 1000}
+              end: {kind: integer, minimum: 0, maximum: 1001}
+            rows:
+              predecessor: {active: true, cells: {start: {present: true, value: 0}, end: {present: true, value: 4}}}
+              successor: {active: true, cells: {start: {present: true, value: 4}, end: {present: true, value: 8}}}
+        unique_constraints: {}
+        foreign_keys: {}
+        cardinality_constraints: {}
+        value_ranges: {}
+        conditional_requirements: {}
+        aggregate_balances: {}
+        consistency_relations: {}
+        temporal_constraints:
+          schedule: {relation: tasks, start_field: start, end_field: end, predecessors: [{before: predecessor, after: successor}]}
+      unknowns: []
+    expectation: both intervals are strict and predecessor end 4 is no later than successor start 4
+  invalid:
+    facts:
+      family: data_integrity
+      mode: verify
+      rules:
+        - {rule_id: data_integrity.temporal_consistency, subjects: [schedule], parameters: {}}
+      facts:
+        relations:
+          tasks:
+            fields:
+              start: {kind: integer, minimum: 0, maximum: 1000}
+              end: {kind: integer, minimum: 0, maximum: 1001}
+            rows:
+              predecessor: {active: true, cells: {start: {present: true, value: 0}, end: {present: true, value: 6}}}
+              successor: {active: true, cells: {start: {present: true, value: 5}, end: {present: true, value: 4}}}
+        unique_constraints: {}
+        foreign_keys: {}
+        cardinality_constraints: {}
+        value_ranges: {}
+        conditional_requirements: {}
+        aggregate_balances: {}
+        consistency_relations: {}
+        temporal_constraints:
+          schedule: {relation: tasks, start_field: start, end_field: end, predecessors: [{before: predecessor, after: successor}]}
+      unknowns: []
+    expectation: counterexample from reversed successor interval and predecessor end 6 after successor start 5
+    expected_diagnostic: data_integrity.temporal_consistency.violation
+conformance:
+  valid:
+    - name: strict intervals meet at a valid predecessor boundary
+      request:
+        family: data_integrity
+        mode: verify
+        rules:
+          - {rule_id: data_integrity.temporal_consistency, subjects: [schedule], parameters: {}}
+        facts:
+          relations:
+            tasks:
+              fields:
+                start: {kind: integer, minimum: 0, maximum: 1000}
+                end: {kind: integer, minimum: 0, maximum: 1001}
+              rows:
+                predecessor: {active: true, cells: {start: {present: true, value: 0}, end: {present: true, value: 4}}}
+                successor: {active: true, cells: {start: {present: true, value: 4}, end: {present: true, value: 8}}}
+          unique_constraints: {}
+          foreign_keys: {}
+          cardinality_constraints: {}
+          value_ranges: {}
+          conditional_requirements: {}
+          aggregate_balances: {}
+          consistency_relations: {}
+          temporal_constraints:
+            schedule: {relation: tasks, start_field: start, end_field: end, predecessors: [{before: predecessor, after: successor}]}
+        unknowns: []
+  invalid:
+    - name: reversed successor interval and late predecessor violate temporal consistency
+      request:
+        family: data_integrity
+        mode: verify
+        rules:
+          - {rule_id: data_integrity.temporal_consistency, subjects: [schedule], parameters: {}}
+        facts:
+          relations:
+            tasks:
+              fields:
+                start: {kind: integer, minimum: 0, maximum: 1000}
+                end: {kind: integer, minimum: 0, maximum: 1001}
+              rows:
+                predecessor: {active: true, cells: {start: {present: true, value: 0}, end: {present: true, value: 6}}}
+                successor: {active: true, cells: {start: {present: true, value: 5}, end: {present: true, value: 4}}}
+          unique_constraints: {}
+          foreign_keys: {}
+          cardinality_constraints: {}
+          value_ranges: {}
+          conditional_requirements: {}
+          aggregate_balances: {}
+          consistency_relations: {}
+          temporal_constraints:
+            schedule: {relation: tasks, start_field: start, end_field: end, predecessors: [{before: predecessor, after: successor}]}
+        unknowns: []
+      expected_diagnostic: data_integrity.temporal_consistency.violation

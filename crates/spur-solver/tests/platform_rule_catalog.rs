@@ -7,9 +7,10 @@ use spur_solver::{
     rules::{builtin_registry, families, manifest_executable_rule_ids},
 };
 
-const EXPECTED_FAMILY_IDS: [&str; 7] = [
+const EXPECTED_FAMILY_IDS: [&str; 8] = [
     "accessibility",
     "configuration",
+    "data_integrity",
     "design",
     "policy",
     "resource",
@@ -17,7 +18,7 @@ const EXPECTED_FAMILY_IDS: [&str; 7] = [
     "workflow",
 ];
 
-const EXPECTED_EXECUTABLE_RULE_IDS: [&str; 31] = [
+const EXPECTED_EXECUTABLE_RULE_IDS: [&str; 39] = [
     "a11y.focus_not_obscured",
     "a11y.reflow",
     "a11y.target_size",
@@ -27,6 +28,14 @@ const EXPECTED_EXECUTABLE_RULE_IDS: [&str; 31] = [
     "configuration.requires_any",
     "configuration.selection_cardinality",
     "configuration.version_interval",
+    "data_integrity.aggregate_balance",
+    "data_integrity.cardinality",
+    "data_integrity.conditional_required",
+    "data_integrity.foreign_key",
+    "data_integrity.mutually_consistent",
+    "data_integrity.temporal_consistency",
+    "data_integrity.unique",
+    "data_integrity.value_range",
     "layout.axis_capacity",
     "layout.containment",
     "layout.non_overlap",
@@ -129,7 +138,7 @@ fn generic_family_solve_rules_schema_has_exact_global_enums() {
     );
     assert_eq!(
         schema["properties"]["rules"]["items"]["properties"]["rule_id"]["enum"],
-        json!(EXPECTED_EXECUTABLE_RULE_IDS)
+        json!(EXPECTED_EXECUTABLE_RULE_IDS.as_slice())
     );
     assert_eq!(schema["type"], "object");
     assert_eq!(schema["required"], json!(["family", "mode", "rules"]));
