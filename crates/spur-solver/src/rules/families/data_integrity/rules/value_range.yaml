@@ -51,7 +51,7 @@ examples:
           measurements:
             fields: {measured: {kind: integer, minimum: 0, maximum: 1000}}
             rows:
-              observed: {active: true, cells: {measured: {present: true, value: 50}}}
+              observed: {active: true, cells: {measured: {present: true, value: 100}}}
               absent: {active: true, cells: {measured: {present: false, value: null}}}
         unique_constraints: {}
         foreign_keys: {}
@@ -63,7 +63,7 @@ examples:
         consistency_relations: {}
         temporal_constraints: {}
       unknowns: []
-    expectation: present value 50 is inside inclusive 0 through 100 and the absent value is ignored
+    expectation: present value 100 is accepted at the inclusive maximum and the absent value is ignored
   invalid:
     facts:
       family: data_integrity
@@ -90,7 +90,7 @@ examples:
     expected_diagnostic: data_integrity.value_range.violation
 conformance:
   valid:
-    - name: present fifty and an absent value satisfy inclusive zero-through-one-hundred range
+    - name: present one-hundred and an absent value satisfy the inclusive upper boundary
       request:
         family: data_integrity
         mode: verify
@@ -101,7 +101,7 @@ conformance:
             measurements:
               fields: {measured: {kind: integer, minimum: 0, maximum: 1000}}
               rows:
-                observed: {active: true, cells: {measured: {present: true, value: 50}}}
+                observed: {active: true, cells: {measured: {present: true, value: 100}}}
                 absent: {active: true, cells: {measured: {present: false, value: null}}}
           unique_constraints: {}
           foreign_keys: {}

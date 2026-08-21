@@ -4,6 +4,7 @@ use super::{catalog::RuleRegistry, compiler::RuleFamilyCompiler};
 
 pub mod accessibility;
 pub mod configuration;
+pub mod data_integrity;
 pub mod design;
 pub mod policy;
 pub mod resource;
