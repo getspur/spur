@@ -15,6 +15,7 @@ use std::ffi::OsString;
 use std::io::{self, BufRead as _, BufReader, Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
 use anyhow::{anyhow, bail, Context as _, Result};
@@ -406,7 +407,8 @@ pub fn run_full_walk_into(
             },
         )
     };
-    let mut ctx = SymbolDiffCtx::new();
+    let shared_parse_cache = Arc::new(SharedParseCache::default());
+    let mut ctx = SymbolDiffCtx::with_parse_cache(Arc::clone(&shared_parse_cache));
     let mut reducer = CommitResultReducer::new(&mut graph, &mut commits, progress, sink);
     for (ordinal, sha) in commit_shas.into_iter().enumerate() {
         let result =
@@ -938,25 +940,122 @@ fn is_gitlink(mode: EntryMode) -> bool {
     mode.value() == 0o160000
 }
 
-pub struct SymbolDiffCtx {
+type BlobOid = String;
+type ParseCacheKey = (Language, BlobOid);
+type SharedExtractedSymbols = Arc<[ExtractedSymbol]>;
+
+/// Successful entries live for the full walk and are shared by every extraction state.
+/// Failed initializations are removed once no same-key caller is waiting to retry them.
+#[derive(Default)]
+struct SharedParseCache {
+    entries: Mutex<HashMap<ParseCacheKey, Arc<Mutex<Option<SharedExtractedSymbols>>>>>,
+}
+
+impl SharedParseCache {
+    fn get_or_init<F>(
+        &self,
+        key: ParseCacheKey,
+        initialize: F,
+    ) -> Result<std::result::Result<SharedExtractedSymbols, ExtractError>>
+    where
+        F: FnOnce() -> Result<std::result::Result<Vec<ExtractedSymbol>, ExtractError>>,
+    {
+        let entry = {
+            let mut entries = self
+                .entries
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            Arc::clone(
+                entries
+                    .entry(key.clone())
+                    .or_insert_with(|| Arc::new(Mutex::new(None))),
+            )
+        };
+        let mut cached = entry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(symbols) = cached.as_ref() {
+            return Ok(Ok(Arc::clone(symbols)));
+        }
+
+        match initialize() {
+            Ok(Ok(symbols)) => {
+                let symbols = Arc::<[ExtractedSymbol]>::from(symbols);
+                *cached = Some(Arc::clone(&symbols));
+                Ok(Ok(symbols))
+            }
+            Ok(Err(error)) => {
+                drop(cached);
+                self.remove_uninitialized_entry(&key, &entry);
+                Ok(Err(error))
+            }
+            Err(error) => {
+                drop(cached);
+                self.remove_uninitialized_entry(&key, &entry);
+                Err(error)
+            }
+        }
+    }
+
+    fn remove_uninitialized_entry(
+        &self,
+        key: &ParseCacheKey,
+        entry: &Arc<Mutex<Option<SharedExtractedSymbols>>>,
+    ) {
+        let cached = entry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if cached.is_some() {
+            return;
+        }
+        let mut entries = self
+            .entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if Arc::strong_count(entry) == 2
+            && entries
+                .get(key)
+                .is_some_and(|registered| Arc::ptr_eq(registered, entry))
+        {
+            entries.remove(key);
+        }
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len()
+    }
+}
+
+#[derive(Default)]
+struct SymbolExtractionState {
     extractors: HashMap<Language, BytesExtractor>,
     diagnostics: Vec<String>,
     cat_file_batches: HashMap<PathBuf, CatFileBatch>,
-    parse_cache: HashMap<(Language, String), Vec<ExtractedSymbol>>,
+}
+
+pub struct SymbolDiffCtx {
+    local: SymbolExtractionState,
+    parse_cache: Arc<SharedParseCache>,
 }
 
 impl SymbolDiffCtx {
     pub fn new() -> Self {
+        Self::with_parse_cache(Arc::new(SharedParseCache::default()))
+    }
+
+    fn with_parse_cache(parse_cache: Arc<SharedParseCache>) -> Self {
         Self {
-            extractors: HashMap::new(),
-            diagnostics: Vec::new(),
-            cat_file_batches: HashMap::new(),
-            parse_cache: HashMap::new(),
+            local: SymbolExtractionState::default(),
+            parse_cache,
         }
     }
 
     pub fn diagnostics(&self) -> &[String] {
-        &self.diagnostics
+        &self.local.diagnostics
     }
 
     #[cfg(test)]
@@ -965,7 +1064,7 @@ impl SymbolDiffCtx {
     }
 
     fn for_language(&mut self, language: Language) -> Result<&mut BytesExtractor> {
-        match self.extractors.entry(language) {
+        match self.local.extractors.entry(language) {
             std::collections::hash_map::Entry::Occupied(entry) => Ok(entry.into_mut()),
             std::collections::hash_map::Entry::Vacant(entry) => {
                 Ok(entry.insert(BytesExtractor::for_language(language)?))
@@ -974,11 +1073,11 @@ impl SymbolDiffCtx {
     }
 
     fn record_diagnostics(&mut self, diagnostics: Vec<String>) {
-        self.diagnostics.extend(diagnostics);
+        self.local.diagnostics.extend(diagnostics);
     }
 
     fn cat_file_batch(&mut self, worktree: &Path) -> Result<&mut CatFileBatch> {
-        match self.cat_file_batches.entry(worktree.to_path_buf()) {
+        match self.local.cat_file_batches.entry(worktree.to_path_buf()) {
             std::collections::hash_map::Entry::Occupied(entry) => Ok(entry.into_mut()),
             std::collections::hash_map::Entry::Vacant(entry) => {
                 Ok(entry.insert(CatFileBatch::new(worktree)?))
@@ -1053,11 +1152,11 @@ pub fn symbol_changes_for_commit(
         let left_path_buf = blobs.left_path.as_ref().map(GitPath::to_path_buf);
         let left_result = match (left_path_buf.as_deref(), blobs.left.as_ref()) {
             (Some(path), Some((oid, bytes))) => cached_extract(ctx, language, oid, path, bytes)?,
-            _ => Ok(Vec::new()),
+            _ => Ok(Arc::from(Vec::<ExtractedSymbol>::new())),
         };
         let right_result = match blobs.right.as_ref() {
             Some((oid, bytes)) => cached_extract(ctx, language, oid, &current_path, bytes)?,
-            None => Ok(Vec::new()),
+            None => Ok(Arc::from(Vec::<ExtractedSymbol>::new())),
         };
         let mut parse_failed = false;
         let left_symbols = match left_result {
@@ -1070,7 +1169,7 @@ pub fn symbol_changes_for_commit(
                     &error,
                 )]);
                 parse_failed = true;
-                Vec::new()
+                Arc::from(Vec::<ExtractedSymbol>::new())
             }
         };
         let right_symbols = match right_result {
@@ -1083,7 +1182,7 @@ pub fn symbol_changes_for_commit(
                     &error,
                 )]);
                 parse_failed = true;
-                Vec::new()
+                Arc::from(Vec::<ExtractedSymbol>::new())
             }
         };
         if parse_failed {
@@ -1121,7 +1220,7 @@ pub fn symbol_changes_for_commit(
                     })
                     .collect();
 
-            for right in &right_symbols {
+            for right in right_symbols.iter() {
                 let identity = (
                     right.entity_name.clone(),
                     right.symbol_kind.clone(),
@@ -1947,19 +2046,13 @@ fn cached_extract(
     oid: &str,
     path: &Path,
     bytes: &[u8],
-) -> Result<std::result::Result<Vec<ExtractedSymbol>, ExtractError>> {
+) -> Result<std::result::Result<SharedExtractedSymbols, ExtractError>> {
     let key = (language, oid.to_owned());
-    if let Some(cached) = ctx.parse_cache.get(&key) {
-        return Ok(Ok(cached.clone()));
-    }
-    let result = {
+    let parse_cache = Arc::clone(&ctx.parse_cache);
+    parse_cache.get_or_init(key, || {
         let extractor = ctx.for_language(language)?;
-        extractor.extract(path, bytes)
-    };
-    if let Ok(symbols) = &result {
-        ctx.parse_cache.insert(key, symbols.clone());
-    }
-    Ok(result)
+        Ok(extractor.extract(path, bytes))
+    })
 }
 
 fn parse_failed_diagnostic(
@@ -2899,6 +2992,101 @@ mod tests {
         symbol_changes_for_commit(dir.path(), &sha2, &file_changes2, &mut ctx).unwrap();
 
         assert_eq!(ctx.parse_cache_len(), 1);
+    }
+
+    #[test]
+    fn shared_parse_cache_initializes_same_key_once_concurrently() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::{Arc, Barrier};
+
+        let cache = Arc::new(SharedParseCache::default());
+        let ready = Arc::new(Barrier::new(8));
+        let initializations = Arc::new(AtomicUsize::new(0));
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let cache = Arc::clone(&cache);
+                let ready = Arc::clone(&ready);
+                let initializations = Arc::clone(&initializations);
+                std::thread::spawn(move || {
+                    ready.wait();
+                    cache
+                        .get_or_init((Language::Rust, "same-blob".to_owned()), || {
+                            initializations.fetch_add(1, Ordering::SeqCst);
+                            std::thread::sleep(std::time::Duration::from_millis(20));
+                            Ok(Ok(vec![cache_test_symbol("shared")]))
+                        })
+                        .unwrap()
+                        .unwrap()
+                })
+            })
+            .collect();
+        let symbols: Vec<_> = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect();
+
+        assert_eq!(initializations.load(Ordering::SeqCst), 1);
+        assert_eq!(cache.len(), 1);
+        let first = &symbols[0];
+        assert!(symbols
+            .iter()
+            .skip(1)
+            .all(|symbols| Arc::ptr_eq(first, symbols)));
+    }
+
+    #[test]
+    fn shared_parse_cache_separates_languages_for_same_blob_oid() {
+        let cache = SharedParseCache::default();
+
+        let rust = cache
+            .get_or_init((Language::Rust, "same-blob".to_owned()), || {
+                Ok(Ok(vec![cache_test_symbol("rust")]))
+            })
+            .unwrap()
+            .unwrap();
+        let python = cache
+            .get_or_init((Language::Python, "same-blob".to_owned()), || {
+                Ok(Ok(vec![cache_test_symbol("python")]))
+            })
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(cache.len(), 2);
+        assert_eq!(rust[0].entity_name, "rust");
+        assert_eq!(python[0].entity_name, "python");
+    }
+
+    #[test]
+    fn shared_parse_cache_does_not_retain_parse_failures() {
+        let cache = SharedParseCache::default();
+        let key = (Language::Rust, "invalid-blob".to_owned());
+
+        let failed = cache
+            .get_or_init(key.clone(), || Ok(Err(ExtractError::NoTree)))
+            .unwrap();
+
+        assert!(matches!(failed, Err(ExtractError::NoTree)));
+        assert_eq!(cache.len(), 0);
+
+        let retried = cache
+            .get_or_init(key, || Ok(Ok(vec![cache_test_symbol("retried")])))
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(cache.len(), 1);
+        assert_eq!(retried[0].entity_name, "retried");
+    }
+
+    fn cache_test_symbol(entity_name: &str) -> ExtractedSymbol {
+        ExtractedSymbol {
+            entity_name: entity_name.to_owned(),
+            symbol_kind: "function".to_owned(),
+            enclosing_scope: None,
+            byte_range: [0, 1],
+            line_range: [1, 1],
+            anchor_hash: format!("hash-{entity_name}"),
+            tokens: vec![entity_name.to_owned()],
+        }
     }
 
     #[test]
