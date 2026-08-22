@@ -153,15 +153,15 @@ git commit -m "feat(spur-graph): temporal-telemetry measure reuse and stalls"
 
 **Acceptance Criteria:**
 
-- [ ] Build one profiling binary from the reviewed Task 1 base and record HEAD plus binary SHA-256.
-- [ ] Use fresh local `--no-hardlinks` Turso clones and unique output directories; every run reports mode Full, 5,269 commits, and explicit jobs=8.
-- [ ] Run one telemetry-disabled and one telemetry-enabled timed cold build with at least a 1,200-second timeout, recording wall/user/system, mean CPU, peak RSS, commits/s, page faults/reclaims, context switches, source HEAD, and exact command.
-- [ ] Report instrumentation overhead as enabled/off wall, CPU-work, and RSS ratios. If either run is censored or differs in workload output, do not credit a performance comparison.
-- [ ] Enabled output includes all required cache and worker counters and no per-key identifiers.
-- [ ] Capture one rootless xctrace profile from the enabled build and analyze its folded file through DuckDB plus the local `quack_flamegraph` extension using schema discovery first.
-- [ ] Use exact-frame unique-stack coverage for recursive functions and occurrence-summed inclusive values only for non-recursive frames.
-- [ ] Record artifact paths and SHA-256 hashes under `/tmp`; commit no trace, clone, folded, SVG, or DuckDB binary.
-- [ ] Apply the decision rules below and recommend exactly one next implementation patch, with a new beads issue/plan rather than editing Rust in this measurement task.
+- [x] Build one profiling binary from the reviewed Task 1 base and record HEAD plus binary SHA-256.
+- [x] Use fresh local `--no-hardlinks` Turso clones and unique output directories; every run reports mode Full, 5,269 commits, and explicit jobs=8.
+- [x] Run one telemetry-disabled and one telemetry-enabled timed cold build with at least a 1,200-second timeout, recording wall/user/system, mean CPU, peak RSS, commits/s, page faults/reclaims, context switches, source HEAD, and exact command.
+- [x] Report instrumentation overhead as enabled/off wall, CPU-work, and RSS ratios. If either run is censored or differs in workload output, do not credit a performance comparison.
+- [x] Enabled output includes all required cache and worker counters and no per-key identifiers.
+- [x] Capture one rootless xctrace profile from the enabled build and analyze its folded file through DuckDB plus the local `quack_flamegraph` extension using schema discovery first.
+- [x] Use exact-frame unique-stack coverage for recursive functions and occurrence-summed inclusive values only for non-recursive frames.
+- [x] Record artifact paths and SHA-256 hashes under `/tmp`; commit no trace, clone, folded, SVG, or DuckDB binary.
+- [x] Apply the decision rules below and recommend exactly one next implementation patch, with a new beads issue/plan rather than editing Rust in this measurement task.
 
 **Suggested Worker:** `codex`, model `gpt-5.6-sol`, effort `xhigh`.
 
@@ -173,7 +173,7 @@ git commit -m "feat(spur-graph): temporal-telemetry measure reuse and stalls"
 
 **Implementation:**
 
-- [ ] **Step 1: Verify the reviewed instrumentation and build once.**
+- [x] **Step 1: Verify the reviewed instrumentation and build once.**
 
 ```bash
 scripts/spur-cargo test -p spur-graph cache_telemetry -- --nocapture
@@ -184,11 +184,11 @@ SPUR_REMOTE=0 scripts/spur-cargo build -p spur-cli --profile profiling
 shasum -a 256 target/profiling/spur
 ```
 
-- [ ] **Step 2: Run paired cold builds.** Use the exact sample flags with `SPUR_EMBEDDING_MODEL=jina-code`, explicit `--temporal-jobs 8`, `/usr/bin/time -l`, and unique graph output. The disabled run must not enable the debug target. The enabled run must enable only the established temporal debug telemetry target and prove `telemetry_enabled=true` in its summary.
+- [x] **Step 2: Run paired cold builds.** Use the exact sample flags with `SPUR_EMBEDDING_MODEL=jina-code`, explicit `--temporal-jobs 8`, `/usr/bin/time -l`, and unique graph output. The disabled run must not enable the debug target. The enabled run must enable only the established temporal debug telemetry target and prove `telemetry_enabled=true` in its summary.
 
-- [ ] **Step 3: Capture and fold the enabled xctrace profile.** Use the installed full Xcode CLI, no root, the same source revision and binary hash, and the established `quack-flamegraph` extension at `/Volumes/Projects/Projects/quack-flamegraph/build/debug/quack_flamegraph.duckdb_extension`.
+- [x] **Step 3: Capture and fold the enabled xctrace profile.** Use the installed full Xcode CLI, no root, the same source revision and binary hash, and the established `quack-flamegraph` extension at `/Volumes/Projects/Projects/quack-flamegraph/build/debug/quack_flamegraph.duckdb_extension`.
 
-- [ ] **Step 4: Quantify from telemetry and profile.** Report:
+- [x] **Step 4: Quantify from telemetry and profile.** Report:
 
   - cold, hit, and reparse initialization counts and nanoseconds;
   - reparse initialization nanoseconds divided by total active-worker nanoseconds;
@@ -198,13 +198,13 @@ shasum -a 256 target/profiling/spur
   - cache initialization, parse, query, parent, token, finalization, and tree-drop exact-frame coverage;
   - recursion-safe `collect_symbol_tokens` coverage and occurrence inflation.
 
-- [ ] **Step 5: Apply one decision rule.**
+- [x] **Step 5: Apply one decision rule.**
 
   1. Choose a byte-budgeted reuse-aware cache next if reparse initialization consumes at least 26.35% of total active-worker time. Its follow-up must run solve pre/post and sweep measured budgets without exceeding 4 GiB RSS.
   2. Otherwise choose ready-worker dispatch plus separately bounded reorder capacity if time-weighted activity is below five workers and next-ordinal/admission waiting accounts for the missing capacity.
   3. Otherwise choose neither: the telemetry model is insufficient, so localize the remaining measured phase before changing policy.
 
-- [ ] **Step 6: Append results and commit only this document.**
+- [x] **Step 6: Append results and commit only this document.**
 
 ```bash
 git add docs/superpowers/plans/2026-08-22-temporal-graph-build-telemetry.md
@@ -213,4 +213,294 @@ git commit -m "docs(spur-graph): cold-turso-telemetry record reuse decision"
 
 ## Results
 
-Pending execution. No cache-budget or scheduler-policy patch is authorized by this plan until the paired run selects it through the decision rule.
+Executed 2026-08-22 from approved Task 1 base
+`aaa366cf7211a883b881ef952e165acd74a651b7`. The selected next patch is
+**cache only**. No Rust source or runtime policy was changed in this task.
+
+### Provenance and verification
+
+- SPUR commit/tree: `aaa366cf7211a883b881ef952e165acd74a651b7` /
+  `e09be538a4481cd99687ebca8feb21dd0ba3b460`; committed
+  `git_walk.rs` SHA-256:
+  `21185990b024be7e5dd4c0d348cba56404c9a4788bdb06f7d7f170970438b0b1`.
+- Turso source commit/tree:
+  `a45cd87ff7b25a30476491037a028c43ff95d6f5` /
+  `4da9932858e594383fb379cca8f87293cf9848af`; every clone reported 5,269
+  first-parent commits and had neither `.spur` nor `.git/spur-graph` before the
+  run.
+- Frozen arm64 Mach-O profiling binary:
+  `/tmp/spur-turso-telemetry.KmIJrb/spur-aaa366cf7`, SHA-256
+  `3fd94f97206bb0ce4deb226769094dd7f97cee68971a092270b73b6dd667d70b`.
+  It was produced once successfully with optimized code, debuginfo, and forced
+  frame pointers. The prescribed native command and a shared-target retry both
+  failed before producing a binary because APFS ran out of space while archiving
+  bundled DuckDB. Their exact, recoverable generated files were removed. The
+  successful repository-supported Darwin cross-build command was:
+
+```bash
+SPUR_REMOTE=1 SPUR_NO_LOCAL_FALLBACK=1 \
+  scripts/spur-cargo zigbuild -p spur-cli --profile profiling -j 8
+SPUR_CLOUD=aws-my SPUR_REMOTE_NAMESPACE=spur \
+  /Volumes/Projects/Projects/spur-notebook/scripts/cloud-build/fetch.sh \
+  --via-s3 --to /tmp/spur-turso-telemetry.KmIJrb/spur-aaa366cf7 \
+  target/aarch64-apple-darwin/profiling/spur
+shasum -a 256 /tmp/spur-turso-telemetry.KmIJrb/spur-aaa366cf7
+```
+
+The verification sequence ran in the prescribed order. Focused telemetry tests
+passed 5/5, `temporal_parallel` passed 1/1, check passed with the existing
+`spur-graph/src/mcp/mod.rs` dead-code warnings, and formatting passed:
+
+```bash
+scripts/spur-cargo test -p spur-graph cache_telemetry -- --nocapture
+scripts/spur-cargo test -p spur-graph --test temporal_parallel
+scripts/spur-cargo check -p spur-graph --tests --benches
+scripts/spur-cargo fmt --all -- --check
+SPUR_REMOTE=0 scripts/spur-cargo build -p spur-cli --profile profiling
+CARGO_TARGET_DIR=/Volumes/Projects/Projects/spur/target SPUR_REMOTE=0 \
+  scripts/spur-cargo build -p spur-cli --profile profiling
+```
+
+The last two commands are the two pre-binary `ENOSPC` attempts described above;
+neither completed or emitted the measured binary.
+
+Host: Darwin 23.4.0 arm64, 10 logical/physical CPUs, 32 GiB memory. Tooling:
+Xcode xctrace 15.3 (15F31d), `flamegraph` 0.6.14, DuckDB 1.5.5
+(`8463eb26527b278109cfddffc4606e1019ebefcfe2eac75efc53c76ed8f282d5`),
+Z3 4.16.0, and quack-flamegraph commit
+`bcc78d53cbf6e1564490af5da106311b1eedec43` with extension SHA-256
+`6679979078c54714808bf30dc28992d9cf5eb21ba3d8fe0c9db941902f235e4b`.
+
+### Exact cold-build commands
+
+Each run began with a distinct local clone:
+
+```bash
+git clone --quiet --local --no-hardlinks /Volumes/Projects/Projects/turso \
+  /tmp/spur-turso-telemetry.KmIJrb/off/repo
+git clone --quiet --local --no-hardlinks /Volumes/Projects/Projects/turso \
+  /tmp/spur-turso-telemetry.KmIJrb/on/repo
+git clone --quiet --local --no-hardlinks /Volumes/Projects/Projects/turso \
+  /tmp/spur-turso-telemetry.KmIJrb/profile/repo
+```
+
+Telemetry off:
+
+```bash
+/usr/bin/time -l -o /tmp/spur-turso-telemetry.KmIJrb/off/time.txt \
+  /opt/homebrew/bin/timeout --signal=TERM --kill-after=10s 1200s \
+  /usr/bin/env -u SPUR_GRAPH_TEMPORAL_JOBS -u RUST_LOG \
+  SPUR_EMBEDDING_MODEL=jina-code \
+  /tmp/spur-turso-telemetry.KmIJrb/spur-aaa366cf7 graph build \
+  --root /tmp/spur-turso-telemetry.KmIJrb/off/repo \
+  --output /tmp/spur-turso-telemetry.KmIJrb/off/graph \
+  --with-temporal --no-section-embeddings --no-code-symbol-embeddings \
+  --no-analyst --temporal-jobs 8
+```
+
+Telemetry on:
+
+```bash
+/usr/bin/time -l -o /tmp/spur-turso-telemetry.KmIJrb/on/time.txt \
+  /opt/homebrew/bin/timeout --signal=TERM --kill-after=10s 1200s \
+  /usr/bin/env -u SPUR_GRAPH_TEMPORAL_JOBS \
+  SPUR_EMBEDDING_MODEL=jina-code RUST_LOG=spur_graph::git_walk=debug \
+  /tmp/spur-turso-telemetry.KmIJrb/spur-aaa366cf7 graph build \
+  --root /tmp/spur-turso-telemetry.KmIJrb/on/repo \
+  --output /tmp/spur-turso-telemetry.KmIJrb/on/graph \
+  --with-temporal --no-section-embeddings --no-code-symbol-embeddings \
+  --no-analyst --temporal-jobs 8
+```
+
+Both exited zero and reported the identical workload summary: mode Full, source
+commit count 5,269, temporal workers 8, final files 1,620, nodes 59,141, edges
+289,851, section rows 1,583, and final code-symbol rows 52,943. The enabled
+stderr contained one structured summary with `telemetry_enabled=true` and no
+per-key identifier.
+
+### Paired timing and instrumentation cost
+
+| Telemetry | Real s | User s | System s | CPU work s | Mean CPU | Peak RSS bytes | Commits/s | Reclaims | Faults | Voluntary ctx | Involuntary ctx |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| off | 777.82 | 1,664.03 | 37.19 | 1,701.22 | 218.716% | 3,434,250,240 | 6.774061 | 1,388,246 | 8,079 | 1,033,134 | 250,462 |
+| on | 771.22 | 1,658.39 | 39.77 | 1,698.16 | 220.191% | 3,442,720,768 | 6.832032 | 1,382,329 | 8,074 | 1,034,887 | 241,256 |
+
+Enabled/off ratios were wall `0.991515x`, CPU work `0.998201x`, RSS
+`1.002466x`, and throughput `1.008558x`. This single pair does not establish a
+telemetry speedup; it shows no measurable positive instrumentation overhead.
+Neither run was censored and their workload summaries match, so the enabled
+profile is representative. No `risk` signal was required.
+
+### Enabled telemetry accounting
+
+Cache classification covered 247,899 lookups: 133,958 hits (54.0373%), 22,530
+cold initializations (9.0884%), and 91,411 reparses after eviction (36.8743%).
+There were 113,941 successful and zero failed initializations; all 113,941
+initialized entries were eventually evicted.
+
+| Cache counter | Value |
+|---|---:|
+| total / cold / reparse initialization time | 1,534.530646 / 427.525594 / 1,107.005053 s |
+| cache-hit / initialization-lock-wait time | 627.404833 / 628.739238 s |
+| reparse / cold / all initialization share of active-worker time | 49.4837% / 19.1106% / 68.5943% |
+| current / peak cache entries | 0 / 1,608 |
+| current / peak retained payload estimate | 0 / 43,368,240 bytes (41.3592 MiB) |
+| reuse-distance count / sum / max / mean | 91,411 / 3,175,797 / 4,702 / 34.742 ordinals |
+| current / peak exact ghost keys | 22,530 / 22,530 |
+
+The initialization-lock value is emitted as `cache_lock_wait_nanos`; it is the
+plan's initialization-lock-wait counter. Durations are summed across concurrent
+calls and therefore are not additive wall-clock phases.
+
+| Worker/reducer counter | Value |
+|---|---:|
+| pool elapsed / summed active-worker time | 733.372648 / 2,237.110903 s |
+| time-weighted average active workers | 3.050 of 8 (38.125% capacity utilization) |
+| completed out of order | 3,755 (71.2659% of commits) |
+| admission-window-full receive wait | 671.749076 s (91.5972% of pool elapsed) |
+| next-ordinal-blocked wait | 648.013143 s (88.3607% of pool elapsed) |
+| coordinator send blocked | 0.011538 s (0.001573% of pool elapsed) |
+| max in-flight / queued / active / result occupancy / reducer pending | 8 / 8 / 8 / 8 / 7 |
+
+Admission and next-ordinal waits describe overlapping coordinator states and
+must not be summed. Scheduler evidence exists (3.05 average workers and 1.95
+workers below the five-worker gate), but the ordered cache rule is evaluated
+first.
+
+### Rootless xctrace and quack-flamegraph accounting
+
+The profile used the same binary and enabled target from a third fresh clone:
+
+```bash
+/usr/bin/time -l -o /tmp/spur-turso-telemetry.KmIJrb/profile/xctrace-time.txt \
+  /usr/bin/env -u SPUR_GRAPH_TEMPORAL_JOBS \
+  DEVELOPER_DIR=/Applications/Xcode-15.4.0.app/Contents/Developer \
+  xcrun xctrace record --template 'Time Profiler' --time-limit 1200s \
+  --output /tmp/spur-turso-telemetry.KmIJrb/profile/enabled.trace \
+  --no-prompt \
+  --target-stdout /tmp/spur-turso-telemetry.KmIJrb/profile/stdout.txt \
+  --env SPUR_EMBEDDING_MODEL=jina-code \
+  --env RUST_LOG=spur_graph::git_walk=debug --launch -- \
+  /tmp/spur-turso-telemetry.KmIJrb/spur-aaa366cf7 graph build \
+  --root /tmp/spur-turso-telemetry.KmIJrb/profile/repo \
+  --output /tmp/spur-turso-telemetry.KmIJrb/profile/graph \
+  --with-temporal --no-section-embeddings --no-code-symbol-embeddings \
+  --no-analyst --temporal-jobs 8
+```
+
+It completed Full in 854.39 seconds including xctrace launch/save, with 1,754.38
+CPU-seconds and 3,491,463,168-byte peak RSS. Its reparse count differed from the
+timed enabled run by only +0.3380%, and its reparse/active-worker ratio was
+49.3039% versus 49.4837%, supporting representativeness.
+
+The trace was ZIP-preserved before conversion, and the disposable copy was
+folded with:
+
+```bash
+XCTRACE=/Applications/Xcode-15.4.0.app/Contents/Developer/usr/bin/xctrace \
+  /Users/vutch/.cargo/bin/flamegraph --deterministic \
+  --title 'spur graph build — Turso temporal telemetry enabled' \
+  --subtitle 'Xcode Time Profiler, fresh clone, jobs=8, 1200s bound' \
+  --post-process \
+  '/usr/bin/tee /tmp/spur-turso-telemetry.KmIJrb/profile/enabled.folded' \
+  --perfdata /tmp/spur-turso-telemetry.KmIJrb/profile/for-flamegraph.trace \
+  -o /tmp/spur-turso-telemetry.KmIJrb/profile/enabled.svg
+```
+
+DuckDB analysis used official CLI 1.5.5 and the exact local extension. Schema
+discovery preceded every analysis query:
+
+```bash
+/tmp/spur-turso-telemetry.KmIJrb/duckdb-v1.5.5/duckdb -unsigned \
+  /tmp/spur-turso-telemetry.KmIJrb/quack-analysis.duckdb -c "
+  LOAD '/Volumes/Projects/Projects/quack-flamegraph/build/debug/quack_flamegraph.duckdb_extension';
+  SELECT function_name, function_type, parameters, parameter_types
+  FROM duckdb_functions()
+  WHERE function_name IN ('read_folded','flamegraph_coverage',
+    'flamegraph_edges','flamegraph_exclusive','flamegraph_hot_stacks',
+    'flamegraph_inclusive') ORDER BY function_name;
+  DESCRIBE SELECT * FROM read_folded(
+    '/tmp/spur-turso-telemetry.KmIJrb/profile/enabled.folded');
+  DESCRIBE SELECT * FROM flamegraph_coverage(
+    '/tmp/spur-turso-telemetry.KmIJrb/profile/enabled.folded');
+  DESCRIBE SELECT * FROM flamegraph_inclusive(
+    '/tmp/spur-turso-telemetry.KmIJrb/profile/enabled.folded');"
+```
+
+Discovery showed `read_folded(frames VARCHAR[], samples BIGINT, source VARCHAR)`
+and the quack table macros before materialization. The folded corpus has 8,911
+stacks and 1,689,971 samples. Exact-frame results below overlap and are not
+additive. Occurrence-summed inclusive values are used only where the observed
+maximum is one occurrence per stack. Repeated frames use exact-frame
+unique-stack coverage.
+
+| Phase (exact frame) | Method | Max occurrences/stack | Samples | Coverage |
+|---|---|---:|---:|---:|
+| cache scope (`spur_graph::git_walk::cached_extract`) | occurrence-summed inclusive | 1 | 1,545,811 | 91.4697% |
+| extract (`spur_graph::extract::tree_sitter::BytesExtractor::extract`) | occurrence-summed inclusive | 1 | 1,538,590 | 91.0424% |
+| parse (`ts_parser_parse_with_options`) | exact-frame unique-stack | 2 | 421,245 | 24.9262% |
+| query (`<tree_sitter::QueryMatches<T,I> as streaming_iterator::StreamingIterator>::advance`) | occurrence-summed inclusive | 1 | 376,590 | 22.2838% |
+| parent traversal (`ts_node_child_with_descendant`) | occurrence-summed inclusive | 1 | 291,936 | 17.2746% |
+| parent primitive (`ts_node_parent`) | occurrence-summed inclusive | 1 | 290,369 | 17.1819% |
+| token collection (`spur_graph::extract::languages::collect_symbol_tokens`) | exact-frame unique-stack | 255 | 236,773 | 14.0105% |
+| finalization (`spur_graph::store::build::buckets_from_facts`) | occurrence-summed inclusive | 1 | 8,308 | 0.4916% |
+| tree drop (`ts_tree_delete`) | occurrence-summed inclusive | 1 | 40,323 | 2.3860% |
+
+For recursive `collect_symbol_tokens`, occurrence summing produces 2,332,979
+samples (138.0485% of the profile), a 9.853231x inflation; that value is retained
+only as the recursion diagnostic and is not used as inclusive phase coverage.
+The repeated parse wrapper similarly uses unique-stack coverage, although its
+occurrence inflation is only 1.000012x. The final method audit reports zero
+non-recursive targets with more than one occurrence and zero repeated targets
+using occurrence-summed reporting.
+
+### Solver decision: cache only
+
+The decision encoding maps `0=cache`, `1=scheduler`, and `2=neither`. It fixes
+the measured reparse share at 4,948 basis points, average activity at 3,050
+milli-workers, and the observed missing-capacity wait predicate to true, then
+applies the plan's ordered rules:
+
+```bash
+/opt/homebrew/bin/z3 -T:30 \
+  /tmp/spur-turso-telemetry.KmIJrb/solver-decision.smt2
+```
+
+Z3 4.16.0 returned `sat` with `decision = 0`. Therefore recommend exactly one
+next implementation patch: **a byte-budgeted reuse-aware cache**. Its separate
+follow-up issue/plan must run solve before and after the change and sweep measured
+byte budgets without exceeding 4 GiB RSS. Do not combine ready-worker dispatch,
+reorder-capacity changes, or any other scheduler tuning with that patch. The
+worker environment exposed no issue-creation mutation (`bd` was absent and the
+worker MCP is read-only for issue state), so the orchestrator must materialize
+this sole selected follow-up as the new beads issue/plan; no second recommendation
+was emitted and no Rust was edited here.
+
+### Artifacts and completion audit
+
+All artifacts live under `/tmp/spur-turso-telemetry.KmIJrb` (3.9 GiB). The full
+checksum manifest is
+`/tmp/spur-turso-telemetry.KmIJrb/artifact-sha256.txt`, SHA-256
+`44817a78a6d44e1888aa9ca6139501fcc7eeb7822829e3cd0a64c88b99813856`;
+every ordinary file entry passed `shasum -a 256 -c`.
+
+| Artifact | SHA-256 |
+|---|---|
+| `off/time.txt` | `0f79f00e8940277604a27cf97aa851341720c7dddb34dca430bc9704552d5beb` |
+| `on/time.txt` | `d691f11ca50c3ebf8f02865426544939f4e0d7da71b5798a79f53624aa45c520` |
+| `on/stderr.txt` (telemetry) | `81f7e5e49fe6a9d5f4ca71a90f617b76962ac1c5ebd0fbb70ea18eae0f3ffd2f` |
+| `profile/enabled.trace.zip` | `3849da7b2bcf5bcb72a5020a2f86e751608df1edf7d5d2212e0f36899e91804e` |
+| `profile/time-profile.xml` | `4a69d53bacc0269849e9cba2554859e5a5a5b32420fa290a84c41e078ea5858b` |
+| `profile/enabled.folded` | `e815bf95e72b517efed3e5a423bff533c3b00aca9e27b64f6207b2cc85fe097e` |
+| `profile/enabled.svg` | `fa6aec69d58eeb26245554ffeb8e8d95228756df2bcc15331ca5ae21b42edf26` |
+| `profile/reported-exact-frame-metrics.csv` | `5e2530557a75abe5fd405e4c6a4cb3c9cb11674de9b840ee73eef339c88af5fe` |
+| `quack-analysis.duckdb` | `8062583cfa47f846685e8fd3477b25411141267f1448ecf9608fb0ee90e99283` |
+| `solver-decision.smt2` / result | `0a104a9e667893c1107742c44f06d6ced28e10773a9d75e3ba68e359c30eee00` / `2ee9463e5ba88ab82c5998f2276690edc52b6cd4783e8babfc394286aff0f905` |
+
+Completion audit: base `aaa366cf7` and Turso `a45cd87f` were reverified;
+three independent cold clones and graph outputs remain under `/tmp`; timed runs
+and profile are uncensored Full jobs=8 builds; telemetry overhead preserves
+profile validity; every required counter is present; schema discovery precedes
+quack analysis; recursion handling passes its method audit; the solver selects
+one cache recommendation; only this plan document is modified; no
+`scope_drift` or `risk` condition occurred.
