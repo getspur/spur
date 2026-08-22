@@ -561,6 +561,17 @@ keeping the same evidence-focused commit intent.
 
 **Task ID:** `task-4-final-profile`
 
+> **User-approved execution amendment (2026-08-22):** Use the mounted
+> `/Volumes/Projects/Projects/ade-bench` checkout for a faster feedback loop,
+> and compare explicit zero against explicit 64 MiB. The compiled default
+> remained zero after Task 3, so profiling an unset default would only repeat
+> the control and would not expose the retained-cache path. Reuse the frozen
+> profiling binary only after proving that Task 3 changed no Rust or build
+> input. This amendment supersedes Task 4's Turso/new-binary/default-run details;
+> its Full-mode, provenance, recursion, identity, DuckDB, and no-Rust-change
+> gates remain binding. Results are directional for ade-bench and are not a
+> controlled CPU-profile delta against Turso.
+
 **Files:**
 
 - Modify: `docs/superpowers/plans/2026-08-22-byte-budgeted-temporal-parse-cache.md`
@@ -985,3 +996,331 @@ out, but subsequent review processed the signal, recorded by
 `spur:signal-processed:86758fd5`. This amendment discovered no new drift or
 risk, so it emitted no duplicate signal. Source issue `bd-mehk` remains open;
 no integration action was taken.
+
+## Task 4 results — ade-bench xctrace and quack-flamegraph (2026-08-22)
+
+### Decision
+
+The explicit 64 MiB retained tier is a directional win on ade-bench, but it
+does **not** change the Task 3 production decision: the compiled default stays
+at **0 bytes**. One fresh zero run and one fresh 64 MiB run completed Full with
+the same canonical graph. Relative to zero, 64 MiB improved wall time by
+14.1221%, CPU work by 16.9435%, eliminated all 1,861 reparses, and reduced RSS
+by 2.1957%. Strict output identity still failed because diagnostics and raw
+Lance/Parquet bytes differ even though canonical core-table multisets match.
+
+The current forced-64 profile localizes the next locally owned,
+semantics-preserving opportunity to tree-sitter **query compilation**, not the
+previous parent-walk or recursive-token readings. `compile_queries` has
+1,388/6,777 unique-stack samples (20.481%) with maximum one occurrence per
+stack. Parent traversal has 227/6,777 unique-stack samples (3.350%).
+`collect_symbol_tokens` has only 263/6,777 unique-stack samples (3.881%); its
+2,014 occurrence-summed samples (29.718%) are inflated by recursion up to 22
+occurrences per stack.
+
+### Provenance and amended method
+
+The complete 519 MiB evidence root is
+`/tmp/spur-ade-cache.m80Zts`. The approved Task 3 tip was
+`432f560bcedfe913ca77b18b6e3fae5755b79237`, tree
+`933f300bf42d31ace2df7255fdebf1dcd91d2198`. The frozen binary was built from
+Task 2 commit `6689c8ed0ca78771263ba5a1eeab4921be874d02`; an exact scoped diff from that
+commit through the Task 3 tip over `crates`, `Cargo.toml`, `Cargo.lock`,
+`xtask`, and `scripts` exited zero, proving that the intervening commits changed
+no Rust or build input. Reusing the binary therefore did not reuse stale
+production code.
+
+ade-bench provenance was:
+
+| Item | Value |
+|---|---|
+| Mounted source | `/Volumes/Projects/Projects/ade-bench` |
+| Commit | `efb8cd576f8127a2427106a553e96ccc8083b7a0` |
+| Tree | `49493be6b430ee6444a22c40053d9ec5d70edaad` |
+| Branch | `feat/spur-agent` |
+| Source history / tracked files | 427 commits / 1,526 files |
+| Walked Full workload | 278 reachable commits / 1,049 input files |
+| Output summary | 1,057 files, 5,799 displayed nodes, 15,856 displayed edges |
+
+The zero, forced-64, and profile clones were distinct local
+`--no-hardlinks` clones. Each was clean, contained neither `.spur` nor
+`.git/spur-graph`, and had no hard-linked Git objects. All commands used
+`--with-temporal --no-section-embeddings --no-code-symbol-embeddings
+--no-analyst --temporal-jobs 8`, `SPUR_EMBEDDING_MODEL=jina-code`, Full mode,
+and a 1,800-second timeout for the unprofiled controls. The only A/B variable
+was:
+
+```text
+zero:     SPUR_GRAPH_TEMPORAL_PARSE_CACHE_BYTES=0
+forced64: SPUR_GRAPH_TEMPORAL_PARSE_CACHE_BYTES=67108864
+```
+
+Exact expanded commands are preserved in `zero/command.txt`,
+`forced64/command.txt`, `profile/record-command.txt`, and
+`profile/fold-command.txt`. Both A/B runs, xctrace, and both deterministic fold
+passes exited zero. The trace used actual `xctrace version 15.3 (15F31d)` from
+the requested Xcode application path.
+
+| Tool/artifact | Version or SHA-256 |
+|---|---|
+| SPUR profiling binary (`spur 1.21.0`) | `42ee2f0b07411111a9a153f656c79621e1ef2736cc9088cec93cc9d9a7645f06` |
+| DuckDB CLI | `v1.5.5 (Variegata) d8cdaa33fd`; binary `1018d0d1ed5b87b4bee5fc0f09d060dbf20bd1d329c2cc911facec8847c1a4f8` |
+| quack-flamegraph commit / tree | `bcc78d53cbf6e1564490af5da106311b1eedec43` / `3ede9c6562da2fa02d5d545fb381c02fcb53d1c8` |
+| quack extension | `6679979078c54714808bf30dc28992d9cf5eb21ba3d8fe0c9db941902f235e4b` |
+| Xcode `xctrace` | `5af2fb6481ac7e73bd4240bd4ddc268e215c9226a9709f4075a818d30f383e0f` |
+| Trace ZIP | `a58a7278cd1c3ccfa7171e8551cc203e6b059b7db94ecd581cc286f18cb1d3e4` |
+| Folded (786,419 bytes) | `cbba483213669606534efe2fd431e26c6ba2f4ac4919d8a6e0abba0cb0634924` |
+| SVG (614,726 bytes) | `70ed6362ee9338b8506cf30f2912ee6b1bb5c2a26d3ecc68de10da8a24ca355d` |
+| Exact SQL suite | `bae527ccdde820fdeb93c05c332730719c248f312b781bcbeda399b141d8c4d0` |
+| 30-entry checksum manifest | `f694f8ad47975645a8a00dd1f015b7bcca89f7b7a75dd39397abfbd3555126e1` |
+
+The repeat fold and SVG are byte-identical to the first fold and SVG. The
+checksum manifest is `analysis/checksums.sha256`; `shasum -a 256 -c` returned
+`OK` for all 30 entries.
+
+### A/B runtime and telemetry
+
+Both runs were uncensored Full executions below 4 GiB:
+
+| Run | Real s | User s | Sys s | CPU work s | Peak RSS bytes | Pool s | Avg active workers |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| explicit zero | 5.24 | 8.36 | 0.67 | 9.03 | 293,994,496 | 2.525185 | 2.782 |
+| explicit 64 MiB | 4.50 | 6.83 | 0.67 | 7.50 | 287,539,200 | 1.763205 | 3.227 |
+
+| Metric | Zero | 64 MiB | Relative change |
+|---|---:|---:|---:|
+| Wall | 5.24 s | 4.50 s | -14.1221% |
+| CPU work | 9.03 s | 7.50 s | -16.9435% |
+| Peak RSS | 293,994,496 B | 287,539,200 B | -2.1957% |
+| Active-worker work | 7.026525 s | 5.690195 s | -19.0184% |
+| Average active workers | 2.782 | 3.227 | +15.9957% |
+| Admission-window receive wait | 2.434673 s | 1.660821 s | -31.7847% |
+| Next-ordinal blocked wait | 2.361293 s | 1.601224 s | -32.1887% |
+
+Average active occupancy rose from 34.775% to 40.338% of the eight configured
+slots during the worker-pool interval. This is not an eight-core utilization
+claim for the whole command; it is the pool's own active-worker telemetry.
+
+| Cache metric | Zero | 64 MiB |
+|---|---:|---:|
+| Cache hits | 4,171 | 6,032 |
+| Cold initializations | 2,664 | 2,664 |
+| Reparse initializations | 1,861 | 0 |
+| Retained-tier hits | 0 | 1,818 |
+| Budget evictions | 4,525 | 0 |
+| Initialization work | 5.671369 s | 4.092867 s |
+| Reparse initialization work | 1.606348 s | 0 s |
+| Retained-tier current/peak | 0 / 0 B | 7,139,780 / 7,139,780 B |
+
+The ade-bench working set used only 6.809 MiB of the 64 MiB allowance and had
+no budget eviction. Total cache-lock wait rose 30.6644% because cache hits rose
+44.6176%; wait per hit fell from 168.286 to 152.050 microseconds (-9.6483%).
+The on-CPU profile attributes only eight samples (0.119%) to the two explicit
+cache-lock frames, so lock time remains off-CPU telemetry and is not added to
+sample coverage.
+
+The separate xctrace run reproduced the intended cache state: 2,664 cold
+initializations, zero reparses, 1,837 retained hits, zero budget evictions,
+7,139,780 peak retained-tier bytes, 3.125 average active workers, and
+5.687683 seconds of active-worker work.
+
+### Artifact identity: canonical pass, strict fail
+
+The normalized stdout workload summary is byte-equal with shared SHA-256
+`dc5d9c06c02de7f224229d2da5ef4aafb6821de39286d3a9a681da5dcd98a5a0`.
+Both graphs advertise content hash
+`f375e6833c3fd0e919e5d3b33b2ea6cb478d29a44bed13d523d09a9da9ea5f3d`,
+and `manifest.json` is byte-identical with SHA-256
+`a3a843f630c6c2c4a0a0a833434e4b4f2692339a2e0d8ba8d6f8ea802e2bf193`.
+
+DuckDB `EXCEPT ALL` in both directions proves multiset equality for every
+canonical core table below:
+
+| Table | Rows per run | Zero-only / 64-only rows |
+|---|---:|---:|
+| commits | 278 | 0 / 0 |
+| edges | 9,566 | 0 / 0 |
+| edges_by_dst | 9,566 | 0 / 0 |
+| edges_unresolved | 6,290 | 0 / 0 |
+| file_manifests | 1,057 | 0 / 0 |
+| files | 1,057 | 0 / 0 |
+| nodes | 4,742 | 0 / 0 |
+| symbol_snapshots | 17,659 | 0 / 0 |
+| temporal_edges | 29,166 | 0 / 0 |
+| tombstones | 0 | 0 / 0 |
+
+Strict identity is false. Each diagnostics relation has 284 rows, with 20
+zero-only and 20 forced-64-only `ambiguous_rename` messages. The complete raw
+artifact trees have 66 differing entries: fresh UUID-bearing Lance index and
+transaction metadata dominate the physical differences, and the snapshot and
+temporal Parquet files have different bytes despite equal row multisets. This
+mirrors Task 3's zero-vs-zero nondeterminism and does not prove a cache-induced
+semantic change, but it still fails the declared byte/diagnostic identity gate.
+
+### DuckDB/quack-flamegraph schema and query discipline
+
+The original analysis attempt stopped correctly because the extension was
+built for DuckDB 1.5.5 while PATH still resolved 1.5.3. The final analysis used
+the explicit compatible executable:
+
+```bash
+/opt/homebrew/opt/duckdb/bin/duckdb -unsigned :memory: \
+  < /tmp/spur-ade-cache.m80Zts/analysis/final-analysis.sql
+```
+
+Schema discovery ran before materialization. `read_folded(path VARCHAR)`
+returns `(frames VARCHAR[], samples BIGINT, source VARCHAR)`. The table macros
+return:
+
+| Macro | Output |
+|---|---|
+| `flamegraph_exclusive` | `(leaf VARCHAR, exclusive BIGINT)` |
+| `flamegraph_coverage` | `(frame VARCHAR, coverage BIGINT, n_stacks BIGINT)` |
+| `flamegraph_edges` | `(parent VARCHAR, child VARCHAR, samples BIGINT)` |
+| `flamegraph_hot_stacks` | `(samples BIGINT, depth BIGINT, leaf VARCHAR, frames VARCHAR[])` |
+| `flamegraph_inclusive` | `(frame VARCHAR, inclusive BIGINT)` |
+
+The exact 512-line query suite and every CSV result are under `analysis/` in
+the evidence root. It assigns a deterministic stack ID, aggregates occurrences
+per `(stack, frame)`, and derives both unique-stack coverage and
+occurrence-summed inclusive counts:
+
+```sql
+SELECT frame,
+       sum(samples) AS coverage,
+       sum(samples * occurrences) AS occurrence_inclusive,
+       max(occurrences) AS max_occurrences
+FROM stack_frames
+GROUP BY frame;
+```
+
+Only rows with `max_occurrences = 1` are treated as safe occurrence-summed
+coverage. Union metrics such as parent traversal instead use one stack-level
+predicate:
+
+```sql
+SELECT sum(samples)
+FROM read_folded('/tmp/spur-ade-cache.m80Zts/profile/forced64.folded')
+WHERE list_contains(frames, 'ts_node_parent')
+   OR list_contains(frames, 'ts_node_child_with_descendant');
+```
+
+### On-CPU profile from different angles
+
+The folded file contains 1,095 nonzero stacks, 6,777 samples, 1,020 distinct
+frame names, and 101,448 occurrence-weighted frames. Sample-weighted mean,
+median, and p90 stack depths are 14.969, 14, and 19; maximum depth is 73.
+Application symbols appear in 1,027 stacks covering 6,667 samples (98.377%).
+Only one sample contains an unknown/address frame, so symbolication is adequate
+for directional attribution.
+
+The mutually exclusive stack-domain partition is:
+
+| Domain | Samples | Share |
+|---|---:|---:|
+| Parse | 2,483 | 36.639% |
+| Query compilation | 1,388 | 20.481% |
+| Query execution | 936 | 13.811% |
+| Pending-edge resolution | 516 | 7.614% |
+| Runtime/other | 479 | 7.068% |
+| Graph store and sidecars | 445 | 6.566% |
+| Token collection | 263 | 3.881% |
+| Cache-path remainder | 142 | 2.095% |
+| Other extraction | 106 | 1.564% |
+| Process spawn | 19 | 0.280% |
+
+Overlapping exact-frame coverage provides the call-path view:
+
+| Target | Unique-stack samples | Coverage | Max occurrences |
+|---|---:|---:|---:|
+| `SharedParseCache::get_or_init_with_ordinal` path | 4,122 | 60.823% | 1 |
+| `BytesExtractor::extract` | 2,994 | 44.179% | 1 |
+| `ts_parser_parse_with_options` | 2,483 | 36.639% | 1 |
+| `compile_queries` | 1,388 | 20.481% | 1 |
+| `run_query` | 936 | 13.811% | 1 |
+| `resolve_pending_edges` | 516 | 7.614% | 1 |
+| `collect_symbol_tokens` | 263 | 3.881% | 22 |
+| parent-node union | 227 | 3.350% | 2 across the union |
+| `buckets_from_facts` | 93 | 1.372% | 1 |
+| `ts_tree_delete` | 90 | 1.328% | 1 |
+| cache state + initialization locks | 8 | 0.119% | 1 |
+
+The cache wrapper's 60.823% is not self time; it encloses extraction on misses.
+Direct edges show 2,994 samples from the cache wrapper into extraction and
+1,114 samples into `BytesExtractor::new`. Every one of the 1,388
+`compile_queries` samples flows directly into `tree_sitter::Query::new`.
+Within that phase, the largest exclusive leaves are
+`ts_query__perform_analysis` (730 samples, 10.773% of the whole profile),
+`ts_query_new` (271, 3.999%), `analysis_state_set__insert_sorted` (243,
+3.586%), and `_platform_memmove` (90, 1.328%).
+
+The recursion audit overturns the misleading unnest reading. Token collection
+appears as 2,014 occurrence-summed samples (29.718%) but covers only 263 sample
+stacks (3.881%); 153 stacks repeat the frame and the maximum is 22. Parent
+traversal similarly has 434 occurrence-summed samples but only 227 unique-stack
+samples. `compile_queries` has no recurrence, so its 20.481% is both inclusive
+and unique-stack coverage.
+
+There is no zero-budget CPU profile in this amended short loop, so this report
+does not claim a controlled before/after hotspot shift. The earlier Turso
+profile is a different repository and workload; its percentages are context,
+not a statistical delta. The A/B runtime and telemetry comparison is controlled
+only for the two unprofiled ade-bench runs.
+
+### Solver-backed prioritization and exactly one next action
+
+Catalog discovery (`solve_rule_spec`, registry schema 1) found no implemented
+performance-selection rule, so a finite generic optimization was used. The
+request mapped measured unique-stack coverage and implementation facts for
+query compilation, parsing, query execution, pending-edge resolution, token
+collection, parent traversal, and cache locks. Eligibility required at least
+5% measured coverage, a locally owned lever, a proven dependency contract, and
+no query/parse algorithm change. Lexicographic objectives maximized coverage
+then minimized risk.
+
+`solve_constraint_check` returned valid (six variables, eleven hard
+constraints, two objectives). The persisted and reloaded result
+`sol_77030f6ff4584447` returned `sat` in 50 ms with Z3 4.16.0 and the model:
+
+```text
+candidate=query_compile
+coverage_bp=2048
+local_lever=true
+share_contract_proven=true
+requires_algorithm_change=false
+risk_score=1
+```
+
+The sharing contract is grounded at the exact locked dependency revision,
+`tree-sitter` 0.25.10 (Cargo checksum
+`78f873475d258561b06f1c595d93308a7ed124d9977cb26b148c2084a4a3cc87`).
+Upstream explicitly implements both `Send` and `Sync` for `Query`. Locally,
+`BytesExtractor` owns `CompiledQueries`, each worker owns a
+`SymbolDiffCtx`/extractor map, and `run_query` creates a fresh `QueryCursor` per
+call. Thus immutable query objects can be shared without sharing mutable parser
+or cursor state.
+
+**Exactly one next action:** prototype a build-scoped immutable
+`Arc<CompiledQueries>` cache keyed by `Language` (or exact language/query-source
+identity), shared across all `BytesExtractor` instances, while keeping each
+`Parser` worker-local and each `QueryCursor` call-local. Add a compilation-count
+assertion plus existing jobs 1/2/4/8 canonical-output checks, then accept the
+change only after a controlled ade-bench A/B and a larger Turso confirmation
+reduce wall/CPU without changing canonical graph or diagnostic semantics.
+
+This target has an Amdahl on-CPU ceiling, not a forecast: eliminating all
+20.481% query-compilation samples would bound ideal sample-time speedup at
+`1 / (1 - 0.20481) = 1.2576x`. Parallel overlap, one unavoidable compilation
+per language, and the short 6,777-sample run make the achievable wall gain
+smaller and currently unknown. The solver proves only that this is the unique
+eligible candidate under the encoded selection gates; the benchmark must prove
+the speedup.
+
+### Verification and collaboration record
+
+The SQL suite completed against DuckDB 1.5.5 with exit zero. Both deterministic
+fold passes were byte-identical, all 30 checksum entries verified, canonical
+core-table multiset comparisons were symmetric, and the documented strict
+diagnostic/raw-byte failure is preserved rather than normalized away. The
+repository change for Task 4 is this plan document only; no Rust source,
+compiled cache default, scheduler, query walker, or token logic changed.
