@@ -723,14 +723,14 @@ but the strict enablement gate did not pass:
 
 1. Ordinary-file artifact manifests and `diagnostics.parquet` multisets did not
    match, including between the two zero controls. Canonical graph content and
-   workload summaries matched, but exact artifact identity is therefore
-   inconclusive.
-2. The generic solver's required typed-language discovery timed out twice at
-   the provider's 300-second boundary. Task policy defines timeout as
-   inconclusive/zero and forbids hand-authoring a request without the live
-   language contract.
+   workload summaries matched, but strict artifact identity is false. The zero
+   controls also differ, so the diagnostic differences cannot be attributed to
+   the cache.
+2. Independent review subsequently completed catalog-first discovery, typed
+   request validation, a persisted solve, and reload. The authoritative
+   `sat` model selects zero because `artifact_identity=false` excludes 64 MiB.
 3. The 128 MiB and 256 MiB sweep observations also exceeded 4 GiB RSS. They
-   were individually disqualified before comparison or optimization.
+   are excluded by their false RSS gates.
 
 No Rust source was changed. In particular,
 `DEFAULT_TEMPORAL_PARSE_CACHE_BUDGET_BYTES` remains the approved Task 1 value
@@ -862,23 +862,79 @@ but the raw file-manifest hashes were all distinct and total bytes ranged from
 UUID-bearing metadata. More importantly, the 291,701-row diagnostics datasets
 had different message multisets. Symmetric differences versus initial zero
 were 91,328 rows for mib64, 92,204 for mib128, 95,304 for mib256, 91,044 for
-mib64 repeat, and **92,800 even for zero repeat**. This baseline-repeat failure
-makes exact artifact equivalence inconclusive rather than attributable to the
-cache candidate; the strict rule still denies enablement.
+mib64 repeat, and **92,800 even for zero repeat**. Independent review
+recomputed the selection-relevant pairwise multiset distances as follows:
+
+| Diagnostics pair | Symmetric multiset distance |
+|---|---:|
+| zero vs zero repeat | 92,800 |
+| 64 MiB vs 64 MiB repeat | 93,276 |
+| initial zero vs initial 64 MiB | 91,328 |
+| repeat zero vs repeat 64 MiB | 95,284 |
+
+The nonzero zero-vs-zero-repeat distance establishes baseline nondeterminism.
+Therefore these diagnostic differences cannot be attributed to the cache, but
+strict artifact identity is still false and the rule still denies enablement.
 
 ### Solver and gate audit
 
 `solve_rule_spec({})` completed first (registry schema 1) and showed no
 applicable implemented rule among accessibility/design/policy/resource, so the
-generic typed solver was required. Before any request was authored,
-`solve_constraint_spec` was attempted with catalog summary, request example,
-limits summary, and a clean summary retry. The limits and clean retry each
-returned `timed out awaiting tools/call after 300s`. Under the solve workflow,
-the missing live typed contract forbids guessing a request and therefore no
-`solve_constraint_check`, persisted `solve_id`, or reload exists. The raw
-catalog and timeout record are preserved as `solver-rule-catalog.txt` and
-`solver-timeout.txt`. Timeout is explicitly inconclusive/zero, consistent with
-the independent artifact gate.
+generic typed solver was required. As operational history, the original worker
+attempted `solve_constraint_spec` with catalog summary, request example, limits
+summary, and a clean summary retry; the limits and clean retry each returned
+`timed out awaiting tools/call after 300s`. The raw catalog and timeout record
+remain preserved as `solver-rule-catalog.txt` and `solver-timeout.txt`.
+
+The solver service later recovered. Independent review performed catalog-first
+discovery, validated the exact typed request with `solve_constraint_check`,
+persisted the solve, and reloaded it with
+`get_solve_result("sol_871df45029524836")`. The finite request declared
+`budget_bytes` in `{0, 67108864, 134217728, 268435456}`, fixed the measured gate
+facts, and encoded nonzero eligibility as:
+
+```text
+budget_bytes =  67108864 ->
+  mib64_rss_pass && mib64_reparse_both_pass && mib64_perf_pass &&
+  mib64_other_metric_pass && mib64_repeat_sign_pass &&
+  mib64_artifact_identity_pass
+budget_bytes = 134217728 -> mib128_rss_pass
+budget_bytes = 268435456 -> mib256_rss_pass
+```
+
+Zero is the finite-domain fallback. The fixed facts were
+`mib64_rss_pass=true`, `mib64_reparse_both_pass=true`,
+`mib64_perf_pass=true`, `mib64_other_metric_pass=true`,
+`mib64_repeat_sign_pass=true`, `mib64_artifact_identity_pass=false`,
+`mib128_rss_pass=false`, and `mib256_rss_pass=false`. The raw reloaded result
+was preceded by a valid schema-1 preflight covering nine variables, twelve hard
+constraints, zero objectives, and no soft constraints. The reload returned:
+
+```json
+{
+  "solve_id": "sol_871df45029524836",
+  "z3_version": "Z3 version 4.16.0 - 64 bit",
+  "status": "sat",
+  "model": {
+    "budget_bytes": 0,
+    "mib128_rss_pass": false,
+    "mib256_rss_pass": false,
+    "mib64_artifact_identity_pass": false,
+    "mib64_other_metric_pass": true,
+    "mib64_perf_pass": true,
+    "mib64_reparse_both_pass": true,
+    "mib64_repeat_sign_pass": true,
+    "mib64_rss_pass": true
+  },
+  "duration_ms": 26,
+  "reason": null
+}
+```
+
+Interpretation: the original timeouts remain useful operational history but
+are no longer a decision blocker. The persisted `sat` model is authoritative:
+64 MiB is excluded only by strict artifact identity, 128 MiB and 256 MiB are
+excluded by RSS, and zero is the sole eligible candidate.
 
 | Gate | Evidence | Result |
 |---|---|---|
@@ -889,8 +945,8 @@ the independent artifact gate.
 | Median wall or CPU improves at least 3% | wall +65.3819%; CPU +63.4409% | pass |
 | Other timing metric regresses no more than 3% | both improve | pass |
 | Initial/repeat direction agrees | wall, CPU, reparses all improve both times | pass |
-| Artifact and workload identity | workload/canonical graph match; raw artifacts and diagnostics do not | **fail/inconclusive** |
-| Persisted/reloaded solver decision | typed spec timed out at 300s; timeout means zero | **inconclusive → zero** |
+| Artifact and workload identity | workload/canonical graph match; all six raw manifests and diagnostics differ, including zero vs zero repeat | **fail (`artifact_identity=false`)** |
+| Persisted/reloaded solver decision | `sol_871df45029524836`: `sat`, `budget_bytes=0` | **pass → zero** |
 
 The single production decision is therefore: **retain zero bytes**.
 
@@ -913,12 +969,19 @@ artifact root.
 
 The artifact root occupied 6.2 GiB at manifest time. Its checksum manifest
 contains 28,170 ordinary files (excluding the manifest and its check output),
-passed `shasum -a 256 -c` for every entry, and has SHA-256
+independently passed `shasum -a 256 -c` with exit 0 for every entry, and has
+SHA-256
 `b8726f27e52e34e9292147af3f55b91d7f3c5e77e1dd850bb01163239d01a8d3`.
+Independent review also recomputed the paired medians as 775.78 s wall and
+1,702.56 s CPU for zero versus 268.56 s wall and 622.44 s CPU for 64 MiB, and
+confirmed one shared canonical-manifest hash, graph-content hash, and workload
+hash across all six runs while all six raw manifests differ.
 
-A high-severity `scope_drift` signal was attempted for bead `bd-35n9` with
-signal ID `b9b871ba-f2ce-4402-be13-75b32d530fb9`: strict diagnostics artifact
-identity cannot be established or fixed without out-of-scope artifact/test or
-production changes. The worker MCP did not acknowledge the mutation before its
-tool-call timeout, so this report preserves the exact sentinel intent for the
-reviewer. Source issue `bd-mehk` remains open; no integration action was taken.
+The original worker attempted a high-severity `scope_drift` signal for bead
+`bd-35n9` with signal ID `b9b871ba-f2ce-4402-be13-75b32d530fb9`: strict
+diagnostics artifact identity cannot be established or fixed without
+out-of-scope artifact/test or production changes. Its worker-side call timed
+out, but subsequent review processed the signal, recorded by
+`spur:signal-processed:86758fd5`. This amendment discovered no new drift or
+risk, so it emitted no duplicate signal. Source issue `bd-mehk` remains open;
+no integration action was taken.
