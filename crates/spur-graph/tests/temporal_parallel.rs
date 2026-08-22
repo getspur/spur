@@ -30,26 +30,13 @@ fn serial_parallel_temporal_artifacts_and_shards_are_deterministic() -> anyhow::
     build_fixture(source.path());
 
     let serial = construct_from_fresh_clone(source.path(), 1)?;
-    let parallel_runs = [
-        construct_from_fresh_clone(source.path(), 8)?,
-        construct_from_fresh_clone(source.path(), 8)?,
-        construct_from_fresh_clone(source.path(), 8)?,
-    ];
-
-    for (run, parallel) in parallel_runs.iter().enumerate() {
-        assert_walk_output_eq(
-            &format!("jobs=1 vs jobs=8 run {}", run + 1),
-            &serial,
-            parallel,
-        );
+    for jobs in [2, 4, 8] {
+        let parallel = construct_from_fresh_clone(source.path(), jobs)?;
+        assert_walk_output_eq(&format!("jobs=1 vs jobs={jobs}"), &serial, &parallel);
     }
-    for run in 1..parallel_runs.len() {
-        assert_walk_output_eq(
-            &format!("jobs=8 run 1 vs run {}", run + 1),
-            &parallel_runs[0],
-            &parallel_runs[run],
-        );
-    }
+    let repeat_a = construct_from_fresh_clone(source.path(), 8)?;
+    let repeat_b = construct_from_fresh_clone(source.path(), 8)?;
+    assert_walk_output_eq("jobs=8 repeat", &repeat_a, &repeat_b);
 
     Ok(())
 }
