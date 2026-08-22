@@ -496,7 +496,10 @@ impl ReactTrace {
 }
 
 #[cfg(feature = "markdown")]
-use crate::components::line_wrap::wrap_line_to_width;
+use crate::components::line_wrap::{wrap_line_to_width, wrap_line_to_width_with_char_starts};
+
+#[cfg(feature = "markdown")]
+use super::render::{PlainTextTailCache, VirtualRowCacheEntry};
 
 #[cfg(feature = "markdown")]
 use super::types::{InlineImageSource, VirtualRow};
@@ -506,6 +509,238 @@ use crate::components::markdown_stream::{MarkdownStream, StreamItem};
 
 #[cfg(feature = "markdown")]
 use crate::components::mermaid::{fence_placeholder_line, FenceRender, MermaidId};
+
+#[cfg(feature = "markdown")]
+pub(super) type VirtualRowsBuild = (
+    Vec<VirtualRow>,
+    Vec<usize>,
+    Vec<Option<std::ops::Range<usize>>>,
+    Option<PlainTextTailCache>,
+);
+
+/// Markdown punctuation that can retroactively change how an unfinished
+/// paragraph is parsed. Keeping this predicate conservative makes the fast
+/// path an optimization only; unsupported input always uses the established
+/// preview/rebuild renderer.
+#[cfg(feature = "markdown")]
+fn is_plain_stream_text(text: &str) -> bool {
+    !text.is_empty()
+        && !text.chars().any(|ch| {
+            ch.is_control()
+                || matches!(
+                    ch,
+                    '\\' | '`' | '*' | '_' | '[' | ']' | '<' | '>' | '~' | '&' | '!' | '#' | '|'
+                )
+        })
+}
+
+/// Whether appending otherwise-plain bytes can no longer turn the beginning
+/// of this paragraph into a Markdown block construct. A digit-only prefix can
+/// still become an ordered list (`1.` / `1)`), while `-` and `+` can still
+/// become unordered-list markers once a following space arrives.
+#[cfg(feature = "markdown")]
+fn has_append_stable_plain_prefix(text: &str) -> bool {
+    text.trim_start_matches(' ')
+        .chars()
+        .next()
+        .is_some_and(|ch| !ch.is_ascii_digit() && !matches!(ch, '-' | '+'))
+}
+
+#[cfg(feature = "markdown")]
+fn plain_body_style(line: &Line<'_>, raw: &str) -> Option<Style> {
+    let mut spans = line.spans.iter();
+    let indent = spans.next()?;
+    if indent.content.as_ref() != "   " {
+        return None;
+    }
+
+    let first_body = spans.next()?;
+    let body_style = first_body.style;
+    let mut rendered = String::from(first_body.content.as_ref());
+    for span in spans {
+        if span.style != body_style {
+            return None;
+        }
+        rendered.push_str(span.content.as_ref());
+    }
+    (rendered == raw.trim_end_matches(' ')).then_some(body_style)
+}
+
+/// Translate sorted character starts from an indented logical line into byte
+/// starts in the raw body. `prefix_chars` accounts for the three-space body
+/// indent on the first visual suffix only.
+#[cfg(feature = "markdown")]
+fn raw_byte_starts(
+    raw: &str,
+    line_char_starts: &[usize],
+    prefix_chars: usize,
+) -> Option<Vec<usize>> {
+    let mut targets = Vec::with_capacity(line_char_starts.len());
+    for (idx, start) in line_char_starts.iter().copied().enumerate() {
+        if idx > 0 && start < prefix_chars {
+            return None;
+        }
+        targets.push(start.saturating_sub(prefix_chars));
+    }
+    if !targets.windows(2).all(|pair| pair[0] <= pair[1]) {
+        return None;
+    }
+
+    let mut bytes = vec![0; targets.len()];
+    let mut next = 0usize;
+    let mut char_count = 0usize;
+    for (char_idx, (byte_idx, _)) in raw.char_indices().enumerate() {
+        char_count = char_idx + 1;
+        while next < targets.len() && targets[next] == char_idx {
+            bytes[next] = byte_idx;
+            next += 1;
+        }
+    }
+    while next < targets.len() && targets[next] == char_count {
+        bytes[next] = raw.len();
+        next += 1;
+    }
+    (next == targets.len()).then_some(bytes)
+}
+
+#[cfg(feature = "markdown")]
+fn push_plain_wrapped_rows(
+    rows: &mut Vec<VirtualRow>,
+    byte_ranges: &mut Vec<Option<std::ops::Range<usize>>>,
+    line: Line<'static>,
+    raw: &str,
+    raw_base: usize,
+    prefix_chars: usize,
+    effective_width: u16,
+) -> Option<usize> {
+    let (wrapped, char_starts) = wrap_line_to_width_with_char_starts(&line, effective_width);
+    let byte_starts = raw_byte_starts(raw, &char_starts, prefix_chars)?;
+    if wrapped.is_empty() || byte_starts.len() != wrapped.len() {
+        return None;
+    }
+
+    for (idx, wrapped_line) in wrapped.into_iter().enumerate() {
+        let start = raw_base + byte_starts[idx];
+        let end = byte_starts
+            .get(idx + 1)
+            .map_or(raw_base + raw.len(), |next| raw_base + *next);
+        if start > end {
+            return None;
+        }
+        rows.push(VirtualRow::Text(pad_bubble_line(
+            wrapped_line,
+            effective_width,
+        )));
+        byte_ranges.push(Some(start..end));
+    }
+    Some(rows.len() - 1)
+}
+
+/// Rebuild only the prior EOF-flushed visual row plus newly appended bytes.
+/// Greedy wrapping makes every earlier row prefix-stable: each was committed
+/// by an actual overflow, while only the final row was emitted because input
+/// ended.
+#[cfg(feature = "markdown")]
+pub(super) fn reuse_plain_text_tail(
+    entry: &super::types::TraceEntry,
+    dirty_idx: usize,
+    effective_width: u16,
+    generation: u64,
+    cache: &mut VirtualRowCacheEntry,
+) -> bool {
+    let Some(tail) = cache.plain_text_tail.clone() else {
+        return false;
+    };
+    if effective_width <= 3
+        || dirty_idx != tail.entry_idx
+        || generation != cache.generation.wrapping_add(1)
+    {
+        return false;
+    }
+    let TraceKind::AgentMessage { .. } = &entry.kind else {
+        return false;
+    };
+    let Some(stream) = entry.markdown.as_ref() else {
+        return false;
+    };
+    if stream.is_finalized() {
+        return false;
+    }
+
+    let raw = stream.raw_text();
+    if raw.len() <= tail.raw_len
+        || tail.raw_tail_start > tail.raw_len
+        || !raw.is_char_boundary(tail.raw_len)
+        || !raw.is_char_boundary(tail.raw_tail_start)
+        || !is_plain_stream_text(&raw[tail.raw_len..])
+        || tail.mutable_row >= cache.rows.len()
+        || tail.mutable_row >= cache.byte_ranges.len()
+        || tail.entry_idx >= cache.entry_row_starts.len()
+    {
+        return false;
+    }
+    if cache.byte_ranges[tail.mutable_row]
+        .as_ref()
+        .is_none_or(|range| range.start != tail.raw_tail_start || range.end != tail.raw_len)
+    {
+        return false;
+    }
+
+    let suffix = &raw[tail.raw_tail_start..];
+    // pulldown-cmark removes ASCII whitespace at EOF. Preserve its display
+    // semantics while byte ranges continue to cover the unmodified raw text.
+    let display_suffix = suffix.trim_end_matches(' ');
+    let prefix_chars = if tail.raw_tail_start == 0 { 3 } else { 0 };
+    let mut spans = Vec::with_capacity(2);
+    if prefix_chars > 0 {
+        spans.push(Span::raw("   "));
+    }
+    spans.push(Span::styled(display_suffix.to_string(), tail.body_style));
+    let mut suffix_line = Line::from(spans);
+    suffix_line.style = tail.line_style;
+    suffix_line.alignment = tail.alignment;
+
+    cache.rows.truncate(tail.mutable_row);
+    cache.byte_ranges.truncate(tail.mutable_row);
+    let Some(new_mutable_row) = push_plain_wrapped_rows(
+        &mut cache.rows,
+        &mut cache.byte_ranges,
+        suffix_line,
+        suffix,
+        tail.raw_tail_start,
+        prefix_chars,
+        effective_width,
+    ) else {
+        return false;
+    };
+
+    // The header is intentionally coarse and may still cover the whole body.
+    // Refresh only such coarse prefix ranges; completed body-row ranges remain
+    // byte-stable and are the reusable invariant.
+    let entry_start = cache.entry_row_starts[tail.entry_idx];
+    for range in &mut cache.byte_ranges[entry_start..new_mutable_row] {
+        if range.as_ref() == Some(&(0..tail.raw_len)) {
+            *range = Some(0..raw.len());
+        }
+    }
+
+    cache.rows.push(VirtualRow::Text(Line::from("")));
+    cache.byte_ranges.push(None);
+    cache.generation = generation;
+    cache.plain_text_tail = Some(PlainTextTailCache {
+        entry_idx: tail.entry_idx,
+        mutable_row: new_mutable_row,
+        raw_tail_start: cache.byte_ranges[new_mutable_row]
+            .as_ref()
+            .map_or(tail.raw_tail_start, |range| range.start),
+        raw_len: raw.len(),
+        reuse_count: tail.reuse_count.saturating_add(1),
+        body_style: tail.body_style,
+        line_style: tail.line_style,
+        alignment: tail.alignment,
+    });
+    true
+}
 
 /// Render an AgentMessage body via [`MarkdownStream::preview_items`].
 ///
@@ -607,6 +842,7 @@ impl ReactTrace {
     ///
     /// Duplicates some entry-kind rendering logic with `build_display_lines`;
     /// future work can consolidate.
+    #[cfg(test)]
     pub(crate) fn build_virtual_rows(
         &self,
         from: usize,
@@ -621,6 +857,21 @@ impl ReactTrace {
         Vec<usize>,
         Vec<Option<std::ops::Range<usize>>>,
     ) {
+        let (rows, entry_row_starts, byte_ranges, _) =
+            self.build_virtual_rows_with_tail(from, effective_width, states, lineage);
+        (rows, entry_row_starts, byte_ranges)
+    }
+
+    pub(super) fn build_virtual_rows_with_tail(
+        &self,
+        from: usize,
+        effective_width: u16,
+        states: &std::collections::HashMap<
+            crate::components::mermaid::MermaidId,
+            crate::components::mermaid::FenceRender,
+        >,
+        lineage: Option<&spur_core::lineage::projection::ExecutorLineage>,
+    ) -> VirtualRowsBuild {
         let theme = &self.theme;
         let tok = |name: &str| resolve_token(theme, name, ColorDepth::Truecolor);
         let timestamp_color = tok("react_trace.timestamp.fg");
@@ -642,6 +893,7 @@ impl ReactTrace {
         let mut rows: Vec<VirtualRow> = Vec::new();
         let mut entry_row_starts = vec![0; self.entries.len().saturating_sub(from)];
         let mut byte_ranges: Vec<Option<std::ops::Range<usize>>> = Vec::new();
+        let mut plain_text_tail = None;
 
         // Helper: wrap a Line to effective_width and push each wrapped visual
         // line as a VirtualRow::Text.
@@ -818,7 +1070,57 @@ impl ReactTrace {
                             |line| staged.borrow_mut().push(BodyRow::Line(line)),
                             |id, h| staged.borrow_mut().push(BodyRow::Image { id, h }),
                         );
-                        for item in staged.into_inner() {
+                        let mut staged = staged.into_inner();
+                        let raw = stream.raw_text();
+                        let plain_style = if effective_width > 3
+                            && i + 1 == self.entries.len()
+                            && !stream.is_finalized()
+                            && is_plain_stream_text(raw)
+                            && has_append_stable_plain_prefix(raw)
+                            && staged.len() == 1
+                        {
+                            match &staged[0] {
+                                BodyRow::Line(line) => plain_body_style(line, raw)
+                                    .map(|style| (style, line.style, line.alignment)),
+                                BodyRow::Image { .. } => None,
+                            }
+                        } else {
+                            None
+                        };
+
+                        if let Some((body_style, line_style, alignment)) = plain_style {
+                            let BodyRow::Line(line) = staged.pop().unwrap() else {
+                                unreachable!("plain body candidate is always a text row")
+                            };
+                            if let Some(mutable_row) = push_plain_wrapped_rows(
+                                &mut rows,
+                                &mut byte_ranges,
+                                line.clone(),
+                                raw,
+                                0,
+                                3,
+                                effective_width,
+                            ) {
+                                let raw_tail_start = byte_ranges[mutable_row]
+                                    .as_ref()
+                                    .map_or(0, |range| range.start);
+                                plain_text_tail = Some(PlainTextTailCache {
+                                    entry_idx: i,
+                                    mutable_row,
+                                    raw_tail_start,
+                                    raw_len: raw.len(),
+                                    reuse_count: 0,
+                                    body_style,
+                                    line_style,
+                                    alignment,
+                                });
+                                staged.clear();
+                            } else {
+                                staged.push(BodyRow::Line(line));
+                            }
+                        }
+
+                        for item in staged {
                             match item {
                                 BodyRow::Line(line) => push_wrapped(
                                     &mut rows,
@@ -1234,6 +1536,6 @@ impl ReactTrace {
             i += 1;
         }
 
-        (rows, entry_row_starts, byte_ranges)
+        (rows, entry_row_starts, byte_ranges, plain_text_tail)
     }
 }

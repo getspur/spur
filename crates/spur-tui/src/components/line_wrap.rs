@@ -27,7 +27,32 @@ use unicode_width::UnicodeWidthChar;
 /// - If `width == 0`, returns `vec![line.clone()]` (degenerate — caller
 ///   must ensure width > 0 for correct behavior).
 pub fn wrap_line_to_width(line: &Line<'_>, width: u16) -> Vec<Line<'static>> {
+    wrap_line_to_width_impl(line, width, None)
+}
+
+/// Wrap a line and also return the source character index where each visual
+/// row begins. The indices are co-indexed with the returned lines.
+///
+/// This is intentionally crate-private: ordinary callers should avoid the
+/// metadata allocation. The streaming trace cache uses it to retain visual
+/// rows that can no longer change after an append.
+pub(crate) fn wrap_line_to_width_with_char_starts(
+    line: &Line<'_>,
+    width: u16,
+) -> (Vec<Line<'static>>, Vec<usize>) {
+    let mut starts = Vec::new();
+    let lines = wrap_line_to_width_impl(line, width, Some(&mut starts));
+    debug_assert_eq!(lines.len(), starts.len());
+    (lines, starts)
+}
+
+fn wrap_line_to_width_impl(
+    line: &Line<'_>,
+    width: u16,
+    mut starts: Option<&mut Vec<usize>>,
+) -> Vec<Line<'static>> {
     if width == 0 {
+        record_start(&mut starts, 0);
         return vec![line_to_owned(line)];
     }
 
@@ -44,6 +69,7 @@ pub fn wrap_line_to_width(line: &Line<'_>, width: u16) -> Vec<Line<'static>> {
 
     // Early-out for trivial cases.
     if flat.is_empty() {
+        record_start(&mut starts, 0);
         return vec![Line::from("")];
     }
     let total_width: u16 = flat
@@ -52,6 +78,7 @@ pub fn wrap_line_to_width(line: &Line<'_>, width: u16) -> Vec<Line<'static>> {
         .sum::<u32>()
         .min(u32::from(u16::MAX)) as u16;
     if total_width <= width {
+        record_start(&mut starts, 0);
         return vec![line_to_owned(line)];
     }
 
@@ -110,6 +137,7 @@ pub fn wrap_line_to_width(line: &Line<'_>, width: u16) -> Vec<Line<'static>> {
                     (i, i)
                 }
             };
+            record_start(&mut starts, cur_start);
             out.push(build_line(&flat[cur_start..emit_end]));
             // Skip any whitespace that immediately follows the break point so
             // it doesn't appear at the start of the next visual line.
@@ -133,13 +161,21 @@ pub fn wrap_line_to_width(line: &Line<'_>, width: u16) -> Vec<Line<'static>> {
 
     // Flush remainder.
     if cur_start < flat.len() {
+        record_start(&mut starts, cur_start);
         out.push(build_line(&flat[cur_start..]));
     }
     if out.is_empty() {
+        record_start(&mut starts, 0);
         out.push(Line::from(""));
     }
 
     out
+}
+
+fn record_start(starts: &mut Option<&mut Vec<usize>>, start: usize) {
+    if let Some(starts) = starts.as_deref_mut() {
+        starts.push(start);
+    }
 }
 
 /// Display width of a single char. Control chars count as 0; width-unknown

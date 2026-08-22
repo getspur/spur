@@ -1407,7 +1407,8 @@ impl ReactTrace {
             crate::components::mermaid::FenceRender,
         >,
     ) {
-        let (rows, entry_row_starts, byte_ranges) = self.build_virtual_rows(0, width, states, None);
+        let (rows, entry_row_starts, byte_ranges, plain_text_tail) =
+            self.build_virtual_rows_with_tail(0, width, states, None);
         self.line_cache = Some(render::VirtualRowCacheEntry {
             rows,
             entry_row_starts,
@@ -1418,6 +1419,7 @@ impl ReactTrace {
             cell_h_px: 16,
             generation: self.generation,
             fence_gen: 0,
+            plain_text_tail,
         });
         self.last_render_width = Some(width);
         // Simulate a Full-surface render so shift_anchor_by picks
