@@ -43,6 +43,28 @@ use crate::store::{
     resolve_artifact_location, TemporalShardSink,
 };
 
+const TEMPORAL_PARSE_CACHE_BUDGET_ENV: &str = "SPUR_GRAPH_TEMPORAL_PARSE_CACHE_BYTES";
+const DEFAULT_TEMPORAL_PARSE_CACHE_BUDGET_BYTES: u64 = 0;
+
+fn parse_temporal_parse_cache_budget_bytes(value: Option<OsString>) -> Result<u64> {
+    let Some(value) = value else {
+        return Ok(DEFAULT_TEMPORAL_PARSE_CACHE_BUDGET_BYTES);
+    };
+    let value = value.into_string().map_err(|_| {
+        anyhow!("{TEMPORAL_PARSE_CACHE_BUDGET_ENV} must be a valid Unicode decimal u64 byte count")
+    })?;
+    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        bail!("{TEMPORAL_PARSE_CACHE_BUDGET_ENV} must be a decimal u64 byte count, got `{value}`");
+    }
+    value.parse::<u64>().with_context(|| {
+        format!("{TEMPORAL_PARSE_CACHE_BUDGET_ENV} exceeds the decimal u64 byte range: `{value}`")
+    })
+}
+
+fn configured_temporal_parse_cache_budget_bytes() -> Result<u64> {
+    parse_temporal_parse_cache_budget_bytes(std::env::var_os(TEMPORAL_PARSE_CACHE_BUDGET_ENV))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GitWalkConfig {
     pub target_refs: Vec<String>,
@@ -951,7 +973,11 @@ fn run_full_walk_into_with_stats(
         )
     };
     let telemetry_enabled = tracing::enabled!(tracing::Level::DEBUG);
-    let shared_parse_cache = Arc::new(SharedParseCache::new(telemetry_enabled));
+    let retained_budget_bytes = configured_temporal_parse_cache_budget_bytes()?;
+    let shared_parse_cache = Arc::new(SharedParseCache::new(
+        telemetry_enabled,
+        retained_budget_bytes,
+    ));
     let worker_root = Arc::new(worktree.to_path_buf());
     let initialize_root = Arc::clone(&worker_root);
     let compute_root = Arc::clone(&worker_root);
@@ -1018,8 +1044,15 @@ fn run_full_walk_into_with_stats(
         cache_hit_nanos = stats.shared_parse_cache.cache_hit_nanos,
         cache_lock_wait_nanos = stats.shared_parse_cache.lock_wait_nanos,
         evicted_entries = stats.shared_parse_cache.evicted_entries,
+        retained_budget_bytes = stats.shared_parse_cache.retained_budget_bytes,
+        retained_tier_hits = stats.shared_parse_cache.retained_tier_hits,
+        budget_evictions = stats.shared_parse_cache.budget_evictions,
         current_retained_payload_bytes = stats.shared_parse_cache.current_retained_payload_bytes,
         peak_retained_payload_bytes = stats.shared_parse_cache.peak_retained_payload_bytes,
+        current_retained_tier_payload_bytes =
+            stats.shared_parse_cache.current_retained_tier_payload_bytes,
+        peak_retained_tier_payload_bytes =
+            stats.shared_parse_cache.peak_retained_tier_payload_bytes,
         reuse_distance_count = stats.shared_parse_cache.reuse_distance_count,
         reuse_distance_sum = stats.shared_parse_cache.reuse_distance_sum,
         reuse_distance_max = stats.shared_parse_cache.reuse_distance_max,
@@ -1578,6 +1611,26 @@ fn retained_payload_estimate(symbols: &[ExtractedSymbol]) -> u64 {
     )
 }
 
+fn stable_language_rank(language: Language) -> u8 {
+    match language {
+        Language::Rust => 0,
+        Language::Python => 1,
+        Language::TypeScript => 2,
+        Language::Tsx => 3,
+        Language::Javascript => 4,
+        Language::Markdown => 5,
+        Language::JupyterNotebook => 6,
+        Language::C => 7,
+        Language::Cpp => 8,
+        Language::Go => 9,
+        Language::Hcl => 10,
+        Language::Terraform => 11,
+        Language::Lua => 12,
+        Language::Shell => 13,
+        Language::Sql => 14,
+    }
+}
+
 #[derive(Clone, Copy)]
 enum ParseCacheInitializationClass {
     Cold,
@@ -1594,6 +1647,8 @@ struct SharedParseCacheEntry {
     /// `None` marks persistent access from a standalone `SymbolDiffCtx`.
     greatest_using_ordinal: Option<usize>,
     retained_payload_bytes: u64,
+    initialized: bool,
+    retained_since_ordinal: Option<usize>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -1610,8 +1665,13 @@ struct ParseCacheTelemetryStats {
     cache_hit_nanos: u64,
     lock_wait_nanos: u64,
     evicted_entries: u64,
+    retained_budget_bytes: u64,
+    retained_tier_hits: u64,
+    budget_evictions: u64,
     current_retained_payload_bytes: u64,
     peak_retained_payload_bytes: u64,
+    current_retained_tier_payload_bytes: u64,
+    peak_retained_tier_payload_bytes: u64,
     reuse_distance_count: u64,
     reuse_distance_sum: u64,
     reuse_distance_max: u64,
@@ -1632,7 +1692,10 @@ struct ParseCacheTelemetry {
     cache_hit_nanos: AtomicU64,
     lock_wait_nanos: AtomicU64,
     evicted_entries: AtomicU64,
+    retained_tier_hits: AtomicU64,
+    budget_evictions: AtomicU64,
     peak_retained_payload_bytes: AtomicU64,
+    peak_retained_tier_payload_bytes: AtomicU64,
     reuse_distance_count: AtomicU64,
     reuse_distance_sum: AtomicU64,
     reuse_distance_max: AtomicU64,
@@ -1654,7 +1717,10 @@ impl ParseCacheTelemetry {
             cache_hit_nanos: AtomicU64::new(0),
             lock_wait_nanos: AtomicU64::new(0),
             evicted_entries: AtomicU64::new(0),
+            retained_tier_hits: AtomicU64::new(0),
+            budget_evictions: AtomicU64::new(0),
             peak_retained_payload_bytes: AtomicU64::new(0),
+            peak_retained_tier_payload_bytes: AtomicU64::new(0),
             reuse_distance_count: AtomicU64::new(0),
             reuse_distance_sum: AtomicU64::new(0),
             reuse_distance_max: AtomicU64::new(0),
@@ -1668,6 +1734,8 @@ struct SharedParseCacheState {
     entries: HashMap<ParseCacheKey, SharedParseCacheEntry>,
     /// Present only when exact temporal reuse telemetry is enabled.
     exact_ghost_ordinals: Option<HashMap<ParseCacheKey, usize>>,
+    current_payload_bytes: u64,
+    retained_tier_payload_bytes: u64,
 }
 
 /// Successful entries are shared by every extraction state while their users are active.
@@ -1675,30 +1743,44 @@ struct SharedParseCacheState {
 struct SharedParseCache {
     state: Mutex<SharedParseCacheState>,
     peak_entries: AtomicUsize,
+    retained_budget_bytes: u64,
     telemetry: ParseCacheTelemetry,
 }
 
 impl Default for SharedParseCache {
     fn default() -> Self {
-        Self::new(false)
+        Self::new(false, DEFAULT_TEMPORAL_PARSE_CACHE_BUDGET_BYTES)
     }
 }
 
 impl SharedParseCache {
-    fn new(telemetry_enabled: bool) -> Self {
+    fn new(telemetry_enabled: bool, retained_budget_bytes: u64) -> Self {
         Self {
             state: Mutex::new(SharedParseCacheState {
                 entries: HashMap::new(),
                 exact_ghost_ordinals: telemetry_enabled.then(HashMap::new),
+                current_payload_bytes: 0,
+                retained_tier_payload_bytes: 0,
             }),
             peak_entries: AtomicUsize::new(0),
+            retained_budget_bytes,
             telemetry: ParseCacheTelemetry::new(telemetry_enabled),
         }
     }
 
     #[cfg(test)]
     fn with_telemetry() -> Self {
-        Self::new(true)
+        Self::new(true, DEFAULT_TEMPORAL_PARSE_CACHE_BUDGET_BYTES)
+    }
+
+    #[cfg(test)]
+    fn with_budget(retained_budget_bytes: u64) -> Self {
+        Self::new(false, retained_budget_bytes)
+    }
+
+    #[cfg(test)]
+    fn with_budget_and_telemetry(retained_budget_bytes: u64) -> Self {
+        Self::new(true, retained_budget_bytes)
     }
 
     fn lock_state(&self) -> MutexGuard<'_, SharedParseCacheState> {
@@ -1773,20 +1855,27 @@ impl SharedParseCache {
         F: FnOnce() -> Result<std::result::Result<Vec<ExtractedSymbol>, ExtractError>>,
     {
         let lookup_started = self.telemetry.enabled.then(Instant::now);
-        let entry = {
+        let (entry, retained_tier_hit) = {
             let mut state = self.lock_state();
             let SharedParseCacheState {
                 entries,
                 exact_ghost_ordinals,
+                retained_tier_payload_bytes,
+                ..
             } = &mut *state;
-            let entry = match entries.entry(key.clone()) {
+            let (entry, retained_tier_hit) = match entries.entry(key.clone()) {
                 std::collections::hash_map::Entry::Occupied(mut occupied) => {
                     let entry = occupied.get_mut();
+                    let retained_tier_hit = entry.retained_since_ordinal.take().is_some();
+                    if retained_tier_hit {
+                        *retained_tier_payload_bytes = retained_tier_payload_bytes
+                            .saturating_sub(entry.retained_payload_bytes);
+                    }
                     entry.greatest_using_ordinal = match (entry.greatest_using_ordinal, ordinal) {
                         (Some(previous), Some(current)) => Some(previous.max(current)),
                         _ => None,
                     };
-                    Arc::clone(&entry.initialization)
+                    (Arc::clone(&entry.initialization), retained_tier_hit)
                 }
                 std::collections::hash_map::Entry::Vacant(vacant) => {
                     let evicted_at = exact_ghost_ordinals
@@ -1804,19 +1893,24 @@ impl SharedParseCache {
                         initialization: Arc::clone(&initialization),
                         greatest_using_ordinal: ordinal,
                         retained_payload_bytes: 0,
+                        initialized: false,
+                        retained_since_ordinal: None,
                     });
-                    initialization
+                    (initialization, false)
                 }
             };
             self.peak_entries
                 .fetch_max(entries.len(), Ordering::Relaxed);
-            entry
+            (entry, retained_tier_hit)
         };
 
         let mut cached = self.lock_initialization(&entry);
         if let Some(symbols) = cached.symbols.as_ref() {
             if self.telemetry.enabled {
                 atomic_saturating_add(&self.telemetry.cache_hits, 1);
+                if retained_tier_hit {
+                    atomic_saturating_add(&self.telemetry.retained_tier_hits, 1);
+                }
                 if let Some(started) = lookup_started {
                     atomic_saturating_add(
                         &self.telemetry.cache_hit_nanos,
@@ -1863,30 +1957,35 @@ impl SharedParseCache {
 
         match initialized {
             Ok(Ok(symbols)) => {
-                let retained_payload_bytes = if self.telemetry.enabled {
-                    retained_payload_estimate(&symbols)
-                } else {
-                    0
-                };
+                let retained_payload_bytes = retained_payload_estimate(&symbols);
                 let symbols = Arc::<[ExtractedSymbol]>::from(symbols);
                 cached.symbols = Some(Arc::clone(&symbols));
-                if self.telemetry.enabled {
+                drop(cached);
+                let current_payload_bytes = {
                     let mut state = self.lock_state();
-                    if let Some(registered) = state
+                    let newly_registered_payload_bytes = state
                         .entries
                         .get_mut(&key)
                         .filter(|registered| Arc::ptr_eq(&registered.initialization, &entry))
-                    {
-                        registered.retained_payload_bytes = retained_payload_bytes;
+                        .and_then(|registered| {
+                            if registered.initialized {
+                                return None;
+                            }
+                            registered.retained_payload_bytes = retained_payload_bytes;
+                            registered.initialized = true;
+                            Some(retained_payload_bytes)
+                        });
+                    if let Some(newly_registered_payload_bytes) = newly_registered_payload_bytes {
+                        state.current_payload_bytes = state
+                            .current_payload_bytes
+                            .saturating_add(newly_registered_payload_bytes);
                     }
-                    let current_retained_payload_bytes = state
-                        .entries
-                        .values()
-                        .map(|entry| entry.retained_payload_bytes)
-                        .fold(0_u64, u64::saturating_add);
-                    self.telemetry
-                        .peak_retained_payload_bytes
-                        .fetch_max(current_retained_payload_bytes, Ordering::Relaxed);
+                    state.current_payload_bytes
+                };
+                self.telemetry
+                    .peak_retained_payload_bytes
+                    .fetch_max(current_payload_bytes, Ordering::Relaxed);
+                if self.telemetry.enabled {
                     atomic_saturating_add(&self.telemetry.successful_initializations, 1);
                 }
                 Ok(Ok(symbols))
@@ -1945,25 +2044,61 @@ impl SharedParseCache {
 
     fn evict_before(&self, next_unreduced_ordinal: usize) {
         let mut state = self.lock_state();
-        if !self.telemetry.enabled {
-            state.entries.retain(|_, entry| {
-                entry
-                    .greatest_using_ordinal
-                    .is_none_or(|ordinal| ordinal >= next_unreduced_ordinal)
-            });
-            return;
+        let mut newly_retained_payload_bytes = 0_u64;
+        let mut candidates = Vec::new();
+        for (key, entry) in &mut state.entries {
+            let Some(greatest_using_ordinal) = entry.greatest_using_ordinal else {
+                continue;
+            };
+            if greatest_using_ordinal >= next_unreduced_ordinal || !entry.initialized {
+                continue;
+            }
+            if entry.retained_since_ordinal.is_none() {
+                entry.retained_since_ordinal = Some(next_unreduced_ordinal);
+                newly_retained_payload_bytes =
+                    newly_retained_payload_bytes.saturating_add(entry.retained_payload_bytes);
+            }
+            candidates.push((
+                greatest_using_ordinal,
+                key.1.clone(),
+                stable_language_rank(key.0),
+                key.clone(),
+            ));
         }
+        state.retained_tier_payload_bytes = state
+            .retained_tier_payload_bytes
+            .saturating_add(newly_retained_payload_bytes);
+        candidates.sort_by(|left, right| {
+            left.0
+                .cmp(&right.0)
+                .then_with(|| left.1.cmp(&right.1))
+                .then_with(|| left.2.cmp(&right.2))
+        });
 
         let mut evicted = Vec::new();
-        state.entries.retain(|key, entry| {
-            let retained = entry
-                .greatest_using_ordinal
-                .is_none_or(|ordinal| ordinal >= next_unreduced_ordinal);
-            if !retained {
-                evicted.push(key.clone());
+        for (_, _, _, key) in candidates {
+            if self.retained_budget_bytes != 0
+                && state.retained_tier_payload_bytes <= self.retained_budget_bytes
+            {
+                break;
             }
-            retained
-        });
+            let Some(entry) = state.entries.remove(&key) else {
+                continue;
+            };
+            debug_assert!(entry.initialized);
+            debug_assert!(entry.retained_since_ordinal.is_some());
+            state.retained_tier_payload_bytes = state
+                .retained_tier_payload_bytes
+                .saturating_sub(entry.retained_payload_bytes);
+            state.current_payload_bytes = state
+                .current_payload_bytes
+                .saturating_sub(entry.retained_payload_bytes);
+            evicted.push(key);
+        }
+        self.telemetry
+            .peak_retained_tier_payload_bytes
+            .fetch_max(state.retained_tier_payload_bytes, Ordering::Relaxed);
+
         let evicted_entries = evicted.len();
         let current_exact_ghost_keys = if let Some(ghosts) = &mut state.exact_ghost_ordinals {
             for key in evicted {
@@ -1976,10 +2111,11 @@ impl SharedParseCache {
         self.telemetry
             .peak_exact_ghost_keys
             .fetch_max(current_exact_ghost_keys, Ordering::Relaxed);
-        atomic_saturating_add(
-            &self.telemetry.evicted_entries,
-            u64::try_from(evicted_entries).unwrap_or(u64::MAX),
-        );
+        if self.telemetry.enabled {
+            let evicted_entries = u64::try_from(evicted_entries).unwrap_or(u64::MAX);
+            atomic_saturating_add(&self.telemetry.evicted_entries, evicted_entries);
+            atomic_saturating_add(&self.telemetry.budget_evictions, evicted_entries);
+        }
     }
 
     fn len(&self) -> usize {
@@ -1991,18 +2127,10 @@ impl SharedParseCache {
     }
 
     fn telemetry_snapshot(&self) -> ParseCacheTelemetryStats {
-        if !self.telemetry.enabled {
-            return ParseCacheTelemetryStats::default();
-        }
         let state = self.lock_state();
-        let current_retained_payload_bytes = state
-            .entries
-            .values()
-            .map(|entry| entry.retained_payload_bytes)
-            .fold(0_u64, u64::saturating_add);
         let current_exact_ghost_keys = state.exact_ghost_ordinals.as_ref().map_or(0, HashMap::len);
         ParseCacheTelemetryStats {
-            telemetry_enabled: true,
+            telemetry_enabled: self.telemetry.enabled,
             cache_hits: self.telemetry.cache_hits.load(Ordering::Relaxed),
             cold_initializations: self.telemetry.cold_initializations.load(Ordering::Relaxed),
             reparse_initializations: self
@@ -2029,10 +2157,18 @@ impl SharedParseCache {
             cache_hit_nanos: self.telemetry.cache_hit_nanos.load(Ordering::Relaxed),
             lock_wait_nanos: self.telemetry.lock_wait_nanos.load(Ordering::Relaxed),
             evicted_entries: self.telemetry.evicted_entries.load(Ordering::Relaxed),
-            current_retained_payload_bytes,
+            retained_budget_bytes: self.retained_budget_bytes,
+            retained_tier_hits: self.telemetry.retained_tier_hits.load(Ordering::Relaxed),
+            budget_evictions: self.telemetry.budget_evictions.load(Ordering::Relaxed),
+            current_retained_payload_bytes: state.current_payload_bytes,
             peak_retained_payload_bytes: self
                 .telemetry
                 .peak_retained_payload_bytes
+                .load(Ordering::Relaxed),
+            current_retained_tier_payload_bytes: state.retained_tier_payload_bytes,
+            peak_retained_tier_payload_bytes: self
+                .telemetry
+                .peak_retained_tier_payload_bytes
                 .load(Ordering::Relaxed),
             reuse_distance_count: self.telemetry.reuse_distance_count.load(Ordering::Relaxed),
             reuse_distance_sum: self.telemetry.reuse_distance_sum.load(Ordering::Relaxed),
@@ -4574,22 +4710,193 @@ mod tests {
     }
 
     #[test]
-    fn shared_parse_cache_initializes_same_key_once_concurrently() {
+    fn retained_tier_reuses_an_eligible_entry_without_reinitializing() {
+        let cache = SharedParseCache::with_budget_and_telemetry(1 << 20);
+        let key = (Language::Rust, "retained".to_owned());
+        let first = cache
+            .get_or_init_at(1, key.clone(), || {
+                Ok(Ok(vec![cache_test_symbol("retained")]))
+            })
+            .unwrap()
+            .unwrap();
+
+        cache.evict_before(2);
+
+        let second = cache
+            .get_or_init_at(8, key, || panic!("retained hit must not reparse"))
+            .unwrap()
+            .unwrap();
+        assert!(Arc::ptr_eq(&first, &second));
+        assert_eq!(cache.telemetry_snapshot().retained_tier_hits, 1);
+    }
+
+    #[test]
+    fn retained_tier_zero_budget_evicts_successful_empty_entries() {
+        let cache = SharedParseCache::with_budget(0);
+        let key = (Language::Rust, "empty".to_owned());
+        let symbols = cache
+            .get_or_init_at(1, key.clone(), || Ok(Ok(Vec::new())))
+            .unwrap()
+            .unwrap();
+
+        assert!(symbols.is_empty());
+        assert_eq!(retained_payload_estimate(&symbols), 0);
+        assert!(cache.contains(&key));
+
+        cache.evict_before(2);
+
+        assert!(!cache.contains(&key));
+    }
+
+    #[test]
+    fn retained_tier_evicts_oversized_entries_but_keeps_unreduced_entries() {
+        let symbol = cache_test_symbol("oversized");
+        let budget = retained_payload_estimate(std::slice::from_ref(&symbol)) - 1;
+        let cache = SharedParseCache::with_budget(budget);
+        let old_key = (Language::Rust, "old".to_owned());
+        let live_key = (Language::Rust, "live".to_owned());
+        let standalone_key = (Language::Rust, "standalone".to_owned());
+        cache
+            .get_or_init_at(1, old_key.clone(), || Ok(Ok(vec![symbol])))
+            .unwrap()
+            .unwrap();
+        cache
+            .get_or_init_at(9, live_key.clone(), || {
+                Ok(Ok(vec![cache_test_symbol("live")]))
+            })
+            .unwrap()
+            .unwrap();
+        cache
+            .get_or_init(standalone_key.clone(), || {
+                Ok(Ok(vec![cache_test_symbol("standalone")]))
+            })
+            .unwrap()
+            .unwrap();
+
+        cache.evict_before(2);
+
+        assert!(!cache.contains(&old_key));
+        assert!(cache.contains(&live_key));
+        assert!(cache.contains(&standalone_key));
+        let stats = cache.telemetry_snapshot();
+        assert_eq!(stats.retained_budget_bytes, budget);
+        assert_eq!(stats.current_retained_tier_payload_bytes, 0);
+    }
+
+    #[test]
+    fn retained_tier_ties_are_independent_of_hashmap_and_insertion_order() {
+        let entry_bytes = retained_payload_estimate(&[cache_test_symbol("equal")]);
+        let budget = entry_bytes.saturating_mul(2);
+        let orders = [
+            [
+                (Language::Rust, "a"),
+                (Language::Python, "a"),
+                (Language::Rust, "z"),
+            ],
+            [
+                (Language::Rust, "z"),
+                (Language::Python, "a"),
+                (Language::Rust, "a"),
+            ],
+        ];
+
+        for order in orders {
+            let cache = SharedParseCache::with_budget_and_telemetry(budget);
+            for (language, blob_oid) in order {
+                cache
+                    .get_or_init_at(1, (language, blob_oid.to_owned()), || {
+                        Ok(Ok(vec![cache_test_symbol("equal")]))
+                    })
+                    .unwrap()
+                    .unwrap();
+            }
+
+            cache.evict_before(2);
+
+            assert!(!cache.contains(&(Language::Rust, "a".to_owned())));
+            assert!(cache.contains(&(Language::Python, "a".to_owned())));
+            assert!(cache.contains(&(Language::Rust, "z".to_owned())));
+            let stats = cache.telemetry_snapshot();
+            assert_eq!(stats.budget_evictions, 1);
+            assert_eq!(stats.current_retained_tier_payload_bytes, budget);
+        }
+    }
+
+    #[test]
+    fn retained_tier_tracks_exact_bytes_with_telemetry_off_and_on() {
+        let expected = retained_payload_estimate(&[cache_test_symbol("accounted")]);
+
+        for telemetry_enabled in [false, true] {
+            let cache = if telemetry_enabled {
+                SharedParseCache::with_budget_and_telemetry(expected)
+            } else {
+                SharedParseCache::with_budget(expected)
+            };
+            let key = (Language::Rust, "accounted".to_owned());
+            let first = cache
+                .get_or_init_at(1, key.clone(), || {
+                    Ok(Ok(vec![cache_test_symbol("accounted")]))
+                })
+                .unwrap()
+                .unwrap();
+            let initialized = cache.telemetry_snapshot();
+            assert_eq!(initialized.retained_budget_bytes, expected);
+            assert_eq!(initialized.current_retained_payload_bytes, expected);
+            assert_eq!(initialized.current_retained_tier_payload_bytes, 0);
+
+            cache.evict_before(2);
+
+            let retained = cache.telemetry_snapshot();
+            assert_eq!(retained.current_retained_payload_bytes, expected);
+            assert_eq!(retained.current_retained_tier_payload_bytes, expected);
+            assert!(retained.peak_retained_tier_payload_bytes >= expected);
+
+            let second = cache
+                .get_or_init_at(8, key, || panic!("retained hit must not reparse"))
+                .unwrap()
+                .unwrap();
+            assert!(Arc::ptr_eq(&first, &second));
+            let promoted = cache.telemetry_snapshot();
+            assert_eq!(promoted.current_retained_payload_bytes, expected);
+            assert_eq!(promoted.current_retained_tier_payload_bytes, 0);
+        }
+    }
+
+    #[test]
+    fn retained_tier_failed_initialization_releases_every_accounted_byte() {
+        let cache = SharedParseCache::with_budget_and_telemetry(1 << 20);
+        let key = (Language::Rust, "failed".to_owned());
+
+        let failed = cache
+            .get_or_init_at(1, key.clone(), || Ok(Err(ExtractError::NoTree)))
+            .unwrap();
+
+        assert!(matches!(failed, Err(ExtractError::NoTree)));
+        cache.evict_before(2);
+        assert!(!cache.contains(&key));
+        let stats = cache.telemetry_snapshot();
+        assert_eq!(stats.current_retained_payload_bytes, 0);
+        assert_eq!(stats.current_retained_tier_payload_bytes, 0);
+        assert_eq!(stats.budget_evictions, 0);
+    }
+
+    #[test]
+    fn retained_tier_same_key_initialization_remains_single_flight() {
         use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::{Arc, Barrier};
 
-        let cache = Arc::new(SharedParseCache::default());
+        let cache = Arc::new(SharedParseCache::with_budget(1 << 20));
         let ready = Arc::new(Barrier::new(8));
         let initializations = Arc::new(AtomicUsize::new(0));
         let handles: Vec<_> = (0..8)
-            .map(|_| {
+            .map(|ordinal| {
                 let cache = Arc::clone(&cache);
                 let ready = Arc::clone(&ready);
                 let initializations = Arc::clone(&initializations);
                 std::thread::spawn(move || {
                     ready.wait();
                     cache
-                        .get_or_init((Language::Rust, "same-blob".to_owned()), || {
+                        .get_or_init_at(ordinal, (Language::Rust, "same-blob".to_owned()), || {
                             initializations.fetch_add(1, Ordering::SeqCst);
                             std::thread::sleep(std::time::Duration::from_millis(20));
                             Ok(Ok(vec![cache_test_symbol("shared")]))
@@ -4611,6 +4918,54 @@ mod tests {
             .iter()
             .skip(1)
             .all(|symbols| Arc::ptr_eq(first, symbols)));
+    }
+
+    #[test]
+    fn retained_tier_initializer_can_reenter_cache_state_without_deadlock() {
+        let cache = SharedParseCache::with_budget(1 << 20);
+        let key = (Language::Rust, "reentrant".to_owned());
+
+        cache
+            .get_or_init_at(1, key.clone(), || {
+                assert!(cache.contains(&key));
+                assert_eq!(cache.len(), 1);
+                Ok(Ok(vec![cache_test_symbol("reentrant")]))
+            })
+            .unwrap()
+            .unwrap();
+    }
+
+    #[test]
+    fn parse_cache_budget_accepts_zero_and_u64_values_and_rejects_invalid_input() {
+        assert_eq!(parse_temporal_parse_cache_budget_bytes(None).unwrap(), 0);
+        assert_eq!(
+            parse_temporal_parse_cache_budget_bytes(Some(OsString::from("0"))).unwrap(),
+            0
+        );
+        assert_eq!(
+            parse_temporal_parse_cache_budget_bytes(Some(OsString::from(u64::MAX.to_string())))
+                .unwrap(),
+            u64::MAX
+        );
+
+        for invalid in ["", "-1", "+1", "1MiB", "18446744073709551616"] {
+            let error =
+                parse_temporal_parse_cache_budget_bytes(Some(OsString::from(invalid))).unwrap_err();
+            assert!(
+                error.to_string().contains(TEMPORAL_PARSE_CACHE_BUDGET_ENV),
+                "{error:#}"
+            );
+        }
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStringExt as _;
+
+            let error =
+                parse_temporal_parse_cache_budget_bytes(Some(OsString::from_vec(vec![0xff])))
+                    .unwrap_err();
+            assert!(error.to_string().contains("valid Unicode"), "{error:#}");
+        }
     }
 
     #[test]
