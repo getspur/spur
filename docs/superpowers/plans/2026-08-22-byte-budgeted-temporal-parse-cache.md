@@ -712,3 +712,213 @@ git commit -m "docs(spur-graph): task-4 record temporal cache profile outcome"
 - **beads compatibility:** Every task has a unique ID, explicit dependency,
   acceptance criteria, worker route, scope boundary, signal checkpoint, test or
   evidence command, and commit-ready outcome.
+
+## Task 3 results — strict Turso budget selection (2026-08-22)
+
+### Decision
+
+The compiled default remains **0 bytes**. The 64 MiB candidate was a large,
+repeatable performance win and its two observations stayed below 4 GiB RSS,
+but the strict enablement gate did not pass:
+
+1. Ordinary-file artifact manifests and `diagnostics.parquet` multisets did not
+   match, including between the two zero controls. Canonical graph content and
+   workload summaries matched, but exact artifact identity is therefore
+   inconclusive.
+2. The generic solver's required typed-language discovery timed out twice at
+   the provider's 300-second boundary. Task policy defines timeout as
+   inconclusive/zero and forbids hand-authoring a request without the live
+   language contract.
+3. The 128 MiB and 256 MiB sweep observations also exceeded 4 GiB RSS. They
+   were individually disqualified before comparison or optimization.
+
+No Rust source was changed. In particular,
+`DEFAULT_TEMPORAL_PARSE_CACHE_BUDGET_BYTES` remains the approved Task 1 value
+`0`.
+
+### Provenance and exact method
+
+All generated data is preserved under the single fresh root
+`/tmp/spur-turso-cache.JRhBfX`. SPUR was clean at
+`6689c8ed0ca78771263ba5a1eeab4921be874d02`, tree
+`315c56a49057e405c6b055dd082e0831a21687b1`; approved Task 1
+`76f9023ec4b6e78f8f7e6ac79adedad353e75858` is its ancestor. Turso was
+`a45cd87ff7b25a30476491037a028c43ff95d6f5`, tree
+`4da9932858e594383fb379cca8f87293cf9848af`. The source checkout had only its
+pre-existing untracked `.spur/`; none of the six clones contained `.spur` or
+`.git/spur-graph` before execution.
+
+The sole profiling binary was built and fetched with:
+
+```bash
+SPUR_REMOTE=1 SPUR_NO_LOCAL_FALLBACK=1 \
+  scripts/spur-cargo zigbuild -p spur-cli --profile profiling -j 8
+SPUR_CLOUD=aws-my SPUR_REMOTE_NAMESPACE=spur \
+  /Volumes/Projects/Projects/spur-notebook/scripts/cloud-build/fetch.sh \
+  --via-s3 --to /tmp/spur-turso-cache.JRhBfX/spur-cache-sweep \
+  target/aarch64-apple-darwin/profiling/spur
+```
+
+The build completed in 25m22s after the supported wrapper's one documented
+Darwin `libproc` bindings repair. The 309,903,616-byte arm64 Mach-O binary
+reported `spur 1.21.0`; every observation recorded SHA-256
+`42ee2f0b07411111a9a153f656c79621e1ef2736cc9088cec93cc9d9a7645f06`.
+Relevant tool hashes were:
+
+| Tool/artifact | SHA-256 |
+|---|---|
+| `scripts/spur-cargo` | `c0fbf1ea9b40788a5c08c5a8c798e382b620beca0c02c29d5f240a6c45ea0007` |
+| `/usr/bin/time` | `b5b68522b051bf4e9481794c06e1daed24eed8801f676bedb2e8285f0f081c21` |
+| `/opt/homebrew/bin/timeout` | `3620232c8cd4a8ce2d9d646cf648bd819c33264529d975796546b47b5c17add1` |
+| Xcode 15.4 `xctrace` (not invoked in Task 3) | `5af2fb6481ac7e73bd4240bd4ddc268e215c9226a9709f4075a818d30f383e0f` |
+| `quack_flamegraph.duckdb_extension` (not invoked in Task 3) | `6679979078c54714808bf30dc28992d9cf5eb21ba3d8fe0c9db941902f235e4b` |
+
+For each label/byte pair, sequentially and with no concurrent observation:
+
+```bash
+git clone --quiet --local --no-hardlinks /Volumes/Projects/Projects/turso \
+  /tmp/spur-turso-cache.JRhBfX/<label>/repo
+/usr/bin/time -l -o /tmp/spur-turso-cache.JRhBfX/<label>/time.txt \
+  /opt/homebrew/bin/timeout --signal=TERM --kill-after=10s 1500s \
+  /usr/bin/env -u SPUR_GRAPH_TEMPORAL_JOBS \
+  SPUR_GRAPH_TEMPORAL_PARSE_CACHE_BYTES=<bytes> \
+  SPUR_EMBEDDING_MODEL=jina-code RUST_LOG=spur_graph::git_walk=debug \
+  /tmp/spur-turso-cache.JRhBfX/spur-cache-sweep graph build \
+  --root /tmp/spur-turso-cache.JRhBfX/<label>/repo \
+  --output /tmp/spur-turso-cache.JRhBfX/<label>/graph \
+  --with-temporal --no-section-embeddings --no-code-symbol-embeddings \
+  --no-analyst --temporal-jobs 8
+```
+
+The recorded order was exactly `zero:0`, `mib64:67108864`,
+`mib128:134217728`, `mib256:268435456`, `zero_repeat:0`, then
+`mib64_repeat:67108864`. Each clone had two packed Git object files and zero
+object files with link count greater than one, independently confirming the
+`--no-hardlinks` contract.
+
+### Raw observations
+
+All runs exited zero, were uncensored, reported `mode: Full`, processed 5,269
+commits with eight temporal workers, and produced the same summary: 1,620
+files, 59,141 nodes, 289,851 displayed edges, 1,583 section rows, and 52,943
+final code-symbol rows.
+
+| Run | Budget bytes | Real s | User s | Sys s | CPU work s | Peak RSS bytes | Commits/s | Avg active workers |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| zero | 0 | 776.26 | 1,665.92 | 37.31 | 1,703.23 | 3,407,659,008 | 6.787674 | 3.040 |
+| mib64 | 67,108,864 | 268.95 | 596.54 | 25.56 | 622.10 | 4,005,658,624 | 19.591002 | 3.545 |
+| mib128 | 134,217,728 | 254.80 | 578.16 | 26.41 | 604.57 | 4,692,672,512 | 20.678964 | 3.644 |
+| mib256 | 268,435,456 | 252.39 | 576.30 | 24.24 | 600.54 | 5,148,704,768 | 20.876421 | 3.671 |
+| zero repeat | 0 | 775.30 | 1,666.08 | 35.81 | 1,701.89 | 3,449,864,192 | 6.796079 | 3.038 |
+| mib64 repeat | 67,108,864 | 268.17 | 598.03 | 24.75 | 622.78 | 4,078,960,640 | 19.647984 | 3.557 |
+
+| Run | Cache hits | Retained hits | Cold init | Reparses | Reparse share of active worker | Reparse delta vs paired zero | Budget evictions | Retained tier current / peak bytes | Total payload current / peak bytes |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| zero | 133,666 | 0 | 22,530 | 91,703 | 49.5453% | 0 | 114,233 | 0 / 0 | 0 / 43,368,240 |
+| mib64 | 222,240 | 98,331 | 22,530 | 3,129 | 3.3004% | -88,574 (-96.5879%) | 24,104 | 66,901,182 / 67,108,802 | 66,901,182 / 83,911,723 |
+| mib128 | 224,493 | 99,272 | 22,530 | 876 | 0.6177% | -90,827 (-99.0447%) | 20,492 | 133,993,049 / 134,217,695 | 133,993,049 / 146,370,393 |
+| mib256 | 225,149 | 99,922 | 22,530 | 220 | 0.0366% | -91,483 (-99.7601%) | 18,221 | 268,381,560 / 268,435,452 | 268,381,560 / 280,065,297 |
+| zero repeat | 133,666 | 0 | 22,530 | 91,703 | 49.6432% | 0 | 114,233 | 0 / 0 | 0 / 43,368,240 |
+| mib64 repeat | 222,235 | 98,354 | 22,530 | 3,134 | 3.3403% | -88,569 (-96.5824%) | 24,109 | 66,901,182 / 67,108,802 | 66,901,182 / 84,330,897 |
+
+The telemetry localizes the measured gain to the intended single lever:
+post-eviction reparses fell from 91,703 to about 3,130 and reparse worker share
+fell from about 49.6% to 3.3%. No scheduler/query/CLI change was mixed into the
+observation.
+
+### Paired quantitative result
+
+With the two-value median defined conventionally as their mean:
+
+| Metric | Zero median | 64 MiB median | Improvement |
+|---|---:|---:|---:|
+| Wall | 775.78 s | 268.56 s | 65.3819% |
+| CPU work | 1,702.56 s | 622.44 s | 63.4409% |
+
+Both initial and repeat comparisons reduced wall, CPU work, and reparses. The
+largest selected-pair RSS was 4,078,960,640 bytes, 216,006,656 bytes below the
+4 GiB boundary. Thus 64 MiB passes the timing, reparse, sign, and selected-pair
+RSS sub-gates. The larger budgets fail RSS.
+
+### Artifact and workload identity
+
+Every run recorded the same source commit/tree and binary hash. After replacing
+only each run-root path, the complete stdout workload summary had one shared
+SHA-256:
+`2920b19799b7f8f75d28b34c28975dec1b3e258ae7ddd1981dc2fd0ab40bab41`.
+The canonical `manifest.json` was byte-identical with SHA-256
+`5ab117806ab3cbf9b64bff1b308dee3447d8c454addd1ec09dd85839e2c72936`,
+and every run advertised graph content hash
+`e93932af19c194ac7106ea6ccd43a0f646d150bc9cde0b541ebf1808a92bf70c`.
+Order-independent DuckDB row-count plus per-column XOR hashes matched for
+commits, edges, edges-by-destination, unresolved edges, file manifests, files,
+nodes, 8,761,084 symbol snapshots, and 9,199,355 temporal edges. The exact SQL
+and output are `artifact-identity.sql` and `artifact-identity.csv` under the
+artifact root.
+
+Strict ordinary-file identity nevertheless failed. Each graph had 684 files,
+but the raw file-manifest hashes were all distinct and total bytes ranged from
+853,794,614 to 853,972,636 because Lance transaction/index files contain fresh
+UUID-bearing metadata. More importantly, the 291,701-row diagnostics datasets
+had different message multisets. Symmetric differences versus initial zero
+were 91,328 rows for mib64, 92,204 for mib128, 95,304 for mib256, 91,044 for
+mib64 repeat, and **92,800 even for zero repeat**. This baseline-repeat failure
+makes exact artifact equivalence inconclusive rather than attributable to the
+cache candidate; the strict rule still denies enablement.
+
+### Solver and gate audit
+
+`solve_rule_spec({})` completed first (registry schema 1) and showed no
+applicable implemented rule among accessibility/design/policy/resource, so the
+generic typed solver was required. Before any request was authored,
+`solve_constraint_spec` was attempted with catalog summary, request example,
+limits summary, and a clean summary retry. The limits and clean retry each
+returned `timed out awaiting tools/call after 300s`. Under the solve workflow,
+the missing live typed contract forbids guessing a request and therefore no
+`solve_constraint_check`, persisted `solve_id`, or reload exists. The raw
+catalog and timeout record are preserved as `solver-rule-catalog.txt` and
+`solver-timeout.txt`. Timeout is explicitly inconclusive/zero, consistent with
+the independent artifact gate.
+
+| Gate | Evidence | Result |
+|---|---|---|
+| One frozen binary; fresh clones; exact Full jobs=8 workload | One binary hash; six distinct cache-free no-hardlinks clones; all exit 0/Full | pass |
+| Every selected-pair RSS observation below 4 GiB | zero max 3,449,864,192; 64 MiB max 4,078,960,640 | pass |
+| Every sweep observation below 4 GiB | 128 MiB 4,692,672,512; 256 MiB 5,148,704,768 | fail |
+| Reparse reduction in both comparisons | -96.5879% initial; -96.5824% repeat | pass |
+| Median wall or CPU improves at least 3% | wall +65.3819%; CPU +63.4409% | pass |
+| Other timing metric regresses no more than 3% | both improve | pass |
+| Initial/repeat direction agrees | wall, CPU, reparses all improve both times | pass |
+| Artifact and workload identity | workload/canonical graph match; raw artifacts and diagnostics do not | **fail/inconclusive** |
+| Persisted/reloaded solver decision | typed spec timed out at 300s; timeout means zero | **inconclusive → zero** |
+
+The single production decision is therefore: **retain zero bytes**.
+
+### Verification and SPUR record
+
+All scoped commands exited zero through the supported wrapper:
+
+```bash
+scripts/spur-cargo test -p spur-graph retained_tier -- --nocapture
+scripts/spur-cargo test -p spur-graph --test temporal_parallel -- --nocapture
+SPUR_GRAPH_TEMPORAL_PARSE_CACHE_BYTES=0 \
+  scripts/spur-cargo test -p spur-graph --test temporal_parallel -- --nocapture
+scripts/spur-cargo check -p spur-graph --tests --benches
+scripts/spur-cargo fmt --all -- --check
+```
+
+The two temporal integration runs each passed 1/1 tests; check finished in
+1m54s; formatting was clean. Per-command logs and exit-status CSV are under the
+artifact root.
+
+The artifact root occupied 6.2 GiB at manifest time. Its checksum manifest
+contains 28,170 ordinary files (excluding the manifest and its check output),
+passed `shasum -a 256 -c` for every entry, and has SHA-256
+`b8726f27e52e34e9292147af3f55b91d7f3c5e77e1dd850bb01163239d01a8d3`.
+
+A high-severity `scope_drift` signal was attempted for bead `bd-35n9` with
+signal ID `b9b871ba-f2ce-4402-be13-75b32d530fb9`: strict diagnostics artifact
+identity cannot be established or fixed without out-of-scope artifact/test or
+production changes. The worker MCP did not acknowledge the mutation before its
+tool-call timeout, so this report preserves the exact sentinel intent for the
+reviewer. Source issue `bd-mehk` remains open; no integration action was taken.
