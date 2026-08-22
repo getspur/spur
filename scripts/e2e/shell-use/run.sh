@@ -33,6 +33,7 @@ journeys=(
   "plan-browser-open"
   "resize"
   "session-detail-reply"
+  "session-detail-sustained-render"
   "session-picker-open"
   "loop-browser-open"
   "session-picker-populated"

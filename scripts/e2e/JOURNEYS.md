@@ -27,6 +27,18 @@ cd scripts/e2e/demos/tui-live
 ./uat.sh --mode capture   # VHS media of lineage / sessions / palette
 ```
 
+Sustained transcript/render profiling uses the behavioral journey directly.
+The default derives a bounded load from the terminal size; explicit knobs make
+benchmark runs reproducible. Set `SPUR_E2E_RESIZE_DELTA=0` for cache-hit
+scrolling, or leave it at `1` to alternate widths and exercise full reflow:
+
+```bash
+SPUR_E2E_TRANSCRIPT_LINES=2000 \
+SPUR_E2E_RENDER_CYCLES=100 \
+SPUR_E2E_RESIZE_DELTA=1 \
+scripts/e2e/shell-use/journeys/session-detail-sustained-render.sh
+```
+
 Do not invent demo beats outside this table — add a journey row first.
 
 | Journey | User story | Side | Fixture | Wait strings | Owning file |
@@ -49,6 +61,7 @@ Do not invent demo beats outside this table — add a journey row first.
 | `plan-browser-open` | As a user, I can open the plan browser from the no-agents dashboard and see the brain-session selection empty state. | behavioral | `no-agents` | `No agents configured`; `Go to`; `Select a brain session first (S)`; `Quit spur?` | `scripts/e2e/shell-use/journeys/plan-browser-open.sh` |
 | `resize` | As a user, resizing the terminal while the no-agents dashboard is open keeps the dashboard rendered and responsive. | behavioral | `no-agents` | `No agents configured`; `Quit spur?` | `scripts/e2e/shell-use/journeys/resize.sh` |
 | `session-detail-reply` | As a user, after sending a message to the fake worker, I can see the canned agent reply render in the session transcript. | behavioral | `worker-mentions` | `Type a task below`; `rust-reviewer`; `GPT-5 Codex`; `e2e deep reasoning`; `model=gpt-5-codex`; `e2e canned reply from fake worker`; `Quit spur?` | `scripts/e2e/shell-use/journeys/session-detail-reply.sh` |
+| `session-detail-sustained-render` | As a performance investigator, I can load a deterministic long transcript and repeatedly scroll and resize it so session-detail rendering has a reproducible profiling workload. | behavioral/performance | `worker-mentions` | `Type a task below`; `model=gpt-5-codex`; `sustained render complete: N lines`; `Quit spur?` | `scripts/e2e/shell-use/journeys/session-detail-sustained-render.sh` |
 | `session-picker-open` | As a user, I can open the session picker from the no-agents dashboard and return to the dashboard cleanly. | behavioral | `no-agents` | `No agents configured`; `Go to`; `Sessions`; `Quit spur?` | `scripts/e2e/shell-use/journeys/session-picker-open.sh` |
 | `loop-browser-open` | As a user, I can open the loop browser from the no-agents dashboard and see its empty state. | behavioral | `no-agents` | `No agents configured`; `Go to`; `No loops found.`; `Quit spur?` | `scripts/e2e/shell-use/journeys/loop-browser-open.sh` |
 | `session-picker-populated` | As a user with session history, I can open the session picker and see a seeded session from today. | behavioral | `worker-mentions` | `Type a task below`; `Go to`; `Sessions`; `TODAY`; `e2e picker seeded prompt`; `Quit spur?` | `scripts/e2e/shell-use/journeys/session-picker-populated.sh` |
