@@ -16,10 +16,11 @@ use std::io::{self, BufRead as _, BufReader, Read as _, Write as _};
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context as _, Result};
 use gix::object::tree::diff::{Action, Change};
@@ -171,6 +172,13 @@ struct WorkerPoolStats {
     max_active_work: usize,
     max_result_occupancy: usize,
     max_reducer_pending: usize,
+    pool_elapsed_nanos: u64,
+    active_worker_nanos: u64,
+    average_active_workers_milli: u64,
+    completed_out_of_order: u64,
+    admission_window_full_receive_wait_nanos: u64,
+    next_ordinal_blocked_wait_nanos: u64,
+    coordinator_send_blocked_nanos: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -184,6 +192,17 @@ struct TemporalWalkStats {
     pool: WorkerPoolStats,
     shared_parse_cache_current_entries: usize,
     shared_parse_cache_peak_entries: usize,
+    shared_parse_cache: ParseCacheTelemetryStats,
+}
+
+fn duration_nanos(duration: Duration) -> u64 {
+    duration.as_nanos().min(u128::from(u64::MAX)) as u64
+}
+
+fn atomic_saturating_add(counter: &AtomicU64, value: u64) {
+    let _ = counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+        Some(current.saturating_add(value))
+    });
 }
 
 #[derive(Default)]
@@ -214,6 +233,11 @@ struct ConcurrentOccupancy {
     active_work: OccupancyCounter,
     /// Completed results in worker hands, the result channel, or reducer pending storage.
     results: OccupancyCounter,
+}
+
+#[derive(Default)]
+struct WorkerTiming {
+    active_worker_nanos: AtomicU64,
 }
 
 /// Bounds admitted ordinals independently of the channel capacities.
@@ -374,12 +398,14 @@ where
     if total_work == 0 {
         return Ok(WorkerPoolStats::default());
     }
+    let pool_started = Instant::now();
     thread::scope(move |scope| {
         let worker_count = jobs.get().min(total_work);
         let initialize = Arc::new(initialize);
         let compute = Arc::new(compute);
         let cancellation = Arc::new(AtomicBool::new(false));
         let occupancy = Arc::new(ConcurrentOccupancy::default());
+        let timing = Arc::new(WorkerTiming::default());
         let (event_sender, event_receiver) = sync_channel(worker_count);
         let mut work_senders: Vec<SyncSender<(usize, Work)>> = Vec::with_capacity(worker_count);
         let mut handles = Vec::with_capacity(worker_count);
@@ -391,6 +417,7 @@ where
             let worker_compute = Arc::clone(&compute);
             let worker_cancellation = Arc::clone(&cancellation);
             let worker_occupancy = Arc::clone(&occupancy);
+            let worker_timing = Arc::clone(&timing);
             let spawn = thread::Builder::new()
                 .name(format!("spur-temporal-{worker_id}"))
                 .spawn_scoped(scope, move || {
@@ -416,10 +443,15 @@ where
                                 }
 
                                 worker_occupancy.active_work.increment();
+                                let compute_started = Instant::now();
                                 let computed = std::panic::catch_unwind(
                                     std::panic::AssertUnwindSafe(|| {
                                         worker_compute(&mut state, ordinal, work)
                                     }),
+                                );
+                                atomic_saturating_add(
+                                    &worker_timing.active_worker_nanos,
+                                    duration_nanos(compute_started.elapsed()),
                                 );
                                 worker_occupancy.active_work.decrement(1);
                                 let output = match computed {
@@ -523,6 +555,11 @@ where
                 let mut work = work_items.into_iter().enumerate();
                 let mut window = OrdinalAdmissionWindow::new(jobs);
                 let mut max_reducer_pending = 0;
+                let mut reducer_pending = 0;
+                let mut completed_out_of_order = 0_u64;
+                let mut admission_window_full_receive_wait_nanos = 0_u64;
+                let mut next_ordinal_blocked_wait_nanos = 0_u64;
+                let mut coordinator_send_blocked_nanos = 0_u64;
 
                 while window.next_reduced < total_work {
                     while window.next_dispatch < total_work
@@ -534,7 +571,11 @@ where
                             .context("temporal worker input ended before its declared length")?;
                         let worker_id = ordinal % worker_count;
                         occupancy.queued_work.increment();
-                        if work_senders[worker_id].send((ordinal, item)).is_err() {
+                        let send_started = Instant::now();
+                        let send_result = work_senders[worker_id].send((ordinal, item));
+                        coordinator_send_blocked_nanos = coordinator_send_blocked_nanos
+                            .saturating_add(duration_nanos(send_started.elapsed()));
+                        if send_result.is_err() {
                             occupancy.queued_work.decrement(1);
                             bail!(
                                 "temporal worker {worker_id} stopped before accepting ordinal {ordinal}"
@@ -543,7 +584,22 @@ where
                         window.admit(ordinal)?;
                     }
 
-                    match event_receiver.recv() {
+                    let admission_window_was_full = !window.has_capacity();
+                    let next_ordinal_was_blocked = reducer_pending > 0;
+                    let receive_started = Instant::now();
+                    let event = event_receiver.recv();
+                    let receive_wait_nanos = duration_nanos(receive_started.elapsed());
+                    if admission_window_was_full {
+                        admission_window_full_receive_wait_nanos =
+                            admission_window_full_receive_wait_nanos
+                                .saturating_add(receive_wait_nanos);
+                    }
+                    if next_ordinal_was_blocked {
+                        next_ordinal_blocked_wait_nanos =
+                            next_ordinal_blocked_wait_nanos.saturating_add(receive_wait_nanos);
+                    }
+
+                    match event {
                         Ok(WorkerEvent::Completed { ordinal, output }) => {
                             if !(window.next_reduced..window.next_dispatch).contains(&ordinal) {
                                 bail!(
@@ -552,11 +608,15 @@ where
                                     window.next_dispatch
                                 );
                             }
+                            if ordinal != window.next_reduced {
+                                completed_out_of_order = completed_out_of_order.saturating_add(1);
+                            }
                             let progress = reduce(output).with_context(|| {
                                 format!("reduce temporal commit ordinal {ordinal}")
                             })?;
                             let reduced = window.note_reduced(progress.next_ordinal)?;
                             occupancy.results.decrement(reduced);
+                            reducer_pending = progress.pending_results;
                             max_reducer_pending = max_reducer_pending.max(progress.pending_results);
                         }
                         Ok(WorkerEvent::Failed {
@@ -581,12 +641,27 @@ where
                     }
                 }
 
+                let pool_elapsed_nanos = duration_nanos(pool_started.elapsed());
+                let active_worker_nanos = timing.active_worker_nanos.load(Ordering::Relaxed);
+                let average_active_workers_milli = if pool_elapsed_nanos == 0 {
+                    0
+                } else {
+                    ((u128::from(active_worker_nanos) * 1_000) / u128::from(pool_elapsed_nanos))
+                        .min(u128::from(u64::MAX)) as u64
+                };
                 let stats = WorkerPoolStats {
                     max_in_flight: window.max_in_flight,
                     max_queued_work: occupancy.queued_work.maximum(),
                     max_active_work: occupancy.active_work.maximum(),
                     max_result_occupancy: occupancy.results.maximum(),
                     max_reducer_pending,
+                    pool_elapsed_nanos,
+                    active_worker_nanos,
+                    average_active_workers_milli,
+                    completed_out_of_order,
+                    admission_window_full_receive_wait_nanos,
+                    next_ordinal_blocked_wait_nanos,
+                    coordinator_send_blocked_nanos,
                 };
                 cancel_on_failure.disarm();
                 Ok(stats)
@@ -875,7 +950,8 @@ fn run_full_walk_into_with_stats(
             },
         )
     };
-    let shared_parse_cache = Arc::new(SharedParseCache::default());
+    let telemetry_enabled = tracing::enabled!(tracing::Level::DEBUG);
+    let shared_parse_cache = Arc::new(SharedParseCache::new(telemetry_enabled));
     let worker_root = Arc::new(worktree.to_path_buf());
     let initialize_root = Arc::clone(&worker_root);
     let compute_root = Arc::clone(&worker_root);
@@ -911,6 +987,7 @@ fn run_full_walk_into_with_stats(
         pool,
         shared_parse_cache_current_entries: shared_parse_cache.len(),
         shared_parse_cache_peak_entries: shared_parse_cache.peak_len(),
+        shared_parse_cache: shared_parse_cache.telemetry_snapshot(),
     };
     tracing::debug!(
         temporal_jobs = config.temporal_jobs.get(),
@@ -919,8 +996,35 @@ fn run_full_walk_into_with_stats(
         max_active_work = stats.pool.max_active_work,
         max_result_occupancy = stats.pool.max_result_occupancy,
         max_reducer_pending = stats.pool.max_reducer_pending,
+        pool_elapsed_nanos = stats.pool.pool_elapsed_nanos,
+        active_worker_nanos = stats.pool.active_worker_nanos,
+        average_active_workers_milli = stats.pool.average_active_workers_milli,
+        completed_out_of_order = stats.pool.completed_out_of_order,
+        admission_window_full_receive_wait_nanos =
+            stats.pool.admission_window_full_receive_wait_nanos,
+        next_ordinal_blocked_wait_nanos = stats.pool.next_ordinal_blocked_wait_nanos,
+        coordinator_send_blocked_nanos = stats.pool.coordinator_send_blocked_nanos,
         shared_parse_cache_current_entries = stats.shared_parse_cache_current_entries,
         shared_parse_cache_peak_entries = stats.shared_parse_cache_peak_entries,
+        telemetry_enabled = stats.shared_parse_cache.telemetry_enabled,
+        cache_hits = stats.shared_parse_cache.cache_hits,
+        cold_initializations = stats.shared_parse_cache.cold_initializations,
+        reparse_initializations = stats.shared_parse_cache.reparse_initializations,
+        successful_initializations = stats.shared_parse_cache.successful_initializations,
+        failed_initializations = stats.shared_parse_cache.failed_initializations,
+        initialization_nanos = stats.shared_parse_cache.initialization_nanos,
+        cold_initialization_nanos = stats.shared_parse_cache.cold_initialization_nanos,
+        reparse_initialization_nanos = stats.shared_parse_cache.reparse_initialization_nanos,
+        cache_hit_nanos = stats.shared_parse_cache.cache_hit_nanos,
+        cache_lock_wait_nanos = stats.shared_parse_cache.lock_wait_nanos,
+        evicted_entries = stats.shared_parse_cache.evicted_entries,
+        current_retained_payload_bytes = stats.shared_parse_cache.current_retained_payload_bytes,
+        peak_retained_payload_bytes = stats.shared_parse_cache.peak_retained_payload_bytes,
+        reuse_distance_count = stats.shared_parse_cache.reuse_distance_count,
+        reuse_distance_sum = stats.shared_parse_cache.reuse_distance_sum,
+        reuse_distance_max = stats.shared_parse_cache.reuse_distance_max,
+        current_exact_ghost_keys = stats.shared_parse_cache.current_exact_ghost_keys,
+        peak_exact_ghost_keys = stats.shared_parse_cache.peak_exact_ghost_keys,
         "spur-graph: temporal worker-pool occupancy"
     );
 
@@ -1451,21 +1555,191 @@ type BlobOid = String;
 type ParseCacheKey = (Language, BlobOid);
 type SharedExtractedSymbols = Arc<[ExtractedSymbol]>;
 
+/// A stable lower-bound estimate: inline symbol storage plus owned string bytes.
+fn retained_payload_estimate(symbols: &[ExtractedSymbol]) -> u64 {
+    symbols.iter().fold(
+        u64::try_from(std::mem::size_of_val(symbols)).unwrap_or(u64::MAX),
+        |total, symbol| {
+            let owned_string_bytes = symbol
+                .entity_name
+                .len()
+                .saturating_add(symbol.symbol_kind.len())
+                .saturating_add(symbol.enclosing_scope.as_ref().map_or(0, String::len))
+                .saturating_add(symbol.anchor_hash.len())
+                .saturating_add(
+                    symbol
+                        .tokens
+                        .iter()
+                        .map(String::len)
+                        .fold(0_usize, usize::saturating_add),
+                );
+            total.saturating_add(u64::try_from(owned_string_bytes).unwrap_or(u64::MAX))
+        },
+    )
+}
+
+#[derive(Clone, Copy)]
+enum ParseCacheInitializationClass {
+    Cold,
+    Reparse { evicted_at: usize },
+}
+
+struct ParseCacheInitializationState {
+    symbols: Option<SharedExtractedSymbols>,
+    class: ParseCacheInitializationClass,
+}
+
 struct SharedParseCacheEntry {
-    initialization: Arc<Mutex<Option<SharedExtractedSymbols>>>,
+    initialization: Arc<Mutex<ParseCacheInitializationState>>,
     /// `None` marks persistent access from a standalone `SymbolDiffCtx`.
     greatest_using_ordinal: Option<usize>,
+    retained_payload_bytes: u64,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct ParseCacheTelemetryStats {
+    telemetry_enabled: bool,
+    cache_hits: u64,
+    cold_initializations: u64,
+    reparse_initializations: u64,
+    successful_initializations: u64,
+    failed_initializations: u64,
+    initialization_nanos: u64,
+    cold_initialization_nanos: u64,
+    reparse_initialization_nanos: u64,
+    cache_hit_nanos: u64,
+    lock_wait_nanos: u64,
+    evicted_entries: u64,
+    current_retained_payload_bytes: u64,
+    peak_retained_payload_bytes: u64,
+    reuse_distance_count: u64,
+    reuse_distance_sum: u64,
+    reuse_distance_max: u64,
+    current_exact_ghost_keys: usize,
+    peak_exact_ghost_keys: usize,
+}
+
+struct ParseCacheTelemetry {
+    enabled: bool,
+    cache_hits: AtomicU64,
+    cold_initializations: AtomicU64,
+    reparse_initializations: AtomicU64,
+    successful_initializations: AtomicU64,
+    failed_initializations: AtomicU64,
+    initialization_nanos: AtomicU64,
+    cold_initialization_nanos: AtomicU64,
+    reparse_initialization_nanos: AtomicU64,
+    cache_hit_nanos: AtomicU64,
+    lock_wait_nanos: AtomicU64,
+    evicted_entries: AtomicU64,
+    peak_retained_payload_bytes: AtomicU64,
+    reuse_distance_count: AtomicU64,
+    reuse_distance_sum: AtomicU64,
+    reuse_distance_max: AtomicU64,
+    peak_exact_ghost_keys: AtomicUsize,
+}
+
+impl ParseCacheTelemetry {
+    fn new(enabled: bool) -> Self {
+        Self {
+            enabled,
+            cache_hits: AtomicU64::new(0),
+            cold_initializations: AtomicU64::new(0),
+            reparse_initializations: AtomicU64::new(0),
+            successful_initializations: AtomicU64::new(0),
+            failed_initializations: AtomicU64::new(0),
+            initialization_nanos: AtomicU64::new(0),
+            cold_initialization_nanos: AtomicU64::new(0),
+            reparse_initialization_nanos: AtomicU64::new(0),
+            cache_hit_nanos: AtomicU64::new(0),
+            lock_wait_nanos: AtomicU64::new(0),
+            evicted_entries: AtomicU64::new(0),
+            peak_retained_payload_bytes: AtomicU64::new(0),
+            reuse_distance_count: AtomicU64::new(0),
+            reuse_distance_sum: AtomicU64::new(0),
+            reuse_distance_max: AtomicU64::new(0),
+            peak_exact_ghost_keys: AtomicUsize::new(0),
+        }
+    }
+}
+
+#[derive(Default)]
+struct SharedParseCacheState {
+    entries: HashMap<ParseCacheKey, SharedParseCacheEntry>,
+    /// Present only when exact temporal reuse telemetry is enabled.
+    exact_ghost_ordinals: Option<HashMap<ParseCacheKey, usize>>,
 }
 
 /// Successful entries are shared by every extraction state while their users are active.
 /// Failed initializations are removed once no same-key caller is waiting to retry them.
-#[derive(Default)]
 struct SharedParseCache {
-    entries: Mutex<HashMap<ParseCacheKey, SharedParseCacheEntry>>,
+    state: Mutex<SharedParseCacheState>,
     peak_entries: AtomicUsize,
+    telemetry: ParseCacheTelemetry,
+}
+
+impl Default for SharedParseCache {
+    fn default() -> Self {
+        Self::new(false)
+    }
 }
 
 impl SharedParseCache {
+    fn new(telemetry_enabled: bool) -> Self {
+        Self {
+            state: Mutex::new(SharedParseCacheState {
+                entries: HashMap::new(),
+                exact_ghost_ordinals: telemetry_enabled.then(HashMap::new),
+            }),
+            peak_entries: AtomicUsize::new(0),
+            telemetry: ParseCacheTelemetry::new(telemetry_enabled),
+        }
+    }
+
+    #[cfg(test)]
+    fn with_telemetry() -> Self {
+        Self::new(true)
+    }
+
+    fn lock_state(&self) -> MutexGuard<'_, SharedParseCacheState> {
+        if !self.telemetry.enabled {
+            return self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+        let started = Instant::now();
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        atomic_saturating_add(
+            &self.telemetry.lock_wait_nanos,
+            duration_nanos(started.elapsed()),
+        );
+        state
+    }
+
+    fn lock_initialization<'a>(
+        &self,
+        initialization: &'a Mutex<ParseCacheInitializationState>,
+    ) -> MutexGuard<'a, ParseCacheInitializationState> {
+        if !self.telemetry.enabled {
+            return initialization
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+        let started = Instant::now();
+        let initialized = initialization
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        atomic_saturating_add(
+            &self.telemetry.lock_wait_nanos,
+            duration_nanos(started.elapsed()),
+        );
+        initialized
+    }
+
     fn get_or_init<F>(
         &self,
         key: ParseCacheKey,
@@ -1498,11 +1772,13 @@ impl SharedParseCache {
     where
         F: FnOnce() -> Result<std::result::Result<Vec<ExtractedSymbol>, ExtractError>>,
     {
+        let lookup_started = self.telemetry.enabled.then(Instant::now);
         let entry = {
-            let mut entries = self
-                .entries
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut state = self.lock_state();
+            let SharedParseCacheState {
+                entries,
+                exact_ghost_ordinals,
+            } = &mut *state;
             let entry = match entries.entry(key.clone()) {
                 std::collections::hash_map::Entry::Occupied(mut occupied) => {
                     let entry = occupied.get_mut();
@@ -1513,37 +1789,120 @@ impl SharedParseCache {
                     Arc::clone(&entry.initialization)
                 }
                 std::collections::hash_map::Entry::Vacant(vacant) => {
-                    let initialization = Arc::new(Mutex::new(None));
+                    let evicted_at = exact_ghost_ordinals
+                        .as_mut()
+                        .and_then(|ghosts| ghosts.remove(&key));
+                    let class = evicted_at
+                        .map_or(ParseCacheInitializationClass::Cold, |evicted_at| {
+                            ParseCacheInitializationClass::Reparse { evicted_at }
+                        });
+                    let initialization = Arc::new(Mutex::new(ParseCacheInitializationState {
+                        symbols: None,
+                        class,
+                    }));
                     vacant.insert(SharedParseCacheEntry {
                         initialization: Arc::clone(&initialization),
                         greatest_using_ordinal: ordinal,
+                        retained_payload_bytes: 0,
                     });
-                    self.peak_entries
-                        .fetch_max(entries.len(), Ordering::Relaxed);
                     initialization
                 }
             };
+            self.peak_entries
+                .fetch_max(entries.len(), Ordering::Relaxed);
             entry
         };
-        let mut cached = entry
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(symbols) = cached.as_ref() {
+
+        let mut cached = self.lock_initialization(&entry);
+        if let Some(symbols) = cached.symbols.as_ref() {
+            if self.telemetry.enabled {
+                atomic_saturating_add(&self.telemetry.cache_hits, 1);
+                if let Some(started) = lookup_started {
+                    atomic_saturating_add(
+                        &self.telemetry.cache_hit_nanos,
+                        duration_nanos(started.elapsed()),
+                    );
+                }
+            }
             return Ok(Ok(Arc::clone(symbols)));
         }
 
-        match initialize() {
+        let initialization_class = cached.class;
+        if self.telemetry.enabled {
+            match initialization_class {
+                ParseCacheInitializationClass::Cold => {
+                    atomic_saturating_add(&self.telemetry.cold_initializations, 1);
+                }
+                ParseCacheInitializationClass::Reparse { evicted_at } => {
+                    atomic_saturating_add(&self.telemetry.reparse_initializations, 1);
+                    if let Some(ordinal) = ordinal {
+                        let distance = ordinal.saturating_sub(evicted_at) as u64;
+                        atomic_saturating_add(&self.telemetry.reuse_distance_count, 1);
+                        atomic_saturating_add(&self.telemetry.reuse_distance_sum, distance);
+                        self.telemetry
+                            .reuse_distance_max
+                            .fetch_max(distance, Ordering::Relaxed);
+                    }
+                }
+            }
+        }
+        let initialization_started = self.telemetry.enabled.then(Instant::now);
+        let initialized = initialize();
+        if let Some(started) = initialization_started {
+            let elapsed = duration_nanos(started.elapsed());
+            atomic_saturating_add(&self.telemetry.initialization_nanos, elapsed);
+            match initialization_class {
+                ParseCacheInitializationClass::Cold => {
+                    atomic_saturating_add(&self.telemetry.cold_initialization_nanos, elapsed)
+                }
+                ParseCacheInitializationClass::Reparse { .. } => {
+                    atomic_saturating_add(&self.telemetry.reparse_initialization_nanos, elapsed)
+                }
+            }
+        }
+
+        match initialized {
             Ok(Ok(symbols)) => {
+                let retained_payload_bytes = if self.telemetry.enabled {
+                    retained_payload_estimate(&symbols)
+                } else {
+                    0
+                };
                 let symbols = Arc::<[ExtractedSymbol]>::from(symbols);
-                *cached = Some(Arc::clone(&symbols));
+                cached.symbols = Some(Arc::clone(&symbols));
+                if self.telemetry.enabled {
+                    let mut state = self.lock_state();
+                    if let Some(registered) = state
+                        .entries
+                        .get_mut(&key)
+                        .filter(|registered| Arc::ptr_eq(&registered.initialization, &entry))
+                    {
+                        registered.retained_payload_bytes = retained_payload_bytes;
+                    }
+                    let current_retained_payload_bytes = state
+                        .entries
+                        .values()
+                        .map(|entry| entry.retained_payload_bytes)
+                        .fold(0_u64, u64::saturating_add);
+                    self.telemetry
+                        .peak_retained_payload_bytes
+                        .fetch_max(current_retained_payload_bytes, Ordering::Relaxed);
+                    atomic_saturating_add(&self.telemetry.successful_initializations, 1);
+                }
                 Ok(Ok(symbols))
             }
             Ok(Err(error)) => {
+                if self.telemetry.enabled {
+                    atomic_saturating_add(&self.telemetry.failed_initializations, 1);
+                }
                 drop(cached);
                 self.remove_uninitialized_entry(&key, &entry);
                 Ok(Err(error))
             }
             Err(error) => {
+                if self.telemetry.enabled {
+                    atomic_saturating_add(&self.telemetry.failed_initializations, 1);
+                }
                 drop(cached);
                 self.remove_uninitialized_entry(&key, &entry);
                 Err(error)
@@ -1554,62 +1913,144 @@ impl SharedParseCache {
     fn remove_uninitialized_entry(
         &self,
         key: &ParseCacheKey,
-        entry: &Arc<Mutex<Option<SharedExtractedSymbols>>>,
+        entry: &Arc<Mutex<ParseCacheInitializationState>>,
     ) {
-        let cached = entry
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if cached.is_some() {
+        let cached = self.lock_initialization(entry);
+        if cached.symbols.is_some() {
             return;
         }
-        let mut entries = self
-            .entries
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let initialization_class = cached.class;
+        let mut state = self.lock_state();
         if Arc::strong_count(entry) == 2
-            && entries
+            && state
+                .entries
                 .get(key)
                 .is_some_and(|registered| Arc::ptr_eq(&registered.initialization, entry))
         {
-            entries.remove(key);
+            state.entries.remove(key);
+            if let ParseCacheInitializationClass::Reparse { evicted_at } = initialization_class {
+                let current_exact_ghost_keys = if let Some(ghosts) = &mut state.exact_ghost_ordinals
+                {
+                    ghosts.insert(key.clone(), evicted_at);
+                    ghosts.len()
+                } else {
+                    0
+                };
+                self.telemetry
+                    .peak_exact_ghost_keys
+                    .fetch_max(current_exact_ghost_keys, Ordering::Relaxed);
+            }
         }
     }
 
     fn evict_before(&self, next_unreduced_ordinal: usize) {
-        self.entries
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .retain(|_, entry| {
+        let mut state = self.lock_state();
+        if !self.telemetry.enabled {
+            state.entries.retain(|_, entry| {
                 entry
                     .greatest_using_ordinal
                     .is_none_or(|ordinal| ordinal >= next_unreduced_ordinal)
             });
+            return;
+        }
+
+        let mut evicted = Vec::new();
+        state.entries.retain(|key, entry| {
+            let retained = entry
+                .greatest_using_ordinal
+                .is_none_or(|ordinal| ordinal >= next_unreduced_ordinal);
+            if !retained {
+                evicted.push(key.clone());
+            }
+            retained
+        });
+        let evicted_entries = evicted.len();
+        let current_exact_ghost_keys = if let Some(ghosts) = &mut state.exact_ghost_ordinals {
+            for key in evicted {
+                ghosts.insert(key, next_unreduced_ordinal);
+            }
+            ghosts.len()
+        } else {
+            0
+        };
+        self.telemetry
+            .peak_exact_ghost_keys
+            .fetch_max(current_exact_ghost_keys, Ordering::Relaxed);
+        atomic_saturating_add(
+            &self.telemetry.evicted_entries,
+            u64::try_from(evicted_entries).unwrap_or(u64::MAX),
+        );
     }
 
     fn len(&self) -> usize {
-        self.entries
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .len()
+        self.lock_state().entries.len()
     }
 
     fn peak_len(&self) -> usize {
         self.peak_entries.load(Ordering::Relaxed)
     }
 
+    fn telemetry_snapshot(&self) -> ParseCacheTelemetryStats {
+        if !self.telemetry.enabled {
+            return ParseCacheTelemetryStats::default();
+        }
+        let state = self.lock_state();
+        let current_retained_payload_bytes = state
+            .entries
+            .values()
+            .map(|entry| entry.retained_payload_bytes)
+            .fold(0_u64, u64::saturating_add);
+        let current_exact_ghost_keys = state.exact_ghost_ordinals.as_ref().map_or(0, HashMap::len);
+        ParseCacheTelemetryStats {
+            telemetry_enabled: true,
+            cache_hits: self.telemetry.cache_hits.load(Ordering::Relaxed),
+            cold_initializations: self.telemetry.cold_initializations.load(Ordering::Relaxed),
+            reparse_initializations: self
+                .telemetry
+                .reparse_initializations
+                .load(Ordering::Relaxed),
+            successful_initializations: self
+                .telemetry
+                .successful_initializations
+                .load(Ordering::Relaxed),
+            failed_initializations: self
+                .telemetry
+                .failed_initializations
+                .load(Ordering::Relaxed),
+            initialization_nanos: self.telemetry.initialization_nanos.load(Ordering::Relaxed),
+            cold_initialization_nanos: self
+                .telemetry
+                .cold_initialization_nanos
+                .load(Ordering::Relaxed),
+            reparse_initialization_nanos: self
+                .telemetry
+                .reparse_initialization_nanos
+                .load(Ordering::Relaxed),
+            cache_hit_nanos: self.telemetry.cache_hit_nanos.load(Ordering::Relaxed),
+            lock_wait_nanos: self.telemetry.lock_wait_nanos.load(Ordering::Relaxed),
+            evicted_entries: self.telemetry.evicted_entries.load(Ordering::Relaxed),
+            current_retained_payload_bytes,
+            peak_retained_payload_bytes: self
+                .telemetry
+                .peak_retained_payload_bytes
+                .load(Ordering::Relaxed),
+            reuse_distance_count: self.telemetry.reuse_distance_count.load(Ordering::Relaxed),
+            reuse_distance_sum: self.telemetry.reuse_distance_sum.load(Ordering::Relaxed),
+            reuse_distance_max: self.telemetry.reuse_distance_max.load(Ordering::Relaxed),
+            current_exact_ghost_keys,
+            peak_exact_ghost_keys: self.telemetry.peak_exact_ghost_keys.load(Ordering::Relaxed),
+        }
+    }
+
     #[cfg(test)]
     fn contains(&self, key: &ParseCacheKey) -> bool {
-        self.entries
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .contains_key(key)
+        self.lock_state().entries.contains_key(key)
     }
 
     #[cfg(test)]
     fn greatest_using_ordinal(&self, key: &ParseCacheKey) -> Option<Option<usize>> {
-        self.entries
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        self.lock_state()
+            .entries
             .get(key)
             .map(|entry| entry.greatest_using_ordinal)
     }
@@ -3347,6 +3788,18 @@ mod tests {
             assert!(stats.max_active_work <= jobs.get());
             assert_eq!(stats.max_result_occupancy, jobs.get());
             assert_eq!(stats.max_reducer_pending, jobs.get().saturating_sub(1));
+            assert!(stats.pool_elapsed_nanos > 0);
+            assert!(stats.active_worker_nanos > 0);
+            assert!(stats.average_active_workers_milli <= jobs.get() as u64 * 1_000);
+            assert!(stats.coordinator_send_blocked_nanos <= stats.pool_elapsed_nanos);
+            if jobs.get() == 1 {
+                assert_eq!(stats.completed_out_of_order, 0);
+                assert_eq!(stats.next_ordinal_blocked_wait_nanos, 0);
+            } else {
+                assert!(stats.completed_out_of_order > 0);
+                assert!(stats.admission_window_full_receive_wait_nanos > 0);
+                assert!(stats.next_ordinal_blocked_wait_nanos > 0);
+            }
             assert_eq!(graph.commits.len(), jobs.get() * 3);
             assert_eq!(graph.commits, commits.commits);
         }
@@ -3960,6 +4413,164 @@ mod tests {
         symbol_changes_for_commit(dir.path(), &sha2, &file_changes2, &mut ctx).unwrap();
 
         assert_eq!(ctx.parse_cache_len(), 1);
+    }
+
+    #[test]
+    fn cache_telemetry_distinguishes_cold_hit_and_post_eviction_reparse() {
+        let cache = SharedParseCache::with_telemetry();
+        let key = (Language::Rust, "reused".to_owned());
+
+        cache
+            .get_or_init_at(1, key.clone(), || Ok(Ok(vec![cache_test_symbol("first")])))
+            .unwrap()
+            .unwrap();
+        cache
+            .get_or_init_at(2, key.clone(), || unreachable!("cache hit"))
+            .unwrap()
+            .unwrap();
+        cache.evict_before(3);
+        cache
+            .get_or_init_at(7, key, || Ok(Ok(vec![cache_test_symbol("second")])))
+            .unwrap()
+            .unwrap();
+
+        let stats = cache.telemetry_snapshot();
+        assert_eq!(stats.cold_initializations, 1);
+        assert_eq!(stats.cache_hits, 1);
+        assert_eq!(stats.reparse_initializations, 1);
+        assert_eq!(stats.successful_initializations, 2);
+        assert!(stats.evicted_entries >= 1);
+        assert!(stats.cache_hit_nanos > 0);
+        assert!(stats.cold_initialization_nanos > 0);
+        assert!(stats.reparse_initialization_nanos > 0);
+        assert_eq!(
+            stats.initialization_nanos,
+            stats
+                .cold_initialization_nanos
+                .saturating_add(stats.reparse_initialization_nanos)
+        );
+        assert_eq!(stats.reuse_distance_count, 1);
+        assert_eq!(stats.reuse_distance_sum, 4);
+        assert_eq!(stats.reuse_distance_max, 4);
+    }
+
+    #[test]
+    fn cache_telemetry_tracks_payload_bytes_and_eviction() {
+        let cache = SharedParseCache::with_telemetry();
+        let key = (Language::Rust, "payload".to_owned());
+
+        cache
+            .get_or_init_at(1, key, || {
+                Ok(Ok(vec![cache_test_symbol("retained-payload")]))
+            })
+            .unwrap()
+            .unwrap();
+
+        let retained = cache.telemetry_snapshot();
+        assert!(retained.telemetry_enabled);
+        assert!(retained.initialization_nanos > 0);
+        assert!(retained.current_retained_payload_bytes > 0);
+        assert!(retained.peak_retained_payload_bytes >= retained.current_retained_payload_bytes);
+
+        cache.evict_before(2);
+
+        let evicted = cache.telemetry_snapshot();
+        assert_eq!(evicted.current_retained_payload_bytes, 0);
+        assert!(evicted.peak_retained_payload_bytes > 0);
+        assert_eq!(evicted.evicted_entries, 1);
+        assert_eq!(evicted.current_exact_ghost_keys, 1);
+        assert_eq!(evicted.peak_exact_ghost_keys, 1);
+    }
+
+    #[test]
+    fn cache_telemetry_counts_failures_without_retaining_payload() {
+        let cache = SharedParseCache::with_telemetry();
+        let key = (Language::Rust, "invalid-payload".to_owned());
+
+        let failed = cache
+            .get_or_init_at(1, key.clone(), || Ok(Err(ExtractError::NoTree)))
+            .unwrap();
+
+        assert!(matches!(failed, Err(ExtractError::NoTree)));
+        let after_failure = cache.telemetry_snapshot();
+        assert_eq!(after_failure.failed_initializations, 1);
+        assert_eq!(after_failure.successful_initializations, 0);
+        assert_eq!(after_failure.current_retained_payload_bytes, 0);
+        assert_eq!(cache.len(), 0);
+
+        cache
+            .get_or_init_at(2, key, || Ok(Ok(vec![cache_test_symbol("retried")])))
+            .unwrap()
+            .unwrap();
+
+        let after_retry = cache.telemetry_snapshot();
+        assert_eq!(after_retry.cold_initializations, 2);
+        assert_eq!(after_retry.failed_initializations, 1);
+        assert_eq!(after_retry.successful_initializations, 1);
+        assert!(after_retry.current_retained_payload_bytes > 0);
+    }
+
+    #[test]
+    fn cache_telemetry_records_same_key_lock_wait_and_initialization_time() {
+        use std::sync::Barrier;
+
+        let cache = Arc::new(SharedParseCache::with_telemetry());
+        let ready = Arc::new(Barrier::new(2));
+        let initializations = Arc::new(AtomicUsize::new(0));
+        let handles: Vec<_> = (0..2)
+            .map(|ordinal| {
+                let cache = Arc::clone(&cache);
+                let ready = Arc::clone(&ready);
+                let initializations = Arc::clone(&initializations);
+                std::thread::spawn(move || {
+                    ready.wait();
+                    cache
+                        .get_or_init_at(ordinal, (Language::Rust, "contended".to_owned()), || {
+                            initializations.fetch_add(1, Ordering::SeqCst);
+                            std::thread::sleep(std::time::Duration::from_millis(20));
+                            Ok(Ok(vec![cache_test_symbol("contended")]))
+                        })
+                        .unwrap()
+                        .unwrap()
+                })
+            })
+            .collect();
+        let symbols: Vec<_> = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect();
+
+        assert_eq!(initializations.load(Ordering::SeqCst), 1);
+        assert!(Arc::ptr_eq(&symbols[0], &symbols[1]));
+        let stats = cache.telemetry_snapshot();
+        assert_eq!(stats.cold_initializations, 1);
+        assert_eq!(stats.cache_hits, 1);
+        assert_eq!(stats.successful_initializations, 1);
+        assert_eq!(stats.failed_initializations, 0);
+        assert!(stats.initialization_nanos >= 20_000_000);
+        assert_eq!(stats.initialization_nanos, stats.cold_initialization_nanos);
+        assert_eq!(stats.reparse_initialization_nanos, 0);
+        assert!(stats.cache_hit_nanos > 0);
+        assert!(stats.lock_wait_nanos > 0);
+    }
+
+    #[test]
+    fn cache_telemetry_is_disabled_by_default_and_retains_no_ghost_keys() {
+        let cache = SharedParseCache::default();
+        let key = (Language::Rust, "disabled".to_owned());
+
+        cache
+            .get_or_init_at(1, key, || Ok(Ok(vec![cache_test_symbol("disabled")])))
+            .unwrap()
+            .unwrap();
+        cache.evict_before(2);
+
+        let stats = cache.telemetry_snapshot();
+        assert!(!stats.telemetry_enabled);
+        assert_eq!(stats.current_exact_ghost_keys, 0);
+        assert_eq!(stats.peak_exact_ghost_keys, 0);
+        assert_eq!(stats.cold_initializations, 0);
+        assert_eq!(stats.evicted_entries, 0);
     }
 
     #[test]
