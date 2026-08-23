@@ -49,11 +49,24 @@ pub(crate) fn wrap_line_to_width_with_char_starts(
 fn wrap_line_to_width_impl(
     line: &Line<'_>,
     width: u16,
+    starts: Option<&mut Vec<usize>>,
+) -> Vec<Line<'static>> {
+    let ascii_len = printable_ascii_span_stream_len(line, width);
+    #[cfg(test)]
+    record_wrap_path(line, width, ascii_len.is_some());
+
+    if let Some(total_len) = ascii_len {
+        return wrap_printable_ascii_spans(line, width, total_len, starts);
+    }
+
+    wrap_line_to_width_generic(line, width, starts)
+}
+
+fn wrap_line_to_width_generic(
+    line: &Line<'_>,
+    width: u16,
     mut starts: Option<&mut Vec<usize>>,
 ) -> Vec<Line<'static>> {
-    #[cfg(test)]
-    record_wrap_path(line, width, false);
-
     if width == 0 {
         record_start(&mut starts, 0);
         return vec![line_to_owned(line)];
@@ -175,6 +188,167 @@ fn wrap_line_to_width_impl(
     out
 }
 
+fn printable_ascii_span_stream_len(line: &Line<'_>, width: u16) -> Option<usize> {
+    if width == 0 || line.spans.is_empty() {
+        return None;
+    }
+
+    let mut total_len = 0usize;
+    for span in &line.spans {
+        let bytes = span.content.as_bytes();
+        if !bytes.iter().all(|byte| matches!(byte, b' '..=b'~')) {
+            return None;
+        }
+        total_len += bytes.len();
+    }
+    (total_len > 0).then_some(total_len)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct AsciiCursor {
+    span_idx: usize,
+    byte_idx: usize,
+    char_idx: usize,
+}
+
+impl AsciiCursor {
+    fn start(line: &Line<'_>) -> Self {
+        let mut cursor = Self {
+            span_idx: 0,
+            byte_idx: 0,
+            char_idx: 0,
+        };
+        cursor.normalize(line);
+        cursor
+    }
+
+    fn byte(self, line: &Line<'_>) -> Option<u8> {
+        line.spans
+            .get(self.span_idx)
+            .and_then(|span| span.content.as_bytes().get(self.byte_idx))
+            .copied()
+    }
+
+    fn advance(&mut self, line: &Line<'_>) {
+        debug_assert!(self.byte(line).is_some());
+        self.byte_idx += 1;
+        self.char_idx += 1;
+        self.normalize(line);
+    }
+
+    fn normalize(&mut self, line: &Line<'_>) {
+        while self.span_idx < line.spans.len()
+            && self.byte_idx == line.spans[self.span_idx].content.len()
+        {
+            self.span_idx += 1;
+            self.byte_idx = 0;
+        }
+    }
+}
+
+fn wrap_printable_ascii_spans(
+    line: &Line<'_>,
+    width: u16,
+    total_len: usize,
+    mut starts: Option<&mut Vec<usize>>,
+) -> Vec<Line<'static>> {
+    debug_assert_eq!(
+        printable_ascii_span_stream_len(line, width),
+        Some(total_len)
+    );
+
+    if total_len <= usize::from(width) {
+        record_start(&mut starts, 0);
+        return vec![line_to_owned(line)];
+    }
+
+    let mut out = Vec::new();
+    let mut cur_start = AsciiCursor::start(line);
+    let mut cursor = cur_start;
+    let mut cur_width = 0usize;
+    let mut break_end_exclusive: Option<AsciiCursor> = None;
+    let mut break_continuation_start: Option<AsciiCursor> = None;
+    let mut in_ws = false;
+
+    while let Some(byte) = cursor.byte(line) {
+        let is_ws = byte == b' ';
+        if is_ws && !in_ws {
+            break_end_exclusive = Some(cursor);
+            break_continuation_start = None;
+            in_ws = true;
+        } else if !is_ws && in_ws {
+            break_continuation_start = Some(cursor);
+            in_ws = false;
+        }
+
+        if cur_width.saturating_add(1) > usize::from(width) && cursor.char_idx > cur_start.char_idx
+        {
+            let (emit_end, next_start) = match (break_end_exclusive, break_continuation_start) {
+                (Some(end), Some(cont))
+                    if end.char_idx > cur_start.char_idx && cont.char_idx > cur_start.char_idx =>
+                {
+                    (end, cont)
+                }
+                (Some(end), None) if end.char_idx > cur_start.char_idx => (end, end),
+                _ => (cursor, cursor),
+            };
+            record_start(&mut starts, cur_start.char_idx);
+            out.push(build_ascii_line_range(line, cur_start, emit_end));
+
+            cursor = next_start;
+            while cursor.byte(line) == Some(b' ') {
+                cursor.advance(line);
+            }
+            cur_start = cursor;
+            cur_width = 0;
+            break_end_exclusive = None;
+            break_continuation_start = None;
+            in_ws = false;
+            continue;
+        }
+
+        cur_width = cur_width.saturating_add(1);
+        cursor.advance(line);
+    }
+
+    if cur_start.char_idx < total_len {
+        record_start(&mut starts, cur_start.char_idx);
+        out.push(build_ascii_line_range(line, cur_start, cursor));
+    }
+    if out.is_empty() {
+        record_start(&mut starts, 0);
+        out.push(Line::from(""));
+    }
+    out
+}
+
+fn build_ascii_line_range(line: &Line<'_>, start: AsciiCursor, end: AsciiCursor) -> Line<'static> {
+    if start.char_idx == end.char_idx {
+        return Line::from("");
+    }
+
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let mut cursor = start;
+    while cursor.char_idx < end.char_idx {
+        let source = &line.spans[cursor.span_idx];
+        let remaining = end.char_idx - cursor.char_idx;
+        let available = source.content.len() - cursor.byte_idx;
+        let take = remaining.min(available);
+        let chunk = &source.content[cursor.byte_idx..cursor.byte_idx + take];
+
+        if let Some(last) = spans.last_mut().filter(|span| span.style == source.style) {
+            last.content.to_mut().push_str(chunk);
+        } else {
+            spans.push(Span::styled(chunk.to_owned(), source.style));
+        }
+
+        cursor.byte_idx += take;
+        cursor.char_idx += take;
+        cursor.normalize(line);
+    }
+    Line::from(spans)
+}
+
 fn record_start(starts: &mut Option<&mut Vec<usize>>, start: usize) {
     if let Some(starts) = starts.as_deref_mut() {
         starts.push(start);
@@ -251,19 +425,6 @@ thread_local! {
 }
 
 #[cfg(test)]
-fn printable_ascii_span_stream_eligible(line: &Line<'_>, width: u16) -> bool {
-    width > 0
-        && !line.spans.is_empty()
-        && line.spans.iter().any(|span| !span.content.is_empty())
-        && line.spans.iter().all(|span| {
-            span.content
-                .as_bytes()
-                .iter()
-                .all(|byte| matches!(byte, b' '..=b'~'))
-        })
-}
-
-#[cfg(test)]
 fn begin_wrap_path_tracking() {
     WRAP_PATH_STATS.with(|stats| stats.set(Some(WrapPathStats::default())));
 }
@@ -290,7 +451,7 @@ fn record_wrap_path(line: &Line<'_>, width: u16, ascii_fast_path_hit: bool) {
             .sum::<u64>();
         stats.observed_calls += 1;
         stats.observed_chars += chars;
-        if printable_ascii_span_stream_eligible(line, width) {
+        if printable_ascii_span_stream_len(line, width).is_some() {
             stats.ascii_eligible_calls += 1;
             stats.ascii_eligible_chars += chars;
         }
@@ -507,6 +668,75 @@ mod tests {
         assert_eq!(out2.len(), 2, "expected 2 rows at width=8");
         assert_eq!(out2[0].to_string(), "aaa bbb");
         assert_eq!(out2[1].to_string(), "ccc");
+    }
+
+    fn assert_ascii_matches_generic(line: &Line<'_>, width: u16) {
+        let total_len = printable_ascii_span_stream_len(line, width)
+            .expect("test input must be printable ASCII");
+        let mut ascii_starts = Vec::new();
+        let ascii = wrap_printable_ascii_spans(line, width, total_len, Some(&mut ascii_starts));
+        let mut generic_starts = Vec::new();
+        let generic = wrap_line_to_width_generic(line, width, Some(&mut generic_starts));
+        assert_eq!(ascii, generic, "line mismatch at width {width}");
+        assert_eq!(
+            ascii_starts, generic_starts,
+            "source starts mismatch at width {width}"
+        );
+    }
+
+    #[test]
+    fn printable_ascii_span_stream_matches_generic_reference() {
+        let red = Style::default().fg(Color::Red);
+        let blue = Style::default().fg(Color::Blue);
+        let cases = vec![
+            s("hello"),
+            s("hello world"),
+            s("abcdefghijklmnopqrstuvwxyz"),
+            s("   indented text with   weird  spacing"),
+            s("             "),
+            Line::from(vec![
+                Span::styled("prefix ", red),
+                Span::styled("same-style ", red),
+                Span::styled("blue words here", blue),
+            ]),
+            Line::from(vec![
+                Span::styled("", red),
+                Span::styled("abc def ghi", blue),
+                Span::styled("", red),
+            ]),
+        ];
+
+        for line in &cases {
+            for width in [1, 2, 3, 5, 8, 13, 64] {
+                assert_ascii_matches_generic(line, width);
+            }
+        }
+    }
+
+    #[test]
+    fn unsupported_ascii_span_stream_inputs_use_generic_reference() {
+        let cases = vec![
+            (s("hello"), 0),
+            (Line::from(""), 8),
+            (s("hello\tworld"), 8),
+            (Line::from(vec![Span::raw("hello\nworld")]), 8),
+            (s("delete\u{7f}"), 8),
+            (s("héllo"), 8),
+            (s("字字字"), 8),
+        ];
+
+        for (line, width) in cases {
+            assert_eq!(printable_ascii_span_stream_len(&line, width), None);
+            let mut actual_starts = Vec::new();
+            let actual = wrap_line_to_width_impl(&line, width, Some(&mut actual_starts));
+            let mut generic_starts = Vec::new();
+            let generic = wrap_line_to_width_generic(&line, width, Some(&mut generic_starts));
+            assert_eq!(actual, generic, "fallback line mismatch at width {width}");
+            assert_eq!(
+                actual_starts, generic_starts,
+                "fallback starts mismatch at width {width}"
+            );
+        }
     }
 
     #[cfg(feature = "markdown")]
