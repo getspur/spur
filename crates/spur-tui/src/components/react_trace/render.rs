@@ -1002,6 +1002,7 @@ impl ReactTrace {
         // rebuild from the dirty index — O(tail) instead of O(n).
         {
             let dirty = self.dirty_from;
+            let plain_text_append = self.plain_text_append;
 
             let (cell_w_px, cell_h_px) = ctx
                 .picker
@@ -1033,6 +1034,9 @@ impl ReactTrace {
                         entry,
                         dirty_idx,
                         effective_width,
+                        plain_text_append
+                            .filter(|provenance| provenance.entry_idx == dirty_idx)
+                            .map(|provenance| provenance.base_generation),
                         self.generation,
                         cache,
                     )
@@ -1115,6 +1119,7 @@ impl ReactTrace {
                 });
                 self.dirty_from = None;
             }
+            self.plain_text_append = None;
         }
 
         let (total, offset) = {
@@ -1597,6 +1602,39 @@ mod copy_friendly_border_tests {
         assert_eq!(
             incremental_cache.entry_row_starts,
             cold_cache.entry_row_starts
+        );
+    }
+
+    #[cfg(feature = "markdown")]
+    #[test]
+    fn streaming_plain_tail_provenance_clears_on_generic_mutation() {
+        let width = 24;
+        let height = 8;
+        let initial = "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu";
+
+        let mut trace = ReactTrace::new_for_tests();
+        trace.append_message(initial, "codex", "12:00".into());
+        render_once(&mut trace, width, height);
+
+        trace.append_message(" nu", "codex", "12:01".into());
+        assert!(trace.plain_text_append.is_some());
+
+        trace.mark_dirty_from_for_update(0);
+        assert!(
+            trace.plain_text_append.is_none(),
+            "a generic in-place mutation must revoke append-only provenance"
+        );
+
+        trace.append_message(" xi", "codex", "12:01".into());
+        render_once(&mut trace, width, height);
+        assert_eq!(
+            trace
+                .line_cache
+                .as_ref()
+                .and_then(|cache| cache.plain_text_tail.as_ref())
+                .map(|tail| tail.reuse_count),
+            Some(0),
+            "a later append must not restore provenance across the generic mutation"
         );
     }
 

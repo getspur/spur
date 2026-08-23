@@ -645,6 +645,7 @@ pub(super) fn reuse_plain_text_tail(
     entry: &super::types::TraceEntry,
     dirty_idx: usize,
     effective_width: u16,
+    append_base_generation: Option<u64>,
     generation: u64,
     cache: &mut VirtualRowCacheEntry,
 ) -> bool {
@@ -653,7 +654,8 @@ pub(super) fn reuse_plain_text_tail(
     };
     if effective_width <= 3
         || dirty_idx != tail.entry_idx
-        || generation != cache.generation.wrapping_add(1)
+        || append_base_generation != Some(cache.generation)
+        || generation == cache.generation
     {
         return false;
     }

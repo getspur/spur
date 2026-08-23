@@ -47,6 +47,15 @@ pub(crate) enum Surface {
     Compact(u64),
 }
 
+#[cfg(feature = "markdown")]
+#[derive(Clone, Copy)]
+pub(super) struct PlainTextAppendProvenance {
+    /// Tail entry receiving every mutation since the cached generation.
+    pub(super) entry_idx: usize,
+    /// Generation represented by the cache before the first append.
+    pub(super) base_generation: u64,
+}
+
 pub struct ReactTrace {
     pub(super) entries: Vec<TraceEntry>,
     pub(super) inline_images: HashMap<types::TraceImageId, types::TraceImage>,
@@ -86,6 +95,10 @@ pub struct ReactTrace {
     pub(super) generation: u64,
     /// Index of the first entry needing row rebuild.
     pub(super) dirty_from: Option<usize>,
+    /// Proof that every mutation since `base_generation` was an append to the
+    /// same active plain-text tail. Generic mutations clear this marker.
+    #[cfg(feature = "markdown")]
+    pub(super) plain_text_append: Option<PlainTextAppendProvenance>,
     /// Cached pre-wrapped display lines.
     #[cfg(not(feature = "markdown"))]
     pub(super) line_cache: Option<render::LineCacheEntry>,
@@ -246,6 +259,8 @@ impl ReactTrace {
             compact: false,
             generation: 0,
             dirty_from: None,
+            #[cfg(feature = "markdown")]
+            plain_text_append: None,
             line_cache: None,
             compact_cache: None,
             body_cache: None,
@@ -439,6 +454,10 @@ impl ReactTrace {
     fn invalidate_cache(&mut self) {
         self.generation = self.generation.wrapping_add(1);
         self.dirty_from = Some(0);
+        #[cfg(feature = "markdown")]
+        {
+            self.plain_text_append = None;
+        }
     }
 
     /// Mark entries from `idx` onward as needing row rebuild.
@@ -446,6 +465,32 @@ impl ReactTrace {
         self.generation = self.generation.wrapping_add(1);
         let prev = self.dirty_from;
         self.dirty_from = Some(prev.map_or(idx, |d| d.min(idx)));
+        #[cfg(feature = "markdown")]
+        {
+            self.plain_text_append = None;
+        }
+    }
+
+    /// Mark an append to the active markdown tail while preserving provenance
+    /// across multiple chunks received before the next render.
+    #[cfg(feature = "markdown")]
+    fn mark_plain_text_append(&mut self, idx: usize) {
+        let previous_generation = self.generation;
+        self.plain_text_append = match (self.plain_text_append, self.dirty_from) {
+            (Some(provenance), Some(dirty_idx))
+                if provenance.entry_idx == idx && dirty_idx == idx =>
+            {
+                Some(provenance)
+            }
+            (None, None) => Some(PlainTextAppendProvenance {
+                entry_idx: idx,
+                base_generation: previous_generation,
+            }),
+            _ => None,
+        };
+        self.generation = self.generation.wrapping_add(1);
+        let prev = self.dirty_from;
+        self.dirty_from = Some(prev.map_or(idx, |dirty_idx| dirty_idx.min(idx)));
     }
 
     /// Public wrapper for external callers that legitimately mutate an
@@ -512,7 +557,7 @@ impl ReactTrace {
                     if let Some(stream) = entry.markdown.as_mut() {
                         if !stream.is_finalized() {
                             stream.append(text);
-                            self.mark_dirty_from(idx);
+                            self.mark_plain_text_append(idx);
                             if self.is_following() {
                                 self.scroll_to_bottom();
                             }
