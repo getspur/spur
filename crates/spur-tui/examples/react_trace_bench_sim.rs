@@ -2,7 +2,7 @@
 //!
 //! Run with:
 //!
-//!     cargo run -p spur-tui --example react_trace_bench_sim -- --quick
+//!     scripts/spur-cargo run -p spur-tui --example react_trace_bench_sim -- --quick
 
 use std::hint::black_box;
 use std::time::{Duration, Instant};
@@ -25,6 +25,7 @@ struct SimConfig {
     warm_iters: usize,
     first_draw_iters: usize,
     stream_frames: usize,
+    stream_appends_per_draw: usize,
 }
 
 #[derive(Clone, Copy)]
@@ -110,6 +111,7 @@ fn main() {
             warm_iters: 10,
             first_draw_iters: 5,
             stream_frames: 32,
+            stream_appends_per_draw: 8,
         }
     } else {
         SimConfig {
@@ -118,6 +120,7 @@ fn main() {
             warm_iters: 50,
             first_draw_iters: 20,
             stream_frames: 128,
+            stream_appends_per_draw: 8,
         }
     };
 
@@ -177,16 +180,22 @@ fn simulate_stream_append_draw(cfg: SimConfig) {
     harness.draw(&mut trace);
 
     let start = Instant::now();
-    for i in 0..cfg.stream_frames {
-        trace.append_message(" +token", streaming_agent, timestamp(9_001 + i));
+    for frame in 0..cfg.stream_frames {
+        for chunk in 0..cfg.stream_appends_per_draw {
+            let append_index = frame * cfg.stream_appends_per_draw + chunk;
+            trace.append_message(" +token", streaming_agent, timestamp(9_001 + append_index));
+        }
         harness.draw(&mut trace);
     }
     let elapsed = start.elapsed();
+    let total_appends = cfg.stream_frames * cfg.stream_appends_per_draw;
     println!(
-        "stream_append_draw total={:.3}ms mean/frame={:.3}ms frames={} tail_entries={}",
+        "stream_append_draw total={:.3}ms mean/frame={:.3}ms frames={} appends_per_draw={} total_appends={} tail_entries={}",
         elapsed.as_secs_f64() * 1_000.0,
         elapsed.as_secs_f64() * 1_000.0 / cfg.stream_frames as f64,
         cfg.stream_frames,
+        cfg.stream_appends_per_draw,
+        total_appends,
         trace.entry_count()
     );
 }

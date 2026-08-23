@@ -51,6 +51,9 @@ fn wrap_line_to_width_impl(
     width: u16,
     mut starts: Option<&mut Vec<usize>>,
 ) -> Vec<Line<'static>> {
+    #[cfg(test)]
+    record_wrap_path(line, width, false);
+
     if width == 0 {
         record_start(&mut starts, 0);
         return vec![line_to_owned(line)];
@@ -227,6 +230,76 @@ fn line_to_owned(line: &Line<'_>) -> Line<'static> {
         .map(|s| Span::styled(s.content.to_string(), s.style))
         .collect();
     Line::from(spans)
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default)]
+struct WrapPathStats {
+    observed_calls: u64,
+    observed_chars: u64,
+    ascii_eligible_calls: u64,
+    ascii_eligible_chars: u64,
+    ascii_fast_path_hits: u64,
+    ascii_fast_path_chars: u64,
+}
+
+#[cfg(test)]
+thread_local! {
+    static WRAP_PATH_STATS: std::cell::Cell<Option<WrapPathStats>> = const {
+        std::cell::Cell::new(None)
+    };
+}
+
+#[cfg(test)]
+fn printable_ascii_span_stream_eligible(line: &Line<'_>, width: u16) -> bool {
+    width > 0
+        && !line.spans.is_empty()
+        && line.spans.iter().any(|span| !span.content.is_empty())
+        && line.spans.iter().all(|span| {
+            span.content
+                .as_bytes()
+                .iter()
+                .all(|byte| matches!(byte, b' '..=b'~'))
+        })
+}
+
+#[cfg(test)]
+fn begin_wrap_path_tracking() {
+    WRAP_PATH_STATS.with(|stats| stats.set(Some(WrapPathStats::default())));
+}
+
+#[cfg(test)]
+fn end_wrap_path_tracking() -> WrapPathStats {
+    WRAP_PATH_STATS.with(|stats| stats.take().expect("wrap path tracking must be active"))
+}
+
+#[cfg(test)]
+fn record_wrap_path(line: &Line<'_>, width: u16, ascii_fast_path_hit: bool) {
+    WRAP_PATH_STATS.with(|slot| {
+        let Some(mut stats) = slot.get() else {
+            return;
+        };
+        if width == 0 {
+            return;
+        }
+
+        let chars = line
+            .spans
+            .iter()
+            .map(|span| span.content.chars().count() as u64)
+            .sum::<u64>();
+        stats.observed_calls += 1;
+        stats.observed_chars += chars;
+        if printable_ascii_span_stream_eligible(line, width) {
+            stats.ascii_eligible_calls += 1;
+            stats.ascii_eligible_chars += chars;
+        }
+        if ascii_fast_path_hit {
+            stats.ascii_fast_path_hits += 1;
+            stats.ascii_fast_path_chars += chars;
+        }
+        slot.set(Some(stats));
+    });
 }
 
 #[cfg(test)]
@@ -434,5 +507,85 @@ mod tests {
         assert_eq!(out2.len(), 2, "expected 2 rows at width=8");
         assert_eq!(out2[0].to_string(), "aaa bbb");
         assert_eq!(out2[1].to_string(), "ccc");
+    }
+
+    #[cfg(feature = "markdown")]
+    #[test]
+    fn sustained_eight_append_journey_uses_ascii_fast_path() {
+        use std::collections::HashMap;
+
+        use ratatui::{backend::TestBackend, Terminal};
+        use spur_acp::AgentKind;
+
+        use crate::components::image_cache::ImageCache;
+        use crate::components::mermaid::{MermaidId, MermaidState};
+        use crate::components::react_trace::{ReactTrace, RenderContext};
+
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).expect("test backend must initialize");
+        let mermaid_registry = HashMap::<MermaidId, MermaidState>::new();
+        let mut image_cache = ImageCache::new();
+        let mut trace = ReactTrace::with_kind(AgentKind::ClaudeCodeAcp);
+        let streaming_agent = "stream-live";
+        trace.append_message("stream bootstrap", streaming_agent, "10:00:00".to_string());
+
+        let mut draw = |trace: &mut ReactTrace| {
+            terminal
+                .draw(|frame| {
+                    let mut ctx = RenderContext {
+                        mermaid_registry: &mermaid_registry,
+                        mermaid_registry_version: 0,
+                        picker: None,
+                        image_cache: &mut image_cache,
+                    };
+                    trace.render_with_ctx(frame, frame.area(), &mut ctx, None);
+                })
+                .expect("draw must succeed");
+        };
+        draw(&mut trace);
+
+        const STREAM_FRAMES: usize = 32;
+        const APPENDS_PER_DRAW: usize = 8;
+        begin_wrap_path_tracking();
+        for frame in 0..STREAM_FRAMES {
+            for chunk in 0..APPENDS_PER_DRAW {
+                let append_index = frame * APPENDS_PER_DRAW + chunk;
+                trace.append_message(
+                    " +token",
+                    streaming_agent,
+                    format!("10:{:02}:{:02}", append_index / 60, append_index % 60),
+                );
+            }
+            draw(&mut trace);
+        }
+        let stats = end_wrap_path_tracking();
+        let eligibility_permille = stats.ascii_eligible_chars * 1_000 / stats.observed_chars;
+        eprintln!(
+            "wrap_path_stats observed_calls={} observed_chars={} eligible_calls={} eligible_chars={} fast_hits={} fast_chars={} eligibility_permille={}",
+            stats.observed_calls,
+            stats.observed_chars,
+            stats.ascii_eligible_calls,
+            stats.ascii_eligible_chars,
+            stats.ascii_fast_path_hits,
+            stats.ascii_fast_path_chars,
+            eligibility_permille,
+        );
+
+        assert!(
+            stats.observed_chars > 0,
+            "journey must exercise line wrapping"
+        );
+        assert!(
+            stats.ascii_eligible_chars * 1_000 >= stats.observed_chars * 818,
+            "ASCII eligibility gate missed: {eligibility_permille} permille"
+        );
+        assert_eq!(
+            stats.ascii_fast_path_chars, stats.ascii_eligible_chars,
+            "every eligible character should bypass generic flattening"
+        );
+        assert_eq!(
+            stats.ascii_fast_path_hits, stats.ascii_eligible_calls,
+            "every eligible call should select the ASCII span stream"
+        );
     }
 }
