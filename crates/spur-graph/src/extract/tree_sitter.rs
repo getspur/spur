@@ -115,6 +115,9 @@ fn symbol_query_policy(language: Language) -> SymbolQueryPolicy {
         | Language::Lua
         | Language::Shell
         | Language::Sql
+        | Language::Json
+        | Language::Toml
+        | Language::Yaml
         | Language::JupyterNotebook => SymbolQueryPolicy::ReuseTags,
         Language::Markdown => {
             SymbolQueryPolicy::Dedicated(include_str!("../../queries/markdown/symbols.scm"))
@@ -2936,6 +2939,9 @@ pub(crate) fn language_family(path: &str) -> Option<&'static str> {
         "cpp" | "cc" | "cxx" | "c" | "h" | "hpp" | "hxx" => "cpp",
         "md" | "markdown" => "markdown",
         "tf" | "hcl" => "hcl",
+        "json" => "json",
+        "toml" => "toml",
+        "yaml" | "yml" => "yaml",
         _ => return None,
     })
 }

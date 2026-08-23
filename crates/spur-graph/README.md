@@ -102,7 +102,7 @@ let artifact = artifact_from_facts(&facts, &root)?;
 
 ## Supported languages
 
-`Language` in `src/extract/languages.rs` (15 variants):
+`Language` in `src/extract/languages.rs` (18 variants):
 
 | Language | Grammar | Notes |
 |---|---|---|
@@ -112,6 +112,9 @@ let artifact = artifact_from_facts(&facts, &root)?;
 | C / C++ | `tree-sitter-c` / `cpp` | Inheritance + relation quality edges |
 | Go | `tree-sitter-go` | |
 | HCL / Terraform | `tree-sitter-hcl` | One grammar for `.hcl` and `.tf` |
+| JSON | `tree-sitter-json` | Named keys only; lockfiles skipped |
+| TOML | `tree-sitter-toml-ng` | Named tables/keys; lockfiles skipped |
+| YAML | `tree-sitter-yaml` | `.yaml` and `.yml`; lockfiles skipped |
 | Lua | `tree-sitter-lua` | |
 | Shell | `tree-sitter-bash` | |
 | SQL | `tree-sitter-sequel` | |

@@ -171,9 +171,10 @@ fn terraform_and_hcl_paths_route_to_shared_grammar_languages() {
         terraform, hcl,
         "tf and hcl must stay distinct variants over the shared grammar"
     );
-    assert!(
-        Language::from_path(Path::new("main.tf.json")).is_none(),
-        ".tf.json is JSON syntax and out of scope"
+    assert_eq!(
+        Language::from_path(Path::new("main.tf.json")),
+        Some(Language::Json),
+        ".tf.json is JSON syntax and is extracted as generic JSON"
     );
 
     let extensions: BTreeSet<_> = all_supported_extensions().into_iter().collect();

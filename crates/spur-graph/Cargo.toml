@@ -57,12 +57,15 @@ tree-sitter-cpp = "0.23"
 tree-sitter-go = "0.25"
 # One grammar covers both .tf and .hcl (shared-variant precedent: Javascript/Tsx on LANGUAGE_TSX).
 tree-sitter-hcl = "1.1.0"
+tree-sitter-json = "0.24.8"
 tree-sitter-lua = "0.5.0"
 tree-sitter-md = "0.5.3"
 tree-sitter-python = "0.25"
 tree-sitter-rust = "0.24"
-tree-sitter-typescript = "0.23"
 tree-sitter-sequel = "0.3"
+tree-sitter-toml-ng = "0.7.0"
+tree-sitter-typescript = "0.23"
+tree-sitter-yaml = "0.7.2"
 tracing = { workspace = true }
 
 [dev-dependencies]

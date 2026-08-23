@@ -34,6 +34,9 @@ pub enum Language {
     Lua,
     Shell,
     Sql,
+    Json,
+    Toml,
+    Yaml,
 }
 
 /// Precision heuristic for common C runtime calls, not an exhaustive builtin list.
@@ -337,6 +340,9 @@ impl Language {
             Self::Lua => tree_sitter_lua::LANGUAGE.into(),
             Self::Shell => tree_sitter_bash::LANGUAGE.into(),
             Self::Sql => tree_sitter_sequel::LANGUAGE.into(),
+            Self::Json => tree_sitter_json::LANGUAGE.into(),
+            Self::Toml => tree_sitter_toml_ng::LANGUAGE.into(),
+            Self::Yaml => tree_sitter_yaml::LANGUAGE.into(),
         }
     }
 
@@ -357,6 +363,9 @@ impl Language {
             Self::Lua => lua_config(),
             Self::Shell => shell_config(),
             Self::Sql => sql_config(),
+            Self::Json => json_config(),
+            Self::Toml => toml_config(),
+            Self::Yaml => yaml_config(),
         }
     }
 
@@ -371,7 +380,14 @@ impl Language {
             Self::Go => GO_BUILTIN_METHODS,
             Self::Lua => LUA_BUILTIN_METHODS,
             Self::Shell => SHELL_BUILTIN_METHODS,
-            Self::Markdown | Self::JupyterNotebook | Self::Sql | Self::Hcl | Self::Terraform => &[],
+            Self::Markdown
+            | Self::JupyterNotebook
+            | Self::Sql
+            | Self::Hcl
+            | Self::Terraform
+            | Self::Json
+            | Self::Toml
+            | Self::Yaml => &[],
         }
     }
 
@@ -392,6 +408,9 @@ impl Language {
             Self::Lua => "lua",
             Self::Shell => "shell",
             Self::Sql => "sql",
+            Self::Json => "json",
+            Self::Toml => "toml",
+            Self::Yaml => "yaml",
         }
     }
 }
@@ -730,6 +749,74 @@ pub(crate) fn sql_config() -> LanguageConfig {
     }
 }
 
+const STRUCTURED_DEFINITION_KIND_MAP: &[(&str, NodeKind)] = &[
+    ("definition.module", NodeKind::Module),
+    ("definition.field", NodeKind::Field),
+    ("definition.constant", NodeKind::Constant),
+];
+
+const STRUCTURED_LOCKFILE_BASENAMES: &[&str] = &[
+    "package-lock.json",
+    "npm-shrinkwrap.json",
+    "pnpm-lock.yaml",
+    "pnpm-lock.yml",
+    "yarn.lock",
+    "bun.lock",
+    "bun.lockb",
+    "composer.lock",
+    "poetry.lock",
+    "uv.lock",
+    "Pipfile.lock",
+    "Gemfile.lock",
+    "flake.lock",
+];
+
+fn is_structured_lockfile(path: &std::path::Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| {
+            STRUCTURED_LOCKFILE_BASENAMES
+                .iter()
+                .any(|locked| name.eq_ignore_ascii_case(locked))
+        })
+}
+
+fn json_config() -> LanguageConfig {
+    LanguageConfig {
+        language: tree_sitter_json::LANGUAGE.into(),
+        inline_language: None,
+        queries: &[("tags", include_str!("../../queries/json/tags.scm"))],
+        definition_kind_map: STRUCTURED_DEFINITION_KIND_MAP,
+        relation_kind_map: None,
+        preserve_bare_import_path: false,
+        is_method: None,
+    }
+}
+
+fn toml_config() -> LanguageConfig {
+    LanguageConfig {
+        language: tree_sitter_toml_ng::LANGUAGE.into(),
+        inline_language: None,
+        queries: &[("tags", include_str!("../../queries/toml/tags.scm"))],
+        definition_kind_map: STRUCTURED_DEFINITION_KIND_MAP,
+        relation_kind_map: None,
+        preserve_bare_import_path: false,
+        is_method: None,
+    }
+}
+
+fn yaml_config() -> LanguageConfig {
+    LanguageConfig {
+        language: tree_sitter_yaml::LANGUAGE.into(),
+        inline_language: None,
+        queries: &[("tags", include_str!("../../queries/yaml/tags.scm"))],
+        definition_kind_map: STRUCTURED_DEFINITION_KIND_MAP,
+        relation_kind_map: None,
+        preserve_bare_import_path: false,
+        is_method: None,
+    }
+}
+
 pub(crate) fn markdown_config() -> LanguageConfig {
     LanguageConfig {
         language: tree_sitter_md::LANGUAGE.into(),
@@ -880,6 +967,32 @@ fn sql_matcher(path: &std::path::Path) -> bool {
         })
 }
 
+fn json_matcher(path: &std::path::Path) -> bool {
+    !is_structured_lockfile(path)
+        && path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("json"))
+}
+
+fn toml_matcher(path: &std::path::Path) -> bool {
+    !is_structured_lockfile(path)
+        && path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("toml"))
+}
+
+fn yaml_matcher(path: &std::path::Path) -> bool {
+    !is_structured_lockfile(path)
+        && path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| {
+                extension.eq_ignore_ascii_case("yaml") || extension.eq_ignore_ascii_case("yml")
+            })
+}
+
 pub(crate) fn language_registry() -> &'static [LanguageDescriptor] {
     &[
         LanguageDescriptor {
@@ -986,6 +1099,27 @@ pub(crate) fn language_registry() -> &'static [LanguageDescriptor] {
             language: Language::JupyterNotebook,
             label: "jupyter_notebook",
             extensions: &["ipynb"],
+        },
+        LanguageDescriptor {
+            matcher: json_matcher,
+            factory: json_config,
+            language: Language::Json,
+            label: "json",
+            extensions: &["json"],
+        },
+        LanguageDescriptor {
+            matcher: toml_matcher,
+            factory: toml_config,
+            language: Language::Toml,
+            label: "toml",
+            extensions: &["toml"],
+        },
+        LanguageDescriptor {
+            matcher: yaml_matcher,
+            factory: yaml_config,
+            language: Language::Yaml,
+            label: "yaml",
+            extensions: &["yaml", "yml"],
         },
     ]
 }
@@ -1678,8 +1812,21 @@ fn definition_name(
         }
         _ => contained_capture_text(definition, source, captures, "name")
             .into_iter()
-            .next(),
+            .next()
+            .map(|name| unquote_structured_key(&name)),
     }
+}
+
+fn unquote_structured_key(text: &str) -> String {
+    let trimmed = text.trim();
+    let bytes = trimmed.as_bytes();
+    if bytes.len() >= 2 {
+        let (first, last) = (bytes[0], bytes[bytes.len() - 1]);
+        if (first == b'"' && last == b'"') || (first == b'\'' && last == b'\'') {
+            return trimmed[1..trimmed.len() - 1].to_owned();
+        }
+    }
+    trimmed.to_owned()
 }
 
 fn is_hcl_block(definition: &CaptureHit<'_>) -> bool {
@@ -2549,6 +2696,18 @@ mod gate_contract {
                 relation_set(&["calls", "constructs", "contains", "defines", "references"]),
             ),
             (
+                Language::Json.label(),
+                relation_set(&["contains", "defines"]),
+            ),
+            (
+                Language::Toml.label(),
+                relation_set(&["contains", "defines"]),
+            ),
+            (
+                Language::Yaml.label(),
+                relation_set(&["contains", "defines"]),
+            ),
+            (
                 Language::Markdown.label(),
                 // README's Markdown `imports` cell is `Y(links)`: the
                 // @import capture channel is remapped to RelationKind::Links.
@@ -2676,6 +2835,11 @@ mod gate_contract {
             ],
             Language::Markdown => &["definition.section"],
             Language::JupyterNotebook => &[],
+            Language::Json | Language::Toml | Language::Yaml => &[
+                "definition.module",
+                "definition.field",
+                "definition.constant",
+            ],
         }
     }
 

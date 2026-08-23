@@ -371,6 +371,9 @@ fn extension_for(language: Language) -> &'static str {
         Language::Lua => "lua",
         Language::Shell => "sh",
         Language::Sql => "sql",
+        Language::Json => "json",
+        Language::Toml => "toml",
+        Language::Yaml => "yaml",
     }
 }
 
@@ -391,6 +394,9 @@ fn language_name(language: Language) -> &'static str {
         Language::Lua => "lua",
         Language::Shell => "shell",
         Language::Sql => "sql",
+        Language::Json => "json",
+        Language::Toml => "toml",
+        Language::Yaml => "yaml",
     }
 }
 

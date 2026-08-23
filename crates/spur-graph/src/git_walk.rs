@@ -1628,6 +1628,9 @@ fn stable_language_rank(language: Language) -> u8 {
         Language::Lua => 12,
         Language::Shell => 13,
         Language::Sql => 14,
+        Language::Json => 15,
+        Language::Toml => 16,
+        Language::Yaml => 17,
     }
 }
 

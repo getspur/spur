@@ -177,6 +177,21 @@ const MANIFEST_QUERY_BYTES: &[ManifestQueryBytes<'static>] = &[
         query: "jsx-edges",
         bytes: include_bytes!("../../queries/typescript/jsx-edges.scm"),
     },
+    ManifestQueryBytes {
+        language: "json",
+        query: "tags",
+        bytes: include_bytes!("../../queries/json/tags.scm"),
+    },
+    ManifestQueryBytes {
+        language: "toml",
+        query: "tags",
+        bytes: include_bytes!("../../queries/toml/tags.scm"),
+    },
+    ManifestQueryBytes {
+        language: "yaml",
+        query: "tags",
+        bytes: include_bytes!("../../queries/yaml/tags.scm"),
+    },
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

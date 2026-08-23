@@ -75,6 +75,9 @@ Legend:
 | Lua | - | Y | Y | - | - | - | - | - | - | - | - | - | - | - | - | - |
 | Shell | - | Y | - | - | - | - | - | - | - | - | - | - | - | Y | - | - |
 | Sql | Y | Y | - | - | - | Y | Y | - | - | Y | - | Y | - | Y | - | - |
+| Json | Y | - | - | - | - | - | - | - | - | - | - | Y | - | Y | - | - |
+| Toml | Y | - | - | - | - | - | - | - | - | - | - | Y | - | Y | - | - |
+| Yaml | Y | - | - | - | - | - | - | - | - | - | - | Y | - | Y | - | - |
 | Markdown | - | - | - | - | - | - | - | - | - | - | - | - | Y | - | - | - |
 | JupyterNotebook | - | - | - | - | - | - | - | - | - | - | - | - | - | - | - | - |
 
@@ -129,9 +132,15 @@ Notes:
   `local.<name>`. Provider references such as `provider = aws.west` resolve to
   the aliased provider block when that block is present in the same module
   scope.
-  `.tf.json` files are JSON syntax and are out of scope (the extension
-  matcher sees `json`); Terragrunt-flavored `.hcl` parses as generic HCL with
+  `.tf.json` files are JSON syntax and extract as generic JSON named keys, not
+  Terraform addresses. Terragrunt-flavored `.hcl` parses as generic HCL with
   no dedicated `dependency`/`include` modeling.
+- Json, Toml, and Yaml capture named keys only: object/table/mapping keys
+  whose value is nested structure become `@definition.module`; top-level
+  scalars become `@definition.constant`; nested scalars become
+  `@definition.field`. Arrays, unnamed nodes, YAML anchors/aliases, and
+  lockfile basenames (`package-lock.json`, `pnpm-lock.yaml`, …) are skipped.
+  Jupyter `.ipynb` stays a container language and is not claimed by JSON.
 - Shell captures function definitions and `alias name=value` declarations;
   aliases fold into `NodeKind::Constant`.
 - Sql captures `CREATE TRIGGER` as `NodeKind::Function` and `CREATE INDEX` as
@@ -146,21 +155,21 @@ This table is the relation-level analogue of the Definition Coverage Matrix and 
 seed of the Tier-0 ontology realization contract
 (`docs/superpowers/specs/2026-06-04-code-graph-ontology-tier0-design.ipynb`).
 
-| Predicate | Rust | Python | TypeScript | Tsx | JavaScript | C | Cpp | Go | Hcl | Terraform | Lua | Shell | Sql | Markdown | JupyterNotebook |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| imports | Y | Y | Y | Y | Y | Y | Y | Y | — | — | Y | Y | — | Y(links) | — |
-| calls | Y | Y | Y | Y | Y | Y | Y | Y | — | — | Y | Y | Y | — | — |
-| constructs | Y | Y | Y | Y | Y | Y | Y | Y | — | — | — | — | Y | — | — |
-| contains | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y |
-| produces | — | — | — | — | — | — | — | — | — | — | — | — | — | — | Y |
-| consumes | — | — | — | — | — | — | — | — | — | — | — | — | — | — | Y |
-| binds | — | — | — | — | — | — | — | — | — | — | — | — | — | — | Y |
-| emits | — | — | — | — | — | — | — | — | — | — | — | — | — | — | Y |
-| defines | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y | — | — |
-| references (HOF/notebook/address) | Y | Y | Y | Y | Y | — | Y | — | Y | Y | — | — | Y | — | Y |
-| links | — | — | — | — | — | — | — | — | — | — | — | — | — | Y | — |
-| implements | Y | Y | Y | Y | Y | — | — | — | — | — | — | — | — | — | — |
-| extends | Y | Y | Y | Y | Y | — | Y | — | — | — | — | — | — | — | — |
+| Predicate | Rust | Python | TypeScript | Tsx | JavaScript | C | Cpp | Go | Hcl | Terraform | Lua | Shell | Sql | Json | Toml | Yaml | Markdown | JupyterNotebook |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| imports | Y | Y | Y | Y | Y | Y | Y | Y | — | — | Y | Y | — | — | — | — | Y(links) | — |
+| calls | Y | Y | Y | Y | Y | Y | Y | Y | — | — | Y | Y | Y | — | — | — | — | — |
+| constructs | Y | Y | Y | Y | Y | Y | Y | Y | — | — | — | — | Y | — | — | — | — | — |
+| contains | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y |
+| produces | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | Y |
+| consumes | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | Y |
+| binds | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | Y |
+| emits | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | Y |
+| defines | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y | — | — |
+| references (HOF/notebook/address) | Y | Y | Y | Y | Y | — | Y | — | Y | Y | — | — | Y | — | — | — | — | Y |
+| links | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | Y | — |
+| implements | Y | Y | Y | Y | Y | — | — | — | — | — | — | — | — | — | — | — | — | — |
+| extends | Y | Y | Y | Y | Y | — | Y | — | — | — | — | — | — | — | — | — | — | — |
 
 Python `implements` is realized after resolution: `@extends` captures targeting
 local classes declared with `Protocol`, `ABC`, or `abc.ABC` bases are
