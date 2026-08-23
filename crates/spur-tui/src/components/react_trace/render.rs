@@ -1559,6 +1559,49 @@ mod copy_friendly_border_tests {
 
     #[cfg(feature = "markdown")]
     #[test]
+    fn streaming_plain_tail_reuses_after_batched_appends_before_render() {
+        let width = 24;
+        let height = 8;
+        let mut final_text =
+            String::from("alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu");
+        let deltas = [
+            " nu", " xi", " omicron", " pi", " rho", " sigma", " tau", " upsilon",
+        ];
+
+        let mut incremental = ReactTrace::new_for_tests();
+        incremental.append_message(&final_text, "codex", "12:00".into());
+        render_once(&mut incremental, width, height);
+
+        for delta in deltas {
+            incremental.append_message(delta, "codex", "12:01".into());
+            final_text.push_str(delta);
+        }
+        render_once(&mut incremental, width, height);
+
+        let incremental_cache = incremental.line_cache.as_ref().unwrap();
+        assert_eq!(
+            incremental_cache
+                .plain_text_tail
+                .as_ref()
+                .map(|tail| tail.reuse_count),
+            Some(1),
+            "one render after eight append-only chunks should reuse the cached suffix once"
+        );
+
+        let mut cold = ReactTrace::new_for_tests();
+        cold.append_message(&final_text, "codex", "12:00".into());
+        render_once(&mut cold, width, height);
+        let cold_cache = cold.line_cache.as_ref().unwrap();
+        assert_eq!(cached_rows(&incremental), cached_rows(&cold));
+        assert_eq!(incremental_cache.byte_ranges, cold_cache.byte_ranges);
+        assert_eq!(
+            incremental_cache.entry_row_starts,
+            cold_cache.entry_row_starts
+        );
+    }
+
+    #[cfg(feature = "markdown")]
+    #[test]
     fn streaming_tail_falls_back_for_context_sensitive_markdown() {
         let width = 24;
         let height = 8;
