@@ -1,9 +1,8 @@
 ---
-name: test-driven-development
+name: spurpower-test-driven-development
 description: "Use when implementing any feature or bugfix, before writing implementation code; when tempted to pick a constant, bound, quota, flag, or layout size by feel; when a catalog rule family may already own the constraint; or when skipping tests or solve because the change \"is not constraint-shaped.\""
-role: worker
 ---
-<!-- SPUR-MANAGED v=1 skill=test-driven-development sha256=6b58ad9036cdc3c0853b138a6eec1e3c99865c9959bb67e5ecbfc3248cd42b1e -->
+<!-- SPUR-MANAGED v=1 skill=spurpower-test-driven-development sha256=6b58ad9036cdc3c0853b138a6eec1e3c99865c9959bb67e5ecbfc3248cd42b1e -->
 
 # Test-Driven Development (TDD)
 

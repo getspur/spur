@@ -2,9 +2,9 @@
 name: test-driven-development
 description: >
   Use when implementing any feature or bugfix, before writing implementation
-  code; also when the change is constraint-shaped (constants, bounds, quotas,
-  clamps, ring buffers, invariants, flag matrices) and needs symbolic pre/post
-  evaluation with solve.
+  code; when tempted to pick a constant, bound, quota, flag, or layout size
+  by feel; when a catalog rule family may already own the constraint; or
+  when skipping tests or solve because the change "is not constraint-shaped."
 role: worker
 ---
 
@@ -18,51 +18,54 @@ Write the test first. Watch it fail. Write minimal code to pass.
 
 **Violating the letter of the rules is violating the spirit of the rules.**
 
-**Constraint-shaped work adds a second proof:** runtime tests prove *this path*;
-`solve` proves *the rules hold for the whole domain* (or returns a concrete
-counterexample). Tests and solve are complements — never substitutes.
+Every new development is a constraint problem until proven otherwise.
+Runtime tests prove *this path*. `solve` proves *the rules hold for the
+encoded domain* (or returns a concrete counterexample). Tests and solve
+are complements — never substitutes.
 
-**REQUIRED SUB-SKILL (when constraint-shaped):** Use `solve` for pre-implement
-feasibility / invariant discharge, then post-implement re-check. Navigate
-catalog rules with `solve_rule_spec`, execute matches with `solve_rules`, and
-fall back to `solve_constraints` for uncatalogued invariants. Do not invent
-constants or collapse `unknown`/`timeout` into `unsat`.
+The sat model is the TDD witness. GREEN bakes that model. Do not invent
+the number, then test it.
+
+**REQUIRED SUB-SKILL:** Use `solve`. Navigate with `solve_rule_spec` before
+hand-encoding. If an implemented family rule applies, execute it with
+`solve_rules` — the family already owns the formula; supply facts or scene
+only. Use `solve_constraints` only when the catalog has no suitable rule.
+Do not invent constants or collapse `unknown` / `timeout` into `unsat`.
 
 ## When to Use
 
-**Always:**
+**Always TDD:**
 - New features
 - Bug fixes
 - Refactoring
 - Behavior changes
 
-**Also pull in `solve` (pre → implement → post) when any of these apply:**
-- Magic numbers, pool/buffer/retry sizes, layout dimensions, config caps
-- Clamps, floors, budgets, quotas, ring/FIFO capacity, dual limits (count **and** bytes)
-- "Prove no overflow / no conflict / no illegal state for all inputs in range"
-- Feature-flag / RBAC / policy matrices that must stay consistent
-- Need a concrete witness input for a RED test (sat model) or a proof none exists (unsat)
+**Always catalog-first on new development:**
+Call `solve_rule_spec` before RED. Execute Z3 when a family matches **or**
+the change chooses a bound, quota, flag, size, interval, or other value
+you would otherwise invent.
+
+**TDD-only** (no Z3) only when *both* are true:
+- Catalog has no implemented hard rule for this behavior
+- The test invents no bounded choice (pure path / error-string / wiring)
 
 **Exceptions (ask your human partner):**
 - Throwaway prototypes
 - Generated code
-- Configuration files (unless they encode multi-rule budgets — then solve)
 
 Thinking "skip TDD just this once"? Stop. That's rationalization.
-Thinking "skip solve, the tests cover it"? Only true if the test space is the whole domain. For universal bounds, solve first.
+Thinking "this isn't constraint-shaped, skip solve"? Navigate the catalog
+anyway. No match and no invented number is the only TDD-only path.
 
 ## The Iron Law
 
 ```
 NO PRODUCTION CODE WITHOUT A FAILING TEST FIRST
+NO INVENTED BOUNDED CHOICE WITHOUT A SAT MODEL FIRST
 ```
 
-**Constraint-shaped corollary:**
-
-```
-NO MAGIC CONSTANT / INVARIANT CLAIM WITHOUT A SOLVE ARTIFACT FIRST
-(pre-solve before RED asserts the number; post-solve after GREEN bakes it)
-```
+Family rules are already defined. Do not re-encode uniqueness, capacity,
+RBAC, layout, or other catalog predicates as generic constraints.
 
 Write code before the test? Delete it. Start over.
 
@@ -74,78 +77,95 @@ Write code before the test? Delete it. Start over.
 
 Implement fresh from tests. Period.
 
-## Red-Green-Refactor (+ Solve when constraint-shaped)
+## Red-Green-Refactor (catalog → sat model → TDD)
 
 ```dot
 digraph tdd_cycle {
     rankdir=TB;
-    decide [label="Constraint-shaped?\n(constants, bounds,\ninvariants, quotas)", shape=diamond];
-    solve_pre [label="SOLVE PRE\nfeasibility + invariants\n(sat model / unsat proof)", shape=box, style=filled, fillcolor="#fff2cc"];
-    red [label="RED\nWrite failing test\n(use model as witness)", shape=box, style=filled, fillcolor="#ffcccc"];
+    catalog [label="SOLVE PRE\nsolve_rule_spec", shape=box, style=filled, fillcolor="#fff2cc"];
+    family [label="Implemented family?", shape=diamond];
+    bounded [label="Invented bound,\nflag, or constant?", shape=diamond];
+    rules [label="solve_rules\nfacts/scene only", shape=box, style=filled, fillcolor="#fff2cc"];
+    generic [label="solve_constraints\nuncatalogued only", shape=box, style=filled, fillcolor="#fff2cc"];
+    red [label="RED\nfailing test\n(model as witness)", shape=box, style=filled, fillcolor="#ffcccc"];
     verify_red [label="Verify fails\ncorrectly", shape=diamond];
-    green [label="GREEN\nMinimal code\n(bake solved values)", shape=box, style=filled, fillcolor="#ccffcc"];
+    green [label="GREEN\nMinimal code\n(bake model)", shape=box, style=filled, fillcolor="#ccffcc"];
     verify_green [label="Verify passes\nAll green", shape=diamond];
-    solve_post [label="SOLVE POST\nre-encode implemented\npolicy / constants", shape=box, style=filled, fillcolor="#fff2cc"];
+    solved [label="Solve ran?", shape=diamond];
+    solve_post [label="SOLVE POST\nre-encode landed policy", shape=box, style=filled, fillcolor="#fff2cc"];
     refactor [label="REFACTOR\nClean up", shape=box, style=filled, fillcolor="#ccccff"];
     next [label="Next", shape=ellipse];
 
-    decide -> solve_pre [label="yes"];
-    decide -> red [label="no"];
-    solve_pre -> red;
+    catalog -> family;
+    family -> rules [label="yes"];
+    family -> bounded [label="no"];
+    bounded -> generic [label="yes"];
+    bounded -> red [label="no"];
+    rules -> red;
+    generic -> red;
     red -> verify_red;
     verify_red -> green [label="yes"];
     verify_red -> red [label="wrong\nfailure"];
     green -> verify_green;
-    verify_green -> solve_post [label="yes +\nconstraint-shaped"];
-    verify_green -> refactor [label="yes +\nnot constraint-shaped"];
-    verify_green -> green [label="no"];
+    verify_green -> solved;
+    solved -> solve_post [label="yes"];
+    solved -> refactor [label="no"];
     solve_post -> refactor [label="still sat /\nunsat-as-proof"];
     solve_post -> green [label="post-solve\nbreaks"];
     refactor -> verify_green [label="stay\ngreen"];
     verify_green -> next;
-    next -> decide;
+    next -> catalog;
 }
 ```
 
-### SOLVE PRE - Symbolic evaluate before RED (constraint-shaped only)
+### SOLVE PRE - Before RED
 
-**When:** ≥2 simultaneous rules, a domain-wide invariant, or a constant you would otherwise invent.
+Do this before the failing test and before any production code.
 
-**Do this before writing the failing test** (and before any production code):
+1. Hard constraints only. Soft prefs wait for a feasible model.
+2. `solve_rule_spec` first. Never hard-code a family or rule list; discover
+   the current catalog. Execute only implemented hard rules. Advisory /
+   `capability_unavailable` entries are guidance, not proof.
+3. Catalog match: `solve_rules` with the family's facts or scene. Do **not**
+   copy the formula into `solve_constraints`. The compiler already lowers it.
+4. No catalog match, but a bounded choice exists: `solve_constraints`.
+   Use `solve_smt` only when B′ cannot express the theory.
+   **REQUIRED:** follow `solve` for routing, status semantics, and generic
+   authoring. Do not duplicate that catalog here.
+5. Act on status:
 
-1. Strip to **hard** constraints only (budgets, safety bounds, identity equations). Soft prefs wait for ratchet.
-2. Call `solve_rule_spec` first when the facts may match a catalog family; execute an implemented match with `solve_rules`.
-3. When no catalog rule applies, call `solve_constraints`; use `solve_smt` only when B′ cannot express the theory.
-4. Interpret catalog requests by their mode outcome. For generic queries, act on status:
-
-| status | TDD action |
+| status / outcome | TDD action |
 |---|---|
-| `sat` + model | RED asserts **feasibility predicates** (and optionally one concrete witness from the model). GREEN will bake model values — not a guessed golden optimum. |
-| `unsat` on feasibility | Stop. Report impossibility. Do **not** invent a constant or write a hopeful test. |
-| `unsat` on assert-¬P | Soundness proof for invariant P. RED/GREEN still cover the runtime path; post-solve will re-discharge. |
+| `sat` + model (`pass` / `solution`) | RED asserts the **predicate** and uses the model as the concrete witness. GREEN bakes model values — not a guessed optimum. |
+| `unsat` on feasibility (`fail` / `infeasible`) | Stop. Report impossibility. Do **not** invent a constant or write a hopeful test. |
+| `unsat` on assert-¬P (generic only) | Soundness proof for P. RED/GREEN still cover the runtime path. Do not apply assert-negation to `solve_rules` verify; the family owns that semantics. |
 | `unknown` / `timeout` | Not a proof. Tighten encoding or raise timeout (≤60s). Never treat as `unsat`. |
 
-Optional: `persist: true` when brain→worker handoff needs a `solve_id` (worker reloads via `get_solve_result`; treat model as authoritative).
+Optional: `persist: true` when brain→worker handoff needs a `solve_id`
+(worker reloads via `get_solve_result`; treat the model as authoritative).
 
-**Do not** implement from the model alone. The model feeds the **test contract**; RED still comes first for production code.
+**Do not** implement from the model alone. The model feeds the **test
+contract**; RED still comes first for production code.
 
 ### RED - Write Failing Test
 
 Write one minimal test showing what should happen.
 
-For constraint-shaped work, prefer tests that encode the **solved predicate**, not a one-off lucky input:
+When a sat model exists, assert the **solved predicate**, not a lucky input:
 
 ```rust
 // After solve sat { workers: 4, batch: 40 } under budget 512:
 #[test]
 fn worker_pool_fits_memory_budget() {
-    const WORKERS: u32 = 4;   // from solve model — RED fails until GREEN defines them
+    const WORKERS: u32 = 4;   // from sat model — RED fails until GREEN defines them
     const BATCH: usize = 40;
     assert!(WORKERS as usize * (48 + 2 * BATCH) <= 512);
 }
 ```
 
-When prove-none / overflow: if pre-solve returned `sat` on the unsafe condition, use that model as the RED counterexample. If pre-solve returned `unsat`, RED still covers the API path; the proof is the solve artifact.
+When prove-none / overflow: if pre-solve returned `sat` on the unsafe
+condition, use that model as the RED counterexample. If pre-solve returned
+`unsat`, RED still covers the API path; the proof is the solve artifact.
 
 <Good>
 ```typescript
@@ -163,7 +183,8 @@ test('retries failed operations 3 times', async () => {
   expect(attempts).toBe(3);
 });
 ```
-Clear name, tests real behavior, one thing
+Clear name, tests real behavior, one thing. The `3` must come from a sat
+model (or an explicit unsat-safe bound) — do not invent retry counts.
 </Good>
 
 <Bad>
@@ -177,13 +198,14 @@ test('retry works', async () => {
   expect(mock).toHaveBeenCalledTimes(3);
 });
 ```
-Vague name, tests mock not code
+Vague name, tests mock not code, invented `3`
 </Bad>
 
 **Requirements:**
 - One behavior
 - Clear name
 - Real code (no mocks unless unavoidable)
+- Bounded choices taken from a sat model
 
 ### Verify RED - Watch It Fail
 
@@ -206,7 +228,9 @@ Confirm:
 
 Write simplest code to pass the test.
 
-For constraint-shaped work: bake **only** values justified by the pre-solve model (or an explicit unsat proof that a bound is safe). Do not invent a second constant "while you're there."
+Bake **only** values justified by the pre-solve model (or an explicit unsat
+proof that a bound is safe). Do not invent a second constant "while you're
+there."
 
 <Good>
 ```typescript
@@ -221,7 +245,7 @@ async function retryOperation<T>(fn: () => Promise<T>): Promise<T> {
   throw new Error('unreachable');
 }
 ```
-Just enough to pass
+Just enough to pass; `3` is the sat-model value
 </Good>
 
 <Bad>
@@ -259,37 +283,41 @@ Confirm:
 
 **Other tests fail?** Fix now.
 
-### SOLVE POST - Symbolic re-check after GREEN (constraint-shaped only)
+### SOLVE POST - After GREEN, when SOLVE PRE ran
 
-**When:** You baked constants, clamps, eviction policy, dual quotas, or any invariant claimed for all inputs.
-
-Re-encode the **implemented** policy (same hard rules, numbers as they landed in code):
+Re-encode the **implemented** policy (same family rules or generic hard
+constraints; numbers as they landed in code):
 
 1. **Feasibility still sat** under the shipped constants and residual bounds.
-2. **Safety still unsat** on assert-¬P (overflow, count > cap after ring write, flag conflict, …).
-3. If post-solve **breaks** (unexpected `sat` on a safety query, or `unsat` on feasibility you claimed): treat as RED — fix code (or the encoding if it no longer matches the product rules). Do **not** "ship anyway" or collapse `unknown`/`timeout` into success.
+2. **Safety still unsat** on assert-¬P when that was the generic proof.
+3. Catalog verify still `pass`; a now-invalid snapshot still `fail` with the
+   family diagnostic.
+4. If post-solve **breaks**: treat as RED. Do **not** ship anyway or collapse
+   `unknown` / `timeout` into success.
 
 | Pre-solve | Post-solve | Meaning |
 |---|---|---|
 | sat model | still sat with baked consts | Implementation matches feasible region |
-| unsat on ¬P | still unsat on ¬P | Invariant holds after the change |
+| unsat on ¬P / family fail | still unsat / fail | Invariant holds after the change |
 | sat model | unsat on feasibility | You over-constrained GREEN — fix or re-solve |
-| unsat on ¬P | sat counterexample | Bug or incomplete clamp — new failing test from the model |
+| family fail / unsat on ¬P | sat counterexample | Bug or incomplete clamp — new failing test from the model |
 
-Post-solve does **not** replace the green suite. It covers the symbolic domain the suite cannot enumerate.
+Post-solve does **not** replace the green suite. It covers the symbolic
+domain the suite cannot enumerate.
 
 ### REFACTOR - Clean Up
 
-After green (and after post-solve when constraint-shaped):
+After green (and after post-solve when a solve ran):
 - Remove duplication
 - Improve names
 - Extract helpers
 
-Keep tests green. Don't add behavior. If refactor changes a bound, re-run post-solve.
+Keep tests green. Don't add behavior. If refactor changes a bound, re-run
+post-solve.
 
 ### Repeat
 
-Next failing test for next feature. Constraint-shaped next step? Back through SOLVE PRE.
+Next failing test for next behavior. Back through SOLVE PRE (catalog first).
 
 ## Good Tests
 
@@ -298,6 +326,7 @@ Next failing test for next feature. Constraint-shaped next step? Back through SO
 | **Minimal** | One thing. "and" in name? Split it. | `test('validates email and domain and whitespace')` |
 | **Clear** | Name describes behavior | `test('test1')` |
 | **Shows intent** | Demonstrates desired API | Obscures what code should do |
+| **Grounded** | Bounded values from a sat model | Invented 512 / 3 / 320 because they "feel right" |
 
 ## Why Order Matters
 
@@ -364,9 +393,12 @@ Tests-first force edge case discovery before implementing. Tests-after verify yo
 | "TDD will slow me down" | TDD faster than debugging. Pragmatic = test-first. |
 | "Manual test faster" | Manual doesn't prove edge cases. You'll re-test every change. |
 | "Existing code has no tests" | You're improving it. Add tests for existing code. |
+| "This isn't constraint-shaped, skip solve" | Catalog-first on every new development. TDD-only only if no family and no invented number. |
+| "I'll re-encode the family rule in solve_constraints" | Family already owns the formula. Use `solve_rules`. |
+| "I know the constant, skip Z3" | The sat model is the witness. Knowing is inventing. |
 | "Solve is enough, skip the failing test" | Solve is symbolic. Runtime path still needs RED→GREEN. |
 | "Tests are green, skip post-solve" | Suite samples points; post-solve re-proves the domain claim. |
-| "I'll pick 512, it feels right" | ≥2 rules on that number → pre-solve. No voodoo constants. |
+| "I'll pick 512, it feels right" | Bounded choice → pre-solve. No voodoo constants. |
 | "unsat means the solver failed" | `unsat` is a result (impossibility or soundness proof). Not an error. |
 | "unknown/timeout ≈ unsat" | Never. Unknown means you do not know. |
 
@@ -385,16 +417,19 @@ Tests-first force edge case discovery before implementing. Tests-after verify yo
 - "Already spent X hours, deleting is wasteful"
 - "TDD is dogmatic, I'm being pragmatic"
 - "This is different because..."
-- Invented a multi-rule constant without SOLVE PRE
+- Skipped `solve_rule_spec` on a new development
+- Re-encoded a catalog rule as generic constraints
+- Invented a bounded choice without SOLVE PRE
 - Claimed "safe for all inputs" without post-solve (or with only happy-path tests)
 - Treated `unknown`/`timeout` as proof of safety
 - Skipped RED because "solve already said sat"
 
-**All of these mean: Delete code. Start over with TDD.** (And re-run solve if constraint-shaped.)
+**All of these mean: Delete code. Start over with TDD.** Re-run solve when
+a bounded choice or family rule is in play.
 
-## Example: Bug Fix
+## Example: Path-only bug (TDD-only)
 
-**Bug:** Empty email accepted
+**Bug:** Empty email accepted. Catalog has no rule; the test invents no bound.
 
 **RED**
 ```typescript
@@ -420,22 +455,45 @@ function submitForm(data: FormData) {
 }
 ```
 
-**Verify GREEN**
-```bash
-$ npm test
-PASS
+**Verify GREEN** — `PASS`. No post-solve; no invented constant.
+
+## Example: Catalog family (solve_rules → TDD)
+
+**Change:** Reject duplicate active keys (NULLS DISTINCT).
+
+**SOLVE PRE**
+- `solve_rule_spec` → implemented hard rule `data_integrity.unique`
+- Distinct keys + absent key: `solve_rules` verify → `sat` + `pass`
+- Duplicate complete keys: `unsat` + `fail`, diagnostic
+  `data_integrity.unique.violation`
+- Do **not** re-encode uniqueness as generic constraints
+
+**RED**
+```rust
+#[test]
+fn unique_key_rejects_second_active_row_with_same_complete_key() {
+    // insert key=1, insert key=1 again → rejected; NULLS DISTINCT still allows absent keys
+}
 ```
+Watch fail under current accept-duplicates behavior.
 
-**REFACTOR**
-Extract validation for multiple fields if needed.
+**GREEN**
+Enforce the family predicate in the write path. Bake no extra constants.
 
-## Example: Constraint-Shaped Change (solve + TDD)
+**Verify GREEN** — suite green.
 
-**Change:** Raise persist cache cap 256→512 and ring-evict oldest when full (count **and** byte budgets).
+**SOLVE POST**
+Re-run the same two family requests against the implemented snapshot:
+distinct → `pass`; duplicate → `fail` with the same diagnostic.
+
+## Example: Uncatalogued bound (solve_constraints → TDD)
+
+**Change:** Raise persist cache cap 256→512 and ring-evict oldest when full
+(count **and** byte budgets). No family encodes this dual quota.
 
 **SOLVE PRE**
 - Feasibility: `cap=512`, `total≤64MiB`, `count_after≤cap` after 1-evict+1-insert → **sat**
-- Safety (assert-negation): `count_after≤cap ∧ count_after>cap` → **unsat** (overflow impossible under policy)
+- Safety (assert-negation): `count_after≤cap ∧ count_after>cap` → **unsat**
 
 **RED**
 ```rust
@@ -447,7 +505,7 @@ fn persist_evicts_oldest_when_artifact_count_is_full() {
 Watch fail under old reject-on-quota behavior.
 
 **GREEN**
-Bake `MAX_ARTIFACTS = 512` and oldest-first eviction under the existing lock.
+Bake `MAX_ARTIFACTS = 512` from the sat model and oldest-first eviction.
 
 **Verify GREEN** — suite green.
 
@@ -463,11 +521,13 @@ Bake `MAX_ARTIFACTS = 512` and oldest-first eviction under the existing lock.
 | Proof kind | Owner | Strength |
 |---|---|---|
 | This API path / this fixture | Unit/integration test (RED→GREEN) | Concrete, regression-safe |
-| All inputs in a bounded domain | `solve` (pre + post) | Symbolic; sat witness or unsat proof |
-| Feasible constant choice | `solve` sat model → test asserts predicate | Avoids voodoo numbers |
-| "Impossible / safe for all" | `solve` unsat on ¬P | Complements, does not replace, path tests |
+| Catalog domain rule | `solve_rules` on an implemented family | Family-owned formula; sat/unsat + diagnostic |
+| Uncatalogued bounded choice | `solve_constraints` sat model → test asserts predicate | Avoids voodoo numbers |
+| "Impossible / safe for all" | `unsat` on ¬P or family `fail` | Complements, does not replace, path tests |
 
-**Never:** skip RED because solve was sat. **Never:** skip post-solve because tests were green when the claim is universal.
+**Never:** skip RED because solve was sat. **Never:** skip post-solve because
+tests were green when the claim is universal. **Never:** re-encode a family
+rule by hand.
 
 ## Verification Checklist
 
@@ -481,11 +541,13 @@ Before marking work complete:
 - [ ] Output pristine (no errors, warnings)
 - [ ] Tests use real code (mocks only if unavoidable)
 - [ ] Edge cases and errors covered
-- [ ] **If constraint-shaped:** SOLVE PRE ran before inventing constants / before RED asserted them
-- [ ] **If constraint-shaped:** GREEN baked model values or explicit unsat-safe bounds (no freehand magic numbers)
-- [ ] **If constraint-shaped:** SOLVE POST re-checked implemented policy; status matches claim (`sat` / `unsat` as expected; never treated `unknown`/`timeout` as proof)
+- [ ] `solve_rule_spec` ran for this development
+- [ ] Family match → `solve_rules` (no hand-encoded duplicate formula)
+- [ ] Uncatalogued bounded choice → `solve_constraints` sat model before RED
+- [ ] GREEN baked model values or explicit unsat-safe bounds
+- [ ] When a solve ran: SOLVE POST re-checked landed policy; status matches the claim (never treated `unknown`/`timeout` as proof)
 
-Can't check all boxes? You skipped TDD (or skipped solve on constraint-shaped work). Start over.
+Can't check all boxes? You skipped TDD or skipped solve. Start over.
 
 ## When Stuck
 
@@ -495,6 +557,7 @@ Can't check all boxes? You skipped TDD (or skipped solve on constraint-shaped wo
 | Test too complicated | Design too complicated. Simplify interface. |
 | Must mock everything | Code too coupled. Use dependency injection. |
 | Test setup huge | Extract helpers. Still complex? Simplify design. |
+| Don't know if a family applies | `solve_rule_spec` with summary, then one selector. Load `solve` for routing. |
 
 ## Debugging Integration
 
@@ -513,7 +576,7 @@ When adding mocks or test utilities, read @testing-anti-patterns.md to avoid com
 
 | Skill | Role relative to TDD |
 |---|---|
-| **`solve`** | Symbolic pre/post for constants & invariants (this skill's SOLVE PRE / SOLVE POST). Load when constraint-shaped. |
+| **`solve`** | Catalog routing, family execution, generic B-prime, status semantics. **REQUIRED** for SOLVE PRE / SOLVE POST. |
 | **`verification-before-completion`** | Evidence before "done"; includes that suites actually ran. |
 | **`systematic-debugging`** | Root-cause before fix; Phase 4 uses this TDD skill for the failing repro. |
 
@@ -521,7 +584,10 @@ When adding mocks or test utilities, read @testing-anti-patterns.md to avoid com
 
 ```
 Production code → test exists and failed first
-Constraint-shaped constant/invariant → solve pre + post around that TDD cycle
+New development → catalog-first
+Family match → solve_rules, then RED from the result
+Bounded choice with no family → sat model, then RED from that model
+Sat model / family outcome → GREEN bakes it; post-solve checks what landed
 Otherwise → not TDD (and not symbolically grounded)
 ```
 

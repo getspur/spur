@@ -720,6 +720,53 @@ mod cli_parse_tests {
     }
 
     #[test]
+    fn cli_accepts_graph_build_temporal_jobs_flag() {
+        let cli = Cli::parse_from([
+            "spur",
+            "graph",
+            "build",
+            "--with-temporal",
+            "--temporal-jobs",
+            "4",
+        ]);
+
+        let Commands::Graph {
+            command: GraphCommands::Build { temporal_jobs, .. },
+        } = cli.command
+        else {
+            panic!("expected graph build command");
+        };
+        assert_eq!(temporal_jobs.as_deref(), Some("4"));
+    }
+
+    #[test]
+    fn cli_graph_build_help_documents_temporal_jobs_sources() {
+        let error = Cli::command()
+            .try_get_matches_from(["spur", "graph", "build", "--help"])
+            .expect_err("--help should stop argument parsing");
+
+        assert_eq!(error.kind(), clap::error::ErrorKind::DisplayHelp);
+        let help = error.to_string();
+        assert!(help.contains("--temporal-jobs <N>"), "{help}");
+        assert!(help.contains("SPUR_GRAPH_TEMPORAL_JOBS"), "{help}");
+    }
+
+    #[test]
+    fn cli_accepts_original_temporal_graph_build_command() {
+        Cli::command()
+            .try_get_matches_from([
+                "spur",
+                "graph",
+                "build",
+                "--with-temporal",
+                "--no-section-embeddings",
+                "--no-code-symbol-embeddings",
+                "--no-analyst",
+            ])
+            .expect("original temporal graph build command should parse");
+    }
+
+    #[test]
     fn cli_accepts_init_global_flag() {
         Cli::command()
             .try_get_matches_from(["spur", "init", "--global"])
@@ -875,6 +922,10 @@ enum GraphCommands {
         /// Also honored via SPUR_GRAPH_WITH_TEMPORAL=1.
         #[arg(long)]
         with_temporal: bool,
+        /// Number of temporal commit workers. Also honored via SPUR_GRAPH_TEMPORAL_JOBS.
+        /// Defaults to 1; higher values explicitly opt in to parallelism.
+        #[arg(long, value_name = "N")]
+        temporal_jobs: Option<String>,
         /// Maximum temporal rows per shard.
         #[arg(long, hide = true, default_value_t = 100_000, value_name = "N")]
         temporal_max_rows_per_shard: usize,
@@ -1457,6 +1508,7 @@ async fn run() -> Result<()> {
                 no_section_embeddings,
                 no_code_symbol_embeddings,
                 with_temporal,
+                temporal_jobs,
                 temporal_max_rows_per_shard,
                 temporal_max_commits_per_shard,
             } => {
@@ -1472,7 +1524,14 @@ async fn run() -> Result<()> {
                         max_commits_per_shard: temporal_max_commits_per_shard,
                     },
                 };
-                if no_section_embeddings || no_code_symbol_embeddings {
+                if temporal_jobs.is_some() {
+                    commands::graph::build_with_temporal_jobs_override(
+                        options,
+                        no_section_embeddings,
+                        no_code_symbol_embeddings,
+                        temporal_jobs,
+                    )
+                } else if no_section_embeddings || no_code_symbol_embeddings {
                     commands::graph::build_with_embedding_overrides(
                         options,
                         no_section_embeddings,

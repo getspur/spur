@@ -142,6 +142,25 @@ pub(in crate::components) struct LineCacheEntry {
 /// `compute_inline_height_rows` depends on them — a font swap with
 /// unchanged cols/rows would otherwise silently false-hit.
 #[cfg(feature = "markdown")]
+#[derive(Clone)]
+pub(in crate::components::react_trace) struct PlainTextTailCache {
+    /// Global entry index for the active append-only AgentMessage.
+    pub(super) entry_idx: usize,
+    /// Global cache-row index of the only visual row that an append can alter.
+    pub(super) mutable_row: usize,
+    /// Byte offset in `MarkdownStream::raw_text()` represented by mutable_row.
+    pub(super) raw_tail_start: usize,
+    /// Raw length observed when the cached rows were built.
+    pub(super) raw_len: usize,
+    /// Number of successful suffix-only refreshes since the last cold build.
+    pub(super) reuse_count: u64,
+    /// Style emitted by the markdown renderer for plain body text.
+    pub(super) body_style: Style,
+    pub(super) line_style: Style,
+    pub(super) alignment: Option<ratatui::layout::Alignment>,
+}
+
+#[cfg(feature = "markdown")]
 pub(in crate::components) struct VirtualRowCacheEntry {
     pub(super) rows: Vec<VirtualRow>,
     /// Row index where each entry's virtual rows begin.
@@ -159,6 +178,9 @@ pub(in crate::components) struct VirtualRowCacheEntry {
     /// Snapshot of mermaid fence states at cache time. If any state changes
     /// (e.g. Pending→Ready), the cache must be rebuilt.
     pub(super) fence_gen: u64,
+    /// Conservative append-only suffix cursor for a plain active message.
+    /// `None` means the next mutation uses the ordinary entry rebuild path.
+    pub(super) plain_text_tail: Option<PlainTextTailCache>,
 }
 
 /// Resolve a ScrollAnchor to an effective row index.
@@ -980,6 +1002,7 @@ impl ReactTrace {
         // rebuild from the dirty index — O(tail) instead of O(n).
         {
             let dirty = self.dirty_from;
+            let plain_text_append = self.plain_text_append;
 
             let (cell_w_px, cell_h_px) = ctx
                 .picker
@@ -1002,55 +1025,86 @@ impl ReactTrace {
                 .is_some_and(|c| c.fence_gen == fence_gen);
 
             if key_ok && fence_ok {
-                match dirty {
-                    None => { /* cache fully valid */ }
-                    Some(dirty_idx) if dirty_idx > 0 => {
-                        // Incremental rebuild from dirty_idx.
-                        let c = self.line_cache.as_mut().unwrap();
-                        let trunc_row = if dirty_idx < c.entry_row_starts.len() {
-                            c.entry_row_starts[dirty_idx]
-                        } else {
-                            c.rows.len()
-                        };
-                        c.rows.truncate(trunc_row);
-                        c.byte_ranges.truncate(trunc_row);
-                        c.entry_row_starts.truncate(dirty_idx);
-                        let base = c.rows.len();
-                        let states = compute_fence_states(&*ctx, effective_width, inner.height);
-                        let (new_rows, new_starts, new_byte_ranges) =
-                            self.build_virtual_rows(dirty_idx, effective_width, &states, lineage);
-                        let c = self.line_cache.as_mut().unwrap();
-                        c.rows.extend(new_rows);
-                        c.byte_ranges.extend(new_byte_ranges);
-                        c.entry_row_starts
-                            .extend(new_starts.iter().map(|s| s + base));
-                        c.generation = self.generation;
-                        self.dirty_from = None;
-                    }
-                    _ => {
-                        // Full rebuild (dirty_idx == 0 or no cache).
-                        let states = compute_fence_states(&*ctx, effective_width, inner.height);
-                        let (rows, entry_row_starts, byte_ranges) =
-                            self.build_virtual_rows(0, effective_width, &states, lineage);
-                        self.line_cache = Some(VirtualRowCacheEntry {
-                            rows,
-                            entry_row_starts,
-                            byte_ranges,
-                            width: effective_width,
-                            soft_cap,
-                            cell_w_px,
-                            cell_h_px,
-                            generation: self.generation,
-                            fence_gen,
-                        });
-                        self.dirty_from = None;
+                let reused_plain_tail = dirty.is_some_and(|dirty_idx| {
+                    let Some(entry) = self.entries.get(dirty_idx) else {
+                        return false;
+                    };
+                    let cache = self.line_cache.as_mut().unwrap();
+                    super::builder::reuse_plain_text_tail(
+                        entry,
+                        dirty_idx,
+                        effective_width,
+                        plain_text_append
+                            .filter(|provenance| provenance.entry_idx == dirty_idx)
+                            .map(|provenance| provenance.base_generation),
+                        self.generation,
+                        cache,
+                    )
+                });
+
+                if reused_plain_tail {
+                    self.dirty_from = None;
+                } else {
+                    match dirty {
+                        None => { /* cache fully valid */ }
+                        Some(dirty_idx) if dirty_idx > 0 => {
+                            // Incremental rebuild from dirty_idx.
+                            let c = self.line_cache.as_mut().unwrap();
+                            let trunc_row = if dirty_idx < c.entry_row_starts.len() {
+                                c.entry_row_starts[dirty_idx]
+                            } else {
+                                c.rows.len()
+                            };
+                            c.rows.truncate(trunc_row);
+                            c.byte_ranges.truncate(trunc_row);
+                            c.entry_row_starts.truncate(dirty_idx);
+                            let base = c.rows.len();
+                            let states = compute_fence_states(&*ctx, effective_width, inner.height);
+                            let (new_rows, new_starts, new_byte_ranges, mut plain_text_tail) = self
+                                .build_virtual_rows_with_tail(
+                                    dirty_idx,
+                                    effective_width,
+                                    &states,
+                                    lineage,
+                                );
+                            if let Some(tail) = plain_text_tail.as_mut() {
+                                tail.mutable_row += base;
+                            }
+                            let c = self.line_cache.as_mut().unwrap();
+                            c.rows.extend(new_rows);
+                            c.byte_ranges.extend(new_byte_ranges);
+                            c.entry_row_starts
+                                .extend(new_starts.iter().map(|s| s + base));
+                            c.plain_text_tail = plain_text_tail;
+                            c.generation = self.generation;
+                            self.dirty_from = None;
+                        }
+                        _ => {
+                            // Full rebuild (dirty_idx == 0 or no cache).
+                            let states = compute_fence_states(&*ctx, effective_width, inner.height);
+                            let (rows, entry_row_starts, byte_ranges, plain_text_tail) = self
+                                .build_virtual_rows_with_tail(0, effective_width, &states, lineage);
+                            self.line_cache = Some(VirtualRowCacheEntry {
+                                rows,
+                                entry_row_starts,
+                                byte_ranges,
+                                width: effective_width,
+                                soft_cap,
+                                cell_w_px,
+                                cell_h_px,
+                                generation: self.generation,
+                                fence_gen,
+                                plain_text_tail,
+                            });
+                            self.dirty_from = None;
+                        }
                     }
                 }
             } else {
                 // Width / soft_cap / cell_metrics / fence_gen drift — full rebuild.
                 let states = compute_fence_states(&*ctx, effective_width, inner.height);
-                let (rows, entry_row_starts, byte_ranges) =
-                    self.build_virtual_rows(0, effective_width, &states, lineage);
+                let (rows, entry_row_starts, byte_ranges, plain_text_tail) =
+                    self.build_virtual_rows_with_tail(0, effective_width, &states, lineage);
                 self.line_cache = Some(VirtualRowCacheEntry {
                     rows,
                     entry_row_starts,
@@ -1061,9 +1115,11 @@ impl ReactTrace {
                     cell_h_px,
                     generation: self.generation,
                     fence_gen,
+                    plain_text_tail,
                 });
                 self.dirty_from = None;
             }
+            self.plain_text_append = None;
         }
 
         let (total, offset) = {
@@ -1300,6 +1356,33 @@ mod copy_friendly_border_tests {
         }
     }
 
+    #[cfg(feature = "markdown")]
+    fn cached_rows(trace: &ReactTrace) -> Vec<String> {
+        trace
+            .line_cache
+            .as_ref()
+            .expect("markdown render should populate the virtual-row cache")
+            .rows
+            .iter()
+            .map(|row| format!("{row:?}"))
+            .collect()
+    }
+
+    #[cfg(feature = "markdown")]
+    fn render_once(trace: &mut ReactTrace, width: u16, height: u16) {
+        let registry = std::collections::HashMap::new();
+        let mut image_cache = crate::components::image_cache::ImageCache::new();
+        let mut ctx = RenderContext {
+            mermaid_registry: &registry,
+            mermaid_registry_version: 0,
+            picker: None,
+            image_cache: &mut image_cache,
+        };
+        let mut term = Terminal::new(TestBackend::new(width, height)).unwrap();
+        term.draw(|f| trace.render_with_ctx(f, Rect::new(0, 0, width, height), &mut ctx, None))
+            .unwrap();
+    }
+
     #[test]
     fn render_does_not_write_vertical_border_glyphs() {
         let width = 40;
@@ -1335,6 +1418,308 @@ mod copy_friendly_border_tests {
             .unwrap();
 
         assert_no_vertical_border_glyphs(term.backend().buffer(), width, height);
+    }
+
+    #[cfg(feature = "markdown")]
+    #[test]
+    fn streaming_plain_tail_reuses_completed_rows() {
+        let width = 24;
+        let height = 8;
+        let initial = "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu ";
+        let delta = "nu xi omicron";
+
+        let mut incremental = ReactTrace::new_for_tests();
+        incremental.append_message(initial, "codex", "12:00".into());
+        render_once(&mut incremental, width, height);
+
+        let first_body_range = incremental
+            .line_cache
+            .as_ref()
+            .unwrap()
+            .byte_ranges
+            .get(1)
+            .and_then(Clone::clone)
+            .expect("the first wrapped body row should map to source bytes");
+        assert!(
+            first_body_range.end < initial.len(),
+            "a completed visual row must not claim the entire active message; got {first_body_range:?} for {} bytes",
+            initial.len()
+        );
+
+        incremental.append_message(delta, "codex", "12:01".into());
+        render_once(&mut incremental, width, height);
+
+        let final_text = format!("{initial}{delta}");
+        let incremental_cache = incremental.line_cache.as_ref().unwrap();
+        assert_eq!(
+            incremental_cache
+                .plain_text_tail
+                .as_ref()
+                .map(|tail| tail.reuse_count),
+            Some(1),
+            "the safe append should take the suffix-only path exactly once"
+        );
+        assert_eq!(
+            incremental_cache.byte_ranges[1].as_ref(),
+            Some(&first_body_range),
+            "completed prefix rows should retain their source range after a safe append"
+        );
+
+        let mut cold = ReactTrace::new_for_tests();
+        cold.append_message(&final_text, "codex", "12:00".into());
+        render_once(&mut cold, width, height);
+
+        assert_eq!(
+            cached_rows(&incremental),
+            cached_rows(&cold),
+            "suffix reuse must be row/style equivalent to a cold rebuild"
+        );
+        assert_eq!(
+            incremental_cache.entry_row_starts,
+            cold.line_cache.as_ref().unwrap().entry_row_starts,
+            "suffix reuse must preserve entry row indexing"
+        );
+        assert_eq!(
+            incremental_cache.byte_ranges,
+            cold.line_cache.as_ref().unwrap().byte_ranges,
+            "suffix reuse must preserve row/source co-indexing"
+        );
+    }
+
+    #[cfg(feature = "markdown")]
+    #[test]
+    fn streaming_plain_tail_keeps_utf8_byte_boundaries() {
+        let width = 20;
+        let height = 8;
+        let initial = "café naïve résumé 東京 alpha beta gamma delta ";
+        let delta = "tiếp tục";
+
+        let mut incremental = ReactTrace::new_for_tests();
+        incremental.append_message(initial, "codex", "12:00".into());
+        render_once(&mut incremental, width, height);
+        for range in incremental
+            .line_cache
+            .as_ref()
+            .unwrap()
+            .byte_ranges
+            .iter()
+            .flatten()
+        {
+            assert!(initial.is_char_boundary(range.start));
+            assert!(initial.is_char_boundary(range.end));
+        }
+
+        incremental.append_message(delta, "codex", "12:01".into());
+        render_once(&mut incremental, width, height);
+
+        let final_text = format!("{initial}{delta}");
+        let mut cold = ReactTrace::new_for_tests();
+        cold.append_message(&final_text, "codex", "12:00".into());
+        render_once(&mut cold, width, height);
+        assert_eq!(
+            cached_rows(&incremental),
+            cached_rows(&cold),
+            "UTF-8 suffix reuse must match a cold rebuild"
+        );
+    }
+
+    #[cfg(feature = "markdown")]
+    #[test]
+    fn streaming_plain_tail_reuses_across_repeated_appends() {
+        let width = 24;
+        let height = 8;
+        let mut final_text =
+            String::from("alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu");
+        let deltas = [" nu", " xi", " omicron", " pi", " rho", " sigma"];
+
+        let mut incremental = ReactTrace::new_for_tests();
+        incremental.append_message(&final_text, "codex", "12:00".into());
+        render_once(&mut incremental, width, height);
+        for delta in deltas {
+            incremental.append_message(delta, "codex", "12:01".into());
+            final_text.push_str(delta);
+            render_once(&mut incremental, width, height);
+        }
+
+        let incremental_cache = incremental.line_cache.as_ref().unwrap();
+        assert_eq!(
+            incremental_cache
+                .plain_text_tail
+                .as_ref()
+                .map(|tail| tail.reuse_count),
+            Some(deltas.len() as u64)
+        );
+
+        let mut cold = ReactTrace::new_for_tests();
+        cold.append_message(&final_text, "codex", "12:00".into());
+        render_once(&mut cold, width, height);
+        let cold_cache = cold.line_cache.as_ref().unwrap();
+        assert_eq!(cached_rows(&incremental), cached_rows(&cold));
+        assert_eq!(incremental_cache.byte_ranges, cold_cache.byte_ranges);
+        assert_eq!(
+            incremental_cache.entry_row_starts,
+            cold_cache.entry_row_starts
+        );
+    }
+
+    #[cfg(feature = "markdown")]
+    #[test]
+    fn streaming_plain_tail_reuses_after_batched_appends_before_render() {
+        let width = 24;
+        let height = 8;
+        let mut final_text =
+            String::from("alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu");
+        let deltas = [
+            " nu", " xi", " omicron", " pi", " rho", " sigma", " tau", " upsilon",
+        ];
+
+        let mut incremental = ReactTrace::new_for_tests();
+        incremental.append_message(&final_text, "codex", "12:00".into());
+        render_once(&mut incremental, width, height);
+
+        for delta in deltas {
+            incremental.append_message(delta, "codex", "12:01".into());
+            final_text.push_str(delta);
+        }
+        render_once(&mut incremental, width, height);
+
+        let incremental_cache = incremental.line_cache.as_ref().unwrap();
+        assert_eq!(
+            incremental_cache
+                .plain_text_tail
+                .as_ref()
+                .map(|tail| tail.reuse_count),
+            Some(1),
+            "one render after eight append-only chunks should reuse the cached suffix once"
+        );
+
+        let mut cold = ReactTrace::new_for_tests();
+        cold.append_message(&final_text, "codex", "12:00".into());
+        render_once(&mut cold, width, height);
+        let cold_cache = cold.line_cache.as_ref().unwrap();
+        assert_eq!(cached_rows(&incremental), cached_rows(&cold));
+        assert_eq!(incremental_cache.byte_ranges, cold_cache.byte_ranges);
+        assert_eq!(
+            incremental_cache.entry_row_starts,
+            cold_cache.entry_row_starts
+        );
+    }
+
+    #[cfg(feature = "markdown")]
+    #[test]
+    fn streaming_plain_tail_provenance_clears_on_generic_mutation() {
+        let width = 24;
+        let height = 8;
+        let initial = "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu";
+
+        let mut trace = ReactTrace::new_for_tests();
+        trace.append_message(initial, "codex", "12:00".into());
+        render_once(&mut trace, width, height);
+
+        trace.append_message(" nu", "codex", "12:01".into());
+        assert!(trace.plain_text_append.is_some());
+
+        trace.mark_dirty_from_for_update(0);
+        assert!(
+            trace.plain_text_append.is_none(),
+            "a generic in-place mutation must revoke append-only provenance"
+        );
+
+        trace.append_message(" xi", "codex", "12:01".into());
+        render_once(&mut trace, width, height);
+        assert_eq!(
+            trace
+                .line_cache
+                .as_ref()
+                .and_then(|cache| cache.plain_text_tail.as_ref())
+                .map(|tail| tail.reuse_count),
+            Some(0),
+            "a later append must not restore provenance across the generic mutation"
+        );
+    }
+
+    #[cfg(feature = "markdown")]
+    #[test]
+    fn streaming_tail_falls_back_for_context_sensitive_markdown() {
+        let width = 24;
+        let height = 8;
+        let initial = "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu";
+
+        for delta in ["\nsecond paragraph", " **bold suffix**"] {
+            let mut incremental = ReactTrace::new_for_tests();
+            incremental.append_message(initial, "codex", "12:00".into());
+            render_once(&mut incremental, width, height);
+            assert!(
+                incremental
+                    .line_cache
+                    .as_ref()
+                    .unwrap()
+                    .plain_text_tail
+                    .is_some(),
+                "plain initial text should establish a reusable suffix cursor"
+            );
+
+            incremental.append_message(delta, "codex", "12:01".into());
+            render_once(&mut incremental, width, height);
+            assert!(
+                incremental
+                    .line_cache
+                    .as_ref()
+                    .unwrap()
+                    .plain_text_tail
+                    .is_none(),
+                "context-sensitive append {delta:?} must use the full markdown rebuild"
+            );
+
+            let final_text = format!("{initial}{delta}");
+            let mut cold = ReactTrace::new_for_tests();
+            cold.append_message(&final_text, "codex", "12:00".into());
+            render_once(&mut cold, width, height);
+            assert_eq!(
+                cached_rows(&incremental),
+                cached_rows(&cold),
+                "fallback output for {delta:?} must match a cold rebuild"
+            );
+        }
+    }
+
+    #[cfg(feature = "markdown")]
+    #[test]
+    fn streaming_tail_rejects_prefixes_that_can_become_markdown_blocks() {
+        let width = 24;
+        let height = 8;
+
+        for (initial, delta) in [
+            ("1", ". ordered item"),
+            ("-", " list item"),
+            ("+", " list item"),
+        ] {
+            let mut incremental = ReactTrace::new_for_tests();
+            incremental.append_message(initial, "codex", "12:00".into());
+            render_once(&mut incremental, width, height);
+            assert!(
+                incremental
+                    .line_cache
+                    .as_ref()
+                    .unwrap()
+                    .plain_text_tail
+                    .is_none(),
+                "append-unstable block prefix {initial:?} must not establish a suffix cursor"
+            );
+
+            incremental.append_message(delta, "codex", "12:01".into());
+            render_once(&mut incremental, width, height);
+
+            let final_text = format!("{initial}{delta}");
+            let mut cold = ReactTrace::new_for_tests();
+            cold.append_message(&final_text, "codex", "12:00".into());
+            render_once(&mut cold, width, height);
+            assert_eq!(
+                cached_rows(&incremental),
+                cached_rows(&cold),
+                "fallback output for completed block prefix {final_text:?} must match a cold build"
+            );
+        }
     }
 }
 

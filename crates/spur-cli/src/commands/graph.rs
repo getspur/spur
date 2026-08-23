@@ -1,4 +1,6 @@
 use std::collections::BTreeMap;
+use std::ffi::OsString;
+use std::num::NonZeroUsize;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
@@ -47,7 +49,7 @@ pub struct GraphVectorBackfillOptions {
 }
 
 pub fn build(options: GraphBuildOptions) -> anyhow::Result<()> {
-    build_with_embedding_overrides(options, false, false)
+    build_with_temporal_jobs_override(options, false, false, None)
 }
 
 pub fn backfill_vectors(options: GraphVectorBackfillOptions) -> anyhow::Result<()> {
@@ -95,6 +97,27 @@ pub fn build_with_embedding_overrides(
     no_section_embeddings: bool,
     no_code_symbol_embeddings: bool,
 ) -> anyhow::Result<()> {
+    build_with_temporal_jobs_override(
+        options,
+        no_section_embeddings,
+        no_code_symbol_embeddings,
+        None,
+    )
+}
+
+pub fn build_with_temporal_jobs_override(
+    options: GraphBuildOptions,
+    no_section_embeddings: bool,
+    no_code_symbol_embeddings: bool,
+    cli_temporal_jobs: Option<String>,
+) -> anyhow::Result<()> {
+    let use_temporal = should_use_temporal(options.with_temporal);
+    let temporal_jobs = resolve_temporal_jobs_if_enabled(
+        use_temporal,
+        cli_temporal_jobs.as_deref(),
+        || std::env::var_os("SPUR_GRAPH_TEMPORAL_JOBS"),
+        std::thread::available_parallelism,
+    )?;
     let root = match (options.root, options.workspace) {
         (Some(path), _) => path,
         (None, _) => resolve_worktree_root_from(std::env::current_dir()?),
@@ -113,7 +136,6 @@ pub fn build_with_embedding_overrides(
     }
 
     let temporal_shard_config = options.temporal_shard_config;
-    let use_temporal = should_use_temporal(options.with_temporal);
     let section_progress_bar = (!options.quiet).then(section_sidecar_progress_bar);
     let section_progress_reporter =
         |event| report_section_sidecar_progress(section_progress_bar.as_ref(), event);
@@ -125,18 +147,29 @@ pub fn build_with_embedding_overrides(
     let warmup_stats = if !options.quiet {
         println!("[spur] Building code graph index for {}", root.display());
         let stats = WarmupStats::collect(&root, use_temporal)?;
-        println!("{}", stats.line());
+        println!("{}", stats.line(temporal_jobs));
         Some(stats)
     } else {
         None
     };
-    tracing::debug!(
-        with_temporal = options.with_temporal,
-        use_temporal,
-        temporal_max_rows_per_shard = temporal_shard_config.max_rows_per_shard,
-        temporal_max_commits_per_shard = temporal_shard_config.max_commits_per_shard,
-        "spur-graph: temporal walk option evaluated"
-    );
+    if let Some(temporal_jobs) = temporal_jobs {
+        tracing::debug!(
+            with_temporal = options.with_temporal,
+            use_temporal,
+            temporal_jobs = temporal_jobs.get(),
+            temporal_max_rows_per_shard = temporal_shard_config.max_rows_per_shard,
+            temporal_max_commits_per_shard = temporal_shard_config.max_commits_per_shard,
+            "spur-graph: temporal walk option evaluated"
+        );
+    } else {
+        tracing::debug!(
+            with_temporal = options.with_temporal,
+            use_temporal,
+            temporal_max_rows_per_shard = temporal_shard_config.max_rows_per_shard,
+            temporal_max_commits_per_shard = temporal_shard_config.max_commits_per_shard,
+            "spur-graph: temporal walk option evaluated"
+        );
+    }
 
     let mut mode = BuildMode::Full;
     // Resolve the previous artifact location; capture the path for both
@@ -212,7 +245,9 @@ pub fn build_with_embedding_overrides(
 
     let mut temporal_write_stage = None;
     if use_temporal {
-        let config = temporal_walk_config();
+        let config = temporal_walk_config(
+            temporal_jobs.expect("temporal jobs must be resolved for temporal builds"),
+        );
         let progress = warmup_stats
             .as_ref()
             .and_then(|stats| stats.temporal_commit_count().map(temporal_progress_bar));
@@ -491,12 +526,52 @@ fn should_use_temporal(with_temporal: bool) -> bool {
     with_temporal || matches!(std::env::var("SPUR_GRAPH_WITH_TEMPORAL"), Ok(v) if v == "1")
 }
 
-fn temporal_walk_config() -> GitWalkConfig {
+fn resolve_temporal_jobs_if_enabled<Env, Parallelism>(
+    use_temporal: bool,
+    cli_value: Option<&str>,
+    env_value: Env,
+    _available_parallelism: Parallelism,
+) -> anyhow::Result<Option<NonZeroUsize>>
+where
+    Env: FnOnce() -> Option<OsString>,
+    Parallelism: FnOnce() -> std::io::Result<NonZeroUsize>,
+{
+    if !use_temporal {
+        return Ok(None);
+    }
+
+    if let Some(value) = cli_value {
+        return parse_temporal_jobs(value, "--temporal-jobs").map(Some);
+    }
+
+    if let Some(value) = env_value() {
+        let value = value.into_string().map_err(|_value| {
+            anyhow::anyhow!(
+                "invalid SPUR_GRAPH_TEMPORAL_JOBS value: expected a UTF-8 positive integer that fits usize"
+            )
+        })?;
+        return parse_temporal_jobs(&value, "SPUR_GRAPH_TEMPORAL_JOBS").map(Some);
+    }
+
+    Ok(Some(NonZeroUsize::MIN))
+}
+
+fn parse_temporal_jobs(value: &str, source: &str) -> anyhow::Result<NonZeroUsize> {
+    let parsed = value.parse::<usize>().with_context(|| {
+        format!("invalid {source} value `{value}`: expected a positive integer that fits usize")
+    })?;
+    NonZeroUsize::new(parsed).ok_or_else(|| {
+        anyhow::anyhow!("invalid {source} value `0`: expected a positive integer that fits usize")
+    })
+}
+
+fn temporal_walk_config(temporal_jobs: NonZeroUsize) -> GitWalkConfig {
     GitWalkConfig {
         target_refs: vec!["HEAD".to_string()],
         walk_strategy: WalkStrategy::FirstParent,
         allow_replace_refs: false,
         use_gix_diff: !matches!(std::env::var("SPUR_GRAPH_USE_CLI_DIFF"), Ok(v) if v == "1"),
+        temporal_jobs,
     }
 }
 
@@ -531,15 +606,18 @@ impl WarmupStats {
         })
     }
 
-    fn line(self) -> String {
-        match self.commit_count {
-            WarmupCommitCount::Disabled => format_warmup_stats_line(self.file_count, None),
-            WarmupCommitCount::Known(commits) => {
-                format_warmup_stats_line(self.file_count, Some(commits))
+    fn line(self, temporal_jobs: Option<NonZeroUsize>) -> String {
+        match (self.commit_count, temporal_jobs) {
+            (WarmupCommitCount::Disabled, None) => {
+                format_warmup_stats_line(self.file_count, None, None)
             }
-            WarmupCommitCount::Unknown => {
-                format_warmup_stats_line_with_unknown_commits(self.file_count)
+            (WarmupCommitCount::Known(commits), Some(temporal_jobs)) => {
+                format_warmup_stats_line(self.file_count, Some(commits), Some(temporal_jobs))
             }
+            (WarmupCommitCount::Unknown, Some(temporal_jobs)) => {
+                format_warmup_stats_line_with_unknown_commits(self.file_count, temporal_jobs)
+            }
+            _ => unreachable!("temporal jobs and warmup commit count must agree"),
         }
     }
 
@@ -568,21 +646,30 @@ fn count_first_parent_commits(root: &Path) -> Option<usize> {
         .ok()
 }
 
-fn format_warmup_stats_line(file_count: usize, commit_count: Option<usize>) -> String {
+fn format_warmup_stats_line(
+    file_count: usize,
+    commit_count: Option<usize>,
+    temporal_jobs: Option<NonZeroUsize>,
+) -> String {
     let mut line = format!("[spur]   files: {}", fmt_thousands(file_count));
-    if let Some(commit_count) = commit_count {
+    if let (Some(commit_count), Some(temporal_jobs)) = (commit_count, temporal_jobs) {
         line.push_str(&format!(
-            "   commits: {} (temporal)",
-            fmt_thousands(commit_count)
+            "   commits: {} (temporal, workers: {})",
+            fmt_thousands(commit_count),
+            temporal_jobs
         ));
     }
     line
 }
 
-fn format_warmup_stats_line_with_unknown_commits(file_count: usize) -> String {
+fn format_warmup_stats_line_with_unknown_commits(
+    file_count: usize,
+    temporal_jobs: NonZeroUsize,
+) -> String {
     format!(
-        "[spur]   files: {}   commits: ? (temporal)",
-        fmt_thousands(file_count)
+        "[spur]   files: {}   commits: ? (temporal, workers: {})",
+        fmt_thousands(file_count),
+        temporal_jobs
     )
 }
 
@@ -1060,7 +1147,28 @@ fn language_counts_from_artifact(
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::OsString;
+    use std::num::NonZeroUsize;
+
     use spur_graph::store::lance_sections::{VectorBackfillStats, VectorBackfillTableStats};
+
+    fn available_parallelism(value: usize) -> std::io::Result<NonZeroUsize> {
+        Ok(NonZeroUsize::new(value).expect("test parallelism must be nonzero"))
+    }
+
+    fn resolve_temporal_jobs(
+        cli: Option<&str>,
+        env: Option<&str>,
+        logical_cpus: usize,
+    ) -> anyhow::Result<NonZeroUsize> {
+        super::resolve_temporal_jobs_if_enabled(
+            true,
+            cli,
+            || env.map(OsString::from),
+            || available_parallelism(logical_cpus),
+        )?
+        .ok_or_else(|| anyhow::anyhow!("temporal jobs were not resolved"))
+    }
 
     struct EnvGuard {
         key: &'static str,
@@ -1123,6 +1231,82 @@ mod tests {
     }
 
     #[test]
+    fn temporal_jobs_cli_value_overrides_environment_value() {
+        assert_eq!(
+            resolve_temporal_jobs(Some("3"), Some("7"), 16).unwrap(),
+            NonZeroUsize::new(3).unwrap()
+        );
+    }
+
+    #[test]
+    fn temporal_jobs_cli_value_bypasses_malformed_environment_value() {
+        assert_eq!(
+            resolve_temporal_jobs(Some("5"), Some("not-a-number"), 16).unwrap(),
+            NonZeroUsize::new(5).unwrap()
+        );
+    }
+
+    #[test]
+    fn temporal_jobs_uses_environment_when_cli_is_absent() {
+        assert_eq!(
+            resolve_temporal_jobs(None, Some("6"), 16).unwrap(),
+            NonZeroUsize::new(6).unwrap()
+        );
+    }
+
+    #[test]
+    fn temporal_jobs_automatic_fallback_is_serial_on_every_host_size() {
+        for logical_cpus in [1, 2, 8, 16] {
+            assert_eq!(
+                resolve_temporal_jobs(None, None, logical_cpus).unwrap(),
+                NonZeroUsize::MIN,
+                "logical_cpus={logical_cpus}"
+            );
+        }
+    }
+
+    #[test]
+    fn temporal_jobs_rejects_invalid_cli_values_with_source_specific_errors() {
+        let overflow = format!("{}0", usize::MAX);
+        for value in ["not-a-number", "0", overflow.as_str()] {
+            let error = resolve_temporal_jobs(Some(value), None, 16).unwrap_err();
+            let message = error.to_string();
+            assert!(message.contains("--temporal-jobs"), "{message}");
+            assert!(message.contains("positive integer"), "{message}");
+        }
+    }
+
+    #[test]
+    fn temporal_jobs_rejects_invalid_environment_values_with_source_specific_errors() {
+        let overflow = format!("{}0", usize::MAX);
+        for value in ["not-a-number", "0", overflow.as_str()] {
+            let error = resolve_temporal_jobs(None, Some(value), 16).unwrap_err();
+            let message = error.to_string();
+            assert!(message.contains("SPUR_GRAPH_TEMPORAL_JOBS"), "{message}");
+            assert!(message.contains("positive integer"), "{message}");
+        }
+    }
+
+    #[test]
+    fn non_temporal_build_ignores_malformed_temporal_jobs_environment_value() {
+        let resolved = super::resolve_temporal_jobs_if_enabled(
+            false,
+            None,
+            || Some(OsString::from("not-a-number")),
+            || panic!("non-temporal builds must not query available parallelism"),
+        )
+        .unwrap();
+
+        assert_eq!(resolved, None);
+    }
+
+    #[test]
+    fn temporal_walk_config_preserves_resolved_nonzero_jobs() {
+        let jobs = NonZeroUsize::new(4).unwrap();
+        assert_eq!(super::temporal_walk_config(jobs).temporal_jobs, jobs);
+    }
+
+    #[test]
     fn fmt_thousands_inserts_commas() {
         assert_eq!(super::fmt_thousands(0), "0");
         assert_eq!(super::fmt_thousands(12), "12");
@@ -1156,15 +1340,19 @@ mod tests {
     #[test]
     fn format_warmup_stats_line_includes_temporal_commit_count_when_present() {
         assert_eq!(
-            super::format_warmup_stats_line(1_234, Some(5_678)),
-            "[spur]   files: 1,234   commits: 5,678 (temporal)"
+            super::format_warmup_stats_line(
+                1_234,
+                Some(5_678),
+                Some(NonZeroUsize::new(4).unwrap())
+            ),
+            "[spur]   files: 1,234   commits: 5,678 (temporal, workers: 4)"
         );
     }
 
     #[test]
     fn format_warmup_stats_line_omits_commit_count_without_temporal() {
         assert_eq!(
-            super::format_warmup_stats_line(1_234, None),
+            super::format_warmup_stats_line(1_234, None, None),
             "[spur]   files: 1,234"
         );
     }
@@ -1172,8 +1360,11 @@ mod tests {
     #[test]
     fn format_warmup_stats_line_marks_unknown_temporal_commits() {
         assert_eq!(
-            super::format_warmup_stats_line_with_unknown_commits(1_234),
-            "[spur]   files: 1,234   commits: ? (temporal)"
+            super::format_warmup_stats_line_with_unknown_commits(
+                1_234,
+                NonZeroUsize::new(4).unwrap()
+            ),
+            "[spur]   files: 1,234   commits: ? (temporal, workers: 4)"
         );
     }
 }
