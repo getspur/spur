@@ -1495,19 +1495,43 @@ async fn code_search_concurrent_dirty_requests_use_overlay_without_rebuild() {
         call_tool(&server, "code_search", search_args.clone()),
         call_tool(&server, "code_search", search_args.clone()),
         call_tool(&server, "code_search", search_args.clone()),
-        call_tool(&server, "code_search", search_args),
+        call_tool(&server, "code_search", search_args.clone()),
     );
 
     for response in [first, second, third, fourth] {
         let body = tool_body(response);
-        assert!(candidate_entity_names(&body).contains("concurrent_unsaved_symbol"));
-        assert_eq!(body["rebuild_status"], "fresh");
+        assert_ne!(body["rebuild_status"], "stale_rebuild_failed");
     }
+    assert_eq!(server.__test_code_graph_rebuild_invocation_count(), 0);
+
+    // Overlay extract continues after the latency budget and fills the
+    // per-worktree cache (solve_id sol_bdb8579701c64516: wait ≤ 750ms).
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(750);
+    let cached = loop {
+        let body = tool_body(call_tool(&server, "code_search", search_args.clone()).await);
+        if candidate_entity_names(&body).contains("concurrent_unsaved_symbol") {
+            break body;
+        }
+        assert_eq!(
+            server.__test_code_graph_rebuild_invocation_count(),
+            0,
+            "overlay timeout must not fall through to rebuild"
+        );
+        if std::time::Instant::now() >= deadline {
+            panic!("overlay cache did not populate after rebuild budget: {body}");
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    };
+    assert_eq!(cached["rebuild_status"], "fresh");
     assert_eq!(server.__test_code_graph_rebuild_invocation_count(), 0);
 }
 
 #[tokio::test]
-async fn code_search_overlay_ignores_rebuild_budget() {
+async fn code_search_overlay_exceeds_rebuild_budget_serves_stale_without_rebuild() {
+    // Overlay wait is the same latency budget as full rebuild
+    // (`DEFAULT_GRAPH_REBUILD_LATENCY_BUDGET` = 750ms; solve_id sol_bdb8579701c64516).
+    // Sequential overlay-then-rebuild (1500ms) is unsat against that limit
+    // (solve_id sol_b21b0c5f71254ae0), so timeout must not fall through to rebuild.
     let _lock = cwd_lock().await;
     let worktree = TempDir::new().expect("temp worktree");
     copy_fixture_crate(worktree.path());
@@ -1534,9 +1558,11 @@ async fn code_search_overlay_ignores_rebuild_budget() {
         .await,
     );
 
-    assert_eq!(body["rebuild_status"], "fresh");
-    assert_eq!(body["worktree_dirty"], false);
-    assert!(candidate_entity_names(&body).contains("budget_exceeded_unsaved_symbol"));
+    assert_eq!(body["rebuild_status"], "stale_budget_exceeded");
+    assert!(
+        !candidate_entity_names(&body).contains("budget_exceeded_unsaved_symbol"),
+        "timed-out overlay must serve the stale parquet, not wait for extract: {body}"
+    );
     assert_eq!(server.__test_code_graph_rebuild_invocation_count(), 0);
 }
 

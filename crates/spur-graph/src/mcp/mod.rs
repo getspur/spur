@@ -954,56 +954,67 @@ async fn code_search_response(
         )
         .await
         {
-            Ok(fresh_body) => return Ok(fresh_body),
+            Ok(OverlayAttempt::Fresh(fresh_body)) => return Ok(fresh_body),
+            Ok(OverlayAttempt::StaleBudgetExceeded) => {
+                analysis.metadata = analysis
+                    .metadata
+                    .with_rebuild_status(RebuildStatus::StaleBudgetExceeded);
+            }
             Err(error) => {
                 tracing::warn!(
                     target: "spur_graph::mcp",
                     error = ?error,
                     "code graph overlay refresh failed; falling back to rebuild"
                 );
-            }
-        }
-        let rebuild = match &backend {
-            CodeSearchBackend::Parquet(_) => {
-                try_rebuild_artifact_from_worktree(
-                    Arc::clone(&rebuild_coordinator),
-                    rebuild_candidate,
-                )
-                .await
-            }
-            CodeSearchBackend::InMemory { artifact, .. } => {
-                try_rebuild_artifact(
-                    Arc::clone(&rebuild_coordinator),
-                    Arc::clone(artifact),
-                    rebuild_candidate,
-                    None,
-                )
-                .await
-            }
-        };
-        match rebuild {
-            RebuildAttempt::Fresh(rebuilt_artifact) => {
-                let client = InMemoryClient::new(Arc::clone(&rebuilt_artifact));
-                let mut fresh_body = code_search_with_artifact(args, &client).map_err(|error| {
-                    CodeGraphError::from(error).with_artifact_metadata(&rebuilt_artifact)
-                })?;
-                let fresh_files = response_file_set_from_body(&rebuilt_artifact, &fresh_body);
-                GraphResponseMetadata::analyze_artifact_with_files(&rebuilt_artifact, &fresh_files)
-                    .await
-                    .metadata
-                    .with_rebuild_status(RebuildStatus::Fresh)
-                    .insert_into_for_format(&mut fresh_body, response_format);
-                return Ok(fresh_body);
-            }
-            RebuildAttempt::StaleBudgetExceeded => {
-                analysis.metadata = analysis
-                    .metadata
-                    .with_rebuild_status(RebuildStatus::StaleBudgetExceeded);
-            }
-            RebuildAttempt::StaleRebuildFailed => {
-                analysis.metadata = analysis
-                    .metadata
-                    .with_rebuild_status(RebuildStatus::StaleRebuildFailed);
+                let rebuild = match &backend {
+                    CodeSearchBackend::Parquet(_) => {
+                        try_rebuild_artifact_from_worktree(
+                            Arc::clone(&rebuild_coordinator),
+                            rebuild_candidate,
+                        )
+                        .await
+                    }
+                    CodeSearchBackend::InMemory { artifact, .. } => {
+                        try_rebuild_artifact(
+                            Arc::clone(&rebuild_coordinator),
+                            Arc::clone(artifact),
+                            rebuild_candidate,
+                            None,
+                        )
+                        .await
+                    }
+                };
+                match rebuild {
+                    RebuildAttempt::Fresh(rebuilt_artifact) => {
+                        let client = InMemoryClient::new(Arc::clone(&rebuilt_artifact));
+                        let mut fresh_body =
+                            code_search_with_artifact(args, &client).map_err(|error| {
+                                CodeGraphError::from(error)
+                                    .with_artifact_metadata(&rebuilt_artifact)
+                            })?;
+                        let fresh_files =
+                            response_file_set_from_body(&rebuilt_artifact, &fresh_body);
+                        GraphResponseMetadata::analyze_artifact_with_files(
+                            &rebuilt_artifact,
+                            &fresh_files,
+                        )
+                        .await
+                        .metadata
+                        .with_rebuild_status(RebuildStatus::Fresh)
+                        .insert_into_for_format(&mut fresh_body, response_format);
+                        return Ok(fresh_body);
+                    }
+                    RebuildAttempt::StaleBudgetExceeded => {
+                        analysis.metadata = analysis
+                            .metadata
+                            .with_rebuild_status(RebuildStatus::StaleBudgetExceeded);
+                    }
+                    RebuildAttempt::StaleRebuildFailed => {
+                        analysis.metadata = analysis
+                            .metadata
+                            .with_rebuild_status(RebuildStatus::StaleRebuildFailed);
+                    }
+                }
             }
         }
     }
@@ -1124,6 +1135,11 @@ enum RefreshOutcome {
     NotRefreshed(RebuildStatus),
 }
 
+enum OverlayAttempt {
+    Fresh(Value),
+    StaleBudgetExceeded,
+}
+
 /// Shared escalation ladder: try the cheap dirty-file overlay first (when the
 /// strategy allows it), then fall back to a full/incremental rebuild. Used
 /// both when a successful-but-stale response needs refreshing, and when the
@@ -1152,7 +1168,10 @@ async fn attempt_refresh(
         )
         .await
         {
-            Ok(fresh_body) => return RefreshOutcome::Fresh(fresh_body),
+            Ok(OverlayAttempt::Fresh(fresh_body)) => return RefreshOutcome::Fresh(fresh_body),
+            Ok(OverlayAttempt::StaleBudgetExceeded) => {
+                return RefreshOutcome::NotRefreshed(RebuildStatus::StaleBudgetExceeded);
+            }
             Err(error) => {
                 tracing::warn!(
                     target: "spur_graph::mcp",
@@ -1316,26 +1335,50 @@ async fn overlay_response_for_backend(
     args: &Value,
     response_format: ResponseFormat,
     handler: impl Fn(&Value, &dyn GraphQueryClient) -> CodeGraphResult,
-) -> CodeGraphResult {
+) -> Result<OverlayAttempt, CodeGraphError> {
     let worktree = rebuild_candidate.worktree.clone();
     let base_files = backend.base_file_set().map_err(|error| {
         CodeGraphError::without_metadata(McpHandlerError::Internal(format!(
             "failed to construct code graph overlay: {error}"
         )))
     })?;
-    let cached =
-        tokio::task::spawn_blocking(move || overlay_delta_for_worktree(worktree, base_files))
-            .await
-            .map_err(|error| {
-                CodeGraphError::without_metadata(McpHandlerError::Internal(format!(
-                    "overlay extract task failed: {error}"
-                )))
-            })?
-            .map_err(|error| {
-                CodeGraphError::without_metadata(McpHandlerError::Internal(format!(
-                    "failed to construct code graph overlay: {error}"
-                )))
-            })?;
+    let mut task =
+        tokio::task::spawn_blocking(move || overlay_delta_for_worktree(worktree, base_files));
+    let cached = match tokio::time::timeout(graph_rebuild_latency_budget(), &mut task).await {
+        Ok(Ok(Ok(cached))) => cached,
+        Ok(Ok(Err(error))) => {
+            return Err(CodeGraphError::without_metadata(McpHandlerError::Internal(
+                format!("failed to construct code graph overlay: {error}"),
+            )));
+        }
+        Ok(Err(error)) => {
+            return Err(CodeGraphError::without_metadata(McpHandlerError::Internal(
+                format!("overlay extract task failed: {error}"),
+            )));
+        }
+        Err(_) => {
+            tokio::spawn(async move {
+                match task.await {
+                    Ok(Ok(_)) => {}
+                    Ok(Err(error)) => {
+                        tracing::warn!(
+                            target: "spur_graph::mcp",
+                            error = %error,
+                            "code graph overlay extract failed after response budget elapsed"
+                        );
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            target: "spur_graph::mcp",
+                            error = %error,
+                            "code graph overlay extract task failed after response budget elapsed"
+                        );
+                    }
+                }
+            });
+            return Ok(OverlayAttempt::StaleBudgetExceeded);
+        }
+    };
     let (mut fresh_body, fresh_files) = match cached {
         Some(cached) => {
             let overlay =
@@ -1363,7 +1406,7 @@ async fn overlay_response_for_backend(
         .metadata
         .with_rebuild_status(RebuildStatus::Fresh)
         .insert_into_for_format(&mut fresh_body, response_format);
-    Ok(fresh_body)
+    Ok(OverlayAttempt::Fresh(fresh_body))
 }
 
 fn overlay_delta_for_worktree(

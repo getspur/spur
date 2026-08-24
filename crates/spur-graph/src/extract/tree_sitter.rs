@@ -16,6 +16,7 @@ use crate::extract::languages::{
 };
 use crate::extract::markdown::extract_markdown_file;
 use crate::extract::mcp_tools::emit_mcp_tools;
+use crate::extract::openapi::{extract_openapi_document, MAX_STRUCTURED_EXTRACT_BYTES};
 use crate::extract::GraphFacts;
 use crate::{
     Confidence, EdgeId, EvidenceId, FileId, GraphEdge, GraphEdgeKind, GraphNode, NodeId, NodeKind,
@@ -274,6 +275,11 @@ impl BytesExtractor {
         }
 
         let source = str::from_utf8(bytes).map_err(ExtractError::InvalidUtf8)?;
+        if matches!(self.language, Language::Json | Language::Yaml)
+            && source.len() > MAX_STRUCTURED_EXTRACT_BYTES
+        {
+            return Ok(Vec::new());
+        }
         let tree = self
             .parser
             .parse(source.as_bytes(), None)
@@ -3341,6 +3347,22 @@ pub(crate) fn extract_file_contents_from_tree(
     root_node: Node<'_>,
     queries: &CompiledQueries,
 ) -> anyhow::Result<()> {
+    if matches!(language_label, "json" | "yaml")
+        && extract_openapi_document(
+            builder,
+            relative_path,
+            file_id,
+            file_node,
+            source,
+            root_node,
+            language_label,
+        )
+    {
+        return Ok(());
+    }
+    if matches!(language_label, "json" | "yaml") && source.len() > MAX_STRUCTURED_EXTRACT_BYTES {
+        return Ok(());
+    }
     let tag_captures = run_query(&queries.tags, root_node, source);
     let mut definitions = emit_definitions(
         config,
