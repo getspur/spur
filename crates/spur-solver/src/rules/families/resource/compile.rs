@@ -430,42 +430,7 @@ fn compile_binding(
             }
             Ok(conjunction(links))
         }
-        NativeHandlerV1::A11yFocusNotObscured
-        | NativeHandlerV1::A11yReflow
-        | NativeHandlerV1::A11yTargetSize
-        | NativeHandlerV1::A11yTextContrast
-        | NativeHandlerV1::LayoutAxisCapacity
-        | NativeHandlerV1::LayoutContainment
-        | NativeHandlerV1::LayoutNonOverlap
-        | NativeHandlerV1::MediaAspectRatio
-        | NativeHandlerV1::RbacDynamicSeparationOfDuty
-        | NativeHandlerV1::RbacPermissionReachable
-        | NativeHandlerV1::RbacRoleHierarchyAcyclic
-        | NativeHandlerV1::RbacStaticSeparationOfDuty
-        | NativeHandlerV1::ConfigurationRequiresAny
-        | NativeHandlerV1::ConfigurationExcludes
-        | NativeHandlerV1::ConfigurationSelectionCardinality
-        | NativeHandlerV1::ConfigurationAttributeAllowedPair
-        | NativeHandlerV1::ConfigurationVersionInterval
-        | NativeHandlerV1::SchedulingAssignmentExactlyOnce
-        | NativeHandlerV1::SchedulingPlacementAllowed
-        | NativeHandlerV1::SchedulingPrecedenceFinishStart
-        | NativeHandlerV1::SchedulingCumulativeCapacity
-        | NativeHandlerV1::SchedulingMinimizeMakespan
-        | NativeHandlerV1::WorkflowInitialStateAllowed
-        | NativeHandlerV1::WorkflowTransitionAllowed
-        | NativeHandlerV1::WorkflowSafetyInvariant
-        | NativeHandlerV1::WorkflowBoundedReachability
-        | NativeHandlerV1::DataIntegrityUnique
-        | NativeHandlerV1::DataIntegrityForeignKey
-        | NativeHandlerV1::DataIntegrityCardinality
-        | NativeHandlerV1::DataIntegrityValueRange
-        | NativeHandlerV1::DataIntegrityConditionalRequired
-        | NativeHandlerV1::DataIntegrityAggregateBalance
-        | NativeHandlerV1::DataIntegrityMutuallyConsistent
-        | NativeHandlerV1::DataIntegrityTemporalConsistency => {
-            Err(format!("unsupported resource rule `{}`", source.rule_id))
-        }
+        _ => Err(format!("unsupported resource rule `{}`", source.rule_id)),
     }
 }
 

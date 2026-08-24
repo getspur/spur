@@ -507,39 +507,9 @@ fn compile_binding(
         NativeHandlerV1::DataIntegrityTemporalConsistency => {
             compile_temporal_consistency(&binding.subject, facts, variable_names)
         }
-        NativeHandlerV1::A11yFocusNotObscured
-        | NativeHandlerV1::A11yReflow
-        | NativeHandlerV1::A11yTargetSize
-        | NativeHandlerV1::A11yTextContrast
-        | NativeHandlerV1::LayoutAxisCapacity
-        | NativeHandlerV1::LayoutContainment
-        | NativeHandlerV1::LayoutNonOverlap
-        | NativeHandlerV1::MediaAspectRatio
-        | NativeHandlerV1::RbacDynamicSeparationOfDuty
-        | NativeHandlerV1::RbacPermissionReachable
-        | NativeHandlerV1::RbacRoleHierarchyAcyclic
-        | NativeHandlerV1::RbacStaticSeparationOfDuty
-        | NativeHandlerV1::PlacementMinimumFailureDomains
-        | NativeHandlerV1::PlacementTopologyMaxSkew
-        | NativeHandlerV1::ResourceAggregateCapacity
-        | NativeHandlerV1::ResourceQuotaCapacity
-        | NativeHandlerV1::ResourceRequestWithinLimit
-        | NativeHandlerV1::ConfigurationRequiresAny
-        | NativeHandlerV1::ConfigurationExcludes
-        | NativeHandlerV1::ConfigurationSelectionCardinality
-        | NativeHandlerV1::ConfigurationAttributeAllowedPair
-        | NativeHandlerV1::ConfigurationVersionInterval
-        | NativeHandlerV1::SchedulingAssignmentExactlyOnce
-        | NativeHandlerV1::SchedulingPlacementAllowed
-        | NativeHandlerV1::SchedulingPrecedenceFinishStart
-        | NativeHandlerV1::SchedulingCumulativeCapacity
-        | NativeHandlerV1::SchedulingMinimizeMakespan
-        | NativeHandlerV1::WorkflowInitialStateAllowed
-        | NativeHandlerV1::WorkflowTransitionAllowed
-        | NativeHandlerV1::WorkflowSafetyInvariant
-        | NativeHandlerV1::WorkflowBoundedReachability => Err(format!(
-            "mismatched data integrity handler `{:?}`",
-            binding.handler
+        _ => Err(format!(
+            "unsupported data integrity rule `{}`",
+            binding.rule_id
         )),
     }
 }
@@ -1898,6 +1868,86 @@ mod tests {
 
     use super::{compile, estimate_expression_nodes, prepare};
     use crate::{service::SolverService, types::SolveStatus};
+
+    #[test]
+    fn family_compilers_keep_owned_handlers_before_stable_foreign_fallbacks() {
+        fn compile_binding_source(source: &str) -> &str {
+            let (_, tail) = source
+                .split_once("\nfn compile_binding(")
+                .expect("family compiler must define compile_binding");
+            let end = tail
+                .find("\nfn ")
+                .expect("compile_binding must precede another top-level function");
+            &tail[..end]
+        }
+
+        let cases: [(&str, &str, &[&str]); 4] = [
+            (
+                "data integrity",
+                include_str!("compile.rs"),
+                &[
+                    "DataIntegrityUnique",
+                    "DataIntegrityForeignKey",
+                    "DataIntegrityCardinality",
+                    "DataIntegrityValueRange",
+                    "DataIntegrityConditionalRequired",
+                    "DataIntegrityAggregateBalance",
+                    "DataIntegrityMutuallyConsistent",
+                    "DataIntegrityTemporalConsistency",
+                ],
+            ),
+            (
+                "resource",
+                include_str!("../resource/compile.rs"),
+                &[
+                    "ResourceRequestWithinLimit",
+                    "ResourceAggregateCapacity",
+                    "ResourceQuotaCapacity",
+                    "PlacementTopologyMaxSkew",
+                    "PlacementMinimumFailureDomains",
+                ],
+            ),
+            (
+                "scheduling",
+                include_str!("../scheduling/compile.rs"),
+                &[
+                    "SchedulingAssignmentExactlyOnce",
+                    "SchedulingPlacementAllowed",
+                    "SchedulingPrecedenceFinishStart",
+                    "SchedulingCumulativeCapacity",
+                    "SchedulingMinimizeMakespan",
+                ],
+            ),
+            (
+                "workflow",
+                include_str!("../workflow/compile.rs"),
+                &[
+                    "WorkflowInitialStateAllowed",
+                    "WorkflowTransitionAllowed",
+                    "WorkflowSafetyInvariant",
+                    "WorkflowBoundedReachability",
+                ],
+            ),
+        ];
+
+        for (family, source, owned_handlers) in cases {
+            let binding_source = compile_binding_source(source);
+            for handler in owned_handlers {
+                assert!(
+                    binding_source.contains(&format!("NativeHandlerV1::{handler}")),
+                    "{family} compiler must keep owned handler {handler} explicit"
+                );
+            }
+            assert!(
+                binding_source.contains("_ => Err(format!("),
+                "{family} compiler must use one stable fallback for foreign handlers"
+            );
+            assert!(
+                binding_source.contains(&format!("\"unsupported {family} rule")),
+                "{family} compiler fallback must report the source rule id"
+            );
+        }
+    }
 
     fn empty_facts() -> Value {
         json!({
