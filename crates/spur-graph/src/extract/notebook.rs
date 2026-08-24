@@ -11,7 +11,7 @@ use crate::extract::markdown::extract_markdown_contents;
 use crate::extract::tree_sitter::{
     compile_queries, extract_file_contents_from_tree, relative_path, FactBuilder,
 };
-use crate::{FileId, NodeId, NodeKind, RelationKind};
+use crate::{FileId, GraphSymbolArtifact, NodeId, NodeKind, RelationKind};
 
 fn language_for_token(token: &str) -> Option<Language> {
     match token.to_ascii_lowercase().as_str() {
@@ -166,6 +166,48 @@ fn cell_id(cell: &Value, source: &str, anonymous_ids: &mut HashMap<String, u32>)
 
 fn cell_identity_path(relative_path: &str, cell_id: &str) -> String {
     format!("{relative_path}#cell:{cell_id}")
+}
+
+/// Document to slice with a notebook symbol's cell-relative `line_range`.
+///
+/// Extract stores ranges against decoded cell source, not the `.ipynb` JSON
+/// wrapper. Callers that slice file bytes by those ranges read the wrong
+/// document. `None` means "use the file bytes".
+pub(crate) fn decoded_source_document(
+    file_source: &str,
+    symbol: &GraphSymbolArtifact,
+) -> Option<String> {
+    if !symbol.file_path.ends_with(".ipynb") {
+        return None;
+    }
+    let wanted = notebook_cell_id_for_symbol(symbol)?;
+    let notebook: Value = serde_json::from_str(file_source).ok()?;
+    let cells = notebook.get("cells")?.as_array()?;
+    let mut anonymous_ids = HashMap::new();
+    for cell in cells {
+        let source = cell_source_text(cell);
+        let id = cell_id(cell, &source, &mut anonymous_ids);
+        if id == wanted {
+            return Some(source);
+        }
+    }
+    None
+}
+
+fn notebook_cell_id_for_symbol(symbol: &GraphSymbolArtifact) -> Option<&str> {
+    strip_cell_uri(symbol.enclosing_scope.as_deref()).or_else(|| {
+        if symbol.symbol_kind == "cell" {
+            strip_cell_uri(Some(symbol.entity_name.as_str()))
+        } else {
+            None
+        }
+    })
+}
+
+fn strip_cell_uri(value: Option<&str>) -> Option<&str> {
+    value
+        .and_then(|text| text.strip_prefix("cell://"))
+        .filter(|id| !id.is_empty())
 }
 
 fn add_cell_node(
@@ -691,6 +733,46 @@ mod tests {
             .nodes
             .iter()
             .any(|node| { node.kind == NodeKind::Cell && node.label == "cell://diagram" }));
+    }
+
+    #[test]
+    fn mermaid_vertex_read_document_is_decoded_cell_source_not_json() {
+        let nb = json!({
+            "nbformat": 4,
+            "nbformat_minor": 5,
+            "metadata": {"kernelspec": {"name": "python3"}},
+            "cells": [
+                {
+                    "cell_type": "code",
+                    "id": "diagram",
+                    "metadata": {"spur": {"code_type": "ns_mermaid"}},
+                    "source": ["flowchart TD\n", "    SPEC[spec]\n", "    CHECK[check]\n", "    SPEC --> CHECK\n"]
+                }
+            ]
+        });
+        let bytes = serde_json::to_vec(&nb).expect("serialize notebook");
+        let file_source = String::from_utf8(bytes).expect("utf8 notebook");
+        let symbol = GraphSymbolArtifact {
+            stable_symbol_id: "spec".to_owned(),
+            file_path: "design.ipynb".to_owned(),
+            byte_range: [0, 4],
+            line_range: [2, 2],
+            entity_name: "SPEC".to_owned(),
+            qualified_name: "cell://diagram::SPEC".to_owned(),
+            symbol_kind: "module".to_owned(),
+            anchor_hash: "0".to_owned(),
+            enclosing_scope: Some("cell://diagram".to_owned()),
+        };
+        let document = decoded_source_document(&file_source, &symbol)
+            .expect("notebook symbols must expose decoded cell source");
+        assert!(
+            document.contains("SPEC[spec]"),
+            "decoded cell source should contain mermaid vertex text, got {document:?}"
+        );
+        assert!(
+            !document.contains("\"cell_type\""),
+            "decoded cell source must not be the JSON wrapper, got {document:?}"
+        );
     }
 
     #[test]

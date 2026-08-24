@@ -1968,6 +1968,8 @@ fn code_read_symbol_with_client(args: &Value, client: &dyn GraphQueryClient) -> 
             (symbol, indexed_source, file_oid)
         }
     };
+    let source_text = crate::extract::notebook::decoded_source_document(&source_text, &symbol)
+        .unwrap_or(source_text);
     let source_range = source_range_with_context(&source_text, &symbol, context_lines.value);
     let source = source_for_line_range(&source_text, source_range);
 
