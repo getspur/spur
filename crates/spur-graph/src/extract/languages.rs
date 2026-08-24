@@ -37,6 +37,7 @@ pub enum Language {
     Json,
     Toml,
     Yaml,
+    Mermaid,
 }
 
 /// Precision heuristic for common C runtime calls, not an exhaustive builtin list.
@@ -343,6 +344,7 @@ impl Language {
             Self::Json => tree_sitter_json::LANGUAGE.into(),
             Self::Toml => tree_sitter_toml_ng::LANGUAGE.into(),
             Self::Yaml => tree_sitter_yaml::LANGUAGE.into(),
+            Self::Mermaid => tree_sitter_mermaid::LANGUAGE.into(),
         }
     }
 
@@ -366,6 +368,7 @@ impl Language {
             Self::Json => json_config(),
             Self::Toml => toml_config(),
             Self::Yaml => yaml_config(),
+            Self::Mermaid => mermaid_config(),
         }
     }
 
@@ -387,7 +390,8 @@ impl Language {
             | Self::Terraform
             | Self::Json
             | Self::Toml
-            | Self::Yaml => &[],
+            | Self::Yaml
+            | Self::Mermaid => &[],
         }
     }
 
@@ -411,6 +415,7 @@ impl Language {
             Self::Json => "json",
             Self::Toml => "toml",
             Self::Yaml => "yaml",
+            Self::Mermaid => "mermaid",
         }
     }
 }
@@ -817,6 +822,20 @@ fn yaml_config() -> LanguageConfig {
     }
 }
 
+const MERMAID_DEFINITION_KIND_MAP: &[(&str, NodeKind)] = &[("definition.module", NodeKind::Module)];
+
+fn mermaid_config() -> LanguageConfig {
+    LanguageConfig {
+        language: tree_sitter_mermaid::LANGUAGE.into(),
+        inline_language: None,
+        queries: &[("tags", include_str!("../../queries/mermaid/tags.scm"))],
+        definition_kind_map: MERMAID_DEFINITION_KIND_MAP,
+        relation_kind_map: None,
+        preserve_bare_import_path: false,
+        is_method: None,
+    }
+}
+
 pub(crate) fn markdown_config() -> LanguageConfig {
     LanguageConfig {
         language: tree_sitter_md::LANGUAGE.into(),
@@ -993,6 +1012,14 @@ fn yaml_matcher(path: &std::path::Path) -> bool {
             })
 }
 
+fn mermaid_matcher(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            extension.eq_ignore_ascii_case("mmd") || extension.eq_ignore_ascii_case("mermaid")
+        })
+}
+
 pub(crate) fn language_registry() -> &'static [LanguageDescriptor] {
     &[
         LanguageDescriptor {
@@ -1120,6 +1147,13 @@ pub(crate) fn language_registry() -> &'static [LanguageDescriptor] {
             language: Language::Yaml,
             label: "yaml",
             extensions: &["yaml", "yml"],
+        },
+        LanguageDescriptor {
+            matcher: mermaid_matcher,
+            factory: mermaid_config,
+            language: Language::Mermaid,
+            label: "mermaid",
+            extensions: &["mmd", "mermaid"],
         },
     ]
 }
@@ -2708,6 +2742,10 @@ mod gate_contract {
                 relation_set(&["contains", "defines"]),
             ),
             (
+                Language::Mermaid.label(),
+                relation_set(&["contains", "defines"]),
+            ),
+            (
                 Language::Markdown.label(),
                 // README's Markdown `imports` cell is `Y(links)`: the
                 // @import capture channel is remapped to RelationKind::Links.
@@ -2840,6 +2878,7 @@ mod gate_contract {
                 "definition.field",
                 "definition.constant",
             ],
+            Language::Mermaid => &["definition.module"],
         }
     }
 

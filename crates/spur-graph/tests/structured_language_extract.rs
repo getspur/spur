@@ -56,6 +56,38 @@ fn jupyter_keeps_ipynb_and_does_not_share_json() {
 }
 
 #[test]
+fn mermaid_paths_route_to_mermaid_language() {
+    assert_eq!(
+        Language::from_path(Path::new("design.mmd")),
+        Some(Language::Mermaid)
+    );
+    assert_eq!(
+        Language::from_path(Path::new("flow.mermaid")),
+        Some(Language::Mermaid)
+    );
+}
+
+#[test]
+fn mermaid_flowchart_emits_vertex_modules() {
+    let labels = extract_labels(&[(
+        "flow.mmd",
+        "flowchart TD\n    SPEC[spec]\n    CHECK[check]\n    SPEC --> CHECK\n",
+    )]);
+    assert!(
+        labels
+            .iter()
+            .any(|(label, kind)| label == "SPEC" && *kind == NodeKind::Module),
+        "expected Module SPEC, got {labels:?}"
+    );
+    assert!(
+        labels
+            .iter()
+            .any(|(label, kind)| label == "CHECK" && *kind == NodeKind::Module),
+        "expected Module CHECK, got {labels:?}"
+    );
+}
+
+#[test]
 fn lockfile_basenames_are_not_structured_languages() {
     for path in [
         "package-lock.json",

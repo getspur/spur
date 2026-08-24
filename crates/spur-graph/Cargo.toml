@@ -66,6 +66,7 @@ tree-sitter-sequel = "0.3"
 tree-sitter-toml-ng = "0.7.0"
 tree-sitter-typescript = "0.23"
 tree-sitter-yaml = "0.7.2"
+tree-sitter-mermaid = { path = "../tree-sitter-mermaid" }
 tracing = { workspace = true }
 
 [dev-dependencies]

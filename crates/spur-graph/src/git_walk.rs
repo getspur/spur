@@ -1631,6 +1631,7 @@ fn stable_language_rank(language: Language) -> u8 {
         Language::Json => 15,
         Language::Toml => 16,
         Language::Yaml => 17,
+        Language::Mermaid => 18,
     }
 }
 

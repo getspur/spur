@@ -141,6 +141,11 @@ Notes:
   `@definition.field`. Arrays, unnamed nodes, YAML anchors/aliases, and
   lockfile basenames (`package-lock.json`, `pnpm-lock.yaml`, …) are skipped.
   Jupyter `.ipynb` stays a container language and is not claimed by JSON.
+- Mermaid captures flowchart `flow_vertex_id` / named subgraphs and sequence
+  participants as `@definition.module`. Notebook `code_type` `ns_mermaid`
+  (alias `mermaid`) maps to this language. `.mmd` / `.mermaid` files route
+  here; `.ipynb` does not. The grammar is a MSRV wrap of monaqa parser.c,
+  not crates.io `tree-sitter-mermaid` 0.1.0.
 - Shell captures function definitions and `alias name=value` declarations;
   aliases fold into `NodeKind::Constant`.
 - Sql captures `CREATE TRIGGER` as `NodeKind::Function` and `CREATE INDEX` as

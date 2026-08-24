@@ -374,6 +374,7 @@ fn extension_for(language: Language) -> &'static str {
         Language::Json => "json",
         Language::Toml => "toml",
         Language::Yaml => "yaml",
+        Language::Mermaid => "mmd",
     }
 }
 
@@ -397,6 +398,7 @@ fn language_name(language: Language) -> &'static str {
         Language::Json => "json",
         Language::Toml => "toml",
         Language::Yaml => "yaml",
+        Language::Mermaid => "mermaid",
     }
 }
 

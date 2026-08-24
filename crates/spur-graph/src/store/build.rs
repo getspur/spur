@@ -192,6 +192,11 @@ const MANIFEST_QUERY_BYTES: &[ManifestQueryBytes<'static>] = &[
         query: "tags",
         bytes: include_bytes!("../../queries/yaml/tags.scm"),
     },
+    ManifestQueryBytes {
+        language: "mermaid",
+        query: "tags",
+        bytes: include_bytes!("../../queries/mermaid/tags.scm"),
+    },
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

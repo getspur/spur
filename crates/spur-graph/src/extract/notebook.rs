@@ -18,6 +18,9 @@ fn language_for_token(token: &str) -> Option<Language> {
         "python" | "python3" => Some(Language::Python),
         "javascript" => Some(Language::Javascript),
         "rust" | "evcxr" => Some(Language::Rust),
+        "go" | "gonb" => Some(Language::Go),
+        "sql" => Some(Language::Sql),
+        "ns_mermaid" | "mermaid" => Some(Language::Mermaid),
         _ => None,
     }
 }
@@ -28,11 +31,15 @@ pub(crate) fn cell_is_markdown(cell: &Value) -> bool {
 
 pub(crate) fn resolve_cell_language(cell: &Value, root: &Value) -> Option<Language> {
     let cell_meta = cell.get("metadata");
+    if let Some(code_type) = cell_meta
+        .and_then(|metadata| metadata.get("spur"))
+        .and_then(|spur| spur.get("code_type"))
+        .and_then(Value::as_str)
+    {
+        return language_for_token(code_type);
+    }
+
     let candidates = [
-        cell_meta
-            .and_then(|metadata| metadata.get("spur"))
-            .and_then(|spur| spur.get("code_type"))
-            .and_then(Value::as_str),
         cell_meta
             .and_then(|metadata| metadata.get("kernelspec"))
             .and_then(|kernelspec| kernelspec.get("name"))
@@ -70,9 +77,10 @@ pub(crate) fn extract_notebook_file(
     };
 
     let mut port_nodes = HashMap::new();
-    for (idx, cell) in cells.iter().enumerate() {
+    let mut anonymous_cell_ids = HashMap::new();
+    for cell in cells {
         let cell_source = cell_source_text(cell);
-        let cell_id = cell_id(cell, idx);
+        let cell_id = cell_id(cell, &cell_source, &mut anonymous_cell_ids);
         let cell_identity_path = cell_identity_path(&relative_path, &cell_id);
         let cell_node = add_cell_node(
             builder,
@@ -94,13 +102,15 @@ pub(crate) fn extract_notebook_file(
         if cell_is_markdown(cell) {
             extract_cell(
                 builder,
-                &relative_path,
-                &cell_identity_path,
-                file_id,
-                cell_node,
-                Language::Markdown,
-                &cell_source,
-                &mut port_nodes,
+                CellExtractInput {
+                    relative_path: &relative_path,
+                    identity_relative_path: &cell_identity_path,
+                    file_id,
+                    parent_node: cell_node,
+                    language: Language::Markdown,
+                    source: &cell_source,
+                    port_nodes: &mut port_nodes,
+                },
             )?;
             continue;
         }
@@ -113,13 +123,15 @@ pub(crate) fn extract_notebook_file(
             Some(language) => {
                 extract_cell(
                     builder,
-                    &relative_path,
-                    &cell_identity_path,
-                    file_id,
-                    cell_node,
-                    language,
-                    &cell_source,
-                    &mut port_nodes,
+                    CellExtractInput {
+                        relative_path: &relative_path,
+                        identity_relative_path: &cell_identity_path,
+                        file_id,
+                        parent_node: cell_node,
+                        language,
+                        source: &cell_source,
+                        port_nodes: &mut port_nodes,
+                    },
                 )?;
             }
             None => {
@@ -134,12 +146,22 @@ pub(crate) fn extract_notebook_file(
     Ok(())
 }
 
-fn cell_id(cell: &Value, idx: usize) -> String {
-    cell.get("id")
-        .and_then(Value::as_str)
-        .map(str::to_owned)
-        // nbformat 4.5 requires cell ids, but older notebooks may not have them.
-        .unwrap_or_else(|| format!("cell-{idx}"))
+fn cell_id(cell: &Value, source: &str, anonymous_ids: &mut HashMap<String, u32>) -> String {
+    if let Some(id) = cell.get("id").and_then(Value::as_str) {
+        let trimmed = id.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_owned();
+        }
+    }
+    let digest = blake3::hash(source.as_bytes());
+    let base = format!("cell-{}", digest.to_hex());
+    let seen = anonymous_ids.entry(base.clone()).or_insert(0);
+    *seen += 1;
+    if *seen == 1 {
+        base
+    } else {
+        format!("{base}-{}", *seen)
+    }
 }
 
 fn cell_identity_path(relative_path: &str, cell_id: &str) -> String {
@@ -306,18 +328,26 @@ fn cell_source_text(cell: &Value) -> String {
     }
 }
 
-// pre-existing lint, unrelated to import-manifest fix
-#[allow(clippy::too_many_arguments)]
-fn extract_cell(
-    builder: &mut FactBuilder<'_>,
-    relative_path: &str,
-    identity_relative_path: &str,
+struct CellExtractInput<'a> {
+    relative_path: &'a str,
+    identity_relative_path: &'a str,
     file_id: FileId,
     parent_node: NodeId,
     language: Language,
-    source: &str,
-    port_nodes: &mut HashMap<String, NodeId>,
-) -> anyhow::Result<()> {
+    source: &'a str,
+    port_nodes: &'a mut HashMap<String, NodeId>,
+}
+
+fn extract_cell(builder: &mut FactBuilder<'_>, input: CellExtractInput<'_>) -> anyhow::Result<()> {
+    let CellExtractInput {
+        relative_path,
+        identity_relative_path,
+        file_id,
+        parent_node,
+        language,
+        source,
+        port_nodes,
+    } = input;
     let config = language.config();
     let queries = compile_queries(&config, language)?;
     let tree = parse_source(language, source)?;
@@ -568,9 +598,52 @@ mod tests {
     #[test]
     fn unknown_and_unsupported_languages_resolve_to_none() {
         let root = json!({"metadata":{}});
-        for kernel in ["go", "gonb", "julia", "r", "ir", "haskell"] {
+        for kernel in ["julia", "r", "ir", "haskell"] {
             let cell = json!({"cell_type":"code","metadata":{"spur":{"code_type":kernel}}});
             assert_eq!(resolve_cell_language(&cell, &root), None, "{kernel}");
+        }
+    }
+
+    #[test]
+    fn explicit_unmapped_code_type_does_not_fall_through_to_kernel() {
+        let root = json!({"metadata":{"kernelspec":{"name":"python3"}}});
+        for token in ["julia", "r", "ir", "haskell"] {
+            let cell = json!({"cell_type":"code","metadata":{"spur":{"code_type":token}}});
+            assert_eq!(
+                resolve_cell_language(&cell, &root),
+                None,
+                "{token} must skip, not inherit python3"
+            );
+        }
+    }
+
+    #[test]
+    fn ns_mermaid_code_type_does_not_inherit_python_kernel() {
+        let root = json!({"metadata":{"kernelspec":{"name":"python3"}}});
+        let cell = json!({"cell_type":"code","metadata":{"spur":{"code_type":"ns_mermaid"}}});
+        assert_eq!(
+            resolve_cell_language(&cell, &root),
+            Some(Language::Mermaid),
+            "ns_mermaid is Mermaid, never Python"
+        );
+    }
+
+    #[test]
+    fn mcp_tokens_map_even_when_notebook_kernel_is_python() {
+        let root = json!({"metadata":{"kernelspec":{"name":"python3"}}});
+        for (token, language) in [
+            ("go", Language::Go),
+            ("gonb", Language::Go),
+            ("sql", Language::Sql),
+            ("ns_mermaid", Language::Mermaid),
+            ("mermaid", Language::Mermaid),
+        ] {
+            let cell = json!({"cell_type":"code","metadata":{"spur":{"code_type":token}}});
+            assert_eq!(
+                resolve_cell_language(&cell, &root),
+                Some(language),
+                "{token}"
+            );
         }
     }
 
@@ -578,6 +651,90 @@ mod tests {
     fn detects_markdown_cells() {
         assert!(cell_is_markdown(&json!({"cell_type":"markdown"})));
         assert!(!cell_is_markdown(&json!({"cell_type":"code"})));
+    }
+
+    #[test]
+    fn ns_mermaid_cell_extracts_flowchart_vertices_under_python_kernel() {
+        let nb = json!({
+            "nbformat": 4,
+            "nbformat_minor": 5,
+            "metadata": {"kernelspec": {"name": "python3"}},
+            "cells": [
+                {
+                    "cell_type": "code",
+                    "id": "diagram",
+                    "metadata": {"spur": {"code_type": "ns_mermaid"}},
+                    "source": ["flowchart TD\n", "    SPEC[spec]\n", "    CHECK[check]\n", "    SPEC --> CHECK\n"]
+                }
+            ]
+        });
+        let bytes = serde_json::to_vec(&nb).expect("serialize notebook");
+        let facts = run_notebook_extraction(Path::new("design.ipynb"), &bytes)
+            .expect("ns_mermaid cell extracts");
+        assert!(
+            facts
+                .nodes
+                .iter()
+                .any(|node| node.kind == NodeKind::Module && node.label == "SPEC"),
+            "expected Module SPEC, got {:?}",
+            facts
+                .nodes
+                .iter()
+                .map(|node| (node.label.clone(), node.kind))
+                .collect::<Vec<_>>()
+        );
+        assert!(facts
+            .nodes
+            .iter()
+            .any(|node| node.kind == NodeKind::Module && node.label == "CHECK"));
+        assert!(facts
+            .nodes
+            .iter()
+            .any(|node| { node.kind == NodeKind::Cell && node.label == "cell://diagram" }));
+    }
+
+    #[test]
+    fn missing_cell_id_is_content_stable_across_reorder() {
+        let source_a = "def alpha():\n    return 1\n";
+        let source_b = "def beta():\n    return 2\n";
+        let cell = |source: &str| {
+            json!({
+                "cell_type": "code",
+                "metadata": {"spur": {"code_type": "python"}},
+                "source": [source]
+            })
+        };
+        let facts_ab = {
+            let nb = json!({
+                "nbformat": 4,
+                "nbformat_minor": 5,
+                "metadata": {},
+                "cells": [cell(source_a), cell(source_b)]
+            });
+            let bytes = serde_json::to_vec(&nb).unwrap();
+            run_notebook_extraction(Path::new("nb.ipynb"), &bytes).unwrap()
+        };
+        let facts_ba = {
+            let nb = json!({
+                "nbformat": 4,
+                "nbformat_minor": 5,
+                "metadata": {},
+                "cells": [cell(source_b), cell(source_a)]
+            });
+            let bytes = serde_json::to_vec(&nb).unwrap();
+            run_notebook_extraction(Path::new("nb.ipynb"), &bytes).unwrap()
+        };
+        let key = |facts: &GraphFacts, name: &str| {
+            facts
+                .nodes
+                .iter()
+                .find(|node| node.label == name)
+                .map(|node| node.stable_key.clone())
+                .unwrap_or_else(|| panic!("missing {name}"))
+        };
+        assert_eq!(key(&facts_ab, "alpha"), key(&facts_ba, "alpha"));
+        assert_eq!(key(&facts_ab, "beta"), key(&facts_ba, "beta"));
+        assert_ne!(key(&facts_ab, "alpha"), key(&facts_ab, "beta"));
     }
 
     #[test]

@@ -1,0 +1,3 @@
+parser.c and tree_sitter headers are vendored from
+https://github.com/monaqa/tree-sitter-mermaid (MIT License).
+The Rust LANGUAGE wrapper targets tree-sitter 0.25 / rust-version 1.88.

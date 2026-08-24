@@ -23,6 +23,7 @@ members = [
     "crates/spur-context-fetcher",
     "crates/spur-context-auth",
     "crates/spur-graph",
+    "crates/tree-sitter-mermaid",
     "xtask",
 ]
 # spur-context-service is excluded — it uses duckdb v1.5.4 (DuckLake 1.0)

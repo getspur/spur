@@ -1,0 +1,25 @@
+[package]
+name = "tree-sitter-mermaid"
+description = "Mermaid grammar for tree-sitter (MSRV-compatible wrap of monaqa/tree-sitter-mermaid parser.c)"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+license = "MIT"
+build = "bindings/rust/build.rs"
+include = ["bindings/rust/*", "src/*"]
+publish = false
+
+[package.metadata.dist]
+dist = false
+
+[lib]
+path = "bindings/rust/lib.rs"
+
+[dependencies]
+tree-sitter-language = "0.1"
+
+[build-dependencies]
+cc = "1.1"
+
+[dev-dependencies]
+tree-sitter = "0.25"
