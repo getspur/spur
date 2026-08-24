@@ -10,7 +10,9 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
+use anyhow::Context as _;
 use chrono::{DateTime, SecondsFormat, Utc};
+use ignore::{DirEntry, WalkBuilder};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use spur_mcp::local_projects::{
@@ -24,9 +26,9 @@ use crate::temporal::{
     resolve_symbol_at_indexed, symbol_history, Resolution, ResolutionFailure, TemporalIndex,
 };
 use crate::{
-    artifact_from_facts, bounded_subgraph_with_budget, build_facts, discover_files, edge_kind,
-    load_artifact, resolve_artifact_location, resolve_selector, resolve_worktree_root_from,
-    CandidateRow, CommitIndexArtifact, GraphArtifactManifest, GraphEdgeArtifact, GraphEdgeKind,
+    artifact_from_facts, bounded_subgraph_with_budget, build_facts, edge_kind, load_artifact,
+    resolve_artifact_location, resolve_selector, resolve_worktree_root_from, CandidateRow,
+    CommitIndexArtifact, GraphArtifactManifest, GraphEdgeArtifact, GraphEdgeKind,
     GraphIndexArtifact, GraphIndexPointer, GraphQueryClient, GraphSymbolArtifact, InMemoryClient,
     OverlayClient, OwnedCalleeRecord, OwnedCallerRecord, ParquetClient, SearchFilters, SearchMode,
     SearchOptions, SearchResult, SearchSymbol, SelectorResolution, SnapshotKey, SubgraphBudget,
@@ -5562,10 +5564,96 @@ fn supported_file_paths_via_fs(
     worktree: &Path,
     allowed_extensions: &[&str],
 ) -> anyhow::Result<BTreeMap<String, PathBuf>> {
-    Ok(discover_files(worktree, allowed_extensions)?
-        .into_iter()
-        .map(|path| (worktree_relative_slash_path(worktree, &path), path))
-        .collect())
+    let canonical_worktree = worktree
+        .canonicalize()
+        .with_context(|| format!("failed to canonicalize `{}`", worktree.display()))?;
+    let mut paths = Vec::new();
+    for entry in WalkBuilder::new(&canonical_worktree)
+        .standard_filters(true)
+        .hidden(false)
+        .filter_entry(fallback_should_descend)
+        .build()
+    {
+        let entry = entry.map_err(|error| {
+            anyhow::anyhow!(
+                "strict filesystem fallback traversal failed under `{}`: {error}",
+                canonical_worktree.display()
+            )
+        })?;
+        if entry
+            .file_type()
+            .is_some_and(|file_type| file_type.is_file())
+            && entry
+                .path()
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| {
+                    allowed_extensions
+                        .iter()
+                        .any(|allowed| extension.eq_ignore_ascii_case(allowed))
+                })
+        {
+            paths.push(entry.into_path());
+        }
+    }
+    paths.sort();
+    collect_supported_file_paths(&canonical_worktree, paths)
+}
+
+fn fallback_should_descend(entry: &DirEntry) -> bool {
+    let Some(file_name) = entry.file_name().to_str() else {
+        return true;
+    };
+    !matches!(file_name, "target" | ".git" | "node_modules")
+}
+
+fn collect_supported_file_paths(
+    canonical_worktree: &Path,
+    paths: impl IntoIterator<Item = PathBuf>,
+) -> anyhow::Result<BTreeMap<String, PathBuf>> {
+    let mut collected = BTreeMap::new();
+    for path in paths {
+        let relative = strict_worktree_relative_slash_path(canonical_worktree, &path)?;
+        if let Some(previous) = collected.get(&relative) {
+            return Err(anyhow::anyhow!(
+                "duplicate normalized filesystem fallback path `{relative}` from {previous:?} and {path:?}"
+            ));
+        }
+        collected.insert(relative, path);
+    }
+    Ok(collected)
+}
+
+fn strict_worktree_relative_slash_path(
+    canonical_worktree: &Path,
+    path: &Path,
+) -> anyhow::Result<String> {
+    let relative = path.strip_prefix(canonical_worktree).with_context(|| {
+        format!(
+            "filesystem fallback path {path:?} is outside canonical worktree {canonical_worktree:?}"
+        )
+    })?;
+    let mut components = Vec::new();
+    for component in relative.components() {
+        let Component::Normal(value) = component else {
+            return Err(anyhow::anyhow!(
+                "filesystem fallback path {path:?} has a non-normal relative component"
+            ));
+        };
+        components.push(value.to_str().ok_or_else(|| {
+            anyhow::anyhow!("filesystem fallback path {path:?} is not valid UTF-8")
+        })?);
+    }
+    if components.is_empty() {
+        return Err(anyhow::anyhow!(
+            "filesystem fallback path {path:?} does not name a worktree-relative file"
+        ));
+    }
+    // Native separators cannot occur inside a Normal component, so joining
+    // validated UTF-8 components with '/' is injective for walker-produced
+    // paths. The collector still rejects repeats explicitly to keep that
+    // contract fail-closed if its inputs or normalization ever change.
+    Ok(components.join("/"))
 }
 
 #[cfg(test)]
@@ -6589,6 +6677,10 @@ fn escape_mermaid_label(label: &str) -> String {
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
+    #[cfg(unix)]
+    use std::ffi::OsString;
+    #[cfg(unix)]
+    use std::os::unix::ffi::OsStringExt as _;
     use std::path::{Path, PathBuf};
     use std::sync::{Arc, OnceLock};
     use std::time::{Duration, Instant};
@@ -6607,6 +6699,65 @@ mod tests {
 
     const ESCALATION_THRESHOLD: usize = 3;
     static REBUILD_TEST_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+
+    #[cfg(unix)]
+    #[test]
+    fn overlay_snapshot_supported_paths_reject_non_utf8_relative_path() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let root = tempdir.path().canonicalize().expect("canonical root");
+        let path = root.join(OsString::from_vec(b"non-utf8-\x80.rs".to_vec()));
+        fs::write(&path, "pub fn invalid_path() {}\n").expect("non-UTF-8 source path");
+
+        let error = supported_file_paths_via_fs(&root, &["rs"])
+            .expect_err("fallback path conversion must reject non-UTF-8 paths");
+
+        eprintln!("lossless fallback path trace: rejected={}", path.display());
+        assert!(
+            error.to_string().contains("UTF-8"),
+            "unexpected non-UTF-8 path error: {error:#}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn overlay_snapshot_supported_paths_reject_lossy_normalized_collision() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let root = tempdir.path().canonicalize().expect("canonical root");
+        let first = root.join(OsString::from_vec(b"collision-\x80.rs".to_vec()));
+        let second = root.join(OsString::from_vec(b"collision-\x81.rs".to_vec()));
+        fs::write(&first, "pub fn first() {}\n").expect("first source");
+        fs::write(&second, "pub fn second() {}\n").expect("second source");
+
+        let error = supported_file_paths_via_fs(&root, &["rs"])
+            .expect_err("distinct paths must never overwrite one normalized fallback key");
+
+        eprintln!(
+            "lossless fallback collision trace: rejected_first={} rejected_second={}",
+            first.display(),
+            second.display()
+        );
+        assert!(
+            error.to_string().contains("UTF-8") || error.to_string().contains("duplicate"),
+            "unexpected normalized-collision error: {error:#}"
+        );
+    }
+
+    #[test]
+    fn overlay_snapshot_supported_path_collector_rejects_duplicate_key() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let root = tempdir.path().canonicalize().expect("canonical root");
+        let path = root.join("duplicate.rs");
+        fs::write(&path, "pub fn duplicate() {}\n").expect("source");
+
+        let error = collect_supported_file_paths(&root, [path.clone(), path.clone()])
+            .expect_err("the strict collector must reject duplicate normalized keys");
+
+        eprintln!("lossless fallback duplicate-key trace: rejected={path:?}");
+        assert!(
+            error.to_string().contains("duplicate normalized"),
+            "unexpected duplicate-key error: {error:#}"
+        );
+    }
 
     #[test]
     fn overlay_snapshot_clean_repeat_avoids_full_index_sweep() {

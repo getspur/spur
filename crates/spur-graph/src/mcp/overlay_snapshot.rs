@@ -220,6 +220,16 @@ trait SnapshotRuntime {
         )
     }
 
+    fn discover_supported_file_paths(
+        &mut self,
+        _attempt: usize,
+        _phase: FallbackScanPhase,
+        worktree: &Path,
+        allowed_extensions: &[&str],
+    ) -> anyhow::Result<BTreeMap<String, PathBuf>> {
+        super::supported_file_paths_via_fs(worktree, allowed_extensions)
+    }
+
     fn validation_hook(&mut self, _attempt: usize, _phase: ValidationPhase, _path: &Path) {}
 
     fn fallback_scan_hook(&mut self, _attempt: usize, _phase: FallbackScanPhase, _path: &Path) {}
@@ -854,7 +864,13 @@ fn certify_filesystem_fallback_once<R: SnapshotRuntime>(
         .context("failed to load current index membership before filesystem fallback scan")?;
 
     runtime.fallback_scan_hook(attempt, FallbackScanPhase::BeforeDiscovery, worktree);
-    let discovered = super::supported_file_paths_via_fs(worktree, allowed_extensions)
+    let discovered = runtime
+        .discover_supported_file_paths(
+            attempt,
+            FallbackScanPhase::BeforeDiscovery,
+            worktree,
+            allowed_extensions,
+        )
         .context("failed to discover supported filesystem fallback paths")?;
     let mut current_oids = BTreeMap::new();
     let mut read_identities = BTreeMap::new();
@@ -891,7 +907,13 @@ fn certify_filesystem_fallback_once<R: SnapshotRuntime>(
     }
 
     runtime.fallback_scan_hook(attempt, FallbackScanPhase::BeforeRediscover, worktree);
-    let rediscovered = super::supported_file_paths_via_fs(worktree, allowed_extensions)
+    let rediscovered = runtime
+        .discover_supported_file_paths(
+            attempt,
+            FallbackScanPhase::BeforeRediscover,
+            worktree,
+            allowed_extensions,
+        )
         .context("failed to rediscover supported filesystem fallback paths")?;
     if discovered != rediscovered {
         return Err(anyhow!(
@@ -1216,8 +1238,12 @@ where
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
+    #[cfg(unix)]
+    use std::ffi::OsString;
     use std::fs;
-    use std::path::Path;
+    #[cfg(unix)]
+    use std::os::unix::ffi::OsStringExt as _;
+    use std::path::{Path, PathBuf};
     use std::process::Command;
 
     use super::*;
@@ -1315,6 +1341,10 @@ mod tests {
         fail_tracked_index: bool,
         synthetic_status_source: bool,
         observed_capabilities: Vec<FsmonitorCapabilities>,
+        discovery_failures: Vec<(usize, FallbackScanPhase)>,
+        discovery_calls: Vec<(usize, FallbackScanPhase)>,
+        path_set_mutations: BTreeSet<usize>,
+        final_restat_mutations: BTreeMap<usize, &'static str>,
         after_read_mutations: BTreeMap<usize, (&'static str, &'static str)>,
         after_read_attempts: Vec<usize>,
     }
@@ -1333,10 +1363,21 @@ mod tests {
                 fail_tracked_index: false,
                 synthetic_status_source: false,
                 observed_capabilities: Vec::new(),
+                discovery_failures: Vec::new(),
+                discovery_calls: Vec::new(),
+                path_set_mutations: BTreeSet::new(),
+                final_restat_mutations: BTreeMap::new(),
                 after_read_mutations: BTreeMap::new(),
                 after_read_attempts: Vec::new(),
             }
         }
+    }
+
+    #[cfg(unix)]
+    fn injected_discovery_failure_path(worktree: &Path) -> PathBuf {
+        worktree
+            .join("src")
+            .join(OsString::from_vec(b"discovery-failure-\x80.rs".to_vec()))
     }
 
     impl SnapshotRuntime for InstrumentedRuntime {
@@ -1396,7 +1437,54 @@ mod tests {
             )
         }
 
+        fn discover_supported_file_paths(
+            &mut self,
+            attempt: usize,
+            phase: FallbackScanPhase,
+            worktree: &Path,
+            allowed_extensions: &[&str],
+        ) -> anyhow::Result<BTreeMap<String, PathBuf>> {
+            self.discovery_calls.push((attempt, phase));
+            if self.discovery_failures.contains(&(attempt, phase)) {
+                return Err(anyhow!(
+                    "injected strict discovery failure on attempt {attempt} during {phase:?}"
+                ));
+            }
+            super::super::supported_file_paths_via_fs(worktree, allowed_extensions)
+        }
+
         fn fallback_scan_hook(&mut self, attempt: usize, phase: FallbackScanPhase, path: &Path) {
+            if phase == FallbackScanPhase::BeforeDiscovery {
+                #[cfg(unix)]
+                {
+                    let failure_path = injected_discovery_failure_path(path);
+                    if attempt > 0 {
+                        let _ = fs::remove_file(&failure_path);
+                    }
+                    if self.discovery_failures.contains(&(attempt, phase)) {
+                        fs::write(&failure_path, "pub fn invalid_path() {}\n")
+                            .expect("inject strict discovery failure");
+                    }
+                }
+                if attempt > 0 {
+                    let _ = fs::remove_file(path.join("src/path-set-added.rs"));
+                }
+            }
+            if phase == FallbackScanPhase::BeforeRediscover
+                && self.path_set_mutations.contains(&attempt)
+            {
+                fs::write(
+                    path.join("src/path-set-added.rs"),
+                    "pub fn added_during_discovery() {}\n",
+                )
+                .expect("mutate supported path set before rediscovery");
+            }
+            if phase == FallbackScanPhase::BeforeFinalRestat {
+                if let Some(body) = self.final_restat_mutations.remove(&attempt) {
+                    fs::write(path.join("src/a.rs"), body)
+                        .expect("mutate earlier file before final restat");
+                }
+            }
             if phase != FallbackScanPhase::AfterReadBeforeSecondStat || !path.ends_with("a.rs") {
                 return;
             }
@@ -1407,6 +1495,257 @@ mod tests {
                     .expect("mutate fallback b.rs after a.rs read");
             }
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn overlay_snapshot_fallback_discovery_failure_retries_once_then_returns_exact_valid() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let root = tempdir.path();
+        init_repo(root);
+        let base_body = b"pub fn base() {}\n";
+        let changed_body = b"pub fn changed() {}\n";
+        fs::write(root.join("src/lib.rs"), base_body).expect("base source");
+        run_git(root, &["add", "src/lib.rs"]);
+        run_git(root, &["commit", "-qm", "base"]);
+        let base = base(root, Some(head(root)));
+        fs::write(root.join("src/lib.rs"), changed_body).expect("changed source");
+        let mut runtime = InstrumentedRuntime {
+            fail_status: true,
+            discovery_failures: vec![(0, FallbackScanPhase::BeforeDiscovery)],
+            ..InstrumentedRuntime::release_disabled()
+        };
+
+        let actual = snapshot_with_runtime(root, base, &supported_extensions(), &mut runtime)
+            .expect("one strict discovery failure must retry and stabilize");
+
+        eprintln!(
+            "fallback discovery stable trace: calls={:?} retries={} lifecycle={:?} path_state={:?}",
+            runtime.discovery_calls,
+            actual.measurements.fallback_scan_retries,
+            actual.lifecycle,
+            actual.path_state
+        );
+        assert_eq!(
+            runtime.discovery_calls,
+            vec![
+                (0, FallbackScanPhase::BeforeDiscovery),
+                (1, FallbackScanPhase::BeforeDiscovery),
+                (1, FallbackScanPhase::BeforeRediscover),
+            ],
+            "the first discovery failure must consume exactly one retry"
+        );
+        assert_eq!(actual.measurements.fallback_scan_retries, 1);
+        assert_eq!(
+            actual.path_state,
+            BTreeMap::from([(
+                "src/lib.rs".to_owned(),
+                OverlayPathState::Tracked(git_blob_oid(changed_body)),
+            )])
+        );
+        assert_eq!(actual.source, OverlaySnapshotSource::ExactFallback);
+        assert_eq!(actual.identity, None);
+        assert_eq!(
+            actual.lifecycle,
+            vec![
+                SnapshotLifecycleState::Cold,
+                SnapshotLifecycleState::Validating,
+                SnapshotLifecycleState::ExactFallback,
+                SnapshotLifecycleState::Valid,
+            ]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn overlay_snapshot_repeated_fallback_discovery_failure_fails_closed() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let root = tempdir.path();
+        init_repo(root);
+        fs::write(root.join("src/lib.rs"), "pub fn base() {}\n").expect("base source");
+        run_git(root, &["add", "src/lib.rs"]);
+        run_git(root, &["commit", "-qm", "base"]);
+        let base = base(root, Some(head(root)));
+        let mut runtime = InstrumentedRuntime {
+            fail_status: true,
+            discovery_failures: vec![
+                (0, FallbackScanPhase::BeforeDiscovery),
+                (1, FallbackScanPhase::BeforeDiscovery),
+            ],
+            ..InstrumentedRuntime::release_disabled()
+        };
+
+        let result = snapshot_with_runtime(root, base, &supported_extensions(), &mut runtime);
+        let error = match result {
+            Ok(snapshot) => panic!(
+                "two strict discovery failures returned a response with lifecycle {:?}",
+                snapshot.lifecycle
+            ),
+            Err(error) => error,
+        };
+
+        eprintln!(
+            "fallback discovery fail-closed trace: calls={:?} valid_response=false error={error:#}",
+            runtime.discovery_calls
+        );
+        assert_eq!(
+            runtime.discovery_calls,
+            vec![
+                (0, FallbackScanPhase::BeforeDiscovery),
+                (1, FallbackScanPhase::BeforeDiscovery),
+            ]
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("failed to certify filesystem fallback"),
+            "unexpected repeated-discovery error: {error:#}"
+        );
+        assert!(!snapshots()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .contains_key(&root.canonicalize().expect("canonical worktree")));
+    }
+
+    #[test]
+    fn overlay_snapshot_fallback_path_set_mutation_retries_then_stabilizes() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let root = tempdir.path();
+        init_repo(root);
+        fs::write(root.join("src/lib.rs"), "pub fn base() {}\n").expect("base source");
+        run_git(root, &["add", "src/lib.rs"]);
+        run_git(root, &["commit", "-qm", "base"]);
+        let base = base(root, Some(head(root)));
+        let mut runtime = InstrumentedRuntime {
+            fail_status: true,
+            path_set_mutations: BTreeSet::from([0]),
+            ..InstrumentedRuntime::release_disabled()
+        };
+
+        let actual = snapshot_with_runtime(root, base, &supported_extensions(), &mut runtime)
+            .expect("one path-set mutation must retry and stabilize");
+
+        eprintln!(
+            "fallback path-set stable trace: calls={:?} retries={} path_state={:?}",
+            runtime.discovery_calls, actual.measurements.fallback_scan_retries, actual.path_state
+        );
+        assert_eq!(runtime.discovery_calls.len(), 4);
+        assert_eq!(actual.measurements.fallback_scan_retries, 1);
+        assert!(actual.path_state.is_empty());
+        assert_eq!(
+            actual.lifecycle.last(),
+            Some(&SnapshotLifecycleState::Valid)
+        );
+    }
+
+    #[test]
+    fn overlay_snapshot_recurrent_fallback_path_set_mutation_fails_closed() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let root = tempdir.path();
+        init_repo(root);
+        fs::write(root.join("src/lib.rs"), "pub fn base() {}\n").expect("base source");
+        run_git(root, &["add", "src/lib.rs"]);
+        run_git(root, &["commit", "-qm", "base"]);
+        let base = base(root, Some(head(root)));
+        let mut runtime = InstrumentedRuntime {
+            fail_status: true,
+            path_set_mutations: BTreeSet::from([0, 1]),
+            ..InstrumentedRuntime::release_disabled()
+        };
+
+        let error = snapshot_with_runtime(root, base, &supported_extensions(), &mut runtime)
+            .expect_err("a second path-set mutation must fail closed");
+
+        eprintln!(
+            "fallback path-set fail-closed trace: calls={:?} valid_response=false error={error:#}",
+            runtime.discovery_calls
+        );
+        assert_eq!(runtime.discovery_calls.len(), 4);
+        assert!(
+            error
+                .to_string()
+                .contains("supported path set changed during the scan"),
+            "unexpected repeated path-set error: {error:#}"
+        );
+        assert!(!snapshots()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .contains_key(&root.canonicalize().expect("canonical worktree")));
+    }
+
+    #[test]
+    fn overlay_snapshot_final_whole_set_restat_retries_then_stabilizes() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let root = tempdir.path();
+        init_repo(root);
+        let a0 = b"pub fn a0() {}\n";
+        let a1 = b"pub fn a1() {}\n";
+        fs::write(root.join("src/a.rs"), a0).expect("a0");
+        fs::write(root.join("src/b.rs"), "pub fn b0() {}\n").expect("b0");
+        run_git(root, &["add", "src"]);
+        run_git(root, &["commit", "-qm", "base"]);
+        let base = base(root, Some(head(root)));
+        let mut runtime = InstrumentedRuntime {
+            fail_status: true,
+            final_restat_mutations: BTreeMap::from([(0, "pub fn a1() {}\n")]),
+            ..InstrumentedRuntime::release_disabled()
+        };
+
+        let actual = snapshot_with_runtime(root, base, &supported_extensions(), &mut runtime)
+            .expect("one post-read whole-set mutation must retry and stabilize");
+
+        eprintln!(
+            "fallback final-restat stable trace: calls={:?} retries={} path_state={:?}",
+            runtime.discovery_calls, actual.measurements.fallback_scan_retries, actual.path_state
+        );
+        assert_eq!(runtime.discovery_calls.len(), 4);
+        assert_eq!(actual.measurements.fallback_scan_retries, 1);
+        assert_eq!(
+            actual.path_state,
+            BTreeMap::from([(
+                "src/a.rs".to_owned(),
+                OverlayPathState::Tracked(git_blob_oid(a1)),
+            )])
+        );
+    }
+
+    #[test]
+    fn overlay_snapshot_recurrent_final_whole_set_restat_mutation_fails_closed() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let root = tempdir.path();
+        init_repo(root);
+        fs::write(root.join("src/a.rs"), "pub fn a0() {}\n").expect("a0");
+        fs::write(root.join("src/b.rs"), "pub fn b0() {}\n").expect("b0");
+        run_git(root, &["add", "src"]);
+        run_git(root, &["commit", "-qm", "base"]);
+        let base = base(root, Some(head(root)));
+        let mut runtime = InstrumentedRuntime {
+            fail_status: true,
+            final_restat_mutations: BTreeMap::from([
+                (0, "pub fn a1() {}\n"),
+                (1, "pub fn a2() {}\n"),
+            ]),
+            ..InstrumentedRuntime::release_disabled()
+        };
+
+        let error = snapshot_with_runtime(root, base, &supported_extensions(), &mut runtime)
+            .expect_err("a second final-restat mutation must fail closed");
+
+        eprintln!(
+            "fallback final-restat fail-closed trace: calls={:?} valid_response=false error={error:#}",
+            runtime.discovery_calls
+        );
+        assert_eq!(runtime.discovery_calls.len(), 4);
+        assert!(
+            error
+                .to_string()
+                .contains("changed before final certification"),
+            "unexpected repeated final-restat error: {error:#}"
+        );
+        assert!(!snapshots()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .contains_key(&root.canonicalize().expect("canonical worktree")));
     }
 
     #[test]
