@@ -196,6 +196,8 @@ impl spur_mcp::ToolModule for GraphMcpModule {
 mod overlay_snapshot;
 #[allow(dead_code)]
 mod request_cache;
+mod request_replay;
+use request_replay::RequestReplayClient;
 mod file_oid_cache {
     use std::collections::{BTreeMap, HashMap, VecDeque};
     use std::fs::{self, Metadata};
@@ -936,7 +938,8 @@ async fn code_search_response(
         .await
         .map_err(CodeGraphError::without_metadata)?;
     let source = backend.metadata_source();
-    let search = code_search_body_for_client(args, backend.client())
+    let request_client = RequestReplayClient::new(backend.client());
+    let search = code_search_body_for_client(args, &request_client)
         .map_err(|error| CodeGraphError::from(error).with_metadata_source(source.clone()))?;
     let files = backend
         .search_response_file_set(&search)
@@ -947,6 +950,7 @@ async fn code_search_response(
     if let Some(rebuild_candidate) = analysis.rebuild_candidate.take() {
         match overlay_response_for_backend(
             &backend,
+            &request_client,
             &rebuild_candidate,
             source.clone(),
             args,
@@ -1056,8 +1060,9 @@ async fn code_graph_backend_value_with_format(
     handler: impl Fn(&Value, &dyn GraphQueryClient) -> CodeGraphResult + Send + Sync,
 ) -> Result<Value, McpHandlerError> {
     let backend = open_code_search_backend_for_request(None).await?;
-    let mut body = handler(args, backend.client()).map_err(CodeGraphError::into_handler_error)?;
-    let files = backend.response_file_set_from_body(&body)?;
+    let request_client = RequestReplayClient::new(backend.client());
+    let mut body = handler(args, &request_client).map_err(CodeGraphError::into_handler_error)?;
+    let files = backend.response_file_set_from_body(&request_client, &body)?;
     GraphResponseMetadata::from_source_inner(backend.metadata_source(), Some(&files))
         .await
         .insert_into_for_format(&mut body, response_format);
@@ -1150,6 +1155,7 @@ enum OverlayAttempt {
 #[allow(clippy::too_many_arguments)]
 async fn attempt_refresh(
     backend: &CodeSearchBackend,
+    request_client: &(dyn GraphQueryClient + Sync),
     rebuild_coordinator: Arc<RebuildCoordinator>,
     rebuild_candidate: RebuildCandidate,
     source: GraphMetadataSource,
@@ -1161,6 +1167,7 @@ async fn attempt_refresh(
     if refresh_strategy == GraphRefreshStrategy::OverlayThenRebuild {
         match overlay_response_for_backend(
             backend,
+            request_client,
             &rebuild_candidate,
             source.clone(),
             args,
@@ -1241,11 +1248,12 @@ async fn code_graph_backend_response_with_refresh(
         .await
         .map_err(CodeGraphError::without_metadata)?;
     let source = backend.metadata_source();
+    let request_client = RequestReplayClient::new(backend.client());
 
-    let (mut body, mut analysis) = match handler(args, backend.client()) {
+    let (mut body, mut analysis) = match handler(args, &request_client) {
         Ok(body) => {
             let files = backend
-                .response_file_set_from_body(&body)
+                .response_file_set_from_body(&request_client, &body)
                 .map_err(CodeGraphError::from)?;
             // The overlay cache key must cover every tracked change that
             // changed_paths_for_overlay may extract, not only response files.
@@ -1279,6 +1287,7 @@ async fn code_graph_backend_response_with_refresh(
             };
             return match attempt_refresh(
                 &backend,
+                &request_client,
                 Arc::clone(&rebuild_coordinator),
                 rebuild_candidate,
                 source.clone(),
@@ -1299,6 +1308,7 @@ async fn code_graph_backend_response_with_refresh(
     if let Some(rebuild_candidate) = analysis.rebuild_candidate.take() {
         match attempt_refresh(
             &backend,
+            &request_client,
             Arc::clone(&rebuild_coordinator),
             rebuild_candidate,
             source.clone(),
@@ -1331,6 +1341,7 @@ async fn code_graph_backend_response_with_refresh(
 
 async fn overlay_response_for_backend(
     backend: &CodeSearchBackend,
+    request_client: &(dyn GraphQueryClient + Sync),
     rebuild_candidate: &RebuildCandidate,
     source: GraphMetadataSource,
     args: &Value,
@@ -1383,12 +1394,12 @@ async fn overlay_response_for_backend(
     let (mut fresh_body, fresh_files) = match cached {
         Some(cached) => {
             let overlay =
-                OverlayClient::from_artifacts(backend.client(), cached.artifact, cached.shadowed)
+                OverlayClient::from_artifacts(request_client, cached.artifact, cached.shadowed)
                     .map_err(|error| {
-                    CodeGraphError::without_metadata(McpHandlerError::Internal(format!(
-                        "failed to construct code graph overlay: {error}"
-                    )))
-                })?;
+                        CodeGraphError::without_metadata(McpHandlerError::Internal(format!(
+                            "failed to construct code graph overlay: {error}"
+                        )))
+                    })?;
             let fresh_body = handler(args, &overlay)?;
             let fresh_files = response_file_set_from_client(&overlay, &fresh_body)?;
             (fresh_body, fresh_files)
@@ -1396,9 +1407,8 @@ async fn overlay_response_for_backend(
         None => {
             // No changed paths → identity overlay. Serve the base client
             // directly and skip extract_delta / remap construction.
-            let client = backend.client();
-            let fresh_body = handler(args, client)?;
-            let fresh_files = response_file_set_from_client(client, &fresh_body)?;
+            let fresh_body = handler(args, request_client)?;
+            let fresh_files = response_file_set_from_client(request_client, &fresh_body)?;
             (fresh_body, fresh_files)
         }
     };
@@ -1433,7 +1443,7 @@ fn overlay_delta_for_worktree(
 fn overlay_client_for_backend<'a>(
     backend: &'a CodeSearchBackend,
     rebuild_candidate: &RebuildCandidate,
-) -> anyhow::Result<Option<OverlayClient<&'a dyn GraphQueryClient>>> {
+) -> anyhow::Result<Option<OverlayClient<&'a (dyn GraphQueryClient + Sync)>>> {
     let worktree = rebuild_candidate.worktree.clone();
     let snapshot_base = backend.snapshot_base()?;
     match overlay_delta_for_worktree(worktree, snapshot_base)? {
@@ -1506,7 +1516,7 @@ enum CodeSearchBackend {
 }
 
 impl CodeSearchBackend {
-    fn client(&self) -> &dyn GraphQueryClient {
+    fn client(&self) -> &(dyn GraphQueryClient + Sync) {
         match self {
             Self::Parquet(client) => client.as_ref(),
             Self::InMemory { client, .. } => client,
@@ -1564,6 +1574,7 @@ impl CodeSearchBackend {
 
     fn response_file_set_from_body(
         &self,
+        request_client: &dyn GraphQueryClient,
         body: &Value,
     ) -> Result<Vec<(String, String)>, McpHandlerError> {
         match self {
@@ -1579,8 +1590,9 @@ impl CodeSearchBackend {
                 let mut files = file_oid_subset(&file_oids, paths);
                 if files.is_empty() {
                     if let Some(symbol_id) = response_symbol_id(body) {
-                        if let Some(symbol) =
-                            client.symbol_by_id(symbol_id).map_err(graph_query_error)?
+                        if let Some(symbol) = request_client
+                            .symbol_by_id(symbol_id)
+                            .map_err(graph_query_error)?
                         {
                             files = file_oid_subset(&file_oids, [symbol.file_path.as_str()]);
                         }
@@ -6905,11 +6917,10 @@ mod tests {
         changed_paths: &[PathBuf],
     ) -> Vec<String> {
         let counting = CountingGraphQueryClient::new(base_artifact);
+        let request_client = RequestReplayClient::new(&counting);
 
-        // RED subject: this is the current production shape. The handler runs
-        // once on the base and again through OverlayClient.
-        let _first_result = (case.handler)(&case.args, &counting);
-        let overlay = OverlayClient::new(&counting, root, changed_paths)
+        let _first_result = (case.handler)(&case.args, &request_client);
+        let overlay = OverlayClient::new(&request_client, root, changed_paths)
             .expect("construct direct overlay subject");
         let actual = code_graph_result_signature((case.handler)(&case.args, &overlay));
 
@@ -7472,6 +7483,7 @@ mod tests {
         };
         let attempt = overlay_response_for_backend(
             &backend,
+            backend.client(),
             &candidate,
             backend.metadata_source(),
             &args,
