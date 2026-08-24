@@ -219,3 +219,161 @@ impl GraphQueryClient for RequestReplayClient<'_> {
             })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use anyhow::Context as _;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Barrier;
+    use std::time::Duration;
+
+    struct SlowCountingClient {
+        loads: AtomicUsize,
+        fail: bool,
+    }
+
+    impl SlowCountingClient {
+        fn new(fail: bool) -> Self {
+            Self {
+                loads: AtomicUsize::new(0),
+                fail,
+            }
+        }
+    }
+
+    impl GraphQueryClient for SlowCountingClient {
+        fn search_symbols(&self, _options: &SearchOptions) -> anyhow::Result<SearchResult> {
+            self.loads.fetch_add(1, Ordering::SeqCst);
+            std::thread::sleep(Duration::from_millis(50));
+            if self.fail {
+                return Err(anyhow::anyhow!("inner replay error")).context("outer replay context");
+            }
+            Ok(SearchResult {
+                candidates: Vec::new(),
+                total_matches: 0,
+                truncated: false,
+            })
+        }
+
+        fn find_caller_edges(&self, _sid: &str) -> Vec<OwnedCallerRecord> {
+            panic!("unused test operation")
+        }
+
+        fn find_callee_edges(&self, _sid: &str) -> Vec<OwnedCalleeRecord> {
+            panic!("unused test operation")
+        }
+
+        fn resolve_selector(&self, _selector: &str) -> anyhow::Result<SelectorResolution> {
+            panic!("unused test operation")
+        }
+
+        fn symbol_by_id(&self, _sid: &str) -> anyhow::Result<Option<GraphSymbolArtifact>> {
+            panic!("unused test operation")
+        }
+
+        fn symbols_by_file(&self, _path: &str) -> anyhow::Result<Vec<GraphSymbolArtifact>> {
+            panic!("unused test operation")
+        }
+
+        fn symbols_by_path_name(
+            &self,
+            _path: &str,
+            _name: &str,
+        ) -> anyhow::Result<Vec<GraphSymbolArtifact>> {
+            panic!("unused test operation")
+        }
+
+        fn file_manifest_by_path(
+            &self,
+            _path: &str,
+        ) -> anyhow::Result<Option<GraphFileManifestEntry>> {
+            panic!("unused test operation")
+        }
+
+        fn file_exists(&self, _path: &str) -> anyhow::Result<bool> {
+            panic!("unused test operation")
+        }
+
+        fn temporal_index(&self) -> Arc<TemporalIndex> {
+            panic!("unused test operation")
+        }
+    }
+
+    fn search_options() -> SearchOptions {
+        SearchOptions {
+            query: "singleflight".to_owned(),
+            mode: crate::SearchMode::Exact,
+            filters: crate::SearchFilters::default(),
+            limit: 20,
+        }
+    }
+
+    #[test]
+    fn concurrent_same_key_searches_singleflight_through_one_request_client() {
+        let base = SlowCountingClient::new(false);
+        let replay = RequestReplayClient::new(&base);
+        let options = search_options();
+        let start = Arc::new(Barrier::new(3));
+
+        let results = std::thread::scope(|scope| {
+            let first_start = Arc::clone(&start);
+            let first_replay = &replay;
+            let first_options = &options;
+            let first = scope.spawn(move || {
+                first_start.wait();
+                first_replay.search_symbols(first_options)
+            });
+            let second_start = Arc::clone(&start);
+            let second_replay = &replay;
+            let second_options = &options;
+            let second = scope.spawn(move || {
+                second_start.wait();
+                second_replay.search_symbols(second_options)
+            });
+            start.wait();
+            [
+                first.join().expect("first replay thread"),
+                second.join().expect("second replay thread"),
+            ]
+        });
+
+        assert!(results.into_iter().all(|result| result.is_ok()));
+        assert_eq!(
+            base.loads.load(Ordering::SeqCst),
+            1,
+            "same-key request-local calls must share one base operation"
+        );
+    }
+
+    #[test]
+    fn contextual_search_error_is_replayed_once_with_identical_chains() {
+        let base = SlowCountingClient::new(true);
+        let replay = RequestReplayClient::new(&base);
+        let options = search_options();
+
+        let first = replay
+            .search_symbols(&options)
+            .expect_err("first base search must fail");
+        let second = replay
+            .search_symbols(&options)
+            .expect_err("second search must replay the failure");
+        let chains =
+            [first, second].map(|error| error.chain().map(ToString::to_string).collect::<Vec<_>>());
+
+        eprintln!(
+            "request replay error evidence base_count={} chains={chains:?}",
+            base.loads.load(Ordering::SeqCst)
+        );
+        assert_eq!(
+            chains[0],
+            vec!["outer replay context", "inner replay error"]
+        );
+        assert_eq!(chains[1], chains[0]);
+        assert_eq!(
+            base.loads.load(Ordering::SeqCst),
+            1,
+            "a replayed error must not execute the base operation again"
+        );
+    }
+}

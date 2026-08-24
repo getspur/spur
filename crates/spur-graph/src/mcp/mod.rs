@@ -6712,6 +6712,8 @@ mod tests {
     use std::ffi::OsString;
     #[cfg(unix)]
     use std::os::unix::ffi::OsStringExt as _;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt as _;
     use std::path::{Path, PathBuf};
     use std::sync::{Arc, Mutex, OnceLock};
     use std::time::{Duration, Instant};
@@ -6906,6 +6908,7 @@ mod tests {
         name: &'static str,
         args: Value,
         handler: RequestReplayHandler,
+        expected_operations: BTreeMap<String, usize>,
     }
 
     fn exercise_request_replay_case(
@@ -6937,16 +6940,19 @@ mod tests {
             case.name
         );
 
-        let mut violations = trace
-            .iter()
-            .filter(|(_, count)| **count != 1)
-            .map(|(operation, count)| {
-                format!(
-                    "scenario={scenario} tool={} operation={operation} count={count}",
-                    case.name
-                )
-            })
-            .collect::<Vec<_>>();
+        let mut violations = Vec::new();
+        if case.expected_operations.is_empty() {
+            violations.push(format!(
+                "scenario={scenario} tool={} expected operation map must not be empty",
+                case.name
+            ));
+        }
+        if trace != case.expected_operations {
+            violations.push(format!(
+                "scenario={scenario} tool={} operation map mismatch actual={trace:?} expected={:?}",
+                case.name, case.expected_operations
+            ));
+        }
         if !equivalent {
             violations.push(format!(
                 "scenario={scenario} tool={} response mismatch actual={actual:#} expected={expected:#}",
@@ -7286,6 +7292,8 @@ mod tests {
                            pub fn caller() { target(); }\n\
                            pub fn old_name() {}\n";
         let base_artifact = Arc::new(artifact_from_source(root, base_source));
+        let target_sid = symbol_id_for(&base_artifact, "target");
+        let symbols_by_files = "symbols_by_files:[\"src/lib.rs\"]".to_owned();
 
         let clean_case = RequestReplayCase {
             name: "search-clean",
@@ -7295,6 +7303,11 @@ mod tests {
                 "limit": 1,
             }),
             handler: search_handler_for_request_replay,
+            expected_operations: BTreeMap::from([(
+                "search_symbols:Exact:target:SearchFilters { symbol_kind: None, file: None, file_glob: None }"
+                    .to_owned(),
+                1,
+            )]),
         };
         let mut violations = exercise_request_replay_case(
             "clean",
@@ -7326,21 +7339,42 @@ mod tests {
                     "response_format": "full",
                 }),
                 handler: search_handler_for_request_replay,
+                expected_operations: BTreeMap::from([
+                    (
+                        "search_symbols:Substring:a:SearchFilters { symbol_kind: None, file: None, file_glob: None }"
+                            .to_owned(),
+                        1,
+                    ),
+                    (symbols_by_files.clone(), 1),
+                ]),
             },
             RequestReplayCase {
                 name: "resolve",
                 args: json!({ "selector": "target" }),
                 handler: code_resolve_with_client,
+                expected_operations: BTreeMap::from([
+                    ("resolve_selector:target".to_owned(), 1),
+                    (format!("symbol_by_id:{target_sid}"), 1),
+                    (symbols_by_files.clone(), 1),
+                ]),
             },
             RequestReplayCase {
                 name: "resolve-new-or-renamed",
                 args: json!({ "selector": "new_name" }),
                 handler: code_resolve_with_client,
+                expected_operations: BTreeMap::from([
+                    ("resolve_selector:new_name".to_owned(), 1),
+                    (symbols_by_files.clone(), 1),
+                ]),
             },
             RequestReplayCase {
                 name: "resolve-not-found-error",
                 args: json!({ "selector": "still_missing" }),
                 handler: code_resolve_with_client,
+                expected_operations: BTreeMap::from([
+                    ("resolve_selector:still_missing".to_owned(), 1),
+                    (symbols_by_files.clone(), 1),
+                ]),
             },
             RequestReplayCase {
                 name: "file-symbols",
@@ -7349,6 +7383,11 @@ mod tests {
                     "response_format": "table",
                 }),
                 handler: code_file_symbols_with_client,
+                expected_operations: BTreeMap::from([
+                    ("file_exists:src/lib.rs".to_owned(), 1),
+                    ("symbols_by_file:src/lib.rs".to_owned(), 1),
+                    (symbols_by_files.clone(), 1),
+                ]),
             },
             RequestReplayCase {
                 name: "read-symbol",
@@ -7359,6 +7398,11 @@ mod tests {
                     "response_format": "source",
                 }),
                 handler: code_read_symbol_with_client,
+                expected_operations: BTreeMap::from([
+                    ("file_manifest_by_path:src/lib.rs".to_owned(), 1),
+                    ("symbols_by_path_name:src/lib.rs:target".to_owned(), 1),
+                    (symbols_by_files.clone(), 1),
+                ]),
             },
             RequestReplayCase {
                 name: "callers",
@@ -7368,6 +7412,17 @@ mod tests {
                     "response_format": "table",
                 }),
                 handler: code_callers_with_client,
+                expected_operations: BTreeMap::from([
+                    (format!("find_caller_edges:{target_sid}"), 1),
+                    (
+                        format!(
+                            "find_unresolved_caller_edges_by_labels:[\"{target_sid}\", \"target\"]"
+                        ),
+                        1,
+                    ),
+                    ("resolve_selector:target".to_owned(), 1),
+                    (symbols_by_files.clone(), 1),
+                ]),
             },
             RequestReplayCase {
                 name: "callees",
@@ -7377,6 +7432,11 @@ mod tests {
                     "response_format": "table",
                 }),
                 handler: code_callees_with_client,
+                expected_operations: BTreeMap::from([
+                    (format!("find_callee_edges:{target_sid}"), 1),
+                    ("resolve_selector:target".to_owned(), 1),
+                    (symbols_by_files, 1),
+                ]),
             },
         ];
 
@@ -7423,6 +7483,13 @@ mod tests {
         )
         .expect("dirty source");
 
+        let base = code_search_with_artifact(
+            &json!({ "query": "a", "mode": "substring", "limit": 20 }),
+            &InMemoryClient::new(Arc::new(artifact.clone())),
+        )
+        .expect("base response");
+        let expected_head = git_stdout_test(root, &["rev-parse", "HEAD"]);
+
         let body = SCOPED_CODE_GRAPH_WORKTREE_ROOT
             .scope(root.to_path_buf(), async {
                 code_search_response(
@@ -7441,11 +7508,26 @@ mod tests {
             .filter_map(|candidate| candidate["entity_name"].as_str())
             .collect::<Vec<_>>();
         eprintln!(
-            "request_replay fallback trace kind=stale_budget digest={} names={names:?} status={}",
+            "request_replay fallback trace kind=stale_budget digest={} names={names:?} \
+             status={} metadata={{graph_hash:{}, head:{}, dirty:{}, oid_match:{}}}",
             response_digest(&body),
-            body["rebuild_status"]
+            body["rebuild_status"],
+            body["graph_content_hash"],
+            body["worktree_head_oid"],
+            body["worktree_dirty"],
+            body["response_file_oids_match"],
         );
+        assert_eq!(body["candidates"], base["candidates"]);
+        assert_eq!(body["total_matches"], base["total_matches"]);
         assert_eq!(names, vec!["alpha"]);
+        assert_eq!(body["graph_content_hash"], artifact.graph_content_hash);
+        assert_eq!(
+            body["graph_index_version"],
+            artifact.header.graph_index_version
+        );
+        assert_eq!(body["worktree_head_oid"], expected_head);
+        assert_eq!(body["worktree_dirty"], true);
+        assert_eq!(body["response_file_oids_match"], false);
         assert_eq!(body["rebuild_status"], "stale_budget_exceeded");
     }
 
@@ -7457,68 +7539,139 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let root = dir.path();
         init_git_repo(root);
-        let artifact = Arc::new(artifact_from_source(root, "pub fn alpha() {}\n"));
+        let artifact = artifact_from_source(root, "pub fn alpha() {}\n");
         run_git_test(root, &["add", "src/lib.rs"]);
         run_git_test(root, &["commit", "-q", "-m", "index alpha"]);
-        let invalid_path = root.join(OsString::from_vec(b"invalid-overlay-\x80.rs".to_vec()));
+        write_current_artifact(root, &artifact);
+        let invalid_path = root.join("src/unreadable.rs");
         fs::write(&invalid_path, "pub fn partial_overlay_only() {}\n")
-            .expect("non-UTF-8 overlay source");
+            .expect("unreadable overlay source");
+        let mut permissions = fs::metadata(&invalid_path)
+            .expect("unreadable source metadata")
+            .permissions();
+        permissions.set_mode(0);
+        fs::set_permissions(&invalid_path, permissions).expect("make overlay source unreadable");
         fs::write(
             root.join("src/lib.rs"),
             "pub fn alpha() {}\n// force response-relevant refresh\n",
         )
         .expect("dirty indexed source");
-        run_git_test(root, &["add", "-A"]);
 
-        let backend = CodeSearchBackend::InMemory {
-            client: InMemoryClient::new(Arc::clone(&artifact)),
-            artifact,
-        };
         let args = json!({ "query": "a", "mode": "substring", "limit": 20 });
         let base =
-            code_graph_result_signature(search_handler_for_request_replay(&args, backend.client()));
-        let candidate = RebuildCandidate {
-            worktree: root.to_path_buf(),
-            key: RebuildKey::from("overlay-failure", &BTreeMap::new()),
-        };
-        let attempt = overlay_response_for_backend(
-            &backend,
-            backend.client(),
-            &candidate,
-            backend.metadata_source(),
-            &args,
-            ResponseFormat::Full,
-            search_handler_for_request_replay,
-        )
-        .await;
-        let error = match attempt {
-            Err(error) => error,
-            Ok(OverlayAttempt::Fresh(body)) => {
-                panic!("overlay failure must not return a partial fresh body: {body:#}")
-            }
-            Ok(OverlayAttempt::StaleBudgetExceeded) => {
-                panic!("fixture must exercise overlay failure, not the latency budget")
-            }
-        };
+            code_search_with_artifact(&args, &InMemoryClient::new(Arc::new(artifact.clone())))
+                .expect("base response");
+        let body = SCOPED_CODE_GRAPH_WORKTREE_ROOT
+            .scope(root.to_path_buf(), async {
+                code_search_response(&args, Arc::new(RebuildCoordinator::new())).await
+            })
+            .await
+            .expect("production wrapper must return the whole base response");
+        let expected_head = git_stdout_test(root, &["rev-parse", "HEAD"]);
 
-        let names = base["ok"]["candidates"]
+        let names = body["candidates"]
             .as_array()
             .expect("candidate array")
             .iter()
             .filter_map(|candidate| candidate["entity_name"].as_str())
             .collect::<Vec<_>>();
         eprintln!(
-            "request_replay fallback trace kind=overlay_failure base_digest={} names={names:?} \
-             error={}",
-            response_digest(&base),
-            handler_error_message(&error.error),
+            "request_replay fallback trace kind=overlay_failure digest={} names={names:?} \
+             status={} metadata={{graph_hash:{}, head:{}, dirty:{}, oid_match:{}}}",
+            response_digest(&body),
+            body["rebuild_status"],
+            body["graph_content_hash"],
+            body["worktree_head_oid"],
+            body["worktree_dirty"],
+            body["response_file_oids_match"],
         );
+        assert_eq!(body["candidates"], base["candidates"]);
+        assert_eq!(body["total_matches"], base["total_matches"]);
         assert_eq!(names, vec!["alpha"]);
-        assert!(
-            handler_error_message(&error.error).contains("failed to construct code graph overlay"),
-            "unexpected overlay failure: {:?}",
-            error.error
+        assert_eq!(body["graph_content_hash"], artifact.graph_content_hash);
+        assert_eq!(
+            body["graph_index_version"],
+            artifact.header.graph_index_version
         );
+        assert_eq!(body["worktree_head_oid"], expected_head);
+        assert_eq!(body["worktree_dirty"], true);
+        assert_eq!(body["response_file_oids_match"], false);
+        assert_eq!(body["rebuild_status"], "stale_rebuild_failed");
+
+        let missing = SCOPED_CODE_GRAPH_WORKTREE_ROOT
+            .scope(root.to_path_buf(), async {
+                code_resolve_response(
+                    &json!({ "selector": "still_missing" }),
+                    Arc::new(RebuildCoordinator::new()),
+                )
+                .await
+            })
+            .await
+            .expect_err("whole not-found error must survive failed refresh");
+        let signature = code_graph_result_signature(Err(missing));
+        assert_eq!(signature["error"]["kind"], "not_found");
+        assert_eq!(
+            signature["error"]["message"],
+            "symbol `still_missing` was not found"
+        );
+        assert_eq!(signature["error"]["temporal_code"], Value::Null);
+        assert_eq!(signature["error"]["temporal_data"], Value::Null);
+        assert_eq!(signature["error"]["has_metadata"], true);
+    }
+
+    #[tokio::test]
+    async fn request_replay_immediate_untracked_source_invalidates_primed_clean_metadata() {
+        let _rebuild_guard = rebuild_test_guard().await;
+        let _budget = set_graph_rebuild_latency_budget_for_test(Duration::from_secs(30));
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        init_git_repo(root);
+        let artifact = artifact_from_source(root, "pub fn alpha() {}\n");
+        run_git_test(root, &["add", "src/lib.rs"]);
+        run_git_test(root, &["commit", "-q", "-m", "index alpha"]);
+        write_current_artifact(root, &artifact);
+        run_git_test(root, &["add", "-A"]);
+        run_git_test(root, &["commit", "-q", "-m", "index graph fixture"]);
+
+        let prime = SCOPED_CODE_GRAPH_WORKTREE_ROOT
+            .scope(root.to_path_buf(), async {
+                code_search_response(
+                    &json!({ "query": "alpha", "mode": "exact" }),
+                    Arc::new(RebuildCoordinator::new()),
+                )
+                .await
+            })
+            .await
+            .expect("prime clean metadata");
+        assert_eq!(prime["rebuild_status"], "not_needed");
+        assert_eq!(prime["worktree_dirty"], false);
+
+        fs::write(
+            root.join("src/immediate.rs"),
+            "pub fn immediate_only() {}\n",
+        )
+        .expect("write immediate untracked source");
+        let body = SCOPED_CODE_GRAPH_WORKTREE_ROOT
+            .scope(root.to_path_buf(), async {
+                code_search_response(
+                    &json!({ "query": "immediate_only", "mode": "exact" }),
+                    Arc::new(RebuildCoordinator::new()),
+                )
+                .await
+            })
+            .await
+            .expect("immediate untracked symbol must be visible");
+
+        eprintln!(
+            "immediate untracked evidence total={} status={} dirty={} candidate={}",
+            body["total_matches"],
+            body["rebuild_status"],
+            body["worktree_dirty"],
+            body["candidates"].get(0).unwrap_or(&Value::Null),
+        );
+        assert_eq!(body["total_matches"], 1, "{body:#}");
+        assert_eq!(body["candidates"][0]["entity_name"], "immediate_only");
+        assert_eq!(body["rebuild_status"], "fresh");
     }
 
     #[derive(Clone)]
@@ -8525,6 +8678,10 @@ mod tests {
     }
 
     fn run_git_test(root: &Path, args: &[&str]) {
+        let _ = git_stdout_test(root, args);
+    }
+
+    fn git_stdout_test(root: &Path, args: &[&str]) -> String {
         let output = Command::new("git")
             .arg("-C")
             .arg(root)
@@ -8537,5 +8694,9 @@ mod tests {
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
+        String::from_utf8(output.stdout)
+            .expect("git test output must be UTF-8")
+            .trim()
+            .to_owned()
     }
 }

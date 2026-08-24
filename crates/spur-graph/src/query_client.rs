@@ -2364,9 +2364,13 @@ mod tests {
     }
 
     fn symbol(id: &str, entity_name: &str) -> GraphSymbolArtifact {
+        symbol_at(id, entity_name, "src/lib.rs")
+    }
+
+    fn symbol_at(id: &str, entity_name: &str, file_path: &str) -> GraphSymbolArtifact {
         GraphSymbolArtifact {
             stable_symbol_id: id.to_owned(),
-            file_path: "src/lib.rs".to_owned(),
+            file_path: file_path.to_owned(),
             byte_range: [0, 8],
             line_range: [1, 2],
             entity_name: entity_name.to_owned(),
@@ -2406,6 +2410,93 @@ mod tests {
         assert_eq!(ids(&actual), ids(&expected));
         assert_eq!(actual.total_matches, expected.total_matches);
         assert_eq!(actual.truncated, expected.truncated);
+    }
+
+    #[test]
+    fn internal_search_overlay_shadows_before_public_cap_and_matches_fresh_oracle() {
+        let base_symbols = (0..202)
+            .map(|index| {
+                symbol_at(
+                    &format!("base-{index:03}"),
+                    &format!("match_{index:03}"),
+                    &format!("src/{index:03}.rs"),
+                )
+            })
+            .collect::<Vec<_>>();
+        let shadowed_path = base_symbols[0].file_path.clone();
+        let replacement = symbol_at("replacement", "replacement", &shadowed_path);
+        let fresh_symbols = base_symbols
+            .iter()
+            .skip(1)
+            .cloned()
+            .chain(std::iter::once(replacement.clone()))
+            .collect::<Vec<_>>();
+        let base = InMemoryClient::new(Arc::new(artifact(base_symbols)));
+        let overlay = OverlayClient::from_artifacts(
+            &base,
+            Arc::new(artifact(vec![replacement])),
+            HashSet::from([shadowed_path]),
+        )
+        .expect("construct overlay");
+        let oracle = InMemoryClient::new(Arc::new(artifact(fresh_symbols)));
+        let options = SearchOptions {
+            query: "match_".to_owned(),
+            mode: SearchMode::Substring,
+            filters: SearchFilters::default(),
+            limit: 200,
+        };
+
+        let actual = overlay.search_symbols(&options).expect("overlay search");
+        let expected = oracle.search_symbols(&options).expect("oracle search");
+        let actual_ids = ids(&actual);
+        let expected_ids = ids(&expected);
+        let actual_digest = blake3::hash(actual_ids.join("\n").as_bytes()).to_hex();
+        let expected_digest = blake3::hash(expected_ids.join("\n").as_bytes()).to_hex();
+
+        eprintln!(
+            "overlay search evidence internal_total={} public_count={} digest={} \
+             oracle_total={} oracle_count={} oracle_digest={}",
+            actual.total_matches,
+            actual.candidates.len(),
+            actual_digest,
+            expected.total_matches,
+            expected.candidates.len(),
+            expected_digest,
+        );
+        assert_eq!(actual.total_matches, 201);
+        assert_eq!(actual.candidates.len(), 200);
+        assert!(actual.truncated);
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn internal_search_parquet_unbounded_sentinel_returns_every_match() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let artifact = artifact(
+            (0..202)
+                .map(|index| symbol(&format!("s-{index:03}"), &format!("match_{index:03}")))
+                .collect(),
+        );
+        let parquet_dir = write_artifact_parquet(
+            &artifact,
+            tempdir.path(),
+            WriteOptions::default(),
+            Vec::new(),
+        )
+        .expect("write parquet artifact");
+        let parquet = ParquetClient::open(&parquet_dir).expect("open parquet client");
+        let options = SearchOptions {
+            query: "match_".to_owned(),
+            mode: SearchMode::Substring,
+            filters: SearchFilters::default(),
+            limit: usize::MAX,
+        };
+
+        let result = parquet.search_symbols(&options).expect("unbounded search");
+
+        assert_eq!(result.total_matches, 202);
+        assert_eq!(result.candidates.len(), 202);
+        assert!(!result.truncated);
     }
 
     #[test]
