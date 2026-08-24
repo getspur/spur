@@ -76,6 +76,8 @@ pub struct RuleManifestV1 {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub availability_reason: Option<String>,
     pub strength: RuleStrengthV1,
+    #[serde(default)]
+    pub execution_kind: ExecutionKindV1,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub authorities: Vec<RuleAuthorityV1>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -117,6 +119,27 @@ pub enum RuleStrengthV1 {
     Hard,
     Soft,
     Advisory,
+}
+
+/// How an implemented rule participates in family execution.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionKindV1 {
+    #[default]
+    Constraint,
+    Objective,
+}
+
+impl RuleManifestV1 {
+    /// Whether this declaration must be backed by an executable native handler.
+    #[must_use]
+    pub const fn is_executable(&self) -> bool {
+        matches!(self.availability, AvailabilityV1::Implemented)
+            && match self.execution_kind {
+                ExecutionKindV1::Constraint => matches!(self.strength, RuleStrengthV1::Hard),
+                ExecutionKindV1::Objective => true,
+            }
+    }
 }
 
 /// Static routing outcome for one valid rule manifest.
@@ -219,7 +242,7 @@ impl NativeObjectValidatorV1 {
     pub const ALL: &'static [Self] = &[Self::AccessibilityException];
 }
 
-/// Closed selectors for every implemented-hard native rule handler.
+/// Closed selectors for every executable native rule handler.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NativeHandlerV1 {
@@ -232,10 +255,12 @@ pub enum NativeHandlerV1 {
     LayoutNonOverlap,
     MediaAspectRatio,
     RbacDynamicSeparationOfDuty,
+    RbacMinimumPrivilege,
     RbacPermissionReachable,
     RbacRoleHierarchyAcyclic,
     RbacStaticSeparationOfDuty,
     PlacementMinimumFailureDomains,
+    PlacementMinimizeSkew,
     PlacementTopologyMaxSkew,
     ResourceAggregateCapacity,
     ResourceQuotaCapacity,
@@ -302,10 +327,12 @@ impl NativeHandlerV1 {
         Self::LayoutNonOverlap,
         Self::MediaAspectRatio,
         Self::RbacDynamicSeparationOfDuty,
+        Self::RbacMinimumPrivilege,
         Self::RbacPermissionReachable,
         Self::RbacRoleHierarchyAcyclic,
         Self::RbacStaticSeparationOfDuty,
         Self::PlacementMinimumFailureDomains,
+        Self::PlacementMinimizeSkew,
         Self::PlacementTopologyMaxSkew,
         Self::ResourceAggregateCapacity,
         Self::ResourceQuotaCapacity,
@@ -345,10 +372,12 @@ impl NativeHandlerV1 {
             | Self::LayoutNonOverlap
             | Self::MediaAspectRatio => "design",
             Self::RbacDynamicSeparationOfDuty
+            | Self::RbacMinimumPrivilege
             | Self::RbacPermissionReachable
             | Self::RbacRoleHierarchyAcyclic
             | Self::RbacStaticSeparationOfDuty => "policy",
             Self::PlacementMinimumFailureDomains
+            | Self::PlacementMinimizeSkew
             | Self::PlacementTopologyMaxSkew
             | Self::ResourceAggregateCapacity
             | Self::ResourceQuotaCapacity
@@ -383,8 +412,10 @@ impl NativeHandlerV1 {
 
         match self {
             Self::A11yFocusNotObscured
+            | Self::RbacMinimumPrivilege
             | Self::RbacPermissionReachable
             | Self::RbacRoleHierarchyAcyclic
+            | Self::PlacementMinimizeSkew
             | Self::ConfigurationRequiresAny
             | Self::ConfigurationExcludes
             | Self::ConfigurationSelectionCardinality
@@ -517,7 +548,7 @@ pub enum ManifestValidationError {
     },
     InvalidRouting {
         rule_id: String,
-        implemented_hard: bool,
+        executable: bool,
         handler_present: bool,
     },
     InvalidNativeHandlerContract {
@@ -564,11 +595,11 @@ impl fmt::Display for ManifestValidationError {
             ),
             Self::InvalidRouting {
                 rule_id,
-                implemented_hard,
+                executable,
                 handler_present,
             } => write!(
                 formatter,
-                "rule `{rule_id}` has invalid routing: implemented_hard={implemented_hard}, handler_present={handler_present}"
+                "rule `{rule_id}` has invalid routing: executable={executable}, handler_present={handler_present}"
             ),
             Self::InvalidNativeHandlerContract {
                 rule_id,
@@ -650,22 +681,27 @@ pub fn validate_rule_manifest(
         validate_parameter_contract(parameter)?;
     }
 
-    let implemented_hard =
-        rule.availability == AvailabilityV1::Implemented && rule.strength == RuleStrengthV1::Hard;
+    if rule.execution_kind == ExecutionKindV1::Objective {
+        validate_objective_diagnostics(rule)?;
+    }
+
+    let executable = rule.is_executable();
     let handler_present = rule.handler.is_some();
-    if implemented_hard != handler_present {
+    if executable != handler_present {
         return Err(ManifestValidationError::InvalidRouting {
             rule_id: rule.id.clone(),
-            implemented_hard,
+            executable,
             handler_present,
         });
     }
-    if implemented_hard {
+    if executable {
         let Some(conformance) = &rule.conformance else {
-            return invalid("rule.conformance", "is required for implemented-hard rules");
+            return invalid("rule.conformance", "is required for executable rules");
         };
         validate_conformance_vectors(conformance)?;
-        validate_violation_diagnostics(rule, conformance)?;
+        if rule.execution_kind == ExecutionKindV1::Constraint {
+            validate_violation_diagnostics(rule, conformance)?;
+        }
         Ok(ManifestRouteV1::Executable)
     } else {
         if rule.conformance.is_some() {
@@ -780,6 +816,26 @@ fn validate_violation_diagnostics(
                 return invalid(
                     format!("rule.conformance.invalid[{index}].expected_diagnostic"),
                     format!("is required and must match `{expected}`"),
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_objective_diagnostics(rule: &RuleManifestV1) -> Result<(), ManifestValidationError> {
+    if rule.examples.invalid.expected_diagnostic.is_some() {
+        return invalid(
+            "rule.examples.invalid.expected_diagnostic",
+            "must be absent for objective rules",
+        );
+    }
+    if let Some(conformance) = &rule.conformance {
+        for (index, vector) in conformance.invalid.iter().enumerate() {
+            if vector.expected_diagnostic.is_some() {
+                return invalid(
+                    format!("rule.conformance.invalid[{index}].expected_diagnostic"),
+                    "must be absent for objective rules",
                 );
             }
         }
@@ -1193,7 +1249,7 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(manifest_handlers, expected);
-        assert_eq!(NativeHandlerV1::ALL.get(17..22), Some(expected.as_slice()));
+        assert_eq!(NativeHandlerV1::ALL.get(19..24), Some(expected.as_slice()));
         assert_eq!(
             NativeHandlerV1::ALL
                 .iter()
@@ -1234,7 +1290,7 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(manifest_handlers, expected);
-        assert_eq!(NativeHandlerV1::ALL.get(22..27), Some(expected.as_slice()));
+        assert_eq!(NativeHandlerV1::ALL.get(24..29), Some(expected.as_slice()));
         assert_eq!(
             NativeHandlerV1::ALL
                 .iter()

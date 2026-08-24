@@ -20,6 +20,13 @@ const APPROVED_FAMILIES: [&str; 8] = [
     "workflow",
 ];
 
+// Technical rollout debt: remove this reservation in final Task 10 once both
+// domain manifests bind their handlers and restore the literal full bijection.
+pub(crate) const TRANSITIONAL_UNOWNED_HANDLERS: &[NativeHandlerV1] = &[
+    NativeHandlerV1::RbacMinimumPrivilege,
+    NativeHandlerV1::PlacementMinimizeSkew,
+];
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LoadedManifestSources {
     pub bundle: ManifestBundleV1,
@@ -331,7 +338,9 @@ fn validate_handler_bijection(
         .collect::<BTreeMap<_, _>>();
     let missing = NativeHandlerV1::ALL
         .iter()
-        .filter(|handler| !owners.contains_key(handler))
+        .filter(|handler| {
+            !owners.contains_key(handler) && !TRANSITIONAL_UNOWNED_HANDLERS.contains(*handler)
+        })
         .map(handler_name)
         .collect::<Vec<_>>();
     if missing.is_empty() {

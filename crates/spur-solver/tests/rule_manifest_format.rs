@@ -2,9 +2,9 @@ mod support;
 
 use serde_json::json;
 use spur_solver::rules::manifest_format::{
-    validate_manifest_bundle, validate_rule_manifest, AvailabilityV1, FamilyManifestV1,
-    ManifestRouteV1, NativeHandlerV1, NativeObjectValidatorV1, ParameterContractV1,
-    ParameterKindV1, RuleManifestV1, RuleStrengthV1, SubjectCardinalityV1,
+    validate_manifest_bundle, validate_rule_manifest, AvailabilityV1, ExecutionKindV1,
+    FamilyManifestV1, ManifestRouteV1, NativeHandlerV1, NativeObjectValidatorV1,
+    ParameterContractV1, ParameterKindV1, RuleManifestV1, RuleStrengthV1, SubjectCardinalityV1,
 };
 
 use support::{bundle_fixture, conformance_fixture, family_fixture, rule_fixture};
@@ -29,17 +29,23 @@ fn native_handler_and_object_validator_enums_are_closed() {
         .iter()
         .map(|handler| serde_yml::to_string(handler).expect("serialize handler"))
         .collect::<Vec<_>>();
-    assert_eq!(handler_names.len(), 39);
+    assert_eq!(handler_names.len(), 41);
     assert_eq!(
         handler_names
             .iter()
             .collect::<std::collections::BTreeSet<_>>()
             .len(),
-        39
+        41
     );
     assert!(handler_names
         .iter()
         .any(|name| name.trim() == "a11y_target_size"));
+    assert!(handler_names
+        .iter()
+        .any(|name| name.trim() == "rbac_minimum_privilege"));
+    assert!(handler_names
+        .iter()
+        .any(|name| name.trim() == "placement_minimize_skew"));
     assert!(handler_names
         .iter()
         .any(|name| name.trim() == "placement_topology_max_skew"));
@@ -62,6 +68,25 @@ fn native_handler_and_object_validator_enums_are_closed() {
 }
 
 #[test]
+fn objective_handlers_follow_family_stable_order() {
+    let expected = [
+        NativeHandlerV1::RbacDynamicSeparationOfDuty,
+        NativeHandlerV1::RbacMinimumPrivilege,
+        NativeHandlerV1::RbacPermissionReachable,
+        NativeHandlerV1::RbacRoleHierarchyAcyclic,
+        NativeHandlerV1::RbacStaticSeparationOfDuty,
+        NativeHandlerV1::PlacementMinimumFailureDomains,
+        NativeHandlerV1::PlacementMinimizeSkew,
+        NativeHandlerV1::PlacementTopologyMaxSkew,
+        NativeHandlerV1::ResourceAggregateCapacity,
+        NativeHandlerV1::ResourceQuotaCapacity,
+        NativeHandlerV1::ResourceRequestWithinLimit,
+    ];
+
+    assert_eq!(NativeHandlerV1::ALL.get(8..19), Some(expected.as_slice()));
+}
+
+#[test]
 fn scheduling_handlers_follow_configuration_in_stable_order() {
     let expected = [
         NativeHandlerV1::ConfigurationRequiresAny,
@@ -76,7 +101,7 @@ fn scheduling_handlers_follow_configuration_in_stable_order() {
         NativeHandlerV1::SchedulingMinimizeMakespan,
     ];
 
-    assert_eq!(NativeHandlerV1::ALL.get(17..27), Some(expected.as_slice()));
+    assert_eq!(NativeHandlerV1::ALL.get(19..29), Some(expected.as_slice()));
 }
 
 #[test]
@@ -88,7 +113,7 @@ fn workflow_handlers_follow_scheduling_in_stable_order() {
         NativeHandlerV1::WorkflowBoundedReachability,
     ];
 
-    assert_eq!(NativeHandlerV1::ALL.get(27..31), Some(expected.as_slice()));
+    assert_eq!(NativeHandlerV1::ALL.get(29..33), Some(expected.as_slice()));
 }
 
 #[test]
@@ -104,11 +129,33 @@ fn data_integrity_handlers_follow_workflow_in_stable_order() {
         NativeHandlerV1::DataIntegrityTemporalConsistency,
     ];
 
-    assert_eq!(NativeHandlerV1::ALL.get(31..39), Some(expected.as_slice()));
+    assert_eq!(NativeHandlerV1::ALL.get(33..41), Some(expected.as_slice()));
 }
 
 #[test]
-fn routing_truth_table_matches_the_formal_manifest_gate() {
+fn execution_kind_defaults_to_constraint_and_serializes_explicitly() {
+    let source = serde_yml::to_string(&rule_fixture(
+        AvailabilityV1::Implemented,
+        RuleStrengthV1::Hard,
+        Some(NativeHandlerV1::A11yTargetSize),
+    ))
+    .expect("serialize rule fixture");
+    let source = source
+        .lines()
+        .filter(|line| !line.starts_with("execution_kind:"))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let omitted: RuleManifestV1 = serde_yml::from_str(&source).expect("default execution kind");
+    assert_eq!(omitted.execution_kind, ExecutionKindV1::Constraint);
+    assert_eq!(
+        serde_json::to_value(omitted).expect("serialize defaulted rule")["execution_kind"],
+        "constraint"
+    );
+}
+
+#[test]
+fn routing_truth_table_matches_constraint_and_objective_manifest_gates() {
     let availabilities = [
         AvailabilityV1::Implemented,
         AvailabilityV1::Experimental,
@@ -120,27 +167,125 @@ fn routing_truth_table_matches_the_formal_manifest_gate() {
         RuleStrengthV1::Advisory,
     ];
 
-    for availability in availabilities {
-        for strength in strengths {
-            for handler_present in [false, true] {
-                let implemented_hard =
-                    availability == AvailabilityV1::Implemented && strength == RuleStrengthV1::Hard;
-                let handler = handler_present.then_some(NativeHandlerV1::A11yTargetSize);
-                let rule = rule_fixture(availability, strength, handler);
-                let result = validate_rule_manifest(&rule);
+    for execution_kind in [ExecutionKindV1::Constraint, ExecutionKindV1::Objective] {
+        for availability in availabilities {
+            for strength in strengths {
+                for handler_present in [false, true] {
+                    let executable = availability == AvailabilityV1::Implemented
+                        && match execution_kind {
+                            ExecutionKindV1::Constraint => strength == RuleStrengthV1::Hard,
+                            ExecutionKindV1::Objective => true,
+                        };
+                    let handler = handler_present.then_some(NativeHandlerV1::A11yTargetSize);
+                    let mut rule = rule_fixture(availability, strength, handler);
+                    rule.execution_kind = execution_kind;
+                    rule.conformance = executable.then(conformance_fixture);
+                    if execution_kind == ExecutionKindV1::Objective {
+                        rule.examples.invalid.expected_diagnostic = None;
+                        if let Some(conformance) = &mut rule.conformance {
+                            for vector in &mut conformance.invalid {
+                                vector.expected_diagnostic = None;
+                            }
+                        }
+                    }
+                    let result = validate_rule_manifest(&rule);
 
-                assert_eq!(
-                    result.is_ok(),
-                    implemented_hard == handler_present,
-                    "availability={availability:?}, strength={strength:?}, handler={handler_present}"
-                );
-                if implemented_hard && handler_present {
-                    assert_eq!(result, Ok(ManifestRouteV1::Executable));
-                } else if !implemented_hard && !handler_present {
-                    assert_eq!(result, Ok(ManifestRouteV1::CatalogOnly));
+                    assert_eq!(rule.is_executable(), executable);
+                    assert_eq!(
+                        result.is_ok(),
+                        executable == handler_present,
+                        "kind={execution_kind:?}, availability={availability:?}, strength={strength:?}, handler={handler_present}"
+                    );
+                    if executable && handler_present {
+                        assert_eq!(result, Ok(ManifestRouteV1::Executable));
+                    } else if !executable && !handler_present {
+                        assert_eq!(result, Ok(ManifestRouteV1::CatalogOnly));
+                    }
                 }
             }
         }
+    }
+}
+
+#[test]
+fn objective_invalid_vectors_do_not_advertise_verification_diagnostics() {
+    let mut objective = rule_fixture(
+        AvailabilityV1::Implemented,
+        RuleStrengthV1::Advisory,
+        Some(NativeHandlerV1::RbacMinimumPrivilege),
+    );
+    objective.execution_kind = ExecutionKindV1::Objective;
+    objective.conformance = Some(conformance_fixture());
+    objective.examples.invalid.expected_diagnostic = None;
+    objective.conformance.as_mut().expect("conformance").invalid[0].expected_diagnostic = None;
+    assert_eq!(
+        validate_rule_manifest(&objective),
+        Ok(ManifestRouteV1::Executable)
+    );
+
+    let mut example_diagnostic = objective.clone();
+    example_diagnostic.examples.invalid.expected_diagnostic = Some("not attributable".to_owned());
+    assert!(validate_rule_manifest(&example_diagnostic).is_err());
+
+    let mut vector_diagnostic = objective;
+    vector_diagnostic
+        .conformance
+        .as_mut()
+        .expect("conformance")
+        .invalid[0]
+        .expected_diagnostic = Some("not attributable".to_owned());
+    assert!(validate_rule_manifest(&vector_diagnostic).is_err());
+}
+
+#[test]
+fn objective_handlers_are_family_owned_and_have_empty_parameter_abis() {
+    for (handler, family_id, profile_id) in [
+        (NativeHandlerV1::RbacMinimumPrivilege, "policy", "nist_rbac"),
+        (
+            NativeHandlerV1::PlacementMinimizeSkew,
+            "resource",
+            "topology_placement",
+        ),
+    ] {
+        let mut objective = rule_fixture(
+            AvailabilityV1::Implemented,
+            RuleStrengthV1::Advisory,
+            Some(handler),
+        );
+        objective.execution_kind = ExecutionKindV1::Objective;
+        objective.family = family_id.to_owned();
+        objective.profile = profile_id.to_owned();
+        objective.conformance = Some(conformance_fixture());
+        objective.examples.invalid.expected_diagnostic = None;
+        objective.conformance.as_mut().expect("conformance").invalid[0].expected_diagnostic = None;
+
+        let mut bundle = bundle_fixture();
+        bundle.families[0].id = family_id.to_owned();
+        bundle.families[0].profiles[0].id = profile_id.to_owned();
+        bundle.rules[0] = objective;
+        assert_eq!(validate_manifest_bundle(&bundle), Ok(()));
+
+        let mut unexpected_parameter = bundle.clone();
+        unexpected_parameter.rules[0].parameters = vec![ParameterContractV1 {
+            name: "unexpected".to_owned(),
+            required: false,
+            default: None,
+            kind: ParameterKindV1::Boolean,
+            minimum: None,
+            maximum: None,
+            values: Vec::new(),
+            min_items: None,
+            max_items: None,
+            validator: None,
+        }];
+        assert!(validate_manifest_bundle(&unexpected_parameter).is_err());
+
+        let mut wrong_family = bundle;
+        wrong_family.families[0].id = "accessibility".to_owned();
+        wrong_family.families[0].profiles[0].id = "wcag_geometry_color".to_owned();
+        wrong_family.rules[0].family = "accessibility".to_owned();
+        wrong_family.rules[0].profile = "wcag_geometry_color".to_owned();
+        assert!(validate_manifest_bundle(&wrong_family).is_err());
     }
 }
 

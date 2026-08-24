@@ -3,9 +3,9 @@
 use serde_json::json;
 use spur_solver::rules::manifest_format::{
     AvailabilityV1, CatalogExampleV1, CatalogExamplesV1, ConformanceVectorV1, ConformanceVectorsV1,
-    FamilyManifestV1, LlmEncodingV1, ManifestBundleV1, NativeHandlerV1, ProfileManifestV1,
-    RuleManifestV1, RuleStrengthV1, SchemaVersionV1, SolverEncodingV1, SubjectCardinalityV1,
-    SubjectContractV1,
+    ExecutionKindV1, FamilyManifestV1, LlmEncodingV1, ManifestBundleV1, NativeHandlerV1,
+    ProfileManifestV1, RuleManifestV1, RuleStrengthV1, SchemaVersionV1, SolverEncodingV1,
+    SubjectCardinalityV1, SubjectContractV1,
 };
 
 pub fn family_fixture() -> FamilyManifestV1 {
@@ -42,7 +42,7 @@ pub fn rule_fixture(
     strength: RuleStrengthV1,
     handler: Option<NativeHandlerV1>,
 ) -> RuleManifestV1 {
-    let implemented_hard =
+    let executable_constraint =
         availability == AvailabilityV1::Implemented && strength == RuleStrengthV1::Hard;
     RuleManifestV1 {
         schema_version: SchemaVersionV1,
@@ -56,6 +56,7 @@ pub fn rule_fixture(
         availability_reason: (availability == AvailabilityV1::CapabilityUnavailable)
             .then(|| "Capability is unavailable".to_owned()),
         strength,
+        execution_kind: ExecutionKindV1::Constraint,
         authorities: Vec::new(),
         requires: Vec::new(),
         llm_encoding: LlmEncodingV1 {
@@ -88,7 +89,7 @@ pub fn rule_fixture(
                 expected_diagnostic: Some("invalid demo".to_owned()),
             },
         },
-        conformance: implemented_hard.then(conformance_fixture),
+        conformance: executable_constraint.then(conformance_fixture),
     }
 }
 

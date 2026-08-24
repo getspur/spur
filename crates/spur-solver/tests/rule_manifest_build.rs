@@ -672,6 +672,42 @@ fn implemented_handlers_must_form_a_bijection_with_native_handler_all() {
 }
 
 #[test]
+fn only_staged_objective_handlers_are_reserved_from_the_bijection() {
+    assert_eq!(
+        manifest_source::TRANSITIONAL_UNOWNED_HANDLERS,
+        &[
+            NativeHandlerV1::RbacMinimumPrivilege,
+            NativeHandlerV1::PlacementMinimizeSkew,
+        ]
+    );
+
+    let loaded = load_manifest_sources(&repository_manifest_root())
+        .expect("only the staged objective handlers may be temporarily unowned");
+    for reserved in manifest_source::TRANSITIONAL_UNOWNED_HANDLERS {
+        assert!(
+            loaded
+                .bundle
+                .rules
+                .iter()
+                .all(|rule| rule.handler != Some(*reserved)),
+            "{reserved:?} must remain an explicit rollout reservation until its domain manifest binds"
+        );
+    }
+
+    let temp = tempfile::tempdir().expect("temporary manifest root");
+    let root = copy_repository_sources(temp.path());
+    fs::remove_file(root.join("accessibility/rules/focus_not_obscured.yaml"))
+        .expect("remove an arbitrary implemented manifest");
+    let diagnostic = load_manifest_sources(&root)
+        .expect_err("an arbitrary missing handler must still fail")
+        .to_string();
+    assert!(
+        diagnostic.contains("a11y_focus_not_obscured"),
+        "{diagnostic}"
+    );
+}
+
+#[test]
 fn native_handlers_must_belong_to_the_declared_rule_family() {
     let temp = tempfile::tempdir().expect("temporary manifest root");
     let root = copy_repository_sources(temp.path());
