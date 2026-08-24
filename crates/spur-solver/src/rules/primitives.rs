@@ -1,8 +1,8 @@
 //! Shared typed-IR constructors used by rule-family compilers.
 
 use crate::types::{
-    ConstraintDecl, ConstraintExpr, ConstraintItem, ConstraintOp, ObjectivePriority, SessionOp,
-    SolveConstraintsRequest, Variable, DEFAULT_MAX_SOLUTIONS,
+    ConstraintDecl, ConstraintExpr, ConstraintItem, ConstraintOp, Objective, ObjectiveOp,
+    ObjectivePriority, SessionOp, SolveConstraintsRequest, Variable, DEFAULT_MAX_SOLUTIONS,
 };
 
 use super::CompiledRule;
@@ -97,6 +97,24 @@ pub fn not(argument: ConstraintExpr) -> ConstraintExpr {
     op(ConstraintOp::Not, vec![argument])
 }
 
+/// Appends the one supported minimize objective to a family request.
+pub fn push_single_minimize(
+    request: &mut SolveConstraintsRequest,
+    expr: ConstraintExpr,
+    rule_id: &str,
+) -> Result<(), String> {
+    if !request.objectives.is_empty() {
+        return Err(format!(
+            "at most one objective binding is allowed; `{rule_id}` would add another"
+        ));
+    }
+    request.objectives.push(Objective {
+        op: ObjectiveOp::Minimize,
+        expr,
+    });
+    Ok(())
+}
+
 /// Builds the generic request shared by family compilers.
 #[must_use]
 pub fn request(
@@ -130,5 +148,20 @@ pub fn request(
         use_cache: true,
         session_id: None,
         session_op: SessionOp::None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn minimize_once_rejects_a_second_objective() {
+        let mut request = request("test", vec![], &[], 1_000, false, false);
+        push_single_minimize(&mut request, var("cost"), "test.first").unwrap();
+        let error = push_single_minimize(&mut request, var("other"), "test.second")
+            .expect_err("one objective per request");
+        assert_eq!(request.objectives.len(), 1);
+        assert!(error.contains("at most one objective binding"));
     }
 }
