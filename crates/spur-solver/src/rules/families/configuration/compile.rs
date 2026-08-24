@@ -1629,6 +1629,82 @@ mod tests {
     }
 
     #[test]
+    fn family_dispatch_lists_only_owned_handlers() {
+        let cases: [(&str, &str, &str, &[&str]); 4] = [
+            (
+                "accessibility",
+                include_str!("../accessibility/compile.rs"),
+                "\nfn contrast_branch(",
+                &[
+                    "A11yTargetSize",
+                    "A11yFocusNotObscured",
+                    "A11yReflow",
+                    "A11yTextContrast",
+                ],
+            ),
+            (
+                "configuration",
+                include_str!("compile.rs"),
+                "\n#[derive(Clone)]\nstruct Indicator",
+                &[
+                    "ConfigurationRequiresAny",
+                    "ConfigurationExcludes",
+                    "ConfigurationSelectionCardinality",
+                    "ConfigurationAttributeAllowedPair",
+                    "ConfigurationVersionInterval",
+                ],
+            ),
+            (
+                "design",
+                include_str!("../design/compile.rs"),
+                "\nfn validate_minimum_subject_count(",
+                &[
+                    "LayoutAxisCapacity",
+                    "LayoutContainment",
+                    "LayoutNonOverlap",
+                    "MediaAspectRatio",
+                ],
+            ),
+            (
+                "policy",
+                include_str!("../policy/compile.rs"),
+                "\nfn require_subjects(",
+                &[
+                    "RbacPermissionReachable",
+                    "RbacRoleHierarchyAcyclic",
+                    "RbacStaticSeparationOfDuty",
+                    "RbacDynamicSeparationOfDuty",
+                ],
+            ),
+        ];
+
+        for (family, source, end_marker, owned_handlers) in cases {
+            let (_, after_start) = source
+                .split_once("fn compile_binding(")
+                .expect("family compiler must define compile_binding");
+            let (match_body, _) = after_start
+                .split_once(end_marker)
+                .expect("compile_binding must retain its expected boundary");
+
+            for handler in owned_handlers {
+                assert!(
+                    match_body.contains(&format!("NativeHandlerV1::{handler}")),
+                    "{family} compiler must explicitly match owned handler {handler}"
+                );
+            }
+            assert_eq!(
+                match_body.matches("NativeHandlerV1::").count(),
+                owned_handlers.len(),
+                "{family} compiler must not enumerate foreign handlers"
+            );
+            assert!(
+                match_body.contains("\n        _ =>"),
+                "{family} compiler must use a stable foreign-handler fallback"
+            );
+        }
+    }
+
+    #[test]
     fn configuration_compiler_is_registered() {
         assert_eq!(
             crate::rules::families::compiler("configuration").map(RuleFamilyCompiler::id),
