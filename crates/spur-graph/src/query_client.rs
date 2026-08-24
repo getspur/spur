@@ -912,6 +912,7 @@ pub struct ParquetClient {
     manifest: GraphArtifactManifest,
     nodes_metadata: ArrowReaderMetadata,
     search_projection: ProjectionMask,
+    file_oids: OnceLock<anyhow::Result<Vec<(String, String)>>>,
     temporal_index: OnceLock<Arc<TemporalIndex>>,
 }
 
@@ -945,6 +946,7 @@ impl ParquetClient {
             manifest,
             nodes_metadata,
             search_projection,
+            file_oids: OnceLock::new(),
             temporal_index: OnceLock::new(),
         })
     }
@@ -958,20 +960,25 @@ impl ParquetClient {
     }
 
     pub fn file_oids(&self) -> anyhow::Result<Vec<(String, String)>> {
-        let batches =
-            projected_batches(&self.dir.join("file_manifests.parquet"), FILE_OID_COLUMNS)?;
-        let mut rows = Vec::new();
-        for batch in batches {
-            let path = string_array_by_name(&batch, "path")?;
-            let content_oid = string_array_by_name(&batch, "content_oid")?;
-            for row in 0..batch.num_rows() {
-                rows.push((
-                    required_string_value(path, row, "path")?.to_owned(),
-                    required_string_value(content_oid, row, "content_oid")?.to_owned(),
-                ));
+        match self.file_oids.get_or_init(|| {
+            let batches =
+                projected_batches(&self.dir.join("file_manifests.parquet"), FILE_OID_COLUMNS)?;
+            let mut rows = Vec::new();
+            for batch in batches {
+                let path = string_array_by_name(&batch, "path")?;
+                let content_oid = string_array_by_name(&batch, "content_oid")?;
+                for row in 0..batch.num_rows() {
+                    rows.push((
+                        required_string_value(path, row, "path")?.to_owned(),
+                        required_string_value(content_oid, row, "content_oid")?.to_owned(),
+                    ));
+                }
             }
+            Ok(rows)
+        }) {
+            Ok(rows) => Ok(rows.clone()),
+            Err(error) => Err(anyhow::anyhow!("{error:#}")),
         }
-        Ok(rows)
     }
 
     fn search_symbols_inner(&self, opts: &SearchOptions) -> anyhow::Result<SearchResult> {

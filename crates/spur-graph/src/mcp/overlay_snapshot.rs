@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
@@ -162,10 +162,71 @@ struct SnapshotBuild {
     status_was_clean: bool,
 }
 
-static SNAPSHOTS: OnceLock<Mutex<HashMap<PathBuf, CachedSnapshot>>> = OnceLock::new();
+const VALIDATED_SNAPSHOT_CACHE_CAPACITY: usize = 8;
 
-fn snapshots() -> &'static Mutex<HashMap<PathBuf, CachedSnapshot>> {
-    SNAPSHOTS.get_or_init(|| Mutex::new(HashMap::new()))
+static SNAPSHOTS: OnceLock<Mutex<ValidatedSnapshotCache>> = OnceLock::new();
+
+struct ValidatedSnapshotCache {
+    entries: HashMap<PathBuf, CachedSnapshot>,
+    lru: VecDeque<PathBuf>,
+    capacity: usize,
+}
+
+impl ValidatedSnapshotCache {
+    fn new(capacity: usize) -> Self {
+        Self {
+            entries: HashMap::new(),
+            lru: VecDeque::new(),
+            capacity,
+        }
+    }
+
+    fn get(&mut self, worktree: &Path) -> Option<&CachedSnapshot> {
+        if !self.entries.contains_key(worktree) {
+            return None;
+        }
+        self.touch(worktree);
+        self.entries.get(worktree)
+    }
+
+    fn insert(&mut self, worktree: PathBuf, snapshot: CachedSnapshot) {
+        self.entries.insert(worktree.clone(), snapshot);
+        self.touch(&worktree);
+        while self.entries.len() > self.capacity {
+            let Some(evicted) = self.lru.pop_front() else {
+                break;
+            };
+            self.entries.remove(&evicted);
+        }
+    }
+
+    fn remove(&mut self, worktree: &Path) -> Option<CachedSnapshot> {
+        self.lru.retain(|candidate| candidate != worktree);
+        self.entries.remove(worktree)
+    }
+
+    #[cfg(test)]
+    fn contains_key(&self, worktree: &Path) -> bool {
+        self.entries.contains_key(worktree)
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    fn touch(&mut self, worktree: &Path) {
+        self.lru.retain(|candidate| candidate != worktree);
+        self.lru.push_back(worktree.to_path_buf());
+    }
+}
+
+fn snapshots() -> &'static Mutex<ValidatedSnapshotCache> {
+    SNAPSHOTS.get_or_init(|| {
+        Mutex::new(ValidatedSnapshotCache::new(
+            VALIDATED_SNAPSHOT_CACHE_CAPACITY,
+        ))
+    })
 }
 
 #[cfg(test)]
@@ -196,13 +257,14 @@ pub(crate) fn test_snapshot_identity(worktree: &Path, tag: u8) -> SnapshotIdenti
 }
 
 #[cfg(test)]
-fn with_isolated_snapshot_cache<T>(
-    test: impl FnOnce(&mut HashMap<PathBuf, CachedSnapshot>) -> T,
-) -> T {
+fn with_isolated_snapshot_cache<T>(test: impl FnOnce(&mut ValidatedSnapshotCache) -> T) -> T {
     let mut cache = snapshots()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let saved = std::mem::take(&mut *cache);
+    let saved = std::mem::replace(
+        &mut *cache,
+        ValidatedSnapshotCache::new(VALIDATED_SNAPSHOT_CACHE_CAPACITY),
+    );
     let result = test(&mut cache);
     *cache = saved;
     result
@@ -351,11 +413,12 @@ fn snapshot_with_runtime<R: SnapshotRuntime>(
             worktree.display()
         )
     })?;
-    let cached = snapshots()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .get(&canonical_worktree)
-        .cloned();
+    let cached = {
+        let mut cache = snapshots()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        cache.get(&canonical_worktree).cloned()
+    };
     let cache_matches_graph = cached.as_ref().is_some_and(|cached| {
         cached.graph_content_hash == base.indexed_graph_content_hash
             && cached.indexed_head_oid == base.indexed_head_oid

@@ -1,7 +1,5 @@
-use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fs;
-use std::hash::{Hash, Hasher as _};
 use std::io::ErrorKind;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
@@ -1416,15 +1414,19 @@ fn overlay_delta_for_worktree(
     worktree: PathBuf,
     base: overlay_snapshot::SnapshotBase,
 ) -> anyhow::Result<Option<request_cache::CachedOverlayDelta>> {
-    let changed = changed_paths_for_overlay_base(&worktree, base)?;
-    if changed.paths.is_empty() {
+    let OverlayChangedPaths { paths, identity } = changed_paths_for_overlay_base(&worktree, base)?;
+    if paths.is_empty() {
         return Ok(None);
     }
-    request_cache::overlay_delta(&worktree, changed.fingerprint, || {
+    let build = || {
         let (artifact, shadowed) =
-            OverlayClient::<&dyn GraphQueryClient>::extract_delta(&worktree, &changed.paths)?;
+            OverlayClient::<&dyn GraphQueryClient>::extract_delta(&worktree, &paths)?;
         Ok(request_cache::CachedOverlayDelta { artifact, shadowed })
-    })
+    };
+    match identity {
+        Some(identity) => request_cache::overlay_delta(identity, build),
+        None => build(),
+    }
     .map(Some)
 }
 
@@ -5422,7 +5424,7 @@ fn indexed_file_oid_for_path<'a>(artifact: &'a GraphIndexArtifact, path: &str) -
 
 pub(crate) struct OverlayChangedPaths {
     pub(crate) paths: Vec<PathBuf>,
-    pub(crate) fingerprint: u64,
+    pub(crate) identity: Option<overlay_snapshot::SnapshotIdentity>,
 }
 
 pub fn overlay_changed_oids(
@@ -5465,26 +5467,28 @@ fn changed_paths_for_overlay_base(
     base: overlay_snapshot::SnapshotBase,
 ) -> anyhow::Result<OverlayChangedPaths> {
     let allowed_extensions = crate::extract::languages::all_supported_extensions();
-    let changed = if crate::git::detect(worktree).is_some() {
-        overlay_snapshot::snapshot_with_capabilities(
+    let (changed, identity) = if crate::git::detect(worktree).is_some() {
+        let snapshot = overlay_snapshot::snapshot_with_capabilities(
             worktree,
             base,
             &allowed_extensions,
             production_overlay_capabilities(),
-        )?
-        .changed_oid_hex()
+        )?;
+        let identity = snapshot.identity.clone();
+        (snapshot.changed_oid_hex(), identity)
     } else {
         let worktree = worktree.canonicalize().map_err(|error| {
             anyhow::anyhow!("failed to canonicalize `{}`: {error}", worktree.display())
         })?;
         let current_oids = current_file_oids_via_fs(&worktree, &allowed_extensions)?;
-        overlay_changed_oid_hex_from_maps(base.file_oids, current_oids)?
+        (
+            overlay_changed_oid_hex_from_maps(base.file_oids, current_oids)?,
+            None,
+        )
     };
-    let mut hasher = DefaultHasher::new();
-    changed.hash(&mut hasher);
     Ok(OverlayChangedPaths {
         paths: changed.keys().map(PathBuf::from).collect(),
-        fingerprint: hasher.finish(),
+        identity,
     })
 }
 
@@ -6832,11 +6836,14 @@ mod tests {
     fn overlay_changed_paths_fingerprint_tracks_all_changed_content() {
         let tempdir = tempfile::tempdir().expect("tempdir");
         let root = tempdir.path();
+        init_git_repo(root);
         fs::create_dir_all(root.join("src")).expect("src dir");
         let old_a = b"pub fn alpha() {}\n";
         let old_b = b"pub fn beta() {}\n";
         fs::write(root.join("src/a.rs"), old_a).expect("a.rs");
         fs::write(root.join("src/b.rs"), old_b).expect("b.rs");
+        run_git_test(root, &["add", "src"]);
+        run_git_test(root, &["commit", "-qm", "base"]);
         let base_files = vec![
             ("src/a.rs".to_owned(), git_blob_oid(old_a)),
             ("src/b.rs".to_owned(), git_blob_oid(old_b)),
@@ -6851,7 +6858,7 @@ mod tests {
 
         assert_eq!(first.paths, second.paths, "the changed path set is stable");
         assert_ne!(
-            first.fingerprint, second.fingerprint,
+            first.identity, second.identity,
             "content changes in any tracked overlay path must invalidate the cached delta"
         );
     }
@@ -6892,13 +6899,16 @@ mod tests {
 
         // Fingerprint must reflect *content* change (Some(oid)), not a false deletion.
         // A status-only dirty set would miss the path entirely or mark it deleted.
-        let mut expected = BTreeMap::<String, Option<String>>::new();
-        expected.insert("src/a.rs".to_owned(), Some(git_blob_oid(v2)));
-        let mut hasher = DefaultHasher::new();
-        expected.hash(&mut hasher);
+        let expected = BTreeMap::from([(
+            "src/a.rs".to_owned(),
+            overlay_snapshot::OverlayPathState::Tracked(git_blob_oid(v2)),
+        )]);
         assert_eq!(
-            changed.fingerprint,
-            hasher.finish(),
+            changed
+                .identity
+                .expect("complete validated identity")
+                .normalized_changed_set_fingerprint,
+            overlay_snapshot::normalized_changed_set_fingerprint(expected.iter()),
             "HEAD-lag must surface the live blob oid, not a tombstone"
         );
     }

@@ -1,10 +1,11 @@
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use super::WorktreeGitMetadata;
+use super::{overlay_snapshot::SnapshotIdentity, WorktreeGitMetadata};
 use crate::{GraphIndexArtifact, ParquetClient};
 
 const GIT_METADATA_CACHE_TTL: Duration = Duration::from_millis(5_000);
@@ -44,13 +45,24 @@ pub(super) fn git_metadata_insert(
 }
 
 pub(super) fn parquet_client(path: &Path) -> anyhow::Result<Arc<ParquetClient>> {
-    let key = ParquetClientCacheKey::from_path(path);
-    if let Some(client) = parquet_cache_get(&key) {
-        return Ok(client);
+    for _attempt in 0..=1 {
+        let key = ParquetClientCacheKey::from_path(path)?;
+        if let Some(client) = parquet_cache_get(&key) {
+            if ParquetClientCacheKey::from_path(path)? == key {
+                return Ok(client);
+            }
+            continue;
+        }
+        let client = Arc::new(ParquetClient::open(path)?);
+        if ParquetClientCacheKey::from_path(path)? == key {
+            parquet_cache_insert(key, Arc::clone(&client));
+            return Ok(client);
+        }
     }
-    let client = Arc::new(ParquetClient::open(path)?);
-    parquet_cache_insert(key, Arc::clone(&client));
-    Ok(client)
+    anyhow::bail!(
+        "Parquet manifest identity for `{}` changed during two open attempts",
+        path.display()
+    )
 }
 
 #[derive(Clone)]
@@ -60,14 +72,10 @@ pub(super) struct CachedOverlayDelta {
 }
 
 pub(super) fn overlay_delta(
-    worktree: &Path,
-    changed_files_fingerprint: u64,
+    identity: SnapshotIdentity,
     build: impl FnOnce() -> anyhow::Result<CachedOverlayDelta>,
 ) -> anyhow::Result<CachedOverlayDelta> {
-    let cache_key = OverlayDeltaCacheKey {
-        worktree: worktree.to_path_buf(),
-        changed_files_fingerprint,
-    };
+    let cache_key = OverlayDeltaCacheKey { identity };
     if let Some(cached) = overlay_delta_cache_get(&cache_key) {
         return Ok(cached);
     }
@@ -77,16 +85,49 @@ pub(super) fn overlay_delta(
         return wait_for_overlay_in_flight(&cell);
     }
 
-    let result = build();
-    finish_overlay_in_flight(&cache_key, &cell, &result);
+    let result = build().map_err(SharedOverlayError::new);
     if let Ok(built) = &result {
-        overlay_delta_cache_insert(cache_key, built.clone());
+        overlay_delta_cache_insert(cache_key.clone(), built.clone());
     }
-    result
+    finish_overlay_in_flight(&cache_key, &cell, &result);
+    into_anyhow_overlay_result(result)
+}
+
+type SharedOverlayResult = Result<CachedOverlayDelta, SharedOverlayError>;
+
+#[derive(Clone)]
+struct SharedOverlayError(Arc<anyhow::Error>);
+
+impl SharedOverlayError {
+    fn new(error: anyhow::Error) -> Self {
+        Self(Arc::new(error))
+    }
+}
+
+impl fmt::Debug for SharedOverlayError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(&self.0, formatter)
+    }
+}
+
+impl fmt::Display for SharedOverlayError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&self.0, formatter)
+    }
+}
+
+impl std::error::Error for SharedOverlayError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.0.source()
+    }
+}
+
+fn into_anyhow_overlay_result(result: SharedOverlayResult) -> anyhow::Result<CachedOverlayDelta> {
+    result.map_err(anyhow::Error::new)
 }
 
 struct OverlayInFlight {
-    done: Mutex<Option<Result<CachedOverlayDelta, String>>>,
+    done: Mutex<Option<SharedOverlayResult>>,
     cv: Condvar,
 }
 
@@ -123,8 +164,7 @@ fn wait_for_overlay_in_flight(cell: &OverlayInFlight) -> anyhow::Result<CachedOv
             .map_err(|_| anyhow::anyhow!("overlay in-flight wait poisoned"))?;
     }
     match done.as_ref() {
-        Some(Ok(value)) => Ok(value.clone()),
-        Some(Err(error)) => Err(anyhow::anyhow!("{error}")),
+        Some(result) => into_anyhow_overlay_result(result.clone()),
         None => Err(anyhow::anyhow!(
             "overlay in-flight result missing after wait"
         )),
@@ -134,13 +174,10 @@ fn wait_for_overlay_in_flight(cell: &OverlayInFlight) -> anyhow::Result<CachedOv
 fn finish_overlay_in_flight(
     cache_key: &OverlayDeltaCacheKey,
     cell: &OverlayInFlight,
-    result: &anyhow::Result<CachedOverlayDelta>,
+    result: &SharedOverlayResult,
 ) {
     if let Ok(mut done) = cell.done.lock() {
-        *done = Some(match result {
-            Ok(value) => Ok(value.clone()),
-            Err(error) => Err(error.to_string()),
-        });
+        *done = Some(result.clone());
         cell.cv.notify_all();
     }
     if let Ok(mut map) = overlay_in_flight_map().lock() {
@@ -258,14 +295,30 @@ impl GitMetadataCache {
 struct ParquetClientCacheKey {
     path: PathBuf,
     manifest_mtime_ns: i128,
+    manifest_digest: [u8; 32],
 }
 
 impl ParquetClientCacheKey {
-    fn from_path(path: &Path) -> Self {
-        Self {
-            path: path.to_path_buf(),
-            manifest_mtime_ns: path_mtime_ns(&path.join("manifest.json")),
-        }
+    fn from_path(path: &Path) -> anyhow::Result<Self> {
+        let path = path.canonicalize().map_err(|error| {
+            anyhow::anyhow!(
+                "failed to canonicalize Parquet artifact `{}`: {error}",
+                path.display()
+            )
+        })?;
+        let manifest = path.join("manifest.json");
+        let manifest_bytes = fs::read(&manifest).map_err(|error| {
+            anyhow::anyhow!(
+                "failed to read Parquet manifest identity `{}`: {error}",
+                manifest.display()
+            )
+        })?;
+        let manifest_mtime_ns = path_mtime_ns(&manifest);
+        Ok(Self {
+            path,
+            manifest_mtime_ns,
+            manifest_digest: *blake3::hash(&manifest_bytes).as_bytes(),
+        })
     }
 }
 
@@ -309,8 +362,7 @@ impl ParquetClientCache {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct OverlayDeltaCacheKey {
-    worktree: PathBuf,
-    changed_files_fingerprint: u64,
+    identity: SnapshotIdentity,
 }
 
 struct OverlayDeltaCache {
@@ -605,12 +657,7 @@ mod tests {
         identity: &SnapshotIdentity,
         build: impl FnOnce() -> anyhow::Result<CachedOverlayDelta>,
     ) -> anyhow::Result<CachedOverlayDelta> {
-        let fingerprint = u64::from_le_bytes(
-            identity.normalized_changed_set_fingerprint[..8]
-                .try_into()
-                .expect("eight-byte legacy fingerprint"),
-        );
-        overlay_delta(&identity.canonical_worktree, fingerprint, build)
+        overlay_delta(identity.clone(), build)
     }
 
     fn run_git(root: &Path, args: &[&str]) {
@@ -831,7 +878,7 @@ mod tests {
 
         assert_eq!(second_file_oids, first_file_oids);
         assert!(second_snapshot.measurements.snapshot_reused);
-        assert_eq!(second_snapshot.identity.as_ref(), Some(&identity));
+        assert_eq!(second_snapshot.path_state, first_snapshot.path_state);
         assert_eq!(builds.load(Ordering::SeqCst), 1);
         assert!(Arc::ptr_eq(&first_delta.artifact, &second_delta.artifact));
     }
@@ -996,6 +1043,30 @@ mod tests {
         assert!(
             !Arc::ptr_eq(&first, &second),
             "a newer manifest should open a fresh ParquetClient"
+        );
+    }
+
+    #[test]
+    fn parquet_client_cache_opens_again_when_manifest_bytes_change_at_same_mtime() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let dir = write_empty_parquet(tempdir.path());
+        let first = parquet_client(&dir).expect("first open");
+        let manifest = dir.join("manifest.json");
+        let original_modified = fs::metadata(&manifest)
+            .expect("manifest metadata")
+            .modified()
+            .expect("manifest modified time");
+        let mut bytes = fs::read(&manifest).expect("manifest bytes");
+        bytes.push(b'\n');
+        fs::write(&manifest, bytes).expect("rewrite manifest bytes");
+        let file = fs::File::open(&manifest).expect("open manifest");
+        file.set_modified(original_modified)
+            .expect("restore manifest mtime");
+
+        let second = parquet_client(&dir).expect("second open");
+        assert!(
+            !Arc::ptr_eq(&first, &second),
+            "manifest content identity must invalidate even when mtime aliases"
         );
     }
 }
