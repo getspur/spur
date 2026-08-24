@@ -2472,11 +2472,14 @@ mod tests {
     #[test]
     fn internal_search_parquet_unbounded_sentinel_returns_every_match() {
         let tempdir = tempfile::tempdir().expect("tempdir");
-        let artifact = artifact(
+        let mut artifact = artifact(
             (0..202)
                 .map(|index| symbol(&format!("s-{index:03}"), &format!("match_{index:03}")))
                 .collect(),
         );
+        artifact.symbol_node_ids = (1..=artifact.symbols.len())
+            .map(|id| NodeId(id as u64))
+            .collect();
         let parquet_dir = write_artifact_parquet(
             &artifact,
             tempdir.path(),

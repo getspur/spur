@@ -7612,7 +7612,7 @@ mod tests {
         assert_eq!(signature["error"]["kind"], "not_found");
         assert_eq!(
             signature["error"]["message"],
-            "symbol `still_missing` was not found"
+            "symbol still_missing not found in graph artifact"
         );
         assert_eq!(signature["error"]["temporal_code"], Value::Null);
         assert_eq!(signature["error"]["temporal_data"], Value::Null);
