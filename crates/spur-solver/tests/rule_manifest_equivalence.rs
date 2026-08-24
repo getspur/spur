@@ -1,5 +1,5 @@
 use serde_json::Value;
-use spur_solver::rules::builtin_registry;
+use spur_solver::rules::manifest_registry;
 
 const BUILTIN_RULE_CATALOG_V1: &str = include_str!("fixtures/builtin_rule_catalog_v1.json");
 
@@ -30,7 +30,7 @@ fn assert_strictly_sorted(ids: &[&str], section: &str) {
 #[test]
 fn builtin_registry_matches_frozen_catalog_v1() {
     let expected = fixture();
-    let actual = serde_json::to_value(builtin_registry()).expect("serialize built-in registry");
+    let actual = serde_json::to_value(manifest_registry()).expect("serialize manifest registry");
 
     assert_eq!(actual, expected);
 }
@@ -46,11 +46,15 @@ fn frozen_catalog_contains_every_rule_in_stable_order() {
     assert_strictly_sorted(&rule_ids, "rules");
     assert_eq!(
         rule_ids.len(),
-        40,
+        41,
         "fixture must contain every built-in rule"
     );
     assert!(
         rule_ids.contains(&"rbac.minimum_privilege"),
-        "fixture must include the catalog-only RBAC rule"
+        "fixture must include the RBAC objective rule"
+    );
+    assert!(
+        rule_ids.contains(&"placement.minimize_skew"),
+        "fixture must include the placement objective rule"
     );
 }

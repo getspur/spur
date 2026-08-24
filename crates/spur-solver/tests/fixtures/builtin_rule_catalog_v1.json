@@ -173,6 +173,7 @@
       "profile_version": 1,
       "summary": "Finite failure-domain count and skew constraints.",
       "rules": [
+        "placement.minimize_skew",
         "placement.minimum_failure_domains",
         "placement.topology_max_skew"
       ]
@@ -199,6 +200,7 @@
       "primitive": "not_fully_contained",
       "summary": "Require a focused rectangle not to be fully hidden by one supplied obscurer.",
       "availability": "implemented",
+      "execution_kind": "constraint",
       "default_strength": "hard",
       "authorities": [
         {
@@ -283,6 +285,7 @@
       "primitive": "viewport_fit",
       "summary": "Require the full horizontal content extent to fit the supplied reflow viewport unless a typed exception applies.",
       "availability": "implemented",
+      "execution_kind": "constraint",
       "default_strength": "hard",
       "authorities": [
         {
@@ -352,6 +355,7 @@
       "primitive": "minimum_target_size",
       "summary": "Require a target to meet its minimum width and height unless a WCAG typed exception, including spacing, applies.",
       "availability": "implemented",
+      "execution_kind": "constraint",
       "default_strength": "hard",
       "authorities": [
         {
@@ -418,6 +422,7 @@
       "primitive": "contrast_ratio",
       "summary": "Require normalized foreground and background luminance to meet a minimum contrast ratio.",
       "availability": "implemented",
+      "execution_kind": "constraint",
       "default_strength": "hard",
       "authorities": [
         {
@@ -486,6 +491,7 @@
       "primitive": "attribute_allowed_pair",
       "summary": "Require active component attributes to match one explicitly declared allowed tuple.",
       "availability": "implemented",
+      "execution_kind": "constraint",
       "default_strength": "hard",
       "authorities": [
         {
@@ -669,6 +675,7 @@
       "primitive": "excludes",
       "summary": "Forbid two declared components from being selected together.",
       "availability": "implemented",
+      "execution_kind": "constraint",
       "default_strength": "hard",
       "authorities": [
         {
@@ -789,6 +796,7 @@
       "primitive": "requires_any",
       "summary": "Require a selected consumer to select at least one declared provider.",
       "availability": "implemented",
+      "execution_kind": "constraint",
       "default_strength": "hard",
       "authorities": [
         {
@@ -919,6 +927,7 @@
       "primitive": "selection_cardinality",
       "summary": "Enforce declared inclusive selection bounds for an active finite component group.",
       "availability": "implemented",
+      "execution_kind": "constraint",
       "default_strength": "hard",
       "authorities": [
         {
@@ -1061,6 +1070,7 @@
       "primitive": "version_interval",
       "summary": "Require a selected provider version rank to lie within a consumer's declared inclusive interval.",
       "availability": "implemented",
+      "execution_kind": "constraint",
       "default_strength": "hard",
       "authorities": [
         {
@@ -1215,6 +1225,7 @@
       "primitive": "exact_integer_aggregate_balance",
       "summary": "Require every declared integer term cell to be present and resolvable and every checked linear term to contribute to one exact integer target.",
       "availability": "implemented",
+      "execution_kind": "constraint",
       "default_strength": "hard",
       "authorities": [
         {
@@ -1450,6 +1461,7 @@
       "primitive": "finite_active_row_cardinality",
       "summary": "Keep the number of active rows in a relation or declared row subset within inclusive integer bounds.",
       "availability": "implemented",
+      "execution_kind": "constraint",
       "default_strength": "hard",
       "authorities": [
         {
@@ -1616,6 +1628,7 @@
       "primitive": "typed_conditional_required",
       "summary": "Require one field to be present when an active row has a present trigger field equal to a schema-typed expected value.",
       "availability": "implemented",
+      "execution_kind": "constraint",
       "default_strength": "hard",
       "authorities": [
         {
@@ -1807,6 +1820,7 @@
       "primitive": "finite_foreign_key_match_simple",
       "summary": "Require every active child row with a complete key to match one active parent row with a complete corresponding key, using MATCH SIMPLE semantics.",
       "availability": "implemented",
+      "execution_kind": "constraint",
       "default_strength": "hard",
       "authorities": [
         {
@@ -2029,6 +2043,7 @@
       "primitive": "finite_allowed_tuples",
       "summary": "Require all participating fields on each active row to be present and equal one explicitly allowed schema-typed tuple.",
       "availability": "implemented",
+      "execution_kind": "constraint",
       "default_strength": "hard",
       "authorities": [
         {
@@ -2253,6 +2268,7 @@
       "primitive": "strict_intervals_with_predecessors",
       "summary": "Require active rows to have present integer endpoints with start before end and every declared predecessor to finish no later than its active successor starts.",
       "availability": "implemented",
+      "execution_kind": "constraint",
       "default_strength": "hard",
       "authorities": [
         {
@@ -2479,6 +2495,7 @@
       "primitive": "finite_unique_nulls_distinct",
       "summary": "Require active rows with complete keys to differ on at least one key field, using SQL-like NULLS DISTINCT semantics.",
       "availability": "implemented",
+      "execution_kind": "constraint",
       "default_strength": "hard",
       "authorities": [
         {
@@ -2670,6 +2687,7 @@
       "primitive": "inclusive_integer_value_range",
       "summary": "Require every present value of one integer field on an active row to lie within inclusive declared bounds.",
       "availability": "implemented",
+      "execution_kind": "constraint",
       "default_strength": "hard",
       "authorities": [
         {
@@ -2843,6 +2861,7 @@
       "primitive": "axis_capacity",
       "summary": "Fit declared item extents, gaps, and insets inside one available axis extent.",
       "availability": "implemented",
+      "execution_kind": "constraint",
       "default_strength": "hard",
       "authorities": [
         {
@@ -2925,6 +2944,7 @@
       "primitive": "inside",
       "summary": "Keep one axis-aligned rectangle inside another with optional padding.",
       "availability": "implemented",
+      "execution_kind": "constraint",
       "default_strength": "hard",
       "authorities": [
         {
@@ -3016,6 +3036,7 @@
       "primitive": "disjoint",
       "summary": "Separate two axis-aligned rectangles by an optional minimum gap.",
       "availability": "implemented",
+      "execution_kind": "constraint",
       "default_strength": "hard",
       "authorities": [
         {
@@ -3104,6 +3125,7 @@
       "primitive": "aspect_ratio",
       "summary": "Preserve a source aspect ratio without division.",
       "availability": "implemented",
+      "execution_kind": "constraint",
       "default_strength": "hard",
       "authorities": [
         {
@@ -3174,6 +3196,150 @@
       }
     },
     {
+      "id": "placement.minimize_skew",
+      "family": "resource",
+      "profile": "topology_placement",
+      "rule_version": 1,
+      "primitive": "minimum_pairwise_skew",
+      "summary": "Minimize the maximum pairwise difference between explicitly declared topology-domain counts while conserving replicas.",
+      "availability": "implemented",
+      "execution_kind": "objective",
+      "default_strength": "advisory",
+      "authorities": [
+        {
+          "kind": "derived_reference",
+          "title": "Finite declared-domain model derived from Kubernetes topology spread concepts",
+          "url": "https://kubernetes.io/docs/concepts/scheduling-eviction/topology-spread-constraints/"
+        }
+      ],
+      "requires": [
+        "workload.replicas",
+        "workload.domain_counts",
+        "bounded domain-count unknowns"
+      ],
+      "llm_encoding": {
+        "effectiveness": "high",
+        "problem_shapes": [
+          "Minimize maximum pairwise skew across an explicit finite set of topology domains."
+        ],
+        "encode_steps": [
+          "Bind exactly one workload with at least two explicitly declared domains.",
+          "Bound replicas and every changeable domain count, then conserve replicas across all declared domains.",
+          "Bound one internal skew above both directions of every unordered domain pair and minimize it once."
+        ],
+        "anti_patterns": [
+          "Do not query or infer live scheduler state or implicit domains.",
+          "Do not replace capacity, quota, request-limit, minimum-domain, or topology-cap bindings with preferences."
+        ],
+        "escalate_when": [
+          "Escalate affinity, taints, priority, or scheduler-global minimum-domain semantics to separate rule primitives."
+        ]
+      },
+      "solver_encoding": {
+        "theory": "QF_LIA with typed optimization",
+        "verification": "unsupported; this objective is synthesis-only",
+        "synthesis": "constrain one bounded skew above every pairwise absolute difference and emit one minimize objective after all hard predicates",
+        "formula": [
+          "sum count(domain) = workload.replicas",
+          "skew >= count(a) - count(b)",
+          "skew >= count(b) - count(a)",
+          "synthesis objective: minimize skew"
+        ]
+      },
+      "examples": {
+        "valid": {
+          "facts": {
+            "facts": {
+              "pools": {},
+              "quotas": {},
+              "workloads": {
+                "api": {
+                  "domain_counts": {
+                    "zone-a": null,
+                    "zone-b": null
+                  },
+                  "limits": {},
+                  "replicas": 3,
+                  "requests": {}
+                }
+              }
+            },
+            "family": "resource",
+            "mode": "synthesize",
+            "rules": [
+              {
+                "parameters": {},
+                "rule_id": "placement.minimize_skew",
+                "subjects": [
+                  "api"
+                ]
+              }
+            ],
+            "unknowns": [
+              {
+                "field": "domain_counts.zone-a",
+                "max": 3,
+                "min": 0,
+                "subject": "api"
+              },
+              {
+                "field": "domain_counts.zone-b",
+                "max": 3,
+                "min": 0,
+                "subject": "api"
+              }
+            ]
+          },
+          "expectation": "optimized topology skew 1 after complete termination"
+        },
+        "invalid": {
+          "facts": {
+            "facts": {
+              "pools": {},
+              "quotas": {},
+              "workloads": {
+                "api": {
+                  "domain_counts": {
+                    "zone-a": null,
+                    "zone-b": null
+                  },
+                  "limits": {},
+                  "replicas": 3,
+                  "requests": {}
+                }
+              }
+            },
+            "family": "resource",
+            "mode": "synthesize",
+            "rules": [
+              {
+                "parameters": {},
+                "rule_id": "placement.minimize_skew",
+                "subjects": [
+                  "api"
+                ]
+              }
+            ],
+            "unknowns": [
+              {
+                "field": "domain_counts.zone-a",
+                "max": 1,
+                "min": 0,
+                "subject": "api"
+              },
+              {
+                "field": "domain_counts.zone-b",
+                "max": 1,
+                "min": 0,
+                "subject": "api"
+              }
+            ]
+          },
+          "expectation": "infeasible because bounded counts cannot conserve three replicas"
+        }
+      }
+    },
+    {
       "id": "placement.minimum_failure_domains",
       "family": "resource",
       "profile": "topology_placement",
@@ -3181,6 +3347,7 @@
       "primitive": "positive_domain_cardinality",
       "summary": "Require positive placement counts in at least the minimum number of declared domains.",
       "availability": "implemented",
+      "execution_kind": "constraint",
       "default_strength": "hard",
       "authorities": [
         {
@@ -3302,6 +3469,7 @@
       "primitive": "pairwise_max_skew",
       "summary": "Conserve replicas and limit the pairwise difference between declared topology-domain counts using a positive maximum skew.",
       "availability": "implemented",
+      "execution_kind": "constraint",
       "default_strength": "hard",
       "authorities": [
         {
@@ -3423,6 +3591,7 @@
       "primitive": "active_role_cardinality",
       "summary": "Limit mutually exclusive active roles in one session.",
       "availability": "implemented",
+      "execution_kind": "constraint",
       "default_strength": "hard",
       "authorities": [
         {
@@ -3575,8 +3744,8 @@
       "rule_version": 1,
       "primitive": "minimum_privilege",
       "summary": "Prefer fewer grants while preserving explicitly declared required permissions.",
-      "availability": "capability_unavailable",
-      "availability_reason": "minimum privilege requires caller-owned utility requirements and an optimization objective",
+      "availability": "implemented",
+      "execution_kind": "objective",
       "default_strength": "advisory",
       "authorities": [
         {
@@ -3592,34 +3761,205 @@
       "llm_encoding": {
         "effectiveness": "conditional",
         "problem_shapes": [
-          "rank feasible policies after requirements are explicit"
+          "Minimize caller-priced candidate role grants after required permissions and hard policy rules are explicit."
         ],
         "encode_steps": [
-          "Declare required permissions",
-          "Declare grant costs",
-          "Use an optimization objective"
+          "Declare non-empty required permissions for every scoped principal.",
+          "Declare a positive integer grant cost for every scoped principal-role candidate.",
+          "Bind every required permission with an exact hard rbac.permission_reachable rule.",
+          "Synthesize candidate grants and read the finite objective bound after complete termination."
         ],
         "anti_patterns": [
-          "Do not infer business-required permissions"
+          "Do not infer business-required permissions or grant costs.",
+          "Do not treat a satisfiable unoptimized model as a minimum-privilege proof."
         ],
         "escalate_when": [
-          "Escalate until utility requirements are explicit"
+          "Escalate until required permissions and positive candidate costs are explicit."
         ]
       },
       "solver_encoding": {
-        "theory": "",
-        "verification": "",
-        "synthesis": "",
-        "formula": []
+        "theory": "QF_LIA with typed optimization",
+        "verification": "rejected because minimum privilege is a synthesis-only objective",
+        "synthesis": "keep reachability, hierarchy, session authorization, and separation of duty hard; minimize caller-declared candidate grant cost",
+        "formula": [
+          "required permission: rbac.permission_reachable(principal, permission)",
+          "objective: minimize sum(grant_cost(principal, role) * assigned_candidate(principal, role))"
+        ]
       },
       "examples": {
         "valid": {
-          "facts": null,
-          "expectation": ""
+          "facts": {
+            "facts": {
+              "principals": {
+                "alice": {
+                  "grant_costs": {
+                    "admin": 5,
+                    "reader": 1,
+                    "writer": 2
+                  },
+                  "required_permissions": [
+                    "read",
+                    "write"
+                  ],
+                  "roles": []
+                }
+              },
+              "roles": {
+                "admin": {
+                  "inherits": [],
+                  "permissions": [
+                    "read",
+                    "write"
+                  ]
+                },
+                "reader": {
+                  "inherits": [],
+                  "permissions": [
+                    "read"
+                  ]
+                },
+                "writer": {
+                  "inherits": [],
+                  "permissions": [
+                    "write"
+                  ]
+                }
+              },
+              "sessions": {}
+            },
+            "family": "policy",
+            "mode": "synthesize",
+            "rules": [
+              {
+                "parameters": {},
+                "rule_id": "rbac.minimum_privilege",
+                "subjects": [
+                  "alice"
+                ]
+              },
+              {
+                "parameters": {},
+                "rule_id": "rbac.permission_reachable",
+                "subjects": [
+                  "alice",
+                  "read"
+                ]
+              },
+              {
+                "parameters": {},
+                "rule_id": "rbac.permission_reachable",
+                "subjects": [
+                  "alice",
+                  "write"
+                ]
+              }
+            ],
+            "unknowns": [
+              {
+                "kind": "principal_role",
+                "principal": "alice",
+                "role": "reader"
+              },
+              {
+                "kind": "principal_role",
+                "principal": "alice",
+                "role": "writer"
+              },
+              {
+                "kind": "principal_role",
+                "principal": "alice",
+                "role": "admin"
+              }
+            ]
+          },
+          "expectation": "optimized grant cost 3 after complete termination"
         },
         "invalid": {
-          "facts": null,
-          "expectation": ""
+          "facts": {
+            "facts": {
+              "principals": {
+                "alice": {
+                  "grant_costs": {
+                    "reader": 1,
+                    "writer": 2
+                  },
+                  "required_permissions": [
+                    "read",
+                    "write"
+                  ],
+                  "roles": []
+                }
+              },
+              "roles": {
+                "reader": {
+                  "inherits": [],
+                  "permissions": [
+                    "read"
+                  ]
+                },
+                "writer": {
+                  "inherits": [],
+                  "permissions": [
+                    "write"
+                  ]
+                }
+              },
+              "sessions": {}
+            },
+            "family": "policy",
+            "mode": "synthesize",
+            "rules": [
+              {
+                "parameters": {},
+                "rule_id": "rbac.minimum_privilege",
+                "subjects": [
+                  "alice"
+                ]
+              },
+              {
+                "parameters": {},
+                "rule_id": "rbac.permission_reachable",
+                "subjects": [
+                  "alice",
+                  "read"
+                ]
+              },
+              {
+                "parameters": {},
+                "rule_id": "rbac.permission_reachable",
+                "subjects": [
+                  "alice",
+                  "write"
+                ]
+              },
+              {
+                "parameters": {
+                  "max_assigned": 1,
+                  "roles": [
+                    "reader",
+                    "writer"
+                  ]
+                },
+                "rule_id": "rbac.static_separation_of_duty",
+                "subjects": [
+                  "alice"
+                ]
+              }
+            ],
+            "unknowns": [
+              {
+                "kind": "principal_role",
+                "principal": "alice",
+                "role": "reader"
+              },
+              {
+                "kind": "principal_role",
+                "principal": "alice",
+                "role": "writer"
+              }
+            ]
+          },
+          "expectation": "infeasible because hard reachability requires both grants while separation of duty permits at most one"
         }
       }
     },
@@ -3631,6 +3971,7 @@
       "primitive": "permission_reachability",
       "summary": "Require a principal to hold a role that reaches the requested permission.",
       "availability": "implemented",
+      "execution_kind": "constraint",
       "default_strength": "hard",
       "authorities": [
         {
@@ -3751,6 +4092,7 @@
       "primitive": "strict_role_rank",
       "summary": "Require every inheritance edge to admit a strict bounded rank order.",
       "availability": "implemented",
+      "execution_kind": "constraint",
       "default_strength": "hard",
       "authorities": [
         {
@@ -3863,6 +4205,7 @@
       "primitive": "assigned_role_cardinality",
       "summary": "Limit mutually exclusive role assignments for one principal.",
       "availability": "implemented",
+      "execution_kind": "constraint",
       "default_strength": "hard",
       "authorities": [
         {
@@ -4000,6 +4343,7 @@
       "primitive": "aggregate_capacity",
       "summary": "Require aggregate replica demand to fit each selected pool capacity.",
       "availability": "implemented",
+      "execution_kind": "constraint",
       "default_strength": "hard",
       "authorities": [
         {
@@ -4138,6 +4482,7 @@
       "primitive": "quota_capacity",
       "summary": "Require aggregate replica demand to fit each selected quota capacity.",
       "availability": "implemented",
+      "execution_kind": "constraint",
       "default_strength": "hard",
       "authorities": [
         {
@@ -4276,6 +4621,7 @@
       "primitive": "request_limit",
       "summary": "Require each selected per-replica request to be at most its matching limit.",
       "availability": "implemented",
+      "execution_kind": "constraint",
       "default_strength": "hard",
       "authorities": [
         {
@@ -4399,6 +4745,7 @@
       "primitive": "time_indexed_exactly_once",
       "summary": "Assign one declared job to exactly one machine and integer start tick inside the finite horizon.",
       "availability": "implemented",
+      "execution_kind": "constraint",
       "default_strength": "hard",
       "authorities": [
         {
@@ -4560,6 +4907,7 @@
       "primitive": "time_indexed_cumulative_capacity",
       "summary": "Keep every declared resource's concurrent non-preemptive demand within one machine's capacity at every horizon tick.",
       "availability": "implemented",
+      "execution_kind": "constraint",
       "default_strength": "hard",
       "authorities": [
         {
@@ -4746,6 +5094,7 @@
       "primitive": "bounded_makespan",
       "summary": "Minimize the latest job completion during synthesis or enforce an explicit maximum makespan during verification.",
       "availability": "implemented",
+      "execution_kind": "constraint",
       "default_strength": "hard",
       "authorities": [
         {
@@ -5050,6 +5399,7 @@
       "primitive": "eligible_window_placement",
       "summary": "Forbid job placements on ineligible machines or outside declared release and deadline windows.",
       "availability": "implemented",
+      "execution_kind": "constraint",
       "default_strength": "hard",
       "authorities": [
         {
@@ -5217,6 +5567,7 @@
       "primitive": "finish_start_precedence",
       "summary": "Require a predecessor to finish plus its declared nonnegative lag before its successor starts.",
       "availability": "implemented",
+      "execution_kind": "constraint",
       "default_strength": "hard",
       "authorities": [
         {
@@ -5428,6 +5779,7 @@
       "primitive": "bounded_existential_reachability",
       "summary": "Require one target state to occur within an explicit finite trace bound, supporting bounded witness or unsafe-target counterexample synthesis.",
       "availability": "implemented",
+      "execution_kind": "constraint",
       "default_strength": "hard",
       "authorities": [
         {
@@ -5698,6 +6050,7 @@
       "primitive": "finite_initial_membership",
       "summary": "Require the first state of one finite trace to belong to the caller-declared initial-state set.",
       "availability": "implemented",
+      "execution_kind": "constraint",
       "default_strength": "hard",
       "authorities": [
         {
@@ -5858,6 +6211,7 @@
       "primitive": "finite_state_invariant",
       "summary": "Require every state slot in one finite workflow trace to belong to the caller-declared safe-state set.",
       "availability": "implemented",
+      "execution_kind": "constraint",
       "default_strength": "hard",
       "authorities": [
         {
@@ -6063,6 +6417,7 @@
       "primitive": "finite_enabled_transition",
       "summary": "Require every adjacent state-event-state step in one finite trace to appear in that step's caller-resolved enabled relation.",
       "availability": "implemented",
+      "execution_kind": "constraint",
       "default_strength": "hard",
       "authorities": [
         {

@@ -45,6 +45,7 @@ fn public_rule_projection(rule: &RuleManifestV1) -> Value {
         "primitive": rule.primitive,
         "summary": rule.summary,
         "availability": rule.availability,
+        "execution_kind": rule.execution_kind,
         "default_strength": rule.strength,
         "authorities": rule.authorities,
         "requires": rule.requires,

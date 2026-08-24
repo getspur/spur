@@ -179,7 +179,7 @@ fn solve_rules_schema_keeps_one_bedrock_compatible_family_execution_tool() {
         .collect::<Vec<_>>();
 
     assert_eq!(rule_ids, manifest_rule_ids);
-    assert_eq!(rule_ids.len(), 39);
+    assert_eq!(rule_ids.len(), 41);
     for expected_rule_id in manifest_executable_rule_ids() {
         assert_eq!(
             rule_ids
@@ -190,10 +190,8 @@ fn solve_rules_schema_keeps_one_bedrock_compatible_family_execution_tool() {
             "{expected_rule_id} must appear exactly once"
         );
     }
-    assert!(
-        !rule_ids.contains(&"rbac.minimum_privilege"),
-        "capability-unavailable rules must not be advertised as executable"
-    );
+    assert!(rule_ids.contains(&"rbac.minimum_privilege"));
+    assert!(rule_ids.contains(&"placement.minimize_skew"));
 }
 
 #[test]
