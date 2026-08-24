@@ -6701,7 +6701,7 @@ mod tests {
     #[cfg(unix)]
     use std::os::unix::ffi::OsStringExt as _;
     use std::path::{Path, PathBuf};
-    use std::sync::{Arc, OnceLock};
+    use std::sync::{Arc, Mutex, OnceLock};
     use std::time::{Duration, Instant};
 
     use crate::{
@@ -6718,6 +6718,232 @@ mod tests {
 
     const ESCALATION_THRESHOLD: usize = 3;
     static REBUILD_TEST_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+
+    #[derive(Default)]
+    struct GraphQueryTrace {
+        calls: Mutex<BTreeMap<String, usize>>,
+    }
+
+    impl GraphQueryTrace {
+        fn record(&self, operation: String) {
+            *self
+                .calls
+                .lock()
+                .expect("graph query trace mutex poisoned")
+                .entry(operation)
+                .or_default() += 1;
+        }
+
+        fn snapshot(&self) -> BTreeMap<String, usize> {
+            self.calls
+                .lock()
+                .expect("graph query trace mutex poisoned")
+                .clone()
+        }
+    }
+
+    struct CountingGraphQueryClient {
+        inner: InMemoryClient,
+        trace: Arc<GraphQueryTrace>,
+    }
+
+    impl CountingGraphQueryClient {
+        fn new(artifact: Arc<GraphIndexArtifact>) -> Self {
+            Self {
+                inner: InMemoryClient::new(artifact),
+                trace: Arc::new(GraphQueryTrace::default()),
+            }
+        }
+
+        fn trace(&self) -> BTreeMap<String, usize> {
+            self.trace.snapshot()
+        }
+
+        fn record(&self, operation: impl Into<String>) {
+            self.trace.record(operation.into());
+        }
+    }
+
+    impl GraphQueryClient for CountingGraphQueryClient {
+        fn search_symbols(&self, opts: &SearchOptions) -> anyhow::Result<SearchResult> {
+            // The caller-visible limit is deliberately excluded: overlay search
+            // must reuse the same logical base search at its unbounded limit.
+            self.record(format!(
+                "search_symbols:{:?}:{}:{:?}",
+                opts.mode, opts.query, opts.filters
+            ));
+            self.inner.search_symbols(opts)
+        }
+
+        fn find_caller_edges(&self, sid: &str) -> Vec<OwnedCallerRecord> {
+            self.record(format!("find_caller_edges:{sid}"));
+            self.inner.find_caller_edges(sid)
+        }
+
+        fn find_unresolved_caller_edges_by_labels(
+            &self,
+            target_labels: &HashSet<String>,
+        ) -> Vec<OwnedCallerRecord> {
+            let mut labels = target_labels.iter().cloned().collect::<Vec<_>>();
+            labels.sort();
+            self.record(format!("find_unresolved_caller_edges_by_labels:{labels:?}"));
+            self.inner
+                .find_unresolved_caller_edges_by_labels(target_labels)
+        }
+
+        fn find_callee_edges(&self, sid: &str) -> Vec<OwnedCalleeRecord> {
+            self.record(format!("find_callee_edges:{sid}"));
+            self.inner.find_callee_edges(sid)
+        }
+
+        fn resolve_selector(&self, selector: &str) -> anyhow::Result<SelectorResolution> {
+            self.record(format!("resolve_selector:{selector}"));
+            self.inner.resolve_selector(selector)
+        }
+
+        fn symbol_by_id(&self, sid: &str) -> anyhow::Result<Option<GraphSymbolArtifact>> {
+            self.record(format!("symbol_by_id:{sid}"));
+            self.inner.symbol_by_id(sid)
+        }
+
+        fn symbols_by_file(&self, path: &str) -> anyhow::Result<Vec<GraphSymbolArtifact>> {
+            self.record(format!("symbols_by_file:{path}"));
+            self.inner.symbols_by_file(path)
+        }
+
+        fn symbols_by_files(&self, paths: &[String]) -> anyhow::Result<Vec<GraphSymbolArtifact>> {
+            self.record(format!("symbols_by_files:{paths:?}"));
+            self.inner.symbols_by_files(paths)
+        }
+
+        fn symbols_by_path_name(
+            &self,
+            path: &str,
+            name: &str,
+        ) -> anyhow::Result<Vec<GraphSymbolArtifact>> {
+            self.record(format!("symbols_by_path_name:{path}:{name}"));
+            self.inner.symbols_by_path_name(path, name)
+        }
+
+        fn file_manifest_by_path(
+            &self,
+            path: &str,
+        ) -> anyhow::Result<Option<GraphFileManifestEntry>> {
+            self.record(format!("file_manifest_by_path:{path}"));
+            self.inner.file_manifest_by_path(path)
+        }
+
+        fn file_exists(&self, path: &str) -> anyhow::Result<bool> {
+            self.record(format!("file_exists:{path}"));
+            self.inner.file_exists(path)
+        }
+
+        fn temporal_index(&self) -> Arc<TemporalIndex> {
+            self.inner.temporal_index()
+        }
+
+        fn symbol_history(
+            &self,
+            commits: &CommitIndexArtifact,
+            symbol_id: &str,
+        ) -> anyhow::Result<Vec<(crate::temporal::GitSha, ChangeKind, SnapshotKey)>> {
+            self.record(format!("symbol_history:{symbol_id}"));
+            self.inner.symbol_history(commits, symbol_id)
+        }
+    }
+
+    fn search_handler_for_request_replay(
+        args: &Value,
+        client: &dyn GraphQueryClient,
+    ) -> CodeGraphResult {
+        code_search_with_artifact(args, client).map_err(CodeGraphError::from)
+    }
+
+    fn code_graph_result_signature(result: CodeGraphResult) -> Value {
+        match result {
+            Ok(body) => json!({ "ok": body }),
+            Err(error) => {
+                let kind = match &error.error {
+                    McpHandlerError::InvalidParams(_) => "invalid_params",
+                    McpHandlerError::NotFound(_) => "not_found",
+                    McpHandlerError::Unauthorized(_) => "unauthorized",
+                    McpHandlerError::UpstreamPm(_) => "upstream_pm",
+                    McpHandlerError::Internal(_) => "internal",
+                };
+                json!({
+                    "error": {
+                        "kind": kind,
+                        "message": handler_error_message(&error.error),
+                        "temporal_code": error.temporal_code,
+                        "temporal_data": error.temporal_data,
+                        "has_metadata": error.metadata.is_some(),
+                    }
+                })
+            }
+        }
+    }
+
+    fn response_digest(value: &Value) -> String {
+        let bytes = serde_json::to_vec(value).expect("serialize response signature");
+        blake3::hash(&bytes).to_hex().to_string()
+    }
+
+    type RequestReplayHandler = fn(&Value, &dyn GraphQueryClient) -> CodeGraphResult;
+
+    struct RequestReplayCase {
+        name: &'static str,
+        args: Value,
+        handler: RequestReplayHandler,
+    }
+
+    fn exercise_request_replay_case(
+        scenario: &str,
+        case: &RequestReplayCase,
+        root: &Path,
+        base_artifact: Arc<GraphIndexArtifact>,
+        oracle_artifact: Arc<GraphIndexArtifact>,
+        changed_paths: &[PathBuf],
+    ) -> Vec<String> {
+        let counting = CountingGraphQueryClient::new(base_artifact);
+
+        // RED subject: this is the current production shape. The handler runs
+        // once on the base and again through OverlayClient.
+        let _first_result = (case.handler)(&case.args, &counting);
+        let overlay = OverlayClient::new(&counting, root, changed_paths)
+            .expect("construct direct overlay subject");
+        let actual = code_graph_result_signature((case.handler)(&case.args, &overlay));
+
+        let oracle = InMemoryClient::new(oracle_artifact);
+        let expected = code_graph_result_signature((case.handler)(&case.args, &oracle));
+        let actual_digest = response_digest(&actual);
+        let oracle_digest = response_digest(&expected);
+        let equivalent = actual == expected;
+        let trace = counting.trace();
+
+        eprintln!(
+            "request_replay trace scenario={scenario} tool={} base_calls={trace:?} \
+             actual_digest={actual_digest} oracle_digest={oracle_digest} equivalent={equivalent}",
+            case.name
+        );
+
+        let mut violations = trace
+            .iter()
+            .filter(|(_, count)| **count != 1)
+            .map(|(operation, count)| {
+                format!(
+                    "scenario={scenario} tool={} operation={operation} count={count}",
+                    case.name
+                )
+            })
+            .collect::<Vec<_>>();
+        if !equivalent {
+            violations.push(format!(
+                "scenario={scenario} tool={} response mismatch actual={actual:#} expected={expected:#}",
+                case.name
+            ));
+        }
+        violations
+    }
 
     #[cfg(unix)]
     #[test]
@@ -7037,6 +7263,249 @@ mod tests {
         assert!(
             overlay.is_none(),
             "matching worktree content must skip OverlayClient construction"
+        );
+    }
+
+    #[tokio::test]
+    async fn request_replay_counts_each_base_operation_once_and_matches_fresh_oracle() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        let base_source = "pub fn target() { leaf(); }\n\
+                           pub fn leaf() {}\n\
+                           pub fn caller() { target(); }\n\
+                           pub fn old_name() {}\n";
+        let base_artifact = Arc::new(artifact_from_source(root, base_source));
+
+        let clean_case = RequestReplayCase {
+            name: "search-clean",
+            args: json!({
+                "query": "target",
+                "mode": "exact",
+                "limit": 1,
+            }),
+            handler: search_handler_for_request_replay,
+        };
+        let mut violations = exercise_request_replay_case(
+            "clean",
+            &clean_case,
+            root,
+            Arc::clone(&base_artifact),
+            Arc::clone(&base_artifact),
+            &[],
+        );
+
+        let current_source = "pub fn target() { new_leaf(); }\n\
+                              pub fn new_leaf() {}\n\
+                              pub fn caller() { target(); }\n\
+                              pub fn added() { target(); }\n\
+                              pub fn new_name() {}\n";
+        fs::write(root.join("src/lib.rs"), current_source).expect("write dirty source");
+        let oracle_facts = build_facts(root, None).expect("extract oracle source").0;
+        let oracle_artifact = Arc::new(
+            artifact_from_facts(&oracle_facts, root).expect("freshly rebuilt oracle artifact"),
+        );
+        let dirty_paths = [PathBuf::from("src/lib.rs")];
+        let dirty_cases = [
+            RequestReplayCase {
+                name: "search",
+                args: json!({
+                    "query": "a",
+                    "mode": "substring",
+                    "limit": 2,
+                    "response_format": "full",
+                }),
+                handler: search_handler_for_request_replay,
+            },
+            RequestReplayCase {
+                name: "resolve",
+                args: json!({ "selector": "target" }),
+                handler: code_resolve_with_client,
+            },
+            RequestReplayCase {
+                name: "resolve-new-or-renamed",
+                args: json!({ "selector": "new_name" }),
+                handler: code_resolve_with_client,
+            },
+            RequestReplayCase {
+                name: "resolve-not-found-error",
+                args: json!({ "selector": "still_missing" }),
+                handler: code_resolve_with_client,
+            },
+            RequestReplayCase {
+                name: "file-symbols",
+                args: json!({
+                    "file": "src/lib.rs",
+                    "response_format": "table",
+                }),
+                handler: code_file_symbols_with_client,
+            },
+            RequestReplayCase {
+                name: "read-symbol",
+                args: json!({
+                    "path": "src/lib.rs",
+                    "name": "target",
+                    "context_lines": 1,
+                    "response_format": "source",
+                }),
+                handler: code_read_symbol_with_client,
+            },
+            RequestReplayCase {
+                name: "callers",
+                args: json!({
+                    "selector": "target",
+                    "include_unresolved": true,
+                    "response_format": "table",
+                }),
+                handler: code_callers_with_client,
+            },
+            RequestReplayCase {
+                name: "callees",
+                args: json!({
+                    "selector": "target",
+                    "include_unresolved": true,
+                    "response_format": "table",
+                }),
+                handler: code_callees_with_client,
+            },
+        ];
+
+        let dirty_violations = SCOPED_CODE_GRAPH_WORKTREE_ROOT
+            .scope(root.to_path_buf(), async {
+                dirty_cases
+                    .iter()
+                    .flat_map(|case| {
+                        exercise_request_replay_case(
+                            "dirty",
+                            case,
+                            root,
+                            Arc::clone(&base_artifact),
+                            Arc::clone(&oracle_artifact),
+                            &dirty_paths,
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .await;
+        violations.extend(dirty_violations);
+
+        assert!(
+            violations.is_empty(),
+            "request replay cardinality/equivalence violations:\n{}",
+            violations.join("\n")
+        );
+    }
+
+    #[tokio::test]
+    async fn request_replay_stale_budget_fallback_returns_whole_base_response() {
+        let _rebuild_guard = rebuild_test_guard().await;
+        let _budget = set_graph_rebuild_latency_budget_for_test(Duration::ZERO);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        init_git_repo(root);
+        let artifact = artifact_from_source(root, "pub fn alpha() {}\n");
+        run_git_test(root, &["add", "src/lib.rs"]);
+        run_git_test(root, &["commit", "-q", "-m", "index alpha"]);
+        write_current_artifact(root, &artifact);
+        fs::write(
+            root.join("src/lib.rs"),
+            "pub fn alpha() {}\npub fn overlay_only() {}\n",
+        )
+        .expect("dirty source");
+
+        let body = SCOPED_CODE_GRAPH_WORKTREE_ROOT
+            .scope(root.to_path_buf(), async {
+                code_search_response(
+                    &json!({ "query": "a", "mode": "substring", "limit": 20 }),
+                    Arc::new(RebuildCoordinator::new()),
+                )
+                .await
+            })
+            .await
+            .expect("stale-budget response");
+
+        let names = body["candidates"]
+            .as_array()
+            .expect("candidate array")
+            .iter()
+            .filter_map(|candidate| candidate["entity_name"].as_str())
+            .collect::<Vec<_>>();
+        eprintln!(
+            "request_replay fallback trace kind=stale_budget digest={} names={names:?} status={}",
+            response_digest(&body),
+            body["rebuild_status"]
+        );
+        assert_eq!(names, vec!["alpha"]);
+        assert_eq!(body["rebuild_status"], "stale_budget_exceeded");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn request_replay_overlay_failure_fallback_returns_whole_base_response() {
+        let _rebuild_guard = rebuild_test_guard().await;
+        let _budget = set_graph_rebuild_latency_budget_for_test(Duration::from_secs(30));
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        init_git_repo(root);
+        let artifact = Arc::new(artifact_from_source(root, "pub fn alpha() {}\n"));
+        run_git_test(root, &["add", "src/lib.rs"]);
+        run_git_test(root, &["commit", "-q", "-m", "index alpha"]);
+        let invalid_path = root.join(OsString::from_vec(b"invalid-overlay-\x80.rs".to_vec()));
+        fs::write(&invalid_path, "pub fn partial_overlay_only() {}\n")
+            .expect("non-UTF-8 overlay source");
+        fs::write(
+            root.join("src/lib.rs"),
+            "pub fn alpha() {}\n// force response-relevant refresh\n",
+        )
+        .expect("dirty indexed source");
+        run_git_test(root, &["add", "-A"]);
+
+        let backend = CodeSearchBackend::InMemory {
+            client: InMemoryClient::new(Arc::clone(&artifact)),
+            artifact,
+        };
+        let args = json!({ "query": "a", "mode": "substring", "limit": 20 });
+        let base =
+            code_graph_result_signature(search_handler_for_request_replay(&args, backend.client()));
+        let candidate = RebuildCandidate {
+            worktree: root.to_path_buf(),
+            key: RebuildKey::from("overlay-failure", &BTreeMap::new()),
+        };
+        let attempt = overlay_response_for_backend(
+            &backend,
+            &candidate,
+            backend.metadata_source(),
+            &args,
+            ResponseFormat::Full,
+            search_handler_for_request_replay,
+        )
+        .await;
+        let error = match attempt {
+            Err(error) => error,
+            Ok(OverlayAttempt::Fresh(body)) => {
+                panic!("overlay failure must not return a partial fresh body: {body:#}")
+            }
+            Ok(OverlayAttempt::StaleBudgetExceeded) => {
+                panic!("fixture must exercise overlay failure, not the latency budget")
+            }
+        };
+
+        let names = base["ok"]["candidates"]
+            .as_array()
+            .expect("candidate array")
+            .iter()
+            .filter_map(|candidate| candidate["entity_name"].as_str())
+            .collect::<Vec<_>>();
+        eprintln!(
+            "request_replay fallback trace kind=overlay_failure base_digest={} names={names:?} \
+             error={}",
+            response_digest(&base),
+            handler_error_message(&error.error),
+        );
+        assert_eq!(names, vec!["alpha"]);
+        assert!(
+            handler_error_message(&error.error).contains("failed to construct code graph overlay"),
+            "unexpected overlay failure: {:?}",
+            error.error
         );
     }
 
