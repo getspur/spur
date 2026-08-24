@@ -4,7 +4,11 @@
 
 **Approved design epic:** `bd-3h31` (closed after written-spec approval)
 
-**Execution epic:** `bd-3a6y`
+**Authoring epic:** `bd-3a6y`
+
+**Submitted plan:** `fb5c7280-e71b-4d77-8bb4-32df84107ec7`
+
+**Orchestrator execution epic:** `bd-2m6c`
 
 **Plan label:** `plan:code-overlay-fsmonitor-20260824`
 
@@ -20,6 +24,17 @@
 | OID-addressed cache integration | `bd-258m` |
 | First-base-query reuse | `bd-1jzq` |
 | Cross-project release gates | `bd-2uzl` |
+
+**Orchestrator issue mapping:**
+
+| Authored issue | Runtime issue |
+|---|---|
+| `bd-2je4` | `bd-2d5w` |
+| `bd-juvn` | `bd-3sgq` |
+| `bd-1l0y` | `bd-13xu` |
+| `bd-258m` | `bd-2hli` |
+| `bd-1jzq` | `bd-3u6e` |
+| `bd-2uzl` | `bd-34p7` |
 
 **Planning solve:** `sol_f48ab4639f9b4075` — the six-task assignment,
 capacity, and finish/start precedence model passed all 19 scheduling bindings.
