@@ -163,6 +163,7 @@ fn approved_sources_load_in_deterministic_canonical_order() {
         "policy/rules/static_separation_of_duty.yaml",
         "resource/family.yaml",
         "resource/rules/aggregate_capacity.yaml",
+        "resource/rules/minimize_skew.yaml",
         "resource/rules/minimum_failure_domains.yaml",
         "resource/rules/quota_capacity.yaml",
         "resource/rules/request_within_limit.yaml",
@@ -672,39 +673,42 @@ fn implemented_handlers_must_form_a_bijection_with_native_handler_all() {
 }
 
 #[test]
-fn only_staged_objective_handlers_are_reserved_from_the_bijection() {
+fn every_native_handler_is_owned_exactly_once_by_source_manifests() {
+    let loaded =
+        load_manifest_sources(&repository_manifest_root()).expect("repository manifests must load");
+    let owners = loaded
+        .bundle
+        .rules
+        .iter()
+        .filter_map(|rule| rule.handler)
+        .collect::<std::collections::BTreeSet<_>>();
+
+    assert_eq!(NativeHandlerV1::ALL.len(), 41);
+    assert_eq!(owners.len(), NativeHandlerV1::ALL.len());
     assert_eq!(
-        manifest_source::TRANSITIONAL_UNOWNED_HANDLERS,
-        &[
-            NativeHandlerV1::RbacMinimumPrivilege,
-            NativeHandlerV1::PlacementMinimizeSkew,
-        ]
+        owners,
+        NativeHandlerV1::ALL.iter().copied().collect(),
+        "source manifests must own every closed native handler exactly once"
     );
 
-    let loaded = load_manifest_sources(&repository_manifest_root())
-        .expect("only the staged objective handlers may be temporarily unowned");
-    for reserved in manifest_source::TRANSITIONAL_UNOWNED_HANDLERS {
-        assert!(
-            loaded
-                .bundle
-                .rules
-                .iter()
-                .all(|rule| rule.handler != Some(*reserved)),
-            "{reserved:?} must remain an explicit rollout reservation until its domain manifest binds"
-        );
+    for (relative, handler) in [
+        (
+            "policy/rules/minimum_privilege.yaml",
+            "rbac_minimum_privilege",
+        ),
+        (
+            "resource/rules/minimize_skew.yaml",
+            "placement_minimize_skew",
+        ),
+    ] {
+        let temp = tempfile::tempdir().expect("temporary manifest root");
+        let root = copy_repository_sources(temp.path());
+        fs::remove_file(root.join(relative)).expect("remove objective manifest");
+        let diagnostic = load_manifest_sources(&root)
+            .expect_err("every missing native handler must fail")
+            .to_string();
+        assert!(diagnostic.contains(handler), "{diagnostic}");
     }
-
-    let temp = tempfile::tempdir().expect("temporary manifest root");
-    let root = copy_repository_sources(temp.path());
-    fs::remove_file(root.join("accessibility/rules/focus_not_obscured.yaml"))
-        .expect("remove an arbitrary implemented manifest");
-    let diagnostic = load_manifest_sources(&root)
-        .expect_err("an arbitrary missing handler must still fail")
-        .to_string();
-    assert!(
-        diagnostic.contains("a11y_focus_not_obscured"),
-        "{diagnostic}"
-    );
 }
 
 #[test]

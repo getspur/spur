@@ -1876,6 +1876,7 @@ mod tests {
                     "ResourceQuotaCapacity",
                     "PlacementTopologyMaxSkew",
                     "PlacementMinimumFailureDomains",
+                    "PlacementMinimizeSkew",
                 ],
             ),
             (
@@ -1947,6 +1948,7 @@ mod tests {
                     "ResourceQuotaCapacity",
                     "PlacementTopologyMaxSkew",
                     "PlacementMinimumFailureDomains",
+                    "PlacementMinimizeSkew",
                 ],
                 "Some(_) | None => Err(format!(",
                 "unsupported resource rule",

@@ -541,7 +541,7 @@ async fn accessibility_requires_evidence_for_typed_exceptions() {
 }
 
 #[tokio::test]
-async fn advisory_unavailable_rules_cannot_masquerade_as_solver_proof() {
+async fn policy_objective_verify_is_rejected_at_the_synthesis_only_boundary() {
     let response = registry()
         .call_json_tool(
             context(),
@@ -559,11 +559,14 @@ async fn advisory_unavailable_rules_cannot_masquerade_as_solver_proof() {
             }),
         )
         .await;
-    let error = response.error.expect("unavailable rule must be rejected");
+    let error = response
+        .error
+        .expect("objective verification must be rejected before solving");
     assert_eq!(error.code, -32602);
-    assert!(error
-        .message
-        .contains("unsupported policy rule `rbac.minimum_privilege`"));
+    assert_eq!(
+        error.message,
+        "policy rule compilation failed: policy objectives are synthesis-only"
+    );
 }
 
 #[tokio::test]

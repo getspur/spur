@@ -1674,6 +1674,7 @@ mod tests {
                     "RbacRoleHierarchyAcyclic",
                     "RbacStaticSeparationOfDuty",
                     "RbacDynamicSeparationOfDuty",
+                    "RbacMinimumPrivilege",
                 ],
             ),
         ];

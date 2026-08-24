@@ -1,7 +1,7 @@
 use serde_json::{json, Map, Value};
 use spur_solver::rules::{
     manifest::{validate_binding_contract, ValidatedBinding},
-    manifest_format::NativeHandlerV1,
+    manifest_format::{ExecutionKindV1, NativeHandlerV1},
 };
 
 fn validate(
@@ -39,16 +39,28 @@ fn defaults_are_applied_and_the_closed_handler_is_returned() {
 }
 
 #[test]
-fn unknown_and_catalog_only_rule_ids_are_rejected_before_dispatch() {
+fn unknown_ids_are_rejected_and_objectives_return_closed_handlers() {
     let unknown = validate("a11y.missing", &[], json!({})).expect_err("unknown rule must fail");
     assert_eq!(unknown, "unknown manifest rule `a11y.missing`");
 
-    let catalog_only = validate("rbac.minimum_privilege", &[], json!({}))
-        .expect_err("catalog-only rule must fail");
-    assert_eq!(
-        catalog_only,
-        "manifest rule `rbac.minimum_privilege` is not executable"
-    );
+    for (rule_id, subject, handler) in [
+        (
+            "rbac.minimum_privilege",
+            "alice",
+            NativeHandlerV1::RbacMinimumPrivilege,
+        ),
+        (
+            "placement.minimize_skew",
+            "api",
+            NativeHandlerV1::PlacementMinimizeSkew,
+        ),
+    ] {
+        let binding = validate(rule_id, &[subject], json!({}))
+            .unwrap_or_else(|error| panic!("{rule_id} objective contract must validate: {error}"));
+        assert_eq!(binding.execution_kind, ExecutionKindV1::Objective);
+        assert_eq!(binding.handler, handler);
+        assert!(binding.parameters.is_empty());
+    }
 }
 
 #[test]
