@@ -4464,6 +4464,7 @@ mod tests {
         );
         assert_eq!(max_symbol_bodies["minimum"].as_f64(), Some(0.0));
         assert_eq!(max_symbol_bodies["maximum"].as_f64(), Some(5.0));
+        assert_eq!(max_symbol_bodies["type"].as_str(), Some("integer"));
         assert!(!schema["required"]
             .as_array()
             .expect("required fields")
