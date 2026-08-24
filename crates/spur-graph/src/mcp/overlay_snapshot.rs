@@ -1608,6 +1608,65 @@ mod tests {
     }
 
     #[test]
+    fn overlay_snapshot_malformed_gitignore_attached_errors_retry_then_fail_closed() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let root = tempdir.path();
+        init_repo(root);
+        fs::write(root.join("src/lib.rs"), "pub fn base() {}\n").expect("base source");
+        run_git(root, &["add", "src/lib.rs"]);
+        run_git(root, &["commit", "-qm", "base"]);
+        let base = base(root, Some(head(root)));
+        fs::write(root.join(".gitignore"), "{foo").expect("malformed root .gitignore");
+        let mut runtime = InstrumentedRuntime {
+            fail_status: true,
+            ..InstrumentedRuntime::release_disabled()
+        };
+
+        let result = snapshot_with_runtime(root, base, &supported_extensions(), &mut runtime);
+        let canonical = root.canonicalize().expect("canonical worktree");
+        let cached = snapshots()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .contains_key(&canonical);
+        let error = match result {
+            Ok(snapshot) => {
+                eprintln!(
+                    "malformed-ignore RED trace: calls={:?} retries={} cached={} lifecycle={:?}",
+                    runtime.discovery_calls,
+                    snapshot.measurements.fallback_scan_retries,
+                    cached,
+                    snapshot.lifecycle
+                );
+                panic!(
+                    "malformed .gitignore attached walker errors incorrectly returned a Valid response: {:?}",
+                    snapshot.lifecycle
+                );
+            }
+            Err(error) => error,
+        };
+
+        eprintln!(
+            "malformed-ignore fail-closed trace: calls={:?} cached={} valid_response=false error={error:#}",
+            runtime.discovery_calls, cached
+        );
+        assert_eq!(
+            runtime.discovery_calls,
+            vec![
+                (0, FallbackScanPhase::BeforeDiscovery),
+                (1, FallbackScanPhase::BeforeDiscovery),
+            ],
+            "the recurring attached ignore error must consume exactly one retry"
+        );
+        assert!(!cached, "failed certification must not cache a snapshot");
+        assert!(
+            error
+                .to_string()
+                .contains("failed to certify filesystem fallback"),
+            "unexpected malformed-ignore error: {error:#}"
+        );
+    }
+
+    #[test]
     fn overlay_snapshot_fallback_path_set_mutation_retries_then_stabilizes() {
         let tempdir = tempfile::tempdir().expect("tempdir");
         let root = tempdir.path();
@@ -1679,7 +1738,7 @@ mod tests {
         let root = tempdir.path();
         init_repo(root);
         let a0 = b"pub fn a0() {}\n";
-        let a1 = b"pub fn a1() {}\n";
+        let a1 = b"pub fn a1_changed() {}\n";
         fs::write(root.join("src/a.rs"), a0).expect("a0");
         fs::write(root.join("src/b.rs"), "pub fn b0() {}\n").expect("b0");
         run_git(root, &["add", "src"]);
@@ -1687,7 +1746,7 @@ mod tests {
         let base = base(root, Some(head(root)));
         let mut runtime = InstrumentedRuntime {
             fail_status: true,
-            final_restat_mutations: BTreeMap::from([(0, "pub fn a1() {}\n")]),
+            final_restat_mutations: BTreeMap::from([(0, "pub fn a1_changed() {}\n")]),
             ..InstrumentedRuntime::release_disabled()
         };
 
@@ -1722,8 +1781,8 @@ mod tests {
         let mut runtime = InstrumentedRuntime {
             fail_status: true,
             final_restat_mutations: BTreeMap::from([
-                (0, "pub fn a1() {}\n"),
-                (1, "pub fn a2() {}\n"),
+                (0, "pub fn a1_changed() {}\n"),
+                (1, "pub fn a2_changed_again() {}\n"),
             ]),
             ..InstrumentedRuntime::release_disabled()
         };
@@ -1754,7 +1813,7 @@ mod tests {
         let root = tempdir.path();
         init_repo(root);
         let a0 = "pub fn a0() {}\n";
-        let a1 = "pub fn a1() {}\n";
+        let a1 = "pub fn a1_changed() {}\n";
         let b0 = "pub fn b0() {}\n";
         let b1 = "pub fn b1() {}\n";
         fs::write(root.join("src/a.rs"), a0).expect("a0");
@@ -1805,8 +1864,8 @@ mod tests {
         let root = tempdir.path();
         init_repo(root);
         let a0 = "pub fn a0() {}\n";
-        let a1 = "pub fn a1() {}\n";
-        let a2 = "pub fn a2() {}\n";
+        let a1 = "pub fn a1_changed() {}\n";
+        let a2 = "pub fn a2_changed_again() {}\n";
         let b0 = "pub fn b0() {}\n";
         let b1 = "pub fn b1() {}\n";
         fs::write(root.join("src/a.rs"), a0).expect("a0");

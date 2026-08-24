@@ -5580,9 +5580,24 @@ fn supported_file_paths_via_fs(
                 canonical_worktree.display()
             )
         })?;
-        if entry
-            .file_type()
-            .is_some_and(|file_type| file_type.is_file())
+        if let Some(error) = entry.error() {
+            return Err(anyhow::anyhow!(
+                "strict filesystem fallback entry `{}` reported an attached traversal error under `{}`: {error}",
+                entry.path().display(),
+                canonical_worktree.display()
+            ));
+        }
+        // Filesystem walker entries normally carry a file type. If a future
+        // backend omits it, strict certification cannot safely decide whether
+        // the path belongs in the complete supported-file set, so fail closed.
+        let file_type = entry.file_type().ok_or_else(|| {
+            anyhow::anyhow!(
+                "strict filesystem fallback entry `{}` had no file type under `{}`",
+                entry.path().display(),
+                canonical_worktree.display()
+            )
+        })?;
+        if file_type.is_file()
             && entry
                 .path()
                 .extension()
