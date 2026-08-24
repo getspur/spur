@@ -92,12 +92,16 @@ impl App {
             });
         };
         let socket_path = spur_core::notebook::control_socket_path(&socket_nonce);
+        let project_root =
+            crate::notebook_daemon::project_root_from_config_path(self.config_path.as_deref());
         let label = notebook_command_label(&arg);
         let command_action = notebook_command_action(&arg);
         let tx = self.background_action_tx.clone();
         self.flash_hint_short(format!("{label}..."));
         tokio::spawn(async move {
-            match crate::notebook_daemon::send_notebook_command(&arg, &socket_path).await {
+            match crate::notebook_daemon::send_notebook_command(&arg, &socket_path, &project_root)
+                .await
+            {
                 Ok(response) if response.ok => {
                     tracing::info!(
                         path = response.path.as_deref(),

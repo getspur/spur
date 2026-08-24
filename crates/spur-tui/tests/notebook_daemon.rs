@@ -46,8 +46,11 @@ fn notebook_launch_report_includes_channel_path_and_reason_before_spawn() {
 #[tokio::test]
 async fn send_notebook_command_uses_supplied_socket_path() {
     let temp = tempfile::tempdir().expect("tempdir");
+    let project_root = temp.path().join("project");
+    std::fs::create_dir(&project_root).expect("create project root");
     let socket_path = temp.path().join("control.sock");
     let listener = UnixListener::bind(&socket_path).expect("bind mock socket");
+    let expected_project_root = project_root.clone();
 
     let server = tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.expect("accept command");
@@ -56,6 +59,7 @@ async fn send_notebook_command_uses_supplied_socket_path() {
         assert_eq!(request["daemon"], "notebook.v1");
         assert_eq!(request["command"], "open");
         assert_eq!(request["path"], json!("chosen.ipynb"));
+        assert_eq!(request["projectRoot"], json!(expected_project_root));
 
         let response = serde_json::to_vec(&json!({
             "ok": true,
@@ -66,9 +70,13 @@ async fn send_notebook_command_uses_supplied_socket_path() {
         write_frame(&mut stream, &response).await;
     });
 
-    let response = spur_tui::notebook_daemon::send_notebook_command("chosen.ipynb", &socket_path)
-        .await
-        .expect("command response");
+    let response = spur_tui::notebook_daemon::send_notebook_command(
+        "chosen.ipynb",
+        &socket_path,
+        &project_root,
+    )
+    .await
+    .expect("command response");
 
     assert!(response.ok);
     server.await.expect("server task");
@@ -102,6 +110,7 @@ async fn slash_notebook_data_add_serializes_attach_datasource() {
     let response = spur_tui::notebook_daemon::send_notebook_command(
         "data add ./data/sales.csv --group quarterly",
         &socket_path,
+        temp.path(),
     )
     .await
     .expect("command response");
@@ -135,7 +144,7 @@ async fn send_notebook_command_retries_until_lazy_socket_binds() {
         write_frame(&mut stream, &response).await;
     });
 
-    match spur_tui::notebook_daemon::send_notebook_command("new", &socket_path).await {
+    match spur_tui::notebook_daemon::send_notebook_command("new", &socket_path, temp.path()).await {
         Ok(response) => assert!(response.ok),
         Err(error) => {
             server.abort();
@@ -167,7 +176,7 @@ async fn send_notebook_command_does_not_retry_protocol_error_after_connect() {
 
     let result = timeout(
         Duration::from_millis(250),
-        spur_tui::notebook_daemon::send_notebook_command("new", &socket_path),
+        spur_tui::notebook_daemon::send_notebook_command("new", &socket_path, temp.path()),
     )
     .await
     .expect("protocol errors should fail without retry");
@@ -192,7 +201,7 @@ async fn send_notebook_command_missing_green_returns_actionable_launch_error() {
     let path_candidate = path_dir.join("spur-notebook");
     let _env = EnvGuard::set_green_missing_paths(&cargo_home, &path_dir);
 
-    let error = spur_tui::notebook_daemon::send_notebook_command("new", &socket_path)
+    let error = spur_tui::notebook_daemon::send_notebook_command("new", &socket_path, temp.path())
         .await
         .expect_err("green launch should fail before spawning notebook");
     let message = error.to_string();

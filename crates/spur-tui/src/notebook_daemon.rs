@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 #[cfg(unix)]
 use std::{io, process::Stdio, time::Duration};
 
@@ -32,6 +32,8 @@ struct ControlRequest<'a> {
     daemon: &'static str,
     command: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
+    project_root: Option<&'a Path>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     path: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     name: Option<&'a str>,
@@ -57,13 +59,20 @@ pub struct ControlError {
 pub async fn send_notebook_command(
     arg: &str,
     socket_path: &Path,
+    project_root: &Path,
 ) -> anyhow::Result<ControlResponse> {
     match parse_notebook_command(arg)? {
-        NotebookCommand::Reopen => send_control("reopen", None, None, None, socket_path).await,
-        NotebookCommand::New => send_control("new", None, None, None, socket_path).await,
-        NotebookCommand::Close => send_control("close", None, None, None, socket_path).await,
+        NotebookCommand::Reopen => {
+            send_control("reopen", None, None, None, socket_path, project_root).await
+        }
+        NotebookCommand::New => {
+            send_control("new", None, None, None, socket_path, project_root).await
+        }
+        NotebookCommand::Close => {
+            send_control("close", None, None, None, socket_path, project_root).await
+        }
         NotebookCommand::Open { path } => {
-            send_control("open", Some(&path), None, None, socket_path).await
+            send_control("open", Some(&path), None, None, socket_path, project_root).await
         }
         NotebookCommand::AttachDatasource { path, name, group } => {
             send_control(
@@ -72,10 +81,29 @@ pub async fn send_notebook_command(
                 Some(&name),
                 group.as_deref(),
                 socket_path,
+                project_root,
             )
             .await
         }
     }
+}
+
+pub(crate) fn project_root_from_config_path(config_path: Option<&Path>) -> PathBuf {
+    let current_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    project_root_from_config_path_and_cwd(config_path, &current_dir)
+}
+
+fn project_root_from_config_path_and_cwd(config_path: Option<&Path>, cwd: &Path) -> PathBuf {
+    let candidate = config_path
+        .and_then(Path::parent)
+        .and_then(Path::parent)
+        .filter(|path| !path.as_os_str().is_empty())
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| cwd.to_path_buf());
+
+    spur_core::project_root::discover(&candidate)
+        .or_else(|_| candidate.canonicalize())
+        .unwrap_or(candidate)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -248,6 +276,7 @@ async fn send_control(
     _name: Option<&str>,
     _group: Option<&str>,
     _socket_path: &Path,
+    _project_root: &Path,
 ) -> anyhow::Result<ControlResponse> {
     anyhow::bail!("the notebook daemon requires unix domain sockets, unavailable on this platform")
 }
@@ -259,11 +288,16 @@ async fn send_control(
     name: Option<&str>,
     group: Option<&str>,
     socket_path: &Path,
+    project_root: &Path,
 ) -> anyhow::Result<ControlResponse> {
-    let mut stream = connect_or_launch_control_socket(socket_path, launch_notebook_app).await?;
+    let mut stream = connect_or_launch_control_socket(socket_path, |socket_path| {
+        launch_notebook_app(socket_path, project_root)
+    })
+    .await?;
     let request = ControlRequest {
         daemon: "notebook.v1",
         command,
+        project_root: Some(project_root),
         path,
         name,
         group,
@@ -346,7 +380,7 @@ fn detach_command_session(command: &mut std::process::Command) {
 }
 
 #[cfg(unix)]
-fn launch_notebook_app(socket_path: &Path) -> io::Result<()> {
+fn launch_notebook_app(socket_path: &Path, project_root: &Path) -> io::Result<()> {
     if let Some(parent) = socket_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -376,6 +410,7 @@ fn launch_notebook_app(socket_path: &Path) -> io::Result<()> {
     command
         .arg("--socket")
         .arg(socket_path)
+        .current_dir(project_root)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(stderr);
@@ -518,10 +553,12 @@ mod tests {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let temp = tempfile::tempdir().expect("tempdir");
+        let project_root = temp.path().join("project");
+        fs::create_dir(&project_root).expect("create project root");
         let fake_notebook = temp.path().join("fake-notebook");
         fs::write(
             &fake_notebook,
-            "#!/bin/sh\nprintf '%s\\n' \"$$\" > \"${2}.pid\"\nwhile [ -e \"${2}.hold\" ]; do\n  sleep 0.05\ndone\n",
+            "#!/bin/sh\npwd > \"${2}.cwd\"\nprintf '%s\\n' \"$$\" > \"${2}.pid\"\nwhile [ -e \"${2}.hold\" ]; do\n  sleep 0.05\ndone\n",
         )
         .expect("write fake notebook");
         let mut permissions = fs::metadata(&fake_notebook)
@@ -531,12 +568,13 @@ mod tests {
         fs::set_permissions(&fake_notebook, permissions).expect("make fake notebook executable");
 
         let socket_path = temp.path().join("notebook.sock");
+        let cwd_path = path_with_suffix(&socket_path, ".cwd");
         let pid_path = path_with_suffix(&socket_path, ".pid");
         let hold_path = path_with_suffix(&socket_path, ".hold");
         fs::write(&hold_path, b"").expect("create child hold file");
         let _bin_override = EnvVarGuard::set("SPUR_NOTEBOOK_BIN", &fake_notebook);
 
-        launch_notebook_app(&socket_path).expect("launch fake notebook");
+        launch_notebook_app(&socket_path, &project_root).expect("launch fake notebook");
 
         let deadline = Instant::now() + Duration::from_secs(5);
         let child_pid = loop {
@@ -559,11 +597,42 @@ mod tests {
         let parent_pid = libc::pid_t::try_from(std::process::id()).expect("parent pid fits pid_t");
         let parent_session = session_id(parent_pid);
         let child_session = session_id(child_pid);
+        let child_cwd = fs::read_to_string(&cwd_path).expect("read child cwd");
         fs::remove_file(&hold_path).expect("release fake notebook child");
 
+        assert_eq!(Path::new(child_cwd.trim()), project_root);
         assert_ne!(
             child_session, parent_session,
             "notebook child must not share the TUI process session"
+        );
+    }
+
+    #[test]
+    fn project_root_comes_from_project_local_config_path() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let project_root = temp.path().join("project");
+        let spur_dir = project_root.join(".spur");
+        fs::create_dir_all(&spur_dir).expect("create .spur directory");
+        let config_path = spur_dir.join("config.toml");
+        fs::write(&config_path, b"").expect("write config");
+
+        assert_eq!(
+            project_root_from_config_path(Some(&config_path)),
+            project_root.canonicalize().expect("canonical project root")
+        );
+    }
+
+    #[test]
+    fn project_root_is_discovered_from_nested_working_directory() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let project_root = temp.path().join("project");
+        let nested_dir = project_root.join("src").join("nested");
+        fs::create_dir_all(project_root.join(".spur")).expect("create .spur directory");
+        fs::create_dir_all(&nested_dir).expect("create nested working directory");
+
+        assert_eq!(
+            project_root_from_config_path_and_cwd(None, &nested_dir),
+            project_root.canonicalize().expect("canonical project root")
         );
     }
 
@@ -571,6 +640,8 @@ mod tests {
     async fn connect_or_launch_control_socket_launches_when_socket_is_missing() {
         let temp = tempfile::tempdir().expect("tempdir");
         let socket_path = temp.path().join("notebook.sock");
+        let project_root = temp.path().join("project");
+        let expected_project_root = project_root.clone();
         let launched = Arc::new(AtomicBool::new(false));
         let launched_for_fn = Arc::clone(&launched);
         let socket_for_server = socket_path.clone();
@@ -579,12 +650,17 @@ mod tests {
             assert_eq!(path, socket_for_server.as_path());
             launched_for_fn.store(true, Ordering::SeqCst);
             let listener = UnixListener::bind(&socket_for_server)?;
+            let expected_project_root = expected_project_root.clone();
             tokio::spawn(async move {
                 let (mut stream, _) = listener.accept().await.expect("accept control socket");
                 let request = read_frame(&mut stream).await.expect("read request frame");
                 assert_eq!(
                     serde_json::from_slice::<serde_json::Value>(&request).expect("json"),
-                    json!({"daemon":"notebook.v1","command":"reopen"})
+                    json!({
+                        "daemon":"notebook.v1",
+                        "command":"reopen",
+                        "projectRoot": expected_project_root,
+                    })
                 );
                 write_frame(&mut stream, br#"{"ok":true,"path":"/tmp/notebook.ipynb"}"#)
                     .await
@@ -598,6 +674,7 @@ mod tests {
         let request = serde_json::to_vec(&ControlRequest {
             daemon: "notebook.v1",
             command: "reopen",
+            project_root: Some(&project_root),
             path: None,
             name: None,
             group: None,
