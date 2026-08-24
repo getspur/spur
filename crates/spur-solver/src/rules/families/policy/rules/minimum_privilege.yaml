@@ -5,8 +5,8 @@ family: policy
 profile: nist_rbac
 primitive: minimum_privilege
 summary: Prefer fewer grants while preserving explicitly declared required permissions.
-availability: capability_unavailable
-availability_reason: minimum privilege requires caller-owned utility requirements and an optimization objective
+availability: implemented
+execution_kind: objective
 strength: advisory
 authorities:
   - kind: nist_standard_model
@@ -18,28 +18,126 @@ requires:
 llm_encoding:
   effectiveness: conditional
   problem_shapes:
-    - rank feasible policies after requirements are explicit
+    - Minimize caller-priced candidate role grants after required permissions and hard policy rules are explicit.
   encode_steps:
-    - Declare required permissions
-    - Declare grant costs
-    - Use an optimization objective
+    - Declare non-empty required permissions for every scoped principal.
+    - Declare a positive integer grant cost for every scoped principal-role candidate.
+    - Bind every required permission with an exact hard rbac.permission_reachable rule.
+    - Synthesize candidate grants and read the finite objective bound after complete termination.
   anti_patterns:
-    - Do not infer business-required permissions
+    - Do not infer business-required permissions or grant costs.
+    - Do not treat a satisfiable unoptimized model as a minimum-privilege proof.
   escalate_when:
-    - Escalate until utility requirements are explicit
+    - Escalate until required permissions and positive candidate costs are explicit.
 solver_encoding:
-  theory: ''
-  verification: ''
-  synthesis: ''
-  formula: []
+  theory: QF_LIA with typed optimization
+  verification: rejected because minimum privilege is a synthesis-only objective
+  synthesis: keep reachability, hierarchy, session authorization, and separation of duty hard; minimize caller-declared candidate grant cost
+  formula:
+    - "required permission: rbac.permission_reachable(principal, permission)"
+    - "objective: minimize sum(grant_cost(principal, role) * assigned_candidate(principal, role))"
 subjects:
   cardinality:
-    kind: exact
-    count: 0
+    kind: at_least
+    count: 1
+handler: rbac_minimum_privilege
 examples:
   valid:
-    facts: null
-    expectation: ''
+    facts:
+      family: policy
+      mode: synthesize
+      rules:
+        - {rule_id: rbac.minimum_privilege, subjects: [alice], parameters: {}}
+        - {rule_id: rbac.permission_reachable, subjects: [alice, read], parameters: {}}
+        - {rule_id: rbac.permission_reachable, subjects: [alice, write], parameters: {}}
+      facts:
+        roles:
+          reader: {inherits: [], permissions: [read]}
+          writer: {inherits: [], permissions: [write]}
+          admin: {inherits: [], permissions: [read, write]}
+        principals:
+          alice:
+            roles: []
+            required_permissions: [read, write]
+            grant_costs: {reader: 1, writer: 2, admin: 5}
+        sessions: {}
+      unknowns:
+        - {kind: principal_role, principal: alice, role: reader}
+        - {kind: principal_role, principal: alice, role: writer}
+        - {kind: principal_role, principal: alice, role: admin}
+    expectation: optimized grant cost 3 after complete termination
   invalid:
-    facts: null
-    expectation: ''
+    facts:
+      family: policy
+      mode: synthesize
+      rules:
+        - {rule_id: rbac.minimum_privilege, subjects: [alice], parameters: {}}
+        - {rule_id: rbac.permission_reachable, subjects: [alice, read], parameters: {}}
+        - {rule_id: rbac.permission_reachable, subjects: [alice, write], parameters: {}}
+        - rule_id: rbac.static_separation_of_duty
+          subjects: [alice]
+          parameters: {roles: [reader, writer], max_assigned: 1}
+      facts:
+        roles:
+          reader: {inherits: [], permissions: [read]}
+          writer: {inherits: [], permissions: [write]}
+        principals:
+          alice:
+            roles: []
+            required_permissions: [read, write]
+            grant_costs: {reader: 1, writer: 2}
+        sessions: {}
+      unknowns:
+        - {kind: principal_role, principal: alice, role: reader}
+        - {kind: principal_role, principal: alice, role: writer}
+    expectation: infeasible because hard reachability requires both grants while separation of duty permits at most one
+conformance:
+  valid:
+    - name: reader and writer synthesize the complete exact optimum of three
+      request:
+        family: policy
+        mode: synthesize
+        rules:
+          - {rule_id: rbac.minimum_privilege, subjects: [alice], parameters: {}}
+          - {rule_id: rbac.permission_reachable, subjects: [alice, read], parameters: {}}
+          - {rule_id: rbac.permission_reachable, subjects: [alice, write], parameters: {}}
+        facts:
+          roles:
+            reader: {inherits: [], permissions: [read]}
+            writer: {inherits: [], permissions: [write]}
+            admin: {inherits: [], permissions: [read, write]}
+          principals:
+            alice:
+              roles: []
+              required_permissions: [read, write]
+              grant_costs: {reader: 1, writer: 2, admin: 5}
+          sessions: {}
+        unknowns:
+          - {kind: principal_role, principal: alice, role: reader}
+          - {kind: principal_role, principal: alice, role: writer}
+          - {kind: principal_role, principal: alice, role: admin}
+  invalid:
+    - name: hard separation of duty makes both required permissions unreachable together
+      request:
+        family: policy
+        mode: synthesize
+        rules:
+          - {rule_id: rbac.minimum_privilege, subjects: [alice], parameters: {}}
+          - {rule_id: rbac.permission_reachable, subjects: [alice, read], parameters: {}}
+          - {rule_id: rbac.permission_reachable, subjects: [alice, write], parameters: {}}
+          - rule_id: rbac.static_separation_of_duty
+            subjects: [alice]
+            parameters: {roles: [reader, writer], max_assigned: 1}
+        facts:
+          roles:
+            reader: {inherits: [], permissions: [read]}
+            writer: {inherits: [], permissions: [write]}
+          principals:
+            alice:
+              roles: []
+              required_permissions: [read, write]
+              grant_costs: {reader: 1, writer: 2}
+          sessions: {}
+        unknowns:
+          - {kind: principal_role, principal: alice, role: reader}
+          - {kind: principal_role, principal: alice, role: writer}

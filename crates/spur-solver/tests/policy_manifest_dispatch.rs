@@ -1,6 +1,7 @@
 use serde_json::{json, Value};
-use spur_solver::rules::{
-    execute::prepare, manifest::manifest_rule_handler, manifest_format::NativeHandlerV1,
+use spur_solver::{
+    rules::{execute::prepare, manifest::manifest_rule_handler, manifest_format::NativeHandlerV1},
+    types::{ConstraintExpr, ConstraintItem, ObjectiveOp, ObjectivePriority},
 };
 
 fn policy_request(rule: Value) -> Value {
@@ -107,18 +108,89 @@ fn manifest_contract_failure_precedes_policy_fact_and_constraint_generation() {
 }
 
 #[test]
-fn minimum_privilege_remains_catalog_only_and_never_reaches_native_dispatch() {
-    assert_eq!(manifest_rule_handler("rbac.minimum_privilege"), None);
-
-    let error = prepare(policy_request(json!({
-        "rule_id": "rbac.minimum_privilege",
-        "subjects": []
-    })))
-    .expect_err("catalog-only policy rule must not compile")
-    .to_string();
-
-    assert!(
-        error.contains("unsupported policy rule `rbac.minimum_privilege`"),
-        "unexpected error: {error}"
+fn minimum_privilege_dispatches_a_neutral_binding_and_typed_minimize_objective() {
+    assert_eq!(
+        manifest_rule_handler("rbac.minimum_privilege"),
+        Some(NativeHandlerV1::RbacMinimumPrivilege)
     );
+
+    let prepared = prepare(json!({
+        "family": "policy",
+        "mode": "synthesize",
+        "rules": [
+            {
+                "rule_id": "rbac.minimum_privilege",
+                "subjects": ["alice"],
+                "parameters": {}
+            },
+            {
+                "rule_id": "rbac.permission_reachable",
+                "subjects": ["alice", "read"],
+                "parameters": {}
+            },
+            {
+                "rule_id": "rbac.permission_reachable",
+                "subjects": ["alice", "write"],
+                "parameters": {}
+            }
+        ],
+        "facts": {
+            "roles": {
+                "reader": {"inherits": [], "permissions": ["read"]},
+                "writer": {"inherits": [], "permissions": ["write"]},
+                "admin": {"inherits": [], "permissions": ["read", "write"]}
+            },
+            "principals": {
+                "alice": {
+                    "roles": [],
+                    "required_permissions": ["read", "write"],
+                    "grant_costs": {"reader": 1, "writer": 2, "admin": 5}
+                }
+            },
+            "sessions": {}
+        },
+        "unknowns": [
+            {"kind": "principal_role", "principal": "alice", "role": "reader"},
+            {"kind": "principal_role", "principal": "alice", "role": "writer"},
+            {"kind": "principal_role", "principal": "alice", "role": "admin"}
+        ]
+    }))
+    .expect("minimum privilege manifest handler must compile");
+
+    assert_eq!(prepared.rules.len(), 3);
+    assert_eq!(prepared.rules[0].rule_id, "rbac.minimum_privilege");
+    assert_eq!(
+        prepared.rules[0].predicate,
+        ConstraintExpr::Bool { value: true }
+    );
+    assert_eq!(
+        prepared
+            .request
+            .constraints
+            .iter()
+            .filter(|constraint| matches!(
+                constraint,
+                ConstraintItem::Declared(decl)
+                    if decl.id.as_deref()
+                        == Some("policy_rule_0_rbac_minimum_privilege")
+                        && decl.group.is_none()
+                        && !decl.soft
+                        && decl.weight.is_none()
+                        && matches!(&decl.expr, ConstraintExpr::Bool { value: true })
+            ))
+            .count(),
+        1,
+        "minimum privilege must contribute exactly one named hard-neutral binding"
+    );
+    assert!(
+        prepared
+            .request
+            .constraints
+            .iter()
+            .all(|constraint| constraint.soft_weight().is_none()),
+        "policy dispatch must not lower any rule to a soft constraint"
+    );
+    assert_eq!(prepared.request.objective_priority, ObjectivePriority::Lex);
+    assert_eq!(prepared.request.objectives.len(), 1);
+    assert_eq!(prepared.request.objectives[0].op, ObjectiveOp::Minimize);
 }

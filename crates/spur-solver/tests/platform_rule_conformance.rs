@@ -4,18 +4,20 @@ use spur_solver::{
     rules::{
         execute::{prepare, run},
         manifest::{
-            manifest_conformance_vectors, manifest_executable_rule_ids, manifest_rule_handler,
+            manifest_conformance_vectors, manifest_executable_rule_ids, manifest_rule_contract,
+            manifest_rule_handler,
         },
-        manifest_format::{ConformanceVectorV1, NativeHandlerV1},
+        manifest_format::{ConformanceVectorV1, ExecutionKindV1, NativeHandlerV1},
         RuleOutcome, RuleSolveMode,
     },
     service::SolverService,
-    types::SolveStatus,
+    types::{ObjectiveBound, OptimizationTermination, SolveStatus},
 };
 
 struct ConformanceCase<'a> {
     rule_id: &'a str,
     handler: NativeHandlerV1,
+    execution_kind: ExecutionKindV1,
     valid: &'a [ConformanceVectorV1],
     invalid: &'a [ConformanceVectorV1],
 }
@@ -24,6 +26,8 @@ fn cases() -> Vec<ConformanceCase<'static>> {
     manifest_executable_rule_ids()
         .iter()
         .map(|rule_id| {
+            let contract = manifest_rule_contract(rule_id)
+                .unwrap_or_else(|| panic!("executable rule `{rule_id}` has no manifest contract"));
             let handler = manifest_rule_handler(rule_id)
                 .unwrap_or_else(|| panic!("executable rule `{rule_id}` has no native handler"));
             let vectors = manifest_conformance_vectors(rule_id).unwrap_or_else(|| {
@@ -33,6 +37,7 @@ fn cases() -> Vec<ConformanceCase<'static>> {
             ConformanceCase {
                 rule_id,
                 handler,
+                execution_kind: contract.execution_kind,
                 valid: &vectors.valid,
                 invalid: &vectors.invalid,
             }
@@ -52,9 +57,10 @@ fn manifest_vectors_cover_every_executable_rule_and_native_handler_exactly_once(
 
     assert_eq!(
         cases.len(),
-        expected_rule_ids.len(),
-        "conformance must contain one vector set per executable rule"
+        41,
+        "conformance must contain exactly 41 executable rule vector sets"
     );
+    assert_eq!(cases.len(), expected_rule_ids.len());
     for case in &cases {
         assert!(
             tested_rule_ids.insert(case.rule_id),
@@ -124,6 +130,44 @@ async fn every_manifest_valid_vector_passes_and_invalid_vector_is_rejected() {
                 case.rule_id,
                 vector.name
             );
+            if case.execution_kind == ExecutionKindV1::Objective {
+                let optimization = result.solver.optimization.as_ref().unwrap_or_else(|| {
+                    panic!(
+                        "{} valid objective vector `{}` lacked optimization metadata",
+                        case.rule_id, vector.name
+                    )
+                });
+                assert_eq!(
+                    optimization.termination,
+                    OptimizationTermination::Complete,
+                    "{} valid objective vector `{}` termination",
+                    case.rule_id,
+                    vector.name
+                );
+                assert_eq!(
+                    optimization.solutions.len(),
+                    1,
+                    "{} valid objective vector `{}` solution count",
+                    case.rule_id,
+                    vector.name
+                );
+                assert_eq!(
+                    optimization.solutions[0].objectives.len(),
+                    1,
+                    "{} valid objective vector `{}` objective count",
+                    case.rule_id,
+                    vector.name
+                );
+                assert!(
+                    matches!(
+                        optimization.solutions[0].objectives[0].bound,
+                        ObjectiveBound::Finite { .. }
+                    ),
+                    "{} valid objective vector `{}` must have a finite objective bound",
+                    case.rule_id,
+                    vector.name
+                );
+            }
         }
 
         for vector in case.invalid {
@@ -147,6 +191,15 @@ async fn every_manifest_valid_vector_passes_and_invalid_vector_is_rejected() {
                 case.rule_id,
                 vector.name
             );
+            if case.execution_kind == ExecutionKindV1::Objective {
+                assert_eq!(
+                    result.mode,
+                    RuleSolveMode::Synthesize,
+                    "{} invalid objective vector `{}` must use synthesis mode",
+                    case.rule_id,
+                    vector.name
+                );
+            }
             match result.mode {
                 RuleSolveMode::Verify => {
                     assert_eq!(result.outcome, RuleOutcome::Fail);

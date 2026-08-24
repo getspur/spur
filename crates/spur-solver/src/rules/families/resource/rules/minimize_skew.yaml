@@ -1,0 +1,124 @@
+schema_version: 1
+id: placement.minimize_skew
+rule_version: 1
+family: resource
+profile: topology_placement
+primitive: minimum_pairwise_skew
+summary: Minimize the maximum pairwise difference between explicitly declared topology-domain counts while conserving replicas.
+availability: implemented
+strength: advisory
+execution_kind: objective
+authorities:
+  - kind: derived_reference
+    title: Finite declared-domain model derived from Kubernetes topology spread concepts
+    url: https://kubernetes.io/docs/concepts/scheduling-eviction/topology-spread-constraints/
+requires:
+  - workload.replicas
+  - workload.domain_counts
+  - bounded domain-count unknowns
+llm_encoding:
+  effectiveness: high
+  problem_shapes:
+    - Minimize maximum pairwise skew across an explicit finite set of topology domains.
+  encode_steps:
+    - Bind exactly one workload with at least two explicitly declared domains.
+    - Bound replicas and every changeable domain count, then conserve replicas across all declared domains.
+    - Bound one internal skew above both directions of every unordered domain pair and minimize it once.
+  anti_patterns:
+    - Do not query or infer live scheduler state or implicit domains.
+    - Do not replace capacity, quota, request-limit, minimum-domain, or topology-cap bindings with preferences.
+  escalate_when:
+    - Escalate affinity, taints, priority, or scheduler-global minimum-domain semantics to separate rule primitives.
+solver_encoding:
+  theory: QF_LIA with typed optimization
+  verification: unsupported; this objective is synthesis-only
+  synthesis: constrain one bounded skew above every pairwise absolute difference and emit one minimize objective after all hard predicates
+  formula:
+    - sum count(domain) = workload.replicas
+    - skew >= count(a) - count(b)
+    - skew >= count(b) - count(a)
+    - "synthesis objective: minimize skew"
+subjects:
+  cardinality:
+    kind: exact
+    count: 1
+parameters: []
+handler: placement_minimize_skew
+examples:
+  valid:
+    facts:
+      family: resource
+      mode: synthesize
+      rules:
+        - {rule_id: placement.minimize_skew, subjects: [api], parameters: {}}
+      facts:
+        workloads:
+          api:
+            replicas: 3
+            requests: {}
+            limits: {}
+            domain_counts: {zone-a: null, zone-b: null}
+        pools: {}
+        quotas: {}
+      unknowns:
+        - {subject: api, field: domain_counts.zone-a, min: 0, max: 3}
+        - {subject: api, field: domain_counts.zone-b, min: 0, max: 3}
+    expectation: optimized topology skew 1 after complete termination
+  invalid:
+    facts:
+      family: resource
+      mode: synthesize
+      rules:
+        - {rule_id: placement.minimize_skew, subjects: [api], parameters: {}}
+      facts:
+        workloads:
+          api:
+            replicas: 3
+            requests: {}
+            limits: {}
+            domain_counts: {zone-a: null, zone-b: null}
+        pools: {}
+        quotas: {}
+      unknowns:
+        - {subject: api, field: domain_counts.zone-a, min: 0, max: 1}
+        - {subject: api, field: domain_counts.zone-b, min: 0, max: 1}
+    expectation: infeasible because bounded counts cannot conserve three replicas
+conformance:
+  valid:
+    - name: three replicas across two domains synthesize complete optimum skew one
+      request:
+        family: resource
+        mode: synthesize
+        rules:
+          - {rule_id: placement.minimize_skew, subjects: [api], parameters: {}}
+        facts:
+          workloads:
+            api:
+              replicas: 3
+              requests: {}
+              limits: {}
+              domain_counts: {zone-a: null, zone-b: null}
+          pools: {}
+          quotas: {}
+        unknowns:
+          - {subject: api, field: domain_counts.zone-a, min: 0, max: 3}
+          - {subject: api, field: domain_counts.zone-b, min: 0, max: 3}
+  invalid:
+    - name: bounded counts cannot conserve three replicas
+      request:
+        family: resource
+        mode: synthesize
+        rules:
+          - {rule_id: placement.minimize_skew, subjects: [api], parameters: {}}
+        facts:
+          workloads:
+            api:
+              replicas: 3
+              requests: {}
+              limits: {}
+              domain_counts: {zone-a: null, zone-b: null}
+          pools: {}
+          quotas: {}
+        unknowns:
+          - {subject: api, field: domain_counts.zone-a, min: 0, max: 1}
+          - {subject: api, field: domain_counts.zone-b, min: 0, max: 1}

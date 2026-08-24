@@ -23,9 +23,12 @@ fn family_rule_enums_equal_manifest_executable_ids() {
         assert_eq!(actual, expected, "{family} compiler rule enum drifted");
     }
 
-    assert!(!schema_rule_ids("policy")
+    assert!(schema_rule_ids("policy")
         .iter()
         .any(|rule_id| rule_id == "rbac.minimum_privilege"));
+    assert!(schema_rule_ids("resource")
+        .iter()
+        .any(|rule_id| rule_id == "placement.minimize_skew"));
 }
 
 #[test]

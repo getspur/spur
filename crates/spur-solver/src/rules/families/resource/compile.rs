@@ -11,7 +11,10 @@ use crate::{
         manifest::{manifest_rule_handler, validate_binding_contract},
         manifest_family_executable_rule_ids,
         manifest_format::NativeHandlerV1,
-        primitives::{add, and, boolean, eq, ge, gt, int, le, mul, or, request, sub, var},
+        primitives::{
+            add, and, boolean, eq, ge, gt, int, le, mul, or, push_single_minimize, request, sub,
+            var,
+        },
         CompiledRule, RuleSolveMode,
     },
     types::{
@@ -138,6 +141,16 @@ fn compile(input: Value) -> Result<FamilyCompilation, String> {
         .iter()
         .map(validate_manifest_binding)
         .collect::<Result<Vec<_>, _>>()?;
+    let skew_bindings = bindings
+        .iter()
+        .filter(|binding| binding.handler == NativeHandlerV1::PlacementMinimizeSkew)
+        .count();
+    if skew_bindings > 1 {
+        return Err("at most one placement.minimize_skew binding is allowed".to_owned());
+    }
+    if input.mode == RuleSolveMode::Verify && skew_bindings == 1 {
+        return Err("placement.minimize_skew is synthesis-only".to_owned());
+    }
     validate_facts(&input.facts, &input.unknowns)?;
     let mut resolver = ResourceResolver::new(input.facts, &input.unknowns);
     let mut rules = Vec::with_capacity(input.rules.len());
@@ -149,7 +162,7 @@ fn compile(input: Value) -> Result<FamilyCompilation, String> {
             predicate,
         ));
     }
-    let solver_request = request(
+    let mut solver_request = request(
         "resource",
         resolver.variables,
         &rules,
@@ -157,6 +170,16 @@ fn compile(input: Value) -> Result<FamilyCompilation, String> {
         input.persist,
         input.include_smt,
     );
+    if input.mode == RuleSolveMode::Synthesize && skew_bindings == 1 {
+        push_single_minimize(
+            &mut solver_request,
+            var(resolver
+                .skew_variable
+                .as_ref()
+                .expect("minimize skew binding creates a variable")),
+            "placement.minimize_skew",
+        )?;
+    }
     solver_request
         .validate()
         .map_err(|error| format!("compiled resource rules are invalid: {error}"))?;
@@ -227,43 +250,11 @@ fn validate_legacy_static_contract(binding: &ResourceRuleBinding) -> Result<(), 
             )?;
             Ok(())
         }
-        Some(
-            NativeHandlerV1::A11yFocusNotObscured
-            | NativeHandlerV1::A11yReflow
-            | NativeHandlerV1::A11yTargetSize
-            | NativeHandlerV1::A11yTextContrast
-            | NativeHandlerV1::LayoutAxisCapacity
-            | NativeHandlerV1::LayoutContainment
-            | NativeHandlerV1::LayoutNonOverlap
-            | NativeHandlerV1::MediaAspectRatio
-            | NativeHandlerV1::RbacDynamicSeparationOfDuty
-            | NativeHandlerV1::RbacPermissionReachable
-            | NativeHandlerV1::RbacRoleHierarchyAcyclic
-            | NativeHandlerV1::RbacStaticSeparationOfDuty
-            | NativeHandlerV1::ConfigurationRequiresAny
-            | NativeHandlerV1::ConfigurationExcludes
-            | NativeHandlerV1::ConfigurationSelectionCardinality
-            | NativeHandlerV1::ConfigurationAttributeAllowedPair
-            | NativeHandlerV1::ConfigurationVersionInterval
-            | NativeHandlerV1::SchedulingAssignmentExactlyOnce
-            | NativeHandlerV1::SchedulingPlacementAllowed
-            | NativeHandlerV1::SchedulingPrecedenceFinishStart
-            | NativeHandlerV1::SchedulingCumulativeCapacity
-            | NativeHandlerV1::SchedulingMinimizeMakespan
-            | NativeHandlerV1::WorkflowInitialStateAllowed
-            | NativeHandlerV1::WorkflowTransitionAllowed
-            | NativeHandlerV1::WorkflowSafetyInvariant
-            | NativeHandlerV1::WorkflowBoundedReachability
-            | NativeHandlerV1::DataIntegrityUnique
-            | NativeHandlerV1::DataIntegrityForeignKey
-            | NativeHandlerV1::DataIntegrityCardinality
-            | NativeHandlerV1::DataIntegrityValueRange
-            | NativeHandlerV1::DataIntegrityConditionalRequired
-            | NativeHandlerV1::DataIntegrityAggregateBalance
-            | NativeHandlerV1::DataIntegrityMutuallyConsistent
-            | NativeHandlerV1::DataIntegrityTemporalConsistency,
-        )
-        | None => Err(format!("unsupported resource rule `{}`", binding.rule_id)),
+        Some(NativeHandlerV1::PlacementMinimizeSkew) => {
+            require_subjects(binding, 1, Some(1))?;
+            reject_placement_parameters(binding)
+        }
+        Some(_) | None => Err(format!("unsupported resource rule `{}`", binding.rule_id)),
     }
 }
 
@@ -430,42 +421,10 @@ fn compile_binding(
             }
             Ok(conjunction(links))
         }
-        NativeHandlerV1::A11yFocusNotObscured
-        | NativeHandlerV1::A11yReflow
-        | NativeHandlerV1::A11yTargetSize
-        | NativeHandlerV1::A11yTextContrast
-        | NativeHandlerV1::LayoutAxisCapacity
-        | NativeHandlerV1::LayoutContainment
-        | NativeHandlerV1::LayoutNonOverlap
-        | NativeHandlerV1::MediaAspectRatio
-        | NativeHandlerV1::RbacDynamicSeparationOfDuty
-        | NativeHandlerV1::RbacPermissionReachable
-        | NativeHandlerV1::RbacRoleHierarchyAcyclic
-        | NativeHandlerV1::RbacStaticSeparationOfDuty
-        | NativeHandlerV1::ConfigurationRequiresAny
-        | NativeHandlerV1::ConfigurationExcludes
-        | NativeHandlerV1::ConfigurationSelectionCardinality
-        | NativeHandlerV1::ConfigurationAttributeAllowedPair
-        | NativeHandlerV1::ConfigurationVersionInterval
-        | NativeHandlerV1::SchedulingAssignmentExactlyOnce
-        | NativeHandlerV1::SchedulingPlacementAllowed
-        | NativeHandlerV1::SchedulingPrecedenceFinishStart
-        | NativeHandlerV1::SchedulingCumulativeCapacity
-        | NativeHandlerV1::SchedulingMinimizeMakespan
-        | NativeHandlerV1::WorkflowInitialStateAllowed
-        | NativeHandlerV1::WorkflowTransitionAllowed
-        | NativeHandlerV1::WorkflowSafetyInvariant
-        | NativeHandlerV1::WorkflowBoundedReachability
-        | NativeHandlerV1::DataIntegrityUnique
-        | NativeHandlerV1::DataIntegrityForeignKey
-        | NativeHandlerV1::DataIntegrityCardinality
-        | NativeHandlerV1::DataIntegrityValueRange
-        | NativeHandlerV1::DataIntegrityConditionalRequired
-        | NativeHandlerV1::DataIntegrityAggregateBalance
-        | NativeHandlerV1::DataIntegrityMutuallyConsistent
-        | NativeHandlerV1::DataIntegrityTemporalConsistency => {
-            Err(format!("unsupported resource rule `{}`", source.rule_id))
+        NativeHandlerV1::PlacementMinimizeSkew => {
+            Ok(conjunction(minimize_skew(resolver, &source.subjects[0])?))
         }
+        _ => Err(format!("unsupported resource rule `{}`", source.rule_id)),
     }
 }
 
@@ -518,6 +477,67 @@ fn topology_max_skew(
             predicates.push(le(
                 sub(unknown_counts[right].clone(), unknown_counts[left].clone()),
                 int(max_skew),
+            ));
+        }
+    }
+    Ok(predicates)
+}
+
+fn minimize_skew(
+    resolver: &mut ResourceResolver,
+    workload: &str,
+) -> Result<Vec<ConstraintExpr>, String> {
+    resolver.require_workload(workload)?;
+    let domains = resolver.facts.workloads[workload]
+        .domain_counts
+        .iter()
+        .map(|(domain, value)| (domain.clone(), *value))
+        .collect::<Vec<_>>();
+    if domains.len() < 2 {
+        return Err("placement.minimize_skew requires at least two declared domains".to_owned());
+    }
+
+    let unknown_domains = domains
+        .iter()
+        .filter_map(|(domain, value)| value.is_none().then_some(domain))
+        .collect::<Vec<_>>();
+    if unknown_domains.is_empty() {
+        return Err(
+            "placement.minimize_skew requires at least one bounded domain-count unknown".to_owned(),
+        );
+    }
+    for domain in unknown_domains {
+        let field = format!("domain_counts.{domain}");
+        if !resolver.has_bounded_unknown(workload, &field) {
+            return Err(format!(
+                "{workload}.{field} is null and has no bounded unknown declaration"
+            ));
+        }
+    }
+
+    let replica_upper_bound = resolver.workload_upper_bound(workload, "replicas")?;
+    let replicas = resolver.workload_field(workload, "replicas")?;
+    let counts = domains
+        .iter()
+        .map(|(domain, _)| resolver.workload_field(workload, &format!("domain_counts.{domain}")))
+        .collect::<Result<Vec<_>, _>>()?;
+    let skew = resolver.add_skew_variable(workload, replica_upper_bound)?;
+
+    let mut predicates = counts
+        .iter()
+        .cloned()
+        .map(|count| ge(count, int(0)))
+        .collect::<Vec<_>>();
+    predicates.push(eq(sum(counts.clone()), replicas));
+    for left in 0..counts.len() {
+        for right in left + 1..counts.len() {
+            predicates.push(ge(
+                skew.clone(),
+                sub(counts[left].clone(), counts[right].clone()),
+            ));
+            predicates.push(ge(
+                skew.clone(),
+                sub(counts[right].clone(), counts[left].clone()),
             ));
         }
     }
@@ -695,7 +715,9 @@ fn sum(expressions: Vec<ConstraintExpr>) -> ConstraintExpr {
 struct ResourceResolver {
     facts: ResourceFacts,
     paths: BTreeMap<(String, String), String>,
+    bounds: BTreeMap<(String, String), (i64, i64)>,
     presence_paths: BTreeMap<(String, String), String>,
+    skew_variable: Option<String>,
     variables: Vec<Variable>,
     projections: Vec<ModelProjection>,
 }
@@ -707,6 +729,7 @@ impl ResourceResolver {
             (&left.subject, &left.field).cmp(&(&right.subject, &right.field))
         });
         let mut paths = BTreeMap::new();
+        let mut bounds = BTreeMap::new();
         let mut variables = Vec::new();
         let mut projections = Vec::new();
         for (index, unknown) in sorted.into_iter().enumerate() {
@@ -714,6 +737,10 @@ impl ResourceResolver {
             paths.insert(
                 (unknown.subject.clone(), unknown.field.clone()),
                 variable.clone(),
+            );
+            bounds.insert(
+                (unknown.subject.clone(), unknown.field.clone()),
+                (unknown.min, unknown.max),
             );
             variables.push(Variable::IntRange {
                 name: variable.clone(),
@@ -729,7 +756,9 @@ impl ResourceResolver {
         Self {
             facts,
             paths,
+            bounds,
             presence_paths: BTreeMap::new(),
+            skew_variable: None,
             variables,
             projections,
         }
@@ -752,6 +781,50 @@ impl ResourceResolver {
             .cloned()
             .map(var)
             .ok_or_else(|| format!("{workload}.{field} is null and has no unknown declaration"))
+    }
+
+    fn has_bounded_unknown(&self, workload: &str, field: &str) -> bool {
+        self.bounds
+            .contains_key(&(workload.to_owned(), field.to_owned()))
+    }
+
+    fn workload_upper_bound(&self, workload: &str, field: &str) -> Result<i64, String> {
+        self.require_workload(workload)?;
+        if let Some(value) = workload_value(&self.facts.workloads[workload], field)? {
+            return Ok(value);
+        }
+        self.bounds
+            .get(&(workload.to_owned(), field.to_owned()))
+            .map(|(_, maximum)| *maximum)
+            .ok_or_else(|| {
+                format!("{workload}.{field} is null and has no bounded unknown declaration")
+            })
+    }
+
+    fn add_skew_variable(
+        &mut self,
+        workload: &str,
+        replica_upper_bound: i64,
+    ) -> Result<ConstraintExpr, String> {
+        if self.skew_variable.is_some() {
+            return Err("at most one placement.minimize_skew binding is allowed".to_owned());
+        }
+        if self.variables.len() >= MAX_VARIABLES {
+            return Err(format!("resource variables exceed maximum {MAX_VARIABLES}"));
+        }
+        let name = format!("resource_skew_{}", self.variables.len());
+        self.variables.push(Variable::IntRange {
+            name: name.clone(),
+            min: 0,
+            max: replica_upper_bound,
+        });
+        self.projections.push(ModelProjection {
+            variable: name.clone(),
+            subject: workload.to_owned(),
+            field: "topology_skew".to_owned(),
+        });
+        self.skew_variable = Some(name.clone());
+        Ok(var(name))
     }
 
     fn presence(&mut self, workload: &str, domain: &str) -> Result<ConstraintExpr, String> {

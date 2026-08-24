@@ -10,8 +10,10 @@ use crate::{
         compiler::{FamilyCompilation, FamilyCompileError, ModelProjection, RuleFamilyCompiler},
         manifest::validate_binding_contract,
         manifest_family_executable_rule_ids,
-        manifest_format::NativeHandlerV1,
-        primitives::{add, and, boolean, eq, int, le, lt, or, request, var},
+        manifest_format::{ExecutionKindV1, NativeHandlerV1},
+        primitives::{
+            add, and, boolean, eq, int, le, lt, mul, or, push_single_minimize, request, var,
+        },
         CompiledRule, RuleSolveMode,
     },
     types::{
@@ -80,6 +82,7 @@ struct PolicyParameters {
 
 struct ValidatedPolicyBinding<'a> {
     source: &'a PolicyRuleBinding,
+    execution_kind: ExecutionKindV1,
     handler: NativeHandlerV1,
     parameters: PolicyParameters,
 }
@@ -106,6 +109,10 @@ struct RoleFacts {
 struct PrincipalFacts {
     #[serde(default)]
     roles: Vec<String>,
+    #[serde(default)]
+    required_permissions: Vec<String>,
+    #[serde(default)]
+    grant_costs: BTreeMap<String, i64>,
 }
 
 #[derive(Clone, Deserialize)]
@@ -142,22 +149,44 @@ fn compile(input: Value) -> Result<FamilyCompilation, String> {
         .iter()
         .map(validate_manifest_binding)
         .collect::<Result<Vec<_>, _>>()?;
+    let objective_bindings = bindings
+        .iter()
+        .filter(|binding| binding.execution_kind == ExecutionKindV1::Objective)
+        .collect::<Vec<_>>();
+    if objective_bindings.len() > 1 {
+        return Err("at most one policy objective binding is allowed".to_owned());
+    }
+    if input.mode == RuleSolveMode::Verify && !objective_bindings.is_empty() {
+        return Err("policy objectives are synthesis-only".to_owned());
+    }
     validate_facts(&input.facts, &input.unknowns)?;
+    if let Some(binding) = objective_bindings.first() {
+        validate_minimum_privilege(binding, &bindings, &input.facts, &input.unknowns)?;
+    }
     let mut resolver = PolicyResolver::new(input.facts, &input.unknowns);
     let session_authorization = resolver.session_authorization();
     let mut rules = Vec::with_capacity(input.rules.len());
     for (index, binding) in bindings.iter().enumerate() {
-        let predicate = and(vec![
-            session_authorization.clone(),
-            compile_binding(binding, &mut resolver)?,
-        ]);
+        let predicate = compile_binding(binding, &mut resolver)?;
+        let predicate = if binding.execution_kind == ExecutionKindV1::Objective {
+            predicate
+        } else {
+            and(vec![session_authorization.clone(), predicate])
+        };
         rules.push(CompiledRule::new(
             binding.source.rule_id.clone(),
             index,
             predicate,
         ));
     }
-    let solver_request = request(
+    let objective = objective_bindings
+        .first()
+        .map(|binding| {
+            minimum_privilege_cost(&binding.source.subjects, &resolver)
+                .map(|expr| (binding.source.rule_id.as_str(), expr))
+        })
+        .transpose()?;
+    let mut solver_request = request(
         "policy",
         resolver.variables,
         &rules,
@@ -165,6 +194,9 @@ fn compile(input: Value) -> Result<FamilyCompilation, String> {
         input.persist,
         input.include_smt,
     );
+    if let Some((rule_id, expr)) = objective {
+        push_single_minimize(&mut solver_request, expr, rule_id)?;
+    }
     solver_request
         .validate()
         .map_err(|error| format!("compiled policy rules are invalid: {error}"))?;
@@ -192,6 +224,7 @@ fn validate_manifest_binding(
 
     Ok(ValidatedPolicyBinding {
         source: binding,
+        execution_kind: validated.execution_kind,
         handler: validated.handler,
         parameters,
     })
@@ -208,6 +241,12 @@ fn stable_contract_error(binding: &PolicyRuleBinding, message: String) -> String
 // established policy diagnostics while static contract failures move before facts.
 fn validate_legacy_static_contract(binding: &PolicyRuleBinding) -> Result<(), String> {
     match binding.rule_id.as_str() {
+        "rbac.minimum_privilege" => {
+            if binding.subjects.is_empty() {
+                return Err("rule `rbac.minimum_privilege` requires at least 1 subject".to_owned());
+            }
+            reject_parameters(binding)
+        }
         "rbac.permission_reachable" => {
             require_subjects(binding, 2)?;
             reject_parameters(binding)
@@ -264,9 +303,25 @@ fn validate_facts(facts: &PolicyFacts, unknowns: &[PolicyUnknown]) -> Result<(),
             &principal_facts.roles,
             &format!("principal `{principal}` roles"),
         )?;
+        reject_duplicates(
+            &principal_facts.required_permissions,
+            &format!("principal `{principal}` required permissions"),
+        )?;
         for role in &principal_facts.roles {
             if !facts.roles.contains_key(role) {
                 return Err(format!("principal `{principal}` has unknown role `{role}`"));
+            }
+        }
+        for (role, cost) in &principal_facts.grant_costs {
+            if !facts.roles.contains_key(role) {
+                return Err(format!(
+                    "principal `{principal}` grant cost references unknown role `{role}`"
+                ));
+            }
+            if *cost <= 0 {
+                return Err(format!(
+                    "principal `{principal}` grant cost for role `{role}` must be positive"
+                ));
             }
         }
     }
@@ -326,6 +381,77 @@ fn validate_facts(facts: &PolicyFacts, unknowns: &[PolicyUnknown]) -> Result<(),
         if !seen.insert(key.clone()) {
             return Err(format!("duplicate policy unknown `{key}`"));
         }
+    }
+    Ok(())
+}
+
+fn validate_minimum_privilege(
+    objective: &ValidatedPolicyBinding<'_>,
+    bindings: &[ValidatedPolicyBinding<'_>],
+    facts: &PolicyFacts,
+    unknowns: &[PolicyUnknown],
+) -> Result<(), String> {
+    if objective.handler != NativeHandlerV1::RbacMinimumPrivilege {
+        return Err(format!(
+            "unsupported policy objective `{}`",
+            objective.source.rule_id
+        ));
+    }
+    reject_duplicates(
+        &objective.source.subjects,
+        "minimum privilege objective subjects",
+    )?;
+
+    let scoped = objective.source.subjects.iter().collect::<BTreeSet<_>>();
+    for principal in &objective.source.subjects {
+        let principal_facts = facts
+            .principals
+            .get(principal)
+            .ok_or_else(|| format!("unknown policy principal `{principal}`"))?;
+        if principal_facts.required_permissions.is_empty() {
+            return Err(format!(
+                "principal `{principal}` requires non-empty `required_permissions`"
+            ));
+        }
+        if principal_facts.grant_costs.is_empty() {
+            return Err(format!(
+                "principal `{principal}` requires non-empty `grant_costs`"
+            ));
+        }
+        for permission in &principal_facts.required_permissions {
+            let covered = bindings.iter().any(|binding| {
+                binding.execution_kind == ExecutionKindV1::Constraint
+                    && binding.handler == NativeHandlerV1::RbacPermissionReachable
+                    && binding.source.rule_id == "rbac.permission_reachable"
+                    && binding.source.subjects == [principal.as_str(), permission.as_str()]
+            });
+            if !covered {
+                return Err(format!(
+                    "principal `{principal}` required permission `{permission}` needs an exact hard rbac.permission_reachable binding"
+                ));
+            }
+        }
+    }
+
+    let mut candidates = 0_usize;
+    for unknown in unknowns {
+        if let PolicyUnknown::PrincipalRole { principal, role } = unknown {
+            if !scoped.contains(principal) {
+                continue;
+            }
+            candidates = candidates.saturating_add(1);
+            if !facts.principals[principal].grant_costs.contains_key(role) {
+                return Err(format!(
+                    "principal `{principal}` candidate role `{role}` requires a grant cost"
+                ));
+            }
+        }
+    }
+    if candidates == 0 {
+        return Err(
+            "rbac.minimum_privilege requires at least one scoped principal_role candidate"
+                .to_owned(),
+        );
     }
     Ok(())
 }
@@ -407,6 +533,7 @@ fn compile_binding(
                 or(assignments)
             })
         }
+        NativeHandlerV1::RbacMinimumPrivilege => Ok(boolean(true)),
         NativeHandlerV1::RbacRoleHierarchyAcyclic => {
             let edges = resolver
                 .facts
@@ -470,43 +597,7 @@ fn compile_binding(
                 int(max),
             ))
         }
-        NativeHandlerV1::A11yFocusNotObscured
-        | NativeHandlerV1::A11yReflow
-        | NativeHandlerV1::A11yTargetSize
-        | NativeHandlerV1::A11yTextContrast
-        | NativeHandlerV1::LayoutAxisCapacity
-        | NativeHandlerV1::LayoutContainment
-        | NativeHandlerV1::LayoutNonOverlap
-        | NativeHandlerV1::MediaAspectRatio
-        | NativeHandlerV1::PlacementMinimumFailureDomains
-        | NativeHandlerV1::PlacementTopologyMaxSkew
-        | NativeHandlerV1::ResourceAggregateCapacity
-        | NativeHandlerV1::ResourceQuotaCapacity
-        | NativeHandlerV1::ResourceRequestWithinLimit
-        | NativeHandlerV1::ConfigurationRequiresAny
-        | NativeHandlerV1::ConfigurationExcludes
-        | NativeHandlerV1::ConfigurationSelectionCardinality
-        | NativeHandlerV1::ConfigurationAttributeAllowedPair
-        | NativeHandlerV1::ConfigurationVersionInterval
-        | NativeHandlerV1::SchedulingAssignmentExactlyOnce
-        | NativeHandlerV1::SchedulingPlacementAllowed
-        | NativeHandlerV1::SchedulingPrecedenceFinishStart
-        | NativeHandlerV1::SchedulingCumulativeCapacity
-        | NativeHandlerV1::SchedulingMinimizeMakespan
-        | NativeHandlerV1::WorkflowInitialStateAllowed
-        | NativeHandlerV1::WorkflowTransitionAllowed
-        | NativeHandlerV1::WorkflowSafetyInvariant
-        | NativeHandlerV1::WorkflowBoundedReachability
-        | NativeHandlerV1::DataIntegrityUnique
-        | NativeHandlerV1::DataIntegrityForeignKey
-        | NativeHandlerV1::DataIntegrityCardinality
-        | NativeHandlerV1::DataIntegrityValueRange
-        | NativeHandlerV1::DataIntegrityConditionalRequired
-        | NativeHandlerV1::DataIntegrityAggregateBalance
-        | NativeHandlerV1::DataIntegrityMutuallyConsistent
-        | NativeHandlerV1::DataIntegrityTemporalConsistency => {
-            Err(format!("unsupported policy rule `{}`", source.rule_id))
-        }
+        _ => Err(format!("unsupported policy rule `{}`", source.rule_id)),
     }
 }
 
@@ -584,6 +675,28 @@ fn sum(mut expressions: Vec<ConstraintExpr>) -> ConstraintExpr {
         1 => expressions.remove(0),
         _ => add(expressions),
     }
+}
+
+fn minimum_privilege_cost(
+    subjects: &[String],
+    resolver: &PolicyResolver,
+) -> Result<ConstraintExpr, String> {
+    let scoped = subjects.iter().collect::<BTreeSet<_>>();
+    let mut terms = Vec::new();
+    for ((principal, role), variable) in &resolver.principal_unknowns {
+        if !scoped.contains(principal) {
+            continue;
+        }
+        let cost = resolver.facts.principals[principal]
+            .grant_costs
+            .get(role)
+            .copied()
+            .ok_or_else(|| {
+                format!("principal `{principal}` candidate role `{role}` requires a grant cost")
+            })?;
+        terms.push(mul(vec![int(cost), var(variable.clone())]));
+    }
+    Ok(sum(terms))
 }
 
 struct PolicyResolver {
@@ -798,7 +911,7 @@ fn input_schema() -> Value {
                     "type": "object",
                     "properties": {
                         "rule_id": {"type": "string", "enum": rule_ids},
-                        "subjects": {"type": "array", "maxItems": 2, "items": {"type": "string"}},
+                        "subjects": {"type": "array", "maxItems": MAX_CONSTRAINTS, "items": {"type": "string"}},
                         "parameters": {
                             "type": "object",
                             "properties": {
@@ -827,7 +940,17 @@ fn input_schema() -> Value {
                     "principals": {
                         "type": "object", "maxProperties": MAX_CONSTRAINTS,
                         "additionalProperties": {
-                            "type": "object", "properties": {"roles": role_array}, "additionalProperties": false
+                            "type": "object",
+                            "properties": {
+                                "roles": role_array,
+                                "required_permissions": role_array,
+                                "grant_costs": {
+                                    "type": "object",
+                                    "maxProperties": MAX_VARIABLES,
+                                    "additionalProperties": {"type": "integer", "minimum": 1}
+                                }
+                            },
+                            "additionalProperties": false
                         }
                     },
                     "sessions": {

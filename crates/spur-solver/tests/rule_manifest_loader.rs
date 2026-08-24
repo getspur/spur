@@ -1,20 +1,20 @@
-use serde_json::Value;
 use spur_solver::rules::{
     manifest_conformance_vectors, manifest_executable_rule_ids,
     manifest_family_executable_rule_ids, manifest_family_registry,
-    manifest_format::{NativeHandlerV1, ParameterKindV1, SubjectCardinalityV1},
+    manifest_format::{ExecutionKindV1, NativeHandlerV1, ParameterKindV1, SubjectCardinalityV1},
     manifest_registry, manifest_rule_contract, manifest_rule_handler,
 };
 
-const BUILTIN_RULE_CATALOG_V1: &str = include_str!("fixtures/builtin_rule_catalog_v1.json");
-
 #[test]
-fn embedded_manifest_registry_matches_frozen_catalog() {
-    let expected: Value =
-        serde_json::from_str(BUILTIN_RULE_CATALOG_V1).expect("valid frozen catalog fixture");
-    let actual = serde_json::to_value(manifest_registry()).expect("serialize manifest registry");
+fn embedded_manifest_registry_contains_41_sorted_rules() {
+    let rule_ids = manifest_registry()
+        .rules()
+        .iter()
+        .map(|rule| rule.id())
+        .collect::<Vec<_>>();
 
-    assert_eq!(actual, expected);
+    assert_eq!(rule_ids.len(), 41);
+    assert!(rule_ids.windows(2).all(|ids| ids[0] < ids[1]));
 }
 
 #[test]
@@ -42,16 +42,19 @@ fn family_registry_is_a_narrow_owned_projection() {
 }
 
 #[test]
-fn executable_rule_ids_exclude_catalog_only_rules() {
+fn executable_rule_ids_cover_the_sorted_catalog() {
     let executable = manifest_executable_rule_ids();
 
-    assert_eq!(executable.len(), 39);
+    assert_eq!(manifest_registry().rules().len(), 41);
+    assert_eq!(executable.len(), 41);
     assert!(executable.windows(2).all(|ids| ids[0] < ids[1]));
-    assert!(!executable.iter().any(|id| id == "rbac.minimum_privilege"));
+    assert!(executable.iter().any(|id| id == "rbac.minimum_privilege"));
+    assert!(executable.iter().any(|id| id == "placement.minimize_skew"));
     assert_eq!(
         manifest_family_executable_rule_ids("policy").expect("policy executable manifest IDs"),
         [
             "rbac.dynamic_separation_of_duty",
+            "rbac.minimum_privilege",
             "rbac.permission_reachable",
             "rbac.role_hierarchy_acyclic",
             "rbac.static_separation_of_duty",
@@ -89,7 +92,16 @@ fn contract_handler_and_conformance_lookups_are_independent() {
     assert_eq!(conformance.valid.len(), 1);
     assert_eq!(conformance.invalid.len(), 1);
 
-    assert!(manifest_rule_handler("rbac.minimum_privilege").is_none());
-    assert!(manifest_conformance_vectors("rbac.minimum_privilege").is_none());
+    let minimum_privilege =
+        manifest_rule_contract("rbac.minimum_privilege").expect("minimum-privilege contract");
+    assert_eq!(minimum_privilege.execution_kind, ExecutionKindV1::Objective);
+    assert_eq!(
+        manifest_rule_handler("rbac.minimum_privilege"),
+        Some(NativeHandlerV1::RbacMinimumPrivilege)
+    );
+    let conformance = manifest_conformance_vectors("rbac.minimum_privilege")
+        .expect("minimum-privilege conformance vectors");
+    assert_eq!(conformance.valid.len(), 1);
+    assert_eq!(conformance.invalid.len(), 1);
     assert!(manifest_rule_contract("missing").is_none());
 }

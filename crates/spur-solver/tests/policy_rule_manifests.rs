@@ -1,13 +1,17 @@
-use std::{collections::BTreeMap, fs, path::PathBuf};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs,
+    path::PathBuf,
+};
 
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use spur_solver::rules::{
     families::policy::builtin_registry,
     manifest_format::{
-        validate_manifest_bundle, validate_rule_manifest, AvailabilityV1, FamilyManifestV1,
-        ManifestBundleV1, ManifestRouteV1, NativeHandlerV1, RuleManifestV1, RuleStrengthV1,
-        SchemaVersionV1,
+        validate_manifest_bundle, validate_rule_manifest, AvailabilityV1, ExecutionKindV1,
+        FamilyManifestV1, ManifestBundleV1, ManifestRouteV1, NativeHandlerV1, RuleManifestV1,
+        RuleStrengthV1, SchemaVersionV1,
     },
 };
 
@@ -82,6 +86,10 @@ fn policy_manifests_preserve_exact_catalog_data_and_executable_routes() {
             NativeHandlerV1::RbacDynamicSeparationOfDuty,
         ),
         (
+            "rbac.minimum_privilege",
+            NativeHandlerV1::RbacMinimumPrivilege,
+        ),
+        (
             "rbac.permission_reachable",
             NativeHandlerV1::RbacPermissionReachable,
         ),
@@ -94,6 +102,16 @@ fn policy_manifests_preserve_exact_catalog_data_and_executable_routes() {
             NativeHandlerV1::RbacStaticSeparationOfDuty,
         ),
     ]);
+    assert_eq!(expected_handlers.len(), 5);
+    assert_eq!(
+        expected_handlers
+            .values()
+            .copied()
+            .collect::<BTreeSet<_>>()
+            .len(),
+        5,
+        "policy routes must select unique native handlers"
+    );
 
     for rule in &rules {
         let catalog_rule = builtin_registry()
@@ -134,25 +152,22 @@ fn policy_manifests_preserve_exact_catalog_data_and_executable_routes() {
 }
 
 #[test]
-fn minimum_privilege_remains_catalog_only_without_a_handler() {
+fn minimum_privilege_is_an_executable_objective_route() {
     let (_, rules) = policy_manifests();
     let rule = rules
         .iter()
         .find(|rule| rule.id == "rbac.minimum_privilege")
         .expect("minimum privilege manifest");
 
-    assert_eq!(rule.availability, AvailabilityV1::CapabilityUnavailable);
+    assert_eq!(rule.availability, AvailabilityV1::Implemented);
     assert_eq!(rule.strength, RuleStrengthV1::Advisory);
-    assert_eq!(
-        rule.availability_reason.as_deref(),
-        Some(
-            "minimum privilege requires caller-owned utility requirements and an optimization objective"
-        )
-    );
-    assert_eq!(rule.handler, None);
-    assert_eq!(rule.conformance, None);
+    assert_eq!(rule.execution_kind, ExecutionKindV1::Objective);
+    assert_eq!(rule.handler, Some(NativeHandlerV1::RbacMinimumPrivilege));
+    let conformance = rule.conformance.as_ref().expect("objective conformance");
+    assert!(!conformance.valid.is_empty());
+    assert!(!conformance.invalid.is_empty());
     assert_eq!(
         validate_rule_manifest(rule),
-        Ok(ManifestRouteV1::CatalogOnly)
+        Ok(ManifestRouteV1::Executable)
     );
 }

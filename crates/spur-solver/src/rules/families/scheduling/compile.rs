@@ -14,12 +14,12 @@ use crate::{
         manifest::validate_binding_contract,
         manifest_family_executable_rule_ids,
         manifest_format::NativeHandlerV1,
-        primitives::{and, boolean, eq, ge, int, le, mul, request, var},
+        primitives::{and, boolean, eq, ge, int, le, mul, push_single_minimize, request, var},
         CompiledRule, RuleSolveMode,
     },
     types::{
-        ConstraintExpr, ModelValue, Objective, ObjectiveOp, SolveModel, Variable,
-        DEFAULT_TIMEOUT_MS, MAX_CONSTRAINTS, MAX_TIMEOUT_MS, MAX_VARIABLES,
+        ConstraintExpr, ModelValue, SolveModel, Variable, DEFAULT_TIMEOUT_MS, MAX_CONSTRAINTS,
+        MAX_TIMEOUT_MS, MAX_VARIABLES,
     },
 };
 
@@ -161,13 +161,14 @@ fn compile(input: Value) -> Result<FamilyCompilation, String> {
         input.include_smt,
     );
     if input.mode == RuleSolveMode::Synthesize && makespan_bindings == 1 {
-        solver_request.objectives.push(Objective {
-            op: ObjectiveOp::Minimize,
-            expr: var(resolver
+        push_single_minimize(
+            &mut solver_request,
+            var(resolver
                 .makespan_variable
                 .as_ref()
                 .expect("makespan binding creates a variable")),
-        });
+            "scheduling.minimize_makespan",
+        )?;
     }
     solver_request
         .validate()

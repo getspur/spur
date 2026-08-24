@@ -188,6 +188,17 @@ pub enum RuleStrength {
     Advisory,
 }
 
+/// Whether a rule contributes feasibility constraints or optimization utility.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionKind {
+    /// The rule contributes a hard feasibility predicate.
+    #[default]
+    Constraint,
+    /// The rule contributes an optimization objective after hard feasibility.
+    Objective,
+}
+
 /// A normative or explanatory source for a rule.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct RuleAuthority {
@@ -307,6 +318,7 @@ pub struct RuleGuidance {
     availability: Availability,
     #[serde(skip_serializing_if = "Option::is_none")]
     availability_reason: Option<String>,
+    execution_kind: ExecutionKind,
     default_strength: RuleStrength,
     authorities: Vec<RuleAuthority>,
     requires: Vec<String>,
@@ -327,7 +339,30 @@ impl RuleGuidance {
         Self {
             availability: Availability::Implemented,
             availability_reason: None,
+            execution_kind: ExecutionKind::Constraint,
             default_strength: RuleStrength::Hard,
+            authorities,
+            requires: strings(requires),
+            llm_encoding,
+            solver_encoding,
+            examples,
+        }
+    }
+
+    /// Creates complete guidance for an implemented optimization objective.
+    pub fn implemented_objective(
+        default_strength: RuleStrength,
+        authorities: Vec<RuleAuthority>,
+        requires: impl IntoIterator<Item = impl Into<String>>,
+        llm_encoding: LlmEncoding,
+        solver_encoding: SolverEncoding,
+        examples: RuleExamples,
+    ) -> Self {
+        Self {
+            availability: Availability::Implemented,
+            availability_reason: None,
+            execution_kind: ExecutionKind::Objective,
+            default_strength,
             authorities,
             requires: strings(requires),
             llm_encoding,
@@ -339,6 +374,7 @@ impl RuleGuidance {
     /// Creates guidance for a documented rule that this runtime cannot prove.
     pub fn capability_unavailable(
         reason: impl Into<String>,
+        execution_kind: ExecutionKind,
         default_strength: RuleStrength,
         authorities: Vec<RuleAuthority>,
         requires: impl IntoIterator<Item = impl Into<String>>,
@@ -347,6 +383,7 @@ impl RuleGuidance {
         Self {
             availability: Availability::CapabilityUnavailable,
             availability_reason: Some(reason.into()),
+            execution_kind,
             default_strength,
             authorities,
             requires: strings(requires),
@@ -362,6 +399,7 @@ impl Default for RuleGuidance {
         Self {
             availability: Availability::Implemented,
             availability_reason: None,
+            execution_kind: ExecutionKind::Constraint,
             default_strength: RuleStrength::Hard,
             authorities: Vec::new(),
             requires: Vec::new(),
@@ -586,4 +624,111 @@ pub enum RegistryError {
         listed_family: String,
         listed_profile: String,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::{
+        LlmEncoding, RuleAuthority, RuleExample, RuleExamples, RuleGuidance, RuleStrength,
+        SolverEncoding,
+    };
+
+    #[test]
+    fn objective_guidance_serializes_its_execution_kind() {
+        let guidance = RuleGuidance::implemented_objective(
+            RuleStrength::Advisory,
+            vec![],
+            Vec::<String>::new(),
+            LlmEncoding::default(),
+            SolverEncoding::default(),
+            RuleExamples::default(),
+        );
+
+        let value = serde_json::to_value(guidance).expect("serialize objective guidance");
+
+        assert_eq!(value["execution_kind"], "objective");
+        assert_eq!(value["default_strength"], "advisory");
+    }
+
+    #[test]
+    fn objective_guidance_preserves_solver_examples_and_explicit_utility_requirements() {
+        let solver_encoding = SolverEncoding::new(
+            "QF_LIA with typed optimization",
+            "verification is unsupported",
+            "minimize caller-declared grant cost",
+            ["cost = sum selected(role) * grant_cost(role)"],
+        );
+        let examples = RuleExamples::new(
+            RuleExample::new(
+                json!({"required_permissions": ["read"], "grant_costs": {"reader": 3}}),
+                "optimized cost 3 after complete termination",
+                None::<String>,
+            ),
+            RuleExample::new(
+                json!({"required_permissions": [], "grant_costs": {}}),
+                "reject missing explicit utility",
+                None::<String>,
+            ),
+        );
+        let guidance = RuleGuidance::implemented_objective(
+            RuleStrength::Advisory,
+            vec![RuleAuthority::new(
+                "standard",
+                "Caller-owned least privilege",
+                "https://example.invalid/least-privilege",
+            )],
+            [
+                "principals[].required_permissions",
+                "principals[].grant_costs",
+            ],
+            LlmEncoding::new(
+                "high",
+                ["Minimize declared grant utility after hard authorization constraints."],
+                ["Require explicit permissions and positive finite grant costs."],
+                ["Do not infer utility from role names."],
+                ["Escalate missing utility facts."],
+            ),
+            solver_encoding,
+            examples,
+        );
+
+        let value = serde_json::to_value(guidance).expect("serialize objective guidance");
+
+        assert_eq!(value["execution_kind"], "objective");
+        assert_eq!(value["default_strength"], "advisory");
+        assert_eq!(
+            value["requires"],
+            json!([
+                "principals[].required_permissions",
+                "principals[].grant_costs"
+            ])
+        );
+        assert_eq!(
+            value["solver_encoding"],
+            json!({
+                "theory": "QF_LIA with typed optimization",
+                "verification": "verification is unsupported",
+                "synthesis": "minimize caller-declared grant cost",
+                "formula": ["cost = sum selected(role) * grant_cost(role)"]
+            })
+        );
+        assert_eq!(
+            value["examples"],
+            json!({
+                "valid": {
+                    "facts": {
+                        "required_permissions": ["read"],
+                        "grant_costs": {"reader": 3}
+                    },
+                    "expectation": "optimized cost 3 after complete termination"
+                },
+                "invalid": {
+                    "facts": {"required_permissions": [], "grant_costs": {}},
+                    "expectation": "reject missing explicit utility"
+                }
+            })
+        );
+    }
 }

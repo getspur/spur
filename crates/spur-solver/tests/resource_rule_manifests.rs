@@ -10,17 +10,18 @@ use spur_solver::{
         execute::{prepare, run},
         families::resource::builtin_registry,
         manifest_format::{
-            validate_manifest_bundle, FamilyManifestV1, ManifestBundleV1, RuleManifestV1,
-            SchemaVersionV1,
+            validate_manifest_bundle, ExecutionKindV1, FamilyManifestV1, ManifestBundleV1,
+            NativeHandlerV1, RuleManifestV1, SchemaVersionV1,
         },
     },
     service::SolverService,
     types::SolveStatus,
 };
 
-const RULE_FILES: [&str; 5] = [
+const RULE_FILES: [&str; 6] = [
     "aggregate_capacity.yaml",
     "minimum_failure_domains.yaml",
+    "minimize_skew.yaml",
     "quota_capacity.yaml",
     "request_within_limit.yaml",
     "topology_max_skew.yaml",
@@ -85,6 +86,7 @@ fn resource_manifests_validate_with_exact_ids_owners_handlers_and_public_catalog
             "topology_placement",
             BTreeSet::from([
                 "placement.minimum_failure_domains",
+                "placement.minimize_skew",
                 "placement.topology_max_skew",
             ]),
         ),
@@ -105,11 +107,47 @@ fn resource_manifests_validate_with_exact_ids_owners_handlers_and_public_catalog
         .collect::<BTreeMap<_, _>>();
     assert_eq!(actual_owners, expected_owners);
 
-    let handlers = rules
+    let expected_handlers = BTreeMap::from([
+        (
+            "placement.minimum_failure_domains",
+            NativeHandlerV1::PlacementMinimumFailureDomains,
+        ),
+        (
+            "placement.minimize_skew",
+            NativeHandlerV1::PlacementMinimizeSkew,
+        ),
+        (
+            "placement.topology_max_skew",
+            NativeHandlerV1::PlacementTopologyMaxSkew,
+        ),
+        (
+            "resource.aggregate_capacity",
+            NativeHandlerV1::ResourceAggregateCapacity,
+        ),
+        (
+            "resource.quota_capacity",
+            NativeHandlerV1::ResourceQuotaCapacity,
+        ),
+        (
+            "resource.request_within_limit",
+            NativeHandlerV1::ResourceRequestWithinLimit,
+        ),
+    ]);
+    let actual_handlers = rules
         .iter()
-        .map(|rule| rule.handler.expect("implemented rule handler"))
-        .collect::<BTreeSet<_>>();
-    assert_eq!(handlers.len(), rules.len(), "handlers must be unique");
+        .map(|rule| {
+            (
+                rule.id.as_str(),
+                rule.handler.expect("implemented rule handler"),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    assert_eq!(actual_handlers, expected_handlers);
+    assert_eq!(
+        actual_handlers.values().collect::<BTreeSet<_>>().len(),
+        rules.len(),
+        "handlers must be unique"
+    );
 
     let registry = builtin_registry();
     let family_json = json!({
@@ -125,11 +163,12 @@ fn resource_manifests_validate_with_exact_ids_owners_handlers_and_public_catalog
     );
 
     for profile in &family.profiles {
-        let rule_ids = rules
+        let mut rule_ids = rules
             .iter()
             .filter(|rule| rule.profile == profile.id)
             .map(|rule| &rule.id)
             .collect::<Vec<_>>();
+        rule_ids.sort_unstable();
         let profile_json = json!({
             "id": profile.id,
             "family": family.id,
@@ -174,10 +213,15 @@ async fn resource_manifest_conformance_vectors_execute() {
             assert_eq!(result.solver.status, SolveStatus::Sat, "{} valid", rule.id);
         }
         for vector in conformance.invalid {
-            assert_eq!(
-                vector.expected_diagnostic.as_deref(),
-                Some(format!("{}.violation", rule.id).as_str())
-            );
+            match rule.execution_kind {
+                ExecutionKindV1::Constraint => assert_eq!(
+                    vector.expected_diagnostic.as_deref(),
+                    Some(format!("{}.violation", rule.id).as_str())
+                ),
+                ExecutionKindV1::Objective => {
+                    assert_eq!(vector.expected_diagnostic, None)
+                }
+            }
             let result = run(
                 &service,
                 prepare(vector.request).unwrap_or_else(|error| {
@@ -192,8 +236,10 @@ async fn resource_manifest_conformance_vectors_execute() {
                 "{} invalid",
                 rule.id
             );
-            assert_eq!(result.rule_results.len(), 1, "{} attribution", rule.id);
-            assert_eq!(result.rule_results[0].rule_id, rule.id);
+            if rule.execution_kind == ExecutionKindV1::Constraint {
+                assert_eq!(result.rule_results.len(), 1, "{} attribution", rule.id);
+                assert_eq!(result.rule_results[0].rule_id, rule.id);
+            }
         }
     }
 }
