@@ -7626,25 +7626,38 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let root = dir.path();
         init_git_repo(root);
-        let artifact = artifact_from_source(root, "pub fn alpha() {}\n");
-        run_git_test(root, &["add", "src/lib.rs"]);
+        fs::create_dir_all(root.join("src")).expect("mkdir src");
+        fs::write(root.join("src/lib.rs"), "pub fn alpha() {}\n").expect("write source");
+        fs::write(root.join(".gitignore"), ".spur/\n").expect("write graph ignore");
+        run_git_test(root, &["add", "src/lib.rs", ".gitignore"]);
         run_git_test(root, &["commit", "-q", "-m", "index alpha"]);
+        let artifact = artifact_from_source(root, "pub fn alpha() {}\n");
         write_current_artifact(root, &artifact);
-        run_git_test(root, &["add", "-A"]);
-        run_git_test(root, &["commit", "-q", "-m", "index graph fixture"]);
 
         let prime = SCOPED_CODE_GRAPH_WORKTREE_ROOT
             .scope(root.to_path_buf(), async {
                 code_search_response(
-                    &json!({ "query": "alpha", "mode": "exact" }),
+                    &json!({
+                        "query": "alpha",
+                        "mode": "exact",
+                        "response_format": "full",
+                    }),
                     Arc::new(RebuildCoordinator::new()),
                 )
                 .await
             })
             .await
             .expect("prime clean metadata");
+        eprintln!(
+            "immediate untracked prime total={} status={} dirty={} candidate={}",
+            prime["total_matches"],
+            prime["rebuild_status"],
+            prime["worktree_dirty"],
+            prime["candidates"].get(0).unwrap_or(&Value::Null),
+        );
         assert_eq!(prime["rebuild_status"], "not_needed");
-        assert_eq!(prime["worktree_dirty"], false);
+        assert_eq!(prime["total_matches"], 1, "{prime:#}");
+        assert_eq!(prime["candidates"][0]["entity_name"], "alpha");
 
         fs::write(
             root.join("src/immediate.rs"),
@@ -7654,7 +7667,11 @@ mod tests {
         let body = SCOPED_CODE_GRAPH_WORKTREE_ROOT
             .scope(root.to_path_buf(), async {
                 code_search_response(
-                    &json!({ "query": "immediate_only", "mode": "exact" }),
+                    &json!({
+                        "query": "immediate_only",
+                        "mode": "exact",
+                        "response_format": "full",
+                    }),
                     Arc::new(RebuildCoordinator::new()),
                 )
                 .await
