@@ -4447,6 +4447,21 @@ mod tests {
     }
 
     #[test]
+    fn knowledge_context_pack_schema_publishes_max_symbol_bodies_contract() {
+        let schema = crate::tool_schemas::schema_value::<KnowledgeContextPackV2Params>();
+        let max_symbol_bodies = &schema["properties"]["max_symbol_bodies"];
+
+        assert_eq!(max_symbol_bodies["default"].as_u64(), Some(0));
+        assert_eq!(max_symbol_bodies["minimum"].as_u64(), Some(0));
+        assert_eq!(max_symbol_bodies["maximum"].as_u64(), Some(5));
+        assert!(!schema["required"]
+            .as_array()
+            .expect("required fields")
+            .iter()
+            .any(|field| field.as_str() == Some("max_symbol_bodies")));
+    }
+
+    #[test]
     fn knowledge_context_root_falls_back_to_repo_db_when_worker_db_missing() {
         let worker_dir = tempfile::tempdir().expect("worker tempdir");
         let repo_dir = tempfile::tempdir().expect("repo tempdir");
