@@ -11,6 +11,7 @@ pub fn discover_files(root: &Path, allowed_extensions: &[&str]) -> anyhow::Resul
 
     for entry in WalkBuilder::new(&root)
         .standard_filters(true)
+        .hidden(false)
         .filter_entry(should_descend)
         .build()
     {
@@ -69,8 +70,59 @@ fn should_descend(entry: &DirEntry) -> bool {
     if file_name == "target" || file_name == ".git" || file_name == "node_modules" {
         return false;
     }
-    if entry.depth() > 0 && file_name.starts_with('.') {
-        return false;
-    }
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::discover_files;
+    use std::fs;
+
+    #[test]
+    fn discover_files_includes_dot_github_yaml_and_skips_git_and_target() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::create_dir_all(root.join(".github/workflows")).expect("mkdir workflows");
+        fs::create_dir_all(root.join(".git")).expect("mkdir .git");
+        fs::create_dir_all(root.join("target")).expect("mkdir target");
+        fs::create_dir_all(root.join("src")).expect("mkdir src");
+        fs::write(
+            root.join(".github/workflows/ci.yml"),
+            "name: ci\non: push\njobs:\n  build:\n    runs-on: ubuntu-latest\n",
+        )
+        .expect("write ci.yml");
+        fs::write(root.join("src/app.yaml"), "interface:\n  name: app\n").expect("write app.yaml");
+        fs::write(root.join(".git/ignored.yml"), "secret: 1\n").expect("write .git yml");
+        fs::write(root.join("target/out.yml"), "artifact: 1\n").expect("write target yml");
+
+        let files = discover_files(root, &["yml", "yaml"]).expect("discover");
+        let relative: Vec<String> = files
+            .iter()
+            .map(|path| {
+                path.strip_prefix(root)
+                    .expect("under root")
+                    .to_string_lossy()
+                    .replace('\\', "/")
+            })
+            .collect();
+
+        assert!(
+            relative
+                .iter()
+                .any(|path| path == ".github/workflows/ci.yml"),
+            "tracked hidden source dir must be indexed, got {relative:?}"
+        );
+        assert!(
+            relative.iter().any(|path| path == "src/app.yaml"),
+            "normal yaml must be indexed, got {relative:?}"
+        );
+        assert!(
+            !relative.iter().any(|path| path.contains(".git/")),
+            ".git must stay skipped, got {relative:?}"
+        );
+        assert!(
+            !relative.iter().any(|path| path.starts_with("target/")),
+            "target/ must stay skipped, got {relative:?}"
+        );
+    }
 }
