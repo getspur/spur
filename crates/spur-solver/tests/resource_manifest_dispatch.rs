@@ -1,7 +1,7 @@
 use serde_json::{json, Value};
 use spur_solver::{
     rules::{execute::prepare, manifest::manifest_rule_handler, manifest_format::NativeHandlerV1},
-    types::{ConstraintExpr, ConstraintOp},
+    types::{ConstraintExpr, ConstraintOp, ObjectiveOp, ObjectivePriority},
 };
 
 fn request(rule: Value) -> Value {
@@ -23,6 +23,65 @@ fn request(rule: Value) -> Value {
         },
         "unknowns": []
     })
+}
+
+#[test]
+fn minimize_skew_dispatches_one_hard_predicate_and_one_lex_objective() {
+    assert_eq!(
+        manifest_rule_handler("placement.minimize_skew"),
+        Some(NativeHandlerV1::PlacementMinimizeSkew)
+    );
+
+    let prepared = prepare(json!({
+        "family": "resource",
+        "mode": "synthesize",
+        "rules": [{
+            "rule_id": "placement.minimize_skew",
+            "subjects": ["api"],
+            "parameters": {}
+        }],
+        "facts": {
+            "workloads": {
+                "api": {
+                    "replicas": 3,
+                    "requests": {},
+                    "limits": {},
+                    "domain_counts": {"zone-a": null, "zone-b": null}
+                }
+            },
+            "pools": {},
+            "quotas": {}
+        },
+        "unknowns": [
+            {"subject": "api", "field": "domain_counts.zone-a", "min": 0, "max": 3},
+            {"subject": "api", "field": "domain_counts.zone-b", "min": 0, "max": 3}
+        ]
+    }))
+    .expect("minimize-skew manifest handler must compile");
+
+    let [constraint] = prepared.request.constraints.as_slice() else {
+        panic!("minimize skew must generate one hard predicate");
+    };
+    assert_eq!(
+        constraint.id(),
+        Some("resource_rule_0_placement_minimize_skew")
+    );
+    assert!(!constraint.is_soft());
+
+    let [objective] = prepared.request.objectives.as_slice() else {
+        panic!("minimize skew must generate one objective");
+    };
+    assert_eq!(objective.op, ObjectiveOp::Minimize);
+    assert_eq!(prepared.request.objective_priority, ObjectivePriority::Lex);
+    assert!(prepared
+        .request
+        .constraints
+        .iter()
+        .all(|item| !item.is_soft()));
+    assert!(prepared
+        .projections
+        .iter()
+        .any(|projection| { projection.subject == "api" && projection.field == "topology_skew" }));
 }
 
 #[test]
