@@ -2421,4 +2421,26 @@ mod tests {
         );
         assert!(parquet.temporal_index.get().is_none());
     }
+
+    #[test]
+    fn parquet_client_file_oids_are_memoized_for_the_open_manifest() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let parquet_dir = write_artifact_parquet(
+            &artifact(Vec::new()),
+            tempdir.path(),
+            WriteOptions::default(),
+            Vec::new(),
+        )
+        .expect("write parquet artifact");
+        let parquet = ParquetClient::open(&parquet_dir).expect("open parquet client");
+        let first = parquet.file_oids().expect("first file OID read");
+
+        std::fs::remove_file(parquet_dir.join("file_manifests.parquet"))
+            .expect("remove backing file after opened-manifest read");
+        let second = parquet
+            .file_oids()
+            .expect("opened manifest must reuse memoized file OIDs");
+
+        assert_eq!(second, first);
+    }
 }

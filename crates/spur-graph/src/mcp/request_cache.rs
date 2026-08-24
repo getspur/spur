@@ -362,7 +362,12 @@ fn path_mtime_ns(path: &Path) -> i128 {
 
 #[cfg(test)]
 mod tests {
+    use super::super::overlay_snapshot::{
+        self, normalized_changed_set_fingerprint, OverlayPathState, SnapshotBase, SnapshotIdentity,
+    };
     use super::*;
+    use anyhow::Context as _;
+    use std::collections::BTreeMap;
     use std::fs;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::{Duration, Instant};
@@ -592,6 +597,56 @@ mod tests {
         }
     }
 
+    fn cache_identity(worktree: &Path, tag: u8) -> SnapshotIdentity {
+        overlay_snapshot::test_snapshot_identity(worktree, tag)
+    }
+
+    fn overlay_delta_for_identity_test(
+        identity: &SnapshotIdentity,
+        build: impl FnOnce() -> anyhow::Result<CachedOverlayDelta>,
+    ) -> anyhow::Result<CachedOverlayDelta> {
+        let fingerprint = u64::from_le_bytes(
+            identity.normalized_changed_set_fingerprint[..8]
+                .try_into()
+                .expect("eight-byte legacy fingerprint"),
+        );
+        overlay_delta(&identity.canonical_worktree, fingerprint, build)
+    }
+
+    fn run_git(root: &Path, args: &[&str]) {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(args)
+            .output()
+            .expect("run git");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn snapshot_fixture(root: &Path) -> SnapshotBase {
+        run_git(root, &["init", "-q"]);
+        run_git(root, &["config", "user.email", "cache@example.com"]);
+        run_git(root, &["config", "user.name", "Cache Test"]);
+        fs::create_dir_all(root.join("src")).expect("src dir");
+        fs::write(root.join("src/lib.rs"), "pub fn cached() {}\n").expect("source");
+        run_git(root, &["add", "src/lib.rs"]);
+        run_git(root, &["commit", "-qm", "base"]);
+        let file_oids = crate::git::ls_files_with_oids(root)
+            .expect("tracked files")
+            .into_iter()
+            .map(|entry| (entry.path, entry.content_oid))
+            .collect::<BTreeMap<_, _>>();
+        SnapshotBase {
+            indexed_graph_content_hash: "no-ttl-graph".to_owned(),
+            indexed_head_oid: Some(crate::git::rev_parse_head(root).expect("HEAD")),
+            file_oids,
+        }
+    }
+
     static OVERLAY_DELTA_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     fn overlay_delta_test_lock() -> std::sync::MutexGuard<'static, ()> {
@@ -605,14 +660,15 @@ mod tests {
         let _guard = overlay_delta_test_lock();
         let tempdir = tempfile::tempdir().expect("tempdir");
         let worktree = tempdir.path();
+        let identity = cache_identity(worktree, 1);
         let builds = AtomicUsize::new(0);
 
-        let first = overlay_delta(worktree, 1, || {
+        let first = overlay_delta_for_identity_test(&identity, || {
             builds.fetch_add(1, Ordering::SeqCst);
             Ok(dummy_overlay_delta("one"))
         })
         .expect("first overlay delta");
-        let second = overlay_delta(worktree, 1, || {
+        let second = overlay_delta_for_identity_test(&identity, || {
             builds.fetch_add(1, Ordering::SeqCst);
             Ok(dummy_overlay_delta("two"))
         })
@@ -634,12 +690,12 @@ mod tests {
         let worktree = tempdir.path();
         let builds = AtomicUsize::new(0);
 
-        overlay_delta(worktree, 1, || {
+        overlay_delta_for_identity_test(&cache_identity(worktree, 1), || {
             builds.fetch_add(1, Ordering::SeqCst);
             Ok(dummy_overlay_delta("one"))
         })
         .expect("first overlay delta");
-        overlay_delta(worktree, 2, || {
+        overlay_delta_for_identity_test(&cache_identity(worktree, 2), || {
             builds.fetch_add(1, Ordering::SeqCst);
             Ok(dummy_overlay_delta("two"))
         })
@@ -660,22 +716,22 @@ mod tests {
         let otobank = tempfile::tempdir().expect("otobank worktree");
         let builds = AtomicUsize::new(0);
 
-        overlay_delta(spur.path(), 1, || {
+        overlay_delta_for_identity_test(&cache_identity(spur.path(), 1), || {
             builds.fetch_add(1, Ordering::SeqCst);
             Ok(dummy_overlay_delta("spur"))
         })
         .expect("spur overlay");
-        overlay_delta(notebook.path(), 1, || {
+        overlay_delta_for_identity_test(&cache_identity(notebook.path(), 1), || {
             builds.fetch_add(1, Ordering::SeqCst);
             Ok(dummy_overlay_delta("notebook"))
         })
         .expect("notebook overlay");
-        overlay_delta(otobank.path(), 1, || {
+        overlay_delta_for_identity_test(&cache_identity(otobank.path(), 1), || {
             builds.fetch_add(1, Ordering::SeqCst);
             Ok(dummy_overlay_delta("otobank"))
         })
         .expect("otobank overlay");
-        overlay_delta(spur.path(), 1, || {
+        overlay_delta_for_identity_test(&cache_identity(spur.path(), 1), || {
             builds.fetch_add(1, Ordering::SeqCst);
             Ok(dummy_overlay_delta("spur-again"))
         })
@@ -697,28 +753,30 @@ mod tests {
         let _guard = overlay_delta_test_lock();
         let tempdir = tempfile::tempdir().expect("tempdir");
         let worktree = tempdir.path().to_path_buf();
+        let identity = cache_identity(&worktree, 7);
         let builds = Arc::new(AtomicUsize::new(0));
         let barrier = Arc::new(std::sync::Barrier::new(2));
 
-        let spawn =
-            |builds: Arc<AtomicUsize>, barrier: Arc<std::sync::Barrier>, worktree: PathBuf| {
-                std::thread::spawn(move || {
-                    barrier.wait();
-                    overlay_delta(&worktree, 7, || {
-                        std::thread::sleep(Duration::from_millis(50));
-                        builds.fetch_add(1, Ordering::SeqCst);
-                        Ok(dummy_overlay_delta("shared"))
-                    })
+        let spawn = |builds: Arc<AtomicUsize>,
+                     barrier: Arc<std::sync::Barrier>,
+                     identity: SnapshotIdentity| {
+            std::thread::spawn(move || {
+                barrier.wait();
+                overlay_delta_for_identity_test(&identity, || {
+                    std::thread::sleep(Duration::from_millis(50));
+                    builds.fetch_add(1, Ordering::SeqCst);
+                    Ok(dummy_overlay_delta("shared"))
                 })
-            };
+            })
+        };
 
-        let first = spawn(Arc::clone(&builds), Arc::clone(&barrier), worktree.clone());
-        let second = spawn(builds.clone(), barrier, worktree);
-        first
+        let first = spawn(Arc::clone(&builds), Arc::clone(&barrier), identity.clone());
+        let second = spawn(builds.clone(), barrier, identity);
+        let first = first
             .join()
             .expect("first overlay thread")
             .expect("first overlay");
-        second
+        let second = second
             .join()
             .expect("second overlay thread")
             .expect("second overlay");
@@ -728,6 +786,201 @@ mod tests {
             1,
             "concurrent overlay extracts for the same worktree fingerprint must share one in-flight build"
         );
+        assert!(Arc::ptr_eq(&first.artifact, &second.artifact));
+        assert_eq!(first.shadowed, second.shadowed);
+    }
+
+    #[test]
+    fn oid_addressed_layers_reuse_after_more_than_five_seconds() {
+        let _guard = overlay_delta_test_lock();
+        let parquet_tempdir = tempfile::tempdir().expect("parquet tempdir");
+        let parquet_dir = write_empty_parquet(parquet_tempdir.path());
+        let parquet = ParquetClient::open(&parquet_dir).expect("open parquet client");
+        let first_file_oids = parquet.file_oids().expect("first file OID read");
+        fs::remove_file(parquet_dir.join("file_manifests.parquet"))
+            .expect("remove backing file after first read");
+
+        let worktree_tempdir = tempfile::tempdir().expect("worktree tempdir");
+        let worktree = worktree_tempdir.path();
+        let base = snapshot_fixture(worktree);
+        let extensions = crate::extract::languages::all_supported_extensions();
+        let first_snapshot = overlay_snapshot::snapshot(worktree, base.clone(), &extensions)
+            .expect("first validated snapshot");
+        let identity = first_snapshot.identity.clone().expect("complete identity");
+        let builds = AtomicUsize::new(0);
+        let first_delta = overlay_delta_for_identity_test(&identity, || {
+            builds.fetch_add(1, Ordering::SeqCst);
+            Ok(dummy_overlay_delta("retained"))
+        })
+        .expect("first delta");
+
+        let started = Instant::now();
+        std::thread::sleep(Duration::from_millis(6_001));
+        eprintln!("no-TTL retention elapsed={:?}", started.elapsed());
+
+        let second_file_oids = parquet
+            .file_oids()
+            .expect("same opened manifest reuses file OIDs after old TTL");
+        let second_snapshot = overlay_snapshot::snapshot(worktree, base, &extensions)
+            .expect("same validated snapshot after old TTL");
+        let second_delta = overlay_delta_for_identity_test(&identity, || {
+            builds.fetch_add(1, Ordering::SeqCst);
+            Ok(dummy_overlay_delta("rebuilt"))
+        })
+        .expect("same cached delta after old TTL");
+
+        assert_eq!(second_file_oids, first_file_oids);
+        assert!(second_snapshot.measurements.snapshot_reused);
+        assert_eq!(second_snapshot.identity.as_ref(), Some(&identity));
+        assert_eq!(builds.load(Ordering::SeqCst), 1);
+        assert!(Arc::ptr_eq(&first_delta.artifact, &second_delta.artifact));
+    }
+
+    #[test]
+    fn overlay_delta_invalidates_every_complete_identity_component() {
+        let _guard = overlay_delta_test_lock();
+        let first_parent = tempfile::tempdir().expect("first parent");
+        let second_parent = tempfile::tempdir().expect("second parent");
+        let first_worktree = first_parent.path().join("same-relative-name");
+        let second_worktree = second_parent.path().join("same-relative-name");
+        fs::create_dir_all(&first_worktree).expect("first worktree");
+        fs::create_dir_all(&second_worktree).expect("second worktree");
+        let baseline = cache_identity(&first_worktree, 1);
+        let other_identity = cache_identity(&second_worktree, 1);
+        let other_index_identity = cache_identity(&first_worktree, 2).index_identity;
+
+        let fingerprint = |entries: Vec<(String, OverlayPathState)>| {
+            normalized_changed_set_fingerprint(entries.iter().map(|(path, state)| (path, state)))
+        };
+        let mut variants = Vec::new();
+        let mut graph = baseline.clone();
+        graph.indexed_graph_content_hash = "graph-changed".to_owned();
+        variants.push(("graph", graph));
+        let mut indexed_head = baseline.clone();
+        indexed_head.indexed_head_oid = Some("indexed-head-changed".to_owned());
+        variants.push(("indexed-head", indexed_head));
+        let mut current_head = baseline.clone();
+        current_head.current_head_oid = "current-head-changed".to_owned();
+        variants.push(("current-head", current_head));
+        let mut index = baseline.clone();
+        index.index_identity = other_index_identity;
+        variants.push(("index", index));
+        let mut changed_oid = baseline.clone();
+        changed_oid.normalized_changed_set_fingerprint = fingerprint(vec![(
+            "src/lib.rs".to_owned(),
+            OverlayPathState::Tracked("oid-v2".to_owned()),
+        )]);
+        variants.push(("changed-oid", changed_oid));
+        let mut deletion = baseline.clone();
+        deletion.normalized_changed_set_fingerprint =
+            fingerprint(vec![("src/lib.rs".to_owned(), OverlayPathState::Deleted)]);
+        variants.push(("deletion", deletion));
+        let mut rename = baseline.clone();
+        rename.normalized_changed_set_fingerprint = fingerprint(vec![
+            ("src/lib.rs".to_owned(), OverlayPathState::Deleted),
+            (
+                "src/renamed.rs".to_owned(),
+                OverlayPathState::Tracked("oid-v1".to_owned()),
+            ),
+        ]);
+        variants.push(("rename", rename));
+        let mut other_worktree = baseline.clone();
+        other_worktree.canonical_worktree = other_identity.canonical_worktree;
+        variants.push(("canonical-worktree", other_worktree));
+
+        let builds = AtomicUsize::new(0);
+        overlay_delta_for_identity_test(&baseline, || {
+            builds.fetch_add(1, Ordering::SeqCst);
+            Ok(dummy_overlay_delta("baseline"))
+        })
+        .expect("baseline");
+        for (label, identity) in &variants {
+            let actual = overlay_delta_for_identity_test(identity, || {
+                builds.fetch_add(1, Ordering::SeqCst);
+                Ok(dummy_overlay_delta(label))
+            })
+            .unwrap_or_else(|error| panic!("{label} rebuild failed: {error:#}"));
+            assert_eq!(
+                actual.artifact.graph_content_hash, *label,
+                "{label} must never reuse a mismatched complete identity"
+            );
+        }
+        assert_eq!(builds.load(Ordering::SeqCst), 1 + variants.len());
+    }
+
+    #[test]
+    fn overlay_delta_capacity_evicts_without_returning_mismatched_entries() {
+        let _guard = overlay_delta_test_lock();
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let builds = AtomicUsize::new(0);
+        let identities = (0..=OVERLAY_DELTA_CACHE_CAPACITY)
+            .map(|index| {
+                let mut identity = cache_identity(tempdir.path(), 42);
+                identity.current_head_oid = format!("head-{index}");
+                identity
+            })
+            .collect::<Vec<_>>();
+
+        for (index, identity) in identities.iter().enumerate() {
+            let tag = format!("entry-{index}");
+            let actual = overlay_delta_for_identity_test(identity, || {
+                builds.fetch_add(1, Ordering::SeqCst);
+                Ok(dummy_overlay_delta(&tag))
+            })
+            .expect("insert cache entry");
+            assert_eq!(actual.artifact.graph_content_hash, tag);
+        }
+        assert_eq!(builds.load(Ordering::SeqCst), identities.len());
+
+        let rebuilt = overlay_delta_for_identity_test(&identities[0], || {
+            builds.fetch_add(1, Ordering::SeqCst);
+            Ok(dummy_overlay_delta("entry-0-rebuilt"))
+        })
+        .expect("oldest entry rebuild");
+        assert_eq!(rebuilt.artifact.graph_content_hash, "entry-0-rebuilt");
+        assert_eq!(builds.load(Ordering::SeqCst), identities.len() + 1);
+    }
+
+    #[test]
+    fn overlay_delta_singleflight_followers_receive_exact_leader_error() {
+        let _guard = overlay_delta_test_lock();
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let identity = cache_identity(tempdir.path(), 99);
+        let builds = Arc::new(AtomicUsize::new(0));
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+
+        let spawn = |builds: Arc<AtomicUsize>,
+                     barrier: Arc<std::sync::Barrier>,
+                     identity: SnapshotIdentity| {
+            std::thread::spawn(move || {
+                barrier.wait();
+                let result = overlay_delta_for_identity_test(&identity, || {
+                    builds.fetch_add(1, Ordering::SeqCst);
+                    std::thread::sleep(Duration::from_millis(50));
+                    Err::<CachedOverlayDelta, _>(anyhow::anyhow!("inner exact error"))
+                        .context("outer exact error")
+                });
+                result.err().expect("shared error")
+            })
+        };
+        let first = spawn(Arc::clone(&builds), Arc::clone(&barrier), identity.clone());
+        let second = spawn(builds.clone(), barrier, identity);
+        let errors = [
+            first.join().expect("first error thread"),
+            second.join().expect("second error thread"),
+        ];
+
+        eprintln!(
+            "singleflight exact errors: {:?}",
+            errors
+                .iter()
+                .map(|error| format!("{error:#}"))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(builds.load(Ordering::SeqCst), 1);
+        assert!(errors
+            .iter()
+            .all(|error| format!("{error:#}") == "outer exact error: inner exact error"));
     }
 
     #[test]

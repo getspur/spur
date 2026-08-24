@@ -168,6 +168,46 @@ fn snapshots() -> &'static Mutex<HashMap<PathBuf, CachedSnapshot>> {
     SNAPSHOTS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+#[cfg(test)]
+pub(crate) fn test_snapshot_identity(worktree: &Path, tag: u8) -> SnapshotIdentity {
+    let canonical_worktree = worktree
+        .canonicalize()
+        .unwrap_or_else(|_| worktree.to_path_buf());
+    SnapshotIdentity {
+        canonical_worktree: canonical_worktree.clone(),
+        indexed_graph_content_hash: format!("graph-{tag}"),
+        indexed_head_oid: Some(format!("indexed-{tag}")),
+        current_head_oid: format!("head-{tag}"),
+        index_identity: IndexIdentity {
+            path: canonical_worktree.join(format!(".git/index-{tag}")),
+            len: u64::from(tag),
+            modified_nanos: u128::from(tag),
+            #[cfg(unix)]
+            device: u64::from(tag),
+            #[cfg(unix)]
+            inode: u64::from(tag),
+            #[cfg(unix)]
+            ctime: i64::from(tag),
+            #[cfg(unix)]
+            ctime_nanos: i64::from(tag),
+        },
+        normalized_changed_set_fingerprint: [tag; 32],
+    }
+}
+
+#[cfg(test)]
+fn with_isolated_snapshot_cache<T>(
+    test: impl FnOnce(&mut HashMap<PathBuf, CachedSnapshot>) -> T,
+) -> T {
+    let mut cache = snapshots()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let saved = std::mem::take(&mut *cache);
+    let result = test(&mut cache);
+    *cache = saved;
+    result
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ValidationPhase {
     AfterReadBeforeSecondStat,
@@ -1332,6 +1372,93 @@ mod tests {
             .expect("fresh filesystem oracle");
         super::super::overlay_changed_oid_hex_from_maps(base.file_oids.clone(), current)
             .expect("exact filesystem delta")
+    }
+
+    fn cached_snapshot_for_cache_test(worktree: &Path, tag: u8) -> CachedSnapshot {
+        let identity = test_snapshot_identity(worktree, tag);
+        let index_identity = identity.index_identity.clone();
+        let snapshot = OverlaySnapshot {
+            identity: Some(identity),
+            path_state: BTreeMap::from([(
+                "src/lib.rs".to_owned(),
+                OverlayPathState::Tracked(format!("oid-{tag}")),
+            )]),
+            source: OverlaySnapshotSource::FsmonitorNative,
+            lifecycle: vec![SnapshotLifecycleState::Valid],
+            measurements: SnapshotMeasurements::default(),
+        };
+        CachedSnapshot {
+            graph_content_hash: format!("graph-{tag}"),
+            indexed_head_oid: Some(format!("indexed-{tag}")),
+            current_head_oid: format!("head-{tag}"),
+            index_identity,
+            tracked_index: BTreeMap::new(),
+            file_identities: BTreeMap::new(),
+            status_was_clean: true,
+            snapshot,
+        }
+    }
+
+    #[test]
+    fn validated_snapshot_cache_is_bounded_and_never_aliases_canonical_worktrees() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let roots = (0..9)
+            .map(|index| {
+                let root = tempdir.path().join(format!("parent-{index}/repo"));
+                fs::create_dir_all(&root).expect("canonical worktree fixture");
+                root.canonicalize().expect("canonical worktree")
+            })
+            .collect::<Vec<_>>();
+
+        with_isolated_snapshot_cache(|cache| {
+            for (tag, root) in roots.iter().take(8).enumerate() {
+                cache.insert(
+                    root.clone(),
+                    cached_snapshot_for_cache_test(root, tag as u8),
+                );
+            }
+            let first = cache
+                .get(&roots[0])
+                .expect("first canonical worktree")
+                .snapshot
+                .clone();
+            assert_eq!(
+                first
+                    .identity
+                    .as_ref()
+                    .map(|identity| identity.canonical_worktree.as_path()),
+                Some(roots[0].as_path())
+            );
+
+            cache.insert(
+                roots[8].clone(),
+                cached_snapshot_for_cache_test(&roots[8], 8),
+            );
+
+            assert_eq!(
+                cache.len(),
+                8,
+                "validated snapshot capacity must remain bounded"
+            );
+            assert!(
+                cache.contains_key(&roots[0]),
+                "recent entry must survive eviction"
+            );
+            assert!(
+                !cache.contains_key(&roots[1]),
+                "least-recent canonical worktree must be evicted"
+            );
+            let newest = cache.get(&roots[8]).expect("newest worktree");
+            assert_eq!(
+                newest
+                    .snapshot
+                    .identity
+                    .as_ref()
+                    .map(|identity| identity.canonical_worktree.as_path()),
+                Some(roots[8].as_path()),
+                "eviction must never return a mismatched canonical worktree"
+            );
+        });
     }
 
     struct InstrumentedRuntime {
