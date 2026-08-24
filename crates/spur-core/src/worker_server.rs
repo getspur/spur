@@ -1049,6 +1049,7 @@ struct KnowledgeContextPackV2Params {
     include_tests: Option<bool>,
     /// Optional maximum number of symbol bodies to include. Defaults to 0; accepted range is 0..=5.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "u64")]
     #[schemars(default = "default_max_symbol_bodies")]
     #[schemars(range(min = 0, max = 5))]
     max_symbol_bodies: Option<u64>,
