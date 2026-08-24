@@ -5464,7 +5464,13 @@ fn changed_paths_for_overlay_base(
 ) -> anyhow::Result<OverlayChangedPaths> {
     let allowed_extensions = crate::extract::languages::all_supported_extensions();
     let changed = if crate::git::detect(worktree).is_some() {
-        overlay_snapshot::snapshot(worktree, base, &allowed_extensions)?.changed_oid_hex()
+        overlay_snapshot::snapshot_with_capabilities(
+            worktree,
+            base,
+            &allowed_extensions,
+            production_overlay_capabilities(),
+        )?
+        .changed_oid_hex()
     } else {
         let worktree = worktree.canonicalize().map_err(|error| {
             anyhow::anyhow!("failed to canonicalize `{}`: {error}", worktree.display())
@@ -5491,10 +5497,27 @@ fn overlay_changed_oid_hex(
     let base_oids = base_files.into_iter().collect::<BTreeMap<_, _>>();
     if crate::git::detect(&worktree).is_some() {
         let base = overlay_snapshot::SnapshotBase::compatibility(base_oids);
-        Ok(overlay_snapshot::snapshot(&worktree, base, &allowed_extensions)?.changed_oid_hex())
+        Ok(overlay_snapshot::snapshot_with_capabilities(
+            &worktree,
+            base,
+            &allowed_extensions,
+            production_overlay_capabilities(),
+        )?
+        .changed_oid_hex())
     } else {
         let current_oids = current_file_oids_via_fs(&worktree, &allowed_extensions)?;
         overlay_changed_oid_hex_from_maps(base_oids, current_oids)
+    }
+}
+
+fn production_overlay_capabilities() -> crate::git::FsmonitorCapabilities {
+    crate::git::FsmonitorCapabilities {
+        // Task 6 owns the formal p95/correctness release gate. Task 3 exposes
+        // the observation seam but must not enable native fsmonitor routing.
+        release_enabled: false,
+        built_in_supported: false,
+        local_filesystem: true,
+        watcher_healthy: false,
     }
 }
 
@@ -6617,6 +6640,18 @@ mod tests {
         );
         assert!(second.measurements.hashed_paths.is_empty());
         assert!(second.measurements.snapshot_reused);
+    }
+
+    #[test]
+    fn overlay_snapshot_production_route_remains_release_disabled() {
+        let capabilities = production_overlay_capabilities();
+        assert!(!capabilities.release_enabled);
+        assert_eq!(
+            crate::git::fsmonitor_status_route(capabilities),
+            crate::git::FsmonitorStatusRoute::ExactFallback(
+                crate::git::FsmonitorFallbackReason::ReleaseDisabled
+            )
+        );
     }
 
     #[test]

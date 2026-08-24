@@ -72,7 +72,7 @@ pub(crate) struct SnapshotMeasurements {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct OverlaySnapshot {
-    pub(crate) identity: SnapshotIdentity,
+    pub(crate) identity: Option<SnapshotIdentity>,
     pub(crate) path_state: BTreeMap<String, OverlayPathState>,
     pub(crate) source: OverlaySnapshotSource,
     pub(crate) lifecycle: Vec<SnapshotLifecycleState>,
@@ -167,6 +167,74 @@ fn snapshots() -> &'static Mutex<HashMap<PathBuf, CachedSnapshot>> {
     SNAPSHOTS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ValidationPhase {
+    AfterReadBeforeSecondStat,
+    BeforeRevalidate,
+}
+
+trait SnapshotRuntime {
+    fn capabilities(&self) -> FsmonitorCapabilities;
+
+    fn rev_parse_head(&mut self, worktree: &Path) -> anyhow::Result<String> {
+        crate::git::rev_parse_head(worktree)
+    }
+
+    fn index_identity(&mut self, worktree: &Path) -> anyhow::Result<IndexIdentity> {
+        index_identity(worktree)
+    }
+
+    fn status_observation(&mut self, worktree: &Path) -> anyhow::Result<GitStatusObservation> {
+        crate::git::status_observation(worktree, self.capabilities())
+    }
+
+    fn load_tracked_index(
+        &mut self,
+        worktree: &Path,
+        allowed_extensions: &[&str],
+    ) -> anyhow::Result<BTreeMap<String, String>> {
+        load_tracked_index(worktree, allowed_extensions)
+    }
+
+    fn head_lag_paths(
+        &mut self,
+        worktree: &Path,
+        indexed_head_oid: &str,
+        current_head_oid: &str,
+        allowed_extensions: &[&str],
+    ) -> anyhow::Result<BTreeSet<String>> {
+        head_lag_paths(
+            worktree,
+            indexed_head_oid,
+            current_head_oid,
+            allowed_extensions,
+        )
+    }
+
+    fn validation_hook(&mut self, _attempt: usize, _phase: ValidationPhase, _path: &Path) {}
+}
+
+struct HookRuntime<F> {
+    capabilities: FsmonitorCapabilities,
+    hook: F,
+}
+
+fn no_validation_hook(_attempt: usize, _phase: ValidationPhase, _path: &Path) {}
+
+impl<F> SnapshotRuntime for HookRuntime<F>
+where
+    F: FnMut(usize, ValidationPhase, &Path),
+{
+    fn capabilities(&self) -> FsmonitorCapabilities {
+        self.capabilities
+    }
+
+    fn validation_hook(&mut self, attempt: usize, phase: ValidationPhase, path: &Path) {
+        (self.hook)(attempt, phase, path);
+    }
+}
+
+#[cfg(test)]
 pub(crate) fn snapshot(
     worktree: &Path,
     base: SnapshotBase,
@@ -175,15 +243,47 @@ pub(crate) fn snapshot(
     snapshot_with_hook(worktree, base, allowed_extensions, |_, _, _| {})
 }
 
+pub(crate) fn snapshot_with_capabilities(
+    worktree: &Path,
+    base: SnapshotBase,
+    allowed_extensions: &[&str],
+    capabilities: FsmonitorCapabilities,
+) -> anyhow::Result<OverlaySnapshot> {
+    let mut runtime = HookRuntime {
+        capabilities,
+        hook: no_validation_hook,
+    };
+    snapshot_with_runtime(worktree, base, allowed_extensions, &mut runtime)
+}
+
+#[cfg(test)]
 fn snapshot_with_hook<F>(
     worktree: &Path,
     base: SnapshotBase,
     allowed_extensions: &[&str],
-    mut hook: F,
+    hook: F,
 ) -> anyhow::Result<OverlaySnapshot>
 where
     F: FnMut(usize, ValidationPhase, &Path),
 {
+    let mut runtime = HookRuntime {
+        capabilities: FsmonitorCapabilities {
+            release_enabled: false,
+            built_in_supported: false,
+            local_filesystem: true,
+            watcher_healthy: false,
+        },
+        hook,
+    };
+    snapshot_with_runtime(worktree, base, allowed_extensions, &mut runtime)
+}
+
+fn snapshot_with_runtime<R: SnapshotRuntime>(
+    worktree: &Path,
+    base: SnapshotBase,
+    allowed_extensions: &[&str],
+    runtime: &mut R,
+) -> anyhow::Result<OverlaySnapshot> {
     let canonical_worktree = worktree.canonicalize().map_err(|error| {
         anyhow!(
             "failed to canonicalize `{}` for overlay snapshot: {error}",
@@ -213,12 +313,63 @@ where
     let mut measurements = SnapshotMeasurements::default();
 
     for attempt in 0..=1 {
-        let pre_head_oid = crate::git::rev_parse_head(&canonical_worktree)?;
-        let before_status_index_identity = index_identity(&canonical_worktree)?;
-        let observation = exact_status_observation(&canonical_worktree)?;
+        if attempt > 0 {
+            lifecycle.push(SnapshotLifecycleState::Validating);
+        }
+        let pre_head_oid = match runtime.rev_parse_head(&canonical_worktree) {
+            Ok(head_oid) => head_oid,
+            Err(_) => {
+                return filesystem_oracle_fallback(
+                    &canonical_worktree,
+                    &base,
+                    allowed_extensions,
+                    lifecycle,
+                    measurements,
+                    runtime,
+                );
+            }
+        };
+        let before_status_index_identity = match runtime.index_identity(&canonical_worktree) {
+            Ok(identity) => identity,
+            Err(_) => {
+                return filesystem_oracle_fallback(
+                    &canonical_worktree,
+                    &base,
+                    allowed_extensions,
+                    lifecycle,
+                    measurements,
+                    runtime,
+                );
+            }
+        };
+        let observation = match runtime.status_observation(&canonical_worktree) {
+            Ok(observation) => observation,
+            Err(_) => {
+                return filesystem_oracle_fallback(
+                    &canonical_worktree,
+                    &base,
+                    allowed_extensions,
+                    lifecycle,
+                    measurements,
+                    runtime,
+                );
+            }
+        };
         // Status is allowed to refresh Git's index metadata. The consistency
         // window starts after that Git-owned refresh, not before it.
-        let observed_index_identity = index_identity(&canonical_worktree)?;
+        let observed_index_identity = match runtime.index_identity(&canonical_worktree) {
+            Ok(identity) => identity,
+            Err(_) => {
+                return filesystem_oracle_fallback(
+                    &canonical_worktree,
+                    &base,
+                    allowed_extensions,
+                    lifecycle,
+                    measurements,
+                    runtime,
+                );
+            }
+        };
 
         if observation.entries.is_empty()
             && cache_matches_graph
@@ -229,13 +380,37 @@ where
                         || cached.index_identity == observed_index_identity)
             })
         {
-            hook(
+            runtime.validation_hook(
                 attempt,
                 ValidationPhase::BeforeRevalidate,
                 &canonical_worktree,
             );
-            let post_head_oid = crate::git::rev_parse_head(&canonical_worktree)?;
-            let post_index_identity = index_identity(&canonical_worktree)?;
+            let post_head_oid = match runtime.rev_parse_head(&canonical_worktree) {
+                Ok(head_oid) => head_oid,
+                Err(_) => {
+                    return filesystem_oracle_fallback(
+                        &canonical_worktree,
+                        &base,
+                        allowed_extensions,
+                        lifecycle,
+                        measurements,
+                        runtime,
+                    );
+                }
+            };
+            let post_index_identity = match runtime.index_identity(&canonical_worktree) {
+                Ok(identity) => identity,
+                Err(_) => {
+                    return filesystem_oracle_fallback(
+                        &canonical_worktree,
+                        &base,
+                        allowed_extensions,
+                        lifecycle,
+                        measurements,
+                        runtime,
+                    );
+                }
+            };
             if pre_head_oid == post_head_oid && observed_index_identity == post_index_identity {
                 let mut refreshed = cached.clone().expect("checked above");
                 let mut reused = refreshed.snapshot.clone();
@@ -246,8 +421,10 @@ where
                 };
                 lifecycle.push(SnapshotLifecycleState::Valid);
                 reused.lifecycle = lifecycle;
-                reused.identity.current_head_oid = post_head_oid.clone();
-                reused.identity.index_identity = post_index_identity.clone();
+                if let Some(identity) = &mut reused.identity {
+                    identity.current_head_oid = post_head_oid.clone();
+                    identity.index_identity = post_index_identity.clone();
+                }
                 refreshed.current_head_oid = post_head_oid;
                 refreshed.index_identity = post_index_identity;
                 refreshed.snapshot = reused.clone();
@@ -259,7 +436,7 @@ where
             }
         }
 
-        let build = build_snapshot_once(
+        let build = match build_snapshot_once(
             &canonical_worktree,
             &base,
             allowed_extensions,
@@ -269,14 +446,52 @@ where
             &observation,
             &mut measurements,
             false,
-        )?;
-        hook(
+            attempt,
+            runtime,
+        ) {
+            Ok(build) => build,
+            Err(_) => {
+                return filesystem_oracle_fallback(
+                    &canonical_worktree,
+                    &base,
+                    allowed_extensions,
+                    lifecycle,
+                    measurements,
+                    runtime,
+                );
+            }
+        };
+        runtime.validation_hook(
             attempt,
             ValidationPhase::BeforeRevalidate,
             &canonical_worktree,
         );
-        let post_head_oid = crate::git::rev_parse_head(&canonical_worktree)?;
-        let post_index_identity = index_identity(&canonical_worktree)?;
+        let post_head_oid = match runtime.rev_parse_head(&canonical_worktree) {
+            Ok(head_oid) => head_oid,
+            Err(_) => {
+                return filesystem_oracle_fallback(
+                    &canonical_worktree,
+                    &base,
+                    allowed_extensions,
+                    lifecycle,
+                    measurements,
+                    runtime,
+                );
+            }
+        };
+        let post_index_identity = match runtime.index_identity(&canonical_worktree) {
+            Ok(identity) => identity,
+            Err(_) => {
+                return filesystem_oracle_fallback(
+                    &canonical_worktree,
+                    &base,
+                    allowed_extensions,
+                    lifecycle,
+                    measurements,
+                    runtime,
+                );
+            }
+        };
         let files_stable = build.file_identities.iter().all(|(path, identity)| {
             file_identity(&canonical_worktree.join(path)).is_ok_and(|current| &current == identity)
         });
@@ -305,39 +520,21 @@ where
             continue;
         }
 
-        measurements.exact_fallbacks = 1;
-        lifecycle.push(SnapshotLifecycleState::ExactFallback);
-        let fallback_head = crate::git::rev_parse_head(&canonical_worktree)?;
-        let fallback_observation = exact_status_observation(&canonical_worktree)?;
-        let fallback_index = index_identity(&canonical_worktree)?;
-        let fallback = build_snapshot_once(
+        return filesystem_oracle_fallback(
             &canonical_worktree,
             &base,
             allowed_extensions,
-            None,
-            fallback_head,
-            fallback_index,
-            &fallback_observation,
-            &mut measurements,
-            true,
-        )?;
-        lifecycle.push(SnapshotLifecycleState::Valid);
-        let snapshot = finish_snapshot(
-            &canonical_worktree,
-            &base,
-            &fallback,
             lifecycle,
             measurements,
+            runtime,
         );
-        store_snapshot(&canonical_worktree, &base, fallback, &snapshot);
-        return Ok(snapshot);
     }
 
     unreachable!("bounded validation loop returns on every terminal route")
 }
 
 #[allow(clippy::too_many_arguments)]
-fn build_snapshot_once(
+fn build_snapshot_once<R: SnapshotRuntime>(
     worktree: &Path,
     base: &SnapshotBase,
     allowed_extensions: &[&str],
@@ -347,12 +544,14 @@ fn build_snapshot_once(
     observation: &GitStatusObservation,
     measurements: &mut SnapshotMeasurements,
     force_full_index: bool,
+    attempt: usize,
+    runtime: &mut R,
 ) -> anyhow::Result<SnapshotBuild> {
     let refresh_index =
         force_full_index || cached.is_none_or(|cached| cached.index_identity != index_identity);
     let tracked_index = if refresh_index {
         measurements.full_index_sweeps += 1;
-        load_tracked_index(worktree, allowed_extensions)?
+        runtime.load_tracked_index(worktree, allowed_extensions)?
     } else {
         cached.expect("checked above").tracked_index.clone()
     };
@@ -401,7 +600,7 @@ fn build_snapshot_once(
         .is_some_and(|indexed| indexed != head_oid)
     {
         measurements.head_lag_diffs += 1;
-        candidates.extend(head_lag_paths(
+        candidates.extend(runtime.head_lag_paths(
             worktree,
             base.indexed_head_oid.as_deref().expect("checked above"),
             &head_oid,
@@ -412,7 +611,7 @@ fn build_snapshot_once(
     let mut path_state = BTreeMap::new();
     let mut file_identities = BTreeMap::new();
     for path in candidates {
-        if rename_old_paths.contains(&path) {
+        if rename_old_paths.contains(&path) && !entries.contains_key(&path) {
             file_identities.insert(path.clone(), FileIdentity::Missing);
             if base.file_oids.contains_key(&path) {
                 path_state.insert(path, OverlayPathState::Deleted);
@@ -434,6 +633,8 @@ fn build_snapshot_once(
                 cached,
                 measurements,
                 &mut file_identities,
+                attempt,
+                runtime,
             )?
         } else if let Some(oid) = tracked_index.get(&path) {
             Some(OverlayPathState::Tracked(oid.clone()))
@@ -473,13 +674,15 @@ fn build_snapshot_once(
     })
 }
 
-fn current_worktree_state(
+fn current_worktree_state<R: SnapshotRuntime>(
     worktree: &Path,
     path: &str,
     untracked: bool,
     cached: Option<&CachedSnapshot>,
     measurements: &mut SnapshotMeasurements,
     file_identities: &mut BTreeMap<String, FileIdentity>,
+    attempt: usize,
+    runtime: &mut R,
 ) -> anyhow::Result<Option<OverlayPathState>> {
     let absolute = worktree.join(path);
     let before = file_identity(&absolute)?;
@@ -514,8 +717,20 @@ fn current_worktree_state(
             absolute.display()
         )
     })?;
+    runtime.validation_hook(
+        attempt,
+        ValidationPhase::AfterReadBeforeSecondStat,
+        &absolute,
+    );
     let after = file_identity(&absolute)?;
-    file_identities.insert(path.to_owned(), after);
+    // The OID belongs to bytes read after `before` and before `after`. Only
+    // equal stamps certify that pairing; preserving `before` on mismatch makes
+    // outer revalidation reject this attempt instead of blessing old bytes
+    // with the newer stamp.
+    file_identities.insert(
+        path.to_owned(),
+        if before == after { after } else { before },
+    );
     measurements.hashed_paths.push(path.to_owned());
     let oid = crate::git_blob_oid(&bytes);
     Ok(Some(if untracked {
@@ -543,12 +758,61 @@ fn finish_snapshot(
         ),
     };
     OverlaySnapshot {
-        identity,
+        identity: Some(identity),
         path_state: build.path_state.clone(),
         source: build.source,
         lifecycle,
         measurements,
     }
+}
+
+fn filesystem_oracle_fallback<R: SnapshotRuntime>(
+    worktree: &Path,
+    base: &SnapshotBase,
+    allowed_extensions: &[&str],
+    mut lifecycle: Vec<SnapshotLifecycleState>,
+    mut measurements: SnapshotMeasurements,
+    runtime: &mut R,
+) -> anyhow::Result<OverlaySnapshot> {
+    snapshots()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .remove(worktree);
+    lifecycle.push(SnapshotLifecycleState::ExactFallback);
+    measurements.exact_fallbacks = 1;
+
+    let current_oids = super::current_file_oids_via_fs(worktree, allowed_extensions)?;
+    let tracked_index = runtime
+        .load_tracked_index(worktree, allowed_extensions)
+        .unwrap_or_default();
+    let changed = super::overlay_changed_oid_hex_from_maps(base.file_oids.clone(), current_oids)?;
+    let path_state = changed
+        .into_iter()
+        .map(|(path, oid)| {
+            let state = match oid {
+                Some(oid)
+                    if tracked_index.contains_key(&path) || base.file_oids.contains_key(&path) =>
+                {
+                    OverlayPathState::Tracked(oid)
+                }
+                Some(oid) => OverlayPathState::Untracked(oid),
+                None => OverlayPathState::Deleted,
+            };
+            (path, state)
+        })
+        .collect();
+
+    lifecycle.push(SnapshotLifecycleState::Valid);
+    Ok(OverlaySnapshot {
+        // A Git failure or repeated consistency race cannot form the complete
+        // stable cache identity. Return the fresh oracle result without making
+        // it eligible for snapshot reuse.
+        identity: None,
+        path_state,
+        source: OverlaySnapshotSource::ExactFallback,
+        lifecycle,
+        measurements,
+    })
 }
 
 fn store_snapshot(
@@ -724,6 +988,7 @@ fn update_len_prefixed(hasher: &mut blake3::Hasher, bytes: &[u8]) {
     hasher.update(bytes);
 }
 
+#[cfg(test)]
 fn exact_status_observation(root: &Path) -> anyhow::Result<GitStatusObservation> {
     crate::git::status_observation(
         root,
@@ -790,11 +1055,6 @@ fn index_identity(root: &Path) -> anyhow::Result<IndexIdentity> {
             modified_nanos,
         })
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ValidationPhase {
-    BeforeRevalidate,
 }
 
 #[cfg(test)]
@@ -892,6 +1152,390 @@ mod tests {
                 (path, state)
             })
             .collect()
+    }
+
+    fn exact_changed_oid_hex_via_fs(
+        root: &Path,
+        base: &SnapshotBase,
+    ) -> BTreeMap<String, Option<String>> {
+        let canonical = root.canonicalize().expect("canonical worktree");
+        let current = super::super::current_file_oids_via_fs(&canonical, &supported_extensions())
+            .expect("fresh filesystem oracle");
+        super::super::overlay_changed_oid_hex_from_maps(base.file_oids.clone(), current)
+            .expect("exact filesystem delta")
+    }
+
+    struct InstrumentedRuntime {
+        capabilities: FsmonitorCapabilities,
+        commands: Vec<&'static str>,
+        fail_status: bool,
+        synthetic_status_source: bool,
+        observed_capabilities: Vec<FsmonitorCapabilities>,
+    }
+
+    impl InstrumentedRuntime {
+        fn release_disabled() -> Self {
+            Self {
+                capabilities: FsmonitorCapabilities {
+                    release_enabled: false,
+                    built_in_supported: true,
+                    local_filesystem: true,
+                    watcher_healthy: true,
+                },
+                commands: Vec::new(),
+                fail_status: false,
+                synthetic_status_source: false,
+                observed_capabilities: Vec::new(),
+            }
+        }
+    }
+
+    impl SnapshotRuntime for InstrumentedRuntime {
+        fn capabilities(&self) -> FsmonitorCapabilities {
+            self.capabilities
+        }
+
+        fn rev_parse_head(&mut self, worktree: &Path) -> anyhow::Result<String> {
+            self.commands.push("git rev-parse HEAD");
+            crate::git::rev_parse_head(worktree)
+        }
+
+        fn index_identity(&mut self, worktree: &Path) -> anyhow::Result<IndexIdentity> {
+            self.commands.push("git rev-parse --git-path index");
+            super::index_identity(worktree)
+        }
+
+        fn status_observation(&mut self, worktree: &Path) -> anyhow::Result<GitStatusObservation> {
+            self.commands.push("git status --porcelain=v2 -z");
+            self.observed_capabilities.push(self.capabilities);
+            if self.fail_status {
+                return Err(anyhow!("injected git status failure"));
+            }
+            if self.synthetic_status_source {
+                let mut observation = exact_status_observation(worktree)?;
+                observation.source = crate::git::fsmonitor_status_route(self.capabilities);
+                return Ok(observation);
+            }
+            crate::git::status_observation(worktree, self.capabilities)
+        }
+
+        fn load_tracked_index(
+            &mut self,
+            worktree: &Path,
+            allowed_extensions: &[&str],
+        ) -> anyhow::Result<BTreeMap<String, String>> {
+            self.commands.push("git ls-files --stage -z");
+            super::load_tracked_index(worktree, allowed_extensions)
+        }
+
+        fn head_lag_paths(
+            &mut self,
+            worktree: &Path,
+            indexed_head_oid: &str,
+            current_head_oid: &str,
+            allowed_extensions: &[&str],
+        ) -> anyhow::Result<BTreeSet<String>> {
+            self.commands.push("git diff --name-status -z");
+            super::head_lag_paths(
+                worktree,
+                indexed_head_oid,
+                current_head_oid,
+                allowed_extensions,
+            )
+        }
+    }
+
+    #[test]
+    fn overlay_snapshot_rename_with_recreated_source_preserves_both_paths() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let root = tempdir.path();
+        init_repo(root);
+        let renamed = b"pub fn renamed() {}\n";
+        let recreated = b"pub fn recreated() {}\n";
+        fs::write(root.join("src/old.rs"), renamed).expect("old source");
+        run_git(root, &["add", "src/old.rs"]);
+        run_git(root, &["commit", "-qm", "base"]);
+        let base = base(root, Some(head(root)));
+
+        run_git(root, &["mv", "src/old.rs", "src/new.rs"]);
+        fs::write(root.join("src/old.rs"), recreated).expect("recreated source");
+
+        let actual = snapshot(root, base.clone(), &supported_extensions()).expect("snapshot");
+        assert_eq!(actual.path_state, exact_path_state(root, &base));
+        assert_eq!(
+            actual.path_state.get("src/new.rs"),
+            Some(&OverlayPathState::Tracked(git_blob_oid(renamed)))
+        );
+        assert_eq!(
+            actual.path_state.get("src/old.rs"),
+            Some(&OverlayPathState::Untracked(git_blob_oid(recreated)))
+        );
+    }
+
+    #[test]
+    fn overlay_snapshot_read_stat_race_retries_before_serving_new_stamp() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let root = tempdir.path();
+        init_repo(root);
+        fs::write(root.join("src/lib.rs"), "pub fn v1() {}\n").expect("v1");
+        run_git(root, &["add", "src/lib.rs"]);
+        run_git(root, &["commit", "-qm", "base"]);
+        let base = base(root, Some(head(root)));
+        let extensions = supported_extensions();
+        snapshot(root, base.clone(), &extensions).expect("cold snapshot");
+        fs::write(root.join("src/lib.rs"), "pub fn v2() {}\n").expect("v2");
+
+        let actual = snapshot_with_validation_hook(
+            root,
+            base.clone(),
+            &extensions,
+            |attempt, phase, path| {
+                if attempt == 0
+                    && phase == ValidationPhase::AfterReadBeforeSecondStat
+                    && path.ends_with("lib.rs")
+                {
+                    fs::write(path, "pub fn v3() {}\n").expect("mutate after read");
+                }
+            },
+        )
+        .expect("single read/stat race");
+
+        assert_eq!(actual.measurements.retries, 1);
+        assert_eq!(actual.measurements.exact_fallbacks, 0);
+        assert_eq!(actual.path_state, exact_path_state(root, &base));
+        assert_eq!(
+            actual.lifecycle,
+            vec![
+                SnapshotLifecycleState::Valid,
+                SnapshotLifecycleState::Validating,
+                SnapshotLifecycleState::Retrying,
+                SnapshotLifecycleState::Validating,
+                SnapshotLifecycleState::Valid,
+            ]
+        );
+    }
+
+    #[test]
+    fn overlay_snapshot_repeated_read_stat_race_uses_fresh_filesystem_oracle() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let root = tempdir.path();
+        init_repo(root);
+        fs::write(root.join("src/lib.rs"), "pub fn v1() {}\n").expect("v1");
+        run_git(root, &["add", "src/lib.rs"]);
+        run_git(root, &["commit", "-qm", "base"]);
+        let base = base(root, Some(head(root)));
+        let extensions = supported_extensions();
+        snapshot(root, base.clone(), &extensions).expect("cold snapshot");
+        fs::write(root.join("src/lib.rs"), "pub fn v2() {}\n").expect("v2");
+
+        let actual = snapshot_with_validation_hook(
+            root,
+            base.clone(),
+            &extensions,
+            |attempt, phase, path| {
+                if phase == ValidationPhase::AfterReadBeforeSecondStat && path.ends_with("lib.rs") {
+                    let body = if attempt == 0 {
+                        "pub fn v3() {}\n"
+                    } else {
+                        "pub fn v4() {}\n"
+                    };
+                    fs::write(path, body).expect("repeat mutation after read");
+                }
+            },
+        )
+        .expect("repeated read/stat race");
+
+        assert_eq!(actual.measurements.retries, 1);
+        assert_eq!(actual.measurements.exact_fallbacks, 1);
+        assert_eq!(
+            actual.changed_oid_hex(),
+            exact_changed_oid_hex_via_fs(root, &base)
+        );
+        assert_eq!(
+            actual.lifecycle,
+            vec![
+                SnapshotLifecycleState::Valid,
+                SnapshotLifecycleState::Validating,
+                SnapshotLifecycleState::Retrying,
+                SnapshotLifecycleState::Validating,
+                SnapshotLifecycleState::ExactFallback,
+                SnapshotLifecycleState::Valid,
+            ]
+        );
+    }
+
+    #[test]
+    fn overlay_snapshot_invalid_indexed_head_uses_fresh_filesystem_oracle() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let root = tempdir.path();
+        init_repo(root);
+        fs::write(root.join("src/lib.rs"), "pub fn current() {}\n").expect("source");
+        run_git(root, &["add", "src/lib.rs"]);
+        run_git(root, &["commit", "-qm", "base"]);
+        let mut base = base(root, None);
+        base.indexed_head_oid = Some("0000000000000000000000000000000000000000".to_owned());
+
+        let actual = snapshot(root, base.clone(), &supported_extensions())
+            .expect("invalid indexed HEAD must use exact fallback");
+        assert_eq!(actual.source, OverlaySnapshotSource::ExactFallback);
+        assert_eq!(
+            actual.changed_oid_hex(),
+            exact_changed_oid_hex_via_fs(root, &base)
+        );
+        assert_eq!(
+            actual.lifecycle,
+            vec![
+                SnapshotLifecycleState::Cold,
+                SnapshotLifecycleState::Validating,
+                SnapshotLifecycleState::ExactFallback,
+                SnapshotLifecycleState::Valid,
+            ]
+        );
+    }
+
+    #[test]
+    fn overlay_snapshot_status_failure_uses_fresh_filesystem_oracle() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let root = tempdir.path();
+        init_repo(root);
+        fs::write(root.join("src/lib.rs"), "pub fn v1() {}\n").expect("v1");
+        run_git(root, &["add", "src/lib.rs"]);
+        run_git(root, &["commit", "-qm", "base"]);
+        let base = base(root, Some(head(root)));
+        let mut runtime = InstrumentedRuntime::release_disabled();
+        snapshot_with_runtime(root, base.clone(), &supported_extensions(), &mut runtime)
+            .expect("seed stable cache");
+        fs::write(root.join("src/lib.rs"), "pub fn v2() {}\n").expect("v2");
+        runtime.fail_status = true;
+
+        let actual =
+            snapshot_with_runtime(root, base.clone(), &supported_extensions(), &mut runtime)
+                .expect("status failure must use exact fallback");
+        assert_eq!(actual.source, OverlaySnapshotSource::ExactFallback);
+        assert_eq!(
+            actual.identity, None,
+            "unstable fallback must not form a cache key"
+        );
+        assert!(!snapshots()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .contains_key(&root.canonicalize().expect("canonical worktree")));
+        assert_eq!(
+            actual.changed_oid_hex(),
+            exact_changed_oid_hex_via_fs(root, &base)
+        );
+        assert_eq!(
+            actual.lifecycle,
+            vec![
+                SnapshotLifecycleState::Valid,
+                SnapshotLifecycleState::Validating,
+                SnapshotLifecycleState::ExactFallback,
+                SnapshotLifecycleState::Valid,
+            ]
+        );
+
+        runtime.fail_status = false;
+        let recovered = snapshot_with_runtime(root, base, &supported_extensions(), &mut runtime)
+            .expect("recovered Git observation");
+        assert!(!recovered.measurements.snapshot_reused);
+        assert_eq!(recovered.measurements.full_index_sweeps, 1);
+    }
+
+    #[test]
+    fn overlay_snapshot_task2_capability_seam_routes_without_enabling_production() {
+        for (capabilities, expected) in [
+            (
+                FsmonitorCapabilities {
+                    release_enabled: true,
+                    built_in_supported: true,
+                    local_filesystem: true,
+                    watcher_healthy: true,
+                },
+                OverlaySnapshotSource::FsmonitorNative,
+            ),
+            (
+                FsmonitorCapabilities {
+                    release_enabled: false,
+                    built_in_supported: true,
+                    local_filesystem: true,
+                    watcher_healthy: true,
+                },
+                OverlaySnapshotSource::ExactFallback,
+            ),
+            (
+                FsmonitorCapabilities {
+                    release_enabled: true,
+                    built_in_supported: true,
+                    local_filesystem: true,
+                    watcher_healthy: false,
+                },
+                OverlaySnapshotSource::ExactFallback,
+            ),
+        ] {
+            let tempdir = tempfile::tempdir().expect("tempdir");
+            let root = tempdir.path();
+            init_repo(root);
+            fs::write(root.join("src/lib.rs"), "pub fn clean() {}\n").expect("source");
+            run_git(root, &["add", "src/lib.rs"]);
+            run_git(root, &["commit", "-qm", "base"]);
+            let base = base(root, Some(head(root)));
+            let mut runtime = InstrumentedRuntime {
+                capabilities,
+                synthetic_status_source: true,
+                ..InstrumentedRuntime::release_disabled()
+            };
+
+            let actual = snapshot_with_runtime(root, base, &supported_extensions(), &mut runtime)
+                .expect("routed snapshot");
+            assert_eq!(actual.source, expected);
+            assert_eq!(runtime.observed_capabilities, vec![capabilities]);
+        }
+
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let root = tempdir.path();
+        init_repo(root);
+        fs::write(root.join("src/lib.rs"), "pub fn production() {}\n").expect("source");
+        run_git(root, &["add", "src/lib.rs"]);
+        run_git(root, &["commit", "-qm", "base"]);
+        let production = snapshot(root, base(root, Some(head(root))), &supported_extensions())
+            .expect("production snapshot");
+        assert_eq!(production.source, OverlaySnapshotSource::ExactFallback);
+    }
+
+    #[test]
+    fn overlay_snapshot_warm_command_trace_has_no_ls_files_sweep() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let root = tempdir.path();
+        init_repo(root);
+        fs::write(root.join("src/lib.rs"), "pub fn clean() {}\n").expect("source");
+        run_git(root, &["add", "src/lib.rs"]);
+        run_git(root, &["commit", "-qm", "base"]);
+        let base = base(root, Some(head(root)));
+        let extensions = supported_extensions();
+        let mut runtime = InstrumentedRuntime::release_disabled();
+        snapshot_with_runtime(root, base.clone(), &extensions, &mut runtime)
+            .expect("cold snapshot");
+        runtime.commands.clear();
+
+        let warm =
+            snapshot_with_runtime(root, base, &extensions, &mut runtime).expect("warm snapshot");
+        eprintln!("warm Git command trace: {:?}", runtime.commands);
+        assert_eq!(
+            runtime.commands,
+            vec![
+                "git rev-parse HEAD",
+                "git rev-parse --git-path index",
+                "git status --porcelain=v2 -z",
+                "git rev-parse --git-path index",
+                "git rev-parse HEAD",
+                "git rev-parse --git-path index",
+            ]
+        );
+        assert!(warm.measurements.snapshot_reused);
+        assert!(!runtime
+            .commands
+            .iter()
+            .any(|command| command.contains("ls-files")));
     }
 
     #[test]
@@ -1049,7 +1693,16 @@ mod tests {
         assert_eq!(single.measurements.retries, 1);
         assert_eq!(single.measurements.exact_fallbacks, 0);
         assert_eq!(single.path_state, exact_path_state(root, &base));
-        assert!(single.lifecycle.contains(&SnapshotLifecycleState::Retrying));
+        assert_eq!(
+            single.lifecycle,
+            vec![
+                SnapshotLifecycleState::Valid,
+                SnapshotLifecycleState::Validating,
+                SnapshotLifecycleState::Retrying,
+                SnapshotLifecycleState::Validating,
+                SnapshotLifecycleState::Valid,
+            ]
+        );
 
         fs::write(root.join("src/lib.rs"), "pub fn v4() {}\n").expect("v4");
         let repeated = snapshot_with_validation_hook(
@@ -1072,8 +1725,16 @@ mod tests {
         assert_eq!(repeated.measurements.retries, 1);
         assert_eq!(repeated.measurements.exact_fallbacks, 1);
         assert_eq!(repeated.path_state, exact_path_state(root, &base));
-        assert!(repeated
-            .lifecycle
-            .contains(&SnapshotLifecycleState::ExactFallback));
+        assert_eq!(
+            repeated.lifecycle,
+            vec![
+                SnapshotLifecycleState::Valid,
+                SnapshotLifecycleState::Validating,
+                SnapshotLifecycleState::Retrying,
+                SnapshotLifecycleState::Validating,
+                SnapshotLifecycleState::ExactFallback,
+                SnapshotLifecycleState::Valid,
+            ]
+        );
     }
 }
