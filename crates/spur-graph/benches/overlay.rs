@@ -17,6 +17,7 @@ use std::time::Duration;
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use spur_graph::{
     GraphQueryClient, OverlayClient, ParquetClient, SearchFilters, SearchMode, SearchOptions,
+    SearchResult,
 };
 
 const DEFAULT_QUERY: &str = "handle_code_search";
@@ -414,17 +415,12 @@ fn bench_overlay_stage_probe(c: &mut Criterion) {
     let overlay_search = overlay
         .search_symbols(&options)
         .expect("validate query against overlay fixture");
-    let symbol_id = overlay_search
-        .candidates
-        .first()
-        .unwrap_or_else(|| {
-            panic!(
-                "SPUR_GRAPH_PERF_QUERY `{}` was shadowed without an overlay replacement after extracting `{}`",
-                config.query, config.changed_file.display()
-            )
-        })
-        .stable_symbol_id
-        .clone();
+    overlay_search.candidates.first().unwrap_or_else(|| {
+        panic!(
+            "SPUR_GRAPH_PERF_QUERY `{}` was shadowed without an overlay replacement after extracting `{}`",
+            config.query, config.changed_file.display()
+        )
+    });
     let digest = total_session_digest(&config, &parquet, &options);
     print_probe_metadata(&config, &parquet, &digest);
 
@@ -452,6 +448,14 @@ fn bench_overlay_stage_probe(c: &mut Criterion) {
             ))
         });
     });
+    group.bench_function("stage_warm_validation_combined", |b| {
+        b.iter(|| {
+            black_box(warm_validation_digest(
+                black_box(&parquet),
+                black_box(&config.repo),
+            ))
+        });
+    });
     group.bench_function("stage_delta_construction", |b| {
         b.iter(|| {
             let delta = OverlayClient::<&ParquetClient>::extract_delta(
@@ -472,7 +476,7 @@ fn bench_overlay_stage_probe(c: &mut Criterion) {
     });
     group.bench_function("stage_response_shaping", |b| {
         b.iter(|| {
-            let response = shape_response(black_box(&overlay), black_box(&symbol_id));
+            let response = shape_response(black_box(&overlay_search));
             black_box(response);
         });
     });
@@ -507,16 +511,29 @@ fn run_mcp_latency_session(client: &dyn GraphQueryClient, options: &SearchOption
     black_box((search, symbol, manifest, callers));
 }
 
-fn shape_response(client: &dyn GraphQueryClient, symbol_id: &str) -> String {
-    let symbol = client
-        .symbol_by_id(symbol_id)
-        .expect("response shaping symbol lookup")
-        .expect("response shaping symbol exists");
-    let manifest = client
-        .file_manifest_by_path(&symbol.file_path)
-        .expect("response shaping file manifest lookup");
-    let callers = client.find_caller_edges(symbol_id);
-    format!("{symbol:?}\n{manifest:?}\n{callers:?}")
+fn shape_response(search: &SearchResult) -> String {
+    let candidates = search
+        .candidates
+        .iter()
+        .map(|candidate| {
+            serde_json::json!({
+                "uri": format!("graph://symbol/{}", candidate.stable_symbol_id),
+                "id": candidate.stable_symbol_id,
+                "entity_name": candidate.entity_name,
+                "qualified_name": candidate.qualified_name,
+                "file_path": candidate.file_path,
+                "line_range": candidate.line_range,
+                "symbol_kind": candidate.symbol_kind,
+                "enclosing_scope": candidate.enclosing_scope,
+            })
+        })
+        .collect::<Vec<_>>();
+    serde_json::json!({
+        "total_matches": search.total_matches,
+        "truncated": search.truncated,
+        "candidates": candidates,
+    })
+    .to_string()
 }
 
 fn total_session_digest(
@@ -527,8 +544,7 @@ fn total_session_digest(
     let base = parquet
         .search_symbols(options)
         .expect("total session base parquet query");
-    let observation = git_observation(&config.repo);
-    let validation = snapshot_oid_validation(parquet, &config.repo);
+    let warm_validation = warm_validation_digest(parquet, &config.repo);
     let changed_files = config.changed_files();
     let (artifact, shadowed) =
         OverlayClient::<&ParquetClient>::extract_delta(&config.repo, &changed_files)
@@ -538,18 +554,15 @@ fn total_session_digest(
     let overlay_search = overlay
         .search_symbols(options)
         .expect("total session overlay query");
-    let overlay_symbol_id = overlay_search
+    overlay_search
         .candidates
         .first()
-        .expect("validated query remains present in total session")
-        .stable_symbol_id
-        .clone();
-    let response = shape_response(&overlay, &overlay_symbol_id);
+        .expect("validated query remains present in total session");
+    let response = shape_response(&overlay_search);
 
     let mut hasher = blake3::Hasher::new();
     hasher.update(format!("{base:?}\n{overlay_search:?}\n{response}").as_bytes());
-    hasher.update(&observation);
-    hasher.update(validation.as_bytes());
+    hasher.update(warm_validation.as_bytes());
     hasher.finalize()
 }
 
@@ -576,6 +589,15 @@ fn snapshot_oid_validation(parquet: &ParquetClient, repo: &Path) -> blake3::Hash
     }
     hasher.update(&tracked_state);
     hasher.update(&tracked_oids);
+    hasher.finalize()
+}
+
+fn warm_validation_digest(parquet: &ParquetClient, repo: &Path) -> blake3::Hash {
+    let observation = git_observation(repo);
+    let validation = snapshot_oid_validation(parquet, repo);
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(&observation);
+    hasher.update(validation.as_bytes());
     hasher.finalize()
 }
 
@@ -652,10 +674,11 @@ fn print_probe_metadata(config: &ProbeConfig, parquet: &ParquetClient, digest: &
             "stage_base_parquet_query": "one Parquet search_symbols call",
             "stage_git_observation": "one exact-path porcelain-v1 status command",
             "stage_snapshot_oid_validation": "artifact file-OID read plus exact-path ls-files -t/-s and fingerprint",
+            "stage_warm_validation_combined": "Git observation followed by snapshot/OID validation in one directly sampled Criterion iteration",
             "stage_delta_construction": "extract_delta for the explicit changed file",
             "stage_overlay_query": "one search_symbols call on a prebuilt overlay",
-            "stage_response_shaping": "post-search symbol, file-manifest, and caller assembly",
-            "stage_total_session": "all preceding stages once, in order"
+            "stage_response_shaping": "pure JSON transformation and serialization of the precomputed overlay search result; zero graph queries",
+            "stage_total_session": "one base query, directly combined warm validation, delta extraction and overlay construction, one overlay query, and pure response shaping that reuses that query result"
         }
     });
     eprintln!("SPUR_GRAPH_PERF_METADATA={metadata}");
