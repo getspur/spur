@@ -5549,15 +5549,23 @@ fn current_file_oids_via_fs(
     worktree: &Path,
     allowed_extensions: &[&str],
 ) -> anyhow::Result<BTreeMap<String, String>> {
-    let current_files = discover_files(worktree, allowed_extensions)?;
     let mut current_oids = BTreeMap::new();
-    for path in current_files {
-        let rel_path = worktree_relative_slash_path(worktree, &path);
+    for (rel_path, path) in supported_file_paths_via_fs(worktree, allowed_extensions)? {
         let bytes = fs::read(&path)
             .map_err(|error| anyhow::anyhow!("failed to read `{}`: {error}", path.display()))?;
         current_oids.insert(rel_path, git_blob_oid(&bytes));
     }
     Ok(current_oids)
+}
+
+fn supported_file_paths_via_fs(
+    worktree: &Path,
+    allowed_extensions: &[&str],
+) -> anyhow::Result<BTreeMap<String, PathBuf>> {
+    Ok(discover_files(worktree, allowed_extensions)?
+        .into_iter()
+        .map(|path| (worktree_relative_slash_path(worktree, &path), path))
+        .collect())
 }
 
 #[cfg(test)]

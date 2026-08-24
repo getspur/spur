@@ -66,6 +66,7 @@ pub(crate) struct SnapshotMeasurements {
     pub(crate) hashed_paths: Vec<String>,
     pub(crate) head_lag_diffs: usize,
     pub(crate) retries: usize,
+    pub(crate) fallback_scan_retries: usize,
     pub(crate) exact_fallbacks: usize,
     pub(crate) snapshot_reused: bool,
 }
@@ -173,6 +174,14 @@ enum ValidationPhase {
     BeforeRevalidate,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FallbackScanPhase {
+    BeforeDiscovery,
+    AfterReadBeforeSecondStat,
+    BeforeRediscover,
+    BeforeFinalRestat,
+}
+
 trait SnapshotRuntime {
     fn capabilities(&self) -> FsmonitorCapabilities;
 
@@ -212,6 +221,8 @@ trait SnapshotRuntime {
     }
 
     fn validation_hook(&mut self, _attempt: usize, _phase: ValidationPhase, _path: &Path) {}
+
+    fn fallback_scan_hook(&mut self, _attempt: usize, _phase: FallbackScanPhase, _path: &Path) {}
 }
 
 struct HookRuntime<F> {
@@ -421,6 +432,7 @@ fn snapshot_with_runtime<R: SnapshotRuntime>(
                 };
                 lifecycle.push(SnapshotLifecycleState::Valid);
                 reused.lifecycle = lifecycle;
+                reused.source = source_from_observation(&observation);
                 if let Some(identity) = &mut reused.identity {
                     identity.current_head_oid = post_head_oid.clone();
                     identity.index_identity = post_index_identity.clone();
@@ -781,26 +793,9 @@ fn filesystem_oracle_fallback<R: SnapshotRuntime>(
     lifecycle.push(SnapshotLifecycleState::ExactFallback);
     measurements.exact_fallbacks = 1;
 
-    let current_oids = super::current_file_oids_via_fs(worktree, allowed_extensions)?;
-    let tracked_index = runtime
-        .load_tracked_index(worktree, allowed_extensions)
-        .unwrap_or_default();
-    let changed = super::overlay_changed_oid_hex_from_maps(base.file_oids.clone(), current_oids)?;
-    let path_state = changed
-        .into_iter()
-        .map(|(path, oid)| {
-            let state = match oid {
-                Some(oid)
-                    if tracked_index.contains_key(&path) || base.file_oids.contains_key(&path) =>
-                {
-                    OverlayPathState::Tracked(oid)
-                }
-                Some(oid) => OverlayPathState::Untracked(oid),
-                None => OverlayPathState::Deleted,
-            };
-            (path, state)
-        })
-        .collect();
+    let certified =
+        certify_filesystem_fallback(worktree, allowed_extensions, &mut measurements, runtime)?;
+    let path_state = fallback_path_state(base, &certified);
 
     lifecycle.push(SnapshotLifecycleState::Valid);
     Ok(OverlaySnapshot {
@@ -813,6 +808,154 @@ fn filesystem_oracle_fallback<R: SnapshotRuntime>(
         lifecycle,
         measurements,
     })
+}
+
+struct CertifiedFilesystemFallback {
+    current_oids: BTreeMap<String, String>,
+    tracked_index: BTreeMap<String, String>,
+}
+
+fn certify_filesystem_fallback<R: SnapshotRuntime>(
+    worktree: &Path,
+    allowed_extensions: &[&str],
+    measurements: &mut SnapshotMeasurements,
+    runtime: &mut R,
+) -> anyhow::Result<CertifiedFilesystemFallback> {
+    let first_error = match certify_filesystem_fallback_once(
+        worktree,
+        allowed_extensions,
+        measurements,
+        0,
+        runtime,
+    ) {
+        Ok(certified) => return Ok(certified),
+        Err(error) => error,
+    };
+    measurements.fallback_scan_retries = 1;
+    certify_filesystem_fallback_once(worktree, allowed_extensions, measurements, 1, runtime)
+        .map_err(|second_error| {
+            anyhow!(
+                "failed to certify filesystem fallback after two attempts: \
+             first attempt: {first_error:#}; second attempt: {second_error:#}"
+            )
+        })
+}
+
+fn certify_filesystem_fallback_once<R: SnapshotRuntime>(
+    worktree: &Path,
+    allowed_extensions: &[&str],
+    measurements: &mut SnapshotMeasurements,
+    attempt: usize,
+    runtime: &mut R,
+) -> anyhow::Result<CertifiedFilesystemFallback> {
+    measurements.full_index_sweeps += 1;
+    let tracked_before = runtime
+        .load_tracked_index(worktree, allowed_extensions)
+        .context("failed to load current index membership before filesystem fallback scan")?;
+
+    runtime.fallback_scan_hook(attempt, FallbackScanPhase::BeforeDiscovery, worktree);
+    let discovered = super::supported_file_paths_via_fs(worktree, allowed_extensions)
+        .context("failed to discover supported filesystem fallback paths")?;
+    let mut current_oids = BTreeMap::new();
+    let mut read_identities = BTreeMap::new();
+    for (path, absolute) in &discovered {
+        let before = file_identity(absolute)
+            .with_context(|| format!("failed to stat fallback path `{}`", absolute.display()))?;
+        if matches!(before, FileIdentity::Missing) {
+            return Err(anyhow!(
+                "filesystem fallback path `{}` disappeared after discovery",
+                absolute.display()
+            ));
+        }
+        let bytes = fs::read(absolute)
+            .with_context(|| format!("failed to read fallback path `{}`", absolute.display()))?;
+        runtime.fallback_scan_hook(
+            attempt,
+            FallbackScanPhase::AfterReadBeforeSecondStat,
+            absolute,
+        );
+        let after = file_identity(absolute).with_context(|| {
+            format!(
+                "failed to stat fallback path `{}` after reading",
+                absolute.display()
+            )
+        })?;
+        if before != after {
+            return Err(anyhow!(
+                "filesystem fallback path `{}` changed while being read",
+                absolute.display()
+            ));
+        }
+        current_oids.insert(path.clone(), crate::git_blob_oid(&bytes));
+        read_identities.insert(path.clone(), after);
+    }
+
+    runtime.fallback_scan_hook(attempt, FallbackScanPhase::BeforeRediscover, worktree);
+    let rediscovered = super::supported_file_paths_via_fs(worktree, allowed_extensions)
+        .context("failed to rediscover supported filesystem fallback paths")?;
+    if discovered != rediscovered {
+        return Err(anyhow!(
+            "filesystem fallback supported path set changed during the scan"
+        ));
+    }
+
+    runtime.fallback_scan_hook(attempt, FallbackScanPhase::BeforeFinalRestat, worktree);
+    for (path, expected) in &read_identities {
+        let absolute = discovered
+            .get(path)
+            .expect("read identity belongs to discovered path set");
+        let current = file_identity(absolute).with_context(|| {
+            format!(
+                "failed to re-stat fallback path `{}` after the complete scan",
+                absolute.display()
+            )
+        })?;
+        if &current != expected {
+            return Err(anyhow!(
+                "filesystem fallback path `{}` changed before final certification",
+                absolute.display()
+            ));
+        }
+    }
+
+    measurements.full_index_sweeps += 1;
+    let tracked_after = runtime
+        .load_tracked_index(worktree, allowed_extensions)
+        .context("failed to load current index membership after filesystem fallback scan")?;
+    if tracked_before != tracked_after {
+        return Err(anyhow!(
+            "current index membership changed during filesystem fallback scan"
+        ));
+    }
+
+    Ok(CertifiedFilesystemFallback {
+        current_oids,
+        tracked_index: tracked_after,
+    })
+}
+
+fn fallback_path_state(
+    base: &SnapshotBase,
+    certified: &CertifiedFilesystemFallback,
+) -> BTreeMap<String, OverlayPathState> {
+    let mut path_state = BTreeMap::new();
+    for (path, oid) in &certified.current_oids {
+        let state = if certified.tracked_index.contains_key(path) {
+            OverlayPathState::Tracked(oid.clone())
+        } else {
+            OverlayPathState::Untracked(oid.clone())
+        };
+        if base.file_oids.get(path) != Some(oid) || matches!(state, OverlayPathState::Untracked(_))
+        {
+            path_state.insert(path.clone(), state);
+        }
+    }
+    for path in base.file_oids.keys() {
+        if !certified.current_oids.contains_key(path) {
+            path_state.insert(path.clone(), OverlayPathState::Deleted);
+        }
+    }
+    path_state
 }
 
 fn store_snapshot(
@@ -1169,8 +1312,11 @@ mod tests {
         capabilities: FsmonitorCapabilities,
         commands: Vec<&'static str>,
         fail_status: bool,
+        fail_tracked_index: bool,
         synthetic_status_source: bool,
         observed_capabilities: Vec<FsmonitorCapabilities>,
+        after_read_mutations: BTreeMap<usize, (&'static str, &'static str)>,
+        after_read_attempts: Vec<usize>,
     }
 
     impl InstrumentedRuntime {
@@ -1184,8 +1330,11 @@ mod tests {
                 },
                 commands: Vec::new(),
                 fail_status: false,
+                fail_tracked_index: false,
                 synthetic_status_source: false,
                 observed_capabilities: Vec::new(),
+                after_read_mutations: BTreeMap::new(),
+                after_read_attempts: Vec::new(),
             }
         }
     }
@@ -1225,6 +1374,9 @@ mod tests {
             allowed_extensions: &[&str],
         ) -> anyhow::Result<BTreeMap<String, String>> {
             self.commands.push("git ls-files --stage -z");
+            if self.fail_tracked_index {
+                return Err(anyhow!("injected tracked-index failure"));
+            }
             super::load_tracked_index(worktree, allowed_extensions)
         }
 
@@ -1242,6 +1394,274 @@ mod tests {
                 current_head_oid,
                 allowed_extensions,
             )
+        }
+
+        fn fallback_scan_hook(&mut self, attempt: usize, phase: FallbackScanPhase, path: &Path) {
+            if phase != FallbackScanPhase::AfterReadBeforeSecondStat || !path.ends_with("a.rs") {
+                return;
+            }
+            self.after_read_attempts.push(attempt);
+            if let Some((a_body, b_body)) = self.after_read_mutations.remove(&attempt) {
+                fs::write(path, a_body).expect("mutate fallback a.rs after read");
+                fs::write(path.with_file_name("b.rs"), b_body)
+                    .expect("mutate fallback b.rs after a.rs read");
+            }
+        }
+    }
+
+    #[test]
+    fn overlay_snapshot_fallback_scan_retries_once_after_torn_read_set() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let root = tempdir.path();
+        init_repo(root);
+        let a0 = "pub fn a0() {}\n";
+        let a1 = "pub fn a1() {}\n";
+        let b0 = "pub fn b0() {}\n";
+        let b1 = "pub fn b1() {}\n";
+        fs::write(root.join("src/a.rs"), a0).expect("a0");
+        fs::write(root.join("src/b.rs"), b0).expect("b0");
+        run_git(root, &["add", "src"]);
+        run_git(root, &["commit", "-qm", "base"]);
+        let base = base(root, Some(head(root)));
+        fs::write(root.join("src/b.rs"), b1).expect("b1 before fallback");
+        let mut runtime = InstrumentedRuntime {
+            fail_status: true,
+            after_read_mutations: BTreeMap::from([(0, (a1, b0))]),
+            ..InstrumentedRuntime::release_disabled()
+        };
+
+        let actual = snapshot_with_runtime(root, base, &supported_extensions(), &mut runtime)
+            .expect("one torn fallback scan must retry and stabilize");
+
+        eprintln!(
+            "fallback stable trace: after_read_attempts={:?} lifecycle={:?} path_state={:?}",
+            runtime.after_read_attempts, actual.lifecycle, actual.path_state
+        );
+        assert_eq!(runtime.after_read_attempts, vec![0, 1]);
+        assert_eq!(actual.measurements.fallback_scan_retries, 1);
+        assert_eq!(
+            actual.path_state,
+            BTreeMap::from([(
+                "src/a.rs".to_owned(),
+                OverlayPathState::Tracked(git_blob_oid(a1.as_bytes())),
+            )]),
+            "the torn a0/b0 read set must never be served as an empty delta"
+        );
+        assert_eq!(actual.source, OverlaySnapshotSource::ExactFallback);
+        assert_eq!(actual.identity, None);
+        assert_eq!(
+            actual.lifecycle,
+            vec![
+                SnapshotLifecycleState::Cold,
+                SnapshotLifecycleState::Validating,
+                SnapshotLifecycleState::ExactFallback,
+                SnapshotLifecycleState::Valid,
+            ]
+        );
+    }
+
+    #[test]
+    fn overlay_snapshot_repeatedly_torn_fallback_scan_fails_closed() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let root = tempdir.path();
+        init_repo(root);
+        let a0 = "pub fn a0() {}\n";
+        let a1 = "pub fn a1() {}\n";
+        let a2 = "pub fn a2() {}\n";
+        let b0 = "pub fn b0() {}\n";
+        let b1 = "pub fn b1() {}\n";
+        fs::write(root.join("src/a.rs"), a0).expect("a0");
+        fs::write(root.join("src/b.rs"), b0).expect("b0");
+        run_git(root, &["add", "src"]);
+        run_git(root, &["commit", "-qm", "base"]);
+        let base = base(root, Some(head(root)));
+        fs::write(root.join("src/b.rs"), b1).expect("b1 before fallback");
+        let mut runtime = InstrumentedRuntime {
+            fail_status: true,
+            after_read_mutations: BTreeMap::from([(0, (a1, b0)), (1, (a2, b1))]),
+            ..InstrumentedRuntime::release_disabled()
+        };
+
+        let error = snapshot_with_runtime(root, base, &supported_extensions(), &mut runtime)
+            .expect_err("a second torn fallback scan must fail closed without a Valid response");
+
+        eprintln!(
+            "fallback fail-closed trace: after_read_attempts={:?} valid_response=false error={error:#}",
+            runtime.after_read_attempts
+        );
+        assert_eq!(runtime.after_read_attempts, vec![0, 1]);
+        assert!(
+            error
+                .to_string()
+                .contains("failed to certify filesystem fallback"),
+            "unexpected fallback certification error: {error:#}"
+        );
+        assert!(!snapshots()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .contains_key(&root.canonicalize().expect("canonical worktree")));
+    }
+
+    #[test]
+    fn overlay_snapshot_status_failure_fallback_preserves_rename_recreate_typing() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let root = tempdir.path();
+        init_repo(root);
+        let renamed = b"pub fn renamed() {}\n";
+        let recreated = b"pub fn recreated() {}\n";
+        fs::write(root.join("src/old.rs"), renamed).expect("old source");
+        run_git(root, &["add", "src/old.rs"]);
+        run_git(root, &["commit", "-qm", "base"]);
+        let base = base(root, Some(head(root)));
+        run_git(root, &["mv", "src/old.rs", "src/new.rs"]);
+        fs::write(root.join("src/old.rs"), recreated).expect("recreated source");
+        let mut runtime = InstrumentedRuntime {
+            fail_status: true,
+            ..InstrumentedRuntime::release_disabled()
+        };
+
+        let actual = snapshot_with_runtime(root, base, &supported_extensions(), &mut runtime)
+            .expect("status failure must use a typed filesystem fallback");
+
+        eprintln!(
+            "fallback rename/recreate typed state: {:?}",
+            actual.path_state
+        );
+        assert_eq!(
+            actual.path_state,
+            BTreeMap::from([
+                (
+                    "src/new.rs".to_owned(),
+                    OverlayPathState::Tracked(git_blob_oid(renamed)),
+                ),
+                (
+                    "src/old.rs".to_owned(),
+                    OverlayPathState::Untracked(git_blob_oid(recreated)),
+                ),
+            ])
+        );
+    }
+
+    #[test]
+    fn overlay_snapshot_fallback_index_failure_fails_closed_without_typing_guess() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let root = tempdir.path();
+        init_repo(root);
+        fs::write(root.join("src/lib.rs"), "pub fn base() {}\n").expect("base source");
+        run_git(root, &["add", "src/lib.rs"]);
+        run_git(root, &["commit", "-qm", "base"]);
+        let base = base(root, Some(head(root)));
+        fs::write(root.join("src/lib.rs"), "pub fn changed() {}\n").expect("changed source");
+        let mut runtime = InstrumentedRuntime {
+            fail_status: true,
+            fail_tracked_index: true,
+            ..InstrumentedRuntime::release_disabled()
+        };
+
+        let error = snapshot_with_runtime(root, base, &supported_extensions(), &mut runtime)
+            .expect_err("unknown current index membership must fail closed");
+
+        assert!(
+            error
+                .to_string()
+                .contains("failed to certify filesystem fallback"),
+            "unexpected current-index error: {error:#}"
+        );
+    }
+
+    #[test]
+    fn overlay_snapshot_fallback_reports_untracked_when_oid_matches_base() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let root = tempdir.path();
+        init_repo(root);
+        let source = b"pub fn same_oid() {}\n";
+        fs::write(root.join("src/lib.rs"), source).expect("source");
+        run_git(root, &["add", "src/lib.rs"]);
+        run_git(root, &["commit", "-qm", "base"]);
+        let base = base(root, Some(head(root)));
+        run_git(root, &["rm", "--cached", "-q", "src/lib.rs"]);
+        let mut runtime = InstrumentedRuntime {
+            fail_status: true,
+            ..InstrumentedRuntime::release_disabled()
+        };
+
+        let actual = snapshot_with_runtime(root, base, &supported_extensions(), &mut runtime)
+            .expect("typed fallback");
+
+        assert_eq!(
+            actual.path_state,
+            BTreeMap::from([(
+                "src/lib.rs".to_owned(),
+                OverlayPathState::Untracked(git_blob_oid(source)),
+            )])
+        );
+    }
+
+    #[test]
+    fn overlay_snapshot_warm_reuse_refreshes_current_route_source() {
+        let eligible = FsmonitorCapabilities {
+            release_enabled: true,
+            built_in_supported: true,
+            local_filesystem: true,
+            watcher_healthy: true,
+        };
+        let unhealthy = FsmonitorCapabilities {
+            watcher_healthy: false,
+            ..eligible
+        };
+        let release_disabled = FsmonitorCapabilities {
+            release_enabled: false,
+            ..eligible
+        };
+
+        for (seed_capabilities, current_capabilities, seed_source, current_source) in [
+            (
+                eligible,
+                unhealthy,
+                OverlaySnapshotSource::FsmonitorNative,
+                OverlaySnapshotSource::ExactFallback,
+            ),
+            (
+                release_disabled,
+                eligible,
+                OverlaySnapshotSource::ExactFallback,
+                OverlaySnapshotSource::FsmonitorNative,
+            ),
+        ] {
+            let tempdir = tempfile::tempdir().expect("tempdir");
+            let root = tempdir.path();
+            init_repo(root);
+            fs::write(root.join("src/lib.rs"), "pub fn clean() {}\n").expect("source");
+            run_git(root, &["add", "src/lib.rs"]);
+            run_git(root, &["commit", "-qm", "base"]);
+            let base = base(root, Some(head(root)));
+            let mut runtime = InstrumentedRuntime {
+                capabilities: seed_capabilities,
+                synthetic_status_source: true,
+                ..InstrumentedRuntime::release_disabled()
+            };
+            let seeded =
+                snapshot_with_runtime(root, base.clone(), &supported_extensions(), &mut runtime)
+                    .expect("seed snapshot");
+            assert_eq!(seeded.source, seed_source);
+
+            runtime.capabilities = current_capabilities;
+            let reused = snapshot_with_runtime(root, base, &supported_extensions(), &mut runtime)
+                .expect("warm reused snapshot");
+
+            eprintln!(
+                "warm route transition: seed={:?} current={:?} reused_source={:?}",
+                seed_source, current_source, reused.source
+            );
+            assert!(reused.measurements.snapshot_reused);
+            assert_eq!(
+                reused.source, current_source,
+                "the current observation, not the cached source, owns the response"
+            );
+            assert_eq!(
+                runtime.observed_capabilities,
+                vec![seed_capabilities, current_capabilities]
+            );
         }
     }
 
