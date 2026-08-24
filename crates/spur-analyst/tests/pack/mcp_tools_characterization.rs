@@ -151,6 +151,28 @@ fn knowledge_context_pack_2_schema_defaults_compact_format_and_zero_bodies() {
 }
 
 #[test]
+fn knowledge_context_pack_schemas_describe_optional_symbol_body_limit() {
+    for name in ["knowledge_context_pack", "knowledge_context_pack_2"] {
+        let tool = tool_definitions()
+            .into_iter()
+            .find(|tool| tool.name == name)
+            .expect("context pack tool");
+        let max_symbol_bodies = &tool.input_schema["properties"]["max_symbol_bodies"];
+
+        assert_eq!(
+            max_symbol_bodies["description"],
+            json!("Optional maximum number of symbol bodies to include. Defaults to 0; accepted range is 0..=5."),
+            "tool={name}"
+        );
+        assert!(!tool.input_schema["required"]
+            .as_array()
+            .expect("required fields")
+            .iter()
+            .any(|field| field.as_str() == Some("max_symbol_bodies")));
+    }
+}
+
+#[test]
 fn analyst_mcp_module_advertises_exact_public_tool_names() {
     let module = AnalystMcpModule::new();
     let names = module
