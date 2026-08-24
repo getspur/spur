@@ -8,6 +8,7 @@
 //! do not deserialize and retain the full graph artifact per request.
 
 use std::collections::{HashMap, HashSet};
+use std::fmt;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
@@ -912,8 +913,37 @@ pub struct ParquetClient {
     manifest: GraphArtifactManifest,
     nodes_metadata: ArrowReaderMetadata,
     search_projection: ProjectionMask,
-    file_oids: OnceLock<anyhow::Result<Vec<(String, String)>>>,
+    file_oids: OnceLock<Result<Vec<(String, String)>, SharedFileOidsError>>,
+    #[cfg(test)]
+    file_oids_load_count: std::sync::atomic::AtomicUsize,
     temporal_index: OnceLock<Arc<TemporalIndex>>,
+}
+
+#[derive(Clone)]
+struct SharedFileOidsError(Arc<anyhow::Error>);
+
+impl SharedFileOidsError {
+    fn new(error: anyhow::Error) -> Self {
+        Self(Arc::new(error))
+    }
+}
+
+impl fmt::Debug for SharedFileOidsError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(&self.0, formatter)
+    }
+}
+
+impl fmt::Display for SharedFileOidsError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&self.0, formatter)
+    }
+}
+
+impl std::error::Error for SharedFileOidsError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.0.source()
+    }
 }
 
 impl ParquetClient {
@@ -947,6 +977,8 @@ impl ParquetClient {
             nodes_metadata,
             search_projection,
             file_oids: OnceLock::new(),
+            #[cfg(test)]
+            file_oids_load_count: std::sync::atomic::AtomicUsize::new(0),
             temporal_index: OnceLock::new(),
         })
     }
@@ -961,23 +993,29 @@ impl ParquetClient {
 
     pub fn file_oids(&self) -> anyhow::Result<Vec<(String, String)>> {
         match self.file_oids.get_or_init(|| {
-            let batches =
-                projected_batches(&self.dir.join("file_manifests.parquet"), FILE_OID_COLUMNS)?;
-            let mut rows = Vec::new();
-            for batch in batches {
-                let path = string_array_by_name(&batch, "path")?;
-                let content_oid = string_array_by_name(&batch, "content_oid")?;
-                for row in 0..batch.num_rows() {
-                    rows.push((
-                        required_string_value(path, row, "path")?.to_owned(),
-                        required_string_value(content_oid, row, "content_oid")?.to_owned(),
-                    ));
+            #[cfg(test)]
+            self.file_oids_load_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            (|| -> anyhow::Result<Vec<(String, String)>> {
+                let batches =
+                    projected_batches(&self.dir.join("file_manifests.parquet"), FILE_OID_COLUMNS)?;
+                let mut rows = Vec::new();
+                for batch in batches {
+                    let path = string_array_by_name(&batch, "path")?;
+                    let content_oid = string_array_by_name(&batch, "content_oid")?;
+                    for row in 0..batch.num_rows() {
+                        rows.push((
+                            required_string_value(path, row, "path")?.to_owned(),
+                            required_string_value(content_oid, row, "content_oid")?.to_owned(),
+                        ));
+                    }
                 }
-            }
-            Ok(rows)
+                Ok(rows)
+            })()
+            .map_err(SharedFileOidsError::new)
         }) {
             Ok(rows) => Ok(rows.clone()),
-            Err(error) => Err(anyhow::anyhow!("{error:#}")),
+            Err(error) => Err(anyhow::Error::new(error.clone())),
         }
     }
 
@@ -2449,5 +2487,50 @@ mod tests {
             .expect("opened manifest must reuse memoized file OIDs");
 
         assert_eq!(second, first);
+    }
+
+    #[test]
+    fn parquet_client_file_oids_memoizes_the_full_error_chain() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let parquet_dir = write_artifact_parquet(
+            &artifact(Vec::new()),
+            tempdir.path(),
+            WriteOptions::default(),
+            Vec::new(),
+        )
+        .expect("write parquet artifact");
+        let parquet = ParquetClient::open(&parquet_dir).expect("open parquet client");
+        let file_manifests = parquet_dir.join("file_manifests.parquet");
+        let file_manifests_bytes =
+            std::fs::read(&file_manifests).expect("read file manifest fixture");
+        std::fs::remove_file(&file_manifests).expect("remove file manifest fixture");
+
+        let cold = parquet
+            .file_oids()
+            .expect_err("cold file OID load must fail with the backing file absent");
+        let cold_chain = cold.chain().map(ToString::to_string).collect::<Vec<_>>();
+
+        std::fs::write(&file_manifests, file_manifests_bytes)
+            .expect("restore file manifest before warm call");
+        let warm = parquet
+            .file_oids()
+            .expect_err("warm file OID load must replay the memoized failure");
+        let warm_chain = warm.chain().map(ToString::to_string).collect::<Vec<_>>();
+        let load_count = parquet
+            .file_oids_load_count
+            .load(std::sync::atomic::Ordering::SeqCst);
+
+        eprintln!(
+            "file_oids cold_chain={cold_chain:?} warm_chain={warm_chain:?} load_count={load_count}"
+        );
+        assert!(
+            cold_chain.len() >= 2,
+            "cold failure must preserve its context and nested source: {cold_chain:?}"
+        );
+        assert_eq!(
+            warm_chain, cold_chain,
+            "warm replay must preserve every source"
+        );
+        assert_eq!(load_count, 1, "the underlying Parquet load must run once");
     }
 }
