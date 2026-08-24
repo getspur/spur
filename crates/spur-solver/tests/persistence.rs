@@ -57,13 +57,11 @@ fn persisted_artifact_round_trips_across_service_instances() -> Result<(), Box<d
     let loaded = reader.get_solve_result(&persisted.solve_id)?;
     assert_eq!(loaded.solve_id, persisted.solve_id);
     assert_eq!(loaded.z3_version, persisted.z3_version);
+    assert_eq!(loaded.request, persisted.request);
     assert_eq!(loaded.result, persisted.result);
 
     let retrieval_json = serde_json::to_value(&loaded)?;
-    assert!(
-        retrieval_json.get("request").is_none(),
-        "get_solve_result must not expose the stored request"
-    );
+    assert_eq!(retrieval_json["request"], serde_json::to_value(&request)?);
     assert!(
         retrieval_json.get("created_at_wall").is_none(),
         "get_solve_result must return the result envelope, not artifact metadata"

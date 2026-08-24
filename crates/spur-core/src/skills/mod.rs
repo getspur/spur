@@ -1565,6 +1565,7 @@ mod tests {
             "`solution_limit`",
             "`get-objectives`",
             "omit `op` and `value`",
+            "exact persisted solve input",
             "complete `optimization` envelope",
         ] {
             assert!(

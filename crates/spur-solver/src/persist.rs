@@ -225,16 +225,15 @@ pub struct SolveArtifact {
     pub result: SolveArtifactResult,
 }
 
-/// Result-only response returned by `get_solve_result`.
-///
-/// The request and creation metadata remain in the handoff cache but are not
-/// exposed through the retrieval API.
+/// Persisted solve response returned by `get_solve_result`.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct GetSolveResultResponse {
     /// Traversal-safe handoff identifier.
     pub solve_id: String,
     /// Z3 version recorded with the solve.
     pub z3_version: String,
+    /// Canonically serialized `solve_constraints` or `solve_smt` request.
+    pub request: Value,
     /// Stable result fields.
     #[serde(flatten)]
     pub result: SolveArtifactResult,
@@ -281,6 +280,7 @@ impl SolveArtifact {
         GetSolveResultResponse {
             solve_id: self.solve_id,
             z3_version: self.z3_version,
+            request: self.request,
             result: self.result,
         }
     }

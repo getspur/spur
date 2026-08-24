@@ -197,10 +197,12 @@ For brain-to-worker handoff:
 2. Put the `solve_id`, selected catalog rule IDs, mode, and key interpretation
    in task context.
 3. Reload with `get_solve_result`; never read `.spur/solver/` directly.
-4. Persisted results retain the complete `optimization` envelope; after reload,
+4. Read the returned `request` as the exact persisted solve input before
+   interpreting the result or comparing it with the implementation.
+5. Persisted results retain the complete `optimization` envelope; after reload,
    use the same `optimization.solutions`, diagnostics, bounds, and `termination`
    paths described above.
-5. Treat the artifact as authoritative evidence, while still checking that the
+6. Treat the artifact as authoritative evidence, while still checking that the
    implementation matches the encoded facts.
 
 ## Proof Discipline
