@@ -3,7 +3,7 @@ use std::fs;
 use std::fs::File;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread::ScopedJoinHandle;
 
 use anyhow::{anyhow, bail, Context as _};
@@ -13,10 +13,15 @@ use arrow_array::{
 };
 use arrow_schema::ArrowError;
 use base64::Engine as _;
-use parquet::arrow::arrow_reader::{ArrowPredicateFn, ParquetRecordBatchReaderBuilder, RowFilter};
+use parquet::arrow::arrow_reader::{
+    ArrowPredicateFn, ArrowReaderMetadata, ArrowReaderOptions, ParquetRecordBatchReaderBuilder,
+    RowFilter, RowSelection, RowSelector,
+};
 use parquet::arrow::ProjectionMask;
 use parquet::basic::{Compression, ZstdLevel};
 use parquet::data_type::{ByteArray, ByteArrayType, FloatType, Int32Type, Int64Type};
+use parquet::file::metadata::{PageIndexPolicy, ParquetMetaData};
+use parquet::file::page_index::column_index::ColumnIndexMetaData;
 use parquet::file::properties::{EnabledStatistics, WriterProperties};
 use parquet::file::writer::{SerializedColumnWriter, SerializedFileWriter};
 use parquet::schema::parser::parse_message_type;
@@ -34,6 +39,304 @@ use crate::{
 pub const PARQUET_ROW_GROUP_SIZE: usize = 16_384;
 const ENCLOSING_SCOPE_DICTIONARY: bool = true;
 const EDGES_BY_DST_PRESENT: bool = true;
+
+#[derive(Debug, Default)]
+pub(crate) struct ParquetMetadataCache {
+    metadata: Mutex<HashMap<PathBuf, ArrowReaderMetadata>>,
+}
+
+impl ParquetMetadataCache {
+    pub(crate) fn get(&self, path: &Path) -> anyhow::Result<ArrowReaderMetadata> {
+        let metadata = self
+            .metadata
+            .lock()
+            .map_err(|_| anyhow!("Parquet metadata cache lock poisoned"))?;
+        if let Some(cached) = metadata.get(path) {
+            return Ok(cached.clone());
+        }
+        drop(metadata);
+
+        let file =
+            File::open(path).with_context(|| format!("failed to open `{}`", path.display()))?;
+        let loaded = ArrowReaderMetadata::load(
+            &file,
+            ArrowReaderOptions::new().with_page_index_policy(PageIndexPolicy::Optional),
+        )
+        .with_context(|| format!("failed to read `{}`", path.display()))?;
+        let mut metadata = self
+            .metadata
+            .lock()
+            .map_err(|_| anyhow!("Parquet metadata cache lock poisoned"))?;
+        Ok(metadata.entry(path.to_path_buf()).or_insert(loaded).clone())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum StringPruningPredicate {
+    AnyValue { column: String, values: Vec<String> },
+    All(Vec<Self>),
+    Any(Vec<Self>),
+}
+
+impl StringPruningPredicate {
+    pub(crate) fn eq(column: impl Into<String>, value: impl Into<String>) -> Self {
+        Self::AnyValue {
+            column: column.into(),
+            values: vec![value.into()],
+        }
+    }
+
+    pub(crate) fn any_value(
+        column: impl Into<String>,
+        values: impl IntoIterator<Item = String>,
+    ) -> Self {
+        Self::AnyValue {
+            column: column.into(),
+            values: values.into_iter().collect(),
+        }
+    }
+
+    pub(crate) fn all(predicates: impl IntoIterator<Item = Self>) -> Self {
+        Self::All(predicates.into_iter().collect())
+    }
+
+    pub(crate) fn any(predicates: impl IntoIterator<Item = Self>) -> Self {
+        Self::Any(predicates.into_iter().collect())
+    }
+
+    fn may_match_row_group(
+        &self,
+        builder: &ParquetRecordBatchReaderBuilder<File>,
+        row_group_idx: usize,
+    ) -> anyhow::Result<bool> {
+        match self {
+            Self::AnyValue { column, values } => {
+                leaf_may_match_row_group(builder, row_group_idx, column, values)
+            }
+            Self::All(predicates) => {
+                for predicate in predicates {
+                    if !predicate.may_match_row_group(builder, row_group_idx)? {
+                        return Ok(false);
+                    }
+                }
+                Ok(true)
+            }
+            Self::Any(predicates) => {
+                for predicate in predicates {
+                    if predicate.may_match_row_group(builder, row_group_idx)? {
+                        return Ok(true);
+                    }
+                }
+                Ok(false)
+            }
+        }
+    }
+
+    fn leaf(&self) -> Option<(&str, &[String])> {
+        match self {
+            Self::AnyValue { column, values } => Some((column, values)),
+            Self::All(predicates) | Self::Any(predicates) if predicates.len() == 1 => {
+                predicates[0].leaf()
+            }
+            Self::All(_) | Self::Any(_) => None,
+        }
+    }
+}
+
+pub(crate) fn read_projected_batches<const N: usize>(
+    path: &Path,
+    metadata_cache: &ParquetMetadataCache,
+    columns: [&str; N],
+) -> anyhow::Result<Vec<RecordBatch>> {
+    let metadata = metadata_cache.get(path)?;
+    let file = File::open(path).with_context(|| format!("failed to open `{}`", path.display()))?;
+    let builder = ParquetRecordBatchReaderBuilder::new_with_metadata(file, metadata);
+    let projection = ProjectionMask::columns(builder.parquet_schema(), columns);
+    builder
+        .with_batch_size(PARQUET_ROW_GROUP_SIZE)
+        .with_projection(projection)
+        .build()
+        .with_context(|| format!("failed to build Arrow reader for `{}`", path.display()))?
+        .collect::<Result<Vec<_>, _>>()
+        .with_context(|| format!("failed to decode `{}`", path.display()))
+}
+
+pub(crate) fn read_filtered_projected_batches<const N: usize>(
+    path: &Path,
+    metadata_cache: &ParquetMetadataCache,
+    columns: [&str; N],
+    pruning_predicate: &StringPruningPredicate,
+    row_filter: impl FnOnce(&SchemaDescriptor) -> RowFilter,
+) -> anyhow::Result<Vec<RecordBatch>> {
+    let metadata = metadata_cache.get(path)?;
+    let file = File::open(path).with_context(|| format!("failed to open `{}`", path.display()))?;
+    let builder = ParquetRecordBatchReaderBuilder::new_with_metadata(file, metadata);
+    let projection = ProjectionMask::columns(builder.parquet_schema(), columns);
+    let row_filter = row_filter(builder.parquet_schema());
+    let row_groups = candidate_row_groups(&builder, pruning_predicate)?;
+    let row_selection = page_row_selection(builder.metadata(), &row_groups, pruning_predicate);
+    let builder = builder
+        .with_batch_size(PARQUET_ROW_GROUP_SIZE)
+        .with_projection(projection)
+        .with_row_groups(row_groups)
+        .with_row_filter(row_filter);
+    let builder = match row_selection {
+        Some(selection) => builder.with_row_selection(selection),
+        None => builder,
+    };
+    builder
+        .build()
+        .with_context(|| format!("failed to build Arrow reader for `{}`", path.display()))?
+        .collect::<Result<Vec<_>, _>>()
+        .with_context(|| format!("failed to decode `{}`", path.display()))
+}
+
+fn candidate_row_groups(
+    builder: &ParquetRecordBatchReaderBuilder<File>,
+    predicate: &StringPruningPredicate,
+) -> anyhow::Result<Vec<usize>> {
+    let mut row_groups = Vec::new();
+    for row_group_idx in 0..builder.metadata().num_row_groups() {
+        if predicate.may_match_row_group(builder, row_group_idx)? {
+            row_groups.push(row_group_idx);
+        }
+    }
+    Ok(row_groups)
+}
+
+fn leaf_may_match_row_group(
+    builder: &ParquetRecordBatchReaderBuilder<File>,
+    row_group_idx: usize,
+    column: &str,
+    values: &[String],
+) -> anyhow::Result<bool> {
+    if values.is_empty() {
+        return Ok(false);
+    }
+    let Some(column_idx) = parquet_column_index(builder.parquet_schema(), column) else {
+        return Ok(true);
+    };
+    let column_metadata = builder
+        .metadata()
+        .row_group(row_group_idx)
+        .column(column_idx);
+    if let Some(statistics) = column_metadata.statistics() {
+        if statistics.min_is_exact()
+            && statistics.max_is_exact()
+            && !values_may_match_bounds(
+                values,
+                statistics.min_bytes_opt(),
+                statistics.max_bytes_opt(),
+            )
+        {
+            return Ok(false);
+        }
+    }
+    if let Some(bloom_filter) = builder
+        .get_row_group_column_bloom_filter(row_group_idx, column_idx)
+        .with_context(|| {
+            format!("failed to read Bloom filter for row group {row_group_idx}, column `{column}`")
+        })?
+    {
+        return Ok(values
+            .iter()
+            .any(|value| bloom_filter.check(value.as_str())));
+    }
+    Ok(true)
+}
+
+fn parquet_column_index(schema: &SchemaDescriptor, column: &str) -> Option<usize> {
+    schema
+        .columns()
+        .iter()
+        .position(|descriptor| descriptor.name() == column)
+}
+
+fn values_may_match_bounds(values: &[String], min: Option<&[u8]>, max: Option<&[u8]>) -> bool {
+    let (Some(min), Some(max)) = (min, max) else {
+        return true;
+    };
+    values.iter().any(|value| {
+        let value = value.as_bytes();
+        min <= value && value <= max
+    })
+}
+
+fn page_row_selection(
+    metadata: &ParquetMetaData,
+    row_groups: &[usize],
+    predicate: &StringPruningPredicate,
+) -> Option<RowSelection> {
+    if row_groups.is_empty() {
+        return None;
+    }
+    let (column, values) = predicate.leaf()?;
+    let column_idx = parquet_column_index(metadata.file_metadata().schema_descr(), column)?;
+    let column_indexes = metadata.column_index()?;
+    let offset_indexes = metadata.offset_index()?;
+    let mut selectors = Vec::new();
+
+    for &row_group_idx in row_groups {
+        let row_count = usize::try_from(metadata.row_group(row_group_idx).num_rows()).ok()?;
+        let column_index = column_indexes.get(row_group_idx)?.get(column_idx)?;
+        let offset_index = offset_indexes.get(row_group_idx)?.get(column_idx)?;
+        let page_locations = offset_index.page_locations();
+        let byte_array_index = match column_index {
+            ColumnIndexMetaData::BYTE_ARRAY(index)
+            | ColumnIndexMetaData::FIXED_LEN_BYTE_ARRAY(index) => index,
+            _ => {
+                selectors.push(RowSelector::select(row_count));
+                continue;
+            }
+        };
+        if page_locations.is_empty()
+            || usize::try_from(byte_array_index.num_pages()).ok()? != page_locations.len()
+        {
+            selectors.push(RowSelector::select(row_count));
+            continue;
+        }
+
+        let mut row_group_selectors = Vec::with_capacity(page_locations.len());
+        let mut valid = true;
+        for (page_idx, location) in page_locations.iter().enumerate() {
+            let Ok(start) = usize::try_from(location.first_row_index) else {
+                valid = false;
+                break;
+            };
+            let end = match page_locations.get(page_idx + 1) {
+                Some(next) => match usize::try_from(next.first_row_index) {
+                    Ok(end) => end,
+                    Err(_) => {
+                        valid = false;
+                        break;
+                    }
+                },
+                None => row_count,
+            };
+            if end < start || end > row_count {
+                valid = false;
+                break;
+            }
+            let page_matches = values_may_match_bounds(
+                values,
+                byte_array_index.min_value(page_idx),
+                byte_array_index.max_value(page_idx),
+            );
+            row_group_selectors.push(if page_matches {
+                RowSelector::select(end - start)
+            } else {
+                RowSelector::skip(end - start)
+            });
+        }
+        if valid {
+            selectors.extend(row_group_selectors);
+        } else {
+            selectors.push(RowSelector::select(row_count));
+        }
+    }
+
+    Some(RowSelection::from(selectors))
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WriteOptions {
@@ -916,6 +1219,18 @@ pub fn read_temporal_artifact_parquet_for_symbol_history(
     dir: &Path,
     symbol_id: &str,
 ) -> anyhow::Result<GraphIndexArtifact> {
+    read_temporal_artifact_parquet_for_symbol_history_with_cache(
+        dir,
+        symbol_id,
+        &ParquetMetadataCache::default(),
+    )
+}
+
+pub(crate) fn read_temporal_artifact_parquet_for_symbol_history_with_cache(
+    dir: &Path,
+    symbol_id: &str,
+    metadata_cache: &ParquetMetadataCache,
+) -> anyhow::Result<GraphIndexArtifact> {
     let manifest = read_artifact_header_parquet(dir)?;
     if !manifest.complete {
         bail!(
@@ -929,7 +1244,8 @@ pub fn read_temporal_artifact_parquet_for_symbol_history(
     let mut chain_ids = HashSet::from([symbol_id.to_owned()]);
     let mut frontier = chain_ids.clone();
     while !frontier.is_empty() {
-        let edges = read_temporal_edges_for_symbols(dir, &manifest, &frontier)?;
+        let edges =
+            read_temporal_edges_for_symbols_with_cache(dir, &manifest, &frontier, metadata_cache)?;
         let mut next_frontier = HashSet::new();
         for edge in edges {
             let Some(rename_ids) = rename_symbol_ids(&edge) else {
@@ -950,8 +1266,10 @@ pub fn read_temporal_artifact_parquet_for_symbol_history(
 
     let commits_path = dir.join("commits.parquet");
     let commits = read_commits(&commits_path, manifest.row_counts.commits)?;
-    let symbol_snapshots = read_symbol_snapshots_for_symbols(dir, &manifest, &chain_ids)?;
-    let temporal_edges = read_temporal_edges_for_symbols(dir, &manifest, &chain_ids)?;
+    let symbol_snapshots =
+        read_symbol_snapshots_for_symbols_with_cache(dir, &manifest, &chain_ids, metadata_cache)?;
+    let temporal_edges =
+        read_temporal_edges_for_symbols_with_cache(dir, &manifest, &chain_ids, metadata_cache)?;
 
     let mut artifact = GraphIndexArtifact {
         header: GraphIndexHeader {
@@ -2334,6 +2652,20 @@ pub fn read_symbol_snapshots_for_symbols(
     manifest: &GraphArtifactManifest,
     ids: &HashSet<String>,
 ) -> anyhow::Result<Vec<SymbolSnapshotArtifact>> {
+    read_symbol_snapshots_for_symbols_with_cache(
+        dir,
+        manifest,
+        ids,
+        &ParquetMetadataCache::default(),
+    )
+}
+
+fn read_symbol_snapshots_for_symbols_with_cache(
+    dir: &Path,
+    manifest: &GraphArtifactManifest,
+    ids: &HashSet<String>,
+    metadata_cache: &ParquetMetadataCache,
+) -> anyhow::Result<Vec<SymbolSnapshotArtifact>> {
     ensure_temporal_shards_layout(dir, manifest)?;
     if ids.is_empty() || manifest.temporal_shards.is_empty() {
         return Ok(Vec::new());
@@ -2346,6 +2678,7 @@ pub fn read_symbol_snapshots_for_symbols(
             &path,
             shard.row_count_snapshots,
             ids,
+            metadata_cache,
         )?);
     }
     Ok(snapshots)
@@ -2355,14 +2688,20 @@ fn read_symbol_snapshots_file_for_symbols(
     path: &Path,
     row_count: usize,
     ids: &HashSet<String>,
+    metadata_cache: &ParquetMetadataCache,
 ) -> anyhow::Result<Vec<SymbolSnapshotArtifact>> {
     if row_count == 0 || ids.is_empty() || !path.exists() {
         return Ok(Vec::new());
     }
     let mut snapshots = Vec::new();
-    for batch in filtered_projected_batches(path, SYMBOL_SNAPSHOT_COLUMNS, |schema| {
-        string_in_row_filter(schema, "key_stable_symbol_id", ids.clone())
-    })? {
+    let pruning = StringPruningPredicate::any_value("key_stable_symbol_id", ids.iter().cloned());
+    for batch in read_filtered_projected_batches(
+        path,
+        metadata_cache,
+        SYMBOL_SNAPSHOT_COLUMNS,
+        &pruning,
+        |schema| string_in_row_filter(schema, "key_stable_symbol_id", ids.clone()),
+    )? {
         snapshots.extend(symbol_snapshots_from_batch(&batch)?);
     }
     Ok(snapshots)
@@ -2444,6 +2783,15 @@ pub fn read_temporal_edges_for_symbols(
     manifest: &GraphArtifactManifest,
     ids: &HashSet<String>,
 ) -> anyhow::Result<Vec<TemporalEdgeArtifact>> {
+    read_temporal_edges_for_symbols_with_cache(dir, manifest, ids, &ParquetMetadataCache::default())
+}
+
+fn read_temporal_edges_for_symbols_with_cache(
+    dir: &Path,
+    manifest: &GraphArtifactManifest,
+    ids: &HashSet<String>,
+    metadata_cache: &ParquetMetadataCache,
+) -> anyhow::Result<Vec<TemporalEdgeArtifact>> {
     ensure_temporal_shards_layout(dir, manifest)?;
     if ids.is_empty() || manifest.temporal_shards.is_empty() {
         return Ok(Vec::new());
@@ -2456,6 +2804,7 @@ pub fn read_temporal_edges_for_symbols(
             &path,
             shard.row_count_edges,
             ids,
+            metadata_cache,
         )?);
     }
     Ok(edges)
@@ -2465,14 +2814,24 @@ fn read_temporal_edges_file_for_symbols(
     path: &Path,
     row_count: usize,
     ids: &HashSet<String>,
+    metadata_cache: &ParquetMetadataCache,
 ) -> anyhow::Result<Vec<TemporalEdgeArtifact>> {
     if row_count == 0 || ids.is_empty() || !path.exists() {
         return Ok(Vec::new());
     }
     let mut edges = Vec::new();
-    for batch in filtered_projected_batches(path, TEMPORAL_EDGE_COLUMNS, |schema| {
-        string_in_any_row_filter(schema, TEMPORAL_EDGE_SYMBOL_ID_COLUMNS, ids.clone())
-    })? {
+    let pruning = StringPruningPredicate::any(
+        TEMPORAL_EDGE_SYMBOL_ID_COLUMNS
+            .iter()
+            .map(|column| StringPruningPredicate::any_value(*column, ids.iter().cloned())),
+    );
+    for batch in read_filtered_projected_batches(
+        path,
+        metadata_cache,
+        TEMPORAL_EDGE_COLUMNS,
+        &pruning,
+        |schema| string_in_any_row_filter(schema, TEMPORAL_EDGE_SYMBOL_ID_COLUMNS, ids.clone()),
+    )? {
         edges.extend(temporal_edges_from_batch(&batch)?);
     }
     Ok(edges)
@@ -2736,26 +3095,6 @@ fn read_record_batches(path: &Path) -> anyhow::Result<Vec<RecordBatch>> {
         Ok(())
     })?;
     Ok(batches)
-}
-
-fn filtered_projected_batches<const N: usize>(
-    path: &Path,
-    columns: [&str; N],
-    row_filter: impl FnOnce(&SchemaDescriptor) -> RowFilter,
-) -> anyhow::Result<Vec<RecordBatch>> {
-    let file = File::open(path).with_context(|| format!("failed to open `{}`", path.display()))?;
-    let builder = ParquetRecordBatchReaderBuilder::try_new(file)
-        .with_context(|| format!("failed to read `{}`", path.display()))?;
-    let projection = ProjectionMask::columns(builder.parquet_schema(), columns);
-    let row_filter = row_filter(builder.parquet_schema());
-    builder
-        .with_batch_size(PARQUET_ROW_GROUP_SIZE)
-        .with_projection(projection)
-        .with_row_filter(row_filter)
-        .build()
-        .with_context(|| format!("failed to build Arrow reader for `{}`", path.display()))?
-        .collect::<Result<Vec<_>, _>>()
-        .with_context(|| format!("failed to decode `{}`", path.display()))
 }
 
 fn stream_record_batches<F>(path: &Path, mut callback: F) -> anyhow::Result<()>

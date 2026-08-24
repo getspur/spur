@@ -27,8 +27,10 @@ use parquet::schema::types::SchemaDescriptor;
 
 use crate::schema::GRAPH_INDEX_VERSION_TEMPORAL;
 use crate::store::parquet::{
-    confidence_from_str, edge_kind_from_str, read_temporal_artifact_parquet,
-    read_temporal_artifact_parquet_for_symbol_history, relation_from_str, PARQUET_ROW_GROUP_SIZE,
+    confidence_from_str, edge_kind_from_str, read_filtered_projected_batches,
+    read_projected_batches, read_temporal_artifact_parquet,
+    read_temporal_artifact_parquet_for_symbol_history_with_cache, relation_from_str,
+    ParquetMetadataCache, StringPruningPredicate, PARQUET_ROW_GROUP_SIZE,
 };
 use crate::temporal::{symbol_history_indexed, GitSha, TemporalIndex};
 use crate::{
@@ -910,6 +912,7 @@ const UNRESOLVED_EDGE_COLUMNS: [&str; 9] = [
 pub struct ParquetClient {
     dir: PathBuf,
     manifest: GraphArtifactManifest,
+    metadata_cache: ParquetMetadataCache,
     nodes_metadata: ArrowReaderMetadata,
     search_projection: ProjectionMask,
     temporal_index: OnceLock<Arc<TemporalIndex>>,
@@ -932,10 +935,8 @@ impl ParquetClient {
             );
         }
         let nodes_path = dir.join("nodes.parquet");
-        let nodes_file = File::open(&nodes_path)
-            .with_context(|| format!("failed to open `{}`", nodes_path.display()))?;
-        let nodes_metadata = ArrowReaderMetadata::load(&nodes_file, Default::default())
-            .with_context(|| format!("failed to read `{}`", nodes_path.display()))?;
+        let metadata_cache = ParquetMetadataCache::default();
+        let nodes_metadata = metadata_cache.get(&nodes_path)?;
         let search_projection = ProjectionMask::columns(
             nodes_metadata.metadata().file_metadata().schema_descr(),
             SEARCH_COLUMNS,
@@ -943,6 +944,7 @@ impl ParquetClient {
         Ok(Self {
             dir,
             manifest,
+            metadata_cache,
             nodes_metadata,
             search_projection,
             temporal_index: OnceLock::new(),
@@ -958,8 +960,11 @@ impl ParquetClient {
     }
 
     pub fn file_oids(&self) -> anyhow::Result<Vec<(String, String)>> {
-        let batches =
-            projected_batches(&self.dir.join("file_manifests.parquet"), FILE_OID_COLUMNS)?;
+        let batches = read_projected_batches(
+            &self.dir.join("file_manifests.parquet"),
+            &self.metadata_cache,
+            FILE_OID_COLUMNS,
+        )?;
         let mut rows = Vec::new();
         for batch in batches {
             let path = string_array_by_name(&batch, "path")?;
@@ -1016,6 +1021,22 @@ impl ParquetClient {
             total_matches,
             truncated,
         })
+    }
+
+    fn filtered_projected_batches<const N: usize>(
+        &self,
+        path: &Path,
+        columns: [&str; N],
+        pruning_predicate: &StringPruningPredicate,
+        row_filter: impl FnOnce(&SchemaDescriptor) -> RowFilter,
+    ) -> anyhow::Result<Vec<RecordBatch>> {
+        read_filtered_projected_batches(
+            path,
+            &self.metadata_cache,
+            columns,
+            pruning_predicate,
+            row_filter,
+        )
     }
 
     pub fn try_find_caller_edges(&self, sid: &str) -> anyhow::Result<Vec<OwnedCallerRecord>> {
@@ -1127,9 +1148,11 @@ impl ParquetClient {
         if sids.is_empty() {
             return Ok(HashMap::new());
         }
-        let batches = filtered_projected_batches(
+        let pruning = StringPruningPredicate::any_value("stable_symbol_id", sids.iter().cloned());
+        let batches = self.filtered_projected_batches(
             &self.dir.join("nodes.parquet"),
             SYMBOL_COLUMNS,
+            &pruning,
             |schema| string_in_row_filter(schema, "stable_symbol_id", sids.clone()),
         )?;
         let mut symbols = HashMap::new();
@@ -1146,9 +1169,11 @@ impl ParquetClient {
         column: &str,
         value: &str,
     ) -> anyhow::Result<Vec<GraphSymbolArtifact>> {
-        let batches = filtered_projected_batches(
+        let pruning = StringPruningPredicate::eq(column, value);
+        let batches = self.filtered_projected_batches(
             &self.dir.join("nodes.parquet"),
             SYMBOL_COLUMNS,
+            &pruning,
             |schema| string_eq_row_filter(schema, column, value.to_owned()),
         )?;
         symbols_from_batches(batches)
@@ -1163,9 +1188,11 @@ impl ParquetClient {
             return Ok(Vec::new());
         }
         let expected = values.iter().cloned().collect::<HashSet<_>>();
-        let batches = filtered_projected_batches(
+        let pruning = StringPruningPredicate::any_value(column, values.iter().cloned());
+        let batches = self.filtered_projected_batches(
             &self.dir.join("nodes.parquet"),
             SYMBOL_COLUMNS,
+            &pruning,
             |schema| string_in_row_filter(schema, column, expected),
         )?;
         symbols_from_batches(batches)
@@ -1175,9 +1202,15 @@ impl ParquetClient {
         &self,
         expected: Vec<(&str, String)>,
     ) -> anyhow::Result<Vec<GraphSymbolArtifact>> {
-        let batches = filtered_projected_batches(
+        let pruning = StringPruningPredicate::all(
+            expected
+                .iter()
+                .map(|(column, value)| StringPruningPredicate::eq(*column, value.clone())),
+        );
+        let batches = self.filtered_projected_batches(
             &self.dir.join("nodes.parquet"),
             SYMBOL_COLUMNS,
+            &pruning,
             |schema| string_eq_all_row_filter(schema, expected),
         )?;
         symbols_from_batches(batches)
@@ -1203,9 +1236,17 @@ impl ParquetClient {
         path: &str,
         name: &str,
     ) -> anyhow::Result<Vec<GraphSymbolArtifact>> {
-        let batches = filtered_projected_batches(
+        let pruning = StringPruningPredicate::all([
+            StringPruningPredicate::eq("file_path", path),
+            StringPruningPredicate::any([
+                StringPruningPredicate::eq("entity_name", name),
+                StringPruningPredicate::eq("qualified_name", name),
+            ]),
+        ]);
+        let batches = self.filtered_projected_batches(
             &self.dir.join("nodes.parquet"),
             SYMBOL_COLUMNS,
+            &pruning,
             |schema| path_name_row_filter(schema, path.to_owned(), name.to_owned()),
         )?;
         symbols_from_batches(batches)
@@ -1215,9 +1256,11 @@ impl ParquetClient {
         &self,
         path: &str,
     ) -> anyhow::Result<Option<GraphFileManifestEntry>> {
-        let batches = filtered_projected_batches(
+        let pruning = StringPruningPredicate::eq("path", path);
+        let batches = self.filtered_projected_batches(
             &self.dir.join("file_manifests.parquet"),
             FILE_MANIFEST_COLUMNS,
+            &pruning,
             |schema| string_eq_row_filter(schema, "path", path.to_owned()),
         )?;
         let mut manifests = file_manifests_from_batches(batches)?;
@@ -1367,9 +1410,11 @@ impl ParquetClient {
         value: &str,
     ) -> anyhow::Result<Vec<GraphEdgeArtifact>> {
         let path = self.dir.join(file_name);
-        let batches = filtered_projected_batches(&path, RESOLVED_EDGE_COLUMNS, |schema| {
-            string_eq_row_filter(schema, column, value.to_owned())
-        })?;
+        let pruning = StringPruningPredicate::eq(column, value);
+        let batches =
+            self.filtered_projected_batches(&path, RESOLVED_EDGE_COLUMNS, &pruning, |schema| {
+                string_eq_row_filter(schema, column, value.to_owned())
+            })?;
         let mut edges = Vec::new();
         for batch in batches {
             edges.extend(resolved_edges_from_batch(&batch)?);
@@ -1382,9 +1427,11 @@ impl ParquetClient {
         source_sid: &str,
     ) -> anyhow::Result<Vec<GraphEdgeArtifact>> {
         let path = self.dir.join("edges_unresolved.parquet");
-        let batches = filtered_projected_batches(&path, UNRESOLVED_EDGE_COLUMNS, |schema| {
-            string_eq_row_filter(schema, "source_stable_id", source_sid.to_owned())
-        })?;
+        let pruning = StringPruningPredicate::eq("source_stable_id", source_sid);
+        let batches =
+            self.filtered_projected_batches(&path, UNRESOLVED_EDGE_COLUMNS, &pruning, |schema| {
+                string_eq_row_filter(schema, "source_stable_id", source_sid.to_owned())
+            })?;
         let mut edges = Vec::new();
         for batch in batches {
             edges.extend(unresolved_edges_from_batch(&batch)?);
@@ -1400,9 +1447,11 @@ impl ParquetClient {
             return Ok(Vec::new());
         }
         let path = self.dir.join("edges_unresolved.parquet");
-        let batches = filtered_projected_batches(&path, UNRESOLVED_EDGE_COLUMNS, |schema| {
-            string_in_row_filter(schema, "target_label", labels.clone())
-        })?;
+        let pruning = StringPruningPredicate::any_value("target_label", labels.iter().cloned());
+        let batches =
+            self.filtered_projected_batches(&path, UNRESOLVED_EDGE_COLUMNS, &pruning, |schema| {
+                string_in_row_filter(schema, "target_label", labels.clone())
+            })?;
         let mut edges = Vec::new();
         for batch in batches {
             edges.extend(unresolved_edges_from_batch(&batch)?);
@@ -1510,53 +1559,20 @@ impl GraphQueryClient for ParquetClient {
         commits: &CommitIndexArtifact,
         symbol_id: &str,
     ) -> anyhow::Result<Vec<(GitSha, ChangeKind, SnapshotKey)>> {
-        let artifact = read_temporal_artifact_parquet_for_symbol_history(&self.dir, symbol_id)
-            .with_context(|| {
-                format!(
-                    "failed to read filtered Parquet temporal artifact from `{}`",
-                    self.dir.display()
-                )
-            })?;
+        let artifact = read_temporal_artifact_parquet_for_symbol_history_with_cache(
+            &self.dir,
+            symbol_id,
+            &self.metadata_cache,
+        )
+        .with_context(|| {
+            format!(
+                "failed to read filtered Parquet temporal artifact from `{}`",
+                self.dir.display()
+            )
+        })?;
         let index = TemporalIndex::new(Arc::new(artifact));
         Ok(symbol_history_indexed(&index, commits, symbol_id))
     }
-}
-
-fn projected_batches<const N: usize>(
-    path: &Path,
-    columns: [&str; N],
-) -> anyhow::Result<Vec<RecordBatch>> {
-    let file = File::open(path).with_context(|| format!("failed to open `{}`", path.display()))?;
-    let builder = ParquetRecordBatchReaderBuilder::try_new(file)
-        .with_context(|| format!("failed to read `{}`", path.display()))?;
-    let projection = ProjectionMask::columns(builder.parquet_schema(), columns);
-    builder
-        .with_batch_size(PARQUET_ROW_GROUP_SIZE)
-        .with_projection(projection)
-        .build()
-        .with_context(|| format!("failed to build Arrow reader for `{}`", path.display()))?
-        .collect::<Result<Vec<_>, _>>()
-        .with_context(|| format!("failed to decode `{}`", path.display()))
-}
-
-fn filtered_projected_batches<const N: usize>(
-    path: &Path,
-    columns: [&str; N],
-    row_filter: impl FnOnce(&SchemaDescriptor) -> RowFilter,
-) -> anyhow::Result<Vec<RecordBatch>> {
-    let file = File::open(path).with_context(|| format!("failed to open `{}`", path.display()))?;
-    let builder = ParquetRecordBatchReaderBuilder::try_new(file)
-        .with_context(|| format!("failed to read `{}`", path.display()))?;
-    let projection = ProjectionMask::columns(builder.parquet_schema(), columns);
-    let row_filter = row_filter(builder.parquet_schema());
-    builder
-        .with_batch_size(PARQUET_ROW_GROUP_SIZE)
-        .with_projection(projection)
-        .with_row_filter(row_filter)
-        .build()
-        .with_context(|| format!("failed to build Arrow reader for `{}`", path.display()))?
-        .collect::<Result<Vec<_>, _>>()
-        .with_context(|| format!("failed to decode `{}`", path.display()))
 }
 
 fn search_row_filter(
@@ -2195,7 +2211,11 @@ mod tests {
         SnapshotKey, SymbolSnapshotArtifact, TemporalEdgeArtifact, WalkStrategy, WriteOptions,
         GRAPH_INDEX_VERSION_TEMPORAL,
     };
+    use parquet::arrow::arrow_reader::{ArrowReaderMetadata, ArrowReaderOptions};
+    use parquet::file::metadata::PageIndexPolicy;
     use std::collections::BTreeMap;
+    use std::fs::OpenOptions;
+    use std::io::{Seek as _, SeekFrom, Write as _};
 
     fn artifact(symbols: Vec<GraphSymbolArtifact>) -> GraphIndexArtifact {
         GraphIndexArtifact {
@@ -2371,6 +2391,144 @@ mod tests {
         let second = client.temporal_index();
 
         assert!(Arc::ptr_eq(&first, &second));
+    }
+
+    #[test]
+    fn parquet_client_loads_page_indexes_for_pruning() -> anyhow::Result<()> {
+        let tempdir = tempfile::tempdir()?;
+        let mut graph = artifact(vec![symbol("sym-a", "alpha")]);
+        graph.symbol_node_ids = vec![NodeId(1)];
+        let parquet_dir =
+            write_artifact_parquet(&graph, tempdir.path(), WriteOptions::default(), Vec::new())?;
+
+        let client = ParquetClient::open(&parquet_dir)?;
+
+        assert!(client.nodes_metadata.metadata().column_index().is_some());
+        assert!(client.nodes_metadata.metadata().offset_index().is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn parquet_client_reuses_non_node_metadata_after_first_query() -> anyhow::Result<()> {
+        let tempdir = tempfile::tempdir()?;
+        let mut graph = artifact(Vec::new());
+        graph.file_manifests = vec![GraphFileManifestEntry {
+            stable_file_id: "file-a".to_owned(),
+            path: "src/lib.rs".to_owned(),
+            content_oid: "content-a".to_owned(),
+            node_ids: vec![NodeId(1)],
+        }];
+        let parquet_dir =
+            write_artifact_parquet(&graph, tempdir.path(), WriteOptions::default(), Vec::new())?;
+        let client = ParquetClient::open(&parquet_dir)?;
+
+        let first = client
+            .file_manifest_by_path_inner("src/lib.rs")?
+            .expect("manifest exists before footer damage");
+        let path = parquet_dir.join("file_manifests.parquet");
+        let mut file = OpenOptions::new().write(true).open(&path)?;
+        file.seek(SeekFrom::End(-8))?;
+        file.write_all(&[0xff; 4])?;
+        file.sync_all()?;
+
+        let second = client
+            .file_manifest_by_path_inner("src/lib.rs")?
+            .expect("cached metadata avoids rereading the damaged footer");
+
+        assert_eq!(second, first);
+        Ok(())
+    }
+
+    #[test]
+    fn exact_symbol_lookup_prunes_non_matching_pages_and_row_groups() -> anyhow::Result<()> {
+        const CANDIDATE_COUNT: usize = 128;
+
+        let tempdir = tempfile::tempdir()?;
+        let mut symbols = Vec::with_capacity(PARQUET_ROW_GROUP_SIZE + 2);
+        for index in 0..(PARQUET_ROW_GROUP_SIZE / 2) {
+            symbols.push(symbol(
+                &format!("a-{index:08x}-{}", "x".repeat(160)),
+                "alpha",
+            ));
+        }
+        let candidates = (0..CANDIDATE_COUNT)
+            .map(|index| format!("m-target-{index:03}"))
+            .collect::<Vec<_>>();
+        symbols.extend(candidates.iter().map(|id| symbol(id, "target")));
+        for index in 0..(PARQUET_ROW_GROUP_SIZE / 2 - CANDIDATE_COUNT) {
+            symbols.push(symbol(
+                &format!("z-{index:08x}-{}", "y".repeat(160)),
+                "zeta",
+            ));
+        }
+        for value in &mut symbols {
+            value.file_path = "src/a.rs".to_owned();
+        }
+        let mut low = symbol("a-second", "low");
+        low.file_path = "src/z.rs".to_owned();
+        let mut high = symbol("z-second", "high");
+        high.file_path = "src/z.rs".to_owned();
+        symbols.extend([low, high]);
+
+        let mut graph = artifact(symbols);
+        graph.symbol_node_ids = (1..=graph.symbols.len())
+            .map(|id| NodeId(u64::try_from(id).expect("test node id fits u64")))
+            .collect();
+        let parquet_dir =
+            write_artifact_parquet(&graph, tempdir.path(), WriteOptions::default(), Vec::new())?;
+        let client = ParquetClient::open(&parquet_dir)?;
+        let nodes_path = parquet_dir.join("nodes.parquet");
+
+        let bloom_builder = ParquetRecordBatchReaderBuilder::try_new(File::open(&nodes_path)?)?;
+        let second_row_group_bloom = bloom_builder
+            .get_row_group_column_bloom_filter(1, 0)?
+            .expect("stable_symbol_id Bloom filter exists");
+        let target = candidates
+            .iter()
+            .find(|candidate| !second_row_group_bloom.check(candidate.as_str()))
+            .expect("at least one candidate is definitely absent from the second row group")
+            .clone();
+
+        let indexed_metadata = ArrowReaderMetadata::load(
+            &File::open(&nodes_path)?,
+            ArrowReaderOptions::new().with_page_index_policy(PageIndexPolicy::Optional),
+        )?;
+        let metadata = indexed_metadata.metadata();
+        assert_eq!(metadata.num_row_groups(), 2);
+        let first_row_group_pages =
+            metadata.offset_index().expect("offset index loaded")[0][0].page_locations();
+        assert!(
+            first_row_group_pages.len() > 1,
+            "fixture must create multiple stable_symbol_id pages"
+        );
+        let page_to_skip = first_row_group_pages
+            .last()
+            .expect("first row group has a final page");
+        let second_row_group_range = metadata.row_group(1).column(0).byte_range();
+
+        let mut file = OpenOptions::new().write(true).open(&nodes_path)?;
+        file.seek(SeekFrom::Start(
+            u64::try_from(page_to_skip.offset).expect("page offset is non-negative"),
+        ))?;
+        file.write_all(&vec![
+            0;
+            usize::try_from(page_to_skip.compressed_page_size)
+                .expect("page size is non-negative")
+        ])?;
+        file.seek(SeekFrom::Start(second_row_group_range.0))?;
+        file.write_all(&vec![
+            0;
+            usize::try_from(second_row_group_range.1)
+                .expect("column chunk size fits usize")
+        ])?;
+        file.sync_all()?;
+
+        let actual = client
+            .symbol_by_id(&target)?
+            .expect("indexed pruning skips corrupt non-matching data");
+
+        assert_eq!(actual.stable_symbol_id, target);
+        Ok(())
     }
 
     #[test]
