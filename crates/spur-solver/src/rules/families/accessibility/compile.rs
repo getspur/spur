@@ -234,6 +234,7 @@ fn validate_manifest_binding(
     let ValidatedBinding {
         parameters,
         handler,
+        ..
     } = validate_binding_contract(&binding.rule_id, &binding.subjects, &parameters)
         .map_err(|message| stable_contract_error(binding, message))?;
     let parameters =

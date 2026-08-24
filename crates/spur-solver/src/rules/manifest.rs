@@ -10,13 +10,15 @@ use serde_json::{Map, Value};
 
 use super::{
     catalog::{
-        LlmEncoding, RegistryError, RuleAuthority, RuleDefinition, RuleExample, RuleExamples,
-        RuleFamily, RuleGuidance, RuleProfile, RuleRegistry, RuleStrength, SolverEncoding,
+        ExecutionKind, LlmEncoding, RegistryError, RuleAuthority, RuleDefinition, RuleExample,
+        RuleExamples, RuleFamily, RuleGuidance, RuleProfile, RuleRegistry, RuleStrength,
+        SolverEncoding,
     },
     manifest_format::{
-        validate_manifest_bundle, AvailabilityV1, ConformanceVectorsV1, ManifestBundleV1,
-        ManifestValidationError, NativeHandlerV1, NativeObjectValidatorV1, ParameterContractV1,
-        ParameterKindV1, RuleManifestV1, RuleStrengthV1, SubjectCardinalityV1, SubjectContractV1,
+        validate_manifest_bundle, AvailabilityV1, ConformanceVectorsV1, ExecutionKindV1,
+        ManifestBundleV1, ManifestValidationError, NativeHandlerV1, NativeObjectValidatorV1,
+        ParameterContractV1, ParameterKindV1, RuleManifestV1, RuleStrengthV1, SubjectCardinalityV1,
+        SubjectContractV1,
     },
 };
 
@@ -40,6 +42,8 @@ struct ManifestData {
 /// The manifest-owned request-shape data for one rule.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ManifestRuleContract<'a> {
+    /// Whether the manifest declares a hard constraint or an optimization objective.
+    pub execution_kind: ExecutionKindV1,
     /// Accepted subject-list cardinality.
     pub subjects: &'a SubjectContractV1,
     /// Accepted parameter names, kinds, defaults, and static bounds.
@@ -49,6 +53,8 @@ pub struct ManifestRuleContract<'a> {
 /// A manifest-validated rule binding ready for closed native dispatch.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ValidatedBinding {
+    /// Whether the executable manifest declares a constraint or objective.
+    pub execution_kind: ExecutionKindV1,
     /// Caller parameters after manifest defaults have been applied.
     pub parameters: Map<String, Value>,
     /// Exhaustive native handler selected by the executable manifest.
@@ -86,6 +92,7 @@ pub fn manifest_family_executable_rule_ids(family_id: &str) -> Option<&'static [
 #[must_use]
 pub fn manifest_rule_contract(rule_id: &str) -> Option<ManifestRuleContract<'static>> {
     rule_manifest(rule_id).map(|rule| ManifestRuleContract {
+        execution_kind: rule.execution_kind,
         subjects: &rule.subjects,
         parameters: &rule.parameters,
     })
@@ -124,9 +131,19 @@ pub fn validate_binding_contract(
 ) -> Result<ValidatedBinding, String> {
     let rule =
         rule_manifest(rule_id).ok_or_else(|| format!("unknown manifest rule `{rule_id}`"))?;
-    let (AvailabilityV1::Implemented, RuleStrengthV1::Hard, Some(handler)) =
-        (rule.availability, rule.strength, rule.handler)
-    else {
+    validate_binding_contract_for_rule(rule, subjects, parameters)
+}
+
+fn validate_binding_contract_for_rule(
+    rule: &RuleManifestV1,
+    subjects: &[String],
+    parameters: &Map<String, Value>,
+) -> Result<ValidatedBinding, String> {
+    let rule_id = &rule.id;
+    if !rule.is_executable() {
+        return Err(format!("manifest rule `{rule_id}` is not executable"));
+    }
+    let Some(handler) = rule.handler else {
         return Err(format!("manifest rule `{rule_id}` is not executable"));
     };
 
@@ -165,6 +182,7 @@ pub fn validate_binding_contract(
     }
 
     Ok(ValidatedBinding {
+        execution_kind: rule.execution_kind,
         parameters: normalized,
         handler,
     })
@@ -431,9 +449,11 @@ fn validate_handler_coverage(bundle: &ManifestBundleV1) -> Result<(), ManifestLo
         .iter()
         .filter_map(|rule| rule.handler)
         .collect::<BTreeSet<_>>();
-    let expected = NativeHandlerV1::ALL
+    let expected = bundle
+        .rules
         .iter()
-        .copied()
+        .filter(|rule| rule.is_executable())
+        .filter_map(|rule| rule.handler)
         .collect::<BTreeSet<_>>();
     if actual != expected {
         return conversion_error(format!(
@@ -504,20 +524,37 @@ fn convert_rule(rule: &RuleManifestV1) -> Result<RuleDefinition, ManifestLoadErr
         rule.llm_encoding.escalate_when.clone(),
     );
 
-    let guidance = match (rule.availability, rule.strength) {
-        (AvailabilityV1::Implemented, RuleStrengthV1::Hard) => RuleGuidance::implemented_hard(
-            authorities,
-            rule.requires.clone(),
-            llm_encoding,
-            SolverEncoding::new(
-                rule.solver_encoding.theory.clone(),
-                rule.solver_encoding.verification.clone(),
-                rule.solver_encoding.synthesis.clone(),
-                rule.solver_encoding.formula.clone(),
-            ),
-            convert_examples(rule),
-        ),
-        (AvailabilityV1::CapabilityUnavailable, strength) => {
+    let guidance = match (rule.availability, rule.execution_kind, rule.strength) {
+        (AvailabilityV1::Implemented, ExecutionKindV1::Constraint, RuleStrengthV1::Hard) => {
+            RuleGuidance::implemented_hard(
+                authorities,
+                rule.requires.clone(),
+                llm_encoding,
+                SolverEncoding::new(
+                    rule.solver_encoding.theory.clone(),
+                    rule.solver_encoding.verification.clone(),
+                    rule.solver_encoding.synthesis.clone(),
+                    rule.solver_encoding.formula.clone(),
+                ),
+                convert_examples(rule),
+            )
+        }
+        (AvailabilityV1::Implemented, ExecutionKindV1::Objective, strength) => {
+            RuleGuidance::implemented_objective(
+                convert_strength(strength),
+                authorities,
+                rule.requires.clone(),
+                llm_encoding,
+                SolverEncoding::new(
+                    rule.solver_encoding.theory.clone(),
+                    rule.solver_encoding.verification.clone(),
+                    rule.solver_encoding.synthesis.clone(),
+                    rule.solver_encoding.formula.clone(),
+                ),
+                convert_examples(rule),
+            )
+        }
+        (AvailabilityV1::CapabilityUnavailable, execution_kind, strength) => {
             ensure_unavailable_projection_is_lossless(rule)?;
             let Some(reason) = rule.availability_reason.clone() else {
                 return conversion_error(format!(
@@ -527,15 +564,16 @@ fn convert_rule(rule: &RuleManifestV1) -> Result<RuleDefinition, ManifestLoadErr
             };
             RuleGuidance::capability_unavailable(
                 reason,
+                convert_execution_kind(execution_kind),
                 convert_strength(strength),
                 authorities,
                 rule.requires.clone(),
                 llm_encoding,
             )
         }
-        (availability, strength) => {
+        (availability, execution_kind, strength) => {
             return conversion_error(format!(
-                "rule `{}` uses unsupported catalog projection `{availability:?}/{strength:?}`",
+                "rule `{}` uses unsupported catalog projection `{availability:?}/{execution_kind:?}/{strength:?}`",
                 rule.id
             ));
         }
@@ -598,6 +636,13 @@ const fn convert_strength(strength: RuleStrengthV1) -> RuleStrength {
     }
 }
 
+const fn convert_execution_kind(execution_kind: ExecutionKindV1) -> ExecutionKind {
+    match execution_kind {
+        ExecutionKindV1::Constraint => ExecutionKind::Constraint,
+        ExecutionKindV1::Objective => ExecutionKind::Objective,
+    }
+}
+
 fn conversion_error<T>(message: String) -> Result<T, ManifestLoadError> {
     Err(ManifestLoadError::Conversion(message))
 }
@@ -641,9 +686,34 @@ mod tests {
     use serde_json::json;
 
     use super::super::manifest_format::{
-        NativeObjectValidatorV1, ParameterContractV1, ParameterKindV1, SubjectCardinalityV1,
-        SubjectContractV1,
+        ExecutionKindV1, NativeObjectValidatorV1, ParameterContractV1, ParameterKindV1,
+        RuleStrengthV1, SubjectCardinalityV1, SubjectContractV1,
     };
+
+    #[test]
+    fn existing_binding_contract_defaults_to_constraint() {
+        let contract = super::manifest_rule_contract("a11y.target_size").expect("manifest rule");
+
+        assert_eq!(contract.execution_kind, ExecutionKindV1::Constraint);
+    }
+
+    #[test]
+    fn objective_binding_contract_uses_the_manifest_executable_route() {
+        let mut objective = super::rule_manifest("scheduling.minimize_makespan")
+            .expect("manifest rule")
+            .clone();
+        objective.execution_kind = ExecutionKindV1::Objective;
+        objective.strength = RuleStrengthV1::Advisory;
+
+        let binding = super::validate_binding_contract_for_rule(
+            &objective,
+            &["a".to_owned(), "b".to_owned(), "c".to_owned()],
+            &serde_json::Map::new(),
+        )
+        .expect("manifest-declared objective is executable");
+
+        assert_eq!(binding.execution_kind, ExecutionKindV1::Objective);
+    }
 
     #[test]
     fn strict_json_failures_are_deterministic() {
