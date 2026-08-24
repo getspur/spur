@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use super::WorktreeGitMetadata;
@@ -9,11 +9,14 @@ use crate::{GraphIndexArtifact, ParquetClient};
 
 const GIT_METADATA_CACHE_TTL: Duration = Duration::from_millis(5_000);
 const PARQUET_CLIENT_CACHE_CAPACITY: usize = 8;
-const OVERLAY_DELTA_CACHE_CAPACITY: usize = 1;
+const OVERLAY_DELTA_CACHE_CAPACITY: usize = PARQUET_CLIENT_CACHE_CAPACITY;
 
 static GIT_METADATA_CACHE: OnceLock<Mutex<GitMetadataCache>> = OnceLock::new();
 static PARQUET_CLIENT_CACHE: OnceLock<Mutex<ParquetClientCache>> = OnceLock::new();
 static OVERLAY_DELTA_CACHE: OnceLock<Mutex<OverlayDeltaCache>> = OnceLock::new();
+static OVERLAY_DELTA_IN_FLIGHT: OnceLock<
+    Mutex<HashMap<OverlayDeltaCacheKey, Arc<OverlayInFlight>>>,
+> = OnceLock::new();
 
 pub(super) fn git_metadata_get(
     worktree: &Path,
@@ -68,9 +71,81 @@ pub(super) fn overlay_delta(
     if let Some(cached) = overlay_delta_cache_get(&cache_key) {
         return Ok(cached);
     }
-    let built = build()?;
-    overlay_delta_cache_insert(cache_key, built.clone());
-    Ok(built)
+
+    let (cell, leader) = overlay_in_flight_cell(cache_key.clone())?;
+    if !leader {
+        return wait_for_overlay_in_flight(&cell);
+    }
+
+    let result = build();
+    finish_overlay_in_flight(&cache_key, &cell, &result);
+    if let Ok(built) = &result {
+        overlay_delta_cache_insert(cache_key, built.clone());
+    }
+    result
+}
+
+struct OverlayInFlight {
+    done: Mutex<Option<Result<CachedOverlayDelta, String>>>,
+    cv: Condvar,
+}
+
+fn overlay_in_flight_map() -> &'static Mutex<HashMap<OverlayDeltaCacheKey, Arc<OverlayInFlight>>> {
+    OVERLAY_DELTA_IN_FLIGHT.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn overlay_in_flight_cell(
+    cache_key: OverlayDeltaCacheKey,
+) -> anyhow::Result<(Arc<OverlayInFlight>, bool)> {
+    let mut map = overlay_in_flight_map()
+        .lock()
+        .map_err(|_| anyhow::anyhow!("overlay in-flight map lock poisoned"))?;
+    if let Some(cell) = map.get(&cache_key) {
+        return Ok((Arc::clone(cell), false));
+    }
+    let cell = Arc::new(OverlayInFlight {
+        done: Mutex::new(None),
+        cv: Condvar::new(),
+    });
+    map.insert(cache_key, Arc::clone(&cell));
+    Ok((cell, true))
+}
+
+fn wait_for_overlay_in_flight(cell: &OverlayInFlight) -> anyhow::Result<CachedOverlayDelta> {
+    let mut done = cell
+        .done
+        .lock()
+        .map_err(|_| anyhow::anyhow!("overlay in-flight result lock poisoned"))?;
+    while done.is_none() {
+        done = cell
+            .cv
+            .wait(done)
+            .map_err(|_| anyhow::anyhow!("overlay in-flight wait poisoned"))?;
+    }
+    match done.as_ref() {
+        Some(Ok(value)) => Ok(value.clone()),
+        Some(Err(error)) => Err(anyhow::anyhow!("{error}")),
+        None => Err(anyhow::anyhow!(
+            "overlay in-flight result missing after wait"
+        )),
+    }
+}
+
+fn finish_overlay_in_flight(
+    cache_key: &OverlayDeltaCacheKey,
+    cell: &OverlayInFlight,
+    result: &anyhow::Result<CachedOverlayDelta>,
+) {
+    if let Ok(mut done) = cell.done.lock() {
+        *done = Some(match result {
+            Ok(value) => Ok(value.clone()),
+            Err(error) => Err(error.to_string()),
+        });
+        cell.cv.notify_all();
+    }
+    if let Ok(mut map) = overlay_in_flight_map().lock() {
+        map.remove(cache_key);
+    }
 }
 
 fn git_cache() -> &'static Mutex<GitMetadataCache> {
@@ -519,11 +594,15 @@ mod tests {
 
     static OVERLAY_DELTA_TEST_LOCK: Mutex<()> = Mutex::new(());
 
+    fn overlay_delta_test_lock() -> std::sync::MutexGuard<'static, ()> {
+        OVERLAY_DELTA_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     #[test]
     fn overlay_delta_cache_reuses_build_for_same_changed_files_fingerprint() {
-        let _guard = OVERLAY_DELTA_TEST_LOCK
-            .lock()
-            .expect("overlay delta test lock");
+        let _guard = overlay_delta_test_lock();
         let tempdir = tempfile::tempdir().expect("tempdir");
         let worktree = tempdir.path();
         let builds = AtomicUsize::new(0);
@@ -550,9 +629,7 @@ mod tests {
 
     #[test]
     fn overlay_delta_cache_rebuilds_when_changed_files_fingerprint_changes() {
-        let _guard = OVERLAY_DELTA_TEST_LOCK
-            .lock()
-            .expect("overlay delta test lock");
+        let _guard = overlay_delta_test_lock();
         let tempdir = tempfile::tempdir().expect("tempdir");
         let worktree = tempdir.path();
         let builds = AtomicUsize::new(0);
@@ -572,6 +649,84 @@ mod tests {
             builds.load(Ordering::SeqCst),
             2,
             "changed file contents should extract a new overlay delta"
+        );
+    }
+
+    #[test]
+    fn overlay_delta_cache_keeps_per_worktree_entries_when_switching_projects() {
+        let _guard = overlay_delta_test_lock();
+        let spur = tempfile::tempdir().expect("spur worktree");
+        let notebook = tempfile::tempdir().expect("notebook worktree");
+        let otobank = tempfile::tempdir().expect("otobank worktree");
+        let builds = AtomicUsize::new(0);
+
+        overlay_delta(spur.path(), 1, || {
+            builds.fetch_add(1, Ordering::SeqCst);
+            Ok(dummy_overlay_delta("spur"))
+        })
+        .expect("spur overlay");
+        overlay_delta(notebook.path(), 1, || {
+            builds.fetch_add(1, Ordering::SeqCst);
+            Ok(dummy_overlay_delta("notebook"))
+        })
+        .expect("notebook overlay");
+        overlay_delta(otobank.path(), 1, || {
+            builds.fetch_add(1, Ordering::SeqCst);
+            Ok(dummy_overlay_delta("otobank"))
+        })
+        .expect("otobank overlay");
+        overlay_delta(spur.path(), 1, || {
+            builds.fetch_add(1, Ordering::SeqCst);
+            Ok(dummy_overlay_delta("spur-again"))
+        })
+        .expect("spur overlay reuse after switching projects");
+
+        assert_eq!(
+            OVERLAY_DELTA_CACHE_CAPACITY, PARQUET_CLIENT_CACHE_CAPACITY,
+            "overlay cache must keep one live delta per cached parquet project"
+        );
+        assert_eq!(
+            builds.load(Ordering::SeqCst),
+            3,
+            "switching projects must reuse each worktree overlay instead of rebuilding after eviction"
+        );
+    }
+
+    #[test]
+    fn overlay_delta_singleflight_shares_in_flight_build_for_same_key() {
+        let _guard = overlay_delta_test_lock();
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let worktree = tempdir.path().to_path_buf();
+        let builds = Arc::new(AtomicUsize::new(0));
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+
+        let spawn =
+            |builds: Arc<AtomicUsize>, barrier: Arc<std::sync::Barrier>, worktree: PathBuf| {
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    overlay_delta(&worktree, 7, || {
+                        std::thread::sleep(Duration::from_millis(50));
+                        builds.fetch_add(1, Ordering::SeqCst);
+                        Ok(dummy_overlay_delta("shared"))
+                    })
+                })
+            };
+
+        let first = spawn(Arc::clone(&builds), Arc::clone(&barrier), worktree.clone());
+        let second = spawn(builds.clone(), barrier, worktree);
+        first
+            .join()
+            .expect("first overlay thread")
+            .expect("first overlay");
+        second
+            .join()
+            .expect("second overlay thread")
+            .expect("second overlay");
+
+        assert_eq!(
+            builds.load(Ordering::SeqCst),
+            1,
+            "concurrent overlay extracts for the same worktree fingerprint must share one in-flight build"
         );
     }
 

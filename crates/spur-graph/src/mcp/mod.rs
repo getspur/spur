@@ -1317,26 +1317,45 @@ async fn overlay_response_for_backend(
     response_format: ResponseFormat,
     handler: impl Fn(&Value, &dyn GraphQueryClient) -> CodeGraphResult,
 ) -> CodeGraphResult {
-    let (mut fresh_body, fresh_files) = {
-        let overlay = overlay_client_for_backend(backend, rebuild_candidate).map_err(|error| {
-            CodeGraphError::without_metadata(McpHandlerError::Internal(format!(
-                "failed to construct code graph overlay: {error}"
-            )))
-        })?;
-        match overlay {
-            Some(overlay) => {
-                let fresh_body = handler(args, &overlay)?;
-                let fresh_files = response_file_set_from_client(&overlay, &fresh_body)?;
-                (fresh_body, fresh_files)
-            }
-            None => {
-                // No changed paths → identity overlay. Serve the base client
-                // directly and skip extract_delta / remap construction.
-                let client = backend.client();
-                let fresh_body = handler(args, client)?;
-                let fresh_files = response_file_set_from_client(client, &fresh_body)?;
-                (fresh_body, fresh_files)
-            }
+    let worktree = rebuild_candidate.worktree.clone();
+    let base_files = backend.base_file_set().map_err(|error| {
+        CodeGraphError::without_metadata(McpHandlerError::Internal(format!(
+            "failed to construct code graph overlay: {error}"
+        )))
+    })?;
+    let cached =
+        tokio::task::spawn_blocking(move || overlay_delta_for_worktree(worktree, base_files))
+            .await
+            .map_err(|error| {
+                CodeGraphError::without_metadata(McpHandlerError::Internal(format!(
+                    "overlay extract task failed: {error}"
+                )))
+            })?
+            .map_err(|error| {
+                CodeGraphError::without_metadata(McpHandlerError::Internal(format!(
+                    "failed to construct code graph overlay: {error}"
+                )))
+            })?;
+    let (mut fresh_body, fresh_files) = match cached {
+        Some(cached) => {
+            let overlay =
+                OverlayClient::from_artifacts(backend.client(), cached.artifact, cached.shadowed)
+                    .map_err(|error| {
+                    CodeGraphError::without_metadata(McpHandlerError::Internal(format!(
+                        "failed to construct code graph overlay: {error}"
+                    )))
+                })?;
+            let fresh_body = handler(args, &overlay)?;
+            let fresh_files = response_file_set_from_client(&overlay, &fresh_body)?;
+            (fresh_body, fresh_files)
+        }
+        None => {
+            // No changed paths → identity overlay. Serve the base client
+            // directly and skip extract_delta / remap construction.
+            let client = backend.client();
+            let fresh_body = handler(args, client)?;
+            let fresh_files = response_file_set_from_client(client, &fresh_body)?;
+            (fresh_body, fresh_files)
         }
     };
     GraphResponseMetadata::analyze_source_inner(source, Some(&fresh_files), None)
@@ -1347,26 +1366,36 @@ async fn overlay_response_for_backend(
     Ok(fresh_body)
 }
 
+fn overlay_delta_for_worktree(
+    worktree: PathBuf,
+    base_files: Vec<(String, String)>,
+) -> anyhow::Result<Option<request_cache::CachedOverlayDelta>> {
+    let changed = changed_paths_for_overlay(&worktree, base_files)?;
+    if changed.paths.is_empty() {
+        return Ok(None);
+    }
+    request_cache::overlay_delta(&worktree, changed.fingerprint, || {
+        let (artifact, shadowed) =
+            OverlayClient::<&dyn GraphQueryClient>::extract_delta(&worktree, &changed.paths)?;
+        Ok(request_cache::CachedOverlayDelta { artifact, shadowed })
+    })
+    .map(Some)
+}
+
 fn overlay_client_for_backend<'a>(
     backend: &'a CodeSearchBackend,
     rebuild_candidate: &RebuildCandidate,
 ) -> anyhow::Result<Option<OverlayClient<&'a dyn GraphQueryClient>>> {
     let worktree = rebuild_candidate.worktree.clone();
     let base_files = backend.base_file_set()?;
-    let changed = changed_paths_for_overlay(&worktree, base_files)?;
-    if changed.paths.is_empty() {
-        return Ok(None);
+    match overlay_delta_for_worktree(worktree, base_files)? {
+        Some(cached) => Ok(Some(OverlayClient::from_artifacts(
+            backend.client(),
+            cached.artifact,
+            cached.shadowed,
+        )?)),
+        None => Ok(None),
     }
-    let cached = request_cache::overlay_delta(&worktree, changed.fingerprint, || {
-        let (artifact, shadowed) =
-            OverlayClient::<&dyn GraphQueryClient>::extract_delta(&worktree, &changed.paths)?;
-        Ok(request_cache::CachedOverlayDelta { artifact, shadowed })
-    })?;
-    Ok(Some(OverlayClient::from_artifacts(
-        backend.client(),
-        cached.artifact,
-        cached.shadowed,
-    )?))
 }
 
 struct CodeSearchBody {
