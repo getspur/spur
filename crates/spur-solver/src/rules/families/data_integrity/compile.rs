@@ -433,37 +433,7 @@ fn validate_binding_subject(
         NativeHandlerV1::DataIntegrityTemporalConsistency => {
             facts.temporal_constraints.contains_key(subject)
         }
-        NativeHandlerV1::A11yFocusNotObscured
-        | NativeHandlerV1::A11yReflow
-        | NativeHandlerV1::A11yTargetSize
-        | NativeHandlerV1::A11yTextContrast
-        | NativeHandlerV1::LayoutAxisCapacity
-        | NativeHandlerV1::LayoutContainment
-        | NativeHandlerV1::LayoutNonOverlap
-        | NativeHandlerV1::MediaAspectRatio
-        | NativeHandlerV1::RbacDynamicSeparationOfDuty
-        | NativeHandlerV1::RbacPermissionReachable
-        | NativeHandlerV1::RbacRoleHierarchyAcyclic
-        | NativeHandlerV1::RbacStaticSeparationOfDuty
-        | NativeHandlerV1::PlacementMinimumFailureDomains
-        | NativeHandlerV1::PlacementTopologyMaxSkew
-        | NativeHandlerV1::ResourceAggregateCapacity
-        | NativeHandlerV1::ResourceQuotaCapacity
-        | NativeHandlerV1::ResourceRequestWithinLimit
-        | NativeHandlerV1::ConfigurationRequiresAny
-        | NativeHandlerV1::ConfigurationExcludes
-        | NativeHandlerV1::ConfigurationSelectionCardinality
-        | NativeHandlerV1::ConfigurationAttributeAllowedPair
-        | NativeHandlerV1::ConfigurationVersionInterval
-        | NativeHandlerV1::SchedulingAssignmentExactlyOnce
-        | NativeHandlerV1::SchedulingPlacementAllowed
-        | NativeHandlerV1::SchedulingPrecedenceFinishStart
-        | NativeHandlerV1::SchedulingCumulativeCapacity
-        | NativeHandlerV1::SchedulingMinimizeMakespan
-        | NativeHandlerV1::WorkflowInitialStateAllowed
-        | NativeHandlerV1::WorkflowTransitionAllowed
-        | NativeHandlerV1::WorkflowSafetyInvariant
-        | NativeHandlerV1::WorkflowBoundedReachability => {
+        _ => {
             return Err(format!(
                 "handler `{handler:?}` does not belong to data_integrity"
             ));
@@ -1871,13 +1841,14 @@ mod tests {
 
     #[test]
     fn family_compilers_keep_owned_handlers_before_stable_foreign_fallbacks() {
-        fn compile_binding_source(source: &str) -> &str {
+        fn function_source<'a>(source: &'a str, function: &str) -> &'a str {
+            let signature = format!("\nfn {function}(");
             let (_, tail) = source
-                .split_once("\nfn compile_binding(")
-                .expect("family compiler must define compile_binding");
+                .split_once(&signature)
+                .unwrap_or_else(|| panic!("family compiler must define {function}"));
             let end = tail
                 .find("\nfn ")
-                .expect("compile_binding must precede another top-level function");
+                .unwrap_or_else(|| panic!("{function} must precede another top-level function"));
             &tail[..end]
         }
 
@@ -1931,7 +1902,7 @@ mod tests {
         ];
 
         for (family, source, owned_handlers) in cases {
-            let binding_source = compile_binding_source(source);
+            let binding_source = function_source(source, "compile_binding");
             for handler in owned_handlers {
                 assert!(
                     binding_source.contains(&format!("NativeHandlerV1::{handler}")),
@@ -1945,6 +1916,72 @@ mod tests {
             assert!(
                 binding_source.contains(&format!("\"unsupported {family} rule")),
                 "{family} compiler fallback must report the source rule id"
+            );
+        }
+
+        let helper_cases: [(&str, &str, &str, &[&str], &str, &str); 2] = [
+            (
+                "data integrity",
+                include_str!("compile.rs"),
+                "validate_binding_subject",
+                &[
+                    "DataIntegrityUnique",
+                    "DataIntegrityForeignKey",
+                    "DataIntegrityCardinality",
+                    "DataIntegrityValueRange",
+                    "DataIntegrityConditionalRequired",
+                    "DataIntegrityAggregateBalance",
+                    "DataIntegrityMutuallyConsistent",
+                    "DataIntegrityTemporalConsistency",
+                ],
+                "_ => {",
+                "does not belong to data_integrity",
+            ),
+            (
+                "resource",
+                include_str!("../resource/compile.rs"),
+                "validate_legacy_static_contract",
+                &[
+                    "ResourceRequestWithinLimit",
+                    "ResourceAggregateCapacity",
+                    "ResourceQuotaCapacity",
+                    "PlacementTopologyMaxSkew",
+                    "PlacementMinimumFailureDomains",
+                ],
+                "Some(_) | None => Err(format!(",
+                "unsupported resource rule",
+            ),
+        ];
+
+        for (family, source, function, owned_handlers, fallback, diagnostic) in helper_cases {
+            let helper_source = function_source(source, function);
+            let fallback_index = helper_source
+                .find(fallback)
+                .unwrap_or_else(|| panic!("{function} must use one stable foreign fallback"));
+            assert_eq!(
+                helper_source.matches(fallback).count(),
+                1,
+                "{function} must use exactly one stable foreign fallback"
+            );
+            assert_eq!(
+                helper_source.matches("NativeHandlerV1::").count(),
+                owned_handlers.len(),
+                "{function} must not enumerate foreign handlers"
+            );
+            for handler in owned_handlers {
+                let owned_index = helper_source
+                    .find(&format!("NativeHandlerV1::{handler}"))
+                    .unwrap_or_else(|| {
+                        panic!("{function} must keep owned handler {handler} explicit")
+                    });
+                assert!(
+                    owned_index < fallback_index,
+                    "{function} must keep owned handler {handler} before its fallback"
+                );
+            }
+            assert!(
+                helper_source.contains(diagnostic),
+                "{family} helper fallback must preserve its diagnostic"
             );
         }
     }
