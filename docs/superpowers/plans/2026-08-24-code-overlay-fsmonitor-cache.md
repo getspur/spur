@@ -6,9 +6,16 @@
 
 **Authoring epic:** `bd-3a6y`
 
-**Submitted plan:** `fb5c7280-e71b-4d77-8bb4-32df84107ec7`
+**Submitted plan:** `60c28eb8-c5e7-4cc8-bd57-5effffbe45c4`
 
-**Orchestrator execution epic:** `bd-2m6c`
+**Orchestrator execution epic:** `bd-3d82`
+
+**Worker routing:** `codex`, model `gpt-5.6-sol`, effort `xhigh` for every task,
+per explicit user instruction.
+
+**Superseded plan:** `fb5c7280-e71b-4d77-8bb4-32df84107ec7` / `bd-2m6c`
+was abandoned before merge because it used mixed workers and could not mutate
+model/effort in place.
 
 **Plan label:** `plan:code-overlay-fsmonitor-20260824`
 
@@ -29,12 +36,12 @@
 
 | Authored issue | Runtime issue |
 |---|---|
-| `bd-2je4` | `bd-2d5w` |
-| `bd-juvn` | `bd-3sgq` |
-| `bd-1l0y` | `bd-13xu` |
-| `bd-258m` | `bd-2hli` |
-| `bd-1jzq` | `bd-3u6e` |
-| `bd-2uzl` | `bd-34p7` |
+| `bd-2je4` | `bd-db9s` |
+| `bd-juvn` | `bd-3q1q` |
+| `bd-1l0y` | `bd-wvwa` |
+| `bd-258m` | `bd-2s0t` |
+| `bd-1jzq` | `bd-1f4f` |
+| `bd-2uzl` | `bd-2oey` |
 
 **Planning solve:** `sol_f48ab4639f9b4075` — the six-task assignment,
 capacity, and finish/start precedence model passed all 19 scheduling bindings.
@@ -166,7 +173,7 @@ required before later production tasks start.
 
 **Depends on:** none
 
-**Suggested worker:** `codex`
+**Suggested worker:** `codex` (`gpt-5.6-sol`, `xhigh`)
 
 **Write scope:**
 
@@ -212,7 +219,7 @@ the latency decomposition and digest, and has a recorded SOLVE PRE/POST pair.
 
 **Depends on:** none
 
-**Suggested worker:** `claude-code`
+**Suggested worker:** `codex` (`gpt-5.6-sol`, `xhigh`)
 
 **Write scope:**
 
@@ -265,7 +272,7 @@ SOLVE POST preserves all five `OVERLAY-ROUTING` checks.
 
 **Depends on:** Tasks 1 and 2
 
-**Suggested worker:** `claude-code`
+**Suggested worker:** `codex` (`gpt-5.6-sol`, `xhigh`)
 
 **Write scope:**
 
@@ -325,7 +332,7 @@ preserves 14/14 lifecycle checks.
 
 **Depends on:** Task 3
 
-**Suggested worker:** `claude-code`
+**Suggested worker:** `codex` (`gpt-5.6-sol`, `xhigh`)
 
 **Write scope:**
 
@@ -385,7 +392,7 @@ proves uniqueness/temporal consistency.
 
 **Depends on:** Task 4
 
-**Suggested worker:** `claude-code`
+**Suggested worker:** `codex` (`gpt-5.6-sol`, `xhigh`)
 
 **Write scope:**
 
@@ -444,7 +451,7 @@ are byte/JSON equivalent to the direct-overlay oracle; SOLVE POST passes.
 
 **Depends on:** Task 5
 
-**Suggested worker:** `codex`
+**Suggested worker:** `codex` (`gpt-5.6-sol`, `xhigh`)
 
 **Write scope:**
 
