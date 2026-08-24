@@ -193,6 +193,7 @@ impl spur_mcp::ToolModule for GraphMcpModule {
     }
 }
 
+mod overlay_snapshot;
 #[allow(dead_code)]
 mod request_cache;
 mod file_oid_cache {
@@ -1337,13 +1338,13 @@ async fn overlay_response_for_backend(
     handler: impl Fn(&Value, &dyn GraphQueryClient) -> CodeGraphResult,
 ) -> Result<OverlayAttempt, CodeGraphError> {
     let worktree = rebuild_candidate.worktree.clone();
-    let base_files = backend.base_file_set().map_err(|error| {
+    let snapshot_base = backend.snapshot_base().map_err(|error| {
         CodeGraphError::without_metadata(McpHandlerError::Internal(format!(
             "failed to construct code graph overlay: {error}"
         )))
     })?;
     let mut task =
-        tokio::task::spawn_blocking(move || overlay_delta_for_worktree(worktree, base_files));
+        tokio::task::spawn_blocking(move || overlay_delta_for_worktree(worktree, snapshot_base));
     let cached = match tokio::time::timeout(graph_rebuild_latency_budget(), &mut task).await {
         Ok(Ok(Ok(cached))) => cached,
         Ok(Ok(Err(error))) => {
@@ -1411,9 +1412,9 @@ async fn overlay_response_for_backend(
 
 fn overlay_delta_for_worktree(
     worktree: PathBuf,
-    base_files: Vec<(String, String)>,
+    base: overlay_snapshot::SnapshotBase,
 ) -> anyhow::Result<Option<request_cache::CachedOverlayDelta>> {
-    let changed = changed_paths_for_overlay(&worktree, base_files)?;
+    let changed = changed_paths_for_overlay_base(&worktree, base)?;
     if changed.paths.is_empty() {
         return Ok(None);
     }
@@ -1430,8 +1431,8 @@ fn overlay_client_for_backend<'a>(
     rebuild_candidate: &RebuildCandidate,
 ) -> anyhow::Result<Option<OverlayClient<&'a dyn GraphQueryClient>>> {
     let worktree = rebuild_candidate.worktree.clone();
-    let base_files = backend.base_file_set()?;
-    match overlay_delta_for_worktree(worktree, base_files)? {
+    let snapshot_base = backend.snapshot_base()?;
+    match overlay_delta_for_worktree(worktree, snapshot_base)? {
         Some(cached) => Ok(Some(OverlayClient::from_artifacts(
             backend.client(),
             cached.artifact,
@@ -1522,6 +1523,22 @@ impl CodeSearchBackend {
             Self::Parquet(client) => client.file_oids(),
             Self::InMemory { artifact, .. } => Ok(all_indexed_file_set(artifact)),
         }
+    }
+
+    fn snapshot_base(&self) -> anyhow::Result<overlay_snapshot::SnapshotBase> {
+        let file_oids = self.base_file_set()?.into_iter().collect();
+        Ok(match self {
+            Self::Parquet(client) => overlay_snapshot::SnapshotBase {
+                indexed_graph_content_hash: client.manifest().graph_content_hash.clone(),
+                indexed_head_oid: client.manifest().indexed_commit_oid.clone(),
+                file_oids,
+            },
+            Self::InMemory { artifact, .. } => overlay_snapshot::SnapshotBase {
+                indexed_graph_content_hash: artifact.graph_content_hash.clone(),
+                indexed_head_oid: None,
+                file_oids,
+            },
+        })
     }
 
     fn search_response_file_set(
@@ -5432,11 +5449,29 @@ fn parse_sha1_oid(hex: &str) -> Option<[u8; 20]> {
     Some(out)
 }
 
+#[allow(dead_code)]
 pub(crate) fn changed_paths_for_overlay(
     worktree: &Path,
     base_files: Vec<(String, String)>,
 ) -> anyhow::Result<OverlayChangedPaths> {
-    let changed = overlay_changed_oid_hex(worktree, base_files)?;
+    let base = overlay_snapshot::SnapshotBase::compatibility(base_files.into_iter().collect());
+    changed_paths_for_overlay_base(worktree, base)
+}
+
+fn changed_paths_for_overlay_base(
+    worktree: &Path,
+    base: overlay_snapshot::SnapshotBase,
+) -> anyhow::Result<OverlayChangedPaths> {
+    let allowed_extensions = crate::extract::languages::all_supported_extensions();
+    let changed = if crate::git::detect(worktree).is_some() {
+        overlay_snapshot::snapshot(worktree, base, &allowed_extensions)?.changed_oid_hex()
+    } else {
+        let worktree = worktree.canonicalize().map_err(|error| {
+            anyhow::anyhow!("failed to canonicalize `{}`: {error}", worktree.display())
+        })?;
+        let current_oids = current_file_oids_via_fs(&worktree, &allowed_extensions)?;
+        overlay_changed_oid_hex_from_maps(base.file_oids, current_oids)?
+    };
     let mut hasher = DefaultHasher::new();
     changed.hash(&mut hasher);
     Ok(OverlayChangedPaths {
@@ -5454,14 +5489,13 @@ fn overlay_changed_oid_hex(
     })?;
     let allowed_extensions = crate::extract::languages::all_supported_extensions();
     let base_oids = base_files.into_iter().collect::<BTreeMap<_, _>>();
-    let current_oids = if crate::git::detect(&worktree).is_some() {
-        // Git dirty set + index oids: avoid full-tree read/hash while still
-        // catching clean-tree HEAD lag vs stale graph index content oids.
-        current_file_oids_via_git(&worktree, &allowed_extensions)?
+    if crate::git::detect(&worktree).is_some() {
+        let base = overlay_snapshot::SnapshotBase::compatibility(base_oids);
+        Ok(overlay_snapshot::snapshot(&worktree, base, &allowed_extensions)?.changed_oid_hex())
     } else {
-        current_file_oids_via_fs(&worktree, &allowed_extensions)?
-    };
-    overlay_changed_oid_hex_from_maps(base_oids, current_oids)
+        let current_oids = current_file_oids_via_fs(&worktree, &allowed_extensions)?;
+        overlay_changed_oid_hex_from_maps(base_oids, current_oids)
+    }
 }
 
 fn overlay_changed_oid_hex_from_maps(
@@ -5503,6 +5537,7 @@ fn current_file_oids_via_fs(
     Ok(current_oids)
 }
 
+#[cfg(test)]
 fn current_file_oids_via_git(
     worktree: &Path,
     allowed_extensions: &[&str],
@@ -5547,6 +5582,7 @@ fn current_file_oids_via_git(
     Ok(current_oids)
 }
 
+#[cfg(test)]
 fn read_overlay_worktree_content_oid(
     worktree: &Path,
     path: &str,
@@ -5564,6 +5600,7 @@ fn read_overlay_worktree_content_oid(
     }
 }
 
+#[cfg(test)]
 fn overlay_path_has_supported_extension(path: &str, allowed_extensions: &[&str]) -> bool {
     Path::new(path)
         .extension()
@@ -6539,6 +6576,48 @@ mod tests {
 
     const ESCALATION_THRESHOLD: usize = 3;
     static REBUILD_TEST_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+
+    #[test]
+    fn overlay_snapshot_clean_repeat_avoids_full_index_sweep() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let root = tempdir.path().join("repo");
+        fs::create_dir_all(root.join("src")).expect("src dir");
+        init_git_repo(&root);
+        let source = b"pub fn clean() {}\n";
+        fs::write(root.join("src/lib.rs"), source).expect("source");
+        run_git_test(&root, &["add", "src/lib.rs"]);
+        run_git_test(&root, &["commit", "-qm", "base"]);
+        let base = overlay_snapshot::SnapshotBase::compatibility(BTreeMap::from([(
+            "src/lib.rs".to_owned(),
+            git_blob_oid(source),
+        )]));
+        let extensions = crate::extract::languages::all_supported_extensions();
+
+        let first =
+            overlay_snapshot::snapshot(&root, base.clone(), &extensions).expect("cold snapshot");
+        assert!(first.path_state.is_empty(), "fixture must start clean");
+        assert_eq!(first.measurements.full_index_sweeps, 1);
+
+        let second = overlay_snapshot::snapshot(&root, base, &extensions).expect("warm snapshot");
+        eprintln!(
+            "overlay snapshot measurement: cold_full_index_sweeps={} warm_full_index_sweeps={} \
+             warm_hashed_paths={} warm_snapshot_reused={}",
+            first.measurements.full_index_sweeps,
+            second.measurements.full_index_sweeps,
+            second.measurements.hashed_paths.len(),
+            second.measurements.snapshot_reused,
+        );
+        assert!(
+            second.path_state.is_empty(),
+            "clean repeat must remain clean"
+        );
+        assert_eq!(
+            second.measurements.full_index_sweeps, 0,
+            "warm unchanged validation must not repeat a full index sweep"
+        );
+        assert!(second.measurements.hashed_paths.is_empty());
+        assert!(second.measurements.snapshot_reused);
+    }
 
     #[test]
     fn overlay_changed_paths_fingerprint_tracks_all_changed_content() {
