@@ -303,7 +303,13 @@ fn include_tests_property_schema() -> serde_json::Value {
 }
 
 fn max_symbol_bodies_property_schema() -> serde_json::Value {
-    json!({ "type": "integer", "minimum": 0, "maximum": 5, "default": 0 })
+    json!({
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 5,
+        "default": 0,
+        "description": "Optional maximum number of symbol bodies to include. Defaults to 0; accepted range is 0..=5."
+    })
 }
 
 fn response_format_property_schema() -> serde_json::Value {
