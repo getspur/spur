@@ -18,7 +18,7 @@ const EXPECTED_FAMILY_IDS: [&str; 8] = [
     "workflow",
 ];
 
-const EXPECTED_EXECUTABLE_RULE_IDS: [&str; 39] = [
+const EXPECTED_EXECUTABLE_RULE_IDS: [&str; 41] = [
     "a11y.focus_not_obscured",
     "a11y.reflow",
     "a11y.target_size",
@@ -40,9 +40,11 @@ const EXPECTED_EXECUTABLE_RULE_IDS: [&str; 39] = [
     "layout.containment",
     "layout.non_overlap",
     "media.aspect_ratio",
+    "placement.minimize_skew",
     "placement.minimum_failure_domains",
     "placement.topology_max_skew",
     "rbac.dynamic_separation_of_duty",
+    "rbac.minimum_privilege",
     "rbac.permission_reachable",
     "rbac.role_hierarchy_acyclic",
     "rbac.static_separation_of_duty",
@@ -105,15 +107,21 @@ fn generic_family_registry_composes_all_platform_families_in_stable_order() {
     );
 
     assert_eq!(
+        builtin_registry()
+            .rules()
+            .iter()
+            .map(|rule| rule.id())
+            .collect::<Vec<_>>(),
+        EXPECTED_EXECUTABLE_RULE_IDS,
+        "the global catalog must contain exactly the sorted executable rule set"
+    );
+    assert_eq!(
         manifest_executable_rule_ids()
             .iter()
             .map(String::as_str)
             .collect::<Vec<_>>(),
         EXPECTED_EXECUTABLE_RULE_IDS
     );
-    assert!(!manifest_executable_rule_ids()
-        .iter()
-        .any(|rule_id| rule_id == "rbac.minimum_privilege"));
 
     for rule_id in EXPECTED_EXECUTABLE_RULE_IDS {
         assert!(
@@ -257,7 +265,7 @@ async fn generic_family_rule_spec_progressively_discovers_all_rules() {
     );
     assert_eq!(
         discovered_advisory_rule_ids.into_iter().collect::<Vec<_>>(),
-        ["rbac.minimum_privilege"]
+        Vec::<String>::new()
     );
 
     for rule_id in EXPECTED_EXECUTABLE_RULE_IDS {
@@ -298,9 +306,21 @@ async fn generic_family_rule_spec_progressively_discovers_all_rules() {
             )
             .await,
     );
-    assert_eq!(
-        least_privilege["rule"]["availability"],
-        "capability_unavailable"
-    );
+    assert_eq!(least_privilege["rule"]["availability"], "implemented");
     assert_eq!(least_privilege["rule"]["default_strength"], "advisory");
+
+    let topology_placement = result_json(
+        &registry()
+            .call_json_tool(
+                context(),
+                "solve_rule_spec",
+                json!({"profile": "topology_placement"}),
+            )
+            .await,
+    );
+    assert!(topology_placement["rules"]
+        .as_array()
+        .is_some_and(|rules| rules
+            .iter()
+            .any(|rule| rule["id"] == "placement.minimize_skew")));
 }
