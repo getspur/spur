@@ -327,7 +327,7 @@ async fn silver_upload_writes_validates_manifest_before_registering() -> Result<
     assert!(manifest
         .files
         .iter()
-        .any(|file| file.path == "code_symbols.lance/part.parquet"));
+        .any(|file| file.path == "code_symbols.parquet"));
     assert!(!manifest
         .files
         .iter()
@@ -944,16 +944,15 @@ fn demo_job_env(source_url: &str) -> JobEnv {
 }
 
 fn write_silver_artifact_fixture(artifact_dir: &Path) -> Result<()> {
-    fs::create_dir_all(artifact_dir.join("code_symbols.lance")).context("create symbols dir")?;
-    fs::create_dir_all(artifact_dir.join("sections.lancedb")).context("create sections dir")?;
+    fs::create_dir_all(artifact_dir).context("create artifact dir")?;
     for relative in [
         "nodes.parquet",
         "edges.parquet",
         "edges_unresolved.parquet",
         "files.parquet",
         "file_manifests.parquet",
-        "code_symbols.lance/part.parquet",
-        "sections.lancedb/part.parquet",
+        "code_symbols.parquet",
+        "sections.parquet",
     ] {
         fs::write(artifact_dir.join(relative), format!("fixture:{relative}"))
             .with_context(|| format!("write {relative}"))?;
@@ -1008,8 +1007,8 @@ fn worker_silver_manifest() -> spur_context_service::medallion::SilverManifest {
             "edges_unresolved.parquet",
             "files.parquet",
             "file_manifests.parquet",
-            "code_symbols.lance/part.parquet",
-            "sections.lancedb/part.parquet",
+            "code_symbols.parquet",
+            "sections.parquet",
         ]
         .into_iter()
         .map(|path| spur_context_service::medallion::SilverManifestFile {

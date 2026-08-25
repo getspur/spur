@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use spur_graph::store::lance_sections::{
     write_sections_dataset_skipping_embeddings,
-    write_sections_dataset_skipping_embeddings_with_delta, SidecarDelta, SECTIONS_DATASET_DIR,
+    write_sections_dataset_skipping_embeddings_with_delta, SidecarDelta, SECTIONS_PARQUET,
 };
 use spur_graph::store::read_artifact_header_parquet;
 use spur_graph::temporal::{resolve_symbol_at_indexed, symbol_history, Resolution, TemporalIndex};
@@ -155,7 +155,7 @@ fn base_sidecar_usable(artifact_dir: &Path) -> bool {
             "base graph manifest does not mark section sidecar complete; checking sidecar directory"
         );
     }
-    artifact_dir.join(SECTIONS_DATASET_DIR).is_dir()
+    artifact_dir.join(SECTIONS_PARQUET).is_file()
 }
 
 pub(super) fn resolve_root_for_as_of(

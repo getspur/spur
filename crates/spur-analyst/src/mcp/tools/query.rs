@@ -8,9 +8,7 @@ use serde_json::{json, Value};
 
 use crate::db::{
     connection::open_analyst_connection_read_only,
-    extensions::{
-        load_analyst_duckpgq_extension, load_analyst_icu_extension, load_analyst_lance_extension,
-    },
+    extensions::{load_analyst_duckpgq_extension, load_analyst_icu_extension},
     freshness::{freshness_gate, FreshnessGate},
     paths::analyst_db_path,
     sql::{query_rows, MAX_QUERY_ROWS},
@@ -140,7 +138,6 @@ fn pooled_query_connection(db_path: &Path) -> Result<PooledQueryConnection, McpH
     let conn = open_analyst_connection_read_only(db_path)
         .map_err(|error| McpHandlerError::Internal(format!("{error:#}")))?;
     load_analyst_icu_extension(&conn);
-    load_analyst_lance_extension(&conn);
     let _ = load_analyst_duckpgq_extension(&conn);
 
     let conn = Arc::new(Mutex::new(conn));

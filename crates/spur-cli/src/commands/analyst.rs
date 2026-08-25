@@ -9,9 +9,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
 use spur_graph::locking::try_lock_exclusive_with_timeout;
-use spur_graph::store::{
-    CODE_SYMBOLS_DATASET_DIR, CODE_SYMBOLS_TABLE, SECTIONS_DATASET_DIR, SECTIONS_TABLE,
-};
+use spur_graph::store::{CODE_SYMBOLS_PARQUET, SECTIONS_PARQUET};
 
 const INIT_SQL: &str = include_str!("../../../spur-context/analyst/init.sql");
 const INIT_TEMPORAL_SQL: &str = include_str!("../../../spur-context/analyst/init_temporal.sql");
@@ -25,10 +23,9 @@ const INIT_STATIC_SEARCH_VIEWS_SQL: &str =
     include_str!("../../../spur-context/analyst/init_search_views_static.sql");
 const INIT_SEARCH_SQL: &str = include_str!("../../../spur-context/analyst/init_search.sql");
 const ARTIFACT_PLACEHOLDER: &str = "__SPUR_GRAPH_ARTIFACT_DIR__";
-const LANCE_ATTACH_PLACEHOLDER: &str = "__SPUR_LANCE_ATTACH_SQL__";
 const SECTIONS_SOURCE_PLACEHOLDER: &str = "__SPUR_SECTIONS_SOURCE_SQL__";
-const LANCE_HYBRID_START: &str = "-- __SPUR_LANCE_HYBRID_START__";
-const LANCE_HYBRID_END: &str = "-- __SPUR_LANCE_HYBRID_END__";
+const SYMBOL_EMBEDDING_JOIN_PLACEHOLDER: &str = "__SPUR_SYMBOL_EMBEDDING_JOIN__";
+const SYMBOL_EMBEDDING_EXPR_PLACEHOLDER: &str = "__SPUR_SYMBOL_EMBEDDING_EXPR__";
 
 /// Compiled-in parquet schema version this analyst build understands.
 ///
@@ -98,12 +95,11 @@ pub fn build(root: &Path, options: AnalystBuildOptions) -> Result<()> {
 
     // Assemble the (pre-substitution) SQL template now so the freshness guard can
     // fingerprint it. Which scripts are included depends on optional temporal,
-    // diagnostics, and Lance sidecar presence, so the fingerprint captures config
+    // diagnostics, and parquet sidecar presence, so the fingerprint captures config
     // as well as SQL content.
-    let sections_dataset_dir = artifact_dir.join(SECTIONS_DATASET_DIR);
-    let code_symbols_dataset_dir = artifact_dir.join(CODE_SYMBOLS_DATASET_DIR);
-    let lance_available = lance_hybrid_available(&artifact_dir, quiet);
-    let init_search_sql = render_init_search_sql(lance_available)?;
+    let sections_available = sections_parquet_available(&artifact_dir, quiet);
+    let symbols_available = symbols_parquet_available(&artifact_dir, quiet);
+    let init_search_sql = render_init_search_sql(sections_available, symbols_available)?;
     let sql_template = [
         INIT_SQL,
         if want_temporal { INIT_TEMPORAL_SQL } else { "" },
@@ -121,10 +117,8 @@ pub fn build(root: &Path, options: AnalystBuildOptions) -> Result<()> {
         } else {
             INIT_STATIC_SEARCH_VIEWS_SQL
         },
-        // Search appliance: materializes the prose (section bodies, from Lance)
-        // and code (symbol tokens) FTS indexes + search() macros. It needs the
-        // scorecard/token views above; Lance-backed prose and hybrid search are
-        // optional branches within the rendered SQL.
+        // Search appliance: materializes prose/code FTS indexes, DuckDB
+        // embedding arrays, and BM25+cosine hybrid search() macros.
         init_search_sql.as_str(),
     ]
     .concat();
@@ -160,24 +154,13 @@ pub fn build(root: &Path, options: AnalystBuildOptions) -> Result<()> {
     let tmp_db = db_path.with_extension(format!("duckdb.tmp-{}", std::process::id()));
     let _ = std::fs::remove_file(&tmp_db);
 
-    let lance_attach_sql = if lance_available {
-        format!(
-            "{}\nATTACH '{}' AS lance_ns (TYPE LANCE);\n",
-            spur_analyst::analyst_extension_load_sql("lance"),
-            sql_escape_path(&sections_dataset_dir)
-        )
-    } else {
-        if !quiet {
-            eprintln!(
-                "[spur] warning: valid Lance hybrid sidecars not found at {} and {} - using BM25-only search",
-                sections_dataset_dir.display(),
-                code_symbols_dataset_dir.display()
-            );
-        }
-        String::new()
-    };
-    let sql = render_artifact_path_placeholders(&sql_template, &artifact_dir)
-        .replace(LANCE_ATTACH_PLACEHOLDER, &lance_attach_sql);
+    if !sections_available && !quiet {
+        eprintln!(
+            "[spur] warning: valid parquet section sidecar not found at {} - using empty sections table",
+            artifact_dir.join(SECTIONS_PARQUET).display(),
+        );
+    }
+    let sql = render_artifact_path_placeholders(&sql_template, &artifact_dir);
 
     let build_result = execute_build_script(&tmp_db, &sql);
 
@@ -209,7 +192,6 @@ pub fn build(root: &Path, options: AnalystBuildOptions) -> Result<()> {
     }
 
     if !quiet {
-        let lance_version = lance_extension_version().unwrap_or_else(|| "<unknown>".into());
         // Surface the schema/content hash from the manifest we already validated.
         let observed_hash = std::fs::read(artifact_dir.join("manifest.json"))
             .ok()
@@ -221,9 +203,8 @@ pub fn build(root: &Path, options: AnalystBuildOptions) -> Result<()> {
             .unwrap_or_else(|| "<unknown>".to_string());
         let elapsed = started.elapsed();
         eprintln!(
-            "[spur] Analyst DB ready (graph_content_hash={}, lance_extension_version={}, {:.1}s)",
+            "[spur] Analyst DB ready (graph_content_hash={}, {:.1}s)",
             short_hash(&observed_hash),
-            lance_version,
             elapsed.as_secs_f64()
         );
     }
@@ -467,53 +448,47 @@ fn manifest_usize_field(value: &serde_json::Value, field: &str) -> usize {
         .unwrap_or(0)
 }
 
-fn lance_hybrid_available(artifact_dir: &Path, quiet: bool) -> bool {
+fn sections_parquet_available(artifact_dir: &Path, quiet: bool) -> bool {
     let Some(status) = manifest_sidecar_status(artifact_dir) else {
         return false;
     };
-    if status.section_bodies == 0 || status.code_symbols == 0 {
+    if status.section_bodies == 0 {
         if !quiet {
             eprintln!(
-                "[spur] warning: Lance sidecar manifest has section_bodies={} and code_symbols={} - using BM25-only search",
-                status.section_bodies, status.code_symbols
+                "[spur] warning: parquet sidecar manifest has section_bodies=0 - using empty sections table"
             );
         }
         return false;
     }
-    let sections_dataset_dir = artifact_dir.join(SECTIONS_DATASET_DIR);
-    let code_symbols_dataset_dir = artifact_dir.join(CODE_SYMBOLS_DATASET_DIR);
-    if !sections_dataset_dir.is_dir() || !code_symbols_dataset_dir.is_dir() {
-        return false;
-    }
-    lance_table_has_rows(
-        &sections_dataset_dir,
-        &sections_dataset_dir,
-        SECTIONS_TABLE,
-        "section table",
-        quiet,
-    ) && lance_table_has_rows(
-        artifact_dir,
-        &code_symbols_dataset_dir,
-        CODE_SYMBOLS_TABLE,
-        "code symbol table",
+    parquet_file_has_rows(
+        &artifact_dir.join(SECTIONS_PARQUET),
+        "section sidecar",
         quiet,
     )
 }
 
-fn lance_table_has_rows(
-    attach_dir: &Path,
-    display_dir: &Path,
-    table_name: &str,
-    table_label: &str,
-    quiet: bool,
-) -> bool {
-    match lance_dataset_row_count(attach_dir, table_name) {
+fn symbols_parquet_available(artifact_dir: &Path, quiet: bool) -> bool {
+    let Some(status) = manifest_sidecar_status(artifact_dir) else {
+        return false;
+    };
+    if status.code_symbols == 0 {
+        return false;
+    }
+    parquet_file_has_rows(
+        &artifact_dir.join(CODE_SYMBOLS_PARQUET),
+        "code symbol sidecar",
+        quiet,
+    )
+}
+
+fn parquet_file_has_rows(path: &Path, table_label: &str, quiet: bool) -> bool {
+    match parquet_row_count(path) {
         Ok(rows) if rows > 0 => true,
         Ok(_) => {
             if !quiet {
                 eprintln!(
-                    "[spur] warning: Lance {table_label} at {} is empty - using BM25-only search",
-                    display_dir.display(),
+                    "[spur] warning: {table_label} at {} is empty - using BM25-only search",
+                    path.display(),
                 );
             }
             false
@@ -521,8 +496,8 @@ fn lance_table_has_rows(
         Err(err) => {
             if !quiet {
                 eprintln!(
-                    "[spur] warning: could not open Lance {table_label} at {}: {err:#} - using BM25-only search",
-                    display_dir.display(),
+                    "[spur] warning: could not open {table_label} at {}: {err:#} - using BM25-only search",
+                    path.display(),
                 );
             }
             false
@@ -530,47 +505,59 @@ fn lance_table_has_rows(
     }
 }
 
-fn lance_dataset_row_count(dataset_dir: &Path, table_name: &str) -> Result<usize> {
-    let dataset_dir_sql = sql_escape_path(dataset_dir);
-    let sql = format!(
-        "{}\nATTACH '{dataset_dir_sql}' AS lance_probe (TYPE LANCE);",
-        spur_analyst::analyst_extension_load_sql("lance")
-    );
+fn parquet_row_count(path: &Path) -> Result<usize> {
+    let path_sql = sql_escape_path(path);
     let conn = duckdb::Connection::open_in_memory()
-        .context("failed to open in-memory duckdb Lance sidecar probe")?;
-    conn.execute_batch(&sql)
-        .context("failed to initialize duckdb Lance sidecar probe")?;
+        .context("failed to open in-memory duckdb parquet sidecar probe")?;
     conn.query_row(
-        &format!("SELECT count(*) FROM lance_probe.{table_name};"),
+        &format!("SELECT count(*) FROM read_parquet('{path_sql}');"),
         [],
         |row| row.get::<_, i64>(0),
     )
-    .with_context(|| format!("failed to query Lance sidecar row count for {table_name}"))
+    .with_context(|| {
+        format!(
+            "failed to query parquet sidecar row count for {}",
+            path.display()
+        )
+    })
     .and_then(|count| {
         usize::try_from(count)
-            .with_context(|| format!("Lance sidecar row count was negative: {count}"))
+            .with_context(|| format!("parquet sidecar row count was negative: {count}"))
     })
 }
 
-fn render_init_search_sql(lance_available: bool) -> Result<String> {
-    let sections_source = if lance_available {
-        lance_sections_source_sql()
+fn render_init_search_sql(sections_available: bool, symbols_available: bool) -> Result<String> {
+    let sections_source = if sections_available {
+        parquet_sections_source_sql()
     } else {
         empty_sections_source_sql()
     };
-    let sql = INIT_SEARCH_SQL.replace(SECTIONS_SOURCE_PLACEHOLDER, &sections_source);
-    if lance_available {
-        return Ok(sql);
-    }
-    strip_lance_hybrid_sql(&sql)
+    let (symbol_join, symbol_expr) = if symbols_available {
+        (
+            format!(
+                "LEFT JOIN (\n\
+                 SELECT stable_symbol_id, vector::FLOAT[768] AS embedding\n\
+                 FROM read_parquet('{ARTIFACT_PLACEHOLDER}/{CODE_SYMBOLS_PARQUET}')\n\
+             ) symbol_embeddings USING (stable_symbol_id)"
+            ),
+            "symbol_embeddings.embedding".to_string(),
+        )
+    } else {
+        (String::new(), "CAST(NULL AS FLOAT[768])".to_string())
+    };
+    Ok(INIT_SEARCH_SQL
+        .replace(SECTIONS_SOURCE_PLACEHOLDER, &sections_source)
+        .replace(SYMBOL_EMBEDDING_JOIN_PLACEHOLDER, &symbol_join)
+        .replace(SYMBOL_EMBEDDING_EXPR_PLACEHOLDER, &symbol_expr))
 }
 
-fn lance_sections_source_sql() -> String {
+fn parquet_sections_source_sql() -> String {
     format!(
         "CREATE OR REPLACE TABLE sections AS\n\
          SELECT stable_symbol_id, parent_stable_id, qualified_name, file_path,\n\
-                heading_level, child_count, content_hash, body_byte_start, body_text\n\
-         FROM lance_ns.{SECTIONS_TABLE}\n\
+                heading_level, child_count, content_hash, body_byte_start, body_text,\n\
+                vector::FLOAT[768] AS embedding\n\
+         FROM read_parquet('{ARTIFACT_PLACEHOLDER}/{SECTIONS_PARQUET}')\n\
          WHERE body_text IS NOT NULL AND length(body_text) > 0;"
     )
 }
@@ -585,48 +572,14 @@ fn empty_sections_source_sql() -> String {
             CAST(NULL AS INTEGER) AS child_count,\n\
             CAST(NULL AS VARCHAR) AS content_hash,\n\
             CAST(NULL AS UBIGINT) AS body_byte_start,\n\
-            CAST(NULL AS VARCHAR) AS body_text\n\
+            CAST(NULL AS VARCHAR) AS body_text,\n\
+            CAST(NULL AS FLOAT[768]) AS embedding\n\
      WHERE FALSE;"
         .to_string()
 }
 
-fn strip_lance_hybrid_sql(sql: &str) -> Result<String> {
-    let start = sql
-        .find(LANCE_HYBRID_START)
-        .ok_or_else(|| anyhow!("init_search.sql missing Lance hybrid start sentinel"))?;
-    let end = sql
-        .find(LANCE_HYBRID_END)
-        .ok_or_else(|| anyhow!("init_search.sql missing Lance hybrid end sentinel"))?;
-    if end < start {
-        return Err(anyhow!(
-            "init_search.sql Lance hybrid sentinels are out of order"
-        ));
-    }
-    let end = end + LANCE_HYBRID_END.len();
-    let mut rendered = String::with_capacity(sql.len().saturating_sub(end - start));
-    rendered.push_str(&sql[..start]);
-    rendered.push_str(&sql[end..]);
-    Ok(rendered)
-}
-
 fn render_artifact_path_placeholders(sql_template: &str, artifact_dir: &Path) -> String {
-    let code_symbols_placeholder = format!("{ARTIFACT_PLACEHOLDER}/{CODE_SYMBOLS_DATASET_DIR}");
-    let sections_table_placeholder =
-        format!("{ARTIFACT_PLACEHOLDER}/{SECTIONS_DATASET_DIR}/{SECTIONS_TABLE}.lance");
-    let code_symbols_path = sql_escape_path(&artifact_dir.join(CODE_SYMBOLS_DATASET_DIR));
-    let sections_table_path = sql_escape_path(&sections_table_lance_path(artifact_dir));
-    let artifact_dir_sql = sql_escape_path(artifact_dir);
-
-    sql_template
-        .replace(&code_symbols_placeholder, &code_symbols_path)
-        .replace(&sections_table_placeholder, &sections_table_path)
-        .replace(ARTIFACT_PLACEHOLDER, &artifact_dir_sql)
-}
-
-fn sections_table_lance_path(artifact_dir: &Path) -> PathBuf {
-    artifact_dir
-        .join(SECTIONS_DATASET_DIR)
-        .join(format!("{SECTIONS_TABLE}.lance"))
+    sql_template.replace(ARTIFACT_PLACEHOLDER, &sql_escape_path(artifact_dir))
 }
 
 fn sql_escape_path(path: &Path) -> String {
@@ -744,28 +697,6 @@ pub(crate) fn diagnostics_present(artifact_dir: &Path) -> bool {
     artifact_dir.join("diagnostics.parquet").is_file()
 }
 
-fn lance_extension_version() -> Option<String> {
-    let conn = duckdb::Connection::open_in_memory().ok()?;
-    conn.execute_batch(&spur_analyst::analyst_extension_load_sql("lance"))
-        .ok()?;
-    conn.query_row(
-        "SELECT COALESCE(extension_version, '<unknown>')
-         FROM duckdb_extensions()
-         WHERE extension_name = 'lance';",
-        [],
-        |row| row.get::<_, String>(0),
-    )
-    .ok()
-    .and_then(|value| {
-        let value = value.trim();
-        if value.is_empty() {
-            None
-        } else {
-            Some(value.to_owned())
-        }
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -830,6 +761,32 @@ mod tests {
             )
             .expect("query fts hits");
         assert_eq!(hit_count, 1);
+    }
+
+    #[test]
+    fn duckdb_cosine_hybrid_ranks_nearer_embedding_first() {
+        let conn = duckdb::Connection::open_in_memory().expect("open duckdb");
+        conn.execute_batch(
+            "CREATE TABLE items (
+                 id VARCHAR,
+                 embedding FLOAT[2]
+             );
+             INSERT INTO items VALUES
+                 ('near', [1.0, 0.0]::FLOAT[2]),
+                 ('far', [0.0, 1.0]::FLOAT[2]);",
+        )
+        .expect("create cosine fixture");
+        let winner: String = conn
+            .query_row(
+                "SELECT id
+                 FROM items
+                 ORDER BY array_cosine_distance(embedding, [1.0, 0.0]::FLOAT[2])
+                 LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .expect("rank by cosine");
+        assert_eq!(winner, "near");
     }
 
     #[test]
@@ -1311,22 +1268,65 @@ mod tests {
     }
 
     #[test]
-    fn init_search_sql_sections_embeddings_materialized() {
+    fn init_sql_does_not_load_or_attach_lance() {
+        // SOLVE PRE sol_9ec16f460ca241b0: lance_sidecar excluded from duckdb_only.
         assert!(
-            !INIT_SEARCH_SQL.contains("CREATE OR REPLACE TABLE sections_embeddings")
-                && !INIT_SEARCH_SQL.contains("sections_embeddings"),
-            "init_search.sql must not materialize Lance vectors into DuckDB"
+            !INIT_SQL.contains("LOAD lance")
+                && !INIT_SQL.contains("__SPUR_LANCE_ATTACH_SQL__")
+                && !INIT_SQL.contains("TYPE LANCE")
+                && !INIT_SQL.contains("TYPE lance"),
+            "analyst init must be DuckDB-only after Lance teardown"
         );
     }
 
     #[test]
-    fn init_search_sql_hybrid_macro_present() {
+    fn render_init_search_sql_reads_sections_from_parquet() {
+        let sql = render_init_search_sql(true, true).expect("render parquet sections source");
+        assert!(
+            sql.contains("read_parquet(")
+                && sql.contains("sections.parquet")
+                && sql.contains("vector::FLOAT[768] AS embedding")
+                && !sql.contains("lance_ns")
+                && !sql.contains("TYPE LANCE")
+                && !sql.contains("TYPE lance"),
+            "sections source must read parquet embeddings, not ATTACH Lance"
+        );
+    }
+
+    #[test]
+    fn init_search_sql_duckdb_only_embeddings_and_cosine_hybrid() {
+        // SOLVE PRE: sol_4b92ab5eeff746b6 brute_force + embeddings_parquet;
+        // sol_63f13d778ff141b5 vector_kind=0 impl_cost=1; persist HNSW unsat.
+        assert_eq!(spur_graph::EMBEDDING_VECTOR_DIMENSIONS, 768);
+        assert!(
+            INIT_SEARCH_SQL.contains("CAST(NULL AS FLOAT[768]) AS embedding")
+                || INIT_SEARCH_SQL.contains("embedding FLOAT[768]")
+                || INIT_SEARCH_SQL.contains("AS embedding"),
+            "sections_search/symbol_text must carry DuckDB embedding arrays"
+        );
         assert!(
             INIT_SEARCH_SQL.contains(
                 "CREATE OR REPLACE MACRO search_context_candidates_hybrid(q, requested_scope, intent, query_vec) AS TABLE",
-            ) && INIT_SEARCH_SQL.contains("lance_hybrid_search(")
+            ) && INIT_SEARCH_SQL.contains("array_cosine_distance(")
                 && INIT_SEARCH_SQL.contains("query_vec IS NULL"),
-            "hybrid ANN fusion must live in the DuckDB Lance macro and keep a BM25 fallback branch"
+            "hybrid fusion must rank DuckDB embeddings with array_cosine_distance and keep BM25 fallback"
+        );
+        assert!(
+            !INIT_SEARCH_SQL.contains("lance_hybrid_search(")
+                && !INIT_SEARCH_SQL.contains("USING HNSW")
+                && !INIT_SEARCH_SQL.contains("hnsw_enable_experimental_persistence"),
+            "duckdb-only hybrid must not call Lance ANN or persistent HNSW"
+        );
+    }
+
+    #[test]
+    fn render_init_search_sql_keeps_cosine_hybrid_without_lance() {
+        let sql = render_init_search_sql(false, false).expect("render bm25-only sections source");
+        assert!(
+            sql.contains("search_context_candidates_hybrid")
+                && sql.contains("array_cosine_distance(")
+                && !sql.contains("lance_hybrid_search("),
+            "cosine hybrid must stay available when Lance sidecars are absent"
         );
     }
 
@@ -1342,24 +1342,14 @@ mod tests {
     }
 
     #[test]
-    fn init_search_sql_code_symbols_path_uses_graph_constant() {
-        use spur_graph::store::CODE_SYMBOLS_DATASET_DIR;
-
+    fn init_search_sql_hybrid_does_not_reference_lance_dataset_paths() {
         let artifact_dir = Path::new("/tmp/spur-graph-artifact");
         let rendered = render_artifact_path_placeholders(INIT_SEARCH_SQL, artifact_dir);
-        let expected_path = artifact_dir
-            .join(CODE_SYMBOLS_DATASET_DIR)
-            .display()
-            .to_string()
-            .replace('\'', "''");
-
         assert!(
-            rendered.contains(&format!("'{expected_path}'")),
-            "rendered init_search.sql must point code hybrid search at {expected_path}"
-        );
-        assert!(
-            !rendered.contains(&format!("{ARTIFACT_PLACEHOLDER}/code_symbols.lance")),
-            "code_symbols Lance path must be rendered through the graph constant"
+            !rendered.contains("lance_hybrid_search(")
+                && !rendered.contains("/code_symbols.lance")
+                && !rendered.contains("/section_bodies.lance"),
+            "duckdb-only hybrid must not reference Lance dataset paths"
         );
     }
 

@@ -873,7 +873,7 @@ fn insert_sidecar_tables(
     .with_context(|| {
         format!(
             "failed to translate `{}`",
-            opts.artifact_dir.join("code_symbols.lance").display()
+            opts.artifact_dir.join("code_symbols.parquet").display()
         )
     })?;
     insert_section_bodies(
@@ -887,7 +887,7 @@ fn insert_sidecar_tables(
     .with_context(|| {
         format!(
             "failed to translate `{}`",
-            opts.artifact_dir.join("sections.lancedb").display()
+            opts.artifact_dir.join("sections.parquet").display()
         )
     })?;
     Ok(symbols_translated)
@@ -901,11 +901,11 @@ fn insert_symbol_embeddings(
     prepared_lance: PreparedLanceSidecars,
     rows_inserted: &mut HashMap<String, usize>,
 ) -> Result<bool> {
-    let sidecar_path = opts.artifact_dir.join("code_symbols.lance");
+    let sidecar_path = opts.artifact_dir.join("code_symbols.parquet");
     let Some(source) = sidecar_source(
         conn,
         opts,
-        "code_symbols.lance",
+        "code_symbols.parquet",
         SidecarKind::CodeSymbols,
         prepared_lance,
     )?
@@ -1057,11 +1057,11 @@ fn insert_section_bodies(
     prepared_lance: PreparedLanceSidecars,
     rows_inserted: &mut HashMap<String, usize>,
 ) -> Result<bool> {
-    let sidecar_path = opts.artifact_dir.join("sections.lancedb");
+    let sidecar_path = opts.artifact_dir.join("sections.parquet");
     let Some(source) = sidecar_source(
         conn,
         opts,
-        "sections.lancedb",
+        "sections.parquet",
         SidecarKind::Sections,
         prepared_lance,
     )?
@@ -1695,8 +1695,8 @@ fn prepare_lance_sidecar_extensions(
     let mut extension_loaded = false;
 
     for (relative_dir, kind) in [
-        ("code_symbols.lance", SidecarKind::CodeSymbols),
-        ("sections.lancedb", SidecarKind::Sections),
+        ("code_symbols.parquet", SidecarKind::CodeSymbols),
+        ("sections.parquet", SidecarKind::Sections),
     ] {
         let Some(path) = lance_sidecar_path_requiring_extension(opts, relative_dir)? else {
             continue;
@@ -1778,21 +1778,7 @@ fn sidecar_source(
         return Ok(None);
     }
 
-    if matches!(kind, SidecarKind::Sections) {
-        let attach_sql = format!(
-            "ATTACH '{}' AS spur_context_sections_lance (TYPE lance);",
-            escape_sql_literal(&path.display().to_string())
-        );
-        if conn.execute_batch(&attach_sql).is_ok() {
-            return Ok(Some(SidecarSource::Lance(
-                "spur_context_sections_lance.main.section_bodies".to_owned(),
-            )));
-        }
-    }
-
-    Ok(Some(SidecarSource::Lance(sql_string(
-        &path.display().to_string(),
-    ))))
+    Ok(None)
 }
 
 fn source_columns(conn: &Connection, source_sql: &str) -> Result<BTreeSet<String>> {

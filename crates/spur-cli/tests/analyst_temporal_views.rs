@@ -2,8 +2,8 @@ use std::path::Path;
 
 use spur_cli::commands::analyst::{self, AnalystBuildOptions};
 use spur_graph::store::lance_sections::{
-    write_sections_dataset_best_effort_with_options, SectionEmbeddingOptions,
-    CODE_SYMBOLS_DATASET_DIR, SECTIONS_DATASET_DIR,
+    write_sections_dataset_best_effort_with_options, SectionEmbeddingOptions, CODE_SYMBOLS_PARQUET,
+    SECTIONS_PARQUET,
 };
 use spur_graph::{
     ChangeKind, CommitArtifact, Confidence, EdgeEndpoint, GraphArtifactSidecarRowCounts,
@@ -18,7 +18,7 @@ const INIT_SQL: &str = include_str!("../../spur-context/analyst/init.sql");
 fn query_csv(db_path: &Path, sql: &str) -> String {
     let conn = duckdb::Connection::open(db_path).expect("open duckdb");
     let _ = conn.execute_batch("INSTALL icu; LOAD icu;");
-    let _ = conn.execute_batch("INSTALL lance; LOAD lance;");
+
     let _ = conn.execute_batch("INSTALL duckpgq FROM community; LOAD duckpgq;");
     let mut stmt = conn.prepare(sql).expect("prepare query");
     let mut rows = stmt.query([]).expect("query rows");
@@ -81,9 +81,7 @@ fn duckdb_value_to_csv(value: duckdb::types::ValueRef<'_>) -> String {
 
 fn structural_init_sql_for_test(artifact_dir: &Path) -> String {
     let artifact_dir_sql = artifact_dir.display().to_string().replace('\'', "''");
-    let sql = INIT_SQL
-        .replace("__SPUR_GRAPH_ARTIFACT_DIR__", &artifact_dir_sql)
-        .replace("__SPUR_LANCE_ATTACH_SQL__", "");
+    let sql = INIT_SQL.replace("__SPUR_GRAPH_ARTIFACT_DIR__", &artifact_dir_sql);
 
     let mut filtered = String::new();
     let mut skip_property_graph = false;
@@ -716,7 +714,11 @@ fn analyst_build_degrades_to_bm25_when_sidecar_manifest_incomplete() {
          FROM duckdb_functions()
          WHERE function_name = 'search_context_candidates_hybrid';",
     );
-    assert_eq!(hybrid_macro_count.trim(), "0");
+    assert_eq!(
+        hybrid_macro_count.trim(),
+        "1",
+        "cosine hybrid must remain registered when Lance sidecars are incomplete"
+    );
 }
 
 #[test]
@@ -734,8 +736,8 @@ fn analyst_build_degrades_to_bm25_when_complete_sidecar_dir_is_empty() {
         Vec::new(),
     )
     .expect("write artifact");
-    std::fs::create_dir_all(artifact_dir.join(SECTIONS_DATASET_DIR))
-        .expect("create stale empty sections.lancedb");
+    std::fs::write(artifact_dir.join(SECTIONS_PARQUET), [])
+        .expect("create stale empty sections.parquet");
     spur_graph::store::stamp_sidecar_status(
         &artifact_dir,
         GraphArtifactSidecarStatus {
@@ -760,7 +762,11 @@ fn analyst_build_degrades_to_bm25_when_complete_sidecar_dir_is_empty() {
          FROM duckdb_functions()
          WHERE function_name = 'search_context_candidates_hybrid';",
     );
-    assert_eq!(hybrid_macro_count.trim(), "0");
+    assert_eq!(
+        hybrid_macro_count.trim(),
+        "1",
+        "cosine hybrid must remain registered when Lance sidecar dirs are empty"
+    );
 }
 
 #[test]
@@ -788,8 +794,8 @@ fn analyst_build_degrades_to_bm25_when_code_symbols_sidecar_missing() {
             batch_size: 64,
         },
     );
-    std::fs::remove_dir_all(artifact_dir.join(CODE_SYMBOLS_DATASET_DIR))
-        .expect("remove stale code_symbols.lance");
+    std::fs::remove_file(artifact_dir.join(CODE_SYMBOLS_PARQUET))
+        .expect("remove stale code_symbols.parquet");
     spur_graph::store::stamp_sidecar_status(
         &artifact_dir,
         GraphArtifactSidecarStatus {
@@ -806,7 +812,11 @@ fn analyst_build_degrades_to_bm25_when_code_symbols_sidecar_missing() {
     build_analyst(tempdir.path(), &artifact_dir, &db_path);
 
     let section_count = query_csv(&db_path, "SELECT count(*) FROM sections;");
-    assert_eq!(section_count.trim(), "0");
+    assert_ne!(
+        section_count.trim(),
+        "0",
+        "section parquet should still load when code_symbols.parquet is absent"
+    );
 
     let hybrid_macro_count = query_csv(
         &db_path,
@@ -814,7 +824,11 @@ fn analyst_build_degrades_to_bm25_when_code_symbols_sidecar_missing() {
          FROM duckdb_functions()
          WHERE function_name = 'search_context_candidates_hybrid';",
     );
-    assert_eq!(hybrid_macro_count.trim(), "0");
+    assert_eq!(
+        hybrid_macro_count.trim(),
+        "1",
+        "cosine hybrid must remain registered when code_symbols.parquet is missing"
+    );
 }
 
 fn external_dependency_artifact(graph_content_hash: &str) -> GraphIndexArtifact {

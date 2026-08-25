@@ -8,7 +8,8 @@
 -- Ordering contract:
 --   * runs AFTER temporal or static search views
 --     (search_code joins v_symbol_scorecard; symbol_text reads v_search_symbol_tokens)
---   * analyst.rs injects either Lance-backed sections or an empty fallback table.
+--   * analyst.rs injects either parquet-backed sections (copied into DuckDB,
+--     including FLOAT[768] embeddings) or an empty fallback table.
 
 LOAD fts;
 
@@ -33,7 +34,8 @@ __SPUR_SECTIONS_SOURCE_SQL__
 -- from the file path for top-level skill files, so each vendored agent directory
 -- gets a different value and duplicate skill bodies never group.
 CREATE OR REPLACE TABLE sections_search AS
-SELECT stable_symbol_id, qualified_name, file_path, heading_level, content_hash, body_text
+SELECT stable_symbol_id, qualified_name, file_path, heading_level, content_hash, body_text,
+       embedding
 FROM sections
 QUALIFY row_number() OVER (
   PARTITION BY heading_level,
@@ -55,9 +57,11 @@ WITH toks AS (
   GROUP BY s.stable_symbol_id
 )
 SELECT n.stable_symbol_id, n.entity_name, n.qualified_name, n.file_path, n.symbol_kind,
-       COALESCE(n.qualified_name, '') || ' ' || COALESCE(t.token_text, '') AS doc_text
+       COALESCE(n.qualified_name, '') || ' ' || COALESCE(t.token_text, '') AS doc_text,
+       __SPUR_SYMBOL_EMBEDDING_EXPR__ AS embedding
 FROM nodes n
 LEFT JOIN toks t USING (stable_symbol_id)
+__SPUR_SYMBOL_EMBEDDING_JOIN__
 WHERE n.symbol_kind NOT IN ('section', 'mcp_tool')   -- sections live in the prose corpus
 -- Dedup symbols copied into agent dirs (the skill installer drops .rs files into
 -- .claude/.codex/...) by identical content, preferring the canonical path.
@@ -225,12 +229,8 @@ CREATE OR REPLACE MACRO search_context_candidates(q, requested_scope, intent) AS
   LIMIT 40;
 
 -- __SPUR_LANCE_HYBRID_START__
--- analyst.rs keeps this whole hybrid macro only when both Lance sidecars used
--- below are valid: sections.lancedb/section_bodies and
--- code_symbols.lance/code_symbols. Otherwise it strips the sentinel block and
--- keeps BM25-only search.
--- The Lance path suffixes below are rendered by analyst.rs from
--- spur_graph::store::{CODE_SYMBOLS_DATASET_DIR, SECTIONS_DATASET_DIR, SECTIONS_TABLE}.
+-- DuckDB-only hybrid: BM25 fused with brute-force cosine over FLOAT[768]
+-- embeddings stored on sections_search / symbol_text. No Lance ANN, no HNSW.
 CREATE OR REPLACE MACRO search_context_candidates_hybrid(q, requested_scope, intent, query_vec) AS TABLE
   WITH bm25_rows AS (
     SELECT * FROM search_context_candidates(q, requested_scope, intent)
@@ -238,15 +238,15 @@ CREATE OR REPLACE MACRO search_context_candidates_hybrid(q, requested_scope, int
   hybrid_code AS (
     SELECT
       'code' AS kind,
-      COALESCE(sc.entity_name, h.entity_name) AS title,
-      COALESCE(sc.file_path, h.file_path) AS file_path,
-      h.stable_symbol_id,
-      COALESCE(sc.symbol_kind, h.symbol_kind) AS symbol_kind,
+      COALESCE(sc.entity_name, st.entity_name) AS title,
+      COALESCE(sc.file_path, st.file_path) AS file_path,
+      st.stable_symbol_id,
+      COALESCE(sc.symbol_kind, st.symbol_kind) AS symbol_kind,
       round(
-        COALESCE(h._hybrid_score, h._score, 1.0 - h._distance)
-          * CASE WHEN COALESCE(sc.file_path, h.file_path) LIKE '%/tests/%' THEN 0.6 ELSE 1.0 END
-          * CASE WHEN COALESCE(sc.symbol_kind, h.symbol_kind) IN ('function','method','struct','enum','trait') THEN 1.15
-                 WHEN COALESCE(sc.symbol_kind, h.symbol_kind) IN ('constant','static','field') THEN 0.85 ELSE 1.0 END
+        (1.0 - array_cosine_distance(st.embedding, query_vec))
+          * CASE WHEN COALESCE(sc.file_path, st.file_path) LIKE '%/tests/%' THEN 0.6 ELSE 1.0 END
+          * CASE WHEN COALESCE(sc.symbol_kind, st.symbol_kind) IN ('function','method','struct','enum','trait') THEN 1.15
+                 WHEN COALESCE(sc.symbol_kind, st.symbol_kind) IN ('constant','static','field') THEN 0.85 ELSE 1.0 END
           * (1 + 0.15 * ln(1 + COALESCE(sc.pagerank, 0) * 1e4))
           * CASE
               WHEN intent = 'debug' THEN 1 + 0.12 * ln(1 + COALESCE(sc.churn_90d, 0))
@@ -261,24 +261,26 @@ CREATE OR REPLACE MACRO search_context_candidates_hybrid(q, requested_scope, int
       'primary' AS neighbor_kind,
       CAST(NULL AS VARCHAR) AS edge_bind_method,
       'hybrid-code' AS grounding
-    FROM lance_hybrid_search(
-      '__SPUR_GRAPH_ARTIFACT_DIR__/code_symbols.lance',
-      'vector', query_vec, 'embed_text', q,
-      k := 30, prefilter := false, alpha := 0.5, oversample_factor := 5
-    ) h
+    FROM symbol_text st
     JOIN v_symbol_scorecard sc USING (stable_symbol_id)
     LEFT JOIN v_symbol_inbound vi USING (stable_symbol_id)
     WHERE requested_scope IN ('all', 'code', 'graph')
+      AND query_vec IS NOT NULL
+      AND st.embedding IS NOT NULL
+    QUALIFY row_number() OVER (
+      ORDER BY array_cosine_distance(st.embedding, query_vec) ASC,
+               st.file_path, st.entity_name, st.stable_symbol_id
+    ) <= 30
   ),
   hybrid_docs AS (
     SELECT
       'doc' AS kind,
       s.qualified_name AS title,
       s.file_path,
-      h.stable_symbol_id,
+      s.stable_symbol_id,
       CAST('section' AS VARCHAR) AS symbol_kind,
       round(
-        COALESCE(h._hybrid_score, h._score, 1.0 - h._distance)
+        (1.0 - array_cosine_distance(s.embedding, query_vec))
           * CASE WHEN intent = 'plan' THEN 1.3 ELSE 1.0 END,
         3
       ) AS score,
@@ -286,20 +288,21 @@ CREATE OR REPLACE MACRO search_context_candidates_hybrid(q, requested_scope, int
       CAST(NULL AS VARCHAR) AS neighbor_kind,
       CAST(NULL AS VARCHAR) AS edge_bind_method,
       'hybrid-doc' AS grounding
-    FROM lance_hybrid_search(
-      '__SPUR_GRAPH_ARTIFACT_DIR__/sections.lancedb/section_bodies.lance',
-      'vector', query_vec, 'body_text', q,
-      k := 30, prefilter := false, alpha := 0.5, oversample_factor := 5
-    ) h
-    JOIN sections_search s USING (stable_symbol_id)
+    FROM sections_search s
     WHERE requested_scope IN ('all', 'docs')
+      AND query_vec IS NOT NULL
+      AND s.embedding IS NOT NULL
+    QUALIFY row_number() OVER (
+      ORDER BY array_cosine_distance(s.embedding, query_vec) ASC,
+               s.file_path, s.qualified_name, s.stable_symbol_id
+    ) <= 30
   ),
   -- Pure BM25 callers keep search_context_candidates unchanged. When a query
   -- vector is present, `score` below is an RRF-fused score across the BM25
-  -- and Lance candidate lists, then normalized to a fixed [0,1] range using a
-  -- constant reference of 2.0/(60.0+1.0). This maps a top-ranked candidate
-  -- in BOTH lists to ~1.0, while a candidate ranked #1 in only one list
-  -- lands around 0.5.
+  -- and DuckDB cosine candidate lists, then normalized to a fixed [0,1] range
+  -- using a constant reference of 2.0/(60.0+1.0). This maps a top-ranked
+  -- candidate in BOTH lists to ~1.0, while a candidate ranked #1 in only one
+  -- list lands around 0.5.
   rrf_sources AS (
     SELECT kind, title, file_path, stable_symbol_id, symbol_kind, score, signal,
            neighbor_kind, edge_bind_method, grounding,

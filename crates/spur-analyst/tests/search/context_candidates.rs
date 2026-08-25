@@ -15,7 +15,7 @@ use spur_analyst::{
     MAX_CONTEXT_PATHS, MAX_CONTEXT_PATH_HOPS,
 };
 use spur_graph::store::{
-    write_artifact_parquet, write_current_pointer, write_sections_dataset, SECTIONS_DATASET_DIR,
+    write_artifact_parquet, write_current_pointer, write_sections_dataset, SECTIONS_PARQUET,
 };
 use spur_graph::{
     artifact_from_facts, build_facts, GraphIndexArtifact, GraphIndexPointer, SourceKind,
@@ -33,7 +33,7 @@ fn context_candidates_return_stable_ids_for_docs_and_code() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("analyst.duckdb");
     let conn = duckdb::Connection::open(&db_path).expect("open fixture db");
-    conn.execute_batch("INSTALL fts; LOAD fts; INSTALL icu; LOAD icu; INSTALL lance; LOAD lance;")
+    conn.execute_batch("INSTALL fts; LOAD fts; INSTALL icu; LOAD icu;")
         .expect("load fixture extensions");
     conn.execute_batch(
         r#"
@@ -46,9 +46,12 @@ fn context_candidates_return_stable_ids_for_docs_and_code() {
             file_path VARCHAR,
             heading_level INTEGER,
             content_hash VARCHAR,
-            body_text VARCHAR
+            body_text VARCHAR,
+            embedding FLOAT[768]
         );
-        INSERT INTO sections_search VALUES
+        INSERT INTO sections_search (
+            stable_symbol_id, qualified_name, file_path, heading_level, content_hash, body_text
+        ) VALUES
             ('doc-1', 'Context Candidate Design', 'docs/context.md', 2, 'doc-hash',
              'knowledge context candidate retrieval');
 
@@ -58,9 +61,12 @@ fn context_candidates_return_stable_ids_for_docs_and_code() {
             qualified_name VARCHAR,
             file_path VARCHAR,
             symbol_kind VARCHAR,
-            doc_text VARCHAR
+            doc_text VARCHAR,
+            embedding FLOAT[768]
         );
-        INSERT INTO symbol_text VALUES
+        INSERT INTO symbol_text (
+            stable_symbol_id, entity_name, qualified_name, file_path, symbol_kind, doc_text
+        ) VALUES
             ('sym-1', 'query_context_candidates', 'spur_analyst::query_context_candidates',
              'crates/spur-analyst/src/lib.rs', 'function', 'knowledge context candidate retrieval');
 
@@ -125,7 +131,7 @@ fn context_candidates_accept_query_vector_and_degrade_to_bm25() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("analyst.duckdb");
     let conn = duckdb::Connection::open(&db_path).expect("open fixture db");
-    conn.execute_batch("INSTALL fts; LOAD fts; INSTALL icu; LOAD icu; INSTALL lance; LOAD lance;")
+    conn.execute_batch("INSTALL fts; LOAD fts; INSTALL icu; LOAD icu;")
         .expect("load fixture extensions");
     conn.execute_batch(
         r#"
@@ -138,9 +144,12 @@ fn context_candidates_accept_query_vector_and_degrade_to_bm25() {
             file_path VARCHAR,
             heading_level INTEGER,
             content_hash VARCHAR,
-            body_text VARCHAR
+            body_text VARCHAR,
+            embedding FLOAT[768]
         );
-        INSERT INTO sections_search VALUES
+        INSERT INTO sections_search (
+            stable_symbol_id, qualified_name, file_path, heading_level, content_hash, body_text
+        ) VALUES
             ('doc-1', 'Context Candidate Design', 'docs/context.md', 2, 'doc-hash',
              'knowledge context candidate retrieval');
 
@@ -150,9 +159,12 @@ fn context_candidates_accept_query_vector_and_degrade_to_bm25() {
             qualified_name VARCHAR,
             file_path VARCHAR,
             symbol_kind VARCHAR,
-            doc_text VARCHAR
+            doc_text VARCHAR,
+            embedding FLOAT[768]
         );
-        INSERT INTO symbol_text VALUES
+        INSERT INTO symbol_text (
+            stable_symbol_id, entity_name, qualified_name, file_path, symbol_kind, doc_text
+        ) VALUES
             ('sym-1', 'query_context_candidates', 'spur_analyst::query_context_candidates',
              'crates/spur-analyst/src/lib.rs', 'function', 'knowledge context candidate retrieval');
 
@@ -253,29 +265,21 @@ fn context_candidates_surface_semantic_only_docs_via_hybrid_fusion() {
 
     let db_path = dir.path().join("analyst.duckdb");
     let conn = duckdb::Connection::open(&db_path).expect("open fixture db");
-    conn.execute_batch("INSTALL fts; LOAD fts; INSTALL icu; LOAD icu; INSTALL lance; LOAD lance;")
+    conn.execute_batch("INSTALL fts; LOAD fts; INSTALL icu; LOAD icu;")
         .expect("load fixture extensions");
-    conn.execute_batch(&format!(
-        "ATTACH '{}' AS lance_ns (TYPE LANCE);",
-        sql_escape_path(&artifact_dir.join(SECTIONS_DATASET_DIR))
-    ))
-    .expect("attach Lance sections");
+    let sections_parquet = sql_escape_path(&artifact_dir.join(SECTIONS_PARQUET));
 
     let query_vec = semantic_query_vec();
-    seed_section_vectors(
-        &conn,
-        &[("docs/semantic-only.md", query_vec.as_slice())],
-        &[],
-    );
 
     conn.execute_batch(
-        r#"
+        &r#"
         CREATE TABLE _meta (graph_content_hash VARCHAR);
         INSERT INTO _meta VALUES ('hybrid-fixture-hash');
 
         CREATE TABLE sections_search AS
-        SELECT stable_symbol_id, qualified_name, file_path, heading_level, content_hash, body_text
-        FROM lance_ns.main.section_bodies;
+        SELECT stable_symbol_id, qualified_name, file_path, heading_level, content_hash, body_text,
+               CAST(NULL AS FLOAT[768]) AS embedding
+        FROM read_parquet('__SECTIONS_PARQUET__');
 
         CREATE TABLE symbol_text (
             stable_symbol_id VARCHAR,
@@ -283,7 +287,8 @@ fn context_candidates_surface_semantic_only_docs_via_hybrid_fusion() {
             qualified_name VARCHAR,
             file_path VARCHAR,
             symbol_kind VARCHAR,
-            doc_text VARCHAR
+            doc_text VARCHAR,
+            embedding FLOAT[768]
         );
 
         CREATE TABLE v_symbol_scorecard (
@@ -302,7 +307,8 @@ fn context_candidates_surface_semantic_only_docs_via_hybrid_fusion() {
             stable_symbol_id VARCHAR,
             callers BIGINT
         );
-        "#,
+        "#
+        .replace("__SECTIONS_PARQUET__", &sections_parquet),
     )
     .expect("create hybrid fixture schema");
     conn.execute_batch(
@@ -312,6 +318,11 @@ fn context_candidates_surface_semantic_only_docs_via_hybrid_fusion() {
         "#,
     )
     .expect("create hybrid fixture indexes");
+    seed_section_vectors(
+        &conn,
+        &[("docs/semantic-only.md", query_vec.as_slice())],
+        &[],
+    );
     let macro_sql = context_candidate_macro_sql_with_artifact_dir(&artifact_dir);
     conn.execute_batch(&macro_sql)
         .expect("define context candidate macros");
@@ -568,7 +579,7 @@ fn graph_candidates_return_primary_and_neighbor_rows() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("analyst.duckdb");
     let conn = duckdb::Connection::open(&db_path).expect("open fixture db");
-    conn.execute_batch("INSTALL fts; LOAD fts; INSTALL icu; LOAD icu; INSTALL lance; LOAD lance;")
+    conn.execute_batch("INSTALL fts; LOAD fts; INSTALL icu; LOAD icu;")
         .expect("load fixture extensions");
     conn.execute_batch(
         r#"
@@ -581,9 +592,12 @@ fn graph_candidates_return_primary_and_neighbor_rows() {
             qualified_name VARCHAR,
             file_path VARCHAR,
             symbol_kind VARCHAR,
-            doc_text VARCHAR
+            doc_text VARCHAR,
+            embedding FLOAT[768]
         );
-        INSERT INTO symbol_text VALUES
+        INSERT INTO symbol_text (
+            stable_symbol_id, entity_name, qualified_name, file_path, symbol_kind, doc_text
+        ) VALUES
             ('sym-1', 'query_graph_candidates', 'spur_analyst::query_graph_candidates',
              'crates/spur-analyst/src/lib.rs', 'function', 'knowledge graph candidate retrieval');
 
@@ -1984,7 +1998,7 @@ fn seed_overlay_pack_analyst_db(
     let parent = db_path.parent().context("analyst db parent")?;
     fs::create_dir_all(parent).context("create analyst db parent")?;
     let conn = duckdb::Connection::open(db_path).context("open overlay pack fixture db")?;
-    conn.execute_batch("INSTALL fts; LOAD fts; INSTALL icu; LOAD icu; INSTALL lance; LOAD lance;")
+    conn.execute_batch("INSTALL fts; LOAD fts; INSTALL icu; LOAD icu;")
         .context("load overlay pack fixture extensions")?;
     let artifact_dir = sql_escape_path(artifact_dir);
     let graph_hash = sql_escape_literal(graph_hash);
@@ -2062,7 +2076,8 @@ fn seed_overlay_pack_analyst_db(
             file_path VARCHAR,
             heading_level INTEGER,
             content_hash VARCHAR,
-            body_text VARCHAR
+            body_text VARCHAR,
+            embedding FLOAT[768]
         );
 
         CREATE TABLE symbol_text AS
@@ -2071,7 +2086,8 @@ fn seed_overlay_pack_analyst_db(
                qualified_name,
                file_path,
                symbol_kind,
-               entity_name || ' ' || replace(entity_name, '_', ' ') || ' overlay beacon' AS doc_text
+               entity_name || ' ' || replace(entity_name, '_', ' ') || ' overlay beacon' AS doc_text,
+               CAST(NULL AS FLOAT[768]) AS embedding
         FROM nodes
         WHERE symbol_kind = 'function';
 
@@ -2213,23 +2229,13 @@ fn seed_section_vectors(
         .collect::<Vec<_>>();
     let sql = format!(
         r#"
-        CREATE OR REPLACE TABLE lance_ns.main.section_bodies AS
-        SELECT s.stable_symbol_id,
-               s.file_path,
-               s.qualified_name,
-               s.heading_level,
-               s.body_text,
-               s.body_byte_start,
-               s.body_byte_end,
-               s.child_count,
-               s.parent_stable_id,
-               s.content_hash,
-               o.vector
-        FROM lance_ns.main.section_bodies AS s
-        LEFT JOIN (
+        UPDATE sections_search
+        SET embedding = o.vector
+        FROM (
             SELECT col0 AS file_path, col1 AS vector
             FROM (VALUES {})
-        ) AS o USING (file_path);
+        ) AS o
+        WHERE sections_search.file_path = o.file_path;
         "#,
         overrides.join(",\n                  ")
     );

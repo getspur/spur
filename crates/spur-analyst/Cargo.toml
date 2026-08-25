@@ -21,8 +21,6 @@ duckdb = { workspace = true, features = ["bundled"] }
 fastembed = { version = "=5.8.0", default-features = false, optional = true }
 futures = { workspace = true }
 globset = "0.4"
-lance-index = { workspace = true }
-lancedb = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 spur-graph = { workspace = true }

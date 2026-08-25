@@ -17,7 +17,7 @@ use crate::store::build::BuildStats;
 use crate::store::lance_sections::{
     write_sections_dataset_with_sidecar_options_and_progress, SectionSidecarOptions,
     SectionSidecarProgressCallback, SectionSidecarProgressEvent, CODE_SYMBOLS_DATASET_DIR,
-    SECTIONS_DATASET_DIR,
+    CODE_SYMBOLS_PARQUET, SECTIONS_DATASET_DIR, SECTIONS_PARQUET,
 };
 use crate::store::pointer::resolve_artifact_location;
 use crate::store::{
@@ -570,6 +570,18 @@ fn prune_rollback_embed_sidecars_best_effort(canonical_dir: &Path, protected: &B
 }
 
 fn remove_embed_sidecars(artifact_dir: &Path) {
+    for name in [SECTIONS_PARQUET, CODE_SYMBOLS_PARQUET] {
+        let sidecar = artifact_dir.join(name);
+        if sidecar.exists() {
+            if let Err(error) = fs::remove_file(&sidecar) {
+                tracing::warn!(
+                    path = %sidecar.display(),
+                    error = %error,
+                    "spur-graph: failed to prune rollback embedding sidecar"
+                );
+            }
+        }
+    }
     for name in [SECTIONS_DATASET_DIR, CODE_SYMBOLS_DATASET_DIR] {
         let sidecar = artifact_dir.join(name);
         if sidecar.exists() {
@@ -577,7 +589,7 @@ fn remove_embed_sidecars(artifact_dir: &Path) {
                 tracing::warn!(
                     path = %sidecar.display(),
                     error = %error,
-                    "spur-graph: failed to prune rollback embedding sidecar"
+                    "spur-graph: failed to prune leftover Lance embedding sidecar"
                 );
             }
         }
@@ -993,13 +1005,13 @@ fn write_sidecar_overwriting(
         }
     };
 
-    replace_sidecar_dir(
-        &staging_dir.join(SECTIONS_DATASET_DIR),
-        &artifact_dir.join(SECTIONS_DATASET_DIR),
+    replace_sidecar_path(
+        &staging_dir.join(SECTIONS_PARQUET),
+        &artifact_dir.join(SECTIONS_PARQUET),
     )?;
-    replace_sidecar_dir(
-        &staging_dir.join(CODE_SYMBOLS_DATASET_DIR),
-        &artifact_dir.join(CODE_SYMBOLS_DATASET_DIR),
+    replace_sidecar_path(
+        &staging_dir.join(CODE_SYMBOLS_PARQUET),
+        &artifact_dir.join(CODE_SYMBOLS_PARQUET),
     )?;
     remove_path_if_exists(&staging_dir)?;
     fsync_dir(artifact_dir);
@@ -1009,9 +1021,9 @@ fn write_sidecar_overwriting(
     Ok(row_counts)
 }
 
-fn replace_sidecar_dir(staged: &Path, final_path: &Path) -> Result<()> {
-    if !staged.is_dir() {
-        anyhow::bail!("sidecar staging dir missing `{}`", staged.display());
+fn replace_sidecar_path(staged: &Path, final_path: &Path) -> Result<()> {
+    if !staged.exists() {
+        anyhow::bail!("sidecar staging path missing `{}`", staged.display());
     }
 
     let backup = temp_path_for(final_path);
@@ -1168,8 +1180,7 @@ mod tests {
     };
     use crate::git::GitCtx;
     use crate::store::lance_sections::{
-        SectionEmbeddingOptions, SectionSidecarOptions, CODE_SYMBOLS_DATASET_DIR,
-        SECTIONS_DATASET_DIR,
+        SectionEmbeddingOptions, SectionSidecarOptions, CODE_SYMBOLS_PARQUET, SECTIONS_PARQUET,
     };
     use crate::store::{
         read_artifact_header_parquet, read_artifact_parquet, read_current_pointer,
@@ -1681,8 +1692,8 @@ mod tests {
         )
         .unwrap();
         let canonical = lookup_canonical(env.common.path(), "manifest-a", "hash-repair").unwrap();
-        fs::remove_dir_all(canonical.join("sections.lancedb")).expect("remove sections sidecar");
-        fs::remove_dir_all(canonical.join("code_symbols.lance")).expect("remove symbols sidecar");
+        fs::remove_file(canonical.join(SECTIONS_PARQUET)).expect("remove sections sidecar");
+        fs::remove_file(canonical.join(CODE_SYMBOLS_PARQUET)).expect("remove symbols sidecar");
         stamp_sidecar_status(
             &canonical,
             GraphArtifactSidecarStatus {
@@ -1706,11 +1717,11 @@ mod tests {
         assert_eq!(manifest.sidecar_row_counts.section_bodies, 1);
         assert_eq!(manifest.sidecar_row_counts.code_symbols, 2);
         assert!(
-            canonical.join("sections.lancedb").is_dir(),
+            canonical.join(SECTIONS_PARQUET).is_file(),
             "repair should rebuild the section sidecar"
         );
         assert!(
-            canonical.join("code_symbols.lance").is_dir(),
+            canonical.join(CODE_SYMBOLS_PARQUET).is_file(),
             "repair should rebuild the code-symbol sidecar"
         );
     }
@@ -1874,14 +1885,14 @@ mod tests {
 
     fn completed_candidate_with_sidecars(canonical_dir: &Path, name: &str) -> PathBuf {
         let candidate = completed_candidate(canonical_dir, name);
-        fs::create_dir_all(candidate.join(SECTIONS_DATASET_DIR)).unwrap();
-        fs::create_dir_all(candidate.join(CODE_SYMBOLS_DATASET_DIR)).unwrap();
+        fs::write(candidate.join(SECTIONS_PARQUET), []).unwrap();
+        fs::write(candidate.join(CODE_SYMBOLS_PARQUET), []).unwrap();
         candidate
     }
 
     fn has_embed_sidecars(artifact_dir: &Path) -> bool {
-        artifact_dir.join(SECTIONS_DATASET_DIR).is_dir()
-            || artifact_dir.join(CODE_SYMBOLS_DATASET_DIR).is_dir()
+        artifact_dir.join(SECTIONS_PARQUET).is_file()
+            || artifact_dir.join(CODE_SYMBOLS_PARQUET).is_file()
     }
 
     fn write_test_pointer(worktree: &Path, target: &Path) {

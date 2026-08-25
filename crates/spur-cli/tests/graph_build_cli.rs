@@ -1,6 +1,6 @@
 use std::process::Command;
 
-use spur_graph::store::lance_sections::{SECTIONS_DATASET_DIR, SECTIONS_TABLE};
+use spur_graph::store::lance_sections::SECTIONS_PARQUET;
 use spur_graph::{read_artifact_header_parquet, read_artifact_parquet, read_current_pointer};
 
 fn spur_binary() -> std::path::PathBuf {
@@ -346,22 +346,19 @@ async fn graph_build_section_sidecar_streaming_writes_all_rows() {
         "test fixture should cross the configured write batch boundary"
     );
 
-    let dataset_dir = artifact_path.join(SECTIONS_DATASET_DIR);
-    assert!(dataset_dir.exists(), "sections.lancedb should exist");
-    let db = lancedb::connect(dataset_dir.to_string_lossy().as_ref())
-        .execute()
-        .await
-        .expect("connect lancedb");
-    let table = db
-        .open_table(SECTIONS_TABLE)
-        .execute()
-        .await
-        .expect("open section_bodies table");
-
-    assert_eq!(
-        table.count_rows(None).await.expect("count rows"),
-        expected_rows
-    );
+    let parquet_path = artifact_path.join(SECTIONS_PARQUET);
+    assert!(parquet_path.is_file(), "sections.parquet should exist");
+    assert!(!artifact_path.join("sections.lancedb").exists());
+    let path_sql = parquet_path.display().to_string().replace('\'', "''");
+    let conn = duckdb::Connection::open_in_memory().expect("open duckdb");
+    let rows: i64 = conn
+        .query_row(
+            &format!("SELECT count(*) FROM read_parquet('{path_sql}')"),
+            [],
+            |row| row.get(0),
+        )
+        .expect("count parquet rows");
+    assert_eq!(rows as usize, expected_rows);
 }
 
 #[test]

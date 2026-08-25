@@ -9,7 +9,7 @@ use spur_graph::CODE_SYMBOL_URI_PREFIX;
 use crate::mcp::McpHandlerError;
 
 use artifact::{current_worktree, open_doc_artifact_for_request, resolve_root_for_as_of};
-use query::{child_hits, fts_hits, open_sections_table};
+use query::{child_hits, fts_hits, open_sections_conn};
 
 const DEFAULT_K: usize = 20;
 const MAX_K: usize = 100;
@@ -18,7 +18,7 @@ pub(crate) async fn doc_navigate(args: &Value) -> Result<Value, McpHandlerError>
     let request = DocNavigateRequest::parse(args)?;
     let worktree = current_worktree()?;
     let source = open_doc_artifact_for_request(&worktree).await?;
-    let table = open_sections_table(source.artifact_dir()).await?;
+    let conn = open_sections_conn(source.artifact_dir())?;
 
     let mut hits = if let Some(root) = request.root.as_deref() {
         let root = resolve_root_for_as_of(
@@ -28,9 +28,9 @@ pub(crate) async fn doc_navigate(args: &Value) -> Result<Value, McpHandlerError>
             request.as_of.as_deref(),
             source.artifact(),
         )?;
-        child_hits(&table, &root).await?
+        child_hits(&conn, &root)?
     } else {
-        fts_hits(&table, &request).await?
+        fts_hits(&conn, &request)?
     };
 
     if let Some(glob) = &request.file_glob {

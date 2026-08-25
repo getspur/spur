@@ -4,8 +4,7 @@ use anyhow::{anyhow, Context as _, Result};
 
 use crate::{
     db::{
-        connection::open_analyst_connection_read_only,
-        extensions::{load_analyst_icu_extension, load_analyst_lance_extension},
+        connection::open_analyst_connection_read_only, extensions::load_analyst_icu_extension,
         sql::sql_escape_literal,
     },
     search::hybrid::format_query_vec_sql,
@@ -22,7 +21,6 @@ pub fn query_context_candidates(
 ) -> Result<KnowledgeQueryResult> {
     let conn = open_analyst_connection_read_only(db_path)?;
     load_analyst_icu_extension(&conn);
-    load_analyst_lance_extension(&conn);
     query_context_candidates_with_conn(&conn, db_path, query, scope, options)
 }
 

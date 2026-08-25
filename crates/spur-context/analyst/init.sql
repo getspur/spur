@@ -34,13 +34,10 @@
 
 -- Extensions are LOADed by spur-cli analyst bootstrap (offline when
 -- SPUR_DUCKDB_EXTENSION_DIR or a dist sidecar is present). Standalone
--- runners should LOAD duckpgq/onager/lance after INSTALL, without repeating
+-- runners should LOAD duckpgq/onager after INSTALL, without repeating
 -- INSTALL FROM community here (that hits the CDN on every init).
 LOAD duckpgq;
 LOAD onager;
-LOAD lance;
-
-__SPUR_LANCE_ATTACH_SQL__
 
 SET preserve_insertion_order = false;
 SET memory_limit = '6GB';

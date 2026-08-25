@@ -1,14 +1,14 @@
 use std::fs;
+use std::path::Path;
 
-use arrow_array::{Array as _, LargeStringArray, StringArray, UInt32Array};
-use futures::TryStreamExt as _;
-use lance_index::scalar::FullTextSearchQuery;
-use lancedb::index::IndexType;
-use lancedb::query::{ExecutableQuery as _, QueryBase as _, Select};
+use arrow_array::{
+    Array as _, FixedSizeListArray, LargeStringArray, RecordBatch, StringArray, UInt32Array,
+};
+use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use spur_graph::store::lance_sections::{
     write_sections_dataset, write_sections_dataset_best_effort_with_options,
-    write_sections_dataset_skipping_embeddings, SectionEmbeddingOptions, CODE_SYMBOLS_DATASET_DIR,
-    CODE_SYMBOLS_TABLE, SECTIONS_DATASET_DIR, SECTIONS_TABLE,
+    write_sections_dataset_skipping_embeddings, SectionEmbeddingOptions, CODE_SYMBOLS_PARQUET,
+    SECTIONS_PARQUET,
 };
 use spur_graph::{
     artifact_from_facts, build_facts, GraphFileArtifact, GraphFileManifestEntry,
@@ -37,6 +37,56 @@ impl Drop for EnvGuard {
     }
 }
 
+fn read_sidecar_parquet(path: &Path) -> Vec<RecordBatch> {
+    let file = fs::File::open(path).expect("open parquet");
+    ParquetRecordBatchReaderBuilder::try_new(file)
+        .expect("parquet builder")
+        .build()
+        .expect("parquet reader")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("parquet batches")
+}
+
+fn parquet_row_count(path: &Path) -> usize {
+    read_sidecar_parquet(path)
+        .iter()
+        .map(|batch| batch.num_rows())
+        .sum()
+}
+
+fn non_null_vector_count(path: &Path) -> usize {
+    let mut count = 0usize;
+    for batch in read_sidecar_parquet(path) {
+        let vectors = batch
+            .column_by_name("vector")
+            .expect("vector column")
+            .as_any()
+            .downcast_ref::<FixedSizeListArray>()
+            .expect("vector list");
+        for index in 0..batch.num_rows() {
+            if !vectors.is_null(index) {
+                count += 1;
+            }
+        }
+    }
+    count
+}
+
+fn string_column_values(batches: &[RecordBatch], name: &str) -> Vec<String> {
+    let mut values = Vec::new();
+    for batch in batches {
+        let column = batch.column_by_name(name).expect("column");
+        if let Some(array) = column.as_any().downcast_ref::<StringArray>() {
+            values.extend((0..array.len()).map(|index| array.value(index).to_owned()));
+        } else if let Some(array) = column.as_any().downcast_ref::<LargeStringArray>() {
+            values.extend((0..array.len()).map(|index| array.value(index).to_owned()));
+        } else {
+            panic!("{name} was not a string column");
+        }
+    }
+    values
+}
+
 #[tokio::test]
 async fn lance_sections_writes_markdown_sections_dataset_with_body_text() {
     let tempdir = tempfile::tempdir().expect("tempdir");
@@ -60,51 +110,54 @@ async fn lance_sections_writes_markdown_sections_dataset_with_body_text() {
 
     write_sections_dataset(&artifact, &root, &out_dir).expect("write sections sidecar");
 
-    let dataset_dir = out_dir.join(SECTIONS_DATASET_DIR);
-    assert!(dataset_dir.exists(), "sections.lancedb should exist");
-
-    let db = lancedb::connect(dataset_dir.to_str().expect("dataset path"))
-        .execute()
-        .await
-        .expect("connect lancedb");
-    let table = db
-        .open_table(SECTIONS_TABLE)
-        .execute()
-        .await
-        .expect("open table");
-    assert_eq!(table.count_rows(None).await.expect("count rows"), 5);
-
-    let batches = table
-        .query()
-        .only_if("qualified_name = 'Guide::Install'")
-        .select(Select::columns(&["body_text", "child_count"]))
-        .limit(1)
-        .execute()
-        .await
-        .expect("query install")
-        .try_collect::<Vec<_>>()
-        .await
-        .expect("collect install");
-    assert_eq!(batches.len(), 1);
-    assert_eq!(batches[0].num_rows(), 1);
-    let body_text = batches[0]
-        .column_by_name("body_text")
-        .expect("body_text column")
-        .as_any()
-        .downcast_ref::<LargeStringArray>()
-        .expect("body_text large string");
+    let parquet_path = out_dir.join(SECTIONS_PARQUET);
+    assert!(parquet_path.is_file(), "sections.parquet should exist");
     assert!(
-        body_text.value(0).contains("Install body line."),
-        "section body_text should include the widened section body: {:?}",
-        body_text.value(0)
+        !out_dir.join("sections.lancedb").exists(),
+        "lance sidecar must not be written"
     );
-    let child_count = batches[0]
+    assert_eq!(parquet_row_count(&parquet_path), 5);
+
+    let batches = read_sidecar_parquet(&parquet_path);
+    let names = string_column_values(&batches, "qualified_name");
+    let bodies = string_column_values(&batches, "body_text");
+    let install = names
+        .iter()
+        .zip(bodies.iter())
+        .find(|(name, _)| *name == "Guide::Install")
+        .expect("install section");
+    assert!(
+        install.1.contains("Install body line."),
+        "section body_text should include the widened section body: {:?}",
+        install.1
+    );
+    let child_counts = batches[0]
         .column_by_name("child_count")
         .expect("child_count column")
         .as_any()
         .downcast_ref::<UInt32Array>()
         .expect("child_count u32");
-    assert_eq!(child_count.value(0), 0);
+    let install_index = names
+        .iter()
+        .position(|name| name == "Guide::Install")
+        .expect("install idx");
+    let mut offset = 0usize;
+    let mut child = None;
+    for batch in &batches {
+        let counts = batch
+            .column_by_name("child_count")
+            .expect("child_count column")
+            .as_any()
+            .downcast_ref::<UInt32Array>()
+            .expect("child_count u32");
+        if install_index < offset + batch.num_rows() {
+            child = Some(counts.value(install_index - offset));
+            break;
+        }
+        offset += batch.num_rows();
+    }
+    let _ = child_counts;
+    assert_eq!(child, Some(0));
 }
 
 #[tokio::test]
@@ -133,28 +186,8 @@ async fn lance_sections_skip_section_embeddings_writes_null_vectors() {
         },
     );
 
-    let db = lancedb::connect(
-        out_dir
-            .join(SECTIONS_DATASET_DIR)
-            .to_str()
-            .expect("dataset path"),
-    )
-    .execute()
-    .await
-    .expect("connect lancedb");
-    let table = db
-        .open_table(SECTIONS_TABLE)
-        .execute()
-        .await
-        .expect("open table");
-
-    assert_eq!(
-        table
-            .count_rows(Some("vector IS NOT NULL".to_owned()))
-            .await
-            .expect("count vector rows"),
-        0
-    );
+    let parquet_path = out_dir.join(SECTIONS_PARQUET);
+    assert_eq!(non_null_vector_count(&parquet_path), 0);
 }
 
 #[tokio::test]
@@ -175,45 +208,14 @@ async fn lance_sections_skipping_embeddings_api_writes_null_vectors_and_fts_hits
     write_sections_dataset_skipping_embeddings(&artifact, &root, &out_dir)
         .expect("write sections sidecar");
 
-    let db = lancedb::connect(
-        out_dir
-            .join(SECTIONS_DATASET_DIR)
-            .to_str()
-            .expect("dataset path"),
-    )
-    .execute()
-    .await
-    .expect("connect lancedb");
-    let table = db
-        .open_table(SECTIONS_TABLE)
-        .execute()
-        .await
-        .expect("open table");
+    let parquet_path = out_dir.join(SECTIONS_PARQUET);
+    assert_eq!(non_null_vector_count(&parquet_path), 0);
 
-    assert_eq!(
-        table
-            .count_rows(Some("vector IS NOT NULL".to_owned()))
-            .await
-            .expect("count vector rows"),
-        0
+    let bodies = string_column_values(&read_sidecar_parquet(&parquet_path), "body_text");
+    assert!(
+        bodies.iter().any(|body| body.contains("overlayneedle")),
+        "section bodies should include the overlay needle"
     );
-
-    let fts = FullTextSearchQuery::new("overlayneedle".to_owned())
-        .with_column("body_text".to_owned())
-        .expect("valid FTS query");
-    let batches = table
-        .query()
-        .full_text_search(fts)
-        .select(Select::columns(&["qualified_name", "body_text"]))
-        .limit(5)
-        .execute()
-        .await
-        .expect("query body_text FTS")
-        .try_collect::<Vec<_>>()
-        .await
-        .expect("collect FTS rows");
-    let hit_rows = batches.iter().map(|batch| batch.num_rows()).sum::<usize>();
-    assert!(hit_rows > 0, "body_text FTS should return at least one hit");
 }
 
 #[tokio::test]
@@ -252,32 +254,9 @@ async fn lance_sections_streams_small_write_batches_without_vectors() {
         },
     );
 
-    let db = lancedb::connect(
-        out_dir
-            .join(SECTIONS_DATASET_DIR)
-            .to_str()
-            .expect("dataset path"),
-    )
-    .execute()
-    .await
-    .expect("connect lancedb");
-    let table = db
-        .open_table(SECTIONS_TABLE)
-        .execute()
-        .await
-        .expect("open table");
-
-    assert_eq!(
-        table.count_rows(None).await.expect("count rows"),
-        section_symbol_count
-    );
-    assert_eq!(
-        table
-            .count_rows(Some("vector IS NOT NULL".to_owned()))
-            .await
-            .expect("count vector rows"),
-        0
-    );
+    let parquet_path = out_dir.join(SECTIONS_PARQUET);
+    assert_eq!(parquet_row_count(&parquet_path), section_symbol_count);
+    assert_eq!(non_null_vector_count(&parquet_path), 0);
 }
 
 #[tokio::test]
@@ -306,39 +285,9 @@ async fn lance_sections_refreshes_existing_fts_index_after_large_append() {
     write_sections_dataset(&updated_artifact, &root, &out_dir)
         .expect("append updated sections sidecar");
 
-    let db = lancedb::connect(
-        out_dir
-            .join(SECTIONS_DATASET_DIR)
-            .to_str()
-            .expect("dataset path"),
-    )
-    .execute()
-    .await
-    .expect("connect lancedb");
-    let table = db
-        .open_table(SECTIONS_TABLE)
-        .execute()
-        .await
-        .expect("open table");
-    assert_eq!(table.count_rows(None).await.expect("count rows"), 51);
-
-    let index = table
-        .list_indices()
-        .await
-        .expect("list indices")
-        .into_iter()
-        .find(|index| {
-            index.index_type == IndexType::FTS && index.columns.as_slice() == ["body_text"]
-        })
-        .expect("body_text FTS index");
-    let stats = table
-        .index_stats(&index.name)
-        .await
-        .expect("index stats")
-        .expect("body_text FTS stats");
-
-    assert_eq!(stats.num_indexed_rows, 51);
-    assert_eq!(stats.num_unindexed_rows, 0);
+    let parquet_path = out_dir.join(SECTIONS_PARQUET);
+    assert_eq!(parquet_row_count(&parquet_path), 51);
+    assert!(!out_dir.join("sections.lancedb").exists());
 }
 
 #[tokio::test]
@@ -372,41 +321,13 @@ async fn lance_sections_skip_code_symbol_embeddings_writes_code_symbol_rows_with
         },
     );
 
-    let db = lancedb::connect(out_dir.to_str().expect("dataset path"))
-        .execute()
-        .await
-        .expect("connect lancedb");
-    let table = db
-        .open_table(CODE_SYMBOLS_TABLE)
-        .execute()
-        .await
-        .expect("open code symbols table");
-    assert!(
-        out_dir.join(CODE_SYMBOLS_DATASET_DIR).exists(),
-        "code_symbols.lance should exist"
-    );
-    assert_eq!(table.count_rows(None).await.expect("count rows"), 2);
-    assert_eq!(
-        table
-            .count_rows(Some("vector IS NOT NULL".to_owned()))
-            .await
-            .expect("count vector rows"),
-        0
-    );
+    let parquet_path = out_dir.join(CODE_SYMBOLS_PARQUET);
+    assert!(parquet_path.is_file(), "code_symbols.parquet should exist");
+    assert!(!out_dir.join("code_symbols.lance").exists());
+    assert_eq!(parquet_row_count(&parquet_path), 2);
+    assert_eq!(non_null_vector_count(&parquet_path), 0);
 
-    let batches = table
-        .query()
-        .select(Select::columns(&[
-            "entity_name",
-            "symbol_kind",
-            "embed_text",
-        ]))
-        .execute()
-        .await
-        .expect("query symbols")
-        .try_collect::<Vec<_>>()
-        .await
-        .expect("collect symbols");
+    let batches = read_sidecar_parquet(&parquet_path);
 
     let mut rows = Vec::new();
     for batch in batches {
@@ -527,42 +448,8 @@ async fn lance_sections_skips_non_utf8_markdown_files() {
 
     write_sections_dataset(&artifact, &root, &out_dir).expect("write sections sidecar");
 
-    let db = lancedb::connect(
-        out_dir
-            .join(SECTIONS_DATASET_DIR)
-            .to_str()
-            .expect("dataset path"),
-    )
-    .execute()
-    .await
-    .expect("connect lancedb");
-    let table = db
-        .open_table(SECTIONS_TABLE)
-        .execute()
-        .await
-        .expect("open table");
-    let batches = table
-        .query()
-        .select(Select::columns(&["file_path"]))
-        .execute()
-        .await
-        .expect("query file paths")
-        .try_collect::<Vec<_>>()
-        .await
-        .expect("collect file paths");
-
-    let file_paths: Vec<_> = batches
-        .iter()
-        .flat_map(|batch| {
-            let paths = batch
-                .column_by_name("file_path")
-                .expect("file_path column")
-                .as_any()
-                .downcast_ref::<StringArray>()
-                .expect("file_path string");
-            (0..paths.len()).map(|index| paths.value(index).to_owned())
-        })
-        .collect();
+    let parquet_path = out_dir.join(SECTIONS_PARQUET);
+    let file_paths = string_column_values(&read_sidecar_parquet(&parquet_path), "file_path");
 
     assert_eq!(file_paths, vec!["docs/good.md".to_owned()]);
     assert!(!file_paths.iter().any(|path| path == "docs/bad.md"));

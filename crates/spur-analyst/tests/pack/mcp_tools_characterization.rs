@@ -696,7 +696,7 @@ fn replace_string_value(value: &mut Value, needle: &str, replacement: &str) {
 
 fn seed_analyst_db(db_path: &Path) {
     let conn = duckdb::Connection::open(db_path).expect("open fixture db");
-    conn.execute_batch("INSTALL fts; LOAD fts; INSTALL icu; LOAD icu; INSTALL lance; LOAD lance;")
+    conn.execute_batch("INSTALL fts; LOAD fts; INSTALL icu; LOAD icu;")
         .expect("load fixture extensions");
     conn.execute_batch(
         r"
@@ -709,9 +709,12 @@ fn seed_analyst_db(db_path: &Path) {
             file_path VARCHAR,
             heading_level INTEGER,
             content_hash VARCHAR,
-            body_text VARCHAR
+            body_text VARCHAR,
+            embedding FLOAT[768]
         );
-        INSERT INTO sections_search VALUES
+        INSERT INTO sections_search (
+            stable_symbol_id, qualified_name, file_path, heading_level, content_hash, body_text
+        ) VALUES
             ('doc-dispatch', 'Dispatch Approval Reading Path', 'docs/dispatch.md', 2, 'doc-hash',
              'dispatch approval evidence reading path');
 
@@ -721,9 +724,12 @@ fn seed_analyst_db(db_path: &Path) {
             qualified_name VARCHAR,
             file_path VARCHAR,
             symbol_kind VARCHAR,
-            doc_text VARCHAR
+            doc_text VARCHAR,
+            embedding FLOAT[768]
         );
-        INSERT INTO symbol_text VALUES
+        INSERT INTO symbol_text (
+            stable_symbol_id, entity_name, qualified_name, file_path, symbol_kind, doc_text
+        ) VALUES
             ('sym-dispatch', 'dispatch_plan', 'fixture::dispatch_plan',
              'src/dispatch.rs', 'function', 'dispatch approval evidence entry point'),
             ('sym-review', 'review_approval', 'fixture::review_approval',

@@ -1,57 +1,38 @@
 use std::fs;
 use std::path::Path;
-use std::process::Command;
 
 use spur_cli::commands::analyst::{self, AnalystBuildOptions};
-use spur_graph::store::write_sections_dataset;
+use spur_graph::store::{
+    stamp_sidecar_status, write_sections_dataset, GraphArtifactSidecarRowCounts,
+    GraphArtifactSidecarStatus,
+};
 use spur_graph::{artifact_from_facts, build_facts, WriteOptions};
 
-fn duckdb_cli_present() -> bool {
-    std::env::var_os("PATH")
-        .map(|p| std::env::split_paths(&p).any(|d| d.join("duckdb").is_file()))
-        .unwrap_or(false)
-}
-
-/// The CLI path needs the lance extension installed for the *CLI's* duckdb
-/// version (in-process spur-analyst installs it into its own bundled duckdb).
-/// Probe INSTALL+LOAD so the extension self-provisions where the environment
-/// allows, and skip gracefully where it doesn't (e.g. no network).
-fn duckdb_lance_available() -> bool {
-    Command::new("duckdb")
-        .args(["-c", "INSTALL lance; LOAD lance;"])
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
-
-fn query_csv(db_path: &Path, lance_dataset_dir: &Path, sql: &str) -> String {
-    let lance_dataset_dir = lance_dataset_dir.display().to_string().replace('\'', "''");
-    let sql = format!("LOAD lance;\nATTACH '{lance_dataset_dir}' AS lance_ns (TYPE LANCE);\n{sql}");
-    let output = Command::new("duckdb")
-        .args(["-csv", "-noheader"])
-        .arg(db_path)
-        .args(["-c", &sql])
-        .output()
-        .expect("duckdb query");
-    assert!(
-        output.status.success(),
-        "duckdb query failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    String::from_utf8(output.stdout).expect("duckdb stdout utf8")
+fn query_csv(db_path: &Path, sql: &str) -> String {
+    let conn = duckdb::Connection::open(db_path).expect("open analyst duckdb");
+    let _ = conn.execute_batch("INSTALL fts; LOAD fts; INSTALL icu; LOAD icu;");
+    let mut stmt = conn.prepare(sql).expect("prepare query");
+    let mut rows = stmt.query([]).expect("query rows");
+    let column_count = rows.as_ref().expect("query result").column_count();
+    let mut lines = Vec::new();
+    while let Some(row) = rows.next().expect("read row") {
+        let mut fields = Vec::with_capacity(column_count);
+        for idx in 0..column_count {
+            fields.push(match row.get_ref(idx).expect("read column") {
+                duckdb::types::ValueRef::Null => String::new(),
+                duckdb::types::ValueRef::Text(value) => {
+                    String::from_utf8_lossy(value).into_owned()
+                }
+                other => format!("{other:?}"),
+            });
+        }
+        lines.push(fields.join(","));
+    }
+    lines.join("\n")
 }
 
 #[test]
-fn analyst_session_attaches_lance_sections_and_joins_nodes() {
-    if !duckdb_cli_present() {
-        eprintln!("skipping: duckdb CLI not on PATH");
-        return;
-    }
-    if !duckdb_lance_available() {
-        eprintln!("skipping: duckdb CLI cannot INSTALL/LOAD the lance extension");
-        return;
-    }
-
+fn analyst_session_searches_parquet_sections_and_joins_nodes() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     let root = tempdir.path().join("repo");
     fs::create_dir_all(root.join("docs")).expect("mkdir docs");
@@ -72,7 +53,18 @@ fn analyst_session_attaches_lance_sections_and_joins_nodes() {
         Vec::new(),
     )
     .expect("write parquet artifact");
-    write_sections_dataset(&artifact, &root, &artifact_dir).expect("write sections.lancedb");
+    write_sections_dataset(&artifact, &root, &artifact_dir).expect("write sections.parquet");
+    stamp_sidecar_status(
+        &artifact_dir,
+        GraphArtifactSidecarStatus {
+            complete: true,
+            row_counts: GraphArtifactSidecarRowCounts {
+                section_bodies: 1,
+                code_symbols: 1,
+            },
+        },
+    )
+    .expect("stamp sidecar complete");
 
     let db_path = tempdir.path().join("analyst.duckdb");
     analyst::build(
@@ -85,31 +77,32 @@ fn analyst_session_attaches_lance_sections_and_joins_nodes() {
     )
     .expect("analyst build");
     if !db_path.is_file() {
-        eprintln!("skipping: duckdb CLI present but analyst init SQL did not produce a DB");
+        eprintln!("skipping: analyst init SQL did not produce a DB");
         return;
     }
 
+    let section_count = query_csv(&db_path, "SELECT count(*) FROM sections;");
+    assert_ne!(
+        section_count.trim(),
+        "0",
+        "parquet sections should load into DuckDB"
+    );
+
     let rows = query_csv(
         &db_path,
-        &artifact_dir.join(spur_graph::store::SECTIONS_DATASET_DIR),
-        "SELECT s.stable_symbol_id, n.qualified_name, s._score
-         FROM lance_fts('lance_ns.main.section_bodies', 'body_text',
-                        'emit_sections body span widen', k => 10) AS s
+        "SELECT s.stable_symbol_id, n.qualified_name, s.body_text
+         FROM sections s
          JOIN nodes n USING (stable_symbol_id)
-         ORDER BY s._score DESC;",
+         WHERE s.body_text ILIKE '%widen%'
+         ORDER BY s.stable_symbol_id;",
     );
 
     assert!(
         !rows.trim().is_empty(),
-        "lance_fts join should return at least one section row"
+        "parquet sections should join nodes: {rows:?}"
     );
     assert!(
-        rows.lines().any(|line| {
-            let mut columns = line.split(',');
-            columns.next().is_some()
-                && columns.next().is_some()
-                && columns.next().is_some_and(|score| !score.trim().is_empty())
-        }),
-        "lance_fts join should include a non-null _score: {rows:?}"
+        rows.to_lowercase().contains("widen"),
+        "loaded section bodies should keep the fixture prose: {rows:?}"
     );
 }

@@ -1,7 +1,6 @@
 use std::borrow::Cow;
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fs;
-use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
@@ -10,8 +9,8 @@ use std::sync::{Mutex, OnceLock};
 
 use anyhow::{bail, Context as _, Result};
 use arrow_array::{
-    Array as _, FixedSizeListArray, Float32Array, LargeStringArray, RecordBatch,
-    RecordBatchIterator, StringArray, UInt32Array, UInt64Array, UInt8Array,
+    Array as _, FixedSizeListArray, Float32Array, LargeStringArray, RecordBatch, StringArray,
+    UInt32Array, UInt64Array, UInt8Array,
 };
 use arrow_buffer::NullBuffer;
 use arrow_schema::{DataType, Field, Schema};
@@ -22,9 +21,8 @@ use fastembed::{
 };
 #[cfg(feature = "embed")]
 use hf_hub::{api::sync::ApiBuilder as HfApiBuilder, Repo, RepoType};
-use lancedb::index::{scalar::FtsIndexBuilder, Index, IndexConfig, IndexType};
-use lancedb::query::{ExecutableQuery as _, QueryBase as _, Select};
-use lancedb::table::OptimizeAction;
+use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+use parquet::arrow::ArrowWriter;
 
 use crate::content_hash::blake3_hex;
 use crate::store::parquet::GraphArtifactSidecarRowCounts;
@@ -44,6 +42,8 @@ pub const SECTIONS_DATASET_DIR: &str = "sections.lancedb";
 pub const SECTIONS_TABLE: &str = "section_bodies";
 pub const CODE_SYMBOLS_DATASET_DIR: &str = "code_symbols.lance";
 pub const CODE_SYMBOLS_TABLE: &str = "code_symbols";
+pub const SECTIONS_PARQUET: &str = "sections.parquet";
+pub const CODE_SYMBOLS_PARQUET: &str = "code_symbols.parquet";
 pub const EMBEDDING_VECTOR_DIMENSIONS: usize = 768;
 const SECTION_EMBED_MAX_BODY_BYTES: usize = 4096;
 const SECTION_EMBED_BATCH_SIZE_DEFAULT: usize = 64;
@@ -70,8 +70,6 @@ const CODE_RANK_EMBED_ONNX_REVISION: &str = "151669b173750250e611e1be00c812f112e
 const CODE_RANK_EMBED_ONNX_FILE: &str = "onnx/model.onnx";
 const EMBEDDING_INPUT_HASH_COLUMN: &str = "embedding_input_hash";
 const EMBEDDING_MODEL_COLUMN: &str = "embedding_model";
-const INDEX_REBUILD_MIN_ROWS: usize = 50;
-const INDEX_REBUILD_MIN_PCT: f64 = 0.1;
 // Integration tests spawn the debug-built CLI; keep this hook out of release builds.
 #[cfg(debug_assertions)]
 const SECTION_SIDECAR_TEST_FAIL_ENV: &str = "SPUR_GRAPH_TEST_FAIL_SECTION_SIDECAR";
@@ -374,9 +372,9 @@ impl SidecarDelta {
 pub struct SectionSidecarOptions {
     pub embedding: SectionEmbeddingOptions,
     pub write_batch_size: usize,
-    /// When set, vectors are carried forward from the corresponding Lance
-    /// tables in this directory before the embedder runs.  Any failure to
-    /// open the previous directory is silently ignored.
+    /// When set, vectors and unchanged rows are carried forward from the
+    /// previous parquet sidecars in this directory. Missing previous files
+    /// are silently ignored.
     pub previous_artifact_dir: Option<PathBuf>,
     /// Caller-known path delta for incremental sidecar planning.
     pub delta: Option<SidecarDelta>,
@@ -474,7 +472,7 @@ fn normalize_section_write_batch_size(write_batch_size: usize) -> usize {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct SectionRow {
     stable_symbol_id: String,
     file_path: String,
@@ -491,7 +489,7 @@ struct SectionRow {
     vector: Option<Vec<f32>>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct SymbolRow {
     stable_symbol_id: String,
     file_path: String,
@@ -503,6 +501,31 @@ struct SymbolRow {
     content_hash: String,
     embedding_input_hash: String,
     embedding_model: String,
+}
+
+fn write_record_batches_parquet(
+    path: &Path,
+    schema: Arc<Schema>,
+    mut batches: Vec<RecordBatch>,
+) -> Result<usize> {
+    if batches.is_empty() {
+        batches.push(RecordBatch::new_empty(schema.clone()));
+    }
+    let file =
+        fs::File::create(path).with_context(|| format!("failed to create `{}`", path.display()))?;
+    let mut writer = ArrowWriter::try_new(file, schema, None)
+        .with_context(|| format!("failed to open parquet writer `{}`", path.display()))?;
+    let mut rows = 0usize;
+    for batch in &batches {
+        rows += batch.num_rows();
+        writer
+            .write(batch)
+            .with_context(|| format!("failed to write parquet batch `{}`", path.display()))?;
+    }
+    writer
+        .close()
+        .with_context(|| format!("failed to close parquet `{}`", path.display()))?;
+    Ok(rows)
 }
 
 pub fn write_sections_dataset(
@@ -625,7 +648,7 @@ fn write_sections_dataset_without_current_runtime(
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .context("failed to create LanceDB runtime")?;
+        .context("failed to create sidecar runtime")?;
     runtime.block_on(write_sections_dataset_async(
         artifact,
         worktree_root,
@@ -662,90 +685,18 @@ async fn write_sections_dataset_async_with_embedding_model(
     embedding_model: EmbeddingModelSelection,
     progress: Option<&SectionSidecarProgressCallback<'_>>,
 ) -> Result<GraphArtifactSidecarRowCounts> {
-    let delta = options.delta.as_ref();
-    let mut changed_paths = delta.map(|delta| &delta.changed_paths);
-
     fs::create_dir_all(artifact_dir)
         .with_context(|| format!("failed to create `{}`", artifact_dir.display()))?;
-    let dataset_dir = artifact_dir.join(SECTIONS_DATASET_DIR);
-    let mut copied_previous_sidecar = false;
-    if delta.is_some() {
-        if let Some(prev_dir) = options.previous_artifact_dir.as_deref() {
-            if prev_dir != artifact_dir {
-                copied_previous_sidecar = try_copy_previous_sidecar_dir(
-                    &prev_dir.join(SECTIONS_DATASET_DIR),
-                    &dataset_dir,
-                    "section",
-                )?;
-            }
-        }
-    }
-    fs::create_dir_all(&dataset_dir)
-        .with_context(|| format!("failed to create `{}`", dataset_dir.display()))?;
 
-    let mut db = lancedb::connect(dataset_dir.to_string_lossy().as_ref())
-        .execute()
-        .await
-        .context("failed to connect to sections.lancedb")?;
     let schema = sections_schema();
-    let mut table = db.open_table(SECTIONS_TABLE).execute().await.ok();
-    let mut fallback_to_full = copied_previous_sidecar && table.is_none();
-    if let Some(existing_table) = table.as_ref() {
-        if !table_has_vector_identity_columns(existing_table, "section sidecar").await {
-            if copied_previous_sidecar {
-                fallback_to_full = true;
-            } else {
-                tracing::info!(
-                    table = SECTIONS_TABLE,
-                    "section sidecar schema is missing vector identity columns; rebuilding table"
-                );
-                db.drop_table(SECTIONS_TABLE, &[])
-                    .await
-                    .context("failed to drop legacy LanceDB section rows table")?;
-                table = None;
-            }
-        }
-    }
-    let mut dataset_changed = false;
-    let mut skipped_existing_rows = 0usize;
-    if !fallback_to_full {
-        if let (Some(table), Some(delta)) = (table.as_ref(), delta) {
-            if copied_previous_sidecar || changed_paths.is_some() {
-                delete_rows_for_delta_paths(table, delta, "section").await?;
-                dataset_changed |=
-                    !delta.changed_paths.is_empty() || !delta.deleted_paths.is_empty();
-                if table_rows_match_embedding_model(table, embedding_model, "section sidecar").await
-                {
-                    skipped_existing_rows = table
-                        .count_rows(None)
-                        .await
-                        .context("failed to count seeded LanceDB section rows")?;
-                } else {
-                    fallback_to_full = true;
-                }
-            }
-        }
-    }
-    if fallback_to_full {
-        tracing::info!(
-            table = SECTIONS_TABLE,
-            "section sidecar seed is incomplete or incompatible; falling back to full write"
-        );
-        drop(table.take());
-        remove_path_if_exists(&dataset_dir)?;
-        fs::create_dir_all(&dataset_dir)
-            .with_context(|| format!("failed to create `{}`", dataset_dir.display()))?;
-        db = lancedb::connect(dataset_dir.to_string_lossy().as_ref())
-            .execute()
-            .await
-            .context("failed to reconnect to sections.lancedb after seed fallback")?;
-        changed_paths = None;
-        dataset_changed = false;
-        skipped_existing_rows = 0;
-    } else if delta.is_some() && !copied_previous_sidecar && table.is_none() {
-        changed_paths = None;
-    }
-    let is_first_write = table.is_none();
+    let previous_compatible = options
+        .previous_artifact_dir
+        .as_deref()
+        .is_none_or(|prev_dir| previous_sidecars_match_embedding_model(prev_dir, embedding_model));
+    let delta = previous_compatible
+        .then_some(options.delta.as_ref())
+        .flatten();
+    let changed_paths = delta.map(|delta| &delta.changed_paths);
     let mut batcher = SectionRowBatcher::new(
         artifact,
         worktree_root,
@@ -755,6 +706,13 @@ async fn write_sections_dataset_async_with_embedding_model(
     );
     let row_scope = SidecarRowScope::from_delta_paths(changed_paths);
     let total_rows = batcher.total_rows();
+    let mut retained_rows = Vec::new();
+    if let (Some(prev_dir), Some(delta)) = (options.previous_artifact_dir.as_deref(), delta) {
+        if prev_dir != artifact_dir {
+            retained_rows = retained_section_rows_from_prev_parquet(prev_dir, delta);
+        }
+    }
+    let skipped_existing_rows = retained_rows.len();
     emit_progress(
         progress,
         SectionSidecarProgressEvent::Started {
@@ -766,46 +724,21 @@ async fn write_sections_dataset_async_with_embedding_model(
             row_scope,
         },
     );
-    let mut existing_versions = ExistingFileVersions::new(table.as_ref());
     let mut embedder = SectionEmbedder::new(options.embedding, embedding_model);
+    let mut batches = Vec::new();
+    if !retained_rows.is_empty() {
+        batches.push(rows_to_batch(retained_rows, schema.clone())?);
+    }
     let mut batch_index = 0usize;
     let mut processed_rows = 0usize;
     let mut written_rows = 0usize;
 
-    while let Some(rows) = batcher.next_batch()? {
+    while let Some(mut rows) = batcher.next_batch()? {
         batch_index += 1;
         processed_rows += rows.len();
-        let current_hashes: HashMap<String, HashSet<String>> =
-            rows.iter().fold(HashMap::new(), |mut acc, row| {
-                acc.entry(row.file_path.clone())
-                    .or_default()
-                    .insert(row.content_hash.clone());
-                acc
-            });
-        let candidate_rows = rows.len();
-        let mut rows = existing_versions.retain_new_rows(rows).await?;
-        if !is_first_write {
-            existing_versions.delete_stale_rows(&current_hashes).await?;
-        }
-        skipped_existing_rows += candidate_rows.saturating_sub(rows.len());
-        if rows.is_empty() {
-            emit_progress(
-                progress,
-                SectionSidecarProgressEvent::BatchWritten {
-                    batch_index,
-                    written_rows,
-                    skipped_existing_rows,
-                    processed_rows,
-                    total_rows,
-                },
-            );
-            continue;
-        }
-        // Carry forward vectors from the previous artifact directory (if any)
-        // before running the embedder, so unchanged rows skip re-embedding.
         if let Some(prev_dir) = options.previous_artifact_dir.as_deref() {
             if prev_dir != artifact_dir {
-                fill_section_vectors_from_prev(&mut rows, prev_dir).await;
+                fill_section_vectors_from_prev_parquet(&mut rows, prev_dir);
             }
         }
         let embedding_eligible_rows = rows
@@ -853,25 +786,8 @@ async fn write_sections_dataset_async_with_embedding_model(
                 );
             })
             .await;
-        let batch_rows = rows.len();
-        let batch = rows_to_batch(rows, schema.clone())?;
-        if let Some(table) = table.as_ref() {
-            table
-                .add(batch)
-                .execute()
-                .await
-                .context("failed to append LanceDB section rows")?;
-            dataset_changed = true;
-        } else {
-            table = Some(
-                db.create_table(SECTIONS_TABLE, batch)
-                    .execute()
-                    .await
-                    .context("failed to create LanceDB sections table")?,
-            );
-            dataset_changed = true;
-        }
-        written_rows += batch_rows;
+        written_rows += rows.len();
+        batches.push(rows_to_batch(rows, schema.clone())?);
         emit_progress(
             progress,
             SectionSidecarProgressEvent::BatchWritten {
@@ -884,47 +800,8 @@ async fn write_sections_dataset_async_with_embedding_model(
         );
     }
 
-    if table.is_none() {
-        let empty_batch = rows_to_batch(Vec::new(), schema.clone())?;
-        table = Some(
-            db.create_table(SECTIONS_TABLE, empty_batch)
-                .execute()
-                .await
-                .context("failed to create LanceDB sections table")?,
-        );
-        dataset_changed = true;
-    }
-
-    let section_bodies = table
-        .as_ref()
-        .expect("section table should exist before sidecar completion")
-        .count_rows(None)
-        .await
-        .context("failed to count LanceDB section rows")?;
-
-    if dataset_changed {
-        let table = table
-            .as_ref()
-            .expect("section table should exist after dataset change");
-        let should_rebuild_indexes = is_first_write
-            || written_rows >= INDEX_REBUILD_MIN_ROWS
-            || (section_bodies > 0
-                && (written_rows as f64 / section_bodies as f64) >= INDEX_REBUILD_MIN_PCT);
-        if should_rebuild_indexes {
-            emit_progress(
-                progress,
-                SectionSidecarProgressEvent::Indexing {
-                    label: "body_text FTS",
-                    phase: SidecarPhase::Sections,
-                },
-            );
-            let should_optimize_existing_indices = ensure_body_text_fts_index(table).await?;
-            if should_optimize_existing_indices {
-                optimize_existing_indices(table, "section").await?;
-            }
-        }
-    }
-
+    let section_bodies =
+        write_record_batches_parquet(&artifact_dir.join(SECTIONS_PARQUET), schema, batches)?;
     emit_progress(
         progress,
         SectionSidecarProgressEvent::Finished {
@@ -961,86 +838,17 @@ async fn write_symbol_rows_dataset_async(
 ) -> Result<usize> {
     let write_batch_size = options.write_batch_size;
     let embedding_options = options.embedding;
-    let delta = options.delta.as_ref();
-    let mut changed_paths = delta.map(|delta| &delta.changed_paths);
-
     fs::create_dir_all(artifact_dir)
         .with_context(|| format!("failed to create `{}`", artifact_dir.display()))?;
-    let table_dir = artifact_dir.join(CODE_SYMBOLS_DATASET_DIR);
-    let mut copied_previous_sidecar = false;
-    if delta.is_some() {
-        if let Some(prev_dir) = options.previous_artifact_dir.as_deref() {
-            if prev_dir != artifact_dir {
-                copied_previous_sidecar = try_copy_previous_sidecar_dir(
-                    &prev_dir.join(CODE_SYMBOLS_DATASET_DIR),
-                    &table_dir,
-                    "code symbol",
-                )?;
-            }
-        }
-    }
-    let mut db = lancedb::connect(artifact_dir.to_string_lossy().as_ref())
-        .execute()
-        .await
-        .context("failed to connect to code_symbols.lance")?;
     let schema = symbol_rows_schema();
-    let mut table = db.open_table(CODE_SYMBOLS_TABLE).execute().await.ok();
-    let mut fallback_to_full = copied_previous_sidecar && table.is_none();
-    if let Some(existing_table) = table.as_ref() {
-        if !table_has_vector_identity_columns(existing_table, "code symbol sidecar").await {
-            if copied_previous_sidecar {
-                fallback_to_full = true;
-            } else {
-                tracing::info!(
-                    table = CODE_SYMBOLS_TABLE,
-                    "code symbol sidecar schema is missing vector identity columns; rebuilding table"
-                );
-                db.drop_table(CODE_SYMBOLS_TABLE, &[])
-                    .await
-                    .context("failed to drop legacy LanceDB code symbol rows table")?;
-                table = None;
-            }
-        }
-    }
-    let mut dataset_changed = false;
-    let mut skipped_existing_rows = 0usize;
-    if !fallback_to_full {
-        if let (Some(table), Some(delta)) = (table.as_ref(), delta) {
-            if copied_previous_sidecar || changed_paths.is_some() {
-                delete_rows_for_delta_paths(table, delta, "code symbol").await?;
-                dataset_changed |=
-                    !delta.changed_paths.is_empty() || !delta.deleted_paths.is_empty();
-                if table_rows_match_embedding_model(table, embedding_model, "code symbol sidecar")
-                    .await
-                {
-                    skipped_existing_rows = table
-                        .count_rows(None)
-                        .await
-                        .context("failed to count seeded LanceDB code symbol rows")?;
-                } else {
-                    fallback_to_full = true;
-                }
-            }
-        }
-    }
-    if fallback_to_full {
-        tracing::info!(
-            table = CODE_SYMBOLS_TABLE,
-            "code symbol sidecar seed is incomplete or incompatible; falling back to full write"
-        );
-        drop(table.take());
-        remove_path_if_exists(&table_dir)?;
-        db = lancedb::connect(artifact_dir.to_string_lossy().as_ref())
-            .execute()
-            .await
-            .context("failed to reconnect to code_symbols.lance after seed fallback")?;
-        changed_paths = None;
-        dataset_changed = false;
-        skipped_existing_rows = 0;
-    } else if delta.is_some() && !copied_previous_sidecar && table.is_none() {
-        changed_paths = None;
-    }
-    let is_first_write = table.is_none();
+    let previous_compatible = options
+        .previous_artifact_dir
+        .as_deref()
+        .is_none_or(|prev_dir| previous_sidecars_match_embedding_model(prev_dir, embedding_model));
+    let delta = previous_compatible
+        .then_some(options.delta.as_ref())
+        .flatten();
+    let changed_paths = delta.map(|delta| &delta.changed_paths);
     let mut batcher = SymbolRowBatcher::new(
         artifact,
         worktree_root,
@@ -1050,7 +858,13 @@ async fn write_symbol_rows_dataset_async(
     );
     let row_scope = SidecarRowScope::from_delta_paths(changed_paths);
     let total_rows = batcher.total_rows();
-
+    let mut retained_rows = Vec::new();
+    if let (Some(prev_dir), Some(delta)) = (options.previous_artifact_dir.as_deref(), delta) {
+        if prev_dir != artifact_dir {
+            retained_rows = retained_symbol_rows_from_prev_parquet(prev_dir, delta);
+        }
+    }
+    let skipped_existing_rows = retained_rows.len();
     emit_progress(
         progress,
         SectionSidecarProgressEvent::CodeSymbolsStarted {
@@ -1059,46 +873,20 @@ async fn write_symbol_rows_dataset_async(
             row_scope,
         },
     );
-    let mut existing_versions = ExistingSymbolFileVersions::new(table.as_ref());
     let mut embedder = SymbolEmbedder::new(embedding_options, embedding_model);
+    let mut batches = Vec::new();
+    if !retained_rows.is_empty() {
+        batches.push(symbol_rows_to_batch(retained_rows, schema.clone())?);
+    }
     let mut batch_index = 0usize;
     let mut processed_rows = 0usize;
     let mut written_rows = 0usize;
-
-    while let Some(rows) = batcher.next_batch()? {
+    while let Some(mut rows) = batcher.next_batch()? {
         batch_index += 1;
         processed_rows += rows.len();
-        let current_hashes: HashMap<String, HashSet<String>> =
-            rows.iter().fold(HashMap::new(), |mut acc, row| {
-                acc.entry(row.file_path.clone())
-                    .or_default()
-                    .insert(row.content_hash.clone());
-                acc
-            });
-        let candidate_rows = rows.len();
-        let mut rows = existing_versions.retain_new_rows(rows).await?;
-        if !is_first_write {
-            existing_versions.delete_stale_rows(&current_hashes).await?;
-        }
-        skipped_existing_rows += candidate_rows.saturating_sub(rows.len());
-        if rows.is_empty() {
-            emit_progress(
-                progress,
-                SectionSidecarProgressEvent::BatchWritten {
-                    batch_index,
-                    written_rows,
-                    skipped_existing_rows,
-                    processed_rows,
-                    total_rows,
-                },
-            );
-            continue;
-        }
-        // Carry forward vectors from the previous artifact directory (if any)
-        // before running the embedder, so unchanged rows skip re-embedding.
         if let Some(prev_dir) = options.previous_artifact_dir.as_deref() {
             if prev_dir != artifact_dir {
-                fill_symbol_vectors_from_prev(&mut rows, prev_dir).await;
+                fill_symbol_vectors_from_prev_parquet(&mut rows, prev_dir);
             }
         }
         let embedding_eligible_rows = rows
@@ -1137,25 +925,8 @@ async fn write_symbol_rows_dataset_async(
                 );
             })
             .await;
-        let batch_rows = rows.len();
-        let batch = symbol_rows_to_batch(rows, schema.clone())?;
-        if let Some(table) = table.as_ref() {
-            table
-                .add(batch)
-                .execute()
-                .await
-                .context("failed to append LanceDB code symbol rows")?;
-            dataset_changed = true;
-        } else {
-            table = Some(
-                db.create_table(CODE_SYMBOLS_TABLE, batch)
-                    .execute()
-                    .await
-                    .context("failed to create LanceDB code symbols table")?,
-            );
-            dataset_changed = true;
-        }
-        written_rows += batch_rows;
+        written_rows += rows.len();
+        batches.push(symbol_rows_to_batch(rows, schema.clone())?);
         emit_progress(
             progress,
             SectionSidecarProgressEvent::BatchWritten {
@@ -1167,47 +938,8 @@ async fn write_symbol_rows_dataset_async(
             },
         );
     }
-
-    if table.is_none() {
-        let empty_batch = symbol_rows_to_batch(Vec::new(), schema)?;
-        table = Some(
-            db.create_table(CODE_SYMBOLS_TABLE, empty_batch)
-                .execute()
-                .await
-                .context("failed to create LanceDB code symbols table")?,
-        );
-    }
-
-    let final_rows = table
-        .as_ref()
-        .expect("code symbol table should exist before sidecar completion")
-        .count_rows(None)
-        .await
-        .context("failed to count LanceDB code symbol rows")?;
-
-    if dataset_changed {
-        let table = table
-            .as_ref()
-            .expect("code symbol table should exist after dataset change");
-        let should_rebuild_indexes = is_first_write
-            || written_rows >= INDEX_REBUILD_MIN_ROWS
-            || (final_rows > 0
-                && (written_rows as f64 / final_rows as f64) >= INDEX_REBUILD_MIN_PCT);
-        if should_rebuild_indexes {
-            emit_progress(
-                progress,
-                SectionSidecarProgressEvent::Indexing {
-                    label: "embed_text FTS",
-                    phase: SidecarPhase::CodeSymbols,
-                },
-            );
-            let should_optimize_existing_indices = ensure_code_symbol_fts_index(table).await?;
-            if should_optimize_existing_indices {
-                optimize_existing_indices(table, "code symbol").await?;
-            }
-        }
-    }
-
+    let final_rows =
+        write_record_batches_parquet(&artifact_dir.join(CODE_SYMBOLS_PARQUET), schema, batches)?;
     emit_progress(
         progress,
         SectionSidecarProgressEvent::Finished {
@@ -1219,7 +951,6 @@ async fn write_symbol_rows_dataset_async(
             row_scope,
         },
     );
-
     Ok(final_rows)
 }
 
@@ -1229,501 +960,6 @@ fn emit_progress(
 ) {
     if let Some(progress) = progress {
         progress(event);
-    }
-}
-
-async fn ensure_body_text_fts_index(table: &lancedb::Table) -> Result<bool> {
-    if has_matching_index(
-        &table
-            .list_indices()
-            .await
-            .context("failed to list LanceDB section indices")?,
-        "body_text",
-        |index_type| *index_type == IndexType::FTS,
-    ) {
-        return Ok(true);
-    }
-
-    table
-        .create_index(&["body_text"], Index::FTS(FtsIndexBuilder::default()))
-        .execute()
-        .await
-        .context("failed to create LanceDB body_text FTS index")?;
-    Ok(false)
-}
-
-fn has_matching_index(
-    indices: &[IndexConfig],
-    column: &str,
-    matches_type: impl Fn(&IndexType) -> bool,
-) -> bool {
-    indices
-        .iter()
-        .any(|index| matches_type(&index.index_type) && index_columns_match(index, column))
-}
-
-fn index_columns_match(index: &IndexConfig, column: &str) -> bool {
-    index.columns.len() == 1 && index.columns[0] == column
-}
-
-async fn optimize_existing_indices(table: &lancedb::Table, table_label: &str) -> Result<()> {
-    table
-        .optimize(OptimizeAction::Index(Default::default()))
-        .await
-        .with_context(|| format!("failed to optimize LanceDB {table_label} indices"))?;
-    Ok(())
-}
-
-async fn ensure_code_symbol_fts_index(table: &lancedb::Table) -> Result<bool> {
-    if has_matching_index(
-        &table
-            .list_indices()
-            .await
-            .context("failed to list LanceDB code symbol indices")?,
-        "embed_text",
-        |index_type| *index_type == IndexType::FTS,
-    ) {
-        return Ok(true);
-    }
-
-    table
-        .create_index(&["embed_text"], Index::FTS(FtsIndexBuilder::default()))
-        .execute()
-        .await
-        .context("failed to create LanceDB embed_text FTS index")?;
-    Ok(false)
-}
-
-async fn table_has_column(table: &lancedb::Table, column: &str, table_label: &str) -> bool {
-    match table.schema().await {
-        Ok(schema) => schema.field_with_name(column).is_ok(),
-        Err(error) => {
-            tracing::debug!(
-                error = %error,
-                table = table_label,
-                column,
-                "failed to inspect LanceDB table schema"
-            );
-            false
-        }
-    }
-}
-
-async fn table_has_vector_identity_columns(table: &lancedb::Table, table_label: &str) -> bool {
-    table_has_column(table, EMBEDDING_INPUT_HASH_COLUMN, table_label).await
-        && table_has_column(table, EMBEDDING_MODEL_COLUMN, table_label).await
-}
-
-async fn table_rows_match_embedding_model(
-    table: &lancedb::Table,
-    embedding_model: EmbeddingModelSelection,
-    table_label: &str,
-) -> bool {
-    let model_name = embedding_model.model_name();
-    let filter = format!(
-        "{EMBEDDING_MODEL_COLUMN} IS NULL OR {EMBEDDING_MODEL_COLUMN} != '{}'",
-        sql_string_literal(model_name)
-    );
-    match table.count_rows(Some(filter)).await {
-        Ok(0) => true,
-        Ok(mismatched_rows) => {
-            tracing::info!(
-                table = table_label,
-                expected_model = model_name,
-                mismatched_rows,
-                "sidecar seed has rows from an incompatible embedding model"
-            );
-            false
-        }
-        Err(error) => {
-            tracing::debug!(
-                error = %error,
-                table = table_label,
-                expected_model = model_name,
-                "failed to validate sidecar seed embedding model"
-            );
-            false
-        }
-    }
-}
-
-fn try_copy_previous_sidecar_dir(
-    previous_dir: &Path,
-    target_dir: &Path,
-    table_label: &str,
-) -> Result<bool> {
-    if !previous_dir.is_dir() {
-        tracing::debug!(
-            previous_dir = %previous_dir.display(),
-            table = table_label,
-            "previous sidecar directory absent; falling back to full sidecar write"
-        );
-        return Ok(false);
-    }
-    if target_dir.exists() {
-        remove_path_if_exists(target_dir)?;
-    }
-    match copy_dir_recursively(previous_dir, target_dir) {
-        Ok(()) => Ok(true),
-        Err(error) => {
-            tracing::debug!(
-                error = %error,
-                previous_dir = %previous_dir.display(),
-                target_dir = %target_dir.display(),
-                table = table_label,
-                "failed to copy previous sidecar directory; falling back to full sidecar write"
-            );
-            let _ = remove_path_if_exists(target_dir);
-            Ok(false)
-        }
-    }
-}
-
-fn copy_dir_recursively(source: &Path, destination: &Path) -> Result<()> {
-    fs::create_dir_all(destination)
-        .with_context(|| format!("failed to create `{}`", destination.display()))?;
-    for entry in
-        fs::read_dir(source).with_context(|| format!("failed to read `{}`", source.display()))?
-    {
-        let entry = entry.with_context(|| format!("failed to read `{}`", source.display()))?;
-        let source_path = entry.path();
-        let destination_path = destination.join(entry.file_name());
-        let metadata = entry
-            .file_type()
-            .with_context(|| format!("failed to inspect `{}`", source_path.display()))?;
-        if metadata.is_dir() {
-            copy_dir_recursively(&source_path, &destination_path)?;
-        } else if metadata.is_file() {
-            fs::copy(&source_path, &destination_path).with_context(|| {
-                format!(
-                    "failed to copy `{}` to `{}`",
-                    source_path.display(),
-                    destination_path.display()
-                )
-            })?;
-        } else {
-            anyhow::bail!(
-                "unsupported sidecar entry `{}` while copying previous sidecar",
-                source_path.display()
-            );
-        }
-    }
-    Ok(())
-}
-
-fn remove_path_if_exists(path: &Path) -> Result<()> {
-    match fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.is_dir() => fs::remove_dir_all(path)
-            .with_context(|| format!("failed to remove `{}`", path.display())),
-        Ok(_) => {
-            fs::remove_file(path).with_context(|| format!("failed to remove `{}`", path.display()))
-        }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error).with_context(|| format!("failed to inspect `{}`", path.display())),
-    }
-}
-
-async fn delete_rows_for_delta_paths(
-    table: &lancedb::Table,
-    delta: &SidecarDelta,
-    table_label: &str,
-) -> Result<()> {
-    let mut paths = BTreeSet::new();
-    paths.extend(delta.changed_paths.iter().map(String::as_str));
-    paths.extend(delta.deleted_paths.iter().map(String::as_str));
-    if paths.is_empty() {
-        return Ok(());
-    }
-    let literals = paths
-        .into_iter()
-        .map(|path| format!("'{}'", sql_string_literal(path)))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let filter = format!("file_path IN ({literals})");
-    table
-        .delete(&filter)
-        .await
-        .with_context(|| format!("failed to delete stale LanceDB {table_label} rows"))?;
-    Ok(())
-}
-
-struct ExistingFileVersions {
-    table: Option<lancedb::Table>,
-    missing_by_file_version: HashSet<(String, String)>,
-}
-
-impl ExistingFileVersions {
-    fn new(table: Option<&lancedb::Table>) -> Self {
-        Self {
-            table: table.cloned(),
-            missing_by_file_version: HashSet::new(),
-        }
-    }
-
-    async fn retain_new_rows(&mut self, rows: Vec<SectionRow>) -> Result<Vec<SectionRow>> {
-        if rows.is_empty() || self.table.is_none() {
-            return Ok(rows);
-        }
-        let existing = self.preload_existing_file_versions(&rows).await?;
-        let mut retained = Vec::with_capacity(rows.len());
-        for row in rows {
-            let key = (row.file_path.clone(), row.content_hash.clone());
-            if !existing.contains(&key) {
-                self.missing_by_file_version.insert(key);
-                retained.push(row);
-            }
-        }
-        Ok(retained)
-    }
-
-    async fn delete_stale_rows(
-        &self,
-        current_hashes: &HashMap<String, HashSet<String>>,
-    ) -> Result<()> {
-        let Some(table) = self.table.as_ref() else {
-            return Ok(());
-        };
-        if current_hashes.is_empty() {
-            return Ok(());
-        }
-        let mut file_paths: Vec<&str> = current_hashes.keys().map(|s| s.as_str()).collect();
-        file_paths.sort_unstable();
-        let path_literals = file_paths
-            .iter()
-            .map(|path| format!("'{}'", sql_string_literal(path)))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let mut keep_clauses: Vec<String> = Vec::new();
-        for (file_path, hashes) in current_hashes {
-            if hashes.is_empty() {
-                continue;
-            }
-            let mut sorted_hashes: Vec<&str> = hashes.iter().map(|s| s.as_str()).collect();
-            sorted_hashes.sort_unstable();
-            let hash_literals = sorted_hashes
-                .into_iter()
-                .map(|h| format!("'{}'", sql_string_literal(h)))
-                .collect::<Vec<_>>()
-                .join(", ");
-            keep_clauses.push(format!(
-                "(file_path = '{}' AND content_hash NOT IN ({hash_literals}))",
-                sql_string_literal(file_path)
-            ));
-        }
-        if keep_clauses.is_empty() {
-            let filter = format!("file_path IN ({path_literals})");
-            table
-                .delete(&filter)
-                .await
-                .context("failed to delete stale LanceDB section rows")?;
-        } else {
-            let keep_filter = keep_clauses.join(" OR ");
-            let filter = format!("file_path IN ({path_literals}) AND ({keep_filter})");
-            table
-                .delete(&filter)
-                .await
-                .context("failed to delete stale LanceDB section rows")?;
-        }
-        Ok(())
-    }
-
-    async fn preload_existing_file_versions(
-        &mut self,
-        rows: &[SectionRow],
-    ) -> Result<HashSet<(String, String)>> {
-        let Some(table) = self.table.as_ref() else {
-            return Ok(HashSet::new());
-        };
-        let mut file_paths: Vec<_> = rows
-            .iter()
-            .map(|row| row.file_path.as_str())
-            .collect::<HashSet<_>>()
-            .into_iter()
-            .collect();
-        if file_paths.is_empty() {
-            return Ok(HashSet::new());
-        }
-        file_paths.sort_unstable();
-        let literals = file_paths
-            .into_iter()
-            .map(|path| format!("'{}'", sql_string_literal(path)))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let filter = format!("file_path IN ({literals})");
-        let mut batches = table
-            .query()
-            .only_if(filter)
-            .select(Select::columns(&["file_path", "content_hash"]))
-            .execute()
-            .await
-            .context("failed to query existing LanceDB section rows")?;
-        let mut existing = HashSet::new();
-        while let Some(batch) = std::future::poll_fn(|cx| batches.as_mut().poll_next(cx))
-            .await
-            .transpose()
-            .context("failed to read existing LanceDB section rows")?
-        {
-            let file_paths = batch
-                .column_by_name("file_path")
-                .context("existing section rows missing file_path column")?
-                .as_any()
-                .downcast_ref::<StringArray>()
-                .context("existing section file_path column was not Utf8")?;
-            let content_hashes = batch
-                .column_by_name("content_hash")
-                .context("existing section rows missing content_hash column")?
-                .as_any()
-                .downcast_ref::<StringArray>()
-                .context("existing section content_hash column was not Utf8")?;
-            for index in 0..batch.num_rows() {
-                existing.insert((
-                    file_paths.value(index).to_owned(),
-                    content_hashes.value(index).to_owned(),
-                ));
-            }
-        }
-        existing.retain(|key| !self.missing_by_file_version.contains(key));
-        Ok(existing)
-    }
-}
-
-struct ExistingSymbolFileVersions {
-    table: Option<lancedb::Table>,
-    missing_by_file_version: HashSet<(String, String)>,
-}
-
-impl ExistingSymbolFileVersions {
-    fn new(table: Option<&lancedb::Table>) -> Self {
-        Self {
-            table: table.cloned(),
-            missing_by_file_version: HashSet::new(),
-        }
-    }
-
-    async fn retain_new_rows(&mut self, rows: Vec<SymbolRow>) -> Result<Vec<SymbolRow>> {
-        if rows.is_empty() || self.table.is_none() {
-            return Ok(rows);
-        }
-        let existing = self.preload_existing_file_versions(&rows).await?;
-        let mut retained = Vec::with_capacity(rows.len());
-        for row in rows {
-            let key = (row.file_path.clone(), row.content_hash.clone());
-            if !existing.contains(&key) {
-                self.missing_by_file_version.insert(key);
-                retained.push(row);
-            }
-        }
-        Ok(retained)
-    }
-
-    async fn delete_stale_rows(
-        &self,
-        current_hashes: &HashMap<String, HashSet<String>>,
-    ) -> Result<()> {
-        let Some(table) = self.table.as_ref() else {
-            return Ok(());
-        };
-        if current_hashes.is_empty() {
-            return Ok(());
-        }
-        let mut file_paths: Vec<&str> = current_hashes.keys().map(|s| s.as_str()).collect();
-        file_paths.sort_unstable();
-        let path_literals = file_paths
-            .iter()
-            .map(|path| format!("'{}'", sql_string_literal(path)))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let mut keep_clauses: Vec<String> = Vec::new();
-        for (file_path, hashes) in current_hashes {
-            if hashes.is_empty() {
-                continue;
-            }
-            let mut sorted_hashes: Vec<&str> = hashes.iter().map(|s| s.as_str()).collect();
-            sorted_hashes.sort_unstable();
-            let hash_literals = sorted_hashes
-                .into_iter()
-                .map(|h| format!("'{}'", sql_string_literal(h)))
-                .collect::<Vec<_>>()
-                .join(", ");
-            keep_clauses.push(format!(
-                "(file_path = '{}' AND content_hash NOT IN ({hash_literals}))",
-                sql_string_literal(file_path)
-            ));
-        }
-        if keep_clauses.is_empty() {
-            let filter = format!("file_path IN ({path_literals})");
-            table
-                .delete(&filter)
-                .await
-                .context("failed to delete stale LanceDB code symbol rows")?;
-        } else {
-            let keep_filter = keep_clauses.join(" OR ");
-            let filter = format!("file_path IN ({path_literals}) AND ({keep_filter})");
-            table
-                .delete(&filter)
-                .await
-                .context("failed to delete stale LanceDB code symbol rows")?;
-        }
-        Ok(())
-    }
-
-    async fn preload_existing_file_versions(
-        &mut self,
-        rows: &[SymbolRow],
-    ) -> Result<HashSet<(String, String)>> {
-        let Some(table) = self.table.as_ref() else {
-            return Ok(HashSet::new());
-        };
-        let mut file_paths: Vec<_> = rows
-            .iter()
-            .map(|row| row.file_path.as_str())
-            .collect::<HashSet<_>>()
-            .into_iter()
-            .collect();
-        if file_paths.is_empty() {
-            return Ok(HashSet::new());
-        }
-        file_paths.sort_unstable();
-        let literals = file_paths
-            .into_iter()
-            .map(|path| format!("'{}'", sql_string_literal(path)))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let filter = format!("file_path IN ({literals})");
-        let mut batches = table
-            .query()
-            .only_if(filter)
-            .select(Select::columns(&["file_path", "content_hash"]))
-            .execute()
-            .await
-            .context("failed to query existing LanceDB code symbol rows")?;
-        let mut existing = HashSet::new();
-        while let Some(batch) = std::future::poll_fn(|cx| batches.as_mut().poll_next(cx))
-            .await
-            .transpose()
-            .context("failed to read existing LanceDB code symbol rows")?
-        {
-            let file_paths = batch
-                .column_by_name("file_path")
-                .context("existing code symbol rows missing file_path column")?
-                .as_any()
-                .downcast_ref::<StringArray>()
-                .context("existing code symbol file_path column was not Utf8")?;
-            let content_hashes = batch
-                .column_by_name("content_hash")
-                .context("existing code symbol rows missing content_hash column")?
-                .as_any()
-                .downcast_ref::<StringArray>()
-                .context("existing code symbol content_hash column was not Utf8")?;
-            for index in 0..batch.num_rows() {
-                existing.insert((
-                    file_paths.value(index).to_owned(),
-                    content_hashes.value(index).to_owned(),
-                ));
-            }
-        }
-        existing.retain(|key| !self.missing_by_file_version.contains(key));
-        Ok(existing)
     }
 }
 
@@ -3040,7 +2276,7 @@ fn backfill_missing_vectors_without_current_runtime(
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .context("failed to create LanceDB vector backfill runtime")?;
+        .context("failed to create vector backfill runtime")?;
     runtime.block_on(backfill_missing_vectors_async(artifact_dir, options))
 }
 
@@ -3117,22 +2353,30 @@ where
     if options.skip_section_embeddings {
         return Ok(VectorBackfillTableStats::default());
     }
-    let Some(table) = open_section_table_for_backfill(artifact_dir).await? else {
+    let path = artifact_dir.join(SECTIONS_PARQUET);
+    if !path.is_file() {
         return Ok(VectorBackfillTableStats::default());
-    };
-    let total_rows = count_backfill_table_rows(&table, "section sidecar").await?;
-    if !table_has_vector_identity_columns(&table, "section sidecar").await {
-        let null_vector_rows = count_backfill_null_vector_rows(&table, "section sidecar").await?;
-        return Ok(VectorBackfillTableStats {
-            total_rows,
-            null_vector_rows,
-            ..VectorBackfillTableStats::default()
-        });
     }
-    let (null_vector_rows, mut rows) = load_section_backfill_rows(&table, embedding_model).await?;
-    let eligible_rows = rows.len();
-    apply_backfill_embeddings_to_section_rows(&mut rows, options, embedding_model, embed_batch);
-    let filled_rows = merge_backfilled_section_rows(&table, rows).await?;
+    let mut all_rows = load_all_section_rows_from_parquet(&path)?;
+    let total_rows = all_rows.len();
+    let null_vector_rows = all_rows.iter().filter(|row| row.vector.is_none()).count();
+    let mut eligible: Vec<SectionRow> = all_rows
+        .iter()
+        .filter(|row| {
+            row.vector.is_none()
+                && section_row_matches_current_embedding_contract(row, embedding_model)
+        })
+        .cloned()
+        .collect();
+    sort_section_rows_by_vector_identity(&mut eligible);
+    let eligible_rows = eligible.len();
+    apply_backfill_embeddings_to_section_rows(&mut eligible, options, embedding_model, embed_batch);
+    let filled_rows = merge_filled_section_vectors(&mut all_rows, eligible);
+    write_record_batches_parquet(
+        &path,
+        sections_schema(),
+        vec![rows_to_batch(all_rows, sections_schema())?],
+    )?;
     Ok(VectorBackfillTableStats {
         total_rows,
         null_vector_rows,
@@ -3153,23 +2397,30 @@ where
     if options.skip_code_symbol_embeddings {
         return Ok(VectorBackfillTableStats::default());
     }
-    let Some(table) = open_symbol_table_for_backfill(artifact_dir).await? else {
+    let path = artifact_dir.join(CODE_SYMBOLS_PARQUET);
+    if !path.is_file() {
         return Ok(VectorBackfillTableStats::default());
-    };
-    let total_rows = count_backfill_table_rows(&table, "code symbol sidecar").await?;
-    if !table_has_vector_identity_columns(&table, "code symbol sidecar").await {
-        let null_vector_rows =
-            count_backfill_null_vector_rows(&table, "code symbol sidecar").await?;
-        return Ok(VectorBackfillTableStats {
-            total_rows,
-            null_vector_rows,
-            ..VectorBackfillTableStats::default()
-        });
     }
-    let (null_vector_rows, mut rows) = load_symbol_backfill_rows(&table, embedding_model).await?;
-    let eligible_rows = rows.len();
-    apply_backfill_embeddings_to_symbol_rows(&mut rows, options, embedding_model, embed_batch);
-    let filled_rows = merge_backfilled_symbol_rows(&table, rows).await?;
+    let mut all_rows = load_all_symbol_rows_from_parquet(&path)?;
+    let total_rows = all_rows.len();
+    let null_vector_rows = all_rows.iter().filter(|row| row.vector.is_none()).count();
+    let mut eligible: Vec<SymbolRow> = all_rows
+        .iter()
+        .filter(|row| {
+            row.vector.is_none()
+                && symbol_row_matches_current_embedding_contract(row, embedding_model)
+        })
+        .cloned()
+        .collect();
+    sort_symbol_rows_by_vector_identity(&mut eligible);
+    let eligible_rows = eligible.len();
+    apply_backfill_embeddings_to_symbol_rows(&mut eligible, options, embedding_model, embed_batch);
+    let filled_rows = merge_filled_symbol_vectors(&mut all_rows, eligible);
+    write_record_batches_parquet(
+        &path,
+        symbol_rows_schema(),
+        vec![symbol_rows_to_batch(all_rows, symbol_rows_schema())?],
+    )?;
     Ok(VectorBackfillTableStats {
         total_rows,
         null_vector_rows,
@@ -3178,208 +2429,218 @@ where
     })
 }
 
-async fn count_backfill_table_rows(table: &lancedb::Table, table_label: &str) -> Result<usize> {
-    table
-        .count_rows(None)
-        .await
-        .with_context(|| format!("failed to count LanceDB {table_label} rows"))
-}
-
-async fn count_backfill_null_vector_rows(
-    table: &lancedb::Table,
-    table_label: &str,
-) -> Result<usize> {
-    table
-        .count_rows(Some("vector IS NULL".to_owned()))
-        .await
-        .with_context(|| format!("failed to count missing LanceDB {table_label} vectors"))
-}
-
-async fn open_section_table_for_backfill(artifact_dir: &Path) -> Result<Option<lancedb::Table>> {
-    let dataset_dir = artifact_dir.join(SECTIONS_DATASET_DIR);
-    if !dataset_dir.is_dir() {
-        return Ok(None);
-    }
-    let db = lancedb::connect(dataset_dir.to_string_lossy().as_ref())
-        .execute()
-        .await
-        .context("failed to connect to sections.lancedb for vector backfill")?;
-    Ok(db.open_table(SECTIONS_TABLE).execute().await.ok())
-}
-
-async fn open_symbol_table_for_backfill(artifact_dir: &Path) -> Result<Option<lancedb::Table>> {
-    if !artifact_dir.join(CODE_SYMBOLS_DATASET_DIR).is_dir() {
-        return Ok(None);
-    }
-    let db = lancedb::connect(artifact_dir.to_string_lossy().as_ref())
-        .execute()
-        .await
-        .context("failed to connect to code_symbols.lance for vector backfill")?;
-    Ok(db.open_table(CODE_SYMBOLS_TABLE).execute().await.ok())
-}
-
-async fn load_section_backfill_rows(
-    table: &lancedb::Table,
-    embedding_model: EmbeddingModelSelection,
-) -> Result<(usize, Vec<SectionRow>)> {
-    let mut stream = table
-        .query()
-        .only_if("vector IS NULL")
-        .select(Select::columns(&[
-            "stable_symbol_id",
-            "file_path",
-            "qualified_name",
-            "heading_level",
-            "body_text",
-            "body_byte_start",
-            "body_byte_end",
-            "child_count",
-            "parent_stable_id",
-            "content_hash",
-            EMBEDDING_INPUT_HASH_COLUMN,
-            EMBEDDING_MODEL_COLUMN,
-        ]))
-        .execute()
-        .await
-        .context("failed to query missing LanceDB section vectors")?;
-    let mut null_vector_rows = 0usize;
+fn load_all_section_rows_from_parquet(path: &Path) -> Result<Vec<SectionRow>> {
     let mut rows = Vec::new();
-    while let Some(batch) = std::future::poll_fn(|cx| stream.as_mut().poll_next(cx))
-        .await
-        .transpose()
-        .context("failed to read missing LanceDB section vector rows")?
-    {
-        null_vector_rows += batch.num_rows();
-        let stable_symbol_ids = string_column(&batch, "stable_symbol_id", "section")?;
-        let file_paths = string_column(&batch, "file_path", "section")?;
-        let qualified_names = string_column(&batch, "qualified_name", "section")?;
-        let heading_levels = batch
-            .column_by_name("heading_level")
-            .context("section backfill rows missing heading_level column")?
-            .as_any()
-            .downcast_ref::<UInt8Array>()
-            .context("section heading_level column was not UInt8")?;
-        let body_texts = batch
-            .column_by_name("body_text")
-            .context("section backfill rows missing body_text column")?
-            .as_any()
-            .downcast_ref::<LargeStringArray>()
-            .context("section body_text column was not LargeUtf8")?;
-        let body_byte_starts = batch
-            .column_by_name("body_byte_start")
-            .context("section backfill rows missing body_byte_start column")?
-            .as_any()
-            .downcast_ref::<UInt64Array>()
-            .context("section body_byte_start column was not UInt64")?;
-        let body_byte_ends = batch
-            .column_by_name("body_byte_end")
-            .context("section backfill rows missing body_byte_end column")?
-            .as_any()
-            .downcast_ref::<UInt64Array>()
-            .context("section body_byte_end column was not UInt64")?;
-        let child_counts = batch
-            .column_by_name("child_count")
-            .context("section backfill rows missing child_count column")?
-            .as_any()
-            .downcast_ref::<UInt32Array>()
-            .context("section child_count column was not UInt32")?;
-        let parent_stable_ids = string_column(&batch, "parent_stable_id", "section")?;
-        let content_hashes = string_column(&batch, "content_hash", "section")?;
-        let embedding_input_hashes = string_column(&batch, EMBEDDING_INPUT_HASH_COLUMN, "section")?;
-        let embedding_models = string_column(&batch, EMBEDDING_MODEL_COLUMN, "section")?;
-        for index in 0..batch.num_rows() {
-            let row = SectionRow {
-                stable_symbol_id: stable_symbol_ids.value(index).to_owned(),
-                file_path: file_paths.value(index).to_owned(),
-                qualified_name: qualified_names.value(index).to_owned(),
-                heading_level: heading_levels.value(index),
-                body_text: body_texts.value(index).to_owned(),
-                body_byte_start: body_byte_starts.value(index),
-                body_byte_end: body_byte_ends.value(index),
-                child_count: child_counts.value(index),
-                parent_stable_id: if parent_stable_ids.is_null(index) {
-                    None
-                } else {
-                    Some(parent_stable_ids.value(index).to_owned())
-                },
-                content_hash: content_hashes.value(index).to_owned(),
-                embedding_input_hash: embedding_input_hashes.value(index).to_owned(),
-                embedding_model: embedding_models.value(index).to_owned(),
-                vector: None,
-            };
-            if section_row_matches_current_embedding_contract(&row, embedding_model) {
-                rows.push(row);
-            }
+    for batch in read_parquet_batches(path)? {
+        rows.extend(section_rows_from_record_batch(&batch)?);
+    }
+    Ok(rows)
+}
+
+fn load_all_symbol_rows_from_parquet(path: &Path) -> Result<Vec<SymbolRow>> {
+    let mut rows = Vec::new();
+    for batch in read_parquet_batches(path)? {
+        rows.extend(symbol_rows_from_record_batch(&batch)?);
+    }
+    Ok(rows)
+}
+
+fn read_parquet_batches(path: &Path) -> Result<Vec<RecordBatch>> {
+    let file = fs::File::open(path)
+        .with_context(|| format!("failed to open parquet `{}`", path.display()))?;
+    let reader = ParquetRecordBatchReaderBuilder::try_new(file)
+        .with_context(|| format!("failed to read parquet `{}`", path.display()))?
+        .build()
+        .with_context(|| format!("failed to build parquet reader `{}`", path.display()))?;
+    reader
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .with_context(|| format!("failed to collect parquet batches `{}`", path.display()))
+}
+
+fn section_rows_from_record_batch(batch: &RecordBatch) -> Result<Vec<SectionRow>> {
+    let stable_symbol_ids = string_column(batch, "stable_symbol_id", "section")?;
+    let file_paths = string_column(batch, "file_path", "section")?;
+    let qualified_names = string_column(batch, "qualified_name", "section")?;
+    let heading_levels = batch
+        .column_by_name("heading_level")
+        .context("section rows missing heading_level column")?
+        .as_any()
+        .downcast_ref::<UInt8Array>()
+        .context("section heading_level column was not UInt8")?;
+    let body_texts = batch
+        .column_by_name("body_text")
+        .context("section rows missing body_text column")?
+        .as_any()
+        .downcast_ref::<LargeStringArray>()
+        .context("section body_text column was not LargeUtf8")?;
+    let body_byte_starts = batch
+        .column_by_name("body_byte_start")
+        .context("section rows missing body_byte_start column")?
+        .as_any()
+        .downcast_ref::<UInt64Array>()
+        .context("section body_byte_start column was not UInt64")?;
+    let body_byte_ends = batch
+        .column_by_name("body_byte_end")
+        .context("section rows missing body_byte_end column")?
+        .as_any()
+        .downcast_ref::<UInt64Array>()
+        .context("section body_byte_end column was not UInt64")?;
+    let child_counts = batch
+        .column_by_name("child_count")
+        .context("section rows missing child_count column")?
+        .as_any()
+        .downcast_ref::<UInt32Array>()
+        .context("section child_count column was not UInt32")?;
+    let parent_stable_ids = string_column(batch, "parent_stable_id", "section")?;
+    let content_hashes = string_column(batch, "content_hash", "section")?;
+    let embedding_input_hashes = string_column(batch, EMBEDDING_INPUT_HASH_COLUMN, "section")?;
+    let embedding_models = string_column(batch, EMBEDDING_MODEL_COLUMN, "section")?;
+    let vectors = batch
+        .column_by_name("vector")
+        .and_then(|col| col.as_any().downcast_ref::<FixedSizeListArray>());
+    let mut rows = Vec::with_capacity(batch.num_rows());
+    for index in 0..batch.num_rows() {
+        rows.push(SectionRow {
+            stable_symbol_id: stable_symbol_ids.value(index).to_owned(),
+            file_path: file_paths.value(index).to_owned(),
+            qualified_name: qualified_names.value(index).to_owned(),
+            heading_level: heading_levels.value(index),
+            body_text: body_texts.value(index).to_owned(),
+            body_byte_start: body_byte_starts.value(index),
+            body_byte_end: body_byte_ends.value(index),
+            child_count: child_counts.value(index),
+            parent_stable_id: if parent_stable_ids.is_null(index) {
+                None
+            } else {
+                Some(parent_stable_ids.value(index).to_owned())
+            },
+            content_hash: content_hashes.value(index).to_owned(),
+            embedding_input_hash: embedding_input_hashes.value(index).to_owned(),
+            embedding_model: embedding_models.value(index).to_owned(),
+            vector: vector_at(vectors, index),
+        });
+    }
+    Ok(rows)
+}
+
+fn symbol_rows_from_record_batch(batch: &RecordBatch) -> Result<Vec<SymbolRow>> {
+    let stable_symbol_ids = string_column(batch, "stable_symbol_id", "code symbol")?;
+    let file_paths = string_column(batch, "file_path", "code symbol")?;
+    let qualified_names = string_column(batch, "qualified_name", "code symbol")?;
+    let entity_names = string_column(batch, "entity_name", "code symbol")?;
+    let symbol_kinds = string_column(batch, "symbol_kind", "code symbol")?;
+    let embed_texts = batch
+        .column_by_name("embed_text")
+        .context("code symbol rows missing embed_text column")?
+        .as_any()
+        .downcast_ref::<LargeStringArray>()
+        .context("code symbol embed_text column was not LargeUtf8")?;
+    let content_hashes = string_column(batch, "content_hash", "code symbol")?;
+    let embedding_input_hashes = string_column(batch, EMBEDDING_INPUT_HASH_COLUMN, "code symbol")?;
+    let embedding_models = string_column(batch, EMBEDDING_MODEL_COLUMN, "code symbol")?;
+    let vectors = batch
+        .column_by_name("vector")
+        .and_then(|col| col.as_any().downcast_ref::<FixedSizeListArray>());
+    let mut rows = Vec::with_capacity(batch.num_rows());
+    for index in 0..batch.num_rows() {
+        rows.push(SymbolRow {
+            stable_symbol_id: stable_symbol_ids.value(index).to_owned(),
+            file_path: file_paths.value(index).to_owned(),
+            qualified_name: qualified_names.value(index).to_owned(),
+            entity_name: entity_names.value(index).to_owned(),
+            symbol_kind: symbol_kinds.value(index).to_owned(),
+            embed_text: embed_texts.value(index).to_owned(),
+            vector: vector_at(vectors, index),
+            content_hash: content_hashes.value(index).to_owned(),
+            embedding_input_hash: embedding_input_hashes.value(index).to_owned(),
+            embedding_model: embedding_models.value(index).to_owned(),
+        });
+    }
+    Ok(rows)
+}
+
+fn vector_at(vectors: Option<&FixedSizeListArray>, index: usize) -> Option<Vec<f32>> {
+    let vectors = vectors?;
+    if vectors.is_null(index) {
+        return None;
+    }
+    vectors
+        .value(index)
+        .as_any()
+        .downcast_ref::<Float32Array>()
+        .map(|array| array.values().to_vec())
+}
+
+fn merge_filled_section_vectors(all_rows: &mut [SectionRow], filled: Vec<SectionRow>) -> usize {
+    let filled_by_key: HashMap<(String, String, String, String), Vec<f32>> = filled
+        .into_iter()
+        .filter_map(|row| {
+            row.vector.map(|vector| {
+                (
+                    (
+                        row.file_path,
+                        row.embedding_model,
+                        row.embedding_input_hash,
+                        row.stable_symbol_id,
+                    ),
+                    vector,
+                )
+            })
+        })
+        .collect();
+    let mut filled_rows = 0usize;
+    for row in all_rows {
+        if row.vector.is_some() {
+            continue;
+        }
+        let key = (
+            row.file_path.clone(),
+            row.embedding_model.clone(),
+            row.embedding_input_hash.clone(),
+            row.stable_symbol_id.clone(),
+        );
+        if let Some(vector) = filled_by_key.get(&key) {
+            row.vector = Some(vector.clone());
+            filled_rows += 1;
         }
     }
-    sort_section_rows_by_vector_identity(&mut rows);
-    Ok((null_vector_rows, rows))
+    filled_rows
 }
 
-async fn load_symbol_backfill_rows(
-    table: &lancedb::Table,
-    embedding_model: EmbeddingModelSelection,
-) -> Result<(usize, Vec<SymbolRow>)> {
-    let mut stream = table
-        .query()
-        .only_if("vector IS NULL")
-        .select(Select::columns(&[
-            "stable_symbol_id",
-            "file_path",
-            "qualified_name",
-            "entity_name",
-            "symbol_kind",
-            "embed_text",
-            "content_hash",
-            EMBEDDING_INPUT_HASH_COLUMN,
-            EMBEDDING_MODEL_COLUMN,
-        ]))
-        .execute()
-        .await
-        .context("failed to query missing LanceDB code symbol vectors")?;
-    let mut null_vector_rows = 0usize;
-    let mut rows = Vec::new();
-    while let Some(batch) = std::future::poll_fn(|cx| stream.as_mut().poll_next(cx))
-        .await
-        .transpose()
-        .context("failed to read missing LanceDB code symbol vector rows")?
-    {
-        null_vector_rows += batch.num_rows();
-        let stable_symbol_ids = string_column(&batch, "stable_symbol_id", "code symbol")?;
-        let file_paths = string_column(&batch, "file_path", "code symbol")?;
-        let qualified_names = string_column(&batch, "qualified_name", "code symbol")?;
-        let entity_names = string_column(&batch, "entity_name", "code symbol")?;
-        let symbol_kinds = string_column(&batch, "symbol_kind", "code symbol")?;
-        let embed_texts = batch
-            .column_by_name("embed_text")
-            .context("code symbol backfill rows missing embed_text column")?
-            .as_any()
-            .downcast_ref::<LargeStringArray>()
-            .context("code symbol embed_text column was not LargeUtf8")?;
-        let content_hashes = string_column(&batch, "content_hash", "code symbol")?;
-        let embedding_input_hashes =
-            string_column(&batch, EMBEDDING_INPUT_HASH_COLUMN, "code symbol")?;
-        let embedding_models = string_column(&batch, EMBEDDING_MODEL_COLUMN, "code symbol")?;
-        for index in 0..batch.num_rows() {
-            let row = SymbolRow {
-                stable_symbol_id: stable_symbol_ids.value(index).to_owned(),
-                file_path: file_paths.value(index).to_owned(),
-                qualified_name: qualified_names.value(index).to_owned(),
-                entity_name: entity_names.value(index).to_owned(),
-                symbol_kind: symbol_kinds.value(index).to_owned(),
-                embed_text: embed_texts.value(index).to_owned(),
-                vector: None,
-                content_hash: content_hashes.value(index).to_owned(),
-                embedding_input_hash: embedding_input_hashes.value(index).to_owned(),
-                embedding_model: embedding_models.value(index).to_owned(),
-            };
-            if symbol_row_matches_current_embedding_contract(&row, embedding_model) {
-                rows.push(row);
-            }
+fn merge_filled_symbol_vectors(all_rows: &mut [SymbolRow], filled: Vec<SymbolRow>) -> usize {
+    let filled_by_key: HashMap<(String, String, String, String), Vec<f32>> = filled
+        .into_iter()
+        .filter_map(|row| {
+            row.vector.map(|vector| {
+                (
+                    (
+                        row.file_path,
+                        row.embedding_model,
+                        row.embedding_input_hash,
+                        row.stable_symbol_id,
+                    ),
+                    vector,
+                )
+            })
+        })
+        .collect();
+    let mut filled_rows = 0usize;
+    for row in all_rows {
+        if row.vector.is_some() {
+            continue;
+        }
+        let key = (
+            row.file_path.clone(),
+            row.embedding_model.clone(),
+            row.embedding_input_hash.clone(),
+            row.stable_symbol_id.clone(),
+        );
+        if let Some(vector) = filled_by_key.get(&key) {
+            row.vector = Some(vector.clone());
+            filled_rows += 1;
         }
     }
-    sort_symbol_rows_by_vector_identity(&mut rows);
-    Ok((null_vector_rows, rows))
+    filled_rows
 }
 
 fn string_column<'a>(
@@ -3505,62 +2766,6 @@ where
     result
 }
 
-async fn merge_backfilled_section_rows(
-    table: &lancedb::Table,
-    rows: Vec<SectionRow>,
-) -> Result<usize> {
-    let rows = rows
-        .into_iter()
-        .filter(|row| row.vector.is_some())
-        .collect::<Vec<_>>();
-    if rows.is_empty() {
-        return Ok(0);
-    }
-    let schema = sections_schema();
-    let batch = rows_to_batch(rows, schema.clone())?;
-    let reader = RecordBatchIterator::new(std::iter::once(Ok(batch)), schema);
-    let mut merge = table.merge_insert(&[
-        "file_path",
-        EMBEDDING_MODEL_COLUMN,
-        EMBEDDING_INPUT_HASH_COLUMN,
-        "stable_symbol_id",
-    ]);
-    merge.when_matched_update_all(Some("target.vector IS NULL".to_owned()));
-    let result = merge
-        .execute(Box::new(reader))
-        .await
-        .context("failed to merge backfilled LanceDB section vectors")?;
-    Ok(result.num_updated_rows as usize)
-}
-
-async fn merge_backfilled_symbol_rows(
-    table: &lancedb::Table,
-    rows: Vec<SymbolRow>,
-) -> Result<usize> {
-    let rows = rows
-        .into_iter()
-        .filter(|row| row.vector.is_some())
-        .collect::<Vec<_>>();
-    if rows.is_empty() {
-        return Ok(0);
-    }
-    let schema = symbol_rows_schema();
-    let batch = symbol_rows_to_batch(rows, schema.clone())?;
-    let reader = RecordBatchIterator::new(std::iter::once(Ok(batch)), schema);
-    let mut merge = table.merge_insert(&[
-        "file_path",
-        EMBEDDING_MODEL_COLUMN,
-        EMBEDDING_INPUT_HASH_COLUMN,
-        "stable_symbol_id",
-    ]);
-    merge.when_matched_update_all(Some("target.vector IS NULL".to_owned()));
-    let result = merge
-        .execute(Box::new(reader))
-        .await
-        .context("failed to merge backfilled LanceDB code symbol vectors")?;
-    Ok(result.num_updated_rows as usize)
-}
-
 fn sort_section_rows_by_vector_identity(rows: &mut [SectionRow]) {
     rows.sort_by(|a, b| {
         a.file_path
@@ -3581,322 +2786,174 @@ fn sort_symbol_rows_by_vector_identity(rows: &mut [SymbolRow]) {
     });
 }
 
-/// Query the `sections.lancedb` table in `prev_dir` and fill `row.vector` for
-/// any row whose `(file_path, embedding_model, embedding_input_hash,
-/// stable_symbol_id)` matches a row in the previous table.  Rows with the
-/// wrong vector length are silently skipped.  Any failure to open the previous
-/// table, including legacy sidecars without vector identity columns, is
-/// silently ignored.
-async fn fill_section_vectors_from_prev(rows: &mut [SectionRow], prev_dir: &Path) {
-    let dataset_dir = prev_dir.join(SECTIONS_DATASET_DIR);
-    let db = match lancedb::connect(dataset_dir.to_string_lossy().as_ref())
-        .execute()
-        .await
-    {
-        Ok(db) => db,
-        Err(err) => {
-            tracing::debug!(
-                error = %err,
-                prev_dir = %prev_dir.display(),
-                "carry-forward: cannot connect to previous sections.lancedb; skipping"
-            );
-            return;
+fn previous_sidecars_match_embedding_model(
+    prev_dir: &Path,
+    embedding_model: EmbeddingModelSelection,
+) -> bool {
+    let expected = embedding_model.model_name();
+    if let Ok(rows) = load_all_section_rows_from_parquet(&prev_dir.join(SECTIONS_PARQUET)) {
+        if rows
+            .iter()
+            .any(|row| row.vector.is_some() && row.embedding_model != expected)
+        {
+            return false;
         }
-    };
-    let table = match db.open_table(SECTIONS_TABLE).execute().await {
-        Ok(t) => t,
-        Err(err) => {
-            tracing::debug!(
-                error = %err,
-                prev_dir = %prev_dir.display(),
-                "carry-forward: previous sections table absent; skipping"
-            );
-            return;
+    }
+    if let Ok(rows) = load_all_symbol_rows_from_parquet(&prev_dir.join(CODE_SYMBOLS_PARQUET)) {
+        if rows
+            .iter()
+            .any(|row| row.vector.is_some() && row.embedding_model != expected)
+        {
+            return false;
         }
-    };
+    }
+    true
+}
 
-    // Collect unique file_paths to constrain the query.
-    let mut file_paths: Vec<&str> = rows
+fn retained_section_rows_from_prev_parquet(
+    prev_dir: &Path,
+    delta: &SidecarDelta,
+) -> Vec<SectionRow> {
+    let Ok(rows) = load_all_section_rows_from_parquet(&prev_dir.join(SECTIONS_PARQUET)) else {
+        return Vec::new();
+    };
+    let excluded = excluded_delta_paths(delta);
+    rows.into_iter()
+        .filter(|row| !excluded.contains(row.file_path.as_str()))
+        .collect()
+}
+
+fn retained_symbol_rows_from_prev_parquet(prev_dir: &Path, delta: &SidecarDelta) -> Vec<SymbolRow> {
+    let Ok(rows) = load_all_symbol_rows_from_parquet(&prev_dir.join(CODE_SYMBOLS_PARQUET)) else {
+        return Vec::new();
+    };
+    let excluded = excluded_delta_paths(delta);
+    rows.into_iter()
+        .filter(|row| !excluded.contains(row.file_path.as_str()))
+        .collect()
+}
+
+fn excluded_delta_paths(delta: &SidecarDelta) -> BTreeSet<&str> {
+    delta
+        .changed_paths
         .iter()
-        .map(|r| r.file_path.as_str())
-        .collect::<std::collections::HashSet<_>>()
-        .into_iter()
-        .collect();
-    if file_paths.is_empty() {
-        return;
-    }
-    file_paths.sort_unstable();
-    let literals = file_paths
-        .iter()
-        .map(|p| format!("'{}'", sql_string_literal(p)))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let filter = format!("file_path IN ({literals})");
+        .chain(delta.deleted_paths.iter())
+        .map(String::as_str)
+        .collect()
+}
 
-    let mut stream = match table
-        .query()
-        .only_if(filter)
-        .select(Select::columns(&[
-            "file_path",
-            EMBEDDING_MODEL_COLUMN,
-            EMBEDDING_INPUT_HASH_COLUMN,
-            "stable_symbol_id",
-            "vector",
-        ]))
-        .execute()
-        .await
-    {
-        Ok(s) => s,
-        Err(err) => {
-            tracing::debug!(
-                error = %err,
-                "carry-forward: failed to query previous sections table; skipping"
-            );
-            return;
-        }
-    };
-
-    // Build map: (file_path, embedding_model, embedding_input_hash, stable_symbol_id) -> vector
-    let mut prev_vectors: HashMap<(String, String, String, String), Vec<f32>> = HashMap::new();
-    loop {
-        match std::future::poll_fn(|cx| stream.as_mut().poll_next(cx)).await {
-            Some(Ok(batch)) => {
-                if let Some(vec_col) = batch
-                    .column_by_name("vector")
-                    .and_then(|c| c.as_any().downcast_ref::<FixedSizeListArray>())
-                {
-                    let fp_col = batch
-                        .column_by_name("file_path")
-                        .and_then(|c| c.as_any().downcast_ref::<StringArray>());
-                    let input_hash_col = batch
-                        .column_by_name(EMBEDDING_INPUT_HASH_COLUMN)
-                        .and_then(|c| c.as_any().downcast_ref::<StringArray>());
-                    let model_col = batch
-                        .column_by_name(EMBEDDING_MODEL_COLUMN)
-                        .and_then(|c| c.as_any().downcast_ref::<StringArray>());
-                    let id_col = batch
-                        .column_by_name("stable_symbol_id")
-                        .and_then(|c| c.as_any().downcast_ref::<StringArray>());
-                    if let (Some(fp_col), Some(model_col), Some(input_hash_col), Some(id_col)) =
-                        (fp_col, model_col, input_hash_col, id_col)
-                    {
-                        for i in 0..batch.num_rows() {
-                            if vec_col.is_null(i) {
-                                continue;
-                            }
-                            let values = vec_col
-                                .value(i)
-                                .as_any()
-                                .downcast_ref::<Float32Array>()
-                                .map(|arr| arr.values().to_vec());
-                            if let Some(v) = values {
-                                if v.len() == EMBEDDING_VECTOR_DIMENSIONS {
-                                    prev_vectors.insert(
-                                        (
-                                            fp_col.value(i).to_owned(),
-                                            model_col.value(i).to_owned(),
-                                            input_hash_col.value(i).to_owned(),
-                                            id_col.value(i).to_owned(),
-                                        ),
-                                        v,
-                                    );
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            Some(Err(err)) => {
-                tracing::debug!(
-                    error = %err,
-                    "carry-forward: error reading previous sections batch; stopping"
-                );
-                break;
-            }
-            None => break,
-        }
-    }
-
-    let mut carried = 0usize;
-    let mut to_embed = 0usize;
-    for row in rows.iter_mut() {
-        if row.vector.is_some() {
-            continue;
-        }
-        let key = (
-            row.file_path.clone(),
-            row.embedding_model.clone(),
-            row.embedding_input_hash.clone(),
-            row.stable_symbol_id.clone(),
-        );
-        if let Some(v) = prev_vectors.get(&key) {
-            row.vector = Some(v.clone());
-            carried += 1;
-        } else if is_embedding_eligible(row) {
-            to_embed += 1;
-        }
-    }
-    tracing::info!(
-        carried_forward = carried,
-        to_embed,
-        "carry-forward: sections vectors"
+fn fill_section_vectors_from_prev_parquet(rows: &mut [SectionRow], prev_dir: &Path) {
+    fill_row_vectors_from_parquet(
+        prev_dir.join(SECTIONS_PARQUET),
+        rows,
+        |row| {
+            (
+                row.file_path.clone(),
+                row.embedding_model.clone(),
+                row.embedding_input_hash.clone(),
+                row.stable_symbol_id.clone(),
+            )
+        },
+        |row, vector| row.vector = Some(vector),
     );
 }
 
-/// Query the `code_symbols.lance` table in `prev_dir` and fill `row.vector`
-/// for any row whose `(file_path, embedding_model, embedding_input_hash,
-/// stable_symbol_id)` matches.
-async fn fill_symbol_vectors_from_prev(rows: &mut [SymbolRow], prev_dir: &Path) {
-    let db = match lancedb::connect(prev_dir.to_string_lossy().as_ref())
-        .execute()
-        .await
-    {
-        Ok(db) => db,
-        Err(err) => {
-            tracing::debug!(
-                error = %err,
-                prev_dir = %prev_dir.display(),
-                "carry-forward: cannot connect to previous code_symbols.lance; skipping"
-            );
-            return;
-        }
-    };
-    let table = match db.open_table(CODE_SYMBOLS_TABLE).execute().await {
-        Ok(t) => t,
-        Err(err) => {
-            tracing::debug!(
-                error = %err,
-                prev_dir = %prev_dir.display(),
-                "carry-forward: previous code_symbols table absent; skipping"
-            );
-            return;
-        }
-    };
+fn fill_symbol_vectors_from_prev_parquet(rows: &mut [SymbolRow], prev_dir: &Path) {
+    fill_row_vectors_from_parquet(
+        prev_dir.join(CODE_SYMBOLS_PARQUET),
+        rows,
+        |row| {
+            (
+                row.file_path.clone(),
+                row.embedding_model.clone(),
+                row.embedding_input_hash.clone(),
+                row.stable_symbol_id.clone(),
+            )
+        },
+        |row, vector| row.vector = Some(vector),
+    );
+}
 
-    let mut file_paths: Vec<&str> = rows
-        .iter()
-        .map(|r| r.file_path.as_str())
-        .collect::<std::collections::HashSet<_>>()
-        .into_iter()
-        .collect();
-    if file_paths.is_empty() {
+fn fill_row_vectors_from_parquet<T>(
+    path: PathBuf,
+    rows: &mut [T],
+    key_of: impl Fn(&T) -> (String, String, String, String),
+    set_vector: impl Fn(&mut T, Vec<f32>),
+) {
+    if rows.is_empty() || !path.is_file() {
         return;
     }
-    file_paths.sort_unstable();
-    let literals = file_paths
-        .iter()
-        .map(|p| format!("'{}'", sql_string_literal(p)))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let filter = format!("file_path IN ({literals})");
-
-    let mut stream = match table
-        .query()
-        .only_if(filter)
-        .select(Select::columns(&[
-            "file_path",
-            EMBEDDING_MODEL_COLUMN,
-            EMBEDDING_INPUT_HASH_COLUMN,
-            "stable_symbol_id",
-            "vector",
-        ]))
-        .execute()
-        .await
-    {
-        Ok(s) => s,
-        Err(err) => {
-            tracing::debug!(
-                error = %err,
-                "carry-forward: failed to query previous code_symbols table; skipping"
-            );
-            return;
-        }
+    let Ok(file) = fs::File::open(&path) else {
+        return;
     };
-
-    let mut prev_vectors: HashMap<(String, String, String, String), Vec<f32>> = HashMap::new();
-    loop {
-        match std::future::poll_fn(|cx| stream.as_mut().poll_next(cx)).await {
-            Some(Ok(batch)) => {
-                if let Some(vec_col) = batch
-                    .column_by_name("vector")
-                    .and_then(|c| c.as_any().downcast_ref::<FixedSizeListArray>())
-                {
-                    let fp_col = batch
-                        .column_by_name("file_path")
-                        .and_then(|c| c.as_any().downcast_ref::<StringArray>());
-                    let input_hash_col = batch
-                        .column_by_name(EMBEDDING_INPUT_HASH_COLUMN)
-                        .and_then(|c| c.as_any().downcast_ref::<StringArray>());
-                    let model_col = batch
-                        .column_by_name(EMBEDDING_MODEL_COLUMN)
-                        .and_then(|c| c.as_any().downcast_ref::<StringArray>());
-                    let id_col = batch
-                        .column_by_name("stable_symbol_id")
-                        .and_then(|c| c.as_any().downcast_ref::<StringArray>());
-                    if let (Some(fp_col), Some(model_col), Some(input_hash_col), Some(id_col)) =
-                        (fp_col, model_col, input_hash_col, id_col)
-                    {
-                        for i in 0..batch.num_rows() {
-                            if vec_col.is_null(i) {
-                                continue;
-                            }
-                            let values = vec_col
-                                .value(i)
-                                .as_any()
-                                .downcast_ref::<Float32Array>()
-                                .map(|arr| arr.values().to_vec());
-                            if let Some(v) = values {
-                                if v.len() == EMBEDDING_VECTOR_DIMENSIONS {
-                                    prev_vectors.insert(
-                                        (
-                                            fp_col.value(i).to_owned(),
-                                            model_col.value(i).to_owned(),
-                                            input_hash_col.value(i).to_owned(),
-                                            id_col.value(i).to_owned(),
-                                        ),
-                                        v,
-                                    );
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            Some(Err(err)) => {
-                tracing::debug!(
-                    error = %err,
-                    "carry-forward: error reading previous code_symbols batch; stopping"
-                );
-                break;
-            }
-            None => break,
-        }
-    }
-
-    let mut carried = 0usize;
-    let mut to_embed = 0usize;
-    for row in rows.iter_mut() {
-        if row.vector.is_some() {
+    let Ok(builder) = ParquetRecordBatchReaderBuilder::try_new(file) else {
+        return;
+    };
+    let Ok(reader) = builder.build() else {
+        return;
+    };
+    let mut previous = HashMap::<(String, String, String, String), Vec<f32>>::new();
+    for batch in reader.flatten() {
+        let Some(ids) = batch
+            .column_by_name("stable_symbol_id")
+            .and_then(|col| col.as_any().downcast_ref::<StringArray>())
+        else {
             continue;
-        }
-        let key = (
-            row.file_path.clone(),
-            row.embedding_model.clone(),
-            row.embedding_input_hash.clone(),
-            row.stable_symbol_id.clone(),
-        );
-        if let Some(v) = prev_vectors.get(&key) {
-            row.vector = Some(v.clone());
-            carried += 1;
-        } else if !row.embed_text.trim().is_empty() {
-            to_embed += 1;
+        };
+        let Some(file_paths) = batch
+            .column_by_name("file_path")
+            .and_then(|col| col.as_any().downcast_ref::<StringArray>())
+        else {
+            continue;
+        };
+        let Some(models) = batch
+            .column_by_name(EMBEDDING_MODEL_COLUMN)
+            .and_then(|col| col.as_any().downcast_ref::<StringArray>())
+        else {
+            continue;
+        };
+        let Some(hashes) = batch
+            .column_by_name(EMBEDDING_INPUT_HASH_COLUMN)
+            .and_then(|col| col.as_any().downcast_ref::<StringArray>())
+        else {
+            continue;
+        };
+        let Some(vectors) = batch
+            .column_by_name("vector")
+            .and_then(|col| col.as_any().downcast_ref::<FixedSizeListArray>())
+        else {
+            continue;
+        };
+        let values = vectors
+            .values()
+            .as_any()
+            .downcast_ref::<Float32Array>()
+            .expect("vector items are f32");
+        for row in 0..batch.num_rows() {
+            if vectors.is_null(row) {
+                continue;
+            }
+            let start = row * EMBEDDING_VECTOR_DIMENSIONS;
+            let end = start + EMBEDDING_VECTOR_DIMENSIONS;
+            if end > values.len() {
+                continue;
+            }
+            previous.insert(
+                (
+                    file_paths.value(row).to_owned(),
+                    models.value(row).to_owned(),
+                    hashes.value(row).to_owned(),
+                    ids.value(row).to_owned(),
+                ),
+                values.values()[start..end].to_vec(),
+            );
         }
     }
-    tracing::info!(
-        carried_forward = carried,
-        to_embed,
-        "carry-forward: code symbol vectors"
-    );
+    for row in rows {
+        if let Some(vector) = previous.get(&key_of(row)) {
+            set_vector(row, vector.clone());
+        }
+    }
 }
 
 /// Test helper: calls `fill_section_vectors_from_prev` in a blocking context.
@@ -3905,14 +2962,14 @@ async fn carry_forward_section_vectors(
     mut rows: Vec<SectionRow>,
     prev_dir: &Path,
 ) -> Vec<SectionRow> {
-    fill_section_vectors_from_prev(&mut rows, prev_dir).await;
+    fill_section_vectors_from_prev_parquet(&mut rows, prev_dir);
     rows
 }
 
 /// Test helper: calls `fill_symbol_vectors_from_prev` in a blocking context.
 #[cfg(test)]
 async fn carry_forward_symbol_vectors(mut rows: Vec<SymbolRow>, prev_dir: &Path) -> Vec<SymbolRow> {
-    fill_symbol_vectors_from_prev(&mut rows, prev_dir).await;
+    fill_symbol_vectors_from_prev_parquet(&mut rows, prev_dir);
     rows
 }
 
@@ -4136,10 +3193,6 @@ fn is_markdown_path(path: &str) -> bool {
         })
 }
 
-fn sql_string_literal(value: &str) -> String {
-    value.replace('\'', "''")
-}
-
 fn embedding_model_from_spur_config() -> Option<String> {
     if let Some(model) = std::env::current_dir()
         .ok()
@@ -4194,7 +3247,6 @@ pub fn fastembed_cache_dir() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lance_index::scalar::FullTextSearchQuery;
     use std::sync::{Arc, Mutex, MutexGuard};
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -4491,34 +3543,23 @@ mod tests {
     }
 
     async fn write_previous_section_sidecar_rows(dir: &Path, rows: Vec<SectionRow>) {
-        let dataset_dir = dir.join(SECTIONS_DATASET_DIR);
-        fs::create_dir_all(&dataset_dir).expect("create previous section sidecar dir");
-        let db = lancedb::connect(dataset_dir.to_str().expect("previous section sidecar dir"))
-            .execute()
-            .await
-            .expect("connect previous section sidecar");
-        db.create_table(
-            SECTIONS_TABLE,
-            rows_to_batch(rows, sections_schema()).expect("previous section batch"),
+        fs::create_dir_all(dir).expect("create previous section sidecar dir");
+        write_record_batches_parquet(
+            &dir.join(SECTIONS_PARQUET),
+            sections_schema(),
+            vec![rows_to_batch(rows, sections_schema()).expect("previous section batch")],
         )
-        .execute()
-        .await
-        .expect("create previous section table");
+        .expect("write previous sections parquet");
     }
 
     async fn write_previous_symbol_sidecar_rows(dir: &Path, rows: Vec<SymbolRow>) {
         fs::create_dir_all(dir).expect("create previous sidecar dir");
-        let db = lancedb::connect(dir.to_str().expect("previous sidecar dir"))
-            .execute()
-            .await
-            .expect("connect previous sidecar");
-        db.create_table(
-            CODE_SYMBOLS_TABLE,
-            symbol_rows_to_batch(rows, symbol_rows_schema()).expect("previous symbol batch"),
+        write_record_batches_parquet(
+            &dir.join(CODE_SYMBOLS_PARQUET),
+            symbol_rows_schema(),
+            vec![symbol_rows_to_batch(rows, symbol_rows_schema()).expect("previous symbol batch")],
         )
-        .execute()
-        .await
-        .expect("create previous symbol table");
+        .expect("write previous symbols parquet");
     }
 
     #[derive(Debug)]
@@ -4540,35 +3581,9 @@ mod tests {
     }
 
     async fn read_stored_section_rows(dir: &Path) -> Vec<StoredSectionRow> {
-        let db = lancedb::connect(
-            dir.join(SECTIONS_DATASET_DIR)
-                .to_str()
-                .expect("section sidecar dir"),
-        )
-        .execute()
-        .await
-        .expect("connect section sidecar");
-        let table = db
-            .open_table(SECTIONS_TABLE)
-            .execute()
-            .await
-            .expect("open section table");
-        let mut stream = table
-            .query()
-            .select(Select::columns(&[
-                "stable_symbol_id",
-                "file_path",
-                EMBEDDING_MODEL_COLUMN,
-                "vector",
-            ]))
-            .execute()
-            .await
-            .expect("query sections");
         let mut rows = Vec::new();
-        while let Some(batch) = std::future::poll_fn(|cx| stream.as_mut().poll_next(cx))
-            .await
-            .transpose()
-            .expect("read section batch")
+        for batch in
+            read_parquet_batches(&dir.join(SECTIONS_PARQUET)).expect("read sections parquet")
         {
             let ids = batch
                 .column_by_name("stable_symbol_id")
@@ -4617,66 +3632,33 @@ mod tests {
     }
 
     async fn section_fts_hit_count(dir: &Path, query: &str) -> usize {
-        let db = lancedb::connect(
-            dir.join(SECTIONS_DATASET_DIR)
-                .to_str()
-                .expect("section sidecar dir"),
-        )
-        .execute()
-        .await
-        .expect("connect section sidecar");
-        let table = db
-            .open_table(SECTIONS_TABLE)
-            .execute()
-            .await
-            .expect("open section table");
-        let fts = FullTextSearchQuery::new(query.to_owned())
-            .with_column("body_text".to_owned())
-            .expect("valid FTS query");
-        let mut stream = table
-            .query()
-            .full_text_search(fts)
-            .select(Select::columns(&["stable_symbol_id"]))
-            .execute()
-            .await
-            .expect("query section FTS");
-        let mut rows = 0;
-        while let Some(batch) = std::future::poll_fn(|cx| stream.as_mut().poll_next(cx))
-            .await
-            .transpose()
-            .expect("read section FTS batch")
+        let mut hits = 0usize;
+        for batch in
+            read_parquet_batches(&dir.join(SECTIONS_PARQUET)).expect("read sections parquet")
         {
-            rows += batch.num_rows();
+            let body_texts = batch
+                .column_by_name("body_text")
+                .expect("body_text column")
+                .as_any()
+                .downcast_ref::<LargeStringArray>()
+                .expect("body_text large utf8");
+            for index in 0..batch.num_rows() {
+                if body_texts
+                    .value(index)
+                    .to_lowercase()
+                    .contains(&query.to_lowercase())
+                {
+                    hits += 1;
+                }
+            }
         }
-        rows
+        hits
     }
 
     async fn read_stored_symbol_rows(dir: &Path) -> Vec<StoredSymbolRow> {
-        let db = lancedb::connect(dir.to_str().expect("sidecar dir"))
-            .execute()
-            .await
-            .expect("connect sidecar");
-        let table = db
-            .open_table(CODE_SYMBOLS_TABLE)
-            .execute()
-            .await
-            .expect("open code symbol table");
-        let mut stream = table
-            .query()
-            .select(Select::columns(&[
-                "stable_symbol_id",
-                "file_path",
-                EMBEDDING_MODEL_COLUMN,
-                "vector",
-            ]))
-            .execute()
-            .await
-            .expect("query code symbols");
         let mut rows = Vec::new();
-        while let Some(batch) = std::future::poll_fn(|cx| stream.as_mut().poll_next(cx))
-            .await
-            .transpose()
-            .expect("read code symbol batch")
+        for batch in
+            read_parquet_batches(&dir.join(CODE_SYMBOLS_PARQUET)).expect("read symbols parquet")
         {
             let ids = batch
                 .column_by_name("stable_symbol_id")
@@ -4915,11 +3897,8 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             indexing_events,
-            vec![
-                (SidecarPhase::Sections, "body_text FTS"),
-                (SidecarPhase::CodeSymbols, "embed_text FTS"),
-            ],
-            "sidecar writes should not report unused LanceDB vector indexes"
+            Vec::<(SidecarPhase, &str)>::new(),
+            "parquet sidecars do not build Lance FTS indexes; DuckDB owns BM25"
         );
     }
 
@@ -5944,111 +4923,6 @@ mod tests {
         assert_eq!(rows[0].stable_symbol_id, "good-symbol");
     }
 
-    #[tokio::test]
-    async fn lance_sections_existing_file_versions_cache_absent_versions_across_appends() {
-        let tempdir = tempfile::tempdir().expect("tempdir");
-        let dataset_dir = tempdir.path().join(SECTIONS_DATASET_DIR);
-        let db = lancedb::connect(dataset_dir.to_str().expect("dataset path"))
-            .execute()
-            .await
-            .expect("connect lancedb");
-        let schema = sections_schema();
-        let table = db
-            .create_table(
-                SECTIONS_TABLE,
-                rows_to_batch(
-                    vec![versioned_section_row(
-                        "existing-1",
-                        "docs/existing.md",
-                        "hash-existing",
-                    )],
-                    schema.clone(),
-                )
-                .expect("existing batch"),
-            )
-            .execute()
-            .await
-            .expect("create table");
-        let mut existing_versions = ExistingFileVersions::new(Some(&table));
-
-        let retained = existing_versions
-            .retain_new_rows(vec![
-                versioned_section_row("existing-2", "docs/existing.md", "hash-existing"),
-                versioned_section_row("new-1", "docs/new.md", "hash-new"),
-            ])
-            .await
-            .expect("filter first chunk");
-        let retained_ids: Vec<_> = retained
-            .iter()
-            .map(|row| row.stable_symbol_id.as_str())
-            .collect();
-        assert_eq!(retained_ids, vec!["new-1"]);
-        table
-            .add(rows_to_batch(retained, schema.clone()).expect("retained batch"))
-            .execute()
-            .await
-            .expect("append retained rows");
-
-        let retained = existing_versions
-            .retain_new_rows(vec![
-                versioned_section_row("existing-3", "docs/existing.md", "hash-existing"),
-                versioned_section_row("new-2", "docs/new.md", "hash-new-2"),
-            ])
-            .await
-            .expect("filter second chunk");
-        let retained_ids: Vec<_> = retained
-            .iter()
-            .map(|row| row.stable_symbol_id.as_str())
-            .collect();
-        assert_eq!(retained_ids, vec!["new-2"]);
-    }
-
-    #[tokio::test]
-    async fn lance_sections_existing_file_versions_preloads_batch_file_paths() {
-        let tempdir = tempfile::tempdir().expect("tempdir");
-        let dataset_dir = tempdir.path().join(SECTIONS_DATASET_DIR);
-        let db = lancedb::connect(dataset_dir.to_str().expect("dataset path"))
-            .execute()
-            .await
-            .expect("connect lancedb");
-        let schema = sections_schema();
-        let table = db
-            .create_table(
-                SECTIONS_TABLE,
-                rows_to_batch(
-                    vec![
-                        versioned_section_row("existing-1", "docs/existing.md", "hash-existing"),
-                        versioned_section_row("quote-1", "docs/it's.md", "hash-quote"),
-                        versioned_section_row("other-1", "docs/other.md", "hash-other"),
-                    ],
-                    schema,
-                )
-                .expect("existing batch"),
-            )
-            .execute()
-            .await
-            .expect("create table");
-        let mut existing_versions = ExistingFileVersions::new(Some(&table));
-
-        let existing = existing_versions
-            .preload_existing_file_versions(&[
-                versioned_section_row("existing-2", "docs/existing.md", "hash-existing"),
-                versioned_section_row("new-1", "docs/existing.md", "hash-new"),
-                versioned_section_row("quote-2", "docs/it's.md", "hash-quote"),
-                versioned_section_row("new-2", "docs/new.md", "hash-new"),
-            ])
-            .await
-            .expect("preload existing versions");
-
-        assert_eq!(
-            existing,
-            std::collections::HashSet::from([
-                ("docs/existing.md".to_owned(), "hash-existing".to_owned()),
-                ("docs/it's.md".to_owned(), "hash-quote".to_owned()),
-            ])
-        );
-    }
-
     fn section_ranges(source: &str, headings: &[&str]) -> Vec<[usize; 2]> {
         headings
             .iter()
@@ -6318,17 +5192,6 @@ mod tests {
             .collect();
 
         // ---- write v1 into dir_a with known vectors ----
-        let schema = sections_schema();
-        let db_a = lancedb::connect(
-            dir_a
-                .path()
-                .join(SECTIONS_DATASET_DIR)
-                .to_str()
-                .expect("path"),
-        )
-        .execute()
-        .await
-        .expect("connect a");
         let old_changed_body = "## Changed\n\nOld body.";
         let new_changed_body = "## Changed\n\nNew body.";
         let row_unchanged = SectionRow {
@@ -6347,13 +5210,7 @@ mod tests {
             ),
             ..versioned_section_row("changed", "docs/b.md", "hash-old")
         };
-        db_a.create_table(
-            SECTIONS_TABLE,
-            rows_to_batch(vec![row_unchanged, row_changed], schema.clone()).expect("v1 batch"),
-        )
-        .execute()
-        .await
-        .expect("create v1 table");
+        write_previous_section_sidecar_rows(dir_a.path(), vec![row_unchanged, row_changed]).await;
 
         // ---- carry forward to dir_b ----
         let rows_v2 = vec![
@@ -6406,33 +5263,13 @@ mod tests {
         // Lance schema enforces EMBEDDING_VECTOR_DIMENSIONS; instead we test
         // that a row absent from the previous table yields None.
 
-        let schema = sections_schema();
-        let db_a = lancedb::connect(
-            dir_a
-                .path()
-                .join(SECTIONS_DATASET_DIR)
-                .to_str()
-                .expect("path"),
-        )
-        .execute()
-        .await
-        .expect("connect a");
-        // Write a row with correct dimensions first so the table exists, then
-        // we will inject by writing a row with a correct-length vector (the
-        // schema enforces fixed size, so we can only test the dimension guard
-        // in the code path by checking that a row NOT in the prev table returns
-        // None).
+        // Write a row with correct dimensions first so the sidecar exists, then
+        // check that a row NOT in the prev sidecar returns None.
         let correct_vec: Vec<f32> = vec![0.5; EMBEDDING_VECTOR_DIMENSIONS];
         let mut row = versioned_section_row("sym-x", "docs/x.md", "hash-x");
         row.vector = Some(correct_vec.clone());
         row.heading_level = 2;
-        db_a.create_table(
-            SECTIONS_TABLE,
-            rows_to_batch(vec![row], schema).expect("v1 batch"),
-        )
-        .execute()
-        .await
-        .expect("create table");
+        write_previous_section_sidecar_rows(dir_a.path(), vec![row]).await;
 
         // Row with same identity but missing from prev still gets None
         let rows_v2 = vec![versioned_section_row("sym-y", "docs/y.md", "hash-y")];
@@ -6463,11 +5300,6 @@ mod tests {
             .map(|i| i as f32 * 0.002)
             .collect();
 
-        let schema = symbol_rows_schema();
-        let db_a = lancedb::connect(dir_a.path().to_str().expect("path"))
-            .execute()
-            .await
-            .expect("connect a");
         let unchanged_input_hash = symbol_embedding_input_hash_for_model(
             "unchanged embed text",
             false,
@@ -6508,13 +5340,7 @@ mod tests {
             embedding_input_hash: old_changed_input_hash,
             embedding_model: NOMIC_EMBED_TEXT_V15_MODEL_NAME.to_owned(),
         };
-        db_a.create_table(
-            CODE_SYMBOLS_TABLE,
-            symbol_rows_to_batch(vec![row_unchanged, row_changed], schema).expect("v1 batch"),
-        )
-        .execute()
-        .await
-        .expect("create v1 symbol table");
+        write_previous_symbol_sidecar_rows(dir_a.path(), vec![row_unchanged, row_changed]).await;
 
         let rows_v2 = vec![
             SymbolRow {
@@ -6573,17 +5399,6 @@ mod tests {
             .map(|i| i as f32 * 0.003)
             .collect();
 
-        let schema = sections_schema();
-        let db_a = lancedb::connect(
-            dir_a
-                .path()
-                .join(SECTIONS_DATASET_DIR)
-                .to_str()
-                .expect("path"),
-        )
-        .execute()
-        .await
-        .expect("connect a");
         let unchanged_input_hash = section_embedding_input_hash_for_model(
             "section-unchanged",
             "## Stable\n\nUnchanged body.",
@@ -6614,13 +5429,7 @@ mod tests {
             embedding_input_hash: old_changed_input_hash,
             ..versioned_section_row("section-changed", "docs/a.md", "hash-old")
         };
-        db_a.create_table(
-            SECTIONS_TABLE,
-            rows_to_batch(vec![row_unchanged, row_changed], schema).expect("v1 batch"),
-        )
-        .execute()
-        .await
-        .expect("create v1 section table");
+        write_previous_section_sidecar_rows(dir_a.path(), vec![row_unchanged, row_changed]).await;
 
         let rows_v2 = vec![
             SectionRow {
@@ -7069,24 +5878,6 @@ mod tests {
             row.vector = Some(fake_vector(index as f32));
         }
         write_previous_section_sidecar_rows(prev_dir.path(), prev_rows).await;
-        let prev_db = lancedb::connect(
-            prev_dir
-                .path()
-                .join(SECTIONS_DATASET_DIR)
-                .to_str()
-                .expect("previous section sidecar dir"),
-        )
-        .execute()
-        .await
-        .expect("connect previous section sidecar");
-        let prev_table = prev_db
-            .open_table(SECTIONS_TABLE)
-            .execute()
-            .await
-            .expect("open previous section table");
-        ensure_body_text_fts_index(&prev_table)
-            .await
-            .expect("create previous FTS index");
         assert_eq!(
             section_fts_hit_count(prev_dir.path(), "oldoverlaytoken").await,
             1

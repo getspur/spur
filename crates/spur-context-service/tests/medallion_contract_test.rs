@@ -85,7 +85,7 @@ fn silver_manifest_round_trips_file_sizes_etags_and_schema_hash() -> Result<()> 
                 etag: "\"nodes-etag\"".to_owned(),
             },
             SilverManifestFile {
-                path: "code_symbols.lance/part.parquet".to_owned(),
+                path: "code_symbols.parquet".to_owned(),
                 size_bytes: 2_048,
                 etag: "\"symbols-etag\"".to_owned(),
             },
@@ -105,7 +105,7 @@ fn silver_manifest_round_trips_file_sizes_etags_and_schema_hash() -> Result<()> 
                     "etag": "\"nodes-etag\""
                 },
                 {
-                    "path": "code_symbols.lance/part.parquet",
+                    "path": "code_symbols.parquet",
                     "size_bytes": 2048,
                     "etag": "\"symbols-etag\""
                 }

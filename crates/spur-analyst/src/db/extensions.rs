@@ -12,12 +12,10 @@ const CONTEXT_EXTENSION_DIR_ENV: &str = "SPUR_CONTEXT_DUCKDB_EXTENSION_DIR";
 const ANALYST_EXTENSIONS: &[(&str, bool)] = &[
     ("duckpgq", true),
     ("onager", true),
-    ("lance", false),
     ("fts", false),
     ("icu", false),
 ];
 
-static LANCE_INSTALLED: OnceLock<()> = OnceLock::new();
 // duckpgq is distributed via DuckDB's community repo (not the core repo) and is
 // only published for DuckDB <= 1.4.4. Install it once per process when no local
 // extension directory is configured; the LOAD is best-effort in general query
@@ -92,17 +90,6 @@ pub(crate) fn load_analyst_icu_extension(conn: &duckdb::Connection) {
     // live in DuckDB's ICU extension. Keep this best-effort and let query
     // preparation surface genuine failures in the existing per-stage shape.
     let _ = conn.execute_batch(&analyst_extension_load_sql("icu"));
-}
-
-pub(crate) fn load_analyst_lance_extension(conn: &duckdb::Connection) {
-    // Hybrid retrieval uses DuckDB's Lance extension when available. Keep this
-    // best-effort so missing extension binaries degrade to BM25-only search.
-    LANCE_INSTALLED.get_or_init(|| {
-        if analyst_extension_directory().is_none() {
-            let _ = conn.execute_batch("INSTALL lance;");
-        }
-    });
-    let _ = conn.execute_batch(&analyst_extension_load_sql("lance"));
 }
 
 pub(crate) fn load_analyst_duckpgq_extension(conn: &duckdb::Connection) -> Result<()> {
@@ -201,7 +188,7 @@ mod tests {
         assert!(sql.contains("SET extension_directory = '/opt/duckdb/extensions/with '' quote'"));
         assert!(sql.contains("LOAD duckpgq;"));
         assert!(sql.contains("LOAD onager;"));
-        assert!(sql.contains("LOAD lance;"));
+        assert!(!sql.contains("LOAD lance;"));
         assert!(sql.contains("LOAD fts;"));
         assert!(sql.contains("LOAD icu;"));
     }
@@ -211,7 +198,7 @@ mod tests {
         let sql = with_extension_dir(None, analyst_extension_bootstrap_sql);
         assert!(sql.contains("INSTALL duckpgq FROM community;"));
         assert!(sql.contains("INSTALL onager FROM community;"));
-        assert!(sql.contains("INSTALL lance;"));
+        assert!(!sql.contains("INSTALL lance;"));
         assert!(
             !sql.contains("SET autoinstall_known_extensions = false"),
             "home-directory flow still uses INSTALL: {sql}"
@@ -220,13 +207,7 @@ mod tests {
 
     #[test]
     fn load_sql_uses_community_only_for_duckpgq_and_onager() {
-        let (duckpgq, lance) = with_extension_dir(None, || {
-            (
-                analyst_extension_load_sql("duckpgq"),
-                analyst_extension_load_sql("lance"),
-            )
-        });
+        let duckpgq = with_extension_dir(None, || analyst_extension_load_sql("duckpgq"));
         assert_eq!(duckpgq, "INSTALL duckpgq FROM community; LOAD duckpgq;");
-        assert_eq!(lance, "INSTALL lance; LOAD lance;");
     }
 }

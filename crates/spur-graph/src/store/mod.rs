@@ -21,9 +21,9 @@ pub use lance_sections::load_embedding_model;
 pub use lance_sections::{
     embedding_query_text_for_model, fastembed_cache_dir, write_sections_dataset,
     EmbeddingModelSelection, CODE_RANK_EMBED_MODEL_NAME, CODE_SYMBOLS_DATASET_DIR,
-    CODE_SYMBOLS_TABLE, EMBEDDING_VECTOR_DIMENSIONS, EMBED_MODEL_ENV,
+    CODE_SYMBOLS_PARQUET, CODE_SYMBOLS_TABLE, EMBEDDING_VECTOR_DIMENSIONS, EMBED_MODEL_ENV,
     JINA_EMBEDDINGS_V2_BASE_CODE_MODEL_NAME, NOMIC_EMBED_TEXT_V15_MODEL_NAME, SECTIONS_DATASET_DIR,
-    SECTIONS_TABLE,
+    SECTIONS_PARQUET, SECTIONS_TABLE,
 };
 pub use parquet::{
     load_temporal_artifact_parquet, read_artifact_header_parquet, read_artifact_parquet,

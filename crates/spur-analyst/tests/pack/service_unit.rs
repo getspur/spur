@@ -29,7 +29,7 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::task::JoinHandle;
 
 use crate::db::sql::{sql_escape_literal, sql_escape_path};
-use spur_graph::store::{write_sections_dataset, SECTIONS_DATASET_DIR};
+use spur_graph::store::{write_sections_dataset, CODE_SYMBOLS_PARQUET, SECTIONS_PARQUET};
 use spur_graph::{
     artifact_from_facts, build_facts, embedding_query_text_for_model, write_artifact_parquet,
     write_current_pointer, EmbeddingModelSelection, EMBEDDING_VECTOR_DIMENSIONS,
@@ -833,7 +833,7 @@ fn kcp2_fixture_repo(include_graph_reasoning_views: bool) -> (tempfile::TempDir,
     fs::create_dir_all(repo.join(".spur")).expect("create .spur");
     let db_path = repo.join(".spur").join("analyst.duckdb");
     let conn = Connection::open(&db_path).expect("open fixture db");
-    conn.execute_batch("INSTALL fts; LOAD fts; INSTALL icu; LOAD icu; INSTALL lance; LOAD lance;")
+    conn.execute_batch("INSTALL fts; LOAD fts; INSTALL icu; LOAD icu;")
         .expect("load fixture extensions");
     conn.execute_batch(
         r#"
@@ -846,9 +846,12 @@ fn kcp2_fixture_repo(include_graph_reasoning_views: bool) -> (tempfile::TempDir,
             file_path VARCHAR,
             heading_level INTEGER,
             content_hash VARCHAR,
-            body_text VARCHAR
+            body_text VARCHAR,
+            embedding FLOAT[768]
         );
-        INSERT INTO sections_search VALUES
+        INSERT INTO sections_search (
+            stable_symbol_id, qualified_name, file_path, heading_level, content_hash, body_text
+        ) VALUES
             ('doc-dispatch', 'Dispatch Approval Reading Path', 'docs/dispatch.md', 2, 'doc-hash',
              'dispatch approval evidence reading path');
 
@@ -858,9 +861,12 @@ fn kcp2_fixture_repo(include_graph_reasoning_views: bool) -> (tempfile::TempDir,
             qualified_name VARCHAR,
             file_path VARCHAR,
             symbol_kind VARCHAR,
-            doc_text VARCHAR
+            doc_text VARCHAR,
+            embedding FLOAT[768]
         );
-        INSERT INTO symbol_text VALUES
+        INSERT INTO symbol_text (
+            stable_symbol_id, entity_name, qualified_name, file_path, symbol_kind, doc_text
+        ) VALUES
             ('sym-dispatch', 'dispatch_plan', 'fixture::dispatch_plan',
              'src/dispatch.rs', 'function', 'dispatch approval evidence entry point'),
             ('sym-review', 'review_approval', 'fixture::review_approval',
@@ -1020,7 +1026,7 @@ pub fn dispatch_approval_evidence() -> &'static str {
 
 fn seed_overlay_pack_analyst_db(db_path: &Path, artifact_dir: &Path, graph_hash: &str) {
     let conn = Connection::open(db_path).expect("open overlay pack fixture db");
-    conn.execute_batch("INSTALL fts; LOAD fts; INSTALL icu; LOAD icu; INSTALL lance; LOAD lance;")
+    conn.execute_batch("INSTALL fts; LOAD fts; INSTALL icu; LOAD icu;")
         .expect("load overlay pack fixture extensions");
     let artifact_dir = sql_escape_path(artifact_dir);
     let graph_hash = sql_escape_literal(graph_hash);
@@ -1098,7 +1104,8 @@ fn seed_overlay_pack_analyst_db(db_path: &Path, artifact_dir: &Path, graph_hash:
             file_path VARCHAR,
             heading_level INTEGER,
             content_hash VARCHAR,
-            body_text VARCHAR
+            body_text VARCHAR,
+            embedding FLOAT[768]
         );
 
         CREATE TABLE symbol_text AS
@@ -1107,7 +1114,8 @@ fn seed_overlay_pack_analyst_db(db_path: &Path, artifact_dir: &Path, graph_hash:
                qualified_name,
                file_path,
                symbol_kind,
-               entity_name || ' dispatch approval evidence' AS doc_text
+               entity_name || ' dispatch approval evidence' AS doc_text,
+               CAST(NULL AS FLOAT[768]) AS embedding
         FROM nodes
         WHERE symbol_kind = 'function';
 
@@ -1203,23 +1211,14 @@ fn seed_section_vectors(
         .collect::<Vec<_>>();
     let sql = format!(
         r#"
-        CREATE OR REPLACE TABLE lance_ns.main.section_bodies AS
-        SELECT s.stable_symbol_id,
-               s.file_path,
-               s.qualified_name,
-               s.heading_level,
-               s.body_text,
-               s.body_byte_start,
-               s.body_byte_end,
-               s.child_count,
-               s.parent_stable_id,
-               s.content_hash,
-               COALESCE(o.vector, s.vector) AS vector
-        FROM lance_ns.main.section_bodies AS s
-        LEFT JOIN (
-            SELECT col0 AS stable_symbol_id, col1 AS vector
+        UPDATE sections_search
+        SET embedding = o.vector
+        FROM (
+            SELECT col0 AS file_path, col1 AS vector
             FROM (VALUES {})
-        ) AS o USING (stable_symbol_id);
+        ) AS o
+        WHERE sections_search.file_path = o.file_path
+           OR sections_search.stable_symbol_id = o.file_path;
         "#,
         overrides.join(",\n                  ")
     );
@@ -1312,34 +1311,28 @@ println!("lexical fallback utility");
 
     let db_path = temp_dir.path().join("analyst.duckdb");
     let conn = Connection::open(&db_path).expect("open fixture db");
-    conn.execute_batch("INSTALL fts; LOAD fts; INSTALL icu; LOAD icu; INSTALL lance; LOAD lance;")
+    conn.execute_batch("INSTALL fts; LOAD fts; INSTALL icu; LOAD icu;")
         .expect("load fixture extensions");
-    conn.execute_batch(&format!(
-        "ATTACH '{}' AS lance_ns (TYPE LANCE);",
-        sql_escape_path(&artifact_dir.join(SECTIONS_DATASET_DIR))
-    ))
-    .expect("attach sections dataset");
-    conn.execute_batch(&format!(
-        "ATTACH '{}' AS code_ns (TYPE LANCE);",
-        sql_escape_path(&artifact_dir)
-    ))
-    .expect("attach code dataset");
+    let sections_parquet = sql_escape_path(&artifact_dir.join(SECTIONS_PARQUET));
+    let symbols_parquet = sql_escape_path(&artifact_dir.join(CODE_SYMBOLS_PARQUET));
     let mut symbol_row_stmt = conn
-        .prepare(
+        .prepare(&format!(
             "
         SELECT stable_symbol_id
-        FROM code_ns.main.code_symbols
+        FROM read_parquet('{symbols_parquet}')
         WHERE file_path = 'src/hybrid.rs'
         ORDER BY stable_symbol_id
         LIMIT 1
-        ",
-        )
+        "
+        ))
         .expect("query code symbol id");
     let strong_symbol_id: String = symbol_row_stmt
         .query_row([], |row| row.get(0))
         .expect("query strong symbol id");
     let mut symbol_vec_stmt = conn
-        .prepare("SELECT to_json(vector) FROM code_ns.main.code_symbols WHERE stable_symbol_id = ? LIMIT 1")
+        .prepare(&format!(
+            "SELECT to_json(vector) FROM read_parquet('{symbols_parquet}') WHERE stable_symbol_id = ? LIMIT 1"
+        ))
         .expect("query strong symbol vector");
     let symbol_vector_json = symbol_vec_stmt
         .query_row([&strong_symbol_id], |row| {
@@ -1351,20 +1344,15 @@ println!("lexical fallback utility");
         .map(|value| parse_vector_json_to_f32(&value))
         .filter(|query_vec| query_vec.len() == EMBEDDING_VECTOR_DIMENSIONS)
         .unwrap_or_else(semantic_query_vec);
-    seed_section_vectors(
-        &conn,
-        &[("docs/strong_hybrid.md", query_vec.as_slice())],
-        &[],
-    );
-
     conn.execute_batch(
-        r#"
+        &r#"
         CREATE TABLE _meta (graph_content_hash VARCHAR);
         INSERT INTO _meta VALUES ('hybrid-fixture-hash');
 
         CREATE TABLE sections_search AS
-        SELECT stable_symbol_id, qualified_name, file_path, heading_level, content_hash, body_text
-        FROM lance_ns.main.section_bodies;
+        SELECT stable_symbol_id, qualified_name, file_path, heading_level, content_hash, body_text,
+               CAST(NULL AS FLOAT[768]) AS embedding
+        FROM read_parquet('__SECTIONS_PARQUET__');
 
         CREATE TABLE symbol_text AS
         SELECT stable_symbol_id,
@@ -1372,8 +1360,9 @@ println!("lexical fallback utility");
                qualified_name,
                file_path,
                symbol_kind,
-               embed_text AS doc_text
-        FROM code_ns.main.code_symbols;
+               embed_text AS doc_text,
+               vector::FLOAT[768] AS embedding
+        FROM read_parquet('__SYMBOLS_PARQUET__');
 
         CREATE TABLE v_symbol_scorecard AS
         SELECT stable_symbol_id,
@@ -1390,7 +1379,9 @@ println!("lexical fallback utility");
         CREATE TABLE v_symbol_inbound AS
         SELECT stable_symbol_id, 1::BIGINT AS callers
         FROM symbol_text;
-        "#,
+        "#
+        .replace("__SECTIONS_PARQUET__", &sections_parquet)
+        .replace("__SYMBOLS_PARQUET__", &symbols_parquet),
     )
     .expect("create fixture schema");
     conn.execute_batch(
@@ -1400,6 +1391,11 @@ println!("lexical fallback utility");
         "#,
     )
     .expect("create fixture fts indexes");
+    seed_section_vectors(
+        &conn,
+        &[("docs/strong_hybrid.md", query_vec.as_slice())],
+        &[],
+    );
     let macro_sql = context_candidate_macro_sql_with_artifact_dir(&artifact_dir);
     conn.execute_batch(&macro_sql)
         .expect("define search context macro");

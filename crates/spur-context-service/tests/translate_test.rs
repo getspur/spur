@@ -419,9 +419,7 @@ fn failed_republish_leaves_previous_gold_generation_readable() -> Result<()> {
     drop(conn);
 
     write_artifact_fixture(&artifact_dir)?;
-    write_invalid_symbol_sidecar_without_embedding(
-        &artifact_dir.join("code_symbols.lance").join("part.parquet"),
-    )?;
+    write_invalid_symbol_sidecar_without_embedding(&artifact_dir.join("code_symbols.parquet"))?;
 
     let error = translate_artifact_to_ducklake(&TranslateOptions {
         source: SOURCE.to_owned(),
@@ -612,9 +610,9 @@ fn expected_embeddings_fail_when_lance_sidecars_are_missing() -> Result<()> {
     let data_path = data_path.display().to_string();
     initialize_catalog(&catalog_dsn, &data_path)?;
     write_artifact_fixture(&artifact_dir)?;
-    fs::remove_file(artifact_dir.join("code_symbols.lance").join("part.parquet"))
+    fs::remove_file(artifact_dir.join("code_symbols.parquet"))
         .context("remove code symbol sidecar parquet")?;
-    fs::remove_file(artifact_dir.join("sections.lancedb").join("part.parquet"))
+    fs::remove_file(artifact_dir.join("sections.parquet"))
         .context("remove section sidecar parquet")?;
 
     let error = translate_artifact_to_ducklake(&TranslateOptions {
@@ -650,9 +648,9 @@ fn skipped_lance_sidecars_do_not_poison_required_graph_commits() -> Result<()> {
     let data_path = data_path.display().to_string();
     initialize_catalog(&catalog_dsn, &data_path)?;
     write_artifact_fixture(&artifact_dir)?;
-    fs::remove_file(artifact_dir.join("code_symbols.lance").join("part.parquet"))
+    fs::remove_file(artifact_dir.join("code_symbols.parquet"))
         .context("remove code symbol sidecar parquet")?;
-    fs::remove_file(artifact_dir.join("sections.lancedb").join("part.parquet"))
+    fs::remove_file(artifact_dir.join("sections.parquet"))
         .context("remove section sidecar parquet")?;
 
     let stats = translate_artifact_to_ducklake(&TranslateOptions {
@@ -694,7 +692,7 @@ fn manifest_translate_ignores_unlisted_sidecar_files() -> Result<()> {
     let data_path = data_path.display().to_string();
     initialize_catalog(&catalog_dsn, &data_path)?;
     write_artifact_fixture(&artifact_dir)?;
-    write_unlisted_symbol_sidecar_row(&artifact_dir.join("code_symbols.lance/stale.parquet"))?;
+    write_unlisted_symbol_sidecar_row(&artifact_dir.join("stale_code_symbols.parquet"))?;
     let manifest = silver_manifest_for_fixture();
 
     let stats = translate_artifact_to_ducklake(&TranslateOptions {
@@ -828,10 +826,7 @@ fn write_artifact_fixture_with_symbol_vector(
     artifact_dir: &Path,
     symbol_vector_expr: &str,
 ) -> Result<()> {
-    fs::create_dir_all(artifact_dir.join("code_symbols.lance"))
-        .context("create code symbol sidecar dir")?;
-    fs::create_dir_all(artifact_dir.join("sections.lancedb"))
-        .context("create sections sidecar dir")?;
+    fs::create_dir_all(artifact_dir).context("create artifact dir")?;
 
     let conn = Connection::open_in_memory().context("open artifact writer duckdb")?;
     let nodes_path = sql_path(&artifact_dir.join("nodes.parquet"));
@@ -839,8 +834,8 @@ fn write_artifact_fixture_with_symbol_vector(
     let unresolved_path = sql_path(&artifact_dir.join("edges_unresolved.parquet"));
     let files_path = sql_path(&artifact_dir.join("files.parquet"));
     let manifests_path = sql_path(&artifact_dir.join("file_manifests.parquet"));
-    let symbols_path = sql_path(&artifact_dir.join("code_symbols.lance").join("part.parquet"));
-    let sections_path = sql_path(&artifact_dir.join("sections.lancedb").join("part.parquet"));
+    let symbols_path = sql_path(&artifact_dir.join("code_symbols.parquet"));
+    let sections_path = sql_path(&artifact_dir.join("sections.parquet"));
 
     conn.execute_batch(&format!(
         r#"
@@ -1069,8 +1064,8 @@ fn silver_manifest_for_fixture() -> SilverManifest {
             "edges_unresolved.parquet",
             "files.parquet",
             "file_manifests.parquet",
-            "code_symbols.lance/part.parquet",
-            "sections.lancedb/part.parquet",
+            "code_symbols.parquet",
+            "sections.parquet",
         ]
         .into_iter()
         .map(|path| SilverManifestFile {

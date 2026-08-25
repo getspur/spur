@@ -11,7 +11,7 @@ use crate::search::hybrid::confidence_score_thresholds;
 use crate::{
     db::{
         connection::open_analyst_connection_read_only,
-        extensions::{load_analyst_icu_extension, load_analyst_lance_extension},
+        extensions::load_analyst_icu_extension,
         paths::{analyst_db_path, current_repo_root},
     },
     query_context_candidates_with_conn, query_graph_candidates_with_conn, KnowledgeQueryOptions,
@@ -147,7 +147,6 @@ fn open_pack_connection(
         ))
     })?;
     load_analyst_icu_extension(&conn);
-    load_analyst_lance_extension(&conn);
     let conn = Arc::new(Mutex::new(conn));
     pool.insert(db_path.to_path_buf(), Arc::clone(&conn));
     Ok(conn)
@@ -189,7 +188,6 @@ async fn open_pack_connection_with_overlay(
         Some((base_path, delta_dir)) => match open_worktree_overlay(base_path, delta_dir) {
             Ok(conn) => {
                 load_analyst_icu_extension(&conn);
-                load_analyst_lance_extension(&conn);
                 staleness = overlay_session
                     .as_ref()
                     .map(|session| PackStaleness {
