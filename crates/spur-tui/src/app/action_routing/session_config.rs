@@ -434,6 +434,37 @@ mod tests {
     }
 
     #[test]
+    fn graph_overlay_fsmonitor_applies_only_after_confirmation() {
+        let (tx, mut rx) = mpsc::channel(8);
+        let mut app = App::new(Some(tx), false);
+
+        app.process_action(Action::ConfigSaveRequested {
+            patch: ConfigPatch::GraphOverlayFsmonitor(OverlayFsmonitorMode::Auto),
+        });
+        assert_eq!(
+            app.config.graph.overlay_fsmonitor,
+            OverlayFsmonitorMode::Off
+        );
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(UserInput::UpdateConfig {
+                patch: ConfigPatch::GraphOverlayFsmonitor(OverlayFsmonitorMode::Auto)
+            })
+        ));
+
+        app.handle_spur_event(SpurEvent::now(SpurEventBody::ConfigUpdateResult {
+            section: "graph".into(),
+            ok: true,
+            message: "saved - restart required".into(),
+        }));
+
+        assert_eq!(
+            app.config.graph.overlay_fsmonitor,
+            OverlayFsmonitorMode::Auto
+        );
+    }
+
+    #[test]
     fn vim_toggle_without_backend_still_flips_in_memory() {
         let mut app = App::new(None, false);
         assert_eq!(app.edit_mode, EditMode::Emacs);

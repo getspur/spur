@@ -31,11 +31,15 @@ impl App {
             }
             Action::NavigateTo(ViewId::AgentConfigBrowser { preselect }) => {
                 let entries = self.config.agents.entries.clone();
+                let graph = self.config.graph.clone();
                 if let Some(view) = self.agent_config_browser.as_mut() {
                     view.set_entries(entries, preselect.clone());
                 } else {
                     self.agent_config_browser =
                         Some(AgentConfigBrowserView::new(entries, preselect.clone()));
+                }
+                if let Some(view) = self.agent_config_browser.as_mut() {
+                    view.set_graph_config(&graph);
                 }
                 self.navigate_to(ViewId::AgentConfigBrowser { preselect });
                 None
@@ -134,5 +138,46 @@ impl App {
             }
             _ => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::views::{View, ViewContext};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use spur_acp::config::{ConfigPatch, OverlayFsmonitorMode};
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn configure_graph_reopen_refreshes_confirmed_overlay_fsmonitor() {
+        let mut app = App::new(None, false);
+        app.process_nav(Action::NavigateTo(ViewId::AgentConfigBrowser {
+            preselect: Some("graph".into()),
+        }));
+
+        std::sync::Arc::make_mut(&mut app.config)
+            .graph
+            .overlay_fsmonitor = OverlayFsmonitorMode::Auto;
+        app.process_nav(Action::NavigateTo(ViewId::AgentConfigBrowser {
+            preselect: Some("graph".into()),
+        }));
+
+        let lineage = spur_core::ExecutorLineage::new();
+        let ctx = ViewContext::test_ctx(&lineage);
+        let browser = app
+            .agent_config_browser
+            .as_mut()
+            .expect("configure browser should be open");
+        browser.handle_key(key(KeyCode::Down), &ctx);
+        assert!(matches!(
+            browser.handle_key(key(KeyCode::Char('s')), &ctx),
+            Some(Action::ConfigSaveRequested {
+                patch: ConfigPatch::GraphOverlayFsmonitor(OverlayFsmonitorMode::Auto)
+            })
+        ));
     }
 }

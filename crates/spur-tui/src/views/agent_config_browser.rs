@@ -8,7 +8,7 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph, Wrap},
     Frame,
 };
-use spur_acp::{AgentConfig, ProfileConfig, SpurEvent};
+use spur_acp::{config::GraphConfig, AgentConfig, ProfileConfig, SpurEvent};
 
 use crate::action::Action;
 use crate::configure_section::{parse_configure_arg, ConfigureSection};
@@ -259,7 +259,7 @@ impl AgentConfigBrowserView {
             selected_section: 0,
             pane: BrowserPane::Agents,
             section: ConfigureSection::Agents,
-            graph_pane: GraphPane::new(None),
+            graph_pane: GraphPane::new(None, Default::default()),
             tui_pane: TuiPane::new(),
             skills_pane: SkillsPane::new(),
             draft: None,
@@ -281,6 +281,10 @@ impl AgentConfigBrowserView {
             self.apply_preselect(Some(&previous_name));
         }
         self.rebuild_draft();
+    }
+
+    pub fn set_graph_config(&mut self, graph: &GraphConfig) {
+        self.graph_pane = GraphPane::new(graph.embedding_model.as_deref(), graph.overlay_fsmonitor);
     }
 
     pub fn replace_agent_config(&mut self, name: &str, updated: AgentConfig) {
@@ -1037,6 +1041,35 @@ mod tests {
         assert_eq!(view.selected_field_index_for_test(), field_before);
         assert_eq!(view.selected_agent_name_for_test(), agent_before.as_deref());
         assert!(!view.editing_active());
+    }
+
+    #[test]
+    fn graph_pane_refreshes_from_confirmed_config() {
+        let lineage = spur_core::ExecutorLineage::new();
+        let ctx = test_ctx(&lineage);
+        let mut view = AgentConfigBrowserView::new(vec![configured_agent()], Some("graph".into()));
+        let graph = spur_acp::config::GraphConfig {
+            embedding_model: Some("coderank".into()),
+            overlay_fsmonitor: spur_acp::config::OverlayFsmonitorMode::Auto,
+        };
+
+        view.set_graph_config(&graph);
+
+        assert!(matches!(
+            view.handle_key(key(KeyCode::Char('s')), &ctx),
+            Some(Action::ConfigSaveRequested {
+                patch: spur_acp::config::ConfigPatch::GraphEmbeddingModel { ref alias }
+            }) if alias == "coderank"
+        ));
+        view.handle_key(key(KeyCode::Down), &ctx);
+        assert!(matches!(
+            view.handle_key(key(KeyCode::Char('s')), &ctx),
+            Some(Action::ConfigSaveRequested {
+                patch: spur_acp::config::ConfigPatch::GraphOverlayFsmonitor(
+                    spur_acp::config::OverlayFsmonitorMode::Auto
+                )
+            })
+        ));
     }
 
     #[test]

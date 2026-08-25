@@ -173,6 +173,10 @@ impl Orchestrator {
         mcp_server.set_dispatch_lease_duration(std::time::Duration::from_secs(
             self.config.spur.dispatch_lease_secs,
         ));
+        mcp_server.set_overlay_fsmonitor_auto(matches!(
+            self.config.graph.overlay_fsmonitor,
+            spur_acp::config::OverlayFsmonitorMode::Auto
+        ));
     }
 
     /// Subscribe to orchestrator events (for TUI, logging, etc.).
@@ -410,8 +414,22 @@ impl Orchestrator {
 #[cfg(test)]
 mod apply_config_patch_tests {
     use super::*;
-    use spur_acp::config::{ConfigPatch, SpurConfig};
+    use spur_acp::config::{ConfigPatch, OverlayFsmonitorMode, SpurConfig};
     use tempfile::TempDir;
+
+    fn callback_server() -> McpCallbackServer {
+        let (server, _channel) = McpCallbackServer::new(
+            None,
+            None,
+            None,
+            crate::server::DetachedContinuationCtx {
+                on_complete: Arc::new(|_continuation, _worker| Box::pin(async {})),
+            },
+            Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+            crate::server::community_feature_gate(),
+        );
+        server
+    }
 
     fn worker_entry(name: &str, args: &[&str]) -> spur_acp::config::AgentConfig {
         let mut config = spur_acp::config::AgentConfig::with_defaults(name);
@@ -480,5 +498,58 @@ mod apply_config_patch_tests {
         .expect("parse");
         assert_eq!(disk.graph.embedding_model.as_deref(), Some("jina-code"));
         assert_eq!(disk.agents.entries[0].args, vec!["old-arg".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn apply_mcp_server_settings_seeds_overlay_fsmonitor_off_and_auto() {
+        let repo = TempDir::new().expect("temp repo");
+        let mut config = SpurConfig::default();
+        let mut orchestrator = Orchestrator::new(repo.path().to_path_buf(), config.clone(), None)
+            .expect("orchestrator");
+        let mut off_server = callback_server();
+
+        orchestrator.apply_mcp_server_settings(&mut off_server);
+
+        assert!(!off_server.graph_mcp_deps.overlay_fsmonitor_auto);
+
+        config.graph.overlay_fsmonitor = OverlayFsmonitorMode::Auto;
+        orchestrator.config = config;
+        let mut auto_server = callback_server();
+
+        orchestrator.apply_mcp_server_settings(&mut auto_server);
+
+        assert!(auto_server.graph_mcp_deps.overlay_fsmonitor_auto);
+    }
+
+    #[tokio::test]
+    async fn apply_config_patch_requires_new_server_for_overlay_fsmonitor() {
+        let repo = TempDir::new().expect("temp repo");
+        std::fs::create_dir_all(repo.path().join(".spur")).expect("create .spur");
+        let config = SpurConfig::default();
+        std::fs::write(
+            repo.path().join(".spur/config.toml"),
+            toml::to_string_pretty(&config).expect("serialize"),
+        )
+        .expect("write config");
+        let mut orchestrator =
+            Orchestrator::new(repo.path().to_path_buf(), config, None).expect("orchestrator");
+        let mut existing_server = callback_server();
+        orchestrator.apply_mcp_server_settings(&mut existing_server);
+
+        orchestrator
+            .apply_config_patch(ConfigPatch::GraphOverlayFsmonitor(
+                OverlayFsmonitorMode::Auto,
+            ))
+            .expect("graph patch");
+
+        assert_eq!(
+            orchestrator.config.graph.overlay_fsmonitor,
+            OverlayFsmonitorMode::Auto
+        );
+        assert!(!existing_server.graph_mcp_deps.overlay_fsmonitor_auto);
+
+        let mut restarted_server = callback_server();
+        orchestrator.apply_mcp_server_settings(&mut restarted_server);
+        assert!(restarted_server.graph_mcp_deps.overlay_fsmonitor_auto);
     }
 }
