@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
 use nucleo_matcher::{
@@ -43,6 +43,22 @@ struct CachedSourceIndex {
     built_at: Instant,
 }
 
+#[derive(Clone)]
+struct MentionSourceSlot {
+    name: &'static str,
+    source: Arc<Mutex<Box<dyn MentionSource>>>,
+}
+
+impl MentionSourceSlot {
+    fn new(source: Box<dyn MentionSource>) -> Self {
+        let name = source.name();
+        Self {
+            name,
+            source: Arc::new(Mutex::new(source)),
+        }
+    }
+}
+
 /// Scope for completion cache lookup. Dashboard pre-session composition
 /// has no real ACP session id yet, while session-detail composition does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,7 +83,7 @@ impl From<CompletionScope<'_>> for CompletionScopeKey {
 }
 
 pub struct MentionRegistry {
-    sources: Vec<Box<dyn MentionSource>>,
+    sources: Vec<MentionSourceSlot>,
     cache: HashMap<&'static str, CachedSourceIndex>,
     code_graph_hint: Option<&'static str>,
     code_graph_token: Option<CodeGraphToken>,
@@ -78,9 +94,9 @@ pub struct MentionRegistry {
     /// not reported completion yet. Surfaced to pickers as a hint so the
     /// missing model/effort slots are explainable while the probe runs.
     agent_model_catalog_probes_in_flight: HashSet<String>,
-    /// Open cascade slot (with real candidates) captured by the most
-    /// recent `query()` call, if any. Read via `take_worker_open_slot`
-    /// by a picker UI right after calling `query`.
+    /// Test observation for the synchronous compatibility API. Production
+    /// pickers receive the slot in `MentionQueryResult`.
+    #[cfg(test)]
     last_worker_open_slot: Option<OpenWorkerSlot>,
     matcher: Matcher,
     #[cfg(any(test, debug_assertions))]
@@ -114,11 +130,52 @@ enum CodeGraphSourceUpdate {
     ClearCodeGraphCache,
 }
 
+pub(crate) struct MentionQueryWork {
+    sources: Vec<Arc<Vec<MentionEntry>>>,
+    query: String,
+    limit: usize,
+    composed_entry: Option<MentionEntry>,
+    open_slot: Option<OpenWorkerSlot>,
+}
+
+impl MentionQueryWork {
+    pub(crate) fn entry_count(&self) -> usize {
+        self.sources.iter().map(|entries| entries.len()).sum()
+    }
+}
+
+pub(crate) struct MentionQueryResult {
+    pub(crate) entries: Vec<MentionEntry>,
+    pub(crate) open_slot: Option<OpenWorkerSlot>,
+}
+
+pub(crate) enum MentionQueryPreparation {
+    Ready(MentionQueryWork),
+    ReadyAndBuild {
+        work: MentionQueryWork,
+        build: MentionCacheBuildWork,
+    },
+}
+
+pub(crate) struct MentionCacheBuildWork {
+    sources: Vec<MentionSourceSlot>,
+    cwd: PathBuf,
+}
+
+struct MentionCacheBuildUpdate {
+    source: MentionSourceSlot,
+    cache: CachedSourceIndex,
+}
+
+pub(crate) struct MentionCacheBuildResult {
+    updates: Vec<MentionCacheBuildUpdate>,
+}
+
 impl MentionRegistry {
     /// Source list for direct (single-agent) sessions. Files only.
     pub fn for_direct_session() -> Self {
         Self {
-            sources: vec![Box::new(FileMentionSource)],
+            sources: vec![MentionSourceSlot::new(Box::new(FileMentionSource))],
             cache: HashMap::new(),
             code_graph_hint: None,
             code_graph_token: None,
@@ -126,6 +183,7 @@ impl MentionRegistry {
             agent_model_catalog_path: None,
             pending_agent_model_catalog_probe_requests: HashSet::new(),
             agent_model_catalog_probes_in_flight: HashSet::new(),
+            #[cfg(test)]
             last_worker_open_slot: None,
             matcher: Matcher::new(Config::DEFAULT),
             #[cfg(any(test, debug_assertions))]
@@ -138,8 +196,8 @@ impl MentionRegistry {
     pub fn for_brain_session(workers: Vec<super::WorkerMentionDescriptor>) -> Self {
         Self {
             sources: vec![
-                Box::new(FileMentionSource),
-                Box::new(WorkerMentionSource::new(workers)),
+                MentionSourceSlot::new(Box::new(FileMentionSource)),
+                MentionSourceSlot::new(Box::new(WorkerMentionSource::new(workers))),
             ],
             cache: HashMap::new(),
             code_graph_hint: None,
@@ -148,6 +206,7 @@ impl MentionRegistry {
             agent_model_catalog_path: None,
             pending_agent_model_catalog_probe_requests: HashSet::new(),
             agent_model_catalog_probes_in_flight: HashSet::new(),
+            #[cfg(test)]
             last_worker_open_slot: None,
             matcher: Matcher::new(Config::DEFAULT),
             #[cfg(any(test, debug_assertions))]
@@ -215,26 +274,26 @@ impl MentionRegistry {
         token: Option<CodeGraphToken>,
         cache_update: CodeGraphSourceUpdate,
     ) {
-        let source: Box<dyn MentionSource> = match worktree_root {
+        let source = MentionSourceSlot::new(match worktree_root {
             Some(worktree_root) => Box::new(CodeGraphMentionSource::for_worktree(
                 worktree_root,
                 explicit_override,
-            )),
+            )) as Box<dyn MentionSource>,
             None => Box::new(CodeGraphMentionSource::new(
                 explicit_override.expect("manual code graph source requires an artifact path"),
-            )),
-        };
+            )) as Box<dyn MentionSource>,
+        });
         if let Some(index) = self
             .sources
             .iter()
-            .position(|source| source.name() == "code_graph")
+            .position(|source| source.name == "code_graph")
         {
             self.sources[index] = source;
         } else {
             let insert_at = self
                 .sources
                 .iter()
-                .position(|source| source.name() != "file")
+                .position(|source| source.name != "file")
                 .unwrap_or(self.sources.len());
             self.sources.insert(insert_at, source);
         }
@@ -249,12 +308,12 @@ impl MentionRegistry {
     fn has_code_graph_source(&self) -> bool {
         self.sources
             .iter()
-            .any(|source| source.name() == "code_graph")
+            .any(|source| source.name == "code_graph")
     }
 
     fn remove_code_graph_source(&mut self) {
         let previous_len = self.sources.len();
-        self.sources.retain(|source| source.name() != "code_graph");
+        self.sources.retain(|source| source.name != "code_graph");
         if self.sources.len() != previous_len {
             self.clear_cache_for("code_graph");
         }
@@ -346,10 +405,9 @@ impl MentionRegistry {
         Some(format!("fetching {} models\u{2026}", names.join(", ")))
     }
 
-    /// Takes the open cascade slot (if any) captured by the most recent
-    /// `query()` call. A picker UI reads this immediately after calling
-    /// `query` to decide whether to render candidate rows for the current
-    /// slot instead of the single composed entry.
+    /// Takes the open cascade slot captured by the most recent synchronous
+    /// `query()` call. Used by compatibility tests for the public query API.
+    #[cfg(test)]
     pub(crate) fn take_worker_open_slot(&mut self) -> Option<OpenWorkerSlot> {
         self.last_worker_open_slot.take()
     }
@@ -360,11 +418,14 @@ impl MentionRegistry {
         if let Some(source) = self
             .sources
             .iter_mut()
-            .find(|source| source.name() == "issue")
+            .find(|source| source.name == "issue")
         {
-            *source = Box::new(IssueMentionSource::new(issues));
+            *source = MentionSourceSlot::new(Box::new(IssueMentionSource::new(issues)));
         } else {
-            self.sources.push(Box::new(IssueMentionSource::new(issues)));
+            self.sources
+                .push(MentionSourceSlot::new(Box::new(IssueMentionSource::new(
+                    issues,
+                ))));
         }
         self.clear_cache_for("issue");
     }
@@ -373,12 +434,14 @@ impl MentionRegistry {
         if let Some(source) = self
             .sources
             .iter_mut()
-            .find(|source| source.name() == "worker")
+            .find(|source| source.name == "worker")
         {
-            *source = Box::new(WorkerMentionSource::new(workers));
+            *source = MentionSourceSlot::new(Box::new(WorkerMentionSource::new(workers)));
         } else {
             self.sources
-                .push(Box::new(WorkerMentionSource::new(workers)));
+                .push(MentionSourceSlot::new(Box::new(WorkerMentionSource::new(
+                    workers,
+                ))));
         }
         self.clear_cache_for("worker");
     }
@@ -387,12 +450,13 @@ impl MentionRegistry {
         if let Some(source) = self
             .sources
             .iter_mut()
-            .find(|source| source.name() == "datasource")
+            .find(|source| source.name == "datasource")
         {
-            *source = Box::new(DatasourceMentionSource::new(entries));
+            *source = MentionSourceSlot::new(Box::new(DatasourceMentionSource::new(entries)));
         } else {
-            self.sources
-                .push(Box::new(DatasourceMentionSource::new(entries)));
+            self.sources.push(MentionSourceSlot::new(Box::new(
+                DatasourceMentionSource::new(entries),
+            )));
         }
         self.clear_cache_for("datasource");
     }
@@ -404,7 +468,52 @@ impl MentionRegistry {
         query: &str,
         limit: usize,
     ) -> Vec<MentionEntry> {
-        self.last_worker_open_slot = None;
+        let work = self.prepare_query_work(scope, cwd, query, limit);
+        let result = self.run_query_work(work);
+        #[cfg(test)]
+        {
+            self.last_worker_open_slot = result.open_slot.clone();
+        }
+        result.entries
+    }
+
+    pub(crate) fn prepare_query_work(
+        &mut self,
+        scope: CompletionScope<'_>,
+        cwd: &Path,
+        query: &str,
+        limit: usize,
+    ) -> MentionQueryWork {
+        match self.prepare_query_work_inner(scope, cwd, query, limit, false) {
+            MentionQueryPreparation::Ready(work) => work,
+            MentionQueryPreparation::ReadyAndBuild { .. } => {
+                unreachable!("synchronous query preparation cannot defer cache builds")
+            }
+        }
+    }
+
+    pub(crate) fn prepare_query_work_nonblocking(
+        &mut self,
+        scope: CompletionScope<'_>,
+        cwd: &Path,
+        query: &str,
+        limit: usize,
+    ) -> MentionQueryPreparation {
+        self.prepare_query_work_inner(scope, cwd, query, limit, true)
+    }
+
+    fn prepare_query_work_inner(
+        &mut self,
+        scope: CompletionScope<'_>,
+        cwd: &Path,
+        query: &str,
+        limit: usize,
+        defer_code_graph_build: bool,
+    ) -> MentionQueryPreparation {
+        #[cfg(test)]
+        {
+            self.last_worker_open_slot = None;
+        }
         #[cfg(any(test, debug_assertions))]
         {
             self.query_call_count += 1;
@@ -418,223 +527,104 @@ impl MentionRegistry {
                 self.code_graph_token,
                 Some(CodeGraphToken::Pointer { .. }) | Some(CodeGraphToken::Resolved { .. })
             );
-        for source in &mut self.sources {
-            let source_name = source.name();
-            let needs_rebuild = match self.cache.get(source_name) {
-                Some(_) if source_name == "code_graph" && resolver_token_unchanged => false,
-                Some(cached) => cached.built_at.elapsed() > source_cache_ttl(source_name),
-                None => true,
-            };
-            if needs_rebuild {
-                tracing::debug!(source = source_name, "rebuilding mention source cache");
-                if let Ok(entries) = source.build(cwd) {
-                    let mut source_code_payloads = HashMap::new();
-                    for (uri, payload) in source.code_payloads() {
-                        source_code_payloads.insert(uri.clone(), Arc::clone(payload));
-                    }
-                    let mut source_datasource_hints = HashMap::new();
-                    for (uri, hint) in source.datasource_hints() {
-                        source_datasource_hints.insert(uri.clone(), Arc::clone(hint));
-                    }
-                    self.cache.insert(
-                        source_name,
-                        CachedSourceIndex {
-                            entries: Arc::new(entries),
-                            code_payloads: source_code_payloads,
-                            datasource_hints: source_datasource_hints,
-                            built_at: Instant::now(),
-                        },
-                    );
-                }
-            }
-        }
-        let total_len: usize = self.cache.values().map(|cached| cached.entries.len()).sum();
-        let mut all_entries: Vec<&MentionEntry> = Vec::with_capacity(total_len);
-        for source in &self.sources {
-            if let Some(cached) = self.cache.get(source.name()) {
-                all_entries.extend(cached.entries.iter());
-            }
-        }
-        dedup_file_entries_with_code_files(&mut all_entries);
-        let entries = all_entries.as_slice();
-
-        if query.is_empty() {
-            let mut workers: Vec<&MentionEntry> = entries
-                .iter()
-                .filter(|e| e.kind == MentionKind::Worker)
-                .copied()
-                .collect();
-            workers.sort_by(|a, b| {
-                a.display
-                    .len()
-                    .cmp(&b.display.len())
-                    .then(a.display.cmp(&b.display))
-            });
-            workers.truncate(WORKER_PIN_CAP);
-            let workers: Vec<MentionEntry> = workers.into_iter().cloned().collect();
-
-            let mut files: Vec<&MentionEntry> = entries
-                .iter()
-                .filter(|e| matches!(e.kind, MentionKind::File | MentionKind::Directory))
-                .copied()
-                .collect();
-            files.sort_by(|a, b| {
-                path_depth(&a.display)
-                    .cmp(&path_depth(&b.display))
-                    .then(a.display.len().cmp(&b.display.len()))
-                    .then(a.display.cmp(&b.display))
-                    .then(a.uri.cmp(&b.uri))
-            });
-            files.truncate(FILE_CAP);
-            let files: Vec<MentionEntry> = files.into_iter().cloned().collect();
-
-            let mut issues: Vec<(usize, &MentionEntry)> = entries
-                .iter()
-                .enumerate()
-                .filter(|(_, e)| e.kind == MentionKind::Issue)
-                .map(|(index, e)| (index, *e))
-                .collect();
-            issues.sort_by(|(idx_a, a), (idx_b, b)| {
-                idx_a
-                    .cmp(idx_b)
-                    .then(issue_id(a).cmp(issue_id(b)))
-                    .then(a.uri.cmp(&b.uri))
-            });
-            issues.truncate(ISSUE_CAP);
-            let issues: Vec<MentionEntry> =
-                issues.into_iter().map(|(_, entry)| entry.clone()).collect();
-
-            let mut datasources: Vec<&MentionEntry> = entries
-                .iter()
-                .filter(|e| e.kind == MentionKind::Datasource)
-                .copied()
-                .collect();
-            datasources.sort_by(|a, b| {
-                a.display
-                    .cmp(&b.display)
-                    .then(a.secondary.cmp(&b.secondary))
-                    .then(a.uri.cmp(&b.uri))
-            });
-            datasources.truncate(DATASOURCE_CAP);
-            let datasources: Vec<MentionEntry> = datasources.into_iter().cloned().collect();
-
-            let mut code_graph: Vec<&MentionEntry> = entries
-                .iter()
-                .filter(|e| matches!(e.kind, MentionKind::CodeFile | MentionKind::CodeSymbol))
-                .copied()
-                .collect();
-            code_graph.sort_by(|a, b| {
-                empty_code_kind_rank(&a.kind)
-                    .cmp(&empty_code_kind_rank(&b.kind))
-                    .then(path_depth(&a.display).cmp(&path_depth(&b.display)))
-                    .then(a.display.len().cmp(&b.display.len()))
-                    .then(a.display.cmp(&b.display))
-                    .then(a.uri.cmp(&b.uri))
-            });
-            code_graph.truncate(CODE_CAP);
-            let code_graph: Vec<MentionEntry> = code_graph.into_iter().cloned().collect();
-
-            let mut rows = Vec::new();
-            append_section_rows(&mut rows, "Workers", &workers);
-            append_section_rows(&mut rows, "Files", &files);
-            append_section_rows(&mut rows, "Issues", &issues);
-            append_section_rows(&mut rows, "Data", &datasources);
-            append_section_rows(&mut rows, "Code", &code_graph);
-            rows.truncate(limit);
-            return rows;
-        }
-
-        let compose_entries: Vec<MentionEntry> =
-            entries.iter().map(|entry| (*entry).clone()).collect();
-        let compose_refs: Vec<&MentionEntry> = compose_entries.iter().collect();
-        // The composed worker row supersedes its base worker entry, but it
-        // must not suppress issue/file/code rows matching the same text —
-        // typing a worker-colliding query like "codex" still has to reach
-        // the issue "Coordinate codex work", and files keep outranking the
-        // worker inside the score window. The composed row takes the base
-        // row's ranked position; it is pinned first only while a cascade
-        // slot is open, because the slot-picker UI pairs the open slot
-        // with `hits.first()`.
-        let mut composed_entry = None;
-        let mut composed_slot_open = false;
-        if let Some(composed) = Self::compose_worker_mention(
-            cwd,
-            &compose_refs,
-            query,
-            &self.cache,
-            self.agent_model_catalog_path.as_ref(),
-            &mut self.pending_agent_model_catalog_probe_requests,
-            &mut self.matcher,
-        ) {
-            composed_slot_open = composed.open_slot.is_some();
-            self.last_worker_open_slot = composed.open_slot;
-            composed_entry = Some(composed.entry);
-        }
-        let composed_base_uri = composed_entry.as_ref().map(|entry| {
-            entry
-                .uri
-                .split('?')
-                .next()
-                .unwrap_or(&entry.uri)
-                .to_string()
-        });
-
-        let pattern = Pattern::parse(query, CaseMatching::Smart, Normalization::Smart);
-        let code_pattern = Pattern::parse(query, CaseMatching::Ignore, Normalization::Smart);
-        let mut buf = Vec::new();
-        let mut scored: Vec<RankedMentionRef<'_>> = entries
+        let stale_sources: Vec<MentionSourceSlot> = self
+            .sources
             .iter()
-            .filter_map(|e| {
-                buf.clear();
-                let rank = if matches!(e.kind, MentionKind::CodeFile | MentionKind::CodeSymbol) {
-                    code_match_rank(e, query, &code_pattern, &mut self.matcher, &mut buf)?
-                } else {
-                    let haystack = e.search_text.as_deref().unwrap_or(&e.display);
-                    pattern.score(
-                        nucleo_matcher::Utf32Str::new(haystack, &mut buf),
-                        &mut self.matcher,
-                    )?
-                };
-                Some(RankedMentionRef { rank, entry: e })
+            .filter(|source| match self.cache.get(source.name) {
+                Some(_) if source.name == "code_graph" && resolver_token_unchanged => false,
+                Some(cached) => cached.built_at.elapsed() > source_cache_ttl(source.name),
+                None => true,
             })
+            .cloned()
             .collect();
-        let max_rank = scored.iter().map(|mention| mention.rank).max().unwrap_or(0);
-        scored.sort_by(|a, b| typed_query_cmp(a, b, max_rank));
-        let is_base_worker = |entry: &MentionEntry| {
-            composed_base_uri
-                .as_deref()
-                .is_some_and(|base| entry.kind == MentionKind::Worker && entry.uri == base)
+        let (deferred_sources, inline_sources): (Vec<_>, Vec<_>) = stale_sources
+            .into_iter()
+            .partition(|source| defer_code_graph_build && source.name == "code_graph");
+        for source in inline_sources {
+            if let Some(cache) = build_source_cache(&source, cwd) {
+                self.cache.insert(source.name, cache);
+            }
+        }
+        let composed = if query.is_empty() {
+            None
+        } else {
+            let worker_entries: Vec<&MentionEntry> = self
+                .cache
+                .get("worker")
+                .map(|cached| cached.entries.iter().collect())
+                .unwrap_or_default();
+            Self::compose_worker_mention(
+                cwd,
+                &worker_entries,
+                query,
+                &self.cache,
+                self.agent_model_catalog_path.as_ref(),
+                &mut self.pending_agent_model_catalog_probe_requests,
+                &mut self.matcher,
+            )
         };
-        let mut rows: Vec<MentionEntry> = Vec::new();
-        let mut composed_emitted = false;
-        for ranked in scored.into_iter().take(limit) {
-            if !composed_emitted && is_base_worker(ranked.entry) {
-                if let Some(entry) = composed_entry.clone() {
-                    rows.push(entry);
-                    composed_emitted = true;
-                    continue;
-                }
+        let sources = self
+            .sources
+            .iter()
+            .filter_map(|source| self.cache.get(source.name))
+            .map(|cached| Arc::clone(&cached.entries))
+            .collect();
+        let (composed_entry, open_slot) = match composed {
+            Some(composed) => (Some(composed.entry), composed.open_slot),
+            None => (None, None),
+        };
+
+        let work = MentionQueryWork {
+            sources,
+            query: query.to_string(),
+            limit,
+            composed_entry,
+            open_slot,
+        };
+        if deferred_sources.is_empty() {
+            MentionQueryPreparation::Ready(work)
+        } else {
+            MentionQueryPreparation::ReadyAndBuild {
+                work,
+                build: MentionCacheBuildWork {
+                    sources: deferred_sources,
+                    cwd: cwd.to_path_buf(),
+                },
             }
-            rows.push(ranked.entry.clone());
         }
-        if let Some(entry) = composed_entry {
-            let composed_uri = entry.uri.clone();
-            if !composed_emitted {
-                // Mid-cascade queries like "codex,gpt-5" fuzzy-match nothing,
-                // so the explicitly named worker still leads the rows.
-                rows.insert(0, entry);
-                rows.truncate(limit.max(1));
-            }
-            if composed_slot_open {
-                if let Some(pos) = rows.iter().position(|row| row.uri == composed_uri) {
-                    if pos > 0 {
-                        let row = rows.remove(pos);
-                        rows.insert(0, row);
-                    }
-                }
+    }
+
+    pub(crate) fn apply_cache_build(&mut self, result: MentionCacheBuildResult) {
+        for update in result.updates {
+            let is_current = self.sources.iter().any(|source| {
+                source.name == update.source.name
+                    && Arc::ptr_eq(&source.source, &update.source.source)
+            });
+            if is_current {
+                self.cache.insert(update.source.name, update.cache);
             }
         }
-        rows
+    }
+
+    pub(crate) fn run_query_work(&mut self, work: MentionQueryWork) -> MentionQueryResult {
+        score_mention_query(work, &mut self.matcher)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_sources_for_test(sources: Vec<Box<dyn MentionSource>>) -> Self {
+        Self {
+            sources: sources.into_iter().map(MentionSourceSlot::new).collect(),
+            cache: HashMap::new(),
+            code_graph_hint: None,
+            code_graph_token: None,
+            code_graph_auto_discovery: false,
+            agent_model_catalog_path: None,
+            pending_agent_model_catalog_probe_requests: HashSet::new(),
+            agent_model_catalog_probes_in_flight: HashSet::new(),
+            last_worker_open_slot: None,
+            matcher: Matcher::new(Config::DEFAULT),
+            query_call_count: 0,
+        }
     }
 
     #[cfg(any(test, debug_assertions))]
@@ -1307,6 +1297,235 @@ fn mention_path_key(path: &str) -> String {
     relative.replace('\\', "/")
 }
 
+fn build_source_cache(source: &MentionSourceSlot, cwd: &Path) -> Option<CachedSourceIndex> {
+    tracing::debug!(source = source.name, "rebuilding mention source cache");
+    let mut builder = match source.source.lock() {
+        Ok(builder) => builder,
+        Err(error) => {
+            tracing::warn!(
+                source = source.name,
+                error = %error,
+                "mention source cache lock poisoned"
+            );
+            return None;
+        }
+    };
+    let entries = match builder.build(cwd) {
+        Ok(entries) => entries,
+        Err(error) => {
+            tracing::warn!(
+                source = source.name,
+                error = %error,
+                "mention source cache build failed"
+            );
+            return None;
+        }
+    };
+    let code_payloads = builder
+        .code_payloads()
+        .iter()
+        .map(|(uri, payload)| (uri.clone(), Arc::clone(payload)))
+        .collect();
+    let datasource_hints = builder
+        .datasource_hints()
+        .iter()
+        .map(|(uri, hint)| (uri.clone(), Arc::clone(hint)))
+        .collect();
+    Some(CachedSourceIndex {
+        entries: Arc::new(entries),
+        code_payloads,
+        datasource_hints,
+        built_at: Instant::now(),
+    })
+}
+
+pub(crate) fn build_mention_caches(work: MentionCacheBuildWork) -> MentionCacheBuildResult {
+    let updates = work
+        .sources
+        .into_iter()
+        .filter_map(|source| {
+            let cache = build_source_cache(&source, &work.cwd)?;
+            Some(MentionCacheBuildUpdate { source, cache })
+        })
+        .collect();
+    MentionCacheBuildResult { updates }
+}
+
+pub(crate) fn score_mention_query(
+    work: MentionQueryWork,
+    matcher: &mut Matcher,
+) -> MentionQueryResult {
+    let MentionQueryWork {
+        sources,
+        query,
+        limit,
+        mut composed_entry,
+        open_slot,
+    } = work;
+    let total_len: usize = sources.iter().map(|entries| entries.len()).sum();
+    let mut all_entries: Vec<&MentionEntry> = Vec::with_capacity(total_len);
+    for entries in &sources {
+        all_entries.extend(entries.iter());
+    }
+    dedup_file_entries_with_code_files(&mut all_entries);
+    let entries = all_entries.as_slice();
+
+    if query.is_empty() {
+        let mut workers: Vec<&MentionEntry> = entries
+            .iter()
+            .filter(|entry| entry.kind == MentionKind::Worker)
+            .copied()
+            .collect();
+        workers.sort_by(|a, b| {
+            a.display
+                .len()
+                .cmp(&b.display.len())
+                .then(a.display.cmp(&b.display))
+        });
+        workers.truncate(WORKER_PIN_CAP);
+        let workers: Vec<MentionEntry> = workers.into_iter().cloned().collect();
+
+        let mut files: Vec<&MentionEntry> = entries
+            .iter()
+            .filter(|entry| matches!(entry.kind, MentionKind::File | MentionKind::Directory))
+            .copied()
+            .collect();
+        files.sort_by(|a, b| {
+            path_depth(&a.display)
+                .cmp(&path_depth(&b.display))
+                .then(a.display.len().cmp(&b.display.len()))
+                .then(a.display.cmp(&b.display))
+                .then(a.uri.cmp(&b.uri))
+        });
+        files.truncate(FILE_CAP);
+        let files: Vec<MentionEntry> = files.into_iter().cloned().collect();
+
+        let mut issues: Vec<(usize, &MentionEntry)> = entries
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| entry.kind == MentionKind::Issue)
+            .map(|(index, entry)| (index, *entry))
+            .collect();
+        issues.sort_by(|(idx_a, a), (idx_b, b)| {
+            idx_a
+                .cmp(idx_b)
+                .then(issue_id(a).cmp(issue_id(b)))
+                .then(a.uri.cmp(&b.uri))
+        });
+        issues.truncate(ISSUE_CAP);
+        let issues: Vec<MentionEntry> =
+            issues.into_iter().map(|(_, entry)| entry.clone()).collect();
+
+        let mut datasources: Vec<&MentionEntry> = entries
+            .iter()
+            .filter(|entry| entry.kind == MentionKind::Datasource)
+            .copied()
+            .collect();
+        datasources.sort_by(|a, b| {
+            a.display
+                .cmp(&b.display)
+                .then(a.secondary.cmp(&b.secondary))
+                .then(a.uri.cmp(&b.uri))
+        });
+        datasources.truncate(DATASOURCE_CAP);
+        let datasources: Vec<MentionEntry> = datasources.into_iter().cloned().collect();
+
+        let mut code_graph: Vec<&MentionEntry> = entries
+            .iter()
+            .filter(|entry| matches!(entry.kind, MentionKind::CodeFile | MentionKind::CodeSymbol))
+            .copied()
+            .collect();
+        code_graph.sort_by(|a, b| {
+            empty_code_kind_rank(&a.kind)
+                .cmp(&empty_code_kind_rank(&b.kind))
+                .then(path_depth(&a.display).cmp(&path_depth(&b.display)))
+                .then(a.display.len().cmp(&b.display.len()))
+                .then(a.display.cmp(&b.display))
+                .then(a.uri.cmp(&b.uri))
+        });
+        code_graph.truncate(CODE_CAP);
+        let code_graph: Vec<MentionEntry> = code_graph.into_iter().cloned().collect();
+
+        let mut rows = Vec::new();
+        append_section_rows(&mut rows, "Workers", &workers);
+        append_section_rows(&mut rows, "Files", &files);
+        append_section_rows(&mut rows, "Issues", &issues);
+        append_section_rows(&mut rows, "Data", &datasources);
+        append_section_rows(&mut rows, "Code", &code_graph);
+        rows.truncate(limit);
+        return MentionQueryResult {
+            entries: rows,
+            open_slot,
+        };
+    }
+
+    // The composed worker row supersedes its base worker entry, but it must
+    // not suppress issue/file/code rows matching the same text.
+    let composed_base_uri = composed_entry.as_ref().map(|entry| {
+        entry
+            .uri
+            .split('?')
+            .next()
+            .unwrap_or(&entry.uri)
+            .to_string()
+    });
+    let pattern = Pattern::parse(&query, CaseMatching::Smart, Normalization::Smart);
+    let code_pattern = Pattern::parse(&query, CaseMatching::Ignore, Normalization::Smart);
+    let mut buf = Vec::new();
+    let mut scored: Vec<RankedMentionRef<'_>> = entries
+        .iter()
+        .filter_map(|entry| {
+            buf.clear();
+            let rank = if matches!(entry.kind, MentionKind::CodeFile | MentionKind::CodeSymbol) {
+                code_match_rank(entry, &query, &code_pattern, matcher, &mut buf)?
+            } else {
+                let haystack = entry.search_text.as_deref().unwrap_or(&entry.display);
+                pattern.score(nucleo_matcher::Utf32Str::new(haystack, &mut buf), matcher)?
+            };
+            Some(RankedMentionRef { rank, entry })
+        })
+        .collect();
+    let max_rank = scored.iter().map(|mention| mention.rank).max().unwrap_or(0);
+    scored.sort_by(|a, b| typed_query_cmp(a, b, max_rank));
+    let is_base_worker = |entry: &MentionEntry| {
+        composed_base_uri
+            .as_deref()
+            .is_some_and(|base| entry.kind == MentionKind::Worker && entry.uri == base)
+    };
+    let mut rows = Vec::new();
+    let mut composed_emitted = false;
+    for ranked in scored.into_iter().take(limit) {
+        if !composed_emitted && is_base_worker(ranked.entry) {
+            if let Some(entry) = composed_entry.clone() {
+                rows.push(entry);
+                composed_emitted = true;
+                continue;
+            }
+        }
+        rows.push(ranked.entry.clone());
+    }
+    if let Some(entry) = composed_entry.take() {
+        let composed_uri = entry.uri.clone();
+        if !composed_emitted {
+            rows.insert(0, entry);
+            rows.truncate(limit.max(1));
+        }
+        if open_slot.is_some() {
+            if let Some(pos) = rows.iter().position(|row| row.uri == composed_uri) {
+                if pos > 0 {
+                    let row = rows.remove(pos);
+                    rows.insert(0, row);
+                }
+            }
+        }
+    }
+
+    MentionQueryResult {
+        entries: rows,
+        open_slot,
+    }
+}
+
 #[derive(Debug, Clone)]
 struct RankedMentionRef<'a> {
     rank: u32,
@@ -1750,11 +1969,9 @@ mod tests {
     #[test]
     fn query_matches_issue_search_text_not_just_display() {
         let mut registry = MentionRegistry {
-            sources: vec![Box::new(IssueMentionSource::new(vec![issue(
-                "bd-1",
-                "Picker rows",
-                Some("alice"),
-            )]))],
+            sources: vec![MentionSourceSlot::new(Box::new(IssueMentionSource::new(
+                vec![issue("bd-1", "Picker rows", Some("alice"))],
+            )))],
             cache: HashMap::new(),
             code_graph_hint: None,
             code_graph_token: None,
@@ -2561,11 +2778,9 @@ mod tests {
     #[test]
     fn set_issue_snapshot_clears_cache_for_next_query() {
         let mut registry = MentionRegistry {
-            sources: vec![Box::new(IssueMentionSource::new(vec![issue(
-                "bd-1",
-                "Old title",
-                None,
-            )]))],
+            sources: vec![MentionSourceSlot::new(Box::new(IssueMentionSource::new(
+                vec![issue("bd-1", "Old title", None)],
+            )))],
             cache: HashMap::new(),
             code_graph_hint: None,
             code_graph_token: None,
@@ -2656,10 +2871,12 @@ mod tests {
     #[test]
     fn query_uses_smart_case_matching() {
         let mut registry = MentionRegistry {
-            sources: vec![Box::new(IssueMentionSource::new(vec![
-                issue("bd-1", "deploy prod", None),
-                issue("bd-2", "Deploy Prod", None),
-            ]))],
+            sources: vec![MentionSourceSlot::new(Box::new(IssueMentionSource::new(
+                vec![
+                    issue("bd-1", "deploy prod", None),
+                    issue("bd-2", "Deploy Prod", None),
+                ],
+            )))],
             cache: HashMap::new(),
             code_graph_hint: None,
             code_graph_token: None,
@@ -2736,7 +2953,7 @@ mod tests {
 
     fn test_registry(sources: Vec<Box<dyn MentionSource>>) -> MentionRegistry {
         MentionRegistry {
-            sources,
+            sources: sources.into_iter().map(MentionSourceSlot::new).collect(),
             cache: HashMap::new(),
             code_graph_hint: None,
             code_graph_token: None,
@@ -2748,6 +2965,73 @@ mod tests {
             matcher: Matcher::new(Config::DEFAULT),
             #[cfg(any(test, debug_assertions))]
             query_call_count: 0,
+        }
+    }
+
+    #[test]
+    #[ignore = "manual large-symbol performance benchmark"]
+    fn benchmark_large_symbol_query_core() {
+        const SYMBOL_COUNT: usize = 77_000;
+        const SAMPLE_COUNT: usize = 7;
+
+        let entries = (0..SYMBOL_COUNT)
+            .map(|index| {
+                mention(
+                    MentionKind::CodeSymbol,
+                    index,
+                    format!("crate::module_{:03}::symbol_{index}", index % 241),
+                )
+            })
+            .collect();
+        let mut registry = test_registry(vec![Box::new(StaticSource {
+            name: "large_symbol_benchmark",
+            entries,
+        })]);
+
+        // Build the source cache outside the measured region. The benchmark
+        // represents steady-state typing after the code-graph snapshot loads.
+        let _ = registry.query(
+            CompletionScope::PreSession,
+            Path::new("."),
+            "symbol_42424",
+            20,
+        );
+
+        for query in ["symbol_42424", "symbol"] {
+            for simulate_legacy_clone in [true, false] {
+                let mut samples = Vec::with_capacity(SAMPLE_COUNT);
+                for _ in 0..SAMPLE_COUNT {
+                    let started = std::time::Instant::now();
+                    let work = registry.prepare_query_work(
+                        CompletionScope::PreSession,
+                        Path::new("."),
+                        query,
+                        20,
+                    );
+                    // Before immutable source snapshots, every non-empty query
+                    // cloned every entry solely to inspect worker composition.
+                    let legacy_clone = simulate_legacy_clone.then(|| {
+                        work.sources
+                            .iter()
+                            .flat_map(|entries| entries.iter().cloned())
+                            .collect::<Vec<_>>()
+                    });
+                    let rows = registry.run_query_work(work).entries;
+                    std::hint::black_box(legacy_clone);
+                    samples.push(started.elapsed());
+                    assert!(!rows.is_empty());
+                }
+                samples.sort_unstable();
+                let mode = if simulate_legacy_clone {
+                    "legacy_full_clone"
+                } else {
+                    "immutable_snapshot"
+                };
+                eprintln!(
+                    "large_symbol_query_core symbols={SYMBOL_COUNT} query={query:?} mode={mode} median_us={}",
+                    samples[SAMPLE_COUNT / 2].as_micros()
+                );
+            }
         }
     }
 

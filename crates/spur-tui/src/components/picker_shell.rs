@@ -224,11 +224,24 @@ impl PickerShell {
     }
 
     pub fn poll_updates(&mut self) -> bool {
+        if let Some(rows) = self.source.take_rows_update() {
+            self.active_preview = None;
+            self.rows = rows;
+            self.list_state.select(first_selectable_index(&self.rows));
+            return true;
+        }
         if self.source.poll_updates() {
             self.update_active_preview();
             return true;
         }
         false
+    }
+
+    pub fn invalidate_pending_rows(&mut self) {
+        self.source.invalidate_pending_rows();
+        self.active_preview = None;
+        self.rows.clear();
+        self.list_state.select(None);
     }
 
     // ── Key handling ───────────────────────────────────────────────────

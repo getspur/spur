@@ -95,6 +95,7 @@ impl InputCompletionPort {
             TriggerTransition::Update { query } => {
                 if let Some(shell) = self.picker_shell.as_mut() {
                     if shell.should_debounce_input_bar_updates() {
+                        shell.invalidate_pending_rows();
                         self.pending_mention_query = Some((Instant::now(), query));
                     } else {
                         shell.set_query_from_input_bar(&query);
@@ -286,11 +287,13 @@ impl InputCompletionPort {
     }
 
     pub fn poll_updates(&mut self) -> bool {
-        let flushed = self.flush_pending_query_if_due();
         let source_updates = self
             .picker_shell
             .as_mut()
             .is_some_and(PickerShell::poll_updates);
+        // Apply completed cache builds before flushing a debounced query so
+        // the latest query can reuse them instead of scheduling a duplicate.
+        let flushed = self.flush_pending_query_if_due();
         flushed || source_updates
     }
 
@@ -672,6 +675,75 @@ mod tests {
             Some("abcde"),
             "the final queued query must win after debounce"
         );
+    }
+
+    #[test]
+    fn mention_query_update_invalidates_rows_before_debounce_flush() {
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+
+        struct InvalidationSource {
+            invalidations: Arc<AtomicUsize>,
+        }
+
+        impl crate::components::query_source::QuerySource for InvalidationSource {
+            fn title(&self) -> &str {
+                "test"
+            }
+
+            fn query_mode(&self) -> crate::components::query_source::QueryMode {
+                crate::components::query_source::QueryMode::ReadFromInputBar
+            }
+
+            fn should_debounce_input_bar_updates(&self) -> bool {
+                true
+            }
+
+            fn refresh(
+                &mut self,
+                _query: &str,
+            ) -> Vec<crate::components::query_source::RetrievalRow> {
+                Vec::new()
+            }
+
+            fn accept(
+                &self,
+                _row_idx: usize,
+            ) -> Option<crate::components::query_source::RetrievalAccept> {
+                None
+            }
+
+            fn invalidate_pending_rows(&mut self) {
+                self.invalidations.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        let command_registry = CommandRegistry::new();
+        let mention_registry = Rc::new(RefCell::new(MentionRegistry::new()));
+        let mut input_bar = InputBar::new();
+        let mut completion = InputCompletionPort::new();
+        input_bar.set_text("@".to_string(), 1);
+        completion.dispatch(
+            IntentEvent::TypedChar('@'),
+            &mut input_bar,
+            &env(&command_registry, &mention_registry, tmp.path()),
+        );
+        let invalidations = Arc::new(AtomicUsize::new(0));
+        completion.open_test_source(Box::new(InvalidationSource {
+            invalidations: Arc::clone(&invalidations),
+        }));
+
+        input_bar.set_text("@a".to_string(), 2);
+        completion.dispatch(
+            IntentEvent::TypedChar('a'),
+            &mut input_bar,
+            &env(&command_registry, &mention_registry, tmp.path()),
+        );
+
+        assert_eq!(invalidations.load(Ordering::Relaxed), 1);
     }
 
     #[test]

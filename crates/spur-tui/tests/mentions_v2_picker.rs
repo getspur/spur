@@ -45,6 +45,27 @@ fn render_text(v: &mut SessionDetailView, width: u16, height: u16) -> String {
     out
 }
 
+fn wait_for_render_text(
+    view: &mut SessionDetailView,
+    width: u16,
+    height: u16,
+    needle: &str,
+) -> String {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        view.tick();
+        let rendered = render_text(view, width, height);
+        if rendered.contains(needle) {
+            return rendered;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "picker did not render {needle:?} before deadline; rendered=\n{rendered}"
+        );
+        std::thread::yield_now();
+    }
+}
+
 fn issue_summary(id: &str, title: &str) -> spur_pm::IssueSummary {
     spur_pm::IssueSummary {
         id: id.to_string(),
@@ -148,7 +169,7 @@ fn empty_at_shows_sectioned_picker() {
     type_str(&mut view, "@");
     assert!(view.completion_active_for_test());
 
-    let rendered = render_text(&mut view, 160, 48);
+    let rendered = wait_for_render_text(&mut view, 160, 48, "── Code ──");
     let workers_header = "── Workers ──";
     let files_header = "── Files ──";
     let issues_header = "── Issues ──";
@@ -283,7 +304,7 @@ fn typed_query_prefers_files_within_window() {
 
     type_str(&mut view, "@foo");
     assert!(view.completion_active_for_test());
-    let rendered = render_text(&mut view, 160, 48);
+    let rendered = wait_for_render_text(&mut view, 160, 48, "foo");
     assert!(
         rendered.contains("foo"),
         "expected foo query results in picker"

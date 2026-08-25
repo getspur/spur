@@ -124,6 +124,10 @@ pub trait QuerySource {
         false
     }
 
+    /// Invalidate rows/results for the previous input immediately when a
+    /// debounced source observes newer text.
+    fn invalidate_pending_rows(&mut self) {}
+
     /// Filter+rank using the given query. Implementors MUST reuse any
     /// internal matcher state across calls; constructing a fresh
     /// `nucleo::Matcher` per call is forbidden for hot-path reasons
@@ -155,6 +159,12 @@ pub trait QuerySource {
     /// picker should be re-rendered.
     fn poll_updates(&mut self) -> bool {
         false
+    }
+
+    /// Return replacement rows produced by background query work. Sources
+    /// that rank synchronously keep the default `None` implementation.
+    fn take_rows_update(&mut self) -> Option<Vec<RetrievalRow>> {
+        None
     }
 }
 
@@ -337,6 +347,82 @@ impl QuerySource for HistoryQuerySource {
 
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::sync::mpsc::{self, Receiver, SendError, Sender};
+
+/// Maximum snapshot size scored on the input/render thread. Derived by
+/// SOLVE PRE from the measured 2,414 ns/entry p95 cost and an 8 ms budget.
+const INLINE_MENTION_QUERY_ENTRY_CAP: usize = 3_314;
+
+struct MentionQueryRequest {
+    generation: u64,
+    task: MentionQueryTask,
+}
+
+struct MentionQueryResponse {
+    generation: u64,
+    result: MentionQueryWorkerResult,
+}
+
+enum MentionQueryTask {
+    Score(Box<crate::mentions::registry::MentionQueryWork>),
+    Build(crate::mentions::registry::MentionCacheBuildWork),
+}
+
+enum MentionQueryWorkerResult {
+    Scored(crate::mentions::registry::MentionQueryResult),
+    Built(crate::mentions::registry::MentionCacheBuildResult),
+}
+
+struct MentionQueryWorker {
+    request_tx: Sender<Box<MentionQueryRequest>>,
+    result_rx: Receiver<MentionQueryResponse>,
+}
+
+impl MentionQueryWorker {
+    fn new() -> Option<Self> {
+        let (request_tx, request_rx) = mpsc::channel::<Box<MentionQueryRequest>>();
+        let (result_tx, result_rx) = mpsc::channel::<MentionQueryResponse>();
+        std::thread::Builder::new()
+            .name("spur-mention-query".to_string())
+            .spawn(move || {
+                let mut matcher = Matcher::new(Config::DEFAULT);
+                while let Ok(mut request) = request_rx.recv() {
+                    while let Ok(newer) = request_rx.try_recv() {
+                        request = newer;
+                    }
+                    let result = match request.task {
+                        MentionQueryTask::Score(work) => MentionQueryWorkerResult::Scored(
+                            crate::mentions::registry::score_mention_query(*work, &mut matcher),
+                        ),
+                        MentionQueryTask::Build(work) => MentionQueryWorkerResult::Built(
+                            crate::mentions::registry::build_mention_caches(work),
+                        ),
+                    };
+                    if result_tx
+                        .send(MentionQueryResponse {
+                            generation: request.generation,
+                            result,
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            })
+            .ok()?;
+        Some(Self {
+            request_tx,
+            result_rx,
+        })
+    }
+
+    fn send(
+        &self,
+        request: MentionQueryRequest,
+    ) -> Result<(), SendError<Box<MentionQueryRequest>>> {
+        self.request_tx.send(Box::new(request))
+    }
+}
 
 /// QuerySource backed by a shared `MentionRegistry` handle. Each `refresh`
 /// call re-queries the registry with the current query, so the source
@@ -366,6 +452,9 @@ pub struct MentionQuerySource {
     /// occludes the input-bar hint line while it is open — the title is
     /// the only mention surface guaranteed visible during a cascade.
     title: String,
+    worker: Option<MentionQueryWorker>,
+    latest_generation: u64,
+    latest_query: String,
 }
 
 enum MentionSourceScope {
@@ -405,7 +494,146 @@ impl MentionQuerySource {
             last_hits: Vec::new(),
             last_slot_pick: None,
             title: "Mentions · @".to_string(),
+            worker: MentionQueryWorker::new(),
+            latest_generation: 0,
+            latest_query: String::new(),
         }
+    }
+
+    fn dispatch_latest_query(&mut self) -> Option<Vec<RetrievalRow>> {
+        let preparation = self.registry.borrow_mut().prepare_query_work_nonblocking(
+            self.scope.as_completion_scope(),
+            &self.cwd,
+            &self.latest_query,
+            20,
+        );
+        self.title = match self.registry.borrow().agent_model_catalog_probe_hint() {
+            Some(hint) => format!("Mentions · @ · {hint}"),
+            None => "Mentions · @".to_string(),
+        };
+        match preparation {
+            crate::mentions::registry::MentionQueryPreparation::Ready(work)
+                if work.entry_count() <= INLINE_MENTION_QUERY_ENTRY_CAP =>
+            {
+                let result = self.registry.borrow_mut().run_query_work(work);
+                Some(self.apply_query_result(result))
+            }
+            crate::mentions::registry::MentionQueryPreparation::Ready(work) => {
+                self.clear_selectable_state();
+                self.send_background(MentionQueryTask::Score(Box::new(work)));
+                None
+            }
+            crate::mentions::registry::MentionQueryPreparation::ReadyAndBuild { work, build }
+                if work.entry_count() <= INLINE_MENTION_QUERY_ENTRY_CAP =>
+            {
+                self.send_background(MentionQueryTask::Build(build));
+                let result = self.registry.borrow_mut().run_query_work(work);
+                Some(self.apply_query_result(result))
+            }
+            crate::mentions::registry::MentionQueryPreparation::ReadyAndBuild { build, .. } => {
+                self.clear_selectable_state();
+                self.send_background(MentionQueryTask::Build(build));
+                None
+            }
+        }
+    }
+
+    fn clear_selectable_state(&mut self) {
+        self.last_hits.clear();
+        self.last_slot_pick = None;
+    }
+
+    fn send_background(&self, task: MentionQueryTask) {
+        let Some(worker) = &self.worker else {
+            tracing::warn!("mention query worker unavailable; leaving large query pending");
+            return;
+        };
+        if worker
+            .send(MentionQueryRequest {
+                generation: self.latest_generation,
+                task,
+            })
+            .is_err()
+        {
+            tracing::warn!("mention query worker disconnected; leaving large query pending");
+        }
+    }
+
+    fn apply_query_result(
+        &mut self,
+        result: crate::mentions::registry::MentionQueryResult,
+    ) -> Vec<RetrievalRow> {
+        use crate::mentions::MentionKind;
+
+        let hits = result.entries;
+        if let Some(slot) = result.open_slot {
+            let Some(entry) = hits.first().cloned() else {
+                self.last_slot_pick = None;
+                self.last_hits.clear();
+                return Vec::new();
+            };
+            let rows = slot
+                .candidates
+                .iter()
+                .map(|candidate| RetrievalRow {
+                    primary: candidate.label.clone(),
+                    secondary: candidate.description.clone().unwrap_or_default(),
+                    tag: String::new(),
+                    atoms: Vec::new(),
+                    selectable: true,
+                    dimmed: false,
+                })
+                .collect();
+            self.last_hits.clear();
+            self.last_slot_pick = Some((entry, slot));
+            return rows;
+        }
+
+        self.last_slot_pick = None;
+        let rows = hits
+            .iter()
+            .map(|mention| {
+                let icon = match mention.kind {
+                    MentionKind::Directory => "\u{1F4C1}", // 📁
+                    MentionKind::File => "\u{1F4C4}",      // 📄
+                    MentionKind::CodeFile => "\u{1F5CE}",  // 🗎
+                    MentionKind::CodeSymbol => "\u{0192}", // ƒ
+                    MentionKind::Worker => "\u{1F916}",    // 🤖
+                    MentionKind::Issue => "\u{1F39F}",     // 🎟
+                    MentionKind::Datasource => "D",
+                };
+                let tag_render = mention
+                    .tag
+                    .clone()
+                    .map(|tag| format!("\u{27E8}{tag}\u{27E9}"))
+                    .unwrap_or_default();
+                let primary = if mention.section_header.is_some() {
+                    mention.display.clone()
+                } else if mention.kind == MentionKind::Issue {
+                    format!("{} {}", icon, mention.display)
+                } else {
+                    format!("{} @{}", icon, mention.display)
+                };
+                RetrievalRow {
+                    primary,
+                    secondary: if mention.section_header.is_some() {
+                        String::new()
+                    } else {
+                        mention.secondary.clone().unwrap_or_default()
+                    },
+                    tag: if mention.section_header.is_some() {
+                        String::new()
+                    } else {
+                        tag_render
+                    },
+                    atoms: Vec::new(),
+                    selectable: mention.section_header.is_none(),
+                    dimmed: mention.section_header.is_some(),
+                }
+            })
+            .collect();
+        self.last_hits = hits;
+        rows
     }
 }
 
@@ -537,85 +765,46 @@ impl QuerySource for MentionQuerySource {
         true
     }
 
-    fn refresh(&mut self, query: &str) -> Vec<RetrievalRow> {
-        use crate::mentions::MentionKind;
-        let hits = self.registry.borrow_mut().query(
-            self.scope.as_completion_scope(),
-            &self.cwd,
-            query,
-            20,
-        );
-        self.title = match self.registry.borrow().agent_model_catalog_probe_hint() {
-            Some(hint) => format!("Mentions · @ · {hint}"),
-            None => "Mentions · @".to_string(),
-        };
-        let open_slot = self.registry.borrow_mut().take_worker_open_slot();
-        if let Some(slot) = open_slot {
-            let Some(entry) = hits.first().cloned() else {
-                self.last_slot_pick = None;
-                return Vec::new();
-            };
-            let rows: Vec<RetrievalRow> = slot
-                .candidates
-                .iter()
-                .map(|candidate| RetrievalRow {
-                    primary: candidate.label.clone(),
-                    secondary: candidate.description.clone().unwrap_or_default(),
-                    tag: String::new(),
-                    atoms: Vec::new(),
-                    selectable: true,
-                    dimmed: false,
-                })
-                .collect();
-            self.last_hits = Vec::new();
-            self.last_slot_pick = Some((entry, slot));
-            return rows;
-        }
+    fn invalidate_pending_rows(&mut self) {
+        self.latest_generation = self.latest_generation.wrapping_add(1);
+        self.last_hits.clear();
         self.last_slot_pick = None;
-        let rows: Vec<RetrievalRow> = hits
-            .iter()
-            .map(|m| {
-                let icon = match m.kind {
-                    MentionKind::Directory => "\u{1F4C1}", // 📁
-                    MentionKind::File => "\u{1F4C4}",      // 📄
-                    MentionKind::CodeFile => "\u{1F5CE}",  // 🗎
-                    MentionKind::CodeSymbol => "\u{0192}", // ƒ
-                    MentionKind::Worker => "\u{1F916}",    // 🤖
-                    MentionKind::Issue => "\u{1F39F}",     // 🎟
-                    MentionKind::Datasource => "D",
-                };
-                let tag_render = m
-                    .tag
-                    .clone()
-                    .map(|t| format!("\u{27E8}{}\u{27E9}", t)) // ⟨tier⟩
-                    .unwrap_or_default();
-                let primary = if m.section_header.is_some() {
-                    m.display.clone()
-                } else if m.kind == MentionKind::Issue {
-                    format!("{} {}", icon, m.display)
-                } else {
-                    format!("{} @{}", icon, m.display)
-                };
-                RetrievalRow {
-                    primary,
-                    secondary: if m.section_header.is_some() {
-                        String::new()
-                    } else {
-                        m.secondary.clone().unwrap_or_default()
-                    },
-                    tag: if m.section_header.is_some() {
-                        String::new()
-                    } else {
-                        tag_render
-                    },
-                    atoms: Vec::new(),
-                    selectable: m.section_header.is_none(),
-                    dimmed: m.section_header.is_some(),
+    }
+
+    fn refresh(&mut self, query: &str) -> Vec<RetrievalRow> {
+        self.latest_generation = self.latest_generation.wrapping_add(1);
+        self.latest_query.clear();
+        self.latest_query.push_str(query);
+        self.dispatch_latest_query().unwrap_or_default()
+    }
+
+    fn take_rows_update(&mut self) -> Option<Vec<RetrievalRow>> {
+        let responses: Vec<MentionQueryResponse> =
+            self.worker.as_ref()?.result_rx.try_iter().collect();
+        let mut latest_scored = None;
+        let mut resume_after_build = false;
+        for response in responses {
+            match response.result {
+                MentionQueryWorkerResult::Scored(result) => {
+                    if response.generation == self.latest_generation {
+                        latest_scored = Some(result);
+                    }
                 }
-            })
-            .collect();
-        self.last_hits = hits;
-        rows
+                MentionQueryWorkerResult::Built(result) => {
+                    self.registry.borrow_mut().apply_cache_build(result);
+                    if response.generation == self.latest_generation {
+                        resume_after_build = true;
+                    }
+                }
+            }
+        }
+        if let Some(result) = latest_scored {
+            return Some(self.apply_query_result(result));
+        }
+        if resume_after_build {
+            return Some(self.dispatch_latest_query().unwrap_or_default());
+        }
+        None
     }
 
     fn accept(&self, row_idx: usize) -> Option<RetrievalAccept> {
@@ -1155,6 +1344,376 @@ mod tests {
             url: "https://example.test/bd-1".to_string(),
             description: Some("Test description for preview".to_string()),
         }
+    }
+
+    #[test]
+    fn large_mention_refresh_defers_scoring_off_the_caller_thread() {
+        const SOLVED_INLINE_ENTRY_CAP: usize = 3_314;
+
+        let mut registry = MentionRegistry::new();
+        let issues = (0..=SOLVED_INLINE_ENTRY_CAP)
+            .map(|index| {
+                let mut descriptor = issue_descriptor();
+                descriptor.id = format!("bd-{index}");
+                descriptor.title = format!("needle issue {index}");
+                descriptor.url = format!("https://example.test/bd-{index}");
+                descriptor
+            })
+            .collect();
+        registry.set_issue_snapshot(issues);
+        let registry = Rc::new(RefCell::new(registry));
+        let mut source = MentionQuerySource::new(
+            registry,
+            crate::mentions::CompletionScope::PreSession,
+            std::path::PathBuf::from("."),
+            0,
+        );
+
+        let rows = source.refresh("needle");
+
+        assert!(
+            rows.is_empty(),
+            "large mention snapshots must publish rows asynchronously"
+        );
+    }
+
+    #[test]
+    fn cold_code_graph_build_runs_off_the_caller_thread() {
+        use std::sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc,
+        };
+
+        struct SlowCodeGraphSource {
+            started: Arc<AtomicBool>,
+        }
+
+        impl crate::mentions::MentionSource for SlowCodeGraphSource {
+            fn build(
+                &mut self,
+                _cwd: &std::path::Path,
+            ) -> anyhow::Result<Vec<crate::mentions::MentionEntry>> {
+                self.started.store(true, Ordering::Release);
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                let mut entry = crate::mentions::MentionEntry::default();
+                entry.kind = crate::mentions::MentionKind::CodeSymbol;
+                entry.uri = "graph://symbol/cold".to_string();
+                entry.display = "cold::needle".to_string();
+                Ok(vec![entry])
+            }
+
+            fn name(&self) -> &'static str {
+                "code_graph"
+            }
+        }
+
+        let started = Arc::new(AtomicBool::new(false));
+        let registry =
+            MentionRegistry::from_sources_for_test(vec![Box::new(SlowCodeGraphSource {
+                started: Arc::clone(&started),
+            })]);
+        let registry = Rc::new(RefCell::new(registry));
+        let mut source = MentionQuerySource::new(
+            registry,
+            crate::mentions::CompletionScope::PreSession,
+            std::path::PathBuf::from("."),
+            0,
+        );
+
+        let before = std::time::Instant::now();
+        let rows = source.refresh("needle");
+
+        assert!(rows.is_empty());
+        assert!(
+            before.elapsed() < std::time::Duration::from_millis(50),
+            "cold code-graph materialization must not block refresh"
+        );
+        let deadline = before + std::time::Duration::from_secs(2);
+        while !started.load(Ordering::Acquire) {
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::yield_now();
+        }
+        loop {
+            if let Some(rows) = source.take_rows_update() {
+                assert_eq!(rows.len(), 1);
+                assert!(rows[0].primary.contains("cold::needle"));
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "cold code-graph build did not publish rows"
+            );
+            std::thread::yield_now();
+        }
+    }
+
+    #[test]
+    fn cold_build_to_large_score_clears_partial_selectable_rows() {
+        struct StaticSource {
+            name: &'static str,
+            entries: Vec<crate::mentions::MentionEntry>,
+        }
+
+        impl crate::mentions::MentionSource for StaticSource {
+            fn build(
+                &mut self,
+                _cwd: &std::path::Path,
+            ) -> anyhow::Result<Vec<crate::mentions::MentionEntry>> {
+                Ok(self.entries.clone())
+            }
+
+            fn name(&self) -> &'static str {
+                self.name
+            }
+        }
+
+        let mut file = crate::mentions::MentionEntry::default();
+        file.kind = crate::mentions::MentionKind::File;
+        file.uri = "file:///partial.rs".to_string();
+        file.display = "partial.rs".to_string();
+        let graph_entries = (0..=INLINE_MENTION_QUERY_ENTRY_CAP)
+            .map(|index| {
+                let mut entry = crate::mentions::MentionEntry::default();
+                entry.kind = crate::mentions::MentionKind::CodeSymbol;
+                entry.uri = format!("graph://symbol/{index}");
+                entry.display = format!("symbol_{index}");
+                entry
+            })
+            .collect();
+        let mut registry = MentionRegistry::from_sources_for_test(vec![
+            Box::new(StaticSource {
+                name: "file",
+                entries: vec![file],
+            }),
+            Box::new(StaticSource {
+                name: "code_graph",
+                entries: graph_entries,
+            }),
+        ]);
+        let (work, build) = match registry.prepare_query_work_nonblocking(
+            crate::mentions::CompletionScope::PreSession,
+            std::path::Path::new("."),
+            "",
+            20,
+        ) {
+            crate::mentions::registry::MentionQueryPreparation::ReadyAndBuild { work, build } => {
+                (work, build)
+            }
+            _ => panic!("cold graph should produce partial rows plus background build"),
+        };
+        let partial = registry.run_query_work(work);
+        let build = crate::mentions::registry::build_mention_caches(build);
+        let registry = Rc::new(RefCell::new(registry));
+        let mut source = MentionQuerySource::new(
+            registry,
+            crate::mentions::CompletionScope::PreSession,
+            std::path::PathBuf::from("."),
+            0,
+        );
+        source.latest_generation = 1;
+        assert!(!source.apply_query_result(partial).is_empty());
+        let (request_tx, _request_rx) = mpsc::channel();
+        let (result_tx, result_rx) = mpsc::channel();
+        source.worker = Some(MentionQueryWorker {
+            request_tx,
+            result_rx,
+        });
+        result_tx
+            .send(MentionQueryResponse {
+                generation: 1,
+                result: MentionQueryWorkerResult::Built(build),
+            })
+            .unwrap();
+
+        let rows = source
+            .take_rows_update()
+            .expect("large-score transition must publish an explicit row clear");
+
+        assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn disconnected_worker_never_scores_large_queries_inline() {
+        const LARGE_ENTRY_COUNT: usize = INLINE_MENTION_QUERY_ENTRY_CAP + 1;
+
+        let mut registry = MentionRegistry::new();
+        let issues = (0..LARGE_ENTRY_COUNT)
+            .map(|index| {
+                let mut descriptor = issue_descriptor();
+                descriptor.id = format!("bd-{index}");
+                descriptor.title = format!("needle issue {index}");
+                descriptor.url = format!("https://example.test/bd-{index}");
+                descriptor
+            })
+            .collect();
+        registry.set_issue_snapshot(issues);
+        let _ = registry.query(
+            crate::mentions::CompletionScope::PreSession,
+            std::path::Path::new("."),
+            "needle",
+            20,
+        );
+        let registry = Rc::new(RefCell::new(registry));
+        let mut source = MentionQuerySource::new(
+            registry,
+            crate::mentions::CompletionScope::PreSession,
+            std::path::PathBuf::from("."),
+            0,
+        );
+        source.worker = None;
+
+        let before = std::time::Instant::now();
+        let rows = source.refresh("needle");
+
+        assert!(rows.is_empty());
+        assert!(
+            before.elapsed() < std::time::Duration::from_millis(50),
+            "worker failure must not fall back to caller-thread scoring"
+        );
+    }
+
+    #[test]
+    fn large_mention_refresh_publishes_background_rows() {
+        const SOLVED_INLINE_ENTRY_CAP: usize = 3_314;
+
+        let mut registry = MentionRegistry::new();
+        let issues = (0..=SOLVED_INLINE_ENTRY_CAP)
+            .map(|index| {
+                let mut descriptor = issue_descriptor();
+                descriptor.id = format!("bd-{index}");
+                descriptor.title = format!("needle issue {index}");
+                descriptor.url = format!("https://example.test/bd-{index}");
+                descriptor
+            })
+            .collect();
+        registry.set_issue_snapshot(issues);
+        let registry = Rc::new(RefCell::new(registry));
+        let mut source = MentionQuerySource::new(
+            registry,
+            crate::mentions::CompletionScope::PreSession,
+            std::path::PathBuf::from("."),
+            0,
+        );
+        assert!(source.refresh("needle").is_empty());
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            if let Some(rows) = source.take_rows_update() {
+                assert!(!rows.is_empty(), "background scoring must publish rows");
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "background scoring did not publish rows before the test deadline"
+            );
+            std::thread::yield_now();
+        }
+    }
+
+    #[test]
+    fn mention_background_rows_ignore_stale_generations() {
+        let registry = Rc::new(RefCell::new(MentionRegistry::new()));
+        let mut source = MentionQuerySource::new(
+            registry,
+            crate::mentions::CompletionScope::PreSession,
+            std::path::PathBuf::from("."),
+            0,
+        );
+        let (request_tx, _request_rx) = mpsc::channel();
+        let (result_tx, result_rx) = mpsc::channel();
+        source.worker = Some(MentionQueryWorker {
+            request_tx,
+            result_rx,
+        });
+        source.latest_generation = 2;
+
+        let response = |generation, display: &str| {
+            let mut entry = crate::mentions::MentionEntry::default();
+            entry.kind = crate::mentions::MentionKind::Issue;
+            entry.uri = format!("beads://{display}");
+            entry.display = display.to_string();
+            MentionQueryResponse {
+                generation,
+                result: MentionQueryWorkerResult::Scored(
+                    crate::mentions::registry::MentionQueryResult {
+                        entries: vec![entry],
+                        open_slot: None,
+                    },
+                ),
+            }
+        };
+        result_tx.send(response(2, "omega-current")).unwrap();
+        result_tx.send(response(1, "alpha-stale")).unwrap();
+
+        let rows = source
+            .take_rows_update()
+            .expect("the current generation should publish rows");
+
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].primary.contains("omega-current"));
+        assert!(!rows[0].primary.contains("alpha-stale"));
+    }
+
+    #[test]
+    #[ignore = "manual large-symbol performance benchmark"]
+    fn benchmark_large_mention_refresh_dispatch() {
+        const SYMBOL_COUNT: usize = 77_000;
+        const SAMPLE_COUNT: usize = 7;
+
+        let mut registry = MentionRegistry::new();
+        let issues = (0..SYMBOL_COUNT)
+            .map(|index| {
+                let mut descriptor = issue_descriptor();
+                descriptor.id = format!("bd-{index}");
+                descriptor.title = format!("symbol {index}");
+                descriptor.url = format!("https://example.test/bd-{index}");
+                descriptor
+            })
+            .collect();
+        registry.set_issue_snapshot(issues);
+        // Prime the immutable cache outside the measured region.
+        let _ = registry.query(
+            crate::mentions::CompletionScope::PreSession,
+            std::path::Path::new("."),
+            "symbol",
+            20,
+        );
+        let registry = Rc::new(RefCell::new(registry));
+        let mut source = MentionQuerySource::new(
+            registry,
+            crate::mentions::CompletionScope::PreSession,
+            std::path::PathBuf::from("."),
+            0,
+        );
+        let mut dispatch_samples = Vec::with_capacity(SAMPLE_COUNT);
+        let mut completion_samples = Vec::with_capacity(SAMPLE_COUNT);
+
+        for _ in 0..SAMPLE_COUNT {
+            let started = std::time::Instant::now();
+            assert!(source.refresh("symbol").is_empty());
+            dispatch_samples.push(started.elapsed());
+            let deadline = started + std::time::Duration::from_secs(5);
+            loop {
+                if let Some(rows) = source.take_rows_update() {
+                    assert!(!rows.is_empty());
+                    completion_samples.push(started.elapsed());
+                    break;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "background scoring did not finish before the benchmark deadline"
+                );
+                std::thread::yield_now();
+            }
+        }
+
+        dispatch_samples.sort_unstable();
+        completion_samples.sort_unstable();
+        eprintln!(
+            "large_mention_refresh symbols={SYMBOL_COUNT} dispatch_median_us={} completion_median_us={}",
+            dispatch_samples[SAMPLE_COUNT / 2].as_micros(),
+            completion_samples[SAMPLE_COUNT / 2].as_micros()
+        );
     }
 
     fn make_mention_registry_with_cwd(cwd: &std::path::Path) -> Rc<RefCell<MentionRegistry>> {
