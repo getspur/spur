@@ -1270,11 +1270,11 @@ async fn code_graph_backend_response_with_refresh(
             if original_error.metadata.is_none() && original_error.temporal_code.is_none() {
                 original_error.metadata = Some(Box::new(source.clone()));
             }
-            // The worktree-dirty check uses cached git metadata (5s TTL)
-            // and doesn't need a successful body to run, so a "not found"
-            // response still deserves a chance against the overlay before we
-            // give up -- otherwise a brand-new or renamed symbol that only
-            // exists in an uncommitted edit looks permanently missing.
+            // Per-request exact Git metadata validation doesn't need a
+            // successful body to run, so a "not found" response still deserves
+            // a chance against the overlay before we give up -- otherwise a
+            // brand-new or renamed symbol that only exists in an uncommitted
+            // edit looks permanently missing.
             let indexed_files = backend.base_file_set().ok();
             let analysis = GraphResponseMetadata::analyze_source_inner(
                 source.clone(),
@@ -6854,32 +6854,24 @@ mod tests {
         code_search_with_artifact(args, client).map_err(CodeGraphError::from)
     }
 
-    fn code_graph_result_signature(result: CodeGraphResult) -> Value {
+    async fn code_graph_result_signature(result: CodeGraphResult) -> Value {
         match result {
             Ok(body) => json!({ "ok": body }),
             Err(error) => {
-                let kind = match &error.error {
-                    McpHandlerError::InvalidParams(_) => "invalid_params",
-                    McpHandlerError::NotFound(_) => "not_found",
-                    McpHandlerError::Unauthorized(_) => "unauthorized",
-                    McpHandlerError::UpstreamPm(_) => "upstream_pm",
-                    McpHandlerError::Internal(_) => "internal",
-                };
+                let response = error.into_error_response().await;
                 json!({
                     "error": {
-                        "kind": kind,
-                        "message": handler_error_message(&error.error),
-                        "temporal_code": error.temporal_code,
-                        "temporal_data": error.temporal_data,
-                        "has_metadata": error.metadata.is_some(),
+                        "code": response.code,
+                        "message": response.message,
+                        "data": response.data,
                     }
                 })
             }
         }
     }
 
-    #[test]
-    fn code_graph_result_signature_distinguishes_complete_error_metadata() {
+    #[tokio::test]
+    async fn code_graph_result_signature_distinguishes_complete_error_metadata() {
         let error_with_hash = |graph_content_hash: &str| {
             CodeGraphError::without_metadata(McpHandlerError::NotFound(
                 "symbol still_missing not found in graph artifact".to_owned(),
@@ -6891,9 +6883,20 @@ mod tests {
             })
         };
 
-        let first = code_graph_result_signature(Err(error_with_hash("graph-hash-a")));
-        let second = code_graph_result_signature(Err(error_with_hash("graph-hash-b")));
+        let first = code_graph_result_signature(Err(error_with_hash("graph-hash-a"))).await;
+        let second = code_graph_result_signature(Err(error_with_hash("graph-hash-b"))).await;
 
+        assert_eq!(first["error"]["code"], CODE_GRAPH_NOT_FOUND_ERROR_CODE);
+        assert_eq!(
+            first["error"]["message"],
+            "symbol still_missing not found in graph artifact"
+        );
+        assert_eq!(first["error"]["data"]["kind"], "not_found");
+        assert_eq!(first["error"]["data"]["graph_content_hash"], "graph-hash-a");
+        assert_eq!(
+            second["error"]["data"]["graph_content_hash"],
+            "graph-hash-b"
+        );
         assert_ne!(
             first, second,
             "observable MCP signatures must preserve distinct graph metadata"
@@ -6914,7 +6917,7 @@ mod tests {
         expected_operations: BTreeMap<String, usize>,
     }
 
-    fn exercise_request_replay_case(
+    async fn exercise_request_replay_case(
         scenario: &str,
         case: &RequestReplayCase,
         root: &Path,
@@ -6928,10 +6931,10 @@ mod tests {
         let _first_result = (case.handler)(&case.args, &request_client);
         let overlay = OverlayClient::new(&request_client, root, changed_paths)
             .expect("construct direct overlay subject");
-        let actual = code_graph_result_signature((case.handler)(&case.args, &overlay));
+        let actual = code_graph_result_signature((case.handler)(&case.args, &overlay)).await;
 
         let oracle = InMemoryClient::new(oracle_artifact);
-        let expected = code_graph_result_signature((case.handler)(&case.args, &oracle));
+        let expected = code_graph_result_signature((case.handler)(&case.args, &oracle)).await;
         let actual_digest = response_digest(&actual);
         let oracle_digest = response_digest(&expected);
         let equivalent = actual == expected;
@@ -7319,7 +7322,8 @@ mod tests {
             Arc::clone(&base_artifact),
             Arc::clone(&base_artifact),
             &[],
-        );
+        )
+        .await;
 
         let current_source = "pub fn target() { new_leaf(); }\n\
                               pub fn new_leaf() {}\n\
@@ -7445,9 +7449,9 @@ mod tests {
 
         let dirty_violations = SCOPED_CODE_GRAPH_WORKTREE_ROOT
             .scope(root.to_path_buf(), async {
-                dirty_cases
-                    .iter()
-                    .flat_map(|case| {
+                let mut violations = Vec::new();
+                for case in &dirty_cases {
+                    violations.extend(
                         exercise_request_replay_case(
                             "dirty",
                             case,
@@ -7456,8 +7460,10 @@ mod tests {
                             Arc::clone(&oracle_artifact),
                             &dirty_paths,
                         )
-                    })
-                    .collect::<Vec<_>>()
+                        .await,
+                    );
+                }
+                violations
             })
             .await;
         violations.extend(dirty_violations);
@@ -7601,25 +7607,47 @@ mod tests {
         assert_eq!(body["response_file_oids_match"], false);
         assert_eq!(body["rebuild_status"], "stale_rebuild_failed");
 
-        let missing = SCOPED_CODE_GRAPH_WORKTREE_ROOT
+        let missing_message = "symbol still_missing not found in graph artifact".to_owned();
+        let reference_error =
+            CodeGraphError::without_metadata(McpHandlerError::NotFound(missing_message.clone()))
+                .with_metadata_source(GraphMetadataSource::from_artifact(&artifact));
+        let (reference, fallback) = SCOPED_CODE_GRAPH_WORKTREE_ROOT
             .scope(root.to_path_buf(), async {
-                code_resolve_response(
+                let reference = reference_error.into_error_response().await;
+                let fallback = code_resolve_response(
                     &json!({ "selector": "still_missing" }),
                     Arc::new(RebuildCoordinator::new()),
                 )
                 .await
+                .expect_err("whole not-found error must survive failed refresh")
+                .into_error_response()
+                .await;
+                (reference, fallback)
             })
-            .await
-            .expect_err("whole not-found error must survive failed refresh");
-        let signature = code_graph_result_signature(Err(missing));
-        assert_eq!(signature["error"]["kind"], "not_found");
-        assert_eq!(
-            signature["error"]["message"],
-            "symbol still_missing not found in graph artifact"
+            .await;
+
+        assert_eq!(fallback.code, reference.code);
+        assert_eq!(fallback.message, reference.message);
+        assert_eq!(fallback.data, reference.data);
+        assert_eq!(fallback.code, CODE_GRAPH_NOT_FOUND_ERROR_CODE);
+        assert_eq!(fallback.message, missing_message);
+        let reference_data = reference.data.as_ref().expect("reference error data");
+        let fallback_data = fallback.data.as_ref().expect("fallback error data");
+        eprintln!(
+            "request_replay fallback error reference={{code:{}, message:{:?}, data:{reference_data}}} \
+             fallback={{code:{}, message:{:?}, data:{fallback_data}}}",
+            reference.code, reference.message, fallback.code, fallback.message,
         );
-        assert_eq!(signature["error"]["temporal_code"], Value::Null);
-        assert_eq!(signature["error"]["temporal_data"], Value::Null);
-        assert_eq!(signature["error"]["has_metadata"], true);
+        assert_eq!(fallback_data["kind"], "not_found");
+        assert_eq!(
+            fallback_data["graph_content_hash"],
+            artifact.graph_content_hash
+        );
+        assert_eq!(
+            fallback_data["graph_index_version"],
+            artifact.header.graph_index_version
+        );
+        assert_eq!(fallback_data["rebuild_status"], "not_needed");
     }
 
     #[tokio::test]
