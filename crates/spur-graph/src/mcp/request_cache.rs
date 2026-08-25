@@ -509,8 +509,23 @@ impl OverlayDeltaCache {
 struct OverlayGenerationCache {
     entries: HashMap<SnapshotIdentity, CachedOverlayGeneration>,
     lru: VecDeque<SnapshotIdentity>,
-    latest: Option<CachedOverlayGeneration>,
+    compatible: HashMap<OverlayGenerationCompatibilityKey, VecDeque<SnapshotIdentity>>,
     capacity: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct OverlayGenerationCompatibilityKey {
+    canonical_worktree: PathBuf,
+    indexed_graph_content_hash: String,
+}
+
+impl From<&SnapshotIdentity> for OverlayGenerationCompatibilityKey {
+    fn from(identity: &SnapshotIdentity) -> Self {
+        Self {
+            canonical_worktree: identity.canonical_worktree.clone(),
+            indexed_graph_content_hash: identity.indexed_graph_content_hash.clone(),
+        }
+    }
 }
 
 impl OverlayGenerationCache {
@@ -518,7 +533,7 @@ impl OverlayGenerationCache {
         Self {
             entries: HashMap::new(),
             lru: VecDeque::new(),
-            latest: None,
+            compatible: HashMap::new(),
             capacity,
         }
     }
@@ -530,22 +545,46 @@ impl OverlayGenerationCache {
     }
 
     fn compatible_latest(&self, identity: &SnapshotIdentity) -> Option<Arc<OverlayGeneration>> {
-        let latest = self.latest.as_ref()?;
-        (latest.identity.canonical_worktree == identity.canonical_worktree
-            && latest.identity.indexed_graph_content_hash == identity.indexed_graph_content_hash)
-            .then(|| Arc::clone(&latest.generation))
+        let key = OverlayGenerationCompatibilityKey::from(identity);
+        let latest_identity = self.compatible.get(&key)?.back()?;
+        self.entries
+            .get(latest_identity)
+            .map(|latest| Arc::clone(&latest.generation))
     }
 
     fn insert(&mut self, value: CachedOverlayGeneration) {
         let identity = value.identity.clone();
-        self.entries.insert(identity.clone(), value.clone());
-        self.latest = Some(value);
+        if self.entries.insert(identity.clone(), value).is_some() {
+            self.remove_compatible_identity(&identity);
+        }
+        self.compatible
+            .entry(OverlayGenerationCompatibilityKey::from(&identity))
+            .or_default()
+            .push_back(identity.clone());
         self.touch(&identity);
         while self.entries.len() > self.capacity {
             let Some(expired) = self.lru.pop_front() else {
                 break;
             };
-            self.entries.remove(&expired);
+            if self.entries.remove(&expired).is_some() {
+                self.remove_compatible_identity(&expired);
+            }
+        }
+        debug_assert_eq!(
+            self.compatible.values().map(VecDeque::len).sum::<usize>(),
+            self.entries.len()
+        );
+        debug_assert!(self.entries.len() <= self.capacity);
+    }
+
+    fn remove_compatible_identity(&mut self, identity: &SnapshotIdentity) {
+        let key = OverlayGenerationCompatibilityKey::from(identity);
+        let remove_key = self.compatible.get_mut(&key).is_some_and(|identities| {
+            identities.retain(|candidate| candidate != identity);
+            identities.is_empty()
+        });
+        if remove_key {
+            self.compatible.remove(&key);
         }
     }
 
@@ -993,6 +1032,107 @@ mod tests {
         })
         .expect("second exact generation");
         assert!(Arc::ptr_eq(&second, &exact));
+    }
+
+    #[test]
+    fn overlay_generation_builder_reuses_seed_after_interleaved_worktree() {
+        let _guard = overlay_generation_test_lock();
+        let first_worktree = tempfile::tempdir().expect("first worktree");
+        let second_worktree = tempfile::tempdir().expect("second worktree");
+        let first_identity = cache_identity(first_worktree.path(), 28);
+        let first = overlay_generation(first_identity.clone(), |seed| {
+            assert!(seed.is_none());
+            Ok(dummy_overlay_generation("interleaved-worktree-a1"))
+        })
+        .expect("first worktree generation");
+
+        let intervening_identity = cache_identity(second_worktree.path(), 28);
+        let intervening = overlay_generation(intervening_identity, |seed| {
+            assert!(seed.is_none());
+            Ok(dummy_overlay_generation("interleaved-worktree-b1"))
+        })
+        .expect("intervening worktree generation");
+
+        let mut next_identity = first_identity;
+        next_identity.current_head_oid = "interleaved-worktree-a2".to_owned();
+        let first_for_seed = Arc::clone(&first);
+        let intervening_for_rejection = Arc::clone(&intervening);
+        overlay_generation(next_identity, |seed| {
+            let seed = seed.expect("retained compatible worktree seed");
+            assert!(Arc::ptr_eq(&seed, &first_for_seed));
+            assert!(!Arc::ptr_eq(&seed, &intervening_for_rejection));
+            Ok(dummy_overlay_generation("interleaved-worktree-a2"))
+        })
+        .expect("next first-worktree generation");
+    }
+
+    #[test]
+    fn overlay_generation_builder_reuses_seed_after_interleaved_base_graph() {
+        let _guard = overlay_generation_test_lock();
+        let worktree = tempfile::tempdir().expect("worktree");
+        let first_identity = cache_identity(worktree.path(), 29);
+        let first = overlay_generation(first_identity.clone(), |seed| {
+            assert!(seed.is_none());
+            Ok(dummy_overlay_generation("interleaved-graph-a1"))
+        })
+        .expect("first base-graph generation");
+
+        let mut intervening_identity = first_identity.clone();
+        intervening_identity.indexed_graph_content_hash =
+            "interleaved-incompatible-base-graph".to_owned();
+        let intervening = overlay_generation(intervening_identity, |seed| {
+            assert!(seed.is_none());
+            Ok(dummy_overlay_generation("interleaved-graph-b1"))
+        })
+        .expect("intervening base-graph generation");
+
+        let mut next_identity = first_identity;
+        next_identity.current_head_oid = "interleaved-graph-a2".to_owned();
+        let first_for_seed = Arc::clone(&first);
+        let intervening_for_rejection = Arc::clone(&intervening);
+        overlay_generation(next_identity, |seed| {
+            let seed = seed.expect("retained compatible base-graph seed");
+            assert!(Arc::ptr_eq(&seed, &first_for_seed));
+            assert!(!Arc::ptr_eq(&seed, &intervening_for_rejection));
+            Ok(dummy_overlay_generation("interleaved-graph-a2"))
+        })
+        .expect("next compatible base-graph generation");
+    }
+
+    #[test]
+    fn overlay_generation_compatible_seed_falls_back_after_lru_eviction() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let first_identity = cache_identity(tempdir.path(), 30);
+        let mut second_identity = first_identity.clone();
+        second_identity.current_head_oid = "lru-compatible-second".to_owned();
+        let first = dummy_overlay_generation("lru-compatible-first");
+        let second = dummy_overlay_generation("lru-compatible-second");
+        let mut cache = OverlayGenerationCache::new(2);
+        cache.insert(CachedOverlayGeneration {
+            identity: first_identity.clone(),
+            generation: Arc::clone(&first),
+        });
+        cache.insert(CachedOverlayGeneration {
+            identity: second_identity.clone(),
+            generation: Arc::clone(&second),
+        });
+
+        assert!(cache.get(&first_identity).is_some());
+        let mut incompatible_identity = first_identity.clone();
+        incompatible_identity.indexed_graph_content_hash = "lru-incompatible-graph".to_owned();
+        cache.insert(CachedOverlayGeneration {
+            identity: incompatible_identity,
+            generation: dummy_overlay_generation("lru-incompatible"),
+        });
+        assert!(cache.get(&second_identity).is_none());
+
+        let mut next_identity = first_identity;
+        next_identity.current_head_oid = "lru-compatible-third".to_owned();
+        let seed = cache
+            .compatible_latest(&next_identity)
+            .expect("older retained compatible seed after latest eviction");
+        assert!(Arc::ptr_eq(&seed, &first));
+        assert!(!Arc::ptr_eq(&seed, &second));
     }
 
     #[test]
