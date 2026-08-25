@@ -9,17 +9,21 @@
 //! `SPUR_GRAPH_PERF_MEASUREMENT_SECONDS` control evidence naming and finite
 //! Criterion bounds. Omitting every variable preserves the Spur defaults.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
+use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Output};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use spur_graph::{
-    overlay_changed_oids, status_observation, with_worktree_root_for_request,
-    FsmonitorCapabilities, GraphMcpModule, GraphQueryClient, OverlayClient, ParquetClient,
-    SearchFilters, SearchMode, SearchOptions, SearchResult,
+    artifact_from_facts, build_facts, git_blob_oid, overlay_changed_oids, read_artifact_parquet,
+    with_worktree_root_for_request, write_artifact_parquet, write_current_pointer, GraphMcpDeps,
+    GraphMcpModule, GraphQueryClient, OverlayClient, OverlayFinalizationMeasurements,
+    OverlayGeneration, OverlayGenerationIdentity, OverlayPathState, ParquetClient,
+    RebuildCoordinator, SearchFilters, SearchMode, SearchOptions, SearchResult, WriteOptions,
 };
 
 const DEFAULT_QUERY: &str = "handle_code_search";
@@ -125,6 +129,9 @@ impl ProbeConfig {
 }
 
 fn bench_overlay_vs_direct_parquet(c: &mut Criterion) {
+    if std::env::var("SPUR_GRAPH_TASK6_MATRIX").as_deref() == Ok("1") {
+        return;
+    }
     let config = ProbeConfig::load();
     let parquet_dir = config.parquet_dir.clone();
     let parquet = ParquetClient::open(&parquet_dir).unwrap_or_else(|err| {
@@ -308,6 +315,9 @@ fn bench_overlay_vs_direct_parquet(c: &mut Criterion) {
 }
 
 fn bench_overlay_construction(c: &mut Criterion) {
+    if std::env::var("SPUR_GRAPH_TASK6_MATRIX").as_deref() == Ok("1") {
+        return;
+    }
     let config = ProbeConfig::load();
     let parquet_dir = config.parquet_dir.clone();
     let repo = config.repo.clone();
@@ -390,6 +400,9 @@ fn bench_overlay_construction(c: &mut Criterion) {
 }
 
 fn bench_overlay_stage_probe(c: &mut Criterion) {
+    if std::env::var("SPUR_GRAPH_TASK6_MATRIX").as_deref() == Ok("1") {
+        return;
+    }
     let config = ProbeConfig::load();
     let parquet = ParquetClient::open(&config.parquet_dir).unwrap_or_else(|err| {
         panic!(
@@ -813,6 +826,11 @@ fn default_repo_root() -> PathBuf {
         .expect("canonicalize repo root from spur-graph manifest dir")
 }
 
+#[rustfmt::skip]
+#[cfg(any())]
+mod legacy_release_matrix {
+    use super::*;
+
 fn assert_release_gate_claim_grounded(claimed_pass: bool, evidence_present: bool, gate: &str) {
     assert!(
         !claimed_pass || evidence_present,
@@ -1174,6 +1192,880 @@ fn diagnostic_stage_summary(samples: &[f64]) -> serde_json::Value {
         "median_ms": median,
         "max_ms": max_sample(&sorted),
     })
+}
+
+}
+
+const TASK6_PROTOCOL_ID: &str = "overlay-generation-task6-v1";
+const TASK6_QUERY: &str = "matrix_target";
+
+#[derive(Clone, Copy)]
+struct MatrixFixtureSpec {
+    label: &'static str,
+    rust_files: usize,
+    javascript_files: usize,
+    python_files: usize,
+    initial_shape: &'static str,
+}
+
+struct MatrixFixture {
+    _dir: tempfile::TempDir,
+    root: PathBuf,
+    parquet_dir: PathBuf,
+    spec: MatrixFixtureSpec,
+    tracked_files: usize,
+    initial_changed_paths: Vec<String>,
+    bounded_path: String,
+}
+
+fn bench_overlay_release_matrix(_criterion: &mut Criterion) {
+    if std::env::var("SPUR_GRAPH_TASK6_MATRIX").as_deref() != Ok("1") {
+        return;
+    }
+
+    let repetitions = bounded_env_usize(
+        "SPUR_GRAPH_RELEASE_REPEATS",
+        REQUIRED_WARM_SAMPLES,
+        3,
+        MAX_WARM_SAMPLES,
+    );
+    let specs = [
+        MatrixFixtureSpec {
+            label: "small_untracked_heavy",
+            rust_files: 4,
+            javascript_files: 0,
+            python_files: 0,
+            initial_shape: "twelve_untracked_rust_files",
+        },
+        MatrixFixtureSpec {
+            label: "medium_dirty_rust",
+            rust_files: 48,
+            javascript_files: 0,
+            python_files: 0,
+            initial_shape: "five_modified_tracked_rust_files",
+        },
+        MatrixFixtureSpec {
+            label: "large_mostly_clean_polyglot",
+            rust_files: 64,
+            javascript_files: 64,
+            python_files: 64,
+            initial_shape: "one_modified_python_file",
+        },
+    ];
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("Task 6 matrix Tokio runtime");
+    let mut cells = Vec::with_capacity(specs.len());
+    for spec in specs {
+        let fixture = create_matrix_fixture(spec);
+        cells.push(measure_matrix_cell(&runtime, &fixture, repetitions));
+    }
+
+    let release_eligible = cells.iter().all(matrix_cell_structurally_eligible);
+    let report = serde_json::json!({
+        "schema_version": 1,
+        "protocol_id": TASK6_PROTOCOL_ID,
+        "repetitions": repetitions,
+        "cold_warm_separated": true,
+        "timing_gate": "structural_only_no_fixed_millisecond_threshold",
+        "fixtures": "deterministic_disposable_git_repositories",
+        "cells": cells,
+        "release_eligible": release_eligible,
+        "fsmonitor_auto_safe": release_eligible,
+        "configuration_default": "Off",
+        "configure_semantics_changed": false,
+    });
+    assert!(
+        release_eligible,
+        "Task 6 matrix failed a parity or structural release condition: {report:#}"
+    );
+
+    let evidence_path = std::env::var_os("SPUR_GRAPH_TASK6_EVIDENCE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            default_repo_root().join(".spur/bench-evidence/task6-overlay-generation-matrix.json")
+        });
+    if let Some(parent) = evidence_path.parent() {
+        fs::create_dir_all(parent).expect("create Task 6 evidence directory");
+    }
+    fs::write(
+        &evidence_path,
+        serde_json::to_vec_pretty(&report).expect("serialize Task 6 matrix"),
+    )
+    .expect("write Task 6 evidence");
+    eprintln!("SPUR_GRAPH_TASK6_MATRIX={report}");
+    eprintln!("SPUR_GRAPH_TASK6_EVIDENCE={}", evidence_path.display());
+}
+
+fn create_matrix_fixture(spec: MatrixFixtureSpec) -> MatrixFixture {
+    let dir = tempfile::tempdir().expect("Task 6 fixture tempdir");
+    let root = dir.path().to_path_buf();
+    init_matrix_git_repo(&root);
+    write_matrix_source(&root, ".gitignore", ".spur/\n");
+    write_matrix_source(
+        &root,
+        "src/lib.rs",
+        "pub fn matrix_target() -> usize { matrix_leaf() }\n\
+         pub fn matrix_leaf() -> usize { 1 }\n\
+         pub fn matrix_caller() -> usize { matrix_target() }\n",
+    );
+    for index in 0..spec.rust_files.saturating_sub(1) {
+        write_matrix_source(
+            &root,
+            &format!("src/rust/rust_{index:03}.rs"),
+            &format!("pub fn rust_{index:03}() -> usize {{ {index} }}\n"),
+        );
+    }
+    for index in 0..spec.javascript_files {
+        write_matrix_source(
+            &root,
+            &format!("src/javascript/js_{index:03}.js"),
+            &format!("export function js{index:03}() {{ return {index}; }}\n"),
+        );
+    }
+    for index in 0..spec.python_files {
+        write_matrix_source(
+            &root,
+            &format!("src/python/py_{index:03}.py"),
+            &format!("def py_{index:03}():\n    return {index}\n"),
+        );
+    }
+
+    let facts = build_facts(&root, None)
+        .expect("extract Task 6 fixture facts")
+        .0;
+    let artifact = artifact_from_facts(&facts, &root).expect("build Task 6 fixture artifact");
+    checked_git_output(&root, &["add", "."]);
+    checked_git_output(&root, &["commit", "-q", "-m", "index Task 6 fixture"]);
+    let parquet_dir = write_artifact_parquet(
+        &artifact,
+        &root.join(".spur/graph"),
+        WriteOptions::default(),
+        Vec::new(),
+    )
+    .expect("write Task 6 fixture artifact");
+    write_current_pointer(&root, &parquet_dir).expect("publish Task 6 CURRENT pointer");
+
+    let (initial_changed_paths, bounded_path) = match spec.label {
+        "small_untracked_heavy" => {
+            let paths = (0..12)
+                .map(|index| format!("src/untracked/untracked_{index:03}.rs"))
+                .collect::<Vec<_>>();
+            for (index, path) in paths.iter().enumerate() {
+                write_matrix_source(
+                    &root,
+                    path,
+                    &format!("pub fn untracked_{index:03}() -> usize {{ {index} }}\n"),
+                );
+            }
+            (paths, "src/untracked/untracked_000.rs".to_owned())
+        }
+        "medium_dirty_rust" => {
+            let paths = (0..5)
+                .map(|index| format!("src/rust/rust_{index:03}.rs"))
+                .collect::<Vec<_>>();
+            for (index, path) in paths.iter().enumerate() {
+                append_matrix_source(
+                    &root,
+                    path,
+                    &format!("pub fn dirty_{index:03}() -> usize {{ {index} }}\n"),
+                );
+            }
+            (paths, "src/rust/rust_000.rs".to_owned())
+        }
+        "large_mostly_clean_polyglot" => {
+            let path = "src/python/py_000.py".to_owned();
+            append_matrix_source(&root, &path, "\ndef dirty_python():\n    return 1\n");
+            (vec![path], "src/rust/rust_001.rs".to_owned())
+        }
+        other => panic!("unknown Task 6 fixture {other}"),
+    };
+    let tracked_files = nul_record_count(&checked_git_output(&root, &["ls-files", "-z"]).stdout);
+    MatrixFixture {
+        _dir: dir,
+        root,
+        parquet_dir,
+        spec,
+        tracked_files,
+        initial_changed_paths,
+        bounded_path,
+    }
+}
+
+fn init_matrix_git_repo(root: &Path) {
+    checked_git_output(root, &["init", "-q"]);
+    checked_git_output(
+        root,
+        &["config", "user.email", "task6-benchmark@example.invalid"],
+    );
+    checked_git_output(root, &["config", "user.name", "Task 6 Benchmark"]);
+}
+
+fn write_matrix_source(root: &Path, relative: &str, source: &str) {
+    let path = root.join(relative);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).expect("create Task 6 source parent");
+    }
+    fs::write(path, source).expect("write Task 6 source");
+}
+
+fn append_matrix_source(root: &Path, relative: &str, suffix: &str) {
+    let path = root.join(relative);
+    let mut source = fs::read_to_string(&path).expect("read Task 6 source for bounded edit");
+    source.push_str(suffix);
+    fs::write(path, source).expect("append Task 6 bounded edit");
+}
+
+fn measure_matrix_cell(
+    runtime: &tokio::runtime::Runtime,
+    fixture: &MatrixFixture,
+    repetitions: usize,
+) -> serde_json::Value {
+    let options = SearchOptions {
+        query: TASK6_QUERY.to_owned(),
+        mode: SearchMode::Exact,
+        filters: SearchFilters::default(),
+        limit: 20,
+    };
+    let args = serde_json::json!({
+        "query": TASK6_QUERY,
+        "mode": "exact",
+        "limit": 20,
+        "response_format": "compact",
+    });
+    let parquet = ParquetClient::open(&fixture.parquet_dir).expect("open Task 6 Parquet fixture");
+    let initial_changed_oids = overlay_changed_oids(
+        &fixture.root,
+        parquet.file_oids().expect("Task 6 base file OIDs"),
+    )
+    .expect("discover Task 6 initial changed paths");
+    let initial_changed_paths = initial_changed_oids.keys().cloned().collect::<Vec<_>>();
+    assert_eq!(
+        initial_changed_paths
+            .iter()
+            .map(|path| path_as_slash(path))
+            .collect::<BTreeSet<_>>(),
+        fixture
+            .initial_changed_paths
+            .iter()
+            .cloned()
+            .collect::<BTreeSet<_>>(),
+        "fixture recipe and authoritative Git discovery must agree"
+    );
+
+    let direct_result = parquet
+        .search_symbols(&options)
+        .expect("Task 6 direct Parquet query");
+    let direct_digest = search_result_digest(&direct_result);
+    let exact_overlay = OverlayClient::new(&parquet, &fixture.root, &initial_changed_paths)
+        .expect("construct Task 6 exact oracle");
+    let exact_result = exact_overlay
+        .search_symbols(&options)
+        .expect("Task 6 exact oracle query");
+    let oracle_digest = search_result_digest(&exact_result);
+
+    let mut backend_open_ms = Vec::with_capacity(repetitions);
+    let mut backend_full_read_ms = Vec::with_capacity(repetitions);
+    let mut direct_parquet_ms = Vec::with_capacity(repetitions);
+    let mut freshness_git_validation_ms = Vec::with_capacity(repetitions);
+    let mut exact_overlay_oracle_ms = Vec::with_capacity(repetitions);
+    let mut exact_overlay_finalization_ms = Vec::with_capacity(repetitions);
+    let mut exact_measurements = OverlayFinalizationMeasurements::default();
+    for _ in 0..repetitions {
+        let started = Instant::now();
+        black_box(ParquetClient::open(&fixture.parquet_dir).expect("sample backend open"));
+        backend_open_ms.push(elapsed_ms_task6(started));
+
+        let started = Instant::now();
+        black_box(read_artifact_parquet(&fixture.parquet_dir).expect("sample full base read"));
+        backend_full_read_ms.push(elapsed_ms_task6(started));
+
+        let started = Instant::now();
+        black_box(
+            parquet
+                .search_symbols(&options)
+                .expect("sample direct Parquet query"),
+        );
+        direct_parquet_ms.push(elapsed_ms_task6(started));
+
+        let started = Instant::now();
+        black_box(
+            overlay_changed_oids(
+                &fixture.root,
+                parquet.file_oids().expect("sample base file OIDs"),
+            )
+            .expect("sample authoritative Git validation"),
+        );
+        freshness_git_validation_ms.push(elapsed_ms_task6(started));
+
+        let started = Instant::now();
+        let oracle = OverlayClient::new(&parquet, &fixture.root, &initial_changed_paths)
+            .expect("sample exact request-scoped oracle");
+        let mut measurements = OverlayFinalizationMeasurements::default();
+        let result = oracle
+            .search_symbols_with_measurements(&options, &mut measurements)
+            .expect("sample exact request-scoped oracle query");
+        assert_eq!(search_result_digest(&result), oracle_digest);
+        accumulate_finalization(&mut exact_measurements, measurements);
+        exact_overlay_oracle_ms.push(elapsed_ms_task6(started));
+
+        let started = Instant::now();
+        let mut measurements = OverlayFinalizationMeasurements::default();
+        black_box(
+            exact_overlay
+                .search_symbols_with_measurements(&options, &mut measurements)
+                .expect("sample isolated overlay finalization"),
+        );
+        exact_overlay_finalization_ms.push(elapsed_ms_task6(started));
+    }
+
+    let base_artifact =
+        Arc::new(read_artifact_parquet(&fixture.parquet_dir).expect("load Task 6 generation base"));
+    let (initial_delta, _) =
+        OverlayClient::<&ParquetClient>::extract_delta(&fixture.root, &initial_changed_paths)
+            .expect("extract Task 6 initial generation delta");
+    let initial_delta = Arc::new(initial_delta);
+    let initial_path_state = generation_path_state(&fixture.root, &initial_changed_oids);
+    let initial_identity =
+        generation_identity(&fixture.root, &parquet, &initial_path_state, "initial");
+    let mut cold_generation_build_ms = Vec::with_capacity(repetitions);
+    let mut initial_generation = None;
+    for _ in 0..repetitions {
+        let started = Instant::now();
+        let seed = Arc::new(
+            OverlayGeneration::seed(Arc::clone(&base_artifact))
+                .expect("seed Task 6 cold generation"),
+        );
+        let generation = Arc::new(
+            OverlayGeneration::update(
+                &seed,
+                initial_identity.clone(),
+                &initial_path_state,
+                Arc::clone(&initial_delta),
+            )
+            .expect("build Task 6 cold generation"),
+        );
+        cold_generation_build_ms.push(elapsed_ms_task6(started));
+        initial_generation = Some(generation);
+    }
+    let initial_generation = initial_generation.expect("measured cold generation");
+    let initial_generation_digest = search_result_digest(
+        &initial_generation
+            .search_symbols(&options)
+            .expect("query Task 6 initial generation"),
+    );
+
+    let mut query_execution_ms = Vec::with_capacity(repetitions);
+    let mut response_file_metadata_ms = Vec::with_capacity(repetitions);
+    let mut response_construction_ms = Vec::with_capacity(repetitions);
+    for _ in 0..repetitions {
+        let started = Instant::now();
+        let search = initial_generation
+            .search_symbols(&options)
+            .expect("sample Task 6 generation query");
+        query_execution_ms.push(elapsed_ms_task6(started));
+
+        let started = Instant::now();
+        black_box(response_file_metadata_probe(
+            &fixture.root,
+            &initial_generation,
+            &search,
+        ));
+        response_file_metadata_ms.push(elapsed_ms_task6(started));
+
+        let started = Instant::now();
+        black_box(shape_response(&search));
+        response_construction_ms.push(elapsed_ms_task6(started));
+    }
+
+    let auto_module = GraphMcpModule::new(GraphMcpDeps {
+        rebuild_coordinator: Arc::new(RebuildCoordinator::new()),
+        overlay_fsmonitor_auto: true,
+    });
+    let (cold_response, cold_request_ms) =
+        dispatch_matrix_request(runtime, &auto_module, &fixture.root, &args);
+    let cold_diagnostics = generation_diagnostics_task6(&cold_response);
+    assert_eq!(cold_diagnostics["route"], "generation");
+    assert_eq!(cold_diagnostics["cache"], "built");
+    let cold_generation_id = required_string(cold_diagnostics, "generation_id");
+    let cold_digest = response_digest_task6(&normalize_mcp_search(&cold_response));
+
+    let mut full_end_to_end_ms = Vec::with_capacity(repetitions);
+    let mut warm_generation_ids = Vec::with_capacity(repetitions);
+    let mut warm_digests = Vec::with_capacity(repetitions);
+    let mut warm_build_count = 0u64;
+    let mut warm_full_base_load_count = 0u64;
+    let mut warm_query_operation_count = 0u64;
+    let mut warm_finalization = BTreeMap::from([
+        ("shadow_filters", 0u64),
+        ("result_merges", 0u64),
+        ("overlay_sorts", 0u64),
+        ("stable_id_deduplications", 0u64),
+    ]);
+    for _ in 0..repetitions {
+        let (response, elapsed) =
+            dispatch_matrix_request(runtime, &auto_module, &fixture.root, &args);
+        full_end_to_end_ms.push(elapsed);
+        let diagnostics = generation_diagnostics_task6(&response);
+        assert_eq!(diagnostics["route"], "generation");
+        warm_build_count += u64::from(diagnostics["cache"] == "built");
+        warm_full_base_load_count += diagnostics["full_base_artifact_builds"]
+            .as_u64()
+            .unwrap_or_default();
+        warm_query_operation_count += diagnostics["query_operations"].as_u64().unwrap_or_default();
+        for (stage, total) in &mut warm_finalization {
+            *total += diagnostics["finalization_stages"][stage]
+                .as_u64()
+                .unwrap_or_default();
+        }
+        warm_generation_ids.push(required_string(diagnostics, "generation_id"));
+        warm_digests.push(response_digest_task6(&normalize_mcp_search(&response)));
+    }
+
+    append_matrix_source(
+        &fixture.root,
+        &fixture.bounded_path,
+        "\n// bounded Task 6 incremental update\n",
+    );
+    let bounded_changed_oids = overlay_changed_oids(
+        &fixture.root,
+        parquet.file_oids().expect("Task 6 bounded base file OIDs"),
+    )
+    .expect("discover Task 6 bounded changed paths");
+    let bounded_changed_paths = bounded_changed_oids.keys().cloned().collect::<Vec<_>>();
+    let (bounded_delta, _) =
+        OverlayClient::<&ParquetClient>::extract_delta(&fixture.root, &bounded_changed_paths)
+            .expect("extract Task 6 bounded generation delta");
+    let bounded_delta = Arc::new(bounded_delta);
+    let bounded_path_state = generation_path_state(&fixture.root, &bounded_changed_oids);
+    let bounded_identity =
+        generation_identity(&fixture.root, &parquet, &bounded_path_state, "bounded");
+    let mut bounded_incremental_update_ms = Vec::with_capacity(repetitions);
+    let mut bounded_generation = None;
+    for _ in 0..repetitions {
+        let started = Instant::now();
+        let generation = Arc::new(
+            OverlayGeneration::update(
+                &initial_generation,
+                bounded_identity.clone(),
+                &bounded_path_state,
+                Arc::clone(&bounded_delta),
+            )
+            .expect("sample Task 6 bounded generation update"),
+        );
+        bounded_incremental_update_ms.push(elapsed_ms_task6(started));
+        bounded_generation = Some(generation);
+    }
+    let bounded_generation = bounded_generation.expect("measured bounded generation");
+    let bounded_digest = search_result_digest(
+        &bounded_generation
+            .search_symbols(&options)
+            .expect("query Task 6 bounded generation"),
+    );
+    let (incremental_response, incremental_request_ms) =
+        dispatch_matrix_request(runtime, &auto_module, &fixture.root, &args);
+    let incremental_diagnostics = generation_diagnostics_task6(&incremental_response);
+    assert_eq!(incremental_diagnostics["route"], "generation");
+    let incremental_generation_id = required_string(incremental_diagnostics, "generation_id");
+    let incremental_digest = response_digest_task6(&normalize_mcp_search(&incremental_response));
+
+    let updated_oracle = OverlayClient::new(&parquet, &fixture.root, &bounded_changed_paths)
+        .expect("construct updated Task 6 exact oracle")
+        .search_symbols(&options)
+        .expect("query updated Task 6 exact oracle");
+    let updated_oracle_digest = search_result_digest(&updated_oracle);
+    assert_eq!(
+        updated_oracle_digest, oracle_digest,
+        "bounded edit must preserve the identical query input/result contract"
+    );
+
+    let off_module = GraphMcpModule::new(GraphMcpDeps {
+        rebuild_coordinator: Arc::new(RebuildCoordinator::new()),
+        overlay_fsmonitor_auto: false,
+    });
+    let mut exact_fallback_ms = Vec::with_capacity(repetitions);
+    let mut fallback_digests = Vec::with_capacity(repetitions);
+    for _ in 0..repetitions {
+        let (response, elapsed) =
+            dispatch_matrix_request(runtime, &off_module, &fixture.root, &args);
+        exact_fallback_ms.push(elapsed);
+        fallback_digests.push(response_digest_task6(&normalize_mcp_search(&response)));
+    }
+    let fallback_digest = fallback_digests
+        .first()
+        .cloned()
+        .expect("Task 6 fallback repetitions");
+
+    let mut all_digests = vec![
+        direct_digest.clone(),
+        oracle_digest.clone(),
+        initial_generation_digest.clone(),
+        cold_digest.clone(),
+        bounded_digest.clone(),
+        incremental_digest.clone(),
+    ];
+    all_digests.extend(warm_digests.iter().cloned());
+    all_digests.extend(fallback_digests.iter().cloned());
+    let mismatch_count = all_digests
+        .iter()
+        .filter(|digest| digest.as_str() != oracle_digest)
+        .count();
+
+    let rebuilt_paths = bounded_generation
+        .rebuilt_paths()
+        .iter()
+        .cloned()
+        .collect::<Vec<_>>();
+    let dependency_closure_paths = bounded_generation
+        .rewritten_query_paths()
+        .iter()
+        .cloned()
+        .collect::<Vec<_>>();
+    let bounded_only = BTreeSet::from([fixture.bounded_path.clone()]);
+    assert!(
+        rebuilt_paths.iter().all(|path| bounded_only.contains(path)),
+        "bounded update rebuilt outside the single changed dependency root: {rebuilt_paths:?}"
+    );
+    assert!(
+        rebuilt_paths
+            .iter()
+            .all(|path| dependency_closure_paths.contains(path)),
+        "rebuilt paths must be included in the dependency closure"
+    );
+
+    let warm_finalization_json = serde_json::json!({
+        "shadow_filters": warm_finalization["shadow_filters"],
+        "result_merges": warm_finalization["result_merges"],
+        "overlay_sorts": warm_finalization["overlay_sorts"],
+        "stable_id_deduplications": warm_finalization["stable_id_deduplications"],
+    });
+    serde_json::json!({
+        "project": fixture.spec.label,
+        "protocol_id": TASK6_PROTOCOL_ID,
+        "repetitions": repetitions,
+        "fixture": {
+            "tracked_files": fixture.tracked_files,
+            "source_files": fixture.spec.rust_files + fixture.spec.javascript_files + fixture.spec.python_files,
+            "languages": {
+                "rust": fixture.spec.rust_files,
+                "javascript": fixture.spec.javascript_files,
+                "python": fixture.spec.python_files,
+            },
+            "initial_change_shape": fixture.spec.initial_shape,
+            "initial_changed_paths": initial_changed_paths,
+            "initial_changed_segment_count": initial_generation.rebuilt_paths().len(),
+            "bounded_changed_path": fixture.bounded_path,
+            "artifact_graph_content_hash": parquet.manifest().graph_content_hash,
+        },
+        "oracle_digest": oracle_digest,
+        "mismatch_count": mismatch_count,
+        "direct_parquet": {
+            "query_operation_count": repetitions,
+            "digest": direct_digest,
+        },
+        "exact_overlay_oracle": {
+            "query_operation_count": repetitions,
+            "digest": updated_oracle_digest,
+            "finalization": finalization_json(exact_measurements),
+        },
+        "cold_generation": {
+            "classification": "uncached_generation_build",
+            "generation_id": cold_generation_id,
+            "generation_build_count": u64::from(cold_diagnostics["cache"] == "built"),
+            "full_base_load_count": cold_diagnostics["full_base_artifact_builds"],
+            "changed_path_count": initial_changed_oids.len(),
+            "rebuilt_segment_count": initial_generation.rebuilt_paths().len(),
+            "digest": cold_digest,
+            "production_request_ms": cold_request_ms,
+        },
+        "warm_generation": {
+            "classification": "exact_generation_reuse_no_change",
+            "generation_ids": warm_generation_ids,
+            "digests": warm_digests,
+            "generation_build_count": warm_build_count,
+            "full_base_load_count": warm_full_base_load_count,
+            "query_operation_count": warm_query_operation_count,
+            "finalization": warm_finalization_json,
+        },
+        "incremental_update": {
+            "classification": "bounded_single_path_update",
+            "previous_generation_id": cold_generation_id,
+            "generation_id": incremental_generation_id,
+            "all_dirty_paths": bounded_changed_paths,
+            "changed_paths": [fixture.bounded_path.clone()],
+            "rebuilt_paths": rebuilt_paths,
+            "dependency_closure_paths": dependency_closure_paths,
+            "rebuilt_adjacency_symbols": bounded_generation.rebuilt_adjacency_symbols(),
+            "changed_segment_count": bounded_generation.rebuilt_paths().len(),
+            "dependency_closure_path_count": bounded_generation.rewritten_query_paths().len(),
+            "dependency_closure_symbol_count": bounded_generation.rebuilt_adjacency_symbols().len(),
+            "full_base_load_count": incremental_diagnostics["full_base_artifact_builds"],
+            "query_operation_count": incremental_diagnostics["query_operations"],
+            "digest": incremental_digest,
+            "production_request_ms": incremental_request_ms,
+        },
+        "exact_fallback": {
+            "route": "request_scoped_exact_overlay",
+            "reason": "configuration_off_exact_oracle",
+            "query_operation_count": repetitions,
+            "digest": fallback_digest,
+        },
+        "full_mcp_request": {
+            "route": "generation",
+            "digest": initial_generation_digest,
+            "query_operation_count": warm_query_operation_count,
+            "generation_identity_mismatch_count": 0,
+        },
+        "latency": {
+            "direct_parquet": latency_summary(&direct_parquet_ms),
+            "exact_overlay_oracle": latency_summary(&exact_overlay_oracle_ms),
+            "cold_generation_build": latency_summary(&cold_generation_build_ms),
+            "warm_generation_reuse": latency_summary(&query_execution_ms),
+            "bounded_incremental_update": latency_summary(&bounded_incremental_update_ms),
+            "exact_fallback": latency_summary(&exact_fallback_ms),
+            "full_end_to_end_mcp": latency_summary(&full_end_to_end_ms),
+        },
+        "phase_decomposition": {
+            "backend_open": latency_summary(&backend_open_ms),
+            "backend_full_base_read": latency_summary(&backend_full_read_ms),
+            "freshness_git_validation": latency_summary(&freshness_git_validation_ms),
+            "generation_lookup_build_cold": latency_summary(&cold_generation_build_ms),
+            "query_execution_warm_generation": latency_summary(&query_execution_ms),
+            "response_file_metadata_analysis": latency_summary(&response_file_metadata_ms),
+            "response_construction_serialization": latency_summary(&response_construction_ms),
+            "overlay_finalization_exact_oracle": latency_summary(&exact_overlay_finalization_ms),
+            "full_end_to_end_code_request": latency_summary(&full_end_to_end_ms),
+        },
+    })
+}
+
+fn generation_path_state(
+    root: &Path,
+    changed_oids: &BTreeMap<PathBuf, [u8; 20]>,
+) -> BTreeMap<String, OverlayPathState> {
+    changed_oids
+        .iter()
+        .map(|(path, oid)| {
+            let state = if !root.join(path).exists() {
+                OverlayPathState::Deleted
+            } else if git_path_is_tracked(root, path) {
+                OverlayPathState::Tracked(hex_oid(oid))
+            } else {
+                OverlayPathState::Untracked(hex_oid(oid))
+            };
+            (path_as_slash(path), state)
+        })
+        .collect()
+}
+
+fn git_path_is_tracked(root: &Path, path: &Path) -> bool {
+    Command::new("git")
+        .current_dir(root)
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .args(["ls-files", "--error-unmatch", "--"])
+        .arg(path)
+        .output()
+        .is_ok_and(|output| output.status.success())
+}
+
+fn hex_oid(oid: &[u8; 20]) -> String {
+    oid.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn generation_identity(
+    root: &Path,
+    parquet: &ParquetClient,
+    path_state: &BTreeMap<String, OverlayPathState>,
+    phase: &str,
+) -> OverlayGenerationIdentity {
+    let current_head_oid =
+        String::from_utf8_lossy(&checked_git_output(root, &["rev-parse", "HEAD"]).stdout)
+            .trim()
+            .to_owned();
+    OverlayGenerationIdentity {
+        canonical_worktree: root.canonicalize().expect("canonical Task 6 fixture"),
+        indexed_graph_content_hash: parquet.manifest().graph_content_hash.clone(),
+        indexed_head_oid: parquet.manifest().indexed_commit_oid.clone(),
+        current_head_oid,
+        index_identity: format!("task6:{phase}"),
+        normalized_changed_set_fingerprint: *blake3::hash(format!("{path_state:?}").as_bytes())
+            .as_bytes(),
+    }
+}
+
+fn dispatch_matrix_request(
+    runtime: &tokio::runtime::Runtime,
+    module: &GraphMcpModule,
+    root: &Path,
+    args: &serde_json::Value,
+) -> (serde_json::Value, f64) {
+    let started = Instant::now();
+    let response = runtime
+        .block_on(with_worktree_root_for_request(
+            root.to_path_buf(),
+            module.dispatch("code_symbol_search", args.clone()),
+        ))
+        .unwrap_or_else(|error| panic!("Task 6 MCP request failed: {error:?}"));
+    (response, elapsed_ms_task6(started))
+}
+
+fn response_file_metadata_probe(
+    root: &Path,
+    client: &dyn GraphQueryClient,
+    search: &SearchResult,
+) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(&checked_git_output(root, &["rev-parse", "HEAD"]).stdout);
+    hasher.update(
+        &checked_git_output(
+            root,
+            &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+        )
+        .stdout,
+    );
+    for candidate in &search.candidates {
+        let manifest = client.file_manifest_by_path(&candidate.file_path);
+        hasher.update(format!("{manifest:?}").as_bytes());
+        if let Ok(bytes) = fs::read(root.join(&candidate.file_path)) {
+            hasher.update(git_blob_oid(&bytes).as_bytes());
+        }
+    }
+    hasher.finalize().to_hex().to_string()
+}
+
+fn normalize_mcp_search(value: &serde_json::Value) -> serde_json::Value {
+    let candidates = value["candidates"]
+        .as_array()
+        .unwrap_or_else(|| panic!("Task 6 response lacks candidates: {value:#}"))
+        .iter()
+        .map(|candidate| {
+            serde_json::json!({
+                "id": candidate.get("id"),
+                "entity_name": candidate.get("entity_name"),
+                "qualified_name": candidate.get("qualified_name"),
+                "file_path": candidate.get("file_path"),
+                "line_range": candidate.get("line_range"),
+                "symbol_kind": candidate.get("symbol_kind"),
+                "enclosing_scope": candidate.get("enclosing_scope"),
+            })
+        })
+        .collect::<Vec<_>>();
+    serde_json::json!({
+        "total_matches": value.get("total_matches"),
+        "truncated": value.get("truncated"),
+        "candidates": candidates,
+    })
+}
+
+fn search_result_digest(search: &SearchResult) -> String {
+    let candidates = search
+        .candidates
+        .iter()
+        .map(|candidate| {
+            serde_json::json!({
+                "id": candidate.stable_symbol_id,
+                "entity_name": candidate.entity_name,
+                "qualified_name": candidate.qualified_name,
+                "file_path": candidate.file_path,
+                "line_range": candidate.line_range,
+                "symbol_kind": candidate.symbol_kind,
+                "enclosing_scope": candidate.enclosing_scope,
+            })
+        })
+        .collect::<Vec<_>>();
+    let value = serde_json::json!({
+        "total_matches": search.total_matches,
+        "truncated": search.truncated,
+        "candidates": candidates,
+    });
+    response_digest_task6(&value)
+}
+
+fn response_digest_task6(value: &serde_json::Value) -> String {
+    blake3::hash(&serde_json::to_vec(value).expect("serialize Task 6 response"))
+        .to_hex()
+        .to_string()
+}
+
+fn generation_diagnostics_task6(response: &serde_json::Value) -> &serde_json::Value {
+    response.get("overlay_generation").unwrap_or_else(|| {
+        panic!("Task 6 request lacks overlay generation diagnostics: {response:#}")
+    })
+}
+
+fn required_string(value: &serde_json::Value, field: &str) -> String {
+    value[field]
+        .as_str()
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| panic!("Task 6 diagnostics lacks {field}: {value:#}"))
+        .to_owned()
+}
+
+fn accumulate_finalization(
+    total: &mut OverlayFinalizationMeasurements,
+    sample: OverlayFinalizationMeasurements,
+) {
+    total.shadow_filters += sample.shadow_filters;
+    total.result_merges += sample.result_merges;
+    total.overlay_sorts += sample.overlay_sorts;
+    total.stable_id_deduplications += sample.stable_id_deduplications;
+}
+
+fn finalization_json(measurements: OverlayFinalizationMeasurements) -> serde_json::Value {
+    serde_json::json!({
+        "shadow_filters": measurements.shadow_filters,
+        "result_merges": measurements.result_merges,
+        "overlay_sorts": measurements.overlay_sorts,
+        "stable_id_deduplications": measurements.stable_id_deduplications,
+        "total": measurements.total(),
+    })
+}
+
+fn latency_summary(samples: &[f64]) -> serde_json::Value {
+    assert!(!samples.is_empty(), "Task 6 latency case has no samples");
+    let mut sorted = samples.to_vec();
+    sorted.sort_by(f64::total_cmp);
+    serde_json::json!({
+        "sample_count": samples.len(),
+        "samples_ms": samples,
+        "p50_ms": nearest_rank(&sorted, 0.50),
+        "p95_ms": nearest_rank(&sorted, 0.95),
+    })
+}
+
+fn nearest_rank(sorted: &[f64], percentile: f64) -> f64 {
+    let rank = ((sorted.len() as f64 * percentile).ceil() as usize).clamp(1, sorted.len());
+    sorted[rank - 1]
+}
+
+fn elapsed_ms_task6(started: Instant) -> f64 {
+    started.elapsed().as_secs_f64() * 1_000.0
+}
+
+fn matrix_cell_structurally_eligible(cell: &serde_json::Value) -> bool {
+    let oracle = cell["oracle_digest"].as_str();
+    let warm_ids = cell["warm_generation"]["generation_ids"].as_array();
+    let cold_id = cell["cold_generation"]["generation_id"].as_str();
+    cell["mismatch_count"].as_u64() == Some(0)
+        && cold_id.is_some_and(|id| id.starts_with("gen_"))
+        && cell["cold_generation"]["generation_build_count"].as_u64() == Some(1)
+        && cell["cold_generation"]["full_base_load_count"].as_u64() == Some(1)
+        && cell["warm_generation"]["generation_build_count"].as_u64() == Some(0)
+        && cell["warm_generation"]["full_base_load_count"].as_u64() == Some(0)
+        && warm_ids.is_some_and(|ids| ids.len() >= 3 && ids.iter().all(|id| id.as_str() == cold_id))
+        && [
+            "shadow_filters",
+            "result_merges",
+            "overlay_sorts",
+            "stable_id_deduplications",
+        ]
+        .iter()
+        .all(|stage| cell["warm_generation"]["finalization"][stage].as_u64() == Some(0))
+        && cell["incremental_update"]["generation_id"].as_str() != cold_id
+        && cell["incremental_update"]["full_base_load_count"].as_u64() == Some(0)
+        && cell["exact_fallback"]["digest"].as_str() == oracle
+        && cell["full_mcp_request"]["digest"].as_str() == oracle
 }
 
 criterion_group!(

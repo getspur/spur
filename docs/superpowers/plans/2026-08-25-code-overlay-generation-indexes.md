@@ -479,8 +479,265 @@ this plan's PRE unless their complete protocol identity is proven equal.
 
 ### PRE
 
-Pending Task 1 execution under the committed plan protocol.
+Task 1 measured the existing request-scoped overlay search on the Spur worker
+worktree. The selected session used exact query `handle_code_search`, limit 20,
+default filters, and one explicit changed path
+(`crates/spur-graph/src/query_client.rs`). Each repetition warmed the prebuilt
+overlay for one second, then collected 30 Criterion samples / 90 measured query
+iterations over a one-second measurement window. Percentiles below are
+nearest-rank percentiles of the raw per-iteration sample times
+(`times[i] / iters[i]`), not Criterion confidence-interval endpoints.
+
+Project/protocol identity:
+
+- repository:
+  `/Volumes/Projects/Projects/spur/.spur/worktrees/516c98c3-8a9b-44cc-a20f-c2a1e1867c9c`
+- source revision: `b7fff63f41832de154c1fb83951fd0a5f4fcb7ba`
+  plus the uncommitted GREEN measurement seam in `query_client.rs`
+- tracked files: 3,222; probe dirty records: 1; selected changed-path count: 1
+- base artifact:
+  `/Volumes/Projects/Projects/spur/.spur/graph/acd60905a3a40accf38792d2e7ce41e37e58bd4ad0d4e62624b069d57a02b832.parquet`
+- base graph content hash:
+  `acd60905a3a40accf38792d2e7ce41e37e58bd4ad0d4e62624b069d57a02b832`
+- artifact indexed commit OID: `null` (not present in this artifact manifest);
+  indexed source files: 3,434
+- classification: warm overlay query; one-second warm-up before every
+  repetition
+
+The probe command was run three times with only the final saved-baseline name
+changed from `task1-pre-r1` through `task1-pre-r3`. `GIT_INDEX_FILE` pointed to
+a disposable copy of the worktree index with the host-only Cargo lockfile
+refresh marked assume-unchanged, keeping the measured Git snapshot at the one
+intentional changed path. The disposable index and lockfile refresh were
+removed after the probe.
+
+```bash
+GIT_INDEX_FILE=/tmp/spur-task1-index.OUzSBo/index \
+SPUR_REMOTE=0 \
+SPUR_GRAPH_PERF_REPO=/Volumes/Projects/Projects/spur/.spur/worktrees/516c98c3-8a9b-44cc-a20f-c2a1e1867c9c \
+SPUR_GRAPH_PERF_FIXTURE=/Volumes/Projects/Projects/spur/.spur/graph/CURRENT \
+SPUR_GRAPH_PERF_CHANGED_FILE=crates/spur-graph/src/query_client.rs \
+SPUR_GRAPH_PERF_LABEL=task1_pre_spur \
+SPUR_GRAPH_PERF_SAMPLE_SIZE=30 \
+SPUR_GRAPH_PERF_MEASUREMENT_SECONDS=1 \
+scripts/spur-cargo bench --locked -p spur-graph --bench overlay -- \
+  overlay_stage_probe_task1_pre_spur/stage_overlay_query --noplot \
+  --save-baseline task1-pre-r1
+```
+
+| Repetition | Samples / iterations | p50 (ms) | p95 (ms) | Correctness digest | Per-query finalization stages | Measured-window stage counts |
+|---|---:|---:|---:|---|---|---|
+| `task1-pre-r1` | 30 / 90 | 13.684097 | 13.938806 | `37d1ae135cd80b90589253cd74df41bd88389b2cfc13de96907ff62700985936` | shadow=1, merge=1, overlay-sort=1, stable-ID-dedup=1; total=4 | 90 / 90 / 90 / 90; total=360 |
+| `task1-pre-r2` | 30 / 90 | 13.585958 | 14.999069 | `37d1ae135cd80b90589253cd74df41bd88389b2cfc13de96907ff62700985936` | shadow=1, merge=1, overlay-sort=1, stable-ID-dedup=1; total=4 | 90 / 90 / 90 / 90; total=360 |
+| `task1-pre-r3` | 30 / 90 | 13.618861 | 15.516486 | `37d1ae135cd80b90589253cd74df41bd88389b2cfc13de96907ff62700985936` | shadow=1, merge=1, overlay-sort=1, stable-ID-dedup=1; total=4 | 90 / 90 / 90 / 90; total=360 |
+
+The stage-count contract is the counted `OverlayClient` execution seam tested
+against the same non-identity search path. Identity overlay searches report
+zero for all four labels. `overlay_sorts` counts only the sort that orders the
+separately queried base and delta vectors as one overlay result; ranking sorts
+inside either query client are intentionally excluded.
+
+SOLVE evidence:
+
+- PRE `sol_165c862dc07941fd` (persisted and reloaded):
+  `data_integrity.cardinality` passed all eight bindings. Three repeated warm
+  non-identity searches contain three occurrences of each stage (12 total),
+  while all four identity relations have cardinality zero. This is the expected
+  non-zero counterexample to the approved zero-finalization target.
+- POST `sol_b6bf8aa93db74d7c` (persisted and reloaded): all nine cardinality
+  bindings plus `data_integrity.unique` and
+  `data_integrity.mutually_consistent` passed. The four labels are unique and
+  drawn only from shadow filter, result merge, overlay sort, and stable-ID
+  deduplication; `query_ranking_sort` is outside the allowed overlay-label
+  relation. Task 1 intentionally measures rather than removes the PRE
+  counterexample; Task 6 must reduce these four warm-path counts to zero.
 
 ### POST
 
-Pending Task 6 execution under the committed plan protocol.
+Task 6 ran the release matrix on 2026-08-26 at the reviewed Task 5 tip
+`6b5db470e2a88dd5669520a79473c8ab2b912d11`, plus the Task 6 benchmark and
+gate commits. The protocol ID is `overlay-generation-task6-v1`: exact query
+`matrix_target`, limit 20, compact response format, the same base artifact and
+changed-path snapshot within each cell, 30 repetitions per latency case, and
+nearest-rank p50/p95. Fixture construction is excluded from every timing.
+
+The raw report is preserved in the repository runtime evidence store at
+`/Volumes/Projects/Projects/spur/.spur/bench-evidence/task6-overlay-generation-matrix-29fa6d9973eb.json`
+(2,322 lines, 67,064 bytes, SHA-256
+`29fa6d9973eb7ab464aae81ccc3710ec1d9a5a2d50e9de1ca7168191d22b7a5f`).
+It contains all 30 raw samples for each case, generation identities, operation
+and finalization counters, changed paths, dependency closures, result digests,
+fallback reasons, and fixture manifests. The full run was:
+
+```bash
+SPUR_GRAPH_TASK6_MATRIX=1 \
+SPUR_GRAPH_RELEASE_REPEATS=30 \
+scripts/spur-cargo bench -p spur-graph --bench overlay -- \
+  task6_matrix_only --noplot
+# release_eligible=true; fsmonitor_auto_safe=true;
+# configuration_default=Off; configure_semantics_changed=false
+```
+
+Representative deterministic projects deliberately differ in size and change
+shape:
+
+| Project | Tracked / source files | Languages | Initial change shape | Initial changed / rebuilt segments |
+|---|---:|---|---|---:|
+| `small_untracked_heavy` | 5 / 4 | Rust | 12 untracked Rust files | 12 / 12 |
+| `medium_dirty_rust` | 49 / 48 | Rust | 5 modified tracked Rust files | 5 / 5 |
+| `large_mostly_clean_polyglot` | 193 / 192 | Rust, JavaScript, Python | 1 modified Python file | 1 / 1 |
+
+All latency values below are milliseconds, shown as p50 / p95. “Cold” and
+“incremental” are isolated generation operations over identical already
+extracted inputs; production cold/incremental request samples are reported
+separately below.
+
+| Project | Direct Parquet | Exact request oracle | Cold generation build | Warm generation query | Bounded incremental | Exact fallback | Full warm `code_*` MCP |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| small | 0.088 / 0.163 | 42.234 / 44.147 | 0.193 / 0.219 | 0.003 / 0.004 | 0.015 / 0.021 | 50.585 / 53.780 | 128.632 / 132.357 |
+| medium | 0.101 / 0.169 | 42.334 / 48.000 | 0.366 / 0.400 | 0.004 / 0.005 | 0.019 / 0.023 | 50.723 / 52.546 | 127.820 / 134.930 |
+| large | 0.123 / 0.152 | 37.844 / 40.834 | 1.219 / 1.449 | 0.010 / 0.013 | 0.011 / 0.015 | 53.396 / 55.957 | 131.568 / 139.354 |
+
+The raw production cold requests were 179.530, 180.069, and 181.026 ms for
+small, medium, and large respectively. The production request after the bounded
+change was 180.463, 174.857, and 200.473 ms. Those are single state
+transitions, not percentile claims; the repeated isolated cold and incremental
+cases above provide the 30-sample p50/p95 distributions.
+
+The phase probes use the same fixture, snapshot, and query as each cell. They
+measure the named work independently, so percentile columns are not summed as
+if they were a critical-path trace.
+
+| Project | Backend open | Full base read | Exact Git freshness | Cold lookup/build | Warm query | Response-file OID analysis | Construct/serialize | Exact overlay finalization |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| small | 0.075 / 0.088 | 0.483 / 0.614 | 34.010 / 41.699 | 0.193 / 0.219 | 0.003 / 0.004 | 8.173 / 8.591 | 0.008 / 0.010 | 0.071 / 0.132 |
+| medium | 0.076 / 0.082 | 0.480 / 0.554 | 33.955 / 43.462 | 0.366 / 0.400 | 0.004 / 0.005 | 8.383 / 9.204 | 0.008 / 0.009 | 0.116 / 0.160 |
+| large | 0.076 / 0.083 | 0.679 / 0.776 | 34.401 / 43.934 | 1.219 / 1.449 | 0.010 / 0.013 | 8.449 / 9.054 | 0.008 / 0.010 | 0.127 / 0.184 |
+
+This explains the historical roughly 40 ms direct/request-scoped work versus
+roughly 200 ms complete request without attributing the gap to the query. The
+generation query itself is 0.003--0.010 ms p50 and response serialization is
+about 0.008 ms. One exact Git freshness observation costs about 34 ms p50 and
+response-file OID analysis another 8.2--8.4 ms. After subtracting one measured
+freshness observation, response-file analysis, backend open, warm query, and
+serialization from the full-request p50, the accounting remainder is 86.363,
+85.394, and 88.624 ms. The request source identifies that remainder: search
+preflight runs `GraphResponseMetadata::analyze_source_inner`, stable overlay
+preparation performs an initial snapshot plus an exact validation,
+`authoritative_overlay_identity` validates again after the handler, and final
+response metadata performs Git/OID analysis again. These repeated
+freshness/metadata passes are outside the already-pinned generation query.
+Cold production adds one exact extraction/generation transition and lands at
+179--181 ms; the bounded production transition reached 200.473 ms. The old
+40/200 observation is therefore the expected composition of base/query work,
+repeated authoritative validation and metadata work, and (when cold) one
+generation transition, rather than repeated result merging or sorting.
+
+Structural evidence:
+
+| Project | Cold generation | Warm identity / builds / base loads / query ops | Warm shadow / merge / sort / stable-ID dedup | Incremental generation; changed paths / closure paths / closure symbols / base loads / query ops |
+|---|---|---|---|---|
+| small | `gen_91066763235ea3db`; 1 build, 1 base load | same ID for all 30; 0 / 0 / 60 | 0 / 0 / 0 / 0 | `gen_6d9caed162e51e5d`; 1 / 1 / 1 / 0 / 2 |
+| medium | `gen_ed559c6382a11ae5`; 1 build, 1 base load | same ID for all 30; 0 / 0 / 60 | 0 / 0 / 0 / 0 | `gen_da270027d508080a`; 1 / 1 / 2 / 0 / 2 |
+| large | `gen_d261f43c9cb306f8`; 1 build, 1 base load | same ID for all 30; 0 / 0 / 60 | 0 / 0 / 0 / 0 | `gen_0a9303f0eb1427eb`; 1 / 1 / 1 / 0 / 2 |
+
+Every direct, oracle, cold, warm, incremental, fallback, and full-MCP result
+has digest
+`36559330dd94c8dfb87202d6e9957d92d9ed455a00e5cd66fb23dbcbcd215476`.
+Mismatch count is zero in every cell. The exact oracle performed 30 shadow
+filters, 30 merges, 30 overlay sorts, and 30 stable-ID deduplications per cell;
+the 30 warm generation requests performed zero of every stage. The exact
+fallback route is `request_scoped_exact_overlay`, reason
+`configuration_off_exact_oracle`, and also matches the oracle. Cold and warm
+are explicitly classified and never pooled. There is no fixed millisecond
+release threshold; the gate is parity plus structural work elimination.
+
+The emitted JSON passed the same production release contract used by the
+deterministic tests:
+
+```bash
+SPUR_REMOTE=0 \
+SPUR_GRAPH_TASK6_EVIDENCE=/Volumes/Projects/Projects/spur/.spur/bench-evidence/task6-overlay-generation-matrix-29fa6d9973eb.json \
+scripts/spur-cargo test -p spur-graph --test perf_gates gate_task6_ -- --nocapture
+# 4 passed; 0 failed
+
+scripts/spur-cargo test -p spur-graph --test perf_gates -- --nocapture
+# 4 passed; 0 failed; 9 ignored
+
+scripts/spur-cargo test -p spur-graph --lib
+# remote Linux: 490 passed; 0 failed; 3 ignored
+```
+
+The local macOS classification reproduced the two caller-identified old
+fixtures,
+`overlay_snapshot_supported_paths_reject_lossy_normalized_collision` and
+`overlay_snapshot_supported_paths_reject_non_utf8_relative_path`: APFS rejects
+their non-UTF-8 path creation with `Illegal byte sequence`. Neither test nor
+its production source is in the Task 6 diff, and both pass as part of the
+remote Linux result above. Strict clippy is presently blocked before Task 6
+code by pre-existing warnings: the normal invocation stops on six `spur-acp`
+findings, while `--no-deps` reaches unchanged `spur-graph` and stops on its
+existing dead-code/complexity/test findings.
+
+SOLVE evidence:
+
+- PRE `sol_49fb133b237749de` (persisted and reloaded): `unsat` / `fail`.
+  The one-project, zero-admissible-cell pre-edit model violated both the exact
+  three-project cardinality and the mutually-consistent release-cell rule.
+- POST `sol_c479540b80db46da` (persisted and reloaded): `sat` / `pass`.
+  Exactly three unique project rows satisfy identical-input parity, exact
+  digest equality, stable generation reuse, zero warm finalization, bounded
+  incremental closure, and exact fallback. All three hard rules
+  (`cardinality`, `unique`, and `mutually_consistent`) pass; there is no
+  objective and no unsat core.
+
+Release decision: the measured generation route and fsmonitor `Auto` path are
+safe to release when explicitly selected: parity and every structural gate
+pass across all three project shapes. The production/configuration default
+nevertheless remains `Off`, automatic enablement remains disabled, and
+`/configure` semantics are unchanged because Task 6 does not alter production
+configuration. A later configuration task may choose to change that default;
+this evidence removes correctness and structural-performance objections but
+does not silently broaden the present release surface.
+
+### Task 3 SOLVE evidence correction (2026-08-25)
+
+The originally reported PRE `sol_687d78351d7e4d8d` and POST
+`sol_7a7f30732b9b4d8f` are invalid audit references: reloading either with
+`get_solve_result` returns `-32004` (`solve_id ... was not found`). They are
+replaced, without changing Task 3 Rust production or test code, by these
+persisted and independently reloaded artifacts:
+
+- PRE `sol_23670cb13d6b4d4c`: `sat`, five named hard constraints, no objective.
+  Its counterexample model has visible source/target and an oracle edge, but
+  `generation_adjacency_present=0` and
+  `same_generation_adjacency_available=0`, representing the pre-Task-3
+  absent-adjacency base state and exact-oracle mismatch.
+- POST `sol_9ef784d457e2477f`: `sat`, nine named hard constraints covering
+  endpoint visibility, caller/callee symmetry, deleted-edge exclusion, exact
+  edge/selector/oracle equivalence, nested request-generation coherence,
+  digest equality, and unaffected-segment reuse. The reloaded model has every
+  positive invariant at `1` and `deleted_edge_leaks=0`; its single lexicographic
+  maximize objective has value and finite bound `11`, with
+  `optimization.termination=complete`.
+- Existing catalog POST `sol_475ba936ad3042e9` remains reloadable: `sat`, one
+  hard `data_integrity.mutually_consistent` constraint, no objective, and a
+  complete coherent model whose generation/oracle digest fields both equal
+  `digest_7d4d470d5a4d145d`.
+
+Catalog-first routing used `solve_rule_spec` before the generic typed fallback;
+both replacement requests passed `solve_constraint_check`, used
+`persist=true`, and were then verified from their reloaded requests, models,
+constraints/objectives, and optimization envelope. GREEN was reconfirmed with:
+
+```bash
+scripts/spur-cargo test -p spur-graph --test overlay_client \
+  overlay_generation_adjacency_matches_fresh_oracle_and_reuses_unaffected_segments \
+  -- --exact --nocapture
+# ok: 1 passed, 11 filtered; generation/oracle digest
+# 7d4d470d5a4d145d9ac19ecfac2dd49e1267b5c87f5081163359ccdedb37cc0f;
+# stable caller and isolated adjacency segments reused
+
+scripts/spur-cargo fmt -p spur-graph -- --check
+# exit 0
+```
