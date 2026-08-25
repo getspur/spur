@@ -1705,4 +1705,42 @@ level = "warn,spur_core::orchestrator=info"
             SkillsProjectionMode::CatalogOnly
         );
     }
+
+    #[test]
+    fn graph_overlay_fsmonitor_parses_modes_and_defaults_off() {
+        let missing: SpurConfig = toml::from_str("").expect("empty config should parse");
+        assert_eq!(
+            missing.graph.overlay_fsmonitor,
+            OverlayFsmonitorMode::Off
+        );
+
+        for (serialized_mode, expected, display) in [
+            ("off", OverlayFsmonitorMode::Off, "Off"),
+            ("auto", OverlayFsmonitorMode::Auto, "Auto (experimental)"),
+        ] {
+            let config: SpurConfig = toml::from_str(&format!(
+                "[graph]\noverlay_fsmonitor = \"{serialized_mode}\"\n"
+            ))
+            .expect("overlay fsmonitor mode should parse");
+            assert_eq!(config.graph.overlay_fsmonitor, expected);
+            assert_eq!(expected.to_string(), display);
+        }
+    }
+
+    #[test]
+    fn graph_overlay_fsmonitor_default_omits_graph_and_patch_applies_auto() {
+        let serialized =
+            toml::to_string(&SpurConfig::default()).expect("default config should serialize");
+        assert!(!serialized.contains("[graph]"));
+
+        let mut cfg = SpurConfig::default();
+        let patch = ConfigPatch::GraphOverlayFsmonitor(OverlayFsmonitorMode::Auto);
+        assert_eq!(patch.section_id(), "graph");
+        patch.apply(&mut cfg).expect("graph patch should apply");
+        assert_eq!(cfg.graph.overlay_fsmonitor, OverlayFsmonitorMode::Auto);
+
+        let serialized = toml::to_string(&cfg).expect("auto config should serialize");
+        assert!(serialized.contains("[graph]"));
+        assert!(serialized.contains("overlay_fsmonitor = \"auto\""));
+    }
 }
