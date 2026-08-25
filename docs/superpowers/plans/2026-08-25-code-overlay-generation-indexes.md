@@ -555,3 +555,45 @@ SOLVE evidence:
 ### POST
 
 Pending Task 6 execution under the committed plan protocol.
+
+### Task 3 SOLVE evidence correction (2026-08-25)
+
+The originally reported PRE `sol_687d78351d7e4d8d` and POST
+`sol_7a7f30732b9b4d8f` are invalid audit references: reloading either with
+`get_solve_result` returns `-32004` (`solve_id ... was not found`). They are
+replaced, without changing Task 3 Rust production or test code, by these
+persisted and independently reloaded artifacts:
+
+- PRE `sol_23670cb13d6b4d4c`: `sat`, five named hard constraints, no objective.
+  Its counterexample model has visible source/target and an oracle edge, but
+  `generation_adjacency_present=0` and
+  `same_generation_adjacency_available=0`, representing the pre-Task-3
+  absent-adjacency base state and exact-oracle mismatch.
+- POST `sol_9ef784d457e2477f`: `sat`, nine named hard constraints covering
+  endpoint visibility, caller/callee symmetry, deleted-edge exclusion, exact
+  edge/selector/oracle equivalence, nested request-generation coherence,
+  digest equality, and unaffected-segment reuse. The reloaded model has every
+  positive invariant at `1` and `deleted_edge_leaks=0`; its single lexicographic
+  maximize objective has value and finite bound `11`, with
+  `optimization.termination=complete`.
+- Existing catalog POST `sol_475ba936ad3042e9` remains reloadable: `sat`, one
+  hard `data_integrity.mutually_consistent` constraint, no objective, and a
+  complete coherent model whose generation/oracle digest fields both equal
+  `digest_7d4d470d5a4d145d`.
+
+Catalog-first routing used `solve_rule_spec` before the generic typed fallback;
+both replacement requests passed `solve_constraint_check`, used
+`persist=true`, and were then verified from their reloaded requests, models,
+constraints/objectives, and optimization envelope. GREEN was reconfirmed with:
+
+```bash
+scripts/spur-cargo test -p spur-graph --test overlay_client \
+  overlay_generation_adjacency_matches_fresh_oracle_and_reuses_unaffected_segments \
+  -- --exact --nocapture
+# ok: 1 passed, 11 filtered; generation/oracle digest
+# 7d4d470d5a4d145d9ac19ecfac2dd49e1267b5c87f5081163359ccdedb37cc0f;
+# stable caller and isolated adjacency segments reused
+
+scripts/spur-cargo fmt -p spur-graph -- --check
+# exit 0
+```
