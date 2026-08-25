@@ -34,7 +34,8 @@ use crate::store::parquet::{
 use crate::temporal::{symbol_history_indexed, GitSha, TemporalIndex};
 use crate::{
     artifact_from_facts, build_facts_for_paths, compare_symbols, find_callee_edges,
-    find_caller_edges, read_artifact_header_parquet, resolve_selector, search_symbols, ChangeKind,
+    find_caller_edges, internal_unbounded_search_options, limited_search_result,
+    read_artifact_header_parquet, resolve_selector, search_symbols, ChangeKind,
     CommitIndexArtifact, GraphArtifactManifest, GraphEdgeArtifact, GraphFileManifestEntry,
     GraphIndexArtifact, GraphIndexHeader, GraphSymbolArtifact, OwnedCalleeRecord,
     OwnedCallerRecord, RelationKind, SearchOptions, SearchResult, SearchSymbol, SelectorResolution,
@@ -545,8 +546,7 @@ impl<B: GraphQueryClient> GraphQueryClient for OverlayClient<B> {
         if self.is_identity_overlay() {
             return self.base.search_symbols(opts);
         }
-        let mut unbounded = opts.clone();
-        unbounded.limit = 200;
+        let unbounded = internal_unbounded_search_options(opts);
         let mut candidates = self
             .base
             .search_symbols(&unbounded)?
@@ -559,14 +559,7 @@ impl<B: GraphQueryClient> GraphQueryClient for OverlayClient<B> {
         candidates.dedup_by(|left, right| left.stable_symbol_id == right.stable_symbol_id);
 
         let total_matches = candidates.len();
-        let limit = opts.limit.clamp(1, 200);
-        let truncated = total_matches > limit;
-        candidates.truncate(limit);
-        Ok(SearchResult {
-            candidates,
-            total_matches,
-            truncated,
-        })
+        Ok(limited_search_result(candidates, total_matches, opts.limit))
     }
 
     fn find_caller_edges(&self, sid: &str) -> Vec<OwnedCallerRecord> {
@@ -1052,15 +1045,7 @@ impl ParquetClient {
         candidates.sort_by(|left, right| compare_symbols(left, right, opts));
 
         let total_matches = candidates.len();
-        let limit = opts.limit.clamp(1, 200);
-        let truncated = total_matches > limit;
-        candidates.truncate(limit);
-
-        Ok(SearchResult {
-            candidates,
-            total_matches,
-            truncated,
-        })
+        Ok(limited_search_result(candidates, total_matches, opts.limit))
     }
 
     pub fn try_find_caller_edges(&self, sid: &str) -> anyhow::Result<Vec<OwnedCallerRecord>> {

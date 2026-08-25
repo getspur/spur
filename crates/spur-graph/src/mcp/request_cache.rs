@@ -3,46 +3,18 @@ use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
-use std::time::{Duration, Instant};
 
-use super::{overlay_snapshot::SnapshotIdentity, WorktreeGitMetadata};
+use super::overlay_snapshot::SnapshotIdentity;
 use crate::{GraphIndexArtifact, ParquetClient};
 
-const GIT_METADATA_CACHE_TTL: Duration = Duration::from_millis(5_000);
 const PARQUET_CLIENT_CACHE_CAPACITY: usize = 8;
 const OVERLAY_DELTA_CACHE_CAPACITY: usize = PARQUET_CLIENT_CACHE_CAPACITY;
 
-static GIT_METADATA_CACHE: OnceLock<Mutex<GitMetadataCache>> = OnceLock::new();
 static PARQUET_CLIENT_CACHE: OnceLock<Mutex<ParquetClientCache>> = OnceLock::new();
 static OVERLAY_DELTA_CACHE: OnceLock<Mutex<OverlayDeltaCache>> = OnceLock::new();
 static OVERLAY_DELTA_IN_FLIGHT: OnceLock<
     Mutex<HashMap<OverlayDeltaCacheKey, Arc<OverlayInFlight>>>,
 > = OnceLock::new();
-
-pub(super) fn git_metadata_get(
-    worktree: &Path,
-    indexed_head_oid: Option<&str>,
-    now: Instant,
-) -> Option<WorktreeGitMetadata> {
-    let stamp = GitMetadataCacheStamp::from_worktree(worktree, indexed_head_oid);
-    let Ok(cache) = git_cache().lock() else {
-        return None;
-    };
-    cache.get(worktree, &stamp, now)
-}
-
-pub(super) fn git_metadata_insert(
-    worktree: &Path,
-    indexed_head_oid: Option<&str>,
-    now: Instant,
-    value: WorktreeGitMetadata,
-) {
-    let stamp = GitMetadataCacheStamp::from_worktree(worktree, indexed_head_oid);
-    let Ok(mut cache) = git_cache().lock() else {
-        return;
-    };
-    cache.insert(worktree.to_path_buf(), stamp, now, value);
-}
 
 pub(super) fn parquet_client(path: &Path) -> anyhow::Result<Arc<ParquetClient>> {
     for _attempt in 0..=1 {
@@ -185,10 +157,6 @@ fn finish_overlay_in_flight(
     }
 }
 
-fn git_cache() -> &'static Mutex<GitMetadataCache> {
-    GIT_METADATA_CACHE.get_or_init(|| Mutex::new(GitMetadataCache::default()))
-}
-
 fn parquet_cache() -> &'static Mutex<ParquetClientCache> {
     PARQUET_CLIENT_CACHE
         .get_or_init(|| Mutex::new(ParquetClientCache::new(PARQUET_CLIENT_CACHE_CAPACITY)))
@@ -225,70 +193,6 @@ fn overlay_delta_cache_insert(key: OverlayDeltaCacheKey, value: CachedOverlayDel
         return;
     };
     cache.insert(key, value);
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct GitMetadataCacheStamp {
-    indexed_head_oid: Option<String>,
-    head_mtime_ns: i128,
-    index_mtime_ns: i128,
-}
-
-impl GitMetadataCacheStamp {
-    fn from_worktree(worktree: &Path, indexed_head_oid: Option<&str>) -> Self {
-        let git_dir = worktree.join(".git");
-        Self {
-            indexed_head_oid: indexed_head_oid.map(str::to_owned),
-            head_mtime_ns: path_mtime_ns(&git_dir.join("HEAD")),
-            index_mtime_ns: path_mtime_ns(&git_dir.join("index")),
-        }
-    }
-}
-
-struct GitMetadataCacheEntry {
-    stamp: GitMetadataCacheStamp,
-    fetched_at: Instant,
-    value: WorktreeGitMetadata,
-}
-
-#[derive(Default)]
-struct GitMetadataCache {
-    entries: HashMap<PathBuf, GitMetadataCacheEntry>,
-}
-
-impl GitMetadataCache {
-    fn get(
-        &self,
-        worktree: &Path,
-        stamp: &GitMetadataCacheStamp,
-        now: Instant,
-    ) -> Option<WorktreeGitMetadata> {
-        let entry = self.entries.get(worktree)?;
-        if entry.stamp != *stamp {
-            return None;
-        }
-        if now.saturating_duration_since(entry.fetched_at) >= GIT_METADATA_CACHE_TTL {
-            return None;
-        }
-        Some(entry.value.clone())
-    }
-
-    fn insert(
-        &mut self,
-        worktree: PathBuf,
-        stamp: GitMetadataCacheStamp,
-        now: Instant,
-        value: WorktreeGitMetadata,
-    ) {
-        self.entries.insert(
-            worktree,
-            GitMetadataCacheEntry {
-                stamp,
-                fetched_at: now,
-                value,
-            },
-        );
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -427,28 +331,6 @@ mod tests {
     use crate::schema::{GraphIndexHeader, GRAPH_INDEX_VERSION_TEMPORAL};
     use crate::{write_artifact_parquet, GraphIndexArtifact, WriteOptions};
 
-    fn sample_git_metadata(head: &str) -> WorktreeGitMetadata {
-        WorktreeGitMetadata {
-            head_oid: head.to_owned(),
-            has_uncommitted_changes: true,
-            supplemental_changed: Vec::new(),
-        }
-    }
-
-    fn git_metadata_cached(
-        worktree: &Path,
-        indexed_head_oid: Option<&str>,
-        now: Instant,
-        fetch: impl FnOnce() -> Option<WorktreeGitMetadata>,
-    ) -> Option<WorktreeGitMetadata> {
-        if let Some(cached) = git_metadata_get(worktree, indexed_head_oid, now) {
-            return Some(cached);
-        }
-        let fetched = fetch()?;
-        git_metadata_insert(worktree, indexed_head_oid, now, fetched.clone());
-        Some(fetched)
-    }
-
     fn write_empty_parquet(dir: &Path) -> PathBuf {
         let artifact = GraphIndexArtifact {
             header: GraphIndexHeader {
@@ -471,141 +353,6 @@ mod tests {
         };
         write_artifact_parquet(&artifact, dir, WriteOptions::default(), Vec::new())
             .expect("write empty parquet artifact")
-    }
-
-    #[test]
-    fn git_metadata_cache_reuses_fetch_within_ttl() {
-        let tempdir = tempfile::tempdir().expect("tempdir");
-        let worktree = tempdir.path();
-        fs::create_dir_all(worktree.join(".git")).expect("git dir");
-        fs::write(worktree.join(".git/HEAD"), "ref: refs/heads/main\n").expect("HEAD");
-        let fetches = AtomicUsize::new(0);
-        let now = Instant::now();
-
-        let first = git_metadata_cached(worktree, None, now, || {
-            fetches.fetch_add(1, Ordering::SeqCst);
-            Some(sample_git_metadata("abc"))
-        });
-        let second = git_metadata_cached(worktree, None, now + Duration::from_millis(10), || {
-            fetches.fetch_add(1, Ordering::SeqCst);
-            Some(sample_git_metadata("def"))
-        });
-
-        assert_eq!(fetches.load(Ordering::SeqCst), 1);
-        assert_eq!(
-            first.as_ref().map(|meta| meta.head_oid.as_str()),
-            Some("abc")
-        );
-        assert_eq!(
-            second.as_ref().map(|meta| meta.head_oid.as_str()),
-            Some("abc")
-        );
-    }
-
-    #[test]
-    fn git_metadata_cache_refetches_after_ttl() {
-        let tempdir = tempfile::tempdir().expect("tempdir");
-        let worktree = tempdir.path();
-        fs::create_dir_all(worktree.join(".git")).expect("git dir");
-        fs::write(worktree.join(".git/HEAD"), "ref: refs/heads/main\n").expect("HEAD");
-        let fetches = AtomicUsize::new(0);
-        let now = Instant::now();
-
-        let first = git_metadata_cached(worktree, None, now, || {
-            fetches.fetch_add(1, Ordering::SeqCst);
-            Some(sample_git_metadata("abc"))
-        });
-        let second =
-            git_metadata_cached(worktree, None, now + Duration::from_millis(5_001), || {
-                fetches.fetch_add(1, Ordering::SeqCst);
-                Some(sample_git_metadata("def"))
-            });
-
-        assert_eq!(fetches.load(Ordering::SeqCst), 2);
-        assert_eq!(first.unwrap().head_oid, "abc");
-        assert_eq!(second.unwrap().head_oid, "def");
-    }
-
-    #[test]
-    fn git_metadata_cache_refetches_when_head_mtime_changes() {
-        let tempdir = tempfile::tempdir().expect("tempdir");
-        let worktree = tempdir.path();
-        let git_dir = worktree.join(".git");
-        fs::create_dir_all(&git_dir).expect("git dir");
-        let head = git_dir.join("HEAD");
-        fs::write(&head, "ref: refs/heads/main\n").expect("HEAD");
-        let fetches = AtomicUsize::new(0);
-        let now = Instant::now();
-
-        git_metadata_cached(worktree, None, now, || {
-            fetches.fetch_add(1, Ordering::SeqCst);
-            Some(sample_git_metadata("abc"))
-        });
-        fs::write(&head, "ref: refs/heads/topic\n").expect("rewrite HEAD");
-        let file = fs::File::open(&head).expect("open HEAD");
-        file.set_modified(std::time::SystemTime::now() + Duration::from_secs(2))
-            .expect("bump HEAD mtime");
-
-        git_metadata_cached(worktree, None, now + Duration::from_millis(10), || {
-            fetches.fetch_add(1, Ordering::SeqCst);
-            Some(sample_git_metadata("def"))
-        });
-
-        assert_eq!(fetches.load(Ordering::SeqCst), 2);
-    }
-
-    #[test]
-    fn git_metadata_cache_refetches_when_indexed_head_changes() {
-        let tempdir = tempfile::tempdir().expect("tempdir");
-        let worktree = tempdir.path();
-        fs::create_dir_all(worktree.join(".git")).expect("git dir");
-        fs::write(worktree.join(".git/HEAD"), "ref: refs/heads/main\n").expect("HEAD");
-        let fetches = AtomicUsize::new(0);
-        let now = Instant::now();
-
-        git_metadata_cached(worktree, None, now, || {
-            fetches.fetch_add(1, Ordering::SeqCst);
-            Some(sample_git_metadata("abc"))
-        });
-        let refreshed = git_metadata_cached(
-            worktree,
-            Some("indexed-base"),
-            now + Duration::from_millis(10),
-            || {
-                fetches.fetch_add(1, Ordering::SeqCst);
-                Some(sample_git_metadata("def"))
-            },
-        );
-
-        assert_eq!(fetches.load(Ordering::SeqCst), 2);
-        assert_eq!(refreshed.unwrap().head_oid, "def");
-    }
-
-    #[test]
-    fn git_metadata_cache_replaces_prior_stamp_for_worktree() {
-        let mut cache = GitMetadataCache::default();
-        let worktree = PathBuf::from("/repo");
-        let now = Instant::now();
-        let first = GitMetadataCacheStamp {
-            indexed_head_oid: Some("base-a".into()),
-            head_mtime_ns: 1,
-            index_mtime_ns: 1,
-        };
-        let second = GitMetadataCacheStamp {
-            indexed_head_oid: Some("base-b".into()),
-            head_mtime_ns: 2,
-            index_mtime_ns: 2,
-        };
-
-        cache.insert(worktree.clone(), first, now, sample_git_metadata("abc"));
-        cache.insert(
-            worktree,
-            second,
-            now + Duration::from_millis(1),
-            sample_git_metadata("def"),
-        );
-
-        assert_eq!(cache.entries.len(), 1);
     }
 
     #[test]

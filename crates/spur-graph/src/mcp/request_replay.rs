@@ -1,20 +1,19 @@
 use std::collections::HashSet;
+use std::fmt;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
 use crate::temporal::{GitSha, TemporalIndex};
 use crate::{
-    ChangeKind, CommitIndexArtifact, GraphFileManifestEntry, GraphQueryClient, GraphSymbolArtifact,
-    OwnedCalleeRecord, OwnedCallerRecord, SearchOptions, SearchResult, SelectorResolution,
-    SnapshotKey,
+    internal_unbounded_search_options, limited_search_result, ChangeKind, CommitIndexArtifact,
+    GraphFileManifestEntry, GraphQueryClient, GraphSymbolArtifact, OwnedCalleeRecord,
+    OwnedCallerRecord, SearchOptions, SearchResult, SelectorResolution, SnapshotKey,
 };
-
-const MAX_SEARCH_RESULTS: usize = 200;
 
 type SymbolHistoryKey = (CommitIndexArtifact, String);
 type SymbolHistory = Vec<(GitSha, ChangeKind, SnapshotKey)>;
 
 struct RequestMemo<K, V> {
-    entries: Mutex<Vec<(K, V)>>,
+    entries: Mutex<Vec<(K, Arc<OnceLock<V>>)>>,
 }
 
 impl<K, V> Default for RequestMemo<K, V> {
@@ -30,43 +29,68 @@ where
     K: PartialEq,
     V: Clone,
 {
-    fn entries(&self) -> MutexGuard<'_, Vec<(K, V)>> {
+    fn entries(&self) -> MutexGuard<'_, Vec<(K, Arc<OnceLock<V>>)>> {
         self.entries
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    fn get(&self, key: &K) -> Option<V> {
-        self.entries()
-            .iter()
-            .find(|(candidate, _)| candidate == key)
-            .map(|(_, value)| value.clone())
-    }
-
-    fn insert(&self, key: K, value: &V) {
-        self.entries().push((key, value.clone()));
+    fn entry(&self, key: K) -> Arc<OnceLock<V>> {
+        let mut entries = self.entries();
+        if let Some((_, entry)) = entries.iter().find(|(candidate, _)| candidate == &key) {
+            return Arc::clone(entry);
+        }
+        let entry = Arc::new(OnceLock::new());
+        entries.push((key, Arc::clone(&entry)));
+        entry
     }
 
     fn get_or_insert_with(&self, key: K, load: impl FnOnce() -> V) -> V {
-        if let Some(value) = self.get(&key) {
-            return value;
-        }
-        let value = load();
-        self.insert(key, &value);
-        value
+        self.entry(key).get_or_init(load).clone()
     }
+}
 
-    fn get_or_try_insert_with<E>(
+type SharedRequestResult<V> = Result<V, SharedRequestError>;
+
+#[derive(Clone)]
+struct SharedRequestError(Arc<anyhow::Error>);
+
+impl SharedRequestError {
+    fn new(error: anyhow::Error) -> Self {
+        Self(Arc::new(error))
+    }
+}
+
+impl fmt::Debug for SharedRequestError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(&self.0, formatter)
+    }
+}
+
+impl fmt::Display for SharedRequestError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&self.0, formatter)
+    }
+}
+
+impl std::error::Error for SharedRequestError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.0.source()
+    }
+}
+
+impl<K, V> RequestMemo<K, SharedRequestResult<V>>
+where
+    K: PartialEq,
+    V: Clone,
+{
+    fn get_or_try_insert_with(
         &self,
         key: K,
-        load: impl FnOnce() -> Result<V, E>,
-    ) -> Result<V, E> {
-        if let Some(value) = self.get(&key) {
-            return Ok(value);
-        }
-        let value = load()?;
-        self.insert(key, &value);
-        Ok(value)
+        load: impl FnOnce() -> anyhow::Result<V>,
+    ) -> anyhow::Result<V> {
+        self.get_or_insert_with(key, || load().map_err(SharedRequestError::new))
+            .map_err(anyhow::Error::new)
     }
 }
 
@@ -75,24 +99,24 @@ where
 /// A request executes its handler once against this client before freshness
 /// analysis. If a dirty overlay is required, the same client becomes the
 /// overlay's base. Repeated operations are then served from these typed memos
-/// rather than querying Parquet again. Errors are deliberately not memoized:
-/// retaining them would require cloning or reconstructing `anyhow::Error` and
-/// would change its source chain.
+/// rather than querying Parquet again. Fallible operations memoize a shared
+/// result so both successes and contextual errors retain their source chains.
 pub(super) struct RequestReplayClient<'a> {
     base: &'a (dyn GraphQueryClient + Sync),
-    searches: RequestMemo<SearchOptions, SearchResult>,
+    searches: RequestMemo<SearchOptions, SharedRequestResult<SearchResult>>,
     caller_edges: RequestMemo<String, Vec<OwnedCallerRecord>>,
     unresolved_callers: RequestMemo<Vec<String>, Vec<OwnedCallerRecord>>,
     callee_edges: RequestMemo<String, Vec<OwnedCalleeRecord>>,
-    resolutions: RequestMemo<String, SelectorResolution>,
-    symbols_by_id: RequestMemo<String, Option<GraphSymbolArtifact>>,
-    symbols_by_file: RequestMemo<String, Vec<GraphSymbolArtifact>>,
-    symbols_by_files: RequestMemo<Vec<String>, Vec<GraphSymbolArtifact>>,
-    symbols_by_path_name: RequestMemo<(String, String), Vec<GraphSymbolArtifact>>,
-    file_manifests: RequestMemo<String, Option<GraphFileManifestEntry>>,
-    file_exists: RequestMemo<String, bool>,
+    resolutions: RequestMemo<String, SharedRequestResult<SelectorResolution>>,
+    symbols_by_id: RequestMemo<String, SharedRequestResult<Option<GraphSymbolArtifact>>>,
+    symbols_by_file: RequestMemo<String, SharedRequestResult<Vec<GraphSymbolArtifact>>>,
+    symbols_by_files: RequestMemo<Vec<String>, SharedRequestResult<Vec<GraphSymbolArtifact>>>,
+    symbols_by_path_name:
+        RequestMemo<(String, String), SharedRequestResult<Vec<GraphSymbolArtifact>>>,
+    file_manifests: RequestMemo<String, SharedRequestResult<Option<GraphFileManifestEntry>>>,
+    file_exists: RequestMemo<String, SharedRequestResult<bool>>,
     temporal_index: OnceLock<Arc<TemporalIndex>>,
-    symbol_histories: RequestMemo<SymbolHistoryKey, SymbolHistory>,
+    symbol_histories: RequestMemo<SymbolHistoryKey, SharedRequestResult<SymbolHistory>>,
 }
 
 impl<'a> RequestReplayClient<'a> {
@@ -114,28 +138,19 @@ impl<'a> RequestReplayClient<'a> {
             symbol_histories: RequestMemo::default(),
         }
     }
-
-    fn unbounded_search_options(options: &SearchOptions) -> SearchOptions {
-        let mut options = options.clone();
-        options.limit = MAX_SEARCH_RESULTS;
-        options
-    }
-
-    fn limited_search_result(mut result: SearchResult, requested_limit: usize) -> SearchResult {
-        let limit = requested_limit.clamp(1, MAX_SEARCH_RESULTS);
-        result.candidates.truncate(limit);
-        result.truncated = result.total_matches > limit;
-        result
-    }
 }
 
 impl GraphQueryClient for RequestReplayClient<'_> {
     fn search_symbols(&self, options: &SearchOptions) -> anyhow::Result<SearchResult> {
-        let unbounded = Self::unbounded_search_options(options);
+        let unbounded = internal_unbounded_search_options(options);
         let result = self
             .searches
             .get_or_try_insert_with(unbounded.clone(), || self.base.search_symbols(&unbounded))?;
-        Ok(Self::limited_search_result(result, options.limit))
+        Ok(limited_search_result(
+            result.candidates,
+            result.total_matches,
+            options.limit,
+        ))
     }
 
     fn find_caller_edges(&self, sid: &str) -> Vec<OwnedCallerRecord> {

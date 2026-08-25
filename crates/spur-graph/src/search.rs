@@ -2,6 +2,9 @@ use crate::{GraphIndexArtifact, GraphSymbolArtifact};
 use globset::{Glob, GlobMatcher};
 use std::cmp::Ordering;
 
+pub(crate) const PUBLIC_SEARCH_LIMIT: usize = 200;
+pub(crate) const INTERNAL_SEARCH_UNBOUNDED: usize = usize::MAX;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SearchMode {
     Exact,
@@ -56,6 +59,32 @@ pub struct SearchResult {
     pub truncated: bool,
 }
 
+pub(crate) fn internal_unbounded_search_options(options: &SearchOptions) -> SearchOptions {
+    let mut options = options.clone();
+    options.limit = INTERNAL_SEARCH_UNBOUNDED;
+    options
+}
+
+pub(crate) fn limited_search_result(
+    mut candidates: Vec<SearchSymbol>,
+    total_matches: usize,
+    requested_limit: usize,
+) -> SearchResult {
+    let truncated = if requested_limit == INTERNAL_SEARCH_UNBOUNDED {
+        false
+    } else {
+        let limit = requested_limit.clamp(1, PUBLIC_SEARCH_LIMIT);
+        candidates.truncate(limit);
+        total_matches > limit
+    };
+
+    SearchResult {
+        candidates,
+        total_matches,
+        truncated,
+    }
+}
+
 pub fn search_symbols(artifact: &GraphIndexArtifact, options: &SearchOptions) -> SearchResult {
     let glob = options
         .filters
@@ -74,15 +103,7 @@ pub fn search_symbols(artifact: &GraphIndexArtifact, options: &SearchOptions) ->
     candidates.sort_by(|left, right| compare_symbols(left, right, options));
 
     let total_matches = candidates.len();
-    let limit = options.limit.clamp(1, 200);
-    let truncated = total_matches > limit;
-    candidates.truncate(limit);
-
-    SearchResult {
-        candidates,
-        total_matches,
-        truncated,
-    }
+    limited_search_result(candidates, total_matches, options.limit)
 }
 
 pub(crate) fn matches_query(symbol: &SearchSymbol, options: &SearchOptions) -> bool {

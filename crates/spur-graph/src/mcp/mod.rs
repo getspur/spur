@@ -6,7 +6,7 @@ use std::process::Command;
 #[cfg(any(test, feature = "test-support"))]
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::Context as _;
 use chrono::{DateTime, SecondsFormat, Utc};
@@ -5833,14 +5833,7 @@ async fn worktree_git_metadata_with_extensions(
     allowed_extensions: &[&str],
     include_tracked_supplemental_paths: bool,
 ) -> Option<WorktreeGitMetadata> {
-    let now = Instant::now();
-    if !include_tracked_supplemental_paths {
-        if let Some(cached) = request_cache::git_metadata_get(worktree, indexed_head_oid, now) {
-            return Some(cached);
-        }
-    }
-
-    let fetched = tokio::time::timeout(GRAPH_GIT_METADATA_TIMEOUT, async {
+    tokio::time::timeout(GRAPH_GIT_METADATA_TIMEOUT, async {
         let head_oid = run_git_stdout(worktree, &["rev-parse", "HEAD"]).await?;
         let status = run_git_stdout(
             worktree,
@@ -5875,19 +5868,7 @@ async fn worktree_git_metadata_with_extensions(
     })
     .await
     .ok()
-    .flatten();
-
-    if !include_tracked_supplemental_paths {
-        if let Some(metadata) = fetched.as_ref() {
-            request_cache::git_metadata_insert(
-                worktree,
-                indexed_head_oid,
-                Instant::now(),
-                metadata.clone(),
-            );
-        }
-    }
-    fetched
+    .flatten()
 }
 
 struct GitStatusOverlayReport {
