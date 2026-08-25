@@ -21,10 +21,10 @@ use crate::mentions::{CompletionScope, MentionRegistry};
 pub struct InputCompletionPort {
     trigger_detector: TriggerDetector,
     picker_shell: Option<PickerShell>,
-    pending_mention_query: Option<(Instant, String)>,
+    pending_debounced_query: Option<(Instant, String)>,
 }
 
-const MENTION_QUERY_DEBOUNCE: Duration = Duration::from_millis(30);
+const INPUT_QUERY_DEBOUNCE: Duration = Duration::from_millis(30);
 
 pub struct CompletionEnv<'a> {
     pub command_registry: &'a CommandRegistry,
@@ -42,7 +42,7 @@ impl InputCompletionPort {
         Self {
             trigger_detector: TriggerDetector::new(),
             picker_shell: None,
-            pending_mention_query: None,
+            pending_debounced_query: None,
         }
     }
 
@@ -96,7 +96,7 @@ impl InputCompletionPort {
                 if let Some(shell) = self.picker_shell.as_mut() {
                     if shell.should_debounce_input_bar_updates() {
                         shell.invalidate_pending_rows();
-                        self.pending_mention_query = Some((Instant::now(), query));
+                        self.pending_debounced_query = Some((Instant::now(), query));
                     } else {
                         shell.set_query_from_input_bar(&query);
                     }
@@ -197,11 +197,11 @@ impl InputCompletionPort {
                     }
                 };
                 self.picker_shell = Some(shell);
-                self.pending_mention_query = None;
+                self.pending_debounced_query = None;
             }
             TriggerTransition::Close => {
                 self.picker_shell = None;
-                self.pending_mention_query = None;
+                self.pending_debounced_query = None;
             }
         }
     }
@@ -217,7 +217,7 @@ impl InputCompletionPort {
             PickerAction::Cancel => {
                 self.picker_shell = None;
                 self.trigger_detector.reset();
-                self.pending_mention_query = None;
+                self.pending_debounced_query = None;
                 None
             }
             PickerAction::Accept(accept) => {
@@ -225,7 +225,7 @@ impl InputCompletionPort {
                 self.apply_accept(accept, input_bar);
                 self.picker_shell = None;
                 self.trigger_detector.reset();
-                self.pending_mention_query = None;
+                self.pending_debounced_query = None;
                 Some(out)
             }
             PickerAction::AcceptKeepOpen(accept) => {
@@ -300,7 +300,7 @@ impl InputCompletionPort {
     pub fn reset(&mut self) {
         self.trigger_detector.reset();
         self.picker_shell = None;
-        self.pending_mention_query = None;
+        self.pending_debounced_query = None;
     }
 
     pub fn is_trigger_driven(&self) -> bool {
@@ -316,7 +316,7 @@ impl InputCompletionPort {
             history,
         ))));
         self.trigger_detector.reset();
-        self.pending_mention_query = None;
+        self.pending_debounced_query = None;
     }
 
     pub fn open_theme_picker(&mut self, active_theme_name: &str) {
@@ -326,14 +326,14 @@ impl InputCompletionPort {
         );
         self.picker_shell = Some(PickerShell::open(Box::new(source)));
         self.trigger_detector.reset();
-        self.pending_mention_query = None;
+        self.pending_debounced_query = None;
     }
 
     pub fn open_brain_picker(&mut self, brains: Vec<spur_acp::BrainInfo>, active: &str) {
         let source = crate::components::brain_query_source::BrainQuerySource::new(brains, active);
         self.picker_shell = Some(PickerShell::open(Box::new(source)));
         self.trigger_detector.reset();
-        self.pending_mention_query = None;
+        self.pending_debounced_query = None;
     }
 
     pub fn flush_pending_query_if_due(&mut self) -> bool {
@@ -341,23 +341,23 @@ impl InputCompletionPort {
     }
 
     fn flush_pending_query_if_due_at(&mut self, now: Instant) -> bool {
-        let Some((queued_at, query)) = self.pending_mention_query.as_ref() else {
+        let Some((queued_at, query)) = self.pending_debounced_query.as_ref() else {
             return false;
         };
-        let should_flush = now.duration_since(*queued_at) >= MENTION_QUERY_DEBOUNCE;
+        let should_flush = now.duration_since(*queued_at) >= INPUT_QUERY_DEBOUNCE;
         if !should_flush {
             return false;
         }
         let Some(shell) = self.picker_shell.as_mut() else {
-            self.pending_mention_query = None;
+            self.pending_debounced_query = None;
             return false;
         };
         if !shell.should_debounce_input_bar_updates() {
-            self.pending_mention_query = None;
+            self.pending_debounced_query = None;
             return false;
         }
         shell.set_query_from_input_bar(query);
-        self.pending_mention_query = None;
+        self.pending_debounced_query = None;
         true
     }
 
@@ -406,7 +406,7 @@ impl InputCompletionPort {
 
     #[cfg(test)]
     pub fn set_pending_query_age_at_for_test(&mut self, now: Instant, age: Duration) {
-        if let Some((queued_at, _)) = self.pending_mention_query.as_mut() {
+        if let Some((queued_at, _)) = self.pending_debounced_query.as_mut() {
             *queued_at = now.checked_sub(age).unwrap_or(now);
         }
     }
@@ -628,7 +628,7 @@ mod tests {
     }
 
     #[test]
-    fn mention_query_updates_are_debounced_and_flush_latest_query() {
+    fn mention_query_updates_dispatch_immediately() {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(tmp.path().join("Cargo.toml"), "[package]\nname = \"x\"").unwrap();
         let command_registry = CommandRegistry::new();
@@ -658,27 +658,22 @@ mod tests {
 
         assert_eq!(
             mention_registry.borrow().query_call_count_for_test(),
-            base_queries,
-            "rapid query updates should not refresh mention rows until debounce flush"
+            base_queries + 5,
+            "every mention keystroke should dispatch without waiting for a UI tick"
         );
-        completion.set_pending_query_age_for_test(Duration::from_millis(31));
         assert!(
-            completion.poll_updates(),
-            "debounce flush should run on tick"
-        );
-        assert_eq!(
-            mention_registry.borrow().query_call_count_for_test(),
-            base_queries + 1
+            !completion.flush_pending_query_if_due(),
+            "immediate mention updates must not leave a pending debounce"
         );
         assert_eq!(
             completion.picker_query_for_test().as_deref(),
             Some("abcde"),
-            "the final queued query must win after debounce"
+            "the picker must observe the latest query in the input event"
         );
     }
 
     #[test]
-    fn mention_query_update_invalidates_rows_before_debounce_flush() {
+    fn debounced_query_update_invalidates_rows_before_flush() {
         use std::sync::{
             atomic::{AtomicUsize, Ordering},
             Arc,
@@ -747,9 +742,46 @@ mod tests {
     }
 
     #[test]
-    fn mention_query_flushes_only_after_30ms_quiescence() {
+    fn debounced_query_flushes_only_after_30ms_quiescence() {
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+
+        struct DebouncedSource {
+            refreshes: Arc<AtomicUsize>,
+        }
+
+        impl crate::components::query_source::QuerySource for DebouncedSource {
+            fn title(&self) -> &str {
+                "test"
+            }
+
+            fn query_mode(&self) -> crate::components::query_source::QueryMode {
+                crate::components::query_source::QueryMode::ReadFromInputBar
+            }
+
+            fn should_debounce_input_bar_updates(&self) -> bool {
+                true
+            }
+
+            fn refresh(
+                &mut self,
+                _query: &str,
+            ) -> Vec<crate::components::query_source::RetrievalRow> {
+                self.refreshes.fetch_add(1, Ordering::Relaxed);
+                Vec::new()
+            }
+
+            fn accept(
+                &self,
+                _row_idx: usize,
+            ) -> Option<crate::components::query_source::RetrievalAccept> {
+                None
+            }
+        }
+
         let tmp = tempfile::tempdir().unwrap();
-        std::fs::write(tmp.path().join("Cargo.toml"), "[package]\nname = \"x\"").unwrap();
         let command_registry = CommandRegistry::new();
         let mention_registry = Rc::new(RefCell::new(MentionRegistry::new()));
         let mut input_bar = InputBar::new();
@@ -761,7 +793,11 @@ mod tests {
             &mut input_bar,
             &env(&command_registry, &mention_registry, tmp.path()),
         );
-        let base_queries = mention_registry.borrow().query_call_count_for_test();
+        let refreshes = Arc::new(AtomicUsize::new(0));
+        completion.open_test_source(Box::new(DebouncedSource {
+            refreshes: Arc::clone(&refreshes),
+        }));
+        let base_queries = refreshes.load(Ordering::Relaxed);
 
         for ch in ['a', 'b', 'c'] {
             input_bar.set_text(
@@ -781,20 +817,14 @@ mod tests {
             !completion.flush_pending_query_if_due_at_for_test(now),
             "debounce must not flush before 30ms idle"
         );
-        assert_eq!(
-            mention_registry.borrow().query_call_count_for_test(),
-            base_queries
-        );
+        assert_eq!(refreshes.load(Ordering::Relaxed), base_queries);
 
         completion.set_pending_query_age_at_for_test(now, Duration::from_millis(35));
         assert!(
             completion.flush_pending_query_if_due_at_for_test(now),
             "debounce should flush after 30ms"
         );
-        assert_eq!(
-            mention_registry.borrow().query_call_count_for_test(),
-            base_queries + 1
-        );
+        assert_eq!(refreshes.load(Ordering::Relaxed), base_queries + 1);
         assert_eq!(completion.picker_query_for_test().as_deref(), Some("abc"));
     }
 
@@ -1534,11 +1564,6 @@ mod tests {
             &mut input_bar,
             &env(&command_registry, &mention_registry, tmp.path()),
         );
-        // MentionQuerySource debounces InputBar-driven updates; force the
-        // flush instead of waiting on a real timer (same pattern as
-        // mention_query_updates_are_debounced_and_flush_latest_query).
-        completion.set_pending_query_age_for_test(Duration::from_millis(31));
-        completion.poll_updates();
 
         let rows = completion.row_primaries_for_test();
         assert!(

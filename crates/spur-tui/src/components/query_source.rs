@@ -761,10 +761,6 @@ impl QuerySource for MentionQuerySource {
         QueryMode::ReadFromInputBar
     }
 
-    fn should_debounce_input_bar_updates(&self) -> bool {
-        true
-    }
-
     fn invalidate_pending_rows(&mut self) {
         self.latest_generation = self.latest_generation.wrapping_add(1);
         self.last_hits.clear();
