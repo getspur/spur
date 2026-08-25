@@ -294,6 +294,255 @@ fn overlay_generation_warm_search_performs_no_overlay_finalization() {
     );
 }
 
+#[test]
+fn overlay_generation_adjacency_matches_fresh_oracle_and_reuses_unaffected_segments() {
+    let base = Arc::new(adjacency_generation_base_artifact());
+    let seed = Arc::new(OverlayGeneration::seed(base).expect("seed adjacency generation"));
+    let stable_caller_seed = seed
+        .adjacency_segment("stable-caller-id")
+        .expect("stable caller seed adjacency");
+    let stable_isolated_seed = seed
+        .adjacency_segment("stable-isolated-id")
+        .expect("stable isolated seed adjacency");
+    let path_state = BTreeMap::from([
+        (
+            "src/changed.rs".to_owned(),
+            OverlayPathState::Tracked("oid-adjacency-changed".to_owned()),
+        ),
+        ("src/deleted.rs".to_owned(), OverlayPathState::Deleted),
+        ("src/rename_old.rs".to_owned(), OverlayPathState::Deleted),
+        (
+            "src/rename_new.rs".to_owned(),
+            OverlayPathState::Untracked("oid-adjacency-rename".to_owned()),
+        ),
+        (
+            "src/added.rs".to_owned(),
+            OverlayPathState::Untracked("oid-adjacency-added".to_owned()),
+        ),
+    ]);
+    let generation = Arc::new(
+        OverlayGeneration::update(
+            &seed,
+            adjacency_generation_identity(),
+            &path_state,
+            Arc::new(adjacency_generation_delta_artifact()),
+        )
+        .expect("updated adjacency generation"),
+    );
+    let oracle = InMemoryClient::new(Arc::new(adjacency_generation_oracle_artifact()));
+
+    assert_generation_graph_matches_oracle(&generation, &oracle, "adjacency-v1");
+    assert!(Arc::ptr_eq(
+        &stable_caller_seed,
+        &generation
+            .adjacency_segment("stable-caller-id")
+            .expect("stable caller generation adjacency")
+    ));
+    assert!(Arc::ptr_eq(
+        &stable_isolated_seed,
+        &generation
+            .adjacency_segment("stable-isolated-id")
+            .expect("stable isolated generation adjacency")
+    ));
+    assert!(
+        !generation
+            .rebuilt_adjacency_symbols()
+            .contains("stable-caller-id")
+            && !generation
+                .rebuilt_adjacency_symbols()
+                .contains("stable-isolated-id"),
+        "unaffected adjacency must remain outside the changed-endpoint dependency closure"
+    );
+    println!(
+        "overlay_generation_adjacency_reuse rebuilt={} stable_caller_reused=true stable_isolated_reused=true",
+        generation.rebuilt_adjacency_symbols().len()
+    );
+}
+
+fn assert_generation_graph_matches_oracle(
+    generation: &Arc<OverlayGeneration>,
+    oracle: &impl GraphQueryClient,
+    label: &str,
+) {
+    let generation_client: &dyn GraphQueryClient = generation;
+    let symbol_ids = [
+        "old-changed-id",
+        "new-changed-id",
+        "new-caller-id",
+        "unchanged-caller-id",
+        "unchanged-target-id",
+        "deleted-id",
+        "rename-old-id",
+        "rename-new-id",
+        "added-id",
+        "collision-id",
+        "stable-caller-id",
+        "stable-target-id",
+        "stable-isolated-id",
+    ];
+    let selectors = [
+        "target",
+        "new_caller",
+        "unchanged_target",
+        "deleted_target",
+        "renamed_target",
+        "added_target",
+        "new_collision",
+        "src/changed.rs::target",
+        "src/rename_new.rs::renamed_target",
+        "graph://symbol/new-changed-id",
+        "graph://symbol/deleted-id",
+        "graph://symbol/collision-id",
+    ];
+    let paths = [
+        "src/changed.rs",
+        "src/unchanged.rs",
+        "src/deleted.rs",
+        "src/rename_old.rs",
+        "src/rename_new.rs",
+        "src/added.rs",
+        "src/collision_base.rs",
+        "src/stable.rs",
+    ];
+    let mut generation_rows = Vec::new();
+    let mut oracle_rows = Vec::new();
+
+    for sid in symbol_ids {
+        let actual_symbol = generation_client
+            .symbol_by_id(sid)
+            .expect("generation symbol by id");
+        let expected_symbol = oracle.symbol_by_id(sid).expect("oracle symbol by id");
+        assert_eq!(
+            actual_symbol, expected_symbol,
+            "{label} symbol_by_id({sid})"
+        );
+
+        let actual_callers = caller_records(generation_client.find_caller_edges(sid));
+        let expected_callers = caller_records(oracle.find_caller_edges(sid));
+        assert_eq!(actual_callers, expected_callers, "{label} callers({sid})");
+
+        let actual_callees = callee_records(generation_client.find_callee_edges(sid));
+        let expected_callees = callee_records(oracle.find_callee_edges(sid));
+        assert_eq!(actual_callees, expected_callees, "{label} callees({sid})");
+
+        generation_rows.push(format!(
+            "symbol:{sid}:{actual_symbol:?}:callers:{actual_callers:?}:callees:{actual_callees:?}"
+        ));
+        oracle_rows.push(format!(
+            "symbol:{sid}:{expected_symbol:?}:callers:{expected_callers:?}:callees:{expected_callees:?}"
+        ));
+    }
+
+    for selector in selectors {
+        let actual = generation_client
+            .resolve_selector(selector)
+            .expect("generation selector");
+        let expected = oracle.resolve_selector(selector).expect("oracle selector");
+        assert_eq!(actual, expected, "{label} resolve_selector({selector})");
+        generation_rows.push(format!("selector:{selector}:{actual:?}"));
+        oracle_rows.push(format!("selector:{selector}:{expected:?}"));
+    }
+
+    for path in paths {
+        let actual_symbols = generation_client
+            .symbols_by_file(path)
+            .expect("generation listed file symbols");
+        let expected_symbols = oracle
+            .symbols_by_file(path)
+            .expect("oracle listed file symbols");
+        let actual_manifest = generation_client
+            .file_manifest_by_path(path)
+            .expect("generation file manifest");
+        let expected_manifest = oracle
+            .file_manifest_by_path(path)
+            .expect("oracle file manifest");
+        let actual_exists = generation_client
+            .file_exists(path)
+            .expect("generation file exists");
+        let expected_exists = oracle.file_exists(path).expect("oracle file exists");
+        assert_eq!(
+            actual_symbols, expected_symbols,
+            "{label} list file symbols({path})"
+        );
+        assert_eq!(
+            actual_manifest, expected_manifest,
+            "{label} list file manifest({path})"
+        );
+        assert_eq!(
+            actual_exists, expected_exists,
+            "{label} file_exists({path})"
+        );
+        generation_rows.push(format!(
+            "file:{path}:{actual_exists}:{actual_manifest:?}:{actual_symbols:?}"
+        ));
+        oracle_rows.push(format!(
+            "file:{path}:{expected_exists}:{expected_manifest:?}:{expected_symbols:?}"
+        ));
+    }
+
+    let actual_nested = nested_subgraph_rows(generation_client, "unchanged-caller-id", 2);
+    let expected_nested = nested_subgraph_rows(oracle, "unchanged-caller-id", 2);
+    assert_eq!(
+        actual_nested, expected_nested,
+        "{label} nested subgraph must remain on one generation"
+    );
+    generation_rows.push(format!("nested:{actual_nested:?}"));
+    oracle_rows.push(format!("nested:{expected_nested:?}"));
+
+    let generation_digest = blake3::hash(generation_rows.join("\n").as_bytes()).to_hex();
+    let oracle_digest = blake3::hash(oracle_rows.join("\n").as_bytes()).to_hex();
+    println!(
+        "overlay_generation_graph_oracle_digest state={label} generation={generation_digest} oracle={oracle_digest}"
+    );
+    assert_eq!(
+        generation_digest, oracle_digest,
+        "{label} graph oracle digest"
+    );
+}
+
+fn nested_subgraph_rows(
+    client: &dyn GraphQueryClient,
+    root: &str,
+    radius: usize,
+) -> Vec<(usize, String, String, Option<String>, bool)> {
+    let mut frontier = BTreeSet::from([root.to_owned()]);
+    let mut visited = BTreeSet::new();
+    let mut rows = Vec::new();
+    for depth in 0..=radius {
+        let current = std::mem::take(&mut frontier);
+        for sid in current {
+            if !visited.insert(sid.clone()) {
+                continue;
+            }
+            for record in client.find_callee_edges(&sid) {
+                match record {
+                    OwnedCalleeRecord::Resolved { symbol, edge } => {
+                        rows.push((
+                            depth,
+                            edge.source_stable_symbol_id,
+                            symbol.stable_symbol_id.clone(),
+                            edge.target_stable_symbol_id,
+                            true,
+                        ));
+                        if depth < radius {
+                            frontier.insert(symbol.stable_symbol_id);
+                        }
+                    }
+                    OwnedCalleeRecord::Unresolved { edge, target_label } => rows.push((
+                        depth,
+                        edge.source_stable_symbol_id,
+                        target_label,
+                        edge.target_stable_symbol_id,
+                        false,
+                    )),
+                }
+            }
+        }
+    }
+    rows.sort();
+    rows
+}
+
 fn assert_generation_matches_oracle(
     generation: &OverlayGeneration,
     oracle: &impl GraphQueryClient,
@@ -399,6 +648,296 @@ fn generation_identity(label: &str, fingerprint_byte: u8) -> OverlayGenerationId
         index_identity: format!("index-{label}"),
         normalized_changed_set_fingerprint: [fingerprint_byte; 32],
     }
+}
+
+fn adjacency_generation_identity() -> OverlayGenerationIdentity {
+    OverlayGenerationIdentity {
+        canonical_worktree: PathBuf::from("/test/worktree"),
+        indexed_graph_content_hash: "adjacency-generation-base".to_owned(),
+        indexed_head_oid: Some("indexed-head".to_owned()),
+        current_head_oid: "adjacency-generation-v1".to_owned(),
+        index_identity: "adjacency-index-v1".to_owned(),
+        normalized_changed_set_fingerprint: [9; 32],
+    }
+}
+
+fn adjacency_generation_base_artifact() -> GraphIndexArtifact {
+    artifact(
+        "adjacency-generation-base",
+        vec![
+            file("src/changed.rs"),
+            file("src/unchanged.rs"),
+            file("src/deleted.rs"),
+            file("src/rename_old.rs"),
+            file("src/collision_base.rs"),
+            file("src/stable.rs"),
+        ],
+        vec![
+            symbol(
+                "old-changed-id",
+                "src/changed.rs",
+                [1, 4],
+                "target",
+                "target",
+            ),
+            symbol(
+                "unchanged-caller-id",
+                "src/unchanged.rs",
+                [10, 18],
+                "unchanged_caller",
+                "unchanged_caller",
+            ),
+            symbol(
+                "unchanged-target-id",
+                "src/unchanged.rs",
+                [20, 24],
+                "unchanged_target",
+                "unchanged_target",
+            ),
+            symbol(
+                "deleted-id",
+                "src/deleted.rs",
+                [30, 34],
+                "deleted_target",
+                "deleted_target",
+            ),
+            symbol(
+                "rename-old-id",
+                "src/rename_old.rs",
+                [40, 44],
+                "renamed_target",
+                "renamed_target",
+            ),
+            symbol(
+                "collision-id",
+                "src/collision_base.rs",
+                [50, 54],
+                "old_collision",
+                "old_collision",
+            ),
+            symbol(
+                "stable-caller-id",
+                "src/stable.rs",
+                [60, 64],
+                "stable_caller",
+                "stable_caller",
+            ),
+            symbol(
+                "stable-target-id",
+                "src/stable.rs",
+                [70, 74],
+                "stable_target",
+                "stable_target",
+            ),
+            symbol(
+                "stable-isolated-id",
+                "src/stable.rs",
+                [76, 78],
+                "stable_isolated",
+                "stable_isolated",
+            ),
+        ],
+        vec![
+            edge(
+                "unchanged-caller-id",
+                Some("old-changed-id"),
+                Some("target"),
+            ),
+            edge(
+                "unchanged-caller-id",
+                Some("deleted-id"),
+                Some("deleted_target"),
+            ),
+            edge(
+                "unchanged-caller-id",
+                Some("rename-old-id"),
+                Some("renamed_target"),
+            ),
+            edge("unchanged-caller-id", None, Some("added_target")),
+            edge(
+                "collision-id",
+                Some("stable-target-id"),
+                Some("stable_target"),
+            ),
+            edge(
+                "stable-caller-id",
+                Some("stable-target-id"),
+                Some("stable_target"),
+            ),
+        ],
+    )
+}
+
+fn adjacency_generation_delta_artifact() -> GraphIndexArtifact {
+    artifact(
+        "adjacency-generation-delta",
+        vec![
+            file("src/changed.rs"),
+            file("src/unchanged.rs"),
+            file("src/rename_new.rs"),
+            file("src/added.rs"),
+            file("src/collision_base.rs"),
+            file("src/stable.rs"),
+        ],
+        vec![
+            symbol(
+                "new-changed-id",
+                "src/changed.rs",
+                [1, 5],
+                "target",
+                "target",
+            ),
+            symbol(
+                "new-caller-id",
+                "src/changed.rs",
+                [7, 11],
+                "new_caller",
+                "new_caller",
+            ),
+            symbol(
+                "collision-id",
+                "src/changed.rs",
+                [13, 17],
+                "new_collision",
+                "new_collision",
+            ),
+            symbol(
+                "rename-new-id",
+                "src/rename_new.rs",
+                [40, 45],
+                "renamed_target",
+                "renamed_target",
+            ),
+            symbol(
+                "added-id",
+                "src/added.rs",
+                [80, 84],
+                "added_target",
+                "added_target",
+            ),
+        ],
+        vec![
+            edge("new-changed-id", None, Some("added_target")),
+            edge("new-caller-id", None, Some("unchanged_target")),
+            edge("collision-id", None, Some("added_target")),
+        ],
+    )
+}
+
+fn adjacency_generation_oracle_artifact() -> GraphIndexArtifact {
+    artifact(
+        "adjacency-generation-oracle",
+        vec![
+            file("src/changed.rs"),
+            file("src/unchanged.rs"),
+            file("src/rename_new.rs"),
+            file("src/added.rs"),
+            file("src/collision_base.rs"),
+            file("src/stable.rs"),
+        ],
+        vec![
+            symbol(
+                "new-changed-id",
+                "src/changed.rs",
+                [1, 5],
+                "target",
+                "target",
+            ),
+            symbol(
+                "new-caller-id",
+                "src/changed.rs",
+                [7, 11],
+                "new_caller",
+                "new_caller",
+            ),
+            symbol(
+                "collision-id",
+                "src/changed.rs",
+                [13, 17],
+                "new_collision",
+                "new_collision",
+            ),
+            symbol(
+                "unchanged-caller-id",
+                "src/unchanged.rs",
+                [10, 18],
+                "unchanged_caller",
+                "unchanged_caller",
+            ),
+            symbol(
+                "unchanged-target-id",
+                "src/unchanged.rs",
+                [20, 24],
+                "unchanged_target",
+                "unchanged_target",
+            ),
+            symbol(
+                "rename-new-id",
+                "src/rename_new.rs",
+                [40, 45],
+                "renamed_target",
+                "renamed_target",
+            ),
+            symbol(
+                "added-id",
+                "src/added.rs",
+                [80, 84],
+                "added_target",
+                "added_target",
+            ),
+            symbol(
+                "stable-caller-id",
+                "src/stable.rs",
+                [60, 64],
+                "stable_caller",
+                "stable_caller",
+            ),
+            symbol(
+                "stable-target-id",
+                "src/stable.rs",
+                [70, 74],
+                "stable_target",
+                "stable_target",
+            ),
+            symbol(
+                "stable-isolated-id",
+                "src/stable.rs",
+                [76, 78],
+                "stable_isolated",
+                "stable_isolated",
+            ),
+        ],
+        vec![
+            edge(
+                "unchanged-caller-id",
+                Some("new-changed-id"),
+                Some("target"),
+            ),
+            edge("unchanged-caller-id", None, Some("deleted_target")),
+            edge(
+                "unchanged-caller-id",
+                Some("rename-new-id"),
+                Some("renamed_target"),
+            ),
+            edge(
+                "unchanged-caller-id",
+                Some("added-id"),
+                Some("added_target"),
+            ),
+            edge("new-changed-id", Some("added-id"), Some("added_target")),
+            edge(
+                "new-caller-id",
+                Some("unchanged-target-id"),
+                Some("unchanged_target"),
+            ),
+            edge("collision-id", Some("added-id"), Some("added_target")),
+            edge(
+                "stable-caller-id",
+                Some("stable-target-id"),
+                Some("stable_target"),
+            ),
+        ],
+    )
 }
 
 fn generation_base_artifact() -> GraphIndexArtifact {

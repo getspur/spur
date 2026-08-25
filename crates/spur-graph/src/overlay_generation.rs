@@ -7,10 +7,12 @@ use anyhow::{bail, Context as _};
 use globset::Glob;
 
 use crate::search::{compare_symbols, limited_search_result, matches_filters, matches_query};
+use crate::temporal::TemporalIndex;
 use crate::{
-    CandidateRow, CodeSelectorResolution, GraphFileArtifact, GraphFileManifestEntry,
-    GraphIndexArtifact, GraphSymbolArtifact, ResolvedSymbol, SearchOptions, SearchResult,
-    SearchSymbol, SelectorResolution, CODE_SYMBOL_URI_PREFIX,
+    CandidateRow, CodeSelectorResolution, GraphEdgeArtifact, GraphFileArtifact,
+    GraphFileManifestEntry, GraphIndexArtifact, GraphQueryClient, GraphSymbolArtifact,
+    OwnedCalleeRecord, OwnedCallerRecord, RelationKind, ResolvedSymbol, SearchOptions,
+    SearchResult, SearchSymbol, SelectorResolution, CODE_SYMBOL_URI_PREFIX,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -49,6 +51,7 @@ pub struct OverlayFileSegment {
     manifest: Option<GraphFileManifestEntry>,
     symbols: Arc<[GraphSymbolArtifact]>,
     search_symbols: Arc<[SearchSymbol]>,
+    edges: Arc<[GraphEdgeArtifact]>,
 }
 
 impl OverlayFileSegment {
@@ -66,6 +69,26 @@ impl OverlayFileSegment {
 
     pub fn symbols(&self) -> &[GraphSymbolArtifact] {
         &self.symbols
+    }
+
+    fn edges(&self) -> &[GraphEdgeArtifact] {
+        &self.edges
+    }
+}
+
+#[derive(Debug)]
+pub struct OverlayAdjacencySegment {
+    callers: Arc<[OwnedCallerRecord]>,
+    callees: Arc<[OwnedCalleeRecord]>,
+}
+
+impl OverlayAdjacencySegment {
+    pub fn callers(&self) -> &[OwnedCallerRecord] {
+        &self.callers
+    }
+
+    pub fn callees(&self) -> &[OwnedCalleeRecord] {
+        &self.callees
     }
 }
 
@@ -189,6 +212,7 @@ fn persistent_chunk_index(key: &str) -> usize {
 #[derive(Debug)]
 struct BaseGeneration {
     artifact: Arc<GraphIndexArtifact>,
+    temporal_index: Arc<TemporalIndex>,
     segments: BTreeMap<String, Arc<OverlayFileSegment>>,
     symbol_owners: HashMap<String, String>,
 }
@@ -201,8 +225,14 @@ pub struct OverlayGeneration {
     overrides: BTreeMap<String, Option<Arc<OverlayFileSegment>>>,
     visible_files: PersistentMap<Arc<VisibleFileSlot>>,
     visible_symbol_owners: PersistentMap<String>,
+    selector_index: PersistentMap<Arc<[String]>>,
+    remap: PersistentMap<String>,
+    remappable_labels: Arc<HashSet<String>>,
+    adjacency: PersistentMap<Arc<OverlayAdjacencySegment>>,
+    unresolved_callers_by_label: PersistentMap<Arc<[OwnedCallerRecord]>>,
     rebuilt_paths: BTreeSet<String>,
     rewritten_query_paths: BTreeSet<String>,
+    rebuilt_adjacency_symbols: BTreeSet<String>,
 }
 
 impl OverlayGeneration {
@@ -236,9 +266,11 @@ impl OverlayGeneration {
             );
         }
 
-        Ok(Self {
+        let temporal_index = Arc::new(TemporalIndex::new(Arc::clone(&base)));
+        let mut generation = Self {
             base: Arc::new(BaseGeneration {
                 artifact: base,
+                temporal_index,
                 segments,
                 symbol_owners,
             }),
@@ -247,9 +279,20 @@ impl OverlayGeneration {
             overrides: BTreeMap::new(),
             visible_files,
             visible_symbol_owners,
+            selector_index: PersistentMap::default(),
+            remap: PersistentMap::default(),
+            remappable_labels: Arc::new(HashSet::new()),
+            adjacency: PersistentMap::default(),
+            unresolved_callers_by_label: PersistentMap::default(),
             rebuilt_paths: BTreeSet::new(),
             rewritten_query_paths: BTreeSet::new(),
-        })
+            rebuilt_adjacency_symbols: BTreeSet::new(),
+        };
+        generation.selector_index = build_selector_index(&generation);
+        let (adjacency, unresolved_callers_by_label) = build_full_adjacency(&generation);
+        generation.adjacency = adjacency;
+        generation.unresolved_callers_by_label = unresolved_callers_by_label;
+        Ok(generation)
     }
 
     pub fn update(
@@ -369,16 +412,33 @@ impl OverlayGeneration {
             };
         }
 
-        Ok(Self {
+        let selector_index = update_selector_index(
+            previous,
+            &visible_files,
+            &visible_symbol_owners,
+            &rewritten_query_paths,
+        );
+        let current_remap = build_generation_remap(&previous.base, path_state, &overrides);
+        let remap = update_string_index(&previous.remap, &current_remap);
+        let remappable_labels = Arc::new(changed_definition_labels(path_state, &overrides));
+        let mut generation = Self {
             base: Arc::clone(&previous.base),
             identity: Some(identity),
             path_state: Arc::new(path_state.clone()),
             overrides,
             visible_files,
             visible_symbol_owners,
+            selector_index,
+            remap,
+            remappable_labels,
+            adjacency: previous.adjacency.clone(),
+            unresolved_callers_by_label: previous.unresolved_callers_by_label.clone(),
             rebuilt_paths,
             rewritten_query_paths,
-        })
+            rebuilt_adjacency_symbols: BTreeSet::new(),
+        };
+        rebuild_changed_adjacency(previous, &mut generation);
+        Ok(generation)
     }
 
     pub fn identity(&self) -> Option<&OverlayGenerationIdentity> {
@@ -410,6 +470,14 @@ impl OverlayGeneration {
         self.visible_files
             .get(path)
             .map(|slot| Arc::clone(&slot.segment))
+    }
+
+    pub fn adjacency_segment(&self, sid: &str) -> Option<Arc<OverlayAdjacencySegment>> {
+        self.adjacency.get(sid).cloned()
+    }
+
+    pub fn rebuilt_adjacency_symbols(&self) -> &BTreeSet<String> {
+        &self.rebuilt_adjacency_symbols
     }
 
     pub fn search_symbols(&self, options: &SearchOptions) -> anyhow::Result<SearchResult> {
@@ -540,11 +608,10 @@ impl OverlayGeneration {
             return resolution;
         }
         if !first_token_contains_path_separator(selector) {
-            let resolution = resolution_from_symbols(
-                self.visible_symbols()
-                    .filter(|symbol| symbol.qualified_name == selector)
-                    .collect(),
-            );
+            let resolution = self.resolution_from_selector_key(&selector_index_key(
+                SelectorIndexKind::Qualified,
+                selector,
+            ));
             if !matches!(resolution, SelectorResolution::NotFound) {
                 return resolution;
             }
@@ -552,11 +619,18 @@ impl OverlayGeneration {
         if selector.contains("::") {
             return SelectorResolution::NotFound;
         }
-        resolution_from_symbols(
-            self.visible_symbols()
-                .filter(|symbol| symbol.entity_name == selector)
-                .collect(),
-        )
+        self.resolution_from_selector_key(&selector_index_key(SelectorIndexKind::Entity, selector))
+    }
+
+    fn resolution_from_selector_key(&self, key: &str) -> SelectorResolution {
+        let symbols = self
+            .selector_index
+            .get(key)
+            .into_iter()
+            .flat_map(|symbol_ids| symbol_ids.iter())
+            .filter_map(|symbol_id| self.symbol_by_id(symbol_id).ok().flatten())
+            .collect::<Vec<_>>();
+        resolution_from_owned_symbols(symbols)
     }
 
     fn resolved_symbol_by_id(&self, symbol_id: &str) -> SelectorResolution {
@@ -636,6 +710,637 @@ impl OverlayGeneration {
     }
 }
 
+impl GraphQueryClient for Arc<OverlayGeneration> {
+    fn search_symbols(&self, options: &SearchOptions) -> anyhow::Result<SearchResult> {
+        OverlayGeneration::search_symbols(self.as_ref(), options)
+    }
+
+    fn find_caller_edges(&self, sid: &str) -> Vec<OwnedCallerRecord> {
+        self.adjacency
+            .get(sid)
+            .map(|segment| segment.callers().to_vec())
+            .unwrap_or_default()
+    }
+
+    fn find_unresolved_caller_edges_by_labels(
+        &self,
+        target_labels: &HashSet<String>,
+    ) -> Vec<OwnedCallerRecord> {
+        let mut records = Vec::new();
+        let mut seen = HashSet::new();
+        for label in target_labels {
+            let Some(label_records) = self.unresolved_callers_by_label.get(label) else {
+                continue;
+            };
+            for record in label_records.iter().cloned() {
+                if seen.insert(edge_dedupe_key(record.edge())) {
+                    records.push(record);
+                }
+            }
+        }
+        sort_caller_records(&mut records);
+        records
+    }
+
+    fn find_callee_edges(&self, sid: &str) -> Vec<OwnedCalleeRecord> {
+        self.adjacency
+            .get(sid)
+            .map(|segment| segment.callees().to_vec())
+            .unwrap_or_default()
+    }
+
+    fn resolve_selector(&self, selector: &str) -> anyhow::Result<CodeSelectorResolution> {
+        OverlayGeneration::resolve_selector(self.as_ref(), selector)
+    }
+
+    fn symbol_by_id(&self, sid: &str) -> anyhow::Result<Option<GraphSymbolArtifact>> {
+        OverlayGeneration::symbol_by_id(self.as_ref(), sid)
+    }
+
+    fn symbols_by_file(&self, path: &str) -> anyhow::Result<Vec<GraphSymbolArtifact>> {
+        OverlayGeneration::symbols_by_file(self.as_ref(), path)
+    }
+
+    fn symbols_by_path_name(
+        &self,
+        path: &str,
+        name: &str,
+    ) -> anyhow::Result<Vec<GraphSymbolArtifact>> {
+        OverlayGeneration::symbols_by_path_name(self.as_ref(), path, name)
+    }
+
+    fn file_manifest_by_path(&self, path: &str) -> anyhow::Result<Option<GraphFileManifestEntry>> {
+        OverlayGeneration::file_manifest_by_path(self.as_ref(), path)
+    }
+
+    fn file_exists(&self, path: &str) -> anyhow::Result<bool> {
+        OverlayGeneration::file_exists(self.as_ref(), path)
+    }
+
+    fn temporal_index(&self) -> Arc<TemporalIndex> {
+        Arc::clone(&self.base.temporal_index)
+    }
+}
+
+#[derive(Clone, Copy)]
+enum SelectorIndexKind {
+    Qualified,
+    Entity,
+}
+
+fn selector_index_key(kind: SelectorIndexKind, label: &str) -> String {
+    let prefix = match kind {
+        SelectorIndexKind::Qualified => "qualified",
+        SelectorIndexKind::Entity => "entity",
+    };
+    format!("{prefix}\0{label}")
+}
+
+fn selector_keys(symbol: &GraphSymbolArtifact) -> [String; 2] {
+    [
+        selector_index_key(SelectorIndexKind::Qualified, &symbol.qualified_name),
+        selector_index_key(SelectorIndexKind::Entity, &symbol.entity_name),
+    ]
+}
+
+fn build_selector_index(generation: &OverlayGeneration) -> PersistentMap<Arc<[String]>> {
+    let mut rows = BTreeMap::<String, Vec<String>>::new();
+    for symbol in generation.visible_symbols() {
+        for key in selector_keys(symbol) {
+            rows.entry(key)
+                .or_default()
+                .push(symbol.stable_symbol_id.clone());
+        }
+    }
+
+    let mut index = PersistentMap::default();
+    for (key, mut symbol_ids) in rows {
+        symbol_ids.sort();
+        symbol_ids.dedup();
+        index = index.insert(key, symbol_ids.into());
+    }
+    index
+}
+
+fn update_selector_index(
+    previous: &OverlayGeneration,
+    visible_files: &PersistentMap<Arc<VisibleFileSlot>>,
+    _visible_symbol_owners: &PersistentMap<String>,
+    rewritten_paths: &BTreeSet<String>,
+) -> PersistentMap<Arc<[String]>> {
+    let mut affected_keys = BTreeSet::new();
+    for path in rewritten_paths {
+        if let Some(slot) = previous.visible_files.get(path) {
+            for symbol in slot.symbols() {
+                affected_keys.extend(selector_keys(symbol));
+            }
+        }
+        if let Some(slot) = visible_files.get(path) {
+            for symbol in slot.symbols() {
+                affected_keys.extend(selector_keys(symbol));
+            }
+        }
+    }
+
+    let mut index = previous.selector_index.clone();
+    for key in affected_keys {
+        let mut symbol_ids = previous
+            .selector_index
+            .get(&key)
+            .map(|ids| ids.to_vec())
+            .unwrap_or_default();
+        symbol_ids.retain(|symbol_id| {
+            previous
+                .visible_symbol_owners
+                .get(symbol_id)
+                .is_some_and(|path| !rewritten_paths.contains(path))
+        });
+        for path in rewritten_paths {
+            let Some(slot) = visible_files.get(path) else {
+                continue;
+            };
+            symbol_ids.extend(
+                slot.symbols()
+                    .filter(|symbol| selector_keys(symbol).contains(&key))
+                    .map(|symbol| symbol.stable_symbol_id.clone()),
+            );
+        }
+        symbol_ids.sort();
+        symbol_ids.dedup();
+        index = if symbol_ids.is_empty() {
+            index.remove(&key)
+        } else {
+            index.insert(key, symbol_ids.into())
+        };
+    }
+    index
+}
+
+fn update_string_index(
+    previous: &PersistentMap<String>,
+    current: &HashMap<String, String>,
+) -> PersistentMap<String> {
+    let mut keys = previous
+        .iter()
+        .map(|(key, _)| key.to_owned())
+        .collect::<BTreeSet<_>>();
+    keys.extend(current.keys().cloned());
+    let mut index = previous.clone();
+    for key in keys {
+        index = match current.get(&key) {
+            Some(value) if previous.get(&key) == Some(value) => index,
+            Some(value) => index.insert(key, value.clone()),
+            None => index.remove(&key),
+        };
+    }
+    index
+}
+
+fn build_generation_remap(
+    base: &BaseGeneration,
+    path_state: &BTreeMap<String, OverlayPathState>,
+    overrides: &BTreeMap<String, Option<Arc<OverlayFileSegment>>>,
+) -> HashMap<String, String> {
+    let mut remap = HashMap::new();
+    for (path, state) in path_state {
+        if matches!(state, OverlayPathState::Deleted) {
+            continue;
+        }
+        let Some(current) = overrides.get(path).and_then(Option::as_deref) else {
+            continue;
+        };
+        let base_symbols = base
+            .segments
+            .get(path)
+            .map(|segment| segment.symbols())
+            .unwrap_or_default();
+        for current_symbol in current.symbols() {
+            let matching_name = |name: &str| {
+                base_symbols
+                    .iter()
+                    .filter(|base_symbol| {
+                        base_symbol.entity_name == name || base_symbol.qualified_name == name
+                    })
+                    .collect::<Vec<_>>()
+            };
+            let mut candidates = matching_name(&current_symbol.qualified_name);
+            if candidates.is_empty() && current_symbol.qualified_name != current_symbol.entity_name
+            {
+                candidates = matching_name(&current_symbol.entity_name);
+            }
+            if candidates.is_empty() {
+                candidates = base_symbols
+                    .iter()
+                    .filter(|base_symbol| base_symbol.symbol_kind == current_symbol.symbol_kind)
+                    .filter(|base_symbol| {
+                        ranges_overlap(base_symbol.line_range, current_symbol.line_range)
+                    })
+                    .collect();
+            }
+            candidates.sort_by(|left, right| {
+                line_distance(left.line_range, current_symbol.line_range)
+                    .cmp(&line_distance(right.line_range, current_symbol.line_range))
+                    .then_with(|| left.stable_symbol_id.cmp(&right.stable_symbol_id))
+            });
+            for base_symbol in candidates {
+                if base_symbol.stable_symbol_id != current_symbol.stable_symbol_id {
+                    remap.insert(
+                        base_symbol.stable_symbol_id.clone(),
+                        current_symbol.stable_symbol_id.clone(),
+                    );
+                }
+            }
+        }
+    }
+    remap
+}
+
+fn changed_definition_labels(
+    path_state: &BTreeMap<String, OverlayPathState>,
+    overrides: &BTreeMap<String, Option<Arc<OverlayFileSegment>>>,
+) -> HashSet<String> {
+    path_state
+        .keys()
+        .filter_map(|path| overrides.get(path).and_then(Option::as_deref))
+        .flat_map(OverlayFileSegment::symbols)
+        .flat_map(symbol_labels)
+        .collect()
+}
+
+fn symbol_labels(symbol: &GraphSymbolArtifact) -> [String; 3] {
+    [
+        symbol.stable_symbol_id.clone(),
+        symbol.entity_name.clone(),
+        symbol.qualified_name.clone(),
+    ]
+}
+
+fn build_full_adjacency(
+    generation: &OverlayGeneration,
+) -> (
+    PersistentMap<Arc<OverlayAdjacencySegment>>,
+    PersistentMap<Arc<[OwnedCallerRecord]>>,
+) {
+    let symbol_ids = generation
+        .visible_symbol_owners
+        .iter()
+        .map(|(symbol_id, _)| symbol_id.to_owned())
+        .collect::<Vec<_>>();
+    let mut callees_by_source = BTreeMap::new();
+    let mut callers_by_target = BTreeMap::<String, Vec<OwnedCallerRecord>>::new();
+    let mut unresolved_by_label = BTreeMap::<String, Vec<OwnedCallerRecord>>::new();
+    for source_id in &symbol_ids {
+        let callees = current_callees_for_source(generation, source_id);
+        if let Ok(Some(source)) = generation.symbol_by_id(source_id) {
+            for callee in &callees {
+                let caller = caller_record_from_callee(&source, callee);
+                match callee {
+                    OwnedCalleeRecord::Resolved { symbol, .. } => callers_by_target
+                        .entry(symbol.stable_symbol_id.clone())
+                        .or_default()
+                        .push(caller),
+                    OwnedCalleeRecord::Unresolved { target_label, .. } => unresolved_by_label
+                        .entry(target_label.clone())
+                        .or_default()
+                        .push(caller),
+                }
+            }
+        }
+        callees_by_source.insert(source_id.clone(), callees);
+    }
+
+    let mut adjacency = PersistentMap::default();
+    for symbol_id in symbol_ids {
+        let mut callers = callers_by_target.remove(&symbol_id).unwrap_or_default();
+        let mut callees = callees_by_source.remove(&symbol_id).unwrap_or_default();
+        sort_caller_records(&mut callers);
+        sort_callee_records(&mut callees);
+        adjacency = adjacency.insert(
+            symbol_id,
+            Arc::new(OverlayAdjacencySegment {
+                callers: callers.into(),
+                callees: callees.into(),
+            }),
+        );
+    }
+
+    let mut unresolved_index = PersistentMap::default();
+    for (label, mut callers) in unresolved_by_label {
+        dedupe_caller_records(&mut callers);
+        unresolved_index = unresolved_index.insert(label, callers.into());
+    }
+    (adjacency, unresolved_index)
+}
+
+fn rebuild_changed_adjacency(previous: &OverlayGeneration, current: &mut OverlayGeneration) {
+    let mut affected_ids = BTreeSet::new();
+    let mut affected_labels = BTreeSet::new();
+    for path in &current.rewritten_query_paths {
+        if let Some(slot) = previous.visible_files.get(path) {
+            for symbol in slot.symbols() {
+                affected_ids.insert(symbol.stable_symbol_id.clone());
+                affected_labels.extend(symbol_labels(symbol));
+            }
+        }
+        if let Some(slot) = current.visible_files.get(path) {
+            for symbol in slot.symbols() {
+                affected_ids.insert(symbol.stable_symbol_id.clone());
+                affected_labels.extend(symbol_labels(symbol));
+            }
+        }
+    }
+    let mut remap_keys = previous
+        .remap
+        .iter()
+        .map(|(old, _)| old.to_owned())
+        .collect::<BTreeSet<_>>();
+    remap_keys.extend(current.remap.iter().map(|(old, _)| old.to_owned()));
+    for old_id in remap_keys {
+        let previous_new = previous.remap.get(&old_id);
+        let current_new = current.remap.get(&old_id);
+        if previous_new == current_new {
+            continue;
+        }
+        affected_ids.insert(old_id);
+        if let Some(symbol_id) = previous_new {
+            affected_ids.insert(symbol_id.clone());
+        }
+        if let Some(symbol_id) = current_new {
+            affected_ids.insert(symbol_id.clone());
+        }
+    }
+
+    let mut affected_sources = affected_ids.clone();
+    for target_id in &affected_ids {
+        if let Some(segment) = previous.adjacency.get(target_id) {
+            affected_sources.extend(
+                segment
+                    .callers()
+                    .iter()
+                    .map(|record| record.edge().source_stable_symbol_id.clone()),
+            );
+        }
+    }
+    for label in &affected_labels {
+        if let Some(records) = previous.unresolved_callers_by_label.get(label) {
+            affected_sources.extend(
+                records
+                    .iter()
+                    .map(|record| record.edge().source_stable_symbol_id.clone()),
+            );
+        }
+    }
+
+    let mut new_callees = BTreeMap::<String, Vec<OwnedCalleeRecord>>::new();
+    let mut affected_targets = affected_ids;
+    let mut unresolved_labels = BTreeSet::new();
+    for source_id in &affected_sources {
+        if let Some(segment) = previous.adjacency.get(source_id) {
+            for record in segment.callees() {
+                match record {
+                    OwnedCalleeRecord::Resolved { symbol, .. } => {
+                        affected_targets.insert(symbol.stable_symbol_id.clone());
+                    }
+                    OwnedCalleeRecord::Unresolved { target_label, .. } => {
+                        unresolved_labels.insert(target_label.clone());
+                    }
+                }
+            }
+        }
+        let records = current_callees_for_source(current, source_id);
+        for record in &records {
+            match record {
+                OwnedCalleeRecord::Resolved { symbol, .. } => {
+                    affected_targets.insert(symbol.stable_symbol_id.clone());
+                }
+                OwnedCalleeRecord::Unresolved { target_label, .. } => {
+                    unresolved_labels.insert(target_label.clone());
+                }
+            }
+        }
+        new_callees.insert(source_id.clone(), records);
+    }
+
+    let mut new_callers_by_target = BTreeMap::<String, Vec<OwnedCallerRecord>>::new();
+    let mut new_unresolved_by_label = BTreeMap::<String, Vec<OwnedCallerRecord>>::new();
+    for (source_id, callees) in &new_callees {
+        let Ok(Some(source)) = current.symbol_by_id(source_id) else {
+            continue;
+        };
+        for callee in callees {
+            let caller = caller_record_from_callee(&source, callee);
+            match callee {
+                OwnedCalleeRecord::Resolved { symbol, .. } => new_callers_by_target
+                    .entry(symbol.stable_symbol_id.clone())
+                    .or_default()
+                    .push(caller),
+                OwnedCalleeRecord::Unresolved { target_label, .. } => new_unresolved_by_label
+                    .entry(target_label.clone())
+                    .or_default()
+                    .push(caller),
+            }
+        }
+    }
+
+    for label in unresolved_labels {
+        let mut records = previous
+            .unresolved_callers_by_label
+            .get(&label)
+            .map(|records| records.to_vec())
+            .unwrap_or_default();
+        records.retain(|record| !affected_sources.contains(&record.edge().source_stable_symbol_id));
+        records.extend(new_unresolved_by_label.remove(&label).unwrap_or_default());
+        dedupe_caller_records(&mut records);
+        current.unresolved_callers_by_label = if records.is_empty() {
+            current.unresolved_callers_by_label.remove(&label)
+        } else {
+            current
+                .unresolved_callers_by_label
+                .insert(label, records.into())
+        };
+    }
+
+    let mut callers_by_target = BTreeMap::<String, Vec<OwnedCallerRecord>>::new();
+    for target_id in &affected_targets {
+        let mut records = previous
+            .adjacency
+            .get(target_id)
+            .map(|segment| segment.callers().to_vec())
+            .unwrap_or_default();
+        records.retain(|record| !affected_sources.contains(&record.edge().source_stable_symbol_id));
+        records.extend(new_callers_by_target.remove(target_id).unwrap_or_default());
+        dedupe_caller_records(&mut records);
+        callers_by_target.insert(target_id.clone(), records);
+    }
+
+    let mut rebuilt = affected_sources.clone();
+    rebuilt.extend(affected_targets.iter().cloned());
+    for symbol_id in &rebuilt {
+        if current.symbol_by_id(symbol_id).ok().flatten().is_none() {
+            current.adjacency = current.adjacency.remove(symbol_id);
+            continue;
+        }
+        let callers = if affected_targets.contains(symbol_id) {
+            callers_by_target.remove(symbol_id).unwrap_or_default()
+        } else {
+            previous
+                .adjacency
+                .get(symbol_id)
+                .map(|segment| segment.callers().to_vec())
+                .unwrap_or_default()
+        };
+        let callees = if affected_sources.contains(symbol_id) {
+            new_callees.remove(symbol_id).unwrap_or_default()
+        } else {
+            previous
+                .adjacency
+                .get(symbol_id)
+                .map(|segment| segment.callees().to_vec())
+                .unwrap_or_default()
+        };
+        current.adjacency = current.adjacency.insert(
+            symbol_id.clone(),
+            Arc::new(OverlayAdjacencySegment {
+                callers: callers.into(),
+                callees: callees.into(),
+            }),
+        );
+    }
+    current.rebuilt_adjacency_symbols = rebuilt;
+}
+
+fn current_callees_for_source(
+    generation: &OverlayGeneration,
+    source_id: &str,
+) -> Vec<OwnedCalleeRecord> {
+    let Ok(Some(source)) = generation.symbol_by_id(source_id) else {
+        return Vec::new();
+    };
+    let Some(slot) = generation.visible_files.get(&source.file_path) else {
+        return Vec::new();
+    };
+    let source_is_changed = generation.path_state.contains_key(&source.file_path);
+    let mut records = slot
+        .segment
+        .edges()
+        .iter()
+        .filter(|edge| is_caller_relation(edge.relation))
+        .filter(|edge| edge.source_stable_symbol_id == source_id)
+        .filter_map(|edge| resolve_callee_edge(generation, edge.clone(), source_is_changed))
+        .collect::<Vec<_>>();
+    sort_callee_records(&mut records);
+    records
+}
+
+fn resolve_callee_edge(
+    generation: &OverlayGeneration,
+    mut edge: GraphEdgeArtifact,
+    source_is_changed: bool,
+) -> Option<OwnedCalleeRecord> {
+    if let Some(target_id) = edge.target_stable_symbol_id.clone() {
+        if let Some(remapped) = generation.remap.get(&target_id) {
+            edge.target_stable_symbol_id = Some(remapped.clone());
+        }
+        if let Some(symbol) = edge
+            .target_stable_symbol_id
+            .as_deref()
+            .and_then(|target_id| generation.symbol_by_id(target_id).ok().flatten())
+        {
+            return Some(OwnedCalleeRecord::Resolved { symbol, edge });
+        }
+    }
+
+    let target_label = edge.target_label.clone()?;
+    let label_can_remap = source_is_changed
+        || generation.remappable_labels.contains(&target_label)
+        || edge
+            .target_stable_symbol_id
+            .as_deref()
+            .is_some_and(|target_id| generation.remap.get(target_id).is_some());
+    if label_can_remap {
+        if let Some(symbol) = resolve_label_to_visible_symbol(generation, &target_label) {
+            edge.target_stable_symbol_id = Some(symbol.stable_symbol_id.clone());
+            return Some(OwnedCalleeRecord::Resolved { symbol, edge });
+        }
+    }
+    edge.target_stable_symbol_id = None;
+    Some(OwnedCalleeRecord::Unresolved { edge, target_label })
+}
+
+fn resolve_label_to_visible_symbol(
+    generation: &OverlayGeneration,
+    label: &str,
+) -> Option<GraphSymbolArtifact> {
+    match generation.resolve_selector_inner(label) {
+        SelectorResolution::Resolved(resolved) => generation
+            .symbol_by_id(&resolved.stable_symbol_id)
+            .ok()
+            .flatten(),
+        SelectorResolution::Ambiguous { .. } | SelectorResolution::NotFound => None,
+    }
+}
+
+fn caller_record_from_callee(
+    source: &GraphSymbolArtifact,
+    callee: &OwnedCalleeRecord,
+) -> OwnedCallerRecord {
+    match callee {
+        OwnedCalleeRecord::Resolved { edge, .. } => OwnedCallerRecord::Resolved {
+            caller: source.clone(),
+            edge: edge.clone(),
+        },
+        OwnedCalleeRecord::Unresolved { edge, target_label } => OwnedCallerRecord::Unresolved {
+            caller: source.clone(),
+            edge: edge.clone(),
+            target_label: target_label.clone(),
+        },
+    }
+}
+
+fn is_caller_relation(relation: RelationKind) -> bool {
+    matches!(relation, RelationKind::Calls | RelationKind::References)
+}
+
+fn edge_dedupe_key(edge: &GraphEdgeArtifact) -> String {
+    format!(
+        "{}\0{:?}\0{:?}\0{:?}\0{:?}\0{:?}\0{:?}\0{:?}\0{:?}",
+        edge.source_stable_symbol_id,
+        edge.target_stable_symbol_id,
+        edge.target_label,
+        edge.import_path,
+        edge.receiver_text,
+        edge.scope_text,
+        edge.relation,
+        edge.edge_kind,
+        edge.bind_method,
+    )
+}
+
+fn dedupe_caller_records(records: &mut Vec<OwnedCallerRecord>) {
+    sort_caller_records(records);
+    records.dedup_by(|left, right| edge_dedupe_key(left.edge()) == edge_dedupe_key(right.edge()));
+}
+
+fn sort_caller_records(records: &mut [OwnedCallerRecord]) {
+    records.sort_by_key(|record| edge_dedupe_key(record.edge()));
+}
+
+fn sort_callee_records(records: &mut [OwnedCalleeRecord]) {
+    records.sort_by_key(|record| edge_dedupe_key(record.edge()));
+}
+
+fn ranges_overlap(left: [usize; 2], right: [usize; 2]) -> bool {
+    left[0] <= right[1] && right[0] <= left[1]
+}
+
+fn line_distance(left: [usize; 2], right: [usize; 2]) -> usize {
+    left[0].abs_diff(right[0]) + left[1].abs_diff(right[1])
+}
+
+fn resolution_from_owned_symbols(symbols: Vec<GraphSymbolArtifact>) -> SelectorResolution {
+    resolution_from_symbols(symbols.iter().collect())
+}
+
 fn collect_segment_stable_ids(
     segment: Option<&OverlayFileSegment>,
     stable_symbol_ids: &mut BTreeSet<String>,
@@ -683,6 +1388,7 @@ struct SegmentBuilder {
     file: Option<GraphFileArtifact>,
     manifest: Option<GraphFileManifestEntry>,
     symbols: Vec<GraphSymbolArtifact>,
+    edges: Vec<GraphEdgeArtifact>,
     observed: bool,
 }
 
@@ -733,6 +1439,21 @@ fn build_segments_for_paths(
             builder.observed = true;
         }
     }
+    let mut source_paths = HashMap::new();
+    for symbol in &artifact.symbols {
+        source_paths
+            .entry(symbol.stable_symbol_id.as_str())
+            .or_insert(symbol.file_path.as_str());
+    }
+    for edge in &artifact.edges {
+        let Some(path) = source_paths.get(edge.source_stable_symbol_id.as_str()) else {
+            continue;
+        };
+        if let Some(builder) = builders.get_mut(*path) {
+            builder.edges.push(edge.clone());
+            builder.observed = true;
+        }
+    }
 
     builders
         .into_iter()
@@ -764,6 +1485,7 @@ fn build_segments_for_paths(
                     manifest: builder.manifest,
                     symbols: builder.symbols.into(),
                     search_symbols: search_symbols.into(),
+                    edges: builder.edges.into(),
                 }),
             ))
         })
