@@ -237,7 +237,7 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use spur_acp::config::{ConfigPatch, EditorMode};
+    use spur_acp::config::{ConfigPatch, EditorMode, OverlayFsmonitorMode};
     use tokio::sync::mpsc;
 
     fn app_with_agent(tx: Option<mpsc::Sender<UserInput>>) -> App {
@@ -284,6 +284,23 @@ mod tests {
         apply_config_patch_locally(&mut cfg, &ConfigPatch::TuiEditMode(EditorMode::Vim));
         assert_eq!(cfg.tui.edit_mode, EditorMode::Vim);
         assert_eq!(cfg.tui.theme, "dark");
+    }
+
+    #[test]
+    fn acknowledged_graph_fsmonitor_patch_applies_without_a_tui_live_hook() {
+        let mut app = app_with_agent(None);
+        app.dirty = false;
+        app.pending_config_patch = Some(ConfigPatch::GraphOverlayFsmonitor(
+            OverlayFsmonitorMode::Auto,
+        ));
+
+        app.apply_pending_config_on_ok();
+
+        assert_eq!(
+            app.config.graph.overlay_fsmonitor,
+            OverlayFsmonitorMode::Auto
+        );
+        assert!(app.dirty);
     }
 
     #[test]
