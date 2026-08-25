@@ -554,7 +554,151 @@ SOLVE evidence:
 
 ### POST
 
-Pending Task 6 execution under the committed plan protocol.
+Task 6 ran the release matrix on 2026-08-26 at the reviewed Task 5 tip
+`6b5db470e2a88dd5669520a79473c8ab2b912d11`, plus the Task 6 benchmark and
+gate commits. The protocol ID is `overlay-generation-task6-v1`: exact query
+`matrix_target`, limit 20, compact response format, the same base artifact and
+changed-path snapshot within each cell, 30 repetitions per latency case, and
+nearest-rank p50/p95. Fixture construction is excluded from every timing.
+
+The raw report is preserved in the repository runtime evidence store at
+`/Volumes/Projects/Projects/spur/.spur/bench-evidence/task6-overlay-generation-matrix-29fa6d9973eb.json`
+(2,322 lines, 67,064 bytes, SHA-256
+`29fa6d9973eb7ab464aae81ccc3710ec1d9a5a2d50e9de1ca7168191d22b7a5f`).
+It contains all 30 raw samples for each case, generation identities, operation
+and finalization counters, changed paths, dependency closures, result digests,
+fallback reasons, and fixture manifests. The full run was:
+
+```bash
+SPUR_GRAPH_TASK6_MATRIX=1 \
+SPUR_GRAPH_RELEASE_REPEATS=30 \
+scripts/spur-cargo bench -p spur-graph --bench overlay -- \
+  task6_matrix_only --noplot
+# release_eligible=true; fsmonitor_auto_safe=true;
+# configuration_default=Off; configure_semantics_changed=false
+```
+
+Representative deterministic projects deliberately differ in size and change
+shape:
+
+| Project | Tracked / source files | Languages | Initial change shape | Initial changed / rebuilt segments |
+|---|---:|---|---|---:|
+| `small_untracked_heavy` | 5 / 4 | Rust | 12 untracked Rust files | 12 / 12 |
+| `medium_dirty_rust` | 49 / 48 | Rust | 5 modified tracked Rust files | 5 / 5 |
+| `large_mostly_clean_polyglot` | 193 / 192 | Rust, JavaScript, Python | 1 modified Python file | 1 / 1 |
+
+All latency values below are milliseconds, shown as p50 / p95. “Cold” and
+“incremental” are isolated generation operations over identical already
+extracted inputs; production cold/incremental request samples are reported
+separately below.
+
+| Project | Direct Parquet | Exact request oracle | Cold generation build | Warm generation query | Bounded incremental | Exact fallback | Full warm `code_*` MCP |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| small | 0.088 / 0.163 | 42.234 / 44.147 | 0.193 / 0.219 | 0.003 / 0.004 | 0.015 / 0.021 | 50.585 / 53.780 | 128.632 / 132.357 |
+| medium | 0.101 / 0.169 | 42.334 / 48.000 | 0.366 / 0.400 | 0.004 / 0.005 | 0.019 / 0.023 | 50.723 / 52.546 | 127.820 / 134.930 |
+| large | 0.123 / 0.152 | 37.844 / 40.834 | 1.219 / 1.449 | 0.010 / 0.013 | 0.011 / 0.015 | 53.396 / 55.957 | 131.568 / 139.354 |
+
+The raw production cold requests were 179.530, 180.069, and 181.026 ms for
+small, medium, and large respectively. The production request after the bounded
+change was 180.463, 174.857, and 200.473 ms. Those are single state
+transitions, not percentile claims; the repeated isolated cold and incremental
+cases above provide the 30-sample p50/p95 distributions.
+
+The phase probes use the same fixture, snapshot, and query as each cell. They
+measure the named work independently, so percentile columns are not summed as
+if they were a critical-path trace.
+
+| Project | Backend open | Full base read | Exact Git freshness | Cold lookup/build | Warm query | Response-file OID analysis | Construct/serialize | Exact overlay finalization |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| small | 0.075 / 0.088 | 0.483 / 0.614 | 34.010 / 41.699 | 0.193 / 0.219 | 0.003 / 0.004 | 8.173 / 8.591 | 0.008 / 0.010 | 0.071 / 0.132 |
+| medium | 0.076 / 0.082 | 0.480 / 0.554 | 33.955 / 43.462 | 0.366 / 0.400 | 0.004 / 0.005 | 8.383 / 9.204 | 0.008 / 0.009 | 0.116 / 0.160 |
+| large | 0.076 / 0.083 | 0.679 / 0.776 | 34.401 / 43.934 | 1.219 / 1.449 | 0.010 / 0.013 | 8.449 / 9.054 | 0.008 / 0.010 | 0.127 / 0.184 |
+
+This explains the historical roughly 40 ms direct/request-scoped work versus
+roughly 200 ms complete request without attributing the gap to the query. The
+generation query itself is 0.003--0.010 ms p50 and response serialization is
+about 0.008 ms. One exact Git freshness observation costs about 34 ms p50 and
+response-file OID analysis another 8.2--8.4 ms. After subtracting one measured
+freshness observation, response-file analysis, backend open, warm query, and
+serialization from the full-request p50, the accounting remainder is 86.363,
+85.394, and 88.624 ms. The request source identifies that remainder: search
+preflight runs `GraphResponseMetadata::analyze_source_inner`, stable overlay
+preparation performs an initial snapshot plus an exact validation,
+`authoritative_overlay_identity` validates again after the handler, and final
+response metadata performs Git/OID analysis again. These repeated
+freshness/metadata passes are outside the already-pinned generation query.
+Cold production adds one exact extraction/generation transition and lands at
+179--181 ms; the bounded production transition reached 200.473 ms. The old
+40/200 observation is therefore the expected composition of base/query work,
+repeated authoritative validation and metadata work, and (when cold) one
+generation transition, rather than repeated result merging or sorting.
+
+Structural evidence:
+
+| Project | Cold generation | Warm identity / builds / base loads / query ops | Warm shadow / merge / sort / stable-ID dedup | Incremental generation; changed paths / closure paths / closure symbols / base loads / query ops |
+|---|---|---|---|---|
+| small | `gen_91066763235ea3db`; 1 build, 1 base load | same ID for all 30; 0 / 0 / 60 | 0 / 0 / 0 / 0 | `gen_6d9caed162e51e5d`; 1 / 1 / 1 / 0 / 2 |
+| medium | `gen_ed559c6382a11ae5`; 1 build, 1 base load | same ID for all 30; 0 / 0 / 60 | 0 / 0 / 0 / 0 | `gen_da270027d508080a`; 1 / 1 / 2 / 0 / 2 |
+| large | `gen_d261f43c9cb306f8`; 1 build, 1 base load | same ID for all 30; 0 / 0 / 60 | 0 / 0 / 0 / 0 | `gen_0a9303f0eb1427eb`; 1 / 1 / 1 / 0 / 2 |
+
+Every direct, oracle, cold, warm, incremental, fallback, and full-MCP result
+has digest
+`36559330dd94c8dfb87202d6e9957d92d9ed455a00e5cd66fb23dbcbcd215476`.
+Mismatch count is zero in every cell. The exact oracle performed 30 shadow
+filters, 30 merges, 30 overlay sorts, and 30 stable-ID deduplications per cell;
+the 30 warm generation requests performed zero of every stage. The exact
+fallback route is `request_scoped_exact_overlay`, reason
+`configuration_off_exact_oracle`, and also matches the oracle. Cold and warm
+are explicitly classified and never pooled. There is no fixed millisecond
+release threshold; the gate is parity plus structural work elimination.
+
+The emitted JSON passed the same production release contract used by the
+deterministic tests:
+
+```bash
+SPUR_REMOTE=0 \
+SPUR_GRAPH_TASK6_EVIDENCE=/Volumes/Projects/Projects/spur/.spur/bench-evidence/task6-overlay-generation-matrix-29fa6d9973eb.json \
+scripts/spur-cargo test -p spur-graph --test perf_gates gate_task6_ -- --nocapture
+# 4 passed; 0 failed
+
+scripts/spur-cargo test -p spur-graph --test perf_gates -- --nocapture
+# 4 passed; 0 failed; 9 ignored
+
+scripts/spur-cargo test -p spur-graph --lib
+# remote Linux: 490 passed; 0 failed; 3 ignored
+```
+
+The local macOS classification reproduced the two caller-identified old
+fixtures,
+`overlay_snapshot_supported_paths_reject_lossy_normalized_collision` and
+`overlay_snapshot_supported_paths_reject_non_utf8_relative_path`: APFS rejects
+their non-UTF-8 path creation with `Illegal byte sequence`. Neither test nor
+its production source is in the Task 6 diff, and both pass as part of the
+remote Linux result above. Strict clippy is presently blocked before Task 6
+code by pre-existing warnings: the normal invocation stops on six `spur-acp`
+findings, while `--no-deps` reaches unchanged `spur-graph` and stops on its
+existing dead-code/complexity/test findings.
+
+SOLVE evidence:
+
+- PRE `sol_49fb133b237749de` (persisted and reloaded): `unsat` / `fail`.
+  The one-project, zero-admissible-cell pre-edit model violated both the exact
+  three-project cardinality and the mutually-consistent release-cell rule.
+- POST `sol_c479540b80db46da` (persisted and reloaded): `sat` / `pass`.
+  Exactly three unique project rows satisfy identical-input parity, exact
+  digest equality, stable generation reuse, zero warm finalization, bounded
+  incremental closure, and exact fallback. All three hard rules
+  (`cardinality`, `unique`, and `mutually_consistent`) pass; there is no
+  objective and no unsat core.
+
+Release decision: the measured generation route and fsmonitor `Auto` path are
+safe to release when explicitly selected: parity and every structural gate
+pass across all three project shapes. The production/configuration default
+nevertheless remains `Off`, automatic enablement remains disabled, and
+`/configure` semantics are unchanged because Task 6 does not alter production
+configuration. A later configuration task may choose to change that default;
+this evidence removes correctness and structural-performance objections but
+does not silently broaden the present release surface.
 
 ### Task 3 SOLVE evidence correction (2026-08-25)
 

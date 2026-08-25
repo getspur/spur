@@ -2,6 +2,7 @@
 
 use std::cmp::Ordering;
 use std::env;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Mutex, MutexGuard, OnceLock};
@@ -766,4 +767,460 @@ fn normalize_ru_maxrss_to_kb(raw: u64) -> u64 {
 #[cfg(not(target_os = "macos"))]
 fn normalize_ru_maxrss_to_kb(raw: u64) -> u64 {
     raw
+}
+
+#[test]
+fn gate_task6_overlay_generation_matrix_requires_structural_release_evidence() {
+    let complete_matrix = serde_json::json!({
+        "schema_version": 1,
+        "protocol_id": "overlay-generation-task6-v1",
+        "repetitions": 3,
+        "cold_warm_separated": true,
+        "timing_gate": "structural_only_no_fixed_millisecond_threshold",
+        "release_eligible": true,
+        "fsmonitor_auto_safe": true,
+        "configuration_default": "Off",
+        "configure_semantics_changed": false,
+        "cells": [
+            task6_release_cell("small_untracked_heavy", "gen_small"),
+            task6_release_cell("medium_dirty_rust", "gen_medium"),
+            task6_release_cell("large_mostly_clean_polyglot", "gen_large"),
+        ],
+    });
+
+    validate_task6_overlay_generation_matrix(&complete_matrix)
+        .expect("complete parity and structural evidence must pass without a wall-clock threshold");
+}
+
+#[test]
+fn gate_task6_overlay_generation_matrix_rejects_missing_or_correlated_evidence() {
+    let mut incomplete = task6_release_cell("small_untracked_heavy", "gen_small");
+    incomplete["warm_generation"]["finalization"]["result_merges"] = serde_json::json!(1);
+    incomplete["exact_fallback"]["digest"] = serde_json::json!("different");
+    let matrix = serde_json::json!({
+        "schema_version": 1,
+        "protocol_id": "overlay-generation-task6-v1",
+        "repetitions": 3,
+        "cells": [incomplete],
+    });
+
+    let errors = validate_task6_overlay_generation_matrix(&matrix)
+        .expect_err("incomplete, mismatched evidence must fail closed");
+    assert!(errors.iter().any(|error| error.contains("three projects")));
+    assert!(errors
+        .iter()
+        .any(|error| error.contains("warm finalization")));
+    assert!(errors.iter().any(|error| error.contains("fallback digest")));
+}
+
+#[test]
+fn gate_task6_fsmonitor_default_remains_off() {
+    assert!(
+        !spur_graph::GraphMcpDeps::default().overlay_fsmonitor_auto,
+        "Task 6 may recommend Auto from evidence but must not alter configuration defaults"
+    );
+}
+
+#[test]
+fn gate_task6_emitted_matrix_when_evidence_path_is_set() {
+    let Some(path) = std::env::var_os("SPUR_GRAPH_TASK6_EVIDENCE") else {
+        eprintln!("SPUR_GRAPH_TASK6_EVIDENCE is unset; deterministic contract tests remain active");
+        return;
+    };
+    let bytes = fs::read(&path).unwrap_or_else(|error| {
+        panic!(
+            "read SPUR_GRAPH_TASK6_EVIDENCE `{}`: {error}",
+            PathBuf::from(&path).display()
+        )
+    });
+    let matrix = serde_json::from_slice::<serde_json::Value>(&bytes)
+        .expect("parse SPUR_GRAPH_TASK6_EVIDENCE JSON");
+    validate_task6_overlay_generation_matrix(&matrix).unwrap_or_else(|errors| {
+        panic!("Task 6 emitted matrix failed structural release gates: {errors:#?}")
+    });
+}
+
+fn validate_task6_overlay_generation_matrix(matrix: &serde_json::Value) -> Result<(), Vec<String>> {
+    const PROTOCOL: &str = "overlay-generation-task6-v1";
+    const LATENCY_CASES: [&str; 7] = [
+        "direct_parquet",
+        "exact_overlay_oracle",
+        "cold_generation_build",
+        "warm_generation_reuse",
+        "bounded_incremental_update",
+        "exact_fallback",
+        "full_end_to_end_mcp",
+    ];
+    const PHASE_CASES: [&str; 9] = [
+        "backend_open",
+        "backend_full_base_read",
+        "freshness_git_validation",
+        "generation_lookup_build_cold",
+        "query_execution_warm_generation",
+        "response_file_metadata_analysis",
+        "response_construction_serialization",
+        "overlay_finalization_exact_oracle",
+        "full_end_to_end_code_request",
+    ];
+
+    let mut errors = Vec::new();
+    let protocol = matrix["protocol_id"].as_str().unwrap_or_default();
+    if matrix["schema_version"].as_u64() != Some(1) {
+        errors.push("matrix schema_version must be 1".to_owned());
+    }
+    if protocol != PROTOCOL {
+        errors.push(format!("matrix protocol_id must be {PROTOCOL}"));
+    }
+    if matrix["cold_warm_separated"].as_bool() != Some(true) {
+        errors.push("matrix must separate cold and warm cases".to_owned());
+    }
+    if matrix["timing_gate"].as_str() != Some("structural_only_no_fixed_millisecond_threshold") {
+        errors.push("matrix must use the structural-only timing gate".to_owned());
+    }
+    if matrix["release_eligible"].as_bool() != Some(true)
+        || matrix["fsmonitor_auto_safe"].as_bool() != Some(true)
+    {
+        errors.push("matrix release and fsmonitor Auto verdicts must pass".to_owned());
+    }
+    if matrix["configuration_default"].as_str() != Some("Off")
+        || matrix["configure_semantics_changed"].as_bool() != Some(false)
+    {
+        errors.push("matrix must preserve default-Off configuration semantics".to_owned());
+    }
+    let repetitions = matrix["repetitions"].as_u64().unwrap_or_default();
+    if repetitions < 3 {
+        errors.push("matrix requires at least three measured repetitions".to_owned());
+    }
+    let cells = matrix["cells"].as_array().cloned().unwrap_or_default();
+    let projects = cells
+        .iter()
+        .filter_map(|cell| cell["project"].as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    if projects.len() < 3 {
+        errors.push("matrix must contain three projects with distinct identities".to_owned());
+    }
+
+    for cell in &cells {
+        let project = cell["project"].as_str().unwrap_or("<missing-project>");
+        let prefix = |message: &str| format!("{project}: {message}");
+        if cell["protocol_id"].as_str() != Some(protocol) {
+            errors.push(prefix("protocol differs from the matrix protocol"));
+        }
+        if cell["repetitions"].as_u64() != Some(repetitions) {
+            errors.push(prefix("repetition count differs from the matrix protocol"));
+        }
+        if cell["mismatch_count"].as_u64() != Some(0) {
+            errors.push(prefix("mismatch_count must be zero"));
+        }
+        for (label, count) in [
+            (
+                "direct Parquet",
+                cell["direct_parquet"]["query_operation_count"].as_u64(),
+            ),
+            (
+                "exact oracle",
+                cell["exact_overlay_oracle"]["query_operation_count"].as_u64(),
+            ),
+            (
+                "exact fallback",
+                cell["exact_fallback"]["query_operation_count"].as_u64(),
+            ),
+        ] {
+            if count.unwrap_or_default() < repetitions {
+                errors.push(prefix(&format!(
+                    "{label} query operation count is incomplete"
+                )));
+            }
+        }
+
+        let oracle_digest = cell["oracle_digest"].as_str().unwrap_or_default();
+        if oracle_digest.is_empty() {
+            errors.push(prefix("exact oracle digest is missing"));
+        }
+        for (label, digest) in [
+            ("direct Parquet", cell["direct_parquet"]["digest"].as_str()),
+            (
+                "exact oracle",
+                cell["exact_overlay_oracle"]["digest"].as_str(),
+            ),
+            (
+                "cold generation",
+                cell["cold_generation"]["digest"].as_str(),
+            ),
+            (
+                "incremental generation",
+                cell["incremental_update"]["digest"].as_str(),
+            ),
+            ("fallback", cell["exact_fallback"]["digest"].as_str()),
+            ("full MCP", cell["full_mcp_request"]["digest"].as_str()),
+        ] {
+            if digest != Some(oracle_digest) {
+                errors.push(prefix(&format!(
+                    "{label} digest must match the exact oracle"
+                )));
+            }
+        }
+        let warm_digests = cell["warm_generation"]["digests"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        if warm_digests.len() < repetitions as usize
+            || warm_digests
+                .iter()
+                .any(|digest| digest.as_str() != Some(oracle_digest))
+        {
+            errors.push(prefix(
+                "every warm generation digest must match the exact oracle",
+            ));
+        }
+
+        let cold_id = cell["cold_generation"]["generation_id"]
+            .as_str()
+            .unwrap_or_default();
+        if !cold_id.starts_with("gen_") {
+            errors.push(prefix(
+                "cold generation identity must be opaque and present",
+            ));
+        }
+        if cell["cold_generation"]["generation_build_count"].as_u64() != Some(1) {
+            errors.push(prefix("cold generation must build exactly once"));
+        }
+        if cell["cold_generation"]["full_base_load_count"].as_u64() != Some(1) {
+            errors.push(prefix(
+                "cold generation must load the full base exactly once",
+            ));
+        }
+
+        let warm_ids = cell["warm_generation"]["generation_ids"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        if warm_ids.len() < repetitions as usize
+            || warm_ids.iter().any(|id| id.as_str() != Some(cold_id))
+        {
+            errors.push(prefix(
+                "warm no-change requests must reuse the cold generation identity",
+            ));
+        }
+        if cell["warm_generation"]["generation_build_count"].as_u64() != Some(0) {
+            errors.push(prefix("warm no-change requests must perform zero builds"));
+        }
+        if cell["warm_generation"]["full_base_load_count"].as_u64() != Some(0) {
+            errors.push(prefix(
+                "warm no-change requests must perform zero full-base loads",
+            ));
+        }
+        if cell["warm_generation"]["query_operation_count"]
+            .as_u64()
+            .unwrap_or_default()
+            < repetitions
+        {
+            errors.push(prefix("warm query operation count is incomplete"));
+        }
+        let finalization = &cell["warm_generation"]["finalization"];
+        for stage in [
+            "shadow_filters",
+            "result_merges",
+            "overlay_sorts",
+            "stable_id_deduplications",
+        ] {
+            if finalization[stage].as_u64() != Some(0) {
+                errors.push(prefix(&format!(
+                    "warm finalization stage {stage} must be zero"
+                )));
+            }
+        }
+
+        let previous_id = cell["incremental_update"]["previous_generation_id"]
+            .as_str()
+            .unwrap_or_default();
+        let incremental_id = cell["incremental_update"]["generation_id"]
+            .as_str()
+            .unwrap_or_default();
+        if previous_id != cold_id || incremental_id.is_empty() || incremental_id == cold_id {
+            errors.push(prefix(
+                "bounded update must advance from the measured cold generation identity",
+            ));
+        }
+        if cell["incremental_update"]["full_base_load_count"].as_u64() != Some(0) {
+            errors.push(prefix(
+                "bounded incremental update must reuse the full base",
+            ));
+        }
+        let changed = string_set(&cell["incremental_update"]["changed_paths"]);
+        let rebuilt = string_set(&cell["incremental_update"]["rebuilt_paths"]);
+        let closure = string_set(&cell["incremental_update"]["dependency_closure_paths"]);
+        if changed.is_empty() || rebuilt.is_empty() || !rebuilt.is_subset(&changed) {
+            errors.push(prefix(
+                "bounded update rebuilt paths must be non-empty and contained in changed paths",
+            ));
+        }
+        if !rebuilt.is_subset(&closure) {
+            errors.push(prefix(
+                "rebuilt paths must be contained in the reported dependency closure",
+            ));
+        }
+        if cell["incremental_update"]["changed_segment_count"].as_u64()
+            != Some(rebuilt.len() as u64)
+            || cell["incremental_update"]["dependency_closure_path_count"].as_u64()
+                != Some(closure.len() as u64)
+            || cell["incremental_update"]["query_operation_count"]
+                .as_u64()
+                .unwrap_or_default()
+                == 0
+        {
+            errors.push(prefix(
+                "bounded update segment, closure, and query counts must be complete",
+            ));
+        }
+
+        if cell["exact_fallback"]["route"].as_str() != Some("request_scoped_exact_overlay")
+            || cell["exact_fallback"]["reason"]
+                .as_str()
+                .is_none_or(str::is_empty)
+        {
+            errors.push(prefix("exact fallback route or reason is missing"));
+        }
+        if cell["full_mcp_request"]["query_operation_count"]
+            .as_u64()
+            .unwrap_or_default()
+            == 0
+        {
+            errors.push(prefix("full MCP request must execute a query operation"));
+        }
+        if cell["full_mcp_request"]["generation_identity_mismatch_count"].as_u64() != Some(0) {
+            errors.push(prefix(
+                "full MCP request must report zero generation identity mismatches",
+            ));
+        }
+
+        for latency_case in LATENCY_CASES {
+            let summary = &cell["latency"][latency_case];
+            let p50 = summary["p50_ms"].as_f64();
+            let p95 = summary["p95_ms"].as_f64();
+            if !matches!((p50, p95), (Some(p50), Some(p95)) if p50 >= 0.0 && p95 >= p50) {
+                errors.push(prefix(&format!(
+                    "{latency_case} must report ordered non-negative p50/p95"
+                )));
+            }
+            if summary["sample_count"].as_u64() != Some(repetitions) {
+                errors.push(prefix(&format!(
+                    "{latency_case} must contain every measured repetition"
+                )));
+            }
+        }
+        for phase_case in PHASE_CASES {
+            let summary = &cell["phase_decomposition"][phase_case];
+            let p50 = summary["p50_ms"].as_f64();
+            let p95 = summary["p95_ms"].as_f64();
+            if summary["sample_count"].as_u64() != Some(repetitions)
+                || !matches!((p50, p95), (Some(p50), Some(p95)) if p50 >= 0.0 && p95 >= p50)
+            {
+                errors.push(prefix(&format!(
+                    "phase {phase_case} must report every ordered p50/p95 sample"
+                )));
+            }
+        }
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors)
+    }
+}
+
+fn string_set(value: &serde_json::Value) -> std::collections::BTreeSet<&str> {
+    value
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .collect()
+}
+
+fn task6_release_cell(project: &str, generation_id: &str) -> serde_json::Value {
+    serde_json::json!({
+        "project": project,
+        "protocol_id": "overlay-generation-task6-v1",
+        "repetitions": 3,
+        "oracle_digest": "digest_equal",
+        "mismatch_count": 0,
+        "direct_parquet": {
+            "query_operation_count": 3,
+            "digest": "digest_equal",
+        },
+        "exact_overlay_oracle": {
+            "query_operation_count": 3,
+            "digest": "digest_equal",
+            "finalization": {
+                "shadow_filters": 3,
+                "result_merges": 3,
+                "overlay_sorts": 3,
+                "stable_id_deduplications": 3,
+            },
+        },
+        "cold_generation": {
+            "generation_id": generation_id,
+            "generation_build_count": 1,
+            "full_base_load_count": 1,
+            "digest": "digest_equal",
+        },
+        "warm_generation": {
+            "generation_ids": [generation_id, generation_id, generation_id],
+            "digests": ["digest_equal", "digest_equal", "digest_equal"],
+            "generation_build_count": 0,
+            "full_base_load_count": 0,
+            "query_operation_count": 3,
+            "finalization": {
+                "shadow_filters": 0,
+                "result_merges": 0,
+                "overlay_sorts": 0,
+                "stable_id_deduplications": 0,
+            },
+        },
+        "incremental_update": {
+            "previous_generation_id": generation_id,
+            "generation_id": format!("{generation_id}_next"),
+            "changed_paths": ["src/bounded.rs"],
+            "rebuilt_paths": ["src/bounded.rs"],
+            "dependency_closure_paths": ["src/bounded.rs"],
+            "changed_segment_count": 1,
+            "dependency_closure_path_count": 1,
+            "full_base_load_count": 0,
+            "query_operation_count": 1,
+            "digest": "digest_equal",
+        },
+        "exact_fallback": {
+            "route": "request_scoped_exact_overlay",
+            "reason": "configuration_off_exact_oracle",
+            "query_operation_count": 3,
+            "digest": "digest_equal",
+        },
+        "full_mcp_request": {
+            "digest": "digest_equal",
+            "query_operation_count": 1,
+            "generation_identity_mismatch_count": 0,
+        },
+        "latency": {
+            "direct_parquet": {"sample_count": 3, "p50_ms": 1.0, "p95_ms": 2.0},
+            "exact_overlay_oracle": {"sample_count": 3, "p50_ms": 2.0, "p95_ms": 3.0},
+            "cold_generation_build": {"sample_count": 3, "p50_ms": 3.0, "p95_ms": 4.0},
+            "warm_generation_reuse": {"sample_count": 3, "p50_ms": 1.0, "p95_ms": 2.0},
+            "bounded_incremental_update": {"sample_count": 3, "p50_ms": 2.0, "p95_ms": 3.0},
+            "exact_fallback": {"sample_count": 3, "p50_ms": 2.0, "p95_ms": 3.0},
+            "full_end_to_end_mcp": {"sample_count": 3, "p50_ms": 3.0, "p95_ms": 4.0},
+        },
+        "phase_decomposition": {
+            "backend_open": {"sample_count": 3, "p50_ms": 1.0, "p95_ms": 2.0},
+            "backend_full_base_read": {"sample_count": 3, "p50_ms": 1.0, "p95_ms": 2.0},
+            "freshness_git_validation": {"sample_count": 3, "p50_ms": 1.0, "p95_ms": 2.0},
+            "generation_lookup_build_cold": {"sample_count": 3, "p50_ms": 1.0, "p95_ms": 2.0},
+            "query_execution_warm_generation": {"sample_count": 3, "p50_ms": 1.0, "p95_ms": 2.0},
+            "response_file_metadata_analysis": {"sample_count": 3, "p50_ms": 1.0, "p95_ms": 2.0},
+            "response_construction_serialization": {"sample_count": 3, "p50_ms": 1.0, "p95_ms": 2.0},
+            "overlay_finalization_exact_oracle": {"sample_count": 3, "p50_ms": 1.0, "p95_ms": 2.0},
+            "full_end_to_end_code_request": {"sample_count": 3, "p50_ms": 1.0, "p95_ms": 2.0},
+        },
+    })
 }
