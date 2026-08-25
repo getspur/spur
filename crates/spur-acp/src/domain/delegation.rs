@@ -279,6 +279,11 @@ pub struct ResolvedSessionConfig {
     /// rejected: <error>"`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skipped: Vec<String>,
+    /// Bounded user-visible warning attached after the worker session,
+    /// such as a worktree-normalization caveat. Kept separate from the
+    /// canonical agent `summary`; optional for wire compatibility.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome_warning: Option<String>,
 }
 
 /// Structured reasoning trace the brain passes alongside each

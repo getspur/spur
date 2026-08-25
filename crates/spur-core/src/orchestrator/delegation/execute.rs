@@ -15,6 +15,47 @@ pub(crate) fn resolve_effective_model_effort(
     (effective_model, effective_effort)
 }
 
+fn bounded_inline_summary(summary: Option<&str>) -> String {
+    summary
+        .map(truncate_summary_env_default)
+        .unwrap_or_default()
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn finalize_worker_outcome(
+    funnel: &crate::event_funnel::FunnelHandle,
+    worker_mcp_servers: &Arc<DashMap<spur_acp::BrainSessionId, Arc<WorkerMcpServer>>>,
+    pm_service: Option<&Arc<PmService>>,
+    brain_session_id: &spur_acp::BrainSessionId,
+    delegation_id: &str,
+    issue_id: Option<&str>,
+    outcome: WorkerAttemptOutcome,
+    final_status: DelegationStatus,
+    total_cost: f64,
+    worker_branch: Option<String>,
+    normalization_warning: Option<String>,
+) -> DelegationResult {
+    finalize(
+        funnel,
+        worker_mcp_servers,
+        pm_service,
+        brain_session_id,
+        delegation_id,
+        issue_id,
+        outcome.worker_session,
+        final_status,
+        outcome.diff,
+        outcome.diff_summary,
+        outcome.summary,
+        total_cost,
+        worker_branch,
+        outcome.artifact,
+        normalization_warning,
+        Some(outcome.resolved_config),
+    )
+    .await
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn execute_delegation(
     agent: String,
@@ -316,10 +357,11 @@ pub(crate) async fn execute_delegation(
 
         // No review gate — commit/remove then emit DelegationCompleted.
         if !agent_config.review.review_required {
+            let final_status = outcome.candidate_status.clone();
             let cleanup = apply_worktree_cleanup(
                 &mut worktrees,
                 &outcome.worker_session,
-                &outcome.candidate_status,
+                &final_status,
                 WorktreeCleanupContext {
                     agent: &agent,
                     worktree_path: &outcome.worktree_path,
@@ -330,23 +372,18 @@ pub(crate) async fn execute_delegation(
             )
             .await;
             return (
-                finalize(
+                finalize_worker_outcome(
                     &funnel,
                     &worker_mcp_servers,
                     pm_service.as_ref(),
                     &brain_session_id,
                     &request_id,
                     issue_id.as_deref(),
-                    outcome.worker_session,
-                    outcome.candidate_status,
-                    outcome.diff,
-                    outcome.diff_summary,
-                    outcome.summary,
+                    outcome,
+                    final_status,
                     total_cost,
                     cleanup.worker_branch,
-                    None,
                     cleanup.normalization_warning,
-                    Some(outcome.resolved_config.clone()),
                 )
                 .await,
                 executor_id.clone(),
@@ -389,23 +426,18 @@ pub(crate) async fn execute_delegation(
                 )
                 .await;
                 return (
-                    finalize(
+                    finalize_worker_outcome(
                         &funnel,
                         &worker_mcp_servers,
                         pm_service.as_ref(),
                         &brain_session_id,
                         &request_id,
                         issue_id.as_deref(),
-                        outcome.worker_session,
+                        outcome,
                         failed_status,
-                        outcome.diff,
-                        outcome.diff_summary.clone(),
-                        outcome.summary,
                         total_cost,
                         cleanup.worker_branch,
-                        None,
                         cleanup.normalization_warning,
-                        Some(outcome.resolved_config.clone()),
                     )
                     .await,
                     executor_id.clone(),
@@ -479,7 +511,7 @@ pub(crate) async fn execute_delegation(
         };
 
         let review_payload = ReviewPayload {
-            summary: outcome.summary.clone().unwrap_or_default(),
+            summary: bounded_inline_summary(outcome.summary.as_deref()),
             diff_summary: outcome.diff_summary.clone(),
             pr_url: None,
             error: None,
@@ -526,23 +558,18 @@ pub(crate) async fn execute_delegation(
                 )
                 .await;
                 return (
-                    finalize(
+                    finalize_worker_outcome(
                         &funnel,
                         &worker_mcp_servers,
                         pm_service.as_ref(),
                         &brain_session_id,
                         &request_id,
                         issue_id.as_deref(),
-                        outcome.worker_session,
+                        outcome,
                         final_status,
-                        outcome.diff,
-                        outcome.diff_summary.clone(),
-                        outcome.summary,
                         total_cost,
                         cleanup.worker_branch,
-                        None,
                         cleanup.normalization_warning,
-                        Some(outcome.resolved_config.clone()),
                     )
                     .await,
                     executor_id.clone(),
@@ -572,23 +599,18 @@ pub(crate) async fn execute_delegation(
                 )
                 .await;
                 return (
-                    finalize(
+                    finalize_worker_outcome(
                         &funnel,
                         &worker_mcp_servers,
                         pm_service.as_ref(),
                         &brain_session_id,
                         &request_id,
                         issue_id.as_deref(),
-                        outcome.worker_session,
+                        outcome,
                         final_status,
-                        outcome.diff,
-                        outcome.diff_summary.clone(),
-                        outcome.summary,
                         total_cost,
                         cleanup.worker_branch,
-                        None,
                         cleanup.normalization_warning,
-                        Some(outcome.resolved_config.clone()),
                     )
                     .await,
                     executor_id.clone(),
@@ -617,23 +639,18 @@ pub(crate) async fn execute_delegation(
                 )
                 .await;
                 return (
-                    finalize(
+                    finalize_worker_outcome(
                         &funnel,
                         &worker_mcp_servers,
                         pm_service.as_ref(),
                         &brain_session_id,
                         &request_id,
                         issue_id.as_deref(),
-                        outcome.worker_session,
+                        outcome,
                         final_status,
-                        outcome.diff,
-                        outcome.diff_summary.clone(),
-                        outcome.summary,
                         total_cost,
                         cleanup.worker_branch,
-                        None,
                         cleanup.normalization_warning,
-                        Some(outcome.resolved_config.clone()),
                     )
                     .await,
                     executor_id.clone(),
@@ -662,23 +679,18 @@ pub(crate) async fn execute_delegation(
                 )
                 .await;
                 return (
-                    finalize(
+                    finalize_worker_outcome(
                         &funnel,
                         &worker_mcp_servers,
                         pm_service.as_ref(),
                         &brain_session_id,
                         &request_id,
                         issue_id.as_deref(),
-                        outcome.worker_session,
+                        outcome,
                         final_status,
-                        outcome.diff,
-                        outcome.diff_summary.clone(),
-                        outcome.summary,
                         total_cost,
                         cleanup.worker_branch,
-                        None,
                         cleanup.normalization_warning,
-                        Some(outcome.resolved_config.clone()),
                     )
                     .await,
                     executor_id.clone(),
@@ -715,23 +727,18 @@ pub(crate) async fn execute_delegation(
                     )
                     .await;
                     return (
-                        finalize(
+                        finalize_worker_outcome(
                             &funnel,
                             &worker_mcp_servers,
                             pm_service.as_ref(),
                             &brain_session_id,
                             &request_id,
                             issue_id.as_deref(),
-                            outcome.worker_session,
+                            outcome,
                             final_status,
-                            outcome.diff,
-                            outcome.diff_summary.clone(),
-                            outcome.summary,
                             total_cost,
                             cleanup.worker_branch,
-                            None,
                             cleanup.normalization_warning,
-                            Some(outcome.resolved_config.clone()),
                         )
                         .await,
                         executor_id.clone(),
@@ -762,7 +769,7 @@ pub(crate) async fn execute_delegation(
                 // mitigation.
                 retry_history.push(RetryAttempt {
                     attempt_n,
-                    summary: outcome.summary.clone().unwrap_or_default(),
+                    summary: bounded_inline_summary(outcome.summary.as_deref()),
                     diff_summary: outcome.diff_summary.clone(),
                     feedback: new_constraints.clone(),
                 });
@@ -828,23 +835,18 @@ pub(crate) async fn execute_delegation(
                 )
                 .await;
                 return (
-                    finalize(
+                    finalize_worker_outcome(
                         &funnel,
                         &worker_mcp_servers,
                         pm_service.as_ref(),
                         &brain_session_id,
                         &request_id,
                         issue_id.as_deref(),
-                        outcome.worker_session,
+                        outcome,
                         final_status,
-                        outcome.diff,
-                        outcome.diff_summary.clone(),
-                        outcome.summary,
                         total_cost,
                         cleanup.worker_branch,
-                        None,
                         cleanup.normalization_warning,
-                        Some(outcome.resolved_config.clone()),
                     )
                     .await,
                     executor_id.clone(),
@@ -929,6 +931,339 @@ pub(crate) fn apply_bloat_cap(history: &mut Vec<RetryAttempt>, max_bytes: usize)
     }
     while history.iter().map(size).sum::<usize>() > max_bytes && !history.is_empty() {
         history.remove(0);
+    }
+}
+
+#[cfg(test)]
+mod full_summary_retention_tests {
+    use super::{bounded_inline_summary, summary_cap_bytes};
+
+    #[test]
+    fn full_summary_retention_clips_inline_consumer_projection() {
+        let full_summary = "x".repeat(summary_cap_bytes() + 1);
+
+        let inline = bounded_inline_summary(Some(&full_summary));
+
+        assert_ne!(inline, full_summary);
+        assert!(inline.contains("chars omitted"));
+    }
+}
+
+#[cfg(test)]
+mod production_outcome_roundtrip_tests {
+    use super::*;
+    use crate::handlers::{fetch_outcome_artifact, WorkerCallContext};
+    use crate::outcome_materializer::OutcomeMaterializer;
+    use async_trait::async_trait;
+    use futures::Stream;
+    use spur_acp::domain::ContinuationSource;
+    use spur_acp::{
+        AcpSessionId, AcpToolCall, BrainSessionId, ContentChunk, DelegationId, InitializeResponse,
+        NewSessionResponse, SessionNotification, TextContent,
+    };
+    use spur_blob_store::{MemoryOutcomeStore, OutcomeStore};
+    use std::pin::Pin;
+    use std::process::Command;
+
+    struct ScriptedConnection {
+        notifications: Vec<SessionNotification>,
+    }
+
+    #[async_trait]
+    impl AgentConnection for ScriptedConnection {
+        async fn initialize(
+            &mut self,
+            _request: InitializeRequest,
+        ) -> anyhow::Result<InitializeResponse> {
+            Ok(InitializeResponse::new(ProtocolVersion::LATEST))
+        }
+
+        async fn new_session(
+            &mut self,
+            _cwd: PathBuf,
+            _mcp_servers: Vec<McpServer>,
+        ) -> anyhow::Result<NewSessionResponse> {
+            Ok(NewSessionResponse::new(AcpSessionId::new(
+                "scripted-session",
+            )))
+        }
+
+        async fn prompt(
+            &mut self,
+            _request: PromptRequest,
+        ) -> anyhow::Result<Pin<Box<dyn Stream<Item = SessionNotification> + Send>>> {
+            Ok(Box::pin(futures::stream::iter(self.notifications.clone())))
+        }
+
+        async fn cancel(&mut self, _session_id: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn shutdown(&mut self) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn health(&self) -> AgentHealth {
+            AgentHealth::Ready
+        }
+    }
+
+    fn run_git(repo: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .output()
+            .expect("git command must start");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn setup_repo() -> tempfile::TempDir {
+        let repo = tempfile::TempDir::new().expect("tempdir");
+        run_git(repo.path(), &["init", "-q", "-b", "main"]);
+        run_git(repo.path(), &["config", "user.email", "test@spur.local"]);
+        run_git(repo.path(), &["config", "user.name", "SPUR Test"]);
+        std::fs::write(repo.path().join("README.md"), "base\n").expect("write seed");
+        run_git(repo.path(), &["add", "README.md"]);
+        run_git(repo.path(), &["commit", "-q", "-m", "seed"]);
+        repo
+    }
+
+    fn text_update(text: impl Into<String>, thought: bool) -> SessionUpdate {
+        let chunk = ContentChunk::new(ContentBlock::Text(TextContent::new(text.into())));
+        if thought {
+            SessionUpdate::AgentThoughtChunk(chunk)
+        } else {
+            SessionUpdate::AgentMessageChunk(chunk)
+        }
+    }
+
+    async fn run_scripted_attempt(
+        repo_root: PathBuf,
+        brain_session_id: &BrainSessionId,
+        delegation_id: &str,
+        final_message: &str,
+        funnel: &crate::event_funnel::FunnelHandle,
+    ) -> WorkerAttemptOutcome {
+        let session_id = AcpSessionId::new("scripted-session");
+        let notifications = vec![
+            SessionNotification::new(
+                session_id.clone(),
+                text_update("earlier assistant message", false),
+            ),
+            SessionNotification::new(
+                session_id.clone(),
+                SessionUpdate::ToolCall(AcpToolCall::new("tool-1", "read")),
+            ),
+            SessionNotification::new(
+                session_id.clone(),
+                text_update("private post-tool reasoning", true),
+            ),
+            SessionNotification::new(session_id.clone(), text_update("final: ", false)),
+            SessionNotification::new(session_id, text_update(final_message, false)),
+        ];
+        let notifications_for_factory = notifications.clone();
+        let mut worktrees = WorktreeManager::new(repo_root);
+        let mut agent_config = spur_acp::AgentConfig::with_defaults("scripted");
+        agent_config.kind = spur_acp::types::AgentKind::Generic;
+        let worker_session = SessionId::new();
+        let fault_hooks = FaultInjectionHooks::default();
+        let feature_gate = spur_license::FeatureGate::new_with_install_id(
+            spur_license::policy::PolicyResolver::embedded(),
+            spur_license::InstallId::from_uuid(uuid::Uuid::nil()),
+        );
+
+        run_one_worker_attempt(
+            worker_session,
+            WorkerAttemptCtx {
+                brain_session_id,
+                agent: "scripted",
+                model: None,
+                effort: None,
+                profile: None,
+                profile_def: None,
+                skills: None,
+                config_overrides: None,
+                task: "produce the final response",
+                request_id: delegation_id,
+                attempt: 1,
+                agent_config: &agent_config,
+                delegation_plan: None,
+                issue_id: None,
+                prior_branch_for_reuse: None,
+                peer_mailbox: None,
+                ack_tx: None,
+                base: None,
+                dispatched_base_oid_tx: None,
+                fault_injection_hooks: &fault_hooks,
+                worker_mcp_servers: &[],
+                worker_mcp_server: None,
+                worker_mcp_tool_names: None,
+                pm_service: None,
+                feature_gate: &feature_gate,
+                connection_factory: Some(&move |_cfg, _args, _env, _repo_root| {
+                    Box::new(ScriptedConnection {
+                        notifications: notifications_for_factory.clone(),
+                    })
+                }),
+            },
+            &mut worktrees,
+            funnel,
+        )
+        .await
+        .expect("scripted worker attempt must succeed")
+    }
+
+    #[tokio::test]
+    async fn production_terminal_paths_round_trip_complete_latest_message_and_artifact() {
+        let repo = setup_repo();
+        let (funnel, _events_rx) = crate::event_funnel::test_channel();
+        let brain_session_id = BrainSessionId::new(SessionId::new());
+        let worker_servers: Arc<DashMap<BrainSessionId, Arc<WorkerMcpServer>>> =
+            Arc::new(DashMap::new());
+        let final_tail = "x".repeat(summary_cap_bytes() + 64);
+        let expected_summary = format!("final: {final_tail}");
+        let captured = run_scripted_attempt(
+            repo.path().to_path_buf(),
+            &brain_session_id,
+            "production-roundtrip",
+            &final_tail,
+            &funnel,
+        )
+        .await;
+        assert_eq!(captured.summary.as_deref(), Some(expected_summary.as_str()));
+        assert!(
+            captured.artifact.is_some(),
+            "long response must persist an artifact"
+        );
+
+        let store: Arc<dyn OutcomeStore> = Arc::new(MemoryOutcomeStore::new());
+        let materializer = OutcomeMaterializer::new(store.clone());
+        let statuses = vec![
+            DelegationStatus::Success,
+            DelegationStatus::Failed {
+                error: "review registration failed".into(),
+            },
+            DelegationStatus::Rejected {
+                reason: "review rejected".into(),
+            },
+            DelegationStatus::Modified {
+                reviewer_note: "approved with changes".into(),
+            },
+            DelegationStatus::TimedOut {
+                waited_for: Duration::from_secs(1),
+                fallback: TimeoutFallback::Abandon,
+            },
+        ];
+
+        for (index, status) in statuses.into_iter().enumerate() {
+            let delegation_id: DelegationId = format!("terminal-path-{index}").into();
+            let result = finalize_worker_outcome(
+                &funnel,
+                &worker_servers,
+                None,
+                &brain_session_id,
+                delegation_id.as_str(),
+                None,
+                captured.clone(),
+                status,
+                0.0,
+                None,
+                Some("normalization diagnostic".into()),
+            )
+            .await;
+            assert_eq!(result.summary.as_deref(), Some(expected_summary.as_str()));
+            assert!(
+                result.artifact.is_some(),
+                "terminal path {index} lost artifact"
+            );
+            assert_eq!(
+                result
+                    .resolved_config
+                    .as_ref()
+                    .expect("worker outcome has resolved config")
+                    .outcome_warning
+                    .as_deref(),
+                Some("normalization diagnostic")
+            );
+
+            let continuation = materializer
+                .materialize(
+                    result,
+                    delegation_id.clone(),
+                    1,
+                    brain_session_id.clone(),
+                    ContinuationSource::Inline,
+                    None,
+                )
+                .await;
+            assert_ne!(
+                continuation.payload.summary.as_deref(),
+                Some(expected_summary.as_str()),
+                "continuation path {index} must remain bounded"
+            );
+            assert_eq!(
+                continuation
+                    .payload
+                    .resolved_config
+                    .as_ref()
+                    .expect("continuation carries resolved config")
+                    .outcome_warning
+                    .as_deref(),
+                Some("normalization diagnostic")
+            );
+
+            let response = fetch_outcome_artifact(
+                &materializer,
+                store.as_ref(),
+                &WorkerCallContext {
+                    delegation_id: delegation_id.to_string(),
+                    brain_session_id: brain_session_id.as_session_id().to_string(),
+                },
+                serde_json::json!({
+                    "delegation_id": delegation_id.as_str(),
+                    "attempt": 1,
+                    "section": "summary"
+                }),
+            )
+            .await
+            .expect("terminal summary fetch must succeed");
+            let projected: serde_json::Value = serde_json::from_str(
+                response["content"][0]["text"]
+                    .as_str()
+                    .expect("fetch response text"),
+            )
+            .expect("summary section must be JSON");
+            assert_eq!(projected["summary"], expected_summary);
+        }
+
+        let setup_failure = finalize(
+            &funnel,
+            &worker_servers,
+            None,
+            &brain_session_id,
+            "setup-failure",
+            None,
+            SessionId::new(),
+            DelegationStatus::SetupFailed {
+                error: spur_acp::AttemptSetupError::InitFailed {
+                    error: "connection unavailable".into(),
+                },
+            },
+            None,
+            None,
+            None,
+            0.0,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert!(setup_failure.artifact.is_none());
     }
 }
 

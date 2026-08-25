@@ -37,6 +37,54 @@ pub(crate) fn format_worker_task(task: &str, context_files: &[String]) -> String
     out
 }
 
+#[derive(Default)]
+struct FinalMessageCapture {
+    text: String,
+    reset_before_next_message: bool,
+}
+
+impl FinalMessageCapture {
+    fn observe(&mut self, update: &SessionUpdate) {
+        match update {
+            SessionUpdate::AgentMessageChunk(chunk) => {
+                if let ContentBlock::Text(text) = &chunk.content {
+                    if self.reset_before_next_message {
+                        self.text.clear();
+                        self.reset_before_next_message = false;
+                    }
+                    self.text.push_str(&text.text);
+                }
+            }
+            SessionUpdate::ToolCall(_) | SessionUpdate::ToolCallUpdate(_) => {
+                self.reset_before_next_message = !self.text.is_empty();
+            }
+            _ => {}
+        }
+    }
+
+    fn replace_with_diagnostic(&mut self, diagnostic: String) {
+        self.text = diagnostic;
+        self.reset_before_next_message = false;
+    }
+
+    #[cfg(test)]
+    fn as_str(&self) -> &str {
+        &self.text
+    }
+
+    fn into_string(self) -> String {
+        self.text
+    }
+}
+
+fn build_full_attempt_summary(final_message: &str) -> Option<String> {
+    if final_message.is_empty() {
+        return None;
+    }
+
+    Some(final_message.to_owned())
+}
+
 #[allow(clippy::enum_variant_names)]
 #[derive(Debug)]
 pub(crate) enum AttemptSetupError {
@@ -73,6 +121,7 @@ impl std::fmt::Display for AttemptSetupError {
 
 /// Outcome of one worker attempt: whatever we'd need to close out the
 /// delegation OR feed into the review gate.
+#[derive(Clone)]
 pub(crate) struct WorkerAttemptOutcome {
     pub(crate) worker_session: SessionId,
     pub(crate) candidate_status: DelegationStatus,
@@ -87,7 +136,6 @@ pub(crate) struct WorkerAttemptOutcome {
     pub(crate) worktree_path: PathBuf,
     /// Side-channel artifact (persisted stdout when output > summary cap).
     /// `None` when the worker's stdout fit under the cap.
-    #[allow(dead_code)] // Populated in Task 8 (artifact persistence wiring).
     pub(crate) artifact: Option<spur_acp::WorkerArtifact>,
     /// Resolved `{agent, profile, model, effort, config_overrides}`
     /// actually applied to this attempt's worker session. Captured at
@@ -1299,7 +1347,7 @@ pub(crate) async fn run_one_worker_attempt(
     }
     let prompt_request = PromptRequest::new(session_response.session_id.clone(), prompt_blocks);
 
-    let mut output_text = String::new();
+    let mut final_message = FinalMessageCapture::default();
     let mut worker_success = true;
 
     // S5 — Per-worker-attempt file-touch dedup. Owned locally (no Arc
@@ -1329,15 +1377,7 @@ pub(crate) async fn run_one_worker_attempt(
                 executor_id: worker_session.0.clone(),
                 notification: Box::new(notification.clone()),
             });
-            match &notification.update {
-                SessionUpdate::AgentThoughtChunk(chunk)
-                | SessionUpdate::AgentMessageChunk(chunk) => {
-                    if let ContentBlock::Text(tc) = &chunk.content {
-                        output_text.push_str(&tc.text);
-                    }
-                }
-                _ => {}
-            }
+            final_message.observe(&notification.update);
         },
     )
     .await;
@@ -1345,11 +1385,12 @@ pub(crate) async fn run_one_worker_attempt(
         Ok(outcome) => Some(outcome.usage),
         Err(e) => {
             worker_success = false;
-            output_text = format!("Failed to prompt worker: {e}");
+            final_message.replace_with_diagnostic(format!("Failed to prompt worker: {e}"));
             None
         }
     }
     .flatten();
+    let output_text = final_message.into_string();
 
     if worker_success {
         if let (Some(bundle), Some(pc)) = (ctx.peer_mailbox, peer_context) {
@@ -1604,7 +1645,7 @@ pub(crate) async fn run_one_worker_attempt(
         Some(DelegationStatus::Failed { error })
     };
 
-    let (candidate_status, artifact, persist_failure_note) =
+    let (candidate_status, artifact) =
         decide_artifact_handling(worker_success, persist_result, original_error_status);
 
     // Surface a success-path tracing event for observability. Warn
@@ -1619,14 +1660,9 @@ pub(crate) async fn run_one_worker_attempt(
         );
     }
 
-    // Apply the persist-failure annotation to the summary tail (if any).
-    let summary = summary_pre_annotation.map(|mut s| {
-        if let Some(note) = persist_failure_note.as_deref() {
-            s.push('\n');
-            s.push_str(note);
-        }
-        s
-    });
+    // Preserve the complete final agent response for ResultJson persistence.
+    // Inline consumers apply their own bounded projections downstream.
+    let summary = build_full_attempt_summary(&output_text);
 
     Ok(WorkerAttemptOutcome {
         worker_session,
@@ -1688,6 +1724,174 @@ async fn delete_worker_session_best_effort(
             %error,
             "worker ACP session delete failed during delegation teardown"
         ),
+    }
+}
+
+#[cfg(test)]
+mod final_message_capture_tests {
+    use super::FinalMessageCapture;
+    use spur_acp::{AcpToolCall, ContentBlock, ContentChunk, SessionUpdate, TextContent};
+
+    fn text_chunk(text: &str, thought: bool) -> SessionUpdate {
+        let chunk = ContentChunk::new(ContentBlock::Text(TextContent::new(text)));
+        if thought {
+            SessionUpdate::AgentThoughtChunk(chunk)
+        } else {
+            SessionUpdate::AgentMessageChunk(chunk)
+        }
+    }
+
+    #[test]
+    fn final_message_capture_ignores_thought_chunks() {
+        let mut final_message = FinalMessageCapture::default();
+
+        final_message.observe(&text_chunk("private reasoning", true));
+        final_message.observe(&text_chunk("final ", false));
+        final_message.observe(&text_chunk("answer", false));
+
+        assert_eq!(final_message.as_str(), "final answer");
+    }
+
+    #[test]
+    fn final_message_capture_replaces_pre_tool_assistant_text() {
+        let mut final_message = FinalMessageCapture::default();
+
+        final_message.observe(&text_chunk("I will inspect the implementation.", false));
+        final_message.observe(&SessionUpdate::ToolCall(AcpToolCall::new("tool-1", "read")));
+        final_message.observe(&text_chunk("Root cause: ", false));
+        final_message.observe(&text_chunk("the final answer.", false));
+
+        assert_eq!(final_message.as_str(), "Root cause: the final answer.");
+    }
+}
+
+#[cfg(test)]
+mod full_summary_retention_tests {
+    use super::{build_full_attempt_summary, decide_artifact_handling, summary_cap_bytes};
+
+    #[test]
+    fn full_summary_retention_preserves_content_beyond_inline_cap() {
+        let final_message = "x".repeat(summary_cap_bytes() + 1);
+
+        let summary = build_full_attempt_summary(&final_message)
+            .expect("non-empty final message must produce a summary");
+
+        assert_eq!(summary, final_message);
+    }
+
+    #[test]
+    fn canonical_summary_excludes_persistence_diagnostic() {
+        let (status, _artifact) =
+            decide_artifact_handling(true, Some(Err("disk full".into())), None);
+        assert!(matches!(
+            status,
+            spur_acp::DelegationStatus::Failed { ref error }
+                if error.contains("artifact persistence failed: disk full")
+        ));
+
+        let summary = build_full_attempt_summary("agent answer")
+            .expect("non-empty final message must produce a summary");
+
+        assert_eq!(summary, "agent answer");
+    }
+}
+
+#[cfg(test)]
+mod complete_final_message_roundtrip_tests {
+    use super::{build_full_attempt_summary, summary_cap_bytes, FinalMessageCapture};
+    use crate::handlers::{fetch_outcome_artifact, WorkerCallContext};
+    use crate::outcome_materializer::OutcomeMaterializer;
+    use spur_acp::domain::ContinuationSource;
+    use spur_acp::{
+        ArtifactKind, BrainSessionId, ContentBlock, ContentChunk, DelegationId, DelegationResult,
+        DelegationStatus, SessionId, SessionUpdate, TextContent, WorkerArtifact,
+    };
+    use spur_blob_store::{MemoryOutcomeStore, OutcomeStore};
+    use std::sync::Arc;
+
+    fn text_chunk(text: &str, thought: bool) -> SessionUpdate {
+        let chunk = ContentChunk::new(ContentBlock::Text(TextContent::new(text)));
+        if thought {
+            SessionUpdate::AgentThoughtChunk(chunk)
+        } else {
+            SessionUpdate::AgentMessageChunk(chunk)
+        }
+    }
+
+    #[tokio::test]
+    async fn complete_final_message_round_trips_through_materializer_and_fetch() {
+        let mut captured = FinalMessageCapture::default();
+        captured.observe(&text_chunk("private reasoning", true));
+        captured.observe(&text_chunk("final:", false));
+        captured.observe(&text_chunk(&" —".repeat(summary_cap_bytes() + 1), false));
+        let full_message = captured.into_string();
+        let full_summary = build_full_attempt_summary(&full_message)
+            .expect("captured final message must produce a summary");
+
+        let store: Arc<dyn OutcomeStore> = Arc::new(MemoryOutcomeStore::new());
+        let materializer = OutcomeMaterializer::new(store.clone());
+        let brain_session_id =
+            BrainSessionId::new(SessionId("550e8400-e29b-41d4-a716-446655440000".into()));
+        let delegation_id: DelegationId = "complete-final-message".into();
+        let result = DelegationResult {
+            resolved_config: None,
+            status: DelegationStatus::Success,
+            diff: None,
+            diff_summary: None,
+            summary: Some(full_summary),
+            estimated_cost_usd: 0.0,
+            worker_branch: None,
+            artifact: Some(WorkerArtifact {
+                object_ref: "refs/spur/artifacts/complete-final-message".into(),
+                blob_sha: "abc123".into(),
+                size_bytes: full_message.len(),
+                kind: ArtifactKind::Output,
+            }),
+        };
+
+        let continuation = materializer
+            .materialize(
+                result,
+                delegation_id.clone(),
+                1,
+                brain_session_id.clone(),
+                ContinuationSource::Inline,
+                None,
+            )
+            .await;
+        assert_ne!(
+            continuation.payload.summary.as_deref(),
+            Some(full_message.as_str()),
+            "inline continuation must remain bounded"
+        );
+
+        let response = fetch_outcome_artifact(
+            &materializer,
+            store.as_ref(),
+            &WorkerCallContext {
+                delegation_id: delegation_id.to_string(),
+                brain_session_id: brain_session_id.as_session_id().to_string(),
+            },
+            serde_json::json!({
+                "delegation_id": delegation_id.as_str(),
+                "attempt": 1,
+                "section": "summary"
+            }),
+        )
+        .await
+        .expect("same-session summary fetch must succeed");
+
+        let projected: serde_json::Value = serde_json::from_str(
+            response["content"][0]["text"]
+                .as_str()
+                .expect("fetch response text"),
+        )
+        .expect("summary section must be JSON");
+        assert_eq!(projected["summary"], full_message);
+        assert!(!projected["summary"]
+            .as_str()
+            .expect("summary string")
+            .contains("private reasoning"));
     }
 }
 

@@ -973,6 +973,7 @@ fn worker_session_configured_roundtrips() {
             skipped: vec![
                 "effort: agent exposed no thought-level option (requested 'high')".into(),
             ],
+            outcome_warning: Some("worktree normalized".into()),
         },
     });
 
@@ -998,6 +999,10 @@ fn worker_session_configured_roundtrips() {
                 Some("plan")
             );
             assert_eq!(config.skipped.len(), 1);
+            assert_eq!(
+                config.outcome_warning.as_deref(),
+                Some("worktree normalized")
+            );
         }
         other => panic!("expected WorkerSessionConfigured, got {other:?}"),
     }
@@ -1031,6 +1036,7 @@ fn worker_session_configured_defaults_are_compact_when_absent() {
     assert!(!obj.contains_key("effort"));
     assert!(!obj.contains_key("config_overrides_applied"));
     assert!(!obj.contains_key("skipped"));
+    assert!(!obj.contains_key("outcome_warning"));
 
     let _round: SpurEvent = serde_json::from_value(value).expect("round-trip");
 }

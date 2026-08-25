@@ -735,6 +735,7 @@ fn worker_session_configured_populates_resolved_config() {
             effort: Some("high".into()),
             config_overrides_applied,
             skipped: Vec::new(),
+            outcome_warning: None,
         },
     }));
 

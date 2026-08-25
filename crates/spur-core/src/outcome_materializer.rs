@@ -32,6 +32,20 @@ pub const DEFAULT_BASE_HINT_CAP_BYTES: usize = 256;
 pub const DEFAULT_DIFF_FILES_CAP_COUNT: usize = 16;
 pub const DEFAULT_STATUS_STRING_CAP_BYTES: usize = 512;
 pub const DEFAULT_ARTIFACT_REF_STRING_CAP_BYTES: usize = 256;
+pub const DEFAULT_RESULT_WARNING_CAP_BYTES: usize = 256;
+
+fn clip_resolved_config_warning(
+    mut config: Option<spur_acp::ResolvedSessionConfig>,
+) -> Option<spur_acp::ResolvedSessionConfig> {
+    if let Some(resolved) = config.as_mut() {
+        resolved.outcome_warning = spur_acp::domain::clip::clip_with_ellipsis(
+            resolved.outcome_warning.take(),
+            DEFAULT_RESULT_WARNING_CAP_BYTES,
+        )
+        .0;
+    }
+    config
+}
 
 #[derive(Clone)]
 pub struct OutcomeMaterializer {
@@ -276,7 +290,7 @@ impl OutcomeMaterializer {
         let (base_hint, _) = clip_with_ellipsis(base_hint, self.base_hint_cap_bytes);
 
         let payload = ContinuationPayload {
-            resolved_config: result.resolved_config.clone(),
+            resolved_config: clip_resolved_config_warning(result.resolved_config.clone()),
             status: clipped_status,
             summary: clipped_summary,
             diff_summary: clipped_diff,
@@ -395,7 +409,7 @@ impl OutcomeMaterializer {
         }
 
         let payload = ContinuationPayload {
-            resolved_config: result.resolved_config.clone(),
+            resolved_config: clip_resolved_config_warning(result.resolved_config.clone()),
             status: clipped_status,
             summary: clipped_summary,
             diff_summary: clipped_diff,
@@ -675,6 +689,7 @@ mod tests {
             skipped: vec![
                 "effort: agent exposed no thought-level option (requested 'high')".into(),
             ],
+            outcome_warning: Some("worktree normalized".into()),
         });
         let cont = mat
             .materialize(
@@ -695,6 +710,10 @@ mod tests {
         assert_eq!(resolved.profile.as_deref(), Some("rust-pro"));
         assert_eq!(resolved.model.as_deref(), Some("gpt-5-codex"));
         assert_eq!(resolved.effort.as_deref(), Some("high"));
+        assert_eq!(
+            resolved.outcome_warning.as_deref(),
+            Some("worktree normalized")
+        );
         assert_eq!(resolved.skipped.len(), 1);
     }
 

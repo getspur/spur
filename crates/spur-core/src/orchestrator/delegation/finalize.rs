@@ -29,7 +29,7 @@ pub(crate) async fn finalize(
     worker_branch: Option<String>,
     artifact: Option<spur_acp::WorkerArtifact>,
     normalization_warning: Option<String>,
-    resolved_config: Option<spur_acp::ResolvedSessionConfig>,
+    mut resolved_config: Option<spur_acp::ResolvedSessionConfig>,
 ) -> DelegationResult {
     flush_then_emit_completed(
         funnel,
@@ -42,11 +42,21 @@ pub(crate) async fn finalize(
         &final_status,
     )
     .await;
-    let summary = match (normalization_warning, summary) {
-        (Some(warn), Some(summary)) if !summary.is_empty() => Some(format!("{warn}\n{summary}")),
-        (Some(warn), _) => Some(warn),
-        (None, summary) => summary,
-    };
+    if let Some(warning) = normalization_warning {
+        tracing::warn!(
+            delegation_id,
+            warning = %warning,
+            "worktree normalization completed with a warning"
+        );
+        let bounded_warning = spur_acp::domain::clip::clip_with_ellipsis(
+            Some(warning),
+            crate::outcome_materializer::DEFAULT_RESULT_WARNING_CAP_BYTES,
+        )
+        .0;
+        resolved_config
+            .get_or_insert_with(spur_acp::ResolvedSessionConfig::default)
+            .outcome_warning = bounded_warning;
+    }
 
     DelegationResult {
         resolved_config,
@@ -389,12 +399,16 @@ mod flush_ordering_tests {
     }
 
     #[tokio::test]
-    async fn finalize_prepends_normalization_warning_to_summary() {
+    async fn canonical_summary_excludes_normalization_warning() {
         let (funnel, _body_rx) = crate::event_funnel::test_channel();
         let brain_session_id = spur_acp::BrainSessionId::new(spur_acp::types::SessionId::new());
         let servers: Arc<DashMap<spur_acp::BrainSessionId, Arc<WorkerMcpServer>>> =
             Arc::new(DashMap::new());
 
+        let warning = format!(
+            "[normalize: squashed 3 worker commits] {}",
+            "🚧".repeat(crate::outcome_materializer::DEFAULT_RESULT_WARNING_CAP_BYTES)
+        );
         let result = finalize(
             &funnel,
             &servers,
@@ -410,14 +424,22 @@ mod flush_ordering_tests {
             0.0,
             Some("worker-branch".into()),
             None,
-            Some("[normalize: squashed 3 worker commits into 1; please maintain a clean tree or commit exactly once]".into()),
-            None,
+            Some(warning.clone()),
+            Some(spur_acp::ResolvedSessionConfig::default()),
         )
         .await;
 
-        let summary = result.summary.expect("summary");
-        assert!(summary.starts_with("[normalize: squashed 3 worker commits into 1"));
-        assert!(summary.contains("worker summary"));
+        assert_eq!(result.summary.as_deref(), Some("worker summary"));
+        let outcome_warning = result
+            .resolved_config
+            .expect("resolved config")
+            .outcome_warning
+            .expect("normalization warning remains user-visible");
+        assert_ne!(outcome_warning, warning);
+        assert!(outcome_warning.starts_with("[normalize: squashed 3 worker commits]"));
+        assert!(
+            outcome_warning.len() <= crate::outcome_materializer::DEFAULT_RESULT_WARNING_CAP_BYTES
+        );
     }
 
     /// Abort-path ordering: `flush_then_emit_completed` (used by the

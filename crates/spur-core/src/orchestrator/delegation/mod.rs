@@ -18,6 +18,7 @@ pub(crate) use execute::execute_delegation;
 pub(crate) use finalize::{finalize, flush_then_emit_completed};
 pub(crate) use worker_attempt::{
     format_worker_task, run_one_worker_attempt, AttemptSetupError, WorkerAttemptCtx,
+    WorkerAttemptOutcome,
 };
 
 fn maybe_spawn_dispatch_lease_heartbeat(

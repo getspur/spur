@@ -85,58 +85,45 @@ pub(crate) fn sha256_hex_for_outcome(content: &[u8]) -> String {
 ///   `!worker_success` branch; the helper composes with existing error
 ///   extraction so this path keeps the worker's original error.
 ///
-/// Returns: `(status, artifact, summary_annotation)`.
+/// Returns: `(status, artifact)`.
 /// - `status` is the final `DelegationStatus`.
 /// - `artifact` is `Some` on successful persistence (regardless of
 ///   worker success — failing workers still get diagnostic artifacts).
-/// - `summary_annotation`, if `Some`, must be appended to the truncated
-///   summary tail by the caller.
 ///
 /// Failure rule:
-/// - worker_success + Ok  -> Success + Some(artifact) + no note
-/// - worker_success + Err -> Failed { "artifact persistence failed: ..." } + None + note
-/// - !worker_success + Ok -> original_error_status + Some(artifact) + no note
-/// - !worker_success + Err -> original_error_status + None + note
+/// - worker_success + Ok  -> Success + Some(artifact)
+/// - worker_success + Err -> Failed { "artifact persistence failed: ..." } + None
+/// - !worker_success + Ok -> original_error_status + Some(artifact)
+/// - !worker_success + Err -> original_error_status + None
 pub(crate) fn decide_artifact_handling(
     worker_success: bool,
     persist_result: Option<Result<spur_acp::WorkerArtifact, String>>,
     original_error_status: Option<DelegationStatus>,
-) -> (
-    DelegationStatus,
-    Option<spur_acp::WorkerArtifact>,
-    Option<String>,
-) {
+) -> (DelegationStatus, Option<spur_acp::WorkerArtifact>) {
     match (worker_success, persist_result) {
-        (true, Some(Ok(art))) => (DelegationStatus::Success, Some(art), None),
+        (true, Some(Ok(art))) => (DelegationStatus::Success, Some(art)),
         (true, Some(Err(e))) => {
             let msg = format!("artifact persistence failed: {e}");
-            (
-                DelegationStatus::Failed { error: msg.clone() },
-                None,
-                Some(format!("[orchestrator: {msg}]")),
-            )
+            (DelegationStatus::Failed { error: msg }, None)
         }
         (false, Some(Ok(art))) => (
             original_error_status.unwrap_or(DelegationStatus::Failed {
                 error: "worker failed".into(),
             }),
             Some(art),
-            None,
         ),
-        (false, Some(Err(e))) => (
+        (false, Some(Err(_))) => (
             original_error_status.unwrap_or(DelegationStatus::Failed {
                 error: "worker failed".into(),
             }),
             None,
-            Some(format!("[orchestrator: artifact persistence failed: {e}]")),
         ),
         // No persist attempt — caller's responsibility.
-        (true, None) => (DelegationStatus::Success, None, None),
+        (true, None) => (DelegationStatus::Success, None),
         (false, None) => (
             original_error_status.unwrap_or(DelegationStatus::Failed {
                 error: "worker failed".into(),
             }),
-            None,
             None,
         ),
     }
@@ -480,19 +467,18 @@ mod artifact_decision_tests {
 
     #[test]
     fn success_with_persist_ok_is_success_and_carries_artifact() {
-        let (status, artifact, note) = decide_artifact_handling(
+        let (status, artifact) = decide_artifact_handling(
             /* worker_success */ true,
             /* persist_result */ Some(Ok(sample_artifact())),
             /* original_error_status */ None,
         );
         assert!(matches!(status, DelegationStatus::Success));
         assert!(artifact.is_some());
-        assert!(note.is_none());
     }
 
     #[test]
     fn success_with_persist_err_escalates_to_failed() {
-        let (status, artifact, note) =
+        let (status, artifact) =
             decide_artifact_handling(true, Some(Err("disk full".into())), None);
         match status {
             DelegationStatus::Failed { error } => {
@@ -504,24 +490,20 @@ mod artifact_decision_tests {
             other => panic!("expected Failed, got {other:?}"),
         }
         assert!(artifact.is_none());
-        assert!(note.is_some());
     }
 
     #[test]
-    fn failure_with_persist_err_preserves_original_error_and_annotates() {
+    fn failure_with_persist_err_preserves_original_error() {
         let original = DelegationStatus::Failed {
             error: "compile error".into(),
         };
-        let (status, artifact, note) = decide_artifact_handling(
+        let (status, artifact) = decide_artifact_handling(
             /* worker_success */ false,
             Some(Err("ref locked".into())),
             Some(original.clone()),
         );
         assert_eq!(status, original);
         assert!(artifact.is_none());
-        let n = note.expect("failure path must annotate");
-        assert!(n.contains("orchestrator"));
-        assert!(n.contains("artifact persistence failed"));
     }
 
     #[test]
@@ -529,7 +511,7 @@ mod artifact_decision_tests {
         let original = DelegationStatus::Failed {
             error: "panic".into(),
         };
-        let (status, artifact, note) = decide_artifact_handling(
+        let (status, artifact) = decide_artifact_handling(
             false,
             Some(Ok(WorkerArtifact {
                 kind: ArtifactKind::Diagnostic,
@@ -540,14 +522,13 @@ mod artifact_decision_tests {
         assert_eq!(status, original);
         let a = artifact.expect("diagnostic artifact must be surfaced on failed worker");
         assert_eq!(a.kind, ArtifactKind::Diagnostic);
-        assert!(note.is_none());
     }
 
     #[test]
     fn under_cap_path_is_unchanged() {
         // When we never attempted persistence (output_text.len() <= cap),
         // the helper is not called. Document the caller's contract: no
-        // call -> no annotation -> no escalation. This is asserted by
+        // call -> no persistence-related status escalation. This is asserted by
         // the absence of the call site at the appropriate branch.
         // See `run_one_worker_attempt` for the guard.
     }

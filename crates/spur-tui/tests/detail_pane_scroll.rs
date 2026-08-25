@@ -275,6 +275,7 @@ fn task_tab_shows_resolved_session_config() {
             effort: Some("high".into()),
             config_overrides_applied: Default::default(),
             skipped: Vec::new(),
+            outcome_warning: None,
         },
     );
 
