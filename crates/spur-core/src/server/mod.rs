@@ -896,6 +896,12 @@ impl McpCallbackServer {
         self.dispatch_lease_duration = duration;
     }
 
+    /// Configure the immutable graph fsmonitor policy before `start()` shares
+    /// this callback server.
+    pub(crate) fn set_overlay_fsmonitor_auto(&mut self, enabled: bool) {
+        self.graph_mcp_deps.overlay_fsmonitor_auto = enabled;
+    }
+
     /// Set the list of available worker agents.
     pub fn set_workers(&mut self, workers: Vec<WorkerInfo>) {
         self.workers = workers;
@@ -1320,6 +1326,35 @@ impl ServerHandler for McpCallbackServer {
         };
         Self::emit_mcp_request_duration(started_at.elapsed(), outcome);
         result
+    }
+}
+
+#[cfg(test)]
+mod overlay_fsmonitor_startup_tests {
+    use super::*;
+
+    fn callback_server() -> McpCallbackServer {
+        let (server, _channel) = McpCallbackServer::new(
+            None,
+            None,
+            None,
+            DetachedContinuationCtx {
+                on_complete: Arc::new(|_continuation, _worker| Box::pin(async {})),
+            },
+            Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+            community_feature_gate(),
+        );
+        server
+    }
+
+    #[test]
+    fn callback_server_overlay_fsmonitor_policy_is_prestart_mutable() {
+        let mut server = callback_server();
+        assert!(!server.graph_mcp_deps.overlay_fsmonitor_auto);
+
+        server.set_overlay_fsmonitor_auto(true);
+
+        assert!(server.graph_mcp_deps.overlay_fsmonitor_auto);
     }
 }
 
