@@ -4,9 +4,10 @@ use std::io::ErrorKind;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 #[cfg(any(test, feature = "test-support"))]
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, OnceLock};
-use std::time::Duration;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use anyhow::Context as _;
 use chrono::{DateTime, SecondsFormat, Utc};
@@ -25,12 +26,13 @@ use crate::temporal::{
 };
 use crate::{
     artifact_from_facts, bounded_subgraph_with_budget, build_facts, edge_kind, load_artifact,
-    resolve_artifact_location, resolve_selector, resolve_worktree_root_from, CandidateRow,
-    CommitIndexArtifact, GraphArtifactManifest, GraphEdgeArtifact, GraphEdgeKind,
+    read_artifact_parquet, resolve_artifact_location, resolve_selector, resolve_worktree_root_from,
+    CandidateRow, CommitIndexArtifact, GraphArtifactManifest, GraphEdgeArtifact, GraphEdgeKind,
     GraphIndexArtifact, GraphIndexPointer, GraphQueryClient, GraphSymbolArtifact, InMemoryClient,
-    OverlayClient, OwnedCalleeRecord, OwnedCallerRecord, ParquetClient, SearchFilters, SearchMode,
-    SearchOptions, SearchResult, SearchSymbol, SelectorResolution, SnapshotKey, SubgraphBudget,
-    CODE_SYMBOL_URI_PREFIX,
+    OverlayClient, OverlayFinalizationMeasurements, OverlayGeneration, OverlayGenerationIdentity,
+    OverlayPathState as GenerationPathState, OwnedCalleeRecord, OwnedCallerRecord, ParquetClient,
+    SearchFilters, SearchMode, SearchOptions, SearchResult, SearchSymbol, SelectorResolution,
+    SnapshotKey, SubgraphBudget, CODE_SYMBOL_URI_PREFIX,
 };
 
 pub use spur_mcp::tools::McpHandlerError;
@@ -570,6 +572,60 @@ pub use rebuild_singleflight::RebuildCoordinator;
 use rebuild_singleflight::RebuildKey;
 
 static SHARED_REBUILD_COORDINATOR: OnceLock<Arc<RebuildCoordinator>> = OnceLock::new();
+static CANONICAL_OVERLAY_IDENTITIES: OnceLock<Mutex<CanonicalOverlayIdentities>> = OnceLock::new();
+
+const CANONICAL_OVERLAY_IDENTITY_CAPACITY: usize = 8;
+
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct VisibleOverlayIdentity {
+    canonical_worktree: PathBuf,
+    indexed_graph_content_hash: String,
+    indexed_head_oid: Option<String>,
+    current_head_oid: String,
+    normalized_changed_set_fingerprint: [u8; 32],
+}
+
+impl From<&overlay_snapshot::SnapshotIdentity> for VisibleOverlayIdentity {
+    fn from(identity: &overlay_snapshot::SnapshotIdentity) -> Self {
+        Self {
+            canonical_worktree: identity.canonical_worktree.clone(),
+            indexed_graph_content_hash: identity.indexed_graph_content_hash.clone(),
+            indexed_head_oid: identity.indexed_head_oid.clone(),
+            current_head_oid: identity.current_head_oid.clone(),
+            normalized_changed_set_fingerprint: identity.normalized_changed_set_fingerprint,
+        }
+    }
+}
+
+struct CanonicalOverlayIdentities {
+    entries: HashMap<VisibleOverlayIdentity, overlay_snapshot::SnapshotIdentity>,
+    lru: VecDeque<VisibleOverlayIdentity>,
+}
+
+fn canonical_overlay_identity(
+    identity: overlay_snapshot::SnapshotIdentity,
+) -> overlay_snapshot::SnapshotIdentity {
+    let key = VisibleOverlayIdentity::from(&identity);
+    let cache = CANONICAL_OVERLAY_IDENTITIES.get_or_init(|| {
+        Mutex::new(CanonicalOverlayIdentities {
+            entries: HashMap::new(),
+            lru: VecDeque::new(),
+        })
+    });
+    let mut cache = cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let canonical = cache.entries.entry(key.clone()).or_insert(identity).clone();
+    cache.lru.retain(|candidate| candidate != &key);
+    cache.lru.push_back(key);
+    while cache.entries.len() > CANONICAL_OVERLAY_IDENTITY_CAPACITY {
+        let Some(expired) = cache.lru.pop_front() else {
+            break;
+        };
+        cache.entries.remove(&expired);
+    }
+    canonical
+}
 
 pub fn shared_rebuild_coordinator() -> Arc<RebuildCoordinator> {
     Arc::clone(SHARED_REBUILD_COORDINATOR.get_or_init(|| Arc::new(RebuildCoordinator::new())))
@@ -615,6 +671,8 @@ static GRAPH_REBUILD_LATENCY_BUDGET_OVERRIDE_MS: AtomicU64 =
 static GRAPH_REBUILD_DELAY_MS: AtomicU64 = AtomicU64::new(0);
 #[cfg(any(test, feature = "test-support"))]
 static INCREMENTAL_REBUILD_FAILURES_REMAINING: AtomicUsize = AtomicUsize::new(0);
+#[cfg(test)]
+static OVERLAY_GENERATION_FAILURES_REMAINING: AtomicUsize = AtomicUsize::new(0);
 // Temporal resolution error codes (T3 / Phase 1.5 hardening)
 const CODE_GRAPH_NOT_FOUND_ERROR_CODE: i64 = -32004;
 const CODE_GRAPH_DELETED_ERROR_CODE: i64 = -32005;
@@ -986,92 +1044,52 @@ async fn code_search_response(
         .map_err(CodeGraphError::without_metadata)?;
     let source = backend.metadata_source();
     let request_client = RequestReplayClient::new(backend.client());
-    let search = code_search_body_for_client(args, &request_client)
-        .map_err(|error| CodeGraphError::from(error).with_metadata_source(source.clone()))?;
-    let files = backend
-        .search_response_file_set(&search)
-        .map_err(|error| CodeGraphError::from(error).with_metadata_source(source.clone()))?;
-    let mut analysis =
-        GraphResponseMetadata::analyze_source_inner(source.clone(), Some(&files), None).await;
-
-    if let Some(rebuild_candidate) = analysis.rebuild_candidate.take() {
-        match overlay_response_for_backend(
+    let indexed_files = backend.base_file_set().ok();
+    let mut preflight =
+        GraphResponseMetadata::analyze_source_inner(source.clone(), None, indexed_files.as_deref())
+            .await;
+    let mut refresh_error = None;
+    if let Some(rebuild_candidate) = preflight.rebuild_candidate.take() {
+        match attempt_refresh(
             &backend,
             &request_client,
-            &rebuild_candidate,
+            Arc::clone(&rebuild_coordinator),
+            rebuild_candidate,
             source.clone(),
             args,
             response_format,
+            GraphRefreshStrategy::OverlayThenRebuild,
             overlay_fsmonitor_auto,
             |args, client| code_search_with_artifact(args, client).map_err(CodeGraphError::from),
         )
         .await
         {
-            Ok(OverlayAttempt::Fresh(fresh_body)) => return Ok(fresh_body),
-            Ok(OverlayAttempt::StaleBudgetExceeded) => {
-                analysis.metadata = analysis
-                    .metadata
-                    .with_rebuild_status(RebuildStatus::StaleBudgetExceeded);
-            }
-            Err(error) => {
-                tracing::warn!(
-                    target: "spur_graph::mcp",
-                    error = ?error,
-                    "code graph overlay refresh failed; falling back to rebuild"
-                );
-                let rebuild = match &backend {
-                    CodeSearchBackend::Parquet(_) => {
-                        try_rebuild_artifact_from_worktree(
-                            Arc::clone(&rebuild_coordinator),
-                            rebuild_candidate,
-                        )
-                        .await
-                    }
-                    CodeSearchBackend::InMemory { artifact, .. } => {
-                        try_rebuild_artifact(
-                            Arc::clone(&rebuild_coordinator),
-                            Arc::clone(artifact),
-                            rebuild_candidate,
-                            None,
-                        )
-                        .await
-                    }
-                };
-                match rebuild {
-                    RebuildAttempt::Fresh(rebuilt_artifact) => {
-                        let client = InMemoryClient::new(Arc::clone(&rebuilt_artifact));
-                        let mut fresh_body =
-                            code_search_with_artifact(args, &client).map_err(|error| {
-                                CodeGraphError::from(error)
-                                    .with_artifact_metadata(&rebuilt_artifact)
-                            })?;
-                        let fresh_files =
-                            response_file_set_from_body(&rebuilt_artifact, &fresh_body);
-                        GraphResponseMetadata::analyze_artifact_with_files(
-                            &rebuilt_artifact,
-                            &fresh_files,
-                        )
-                        .await
-                        .metadata
-                        .with_rebuild_status(RebuildStatus::Fresh)
-                        .insert_into_for_format(&mut fresh_body, response_format);
-                        return Ok(fresh_body);
-                    }
-                    RebuildAttempt::StaleBudgetExceeded => {
-                        analysis.metadata = analysis
-                            .metadata
-                            .with_rebuild_status(RebuildStatus::StaleBudgetExceeded);
-                    }
-                    RebuildAttempt::StaleRebuildFailed => {
-                        analysis.metadata = analysis
-                            .metadata
-                            .with_rebuild_status(RebuildStatus::StaleRebuildFailed);
-                    }
-                }
+            RefreshOutcome::Fresh(fresh_body) => return Ok(fresh_body),
+            RefreshOutcome::Errored(error) => refresh_error = Some(error),
+            RefreshOutcome::NotRefreshed(status) => {
+                preflight.metadata = preflight.metadata.with_rebuild_status(status);
             }
         }
     }
 
+    let search = match code_search_body_for_client(args, &request_client) {
+        Ok(search) => search,
+        Err(error) => {
+            return Err(refresh_error.unwrap_or_else(|| {
+                CodeGraphError::from(error).with_metadata_source(source.clone())
+            }));
+        }
+    };
+    let files = backend
+        .search_response_file_set(&search)
+        .map_err(|error| CodeGraphError::from(error).with_metadata_source(source.clone()))?;
+    let mut analysis =
+        GraphResponseMetadata::analyze_source_inner(source, Some(&files), None).await;
+    if !matches!(preflight.metadata.rebuild_status, RebuildStatus::NotNeeded) {
+        analysis.metadata = analysis
+            .metadata
+            .with_rebuild_status(preflight.metadata.rebuild_status);
+    }
     let mut body = search.body;
     analysis
         .metadata
@@ -1199,12 +1217,208 @@ enum OverlayAttempt {
     StaleBudgetExceeded,
 }
 
-/// Shared escalation ladder: try the cheap dirty-file overlay first (when the
-/// strategy allows it), then fall back to a full/incremental rebuild. Used
-/// both when a successful-but-stale response needs refreshing, and when the
-/// handler's first pass returned `Err` (e.g. "not found") against a dirty
-/// worktree, since a brand-new or renamed symbol can look "missing" from the
-/// static base artifact even though it's genuinely present in the worktree.
+#[derive(Clone)]
+enum FullBaseArtifactSource {
+    Parquet(PathBuf),
+    InMemory(Arc<GraphIndexArtifact>),
+}
+
+impl FullBaseArtifactSource {
+    fn load(&self) -> anyhow::Result<Arc<GraphIndexArtifact>> {
+        match self {
+            Self::Parquet(dir) => read_artifact_parquet(dir).map(Arc::new),
+            Self::InMemory(artifact) => Ok(Arc::clone(artifact)),
+        }
+    }
+}
+
+struct PinnedGenerationClient {
+    generation: Arc<OverlayGeneration>,
+    query_operations: AtomicU64,
+}
+
+impl PinnedGenerationClient {
+    fn new(generation: Arc<OverlayGeneration>) -> Self {
+        Self {
+            generation,
+            query_operations: AtomicU64::new(0),
+        }
+    }
+
+    fn record_query(&self) {
+        self.query_operations.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn query_operations(&self) -> u64 {
+        self.query_operations.load(Ordering::Relaxed)
+    }
+}
+
+impl GraphQueryClient for PinnedGenerationClient {
+    fn search_symbols(&self, opts: &SearchOptions) -> anyhow::Result<SearchResult> {
+        self.record_query();
+        self.generation.search_symbols(opts)
+    }
+
+    fn find_caller_edges(&self, sid: &str) -> Vec<OwnedCallerRecord> {
+        self.record_query();
+        self.generation.find_caller_edges(sid)
+    }
+
+    fn find_unresolved_caller_edges_by_labels(
+        &self,
+        target_labels: &HashSet<String>,
+    ) -> Vec<OwnedCallerRecord> {
+        self.record_query();
+        self.generation
+            .find_unresolved_caller_edges_by_labels(target_labels)
+    }
+
+    fn find_callee_edges(&self, sid: &str) -> Vec<OwnedCalleeRecord> {
+        self.record_query();
+        self.generation.find_callee_edges(sid)
+    }
+
+    fn resolve_selector(&self, selector: &str) -> anyhow::Result<SelectorResolution> {
+        self.record_query();
+        self.generation.resolve_selector(selector)
+    }
+
+    fn symbol_by_id(&self, sid: &str) -> anyhow::Result<Option<GraphSymbolArtifact>> {
+        self.record_query();
+        self.generation.symbol_by_id(sid)
+    }
+
+    fn symbols_by_file(&self, path: &str) -> anyhow::Result<Vec<GraphSymbolArtifact>> {
+        self.record_query();
+        self.generation.symbols_by_file(path)
+    }
+
+    fn symbols_by_files(&self, paths: &[String]) -> anyhow::Result<Vec<GraphSymbolArtifact>> {
+        self.record_query();
+        self.generation.symbols_by_files(paths)
+    }
+
+    fn symbols_by_path_name(
+        &self,
+        path: &str,
+        name: &str,
+    ) -> anyhow::Result<Vec<GraphSymbolArtifact>> {
+        self.record_query();
+        self.generation.symbols_by_path_name(path, name)
+    }
+
+    fn file_manifest_by_path(
+        &self,
+        path: &str,
+    ) -> anyhow::Result<Option<crate::GraphFileManifestEntry>> {
+        self.record_query();
+        self.generation.file_manifest_by_path(path)
+    }
+
+    fn file_exists(&self, path: &str) -> anyhow::Result<bool> {
+        self.record_query();
+        self.generation.file_exists(path)
+    }
+
+    fn temporal_index(&self) -> Arc<TemporalIndex> {
+        self.record_query();
+        self.generation.temporal_index()
+    }
+}
+
+struct MeasuredOverlayClient<B: GraphQueryClient> {
+    overlay: OverlayClient<B>,
+    measurements: Mutex<OverlayFinalizationMeasurements>,
+}
+
+impl<B: GraphQueryClient> MeasuredOverlayClient<B> {
+    fn new(overlay: OverlayClient<B>) -> Self {
+        Self {
+            overlay,
+            measurements: Mutex::new(OverlayFinalizationMeasurements::default()),
+        }
+    }
+
+    fn measurements(&self) -> OverlayFinalizationMeasurements {
+        *self
+            .measurements
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+impl<B: GraphQueryClient> GraphQueryClient for MeasuredOverlayClient<B> {
+    fn search_symbols(&self, opts: &SearchOptions) -> anyhow::Result<SearchResult> {
+        let mut measurements = self
+            .measurements
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.overlay
+            .search_symbols_with_measurements(opts, &mut measurements)
+    }
+
+    fn find_caller_edges(&self, sid: &str) -> Vec<OwnedCallerRecord> {
+        self.overlay.find_caller_edges(sid)
+    }
+
+    fn find_unresolved_caller_edges_by_labels(
+        &self,
+        target_labels: &HashSet<String>,
+    ) -> Vec<OwnedCallerRecord> {
+        self.overlay
+            .find_unresolved_caller_edges_by_labels(target_labels)
+    }
+
+    fn find_callee_edges(&self, sid: &str) -> Vec<OwnedCalleeRecord> {
+        self.overlay.find_callee_edges(sid)
+    }
+
+    fn resolve_selector(&self, selector: &str) -> anyhow::Result<SelectorResolution> {
+        self.overlay.resolve_selector(selector)
+    }
+
+    fn symbol_by_id(&self, sid: &str) -> anyhow::Result<Option<GraphSymbolArtifact>> {
+        self.overlay.symbol_by_id(sid)
+    }
+
+    fn symbols_by_file(&self, path: &str) -> anyhow::Result<Vec<GraphSymbolArtifact>> {
+        self.overlay.symbols_by_file(path)
+    }
+
+    fn symbols_by_files(&self, paths: &[String]) -> anyhow::Result<Vec<GraphSymbolArtifact>> {
+        self.overlay.symbols_by_files(paths)
+    }
+
+    fn symbols_by_path_name(
+        &self,
+        path: &str,
+        name: &str,
+    ) -> anyhow::Result<Vec<GraphSymbolArtifact>> {
+        self.overlay.symbols_by_path_name(path, name)
+    }
+
+    fn file_manifest_by_path(
+        &self,
+        path: &str,
+    ) -> anyhow::Result<Option<crate::GraphFileManifestEntry>> {
+        self.overlay.file_manifest_by_path(path)
+    }
+
+    fn file_exists(&self, path: &str) -> anyhow::Result<bool> {
+        self.overlay.file_exists(path)
+    }
+
+    fn temporal_index(&self) -> Arc<TemporalIndex> {
+        self.overlay.temporal_index()
+    }
+}
+
+/// Shared escalation ladder after the request freshness preflight: try the
+/// cheap dirty-file overlay first (when the strategy allows it), then fall
+/// back to a full/incremental rebuild. The handler's first query therefore
+/// sees the fresh route, including for a brand-new or renamed symbol that is
+/// absent from the static base artifact.
 #[allow(clippy::too_many_arguments)]
 async fn attempt_refresh(
     backend: &CodeSearchBackend,
@@ -1305,64 +1519,15 @@ async fn code_graph_backend_response_with_refresh(
         .map_err(CodeGraphError::without_metadata)?;
     let source = backend.metadata_source();
     let request_client = RequestReplayClient::new(backend.client());
-
-    let (mut body, mut analysis) = match handler(args, &request_client) {
-        Ok(body) => {
-            let files = backend
-                .response_file_set_from_body(&request_client, &body)
-                .map_err(CodeGraphError::from)?;
-            // The overlay cache key must cover every tracked change that
-            // changed_paths_for_overlay may extract, not only response files.
-            let indexed_files = backend.base_file_set().ok();
-            let analysis = GraphResponseMetadata::analyze_source_inner(
-                source.clone(),
-                Some(&files),
-                indexed_files.as_deref(),
-            )
+    // Establish freshness before the first handler call. A dirty request then
+    // executes all of its nested graph operations against one pinned
+    // generation (or one exact fallback client), never against the base first.
+    let indexed_files = backend.base_file_set().ok();
+    let mut preflight =
+        GraphResponseMetadata::analyze_source_inner(source.clone(), None, indexed_files.as_deref())
             .await;
-            (body, analysis)
-        }
-        Err(mut original_error) => {
-            if original_error.metadata.is_none() && original_error.temporal_code.is_none() {
-                original_error.metadata = Some(Box::new(source.clone()));
-            }
-            // Per-request exact Git metadata validation doesn't need a
-            // successful body to run, so a "not found" response still deserves
-            // a chance against the overlay before we give up -- otherwise a
-            // brand-new or renamed symbol that only exists in an uncommitted
-            // edit looks permanently missing.
-            let indexed_files = backend.base_file_set().ok();
-            let analysis = GraphResponseMetadata::analyze_source_inner(
-                source.clone(),
-                None,
-                indexed_files.as_deref(),
-            )
-            .await;
-            let Some(rebuild_candidate) = analysis.rebuild_candidate else {
-                return Err(original_error);
-            };
-            return match attempt_refresh(
-                &backend,
-                &request_client,
-                Arc::clone(&rebuild_coordinator),
-                rebuild_candidate,
-                source.clone(),
-                args,
-                response_format,
-                refresh_strategy,
-                overlay_fsmonitor_auto,
-                &handler,
-            )
-            .await
-            {
-                RefreshOutcome::Fresh(fresh_body) => Ok(fresh_body),
-                RefreshOutcome::Errored(fresh_error) => Err(fresh_error),
-                RefreshOutcome::NotRefreshed(_status) => Err(original_error),
-            };
-        }
-    };
-
-    if let Some(rebuild_candidate) = analysis.rebuild_candidate.take() {
+    let mut refresh_error = None;
+    if let Some(rebuild_candidate) = preflight.rebuild_candidate.take() {
         match attempt_refresh(
             &backend,
             &request_client,
@@ -1378,19 +1543,36 @@ async fn code_graph_backend_response_with_refresh(
         .await
         {
             RefreshOutcome::Fresh(fresh_body) => return Ok(fresh_body),
-            RefreshOutcome::Errored(fresh_error) => {
-                tracing::debug!(
-                    target: "spur_graph::mcp",
-                    error = ?fresh_error,
-                    "code graph refresh failed after a successful stale response; serving stale response"
-                );
-            }
+            RefreshOutcome::Errored(fresh_error) => refresh_error = Some(fresh_error),
             RefreshOutcome::NotRefreshed(status) => {
-                analysis.metadata = analysis.metadata.with_rebuild_status(status);
+                preflight.metadata = preflight.metadata.with_rebuild_status(status);
             }
         }
     }
 
+    let mut body = match handler(args, &request_client) {
+        Ok(body) => body,
+        Err(mut original_error) => {
+            if let Some(fresh_error) = refresh_error {
+                return Err(fresh_error);
+            }
+            if original_error.metadata.is_none() && original_error.temporal_code.is_none() {
+                original_error.metadata = Some(Box::new(source.clone()));
+            }
+            return Err(original_error);
+        }
+    };
+    let files = backend
+        .response_file_set_from_body(&request_client, &body)
+        .map_err(CodeGraphError::from)?;
+    let mut analysis =
+        GraphResponseMetadata::analyze_source_inner(source, Some(&files), indexed_files.as_deref())
+            .await;
+    if !matches!(preflight.metadata.rebuild_status, RebuildStatus::NotNeeded) {
+        analysis.metadata = analysis
+            .metadata
+            .with_rebuild_status(preflight.metadata.rebuild_status);
+    }
     analysis
         .metadata
         .insert_into_for_format(&mut body, response_format);
@@ -1413,11 +1595,25 @@ async fn overlay_response_for_backend(
             "failed to construct code graph overlay: {error}"
         )))
     })?;
+    let full_base_source = backend.full_base_artifact_source();
+    let started = Instant::now();
+    let budget = graph_rebuild_latency_budget();
+    let prepare_worktree = worktree.clone();
+    let prepare_base = snapshot_base.clone();
     let mut task = tokio::task::spawn_blocking(move || {
-        overlay_delta_for_worktree(worktree, snapshot_base, overlay_fsmonitor_auto)
+        if overlay_fsmonitor_auto {
+            prepare_stable_overlay_for_worktree(prepare_worktree, prepare_base, true)
+        } else {
+            prepare_overlay_for_worktree(prepare_worktree, prepare_base, false).map(|prepared| {
+                prepared.map(|mut prepared| {
+                    prepared.stable = true;
+                    prepared
+                })
+            })
+        }
     });
-    let cached = match tokio::time::timeout(graph_rebuild_latency_budget(), &mut task).await {
-        Ok(Ok(Ok(cached))) => cached,
+    let prepared = match tokio::time::timeout(budget, &mut task).await {
+        Ok(Ok(Ok(prepared))) => prepared,
         Ok(Ok(Err(error))) => {
             return Err(CodeGraphError::without_metadata(McpHandlerError::Internal(
                 format!("failed to construct code graph overlay: {error}"),
@@ -1451,33 +1647,375 @@ async fn overlay_response_for_backend(
             return Ok(OverlayAttempt::StaleBudgetExceeded);
         }
     };
-    let (mut fresh_body, fresh_files) = match cached {
-        Some(cached) => {
-            let overlay =
-                OverlayClient::from_artifacts(request_client, cached.artifact, cached.shadowed)
-                    .map_err(|error| {
-                        CodeGraphError::without_metadata(McpHandlerError::Internal(format!(
-                            "failed to construct code graph overlay: {error}"
-                        )))
-                    })?;
-            let fresh_body = handler(args, &overlay)?;
-            let fresh_files = response_file_set_from_client(&overlay, &fresh_body)?;
-            (fresh_body, fresh_files)
+
+    let Some(prepared) = prepared else {
+        // No changed paths → identity overlay. Serve the base client directly
+        // and preserve the pre-generation response shape.
+        let mut fresh_body = handler(args, request_client)?;
+        let fresh_files = response_file_set_from_client(request_client, &fresh_body)?;
+        GraphResponseMetadata::analyze_source_inner(source, Some(&fresh_files), None)
+            .await
+            .metadata
+            .with_rebuild_status(RebuildStatus::Fresh)
+            .insert_into_for_format(&mut fresh_body, response_format);
+        return Ok(OverlayAttempt::Fresh(fresh_body));
+    };
+
+    if !overlay_fsmonitor_auto || prepared.changed.identity.is_none() || !prepared.stable {
+        let reason = prepared
+            .stable
+            .then_some("generation_unavailable")
+            .unwrap_or("snapshot_changed_during_construction");
+        let diagnostics = overlay_fsmonitor_auto.then(|| exact_fallback_diagnostics(reason));
+        let exact = if prepared.stable {
+            prepared.cached
+        } else {
+            exact_overlay_delta(
+                worktree.clone(),
+                snapshot_base.clone(),
+                overlay_fsmonitor_auto,
+            )
+            .await?
+        };
+        let (mut fresh_body, fresh_files, _measurements) =
+            exact_overlay_response(request_client, exact, args, &handler)?;
+        GraphResponseMetadata::analyze_source_inner(source, Some(&fresh_files), None)
+            .await
+            .metadata
+            .with_rebuild_status(RebuildStatus::Fresh)
+            .insert_into_for_format(&mut fresh_body, response_format);
+        if let Some(diagnostics) = diagnostics {
+            insert_overlay_generation_diagnostics(&mut fresh_body, diagnostics);
         }
-        None => {
-            // No changed paths → identity overlay. Serve the base client
-            // directly and skip extract_delta / remap construction.
-            let fresh_body = handler(args, request_client)?;
-            let fresh_files = response_file_set_from_client(request_client, &fresh_body)?;
-            (fresh_body, fresh_files)
+        return Ok(OverlayAttempt::Fresh(fresh_body));
+    }
+
+    let snapshot_identity = prepared
+        .changed
+        .identity
+        .clone()
+        .expect("checked exact overlay identity above");
+    let generation_id = opaque_generation_id(&snapshot_identity);
+    let generation_identity = overlay_generation_identity(&snapshot_identity);
+    let generation_path_state = generation_path_state(&prepared.changed.path_state);
+    let cached = prepared
+        .cached
+        .clone()
+        .expect("non-empty overlay has extracted delta");
+    let cache_built = Arc::new(AtomicBool::new(false));
+    let full_base_artifact_builds = Arc::new(AtomicU64::new(0));
+    let build_cache_built = Arc::clone(&cache_built);
+    let build_full_base_artifact_builds = Arc::clone(&full_base_artifact_builds);
+    let build_snapshot_identity = snapshot_identity.clone();
+    let mut generation_task = tokio::task::spawn_blocking(move || {
+        request_cache::overlay_generation(build_snapshot_identity, |seed| {
+            fail_overlay_generation_for_test()?;
+            build_cache_built.store(true, Ordering::Relaxed);
+            let previous = match seed {
+                Some(seed) => seed,
+                None => {
+                    build_full_base_artifact_builds.fetch_add(1, Ordering::Relaxed);
+                    Arc::new(OverlayGeneration::seed(full_base_source.load()?)?)
+                }
+            };
+            OverlayGeneration::update(
+                &previous,
+                generation_identity,
+                &generation_path_state,
+                cached.artifact,
+            )
+            .map(Arc::new)
+        })
+    });
+    let remaining = budget.saturating_sub(started.elapsed());
+    let generation = match tokio::time::timeout(remaining, &mut generation_task).await {
+        Ok(Ok(Ok(generation))) => generation,
+        Ok(Ok(Err(_))) | Ok(Err(_)) => {
+            let (mut fresh_body, fresh_files, measurements) =
+                exact_overlay_response(request_client, prepared.cached, args, &handler)?;
+            GraphResponseMetadata::analyze_source_inner(source, Some(&fresh_files), None)
+                .await
+                .metadata
+                .with_rebuild_status(RebuildStatus::Fresh)
+                .insert_into_for_format(&mut fresh_body, response_format);
+            insert_overlay_generation_diagnostics(
+                &mut fresh_body,
+                exact_fallback_diagnostics_with_measurements(
+                    "generation_build_failed",
+                    measurements,
+                ),
+            );
+            return Ok(OverlayAttempt::Fresh(fresh_body));
+        }
+        Err(_) => {
+            tokio::spawn(async move {
+                if generation_task.await.is_err() {
+                    tracing::warn!(
+                        target: "spur_graph::mcp",
+                        "overlay generation task failed after response budget elapsed"
+                    );
+                }
+            });
+            let (mut fresh_body, fresh_files, measurements) =
+                exact_overlay_response(request_client, prepared.cached, args, &handler)?;
+            GraphResponseMetadata::analyze_source_inner(source, Some(&fresh_files), None)
+                .await
+                .metadata
+                .with_rebuild_status(RebuildStatus::Fresh)
+                .insert_into_for_format(&mut fresh_body, response_format);
+            insert_overlay_generation_diagnostics(
+                &mut fresh_body,
+                exact_fallback_diagnostics_with_measurements(
+                    "generation_build_budget_exceeded",
+                    measurements,
+                ),
+            );
+            return Ok(OverlayAttempt::Fresh(fresh_body));
         }
     };
+
+    let pinned = PinnedGenerationClient::new(generation);
+    let query_result = handler(args, &pinned);
+    let snapshot_still_exact = authoritative_overlay_identity(
+        worktree.clone(),
+        snapshot_base.clone(),
+        overlay_fsmonitor_auto,
+    )
+    .await
+    .is_some_and(|identity| identity == snapshot_identity);
+    if !snapshot_still_exact {
+        let exact = exact_overlay_delta(worktree, snapshot_base, overlay_fsmonitor_auto).await?;
+        let (mut fresh_body, fresh_files, measurements) =
+            exact_overlay_response(request_client, exact, args, &handler)?;
+        GraphResponseMetadata::analyze_source_inner(source, Some(&fresh_files), None)
+            .await
+            .metadata
+            .with_rebuild_status(RebuildStatus::Fresh)
+            .insert_into_for_format(&mut fresh_body, response_format);
+        insert_overlay_generation_diagnostics(
+            &mut fresh_body,
+            exact_fallback_diagnostics_with_measurements(
+                "authoritative_snapshot_changed",
+                measurements,
+            ),
+        );
+        return Ok(OverlayAttempt::Fresh(fresh_body));
+    }
+
+    let mut fresh_body = query_result?;
+    let fresh_files = response_file_set_from_client(&pinned, &fresh_body)?;
     GraphResponseMetadata::analyze_source_inner(source, Some(&fresh_files), None)
         .await
         .metadata
         .with_rebuild_status(RebuildStatus::Fresh)
         .insert_into_for_format(&mut fresh_body, response_format);
+    insert_overlay_generation_diagnostics(
+        &mut fresh_body,
+        overlay_generation_diagnostics_value(
+            generation_id,
+            cache_built.load(Ordering::Relaxed),
+            full_base_artifact_builds.load(Ordering::Relaxed),
+            pinned.query_operations(),
+        ),
+    );
     Ok(OverlayAttempt::Fresh(fresh_body))
+}
+
+fn prepare_stable_overlay_for_worktree(
+    worktree: PathBuf,
+    base: overlay_snapshot::SnapshotBase,
+    overlay_fsmonitor_auto: bool,
+) -> anyhow::Result<Option<PreparedOverlay>> {
+    let mut last = None;
+    for _attempt in 0..=1 {
+        let Some(mut prepared) =
+            prepare_overlay_for_worktree(worktree.clone(), base.clone(), overlay_fsmonitor_auto)?
+        else {
+            return Ok(None);
+        };
+        let Some(identity) = prepared.changed.identity.as_ref() else {
+            prepared.stable = true;
+            return Ok(Some(prepared));
+        };
+        let mut validation =
+            changed_paths_for_overlay_base(&worktree, base.clone(), overlay_fsmonitor_auto)?;
+        validation.identity = validation.identity.map(canonical_overlay_identity);
+        if validation.identity.as_ref() == Some(identity) {
+            prepared.stable = true;
+            return Ok(Some(prepared));
+        }
+        last = Some(prepared);
+    }
+    if let Some(prepared) = &mut last {
+        prepared.stable = false;
+    }
+    Ok(last)
+}
+
+async fn authoritative_overlay_identity(
+    worktree: PathBuf,
+    base: overlay_snapshot::SnapshotBase,
+    overlay_fsmonitor_auto: bool,
+) -> Option<overlay_snapshot::SnapshotIdentity> {
+    tokio::task::spawn_blocking(move || {
+        changed_paths_for_overlay_base(&worktree, base, overlay_fsmonitor_auto)
+            .ok()
+            .and_then(|changed| changed.identity)
+            .map(canonical_overlay_identity)
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+async fn exact_overlay_delta(
+    worktree: PathBuf,
+    base: overlay_snapshot::SnapshotBase,
+    overlay_fsmonitor_auto: bool,
+) -> Result<Option<request_cache::CachedOverlayDelta>, CodeGraphError> {
+    tokio::task::spawn_blocking(move || {
+        overlay_delta_for_worktree(worktree, base, overlay_fsmonitor_auto)
+    })
+    .await
+    .map_err(|_| {
+        CodeGraphError::without_metadata(McpHandlerError::Internal(
+            "exact overlay fallback task failed".to_string(),
+        ))
+    })?
+    .map_err(|_| {
+        CodeGraphError::without_metadata(McpHandlerError::Internal(
+            "failed to construct exact overlay fallback".to_string(),
+        ))
+    })
+}
+
+fn exact_overlay_response(
+    request_client: &(dyn GraphQueryClient + Sync),
+    cached: Option<request_cache::CachedOverlayDelta>,
+    args: &Value,
+    handler: &impl Fn(&Value, &dyn GraphQueryClient) -> CodeGraphResult,
+) -> Result<
+    (
+        Value,
+        Vec<(String, String)>,
+        OverlayFinalizationMeasurements,
+    ),
+    CodeGraphError,
+> {
+    match cached {
+        Some(cached) => {
+            let overlay =
+                OverlayClient::from_artifacts(request_client, cached.artifact, cached.shadowed)
+                    .map_err(|_| {
+                        CodeGraphError::without_metadata(McpHandlerError::Internal(
+                            "failed to construct exact overlay fallback".to_string(),
+                        ))
+                    })?;
+            let measured = MeasuredOverlayClient::new(overlay);
+            let body = handler(args, &measured)?;
+            let files = response_file_set_from_client(&measured, &body)?;
+            Ok((body, files, measured.measurements()))
+        }
+        None => {
+            let body = handler(args, request_client)?;
+            let files = response_file_set_from_client(request_client, &body)?;
+            Ok((body, files, OverlayFinalizationMeasurements::default()))
+        }
+    }
+}
+
+fn overlay_generation_identity(
+    identity: &overlay_snapshot::SnapshotIdentity,
+) -> OverlayGenerationIdentity {
+    OverlayGenerationIdentity {
+        canonical_worktree: identity.canonical_worktree.clone(),
+        indexed_graph_content_hash: identity.indexed_graph_content_hash.clone(),
+        indexed_head_oid: identity.indexed_head_oid.clone(),
+        current_head_oid: identity.current_head_oid.clone(),
+        index_identity: blake3::hash(format!("{:?}", identity.index_identity).as_bytes())
+            .to_hex()
+            .to_string(),
+        normalized_changed_set_fingerprint: identity.normalized_changed_set_fingerprint,
+    }
+}
+
+fn generation_path_state(
+    path_state: &BTreeMap<String, overlay_snapshot::OverlayPathState>,
+) -> BTreeMap<String, GenerationPathState> {
+    path_state
+        .iter()
+        .map(|(path, state)| {
+            let state = match state {
+                overlay_snapshot::OverlayPathState::Tracked(oid) => {
+                    GenerationPathState::Tracked(oid.clone())
+                }
+                overlay_snapshot::OverlayPathState::Untracked(oid) => {
+                    GenerationPathState::Untracked(oid.clone())
+                }
+                overlay_snapshot::OverlayPathState::Deleted => GenerationPathState::Deleted,
+            };
+            (path.clone(), state)
+        })
+        .collect()
+}
+
+fn opaque_generation_id(identity: &overlay_snapshot::SnapshotIdentity) -> String {
+    let digest = blake3::hash(format!("{identity:?}").as_bytes())
+        .to_hex()
+        .to_string();
+    format!("gen_{}", &digest[..16])
+}
+
+fn finalization_stages(measurements: OverlayFinalizationMeasurements) -> Value {
+    json!({
+        "shadow_filters": measurements.shadow_filters,
+        "result_merges": measurements.result_merges,
+        "overlay_sorts": measurements.overlay_sorts,
+        "stable_id_deduplications": measurements.stable_id_deduplications,
+        "total": measurements.total(),
+    })
+}
+
+fn overlay_generation_diagnostics_value(
+    generation_id: String,
+    built: bool,
+    full_base_artifact_builds: u64,
+    query_operations: u64,
+) -> Value {
+    json!({
+        "route": "generation",
+        "cache": if built { "built" } else { "reused" },
+        "generation_id": generation_id,
+        "full_base_artifact_builds": full_base_artifact_builds,
+        "query_operations": query_operations,
+        "generation_identity_mismatches": 0,
+        "finalization_stages": finalization_stages(OverlayFinalizationMeasurements::default()),
+    })
+}
+
+fn exact_fallback_diagnostics(reason: &'static str) -> Value {
+    exact_fallback_diagnostics_with_measurements(reason, OverlayFinalizationMeasurements::default())
+}
+
+fn exact_fallback_diagnostics_with_measurements(
+    reason: &'static str,
+    measurements: OverlayFinalizationMeasurements,
+) -> Value {
+    json!({
+        "route": "exact_fallback",
+        "cache": "not_applicable",
+        "generation_id": Value::Null,
+        "fallback_reason": reason,
+        "full_base_artifact_builds": 0,
+        "generation_identity_mismatches": 0,
+        "finalization_stages": finalization_stages(measurements),
+    })
+}
+
+fn insert_overlay_generation_diagnostics(body: &mut Value, diagnostics: Value) {
+    if let Value::Object(map) = body {
+        map.insert("overlay_generation".to_string(), diagnostics);
+    }
 }
 
 fn overlay_delta_for_worktree(
@@ -1485,21 +2023,45 @@ fn overlay_delta_for_worktree(
     base: overlay_snapshot::SnapshotBase,
     overlay_fsmonitor_auto: bool,
 ) -> anyhow::Result<Option<request_cache::CachedOverlayDelta>> {
-    let OverlayChangedPaths { paths, identity } =
-        changed_paths_for_overlay_base(&worktree, base, overlay_fsmonitor_auto)?;
+    Ok(
+        prepare_overlay_for_worktree(worktree, base, overlay_fsmonitor_auto)?
+            .and_then(|prepared| prepared.cached),
+    )
+}
+
+struct PreparedOverlay {
+    changed: OverlayChangedPaths,
+    cached: Option<request_cache::CachedOverlayDelta>,
+    stable: bool,
+}
+
+fn prepare_overlay_for_worktree(
+    worktree: PathBuf,
+    base: overlay_snapshot::SnapshotBase,
+    overlay_fsmonitor_auto: bool,
+) -> anyhow::Result<Option<PreparedOverlay>> {
+    let mut changed = changed_paths_for_overlay_base(&worktree, base, overlay_fsmonitor_auto)?;
+    if overlay_fsmonitor_auto {
+        changed.identity = changed.identity.map(canonical_overlay_identity);
+    }
+    let paths = &changed.paths;
     if paths.is_empty() {
         return Ok(None);
     }
     let build = || {
         let (artifact, shadowed) =
-            OverlayClient::<&dyn GraphQueryClient>::extract_delta(&worktree, &paths)?;
+            OverlayClient::<&dyn GraphQueryClient>::extract_delta(&worktree, paths)?;
         Ok(request_cache::CachedOverlayDelta { artifact, shadowed })
     };
-    match identity {
+    let cached = match changed.identity.clone() {
         Some(identity) => request_cache::overlay_delta(identity, build),
         None => build(),
-    }
-    .map(Some)
+    }?;
+    Ok(Some(PreparedOverlay {
+        changed,
+        cached: Some(cached),
+        stable: false,
+    }))
 }
 
 fn overlay_client_for_backend<'a>(
@@ -1615,6 +2177,15 @@ impl CodeSearchBackend {
                 file_oids,
             },
         })
+    }
+
+    fn full_base_artifact_source(&self) -> FullBaseArtifactSource {
+        match self {
+            Self::Parquet(client) => FullBaseArtifactSource::Parquet(client.dir().to_path_buf()),
+            Self::InMemory { artifact, .. } => {
+                FullBaseArtifactSource::InMemory(Arc::clone(artifact))
+            }
+        }
     }
 
     fn search_response_file_set(
@@ -3439,6 +4010,37 @@ pub fn set_incremental_rebuild_failures_for_test(
 ) -> IncrementalRebuildFailureGuard {
     let previous_failures = INCREMENTAL_REBUILD_FAILURES_REMAINING.swap(failures, Ordering::SeqCst);
     IncrementalRebuildFailureGuard { previous_failures }
+}
+
+#[cfg(test)]
+struct OverlayGenerationFailureGuard {
+    previous_failures: usize,
+}
+
+#[cfg(test)]
+impl Drop for OverlayGenerationFailureGuard {
+    fn drop(&mut self) {
+        OVERLAY_GENERATION_FAILURES_REMAINING.store(self.previous_failures, Ordering::SeqCst);
+    }
+}
+
+#[cfg(test)]
+fn set_overlay_generation_failures_for_test(failures: usize) -> OverlayGenerationFailureGuard {
+    let previous_failures = OVERLAY_GENERATION_FAILURES_REMAINING.swap(failures, Ordering::SeqCst);
+    OverlayGenerationFailureGuard { previous_failures }
+}
+
+fn fail_overlay_generation_for_test() -> anyhow::Result<()> {
+    #[cfg(test)]
+    if OVERLAY_GENERATION_FAILURES_REMAINING
+        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+            remaining.checked_sub(1)
+        })
+        .is_ok()
+    {
+        anyhow::bail!("forced overlay generation build failure for test");
+    }
+    Ok(())
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -5547,9 +6149,11 @@ fn indexed_file_oid_for_path<'a>(artifact: &'a GraphIndexArtifact, path: &str) -
         .map(|entry| entry.content_oid.as_str())
 }
 
+#[derive(Clone)]
 pub(crate) struct OverlayChangedPaths {
     pub(crate) paths: Vec<PathBuf>,
     pub(crate) identity: Option<overlay_snapshot::SnapshotIdentity>,
+    pub(crate) path_state: BTreeMap<String, overlay_snapshot::OverlayPathState>,
 }
 
 pub fn overlay_changed_oids(
@@ -5593,7 +6197,8 @@ fn changed_paths_for_overlay_base(
     overlay_fsmonitor_auto: bool,
 ) -> anyhow::Result<OverlayChangedPaths> {
     let allowed_extensions = crate::extract::languages::all_supported_extensions();
-    let (changed, identity) = if crate::git::detect(worktree).is_some() {
+    let base_file_oids = base.file_oids.clone();
+    let (changed, identity, path_state) = if crate::git::detect(worktree).is_some() {
         let capabilities = overlay_capabilities_for_worktree(worktree, overlay_fsmonitor_auto);
         let snapshot = overlay_snapshot::snapshot_with_capabilities(
             worktree,
@@ -5602,20 +6207,33 @@ fn changed_paths_for_overlay_base(
             capabilities,
         )?;
         let identity = snapshot.identity.clone();
-        (snapshot.changed_oid_hex(), identity)
+        let changed = snapshot.changed_oid_hex();
+        (changed, identity, snapshot.path_state)
     } else {
         let worktree = worktree.canonicalize().map_err(|error| {
             anyhow::anyhow!("failed to canonicalize `{}`: {error}", worktree.display())
         })?;
         let current_oids = current_file_oids_via_fs(&worktree, &allowed_extensions)?;
-        (
-            overlay_changed_oid_hex_from_maps(base.file_oids, current_oids)?,
-            None,
-        )
+        let changed = overlay_changed_oid_hex_from_maps(base.file_oids, current_oids)?;
+        let path_state = changed
+            .iter()
+            .map(|(path, oid)| {
+                let state = match oid {
+                    Some(oid) if base_file_oids.contains_key(path) => {
+                        overlay_snapshot::OverlayPathState::Tracked(oid.clone())
+                    }
+                    Some(oid) => overlay_snapshot::OverlayPathState::Untracked(oid.clone()),
+                    None => overlay_snapshot::OverlayPathState::Deleted,
+                };
+                (path.clone(), state)
+            })
+            .collect();
+        (changed, None, path_state)
     };
     Ok(OverlayChangedPaths {
         paths: changed.keys().map(PathBuf::from).collect(),
         identity,
+        path_state,
     })
 }
 
@@ -7477,6 +8095,306 @@ mod tests {
             overlay.is_none(),
             "matching worktree content must skip OverlayClient construction"
         );
+    }
+
+    struct OverlayGenerationMcpFixture {
+        _dir: tempfile::TempDir,
+        root: PathBuf,
+    }
+
+    impl OverlayGenerationMcpFixture {
+        fn new(source: &str) -> Self {
+            let dir = tempfile::tempdir().expect("generation MCP tempdir");
+            let root = dir.path().to_path_buf();
+            init_git_repo(&root);
+            let artifact = artifact_from_source(&root, source);
+            fs::write(root.join(".gitignore"), ".spur/\n").expect("write graph ignore");
+            run_git_test(&root, &["add", "src/lib.rs", ".gitignore"]);
+            run_git_test(&root, &["commit", "-q", "-m", "index generation fixture"]);
+            write_current_artifact(&root, &artifact);
+            Self { _dir: dir, root }
+        }
+
+        async fn search(&self, query: &str, overlay_fsmonitor_auto: bool) -> Value {
+            SCOPED_CODE_GRAPH_WORKTREE_ROOT
+                .scope(self.root.clone(), async {
+                    code_search_response(
+                        &json!({
+                            "query": query,
+                            "mode": "exact",
+                            "response_format": "full",
+                        }),
+                        Arc::new(RebuildCoordinator::new()),
+                        overlay_fsmonitor_auto,
+                    )
+                    .await
+                })
+                .await
+                .expect("generation-routed search")
+        }
+
+        async fn subgraph(&self, selector: &str) -> Value {
+            SCOPED_CODE_GRAPH_WORKTREE_ROOT
+                .scope(self.root.clone(), async {
+                    code_subgraph_response(
+                        &json!({
+                            "selector": selector,
+                            "radius": 2,
+                            "edge_kinds": ["calls"],
+                            "include_unresolved": true,
+                        }),
+                        Arc::new(RebuildCoordinator::new()),
+                        true,
+                    )
+                    .await
+                })
+                .await
+                .expect("generation-routed subgraph")
+        }
+    }
+
+    fn generation_diagnostics(body: &Value) -> &Value {
+        body.get("overlay_generation")
+            .unwrap_or_else(|| panic!("missing bounded overlay generation diagnostics: {body:#}"))
+    }
+
+    fn without_generation_diagnostics(mut body: Value) -> Value {
+        body.as_object_mut()
+            .expect("MCP response object")
+            .remove("overlay_generation");
+        body
+    }
+
+    #[tokio::test]
+    async fn generation_route_reuses_exact_snapshot_and_reports_zero_warm_finalization() {
+        let _rebuild_guard = rebuild_test_guard().await;
+        let _budget = set_graph_rebuild_latency_budget_for_test(Duration::from_secs(30));
+        let fixture = OverlayGenerationMcpFixture::new("pub fn alpha() {}\n");
+        fs::write(
+            fixture.root.join("src/lib.rs"),
+            "pub fn alpha() {}\npub fn generation_only() {}\n",
+        )
+        .expect("dirty generation source");
+
+        let first = fixture.search("generation_only", true).await;
+        let second = fixture.search("generation_only", true).await;
+        let first_diagnostics = generation_diagnostics(&first);
+        let second_diagnostics = generation_diagnostics(&second);
+
+        assert_eq!(first["total_matches"], 1, "{first:#}");
+        assert_eq!(second["total_matches"], 1, "{second:#}");
+        assert_eq!(first_diagnostics["route"], "generation");
+        assert_eq!(second_diagnostics["route"], "generation");
+        assert_eq!(first_diagnostics["cache"], "built");
+        assert_eq!(second_diagnostics["cache"], "reused");
+        assert_eq!(
+            first_diagnostics["generation_id"], second_diagnostics["generation_id"],
+            "sequential requests over one exact snapshot must pin the same generation"
+        );
+        assert_eq!(first_diagnostics["full_base_artifact_builds"], 1);
+        assert_eq!(second_diagnostics["full_base_artifact_builds"], 0);
+        for diagnostics in [first_diagnostics, second_diagnostics] {
+            assert_eq!(diagnostics["finalization_stages"]["shadow_filters"], 0);
+            assert_eq!(diagnostics["finalization_stages"]["result_merges"], 0);
+            assert_eq!(diagnostics["finalization_stages"]["overlay_sorts"], 0);
+            assert_eq!(
+                diagnostics["finalization_stages"]["stable_id_deduplications"],
+                0
+            );
+            assert_eq!(diagnostics["finalization_stages"]["total"], 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn generation_route_pins_every_nested_subgraph_query_to_one_identity() {
+        let _rebuild_guard = rebuild_test_guard().await;
+        let _budget = set_graph_rebuild_latency_budget_for_test(Duration::from_secs(30));
+        let fixture = OverlayGenerationMcpFixture::new(
+            "pub fn alpha() { beta(); }\npub fn beta() {}\npub fn caller() { alpha(); }\n",
+        );
+        fs::write(
+            fixture.root.join("src/lib.rs"),
+            "pub fn alpha() { beta(); }\npub fn beta() {}\npub fn caller() { alpha(); }\n// dirty\n",
+        )
+        .expect("dirty nested-query source");
+
+        let body = fixture.subgraph("alpha").await;
+        let diagnostics = generation_diagnostics(&body);
+        assert_eq!(diagnostics["route"], "generation");
+        assert!(
+            diagnostics["query_operations"].as_u64().unwrap_or_default() >= 3,
+            "subgraph must perform multiple nested graph operations: {body:#}"
+        );
+        assert_eq!(diagnostics["generation_identity_mismatches"], 0);
+        assert!(
+            diagnostics["generation_id"]
+                .as_str()
+                .is_some_and(|id| id.starts_with("gen_")),
+            "generation identity must be bounded and opaque: {body:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn generation_route_singleflights_concurrent_identical_requests() {
+        let _rebuild_guard = rebuild_test_guard().await;
+        let _budget = set_graph_rebuild_latency_budget_for_test(Duration::from_secs(30));
+        let fixture = OverlayGenerationMcpFixture::new("pub fn alpha() {}\n");
+        fs::write(
+            fixture.root.join("src/lib.rs"),
+            "pub fn alpha() {}\npub fn concurrent_only() {}\n",
+        )
+        .expect("dirty concurrent source");
+
+        let (first, second) = tokio::join!(
+            fixture.search("concurrent_only", true),
+            fixture.search("concurrent_only", true),
+        );
+        let first_diagnostics = generation_diagnostics(&first);
+        let second_diagnostics = generation_diagnostics(&second);
+        assert_eq!(
+            first_diagnostics["generation_id"],
+            second_diagnostics["generation_id"]
+        );
+        let mut cache_states = vec![
+            first_diagnostics["cache"].as_str().unwrap_or_default(),
+            second_diagnostics["cache"].as_str().unwrap_or_default(),
+        ];
+        cache_states.sort_unstable();
+        assert_eq!(cache_states, vec!["built", "reused"]);
+        let base_builds = first_diagnostics["full_base_artifact_builds"]
+            .as_u64()
+            .unwrap_or_default()
+            + second_diagnostics["full_base_artifact_builds"]
+                .as_u64()
+                .unwrap_or_default();
+        assert_eq!(base_builds, 1, "one generation may load its full base once");
+    }
+
+    #[tokio::test]
+    async fn generation_route_observes_immediate_new_file_and_rename_snapshots_exactly() {
+        let _rebuild_guard = rebuild_test_guard().await;
+        let _budget = set_graph_rebuild_latency_budget_for_test(Duration::from_secs(30));
+        let fixture = OverlayGenerationMcpFixture::new("pub fn alpha() {}\n");
+        let prime = fixture.search("alpha", true).await;
+        assert_eq!(prime["total_matches"], 1);
+
+        fs::write(
+            fixture.root.join("src/new.rs"),
+            "pub fn immediate_new_file() {}\n",
+        )
+        .expect("write immediate untracked source");
+        let added = fixture.search("immediate_new_file", true).await;
+        assert_eq!(added["total_matches"], 1, "{added:#}");
+        assert_eq!(added["candidates"][0]["entity_name"], "immediate_new_file");
+
+        fs::rename(
+            fixture.root.join("src/lib.rs"),
+            fixture.root.join("src/renamed.rs"),
+        )
+        .expect("rename tracked source");
+        fs::write(
+            fixture.root.join("src/renamed.rs"),
+            "pub fn renamed_snapshot_only() {}\n",
+        )
+        .expect("rewrite renamed source");
+        let renamed = fixture.search("renamed_snapshot_only", true).await;
+        assert_eq!(renamed["total_matches"], 1, "{renamed:#}");
+        assert_eq!(
+            renamed["candidates"][0]["entity_name"],
+            "renamed_snapshot_only"
+        );
+        assert_ne!(
+            generation_diagnostics(&added)["generation_id"],
+            generation_diagnostics(&renamed)["generation_id"],
+            "rename delete+add state must not reuse the prior exact generation"
+        );
+    }
+
+    #[tokio::test]
+    async fn authoritative_snapshot_correction_never_serves_a_stale_pinned_generation() {
+        let _rebuild_guard = rebuild_test_guard().await;
+        let _budget = set_graph_rebuild_latency_budget_for_test(Duration::from_secs(30));
+        let fixture = OverlayGenerationMcpFixture::new("pub fn alpha() {}\n");
+        fs::write(
+            fixture.root.join("src/lib.rs"),
+            "pub fn monitor_hint_v1() {}\n",
+        )
+        .expect("first hinted edit");
+        let first = fixture.search("monitor_hint_v1", true).await;
+        let first_id = generation_diagnostics(&first)["generation_id"].clone();
+
+        fs::write(
+            fixture.root.join("src/lib.rs"),
+            "pub fn authoritative_v2() {}\n",
+        )
+        .expect("authoritative correction");
+        let corrected = fixture.search("authoritative_v2", true).await;
+        assert_eq!(corrected["total_matches"], 1, "{corrected:#}");
+        assert_eq!(
+            corrected["candidates"][0]["entity_name"],
+            "authoritative_v2"
+        );
+        assert_ne!(
+            generation_diagnostics(&corrected)["generation_id"],
+            first_id,
+            "exact Git state must invalidate a stale monitor-hinted generation"
+        );
+        let stale = fixture.search("monitor_hint_v1", true).await;
+        assert_eq!(stale["total_matches"], 0, "{stale:#}");
+        assert_eq!(
+            generation_diagnostics(&stale)["generation_id"],
+            generation_diagnostics(&corrected)["generation_id"]
+        );
+    }
+
+    #[tokio::test]
+    async fn generation_build_failure_uses_the_exact_existing_overlay_fallback() {
+        let _rebuild_guard = rebuild_test_guard().await;
+        let _budget = set_graph_rebuild_latency_budget_for_test(Duration::from_secs(30));
+        let fixture = OverlayGenerationMcpFixture::new("pub fn alpha() {}\n");
+        fs::write(
+            fixture.root.join("src/lib.rs"),
+            "pub fn alpha() {}\npub fn fallback_only() {}\n",
+        )
+        .expect("dirty fallback source");
+
+        let exact = fixture.search("fallback_only", false).await;
+        assert!(
+            exact.get("overlay_generation").is_none(),
+            "Off mode must retain the existing exact OverlayClient response shape"
+        );
+        let _failure = set_overlay_generation_failures_for_test(1);
+        let fallback = fixture.search("fallback_only", true).await;
+        let diagnostics = generation_diagnostics(&fallback);
+        assert_eq!(diagnostics["route"], "exact_fallback");
+        assert_eq!(diagnostics["fallback_reason"], "generation_build_failed");
+        assert_eq!(diagnostics["generation_id"], Value::Null);
+        assert_eq!(
+            without_generation_diagnostics(fallback),
+            exact,
+            "generation failure must preserve the whole exact fallback response"
+        );
+    }
+
+    #[tokio::test]
+    async fn off_mode_and_no_overlay_identity_responses_remain_unchanged() {
+        let _rebuild_guard = rebuild_test_guard().await;
+        let _budget = set_graph_rebuild_latency_budget_for_test(Duration::from_secs(30));
+        let fixture = OverlayGenerationMcpFixture::new("pub fn alpha() {}\n");
+
+        let clean = fixture.search("alpha", true).await;
+        assert_eq!(clean["total_matches"], 1);
+        assert!(clean.get("overlay_generation").is_none());
+
+        fs::write(
+            fixture.root.join("src/lib.rs"),
+            "pub fn alpha() {}\npub fn off_mode_only() {}\n",
+        )
+        .expect("dirty Off-mode source");
+        let off = fixture.search("off_mode_only", false).await;
+        assert_eq!(off["total_matches"], 1, "{off:#}");
+        assert_eq!(off["candidates"][0]["entity_name"], "off_mode_only");
+        assert!(off.get("overlay_generation").is_none());
     }
 
     #[tokio::test]
