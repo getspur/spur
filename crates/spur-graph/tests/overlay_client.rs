@@ -7,8 +7,9 @@ use spur_graph::{
     CodeSelectorResolution, Confidence, GraphEdgeArtifact, GraphEdgeKind, GraphFileArtifact,
     GraphFileManifestEntry, GraphIndexArtifact, GraphIndexHeader, GraphQueryClient,
     GraphSymbolArtifact, InMemoryClient, NodeId, OverlayClient, OverlayGeneration,
-    OverlayGenerationIdentity, OverlayPathState, OwnedCalleeRecord, OwnedCallerRecord,
-    RelationKind, SearchFilters, SearchMode, SearchOptions, SearchResult,
+    OverlayGenerationIdentity, OverlayGenerationQueryMeasurements, OverlayPathState,
+    OwnedCalleeRecord, OwnedCallerRecord, RelationKind, SearchFilters, SearchMode, SearchOptions,
+    SearchResult,
 };
 
 use spur_graph::temporal::TemporalIndex;
@@ -69,6 +70,22 @@ fn overlay_generation_matches_fresh_oracle_across_full_path_state_lifecycle() {
             "src/untracked.rs".to_owned(),
         ])
     );
+    assert_eq!(
+        generation_v1.rewritten_query_paths(),
+        generation_v1.rebuilt_paths(),
+        "v1 rewrites only its changed-path query slots"
+    );
+    assert!(
+        generation_v1.shared_query_chunk_count(&seed) > 0,
+        "v1 must structurally share at least one unchanged visible-query chunk"
+    );
+    println!(
+        "overlay_generation_storage state=v1 rebuilt_paths={} rewritten_query_paths={} shared_query_chunks={} query_chunks={} unchanged_segment_reused=true",
+        generation_v1.rebuilt_paths().len(),
+        generation_v1.rewritten_query_paths().len(),
+        generation_v1.shared_query_chunk_count(&seed),
+        generation_v1.query_chunk_count(),
+    );
 
     let renamed_v1 = generation_v1
         .file_segment("src/rename_new.rs")
@@ -127,6 +144,22 @@ fn overlay_generation_matches_fresh_oracle_across_full_path_state_lifecycle() {
     assert_eq!(
         generation_v2.rebuilt_paths(),
         &BTreeSet::from(["src/changed.rs".to_owned()])
+    );
+    assert_eq!(
+        generation_v2.rewritten_query_paths(),
+        generation_v2.rebuilt_paths(),
+        "v2 rewrites only the restored-path query slot"
+    );
+    assert!(
+        generation_v2.shared_query_chunk_count(&generation_v1) > 0,
+        "v2 must structurally share unchanged visible-query chunks"
+    );
+    println!(
+        "overlay_generation_storage state=v2 rebuilt_paths={} rewritten_query_paths={} shared_query_chunks={} query_chunks={} reused_segments=4",
+        generation_v2.rebuilt_paths().len(),
+        generation_v2.rewritten_query_paths().len(),
+        generation_v2.shared_query_chunk_count(&generation_v1),
+        generation_v2.query_chunk_count(),
     );
 }
 
@@ -204,6 +237,60 @@ fn overlay_generation_resolves_stable_id_collision_once_during_update() {
             .expect("collision search")
             .total_matches,
         1
+    );
+    assert_eq!(
+        generation.rewritten_query_paths(),
+        &BTreeSet::from(["src/changed.rs".to_owned(), "src/unchanged.rs".to_owned(),]),
+        "stable-ID collision resolution rewrites only the changed slot and displaced-owner closure"
+    );
+}
+
+#[test]
+fn overlay_generation_warm_search_performs_no_overlay_finalization() {
+    let base = Arc::new(generation_base_artifact());
+    let seed = Arc::new(OverlayGeneration::seed(base).expect("seed generation"));
+    let generation = OverlayGeneration::update(
+        &seed,
+        generation_identity("measurement", 4),
+        &BTreeMap::from([
+            (
+                "src/changed.rs".to_owned(),
+                OverlayPathState::Tracked("oid-changed-v1".to_owned()),
+            ),
+            ("src/deleted.rs".to_owned(), OverlayPathState::Deleted),
+            ("src/rename_old.rs".to_owned(), OverlayPathState::Deleted),
+            (
+                "src/rename_new.rs".to_owned(),
+                OverlayPathState::Untracked("oid-rename-v1".to_owned()),
+            ),
+            (
+                "src/untracked.rs".to_owned(),
+                OverlayPathState::Untracked("oid-untracked-v1".to_owned()),
+            ),
+        ]),
+        Arc::new(generation_delta_v1()),
+    )
+    .expect("measured generation");
+    let mut measurements = OverlayGenerationQueryMeasurements::default();
+
+    generation
+        .search_symbols_with_measurements(
+            &options("target", SearchMode::Substring),
+            &mut measurements,
+        )
+        .expect("measured warm search");
+
+    assert_eq!(
+        measurements,
+        OverlayGenerationQueryMeasurements::default(),
+        "warm generation search must only match, filter, score, sort, and select top-k"
+    );
+    println!(
+        "overlay_generation_query_stages path_visibility_filters={} result_layer_merges={} stable_id_dedup_checks={} total={}",
+        measurements.path_visibility_filters,
+        measurements.result_layer_merges,
+        measurements.stable_id_dedup_checks,
+        measurements.total(),
     );
 }
 

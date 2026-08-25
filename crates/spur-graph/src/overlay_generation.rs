@@ -30,6 +30,19 @@ pub enum OverlayPathState {
     Deleted,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct OverlayGenerationQueryMeasurements {
+    pub path_visibility_filters: u64,
+    pub result_layer_merges: u64,
+    pub stable_id_dedup_checks: u64,
+}
+
+impl OverlayGenerationQueryMeasurements {
+    pub fn total(self) -> u64 {
+        self.path_visibility_filters + self.result_layer_merges + self.stable_id_dedup_checks
+    }
+}
+
 #[derive(Debug)]
 pub struct OverlayFileSegment {
     file: GraphFileArtifact,
@@ -57,6 +70,123 @@ impl OverlayFileSegment {
 }
 
 #[derive(Debug)]
+struct VisibleFileSlot {
+    segment: Arc<OverlayFileSegment>,
+    visible_symbol_indices: Arc<[usize]>,
+}
+
+impl VisibleFileSlot {
+    fn new(segment: Arc<OverlayFileSegment>, symbol_owners: &PersistentMap<String>) -> Self {
+        let visible_symbol_indices = segment
+            .symbols
+            .iter()
+            .enumerate()
+            .filter(|(_, symbol)| {
+                symbol_owners
+                    .get(&symbol.stable_symbol_id)
+                    .is_some_and(|owner| owner == segment.path())
+            })
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>()
+            .into();
+        Self {
+            segment,
+            visible_symbol_indices,
+        }
+    }
+
+    fn symbols(&self) -> impl Iterator<Item = &GraphSymbolArtifact> {
+        self.visible_symbol_indices
+            .iter()
+            .map(|index| &self.segment.symbols[*index])
+    }
+
+    fn search_symbols(&self) -> impl Iterator<Item = &SearchSymbol> {
+        self.visible_symbol_indices
+            .iter()
+            .map(|index| &self.segment.search_symbols[*index])
+    }
+}
+
+#[derive(Debug, Clone)]
+struct PersistentMap<V> {
+    chunks: Arc<[Option<Arc<BTreeMap<String, V>>>; 256]>,
+    len: usize,
+}
+
+impl<V> Default for PersistentMap<V> {
+    fn default() -> Self {
+        Self {
+            chunks: Arc::new(std::array::from_fn(|_| None)),
+            len: 0,
+        }
+    }
+}
+
+impl<V: Clone> PersistentMap<V> {
+    fn get(&self, key: &str) -> Option<&V> {
+        self.chunks[persistent_chunk_index(key)]
+            .as_deref()
+            .and_then(|chunk| chunk.get(key))
+    }
+
+    fn insert(&self, key: String, value: V) -> Self {
+        let index = persistent_chunk_index(&key);
+        let mut chunks = self.chunks.as_ref().clone();
+        let mut chunk = chunks[index].as_deref().cloned().unwrap_or_default();
+        let inserted = chunk.insert(key, value).is_none();
+        chunks[index] = Some(Arc::new(chunk));
+        Self {
+            chunks: Arc::new(chunks),
+            len: self.len + usize::from(inserted),
+        }
+    }
+
+    fn remove(&self, key: &str) -> Self {
+        let index = persistent_chunk_index(key);
+        let Some(existing) = self.chunks[index].as_deref() else {
+            return self.clone();
+        };
+        let mut chunk = existing.clone();
+        if chunk.remove(key).is_none() {
+            return self.clone();
+        }
+        let mut chunks = self.chunks.as_ref().clone();
+        chunks[index] = (!chunk.is_empty()).then(|| Arc::new(chunk));
+        Self {
+            chunks: Arc::new(chunks),
+            len: self.len - 1,
+        }
+    }
+
+    fn iter(&self) -> impl Iterator<Item = (&str, &V)> {
+        self.chunks
+            .iter()
+            .filter_map(|chunk| chunk.as_deref())
+            .flat_map(|chunk| chunk.iter().map(|(key, value)| (key.as_str(), value)))
+    }
+
+    fn populated_chunk_count(&self) -> usize {
+        self.chunks.iter().filter(|chunk| chunk.is_some()).count()
+    }
+
+    fn shared_chunk_count(&self, previous: &Self) -> usize {
+        self.chunks
+            .iter()
+            .zip(previous.chunks.iter())
+            .filter(|(current, previous)| match (current, previous) {
+                (Some(current), Some(previous)) => Arc::ptr_eq(current, previous),
+                _ => false,
+            })
+            .count()
+    }
+}
+
+fn persistent_chunk_index(key: &str) -> usize {
+    usize::from(blake3::hash(key.as_bytes()).as_bytes()[0])
+}
+
+#[derive(Debug)]
 struct BaseGeneration {
     artifact: Arc<GraphIndexArtifact>,
     segments: BTreeMap<String, Arc<OverlayFileSegment>>,
@@ -69,8 +199,10 @@ pub struct OverlayGeneration {
     identity: Option<OverlayGenerationIdentity>,
     path_state: Arc<BTreeMap<String, OverlayPathState>>,
     overrides: BTreeMap<String, Option<Arc<OverlayFileSegment>>>,
-    delta_symbol_owners: HashMap<String, String>,
+    visible_files: PersistentMap<Arc<VisibleFileSlot>>,
+    visible_symbol_owners: PersistentMap<String>,
     rebuilt_paths: BTreeSet<String>,
+    rewritten_query_paths: BTreeSet<String>,
 }
 
 impl OverlayGeneration {
@@ -86,6 +218,24 @@ impl OverlayGeneration {
             }
         }
 
+        let mut visible_symbol_owners = PersistentMap::default();
+        let mut sorted_symbol_owners = symbol_owners.iter().collect::<Vec<_>>();
+        sorted_symbol_owners.sort_by(|(left, _), (right, _)| left.cmp(right));
+        for (stable_symbol_id, path) in sorted_symbol_owners {
+            visible_symbol_owners =
+                visible_symbol_owners.insert(stable_symbol_id.clone(), path.clone());
+        }
+        let mut visible_files = PersistentMap::default();
+        for (path, segment) in &segments {
+            visible_files = visible_files.insert(
+                path.clone(),
+                Arc::new(VisibleFileSlot::new(
+                    Arc::clone(segment),
+                    &visible_symbol_owners,
+                )),
+            );
+        }
+
         Ok(Self {
             base: Arc::new(BaseGeneration {
                 artifact: base,
@@ -95,8 +245,10 @@ impl OverlayGeneration {
             identity: None,
             path_state: Arc::new(BTreeMap::new()),
             overrides: BTreeMap::new(),
-            delta_symbol_owners: HashMap::new(),
+            visible_files,
+            visible_symbol_owners,
             rebuilt_paths: BTreeSet::new(),
+            rewritten_query_paths: BTreeSet::new(),
         })
     }
 
@@ -161,13 +313,71 @@ impl OverlayGeneration {
             }
         }
 
+        let mut affected_stable_ids = BTreeSet::new();
+        for path in &rebuilt_paths {
+            collect_segment_stable_ids(
+                previous.overrides.get(path).and_then(Option::as_deref),
+                &mut affected_stable_ids,
+            );
+            collect_segment_stable_ids(
+                previous.base.segments.get(path).map(Arc::as_ref),
+                &mut affected_stable_ids,
+            );
+            collect_segment_stable_ids(
+                current_file_segment(&previous.base, path_state, &overrides, path).as_deref(),
+                &mut affected_stable_ids,
+            );
+        }
+
+        let mut visible_symbol_owners = previous.visible_symbol_owners.clone();
+        let mut rewritten_query_paths = rebuilt_paths.clone();
+        for stable_symbol_id in affected_stable_ids {
+            let previous_owner = previous
+                .visible_symbol_owners
+                .get(&stable_symbol_id)
+                .cloned();
+            let current_owner = current_symbol_owner(
+                &stable_symbol_id,
+                &delta_symbol_owners,
+                &previous.base,
+                path_state,
+            );
+            if previous_owner == current_owner {
+                continue;
+            }
+            if let Some(path) = previous_owner {
+                rewritten_query_paths.insert(path);
+            }
+            if let Some(path) = current_owner.as_ref() {
+                rewritten_query_paths.insert(path.clone());
+                visible_symbol_owners =
+                    visible_symbol_owners.insert(stable_symbol_id, path.clone());
+            } else {
+                visible_symbol_owners = visible_symbol_owners.remove(&stable_symbol_id);
+            }
+        }
+
+        let mut visible_files = previous.visible_files.clone();
+        for path in &rewritten_query_paths {
+            let segment = current_file_segment(&previous.base, path_state, &overrides, path);
+            visible_files = match segment {
+                Some(segment) => visible_files.insert(
+                    path.clone(),
+                    Arc::new(VisibleFileSlot::new(segment, &visible_symbol_owners)),
+                ),
+                None => visible_files.remove(path),
+            };
+        }
+
         Ok(Self {
             base: Arc::clone(&previous.base),
             identity: Some(identity),
             path_state: Arc::new(path_state.clone()),
             overrides,
-            delta_symbol_owners,
+            visible_files,
+            visible_symbol_owners,
             rebuilt_paths,
+            rewritten_query_paths,
         })
     }
 
@@ -183,14 +393,38 @@ impl OverlayGeneration {
         &self.rebuilt_paths
     }
 
+    pub fn rewritten_query_paths(&self) -> &BTreeSet<String> {
+        &self.rewritten_query_paths
+    }
+
+    pub fn query_chunk_count(&self) -> usize {
+        self.visible_files.populated_chunk_count()
+    }
+
+    pub fn shared_query_chunk_count(&self, previous: &Self) -> usize {
+        self.visible_files
+            .shared_chunk_count(&previous.visible_files)
+    }
+
     pub fn file_segment(&self, path: &str) -> Option<Arc<OverlayFileSegment>> {
-        if self.path_state.contains_key(path) {
-            return self.overrides.get(path).and_then(Clone::clone);
-        }
-        self.base.segments.get(path).cloned()
+        self.visible_files
+            .get(path)
+            .map(|slot| Arc::clone(&slot.segment))
     }
 
     pub fn search_symbols(&self, options: &SearchOptions) -> anyhow::Result<SearchResult> {
+        self.search_symbols_counted(options)
+    }
+
+    pub fn search_symbols_with_measurements(
+        &self,
+        options: &SearchOptions,
+        _measurements: &mut OverlayGenerationQueryMeasurements,
+    ) -> anyhow::Result<SearchResult> {
+        self.search_symbols_counted(options)
+    }
+
+    fn search_symbols_counted(&self, options: &SearchOptions) -> anyhow::Result<SearchResult> {
         let glob = options
             .filters
             .file_glob
@@ -198,7 +432,9 @@ impl OverlayGeneration {
             .and_then(|pattern| Glob::new(pattern).ok())
             .map(|glob| glob.compile_matcher());
         let mut candidates = self
-            .visible_search_symbols()
+            .visible_files
+            .iter()
+            .flat_map(|(_, slot)| slot.search_symbols())
             .filter(|symbol| matches_query(symbol, options))
             .filter(|symbol| matches_filters(symbol, &options.filters, glob.as_ref()))
             .cloned()
@@ -217,20 +453,12 @@ impl OverlayGeneration {
     }
 
     pub fn symbol_by_id(&self, sid: &str) -> anyhow::Result<Option<GraphSymbolArtifact>> {
-        let owner = self
-            .delta_symbol_owners
-            .get(sid)
-            .or_else(|| self.base.symbol_owners.get(sid));
+        let owner = self.visible_symbol_owners.get(sid);
         let Some(owner) = owner else {
             return Ok(None);
         };
-        if !self.delta_symbol_owners.contains_key(sid) && self.path_state.contains_key(owner) {
-            return Ok(None);
-        }
-        Ok(self.file_segment(owner).and_then(|segment| {
-            segment
-                .symbols()
-                .iter()
+        Ok(self.visible_files.get(owner).and_then(|slot| {
+            slot.symbols()
                 .find(|symbol| symbol.stable_symbol_id == sid)
                 .cloned()
         }))
@@ -238,15 +466,9 @@ impl OverlayGeneration {
 
     pub fn symbols_by_file(&self, path: &str) -> anyhow::Result<Vec<GraphSymbolArtifact>> {
         Ok(self
-            .file_segment(path)
-            .map(|segment| {
-                segment
-                    .symbols()
-                    .iter()
-                    .filter(|symbol| self.symbol_is_visible(symbol))
-                    .cloned()
-                    .collect()
-            })
+            .visible_files
+            .get(path)
+            .map(|slot| slot.symbols().cloned().collect())
             .unwrap_or_default())
     }
 
@@ -267,74 +489,27 @@ impl OverlayGeneration {
         path: &str,
     ) -> anyhow::Result<Option<GraphFileManifestEntry>> {
         Ok(self
-            .file_segment(path)
-            .and_then(|segment| segment.manifest().cloned()))
+            .visible_files
+            .get(path)
+            .and_then(|slot| slot.segment.manifest().cloned()))
     }
 
     pub fn file_exists(&self, path: &str) -> anyhow::Result<bool> {
-        Ok(self.file_segment(path).is_some())
+        Ok(self.visible_files.get(path).is_some())
     }
 
     pub fn base_artifact(&self) -> &Arc<GraphIndexArtifact> {
         &self.base.artifact
     }
 
-    fn visible_segments(&self) -> impl Iterator<Item = &OverlayFileSegment> {
-        let base = self
-            .base
-            .segments
-            .iter()
-            .filter(|(path, _)| !self.path_state.contains_key(path.as_str()))
-            .map(|(_, segment)| segment.as_ref());
-        let overrides = self.overrides.values().filter_map(Option::as_deref);
-        base.chain(overrides)
-    }
-
     fn visible_symbols(&self) -> impl Iterator<Item = &GraphSymbolArtifact> {
-        self.visible_segments()
-            .flat_map(|segment| segment.symbols().iter())
-            .filter(|symbol| self.symbol_is_visible(symbol))
-    }
-
-    fn visible_search_symbols(&self) -> impl Iterator<Item = &SearchSymbol> {
-        self.visible_segments()
-            .flat_map(|segment| segment.search_symbols.iter())
-            .filter(|symbol| self.search_symbol_is_visible(symbol))
-    }
-
-    fn symbol_is_visible(&self, symbol: &GraphSymbolArtifact) -> bool {
-        self.stable_id_owner_is_path(&symbol.stable_symbol_id, &symbol.file_path)
-    }
-
-    fn search_symbol_is_visible(&self, symbol: &SearchSymbol) -> bool {
-        self.stable_id_owner_is_path(&symbol.stable_symbol_id, &symbol.file_path)
-    }
-
-    fn stable_id_owner_is_path(&self, stable_symbol_id: &str, path: &str) -> bool {
-        if let Some(owner) = self.delta_symbol_owners.get(stable_symbol_id) {
-            return owner == path;
-        }
-        !self.path_state.contains_key(path)
-            && self
-                .base
-                .symbol_owners
-                .get(stable_symbol_id)
-                .is_some_and(|owner| owner == path)
+        self.visible_files
+            .iter()
+            .flat_map(|(_, slot)| slot.symbols())
     }
 
     fn visible_file_paths(&self) -> impl Iterator<Item = &str> {
-        let base = self
-            .base
-            .segments
-            .keys()
-            .filter(|path| !self.path_state.contains_key(path.as_str()))
-            .map(String::as_str);
-        let overrides = self
-            .overrides
-            .iter()
-            .filter(|(_, segment)| segment.is_some())
-            .map(|(path, _)| path.as_str());
-        base.chain(overrides)
+        self.visible_files.iter().map(|(path, _)| path)
     }
 
     fn resolve_selector_inner(&self, selector: &str) -> SelectorResolution {
@@ -459,6 +634,48 @@ impl OverlayGeneration {
             })
             .max_by_key(|(file_path, _)| file_path.len())
     }
+}
+
+fn collect_segment_stable_ids(
+    segment: Option<&OverlayFileSegment>,
+    stable_symbol_ids: &mut BTreeSet<String>,
+) {
+    let Some(segment) = segment else {
+        return;
+    };
+    stable_symbol_ids.extend(
+        segment
+            .symbols()
+            .iter()
+            .map(|symbol| symbol.stable_symbol_id.clone()),
+    );
+}
+
+fn current_file_segment(
+    base: &BaseGeneration,
+    path_state: &BTreeMap<String, OverlayPathState>,
+    overrides: &BTreeMap<String, Option<Arc<OverlayFileSegment>>>,
+    path: &str,
+) -> Option<Arc<OverlayFileSegment>> {
+    if path_state.contains_key(path) {
+        return overrides.get(path).and_then(Clone::clone);
+    }
+    base.segments.get(path).cloned()
+}
+
+fn current_symbol_owner(
+    stable_symbol_id: &str,
+    delta_symbol_owners: &HashMap<String, String>,
+    base: &BaseGeneration,
+    path_state: &BTreeMap<String, OverlayPathState>,
+) -> Option<String> {
+    if let Some(owner) = delta_symbol_owners.get(stable_symbol_id) {
+        return Some(owner.clone());
+    }
+    base.symbol_owners
+        .get(stable_symbol_id)
+        .filter(|owner| !path_state.contains_key(owner.as_str()))
+        .cloned()
 }
 
 #[derive(Default)]
