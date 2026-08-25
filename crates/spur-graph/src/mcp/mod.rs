@@ -7082,6 +7082,58 @@ mod tests {
     }
 
     #[test]
+    fn graph_mcp_deps_default_keeps_overlay_fsmonitor_off() {
+        assert!(!GraphMcpDeps::default().overlay_fsmonitor_auto);
+    }
+
+    #[test]
+    fn overlay_fsmonitor_off_never_probes_and_returns_release_disabled() {
+        let capabilities = overlay_capabilities_for_worktree_with_probe(
+            Path::new("configured-repo"),
+            false,
+            |_, _, _| panic!("Off must not probe Git fsmonitor"),
+        );
+
+        assert_eq!(
+            crate::git::fsmonitor_status_route(capabilities),
+            crate::git::FsmonitorStatusRoute::ExactFallback(
+                crate::git::FsmonitorFallbackReason::ReleaseDisabled
+            )
+        );
+    }
+
+    #[test]
+    fn overlay_fsmonitor_auto_uses_probe_derived_capabilities() {
+        let worktree = Path::new("configured-repo");
+        let expected = crate::git::FsmonitorCapabilities {
+            release_enabled: true,
+            built_in_supported: true,
+            local_filesystem: true,
+            watcher_healthy: false,
+        };
+
+        let actual = overlay_capabilities_for_worktree_with_probe(
+            worktree,
+            true,
+            |observed_worktree, release_enabled, local_filesystem| {
+                assert_eq!(observed_worktree, worktree);
+                assert!(release_enabled);
+                assert!(local_filesystem);
+                expected
+            },
+        );
+
+        assert_eq!(actual, expected);
+        assert_eq!(
+            crate::git::fsmonitor_status_route(actual),
+            crate::git::FsmonitorStatusRoute::ExactFallback(
+                crate::git::FsmonitorFallbackReason::WatcherUnhealthy
+            ),
+            "Auto must preserve the probe's exact-fallback decision"
+        );
+    }
+
+    #[test]
     fn overlay_changed_paths_fingerprint_tracks_all_changed_content() {
         let tempdir = tempfile::tempdir().expect("tempdir");
         let root = tempdir.path();
