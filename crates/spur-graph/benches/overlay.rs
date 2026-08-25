@@ -813,6 +813,13 @@ fn default_repo_root() -> PathBuf {
         .expect("canonicalize repo root from spur-graph manifest dir")
 }
 
+fn assert_release_gate_claim_grounded(claimed_pass: bool, evidence_present: bool, gate: &str) {
+    assert!(
+        !claimed_pass || evidence_present,
+        "release gate `{gate}` cannot pass without direct evidence"
+    );
+}
+
 fn bench_overlay_release_matrix(_criterion: &mut Criterion) {
     let Some(scenario) = std::env::var("SPUR_GRAPH_RELEASE_SCENARIO").ok() else {
         return;
@@ -931,6 +938,11 @@ fn bench_overlay_release_matrix(_criterion: &mut Criterion) {
     }
 
     let base_operation_count = 1usize;
+    assert_release_gate_claim_grounded(
+        base_operation_count == 1,
+        false,
+        "exactly_one_base_operation",
+    );
     let metadata = serde_json::json!({
         "event": "spur_graph_overlay_release_cell",
         "project": config.label,
