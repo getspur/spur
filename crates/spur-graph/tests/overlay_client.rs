@@ -1,15 +1,512 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use spur_graph::{
     CodeSelectorResolution, Confidence, GraphEdgeArtifact, GraphEdgeKind, GraphFileArtifact,
     GraphFileManifestEntry, GraphIndexArtifact, GraphIndexHeader, GraphQueryClient,
-    GraphSymbolArtifact, InMemoryClient, NodeId, OverlayClient, OwnedCalleeRecord,
-    OwnedCallerRecord, RelationKind, SearchFilters, SearchMode, SearchOptions, SearchResult,
+    GraphSymbolArtifact, InMemoryClient, NodeId, OverlayClient, OverlayGeneration,
+    OverlayGenerationIdentity, OverlayPathState, OwnedCalleeRecord, OwnedCallerRecord,
+    RelationKind, SearchFilters, SearchMode, SearchOptions, SearchResult,
 };
 
 use spur_graph::temporal::TemporalIndex;
+
+#[test]
+fn overlay_generation_matches_fresh_oracle_across_full_path_state_lifecycle() {
+    let base = Arc::new(generation_base_artifact());
+    let seed = Arc::new(OverlayGeneration::seed(Arc::clone(&base)).expect("seed generation"));
+    let unchanged_seed = seed
+        .file_segment("src/unchanged.rs")
+        .expect("unchanged seed segment");
+    let restored_seed = seed
+        .file_segment("src/changed.rs")
+        .expect("restorable seed segment");
+
+    let delta_v1 = Arc::new(generation_delta_v1());
+    let path_state_v1 = BTreeMap::from([
+        (
+            "src/changed.rs".to_owned(),
+            OverlayPathState::Tracked("oid-changed-v1".to_owned()),
+        ),
+        ("src/deleted.rs".to_owned(), OverlayPathState::Deleted),
+        ("src/rename_old.rs".to_owned(), OverlayPathState::Deleted),
+        (
+            "src/rename_new.rs".to_owned(),
+            OverlayPathState::Untracked("oid-rename-v1".to_owned()),
+        ),
+        (
+            "src/untracked.rs".to_owned(),
+            OverlayPathState::Untracked("oid-untracked-v1".to_owned()),
+        ),
+    ]);
+    let generation_v1 = Arc::new(
+        OverlayGeneration::update(
+            &seed,
+            generation_identity("generation-v1", 1),
+            &path_state_v1,
+            Arc::clone(&delta_v1),
+        )
+        .expect("generation v1"),
+    );
+    let oracle_v1 = InMemoryClient::new(Arc::new(generation_oracle_v1()));
+
+    assert_generation_matches_oracle(&generation_v1, &oracle_v1, "v1");
+    assert!(Arc::ptr_eq(
+        &unchanged_seed,
+        &generation_v1
+            .file_segment("src/unchanged.rs")
+            .expect("unchanged v1 segment")
+    ));
+    assert_eq!(
+        generation_v1.rebuilt_paths(),
+        &BTreeSet::from([
+            "src/changed.rs".to_owned(),
+            "src/deleted.rs".to_owned(),
+            "src/rename_new.rs".to_owned(),
+            "src/rename_old.rs".to_owned(),
+            "src/untracked.rs".to_owned(),
+        ])
+    );
+
+    let renamed_v1 = generation_v1
+        .file_segment("src/rename_new.rs")
+        .expect("renamed v1 segment");
+    let untracked_v1 = generation_v1
+        .file_segment("src/untracked.rs")
+        .expect("untracked v1 segment");
+    let path_state_v2 = BTreeMap::from([
+        ("src/deleted.rs".to_owned(), OverlayPathState::Deleted),
+        ("src/rename_old.rs".to_owned(), OverlayPathState::Deleted),
+        (
+            "src/rename_new.rs".to_owned(),
+            OverlayPathState::Untracked("oid-rename-v1".to_owned()),
+        ),
+        (
+            "src/untracked.rs".to_owned(),
+            OverlayPathState::Untracked("oid-untracked-v1".to_owned()),
+        ),
+    ]);
+    let generation_v2 = Arc::new(
+        OverlayGeneration::update(
+            &generation_v1,
+            generation_identity("generation-v2", 2),
+            &path_state_v2,
+            Arc::new(generation_delta_v2()),
+        )
+        .expect("generation v2"),
+    );
+    let oracle_v2 = InMemoryClient::new(Arc::new(generation_oracle_v2()));
+
+    assert_generation_matches_oracle(&generation_v2, &oracle_v2, "v2");
+    assert!(Arc::ptr_eq(
+        &unchanged_seed,
+        &generation_v2
+            .file_segment("src/unchanged.rs")
+            .expect("unchanged v2 segment")
+    ));
+    assert!(Arc::ptr_eq(
+        &restored_seed,
+        &generation_v2
+            .file_segment("src/changed.rs")
+            .expect("restored base segment")
+    ));
+    assert!(Arc::ptr_eq(
+        &renamed_v1,
+        &generation_v2
+            .file_segment("src/rename_new.rs")
+            .expect("renamed v2 segment")
+    ));
+    assert!(Arc::ptr_eq(
+        &untracked_v1,
+        &generation_v2
+            .file_segment("src/untracked.rs")
+            .expect("untracked v2 segment")
+    ));
+    assert_eq!(
+        generation_v2.rebuilt_paths(),
+        &BTreeSet::from(["src/changed.rs".to_owned()])
+    );
+}
+
+#[test]
+fn overlay_generation_resolves_stable_id_collision_once_during_update() {
+    let base = Arc::new(artifact(
+        "collision-base",
+        vec![file("src/changed.rs"), file("src/unchanged.rs")],
+        vec![
+            symbol(
+                "collision-id",
+                "src/unchanged.rs",
+                [1, 2],
+                "old_collision",
+                "old_collision",
+            ),
+            symbol(
+                "changed-base-id",
+                "src/changed.rs",
+                [4, 5],
+                "changed_base",
+                "changed_base",
+            ),
+        ],
+        vec![],
+    ));
+    let seed = Arc::new(OverlayGeneration::seed(base).expect("seed generation"));
+    let delta = Arc::new(artifact(
+        "collision-delta",
+        vec![file("src/changed.rs")],
+        vec![symbol(
+            "collision-id",
+            "src/changed.rs",
+            [8, 9],
+            "new_collision",
+            "new_collision",
+        )],
+        vec![],
+    ));
+    let mut identity = generation_identity("collision", 3);
+    identity.indexed_graph_content_hash = "collision-base".to_owned();
+    let generation = OverlayGeneration::update(
+        &seed,
+        identity,
+        &BTreeMap::from([(
+            "src/changed.rs".to_owned(),
+            OverlayPathState::Tracked("oid-collision".to_owned()),
+        )]),
+        delta,
+    )
+    .expect("collision generation");
+    let oracle = InMemoryClient::new(Arc::new(artifact(
+        "collision-oracle",
+        vec![file("src/changed.rs"), file("src/unchanged.rs")],
+        vec![symbol(
+            "collision-id",
+            "src/changed.rs",
+            [8, 9],
+            "new_collision",
+            "new_collision",
+        )],
+        vec![],
+    )));
+
+    assert_generation_matches_oracle(&generation, &oracle, "collision");
+    assert_eq!(
+        generation
+            .symbol_by_id("collision-id")
+            .expect("generation symbol"),
+        oracle.symbol_by_id("collision-id").expect("oracle symbol")
+    );
+    assert_eq!(
+        generation
+            .search_symbols(&options("collision", SearchMode::Substring))
+            .expect("collision search")
+            .total_matches,
+        1
+    );
+}
+
+fn assert_generation_matches_oracle(
+    generation: &OverlayGeneration,
+    oracle: &impl GraphQueryClient,
+    label: &str,
+) {
+    let search_options = [
+        options("base_target", SearchMode::Exact),
+        options("modified_target", SearchMode::Exact),
+        options("unchanged", SearchMode::Substring),
+        options("renamed_target", SearchMode::Exact),
+        options("untracked_target", SearchMode::Exact),
+        options("collision", SearchMode::Substring),
+        SearchOptions {
+            query: "target".to_owned(),
+            mode: SearchMode::Substring,
+            filters: SearchFilters {
+                file_glob: Some("src/*.rs".to_owned()),
+                ..SearchFilters::default()
+            },
+            limit: 2,
+        },
+    ];
+    let selectors = [
+        "base-target-id",
+        "modified-target-id",
+        "unchanged-id",
+        "deleted-id",
+        "rename-id",
+        "untracked-id",
+        "collision-id",
+        "base_target",
+        "modified_target",
+        "renamed_target",
+        "src/changed.rs::base_target",
+        "src/changed.rs::modified_target",
+        "src/rename_new.rs::renamed_target",
+        "graph://symbol/rename-id",
+    ];
+
+    let mut generation_rows = Vec::new();
+    let mut oracle_rows = Vec::new();
+    for search in &search_options {
+        let actual = generation
+            .search_symbols(search)
+            .expect("generation search");
+        let expected = oracle.search_symbols(search).expect("oracle search");
+        assert_eq!(actual, expected, "{label} search options: {search:?}");
+        generation_rows.push(format!("search:{search:?}:{actual:?}"));
+        oracle_rows.push(format!("search:{search:?}:{expected:?}"));
+    }
+    for selector in selectors {
+        let actual = generation
+            .resolve_selector(selector)
+            .expect("generation selector");
+        let expected = oracle.resolve_selector(selector).expect("oracle selector");
+        assert_eq!(actual, expected, "{label} selector: {selector}");
+        generation_rows.push(format!("selector:{selector}:{actual:?}"));
+        oracle_rows.push(format!("selector:{selector}:{expected:?}"));
+    }
+    for path in [
+        "src/changed.rs",
+        "src/unchanged.rs",
+        "src/deleted.rs",
+        "src/rename_old.rs",
+        "src/rename_new.rs",
+        "src/untracked.rs",
+    ] {
+        let actual = generation
+            .symbols_by_file(path)
+            .expect("generation file symbols");
+        let expected = oracle.symbols_by_file(path).expect("oracle file symbols");
+        assert_eq!(actual, expected, "{label} symbols_by_file({path})");
+        assert_eq!(
+            generation
+                .file_manifest_by_path(path)
+                .expect("generation manifest"),
+            oracle.file_manifest_by_path(path).expect("oracle manifest"),
+            "{label} file_manifest_by_path({path})"
+        );
+        assert_eq!(
+            generation
+                .file_exists(path)
+                .expect("generation file exists"),
+            oracle.file_exists(path).expect("oracle file exists"),
+            "{label} file_exists({path})"
+        );
+    }
+
+    let generation_digest = blake3::hash(generation_rows.join("\n").as_bytes()).to_hex();
+    let oracle_digest = blake3::hash(oracle_rows.join("\n").as_bytes()).to_hex();
+    println!(
+        "overlay_generation_oracle_digest state={label} generation={generation_digest} oracle={oracle_digest}"
+    );
+    assert_eq!(generation_digest, oracle_digest, "{label} oracle digest");
+}
+
+fn generation_identity(label: &str, fingerprint_byte: u8) -> OverlayGenerationIdentity {
+    OverlayGenerationIdentity {
+        canonical_worktree: PathBuf::from("/test/worktree"),
+        indexed_graph_content_hash: "generation-base".to_owned(),
+        indexed_head_oid: Some("indexed-head".to_owned()),
+        current_head_oid: label.to_owned(),
+        index_identity: format!("index-{label}"),
+        normalized_changed_set_fingerprint: [fingerprint_byte; 32],
+    }
+}
+
+fn generation_base_artifact() -> GraphIndexArtifact {
+    artifact(
+        "generation-base",
+        vec![
+            file("src/changed.rs"),
+            file("src/unchanged.rs"),
+            file("src/deleted.rs"),
+            file("src/rename_old.rs"),
+        ],
+        vec![
+            symbol(
+                "base-target-id",
+                "src/changed.rs",
+                [1, 2],
+                "base_target",
+                "base_target",
+            ),
+            symbol(
+                "unchanged-id",
+                "src/unchanged.rs",
+                [3, 4],
+                "unchanged_target",
+                "unchanged_target",
+            ),
+            symbol(
+                "deleted-id",
+                "src/deleted.rs",
+                [5, 6],
+                "deleted_target",
+                "deleted_target",
+            ),
+            symbol(
+                "rename-id",
+                "src/rename_old.rs",
+                [7, 8],
+                "renamed_target",
+                "renamed_target",
+            ),
+        ],
+        vec![],
+    )
+}
+
+fn generation_delta_v1() -> GraphIndexArtifact {
+    artifact(
+        "generation-delta-v1",
+        vec![
+            file("src/changed.rs"),
+            file("src/unchanged.rs"),
+            file("src/rename_new.rs"),
+            file("src/untracked.rs"),
+        ],
+        vec![
+            symbol(
+                "modified-target-id",
+                "src/changed.rs",
+                [10, 12],
+                "modified_target",
+                "modified_target",
+            ),
+            symbol(
+                "rename-id",
+                "src/rename_new.rs",
+                [14, 16],
+                "renamed_target",
+                "renamed_target",
+            ),
+            symbol(
+                "untracked-id",
+                "src/untracked.rs",
+                [18, 20],
+                "untracked_target",
+                "untracked_target",
+            ),
+        ],
+        vec![],
+    )
+}
+
+fn generation_delta_v2() -> GraphIndexArtifact {
+    artifact(
+        "generation-delta-v2",
+        vec![
+            file("src/changed.rs"),
+            file("src/unchanged.rs"),
+            file("src/rename_new.rs"),
+            file("src/untracked.rs"),
+        ],
+        vec![
+            symbol(
+                "rename-id",
+                "src/rename_new.rs",
+                [14, 16],
+                "renamed_target",
+                "renamed_target",
+            ),
+            symbol(
+                "untracked-id",
+                "src/untracked.rs",
+                [18, 20],
+                "untracked_target",
+                "untracked_target",
+            ),
+        ],
+        vec![],
+    )
+}
+
+fn generation_oracle_v1() -> GraphIndexArtifact {
+    artifact(
+        "generation-oracle-v1",
+        vec![
+            file("src/changed.rs"),
+            file("src/unchanged.rs"),
+            file("src/rename_new.rs"),
+            file("src/untracked.rs"),
+        ],
+        vec![
+            symbol(
+                "modified-target-id",
+                "src/changed.rs",
+                [10, 12],
+                "modified_target",
+                "modified_target",
+            ),
+            symbol(
+                "unchanged-id",
+                "src/unchanged.rs",
+                [3, 4],
+                "unchanged_target",
+                "unchanged_target",
+            ),
+            symbol(
+                "rename-id",
+                "src/rename_new.rs",
+                [14, 16],
+                "renamed_target",
+                "renamed_target",
+            ),
+            symbol(
+                "untracked-id",
+                "src/untracked.rs",
+                [18, 20],
+                "untracked_target",
+                "untracked_target",
+            ),
+        ],
+        vec![],
+    )
+}
+
+fn generation_oracle_v2() -> GraphIndexArtifact {
+    artifact(
+        "generation-oracle-v2",
+        vec![
+            file("src/changed.rs"),
+            file("src/unchanged.rs"),
+            file("src/rename_new.rs"),
+            file("src/untracked.rs"),
+        ],
+        vec![
+            symbol(
+                "base-target-id",
+                "src/changed.rs",
+                [1, 2],
+                "base_target",
+                "base_target",
+            ),
+            symbol(
+                "unchanged-id",
+                "src/unchanged.rs",
+                [3, 4],
+                "unchanged_target",
+                "unchanged_target",
+            ),
+            symbol(
+                "rename-id",
+                "src/rename_new.rs",
+                [14, 16],
+                "renamed_target",
+                "renamed_target",
+            ),
+            symbol(
+                "untracked-id",
+                "src/untracked.rs",
+                [18, 20],
+                "untracked_target",
+                "untracked_target",
+            ),
+        ],
+        vec![],
+    )
+}
 
 #[test]
 fn empty_delta_matches_base_across_query_surface() {
