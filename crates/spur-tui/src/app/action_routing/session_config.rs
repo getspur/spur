@@ -82,7 +82,9 @@ impl App {
                     detail.set_disable_paste_burst(*disabled);
                 }
             }
-            ConfigPatch::GraphEmbeddingModel { .. } | ConfigPatch::SkillsProjectionMode(_) => {}
+            ConfigPatch::GraphEmbeddingModel { .. }
+            | ConfigPatch::GraphOverlayFsmonitor(_)
+            | ConfigPatch::SkillsProjectionMode(_) => {}
         }
         self.dirty = true;
     }
@@ -237,7 +239,7 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use spur_acp::config::{ConfigPatch, EditorMode};
+    use spur_acp::config::{ConfigPatch, EditorMode, OverlayFsmonitorMode};
     use tokio::sync::mpsc;
 
     fn app_with_agent(tx: Option<mpsc::Sender<UserInput>>) -> App {
@@ -412,6 +414,37 @@ mod tests {
         assert_eq!(app.config.tui.edit_mode, EditorMode::Emacs);
         let hint = app.transient_hint_text().unwrap_or("");
         assert!(hint.contains("failed"), "failure flash missing: {hint}");
+    }
+
+    #[test]
+    fn graph_overlay_fsmonitor_applies_only_after_confirmation() {
+        let (tx, mut rx) = mpsc::channel(8);
+        let mut app = App::new(Some(tx), false);
+
+        app.process_action(Action::ConfigSaveRequested {
+            patch: ConfigPatch::GraphOverlayFsmonitor(OverlayFsmonitorMode::Auto),
+        });
+        assert_eq!(
+            app.config.graph.overlay_fsmonitor,
+            OverlayFsmonitorMode::Off
+        );
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(UserInput::UpdateConfig {
+                patch: ConfigPatch::GraphOverlayFsmonitor(OverlayFsmonitorMode::Auto)
+            })
+        ));
+
+        app.handle_spur_event(SpurEvent::now(SpurEventBody::ConfigUpdateResult {
+            section: "graph".into(),
+            ok: true,
+            message: "saved - restart required".into(),
+        }));
+
+        assert_eq!(
+            app.config.graph.overlay_fsmonitor,
+            OverlayFsmonitorMode::Auto
+        );
     }
 
     #[test]
