@@ -12,6 +12,11 @@ pub(crate) const DUCKLAKE_DATA_PATH_ENV: &str = "SPUR_CONTEXT_DUCKLAKE_DATA_PATH
 pub(crate) const DUCKDB_EXTENSION_DIR_ENV: &str = "SPUR_CONTEXT_DUCKDB_EXTENSION_DIR";
 const POSTGRES_DUCKLAKE_WRITE_LOCK_KEY: i64 = 7_830_668_896_113_191_951;
 const CATALOG_PASSWORD_ENV: &str = "SPUR_CATALOG_PASSWORD";
+// sol_33f7c9ded2f042c0: 2 attempts × 30s connect + 1s backoff = 61s, covering
+// Aurora Serverless v2 resume-from-0 ACU without eating the 900s worker budget.
+const POSTGRES_PAUSE_RESUME_CONNECT_TIMEOUT_SECS: u64 = 30;
+const POSTGRES_PAUSE_RESUME_ATTEMPTS: u32 = 2;
+const POSTGRES_PAUSE_RESUME_BACKOFF: Duration = Duration::from_secs(1);
 const SNAPSHOT_POINTER_RELATIVE_PATH: &str = "gold/catalog-snapshot/current.json";
 const SNAPSHOT_GENERATIONS_RELATIVE_DIR: &str = "gold/catalog-snapshot/generations";
 const SNAPSHOT_FILE_NAME: &str = "spur_context.ducklake";
@@ -405,13 +410,25 @@ fn connect_ducklake_with_data_path_inner(
 fn acquire_postgres_ducklake_write_lock(conn: &Connection, catalog_dsn: &str) -> Result<()> {
     let alias = format!("spur_catalog_lock_{}", uuid::Uuid::new_v4().simple());
     let dsn = postgres_metadata_dsn(catalog_dsn);
-    conn.execute_batch(&format!(
-        "ATTACH '{}' AS {alias} (TYPE postgres);",
-        escape_sql_literal(&dsn)
-    ))
-    .context("failed to attach Postgres catalog for DuckLake write lock")?;
+    attach_postgres_alias(conn, &alias, &dsn)
+        .context("failed to attach Postgres catalog for DuckLake write lock")?;
     conn.query_row(&postgres_ducklake_write_lock_sql(&alias), [], |_| Ok(()))
         .context("failed to acquire Postgres DuckLake write lock")
+}
+
+pub(crate) fn attach_postgres_alias(conn: &Connection, alias: &str, dsn: &str) -> Result<()> {
+    retry_postgres_pause_resume(
+        || {
+            let _ = conn.execute_batch(&format!("DETACH DATABASE IF EXISTS {alias};"));
+            conn.execute_batch(&format!(
+                "ATTACH '{}' AS {alias} (TYPE postgres);",
+                escape_sql_literal(dsn)
+            ))
+            .map_err(|error| anyhow!("{}", redact_libpq_secrets(&error.to_string())))
+            .map(|_| ())
+        },
+        thread::sleep,
+    )
 }
 
 pub(crate) fn postgres_ducklake_write_lock_sql(alias: &str) -> String {
@@ -1382,13 +1399,100 @@ fn s3_client_from_env() -> aws_sdk_s3::Client {
 
 pub(crate) fn postgres_metadata_dsn(catalog_dsn: &str) -> String {
     let dsn = catalog_dsn.strip_prefix("ducklake:").unwrap_or(catalog_dsn);
-    if let Some(rest) = dsn.strip_prefix("postgres:") {
+    let stripped = if let Some(rest) = dsn.strip_prefix("postgres:") {
         rest.to_owned()
     } else if let Some(rest) = dsn.strip_prefix("postgresql:") {
         format!("postgresql:{rest}")
     } else {
         dsn.to_owned()
+    };
+    with_postgres_connect_timeout(&stripped, POSTGRES_PAUSE_RESUME_CONNECT_TIMEOUT_SECS)
+}
+
+fn with_postgres_connect_timeout(dsn: &str, timeout_secs: u64) -> String {
+    if postgres_keyword_dsn_has(dsn, "connect_timeout") {
+        return dsn.to_owned();
     }
+    format!("{dsn} connect_timeout={timeout_secs}")
+}
+
+fn postgres_keyword_dsn_has(dsn: &str, key: &str) -> bool {
+    let needle = format!("{key}=");
+    dsn.split_whitespace().any(|token| {
+        token
+            .strip_prefix('\'')
+            .unwrap_or(token)
+            .starts_with(&needle)
+    })
+}
+
+fn is_postgres_pause_resume_error(error: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
+    lower.contains("connection timed out")
+        || lower.contains("timeout expired")
+        || lower.contains("the database system is starting up")
+        || lower.contains("the database system is not yet accepting connections")
+        || lower.contains("could not connect to server")
+        || lower.contains("connection refused")
+        || lower.contains("server closed the connection unexpectedly")
+}
+
+fn retry_postgres_pause_resume<T, E>(
+    mut op: impl FnMut() -> std::result::Result<T, E>,
+    mut sleep: impl FnMut(Duration),
+) -> std::result::Result<T, E>
+where
+    E: std::fmt::Display,
+{
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        match op() {
+            Ok(value) => return Ok(value),
+            Err(error)
+                if attempt < POSTGRES_PAUSE_RESUME_ATTEMPTS
+                    && is_postgres_pause_resume_error(&error.to_string()) =>
+            {
+                sleep(POSTGRES_PAUSE_RESUME_BACKOFF);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+fn redact_libpq_secrets(message: &str) -> String {
+    let mut redacted = String::with_capacity(message.len());
+    let mut rest = message;
+    while let Some(idx) = rest.find("password=") {
+        redacted.push_str(&rest[..idx]);
+        redacted.push_str("password=REDACTED");
+        let after = &rest[idx + "password=".len()..];
+        rest = if after.starts_with('\'') {
+            after
+                .get(1..)
+                .and_then(|quoted| {
+                    let mut chars = quoted.char_indices();
+                    while let Some((i, ch)) = chars.next() {
+                        if ch == '\\' {
+                            chars.next();
+                            continue;
+                        }
+                        if ch == '\'' {
+                            return Some(&quoted[i + 1..]);
+                        }
+                    }
+                    Some("")
+                })
+                .unwrap_or("")
+        } else {
+            after
+                .split_once(|ch: char| ch.is_whitespace() || ch == '\'' || ch == '"')
+                .map(|(_, tail)| tail)
+                .unwrap_or("")
+        };
+    }
+    redacted.push_str(rest);
+    redacted
 }
 
 fn sqlite_catalog_path(catalog_dsn: &str) -> Option<PathBuf> {
@@ -1701,6 +1805,89 @@ mod tests {
         }
 
         assert_eq!(dsn, "postgres:host=aurora password=already-present");
+    }
+
+    #[test]
+    fn postgres_metadata_dsn_sets_pause_resume_connect_timeout() {
+        // sol_33f7c9ded2f042c0: connect_timeout_s=30 covers Aurora resume-from-0 ACU.
+        let dsn = postgres_metadata_dsn(
+            "postgres:host=aurora.example port=5432 dbname=spur_context user=spur_context sslmode=require",
+        );
+        assert!(
+            dsn.contains("connect_timeout=30"),
+            "pause-resume attach DSN should wait 30s per attempt, got `{dsn}`"
+        );
+        assert!(dsn.contains("host=aurora.example"));
+        assert!(dsn.contains("sslmode=require"));
+    }
+
+    #[test]
+    fn postgres_metadata_dsn_keeps_existing_connect_timeout() {
+        let dsn = postgres_metadata_dsn("postgres:host=aurora connect_timeout=12");
+        assert!(dsn.contains("connect_timeout=12"));
+        assert!(
+            !dsn.contains("connect_timeout=30"),
+            "explicit connect_timeout must not be overwritten, got `{dsn}`"
+        );
+    }
+
+    #[test]
+    fn pause_resume_retry_succeeds_on_second_attempt() {
+        let mut calls = 0u32;
+        let mut sleeps = 0u32;
+        let result = retry_postgres_pause_resume(
+            || {
+                calls += 1;
+                if calls == 1 {
+                    Err(anyhow!("connection timed out"))
+                } else {
+                    Ok(())
+                }
+            },
+            |_| {
+                sleeps += 1;
+            },
+        );
+        assert!(result.is_ok());
+        assert_eq!(calls, POSTGRES_PAUSE_RESUME_ATTEMPTS);
+        assert_eq!(sleeps, POSTGRES_PAUSE_RESUME_ATTEMPTS - 1);
+    }
+
+    #[test]
+    fn pause_resume_retry_exhausts_budgeted_attempts() {
+        let mut calls = 0u32;
+        let result: Result<()> = retry_postgres_pause_resume(
+            || {
+                calls += 1;
+                Err(anyhow!("could not connect to server"))
+            },
+            |_| {},
+        );
+        assert!(result.is_err());
+        assert_eq!(calls, POSTGRES_PAUSE_RESUME_ATTEMPTS);
+    }
+
+    #[test]
+    fn pause_resume_retry_does_not_retry_permanent_errors() {
+        let mut calls = 0u32;
+        let result: Result<()> = retry_postgres_pause_resume(
+            || {
+                calls += 1;
+                Err(anyhow!("password authentication failed"))
+            },
+            |_| {},
+        );
+        assert!(result.is_err());
+        assert_eq!(calls, 1);
+    }
+
+    #[test]
+    fn attach_error_redacts_libpq_password() {
+        let redacted = redact_libpq_secrets(
+            "Unable to connect to Postgres at \"host=aurora password='s3cret\\\\value' dbname=spur_context\"",
+        );
+        assert!(!redacted.contains("s3cret"));
+        assert!(redacted.contains("password=REDACTED"));
     }
 
     #[test]

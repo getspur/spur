@@ -12,8 +12,9 @@ use duckdb::{params, Connection};
 use serde::Deserialize;
 
 use crate::catalog::{
-    catalog_dsn_with_env_password, ducklake_data_path, export_frozen_snapshot, gold_table,
-    load_duckdb_extension, postgres_ducklake_write_lock_sql, postgres_metadata_dsn,
+    attach_postgres_alias, catalog_dsn_with_env_password, ducklake_data_path,
+    export_frozen_snapshot, gold_table, load_duckdb_extension, postgres_ducklake_write_lock_sql,
+    postgres_metadata_dsn,
 };
 use crate::medallion::SilverManifest;
 
@@ -1321,11 +1322,8 @@ fn attach_postgres_metadata_catalog(
 
     let alias = format!("spur_metadata_{}", uuid::Uuid::new_v4().simple());
     let dsn = postgres_metadata_dsn(catalog_dsn_with_env_password(catalog_dsn).as_str());
-    conn.execute_batch(&format!(
-        "ATTACH '{}' AS {alias} (TYPE postgres);",
-        escape_sql_literal(&dsn)
-    ))
-    .context("failed to attach Postgres metadata catalog")?;
+    attach_postgres_alias(conn, &alias, &dsn)
+        .context("failed to attach Postgres metadata catalog")?;
 
     Ok(Some(PostgresMetadataCatalog { alias }))
 }
