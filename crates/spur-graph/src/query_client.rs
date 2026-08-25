@@ -300,6 +300,23 @@ pub struct OverlayClient<B: GraphQueryClient> {
     remap: HashMap<String, String>,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct OverlayFinalizationMeasurements {
+    pub shadow_filters: u64,
+    pub result_merges: u64,
+    pub overlay_sorts: u64,
+    pub stable_id_deduplications: u64,
+}
+
+impl OverlayFinalizationMeasurements {
+    pub fn total(self) -> u64 {
+        self.shadow_filters
+            + self.result_merges
+            + self.overlay_sorts
+            + self.stable_id_deduplications
+    }
+}
+
 fn empty_overlay_delta_artifact() -> GraphIndexArtifact {
     GraphIndexArtifact {
         header: GraphIndexHeader {
@@ -364,6 +381,55 @@ impl<B: GraphQueryClient> OverlayClient<B> {
 
     fn is_identity_overlay(&self) -> bool {
         self.shadowed.is_empty() && self.remap.is_empty()
+    }
+
+    pub fn search_symbols_with_measurements(
+        &self,
+        opts: &SearchOptions,
+        measurements: &mut OverlayFinalizationMeasurements,
+    ) -> anyhow::Result<SearchResult> {
+        self.search_symbols_counted(opts, Some(measurements))
+    }
+
+    fn search_symbols_counted(
+        &self,
+        opts: &SearchOptions,
+        mut measurements: Option<&mut OverlayFinalizationMeasurements>,
+    ) -> anyhow::Result<SearchResult> {
+        if self.is_identity_overlay() {
+            return self.base.search_symbols(opts);
+        }
+        let unbounded = internal_unbounded_search_options(opts);
+        let mut candidates = self
+            .base
+            .search_symbols(&unbounded)?
+            .candidates
+            .into_iter()
+            .filter(|symbol| !self.is_shadowed_path(&symbol.file_path))
+            .collect::<Vec<_>>();
+        if let Some(measurements) = measurements.as_deref_mut() {
+            measurements.shadow_filters += 1;
+        }
+
+        candidates.extend(self.delta.search_symbols(&unbounded)?.candidates);
+        if let Some(measurements) = measurements.as_deref_mut() {
+            measurements.result_merges += 1;
+        }
+
+        // This orders the separately queried base and delta vectors as one overlay.
+        // Ranking sorts inside either query client are not overlay finalization.
+        candidates.sort_by(|left, right| compare_symbols(left, right, opts));
+        if let Some(measurements) = measurements.as_deref_mut() {
+            measurements.overlay_sorts += 1;
+        }
+
+        candidates.dedup_by(|left, right| left.stable_symbol_id == right.stable_symbol_id);
+        if let Some(measurements) = measurements {
+            measurements.stable_id_deduplications += 1;
+        }
+
+        let total_matches = candidates.len();
+        Ok(limited_search_result(candidates, total_matches, opts.limit))
     }
 
     fn is_shadowed_path(&self, path: &str) -> bool {
@@ -545,23 +611,7 @@ impl<B: GraphQueryClient> OverlayClient<B> {
 
 impl<B: GraphQueryClient> GraphQueryClient for OverlayClient<B> {
     fn search_symbols(&self, opts: &SearchOptions) -> anyhow::Result<SearchResult> {
-        if self.is_identity_overlay() {
-            return self.base.search_symbols(opts);
-        }
-        let unbounded = internal_unbounded_search_options(opts);
-        let mut candidates = self
-            .base
-            .search_symbols(&unbounded)?
-            .candidates
-            .into_iter()
-            .filter(|symbol| !self.is_shadowed_path(&symbol.file_path))
-            .collect::<Vec<_>>();
-        candidates.extend(self.delta.search_symbols(&unbounded)?.candidates);
-        candidates.sort_by(|left, right| compare_symbols(left, right, opts));
-        candidates.dedup_by(|left, right| left.stable_symbol_id == right.stable_symbol_id);
-
-        let total_matches = candidates.len();
-        Ok(limited_search_result(candidates, total_matches, opts.limit))
+        self.search_symbols_counted(opts, None)
     }
 
     fn find_caller_edges(&self, sid: &str) -> Vec<OwnedCallerRecord> {
@@ -2415,6 +2465,69 @@ mod tests {
         assert_eq!(ids(&actual), ids(&expected));
         assert_eq!(actual.total_matches, expected.total_matches);
         assert_eq!(actual.truncated, expected.truncated);
+    }
+
+    #[test]
+    fn non_identity_overlay_search_reports_each_finalization_stage_once() {
+        let base = InMemoryClient::new(Arc::new(artifact(vec![symbol_at(
+            "base",
+            "target",
+            "src/lib.rs",
+        )])));
+        let overlay = OverlayClient::from_artifacts(
+            &base,
+            Arc::new(artifact(vec![symbol_at(
+                "replacement",
+                "target",
+                "src/lib.rs",
+            )])),
+            HashSet::from(["src/lib.rs".to_owned()]),
+        )
+        .expect("construct non-identity overlay");
+        let options = SearchOptions {
+            query: "target".to_owned(),
+            mode: SearchMode::Exact,
+            filters: SearchFilters::default(),
+            limit: 20,
+        };
+        let mut measurements = OverlayFinalizationMeasurements::default();
+
+        overlay
+            .search_symbols_with_measurements(&options, &mut measurements)
+            .expect("measured overlay search succeeds");
+
+        assert_eq!(
+            measurements,
+            OverlayFinalizationMeasurements {
+                shadow_filters: 1,
+                result_merges: 1,
+                overlay_sorts: 1,
+                stable_id_deduplications: 1,
+            }
+        );
+        assert_eq!(measurements.total(), 4);
+    }
+
+    #[test]
+    fn identity_overlay_search_reports_zero_finalization_stages() {
+        let base = InMemoryClient::new(Arc::new(artifact(vec![symbol("base", "target")])));
+        let overlay =
+            OverlayClient::from_artifacts(&base, Arc::new(artifact(Vec::new())), HashSet::new())
+                .expect("construct identity overlay");
+        let options = SearchOptions {
+            query: "target".to_owned(),
+            mode: SearchMode::Exact,
+            filters: SearchFilters::default(),
+            limit: 20,
+        };
+        let mut measurements = OverlayFinalizationMeasurements::default();
+
+        overlay
+            .search_symbols_with_measurements(&options, &mut measurements)
+            .expect("measured identity search succeeds");
+
+        assert_eq!(measurements, OverlayFinalizationMeasurements::default());
+        assert_eq!(measurements.total(), 0);
     }
 
     #[test]

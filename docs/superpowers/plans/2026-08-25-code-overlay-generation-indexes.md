@@ -479,7 +479,78 @@ this plan's PRE unless their complete protocol identity is proven equal.
 
 ### PRE
 
-Pending Task 1 execution under the committed plan protocol.
+Task 1 measured the existing request-scoped overlay search on the Spur worker
+worktree. The selected session used exact query `handle_code_search`, limit 20,
+default filters, and one explicit changed path
+(`crates/spur-graph/src/query_client.rs`). Each repetition warmed the prebuilt
+overlay for one second, then collected 30 Criterion samples / 90 measured query
+iterations over a one-second measurement window. Percentiles below are
+nearest-rank percentiles of the raw per-iteration sample times
+(`times[i] / iters[i]`), not Criterion confidence-interval endpoints.
+
+Project/protocol identity:
+
+- repository:
+  `/Volumes/Projects/Projects/spur/.spur/worktrees/516c98c3-8a9b-44cc-a20f-c2a1e1867c9c`
+- source revision: `b7fff63f41832de154c1fb83951fd0a5f4fcb7ba`
+  plus the uncommitted GREEN measurement seam in `query_client.rs`
+- tracked files: 3,222; probe dirty records: 1; selected changed-path count: 1
+- base artifact:
+  `/Volumes/Projects/Projects/spur/.spur/graph/acd60905a3a40accf38792d2e7ce41e37e58bd4ad0d4e62624b069d57a02b832.parquet`
+- base graph content hash:
+  `acd60905a3a40accf38792d2e7ce41e37e58bd4ad0d4e62624b069d57a02b832`
+- artifact indexed commit OID: `null` (not present in this artifact manifest);
+  indexed source files: 3,434
+- classification: warm overlay query; one-second warm-up before every
+  repetition
+
+The probe command was run three times with only the final saved-baseline name
+changed from `task1-pre-r1` through `task1-pre-r3`. `GIT_INDEX_FILE` pointed to
+a disposable copy of the worktree index with the host-only Cargo lockfile
+refresh marked assume-unchanged, keeping the measured Git snapshot at the one
+intentional changed path. The disposable index and lockfile refresh were
+removed after the probe.
+
+```bash
+GIT_INDEX_FILE=/tmp/spur-task1-index.OUzSBo/index \
+SPUR_REMOTE=0 \
+SPUR_GRAPH_PERF_REPO=/Volumes/Projects/Projects/spur/.spur/worktrees/516c98c3-8a9b-44cc-a20f-c2a1e1867c9c \
+SPUR_GRAPH_PERF_FIXTURE=/Volumes/Projects/Projects/spur/.spur/graph/CURRENT \
+SPUR_GRAPH_PERF_CHANGED_FILE=crates/spur-graph/src/query_client.rs \
+SPUR_GRAPH_PERF_LABEL=task1_pre_spur \
+SPUR_GRAPH_PERF_SAMPLE_SIZE=30 \
+SPUR_GRAPH_PERF_MEASUREMENT_SECONDS=1 \
+scripts/spur-cargo bench --locked -p spur-graph --bench overlay -- \
+  overlay_stage_probe_task1_pre_spur/stage_overlay_query --noplot \
+  --save-baseline task1-pre-r1
+```
+
+| Repetition | Samples / iterations | p50 (ms) | p95 (ms) | Correctness digest | Per-query finalization stages | Measured-window stage counts |
+|---|---:|---:|---:|---|---|---|
+| `task1-pre-r1` | 30 / 90 | 13.684097 | 13.938806 | `37d1ae135cd80b90589253cd74df41bd88389b2cfc13de96907ff62700985936` | shadow=1, merge=1, overlay-sort=1, stable-ID-dedup=1; total=4 | 90 / 90 / 90 / 90; total=360 |
+| `task1-pre-r2` | 30 / 90 | 13.585958 | 14.999069 | `37d1ae135cd80b90589253cd74df41bd88389b2cfc13de96907ff62700985936` | shadow=1, merge=1, overlay-sort=1, stable-ID-dedup=1; total=4 | 90 / 90 / 90 / 90; total=360 |
+| `task1-pre-r3` | 30 / 90 | 13.618861 | 15.516486 | `37d1ae135cd80b90589253cd74df41bd88389b2cfc13de96907ff62700985936` | shadow=1, merge=1, overlay-sort=1, stable-ID-dedup=1; total=4 | 90 / 90 / 90 / 90; total=360 |
+
+The stage-count contract is the counted `OverlayClient` execution seam tested
+against the same non-identity search path. Identity overlay searches report
+zero for all four labels. `overlay_sorts` counts only the sort that orders the
+separately queried base and delta vectors as one overlay result; ranking sorts
+inside either query client are intentionally excluded.
+
+SOLVE evidence:
+
+- PRE `sol_165c862dc07941fd` (persisted and reloaded):
+  `data_integrity.cardinality` passed all eight bindings. Three repeated warm
+  non-identity searches contain three occurrences of each stage (12 total),
+  while all four identity relations have cardinality zero. This is the expected
+  non-zero counterexample to the approved zero-finalization target.
+- POST `sol_b6bf8aa93db74d7c` (persisted and reloaded): all nine cardinality
+  bindings plus `data_integrity.unique` and
+  `data_integrity.mutually_consistent` passed. The four labels are unique and
+  drawn only from shadow filter, result merge, overlay sort, and stable-ID
+  deduplication; `query_ranking_sort` is outside the allowed overlay-label
+  relation. Task 1 intentionally measures rather than removes the PRE
+  counterexample; Task 6 must reduce these four warm-path counts to zero.
 
 ### POST
 
