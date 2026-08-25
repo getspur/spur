@@ -1,16 +1,16 @@
-use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fs;
-use std::hash::{Hash, Hasher as _};
 use std::io::ErrorKind;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 #[cfg(any(test, feature = "test-support"))]
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
+use anyhow::Context as _;
 use chrono::{DateTime, SecondsFormat, Utc};
+use ignore::{DirEntry, WalkBuilder};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use spur_mcp::local_projects::{
@@ -24,9 +24,9 @@ use crate::temporal::{
     resolve_symbol_at_indexed, symbol_history, Resolution, ResolutionFailure, TemporalIndex,
 };
 use crate::{
-    artifact_from_facts, bounded_subgraph_with_budget, build_facts, discover_files, edge_kind,
-    load_artifact, resolve_artifact_location, resolve_selector, resolve_worktree_root_from,
-    CandidateRow, CommitIndexArtifact, GraphArtifactManifest, GraphEdgeArtifact, GraphEdgeKind,
+    artifact_from_facts, bounded_subgraph_with_budget, build_facts, edge_kind, load_artifact,
+    resolve_artifact_location, resolve_selector, resolve_worktree_root_from, CandidateRow,
+    CommitIndexArtifact, GraphArtifactManifest, GraphEdgeArtifact, GraphEdgeKind,
     GraphIndexArtifact, GraphIndexPointer, GraphQueryClient, GraphSymbolArtifact, InMemoryClient,
     OverlayClient, OwnedCalleeRecord, OwnedCallerRecord, ParquetClient, SearchFilters, SearchMode,
     SearchOptions, SearchResult, SearchSymbol, SelectorResolution, SnapshotKey, SubgraphBudget,
@@ -193,8 +193,11 @@ impl spur_mcp::ToolModule for GraphMcpModule {
     }
 }
 
+mod overlay_snapshot;
 #[allow(dead_code)]
 mod request_cache;
+mod request_replay;
+use request_replay::RequestReplayClient;
 mod file_oid_cache {
     use std::collections::{BTreeMap, HashMap, VecDeque};
     use std::fs::{self, Metadata};
@@ -935,7 +938,8 @@ async fn code_search_response(
         .await
         .map_err(CodeGraphError::without_metadata)?;
     let source = backend.metadata_source();
-    let search = code_search_body_for_client(args, backend.client())
+    let request_client = RequestReplayClient::new(backend.client());
+    let search = code_search_body_for_client(args, &request_client)
         .map_err(|error| CodeGraphError::from(error).with_metadata_source(source.clone()))?;
     let files = backend
         .search_response_file_set(&search)
@@ -946,6 +950,7 @@ async fn code_search_response(
     if let Some(rebuild_candidate) = analysis.rebuild_candidate.take() {
         match overlay_response_for_backend(
             &backend,
+            &request_client,
             &rebuild_candidate,
             source.clone(),
             args,
@@ -1055,8 +1060,9 @@ async fn code_graph_backend_value_with_format(
     handler: impl Fn(&Value, &dyn GraphQueryClient) -> CodeGraphResult + Send + Sync,
 ) -> Result<Value, McpHandlerError> {
     let backend = open_code_search_backend_for_request(None).await?;
-    let mut body = handler(args, backend.client()).map_err(CodeGraphError::into_handler_error)?;
-    let files = backend.response_file_set_from_body(&body)?;
+    let request_client = RequestReplayClient::new(backend.client());
+    let mut body = handler(args, &request_client).map_err(CodeGraphError::into_handler_error)?;
+    let files = backend.response_file_set_from_body(&request_client, &body)?;
     GraphResponseMetadata::from_source_inner(backend.metadata_source(), Some(&files))
         .await
         .insert_into_for_format(&mut body, response_format);
@@ -1149,6 +1155,7 @@ enum OverlayAttempt {
 #[allow(clippy::too_many_arguments)]
 async fn attempt_refresh(
     backend: &CodeSearchBackend,
+    request_client: &(dyn GraphQueryClient + Sync),
     rebuild_coordinator: Arc<RebuildCoordinator>,
     rebuild_candidate: RebuildCandidate,
     source: GraphMetadataSource,
@@ -1160,6 +1167,7 @@ async fn attempt_refresh(
     if refresh_strategy == GraphRefreshStrategy::OverlayThenRebuild {
         match overlay_response_for_backend(
             backend,
+            request_client,
             &rebuild_candidate,
             source.clone(),
             args,
@@ -1240,11 +1248,12 @@ async fn code_graph_backend_response_with_refresh(
         .await
         .map_err(CodeGraphError::without_metadata)?;
     let source = backend.metadata_source();
+    let request_client = RequestReplayClient::new(backend.client());
 
-    let (mut body, mut analysis) = match handler(args, backend.client()) {
+    let (mut body, mut analysis) = match handler(args, &request_client) {
         Ok(body) => {
             let files = backend
-                .response_file_set_from_body(&body)
+                .response_file_set_from_body(&request_client, &body)
                 .map_err(CodeGraphError::from)?;
             // The overlay cache key must cover every tracked change that
             // changed_paths_for_overlay may extract, not only response files.
@@ -1261,11 +1270,11 @@ async fn code_graph_backend_response_with_refresh(
             if original_error.metadata.is_none() && original_error.temporal_code.is_none() {
                 original_error.metadata = Some(Box::new(source.clone()));
             }
-            // The worktree-dirty check uses cached git metadata (5s TTL)
-            // and doesn't need a successful body to run, so a "not found"
-            // response still deserves a chance against the overlay before we
-            // give up -- otherwise a brand-new or renamed symbol that only
-            // exists in an uncommitted edit looks permanently missing.
+            // Per-request exact Git metadata validation doesn't need a
+            // successful body to run, so a "not found" response still deserves
+            // a chance against the overlay before we give up -- otherwise a
+            // brand-new or renamed symbol that only exists in an uncommitted
+            // edit looks permanently missing.
             let indexed_files = backend.base_file_set().ok();
             let analysis = GraphResponseMetadata::analyze_source_inner(
                 source.clone(),
@@ -1278,6 +1287,7 @@ async fn code_graph_backend_response_with_refresh(
             };
             return match attempt_refresh(
                 &backend,
+                &request_client,
                 Arc::clone(&rebuild_coordinator),
                 rebuild_candidate,
                 source.clone(),
@@ -1298,6 +1308,7 @@ async fn code_graph_backend_response_with_refresh(
     if let Some(rebuild_candidate) = analysis.rebuild_candidate.take() {
         match attempt_refresh(
             &backend,
+            &request_client,
             Arc::clone(&rebuild_coordinator),
             rebuild_candidate,
             source.clone(),
@@ -1330,6 +1341,7 @@ async fn code_graph_backend_response_with_refresh(
 
 async fn overlay_response_for_backend(
     backend: &CodeSearchBackend,
+    request_client: &(dyn GraphQueryClient + Sync),
     rebuild_candidate: &RebuildCandidate,
     source: GraphMetadataSource,
     args: &Value,
@@ -1337,13 +1349,13 @@ async fn overlay_response_for_backend(
     handler: impl Fn(&Value, &dyn GraphQueryClient) -> CodeGraphResult,
 ) -> Result<OverlayAttempt, CodeGraphError> {
     let worktree = rebuild_candidate.worktree.clone();
-    let base_files = backend.base_file_set().map_err(|error| {
+    let snapshot_base = backend.snapshot_base().map_err(|error| {
         CodeGraphError::without_metadata(McpHandlerError::Internal(format!(
             "failed to construct code graph overlay: {error}"
         )))
     })?;
     let mut task =
-        tokio::task::spawn_blocking(move || overlay_delta_for_worktree(worktree, base_files));
+        tokio::task::spawn_blocking(move || overlay_delta_for_worktree(worktree, snapshot_base));
     let cached = match tokio::time::timeout(graph_rebuild_latency_budget(), &mut task).await {
         Ok(Ok(Ok(cached))) => cached,
         Ok(Ok(Err(error))) => {
@@ -1382,12 +1394,12 @@ async fn overlay_response_for_backend(
     let (mut fresh_body, fresh_files) = match cached {
         Some(cached) => {
             let overlay =
-                OverlayClient::from_artifacts(backend.client(), cached.artifact, cached.shadowed)
+                OverlayClient::from_artifacts(request_client, cached.artifact, cached.shadowed)
                     .map_err(|error| {
-                    CodeGraphError::without_metadata(McpHandlerError::Internal(format!(
-                        "failed to construct code graph overlay: {error}"
-                    )))
-                })?;
+                        CodeGraphError::without_metadata(McpHandlerError::Internal(format!(
+                            "failed to construct code graph overlay: {error}"
+                        )))
+                    })?;
             let fresh_body = handler(args, &overlay)?;
             let fresh_files = response_file_set_from_client(&overlay, &fresh_body)?;
             (fresh_body, fresh_files)
@@ -1395,9 +1407,8 @@ async fn overlay_response_for_backend(
         None => {
             // No changed paths → identity overlay. Serve the base client
             // directly and skip extract_delta / remap construction.
-            let client = backend.client();
-            let fresh_body = handler(args, client)?;
-            let fresh_files = response_file_set_from_client(client, &fresh_body)?;
+            let fresh_body = handler(args, request_client)?;
+            let fresh_files = response_file_set_from_client(request_client, &fresh_body)?;
             (fresh_body, fresh_files)
         }
     };
@@ -1411,27 +1422,31 @@ async fn overlay_response_for_backend(
 
 fn overlay_delta_for_worktree(
     worktree: PathBuf,
-    base_files: Vec<(String, String)>,
+    base: overlay_snapshot::SnapshotBase,
 ) -> anyhow::Result<Option<request_cache::CachedOverlayDelta>> {
-    let changed = changed_paths_for_overlay(&worktree, base_files)?;
-    if changed.paths.is_empty() {
+    let OverlayChangedPaths { paths, identity } = changed_paths_for_overlay_base(&worktree, base)?;
+    if paths.is_empty() {
         return Ok(None);
     }
-    request_cache::overlay_delta(&worktree, changed.fingerprint, || {
+    let build = || {
         let (artifact, shadowed) =
-            OverlayClient::<&dyn GraphQueryClient>::extract_delta(&worktree, &changed.paths)?;
+            OverlayClient::<&dyn GraphQueryClient>::extract_delta(&worktree, &paths)?;
         Ok(request_cache::CachedOverlayDelta { artifact, shadowed })
-    })
+    };
+    match identity {
+        Some(identity) => request_cache::overlay_delta(identity, build),
+        None => build(),
+    }
     .map(Some)
 }
 
 fn overlay_client_for_backend<'a>(
     backend: &'a CodeSearchBackend,
     rebuild_candidate: &RebuildCandidate,
-) -> anyhow::Result<Option<OverlayClient<&'a dyn GraphQueryClient>>> {
+) -> anyhow::Result<Option<OverlayClient<&'a (dyn GraphQueryClient + Sync)>>> {
     let worktree = rebuild_candidate.worktree.clone();
-    let base_files = backend.base_file_set()?;
-    match overlay_delta_for_worktree(worktree, base_files)? {
+    let snapshot_base = backend.snapshot_base()?;
+    match overlay_delta_for_worktree(worktree, snapshot_base)? {
         Some(cached) => Ok(Some(OverlayClient::from_artifacts(
             backend.client(),
             cached.artifact,
@@ -1501,7 +1516,7 @@ enum CodeSearchBackend {
 }
 
 impl CodeSearchBackend {
-    fn client(&self) -> &dyn GraphQueryClient {
+    fn client(&self) -> &(dyn GraphQueryClient + Sync) {
         match self {
             Self::Parquet(client) => client.as_ref(),
             Self::InMemory { client, .. } => client,
@@ -1524,6 +1539,22 @@ impl CodeSearchBackend {
         }
     }
 
+    fn snapshot_base(&self) -> anyhow::Result<overlay_snapshot::SnapshotBase> {
+        let file_oids = self.base_file_set()?.into_iter().collect();
+        Ok(match self {
+            Self::Parquet(client) => overlay_snapshot::SnapshotBase {
+                indexed_graph_content_hash: client.manifest().graph_content_hash.clone(),
+                indexed_head_oid: client.manifest().indexed_commit_oid.clone(),
+                file_oids,
+            },
+            Self::InMemory { artifact, .. } => overlay_snapshot::SnapshotBase {
+                indexed_graph_content_hash: artifact.graph_content_hash.clone(),
+                indexed_head_oid: None,
+                file_oids,
+            },
+        })
+    }
+
     fn search_response_file_set(
         &self,
         search: &CodeSearchBody,
@@ -1543,6 +1574,7 @@ impl CodeSearchBackend {
 
     fn response_file_set_from_body(
         &self,
+        request_client: &dyn GraphQueryClient,
         body: &Value,
     ) -> Result<Vec<(String, String)>, McpHandlerError> {
         match self {
@@ -1558,8 +1590,9 @@ impl CodeSearchBackend {
                 let mut files = file_oid_subset(&file_oids, paths);
                 if files.is_empty() {
                     if let Some(symbol_id) = response_symbol_id(body) {
-                        if let Some(symbol) =
-                            client.symbol_by_id(symbol_id).map_err(graph_query_error)?
+                        if let Some(symbol) = request_client
+                            .symbol_by_id(symbol_id)
+                            .map_err(graph_query_error)?
                         {
                             files = file_oid_subset(&file_oids, [symbol.file_path.as_str()]);
                         }
@@ -5403,7 +5436,7 @@ fn indexed_file_oid_for_path<'a>(artifact: &'a GraphIndexArtifact, path: &str) -
 
 pub(crate) struct OverlayChangedPaths {
     pub(crate) paths: Vec<PathBuf>,
-    pub(crate) fingerprint: u64,
+    pub(crate) identity: Option<overlay_snapshot::SnapshotIdentity>,
 }
 
 pub fn overlay_changed_oids(
@@ -5432,16 +5465,42 @@ fn parse_sha1_oid(hex: &str) -> Option<[u8; 20]> {
     Some(out)
 }
 
+#[allow(dead_code)]
 pub(crate) fn changed_paths_for_overlay(
     worktree: &Path,
     base_files: Vec<(String, String)>,
 ) -> anyhow::Result<OverlayChangedPaths> {
-    let changed = overlay_changed_oid_hex(worktree, base_files)?;
-    let mut hasher = DefaultHasher::new();
-    changed.hash(&mut hasher);
+    let base = overlay_snapshot::SnapshotBase::compatibility(base_files.into_iter().collect());
+    changed_paths_for_overlay_base(worktree, base)
+}
+
+fn changed_paths_for_overlay_base(
+    worktree: &Path,
+    base: overlay_snapshot::SnapshotBase,
+) -> anyhow::Result<OverlayChangedPaths> {
+    let allowed_extensions = crate::extract::languages::all_supported_extensions();
+    let (changed, identity) = if crate::git::detect(worktree).is_some() {
+        let snapshot = overlay_snapshot::snapshot_with_capabilities(
+            worktree,
+            base,
+            &allowed_extensions,
+            production_overlay_capabilities(),
+        )?;
+        let identity = snapshot.identity.clone();
+        (snapshot.changed_oid_hex(), identity)
+    } else {
+        let worktree = worktree.canonicalize().map_err(|error| {
+            anyhow::anyhow!("failed to canonicalize `{}`: {error}", worktree.display())
+        })?;
+        let current_oids = current_file_oids_via_fs(&worktree, &allowed_extensions)?;
+        (
+            overlay_changed_oid_hex_from_maps(base.file_oids, current_oids)?,
+            None,
+        )
+    };
     Ok(OverlayChangedPaths {
         paths: changed.keys().map(PathBuf::from).collect(),
-        fingerprint: hasher.finish(),
+        identity,
     })
 }
 
@@ -5454,14 +5513,30 @@ fn overlay_changed_oid_hex(
     })?;
     let allowed_extensions = crate::extract::languages::all_supported_extensions();
     let base_oids = base_files.into_iter().collect::<BTreeMap<_, _>>();
-    let current_oids = if crate::git::detect(&worktree).is_some() {
-        // Git dirty set + index oids: avoid full-tree read/hash while still
-        // catching clean-tree HEAD lag vs stale graph index content oids.
-        current_file_oids_via_git(&worktree, &allowed_extensions)?
+    if crate::git::detect(&worktree).is_some() {
+        let base = overlay_snapshot::SnapshotBase::compatibility(base_oids);
+        Ok(overlay_snapshot::snapshot_with_capabilities(
+            &worktree,
+            base,
+            &allowed_extensions,
+            production_overlay_capabilities(),
+        )?
+        .changed_oid_hex())
     } else {
-        current_file_oids_via_fs(&worktree, &allowed_extensions)?
-    };
-    overlay_changed_oid_hex_from_maps(base_oids, current_oids)
+        let current_oids = current_file_oids_via_fs(&worktree, &allowed_extensions)?;
+        overlay_changed_oid_hex_from_maps(base_oids, current_oids)
+    }
+}
+
+fn production_overlay_capabilities() -> crate::git::FsmonitorCapabilities {
+    crate::git::FsmonitorCapabilities {
+        // Task 6 owns the formal p95/correctness release gate. Task 3 exposes
+        // the observation seam but must not enable native fsmonitor routing.
+        release_enabled: false,
+        built_in_supported: false,
+        local_filesystem: true,
+        watcher_healthy: false,
+    }
 }
 
 fn overlay_changed_oid_hex_from_maps(
@@ -5492,10 +5567,8 @@ fn current_file_oids_via_fs(
     worktree: &Path,
     allowed_extensions: &[&str],
 ) -> anyhow::Result<BTreeMap<String, String>> {
-    let current_files = discover_files(worktree, allowed_extensions)?;
     let mut current_oids = BTreeMap::new();
-    for path in current_files {
-        let rel_path = worktree_relative_slash_path(worktree, &path);
+    for (rel_path, path) in supported_file_paths_via_fs(worktree, allowed_extensions)? {
         let bytes = fs::read(&path)
             .map_err(|error| anyhow::anyhow!("failed to read `{}`: {error}", path.display()))?;
         current_oids.insert(rel_path, git_blob_oid(&bytes));
@@ -5503,6 +5576,118 @@ fn current_file_oids_via_fs(
     Ok(current_oids)
 }
 
+fn supported_file_paths_via_fs(
+    worktree: &Path,
+    allowed_extensions: &[&str],
+) -> anyhow::Result<BTreeMap<String, PathBuf>> {
+    let canonical_worktree = worktree
+        .canonicalize()
+        .with_context(|| format!("failed to canonicalize `{}`", worktree.display()))?;
+    let mut paths = Vec::new();
+    for entry in WalkBuilder::new(&canonical_worktree)
+        .standard_filters(true)
+        .hidden(false)
+        .filter_entry(fallback_should_descend)
+        .build()
+    {
+        let entry = entry.map_err(|error| {
+            anyhow::anyhow!(
+                "strict filesystem fallback traversal failed under `{}`: {error}",
+                canonical_worktree.display()
+            )
+        })?;
+        if let Some(error) = entry.error() {
+            return Err(anyhow::anyhow!(
+                "strict filesystem fallback entry `{}` reported an attached traversal error under `{}`: {error}",
+                entry.path().display(),
+                canonical_worktree.display()
+            ));
+        }
+        // Filesystem walker entries normally carry a file type. If a future
+        // backend omits it, strict certification cannot safely decide whether
+        // the path belongs in the complete supported-file set, so fail closed.
+        let file_type = entry.file_type().ok_or_else(|| {
+            anyhow::anyhow!(
+                "strict filesystem fallback entry `{}` had no file type under `{}`",
+                entry.path().display(),
+                canonical_worktree.display()
+            )
+        })?;
+        if file_type.is_file()
+            && entry
+                .path()
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| {
+                    allowed_extensions
+                        .iter()
+                        .any(|allowed| extension.eq_ignore_ascii_case(allowed))
+                })
+        {
+            paths.push(entry.into_path());
+        }
+    }
+    paths.sort();
+    collect_supported_file_paths(&canonical_worktree, paths)
+}
+
+fn fallback_should_descend(entry: &DirEntry) -> bool {
+    let Some(file_name) = entry.file_name().to_str() else {
+        return true;
+    };
+    !matches!(file_name, "target" | ".git" | "node_modules")
+}
+
+fn collect_supported_file_paths(
+    canonical_worktree: &Path,
+    paths: impl IntoIterator<Item = PathBuf>,
+) -> anyhow::Result<BTreeMap<String, PathBuf>> {
+    let mut collected = BTreeMap::new();
+    for path in paths {
+        let relative = strict_worktree_relative_slash_path(canonical_worktree, &path)?;
+        if let Some(previous) = collected.get(&relative) {
+            return Err(anyhow::anyhow!(
+                "duplicate normalized filesystem fallback path `{relative}` from {previous:?} and {path:?}"
+            ));
+        }
+        collected.insert(relative, path);
+    }
+    Ok(collected)
+}
+
+fn strict_worktree_relative_slash_path(
+    canonical_worktree: &Path,
+    path: &Path,
+) -> anyhow::Result<String> {
+    let relative = path.strip_prefix(canonical_worktree).with_context(|| {
+        format!(
+            "filesystem fallback path {path:?} is outside canonical worktree {canonical_worktree:?}"
+        )
+    })?;
+    let mut components = Vec::new();
+    for component in relative.components() {
+        let Component::Normal(value) = component else {
+            return Err(anyhow::anyhow!(
+                "filesystem fallback path {path:?} has a non-normal relative component"
+            ));
+        };
+        components.push(value.to_str().ok_or_else(|| {
+            anyhow::anyhow!("filesystem fallback path {path:?} is not valid UTF-8")
+        })?);
+    }
+    if components.is_empty() {
+        return Err(anyhow::anyhow!(
+            "filesystem fallback path {path:?} does not name a worktree-relative file"
+        ));
+    }
+    // Native separators cannot occur inside a Normal component, so joining
+    // validated UTF-8 components with '/' is injective for walker-produced
+    // paths. The collector still rejects repeats explicitly to keep that
+    // contract fail-closed if its inputs or normalization ever change.
+    Ok(components.join("/"))
+}
+
+#[cfg(test)]
 fn current_file_oids_via_git(
     worktree: &Path,
     allowed_extensions: &[&str],
@@ -5547,6 +5732,7 @@ fn current_file_oids_via_git(
     Ok(current_oids)
 }
 
+#[cfg(test)]
 fn read_overlay_worktree_content_oid(
     worktree: &Path,
     path: &str,
@@ -5564,6 +5750,7 @@ fn read_overlay_worktree_content_oid(
     }
 }
 
+#[cfg(test)]
 fn overlay_path_has_supported_extension(path: &str, allowed_extensions: &[&str]) -> bool {
     Path::new(path)
         .extension()
@@ -5646,14 +5833,7 @@ async fn worktree_git_metadata_with_extensions(
     allowed_extensions: &[&str],
     include_tracked_supplemental_paths: bool,
 ) -> Option<WorktreeGitMetadata> {
-    let now = Instant::now();
-    if !include_tracked_supplemental_paths {
-        if let Some(cached) = request_cache::git_metadata_get(worktree, indexed_head_oid, now) {
-            return Some(cached);
-        }
-    }
-
-    let fetched = tokio::time::timeout(GRAPH_GIT_METADATA_TIMEOUT, async {
+    tokio::time::timeout(GRAPH_GIT_METADATA_TIMEOUT, async {
         let head_oid = run_git_stdout(worktree, &["rev-parse", "HEAD"]).await?;
         let status = run_git_stdout(
             worktree,
@@ -5688,19 +5868,7 @@ async fn worktree_git_metadata_with_extensions(
     })
     .await
     .ok()
-    .flatten();
-
-    if !include_tracked_supplemental_paths {
-        if let Some(metadata) = fetched.as_ref() {
-            request_cache::git_metadata_insert(
-                worktree,
-                indexed_head_oid,
-                Instant::now(),
-                metadata.clone(),
-            );
-        }
-    }
-    fetched
+    .flatten()
 }
 
 struct GitStatusOverlayReport {
@@ -6521,8 +6689,14 @@ fn escape_mermaid_label(label: &str) -> String {
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
+    #[cfg(unix)]
+    use std::ffi::OsString;
+    #[cfg(unix)]
+    use std::os::unix::ffi::OsStringExt as _;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt as _;
     use std::path::{Path, PathBuf};
-    use std::sync::{Arc, OnceLock};
+    use std::sync::{Arc, Mutex, OnceLock};
     use std::time::{Duration, Instant};
 
     use crate::{
@@ -6540,15 +6714,385 @@ mod tests {
     const ESCALATION_THRESHOLD: usize = 3;
     static REBUILD_TEST_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
 
+    #[derive(Default)]
+    struct GraphQueryTrace {
+        calls: Mutex<BTreeMap<String, usize>>,
+    }
+
+    impl GraphQueryTrace {
+        fn record(&self, operation: String) {
+            *self
+                .calls
+                .lock()
+                .expect("graph query trace mutex poisoned")
+                .entry(operation)
+                .or_default() += 1;
+        }
+
+        fn snapshot(&self) -> BTreeMap<String, usize> {
+            self.calls
+                .lock()
+                .expect("graph query trace mutex poisoned")
+                .clone()
+        }
+    }
+
+    struct CountingGraphQueryClient {
+        inner: InMemoryClient,
+        trace: Arc<GraphQueryTrace>,
+    }
+
+    impl CountingGraphQueryClient {
+        fn new(artifact: Arc<GraphIndexArtifact>) -> Self {
+            Self {
+                inner: InMemoryClient::new(artifact),
+                trace: Arc::new(GraphQueryTrace::default()),
+            }
+        }
+
+        fn trace(&self) -> BTreeMap<String, usize> {
+            self.trace.snapshot()
+        }
+
+        fn record(&self, operation: impl Into<String>) {
+            self.trace.record(operation.into());
+        }
+    }
+
+    impl GraphQueryClient for CountingGraphQueryClient {
+        fn search_symbols(&self, opts: &SearchOptions) -> anyhow::Result<SearchResult> {
+            // The caller-visible limit is deliberately excluded: overlay search
+            // must reuse the same logical base search at its unbounded limit.
+            self.record(format!(
+                "search_symbols:{:?}:{}:{:?}",
+                opts.mode, opts.query, opts.filters
+            ));
+            self.inner.search_symbols(opts)
+        }
+
+        fn find_caller_edges(&self, sid: &str) -> Vec<OwnedCallerRecord> {
+            self.record(format!("find_caller_edges:{sid}"));
+            self.inner.find_caller_edges(sid)
+        }
+
+        fn find_unresolved_caller_edges_by_labels(
+            &self,
+            target_labels: &HashSet<String>,
+        ) -> Vec<OwnedCallerRecord> {
+            let mut labels = target_labels.iter().cloned().collect::<Vec<_>>();
+            labels.sort();
+            self.record(format!("find_unresolved_caller_edges_by_labels:{labels:?}"));
+            self.inner
+                .find_unresolved_caller_edges_by_labels(target_labels)
+        }
+
+        fn find_callee_edges(&self, sid: &str) -> Vec<OwnedCalleeRecord> {
+            self.record(format!("find_callee_edges:{sid}"));
+            self.inner.find_callee_edges(sid)
+        }
+
+        fn resolve_selector(&self, selector: &str) -> anyhow::Result<SelectorResolution> {
+            self.record(format!("resolve_selector:{selector}"));
+            self.inner.resolve_selector(selector)
+        }
+
+        fn symbol_by_id(&self, sid: &str) -> anyhow::Result<Option<GraphSymbolArtifact>> {
+            self.record(format!("symbol_by_id:{sid}"));
+            self.inner.symbol_by_id(sid)
+        }
+
+        fn symbols_by_file(&self, path: &str) -> anyhow::Result<Vec<GraphSymbolArtifact>> {
+            self.record(format!("symbols_by_file:{path}"));
+            self.inner.symbols_by_file(path)
+        }
+
+        fn symbols_by_files(&self, paths: &[String]) -> anyhow::Result<Vec<GraphSymbolArtifact>> {
+            self.record(format!("symbols_by_files:{paths:?}"));
+            self.inner.symbols_by_files(paths)
+        }
+
+        fn symbols_by_path_name(
+            &self,
+            path: &str,
+            name: &str,
+        ) -> anyhow::Result<Vec<GraphSymbolArtifact>> {
+            self.record(format!("symbols_by_path_name:{path}:{name}"));
+            self.inner.symbols_by_path_name(path, name)
+        }
+
+        fn file_manifest_by_path(
+            &self,
+            path: &str,
+        ) -> anyhow::Result<Option<GraphFileManifestEntry>> {
+            self.record(format!("file_manifest_by_path:{path}"));
+            self.inner.file_manifest_by_path(path)
+        }
+
+        fn file_exists(&self, path: &str) -> anyhow::Result<bool> {
+            self.record(format!("file_exists:{path}"));
+            self.inner.file_exists(path)
+        }
+
+        fn temporal_index(&self) -> Arc<TemporalIndex> {
+            self.inner.temporal_index()
+        }
+
+        fn symbol_history(
+            &self,
+            commits: &CommitIndexArtifact,
+            symbol_id: &str,
+        ) -> anyhow::Result<Vec<(crate::temporal::GitSha, ChangeKind, SnapshotKey)>> {
+            self.record(format!("symbol_history:{symbol_id}"));
+            self.inner.symbol_history(commits, symbol_id)
+        }
+    }
+
+    fn search_handler_for_request_replay(
+        args: &Value,
+        client: &dyn GraphQueryClient,
+    ) -> CodeGraphResult {
+        code_search_with_artifact(args, client).map_err(CodeGraphError::from)
+    }
+
+    async fn code_graph_result_signature(result: CodeGraphResult) -> Value {
+        match result {
+            Ok(body) => json!({ "ok": body }),
+            Err(error) => {
+                let response = error.into_error_response().await;
+                json!({
+                    "error": {
+                        "code": response.code,
+                        "message": response.message,
+                        "data": response.data,
+                    }
+                })
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn code_graph_result_signature_distinguishes_complete_error_metadata() {
+        let error_with_hash = |graph_content_hash: &str| {
+            CodeGraphError::without_metadata(McpHandlerError::NotFound(
+                "symbol still_missing not found in graph artifact".to_owned(),
+            ))
+            .with_metadata_source(GraphMetadataSource {
+                graph_content_hash: graph_content_hash.to_owned(),
+                graph_index_version: "4".to_owned(),
+                manifest_version: "1".to_owned(),
+            })
+        };
+
+        let first = code_graph_result_signature(Err(error_with_hash("graph-hash-a"))).await;
+        let second = code_graph_result_signature(Err(error_with_hash("graph-hash-b"))).await;
+
+        assert_eq!(first["error"]["code"], CODE_GRAPH_NOT_FOUND_ERROR_CODE);
+        assert_eq!(
+            first["error"]["message"],
+            "symbol still_missing not found in graph artifact"
+        );
+        assert_eq!(first["error"]["data"]["kind"], "not_found");
+        assert_eq!(first["error"]["data"]["graph_content_hash"], "graph-hash-a");
+        assert_eq!(
+            second["error"]["data"]["graph_content_hash"],
+            "graph-hash-b"
+        );
+        assert_ne!(
+            first, second,
+            "observable MCP signatures must preserve distinct graph metadata"
+        );
+    }
+
+    fn response_digest(value: &Value) -> String {
+        let bytes = serde_json::to_vec(value).expect("serialize response signature");
+        blake3::hash(&bytes).to_hex().to_string()
+    }
+
+    type RequestReplayHandler = fn(&Value, &dyn GraphQueryClient) -> CodeGraphResult;
+
+    struct RequestReplayCase {
+        name: &'static str,
+        args: Value,
+        handler: RequestReplayHandler,
+        expected_operations: BTreeMap<String, usize>,
+    }
+
+    async fn exercise_request_replay_case(
+        scenario: &str,
+        case: &RequestReplayCase,
+        root: &Path,
+        base_artifact: Arc<GraphIndexArtifact>,
+        oracle_artifact: Arc<GraphIndexArtifact>,
+        changed_paths: &[PathBuf],
+    ) -> Vec<String> {
+        let counting = CountingGraphQueryClient::new(base_artifact);
+        let request_client = RequestReplayClient::new(&counting);
+
+        let _first_result = (case.handler)(&case.args, &request_client);
+        let overlay = OverlayClient::new(&request_client, root, changed_paths)
+            .expect("construct direct overlay subject");
+        let actual = code_graph_result_signature((case.handler)(&case.args, &overlay)).await;
+
+        let oracle = InMemoryClient::new(oracle_artifact);
+        let expected = code_graph_result_signature((case.handler)(&case.args, &oracle)).await;
+        let actual_digest = response_digest(&actual);
+        let oracle_digest = response_digest(&expected);
+        let equivalent = actual == expected;
+        let trace = counting.trace();
+
+        eprintln!(
+            "request_replay trace scenario={scenario} tool={} base_calls={trace:?} \
+             actual_digest={actual_digest} oracle_digest={oracle_digest} equivalent={equivalent}",
+            case.name
+        );
+
+        let mut violations = Vec::new();
+        if case.expected_operations.is_empty() {
+            violations.push(format!(
+                "scenario={scenario} tool={} expected operation map must not be empty",
+                case.name
+            ));
+        }
+        if trace != case.expected_operations {
+            violations.push(format!(
+                "scenario={scenario} tool={} operation map mismatch actual={trace:?} expected={:?}",
+                case.name, case.expected_operations
+            ));
+        }
+        if !equivalent {
+            violations.push(format!(
+                "scenario={scenario} tool={} response mismatch actual={actual:#} expected={expected:#}",
+                case.name
+            ));
+        }
+        violations
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn overlay_snapshot_supported_paths_reject_non_utf8_relative_path() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let root = tempdir.path().canonicalize().expect("canonical root");
+        let path = root.join(OsString::from_vec(b"non-utf8-\x80.rs".to_vec()));
+        fs::write(&path, "pub fn invalid_path() {}\n").expect("non-UTF-8 source path");
+
+        let error = supported_file_paths_via_fs(&root, &["rs"])
+            .expect_err("fallback path conversion must reject non-UTF-8 paths");
+
+        eprintln!("lossless fallback path trace: rejected={}", path.display());
+        assert!(
+            error.to_string().contains("UTF-8"),
+            "unexpected non-UTF-8 path error: {error:#}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn overlay_snapshot_supported_paths_reject_lossy_normalized_collision() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let root = tempdir.path().canonicalize().expect("canonical root");
+        let first = root.join(OsString::from_vec(b"collision-\x80.rs".to_vec()));
+        let second = root.join(OsString::from_vec(b"collision-\x81.rs".to_vec()));
+        fs::write(&first, "pub fn first() {}\n").expect("first source");
+        fs::write(&second, "pub fn second() {}\n").expect("second source");
+
+        let error = supported_file_paths_via_fs(&root, &["rs"])
+            .expect_err("distinct paths must never overwrite one normalized fallback key");
+
+        eprintln!(
+            "lossless fallback collision trace: rejected_first={} rejected_second={}",
+            first.display(),
+            second.display()
+        );
+        assert!(
+            error.to_string().contains("UTF-8") || error.to_string().contains("duplicate"),
+            "unexpected normalized-collision error: {error:#}"
+        );
+    }
+
+    #[test]
+    fn overlay_snapshot_supported_path_collector_rejects_duplicate_key() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let root = tempdir.path().canonicalize().expect("canonical root");
+        let path = root.join("duplicate.rs");
+        fs::write(&path, "pub fn duplicate() {}\n").expect("source");
+
+        let error = collect_supported_file_paths(&root, [path.clone(), path.clone()])
+            .expect_err("the strict collector must reject duplicate normalized keys");
+
+        eprintln!("lossless fallback duplicate-key trace: rejected={path:?}");
+        assert!(
+            error.to_string().contains("duplicate normalized"),
+            "unexpected duplicate-key error: {error:#}"
+        );
+    }
+
+    #[test]
+    fn overlay_snapshot_clean_repeat_avoids_full_index_sweep() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let root = tempdir.path().join("repo");
+        fs::create_dir_all(root.join("src")).expect("src dir");
+        init_git_repo(&root);
+        let source = b"pub fn clean() {}\n";
+        fs::write(root.join("src/lib.rs"), source).expect("source");
+        run_git_test(&root, &["add", "src/lib.rs"]);
+        run_git_test(&root, &["commit", "-qm", "base"]);
+        let base = overlay_snapshot::SnapshotBase::compatibility(BTreeMap::from([(
+            "src/lib.rs".to_owned(),
+            git_blob_oid(source),
+        )]));
+        let extensions = crate::extract::languages::all_supported_extensions();
+
+        let first =
+            overlay_snapshot::snapshot(&root, base.clone(), &extensions).expect("cold snapshot");
+        assert!(first.path_state.is_empty(), "fixture must start clean");
+        assert_eq!(first.measurements.full_index_sweeps, 1);
+
+        let second = overlay_snapshot::snapshot(&root, base, &extensions).expect("warm snapshot");
+        eprintln!(
+            "overlay snapshot measurement: cold_full_index_sweeps={} warm_full_index_sweeps={} \
+             warm_hashed_paths={} warm_snapshot_reused={}",
+            first.measurements.full_index_sweeps,
+            second.measurements.full_index_sweeps,
+            second.measurements.hashed_paths.len(),
+            second.measurements.snapshot_reused,
+        );
+        assert!(
+            second.path_state.is_empty(),
+            "clean repeat must remain clean"
+        );
+        assert_eq!(
+            second.measurements.full_index_sweeps, 0,
+            "warm unchanged validation must not repeat a full index sweep"
+        );
+        assert!(second.measurements.hashed_paths.is_empty());
+        assert!(second.measurements.snapshot_reused);
+    }
+
+    #[test]
+    fn overlay_snapshot_production_route_remains_release_disabled() {
+        let capabilities = production_overlay_capabilities();
+        assert!(!capabilities.release_enabled);
+        assert_eq!(
+            crate::git::fsmonitor_status_route(capabilities),
+            crate::git::FsmonitorStatusRoute::ExactFallback(
+                crate::git::FsmonitorFallbackReason::ReleaseDisabled
+            )
+        );
+    }
+
     #[test]
     fn overlay_changed_paths_fingerprint_tracks_all_changed_content() {
         let tempdir = tempfile::tempdir().expect("tempdir");
         let root = tempdir.path();
+        init_git_repo(root);
         fs::create_dir_all(root.join("src")).expect("src dir");
         let old_a = b"pub fn alpha() {}\n";
         let old_b = b"pub fn beta() {}\n";
         fs::write(root.join("src/a.rs"), old_a).expect("a.rs");
         fs::write(root.join("src/b.rs"), old_b).expect("b.rs");
+        run_git_test(root, &["add", "src"]);
+        run_git_test(root, &["commit", "-qm", "base"]);
         let base_files = vec![
             ("src/a.rs".to_owned(), git_blob_oid(old_a)),
             ("src/b.rs".to_owned(), git_blob_oid(old_b)),
@@ -6563,7 +7107,7 @@ mod tests {
 
         assert_eq!(first.paths, second.paths, "the changed path set is stable");
         assert_ne!(
-            first.fingerprint, second.fingerprint,
+            first.identity, second.identity,
             "content changes in any tracked overlay path must invalidate the cached delta"
         );
     }
@@ -6604,13 +7148,16 @@ mod tests {
 
         // Fingerprint must reflect *content* change (Some(oid)), not a false deletion.
         // A status-only dirty set would miss the path entirely or mark it deleted.
-        let mut expected = BTreeMap::<String, Option<String>>::new();
-        expected.insert("src/a.rs".to_owned(), Some(git_blob_oid(v2)));
-        let mut hasher = DefaultHasher::new();
-        expected.hash(&mut hasher);
+        let expected = BTreeMap::from([(
+            "src/a.rs".to_owned(),
+            overlay_snapshot::OverlayPathState::Tracked(git_blob_oid(v2)),
+        )]);
         assert_eq!(
-            changed.fingerprint,
-            hasher.finish(),
+            changed
+                .identity
+                .expect("complete validated identity")
+                .normalized_changed_set_fingerprint,
+            overlay_snapshot::normalized_changed_set_fingerprint(expected.iter()),
             "HEAD-lag must surface the live blob oid, not a tombstone"
         );
     }
@@ -6740,6 +7287,439 @@ mod tests {
             overlay.is_none(),
             "matching worktree content must skip OverlayClient construction"
         );
+    }
+
+    #[tokio::test]
+    async fn request_replay_counts_each_base_operation_once_and_matches_fresh_oracle() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        let base_source = "pub fn target() { leaf(); }\n\
+                           pub fn leaf() {}\n\
+                           pub fn caller() { target(); }\n\
+                           pub fn old_name() {}\n";
+        let base_artifact = Arc::new(artifact_from_source(root, base_source));
+        let target_sid = symbol_id_for(&base_artifact, "target");
+        let symbols_by_files = "symbols_by_files:[\"src/lib.rs\"]".to_owned();
+
+        let clean_case = RequestReplayCase {
+            name: "search-clean",
+            args: json!({
+                "query": "target",
+                "mode": "exact",
+                "limit": 1,
+            }),
+            handler: search_handler_for_request_replay,
+            expected_operations: BTreeMap::from([(
+                "search_symbols:Exact:target:SearchFilters { symbol_kind: None, file: None, file_glob: None }"
+                    .to_owned(),
+                1,
+            )]),
+        };
+        let mut violations = exercise_request_replay_case(
+            "clean",
+            &clean_case,
+            root,
+            Arc::clone(&base_artifact),
+            Arc::clone(&base_artifact),
+            &[],
+        )
+        .await;
+
+        let current_source = "pub fn target() { new_leaf(); }\n\
+                              pub fn new_leaf() {}\n\
+                              pub fn caller() { target(); }\n\
+                              pub fn added() { target(); }\n\
+                              pub fn new_name() {}\n";
+        fs::write(root.join("src/lib.rs"), current_source).expect("write dirty source");
+        let oracle_facts = build_facts(root, None).expect("extract oracle source").0;
+        let oracle_artifact = Arc::new(
+            artifact_from_facts(&oracle_facts, root).expect("freshly rebuilt oracle artifact"),
+        );
+        let dirty_paths = [PathBuf::from("src/lib.rs")];
+        let dirty_cases = [
+            RequestReplayCase {
+                name: "search",
+                args: json!({
+                    "query": "a",
+                    "mode": "substring",
+                    "limit": 2,
+                    "response_format": "full",
+                }),
+                handler: search_handler_for_request_replay,
+                expected_operations: BTreeMap::from([
+                    (
+                        "search_symbols:Substring:a:SearchFilters { symbol_kind: None, file: None, file_glob: None }"
+                            .to_owned(),
+                        1,
+                    ),
+                    (symbols_by_files.clone(), 1),
+                ]),
+            },
+            RequestReplayCase {
+                name: "resolve",
+                args: json!({ "selector": "target" }),
+                handler: code_resolve_with_client,
+                expected_operations: BTreeMap::from([
+                    ("resolve_selector:target".to_owned(), 1),
+                    (format!("symbol_by_id:{target_sid}"), 1),
+                    (symbols_by_files.clone(), 1),
+                ]),
+            },
+            RequestReplayCase {
+                name: "resolve-new-or-renamed",
+                args: json!({ "selector": "new_name" }),
+                handler: code_resolve_with_client,
+                expected_operations: BTreeMap::from([
+                    ("resolve_selector:new_name".to_owned(), 1),
+                    (symbols_by_files.clone(), 1),
+                ]),
+            },
+            RequestReplayCase {
+                name: "resolve-not-found-error",
+                args: json!({ "selector": "still_missing" }),
+                handler: code_resolve_with_client,
+                expected_operations: BTreeMap::from([
+                    ("resolve_selector:still_missing".to_owned(), 1),
+                    (symbols_by_files.clone(), 1),
+                ]),
+            },
+            RequestReplayCase {
+                name: "file-symbols",
+                args: json!({
+                    "file": "src/lib.rs",
+                    "response_format": "table",
+                }),
+                handler: code_file_symbols_with_client,
+                expected_operations: BTreeMap::from([
+                    ("file_exists:src/lib.rs".to_owned(), 1),
+                    ("symbols_by_file:src/lib.rs".to_owned(), 1),
+                    (symbols_by_files.clone(), 1),
+                ]),
+            },
+            RequestReplayCase {
+                name: "read-symbol",
+                args: json!({
+                    "path": "src/lib.rs",
+                    "name": "target",
+                    "context_lines": 1,
+                    "response_format": "source",
+                }),
+                handler: code_read_symbol_with_client,
+                expected_operations: BTreeMap::from([
+                    ("file_manifest_by_path:src/lib.rs".to_owned(), 1),
+                    ("symbols_by_path_name:src/lib.rs:target".to_owned(), 1),
+                    (symbols_by_files.clone(), 1),
+                ]),
+            },
+            RequestReplayCase {
+                name: "callers",
+                args: json!({
+                    "selector": "target",
+                    "include_unresolved": true,
+                    "response_format": "table",
+                }),
+                handler: code_callers_with_client,
+                expected_operations: BTreeMap::from([
+                    (format!("find_caller_edges:{target_sid}"), 1),
+                    (
+                        format!(
+                            "find_unresolved_caller_edges_by_labels:[\"{target_sid}\", \"target\"]"
+                        ),
+                        1,
+                    ),
+                    ("resolve_selector:target".to_owned(), 1),
+                    (symbols_by_files.clone(), 1),
+                ]),
+            },
+            RequestReplayCase {
+                name: "callees",
+                args: json!({
+                    "selector": "target",
+                    "include_unresolved": true,
+                    "response_format": "table",
+                }),
+                handler: code_callees_with_client,
+                expected_operations: BTreeMap::from([
+                    (format!("find_callee_edges:{target_sid}"), 1),
+                    ("resolve_selector:target".to_owned(), 1),
+                    (symbols_by_files, 1),
+                ]),
+            },
+        ];
+
+        let dirty_violations = SCOPED_CODE_GRAPH_WORKTREE_ROOT
+            .scope(root.to_path_buf(), async {
+                let mut violations = Vec::new();
+                for case in &dirty_cases {
+                    violations.extend(
+                        exercise_request_replay_case(
+                            "dirty",
+                            case,
+                            root,
+                            Arc::clone(&base_artifact),
+                            Arc::clone(&oracle_artifact),
+                            &dirty_paths,
+                        )
+                        .await,
+                    );
+                }
+                violations
+            })
+            .await;
+        violations.extend(dirty_violations);
+
+        assert!(
+            violations.is_empty(),
+            "request replay cardinality/equivalence violations:\n{}",
+            violations.join("\n")
+        );
+    }
+
+    #[tokio::test]
+    async fn request_replay_stale_budget_fallback_returns_whole_base_response() {
+        let _rebuild_guard = rebuild_test_guard().await;
+        let _budget = set_graph_rebuild_latency_budget_for_test(Duration::ZERO);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        init_git_repo(root);
+        let artifact = artifact_from_source(root, "pub fn alpha() {}\n");
+        run_git_test(root, &["add", "src/lib.rs"]);
+        run_git_test(root, &["commit", "-q", "-m", "index alpha"]);
+        write_current_artifact(root, &artifact);
+        fs::write(
+            root.join("src/lib.rs"),
+            "pub fn alpha() {}\npub fn overlay_only() {}\n",
+        )
+        .expect("dirty source");
+
+        let base = code_search_with_artifact(
+            &json!({ "query": "a", "mode": "substring", "limit": 20 }),
+            &InMemoryClient::new(Arc::new(artifact.clone())),
+        )
+        .expect("base response");
+        let expected_head = git_stdout_test(root, &["rev-parse", "HEAD"]);
+
+        let body = SCOPED_CODE_GRAPH_WORKTREE_ROOT
+            .scope(root.to_path_buf(), async {
+                code_search_response(
+                    &json!({ "query": "a", "mode": "substring", "limit": 20 }),
+                    Arc::new(RebuildCoordinator::new()),
+                )
+                .await
+            })
+            .await
+            .expect("stale-budget response");
+
+        let names = body["candidates"]
+            .as_array()
+            .expect("candidate array")
+            .iter()
+            .filter_map(|candidate| candidate["entity_name"].as_str())
+            .collect::<Vec<_>>();
+        eprintln!(
+            "request_replay fallback trace kind=stale_budget digest={} names={names:?} \
+             status={} metadata={{graph_hash:{}, head:{}, dirty:{}, oid_match:{}}}",
+            response_digest(&body),
+            body["rebuild_status"],
+            body["graph_content_hash"],
+            body["worktree_head_oid"],
+            body["worktree_dirty"],
+            body["response_file_oids_match"],
+        );
+        assert_eq!(body["candidates"], base["candidates"]);
+        assert_eq!(body["total_matches"], base["total_matches"]);
+        assert_eq!(names, vec!["alpha"]);
+        assert_eq!(body["graph_content_hash"], artifact.graph_content_hash);
+        assert_eq!(
+            body["graph_index_version"],
+            artifact.header.graph_index_version
+        );
+        assert_eq!(body["worktree_head_oid"], expected_head);
+        assert_eq!(body["worktree_dirty"], true);
+        assert_eq!(body["response_file_oids_match"], false);
+        assert_eq!(body["rebuild_status"], "stale_budget_exceeded");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn request_replay_overlay_failure_fallback_returns_whole_base_response() {
+        let _rebuild_guard = rebuild_test_guard().await;
+        let _budget = set_graph_rebuild_latency_budget_for_test(Duration::from_secs(30));
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        init_git_repo(root);
+        let artifact = artifact_from_source(root, "pub fn alpha() {}\n");
+        run_git_test(root, &["add", "src/lib.rs"]);
+        run_git_test(root, &["commit", "-q", "-m", "index alpha"]);
+        write_current_artifact(root, &artifact);
+        let invalid_path = root.join("src/unreadable.rs");
+        fs::write(&invalid_path, "pub fn partial_overlay_only() {}\n")
+            .expect("unreadable overlay source");
+        let mut permissions = fs::metadata(&invalid_path)
+            .expect("unreadable source metadata")
+            .permissions();
+        permissions.set_mode(0);
+        fs::set_permissions(&invalid_path, permissions).expect("make overlay source unreadable");
+        fs::write(
+            root.join("src/lib.rs"),
+            "pub fn alpha() {}\n// force response-relevant refresh\n",
+        )
+        .expect("dirty indexed source");
+
+        let args = json!({ "query": "a", "mode": "substring", "limit": 20 });
+        let base =
+            code_search_with_artifact(&args, &InMemoryClient::new(Arc::new(artifact.clone())))
+                .expect("base response");
+        let body = SCOPED_CODE_GRAPH_WORKTREE_ROOT
+            .scope(root.to_path_buf(), async {
+                code_search_response(&args, Arc::new(RebuildCoordinator::new())).await
+            })
+            .await
+            .expect("production wrapper must return the whole base response");
+        let expected_head = git_stdout_test(root, &["rev-parse", "HEAD"]);
+
+        let names = body["candidates"]
+            .as_array()
+            .expect("candidate array")
+            .iter()
+            .filter_map(|candidate| candidate["entity_name"].as_str())
+            .collect::<Vec<_>>();
+        eprintln!(
+            "request_replay fallback trace kind=overlay_failure digest={} names={names:?} \
+             status={} metadata={{graph_hash:{}, head:{}, dirty:{}, oid_match:{}}}",
+            response_digest(&body),
+            body["rebuild_status"],
+            body["graph_content_hash"],
+            body["worktree_head_oid"],
+            body["worktree_dirty"],
+            body["response_file_oids_match"],
+        );
+        assert_eq!(body["candidates"], base["candidates"]);
+        assert_eq!(body["total_matches"], base["total_matches"]);
+        assert_eq!(names, vec!["alpha"]);
+        assert_eq!(body["graph_content_hash"], artifact.graph_content_hash);
+        assert_eq!(
+            body["graph_index_version"],
+            artifact.header.graph_index_version
+        );
+        assert_eq!(body["worktree_head_oid"], expected_head);
+        assert_eq!(body["worktree_dirty"], true);
+        assert_eq!(body["response_file_oids_match"], false);
+        assert_eq!(body["rebuild_status"], "stale_rebuild_failed");
+
+        let missing_message = "symbol still_missing not found in graph artifact".to_owned();
+        let reference_error =
+            CodeGraphError::without_metadata(McpHandlerError::NotFound(missing_message.clone()))
+                .with_metadata_source(GraphMetadataSource::from_artifact(&artifact));
+        let (reference, fallback) = SCOPED_CODE_GRAPH_WORKTREE_ROOT
+            .scope(root.to_path_buf(), async {
+                let reference = reference_error.into_error_response().await;
+                let fallback = code_resolve_response(
+                    &json!({ "selector": "still_missing" }),
+                    Arc::new(RebuildCoordinator::new()),
+                )
+                .await
+                .expect_err("whole not-found error must survive failed refresh")
+                .into_error_response()
+                .await;
+                (reference, fallback)
+            })
+            .await;
+
+        assert_eq!(fallback.code, reference.code);
+        assert_eq!(fallback.message, reference.message);
+        assert_eq!(fallback.data, reference.data);
+        assert_eq!(fallback.code, CODE_GRAPH_NOT_FOUND_ERROR_CODE);
+        assert_eq!(fallback.message, missing_message);
+        let reference_data = reference.data.as_ref().expect("reference error data");
+        let fallback_data = fallback.data.as_ref().expect("fallback error data");
+        eprintln!(
+            "request_replay fallback error reference={{code:{}, message:{:?}, data:{reference_data}}} \
+             fallback={{code:{}, message:{:?}, data:{fallback_data}}}",
+            reference.code, reference.message, fallback.code, fallback.message,
+        );
+        assert_eq!(fallback_data["kind"], "not_found");
+        assert_eq!(
+            fallback_data["graph_content_hash"],
+            artifact.graph_content_hash
+        );
+        assert_eq!(
+            fallback_data["graph_index_version"],
+            artifact.header.graph_index_version
+        );
+        assert_eq!(fallback_data["rebuild_status"], "not_needed");
+    }
+
+    #[tokio::test]
+    async fn request_replay_immediate_untracked_source_invalidates_primed_clean_metadata() {
+        let _rebuild_guard = rebuild_test_guard().await;
+        let _budget = set_graph_rebuild_latency_budget_for_test(Duration::from_secs(30));
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        init_git_repo(root);
+        fs::create_dir_all(root.join("src")).expect("mkdir src");
+        fs::write(root.join("src/lib.rs"), "pub fn alpha() {}\n").expect("write source");
+        fs::write(root.join(".gitignore"), ".spur/\n").expect("write graph ignore");
+        run_git_test(root, &["add", "src/lib.rs", ".gitignore"]);
+        run_git_test(root, &["commit", "-q", "-m", "index alpha"]);
+        let artifact = artifact_from_source(root, "pub fn alpha() {}\n");
+        write_current_artifact(root, &artifact);
+
+        let prime = SCOPED_CODE_GRAPH_WORKTREE_ROOT
+            .scope(root.to_path_buf(), async {
+                code_search_response(
+                    &json!({
+                        "query": "alpha",
+                        "mode": "exact",
+                        "response_format": "full",
+                    }),
+                    Arc::new(RebuildCoordinator::new()),
+                )
+                .await
+            })
+            .await
+            .expect("prime clean metadata");
+        eprintln!(
+            "immediate untracked prime total={} status={} dirty={} candidate={}",
+            prime["total_matches"],
+            prime["rebuild_status"],
+            prime["worktree_dirty"],
+            prime["candidates"].get(0).unwrap_or(&Value::Null),
+        );
+        assert_eq!(prime["rebuild_status"], "not_needed");
+        assert_eq!(prime["total_matches"], 1, "{prime:#}");
+        assert_eq!(prime["candidates"][0]["entity_name"], "alpha");
+
+        fs::write(
+            root.join("src/immediate.rs"),
+            "pub fn immediate_only() {}\n",
+        )
+        .expect("write immediate untracked source");
+        let body = SCOPED_CODE_GRAPH_WORKTREE_ROOT
+            .scope(root.to_path_buf(), async {
+                code_search_response(
+                    &json!({
+                        "query": "immediate_only",
+                        "mode": "exact",
+                        "response_format": "full",
+                    }),
+                    Arc::new(RebuildCoordinator::new()),
+                )
+                .await
+            })
+            .await
+            .expect("immediate untracked symbol must be visible");
+
+        eprintln!(
+            "immediate untracked evidence total={} status={} dirty={} candidate={}",
+            body["total_matches"],
+            body["rebuild_status"],
+            body["worktree_dirty"],
+            body["candidates"].get(0).unwrap_or(&Value::Null),
+        );
+        assert_eq!(body["total_matches"], 1, "{body:#}");
+        assert_eq!(body["candidates"][0]["entity_name"], "immediate_only");
+        assert_eq!(body["rebuild_status"], "fresh");
     }
 
     #[derive(Clone)]
@@ -7746,6 +8726,10 @@ mod tests {
     }
 
     fn run_git_test(root: &Path, args: &[&str]) {
+        let _ = git_stdout_test(root, args);
+    }
+
+    fn git_stdout_test(root: &Path, args: &[&str]) -> String {
         let output = Command::new("git")
             .arg("-C")
             .arg(root)
@@ -7758,5 +8742,9 @@ mod tests {
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
+        String::from_utf8(output.stdout)
+            .expect("git test output must be UTF-8")
+            .trim()
+            .to_owned()
     }
 }

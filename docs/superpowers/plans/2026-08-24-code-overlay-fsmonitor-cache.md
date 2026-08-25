@@ -192,14 +192,23 @@ the same finite bounds to every project.
    file through `SPUR_GRAPH_PERF_*` variables. Defaults must preserve the
    current Spur benchmark.
 2. Add named stages for base Parquet query, Git observation, snapshot/OID
-   validation, delta construction, overlay query, response shaping, and total
-   session. Do not combine stages in a way that re-labels unmeasured time.
-3. Make invalid/missing fixtures fail with actionable messages before the
+   validation, directly combined warm validation, delta construction, overlay
+   query, response shaping, and total session. The combined stage intentionally
+   overlaps its two decomposition stages so its own sample distribution can
+   supply p50/p95; never present a sum of separately sampled percentiles as a
+   percentile of the combined work.
+3. Shape one `code_search` response by transforming and serializing the
+   already-produced search result. Response shaping and the response portion
+   of total session must execute no symbol, manifest, caller, or other graph
+   query.
+4. Make invalid/missing fixtures fail with actionable messages before the
    measurement loop.
-4. Run at least 30 warm samples for all three project classes from disposable
+5. Run at least 30 warm samples for all three project classes from disposable
    clones/worktrees. Record p50, p95, command, fixture identity, Git version,
    tracked/dirty counts, and correctness digest in a `PRE results` section.
-5. Preserve raw Criterion output paths. Do not enable or persist repository or
+6. Preserve raw Criterion `sample.json` and `estimates.json` below a stable
+   evidence root outside the disposable worker worktree, verify the files
+   before reporting, and checksum them. Do not enable or persist repository or
    global Git configuration.
 
 **Verify:**
@@ -211,7 +220,9 @@ scripts/spur-cargo fmt --all -- --check
 ```
 
 **Acceptance:** the same command shape can target all three fixtures, reports
-the latency decomposition and digest, and has a recorded SOLVE PRE/POST pair.
+the latency decomposition and digest, directly measures combined warm
+validation, shapes one response without extra graph operations, retains raw
+artifacts after worker cleanup, and has a recorded SOLVE PRE/POST pair.
 
 ## Task 2 — Add a gated porcelain-v2 fsmonitor observer
 
@@ -504,8 +515,589 @@ SPUR_REMOTE=0 scripts/spur-cargo bench -p spur-graph --bench overlay -- --noplot
 
 ### PRE results
 
-Pending Task 1.
+Task 1 (`bd-2je4`) completed the first measurement harness on 2026-08-24.
+These PRE-production measurements are retained as provenance, but the reviewed
+response-shaping, percentile, and artifact-path evidence below is superseded by
+the corrected `bd-38yt` retry. Neither attempt is a release decision for the
+later fsmonitor/cache implementation.
 
-### POST results
+#### Bounds, RED, and SOLVE evidence
 
-Pending Task 6.
+- Catalog navigation selected implemented hard rule
+  `resource.request_within_limit` (family `resource`, profile `capacity`, rule
+  version 1).
+- **SOLVE PRE / measurement-only RED:** `sol_3555c3212e224caf`, raw status
+  `unsat`, outcome `fail`. Facts modeled the original query-path and
+  construction sample shortfalls as 10 and 20 respectively, requested
+  measurement windows of 8 and 10 seconds against a 10-second bound, and the
+  strict `<30 ms` warm-validation gate as integer request/limit 29. Invariant:
+  zero sample shortfall, bounded measurement window, and a 29 ms maximum.
+- The focused bad-fixture check exited 101 before any measurement with
+  `invalid SPUR_GRAPH_PERF_FIXTURE ... No such file or directory`. Raw output:
+  `/private/tmp/spur-task1-verify.DGC2B3/bad-fixture.txt`.
+- **SOLVE POST:** `sol_131bd3c442e14900`, raw status `sat`, outcome `pass`.
+  The same rule and resource shape was applied to `quack_flamegraph`, `spur`,
+  and `otobank`: `warm_sample_shortfall=0 <= 0`, requested
+  `measurement_timeout_seconds=3 <= 10`, and
+  `warm_validation_gate_ms=29 <= 29`. This proves the probe applies the same
+  finite configuration to every class; it does **not** claim that the current
+  exact implementation passes the later release gate.
+- Criterion was configured for 30 post-warm-up samples per stage and a
+  3-second requested measurement window. For slow stages Criterion extended
+  collection time rather than reducing the sample count; every raw
+  `sample.json` contains exactly 30 samples.
+- GREEN verification: the final benchmark compiled in optimized bench mode in
+  `/private/tmp/spur-task1-verify.DGC2B3/repo` with
+  `SPUR_REMOTE=0 scripts/spur-cargo bench -p spur-graph --bench overlay --no-run`;
+  direct `rustfmt --edition 2021 --check` and `git diff --check` passed.
+  The assigned clean base itself cannot run the wrapper compile or workspace
+  fmt because tracked `crates/spur-graph/src/extract/mod.rs` declares
+  `openapi`, while `crates/spur-graph/src/extract/openapi.rs` exists only as an
+  untracked file in the main checkout. The disposable verification copy
+  supplied that unchanged module without adding it to this task's diff.
+  Scope signal `6d488e0d-88c6-4c53-9537-d40705162013` records this pre-existing
+  dependency; both wrapper failures remain `E0583`, not benchmark failures.
+
+#### Fixture identity and correctness digest
+
+All repositories were cloned under `/private/tmp/spur-overlay-pre.JwtAoI`.
+Tracked edits were replayed with `git diff --binary | git apply`; the exact
+untracked pathname set was materialized as empty files so Git observed the
+same dirty-record shape without copying heavyweight caches. Source repositories
+and their Git configuration were not written. Every measured Git command used
+`GIT_OPTIONAL_LOCKS=0`, `-c core.fsmonitor=false`, and
+`-c core.untrackedCache=false`.
+
+Measured Git: `git version 2.39.3 (Apple Git-146)`.
+
+| Class / project | Revision | Tracked / dirty | Indexed sources | Query / changed file | Graph hash | Correctness digest |
+|---|---|---:|---:|---|---|---|
+| small, untracked-heavy / quack-flamegraph | `bcc78d53cbf6e1564490af5da106311b1eedec43` | 21 / 361 | 3 | `extension_entrypoint` / `src/lib.rs` | `c3684ef7c7139e0ea5d41b01f5100b994ff7b75e47ad5942fdb990987d139d8e` | `2a2d1484e528a09e9fcc09a7f96e089f4c7d7f5343396169eddbf2c00f102149` |
+| medium dirty Rust / spur | `8358179ece0c488355b412749632e06276f2d3f7` | 3,214 / 223 | 3,231 | `handle_code_search` / `crates/spur-graph/src/mcp/mod.rs` | `f3f98fa5a5ceae2ce31ac75fd2dbb93a35f80fd5e9e30d555d92469c192827f6` | `8f3a5d83c008a61672afad6d5d370c2380ad679e316f5239ee049cbffa1371ec` |
+| large mostly-clean polyglot / otobank | `4e934d438c009a875658466be2b811264d4295fb` | 4,913 / 33 | 4,295 | `run_refresh_tick` / `apps/api/src/bin/netops_worker.rs` | `4d2d488034e5352c8f0a599f29a71623ed94f5eac34352ba7bed9bdb2b6cd77d` | `f757b0edf5bfc4b6b5bf66380ca8c91e7f0aef6073312ec57d49164e301b88cd` |
+
+All three manifests reported `artifact_indexed_commit_oid=null`; revision and
+graph-content hash are therefore recorded independently rather than implying a
+commit binding the artifact does not declare.
+
+#### Stage timing matrix
+
+Values are milliseconds. p50 is the mean of sorted samples 15 and 16; p95 is
+nearest-rank sample 29 of 30. In this first attempt, `response shaping` also
+performed symbol, file-manifest, and caller graph queries, and `total session`
+repeated those queries. Those two stage names were semantically inaccurate;
+their values are retained only to preserve PRE provenance.
+
+| Project | Stage | p50 (ms) | p95 (ms) |
+|---|---|---:|---:|
+| quack-flamegraph | base Parquet query | 0.111 | 0.116 |
+| quack-flamegraph | Git observation | 12.694 | 13.567 |
+| quack-flamegraph | snapshot/OID validation | 13.677 | 14.946 |
+| quack-flamegraph | delta construction | 69.695 | 73.397 |
+| quack-flamegraph | overlay query | 0.114 | 0.118 |
+| quack-flamegraph | response shaping | 0.359 | 0.366 |
+| quack-flamegraph | total session | 97.082 | 102.161 |
+| spur | base Parquet query | 13.066 | 13.408 |
+| spur | Git observation | 26.007 | 27.202 |
+| spur | snapshot/OID validation | 17.299 | 18.923 |
+| spur | delta construction | 279.825 | 290.952 |
+| spur | overlay query | 13.234 | 13.626 |
+| spur | response shaping | 39.179 | 40.505 |
+| spur | total session | 404.154 | 409.880 |
+| otobank | base Parquet query | 15.196 | 15.660 |
+| otobank | Git observation | 27.210 | 28.152 |
+| otobank | snapshot/OID validation | 18.709 | 20.090 |
+| otobank | delta construction | 92.878 | 96.826 |
+| otobank | overlay query | 14.814 | 15.492 |
+| otobank | response shaping | 48.630 | 49.933 |
+| otobank | total session | 230.367 | 243.598 |
+
+The first attempt's arithmetic `sum(stage p95)` for Git observation plus
+snapshot/OID validation was 28.513 ms, 46.125 ms, and 48.242 ms respectively.
+These are sums of separately sampled percentiles, **not** p95 estimates of the
+combined work, and they are not direct gate evidence. The corrected retry below
+adds one combined stage and uses its measured distribution for the gate claim.
+
+#### Exact commands and raw output
+
+Fixture recipe (run once for each project name):
+
+```bash
+PRE_ROOT=/tmp/spur-overlay-pre.JwtAoI
+for name in quack-flamegraph spur otobank; do
+  source_repo="/Volumes/Projects/Projects/$name"
+  fixture_repo="$PRE_ROOT/$name"
+  git clone --quiet --shared "$source_repo" "$fixture_repo"
+  if ! GIT_OPTIONAL_LOCKS=0 git -C "$source_repo" -c core.fsmonitor=false -c core.untrackedCache=false diff --quiet --no-ext-diff --; then
+    GIT_OPTIONAL_LOCKS=0 git -C "$source_repo" -c core.fsmonitor=false -c core.untrackedCache=false diff --binary --no-ext-diff -- | git -C "$fixture_repo" apply
+  fi
+  while IFS= read -r -d '' relative_path; do
+    mkdir -p "$fixture_repo/${relative_path:h}"
+    touch "$fixture_repo/$relative_path"
+  done < <(GIT_OPTIONAL_LOCKS=0 git -C "$source_repo" -c core.fsmonitor=false -c core.untrackedCache=false ls-files --others --exclude-standard -z)
+done
+```
+
+Benchmark commands (all run from the disposable verification copy with the
+same optimized benchmark binary):
+
+```bash
+SPUR_GRAPH_PERF_REPO='/tmp/spur-overlay-pre.JwtAoI/quack-flamegraph' SPUR_GRAPH_PERF_FIXTURE='/Volumes/Projects/Projects/quack-flamegraph/.spur/graph/CURRENT' SPUR_GRAPH_PERF_QUERY='extension_entrypoint' SPUR_GRAPH_PERF_CHANGED_FILE='src/lib.rs' SPUR_GRAPH_PERF_LABEL='quack_flamegraph' SPUR_GRAPH_PERF_SAMPLE_SIZE=30 SPUR_GRAPH_PERF_MEASUREMENT_SECONDS=3 SPUR_REMOTE=0 scripts/spur-cargo bench -p spur-graph --bench overlay -- overlay_stage_probe --noplot
+
+SPUR_GRAPH_PERF_REPO='/tmp/spur-overlay-pre.JwtAoI/spur' SPUR_GRAPH_PERF_FIXTURE='/Volumes/Projects/Projects/spur/.spur/graph/CURRENT' SPUR_GRAPH_PERF_QUERY='handle_code_search' SPUR_GRAPH_PERF_CHANGED_FILE='crates/spur-graph/src/mcp/mod.rs' SPUR_GRAPH_PERF_LABEL='spur' SPUR_GRAPH_PERF_SAMPLE_SIZE=30 SPUR_GRAPH_PERF_MEASUREMENT_SECONDS=3 SPUR_REMOTE=0 scripts/spur-cargo bench -p spur-graph --bench overlay -- overlay_stage_probe --noplot
+
+SPUR_GRAPH_PERF_REPO='/tmp/spur-overlay-pre.JwtAoI/otobank' SPUR_GRAPH_PERF_FIXTURE='/Volumes/Projects/Projects/otobank/.spur/graph/CURRENT' SPUR_GRAPH_PERF_QUERY='run_refresh_tick' SPUR_GRAPH_PERF_CHANGED_FILE='apps/api/src/bin/netops_worker.rs' SPUR_GRAPH_PERF_LABEL='otobank' SPUR_GRAPH_PERF_SAMPLE_SIZE=30 SPUR_GRAPH_PERF_MEASUREMENT_SECONDS=3 SPUR_REMOTE=0 scripts/spur-cargo bench -p spur-graph --bench overlay -- overlay_stage_probe --noplot
+```
+
+Raw console outputs:
+
+- `/private/tmp/spur-overlay-pre.JwtAoI/quack-flamegraph.txt`
+- `/private/tmp/spur-overlay-pre.JwtAoI/spur.txt`
+- `/private/tmp/spur-overlay-pre.JwtAoI/otobank.txt`
+- `/private/tmp/spur-overlay-pre.JwtAoI/criterion-percentiles.tsv`
+
+Raw Criterion directories:
+
+- `/Volumes/Projects/Projects/spur/.spur/worktrees/d789546a-5459-40cb-babb-e56ea8e43914/target/criterion/overlay_stage_probe_quack_flamegraph/`
+- `/Volumes/Projects/Projects/spur/.spur/worktrees/d789546a-5459-40cb-babb-e56ea8e43914/target/criterion/overlay_stage_probe_spur/`
+- `/Volumes/Projects/Projects/spur/.spur/worktrees/d789546a-5459-40cb-babb-e56ea8e43914/target/criterion/overlay_stage_probe_otobank/`
+
+Each stage directory originally retained `new/sample.json`,
+`new/estimates.json`, and the Criterion report artifacts. Those paths were
+inside Attempt 1's disposable worktree and temporary root and therefore do not
+survive delegation cleanup; they are superseded by the verified stable evidence
+root below.
+
+### Corrected Task 1 retry evidence
+
+Retry issue `bd-38yt` corrected the three review defects without changing the
+PRE matrix parameterization. This is still a measurement of the pre-production
+exact path. It does not replace the Task 6 release POST.
+
+#### Measurement RED, GREEN, and response shape
+
+The focused measurement-semantic guard was run before the correction:
+
+```bash
+zsh -c 'if awk '\''/fn shape_response\(/,/^}/'\'' crates/spur-graph/benches/overlay.rs | rg -q '\''symbol_by_id|file_manifest_by_path|find_caller_edges'\''; then print -u2 "RED: response shaping still performs graph queries"; exit 1; fi'
+```
+
+It exited 1 with the expected RED message because `shape_response` executed
+all three forbidden graph operations. The identical guard exited 0 after
+GREEN. The corrected function accepts `&SearchResult`, creates the candidate
+response rows, and serializes one JSON value. `stage_response_shaping` consumes
+the precomputed `overlay_search`; `total_session_digest` passes its one overlay
+query result to the same pure function. Neither path performs a post-search
+graph query.
+
+`stage_warm_validation_combined` runs one Git observation followed by one
+snapshot/OID validation in the same Criterion iteration. Its distribution is
+the only warm-validation p50/p95 gate evidence below. The individual stages
+remain decomposition evidence and are intentionally overlapping; their
+percentiles are never added and relabeled as a combined percentile.
+
+#### Corrected SOLVE POST
+
+- Catalog navigation reconfirmed implemented hard rule
+  `resource.request_within_limit` (family `resource`, profile `capacity`, rule
+  version 1).
+- Persisted **SOLVE POST**: `sol_9f65330e34214948`, raw status `sat`, outcome
+  `pass`, Z3 4.16.0. It uses the same three-workload/resource shape as the
+  original POST: for `quack_flamegraph`, `spur`, and `otobank`,
+  `warm_sample_shortfall=0 <= 0`,
+  `measurement_timeout_seconds=3 <= 10`, and
+  `warm_validation_gate_ms=29 <= 29`.
+- This same-shape POST proves that every corrected run applied the declared
+  finite probe bounds. It deliberately does not encode the observed PRE p95s
+  as passing the future release gate; the directly measured table shows which
+  current projects fail.
+
+#### Corrected fixture identity and digest
+
+The source repositories and their Git configuration were not written. Dirty
+state was replayed into shared disposable clones under
+`/private/tmp/spur-overlay-corrected.HJ7UeA`; tracked diffs were applied and
+untracked pathname sets were materialized as empty files. Every measured Git
+command used `GIT_OPTIONAL_LOCKS=0`, `-c core.fsmonitor=false`, and
+`-c core.untrackedCache=false`.
+
+Measured Git: `git version 2.55.0`.
+
+| Class / project | Revision | Tracked / dirty | Indexed sources | Query / changed file | Graph hash | Correctness digest |
+|---|---|---:|---:|---|---|---|
+| small, untracked-heavy / quack-flamegraph | `bcc78d53cbf6e1564490af5da106311b1eedec43` | 21 / 361 | 3 | `extension_entrypoint` / `src/lib.rs` | `c3684ef7c7139e0ea5d41b01f5100b994ff7b75e47ad5942fdb990987d139d8e` | `6ec2c488c05c418f0e32a76aa425695d1ef773be501d210181728be6a83f1573` |
+| medium dirty Rust / spur | `8358179ece0c488355b412749632e06276f2d3f7` | 3,214 / 223 | 3,231 | `handle_code_search` / `crates/spur-graph/src/mcp/mod.rs` | `f3f98fa5a5ceae2ce31ac75fd2dbb93a35f80fd5e9e30d555d92469c192827f6` | `b9b804495e4d52a60341f5e0a89503615ba8a95e8cfbd6c77b36eb18ddf17aa8` |
+| large mostly-clean polyglot / otobank | `4e934d438c009a875658466be2b811264d4295fb` | 4,913 / 37 | 4,295 | `run_refresh_tick` / `apps/api/src/bin/netops_worker.rs` | `4d2d488034e5352c8f0a599f29a71623ed94f5eac34352ba7bed9bdb2b6cd77d` | `f6201764a1846047fc8b92a4e3a53ae19960b00a2598a3bec6a35ad590ab6838` |
+
+All manifests again reported `artifact_indexed_commit_oid=null`. Otobank has
+four additional untracked paths versus Attempt 1; its exact 37-record shape is
+recorded rather than silently describing it as the older 33-record fixture.
+
+#### Corrected 30-sample timing matrix
+
+Values are milliseconds derived from each persisted `sample.json` as
+`times[i] / iters[i]`. p50 is the mean of sorted samples 15 and 16; p95 is the
+nearest-rank sample 29 of 30.
+
+| Project | Stage | p50 (ms) | p95 (ms) |
+|---|---|---:|---:|
+| quack-flamegraph | base Parquet query | 0.1079 | 0.1147 |
+| quack-flamegraph | Git observation | 9.624 | 10.507 |
+| quack-flamegraph | snapshot/OID validation | 7.466 | 8.344 |
+| quack-flamegraph | **combined warm validation** | **17.027** | **17.480** |
+| quack-flamegraph | delta construction | 50.668 | 52.696 |
+| quack-flamegraph | overlay query | 0.1124 | 0.1186 |
+| quack-flamegraph | response shaping (pure serialization) | 0.00244 | 0.00250 |
+| quack-flamegraph | total session | 67.818 | 71.496 |
+| spur | base Parquet query | 13.367 | 13.502 |
+| spur | Git observation | 22.196 | 23.623 |
+| spur | snapshot/OID validation | 10.819 | 11.324 |
+| spur | **combined warm validation** | **33.332** | **35.654** |
+| spur | delta construction | 262.599 | 269.545 |
+| spur | overlay query | 13.434 | 13.790 |
+| spur | response shaping (pure serialization) | 0.00452 | 0.00458 |
+| spur | total session | 338.491 | 389.670 |
+| otobank | base Parquet query | 15.371 | 16.395 |
+| otobank | Git observation | 23.378 | 24.125 |
+| otobank | snapshot/OID validation | 12.473 | 13.155 |
+| otobank | **combined warm validation** | **36.650** | **40.917** |
+| otobank | delta construction | 74.082 | 78.047 |
+| otobank | overlay query | 14.829 | 15.874 |
+| otobank | response shaping (pure serialization) | 0.00447 | 0.00464 |
+| otobank | total session | 151.341 | 153.187 |
+
+The directly measured combined warm-validation p95 is therefore 17.480 ms,
+35.654 ms, and 40.917 ms. Quack passes the strict `<30 ms` future release
+gate; Spur and otobank fail it on the current exact path. This is the truthful
+PRE signal later tasks must improve.
+
+#### Exact corrected commands
+
+Fixture preparation used this process-scoped recipe:
+
+```bash
+CORRECTED_ROOT=/private/tmp/spur-overlay-corrected.HJ7UeA
+EVIDENCE_ROOT=/Volumes/Projects/Projects/spur/.spur/bench-evidence/bd-38yt-corrected-task1
+mkdir -p "$EVIDENCE_ROOT/console" "$EVIDENCE_ROOT/criterion"
+for project_name in quack-flamegraph spur otobank; do
+  source_repo="/Volumes/Projects/Projects/$project_name"
+  fixture_repo="$CORRECTED_ROOT/$project_name"
+  GIT_OPTIONAL_LOCKS=0 git -c core.fsmonitor=false -c core.untrackedCache=false clone --quiet --shared "$source_repo" "$fixture_repo"
+  if ! GIT_OPTIONAL_LOCKS=0 git -C "$source_repo" -c core.fsmonitor=false -c core.untrackedCache=false diff --quiet --no-ext-diff --; then
+    GIT_OPTIONAL_LOCKS=0 git -C "$source_repo" -c core.fsmonitor=false -c core.untrackedCache=false diff --binary --no-ext-diff -- | GIT_OPTIONAL_LOCKS=0 git -C "$fixture_repo" -c core.fsmonitor=false -c core.untrackedCache=false apply
+  fi
+  while IFS= read -r -d '' relative_path; do
+    mkdir -p "$fixture_repo/${relative_path:h}"
+    touch "$fixture_repo/$relative_path"
+  done < <(GIT_OPTIONAL_LOCKS=0 git -C "$source_repo" -c core.fsmonitor=false -c core.untrackedCache=false ls-files --others --exclude-standard -z)
+done
+```
+
+The three benchmark commands were run from the disposable verification clone
+with the same optimized binary and persistent target:
+
+```bash
+SPUR_GRAPH_PERF_REPO='/private/tmp/spur-overlay-corrected.HJ7UeA/quack-flamegraph' SPUR_GRAPH_PERF_FIXTURE='/Volumes/Projects/Projects/quack-flamegraph/.spur/graph/CURRENT' SPUR_GRAPH_PERF_QUERY='extension_entrypoint' SPUR_GRAPH_PERF_CHANGED_FILE='src/lib.rs' SPUR_GRAPH_PERF_LABEL='quack_flamegraph_corrected' SPUR_GRAPH_PERF_SAMPLE_SIZE=30 SPUR_GRAPH_PERF_MEASUREMENT_SECONDS=3 CARGO_TARGET_DIR='/Volumes/Projects/Projects/spur/.spur/worktrees/618383bb-51be-400c-8377-fe59b4a66287/target' SPUR_REMOTE=0 scripts/spur-cargo bench -p spur-graph --bench overlay -- overlay_stage_probe --noplot
+
+SPUR_GRAPH_PERF_REPO='/private/tmp/spur-overlay-corrected.HJ7UeA/spur' SPUR_GRAPH_PERF_FIXTURE='/Volumes/Projects/Projects/spur/.spur/graph/CURRENT' SPUR_GRAPH_PERF_QUERY='handle_code_search' SPUR_GRAPH_PERF_CHANGED_FILE='crates/spur-graph/src/mcp/mod.rs' SPUR_GRAPH_PERF_LABEL='spur_corrected' SPUR_GRAPH_PERF_SAMPLE_SIZE=30 SPUR_GRAPH_PERF_MEASUREMENT_SECONDS=3 CARGO_TARGET_DIR='/Volumes/Projects/Projects/spur/.spur/worktrees/618383bb-51be-400c-8377-fe59b4a66287/target' SPUR_REMOTE=0 scripts/spur-cargo bench -p spur-graph --bench overlay -- overlay_stage_probe --noplot
+
+SPUR_GRAPH_PERF_REPO='/private/tmp/spur-overlay-corrected.HJ7UeA/otobank' SPUR_GRAPH_PERF_FIXTURE='/Volumes/Projects/Projects/otobank/.spur/graph/CURRENT' SPUR_GRAPH_PERF_QUERY='run_refresh_tick' SPUR_GRAPH_PERF_CHANGED_FILE='apps/api/src/bin/netops_worker.rs' SPUR_GRAPH_PERF_LABEL='otobank_corrected' SPUR_GRAPH_PERF_SAMPLE_SIZE=30 SPUR_GRAPH_PERF_MEASUREMENT_SECONDS=3 CARGO_TARGET_DIR='/Volumes/Projects/Projects/spur/.spur/worktrees/618383bb-51be-400c-8377-fe59b4a66287/target' SPUR_REMOTE=0 scripts/spur-cargo bench -p spur-graph --bench overlay -- overlay_stage_probe --noplot
+```
+
+The bad-fixture command used the quack environment above with
+`SPUR_GRAPH_PERF_FIXTURE=/private/tmp/spur-overlay-corrected.HJ7UeA/missing-fixture`.
+It exited 101 before measurement with actionable text:
+`invalid SPUR_GRAPH_PERF_FIXTURE ... No such file or directory`.
+
+#### Compile, format, and persistent raw artifacts
+
+- `CARGO_TARGET_DIR=.../618383bb-51be-400c-8377-fe59b4a66287/target
+  SPUR_REMOTE=0 scripts/spur-cargo bench -p spur-graph --bench overlay
+  --no-run` passed in the disposable verification clone and produced
+  `overlay-693f3cb4ccaa1274`. It reported only four pre-existing dead-code
+  warnings in `crates/spur-graph/src/mcp/mod.rs`; the benchmark emitted no
+  warning.
+- `scripts/spur-cargo fmt --all -- --check` and
+  `rustfmt --edition 2021 --check crates/spur-graph/benches/overlay.rs` passed
+  in the disposable verification clone; the direct scoped `rustfmt` check and
+  `git diff --check` also passed in the assigned worktree. As in Attempt 1,
+  workspace fmt in the assigned worktree alone fails before formatting because
+  tracked `extract/mod.rs` declares missing `openapi.rs`; the verification
+  clone supplied the unchanged untracked module without adding it to this
+  task's diff.
+- Stable evidence root:
+  `/Volumes/Projects/Projects/spur/.spur/bench-evidence/bd-38yt-corrected-task1`.
+  It is outside `.spur/worktrees` and remained valid after the active
+  `/private/tmp/spur-overlay-corrected.HJ7UeA` fixture root was moved to Trash.
+- Raw Criterion group directories are
+  `criterion/overlay_stage_probe_{quack_flamegraph,spur,otobank}_corrected/`.
+  Every one of the 24 stage directories contains `new/sample.json` with 30
+  `iters` and 30 `times`, plus `new/estimates.json`.
+- Derived exact percentiles are in `criterion-percentiles.tsv`; raw console,
+  compile, fmt, bad-fixture, and diff-check outputs are under `console/`.
+  `SHA256SUMS` contains 202 checksums covering those persisted files.
+
+### Task 6 diagnostic results — corrected inline review
+
+The first Task 6 (`bd-2uzl`) attempt ran on 2026-08-25 from base
+`02bd3fbf35e41525a349204ae321d15a39208290`; its normalized tip is
+`3116636fb`. Independent review rejected its release interpretation because
+the harness did not directly count base queries, did not observe the route of
+the dispatched production request, compared against a correlated overlay
+oracle, and used a three-sample/five-stage POST protocol against a
+thirty-sample/eight-stage PRE protocol. The inline correction added the RED
+contract in `161faaa80` and keeps every unsupported gate fail-closed.
+
+No production code or fsmonitor setting changed. The source-level release flag
+remains false. `ExactFallback(ReleaseDisabled)` is the expected route implied
+by that flag, not a runtime route observation from the measured request.
+
+#### TDD contract
+
+The focused RED command was:
+
+```bash
+SPUR_GRAPH_PERF_REPO=/private/tmp/spur-overlay-post.bd-2uzl-matrix.6Obpa7/quack-flamegraph/clean \
+SPUR_GRAPH_PERF_FIXTURE=/Volumes/Projects/Projects/quack-flamegraph/.spur/graph/c3684ef7c7139e0ea5d41b01f5100b994ff7b75e47ad5942fdb990987d139d8e.parquet \
+SPUR_GRAPH_PERF_QUERY=extension_entrypoint \
+SPUR_GRAPH_PERF_CHANGED_FILE=src/lib.rs \
+SPUR_GRAPH_PERF_LABEL=quack_flamegraph \
+SPUR_GRAPH_RELEASE_SCENARIO=clean \
+SPUR_GRAPH_RELEASE_REPEATS=3 \
+SPUR_REMOTE=0 scripts/spur-cargo bench -p spur-graph --bench overlay -- overlay_release_matrix --noplot
+```
+
+It exited 101 only after the real `code_symbol_search` dispatch, with the
+intentional message `release gate 'exactly_one_base_operation' cannot pass
+without direct evidence`. The first attempted RED used a clone without a
+discoverable graph pointer and was discarded because it failed for the wrong
+reason.
+
+The corrected GREEN command exited 0 and emitted `base_operation_count=null`,
+`production_request_routes=[]`, `independent_correctness_mismatches=null`,
+`production_release_state_observed_by_harness=false`,
+`sample_protocol.pre_post_comparable=false`, and `release_eligible=false`.
+The separately injected observer probe still reported `FsmonitorNative`, but
+the schema now prevents that observation from being attributed to the
+production request.
+
+#### Disposable fixtures and mutation guard
+
+The matrix fixture root is
+`/private/tmp/spur-overlay-post.bd-2uzl-matrix.6Obpa7`. Each cell was a fresh
+shared clone of the corresponding read-only source under
+`/private/tmp/spur-overlay-pre.JwtAoI`, detached at the exact PRE revision.
+Tracked diffs were replayed with `git diff --binary | git apply`; each
+untracked pathname was recreated as an empty file, matching the corrected PRE
+recipe. Before scenario mutation, all 30 clone status hashes matched their
+source status hash. “Clean” means no Task-6 delta on top of that exact PRE
+dirty-state recipe.
+
+| Project | HEAD | Tracked / dirty | Source status SHA-256 before and after |
+|---|---|---:|---|
+| quack-flamegraph | `bcc78d53cbf6e1564490af5da106311b1eedec43` | 21 / 361 | `affb126bb4dd7c79eae53397bca9f6d76023dc758ecb1e40177f2e844f9069ce` |
+| spur | `8358179ece0c488355b412749632e06276f2d3f7` | 3,214 / 223 | `f6d4445447feeddadcccd7b0f96c56a096043ec55583dbdf97cbe9010bcdfa98` |
+| otobank | `4e934d438c009a875658466be2b811264d4295fb` | 4,913 / 33 | `a4099acad0d165cddc1f1048c9c6dd1aa8d5af8e754f37c993c60148edbfc3be` |
+
+The after guard is byte-identical to the before guard
+(`matrix/source-guard.diff` is empty). The sources were never benchmarked or
+mutated. Scenario deltas were one tracked mode edit, 20 tracked mode edits,
+128 extra untracked Rust paths, one tracked deletion, one tracked rename, one
+empty commit advancing HEAD, unsupported fsmonitor capability, unhealthy
+watcher capability, or three concurrent requests. The exact resulting HEAD,
+dirty count, and artifact target for every fixture are recorded in
+`matrix/scenario-fixtures.tsv`.
+
+Quack and otobank use the exact PRE graph hashes `c3684ef7...` and
+`4d2d488...`. Spur's PRE artifact `f3f98fa5...` is unavailable; POST therefore
+uses the current `dfb5e95f...` artifact at the preserved source revision. Spur
+is measured, but its PRE/POST comparison is explicitly non-identical and
+cannot approve release.
+
+#### Historical three-repeat diagnostic matrix
+
+The raw 30-cell matrix is retained unchanged for provenance, but it is not an
+identical POST matrix and cannot support p95 or speedup claims. With three
+samples, the old `p50/p95` fields below are only median/max-of-three. The
+stages overlap and have different boundaries, so they are not additive.
+`Merge + shape` is the correlated oracle path, not pure serialization.
+`Observer route` belongs to a separately injected probe. The legacy base
+literal was hard-coded to one and is explicitly invalid as query-count
+evidence; the mismatch count compares two paths that share artifact and
+changed-path inputs.
+
+| Project | Scenario | Injected probe route / watcher | Git observe median/max ms | Snapshot median/max ms | Manual Parquet median/max ms | Correlated merge + shape median/max ms | Request total median/max ms | Legacy base literal (invalid) | Correlated mismatch |
+|---|---|---|---:|---:|---:|---:|---:|---:|---:|
+| quack-flamegraph | clean | FsmonitorNative / true | 22.027/22.851 | 53.294/54.838 | 0.197/0.227 | 196.618/202.98 | 277.6/282.713 | 1 | 0 |
+| quack-flamegraph | one_edit | FsmonitorNative / true | 21.962/22.347 | 52.211/57.679 | 0.212/0.285 | 194.915/200.565 | 281.525/284.38 | 1 | 0 |
+| quack-flamegraph | many_edits | FsmonitorNative / true | 23.212/24.008 | 57.044/57.312 | 0.191/0.207 | 196.519/199.284 | 283.167/294.779 | 1 | 0 |
+| quack-flamegraph | untracked_heavy | FsmonitorNative / true | 23.167/23.587 | 53.893/58.144 | 0.235/0.302 | 199.486/205.488 | 288.472/288.734 | 1 | 0 |
+| quack-flamegraph | delete | FsmonitorNative / true | 23.002/23.19 | 57.153/57.225 | 0.196/0.198 | 198.062/200.579 | 284/286.115 | 1 | 0 |
+| quack-flamegraph | rename | FsmonitorNative / true | 22.401/22.449 | 53.75/56.069 | 0.205/0.209 | 203.887/205.19 | 289.735/294.59 | 1 | 0 |
+| quack-flamegraph | head_lag | FsmonitorNative / true | 22.297/22.824 | 55.632/57.539 | 0.237/0.273 | 197.943/198.483 | 288.117/290.106 | 1 | 0 |
+| quack-flamegraph | fsmonitor_unsupported | ExactFallback(BuiltInUnsupported) / false | 10.623/10.758 | 54.636/56.759 | 0.232/0.285 | 200.821/209.086 | 87.191/285.144 | 1 | 0 |
+| quack-flamegraph | watcher_failure | ExactFallback(WatcherUnhealthy) / false | 10.436/10.538 | 54.331/55.403 | 0.206/0.289 | 199.749/200.469 | 88.4/286.341 | 1 | 0 |
+| quack-flamegraph | concurrent_requests | FsmonitorNative / true | 22.315/23.181 | 54.444/55.904 | 0.187/0.221 | 196.693/198.6 | 297.07/300.199 | 1 | 0 |
+| spur | clean | FsmonitorNative / true | 38.507/39.337 | 77.224/88.045 | 14.046/14.646 | 1087.881/1093.133 | 796.789/797.319 | 1 | 0 |
+| spur | one_edit | FsmonitorNative / true | 38.77/41.235 | 77.005/80.536 | 15.091/15.243 | 1076.433/1135.747 | 795.415/799.791 | 1 | 0 |
+| spur | many_edits | FsmonitorNative / true | 38.121/44.628 | 75.897/78.021 | 14.919/15.11 | 1072.655/1079.319 | 796.115/798.886 | 1 | 0 |
+| spur | untracked_heavy | FsmonitorNative / true | 37.272/40.794 | 75.059/77.455 | 14.008/14.311 | 1079.831/1084.219 | 798.62/799.274 | 1 | 0 |
+| spur | delete | FsmonitorNative / true | 37.05/41.284 | 78.558/79.248 | 14.837/14.87 | 1114.554/1153.526 | 798.029/800.601 | 1 | 0 |
+| spur | rename | FsmonitorNative / true | 42.952/52.647 | 90.898/127.56 | 15.707/15.898 | 1185.098/1213.796 | 801.101/806.135 | 1 | 0 |
+| spur | head_lag | FsmonitorNative / true | 36.3/38.017 | 73.057/76.562 | 13.844/14.169 | 1053.209/1055.218 | 795.435/796.576 | 1 | 0 |
+| spur | fsmonitor_unsupported | ExactFallback(BuiltInUnsupported) / false | 23.955/26.932 | 70.76/77.37 | 14.833/15.03 | 1069.609/1074.149 | 171.076/797.897 | 1 | 0 |
+| spur | watcher_failure | ExactFallback(WatcherUnhealthy) / false | 25.417/25.913 | 73.599/78.879 | 14.08/14.326 | 1103.063/1178.153 | 175.576/799.718 | 1 | 0 |
+| spur | concurrent_requests | FsmonitorNative / true | 37.946/42.228 | 75.628/77.534 | 14.362/14.867 | 1081.166/1095.442 | 818.068/837.625 | 1 | 0 |
+| otobank | clean | FsmonitorNative / true | 39.798/39.998 | 75.314/75.853 | 17.049/17.2 | 148.282/149.176 | 282.162/315.504 | 1 | 0 |
+| otobank | one_edit | FsmonitorNative / true | 39.011/40.527 | 72.99/82.176 | 16.07/16.171 | 150.141/152.997 | 282.603/285.373 | 1 | 0 |
+| otobank | many_edits | FsmonitorNative / true | 39.527/45.027 | 75.589/76.163 | 16.093/16.333 | 151.015/152.074 | 285.063/288.947 | 1 | 0 |
+| otobank | untracked_heavy | FsmonitorNative / true | 39.637/39.952 | 77.171/77.577 | 16.422/16.423 | 170.469/172.975 | 308.71/323.182 | 1 | 0 |
+| otobank | delete | FsmonitorNative / true | 38.78/39.446 | 73.165/78.318 | 16.368/16.513 | 147.554/150.356 | 281.332/281.367 | 1 | 0 |
+| otobank | rename | FsmonitorNative / true | 39.05/39.264 | 74.725/75.996 | 16.303/16.405 | 179.912/180.077 | 311.037/311.868 | 1 | 0 |
+| otobank | head_lag | FsmonitorNative / true | 39.556/40.401 | 72.252/73.261 | 15.891/17.451 | 146.846/147.09 | 278.088/278.208 | 1 | 0 |
+| otobank | fsmonitor_unsupported | ExactFallback(BuiltInUnsupported) / false | 24.409/24.741 | 70.26/71.107 | 16.138/16.574 | 146.327/148.924 | 147.758/282.597 | 1 | 0 |
+| otobank | watcher_failure | ExactFallback(WatcherUnhealthy) / false | 24.188/24.364 | 70.391/70.536 | 15.961/16.61 | 146.79/147.588 | 150.002/278.801 | 1 | 0 |
+| otobank | concurrent_requests | FsmonitorNative / true | 37.4/38.75 | 72.696/73.856 | 16.167/16.393 | 146.918/149.06 | 338.178/366.99 | 1 | 0 |
+
+All candidate and correlated-oracle digests agree on every repeat. The stable
+diagnostic result digests are
+`c1427804c84a10a88863f7f4d1c8fc86f8d774df44367bd3dbefd60702200a1a` for
+quack-flamegraph,
+`d1fc0216cc54b216574f8fb5ba28bf55f20f3d458e4a6fe4dc677245ae00d6ca`
+for spur, and
+`b7da6ed28fc9d92949321c476f4e2feda0cc6192a1418bc9278935695527fd69`
+for otobank. There were 108 request dispatches, not 108 observed base queries.
+The zero correlated mismatches are a useful regression diagnostic, but they do
+not prove correctness against an independent exact scan or fresh rebuild.
+Likewise, the 24 native and six fallback observations belong only to the
+observer probe; the production request route was not instrumented.
+
+#### PRE/POST comparison rejected
+
+The original ratios divided a 30-sample PRE p95 by a three-sample POST maximum
+from differently named and bounded stages. Spur also used a different graph
+artifact. Those ratios are removed from release consideration.
+
+| Project | PRE warm p50/p95 ms (30 samples) | Diagnostic snapshot median/max ms (3 samples) | Comparability |
+|---|---:|---:|---|
+| quack-flamegraph | 17.028/17.480 | 53.294/54.838 | no: sample count and stage boundary differ |
+| spur | 33.332/35.654 | 77.224/88.045 | no: sample count, stage boundary, and artifact differ |
+| otobank | 36.650/40.917 | 75.314/75.853 | no: sample count and stage boundary differ |
+
+The measurements still support a directional latency diagnosis. Manual base
+Parquet work is small relative to the end-to-end request in these fixtures;
+freshness observation/snapshot certification and overlay construction/merge
+are substantial. “Normal post-query processing” includes merge/filter/sort,
+limit handling, metadata shaping, and JSON serialization, but the earlier pure
+response-shaping probe measured only about 0.0025–0.0046 ms p95. It therefore
+does not explain roughly half of a 200 ms request. The dominant work is before
+that pure shaping step: Git/worktree certification and overlay/delta work.
+Because these diagnostic stages overlap, their medians or maxima must not be
+summed into an exact attribution percentage.
+
+#### Verification before claims
+
+All build/test commands used `scripts/spur-cargo`. A temporary copy of the
+user-owned untracked `extract/openapi.rs` was protected by a trap and removed
+with `/bin/unlink`; it was absent after verification and after the matrix.
+
+| Command | Exit | Result |
+|---|---:|---|
+| corrected focused RED release contract | 101 | expected panic: an unobserved base count cannot claim PASS |
+| corrected focused GREEN release contract | 0 | unsupported counts/routes/oracle are null or empty; `release_eligible=false` |
+| `scripts/spur-cargo test -p spur-graph` | 101 | real failure: 461 passed, 1 failed, 3 ignored; `code_search_response_adds_full_metadata_and_clamps_limit` got `rebuild_status="fresh"`, expected `"not_needed"` |
+| `scripts/spur-cargo check --workspace` | 0 | pass |
+| `SPUR_REMOTE=1 scripts/spur-cargo clippy --workspace -- -D warnings` | 101 | known baseline exactly: five `spur-acp` `ref_patterns` plus one `large_enum_variant` |
+| `SPUR_REMOTE=1 scripts/spur-cargo clippy -p spur-graph --no-deps -- -D warnings` | 101 | known baseline exactly: four dead-code findings plus one `too_many_arguments` |
+| benchmark-target clippy with only those declared baseline lints allowed | 0 | new `overlay` benchmark code passes every other lint under `-D warnings` |
+| `scripts/spur-cargo fmt --all -- --check` | 0 | pass |
+| `SPUR_REMOTE=0 scripts/spur-cargo bench -p spur-graph --bench overlay -- --noplot` | 0 | pass with existing defaults |
+| historical 30 focused matrix invocations | 0 each | raw samples are preserved, but their old PASS fields are rejected |
+
+The failing unit test and its assertion are byte-identical at the base commit
+and current HEAD, and Task 6 changes only the benchmark and this plan. It is
+therefore an unrelated but honest mandatory-verification failure; it was not
+rerun locally to hide the remote red. Strict clippy did not pass, and the
+before/after findings exactly match the declared unrelated baseline.
+
+#### Catalog-first SOLVE evidence
+
+Catalog navigation loaded the exact implemented hard rules before RED. The
+inline correction persisted both phases with `solve_rules`; no generic SMT
+substitute or threshold relaxation was used.
+
+SOLVE PRE:
+
+- `sol_f8a8fc4f06954043`: `resource.request_within_limit`, raw `unsat`, outcome
+  `fail`; clean snapshot diagnostics 54,838, 88,046, and 75,854 microseconds
+  exceed the strict 29,999-microsecond request bound;
+- `sol_5b7fdb8670614497`: `data_integrity.value_range`, raw `sat`, outcome
+  `pass`; this proves only that the three reported correlated-oracle mismatch
+  values are zero;
+- `sol_9623c916aa494f8c`: `data_integrity.cardinality`, raw `unsat`, outcome
+  `fail`; zero of the five release gates had direct passing evidence.
+
+SOLVE POST reran the same model after the fail-closed schema landed:
+
+- `sol_54cba073df894bec`: resource bound, raw `unsat`, outcome `fail`;
+- `sol_f6c828474f294530`: narrow correlated-mismatch range, raw `sat`, outcome
+  `pass`;
+- `sol_17b7cb17c8ea4e0b`: five-of-five proven-gate cardinality, raw `unsat`,
+  outcome `fail`.
+
+The narrow mismatch PASS is not promoted to the independent-correctness gate.
+The aggregate cardinality failure is the authoritative release result.
+
+#### Reproduction and stable raw evidence
+
+Each cell used the same command shape, changing only the four project inputs
+and scenario:
+
+```bash
+SPUR_GRAPH_PERF_REPO="$MATRIX_ROOT/$project/$scenario" \
+SPUR_GRAPH_PERF_FIXTURE="$artifact" \
+SPUR_GRAPH_PERF_QUERY="$query" \
+SPUR_GRAPH_PERF_OVERLAY_QUERY="$query" \
+SPUR_GRAPH_PERF_CHANGED_FILE="$changed_file" \
+SPUR_GRAPH_PERF_LABEL="$label" \
+SPUR_GRAPH_RELEASE_SCENARIO="$scenario" \
+SPUR_GRAPH_RELEASE_REPEATS=3 \
+SPUR_REMOTE=0 scripts/spur-cargo bench -p spur-graph --bench overlay -- overlay_release_matrix --noplot
+```
+
+Stable evidence root:
+`/Volumes/Projects/Projects/spur/.spur/bench-evidence/bd-2uzl-post-20260825`.
+`matrix/cells.jsonl` is the historical 30-cell machine-readable timing source;
+its old route, base-count, mismatch-gate, and p95 labels are rejected and must
+not be consumed as release evidence. The corrected focused output above is the
+schema contract for future reruns.
+`matrix/cells.tsv` is the derived table, `matrix/status.tsv` records every
+exit, `matrix/source-guard-{before,after}.tsv` records mutation guards, and
+per-cell console is under `matrix/{quack-flamegraph,spur,otobank}`. RED,
+GREEN, verification, and SOLVE transport evidence are in their named
+subdirectories. `SHA256SUMS` covers all 56 raw/derived files other than
+itself. Two aborted fixture roots are explicitly recorded in
+`matrix/aborted-fixture-root.txt` and were left intact rather than
+destructively cleaned.
+
+#### Release decision
+
+**RELEASE BLOCKED.** The five approved gates remain mandatory; no condition
+was dropped or weakened. The corrected accounting has zero proven passing
+gates out of five.
+
+| Gate | Direct evidence | Result |
+|---|---|---|
+| warm unchanged snapshot p95 `<30 ms` in every class | only three-sample maxima with non-identical stage definitions; observed clean maxima are 54.838, 88.045, and 75.853 ms | **NOT PROVEN** |
+| exactly one base operation | production dispatch had no base-query counter; the old value `1` was a literal | **NOT PROVEN** |
+| zero correctness mismatch | zero mismatches only against a correlated oracle; no independent exact scan/fresh rebuild | **NOT PROVEN** |
+| optimized and fallback routes | injected observer probe covered both; production-request route was not observed and release remains disabled | **NOT PROVEN** |
+| reproducible committed matrix and SOLVE evidence | raw files are checksummed, but protocols differ and Spur's artifact drifted; cardinality POST is `unsat` | **FAIL** |
+
+The mandatory verification suite also has the unrelated unit-test red above.
+No TTL, threshold, fixture shape, production source, or release setting was
+adjusted. The durable rejection signal is
+`7d8a1c42-2f6e-4b91-8a53-0e7d4c9f261b` (`signal:retry-exhausted`), and
+`bd-2uzl` remains open. This corrected two-file evidence change is suitable to
+merge as an honest blocked-result record; it does **not** authorize enabling
+fsmonitor or closing Task 6.

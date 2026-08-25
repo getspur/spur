@@ -8,6 +8,7 @@
 //! do not deserialize and retain the full graph artifact per request.
 
 use std::collections::{HashMap, HashSet};
+use std::fmt;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
@@ -35,7 +36,8 @@ use crate::store::parquet::{
 use crate::temporal::{symbol_history_indexed, GitSha, TemporalIndex};
 use crate::{
     artifact_from_facts, build_facts_for_paths, compare_symbols, find_callee_edges,
-    find_caller_edges, read_artifact_header_parquet, resolve_selector, search_symbols, ChangeKind,
+    find_caller_edges, internal_unbounded_search_options, limited_search_result,
+    read_artifact_header_parquet, resolve_selector, search_symbols, ChangeKind,
     CommitIndexArtifact, GraphArtifactManifest, GraphEdgeArtifact, GraphFileManifestEntry,
     GraphIndexArtifact, GraphIndexHeader, GraphSymbolArtifact, OwnedCalleeRecord,
     OwnedCallerRecord, RelationKind, SearchOptions, SearchResult, SearchSymbol, SelectorResolution,
@@ -546,8 +548,7 @@ impl<B: GraphQueryClient> GraphQueryClient for OverlayClient<B> {
         if self.is_identity_overlay() {
             return self.base.search_symbols(opts);
         }
-        let mut unbounded = opts.clone();
-        unbounded.limit = 200;
+        let unbounded = internal_unbounded_search_options(opts);
         let mut candidates = self
             .base
             .search_symbols(&unbounded)?
@@ -560,14 +561,7 @@ impl<B: GraphQueryClient> GraphQueryClient for OverlayClient<B> {
         candidates.dedup_by(|left, right| left.stable_symbol_id == right.stable_symbol_id);
 
         let total_matches = candidates.len();
-        let limit = opts.limit.clamp(1, 200);
-        let truncated = total_matches > limit;
-        candidates.truncate(limit);
-        Ok(SearchResult {
-            candidates,
-            total_matches,
-            truncated,
-        })
+        Ok(limited_search_result(candidates, total_matches, opts.limit))
     }
 
     fn find_caller_edges(&self, sid: &str) -> Vec<OwnedCallerRecord> {
@@ -915,7 +909,37 @@ pub struct ParquetClient {
     metadata_cache: ParquetMetadataCache,
     nodes_metadata: ArrowReaderMetadata,
     search_projection: ProjectionMask,
+    file_oids: OnceLock<Result<Vec<(String, String)>, SharedFileOidsError>>,
+    #[cfg(test)]
+    file_oids_load_count: std::sync::atomic::AtomicUsize,
     temporal_index: OnceLock<Arc<TemporalIndex>>,
+}
+
+#[derive(Clone)]
+struct SharedFileOidsError(Arc<anyhow::Error>);
+
+impl SharedFileOidsError {
+    fn new(error: anyhow::Error) -> Self {
+        Self(Arc::new(error))
+    }
+}
+
+impl fmt::Debug for SharedFileOidsError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(&self.0, formatter)
+    }
+}
+
+impl fmt::Display for SharedFileOidsError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&self.0, formatter)
+    }
+}
+
+impl std::error::Error for SharedFileOidsError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.0.source()
+    }
 }
 
 impl ParquetClient {
@@ -947,6 +971,9 @@ impl ParquetClient {
             metadata_cache,
             nodes_metadata,
             search_projection,
+            file_oids: OnceLock::new(),
+            #[cfg(test)]
+            file_oids_load_count: std::sync::atomic::AtomicUsize::new(0),
             temporal_index: OnceLock::new(),
         })
     }
@@ -960,23 +987,34 @@ impl ParquetClient {
     }
 
     pub fn file_oids(&self) -> anyhow::Result<Vec<(String, String)>> {
-        let batches = read_projected_batches(
-            &self.dir.join("file_manifests.parquet"),
-            &self.metadata_cache,
-            FILE_OID_COLUMNS,
-        )?;
-        let mut rows = Vec::new();
-        for batch in batches {
-            let path = string_array_by_name(&batch, "path")?;
-            let content_oid = string_array_by_name(&batch, "content_oid")?;
-            for row in 0..batch.num_rows() {
-                rows.push((
-                    required_string_value(path, row, "path")?.to_owned(),
-                    required_string_value(content_oid, row, "content_oid")?.to_owned(),
-                ));
-            }
+        match self.file_oids.get_or_init(|| {
+            #[cfg(test)]
+            self.file_oids_load_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            (|| -> anyhow::Result<Vec<(String, String)>> {
+                let batches = read_projected_batches(
+                    &self.dir.join("file_manifests.parquet"),
+                    &self.metadata_cache,
+                    FILE_OID_COLUMNS,
+                )?;
+                let mut rows = Vec::new();
+                for batch in batches {
+                    let path = string_array_by_name(&batch, "path")?;
+                    let content_oid = string_array_by_name(&batch, "content_oid")?;
+                    for row in 0..batch.num_rows() {
+                        rows.push((
+                            required_string_value(path, row, "path")?.to_owned(),
+                            required_string_value(content_oid, row, "content_oid")?.to_owned(),
+                        ));
+                    }
+                }
+                Ok(rows)
+            })()
+            .map_err(SharedFileOidsError::new)
+        }) {
+            Ok(rows) => Ok(rows.clone()),
+            Err(error) => Err(anyhow::Error::new(error.clone())),
         }
-        Ok(rows)
     }
 
     fn search_symbols_inner(&self, opts: &SearchOptions) -> anyhow::Result<SearchResult> {
@@ -1012,15 +1050,7 @@ impl ParquetClient {
         candidates.sort_by(|left, right| compare_symbols(left, right, opts));
 
         let total_matches = candidates.len();
-        let limit = opts.limit.clamp(1, 200);
-        let truncated = total_matches > limit;
-        candidates.truncate(limit);
-
-        Ok(SearchResult {
-            candidates,
-            total_matches,
-            truncated,
-        })
+        Ok(limited_search_result(candidates, total_matches, opts.limit))
     }
 
     fn filtered_projected_batches<const N: usize>(
@@ -2339,9 +2369,13 @@ mod tests {
     }
 
     fn symbol(id: &str, entity_name: &str) -> GraphSymbolArtifact {
+        symbol_at(id, entity_name, "src/lib.rs")
+    }
+
+    fn symbol_at(id: &str, entity_name: &str, file_path: &str) -> GraphSymbolArtifact {
         GraphSymbolArtifact {
             stable_symbol_id: id.to_owned(),
-            file_path: "src/lib.rs".to_owned(),
+            file_path: file_path.to_owned(),
             byte_range: [0, 8],
             line_range: [1, 2],
             entity_name: entity_name.to_owned(),
@@ -2381,6 +2415,96 @@ mod tests {
         assert_eq!(ids(&actual), ids(&expected));
         assert_eq!(actual.total_matches, expected.total_matches);
         assert_eq!(actual.truncated, expected.truncated);
+    }
+
+    #[test]
+    fn internal_search_overlay_shadows_before_public_cap_and_matches_fresh_oracle() {
+        let base_symbols = (0..202)
+            .map(|index| {
+                symbol_at(
+                    &format!("base-{index:03}"),
+                    &format!("match_{index:03}"),
+                    &format!("src/{index:03}.rs"),
+                )
+            })
+            .collect::<Vec<_>>();
+        let shadowed_path = base_symbols[0].file_path.clone();
+        let replacement = symbol_at("replacement", "replacement", &shadowed_path);
+        let fresh_symbols = base_symbols
+            .iter()
+            .skip(1)
+            .cloned()
+            .chain(std::iter::once(replacement.clone()))
+            .collect::<Vec<_>>();
+        let base = InMemoryClient::new(Arc::new(artifact(base_symbols)));
+        let overlay = OverlayClient::from_artifacts(
+            &base,
+            Arc::new(artifact(vec![replacement])),
+            HashSet::from([shadowed_path]),
+        )
+        .expect("construct overlay");
+        let oracle = InMemoryClient::new(Arc::new(artifact(fresh_symbols)));
+        let options = SearchOptions {
+            query: "match_".to_owned(),
+            mode: SearchMode::Substring,
+            filters: SearchFilters::default(),
+            limit: 200,
+        };
+
+        let actual = overlay.search_symbols(&options).expect("overlay search");
+        let expected = oracle.search_symbols(&options).expect("oracle search");
+        let actual_ids = ids(&actual);
+        let expected_ids = ids(&expected);
+        let actual_digest = blake3::hash(actual_ids.join("\n").as_bytes()).to_hex();
+        let expected_digest = blake3::hash(expected_ids.join("\n").as_bytes()).to_hex();
+
+        eprintln!(
+            "overlay search evidence internal_total={} public_count={} digest={} \
+             oracle_total={} oracle_count={} oracle_digest={}",
+            actual.total_matches,
+            actual.candidates.len(),
+            actual_digest,
+            expected.total_matches,
+            expected.candidates.len(),
+            expected_digest,
+        );
+        assert_eq!(actual.total_matches, 201);
+        assert_eq!(actual.candidates.len(), 200);
+        assert!(actual.truncated);
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn internal_search_parquet_unbounded_sentinel_returns_every_match() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let mut artifact = artifact(
+            (0..202)
+                .map(|index| symbol(&format!("s-{index:03}"), &format!("match_{index:03}")))
+                .collect(),
+        );
+        artifact.symbol_node_ids = (1..=artifact.symbols.len())
+            .map(|id| NodeId(id as u64))
+            .collect();
+        let parquet_dir = write_artifact_parquet(
+            &artifact,
+            tempdir.path(),
+            WriteOptions::default(),
+            Vec::new(),
+        )
+        .expect("write parquet artifact");
+        let parquet = ParquetClient::open(&parquet_dir).expect("open parquet client");
+        let options = SearchOptions {
+            query: "match_".to_owned(),
+            mode: SearchMode::Substring,
+            filters: SearchFilters::default(),
+            limit: usize::MAX,
+        };
+
+        let result = parquet.search_symbols(&options).expect("unbounded search");
+
+        assert_eq!(result.total_matches, 202);
+        assert_eq!(result.candidates.len(), 202);
+        assert!(!result.truncated);
     }
 
     #[test]
@@ -2578,5 +2702,72 @@ mod tests {
             ]
         );
         assert!(parquet.temporal_index.get().is_none());
+    }
+
+    #[test]
+    fn parquet_client_file_oids_are_memoized_for_the_open_manifest() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let parquet_dir = write_artifact_parquet(
+            &artifact(Vec::new()),
+            tempdir.path(),
+            WriteOptions::default(),
+            Vec::new(),
+        )
+        .expect("write parquet artifact");
+        let parquet = ParquetClient::open(&parquet_dir).expect("open parquet client");
+        let first = parquet.file_oids().expect("first file OID read");
+
+        std::fs::remove_file(parquet_dir.join("file_manifests.parquet"))
+            .expect("remove backing file after opened-manifest read");
+        let second = parquet
+            .file_oids()
+            .expect("opened manifest must reuse memoized file OIDs");
+
+        assert_eq!(second, first);
+    }
+
+    #[test]
+    fn parquet_client_file_oids_memoizes_the_full_error_chain() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let parquet_dir = write_artifact_parquet(
+            &artifact(Vec::new()),
+            tempdir.path(),
+            WriteOptions::default(),
+            Vec::new(),
+        )
+        .expect("write parquet artifact");
+        let parquet = ParquetClient::open(&parquet_dir).expect("open parquet client");
+        let file_manifests = parquet_dir.join("file_manifests.parquet");
+        let file_manifests_bytes =
+            std::fs::read(&file_manifests).expect("read file manifest fixture");
+        std::fs::remove_file(&file_manifests).expect("remove file manifest fixture");
+
+        let cold = parquet
+            .file_oids()
+            .expect_err("cold file OID load must fail with the backing file absent");
+        let cold_chain = cold.chain().map(ToString::to_string).collect::<Vec<_>>();
+
+        std::fs::write(&file_manifests, file_manifests_bytes)
+            .expect("restore file manifest before warm call");
+        let warm = parquet
+            .file_oids()
+            .expect_err("warm file OID load must replay the memoized failure");
+        let warm_chain = warm.chain().map(ToString::to_string).collect::<Vec<_>>();
+        let load_count = parquet
+            .file_oids_load_count
+            .load(std::sync::atomic::Ordering::SeqCst);
+
+        eprintln!(
+            "file_oids cold_chain={cold_chain:?} warm_chain={warm_chain:?} load_count={load_count}"
+        );
+        assert!(
+            cold_chain.len() >= 2,
+            "cold failure must preserve its context and nested source: {cold_chain:?}"
+        );
+        assert_eq!(
+            warm_chain, cold_chain,
+            "warm replay must preserve every source"
+        );
+        assert_eq!(load_count, 1, "the underlying Parquet load must run once");
     }
 }
