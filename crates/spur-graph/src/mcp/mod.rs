@@ -50,12 +50,14 @@ pub struct ToolDefinition {
 #[derive(Clone)]
 pub struct GraphMcpDeps {
     pub rebuild_coordinator: Arc<RebuildCoordinator>,
+    pub overlay_fsmonitor_auto: bool,
 }
 
 impl Default for GraphMcpDeps {
     fn default() -> Self {
         Self {
             rebuild_coordinator: Arc::new(RebuildCoordinator::new()),
+            overlay_fsmonitor_auto: false,
         }
     }
 }
@@ -113,32 +115,76 @@ impl GraphMcpModule {
         wait_for_project_scope_overlap_for_test().await;
         match name {
             "code_resolve" => {
-                code_resolve_response(&args, Arc::clone(&self.deps.rebuild_coordinator)).await
+                code_resolve_response(
+                    &args,
+                    Arc::clone(&self.deps.rebuild_coordinator),
+                    self.deps.overlay_fsmonitor_auto,
+                )
+                .await
             }
             "code_symbol_search" | "code_search" => {
-                code_search_response(&args, Arc::clone(&self.deps.rebuild_coordinator)).await
+                code_search_response(
+                    &args,
+                    Arc::clone(&self.deps.rebuild_coordinator),
+                    self.deps.overlay_fsmonitor_auto,
+                )
+                .await
             }
             "code_file_symbols" => {
-                code_file_symbols_response(&args, Arc::clone(&self.deps.rebuild_coordinator)).await
+                code_file_symbols_response(
+                    &args,
+                    Arc::clone(&self.deps.rebuild_coordinator),
+                    self.deps.overlay_fsmonitor_auto,
+                )
+                .await
             }
             "code_symbol_info" => {
-                code_symbol_info_response(&args, Arc::clone(&self.deps.rebuild_coordinator)).await
+                code_symbol_info_response(
+                    &args,
+                    Arc::clone(&self.deps.rebuild_coordinator),
+                    self.deps.overlay_fsmonitor_auto,
+                )
+                .await
             }
             "code_read_symbol" => {
-                code_read_symbol_response(&args, Arc::clone(&self.deps.rebuild_coordinator)).await
+                code_read_symbol_response(
+                    &args,
+                    Arc::clone(&self.deps.rebuild_coordinator),
+                    self.deps.overlay_fsmonitor_auto,
+                )
+                .await
             }
             "code_callers" => {
-                code_callers_response(&args, Arc::clone(&self.deps.rebuild_coordinator)).await
+                code_callers_response(
+                    &args,
+                    Arc::clone(&self.deps.rebuild_coordinator),
+                    self.deps.overlay_fsmonitor_auto,
+                )
+                .await
             }
             "code_callees" => {
-                code_callees_response(&args, Arc::clone(&self.deps.rebuild_coordinator)).await
+                code_callees_response(
+                    &args,
+                    Arc::clone(&self.deps.rebuild_coordinator),
+                    self.deps.overlay_fsmonitor_auto,
+                )
+                .await
             }
             "code_subgraph" => {
-                code_subgraph_response(&args, Arc::clone(&self.deps.rebuild_coordinator)).await
+                code_subgraph_response(
+                    &args,
+                    Arc::clone(&self.deps.rebuild_coordinator),
+                    self.deps.overlay_fsmonitor_auto,
+                )
+                .await
             }
             "code_symbol_history" => {
-                code_symbol_history_response(&args, Arc::clone(&self.deps.rebuild_coordinator))
-                    .await
+                code_symbol_history_response(
+                    &args,
+                    Arc::clone(&self.deps.rebuild_coordinator),
+                    self.deps.overlay_fsmonitor_auto,
+                )
+                .await
             }
             other => Err(McpHandlerError::InvalidParams(format!(
                 "unknown code graph MCP tool: {other}"
@@ -932,6 +978,7 @@ pub async fn code_search(args: &Value) -> Result<Value, McpHandlerError> {
 async fn code_search_response(
     args: &Value,
     rebuild_coordinator: Arc<RebuildCoordinator>,
+    overlay_fsmonitor_auto: bool,
 ) -> CodeGraphResult {
     let response_format = ResponseFormat::parse(args).map_err(CodeGraphError::without_metadata)?;
     let backend = open_code_search_backend_for_request(Some(Arc::clone(&rebuild_coordinator)))
@@ -955,6 +1002,7 @@ async fn code_search_response(
             source.clone(),
             args,
             response_format,
+            overlay_fsmonitor_auto,
             |args, client| code_search_with_artifact(args, client).map_err(CodeGraphError::from),
         )
         .await
@@ -1072,11 +1120,13 @@ async fn code_graph_backend_value_with_format(
 async fn code_graph_backend_response(
     args: &Value,
     rebuild_coordinator: Arc<RebuildCoordinator>,
+    overlay_fsmonitor_auto: bool,
     handler: impl Fn(&Value, &dyn GraphQueryClient) -> CodeGraphResult + Send + Sync,
 ) -> CodeGraphResult {
     code_graph_backend_response_with_refresh(
         args,
         rebuild_coordinator,
+        overlay_fsmonitor_auto,
         handler,
         GraphRefreshStrategy::OverlayThenRebuild,
         false,
@@ -1091,11 +1141,13 @@ async fn code_graph_backend_response(
 async fn code_graph_backend_response_allowing_source(
     args: &Value,
     rebuild_coordinator: Arc<RebuildCoordinator>,
+    overlay_fsmonitor_auto: bool,
     handler: impl Fn(&Value, &dyn GraphQueryClient) -> CodeGraphResult + Send + Sync,
 ) -> CodeGraphResult {
     code_graph_backend_response_with_refresh(
         args,
         rebuild_coordinator,
+        overlay_fsmonitor_auto,
         handler,
         GraphRefreshStrategy::OverlayThenRebuild,
         true,
@@ -1112,6 +1164,7 @@ async fn code_graph_backend_response_rebuild_only(
     code_graph_backend_response_with_refresh(
         args,
         rebuild_coordinator,
+        false,
         handler,
         GraphRefreshStrategy::RebuildOnly,
         false,
@@ -1162,6 +1215,7 @@ async fn attempt_refresh(
     args: &Value,
     response_format: ResponseFormat,
     refresh_strategy: GraphRefreshStrategy,
+    overlay_fsmonitor_auto: bool,
     handler: impl Fn(&Value, &dyn GraphQueryClient) -> CodeGraphResult + Send + Sync,
 ) -> RefreshOutcome {
     if refresh_strategy == GraphRefreshStrategy::OverlayThenRebuild {
@@ -1172,6 +1226,7 @@ async fn attempt_refresh(
             source.clone(),
             args,
             response_format,
+            overlay_fsmonitor_auto,
             &handler,
         )
         .await
@@ -1237,6 +1292,7 @@ async fn attempt_refresh(
 async fn code_graph_backend_response_with_refresh(
     args: &Value,
     rebuild_coordinator: Arc<RebuildCoordinator>,
+    overlay_fsmonitor_auto: bool,
     handler: impl Fn(&Value, &dyn GraphQueryClient) -> CodeGraphResult + Send + Sync,
     refresh_strategy: GraphRefreshStrategy,
     allow_source: bool,
@@ -1294,6 +1350,7 @@ async fn code_graph_backend_response_with_refresh(
                 args,
                 response_format,
                 refresh_strategy,
+                overlay_fsmonitor_auto,
                 &handler,
             )
             .await
@@ -1315,6 +1372,7 @@ async fn code_graph_backend_response_with_refresh(
             args,
             response_format,
             refresh_strategy,
+            overlay_fsmonitor_auto,
             &handler,
         )
         .await
@@ -1346,6 +1404,7 @@ async fn overlay_response_for_backend(
     source: GraphMetadataSource,
     args: &Value,
     response_format: ResponseFormat,
+    overlay_fsmonitor_auto: bool,
     handler: impl Fn(&Value, &dyn GraphQueryClient) -> CodeGraphResult,
 ) -> Result<OverlayAttempt, CodeGraphError> {
     let worktree = rebuild_candidate.worktree.clone();
@@ -1354,8 +1413,9 @@ async fn overlay_response_for_backend(
             "failed to construct code graph overlay: {error}"
         )))
     })?;
-    let mut task =
-        tokio::task::spawn_blocking(move || overlay_delta_for_worktree(worktree, snapshot_base));
+    let mut task = tokio::task::spawn_blocking(move || {
+        overlay_delta_for_worktree(worktree, snapshot_base, overlay_fsmonitor_auto)
+    });
     let cached = match tokio::time::timeout(graph_rebuild_latency_budget(), &mut task).await {
         Ok(Ok(Ok(cached))) => cached,
         Ok(Ok(Err(error))) => {
@@ -1423,8 +1483,10 @@ async fn overlay_response_for_backend(
 fn overlay_delta_for_worktree(
     worktree: PathBuf,
     base: overlay_snapshot::SnapshotBase,
+    overlay_fsmonitor_auto: bool,
 ) -> anyhow::Result<Option<request_cache::CachedOverlayDelta>> {
-    let OverlayChangedPaths { paths, identity } = changed_paths_for_overlay_base(&worktree, base)?;
+    let OverlayChangedPaths { paths, identity } =
+        changed_paths_for_overlay_base(&worktree, base, overlay_fsmonitor_auto)?;
     if paths.is_empty() {
         return Ok(None);
     }
@@ -1446,7 +1508,7 @@ fn overlay_client_for_backend<'a>(
 ) -> anyhow::Result<Option<OverlayClient<&'a (dyn GraphQueryClient + Sync)>>> {
     let worktree = rebuild_candidate.worktree.clone();
     let snapshot_base = backend.snapshot_base()?;
-    match overlay_delta_for_worktree(worktree, snapshot_base)? {
+    match overlay_delta_for_worktree(worktree, snapshot_base, false)? {
         Some(cached) => Ok(Some(OverlayClient::from_artifacts(
             backend.client(),
             cached.artifact,
@@ -1645,8 +1707,15 @@ fn code_search_body_for_client(
 async fn code_resolve_response(
     args: &Value,
     rebuild_coordinator: Arc<RebuildCoordinator>,
+    overlay_fsmonitor_auto: bool,
 ) -> CodeGraphResult {
-    code_graph_backend_response(args, rebuild_coordinator, code_resolve_with_client).await
+    code_graph_backend_response(
+        args,
+        rebuild_coordinator,
+        overlay_fsmonitor_auto,
+        code_resolve_with_client,
+    )
+    .await
 }
 
 fn code_resolve_with_client(args: &Value, client: &dyn GraphQueryClient) -> CodeGraphResult {
@@ -1904,8 +1973,15 @@ pub async fn code_file_symbols(args: &Value) -> Result<Value, McpHandlerError> {
 async fn code_file_symbols_response(
     args: &Value,
     rebuild_coordinator: Arc<RebuildCoordinator>,
+    overlay_fsmonitor_auto: bool,
 ) -> CodeGraphResult {
-    code_graph_backend_response(args, rebuild_coordinator, code_file_symbols_with_client).await
+    code_graph_backend_response(
+        args,
+        rebuild_coordinator,
+        overlay_fsmonitor_auto,
+        code_file_symbols_with_client,
+    )
+    .await
 }
 
 fn code_file_symbols_with_client(args: &Value, client: &dyn GraphQueryClient) -> CodeGraphResult {
@@ -1951,8 +2027,15 @@ pub async fn code_symbol_info_rebuild_aware(args: &Value) -> Result<Value, McpHa
 async fn code_symbol_info_response(
     args: &Value,
     rebuild_coordinator: Arc<RebuildCoordinator>,
+    overlay_fsmonitor_auto: bool,
 ) -> CodeGraphResult {
-    code_graph_backend_response(args, rebuild_coordinator, code_symbol_info_with_client).await
+    code_graph_backend_response(
+        args,
+        rebuild_coordinator,
+        overlay_fsmonitor_auto,
+        code_symbol_info_with_client,
+    )
+    .await
 }
 
 fn code_symbol_info_with_client(args: &Value, client: &dyn GraphQueryClient) -> CodeGraphResult {
@@ -1974,10 +2057,12 @@ pub async fn code_read_symbol(args: &Value) -> Result<Value, McpHandlerError> {
 async fn code_read_symbol_response(
     args: &Value,
     rebuild_coordinator: Arc<RebuildCoordinator>,
+    overlay_fsmonitor_auto: bool,
 ) -> CodeGraphResult {
     code_graph_backend_response_allowing_source(
         args,
         rebuild_coordinator,
+        overlay_fsmonitor_auto,
         code_read_symbol_with_client,
     )
     .await
@@ -2123,8 +2208,15 @@ pub async fn code_callers(args: &Value) -> Result<Value, McpHandlerError> {
 async fn code_callers_response(
     args: &Value,
     rebuild_coordinator: Arc<RebuildCoordinator>,
+    overlay_fsmonitor_auto: bool,
 ) -> CodeGraphResult {
-    code_graph_backend_response(args, rebuild_coordinator, code_callers_with_client).await
+    code_graph_backend_response(
+        args,
+        rebuild_coordinator,
+        overlay_fsmonitor_auto,
+        code_callers_with_client,
+    )
+    .await
 }
 
 fn code_callers_with_client(args: &Value, client: &dyn GraphQueryClient) -> CodeGraphResult {
@@ -2179,8 +2271,15 @@ pub async fn code_callees(args: &Value) -> Result<Value, McpHandlerError> {
 async fn code_callees_response(
     args: &Value,
     rebuild_coordinator: Arc<RebuildCoordinator>,
+    overlay_fsmonitor_auto: bool,
 ) -> CodeGraphResult {
-    code_graph_backend_response(args, rebuild_coordinator, code_callees_with_client).await
+    code_graph_backend_response(
+        args,
+        rebuild_coordinator,
+        overlay_fsmonitor_auto,
+        code_callees_with_client,
+    )
+    .await
 }
 
 fn code_callees_with_client(args: &Value, client: &dyn GraphQueryClient) -> CodeGraphResult {
@@ -2235,8 +2334,15 @@ pub async fn code_subgraph(args: &Value) -> Result<Value, McpHandlerError> {
 async fn code_subgraph_response(
     args: &Value,
     rebuild_coordinator: Arc<RebuildCoordinator>,
+    overlay_fsmonitor_auto: bool,
 ) -> CodeGraphResult {
-    code_graph_backend_response(args, rebuild_coordinator, code_subgraph_with_client).await
+    code_graph_backend_response(
+        args,
+        rebuild_coordinator,
+        overlay_fsmonitor_auto,
+        code_subgraph_with_client,
+    )
+    .await
 }
 
 fn code_subgraph_with_client(args: &Value, client: &dyn GraphQueryClient) -> CodeGraphResult {
@@ -2437,8 +2543,15 @@ pub async fn code_symbol_history(args: &Value) -> Result<Value, McpHandlerError>
 async fn code_symbol_history_response(
     args: &Value,
     rebuild_coordinator: Arc<RebuildCoordinator>,
+    overlay_fsmonitor_auto: bool,
 ) -> CodeGraphResult {
-    code_graph_backend_response(args, rebuild_coordinator, code_symbol_history_with_client).await
+    code_graph_backend_response(
+        args,
+        rebuild_coordinator,
+        overlay_fsmonitor_auto,
+        code_symbol_history_with_client,
+    )
+    .await
 }
 
 fn code_symbol_history_with_client(args: &Value, client: &dyn GraphQueryClient) -> CodeGraphResult {
@@ -5471,20 +5584,22 @@ pub(crate) fn changed_paths_for_overlay(
     base_files: Vec<(String, String)>,
 ) -> anyhow::Result<OverlayChangedPaths> {
     let base = overlay_snapshot::SnapshotBase::compatibility(base_files.into_iter().collect());
-    changed_paths_for_overlay_base(worktree, base)
+    changed_paths_for_overlay_base(worktree, base, false)
 }
 
 fn changed_paths_for_overlay_base(
     worktree: &Path,
     base: overlay_snapshot::SnapshotBase,
+    overlay_fsmonitor_auto: bool,
 ) -> anyhow::Result<OverlayChangedPaths> {
     let allowed_extensions = crate::extract::languages::all_supported_extensions();
     let (changed, identity) = if crate::git::detect(worktree).is_some() {
+        let capabilities = overlay_capabilities_for_worktree(worktree, overlay_fsmonitor_auto);
         let snapshot = overlay_snapshot::snapshot_with_capabilities(
             worktree,
             base,
             &allowed_extensions,
-            production_overlay_capabilities(),
+            capabilities,
         )?;
         let identity = snapshot.identity.clone();
         (snapshot.changed_oid_hex(), identity)
@@ -5536,6 +5651,29 @@ fn production_overlay_capabilities() -> crate::git::FsmonitorCapabilities {
         built_in_supported: false,
         local_filesystem: true,
         watcher_healthy: false,
+    }
+}
+
+fn overlay_capabilities_for_worktree(
+    worktree: &Path,
+    overlay_fsmonitor_auto: bool,
+) -> crate::git::FsmonitorCapabilities {
+    overlay_capabilities_for_worktree_with_probe(
+        worktree,
+        overlay_fsmonitor_auto,
+        crate::git::probe_fsmonitor_capabilities,
+    )
+}
+
+fn overlay_capabilities_for_worktree_with_probe(
+    worktree: &Path,
+    overlay_fsmonitor_auto: bool,
+    probe: impl FnOnce(&Path, bool, bool) -> crate::git::FsmonitorCapabilities,
+) -> crate::git::FsmonitorCapabilities {
+    if overlay_fsmonitor_auto {
+        probe(worktree, true, true)
+    } else {
+        production_overlay_capabilities()
     }
 }
 
@@ -7556,6 +7694,7 @@ mod tests {
                 code_search_response(
                     &json!({ "query": "a", "mode": "substring", "limit": 20 }),
                     Arc::new(RebuildCoordinator::new()),
+                    false,
                 )
                 .await
             })
@@ -7624,7 +7763,7 @@ mod tests {
                 .expect("base response");
         let body = SCOPED_CODE_GRAPH_WORKTREE_ROOT
             .scope(root.to_path_buf(), async {
-                code_search_response(&args, Arc::new(RebuildCoordinator::new())).await
+                code_search_response(&args, Arc::new(RebuildCoordinator::new()), false).await
             })
             .await
             .expect("production wrapper must return the whole base response");
@@ -7669,6 +7808,7 @@ mod tests {
                 let fallback = code_resolve_response(
                     &json!({ "selector": "still_missing" }),
                     Arc::new(RebuildCoordinator::new()),
+                    false,
                 )
                 .await
                 .expect_err("whole not-found error must survive failed refresh")
@@ -7726,6 +7866,7 @@ mod tests {
                         "response_format": "full",
                     }),
                     Arc::new(RebuildCoordinator::new()),
+                    false,
                 )
                 .await
             })
@@ -7756,6 +7897,7 @@ mod tests {
                         "response_format": "full",
                     }),
                     Arc::new(RebuildCoordinator::new()),
+                    false,
                 )
                 .await
             })
@@ -7861,13 +8003,14 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let root = dir.path();
         init_git_repo(root);
-        let artifact = artifact_from_source(
-            root,
-            "pub fn alpha() {}\n\
-             pub fn beta() {}\n",
-        );
-        run_git_test(root, &["add", "src/lib.rs"]);
+        let source = "pub fn alpha() {}\n\
+                      pub fn beta() {}\n";
+        fs::create_dir_all(root.join("src")).expect("mkdir src");
+        fs::write(root.join("src/lib.rs"), source).expect("write source");
+        fs::write(root.join(".gitignore"), ".spur/\n").expect("write graph ignore");
+        run_git_test(root, &["add", "src/lib.rs", ".gitignore"]);
         run_git_test(root, &["commit", "-q", "-m", "index symbols"]);
+        let artifact = artifact_from_source(root, source);
         write_current_artifact(root, &artifact);
 
         let body = SCOPED_CODE_GRAPH_WORKTREE_ROOT
@@ -7879,6 +8022,7 @@ mod tests {
                         "limit": 0,
                     }),
                     Arc::new(RebuildCoordinator::new()),
+                    false,
                 )
                 .await
             })
@@ -7918,6 +8062,7 @@ mod tests {
                         "mode": "exact",
                     }),
                     Arc::new(RebuildCoordinator::new()),
+                    false,
                 )
                 .await
             })
@@ -8513,6 +8658,7 @@ mod tests {
                         "stable_symbol_id": stable_symbol_id,
                     }),
                     Arc::new(RebuildCoordinator::new()),
+                    false,
                 )
                 .await
             })
