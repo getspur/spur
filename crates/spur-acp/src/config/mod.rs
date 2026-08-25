@@ -585,6 +585,29 @@ pub struct SpurConfig {
     pub log: LogConfig,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum OverlayFsmonitorMode {
+    #[default]
+    Off,
+    Auto,
+}
+
+impl OverlayFsmonitorMode {
+    fn is_off(&self) -> bool {
+        *self == Self::Off
+    }
+}
+
+impl std::fmt::Display for OverlayFsmonitorMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Off => f.write_str("Off"),
+            Self::Auto => f.write_str("Auto (experimental)"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct GraphConfig {
@@ -592,11 +615,13 @@ pub struct GraphConfig {
     /// `SPUR_EMBEDDING_MODEL` still overrides when set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub embedding_model: Option<String>,
+    #[serde(default, skip_serializing_if = "OverlayFsmonitorMode::is_off")]
+    pub overlay_fsmonitor: OverlayFsmonitorMode,
 }
 
 impl GraphConfig {
     fn is_default(&self) -> bool {
-        self.embedding_model.is_none()
+        self.embedding_model.is_none() && self.overlay_fsmonitor.is_off()
     }
 }
 
@@ -613,6 +638,7 @@ pub enum ConfigPatch {
     GraphEmbeddingModel {
         alias: String,
     },
+    GraphOverlayFsmonitor(OverlayFsmonitorMode),
     TuiEditMode(EditorMode),
     TuiTheme(String),
     TuiDisablePasteBurst(bool),
@@ -623,7 +649,7 @@ impl ConfigPatch {
     pub fn section_id(&self) -> &'static str {
         match self {
             Self::Agent { .. } => "agents",
-            Self::GraphEmbeddingModel { .. } => "graph",
+            Self::GraphEmbeddingModel { .. } | Self::GraphOverlayFsmonitor(_) => "graph",
             Self::TuiEditMode(_) | Self::TuiTheme(_) | Self::TuiDisablePasteBurst(_) => "tui",
             Self::SkillsProjectionMode(_) => "skills",
         }
@@ -637,6 +663,7 @@ impl ConfigPatch {
                 }
                 cfg.graph.embedding_model = Some(alias.clone());
             }
+            Self::GraphOverlayFsmonitor(mode) => cfg.graph.overlay_fsmonitor = *mode,
             Self::TuiEditMode(mode) => cfg.tui.edit_mode = *mode,
             Self::TuiTheme(name) => cfg.tui.theme = name.clone(),
             Self::TuiDisablePasteBurst(v) => cfg.tui.disable_paste_burst = *v,
@@ -1709,10 +1736,7 @@ level = "warn,spur_core::orchestrator=info"
     #[test]
     fn graph_overlay_fsmonitor_parses_modes_and_defaults_off() {
         let missing: SpurConfig = toml::from_str("").expect("empty config should parse");
-        assert_eq!(
-            missing.graph.overlay_fsmonitor,
-            OverlayFsmonitorMode::Off
-        );
+        assert_eq!(missing.graph.overlay_fsmonitor, OverlayFsmonitorMode::Off);
 
         for (serialized_mode, expected, display) in [
             ("off", OverlayFsmonitorMode::Off, "Off"),
