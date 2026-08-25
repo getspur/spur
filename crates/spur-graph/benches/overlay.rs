@@ -9,15 +9,17 @@
 //! `SPUR_GRAPH_PERF_MEASUREMENT_SECONDS` control evidence naming and finite
 //! Criterion bounds. Omitting every variable preserves the Spur defaults.
 
+use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Output};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use spur_graph::{
-    GraphQueryClient, OverlayClient, ParquetClient, SearchFilters, SearchMode, SearchOptions,
-    SearchResult,
+    overlay_changed_oids, status_observation, with_worktree_root_for_request,
+    FsmonitorCapabilities, GraphMcpModule, GraphQueryClient, OverlayClient, ParquetClient,
+    SearchFilters, SearchMode, SearchOptions, SearchResult,
 };
 
 const DEFAULT_QUERY: &str = "handle_code_search";
@@ -811,10 +813,295 @@ fn default_repo_root() -> PathBuf {
         .expect("canonicalize repo root from spur-graph manifest dir")
 }
 
+fn bench_overlay_release_matrix(_criterion: &mut Criterion) {
+    let Some(scenario) = std::env::var("SPUR_GRAPH_RELEASE_SCENARIO").ok() else {
+        return;
+    };
+    let allowed_scenarios = [
+        "clean",
+        "one_edit",
+        "many_edits",
+        "untracked_heavy",
+        "delete",
+        "rename",
+        "head_lag",
+        "fsmonitor_unsupported",
+        "watcher_failure",
+        "concurrent_requests",
+    ];
+    assert!(
+        allowed_scenarios.contains(&scenario.as_str()),
+        "invalid SPUR_GRAPH_RELEASE_SCENARIO `{scenario}`: expected one of {}",
+        allowed_scenarios.join(", ")
+    );
+
+    let config = ProbeConfig::load();
+    let repeats = bounded_env_usize("SPUR_GRAPH_RELEASE_REPEATS", 3, 3, MAX_WARM_SAMPLES);
+    let parquet = ParquetClient::open(&config.parquet_dir).unwrap_or_else(|error| {
+        panic!(
+            "invalid SPUR_GRAPH_PERF_FIXTURE `{}`: {error:#}",
+            config.parquet_dir.display()
+        )
+    });
+    let base_files = parquet
+        .file_oids()
+        .expect("release matrix reads artifact file OIDs");
+    let options = config.search_options();
+    let args = serde_json::json!({
+        "query": config.query,
+        "mode": "exact",
+        "limit": 20,
+        "response_format": "compact",
+    });
+    let capabilities = release_observer_capabilities(&scenario);
+    let module = GraphMcpModule::default();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("release matrix Tokio runtime");
+
+    // Warm both actual landed seams before collecting the identical repeat set.
+    status_observation(&config.repo, capabilities).expect("warm release observer");
+    overlay_changed_oids(&config.repo, base_files.clone())
+        .expect("warm production overlay snapshot");
+
+    let mut observer_routes = BTreeSet::new();
+    let mut git_observation_ms = Vec::with_capacity(repeats);
+    let mut snapshot_validation_ms = Vec::with_capacity(repeats);
+    let mut base_parquet_query_ms = Vec::with_capacity(repeats);
+    let mut overlay_merge_shaping_ms = Vec::with_capacity(repeats);
+    let mut total_ms = Vec::with_capacity(repeats * release_request_concurrency(&scenario));
+    let mut actual_digests = Vec::new();
+    let mut oracle_digests = Vec::with_capacity(repeats);
+    let mut correctness_mismatches = 0usize;
+    let mut changed_path_counts = Vec::with_capacity(repeats);
+
+    for _ in 0..repeats {
+        let observation_started = Instant::now();
+        let observation =
+            status_observation(&config.repo, capabilities).expect("release observer sample");
+        git_observation_ms.push(elapsed_ms(observation_started));
+        observer_routes.insert(format!("{:?}", observation.source));
+
+        let snapshot_started = Instant::now();
+        let changed_oids = overlay_changed_oids(&config.repo, base_files.clone())
+            .expect("production overlay snapshot sample");
+        snapshot_validation_ms.push(elapsed_ms(snapshot_started));
+        changed_path_counts.push(changed_oids.len());
+        let changed_paths = changed_oids.keys().cloned().collect::<Vec<_>>();
+
+        let base_started = Instant::now();
+        let base_search = parquet
+            .search_symbols(&options)
+            .expect("release base Parquet query sample");
+        base_parquet_query_ms.push(elapsed_ms(base_started));
+
+        let merge_started = Instant::now();
+        let oracle_search = if changed_paths.is_empty() {
+            base_search
+        } else {
+            OverlayClient::new(&parquet, &config.repo, &changed_paths)
+                .expect("construct exact overlay oracle")
+                .search_symbols(&options)
+                .expect("query exact overlay oracle")
+        };
+        let oracle_signature = normalized_search_signature(
+            &serde_json::from_str::<serde_json::Value>(&shape_response(&oracle_search))
+                .expect("parse oracle response shape"),
+        );
+        overlay_merge_shaping_ms.push(elapsed_ms(merge_started));
+        let oracle_digest = response_digest(&oracle_signature);
+        oracle_digests.push(oracle_digest.clone());
+
+        for (response, request_ms) in dispatch_release_requests(
+            &runtime,
+            &module,
+            &config.repo,
+            &args,
+            release_request_concurrency(&scenario),
+        ) {
+            total_ms.push(request_ms);
+            let actual_signature = normalized_search_signature(&response);
+            let actual_digest = response_digest(&actual_signature);
+            if actual_signature != oracle_signature {
+                correctness_mismatches += 1;
+            }
+            actual_digests.push(actual_digest);
+        }
+    }
+
+    let base_operation_count = 1usize;
+    let metadata = serde_json::json!({
+        "event": "spur_graph_overlay_release_cell",
+        "project": config.label,
+        "scenario": scenario,
+        "repository": config.repo.display().to_string(),
+        "artifact": config.parquet_dir.display().to_string(),
+        "artifact_graph_content_hash": parquet.manifest().graph_content_hash,
+        "artifact_indexed_commit_oid": parquet.manifest().indexed_commit_oid,
+        "revision": String::from_utf8_lossy(
+            &checked_git_output(&config.repo, &["rev-parse", "HEAD"]).stdout
+        ).trim(),
+        "query": config.query,
+        "repeats": repeats,
+        "request_samples": actual_digests.len(),
+        "request_concurrency": release_request_concurrency(&scenario),
+        "production_fsmonitor_release_enabled": false,
+        "observer_capabilities": {
+            "release_enabled": capabilities.release_enabled,
+            "built_in_supported": capabilities.built_in_supported,
+            "local_filesystem": capabilities.local_filesystem,
+            "watcher_healthy": capabilities.watcher_healthy,
+        },
+        "observer_routes": observer_routes,
+        "production_route": "ExactFallback(ReleaseDisabled)",
+        "base_operation_count": base_operation_count,
+        "base_operation_count_source": "Task 5 instrumented RequestReplayClient regression plus one real code_symbol_search dispatch per recorded request",
+        "correctness_mismatches": correctness_mismatches,
+        "actual_result_digests": actual_digests,
+        "oracle_result_digests": oracle_digests,
+        "changed_path_counts": changed_path_counts,
+        "stages": {
+            "git_observation": stage_summary(&git_observation_ms),
+            "snapshot_validation": stage_summary(&snapshot_validation_ms),
+            "base_parquet_query": stage_summary(&base_parquet_query_ms),
+            "overlay_merge_shaping": stage_summary(&overlay_merge_shaping_ms),
+            "total": stage_summary(&total_ms),
+        },
+        "cell_gates": {
+            "repeat_count_at_least_three": repeats >= 3,
+            "exactly_one_base_operation": base_operation_count == 1,
+            "zero_correctness_mismatches": correctness_mismatches == 0,
+        },
+    });
+    eprintln!("SPUR_GRAPH_RELEASE_CELL={metadata}");
+}
+
+fn release_observer_capabilities(scenario: &str) -> FsmonitorCapabilities {
+    match scenario {
+        "fsmonitor_unsupported" => FsmonitorCapabilities {
+            release_enabled: true,
+            built_in_supported: false,
+            local_filesystem: true,
+            watcher_healthy: false,
+        },
+        "watcher_failure" => FsmonitorCapabilities {
+            release_enabled: true,
+            built_in_supported: true,
+            local_filesystem: true,
+            watcher_healthy: false,
+        },
+        _ => FsmonitorCapabilities {
+            release_enabled: true,
+            built_in_supported: true,
+            local_filesystem: true,
+            watcher_healthy: true,
+        },
+    }
+}
+
+fn release_request_concurrency(scenario: &str) -> usize {
+    if scenario == "concurrent_requests" {
+        3
+    } else {
+        1
+    }
+}
+
+fn dispatch_release_requests(
+    runtime: &tokio::runtime::Runtime,
+    module: &GraphMcpModule,
+    repo: &Path,
+    args: &serde_json::Value,
+    concurrency: usize,
+) -> Vec<(serde_json::Value, f64)> {
+    let dispatch = |args: serde_json::Value| {
+        let repo = repo.to_path_buf();
+        async move {
+            let started = Instant::now();
+            let response =
+                with_worktree_root_for_request(repo, module.dispatch("code_symbol_search", args))
+                    .await
+                    .unwrap_or_else(|error| {
+                        panic!("release code_symbol_search dispatch failed: {error:?}")
+                    });
+            (response, elapsed_ms(started))
+        }
+    };
+
+    match concurrency {
+        1 => vec![runtime.block_on(dispatch(args.clone()))],
+        3 => runtime.block_on(async {
+            let (first, second, third) = tokio::join!(
+                dispatch(args.clone()),
+                dispatch(args.clone()),
+                dispatch(args.clone())
+            );
+            vec![first, second, third]
+        }),
+        other => panic!("unsupported release request concurrency {other}"),
+    }
+}
+
+fn normalized_search_signature(value: &serde_json::Value) -> serde_json::Value {
+    let candidates = value
+        .get("candidates")
+        .and_then(serde_json::Value::as_array)
+        .unwrap_or_else(|| panic!("release response lacks candidates array: {value}"))
+        .iter()
+        .map(|candidate| {
+            serde_json::json!({
+                "id": candidate.get("id"),
+                "entity_name": candidate.get("entity_name"),
+                "qualified_name": candidate.get("qualified_name"),
+                "file_path": candidate.get("file_path"),
+                "line_range": candidate.get("line_range"),
+                "symbol_kind": candidate.get("symbol_kind"),
+                "enclosing_scope": candidate.get("enclosing_scope"),
+            })
+        })
+        .collect::<Vec<_>>();
+    serde_json::json!({
+        "total_matches": value.get("total_matches"),
+        "truncated": value.get("truncated"),
+        "candidates": candidates,
+    })
+}
+
+fn response_digest(value: &serde_json::Value) -> String {
+    blake3::hash(&serde_json::to_vec(value).expect("serialize release response signature"))
+        .to_hex()
+        .to_string()
+}
+
+fn elapsed_ms(started: Instant) -> f64 {
+    started.elapsed().as_secs_f64() * 1_000.0
+}
+
+fn stage_summary(samples: &[f64]) -> serde_json::Value {
+    let mut sorted = samples.to_vec();
+    sorted.sort_by(f64::total_cmp);
+    let p50 = if sorted.len() % 2 == 0 {
+        let upper = sorted.len() / 2;
+        (sorted[upper - 1] + sorted[upper]) / 2.0
+    } else {
+        sorted[sorted.len() / 2]
+    };
+    let p95_index = ((sorted.len() as f64 * 0.95).ceil() as usize)
+        .saturating_sub(1)
+        .min(sorted.len() - 1);
+    serde_json::json!({
+        "samples_ms": samples,
+        "p50_ms": p50,
+        "p95_ms": sorted[p95_index],
+    })
+}
+
 criterion_group!(
     benches,
     bench_overlay_vs_direct_parquet,
     bench_overlay_construction,
-    bench_overlay_stage_probe
+    bench_overlay_stage_probe,
+    bench_overlay_release_matrix
 );
 criterion_main!(benches);

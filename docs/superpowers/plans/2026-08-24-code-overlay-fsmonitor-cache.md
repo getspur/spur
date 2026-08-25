@@ -832,4 +832,246 @@ It exited 101 before measurement with actionable text:
 
 ### POST results
 
-Pending Task 6.
+Task 6 (`bd-2uzl`) ran on 2026-08-25 from base
+`02bd3fbf35e41525a349204ae321d15a39208290`. The benchmark-only contract was
+committed RED as `d04b6d49103dc8fff2d89296add04a7c3a5cb674` and GREEN as
+`a94f34ecd7d36a9630f83fefd4eca8862d26cd58`. No production code or fsmonitor
+setting changed; every recorded production request reports
+`production_fsmonitor_release_enabled=false` and route
+`ExactFallback(ReleaseDisabled)`.
+
+#### TDD contract
+
+The focused RED command was:
+
+```bash
+SPUR_GRAPH_PERF_REPO=/private/tmp/spur-overlay-pre.JwtAoI/quack-flamegraph \
+SPUR_GRAPH_PERF_FIXTURE=/Volumes/Projects/Projects/quack-flamegraph/.spur/graph/c3684ef7c7139e0ea5d41b01f5100b994ff7b75e47ad5942fdb990987d139d8e.parquet \
+SPUR_GRAPH_PERF_QUERY=extension_entrypoint \
+SPUR_GRAPH_PERF_CHANGED_FILE=src/lib.rs \
+SPUR_GRAPH_RELEASE_SCENARIO=clean \
+SPUR_REMOTE=0 scripts/spur-cargo bench -p spur-graph --bench overlay -- overlay_release_matrix --noplot
+```
+
+It exited 101 at `benches/overlay.rs:815` with the intentional message
+`RED: overlay release matrix harness must record every project/scenario cell
+and enforce all five release gates`. Raw RED output is
+`red/focused-red.txt` under the stable evidence root below.
+
+The minimum GREEN implementation makes the release probe opt-in through
+`SPUR_GRAPH_RELEASE_SCENARIO`, so omitting that variable preserves every
+existing benchmark default. The same focused command with the GREEN harness
+exited 0, recorded three repeats, route `FsmonitorNative`, production fallback
+`ReleaseDisabled`, one base operation, and zero mismatch. That focused clone
+was only a contract check; the release decision uses the exact 30-cell matrix
+below.
+
+#### Disposable fixtures and mutation guard
+
+The matrix fixture root is
+`/private/tmp/spur-overlay-post.bd-2uzl-matrix.6Obpa7`. Each cell was a fresh
+shared clone of the corresponding read-only source under
+`/private/tmp/spur-overlay-pre.JwtAoI`, detached at the exact PRE revision.
+Tracked diffs were replayed with `git diff --binary | git apply`; each
+untracked pathname was recreated as an empty file, matching the corrected PRE
+recipe. Before scenario mutation, all 30 clone status hashes matched their
+source status hash. “Clean” means no Task-6 delta on top of that exact PRE
+dirty-state recipe.
+
+| Project | HEAD | Tracked / dirty | Source status SHA-256 before and after |
+|---|---|---:|---|
+| quack-flamegraph | `bcc78d53cbf6e1564490af5da106311b1eedec43` | 21 / 361 | `affb126bb4dd7c79eae53397bca9f6d76023dc758ecb1e40177f2e844f9069ce` |
+| spur | `8358179ece0c488355b412749632e06276f2d3f7` | 3,214 / 223 | `f6d4445447feeddadcccd7b0f96c56a096043ec55583dbdf97cbe9010bcdfa98` |
+| otobank | `4e934d438c009a875658466be2b811264d4295fb` | 4,913 / 33 | `a4099acad0d165cddc1f1048c9c6dd1aa8d5af8e754f37c993c60148edbfc3be` |
+
+The after guard is byte-identical to the before guard
+(`matrix/source-guard.diff` is empty). The sources were never benchmarked or
+mutated. Scenario deltas were one tracked mode edit, 20 tracked mode edits,
+128 extra untracked Rust paths, one tracked deletion, one tracked rename, one
+empty commit advancing HEAD, unsupported fsmonitor capability, unhealthy
+watcher capability, or three concurrent requests. The exact resulting HEAD,
+dirty count, and artifact target for every fixture are recorded in
+`matrix/scenario-fixtures.tsv`.
+
+Quack and otobank use the exact PRE graph hashes `c3684ef7...` and
+`4d2d488...`. Spur's PRE artifact `f3f98fa5...` is unavailable; POST therefore
+uses the current `dfb5e95f...` artifact at the preserved source revision. Spur
+is measured, but its PRE/POST comparison is explicitly non-identical and
+cannot approve release.
+
+#### Identical three-repeat POST matrix
+
+Every row reports directly sampled p50/p95 milliseconds. `Merge + shape`
+includes exact overlay construction/merge plus response shaping; it must not
+be compared as if it were the PRE pure-serialization stage. Percentiles from
+overlapping stages are not added. `Base ops` is tied to the Task 5
+instrumented `RequestReplayClient` regression (which passed in this run) plus
+one real `code_symbol_search` dispatch for each recorded request.
+
+| Project | Scenario | Observer route / watcher | Git observe p50/p95 ms | Snapshot p50/p95 ms | Base Parquet p50/p95 ms | Merge + shape p50/p95 ms | Total p50/p95 ms | Base ops | Mismatch |
+|---|---|---|---:|---:|---:|---:|---:|---:|---:|
+| quack-flamegraph | clean | FsmonitorNative / true | 22.027/22.851 | 53.294/54.838 | 0.197/0.227 | 196.618/202.98 | 277.6/282.713 | 1 | 0 |
+| quack-flamegraph | one_edit | FsmonitorNative / true | 21.962/22.347 | 52.211/57.679 | 0.212/0.285 | 194.915/200.565 | 281.525/284.38 | 1 | 0 |
+| quack-flamegraph | many_edits | FsmonitorNative / true | 23.212/24.008 | 57.044/57.312 | 0.191/0.207 | 196.519/199.284 | 283.167/294.779 | 1 | 0 |
+| quack-flamegraph | untracked_heavy | FsmonitorNative / true | 23.167/23.587 | 53.893/58.144 | 0.235/0.302 | 199.486/205.488 | 288.472/288.734 | 1 | 0 |
+| quack-flamegraph | delete | FsmonitorNative / true | 23.002/23.19 | 57.153/57.225 | 0.196/0.198 | 198.062/200.579 | 284/286.115 | 1 | 0 |
+| quack-flamegraph | rename | FsmonitorNative / true | 22.401/22.449 | 53.75/56.069 | 0.205/0.209 | 203.887/205.19 | 289.735/294.59 | 1 | 0 |
+| quack-flamegraph | head_lag | FsmonitorNative / true | 22.297/22.824 | 55.632/57.539 | 0.237/0.273 | 197.943/198.483 | 288.117/290.106 | 1 | 0 |
+| quack-flamegraph | fsmonitor_unsupported | ExactFallback(BuiltInUnsupported) / false | 10.623/10.758 | 54.636/56.759 | 0.232/0.285 | 200.821/209.086 | 87.191/285.144 | 1 | 0 |
+| quack-flamegraph | watcher_failure | ExactFallback(WatcherUnhealthy) / false | 10.436/10.538 | 54.331/55.403 | 0.206/0.289 | 199.749/200.469 | 88.4/286.341 | 1 | 0 |
+| quack-flamegraph | concurrent_requests | FsmonitorNative / true | 22.315/23.181 | 54.444/55.904 | 0.187/0.221 | 196.693/198.6 | 297.07/300.199 | 1 | 0 |
+| spur | clean | FsmonitorNative / true | 38.507/39.337 | 77.224/88.045 | 14.046/14.646 | 1087.881/1093.133 | 796.789/797.319 | 1 | 0 |
+| spur | one_edit | FsmonitorNative / true | 38.77/41.235 | 77.005/80.536 | 15.091/15.243 | 1076.433/1135.747 | 795.415/799.791 | 1 | 0 |
+| spur | many_edits | FsmonitorNative / true | 38.121/44.628 | 75.897/78.021 | 14.919/15.11 | 1072.655/1079.319 | 796.115/798.886 | 1 | 0 |
+| spur | untracked_heavy | FsmonitorNative / true | 37.272/40.794 | 75.059/77.455 | 14.008/14.311 | 1079.831/1084.219 | 798.62/799.274 | 1 | 0 |
+| spur | delete | FsmonitorNative / true | 37.05/41.284 | 78.558/79.248 | 14.837/14.87 | 1114.554/1153.526 | 798.029/800.601 | 1 | 0 |
+| spur | rename | FsmonitorNative / true | 42.952/52.647 | 90.898/127.56 | 15.707/15.898 | 1185.098/1213.796 | 801.101/806.135 | 1 | 0 |
+| spur | head_lag | FsmonitorNative / true | 36.3/38.017 | 73.057/76.562 | 13.844/14.169 | 1053.209/1055.218 | 795.435/796.576 | 1 | 0 |
+| spur | fsmonitor_unsupported | ExactFallback(BuiltInUnsupported) / false | 23.955/26.932 | 70.76/77.37 | 14.833/15.03 | 1069.609/1074.149 | 171.076/797.897 | 1 | 0 |
+| spur | watcher_failure | ExactFallback(WatcherUnhealthy) / false | 25.417/25.913 | 73.599/78.879 | 14.08/14.326 | 1103.063/1178.153 | 175.576/799.718 | 1 | 0 |
+| spur | concurrent_requests | FsmonitorNative / true | 37.946/42.228 | 75.628/77.534 | 14.362/14.867 | 1081.166/1095.442 | 818.068/837.625 | 1 | 0 |
+| otobank | clean | FsmonitorNative / true | 39.798/39.998 | 75.314/75.853 | 17.049/17.2 | 148.282/149.176 | 282.162/315.504 | 1 | 0 |
+| otobank | one_edit | FsmonitorNative / true | 39.011/40.527 | 72.99/82.176 | 16.07/16.171 | 150.141/152.997 | 282.603/285.373 | 1 | 0 |
+| otobank | many_edits | FsmonitorNative / true | 39.527/45.027 | 75.589/76.163 | 16.093/16.333 | 151.015/152.074 | 285.063/288.947 | 1 | 0 |
+| otobank | untracked_heavy | FsmonitorNative / true | 39.637/39.952 | 77.171/77.577 | 16.422/16.423 | 170.469/172.975 | 308.71/323.182 | 1 | 0 |
+| otobank | delete | FsmonitorNative / true | 38.78/39.446 | 73.165/78.318 | 16.368/16.513 | 147.554/150.356 | 281.332/281.367 | 1 | 0 |
+| otobank | rename | FsmonitorNative / true | 39.05/39.264 | 74.725/75.996 | 16.303/16.405 | 179.912/180.077 | 311.037/311.868 | 1 | 0 |
+| otobank | head_lag | FsmonitorNative / true | 39.556/40.401 | 72.252/73.261 | 15.891/17.451 | 146.846/147.09 | 278.088/278.208 | 1 | 0 |
+| otobank | fsmonitor_unsupported | ExactFallback(BuiltInUnsupported) / false | 24.409/24.741 | 70.26/71.107 | 16.138/16.574 | 146.327/148.924 | 147.758/282.597 | 1 | 0 |
+| otobank | watcher_failure | ExactFallback(WatcherUnhealthy) / false | 24.188/24.364 | 70.391/70.536 | 15.961/16.61 | 146.79/147.588 | 150.002/278.801 | 1 | 0 |
+| otobank | concurrent_requests | FsmonitorNative / true | 37.4/38.75 | 72.696/73.856 | 16.167/16.393 | 146.918/149.06 | 338.178/366.99 | 1 | 0 |
+
+All actual and exact-oracle digests agree on every repeat. The stable result
+digests are `c1427804c84a10a88863f7f4d1c8fc86f8d774df44367bd3dbefd60702200a1a`
+for quack-flamegraph,
+`d1fc0216cc54b216574f8fb5ba28bf55f20f3d458e4a6fe4dc677245ae00d6ca`
+for spur, and
+`b7da6ed28fc9d92949321c476f4e2feda0cc6192a1418bc9278935695527fd69`
+for otobank. There are 108 recorded requests (27 ordinary cells times three,
+plus three concurrent cells times nine), 108 one-base-operation results, and
+zero mismatches. Observer routing exercised `FsmonitorNative` in 24 cells and
+exact fallback in six cells; production exact fallback was exercised in all
+30.
+
+#### Like-for-like PRE/POST release rows
+
+The release comparison uses the no-Task-6-delta row for each exact dirty-state
+recipe. PRE “warm validation” was the directly sampled combined Git plus
+snapshot distribution; POST “snapshot validation” is the landed production
+snapshot seam and is the value named by the approved gate.
+
+| Project | PRE warm p50/p95 ms | POST snapshot p50/p95 ms | p95 ratio | PRE total p95 ms | POST total p95 ms | ratio |
+|---|---:|---:|---:|---:|---:|---:|
+| quack-flamegraph | 17.028/17.480 | 53.294/54.838 | 3.137x | 71.496 | 282.713 | 3.954x |
+| spur | 33.332/35.654 | 77.224/88.045 | 2.469x | 389.670 | 797.319 | 2.046x |
+| otobank | 36.650/40.917 | 75.314/75.853 | 1.854x | 153.187 | 315.504 | 2.060x |
+
+Spur ratios are descriptive only because its graph artifact differs. The
+measured base Parquet p95 is only 0.227, 14.646, and 17.200 ms. The remaining
+latency is not pure JSON serialization: exact freshness/snapshot certification
+is 54.838–88.045 ms p95, and exact overlay merge plus shaping is
+149.176–1,093.133 ms p95 on the clean recipe. This directly answers why a
+roughly 40 ms Parquet read could surface as roughly 200 ms or more of result
+latency.
+
+#### Verification before claims
+
+All build/test commands used `scripts/spur-cargo`. A temporary copy of the
+user-owned untracked `extract/openapi.rs` was protected by a trap and removed
+with `/bin/unlink`; it was absent after verification and after the matrix.
+
+| Command | Exit | Result |
+|---|---:|---|
+| focused RED release contract | 101 | expected intentional panic above |
+| focused GREEN release contract | 0 | three repeats, one base op, zero mismatch |
+| `scripts/spur-cargo test -p spur-graph` | 101 | real failure: 461 passed, 1 failed, 3 ignored; `code_search_response_adds_full_metadata_and_clamps_limit` got `rebuild_status="fresh"`, expected `"not_needed"` |
+| `scripts/spur-cargo check --workspace` | 0 | pass |
+| `SPUR_REMOTE=1 scripts/spur-cargo clippy --workspace -- -D warnings` | 101 | known baseline exactly: five `spur-acp` `ref_patterns` plus one `large_enum_variant` |
+| `SPUR_REMOTE=1 scripts/spur-cargo clippy -p spur-graph --no-deps -- -D warnings` | 101 | known baseline exactly: four dead-code findings plus one `too_many_arguments` |
+| `scripts/spur-cargo fmt --all -- --check` | 0 | pass |
+| `SPUR_REMOTE=0 scripts/spur-cargo bench -p spur-graph --bench overlay -- --noplot` | 0 | pass with existing defaults |
+| 30 focused matrix invocations | 0 each | 30/30 JSON cells parsed successfully |
+
+The failing unit test and its assertion are byte-identical at the base commit
+and current HEAD, and Task 6 changes only the benchmark and this plan. It is
+therefore an unrelated but honest mandatory-verification failure; it was not
+rerun locally to hide the remote red. Strict clippy did not pass, and the
+before/after findings exactly match the declared unrelated baseline.
+
+#### Catalog-first SOLVE evidence
+
+Catalog navigation loaded the implemented hard rules before RED. SOLVE PRE
+used `solve_rules`, not generic SMT:
+
+- resource bounds: `sol_7d56f58bf51a417c`, raw `sat`, outcome `pass`;
+- quack data integrity: `sol_22260bbea1af4139`, raw `sat`, outcome `pass`;
+- spur data integrity: `sol_6b6acffca7a849ef`, raw `sat`, outcome `pass`;
+- otobank data integrity: `sol_e72b366a540345f2`, raw `sat`, outcome `pass`.
+
+The data facts were split by project to remain under the published 64-variable
+limit. Each used `data_integrity.value_range` for mismatch values fixed at
+zero and `data_integrity.cardinality` for exactly one active base operation.
+The corrected Task 1 PRE solve remains `sol_9f65330e34214948`, raw `sat`.
+
+SOLVE POST attempted the implemented
+`resource.request_within_limit` rule with measured integer microseconds
+54,838, 88,046, and 75,854 against the strict `<30 ms` encoding limit 29,999,
+`mode=verify`, and `persist=true`. The worker MCP transport timed out after
+more than 120 seconds without returning a raw solver status or solve ID;
+earlier POST reads/spec navigation also timed out. No generic re-encoding was
+substituted. Raw POST status is therefore **timeout/inconclusive**, solve ID
+**none**, interpretation **never pass**. The required POST data-integrity
+calls could not be accepted by the same unavailable service. Exact attempt
+facts and durations are persisted in `solve/post-timeout.txt`.
+
+#### Reproduction and stable raw evidence
+
+Each cell used the same command shape, changing only the four project inputs
+and scenario:
+
+```bash
+SPUR_GRAPH_PERF_REPO="$MATRIX_ROOT/$project/$scenario" \
+SPUR_GRAPH_PERF_FIXTURE="$artifact" \
+SPUR_GRAPH_PERF_QUERY="$query" \
+SPUR_GRAPH_PERF_OVERLAY_QUERY="$query" \
+SPUR_GRAPH_PERF_CHANGED_FILE="$changed_file" \
+SPUR_GRAPH_PERF_LABEL="$label" \
+SPUR_GRAPH_RELEASE_SCENARIO="$scenario" \
+SPUR_GRAPH_RELEASE_REPEATS=3 \
+SPUR_REMOTE=0 scripts/spur-cargo bench -p spur-graph --bench overlay -- overlay_release_matrix --noplot
+```
+
+Stable evidence root:
+`/Volumes/Projects/Projects/spur/.spur/bench-evidence/bd-2uzl-post-20260825`.
+`matrix/cells.jsonl` is the 30-cell machine-readable source,
+`matrix/cells.tsv` is the derived table, `matrix/status.tsv` records every
+exit, `matrix/source-guard-{before,after}.tsv` records mutation guards, and
+per-cell console is under `matrix/{quack-flamegraph,spur,otobank}`. RED,
+GREEN, verification, and SOLVE transport evidence are in their named
+subdirectories. `SHA256SUMS` covers all 56 raw/derived files other than
+itself. Two aborted fixture roots are explicitly recorded in
+`matrix/aborted-fixture-root.txt` and were left intact rather than
+destructively cleaned.
+
+#### Release decision
+
+**RELEASE BLOCKED.** The five approved gates remain mandatory; no condition
+was dropped or weakened.
+
+| Gate | Calculation | Result |
+|---|---|---|
+| warm unchanged snapshot p95 `<30 ms` in every class | `54.838 < 30 = false`; `88.045 < 30 = false`; `75.853 < 30 = false` | **FAIL (0/3)** |
+| exactly one base operation | 108/108 requests report 1; Task 5 counting regression passed | PASS |
+| zero correctness mismatch | 0/108 | PASS |
+| optimized and fallback routes | 24 optimized observer cells; 6 observer fallback cells; 30 production fallback cells | PASS |
+| reproducible committed matrix and SOLVE evidence | matrix and commands are committed here, but Spur artifact is non-identical and SOLVE POST is timeout/inconclusive with no persisted solve ID | **FAIL** |
+
+The mandatory verification suite also has the unrelated unit-test red above.
+No TTL, threshold, fixture shape, or production behavior was adjusted after
+the failure. Structured escalation UUID
+`4cd7cf14-f9f2-4ac3-9487-b3f3892c8f3a` was submitted as
+`retry_exhausted`, naming the exact three snapshot-stage failures and Spur
+artifact mismatch, but the same worker-MCP outage timed out before durable
+acceptance; the attempt and payload are retained in raw evidence. `bd-2uzl`
+must remain open/escalated for brain review and must not be closed by this
+worker.
