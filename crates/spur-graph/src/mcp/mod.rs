@@ -6878,6 +6878,28 @@ mod tests {
         }
     }
 
+    #[test]
+    fn code_graph_result_signature_distinguishes_complete_error_metadata() {
+        let error_with_hash = |graph_content_hash: &str| {
+            CodeGraphError::without_metadata(McpHandlerError::NotFound(
+                "symbol still_missing not found in graph artifact".to_owned(),
+            ))
+            .with_metadata_source(GraphMetadataSource {
+                graph_content_hash: graph_content_hash.to_owned(),
+                graph_index_version: "4".to_owned(),
+                manifest_version: "1".to_owned(),
+            })
+        };
+
+        let first = code_graph_result_signature(Err(error_with_hash("graph-hash-a")));
+        let second = code_graph_result_signature(Err(error_with_hash("graph-hash-b")));
+
+        assert_ne!(
+            first, second,
+            "observable MCP signatures must preserve distinct graph metadata"
+        );
+    }
+
     fn response_digest(value: &Value) -> String {
         let bytes = serde_json::to_vec(value).expect("serialize response signature");
         blake3::hash(&bytes).to_hex().to_string()
