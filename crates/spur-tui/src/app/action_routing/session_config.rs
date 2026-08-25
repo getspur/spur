@@ -82,7 +82,9 @@ impl App {
                     detail.set_disable_paste_burst(*disabled);
                 }
             }
-            ConfigPatch::GraphEmbeddingModel { .. } | ConfigPatch::SkillsProjectionMode(_) => {}
+            ConfigPatch::GraphEmbeddingModel { .. }
+            | ConfigPatch::GraphOverlayFsmonitor(_)
+            | ConfigPatch::SkillsProjectionMode(_) => {}
         }
         self.dirty = true;
     }
