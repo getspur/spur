@@ -830,41 +830,49 @@ It exited 101 before measurement with actionable text:
   compile, fmt, bad-fixture, and diff-check outputs are under `console/`.
   `SHA256SUMS` contains 202 checksums covering those persisted files.
 
-### POST results
+### Task 6 diagnostic results — corrected inline review
 
-Task 6 (`bd-2uzl`) ran on 2026-08-25 from base
-`02bd3fbf35e41525a349204ae321d15a39208290`. The benchmark-only contract was
-committed RED as `d04b6d49103dc8fff2d89296add04a7c3a5cb674` and GREEN as
-`a94f34ecd7d36a9630f83fefd4eca8862d26cd58`. No production code or fsmonitor
-setting changed; every recorded production request reports
-`production_fsmonitor_release_enabled=false` and route
-`ExactFallback(ReleaseDisabled)`.
+The first Task 6 (`bd-2uzl`) attempt ran on 2026-08-25 from base
+`02bd3fbf35e41525a349204ae321d15a39208290`; its normalized tip is
+`3116636fb`. Independent review rejected its release interpretation because
+the harness did not directly count base queries, did not observe the route of
+the dispatched production request, compared against a correlated overlay
+oracle, and used a three-sample/five-stage POST protocol against a
+thirty-sample/eight-stage PRE protocol. The inline correction added the RED
+contract in `161faaa80` and keeps every unsupported gate fail-closed.
+
+No production code or fsmonitor setting changed. The source-level release flag
+remains false. `ExactFallback(ReleaseDisabled)` is the expected route implied
+by that flag, not a runtime route observation from the measured request.
 
 #### TDD contract
 
 The focused RED command was:
 
 ```bash
-SPUR_GRAPH_PERF_REPO=/private/tmp/spur-overlay-pre.JwtAoI/quack-flamegraph \
+SPUR_GRAPH_PERF_REPO=/private/tmp/spur-overlay-post.bd-2uzl-matrix.6Obpa7/quack-flamegraph/clean \
 SPUR_GRAPH_PERF_FIXTURE=/Volumes/Projects/Projects/quack-flamegraph/.spur/graph/c3684ef7c7139e0ea5d41b01f5100b994ff7b75e47ad5942fdb990987d139d8e.parquet \
 SPUR_GRAPH_PERF_QUERY=extension_entrypoint \
 SPUR_GRAPH_PERF_CHANGED_FILE=src/lib.rs \
+SPUR_GRAPH_PERF_LABEL=quack_flamegraph \
 SPUR_GRAPH_RELEASE_SCENARIO=clean \
+SPUR_GRAPH_RELEASE_REPEATS=3 \
 SPUR_REMOTE=0 scripts/spur-cargo bench -p spur-graph --bench overlay -- overlay_release_matrix --noplot
 ```
 
-It exited 101 at `benches/overlay.rs:815` with the intentional message
-`RED: overlay release matrix harness must record every project/scenario cell
-and enforce all five release gates`. Raw RED output is
-`red/focused-red.txt` under the stable evidence root below.
+It exited 101 only after the real `code_symbol_search` dispatch, with the
+intentional message `release gate 'exactly_one_base_operation' cannot pass
+without direct evidence`. The first attempted RED used a clone without a
+discoverable graph pointer and was discarded because it failed for the wrong
+reason.
 
-The minimum GREEN implementation makes the release probe opt-in through
-`SPUR_GRAPH_RELEASE_SCENARIO`, so omitting that variable preserves every
-existing benchmark default. The same focused command with the GREEN harness
-exited 0, recorded three repeats, route `FsmonitorNative`, production fallback
-`ReleaseDisabled`, one base operation, and zero mismatch. That focused clone
-was only a contract check; the release decision uses the exact 30-cell matrix
-below.
+The corrected GREEN command exited 0 and emitted `base_operation_count=null`,
+`production_request_routes=[]`, `independent_correctness_mismatches=null`,
+`production_release_state_observed_by_harness=false`,
+`sample_protocol.pre_post_comparable=false`, and `release_eligible=false`.
+The separately injected observer probe still reported `FsmonitorNative`, but
+the schema now prevents that observation from being attributed to the
+production request.
 
 #### Disposable fixtures and mutation guard
 
@@ -899,16 +907,19 @@ uses the current `dfb5e95f...` artifact at the preserved source revision. Spur
 is measured, but its PRE/POST comparison is explicitly non-identical and
 cannot approve release.
 
-#### Identical three-repeat POST matrix
+#### Historical three-repeat diagnostic matrix
 
-Every row reports directly sampled p50/p95 milliseconds. `Merge + shape`
-includes exact overlay construction/merge plus response shaping; it must not
-be compared as if it were the PRE pure-serialization stage. Percentiles from
-overlapping stages are not added. `Base ops` is tied to the Task 5
-instrumented `RequestReplayClient` regression (which passed in this run) plus
-one real `code_symbol_search` dispatch for each recorded request.
+The raw 30-cell matrix is retained unchanged for provenance, but it is not an
+identical POST matrix and cannot support p95 or speedup claims. With three
+samples, the old `p50/p95` fields below are only median/max-of-three. The
+stages overlap and have different boundaries, so they are not additive.
+`Merge + shape` is the correlated oracle path, not pure serialization.
+`Observer route` belongs to a separately injected probe. The legacy base
+literal was hard-coded to one and is explicitly invalid as query-count
+evidence; the mismatch count compares two paths that share artifact and
+changed-path inputs.
 
-| Project | Scenario | Observer route / watcher | Git observe p50/p95 ms | Snapshot p50/p95 ms | Base Parquet p50/p95 ms | Merge + shape p50/p95 ms | Total p50/p95 ms | Base ops | Mismatch |
+| Project | Scenario | Injected probe route / watcher | Git observe median/max ms | Snapshot median/max ms | Manual Parquet median/max ms | Correlated merge + shape median/max ms | Request total median/max ms | Legacy base literal (invalid) | Correlated mismatch |
 |---|---|---|---:|---:|---:|---:|---:|---:|---:|
 | quack-flamegraph | clean | FsmonitorNative / true | 22.027/22.851 | 53.294/54.838 | 0.197/0.227 | 196.618/202.98 | 277.6/282.713 | 1 | 0 |
 | quack-flamegraph | one_edit | FsmonitorNative / true | 21.962/22.347 | 52.211/57.679 | 0.212/0.285 | 194.915/200.565 | 281.525/284.38 | 1 | 0 |
@@ -941,38 +952,41 @@ one real `code_symbol_search` dispatch for each recorded request.
 | otobank | watcher_failure | ExactFallback(WatcherUnhealthy) / false | 24.188/24.364 | 70.391/70.536 | 15.961/16.61 | 146.79/147.588 | 150.002/278.801 | 1 | 0 |
 | otobank | concurrent_requests | FsmonitorNative / true | 37.4/38.75 | 72.696/73.856 | 16.167/16.393 | 146.918/149.06 | 338.178/366.99 | 1 | 0 |
 
-All actual and exact-oracle digests agree on every repeat. The stable result
-digests are `c1427804c84a10a88863f7f4d1c8fc86f8d774df44367bd3dbefd60702200a1a`
-for quack-flamegraph,
+All candidate and correlated-oracle digests agree on every repeat. The stable
+diagnostic result digests are
+`c1427804c84a10a88863f7f4d1c8fc86f8d774df44367bd3dbefd60702200a1a` for
+quack-flamegraph,
 `d1fc0216cc54b216574f8fb5ba28bf55f20f3d458e4a6fe4dc677245ae00d6ca`
 for spur, and
 `b7da6ed28fc9d92949321c476f4e2feda0cc6192a1418bc9278935695527fd69`
-for otobank. There are 108 recorded requests (27 ordinary cells times three,
-plus three concurrent cells times nine), 108 one-base-operation results, and
-zero mismatches. Observer routing exercised `FsmonitorNative` in 24 cells and
-exact fallback in six cells; production exact fallback was exercised in all
-30.
+for otobank. There were 108 request dispatches, not 108 observed base queries.
+The zero correlated mismatches are a useful regression diagnostic, but they do
+not prove correctness against an independent exact scan or fresh rebuild.
+Likewise, the 24 native and six fallback observations belong only to the
+observer probe; the production request route was not instrumented.
 
-#### Like-for-like PRE/POST release rows
+#### PRE/POST comparison rejected
 
-The release comparison uses the no-Task-6-delta row for each exact dirty-state
-recipe. PRE “warm validation” was the directly sampled combined Git plus
-snapshot distribution; POST “snapshot validation” is the landed production
-snapshot seam and is the value named by the approved gate.
+The original ratios divided a 30-sample PRE p95 by a three-sample POST maximum
+from differently named and bounded stages. Spur also used a different graph
+artifact. Those ratios are removed from release consideration.
 
-| Project | PRE warm p50/p95 ms | POST snapshot p50/p95 ms | p95 ratio | PRE total p95 ms | POST total p95 ms | ratio |
-|---|---:|---:|---:|---:|---:|---:|
-| quack-flamegraph | 17.028/17.480 | 53.294/54.838 | 3.137x | 71.496 | 282.713 | 3.954x |
-| spur | 33.332/35.654 | 77.224/88.045 | 2.469x | 389.670 | 797.319 | 2.046x |
-| otobank | 36.650/40.917 | 75.314/75.853 | 1.854x | 153.187 | 315.504 | 2.060x |
+| Project | PRE warm p50/p95 ms (30 samples) | Diagnostic snapshot median/max ms (3 samples) | Comparability |
+|---|---:|---:|---|
+| quack-flamegraph | 17.028/17.480 | 53.294/54.838 | no: sample count and stage boundary differ |
+| spur | 33.332/35.654 | 77.224/88.045 | no: sample count, stage boundary, and artifact differ |
+| otobank | 36.650/40.917 | 75.314/75.853 | no: sample count and stage boundary differ |
 
-Spur ratios are descriptive only because its graph artifact differs. The
-measured base Parquet p95 is only 0.227, 14.646, and 17.200 ms. The remaining
-latency is not pure JSON serialization: exact freshness/snapshot certification
-is 54.838–88.045 ms p95, and exact overlay merge plus shaping is
-149.176–1,093.133 ms p95 on the clean recipe. This directly answers why a
-roughly 40 ms Parquet read could surface as roughly 200 ms or more of result
-latency.
+The measurements still support a directional latency diagnosis. Manual base
+Parquet work is small relative to the end-to-end request in these fixtures;
+freshness observation/snapshot certification and overlay construction/merge
+are substantial. “Normal post-query processing” includes merge/filter/sort,
+limit handling, metadata shaping, and JSON serialization, but the earlier pure
+response-shaping probe measured only about 0.0025–0.0046 ms p95. It therefore
+does not explain roughly half of a 200 ms request. The dominant work is before
+that pure shaping step: Git/worktree certification and overlay/delta work.
+Because these diagnostic stages overlap, their medians or maxima must not be
+summed into an exact attribution percentage.
 
 #### Verification before claims
 
@@ -982,15 +996,16 @@ with `/bin/unlink`; it was absent after verification and after the matrix.
 
 | Command | Exit | Result |
 |---|---:|---|
-| focused RED release contract | 101 | expected intentional panic above |
-| focused GREEN release contract | 0 | three repeats, one base op, zero mismatch |
+| corrected focused RED release contract | 101 | expected panic: an unobserved base count cannot claim PASS |
+| corrected focused GREEN release contract | 0 | unsupported counts/routes/oracle are null or empty; `release_eligible=false` |
 | `scripts/spur-cargo test -p spur-graph` | 101 | real failure: 461 passed, 1 failed, 3 ignored; `code_search_response_adds_full_metadata_and_clamps_limit` got `rebuild_status="fresh"`, expected `"not_needed"` |
 | `scripts/spur-cargo check --workspace` | 0 | pass |
 | `SPUR_REMOTE=1 scripts/spur-cargo clippy --workspace -- -D warnings` | 101 | known baseline exactly: five `spur-acp` `ref_patterns` plus one `large_enum_variant` |
 | `SPUR_REMOTE=1 scripts/spur-cargo clippy -p spur-graph --no-deps -- -D warnings` | 101 | known baseline exactly: four dead-code findings plus one `too_many_arguments` |
+| benchmark-target clippy with only those declared baseline lints allowed | 0 | new `overlay` benchmark code passes every other lint under `-D warnings` |
 | `scripts/spur-cargo fmt --all -- --check` | 0 | pass |
 | `SPUR_REMOTE=0 scripts/spur-cargo bench -p spur-graph --bench overlay -- --noplot` | 0 | pass with existing defaults |
-| 30 focused matrix invocations | 0 each | 30/30 JSON cells parsed successfully |
+| historical 30 focused matrix invocations | 0 each | raw samples are preserved, but their old PASS fields are rejected |
 
 The failing unit test and its assertion are byte-identical at the base commit
 and current HEAD, and Task 6 changes only the benchmark and this plan. It is
@@ -1000,29 +1015,31 @@ before/after findings exactly match the declared unrelated baseline.
 
 #### Catalog-first SOLVE evidence
 
-Catalog navigation loaded the implemented hard rules before RED. SOLVE PRE
-used `solve_rules`, not generic SMT:
+Catalog navigation loaded the exact implemented hard rules before RED. The
+inline correction persisted both phases with `solve_rules`; no generic SMT
+substitute or threshold relaxation was used.
 
-- resource bounds: `sol_7d56f58bf51a417c`, raw `sat`, outcome `pass`;
-- quack data integrity: `sol_22260bbea1af4139`, raw `sat`, outcome `pass`;
-- spur data integrity: `sol_6b6acffca7a849ef`, raw `sat`, outcome `pass`;
-- otobank data integrity: `sol_e72b366a540345f2`, raw `sat`, outcome `pass`.
+SOLVE PRE:
 
-The data facts were split by project to remain under the published 64-variable
-limit. Each used `data_integrity.value_range` for mismatch values fixed at
-zero and `data_integrity.cardinality` for exactly one active base operation.
-The corrected Task 1 PRE solve remains `sol_9f65330e34214948`, raw `sat`.
+- `sol_f8a8fc4f06954043`: `resource.request_within_limit`, raw `unsat`, outcome
+  `fail`; clean snapshot diagnostics 54,838, 88,046, and 75,854 microseconds
+  exceed the strict 29,999-microsecond request bound;
+- `sol_5b7fdb8670614497`: `data_integrity.value_range`, raw `sat`, outcome
+  `pass`; this proves only that the three reported correlated-oracle mismatch
+  values are zero;
+- `sol_9623c916aa494f8c`: `data_integrity.cardinality`, raw `unsat`, outcome
+  `fail`; zero of the five release gates had direct passing evidence.
 
-SOLVE POST attempted the implemented
-`resource.request_within_limit` rule with measured integer microseconds
-54,838, 88,046, and 75,854 against the strict `<30 ms` encoding limit 29,999,
-`mode=verify`, and `persist=true`. The worker MCP transport timed out after
-more than 120 seconds without returning a raw solver status or solve ID;
-earlier POST reads/spec navigation also timed out. No generic re-encoding was
-substituted. Raw POST status is therefore **timeout/inconclusive**, solve ID
-**none**, interpretation **never pass**. The required POST data-integrity
-calls could not be accepted by the same unavailable service. Exact attempt
-facts and durations are persisted in `solve/post-timeout.txt`.
+SOLVE POST reran the same model after the fail-closed schema landed:
+
+- `sol_54cba073df894bec`: resource bound, raw `unsat`, outcome `fail`;
+- `sol_f6c828474f294530`: narrow correlated-mismatch range, raw `sat`, outcome
+  `pass`;
+- `sol_17b7cb17c8ea4e0b`: five-of-five proven-gate cardinality, raw `unsat`,
+  outcome `fail`.
+
+The narrow mismatch PASS is not promoted to the independent-correctness gate.
+The aggregate cardinality failure is the authoritative release result.
 
 #### Reproduction and stable raw evidence
 
@@ -1043,7 +1060,10 @@ SPUR_REMOTE=0 scripts/spur-cargo bench -p spur-graph --bench overlay -- overlay_
 
 Stable evidence root:
 `/Volumes/Projects/Projects/spur/.spur/bench-evidence/bd-2uzl-post-20260825`.
-`matrix/cells.jsonl` is the 30-cell machine-readable source,
+`matrix/cells.jsonl` is the historical 30-cell machine-readable timing source;
+its old route, base-count, mismatch-gate, and p95 labels are rejected and must
+not be consumed as release evidence. The corrected focused output above is the
+schema contract for future reruns.
 `matrix/cells.tsv` is the derived table, `matrix/status.tsv` records every
 exit, `matrix/source-guard-{before,after}.tsv` records mutation guards, and
 per-cell console is under `matrix/{quack-flamegraph,spur,otobank}`. RED,
@@ -1056,22 +1076,21 @@ destructively cleaned.
 #### Release decision
 
 **RELEASE BLOCKED.** The five approved gates remain mandatory; no condition
-was dropped or weakened.
+was dropped or weakened. The corrected accounting has zero proven passing
+gates out of five.
 
-| Gate | Calculation | Result |
+| Gate | Direct evidence | Result |
 |---|---|---|
-| warm unchanged snapshot p95 `<30 ms` in every class | `54.838 < 30 = false`; `88.045 < 30 = false`; `75.853 < 30 = false` | **FAIL (0/3)** |
-| exactly one base operation | 108/108 requests report 1; Task 5 counting regression passed | PASS |
-| zero correctness mismatch | 0/108 | PASS |
-| optimized and fallback routes | 24 optimized observer cells; 6 observer fallback cells; 30 production fallback cells | PASS |
-| reproducible committed matrix and SOLVE evidence | matrix and commands are committed here, but Spur artifact is non-identical and SOLVE POST is timeout/inconclusive with no persisted solve ID | **FAIL** |
+| warm unchanged snapshot p95 `<30 ms` in every class | only three-sample maxima with non-identical stage definitions; observed clean maxima are 54.838, 88.045, and 75.853 ms | **NOT PROVEN** |
+| exactly one base operation | production dispatch had no base-query counter; the old value `1` was a literal | **NOT PROVEN** |
+| zero correctness mismatch | zero mismatches only against a correlated oracle; no independent exact scan/fresh rebuild | **NOT PROVEN** |
+| optimized and fallback routes | injected observer probe covered both; production-request route was not observed and release remains disabled | **NOT PROVEN** |
+| reproducible committed matrix and SOLVE evidence | raw files are checksummed, but protocols differ and Spur's artifact drifted; cardinality POST is `unsat` | **FAIL** |
 
 The mandatory verification suite also has the unrelated unit-test red above.
-No TTL, threshold, fixture shape, or production behavior was adjusted after
-the failure. Structured escalation UUID
-`4cd7cf14-f9f2-4ac3-9487-b3f3892c8f3a` was submitted as
-`retry_exhausted`, naming the exact three snapshot-stage failures and Spur
-artifact mismatch, but the same worker-MCP outage timed out before durable
-acceptance; the attempt and payload are retained in raw evidence. `bd-2uzl`
-must remain open/escalated for brain review and must not be closed by this
-worker.
+No TTL, threshold, fixture shape, production source, or release setting was
+adjusted. The durable rejection signal is
+`7d8a1c42-2f6e-4b91-8a53-0e7d4c9f261b` (`signal:retry-exhausted`), and
+`bd-2uzl` remains open. This corrected two-file evidence change is suitable to
+merge as an honest blocked-result record; it does **not** authorize enabling
+fsmonitor or closing Task 6.

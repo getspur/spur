@@ -867,7 +867,7 @@ fn bench_overlay_release_matrix(_criterion: &mut Criterion) {
         .build()
         .expect("release matrix Tokio runtime");
 
-    // Warm both actual landed seams before collecting the identical repeat set.
+    // Warm both landed seams before collecting the diagnostic repeat set.
     status_observation(&config.repo, capabilities).expect("warm release observer");
     overlay_changed_oids(&config.repo, base_files.clone())
         .expect("warm production overlay snapshot");
@@ -937,12 +937,37 @@ fn bench_overlay_release_matrix(_criterion: &mut Criterion) {
         }
     }
 
-    let base_operation_count = 1usize;
+    // This harness dispatches a real request, but the production request path does not
+    // expose a base-query counter or route trace. Keep those release gates fail-closed
+    // until instrumentation supplies direct evidence for each measured request.
+    let base_operation_count = None::<usize>;
+    let exactly_one_base_operation = base_operation_count == Some(1);
     assert_release_gate_claim_grounded(
-        base_operation_count == 1,
-        false,
+        exactly_one_base_operation,
+        base_operation_count.is_some(),
         "exactly_one_base_operation",
     );
+    let independent_correctness_mismatches = None::<usize>;
+    let zero_independent_correctness_mismatches = independent_correctness_mismatches == Some(0);
+    assert_release_gate_claim_grounded(
+        zero_independent_correctness_mismatches,
+        independent_correctness_mismatches.is_some(),
+        "zero_independent_correctness_mismatches",
+    );
+    let production_request_routes = BTreeSet::<String>::new();
+    let optimized_and_fallback_routes_observed = production_request_routes
+        .iter()
+        .any(|route| route == "FsmonitorNative")
+        && production_request_routes
+            .iter()
+            .any(|route| route.starts_with("ExactFallback"));
+    assert_release_gate_claim_grounded(
+        optimized_and_fallback_routes_observed,
+        !production_request_routes.is_empty(),
+        "optimized_and_fallback_request_routes",
+    );
+    let snapshot_max_ms = max_sample(&snapshot_validation_ms);
+    let diagnostic_snapshot_max_below_30_ms = snapshot_max_ms < 30.0;
     let metadata = serde_json::json!({
         "event": "spur_graph_overlay_release_cell",
         "project": config.label,
@@ -958,33 +983,69 @@ fn bench_overlay_release_matrix(_criterion: &mut Criterion) {
         "repeats": repeats,
         "request_samples": actual_digests.len(),
         "request_concurrency": release_request_concurrency(&scenario),
-        "production_fsmonitor_release_enabled": false,
-        "observer_capabilities": {
+        "production_release_state_observed_by_harness": false,
+        "production_fsmonitor_release_enabled_at_task6_source_review": false,
+        "probe_observer_capabilities": {
             "release_enabled": capabilities.release_enabled,
             "built_in_supported": capabilities.built_in_supported,
             "local_filesystem": capabilities.local_filesystem,
             "watcher_healthy": capabilities.watcher_healthy,
         },
-        "observer_routes": observer_routes,
-        "production_route": "ExactFallback(ReleaseDisabled)",
+        "probe_observer_routes": observer_routes,
+        "production_request_routes": production_request_routes,
+        "production_request_route_observed": false,
+        "expected_production_route_at_task6_from_source_review": "ExactFallback(ReleaseDisabled)",
         "base_operation_count": base_operation_count,
-        "base_operation_count_source": "Task 5 instrumented RequestReplayClient regression plus one real code_symbol_search dispatch per recorded request",
-        "correctness_mismatches": correctness_mismatches,
+        "base_operation_count_observed": false,
+        "base_operation_count_source": "unobserved: request dispatch count is not a base-query count",
+        "independent_correctness_mismatches": independent_correctness_mismatches,
+        "independent_correctness_oracle": false,
+        "correlated_oracle_mismatches": correctness_mismatches,
         "actual_result_digests": actual_digests,
-        "oracle_result_digests": oracle_digests,
+        "correlated_oracle_result_digests": oracle_digests,
         "changed_path_counts": changed_path_counts,
+        "sample_protocol": {
+            "statistic": "median_and_max",
+            "post_sample_count": repeats,
+            "pre_sample_count": REQUIRED_WARM_SAMPLES,
+            "pre_post_comparable": false,
+            "reason": "this harness has five differently defined stages from the eight-stage PRE protocol; compare the explicit sample counts separately",
+        },
         "stages": {
-            "git_observation": stage_summary(&git_observation_ms),
-            "snapshot_validation": stage_summary(&snapshot_validation_ms),
-            "base_parquet_query": stage_summary(&base_parquet_query_ms),
-            "overlay_merge_shaping": stage_summary(&overlay_merge_shaping_ms),
-            "total": stage_summary(&total_ms),
+            "probe_git_observation": diagnostic_stage_summary(&git_observation_ms),
+            "production_snapshot_validation": diagnostic_stage_summary(&snapshot_validation_ms),
+            "manual_base_parquet_query": diagnostic_stage_summary(&base_parquet_query_ms),
+            "correlated_oracle_overlay_merge_shaping": diagnostic_stage_summary(&overlay_merge_shaping_ms),
+            "production_request_total": diagnostic_stage_summary(&total_ms),
         },
-        "cell_gates": {
+        "cell_diagnostics": {
             "repeat_count_at_least_three": repeats >= 3,
-            "exactly_one_base_operation": base_operation_count == 1,
-            "zero_correctness_mismatches": correctness_mismatches == 0,
+            "diagnostic_snapshot_max_below_30_ms": diagnostic_snapshot_max_below_30_ms,
+            "correlated_oracle_mismatches_zero": correctness_mismatches == 0,
         },
+        "release_gates": {
+            "cross_project_snapshot_p95_below_30_ms": {
+                "status": "not_proven",
+                "reason": "this cell reports median/max diagnostics and cannot establish a cross-project p95 gate; diagnostic_snapshot_max_below_30_ms records any observed threshold violation",
+            },
+            "exactly_one_base_operation": {
+                "status": "not_proven",
+                "reason": "the production request path did not expose a base-query counter",
+            },
+            "zero_independent_correctness_mismatches": {
+                "status": "not_proven",
+                "reason": "the comparison reused candidate artifact paths and changed-path discovery",
+            },
+            "optimized_and_fallback_request_routes": {
+                "status": "not_proven",
+                "reason": "only the separately injected observer probe recorded routes",
+            },
+            "reproducible_pre_post_and_solve": {
+                "status": "not_proven",
+                "reason": "a per-cell diagnostic cannot establish identical PRE inputs, cross-project aggregation, or persisted SOLVE evidence",
+            },
+        },
+        "release_eligible": false,
     });
     eprintln!("SPUR_GRAPH_RELEASE_CELL={metadata}");
 }
@@ -1090,22 +1151,28 @@ fn elapsed_ms(started: Instant) -> f64 {
     started.elapsed().as_secs_f64() * 1_000.0
 }
 
-fn stage_summary(samples: &[f64]) -> serde_json::Value {
+fn max_sample(samples: &[f64]) -> f64 {
+    samples
+        .iter()
+        .copied()
+        .max_by(f64::total_cmp)
+        .expect("release diagnostic has at least one sample")
+}
+
+fn diagnostic_stage_summary(samples: &[f64]) -> serde_json::Value {
     let mut sorted = samples.to_vec();
     sorted.sort_by(f64::total_cmp);
-    let p50 = if sorted.len() % 2 == 0 {
+    let median = if sorted.len().is_multiple_of(2) {
         let upper = sorted.len() / 2;
         (sorted[upper - 1] + sorted[upper]) / 2.0
     } else {
         sorted[sorted.len() / 2]
     };
-    let p95_index = ((sorted.len() as f64 * 0.95).ceil() as usize)
-        .saturating_sub(1)
-        .min(sorted.len() - 1);
     serde_json::json!({
         "samples_ms": samples,
-        "p50_ms": p50,
-        "p95_ms": sorted[p95_index],
+        "sample_count": samples.len(),
+        "median_ms": median,
+        "max_ms": max_sample(&sorted),
     })
 }
 
