@@ -255,9 +255,16 @@ impl spur_mcp::ToolModule for GraphMcpModule {
 #[allow(dead_code)]
 mod overlay_runtime;
 mod overlay_snapshot;
+#[cfg(feature = "test-support")]
+mod perf_support;
 #[allow(dead_code)]
 mod request_cache;
 mod request_replay;
+#[cfg(feature = "test-support")]
+pub use perf_support::{
+    ExactObservationScope, OverlayFileChange, OverlayProviderLoss, OverlayPublication,
+    OverlayRequestDiagnostics, OverlayRequestSample, OverlayRuntimeSnapshot, OverlayRuntimeSupport,
+};
 use request_replay::RequestReplayClient;
 
 use crate::overlay_watch::{ChangeProviderKind, ChangeSourceSet};
@@ -1042,7 +1049,7 @@ static GRAPH_REBUILD_DELAY_MS: AtomicU64 = AtomicU64::new(0);
 static INCREMENTAL_REBUILD_FAILURES_REMAINING: AtomicUsize = AtomicUsize::new(0);
 #[cfg(test)]
 static OVERLAY_GENERATION_FAILURES_REMAINING: AtomicUsize = AtomicUsize::new(0);
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 static EXACT_OVERLAY_OBSERVATIONS_FOR_TEST: AtomicUsize = AtomicUsize::new(0);
 // Temporal resolution error codes (T3 / Phase 1.5 hardening)
 const CODE_GRAPH_NOT_FOUND_ERROR_CODE: i64 = -32004;
@@ -4590,14 +4597,24 @@ fn set_overlay_generation_failures_for_test(failures: usize) -> OverlayGeneratio
     OverlayGenerationFailureGuard { previous_failures }
 }
 
+#[cfg(any(test, feature = "test-support"))]
+fn reset_exact_overlay_observations() {
+    EXACT_OVERLAY_OBSERVATIONS_FOR_TEST.store(0, Ordering::SeqCst);
+}
+
+#[cfg(any(test, feature = "test-support"))]
+fn exact_overlay_observations() -> usize {
+    EXACT_OVERLAY_OBSERVATIONS_FOR_TEST.load(Ordering::SeqCst)
+}
+
 #[cfg(test)]
 fn reset_exact_overlay_observations_for_test() {
-    EXACT_OVERLAY_OBSERVATIONS_FOR_TEST.store(0, Ordering::SeqCst);
+    reset_exact_overlay_observations();
 }
 
 #[cfg(test)]
 fn exact_overlay_observations_for_test() -> usize {
-    EXACT_OVERLAY_OBSERVATIONS_FOR_TEST.load(Ordering::SeqCst)
+    exact_overlay_observations()
 }
 
 fn fail_overlay_generation_for_test() -> anyhow::Result<()> {
@@ -6766,7 +6783,7 @@ fn changed_paths_for_overlay_base(
     base: overlay_snapshot::SnapshotBase,
     overlay_fsmonitor_auto: bool,
 ) -> anyhow::Result<OverlayChangedPaths> {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     EXACT_OVERLAY_OBSERVATIONS_FOR_TEST.fetch_add(1, Ordering::SeqCst);
 
     let allowed_extensions = crate::extract::languages::all_supported_extensions();

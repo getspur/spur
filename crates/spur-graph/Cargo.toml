@@ -13,7 +13,7 @@ dist = false
 [features]
 default = ["embed"]
 embed = ["dep:fastembed", "dep:hf-hub"]
-perf-gates = []
+perf-gates = ["test-support"]
 test-support = []
 
 [lib]
