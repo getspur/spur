@@ -90,6 +90,18 @@ pub enum FsmonitorStatusRoute {
     ExactFallback(FsmonitorFallbackReason),
 }
 
+/// Correctness route for a request-scoped validation lease.
+///
+/// Git's built-in fsmonitor can accelerate `git status` without exposing a
+/// supported synchronous token fence to callers. Keep those capabilities
+/// separate: a healthy status route is not, by itself, permission to skip the
+/// exact observation at either side of a request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FsmonitorValidationRoute {
+    TokenFence,
+    ExactObservation,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GitStatusObservation {
     pub entries: Vec<PorcelainV2Entry>,
@@ -352,6 +364,38 @@ pub fn fsmonitor_status_route(capabilities: FsmonitorCapabilities) -> FsmonitorS
     } else {
         FsmonitorStatusRoute::FsmonitorNative
     }
+}
+
+pub fn fsmonitor_validation_route(
+    capabilities: FsmonitorCapabilities,
+    synchronous_token_fence_supported: bool,
+) -> FsmonitorValidationRoute {
+    if synchronous_token_fence_supported
+        && matches!(
+            fsmonitor_status_route(capabilities),
+            FsmonitorStatusRoute::FsmonitorNative
+        )
+    {
+        FsmonitorValidationRoute::TokenFence
+    } else {
+        FsmonitorValidationRoute::ExactObservation
+    }
+}
+
+/// Probe the production validation route.
+///
+/// Git 2.55's public `fsmonitor--daemon` command surface exposes daemon
+/// lifecycle operations, but no synchronous token query. The supported route
+/// therefore remains exact even when its status observation may use fsmonitor.
+pub fn probe_fsmonitor_validation_route(
+    root: &Path,
+    release_enabled: bool,
+    local_filesystem: bool,
+) -> FsmonitorValidationRoute {
+    fsmonitor_validation_route(
+        probe_fsmonitor_capabilities(root, release_enabled, local_filesystem),
+        false,
+    )
 }
 
 pub fn fsmonitor_capabilities_from_daemon_status(
@@ -751,9 +795,9 @@ mod tests {
         detect, fsmonitor_capabilities_from_daemon_status, fsmonitor_status_route,
         fsmonitor_validation_route, ls_files_with_oids, parse_porcelain_v2,
         parse_registered_worktree_roots, registered_worktree_roots, rev_parse_common_dir,
-        rev_parse_head, status_dirty_paths, status_observation_with_runner,
-        FsmonitorCapabilities, FsmonitorDaemonStatus, FsmonitorFallbackReason,
-        FsmonitorStatusRoute, FsmonitorValidationRoute, GitStatusCode, PorcelainV2EntryKind,
+        rev_parse_head, status_dirty_paths, status_observation_with_runner, FsmonitorCapabilities,
+        FsmonitorDaemonStatus, FsmonitorFallbackReason, FsmonitorStatusRoute,
+        FsmonitorValidationRoute, GitStatusCode, PorcelainV2EntryKind,
     };
 
     #[test]
