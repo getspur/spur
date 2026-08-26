@@ -1002,7 +1002,7 @@ fn normalize_ru_maxrss_to_kb(raw: u64) -> u64 {
 }
 
 #[test]
-fn gate_task6_overlay_generation_matrix_requires_structural_release_evidence() {
+fn gate_task4b_overlay_generation_matrix_requires_full_runtime_evidence() {
     let complete_matrix = serde_json::json!({
         "schema_version": 1,
         "protocol_id": "overlay-generation-task6-v1",
@@ -1024,8 +1024,8 @@ fn gate_task6_overlay_generation_matrix_requires_structural_release_evidence() {
         ],
     });
 
-    validate_task6_overlay_generation_matrix(&complete_matrix)
-        .expect("complete parity and structural evidence must pass without a wall-clock threshold");
+    validate_task4b_overlay_generation_matrix(&complete_matrix)
+        .expect("the release matrix must satisfy the full Task 4b runtime contract");
 }
 
 #[test]
@@ -1481,4 +1481,296 @@ fn task6_release_cell(project: &str, generation_id: &str) -> serde_json::Value {
             "full_end_to_end_code_request": {"sample_count": 3, "p50_ms": 1.0, "p95_ms": 2.0},
         },
     })
+}
+
+const TASK4B_PROTOCOL: &str = "overlay-watcher-generation-release-v2";
+const TASK4B_SCENARIOS: [&str; 9] = [
+    "exact_fallback",
+    "cold_restart",
+    "healthy_warm",
+    "one_file_event_to_publication",
+    "provider_loss",
+    "recovery_after_loss",
+    "provider_overflow",
+    "recovery_after_overflow",
+    "off_mode",
+];
+
+fn validate_task4b_overlay_generation_matrix(
+    matrix: &serde_json::Value,
+) -> Result<(), Vec<String>> {
+    let mut errors = Vec::new();
+    if matrix["schema_version"].as_u64() != Some(2) {
+        errors.push("matrix schema_version must be 2".to_owned());
+    }
+    if matrix["protocol_id"].as_str() != Some(TASK4B_PROTOCOL) {
+        errors.push(format!("matrix protocol_id must be {TASK4B_PROTOCOL}"));
+    }
+    if matrix["percentile_method"].as_str() != Some("nearest_rank_ceiling") {
+        errors.push("matrix percentile_method must be nearest_rank_ceiling".to_owned());
+    }
+    if matrix["rebuild_semantics"].as_str() != Some("background_exact_rebuild") {
+        errors.push("matrix must call exact_scan-backed work background_exact_rebuild".to_owned());
+    }
+    let repetitions = matrix["repetitions"].as_u64().unwrap_or_default();
+    if repetitions < 30 {
+        errors.push("matrix requires at least 30 runs per scenario".to_owned());
+    }
+
+    let cells = matrix["cells"].as_array().cloned().unwrap_or_default();
+    let projects = cells
+        .iter()
+        .filter_map(|cell| cell["project"].as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    let required_projects = std::collections::BTreeSet::from([
+        "small_untracked_heavy",
+        "medium_dirty_rust",
+        "large_mostly_clean_polyglot",
+        "linked_worktree_shared_commondir",
+    ]);
+    if projects != required_projects {
+        errors.push("matrix must contain all four required project classes".to_owned());
+    }
+
+    let mut hard_gate_failures = std::collections::BTreeSet::new();
+    for cell in &cells {
+        let project = cell["project"].as_str().unwrap_or("<missing-project>");
+        let prefix = |message: &str| format!("{project}: {message}");
+        if cell["protocol_id"].as_str() != Some(TASK4B_PROTOCOL) {
+            errors.push(prefix("protocol differs from the matrix protocol"));
+        }
+        if cell["repetitions"].as_u64() != Some(repetitions) {
+            errors.push(prefix("repetition count differs from the matrix protocol"));
+        }
+        let linked = cell["fixture"]["linked_worktree"].as_bool() == Some(true);
+        let shared = cell["fixture"]["shared_commondir"].as_bool() == Some(true);
+        if project == "linked_worktree_shared_commondir" && !(linked && shared) {
+            hard_gate_failures.insert(format!("{project}:linked_commondir"));
+        }
+
+        let scenarios = cell["scenarios"].as_object().cloned().unwrap_or_default();
+        for scenario in TASK4B_SCENARIOS {
+            let Some(evidence) = scenarios.get(scenario) else {
+                errors.push(prefix(&format!("missing scenario {scenario}")));
+                continue;
+            };
+            validate_task4b_scenario(
+                project,
+                scenario,
+                evidence,
+                repetitions as usize,
+                &mut errors,
+            );
+        }
+
+        let scenario_p95 = |name: &str| {
+            scenarios
+                .get(name)
+                .and_then(|scenario| scenario["latency"]["p95_ms"].as_f64())
+        };
+        if scenario_p95("healthy_warm").is_none_or(|p95| p95 >= 10.0) {
+            hard_gate_failures.insert(format!("{project}:healthy_warm_mcp_p95"));
+        }
+        if scenario_p95("cold_restart").is_none_or(|p95| p95 >= 100.0) {
+            hard_gate_failures.insert(format!("{project}:cold_restart_mcp_p95"));
+        }
+        if scenario_p95("one_file_event_to_publication").is_none_or(|p95| p95 >= 100.0) {
+            hard_gate_failures.insert(format!("{project}:event_to_publication_p95"));
+        }
+
+        if let Some(event) = scenarios.get("one_file_event_to_publication") {
+            let p50 = event["latency"]["p50_ms"].as_f64();
+            let p95 = event["latency"]["p95_ms"].as_f64();
+            if event["freshness_slo_ms"].as_f64() != Some(100.0)
+                || event["p50_within_slo"].as_bool() != p50.map(|value| value < 100.0)
+                || event["p95_within_slo"].as_bool() != p95.map(|value| value < 100.0)
+            {
+                errors.push(prefix(
+                    "event p50/p95 must be explicitly and honestly compared with 100 ms",
+                ));
+            }
+        }
+
+        for (scenario, run) in scenarios.iter().flat_map(|(scenario, evidence)| {
+            evidence["runs"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(move |run| (scenario.as_str(), run))
+        }) {
+            let matches_oracle = run["oracle_match"].as_bool() == Some(true)
+                && run["oracle_digest"]
+                    .as_str()
+                    .is_some_and(|digest| !digest.is_empty())
+                && run["response_digest"].as_str() == run["oracle_digest"].as_str();
+            if !matches_oracle {
+                hard_gate_failures.insert(format!("{project}:correctness"));
+            }
+
+            let exact = run["exact_observations"].as_u64();
+            let background = run["background_exact_observations"].as_u64();
+            let route = run["route"].as_str();
+            let trust = run["trust"].as_str();
+            let pins = run["generation_pins"].as_u64();
+            let pinned = run["pinned_one_immutable_generation"].as_bool();
+            let finalization = run["finalization"]["total"].as_u64();
+            match scenario {
+                "healthy_warm" => {
+                    if route != Some("generation")
+                        || exact != Some(0)
+                        || background != Some(0)
+                        || finalization != Some(0)
+                        || pins != Some(1)
+                        || pinned != Some(true)
+                    {
+                        hard_gate_failures.insert(format!("{project}:healthy_warm_route"));
+                    }
+                }
+                "exact_fallback" | "provider_loss" | "provider_overflow" => {
+                    if route != Some("exact_fallback") || exact.is_none_or(|count| count == 0) {
+                        hard_gate_failures.insert(format!("{project}:{scenario}_route"));
+                    }
+                    if matches!(scenario, "provider_loss" | "provider_overflow")
+                        && trust != Some("untrusted")
+                    {
+                        hard_gate_failures.insert(format!("{project}:{scenario}_trust"));
+                    }
+                }
+                "recovery_after_loss" | "recovery_after_overflow" => {
+                    if route != Some("generation")
+                        || trust != Some("trusted")
+                        || exact != Some(0)
+                        || background.is_none_or(|count| count == 0)
+                        || pins != Some(1)
+                        || pinned != Some(true)
+                    {
+                        hard_gate_failures.insert(format!("{project}:{scenario}"));
+                    }
+                }
+                "off_mode" => {
+                    if route != Some("off") || exact.is_none_or(|count| count == 0) {
+                        hard_gate_failures.insert(format!("{project}:off_mode"));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let declared_failures = string_set(&matrix["hard_gate_failures"])
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<std::collections::BTreeSet<_>>();
+    if declared_failures != hard_gate_failures {
+        errors.push(format!(
+            "hard_gate_failures must exactly match measured failures: declared={declared_failures:?} measured={hard_gate_failures:?}"
+        ));
+    }
+    let expected_verdict = if hard_gate_failures.is_empty() {
+        "RELEASE"
+    } else {
+        "DO NOT RELEASE"
+    };
+    if matrix["verdict"].as_str() != Some(expected_verdict) {
+        errors.push(format!(
+            "matrix verdict must be {expected_verdict} for the measured hard gates"
+        ));
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors)
+    }
+}
+
+fn validate_task4b_scenario(
+    project: &str,
+    scenario: &str,
+    evidence: &serde_json::Value,
+    repetitions: usize,
+    errors: &mut Vec<String>,
+) {
+    let prefix = |message: &str| format!("{project}/{scenario}: {message}");
+    let runs = evidence["runs"].as_array().cloned().unwrap_or_default();
+    let latency = &evidence["latency"];
+    let samples = latency["samples_ms"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    if runs.len() != repetitions || samples.len() != repetitions {
+        errors.push(prefix("must contain every run and raw latency sample"));
+    }
+    if latency["sample_count"].as_u64() != Some(repetitions as u64) {
+        errors.push(prefix("latency sample_count differs from repetitions"));
+    }
+    let numeric_samples = samples
+        .iter()
+        .filter_map(serde_json::Value::as_f64)
+        .collect::<Vec<_>>();
+    if numeric_samples.len() == repetitions {
+        let p50 = task4b_nearest_rank(&numeric_samples, 0.50);
+        let p95 = task4b_nearest_rank(&numeric_samples, 0.95);
+        let recorded_p50 = latency["p50_ms"].as_f64();
+        let recorded_p95 = latency["p95_ms"].as_f64();
+        if recorded_p50.is_none_or(|value| (value - p50).abs() > f64::EPSILON)
+            || recorded_p95.is_none_or(|value| (value - p95).abs() > f64::EPSILON)
+        {
+            errors.push(prefix(
+                "p50/p95 must be nearest-rank values calculated from raw samples",
+            ));
+        }
+    }
+
+    for (index, run) in runs.iter().enumerate() {
+        if run["run"].as_u64() != Some(index as u64 + 1) || run["elapsed_ms"].as_f64().is_none() {
+            errors.push(prefix("run ordinal or elapsed_ms is missing"));
+        }
+        for field in [
+            "route",
+            "trust",
+            "query_operations_source",
+            "oracle_digest",
+            "response_digest",
+        ] {
+            if run[field].as_str().is_none_or(str::is_empty) {
+                errors.push(prefix(&format!("run field {field} is missing")));
+            }
+        }
+        for field in [
+            "exact_observations",
+            "background_exact_observations",
+            "query_operations",
+            "generation_pins",
+        ] {
+            if run[field].as_u64().is_none() {
+                errors.push(prefix(&format!("run count {field} is missing")));
+            }
+        }
+        if run.get("provider").is_none()
+            || run.get("epoch").is_none()
+            || run.get("generation_id").is_none()
+            || run["pinned_one_immutable_generation"].as_bool().is_none()
+            || run["oracle_match"].as_bool().is_none()
+        {
+            errors.push(prefix(
+                "provider/epoch/generation/pin/correctness evidence is incomplete",
+            ));
+        }
+        if run["finalization"]["observed"].as_bool().is_none()
+            || run["finalization"]["source"]
+                .as_str()
+                .is_none_or(str::is_empty)
+            || run["finalization"].get("total").is_none()
+        {
+            errors.push(prefix("finalization evidence is incomplete"));
+        }
+    }
+}
+
+fn task4b_nearest_rank(samples: &[f64], percentile: f64) -> f64 {
+    let mut sorted = samples.to_vec();
+    sorted.sort_by(f64::total_cmp);
+    let rank = ((sorted.len() as f64 * percentile).ceil() as usize).clamp(1, sorted.len());
+    sorted[rank - 1]
 }
