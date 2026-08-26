@@ -9,10 +9,14 @@ use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
 use serde::Deserialize;
+#[cfg(feature = "perf-gates")]
+use spur_graph::mcp::{OverlayFileChange, OverlayProviderLoss, OverlayRuntimeSupport};
 use spur_graph::{
     artifact_from_facts, artifact_from_facts_incremental, build_facts, read_artifact_parquet,
     write_artifact_parquet, GraphEdgeKind, GraphIndexArtifact, RelationKind, WriteOptions,
 };
+#[cfg(feature = "perf-gates")]
+use spur_graph::{write_current_pointer, GraphArtifactManifest};
 use tempfile::TempDir;
 
 const SAMPLE_COUNT: usize = 10;
@@ -326,6 +330,234 @@ fn gate_import_licensed_edges_are_witness_backed_on_spur_graph() {
         report.missing_witness, 0,
         "import_licensed calls must have a same-file workspace import witness"
     );
+}
+
+#[test]
+#[cfg(all(not(feature = "perf-gates"), not(feature = "test-support")))]
+fn overlay_runtime_test_support_is_disabled_without_opt_in() {
+    assert!(!cfg!(feature = "test-support"));
+}
+
+#[tokio::test]
+#[cfg(feature = "perf-gates")]
+async fn overlay_runtime_test_support_drives_the_real_actor_and_mcp_route() {
+    let _guard = perf_gate_guard();
+    assert!(
+        cfg!(feature = "test-support"),
+        "perf-gates must imply test-support"
+    );
+    let fixture = OverlaySupportFixture::new();
+    let support = OverlayRuntimeSupport::start(&fixture.root)
+        .await
+        .expect("start the real overlay runtime actor");
+    let initial = support.state().expect("initial published state");
+    assert_eq!(initial.provider, "notify");
+    assert_eq!(initial.trust, "trusted");
+
+    let exact = support
+        .observe_exact()
+        .expect("exclusive exact-observation scope");
+    let request = support
+        .request(
+            "code_symbol_search",
+            serde_json::json!({
+                "query": "alpha",
+                "mode": "exact",
+                "response_format": "full",
+            }),
+        )
+        .await
+        .expect("dispatch GraphMcpModule code_symbol_search");
+    assert_eq!(
+        request.response["total_matches"], 1,
+        "{:#}",
+        request.response
+    );
+    assert_eq!(request.diagnostics.route, "generation");
+    assert_eq!(request.diagnostics.generation_pins, 1);
+    assert_eq!(
+        request.diagnostics.generation_id,
+        Some(initial.generation_id.clone())
+    );
+    assert_eq!(exact.delta(), 0, "trusted request must not observe Git");
+    drop(exact);
+
+    let change_path = fixture.root.join("src/change.rs");
+    fs::write(&change_path, "pub fn added_support_symbol() {}\n").expect("write added file");
+    let added = support
+        .publish_file_change(
+            OverlayFileChange::Add(change_path.clone()),
+            Duration::from_secs(30),
+        )
+        .await
+        .expect("publish add");
+
+    fs::write(&change_path, "pub fn modified_support_symbol() {}\n").expect("write modified file");
+    let modified = support
+        .publish_file_change(
+            OverlayFileChange::Modify(change_path.clone()),
+            Duration::from_secs(30),
+        )
+        .await
+        .expect("publish modify");
+
+    let renamed_path = fixture.root.join("src/renamed.rs");
+    fs::rename(&change_path, &renamed_path).expect("rename changed file");
+    let renamed = support
+        .publish_file_change(
+            OverlayFileChange::Rename {
+                from: change_path,
+                to: renamed_path.clone(),
+            },
+            Duration::from_secs(30),
+        )
+        .await
+        .expect("publish rename");
+
+    fs::remove_file(&renamed_path).expect("delete renamed file");
+    let deleted = support
+        .publish_file_change(
+            OverlayFileChange::Delete(renamed_path),
+            Duration::from_secs(30),
+        )
+        .await
+        .expect("publish delete");
+    for pair in [
+        (&initial, &added.state),
+        (&added.state, &modified.state),
+        (&modified.state, &renamed.state),
+        (&renamed.state, &deleted.state),
+    ] {
+        assert!(pair.1.epoch > pair.0.epoch);
+        assert_ne!(pair.1.generation_id, pair.0.generation_id);
+    }
+
+    let disconnected = support
+        .pause_recovery(OverlayProviderLoss::Disconnected, Duration::from_secs(30))
+        .await
+        .expect("publish provider disconnection");
+    assert_eq!(disconnected.state.trust, "untrusted");
+    assert_eq!(
+        disconnected.state.generation_id,
+        deleted.state.generation_id
+    );
+
+    let exact = support
+        .observe_exact()
+        .expect("exclusive fallback observation scope");
+    let fallback = support
+        .request(
+            "code_symbol_search",
+            serde_json::json!({
+                "query": "alpha",
+                "mode": "exact",
+                "response_format": "full",
+            }),
+        )
+        .await
+        .expect("dispatch exact fallback through GraphMcpModule");
+    assert_eq!(fallback.diagnostics.route, "exact_fallback");
+    assert_eq!(fallback.diagnostics.generation_pins, 0);
+    assert!(exact.delta() > 0, "fallback request must observe Git");
+    drop(exact);
+
+    let recovered = support
+        .resume_recovery(Duration::from_secs(30))
+        .await
+        .expect("re-arm after disconnection");
+    assert_eq!(recovered.state.trust, "trusted");
+    assert!(recovered.state.arm_count > initial.arm_count);
+
+    for loss in [
+        OverlayProviderLoss::Overflow,
+        OverlayProviderLoss::FreshInstance,
+    ] {
+        let lost = support
+            .pause_recovery(loss, Duration::from_secs(30))
+            .await
+            .expect("publish deterministic provider trust loss");
+        assert_eq!(lost.state.trust, "untrusted");
+        let recovered = support
+            .resume_recovery(Duration::from_secs(30))
+            .await
+            .expect("recover and re-arm provider");
+        assert_eq!(recovered.state.trust, "trusted");
+        assert!(recovered.state.epoch > lost.state.epoch);
+    }
+}
+
+#[cfg(feature = "perf-gates")]
+struct OverlaySupportFixture {
+    _dir: TempDir,
+    root: PathBuf,
+}
+
+#[cfg(feature = "perf-gates")]
+impl OverlaySupportFixture {
+    fn new() -> Self {
+        let dir = tempfile::tempdir().expect("overlay support tempdir");
+        let root = dir.path().to_path_buf();
+        fs::create_dir_all(root.join("src")).expect("create source directory");
+        fs::write(root.join("src/lib.rs"), "pub fn alpha() {}\n").expect("write source");
+        fs::write(root.join(".gitignore"), ".spur/\n").expect("write graph ignore");
+        run_git(&root, &["init", "-q", "-b", "main"]);
+        run_git(
+            &root,
+            &["config", "user.email", "spur-graph@example.invalid"],
+        );
+        run_git(&root, &["config", "user.name", "Spur Graph Test"]);
+        run_git(&root, &["add", "src/lib.rs", ".gitignore"]);
+        run_git(&root, &["commit", "-q", "-m", "overlay support base"]);
+
+        let facts = build_facts(&root, None).expect("build support facts").0;
+        let artifact = artifact_from_facts(&facts, &root).expect("build support artifact");
+        let artifact_base = root.join(".spur/graph");
+        let written = write_artifact_parquet(
+            &artifact,
+            &artifact_base,
+            WriteOptions::default(),
+            Vec::new(),
+        )
+        .expect("write support artifact");
+        let manifest_path = written.join("manifest.json");
+        let mut manifest: GraphArtifactManifest =
+            serde_json::from_slice(&fs::read(&manifest_path).expect("read support manifest"))
+                .expect("decode support manifest");
+        manifest.indexed_commit_oid = Some(git_stdout(&root, &["rev-parse", "HEAD"]));
+        fs::write(
+            &manifest_path,
+            serde_json::to_vec_pretty(&manifest).expect("encode support manifest"),
+        )
+        .expect("write support manifest");
+        write_current_pointer(&root, &written).expect("write support CURRENT pointer");
+
+        Self { _dir: dir, root }
+    }
+}
+
+#[cfg(feature = "perf-gates")]
+fn run_git(root: &Path, args: &[&str]) {
+    let _ = git_stdout(root, args);
+}
+
+#[cfg(feature = "perf-gates")]
+fn git_stdout(root: &Path, args: &[&str]) -> String {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(args)
+        .output()
+        .unwrap_or_else(|error| panic!("failed to run git {args:?}: {error}"));
+    assert!(
+        output.status.success(),
+        "git {args:?} failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout)
+        .expect("git test output must be UTF-8")
+        .trim()
+        .to_owned()
 }
 
 #[test]
