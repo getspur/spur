@@ -84,15 +84,16 @@ fn bench_read_artifact_parquet_slim(c: &mut Criterion) {
 
 fn bench_search_symbols_parquet_vs_inmemory(c: &mut Criterion) {
     let fixture = load_fixture();
+    let artifact = symbol_search_benchmark_artifact(&fixture.artifact);
     let tempdir = tempfile::tempdir().expect("tempdir");
     let parquet_dir = write_artifact_parquet(
-        &fixture.artifact,
+        &artifact,
         tempdir.path(),
         WriteOptions::default(),
         Vec::new(),
     )
     .expect("write parquet artifact");
-    let query = search_benchmark_query(&fixture.artifact);
+    let query = search_benchmark_query(&artifact);
     let options = SearchOptions {
         query,
         mode: SearchMode::Exact,
@@ -625,6 +626,25 @@ fn search_benchmark_query(artifact: &GraphIndexArtifact) -> String {
         .or_else(|| artifact.symbols.first())
         .map(|symbol| symbol.entity_name.clone())
         .expect("benchmark fixture has at least one symbol")
+}
+
+fn symbol_search_benchmark_artifact(artifact: &GraphIndexArtifact) -> GraphIndexArtifact {
+    GraphIndexArtifact {
+        header: artifact.header.clone(),
+        manifest_version: artifact.manifest_version.clone(),
+        graph_content_hash: artifact.graph_content_hash.clone(),
+        file_manifests: Vec::new(),
+        files: Vec::new(),
+        file_node_ids: Vec::new(),
+        symbols: artifact.symbols.clone(),
+        symbol_node_ids: artifact.symbol_node_ids.clone(),
+        edges: Vec::new(),
+        tombstones: Vec::new(),
+        diagnostics: Vec::new(),
+        commits: Vec::new(),
+        symbol_snapshots: Vec::new(),
+        temporal_edges: Vec::new(),
+    }
 }
 
 fn baselines() -> Baselines {

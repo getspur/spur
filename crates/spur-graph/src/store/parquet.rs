@@ -2289,7 +2289,8 @@ fn writer_properties(
     {
         builder = builder.set_column_dictionary_enabled(ColumnPath::from(column), true);
     }
-    let bloom_ndv = u64::try_from(row_count.max(1)).expect("row count fits u64");
+    let bloom_ndv = u64::try_from(row_count.max(1).min(PARQUET_ROW_GROUP_SIZE))
+        .expect("row-group row count fits u64");
     for column in bloom_filter_columns
         .iter()
         .copied()
@@ -4806,6 +4807,51 @@ mod parquet_temporal_test {
             .collect::<Vec<_>>();
 
         assert_eq!(file_paths, vec!["src/a.rs", "src/m.rs", "src/z.rs"]);
+        Ok(())
+    }
+
+    #[test]
+    fn parquet_bloom_filter_size_is_row_group_local() -> anyhow::Result<()> {
+        let tempdir = tempfile::tempdir()?;
+        let one_group_path = tempdir.path().join("one-group.parquet");
+        let two_group_path = tempdir.path().join("two-groups.parquet");
+        let write_keys = |path: &Path, row_count: usize| {
+            write_table(
+                path,
+                r"
+                message schema {
+                  required binary key (STRING);
+                }
+                ",
+                &[],
+                &["key"],
+                vec![ColumnData::RequiredString(
+                    (0..row_count).map(|row| format!("key-{row:08}")).collect(),
+                )],
+            )
+        };
+        write_keys(&one_group_path, PARQUET_ROW_GROUP_SIZE)?;
+        write_keys(&two_group_path, PARQUET_ROW_GROUP_SIZE * 2)?;
+
+        let one_group = SerializedFileReader::new(File::open(one_group_path)?)?;
+        let two_groups = SerializedFileReader::new(File::open(two_group_path)?)?;
+        let one_group_bloom_bytes = one_group
+            .metadata()
+            .row_group(0)
+            .column(0)
+            .bloom_filter_length()
+            .expect("one-group table should write a Bloom filter");
+        let two_group_bloom_bytes = two_groups
+            .metadata()
+            .row_group(0)
+            .column(0)
+            .bloom_filter_length()
+            .expect("two-group table should write a Bloom filter");
+
+        assert_eq!(
+            two_group_bloom_bytes, one_group_bloom_bytes,
+            "each row group's Bloom filter should be sized from that group's maximum NDV"
+        );
         Ok(())
     }
 
