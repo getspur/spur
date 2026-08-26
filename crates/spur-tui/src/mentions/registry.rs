@@ -13,13 +13,13 @@ use spur_acp::{
     DatasourceEntry, SessionId,
 };
 
-use super::code_graph::source::CodeGraphMentionSource;
+use super::code_graph::source::{entry_for_candidate, CodeGraphMentionSource};
 use super::datasource_source::DatasourceMentionSource;
-use super::entry::{MentionEntry, MentionKind, MentionSource};
+use super::entry::{CodeMentionCandidate, MentionEntry, MentionKind, MentionSource};
 use super::file_source::FileMentionSource;
 use super::issue_source::{IssueMentionDescriptor, IssueMentionSource};
 use super::worker_source::{WorkerMentionDescriptor, WorkerMentionSource};
-use spur_graph::CodeMentionPayload;
+use spur_graph::{CodeMentionPayload, CODE_SYMBOL_URI_PREFIX};
 
 const GLOBAL_SOURCE_CACHE_TTL: Duration = Duration::from_secs(600);
 const SESSION_SOURCE_CACHE_TTL: Duration = Duration::from_secs(600);
@@ -39,8 +39,15 @@ const CODE_CAP: usize = 3;
 struct CachedSourceIndex {
     entries: Arc<Vec<MentionEntry>>,
     code_payloads: HashMap<String, Arc<CodeMentionPayload>>,
+    code_index: Option<CodeQueryIndex>,
     datasource_hints: HashMap<String, Arc<String>>,
     built_at: Instant,
+}
+
+#[derive(Clone)]
+struct CodeQueryIndex {
+    candidates: Arc<Vec<CodeMentionCandidate>>,
+    source: Arc<Mutex<Box<dyn MentionSource>>>,
 }
 
 #[derive(Clone)]
@@ -85,6 +92,8 @@ impl From<CompletionScope<'_>> for CompletionScopeKey {
 pub struct MentionRegistry {
     sources: Vec<MentionSourceSlot>,
     cache: HashMap<&'static str, CachedSourceIndex>,
+    retained_code_payloads: HashMap<String, Arc<CodeMentionPayload>>,
+    pinned_code_payload_uris: HashSet<String>,
     code_graph_hint: Option<&'static str>,
     code_graph_token: Option<CodeGraphToken>,
     code_graph_auto_discovery: bool,
@@ -132,6 +141,7 @@ enum CodeGraphSourceUpdate {
 
 pub(crate) struct MentionQueryWork {
     sources: Vec<Arc<Vec<MentionEntry>>>,
+    code_indexes: Vec<CodeQueryIndex>,
     query: String,
     limit: usize,
     composed_entry: Option<MentionEntry>,
@@ -140,12 +150,21 @@ pub(crate) struct MentionQueryWork {
 
 impl MentionQueryWork {
     pub(crate) fn entry_count(&self) -> usize {
-        self.sources.iter().map(|entries| entries.len()).sum()
+        self.sources
+            .iter()
+            .map(|entries| entries.len())
+            .sum::<usize>()
+            + self
+                .code_indexes
+                .iter()
+                .map(|index| index.candidates.len())
+                .sum::<usize>()
     }
 }
 
 pub(crate) struct MentionQueryResult {
     pub(crate) entries: Vec<MentionEntry>,
+    pub(crate) code_payloads: Vec<(String, Arc<CodeMentionPayload>)>,
     pub(crate) open_slot: Option<OpenWorkerSlot>,
 }
 
@@ -177,6 +196,8 @@ impl MentionRegistry {
         Self {
             sources: vec![MentionSourceSlot::new(Box::new(FileMentionSource))],
             cache: HashMap::new(),
+            retained_code_payloads: HashMap::new(),
+            pinned_code_payload_uris: HashSet::new(),
             code_graph_hint: None,
             code_graph_token: None,
             code_graph_auto_discovery: false,
@@ -200,6 +221,8 @@ impl MentionRegistry {
                 MentionSourceSlot::new(Box::new(WorkerMentionSource::new(workers))),
             ],
             cache: HashMap::new(),
+            retained_code_payloads: HashMap::new(),
+            pinned_code_payload_uris: HashSet::new(),
             code_graph_hint: None,
             code_graph_token: None,
             code_graph_auto_discovery: false,
@@ -340,10 +363,44 @@ impl MentionRegistry {
     }
 
     pub fn lookup_code_payload(&self, uri: &str) -> Option<&CodeMentionPayload> {
-        self.cache
-            .values()
-            .find_map(|cached| cached.code_payloads.get(uri))
+        self.retained_code_payloads
+            .get(uri)
+            .or_else(|| {
+                self.cache
+                    .values()
+                    .find_map(|cached| cached.code_payloads.get(uri))
+            })
             .map(Arc::as_ref)
+    }
+
+    pub(crate) fn install_query_code_payloads(
+        &mut self,
+        payloads: Vec<(String, Arc<CodeMentionPayload>)>,
+    ) {
+        self.retained_code_payloads
+            .retain(|uri, _| self.pinned_code_payload_uris.contains(uri));
+        let Some(cached) = self.cache.get_mut("code_graph") else {
+            return;
+        };
+        cached
+            .code_payloads
+            .retain(|uri, _| !is_graph_symbol_uri(uri));
+        cached.code_payloads.extend(payloads);
+    }
+
+    pub(crate) fn retain_code_payload_on_accept(&mut self, uri: &str) {
+        if !is_graph_symbol_uri(uri) {
+            return;
+        }
+        let payload = self
+            .cache
+            .get("code_graph")
+            .and_then(|cached| cached.code_payloads.get(uri))
+            .cloned();
+        if let Some(payload) = payload {
+            self.retained_code_payloads.insert(uri.to_owned(), payload);
+            self.pinned_code_payload_uris.insert(uri.to_owned());
+        }
     }
 
     pub fn lookup_datasource_hint(&self, uri: &str) -> Option<&str> {
@@ -360,10 +417,13 @@ impl MentionRegistry {
 
     pub fn retain_code_payloads_for_uris<'a>(&mut self, uris: impl IntoIterator<Item = &'a str>) {
         let keep: std::collections::HashSet<&str> = uris.into_iter().collect();
+        self.retained_code_payloads
+            .retain(|uri, _| keep.contains(uri.as_str()));
+        self.pinned_code_payload_uris.clear();
         for cached in self.cache.values_mut() {
             cached
                 .code_payloads
-                .retain(|uri, _| !is_graph_uri(uri) || keep.contains(uri.as_str()));
+                .retain(|uri, _| !is_graph_symbol_uri(uri) || keep.contains(uri.as_str()));
         }
     }
 
@@ -569,6 +629,12 @@ impl MentionRegistry {
             .filter_map(|source| self.cache.get(source.name))
             .map(|cached| Arc::clone(&cached.entries))
             .collect();
+        let code_indexes = self
+            .sources
+            .iter()
+            .filter_map(|source| self.cache.get(source.name))
+            .filter_map(|cached| cached.code_index.clone())
+            .collect();
         let (composed_entry, open_slot) = match composed {
             Some(composed) => (Some(composed.entry), composed.open_slot),
             None => (None, None),
@@ -576,6 +642,7 @@ impl MentionRegistry {
 
         let work = MentionQueryWork {
             sources,
+            code_indexes,
             query: query.to_string(),
             limit,
             composed_entry,
@@ -607,7 +674,9 @@ impl MentionRegistry {
     }
 
     pub(crate) fn run_query_work(&mut self, work: MentionQueryWork) -> MentionQueryResult {
-        score_mention_query(work, &mut self.matcher)
+        let result = score_mention_query(work, &mut self.matcher);
+        self.install_query_code_payloads(result.code_payloads.clone());
+        result
     }
 
     #[cfg(test)]
@@ -615,6 +684,8 @@ impl MentionRegistry {
         Self {
             sources: sources.into_iter().map(MentionSourceSlot::new).collect(),
             cache: HashMap::new(),
+            retained_code_payloads: HashMap::new(),
+            pinned_code_payload_uris: HashSet::new(),
             code_graph_hint: None,
             code_graph_token: None,
             code_graph_auto_discovery: false,
@@ -1269,8 +1340,8 @@ pub(crate) fn finalize_worker_slot_pick(
     finalized
 }
 
-fn is_graph_uri(uri: &str) -> bool {
-    uri.starts_with("graph://file/") || uri.starts_with("graph://symbol/")
+fn is_graph_symbol_uri(uri: &str) -> bool {
+    uri.starts_with("graph://symbol/")
 }
 
 fn dedup_file_entries_with_code_files(entries: &mut Vec<&MentionEntry>) {
@@ -1326,6 +1397,11 @@ fn build_source_cache(source: &MentionSourceSlot, cwd: &Path) -> Option<CachedSo
         .iter()
         .map(|(uri, payload)| (uri.clone(), Arc::clone(payload)))
         .collect();
+    let code_candidates = builder.code_candidates();
+    let code_index = (!code_candidates.is_empty()).then(|| CodeQueryIndex {
+        candidates: code_candidates,
+        source: Arc::clone(&source.source),
+    });
     let datasource_hints = builder
         .datasource_hints()
         .iter()
@@ -1334,6 +1410,7 @@ fn build_source_cache(source: &MentionSourceSlot, cwd: &Path) -> Option<CachedSo
     Some(CachedSourceIndex {
         entries: Arc::new(entries),
         code_payloads,
+        code_index,
         datasource_hints,
         built_at: Instant::now(),
     })
@@ -1357,6 +1434,7 @@ pub(crate) fn score_mention_query(
 ) -> MentionQueryResult {
     let MentionQueryWork {
         sources,
+        code_indexes,
         query,
         limit,
         mut composed_entry,
@@ -1430,10 +1508,10 @@ pub(crate) fn score_mention_query(
         datasources.truncate(DATASOURCE_CAP);
         let datasources: Vec<MentionEntry> = datasources.into_iter().cloned().collect();
 
-        let mut code_graph: Vec<&MentionEntry> = entries
+        let mut code_graph: Vec<MentionEntry> = entries
             .iter()
             .filter(|entry| matches!(entry.kind, MentionKind::CodeFile | MentionKind::CodeSymbol))
-            .copied()
+            .map(|entry| (*entry).clone())
             .collect();
         code_graph.sort_by(|a, b| {
             empty_code_kind_rank(&a.kind)
@@ -1444,7 +1522,43 @@ pub(crate) fn score_mention_query(
                 .then(a.uri.cmp(&b.uri))
         });
         code_graph.truncate(CODE_CAP);
-        let code_graph: Vec<MentionEntry> = code_graph.into_iter().cloned().collect();
+        let mut selected_code = Vec::new();
+        if code_graph.len() < CODE_CAP {
+            let remaining = CODE_CAP - code_graph.len();
+            let candidates = if let [index] = code_indexes.as_slice() {
+                index
+                    .candidates
+                    .iter()
+                    .take(remaining)
+                    .map(|candidate| (0, candidate))
+                    .collect::<Vec<_>>()
+            } else {
+                let mut candidates = code_indexes
+                    .iter()
+                    .enumerate()
+                    .flat_map(|(source_index, index)| {
+                        index
+                            .candidates
+                            .iter()
+                            .map(move |candidate| (source_index, candidate))
+                    })
+                    .collect::<Vec<_>>();
+                candidates.sort_by(|(_, left), (_, right)| {
+                    left.entity_name
+                        .len()
+                        .cmp(&right.entity_name.len())
+                        .then(left.entity_name.cmp(&right.entity_name))
+                        .then(left.stable_symbol_id.cmp(&right.stable_symbol_id))
+                });
+                candidates.truncate(remaining);
+                candidates
+            };
+            for (source_index, candidate) in candidates {
+                let entry = entry_for_candidate(candidate);
+                selected_code.push((entry.uri.clone(), source_index));
+                code_graph.push(entry);
+            }
+        }
 
         let mut rows = Vec::new();
         append_section_rows(&mut rows, "Workers", &workers);
@@ -1453,8 +1567,10 @@ pub(crate) fn score_mention_query(
         append_section_rows(&mut rows, "Data", &datasources);
         append_section_rows(&mut rows, "Code", &code_graph);
         rows.truncate(limit);
+        let code_payloads = hydrate_code_rows(&mut rows, &selected_code, &code_indexes);
         return MentionQueryResult {
             entries: rows,
+            code_payloads,
             open_slot,
         };
     }
@@ -1482,9 +1598,25 @@ pub(crate) fn score_mention_query(
                 let haystack = entry.search_text.as_deref().unwrap_or(&entry.display);
                 pattern.score(nucleo_matcher::Utf32Str::new(haystack, &mut buf), matcher)?
             };
-            Some(RankedMentionRef { rank, entry })
+            Some(RankedMentionRef {
+                rank,
+                value: RankedMentionValue::Entry(entry),
+            })
         })
         .collect();
+    for (source_index, index) in code_indexes.iter().enumerate() {
+        scored.extend(index.candidates.iter().filter_map(|candidate| {
+            let rank =
+                code_candidate_match_rank(candidate, &query, &code_pattern, matcher, &mut buf)?;
+            Some(RankedMentionRef {
+                rank,
+                value: RankedMentionValue::CodeSymbol {
+                    source_index,
+                    candidate,
+                },
+            })
+        }));
+    }
     let max_rank = scored.iter().map(|mention| mention.rank).max().unwrap_or(0);
     scored.sort_by(|a, b| typed_query_cmp(a, b, max_rank));
     let is_base_worker = |entry: &MentionEntry| {
@@ -1493,16 +1625,29 @@ pub(crate) fn score_mention_query(
             .is_some_and(|base| entry.kind == MentionKind::Worker && entry.uri == base)
     };
     let mut rows = Vec::new();
+    let mut selected_code = Vec::new();
     let mut composed_emitted = false;
     for ranked in scored.into_iter().take(limit) {
-        if !composed_emitted && is_base_worker(ranked.entry) {
-            if let Some(entry) = composed_entry.clone() {
+        match ranked.value {
+            RankedMentionValue::Entry(entry) => {
+                if !composed_emitted && is_base_worker(entry) {
+                    if let Some(entry) = composed_entry.clone() {
+                        rows.push(entry);
+                        composed_emitted = true;
+                        continue;
+                    }
+                }
+                rows.push(entry.clone());
+            }
+            RankedMentionValue::CodeSymbol {
+                source_index,
+                candidate,
+            } => {
+                let entry = entry_for_candidate(candidate);
+                selected_code.push((entry.uri.clone(), source_index));
                 rows.push(entry);
-                composed_emitted = true;
-                continue;
             }
         }
-        rows.push(ranked.entry.clone());
     }
     if let Some(entry) = composed_entry.take() {
         let composed_uri = entry.uri.clone();
@@ -1520,8 +1665,10 @@ pub(crate) fn score_mention_query(
         }
     }
 
+    let code_payloads = hydrate_code_rows(&mut rows, &selected_code, &code_indexes);
     MentionQueryResult {
         entries: rows,
+        code_payloads,
         open_slot,
     }
 }
@@ -1529,7 +1676,72 @@ pub(crate) fn score_mention_query(
 #[derive(Debug, Clone)]
 struct RankedMentionRef<'a> {
     rank: u32,
-    entry: &'a MentionEntry,
+    value: RankedMentionValue<'a>,
+}
+
+#[derive(Debug, Clone)]
+enum RankedMentionValue<'a> {
+    Entry(&'a MentionEntry),
+    CodeSymbol {
+        source_index: usize,
+        candidate: &'a CodeMentionCandidate,
+    },
+}
+
+impl RankedMentionRef<'_> {
+    fn tier_rank(&self) -> u8 {
+        match &self.value {
+            RankedMentionValue::Entry(entry) => tier_rank(&entry.kind),
+            RankedMentionValue::CodeSymbol { .. } => tier_rank(&MentionKind::CodeSymbol),
+        }
+    }
+
+    fn stable_cmp(&self, other: &Self) -> std::cmp::Ordering {
+        match (&self.value, &other.value) {
+            (RankedMentionValue::Entry(left), RankedMentionValue::Entry(right)) => {
+                stable_tie_key(left).cmp(stable_tie_key(right))
+            }
+            (
+                RankedMentionValue::CodeSymbol {
+                    candidate: left, ..
+                },
+                RankedMentionValue::CodeSymbol {
+                    candidate: right, ..
+                },
+            ) => left.stable_symbol_id.cmp(&right.stable_symbol_id),
+            (
+                RankedMentionValue::CodeSymbol { candidate, .. },
+                RankedMentionValue::Entry(entry),
+            ) => prefixed_key_cmp(
+                CODE_SYMBOL_URI_PREFIX,
+                candidate.stable_symbol_id.as_ref(),
+                stable_tie_key(entry),
+            ),
+            (
+                RankedMentionValue::Entry(entry),
+                RankedMentionValue::CodeSymbol { candidate, .. },
+            ) => prefixed_key_cmp(
+                CODE_SYMBOL_URI_PREFIX,
+                candidate.stable_symbol_id.as_ref(),
+                stable_tie_key(entry),
+            )
+            .reverse(),
+        }
+    }
+
+    #[cfg(test)]
+    fn stable_key(&self) -> String {
+        match &self.value {
+            RankedMentionValue::Entry(entry) => stable_tie_key(entry).to_owned(),
+            RankedMentionValue::CodeSymbol { candidate, .. } => {
+                format!("{CODE_SYMBOL_URI_PREFIX}{}", candidate.stable_symbol_id)
+            }
+        }
+    }
+}
+
+fn prefixed_key_cmp(prefix: &str, suffix: &str, other: &str) -> std::cmp::Ordering {
+    prefix.bytes().chain(suffix.bytes()).cmp(other.bytes())
 }
 
 fn code_match_rank(
@@ -1573,6 +1785,93 @@ fn code_match_rank(
         | MentionKind::Issue
         | MentionKind::Datasource => None,
     }
+}
+
+fn code_candidate_match_rank(
+    candidate: &CodeMentionCandidate,
+    query: &str,
+    pattern: &Pattern,
+    matcher: &mut Matcher,
+    buf: &mut Vec<char>,
+) -> Option<u32> {
+    if eq_ignore_ascii_case(candidate.entity_name.as_ref(), query) {
+        return Some(if candidate.enclosing_scope.is_none() {
+            u32::MAX
+        } else {
+            u32::MAX - 1
+        });
+    }
+
+    if let Some(score) = pattern_score(pattern, matcher, buf, candidate.entity_name.as_ref())
+        .or_else(|| prefix_score(candidate.entity_name.as_ref(), query))
+    {
+        return Some(score);
+    }
+
+    pattern_score(pattern, matcher, buf, candidate.file_path.as_ref())
+        .or_else(|| path_prefix_score(candidate.file_path.as_ref(), query))
+}
+
+fn hydrate_code_rows(
+    rows: &mut Vec<MentionEntry>,
+    selected: &[(String, usize)],
+    code_indexes: &[CodeQueryIndex],
+) -> Vec<(String, Arc<CodeMentionPayload>)> {
+    let returned = rows
+        .iter()
+        .filter(|entry| entry.kind == MentionKind::CodeSymbol)
+        .map(|entry| entry.uri.as_str())
+        .collect::<HashSet<_>>();
+    let mut ids_by_source = vec![Vec::new(); code_indexes.len()];
+    for (uri, source_index) in selected {
+        if !returned.contains(uri.as_str()) {
+            continue;
+        }
+        let Some(stable_id) = uri.strip_prefix(CODE_SYMBOL_URI_PREFIX) else {
+            continue;
+        };
+        if let Some(ids) = ids_by_source.get_mut(*source_index) {
+            ids.push(stable_id.to_owned());
+        }
+    }
+
+    let mut payloads = Vec::new();
+    for (source_index, stable_ids) in ids_by_source.into_iter().enumerate() {
+        if stable_ids.is_empty() {
+            continue;
+        }
+        let Some(index) = code_indexes.get(source_index) else {
+            continue;
+        };
+        let source = match index.source.lock() {
+            Ok(source) => source,
+            Err(error) => {
+                tracing::warn!(error = %error, "code mention payload source lock poisoned");
+                continue;
+            }
+        };
+        match source.hydrate_code_payloads(&stable_ids) {
+            Ok(hydrated) => payloads.extend(hydrated),
+            Err(error) => {
+                tracing::warn!(error = %error, "code mention payload hydration failed");
+            }
+        }
+    }
+
+    let hydrated = payloads
+        .iter()
+        .map(|(uri, _)| uri.as_str())
+        .collect::<HashSet<_>>();
+    let selected = selected
+        .iter()
+        .map(|(uri, _)| uri.as_str())
+        .collect::<HashSet<_>>();
+    rows.retain(|entry| {
+        entry.kind != MentionKind::CodeSymbol
+            || !selected.contains(entry.uri.as_str())
+            || hydrated.contains(entry.uri.as_str())
+    });
+    payloads
 }
 
 fn pattern_score(
@@ -1721,9 +2020,9 @@ fn typed_query_cmp(
     let bucket_b = score_bucket(b.rank, max_rank);
     bucket_b
         .cmp(&bucket_a)
-        .then(tier_rank(&a.entry.kind).cmp(&tier_rank(&b.entry.kind)))
+        .then(a.tier_rank().cmp(&b.tier_rank()))
         .then(b.rank.cmp(&a.rank))
-        .then(stable_tie_key(a.entry).cmp(stable_tie_key(b.entry)))
+        .then_with(|| a.stable_cmp(b))
 }
 
 fn source_cache_ttl(name: &'static str) -> Duration {
@@ -1973,6 +2272,8 @@ mod tests {
                 vec![issue("bd-1", "Picker rows", Some("alice"))],
             )))],
             cache: HashMap::new(),
+            retained_code_payloads: HashMap::new(),
+            pinned_code_payload_uris: HashSet::new(),
             code_graph_hint: None,
             code_graph_token: None,
             code_graph_auto_discovery: false,
@@ -2782,6 +3083,8 @@ mod tests {
                 vec![issue("bd-1", "Old title", None)],
             )))],
             cache: HashMap::new(),
+            retained_code_payloads: HashMap::new(),
+            pinned_code_payload_uris: HashSet::new(),
             code_graph_hint: None,
             code_graph_token: None,
             code_graph_auto_discovery: false,
@@ -2878,6 +3181,8 @@ mod tests {
                 ],
             )))],
             cache: HashMap::new(),
+            retained_code_payloads: HashMap::new(),
+            pinned_code_payload_uris: HashSet::new(),
             code_graph_hint: None,
             code_graph_token: None,
             code_graph_auto_discovery: false,
@@ -2909,6 +3214,138 @@ mod tests {
         fn name(&self) -> &'static str {
             self.name
         }
+    }
+
+    struct CompactCodeSource {
+        candidates: Arc<Vec<CodeMentionCandidate>>,
+    }
+
+    impl MentionSource for CompactCodeSource {
+        fn build(&mut self, _cwd: &Path) -> anyhow::Result<Vec<MentionEntry>> {
+            Ok(Vec::new())
+        }
+
+        fn name(&self) -> &'static str {
+            "code_graph"
+        }
+
+        fn code_candidates(&self) -> Arc<Vec<CodeMentionCandidate>> {
+            Arc::clone(&self.candidates)
+        }
+
+        fn hydrate_code_payloads(
+            &self,
+            stable_symbol_ids: &[String],
+        ) -> anyhow::Result<Vec<(String, Arc<CodeMentionPayload>)>> {
+            Ok(stable_symbol_ids
+                .iter()
+                .map(|stable_id| {
+                    let uri = format!("{CODE_SYMBOL_URI_PREFIX}{stable_id}");
+                    (
+                        uri.clone(),
+                        Arc::new(CodeMentionPayload {
+                            authoritative: spur_graph::CodeMentionAuthoritative {
+                                display: stable_id.clone(),
+                                uri,
+                                kind: spur_graph::CodeMentionKind::Symbol,
+                                file_path: "src/lib.rs".to_owned(),
+                                validation: spur_graph::CodeMentionValidationSpec::SymbolRange {
+                                    path: "src/lib.rs".to_owned(),
+                                    line_range: [1, 1],
+                                    byte_range: [0, 1],
+                                    entity_name: stable_id.clone(),
+                                    anchor_hash: "anchor".to_owned(),
+                                },
+                            },
+                            extraction_hints: spur_graph::CodeMentionExtractionHints {
+                                line_range: Some([1, 1]),
+                                byte_range: Some([0, 1]),
+                                symbol_kind: Some("fn".to_owned()),
+                                entity_name: Some(stable_id.clone()),
+                                qualified_name: stable_id.clone(),
+                            },
+                            display_meta: spur_graph::CodeMentionDisplayMeta {
+                                enclosing_scope: None,
+                                graph_index_version: "test".to_owned(),
+                            },
+                        }),
+                    )
+                })
+                .collect())
+        }
+    }
+
+    fn compact_candidate(stable_id: &str, entity_name: &str) -> CodeMentionCandidate {
+        CodeMentionCandidate {
+            stable_symbol_id: stable_id.into(),
+            entity_name: entity_name.into(),
+            file_path: Arc::from("src/lib.rs"),
+            line_range: [1, 1],
+            symbol_kind: Arc::from("fn"),
+            enclosing_scope: None,
+        }
+    }
+
+    #[test]
+    fn accepted_code_payload_survives_cache_rebuild_until_submit_retention_prunes_it() {
+        let mut registry = test_registry(vec![Box::new(CompactCodeSource {
+            candidates: Arc::new(vec![
+                compact_candidate("symbol-alpha", "alpha"),
+                compact_candidate("symbol-beta", "beta"),
+            ]),
+        })]);
+        let alpha_uri = "graph://symbol/symbol-alpha";
+        let beta_uri = "graph://symbol/symbol-beta";
+
+        let alpha = registry.query(CompletionScope::PreSession, Path::new("."), "alpha", 1);
+        assert_eq!(alpha[0].uri, alpha_uri);
+        assert!(registry.lookup_code_payload(alpha_uri).is_some());
+        assert!(registry.lookup_code_payload(beta_uri).is_none());
+
+        registry.retain_code_payload_on_accept(alpha_uri);
+        registry.clear_cache();
+        let beta = registry.query(CompletionScope::PreSession, Path::new("."), "beta", 1);
+        assert_eq!(beta[0].uri, beta_uri);
+        assert!(registry.lookup_code_payload(alpha_uri).is_some());
+        assert!(registry.lookup_code_payload(beta_uri).is_some());
+
+        registry.retain_code_payloads_for_uris([alpha_uri]);
+        assert!(registry.lookup_code_payload(alpha_uri).is_some());
+        assert!(registry.lookup_code_payload(beta_uri).is_none());
+
+        let _ = registry.query(CompletionScope::PreSession, Path::new("."), "beta", 1);
+        assert!(registry.lookup_code_payload(alpha_uri).is_none());
+        assert!(registry.lookup_code_payload(beta_uri).is_some());
+    }
+
+    #[test]
+    #[ignore = "manual large-symbol performance benchmark"]
+    fn benchmark_large_compact_code_query_core() {
+        const SYMBOL_COUNT: usize = 77_000;
+        const SAMPLE_COUNT: usize = 7;
+
+        let candidates = (0..SYMBOL_COUNT)
+            .map(|index| {
+                compact_candidate(&format!("symbol-{index:05}"), &format!("symbol_{index:05}"))
+            })
+            .collect();
+        let mut registry = test_registry(vec![Box::new(CompactCodeSource {
+            candidates: Arc::new(candidates),
+        })]);
+        let mut samples = Vec::with_capacity(SAMPLE_COUNT);
+
+        for _ in 0..SAMPLE_COUNT {
+            let started = Instant::now();
+            let rows = registry.query(CompletionScope::PreSession, Path::new("."), "symbol", 20);
+            samples.push(started.elapsed());
+            assert_eq!(rows.len(), 20);
+        }
+
+        samples.sort_unstable();
+        eprintln!(
+            "compact_code_query symbols={SYMBOL_COUNT} result_limit=20 median_us={}",
+            samples[SAMPLE_COUNT / 2].as_micros()
+        );
     }
 
     struct CountingSource {
@@ -2955,6 +3392,8 @@ mod tests {
         MentionRegistry {
             sources: sources.into_iter().map(MentionSourceSlot::new).collect(),
             cache: HashMap::new(),
+            retained_code_payloads: HashMap::new(),
+            pinned_code_payload_uris: HashSet::new(),
             code_graph_hint: None,
             code_graph_token: None,
             code_graph_auto_discovery: false,
@@ -3452,6 +3891,28 @@ mod tests {
     }
 
     #[test]
+    fn compact_code_symbol_uses_canonical_uri_tie_key() {
+        let mut file = mention(MentionKind::CodeFile, 1, "needle".into());
+        file.uri = "graph://file/file-needle".into();
+        file.code_path = Some("needle".into());
+        let mut registry = test_registry(vec![
+            Box::new(StaticSource {
+                name: "code",
+                entries: vec![file],
+            }),
+            Box::new(CompactCodeSource {
+                candidates: Arc::new(vec![compact_candidate("e057beef", "needle")]),
+            }),
+        ]);
+
+        let results = registry.query(CompletionScope::PreSession, Path::new("."), "needle", 10);
+
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].kind, MentionKind::CodeFile);
+        assert_eq!(results[1].kind, MentionKind::CodeSymbol);
+    }
+
+    #[test]
     fn empty_query_keeps_most_recent_issues_first() {
         let mut registry = test_registry(vec![Box::new(IssueMentionSource::new(vec![
             issue("bd-5", "Issue 5", None),
@@ -3486,27 +3947,27 @@ mod tests {
         let base = vec![
             RankedMentionRef {
                 rank: 95,
-                entry: &entries[0],
+                value: RankedMentionValue::Entry(&entries[0]),
             },
             RankedMentionRef {
                 rank: 100,
-                entry: &entries[1],
+                value: RankedMentionValue::Entry(&entries[1]),
             },
             RankedMentionRef {
                 rank: 86,
-                entry: &entries[2],
+                value: RankedMentionValue::Entry(&entries[2]),
             },
             RankedMentionRef {
                 rank: 88,
-                entry: &entries[3],
+                value: RankedMentionValue::Entry(&entries[3]),
             },
             RankedMentionRef {
                 rank: 45,
-                entry: &entries[4],
+                value: RankedMentionValue::Entry(&entries[4]),
             },
             RankedMentionRef {
                 rank: 0,
-                entry: &entries[5],
+                value: RankedMentionValue::Entry(&entries[5]),
             },
         ];
         let max_rank = base.iter().map(|mention| mention.rank).max().unwrap_or(0);
@@ -3535,14 +3996,19 @@ mod tests {
 
         let mut expected = base.clone();
         expected.sort_by(|a, b| typed_query_cmp(a, b, max_rank));
-        let expected_ids: Vec<String> =
-            expected.iter().map(|item| item.entry.uri.clone()).collect();
+        let expected_ids: Vec<String> = expected
+            .iter()
+            .map(|item| item.stable_key().to_owned())
+            .collect();
 
         for shift in 0..base.len() {
             let mut shuffled = base.clone();
             shuffled.rotate_left(shift);
             shuffled.sort_by(|a, b| typed_query_cmp(a, b, max_rank));
-            let ids: Vec<String> = shuffled.iter().map(|item| item.entry.uri.clone()).collect();
+            let ids: Vec<String> = shuffled
+                .iter()
+                .map(|item| item.stable_key().to_owned())
+                .collect();
             assert_eq!(ids, expected_ids);
         }
     }

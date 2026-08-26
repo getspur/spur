@@ -565,8 +565,15 @@ impl MentionQuerySource {
     ) -> Vec<RetrievalRow> {
         use crate::mentions::MentionKind;
 
-        let hits = result.entries;
-        if let Some(slot) = result.open_slot {
+        let crate::mentions::registry::MentionQueryResult {
+            entries: hits,
+            code_payloads,
+            open_slot,
+        } = result;
+        self.registry
+            .borrow_mut()
+            .install_query_code_payloads(code_payloads);
+        if let Some(slot) = open_slot {
             let Some(entry) = hits.first().cloned() else {
                 self.last_slot_pick = None;
                 self.last_hits.clear();
@@ -839,6 +846,11 @@ impl QuerySource for MentionQuerySource {
         }
 
         let hit = self.last_hits.get(row_idx)?;
+        if hit.kind == MentionKind::CodeSymbol {
+            self.registry
+                .borrow_mut()
+                .retain_code_payload_on_accept(&hit.uri);
+        }
         let text = hit
             .atom_text
             .clone()
@@ -1608,9 +1620,31 @@ mod tests {
 
     #[test]
     fn mention_background_rows_ignore_stale_generations() {
-        let registry = Rc::new(RefCell::new(MentionRegistry::new()));
+        struct EmptyCodeSource;
+
+        impl crate::mentions::MentionSource for EmptyCodeSource {
+            fn build(
+                &mut self,
+                _cwd: &std::path::Path,
+            ) -> anyhow::Result<Vec<crate::mentions::MentionEntry>> {
+                Ok(Vec::new())
+            }
+
+            fn name(&self) -> &'static str {
+                "code_graph"
+            }
+        }
+
+        let mut registry = MentionRegistry::from_sources_for_test(vec![Box::new(EmptyCodeSource)]);
+        let _ = registry.query(
+            crate::mentions::CompletionScope::PreSession,
+            std::path::Path::new("."),
+            "",
+            1,
+        );
+        let registry = Rc::new(RefCell::new(registry));
         let mut source = MentionQuerySource::new(
-            registry,
+            Rc::clone(&registry),
             crate::mentions::CompletionScope::PreSession,
             std::path::PathBuf::from("."),
             0,
@@ -1628,11 +1662,46 @@ mod tests {
             entry.kind = crate::mentions::MentionKind::Issue;
             entry.uri = format!("beads://{display}");
             entry.display = display.to_string();
+            let code_payloads = (display == "alpha-stale")
+                .then(|| {
+                    let uri = "graph://symbol/stale".to_owned();
+                    vec![(
+                        uri.clone(),
+                        std::sync::Arc::new(spur_graph::CodeMentionPayload {
+                            authoritative: spur_graph::CodeMentionAuthoritative {
+                                display: "stale".to_owned(),
+                                uri,
+                                kind: spur_graph::CodeMentionKind::Symbol,
+                                file_path: "src/lib.rs".to_owned(),
+                                validation: spur_graph::CodeMentionValidationSpec::SymbolRange {
+                                    path: "src/lib.rs".to_owned(),
+                                    line_range: [1, 1],
+                                    byte_range: [0, 1],
+                                    entity_name: "stale".to_owned(),
+                                    anchor_hash: "anchor".to_owned(),
+                                },
+                            },
+                            extraction_hints: spur_graph::CodeMentionExtractionHints {
+                                line_range: Some([1, 1]),
+                                byte_range: Some([0, 1]),
+                                symbol_kind: Some("fn".to_owned()),
+                                entity_name: Some("stale".to_owned()),
+                                qualified_name: "stale".to_owned(),
+                            },
+                            display_meta: spur_graph::CodeMentionDisplayMeta {
+                                enclosing_scope: None,
+                                graph_index_version: "test".to_owned(),
+                            },
+                        }),
+                    )]
+                })
+                .unwrap_or_default();
             MentionQueryResponse {
                 generation,
                 result: MentionQueryWorkerResult::Scored(
                     crate::mentions::registry::MentionQueryResult {
                         entries: vec![entry],
+                        code_payloads,
                         open_slot: None,
                     },
                 ),
@@ -1648,6 +1717,13 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert!(rows[0].primary.contains("omega-current"));
         assert!(!rows[0].primary.contains("alpha-stale"));
+        assert!(
+            registry
+                .borrow()
+                .lookup_code_payload("graph://symbol/stale")
+                .is_none(),
+            "stale generation must not install hydrated payloads"
+        );
     }
 
     #[test]

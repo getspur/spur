@@ -5,6 +5,16 @@ use super::issue_source::IssueMentionDescriptor;
 use spur_acp::AgentKind;
 use spur_graph::CodeMentionPayload;
 
+#[derive(Debug, Clone)]
+pub struct CodeMentionCandidate {
+    pub(crate) stable_symbol_id: Box<str>,
+    pub(crate) entity_name: Box<str>,
+    pub(crate) file_path: Arc<str>,
+    pub(crate) line_range: [usize; 2],
+    pub(crate) symbol_kind: Arc<str>,
+    pub(crate) enclosing_scope: Option<Arc<str>>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MentionKind {
     File,
@@ -87,6 +97,17 @@ pub trait MentionSource: Send {
 
     fn code_payloads(&self) -> &[(String, Arc<CodeMentionPayload>)] {
         &[]
+    }
+
+    fn code_candidates(&self) -> Arc<Vec<CodeMentionCandidate>> {
+        Arc::default()
+    }
+
+    fn hydrate_code_payloads(
+        &self,
+        _stable_symbol_ids: &[String],
+    ) -> anyhow::Result<Vec<(String, Arc<CodeMentionPayload>)>> {
+        Ok(Vec::new())
     }
 
     fn datasource_hints(&self) -> &[(String, Arc<String>)] {

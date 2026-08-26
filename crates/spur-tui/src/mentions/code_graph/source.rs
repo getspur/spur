@@ -1,14 +1,16 @@
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
 
-use crate::mentions::entry::{MentionEntry, MentionKind, MentionSource};
+use crate::mentions::entry::{CodeMentionCandidate, MentionEntry, MentionKind, MentionSource};
 use spur_graph::{
     load_artifact_slim, read_artifact_header_parquet, resolve_artifact_location,
     CodeMentionAuthoritative, CodeMentionDisplayMeta, CodeMentionExtractionHints, CodeMentionKind,
     CodeMentionPayload, CodeMentionValidationSpec, GraphFileArtifact, GraphIndexArtifact,
-    GraphSymbolArtifact, ResolvedArtifact, CODE_FILE_URI_PREFIX, CODE_SYMBOL_URI_PREFIX,
+    GraphQueryClient, GraphSymbolArtifact, ParquetClient, ResolvedArtifact, SearchFilters,
+    SearchMode, SearchOptions, SearchSymbol, CODE_FILE_URI_PREFIX, CODE_SYMBOL_URI_PREFIX,
 };
 
 struct CodeGraphCacheKey {
@@ -24,8 +26,21 @@ pub struct CodeGraphMentionSource {
     cache_key: Option<CodeGraphCacheKey>,
     cached_entries: Vec<MentionEntry>,
     payloads: Vec<(String, Arc<CodeMentionPayload>)>,
+    candidates: Arc<Vec<CodeMentionCandidate>>,
+    payload_backend: Option<CodePayloadBackend>,
     #[cfg(test)]
     reload_count: usize,
+}
+
+enum CodePayloadBackend {
+    Parquet {
+        client: Box<ParquetClient>,
+        graph_index_version: String,
+    },
+    InMemory {
+        symbols: HashMap<String, GraphSymbolArtifact>,
+        graph_index_version: String,
+    },
 }
 
 impl CodeGraphMentionSource {
@@ -36,6 +51,8 @@ impl CodeGraphMentionSource {
             cache_key: None,
             cached_entries: Vec::new(),
             payloads: Vec::new(),
+            candidates: Arc::default(),
+            payload_backend: None,
             #[cfg(test)]
             reload_count: 0,
         }
@@ -51,9 +68,19 @@ impl CodeGraphMentionSource {
             cache_key: None,
             cached_entries: Vec::new(),
             payloads: Vec::new(),
+            candidates: Arc::default(),
+            payload_backend: None,
             #[cfg(test)]
             reload_count: 0,
         }
+    }
+
+    fn clear_loaded_state(&mut self) {
+        self.cache_key = None;
+        self.cached_entries.clear();
+        self.payloads.clear();
+        self.candidates = Arc::default();
+        self.payload_backend = None;
     }
 }
 
@@ -81,9 +108,7 @@ impl MentionSource for CodeGraphMentionSource {
                         explicit_override = explicit_override.as_deref(),
                         "code graph mention source disabled; no readable artifact found"
                     );
-                    self.cache_key = None;
-                    self.cached_entries.clear();
-                    self.payloads.clear();
+                    self.clear_loaded_state();
                     return Ok(Vec::new());
                 }
             };
@@ -127,19 +152,17 @@ impl MentionSource for CodeGraphMentionSource {
         );
         let _guard = span.enter();
 
-        let artifact = match tracing::debug_span!("load_artifact")
-            .in_scope(|| load_artifact_slim(&resolved.path))
+        let loaded = match tracing::debug_span!("load_code_mention_index")
+            .in_scope(|| load_code_index(&resolved.path))
         {
-            Ok(artifact) => artifact,
+            Ok(loaded) => loaded,
             Err(error) => {
                 tracing::warn!(
                     error = %error,
                     path = %resolved.path.display(),
                     "code graph mention source disabled for unreadable artifact"
                 );
-                self.cache_key = None;
-                self.cached_entries.clear();
-                self.payloads.clear();
+                self.clear_loaded_state();
                 return Ok(Vec::new());
             }
         };
@@ -149,8 +172,8 @@ impl MentionSource for CodeGraphMentionSource {
             self.reload_count += 1;
         }
 
-        let content_hash = Some(artifact.graph_content_hash.clone());
-        for diagnostic in &artifact.diagnostics {
+        let content_hash = Some(loaded.content_hash.clone());
+        for diagnostic in &loaded.diagnostics {
             tracing::warn!(
                 diagnostic = diagnostic.as_str(),
                 path = %resolved.path.display(),
@@ -159,13 +182,17 @@ impl MentionSource for CodeGraphMentionSource {
         }
 
         let mut payloads = Vec::new();
-        let entries = tracing::debug_span!("materialize_entries")
-            .in_scope(|| entries_and_payloads(artifact, &mut payloads));
+        let entries = tracing::debug_span!("materialize_entries").in_scope(|| {
+            file_entries_and_payloads(loaded.files, &loaded.graph_index_version, &mut payloads)
+        });
         self.payloads = payloads;
+        self.candidates = Arc::new(compact_candidates(loaded.candidates));
+        self.payload_backend = Some(loaded.payload_backend);
         self.cached_entries = entries.clone();
         tracing::info!(
             path = %resolved.path.display(),
             entries = entries.len(),
+            candidates = self.candidates.len(),
             payloads = self.payloads.len(),
             "code graph mention source reloaded"
         );
@@ -181,6 +208,47 @@ impl MentionSource for CodeGraphMentionSource {
     fn code_payloads(&self) -> &[(String, Arc<CodeMentionPayload>)] {
         &self.payloads
     }
+
+    fn code_candidates(&self) -> Arc<Vec<CodeMentionCandidate>> {
+        Arc::clone(&self.candidates)
+    }
+
+    fn hydrate_code_payloads(
+        &self,
+        stable_symbol_ids: &[String],
+    ) -> anyhow::Result<Vec<(String, Arc<CodeMentionPayload>)>> {
+        let Some(backend) = &self.payload_backend else {
+            return Ok(Vec::new());
+        };
+        let (symbols, graph_index_version) = match backend {
+            CodePayloadBackend::Parquet {
+                client,
+                graph_index_version,
+            } => (
+                client.symbols_by_stable_ids(stable_symbol_ids)?,
+                graph_index_version.as_str(),
+            ),
+            CodePayloadBackend::InMemory {
+                symbols,
+                graph_index_version,
+            } => (
+                stable_symbol_ids
+                    .iter()
+                    .filter_map(|stable_id| symbols.get(stable_id).cloned())
+                    .collect(),
+                graph_index_version.as_str(),
+            ),
+        };
+        Ok(symbols
+            .into_iter()
+            .map(|symbol| {
+                let uri = format!("{}{}", CODE_SYMBOL_URI_PREFIX, symbol.stable_symbol_id);
+                let display = symbol.entity_name.clone();
+                let payload = symbol_payload(&symbol, &uri, &display, graph_index_version);
+                (uri, Arc::new(payload))
+            })
+            .collect())
+    }
 }
 
 fn read_resolved_content_hash(resolved: &ResolvedArtifact) -> anyhow::Result<Option<String>> {
@@ -189,19 +257,114 @@ fn read_resolved_content_hash(resolved: &ResolvedArtifact) -> anyhow::Result<Opt
     ))
 }
 
-fn entries_and_payloads(
-    artifact: GraphIndexArtifact,
+struct LoadedCodeIndex {
+    files: Vec<GraphFileArtifact>,
+    candidates: Vec<SearchSymbol>,
+    payload_backend: CodePayloadBackend,
+    graph_index_version: String,
+    content_hash: String,
+    diagnostics: Vec<String>,
+}
+
+fn load_code_index(path: &Path) -> anyhow::Result<LoadedCodeIndex> {
+    if path.is_dir() {
+        let client = ParquetClient::open(path)?;
+        let manifest = client.manifest();
+        let graph_index_version = manifest.graph_index_version.clone();
+        let content_hash = manifest.graph_content_hash.clone();
+        let files = client.files()?;
+        let diagnostics = client.diagnostics()?;
+        let candidates = client
+            .search_symbols(&SearchOptions {
+                query: String::new(),
+                mode: SearchMode::Substring,
+                filters: SearchFilters::default(),
+                limit: usize::MAX,
+            })?
+            .candidates;
+        return Ok(LoadedCodeIndex {
+            files,
+            candidates,
+            payload_backend: CodePayloadBackend::Parquet {
+                client: Box::new(client),
+                graph_index_version: graph_index_version.clone(),
+            },
+            graph_index_version,
+            content_hash,
+            diagnostics,
+        });
+    }
+
+    let artifact: GraphIndexArtifact = load_artifact_slim(path)?;
+    let graph_index_version = artifact.header.graph_index_version.clone();
+    let content_hash = artifact.graph_content_hash.clone();
+    let diagnostics = artifact.diagnostics.clone();
+    let candidates = artifact.symbols.iter().map(SearchSymbol::from).collect();
+    let symbols = artifact
+        .symbols
+        .into_iter()
+        .map(|symbol| (symbol.stable_symbol_id.clone(), symbol))
+        .collect();
+    Ok(LoadedCodeIndex {
+        files: artifact.files,
+        candidates,
+        payload_backend: CodePayloadBackend::InMemory {
+            symbols,
+            graph_index_version: graph_index_version.clone(),
+        },
+        graph_index_version,
+        content_hash,
+        diagnostics,
+    })
+}
+
+fn compact_candidates(candidates: Vec<SearchSymbol>) -> Vec<CodeMentionCandidate> {
+    let mut interned = HashMap::<String, Arc<str>>::new();
+    let mut compact = candidates
+        .into_iter()
+        .map(|candidate| CodeMentionCandidate {
+            stable_symbol_id: candidate.stable_symbol_id.into_boxed_str(),
+            entity_name: candidate.entity_name.into_boxed_str(),
+            file_path: intern(&mut interned, candidate.file_path),
+            line_range: candidate.line_range,
+            symbol_kind: intern(&mut interned, candidate.symbol_kind),
+            enclosing_scope: candidate
+                .enclosing_scope
+                .map(|scope| intern(&mut interned, scope)),
+        })
+        .collect::<Vec<_>>();
+    compact.sort_by(|left, right| {
+        left.entity_name
+            .len()
+            .cmp(&right.entity_name.len())
+            .then(left.entity_name.cmp(&right.entity_name))
+            .then(left.stable_symbol_id.cmp(&right.stable_symbol_id))
+    });
+    compact
+}
+
+fn intern(interned: &mut HashMap<String, Arc<str>>, value: String) -> Arc<str> {
+    if let Some(existing) = interned.get(&value) {
+        return Arc::clone(existing);
+    }
+    let shared = Arc::<str>::from(value.as_str());
+    interned.insert(value, Arc::clone(&shared));
+    shared
+}
+
+fn file_entries_and_payloads(
+    files: Vec<GraphFileArtifact>,
+    graph_index_version: &str,
     payloads: &mut Vec<(String, Arc<CodeMentionPayload>)>,
 ) -> Vec<MentionEntry> {
-    let graph_index_version = artifact.header.graph_index_version;
-    let mut entries = Vec::with_capacity(artifact.files.len() + artifact.symbols.len());
+    let mut entries = Vec::with_capacity(files.len());
 
-    for file in artifact.files {
+    for file in files {
         let uri = format!("{}{}", CODE_FILE_URI_PREFIX, file.stable_file_id);
         let display = file.file_path.clone();
         payloads.push((
             uri.clone(),
-            Arc::new(file_payload(&file, &uri, &display, &graph_index_version)),
+            Arc::new(file_payload(&file, &uri, &display, graph_index_version)),
         ));
         entries.push(MentionEntry {
             section_header: None,
@@ -224,46 +387,44 @@ fn entries_and_payloads(
         });
     }
 
-    for symbol in artifact.symbols {
-        let uri = format!("{}{}", CODE_SYMBOL_URI_PREFIX, symbol.stable_symbol_id);
-        let display = symbol.entity_name.clone();
-        let secondary = symbol_secondary(&symbol);
-        let code_scope = symbol.enclosing_scope.clone();
-        let atom_text = code_scope
-            .as_ref()
-            .filter(|scope| !scope.is_empty())
-            .map(|scope| format!("@{}::{}", scope, display));
-        payloads.push((
-            uri.clone(),
-            Arc::new(symbol_payload(
-                &symbol,
-                &uri,
-                &display,
-                &graph_index_version,
-            )),
-        ));
-        entries.push(MentionEntry {
-            section_header: None,
-            kind: MentionKind::CodeSymbol,
-            uri,
-            display,
-            secondary: Some(secondary),
-            agent: None,
-            model: None,
-            effort: None,
-            worker_kind: None,
-            worker_cli_identity: None,
-            code_path: Some(symbol.file_path.clone()),
-            code_scope,
-            tag: Some(format!("symbol:{}", symbol.symbol_kind)),
-            search_text: Some(symbol_search_text(&symbol)),
-            atom_text,
-            unconsumed_suffix: None,
-            issue_preview: None,
-        });
-    }
-
     entries
+}
+
+pub(crate) fn entry_for_candidate(candidate: &CodeMentionCandidate) -> MentionEntry {
+    let display = candidate.entity_name.to_string();
+    let code_scope = candidate
+        .enclosing_scope
+        .as_ref()
+        .map(|scope| scope.to_string());
+    let atom_text = code_scope
+        .as_ref()
+        .filter(|scope| !scope.is_empty())
+        .map(|scope| format!("@{}::{}", scope, display));
+    MentionEntry {
+        section_header: None,
+        kind: MentionKind::CodeSymbol,
+        uri: format!("{}{}", CODE_SYMBOL_URI_PREFIX, candidate.stable_symbol_id),
+        display: display.clone(),
+        secondary: Some(symbol_secondary_fields(
+            &display,
+            candidate.file_path.as_ref(),
+            candidate.line_range,
+            candidate.symbol_kind.as_ref(),
+            code_scope.as_deref(),
+        )),
+        agent: None,
+        model: None,
+        effort: None,
+        worker_kind: None,
+        worker_cli_identity: None,
+        code_path: Some(candidate.file_path.to_string()),
+        code_scope,
+        tag: Some(format!("symbol:{}", candidate.symbol_kind)),
+        search_text: None,
+        atom_text,
+        unconsumed_suffix: None,
+        issue_preview: None,
+    }
 }
 
 fn file_payload(
@@ -330,30 +491,35 @@ fn symbol_payload(
     }
 }
 
-fn symbol_secondary(symbol: &GraphSymbolArtifact) -> String {
-    if let Some(scope) = &symbol.enclosing_scope {
+fn symbol_secondary_fields(
+    entity_name: &str,
+    file_path: &str,
+    line_range: [usize; 2],
+    symbol_kind: &str,
+    enclosing_scope: Option<&str>,
+) -> String {
+    if let Some(scope) = enclosing_scope {
         format!(
             "{}::{} · {}:{} ({})",
-            scope, symbol.entity_name, symbol.file_path, symbol.line_range[0], symbol.symbol_kind
+            scope, entity_name, file_path, line_range[0], symbol_kind
         )
     } else {
         format!(
             "{} · {}:{} ({})",
-            symbol.entity_name, symbol.file_path, symbol.line_range[0], symbol.symbol_kind
+            entity_name, file_path, line_range[0], symbol_kind
         )
     }
 }
 
-fn symbol_search_text(symbol: &GraphSymbolArtifact) -> String {
-    let mut text = format!(
-        "{} {} {}",
-        symbol.entity_name, symbol.symbol_kind, symbol.file_path
-    );
-    if let Some(scope) = &symbol.enclosing_scope {
-        text.push(' ');
-        text.push_str(scope);
-    }
-    text
+#[cfg(test)]
+fn symbol_secondary(symbol: &GraphSymbolArtifact) -> String {
+    symbol_secondary_fields(
+        &symbol.entity_name,
+        &symbol.file_path,
+        symbol.line_range,
+        &symbol.symbol_kind,
+        symbol.enclosing_scope.as_deref(),
+    )
 }
 
 #[cfg(test)]
@@ -500,6 +666,75 @@ mod tests {
             .expect("second payload");
 
         assert!(Arc::ptr_eq(&first_payload, second_payload));
+    }
+
+    #[test]
+    fn parquet_build_keeps_symbols_compact_and_hydrates_only_selected_ids() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut artifact = graph_artifact("file-1", "src/lib.rs", "hash-compact");
+        artifact.symbols = vec![
+            GraphSymbolArtifact {
+                stable_symbol_id: "symbol-alpha".to_owned(),
+                file_path: "src/lib.rs".to_owned(),
+                byte_range: [0, 10],
+                line_range: [1, 1],
+                entity_name: "alpha".to_owned(),
+                qualified_name: "alpha".to_owned(),
+                symbol_kind: "fn".to_owned(),
+                anchor_hash: "anchor-alpha".to_owned(),
+                enclosing_scope: None,
+            },
+            GraphSymbolArtifact {
+                stable_symbol_id: "symbol-beta".to_owned(),
+                file_path: "src/lib.rs".to_owned(),
+                byte_range: [11, 20],
+                line_range: [2, 2],
+                entity_name: "beta".to_owned(),
+                qualified_name: "module::beta".to_owned(),
+                symbol_kind: "fn".to_owned(),
+                anchor_hash: "anchor-beta".to_owned(),
+                enclosing_scope: Some("module".to_owned()),
+            },
+        ];
+        artifact.symbol_node_ids = vec![NodeId(2), NodeId(3)];
+        artifact.file_manifests[0].node_ids = vec![NodeId(1), NodeId(2), NodeId(3)];
+        let parquet_dir =
+            write_artifact_parquet(&artifact, temp.path(), WriteOptions::default(), Vec::new())
+                .expect("write parquet artifact");
+        let mut source = CodeGraphMentionSource::new(&parquet_dir);
+
+        let entries = source.build(Path::new(".")).expect("build compact index");
+        let candidates = source.code_candidates();
+        let payloads = source
+            .hydrate_code_payloads(&["symbol-beta".to_owned()])
+            .expect("hydrate selected symbol");
+
+        assert_eq!(
+            entries.len(),
+            1,
+            "only the file row is materialized eagerly"
+        );
+        assert_eq!(entries[0].kind, MentionKind::CodeFile);
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(
+            source.code_payloads().len(),
+            1,
+            "only the file payload is eager"
+        );
+        assert_eq!(payloads.len(), 1);
+        assert_eq!(payloads[0].0, "graph://symbol/symbol-beta");
+        assert_eq!(
+            payloads[0].1.extraction_hints.qualified_name,
+            "module::beta"
+        );
+        assert!(payloads
+            .iter()
+            .all(|(uri, _)| uri != "graph://symbol/symbol-alpha"));
+
+        let _ = source.build(Path::new(".")).expect("reuse compact index");
+        let cached_candidates = source.code_candidates();
+        assert!(Arc::ptr_eq(&candidates, &cached_candidates));
+        assert_eq!(source.reload_count, 1);
     }
 
     #[test]

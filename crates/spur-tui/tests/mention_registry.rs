@@ -472,6 +472,50 @@ fn empty_query_bounds_code_graph_rows() {
 }
 
 #[test]
+fn typed_query_hydrates_only_returned_symbol_payloads() {
+    let tmp = tempfile::tempdir().unwrap();
+    let symbols: Vec<_> = (0..30)
+        .map(|idx| {
+            serde_json::json!({
+                "stable_symbol_id": format!("symbol-needle-{idx:02}"),
+                "file_path": "crates/example/src/lib.rs",
+                "byte_range": [idx, idx + 1],
+                "line_range": [idx + 1, idx + 1],
+                "entity_name": format!("Needle{idx:02}"),
+                "qualified_name": format!("module::Needle{idx:02}"),
+                "symbol_kind": "fn",
+                "anchor_hash": format!("anchor-{idx:02}"),
+                "enclosing_scope": "module"
+            })
+        })
+        .collect();
+    let graph_path = write_graph_fixture(
+        tmp.path(),
+        serde_json::json!({
+            "header": { "graph_index_version": TEST_GRAPH_INDEX_VERSION },
+            "files": [],
+            "symbols": symbols
+        }),
+    );
+    let mut reg = MentionRegistry::for_direct_session().with_code_graph(graph_path);
+    let sid = SessionId::new();
+
+    let hits = reg.query(CompletionScope::Session(&sid), tmp.path(), "Needle", 1);
+    let selected = hits
+        .iter()
+        .find(|hit| hit.kind == MentionKind::CodeSymbol)
+        .expect("one compact symbol result");
+
+    assert_eq!(hits.len(), 1);
+    assert!(reg.lookup_code_payload(&selected.uri).is_some());
+    assert!(
+        reg.lookup_code_payload("graph://symbol/symbol-needle-29")
+            .is_none(),
+        "a symbol outside the query limit must not be hydrated"
+    );
+}
+
+#[test]
 fn worker_and_issue_rows_remain_visible_for_matching_typed_queries() {
     let graph_path = graph_fixture_path();
     let mut reg = MentionRegistry::for_brain_session(vec![WorkerMentionDescriptor {
@@ -847,7 +891,7 @@ fn pruning_code_payloads_after_atom_delete_removes_orphans() {
 }
 
 #[test]
-fn cache_rebuild_payload_loss_and_submit_prune_are_observable() {
+fn cache_rebuild_rehydrates_only_returned_payloads_and_submit_retains_selected() {
     let graph_path = graph_fixture_path();
     let mut reg = MentionRegistry::for_direct_session().with_code_graph(graph_path);
     let sid = SessionId::new();
@@ -868,14 +912,14 @@ fn cache_rebuild_payload_loss_and_submit_prune_are_observable() {
         kept.display.clone(),
     );
     assert!(reg.lookup_code_payload(&kept.uri).is_some());
-    assert!(reg.lookup_code_payload(orphan_uri).is_some());
+    assert!(reg.lookup_code_payload(orphan_uri).is_none());
 
     reg.clear_cache();
     assert!(reg.lookup_code_payload(&kept.uri).is_none());
 
     let _ = reg.query(CompletionScope::Session(&sid), tmp.path(), "Graph", 10);
     assert!(reg.lookup_code_payload(&kept.uri).is_some());
-    assert!(reg.lookup_code_payload(orphan_uri).is_some());
+    assert!(reg.lookup_code_payload(orphan_uri).is_none());
 
     reg.retain_code_payloads_for_uris(
         bar.protected_ranges()

@@ -38,10 +38,10 @@ use crate::{
     artifact_from_facts, build_facts_for_paths, compare_symbols, find_callee_edges,
     find_caller_edges, internal_unbounded_search_options, limited_search_result,
     read_artifact_header_parquet, resolve_selector, search_symbols, ChangeKind,
-    CommitIndexArtifact, GraphArtifactManifest, GraphEdgeArtifact, GraphFileManifestEntry,
-    GraphIndexArtifact, GraphIndexHeader, GraphSymbolArtifact, OwnedCalleeRecord,
-    OwnedCallerRecord, RelationKind, SearchOptions, SearchResult, SearchSymbol, SelectorResolution,
-    SnapshotKey, CODE_SYMBOL_URI_PREFIX,
+    CommitIndexArtifact, GraphArtifactManifest, GraphEdgeArtifact, GraphFileArtifact,
+    GraphFileManifestEntry, GraphIndexArtifact, GraphIndexHeader, GraphSymbolArtifact,
+    OwnedCalleeRecord, OwnedCallerRecord, RelationKind, SearchOptions, SearchResult, SearchSymbol,
+    SelectorResolution, SnapshotKey, CODE_SYMBOL_URI_PREFIX,
 };
 use crate::{CandidateRow, NodeId, ResolvedSymbol, SearchFilters, SearchMode};
 
@@ -915,6 +915,8 @@ const SEARCH_COLUMNS: [&str; 8] = [
 const SEARCH_PREDICATE_COLUMNS: [&str; 4] =
     ["entity_name", "qualified_name", "file_path", "symbol_kind"];
 const FILE_OID_COLUMNS: [&str; 2] = ["path", "content_oid"];
+const FILE_COLUMNS: [&str; 2] = ["stable_file_id", "file_path"];
+const DIAGNOSTIC_COLUMNS: [&str; 1] = ["message"];
 const FILE_MANIFEST_COLUMNS: [&str; 4] = ["stable_file_id", "path", "content_oid", "node_ids"];
 const SYMBOL_COLUMNS: [&str; 11] = [
     "stable_symbol_id",
@@ -1065,6 +1067,63 @@ impl ParquetClient {
             Ok(rows) => Ok(rows.clone()),
             Err(error) => Err(anyhow::Error::new(error.clone())),
         }
+    }
+
+    /// Read the complete graph-file projection without loading symbols or edges.
+    pub fn files(&self) -> anyhow::Result<Vec<GraphFileArtifact>> {
+        let batches = read_projected_batches(
+            &self.dir.join("files.parquet"),
+            &self.metadata_cache,
+            FILE_COLUMNS,
+        )?;
+        let mut files = Vec::new();
+        for batch in batches {
+            let stable_file_id = string_array_by_name(&batch, "stable_file_id")?;
+            let file_path = string_array_by_name(&batch, "file_path")?;
+            files.reserve(batch.num_rows());
+            for row in 0..batch.num_rows() {
+                files.push(GraphFileArtifact {
+                    stable_file_id: required_string_value(stable_file_id, row, "stable_file_id")?
+                        .to_owned(),
+                    file_path: required_string_value(file_path, row, "file_path")?.to_owned(),
+                });
+            }
+        }
+        Ok(files)
+    }
+
+    /// Read graph-build diagnostics without loading any graph data table.
+    pub fn diagnostics(&self) -> anyhow::Result<Vec<String>> {
+        if self.manifest.row_counts.diagnostics == 0 {
+            return Ok(Vec::new());
+        }
+        let batches = read_projected_batches(
+            &self.dir.join("diagnostics.parquet"),
+            &self.metadata_cache,
+            DIAGNOSTIC_COLUMNS,
+        )?;
+        let mut diagnostics = Vec::with_capacity(self.manifest.row_counts.diagnostics);
+        for batch in batches {
+            let message = string_array_by_name(&batch, "message")?;
+            diagnostics.reserve(batch.num_rows());
+            for row in 0..batch.num_rows() {
+                diagnostics.push(required_string_value(message, row, "message")?.to_owned());
+            }
+        }
+        Ok(diagnostics)
+    }
+
+    /// Hydrate full symbols for a bounded set of stable IDs in one pruned Parquet query.
+    pub fn symbols_by_stable_ids(
+        &self,
+        stable_ids: &[String],
+    ) -> anyhow::Result<Vec<GraphSymbolArtifact>> {
+        let requested = stable_ids.iter().cloned().collect::<HashSet<_>>();
+        let mut symbols = self.symbols_by_ids(&requested)?;
+        Ok(stable_ids
+            .iter()
+            .filter_map(|stable_id| symbols.remove(stable_id))
+            .collect())
     }
 
     fn search_symbols_inner(&self, opts: &SearchOptions) -> anyhow::Result<SearchResult> {
@@ -2652,6 +2711,43 @@ mod tests {
         assert_eq!(result.total_matches, 202);
         assert_eq!(result.candidates.len(), 202);
         assert!(!result.truncated);
+    }
+
+    #[test]
+    fn parquet_client_projects_graph_files_and_batches_symbol_hydration() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let mut graph = artifact(vec![symbol("sym-a", "alpha"), symbol("sym-b", "beta")]);
+        graph.symbol_node_ids = vec![NodeId(1), NodeId(2)];
+        graph.files = vec![GraphFileArtifact {
+            stable_file_id: "file-lib".to_owned(),
+            file_path: "src/lib.rs".to_owned(),
+        }];
+        graph.file_node_ids = vec![NodeId(3)];
+        graph.file_manifests = vec![GraphFileManifestEntry {
+            stable_file_id: "file-lib".to_owned(),
+            path: "src/lib.rs".to_owned(),
+            content_oid: "content-lib".to_owned(),
+            node_ids: vec![NodeId(1), NodeId(2)],
+        }];
+        graph.diagnostics = vec!["fixture extraction warning".to_owned()];
+        let parquet_dir =
+            write_artifact_parquet(&graph, tempdir.path(), WriteOptions::default(), Vec::new())
+                .expect("write parquet artifact");
+        let client = ParquetClient::open(&parquet_dir).expect("open parquet client");
+
+        let files = client.files().expect("project graph files");
+        let diagnostics = client.diagnostics().expect("project diagnostics");
+        let symbols = client
+            .symbols_by_stable_ids(&["sym-b".to_owned(), "missing".to_owned()])
+            .expect("hydrate selected symbols in one batch");
+
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].stable_file_id, "file-lib");
+        assert_eq!(files[0].file_path, "src/lib.rs");
+        assert_eq!(diagnostics, vec!["fixture extraction warning"]);
+        assert_eq!(symbols.len(), 1);
+        assert_eq!(symbols[0].stable_symbol_id, "sym-b");
+        assert_eq!(symbols[0].entity_name, "beta");
     }
 
     #[test]
