@@ -5,6 +5,7 @@ use std::fs;
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::path::{Component, Path, PathBuf};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context as _, Result};
@@ -12,9 +13,9 @@ use duckdb::{params, Connection};
 use serde::Deserialize;
 
 use crate::catalog::{
-    attach_postgres_alias, catalog_dsn_with_env_password, ducklake_data_path,
+    attach_postgres_alias, catalog_dsn_with_env_password, ducklake_attach_uri, ducklake_data_path,
     export_frozen_snapshot, gold_table, load_duckdb_extension, postgres_ducklake_write_lock_sql,
-    postgres_metadata_dsn,
+    postgres_metadata_dsn, redact_libpq_secrets, retry_postgres_pause_resume,
 };
 use crate::medallion::SilverManifest;
 
@@ -2089,21 +2090,24 @@ fn load_lance_extension(conn: &Connection) -> Result<()> {
 }
 
 fn attach_ducklake(conn: &Connection, catalog_dsn: &str, data_path: &str) -> Result<()> {
-    let attach_uri = if catalog_dsn.starts_with("ducklake:") {
-        catalog_dsn.to_owned()
-    } else {
-        format!("ducklake:{catalog_dsn}")
-    };
+    let attach_uri = ducklake_attach_uri(catalog_dsn);
 
     // OVERRIDE_DATA_PATH TRUE allows the ATTACH to use a different DATA_PATH
     // than what's stored in the catalog metadata. This is needed for the
     // download-modify-upload pattern where the worker uses a local data path
     // during translate and uploads data files to S3 afterwards.
-    conn.execute_batch(&format!(
-        "ATTACH '{}' AS spur_context (DATA_PATH '{}', OVERRIDE_DATA_PATH TRUE, AUTOMATIC_MIGRATION TRUE); USE spur_context;",
-        escape_sql_literal(&attach_uri),
-        escape_sql_literal(data_path)
-    ))
+    retry_postgres_pause_resume(
+        || {
+            conn.execute_batch(&format!(
+                "ATTACH '{}' AS spur_context (DATA_PATH '{}', OVERRIDE_DATA_PATH TRUE, AUTOMATIC_MIGRATION TRUE); USE spur_context;",
+                escape_sql_literal(&attach_uri),
+                escape_sql_literal(data_path)
+            ))
+            .map_err(|error| anyhow!("{}", redact_libpq_secrets(&error.to_string())))
+            .map(|_| ())
+        },
+        thread::sleep,
+    )
     .context("failed to attach DuckLake catalog")
 }
 
@@ -2358,6 +2362,27 @@ mod tests {
         assert!(
             acquire_lock < reserve_generation,
             "Postgres generation reservation must remain inside the publish lock"
+        );
+    }
+
+    #[test]
+    fn translate_attach_ducklake_retries_pause_resume_errors() {
+        let source = include_str!("translate.rs");
+        let start = source
+            .find("fn attach_ducklake(")
+            .expect("translate attach_ducklake must exist");
+        let body = &source[start..];
+        let end = body
+            .find("\nfn ensure_catalog_schema")
+            .unwrap_or(body.len());
+        let body = &body[..end];
+        assert!(
+            body.contains("ducklake_attach_uri"),
+            "translate DuckLake ATTACH must inject pause-resume connect_timeout via ducklake_attach_uri"
+        );
+        assert!(
+            body.contains("retry_postgres_pause_resume"),
+            "translate DuckLake ATTACH must retry Aurora pause-resume errors"
         );
     }
 

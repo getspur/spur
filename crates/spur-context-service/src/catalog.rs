@@ -660,6 +660,25 @@ fn create_local_data_path_if_needed(path: &str) -> Result<()> {
     Ok(())
 }
 
+/// DuckLake ATTACH URI for a catalog DSN.
+///
+/// Postgres catalogs reuse the solved pause-resume `connect_timeout=30`
+/// (`sol_f9b97ca9d2a94eef` / `sol_1744e36a489a4b49`) so bronze/translate
+/// attach fail-fasts instead of hanging on an unguarded TCP timeout.
+pub(crate) fn ducklake_attach_uri(catalog_dsn: &str) -> String {
+    let rest = catalog_dsn.strip_prefix("ducklake:").unwrap_or(catalog_dsn);
+    if is_postgres_catalog(catalog_dsn) {
+        format!(
+            "ducklake:{}",
+            with_postgres_connect_timeout(rest, POSTGRES_PAUSE_RESUME_CONNECT_TIMEOUT_SECS)
+        )
+    } else if catalog_dsn.starts_with("ducklake:") {
+        catalog_dsn.to_owned()
+    } else {
+        format!("ducklake:{catalog_dsn}")
+    }
+}
+
 fn attach_ducklake(conn: &Connection, catalog_dsn: &str, data_path: &str) -> Result<()> {
     if is_remote_catalog(catalog_dsn) {
         conn.execute_batch(&format!(
@@ -668,16 +687,19 @@ fn attach_ducklake(conn: &Connection, catalog_dsn: &str, data_path: &str) -> Res
         ))
         .context("failed to attach remote DuckLake catalog")
     } else {
-        let attach_uri = if catalog_dsn.starts_with("ducklake:") {
-            catalog_dsn.to_owned()
-        } else {
-            format!("ducklake:{catalog_dsn}")
-        };
-        conn.execute_batch(&format!(
-            "ATTACH '{}' AS spur_context (DATA_PATH '{}'); USE spur_context;",
-            escape_sql_literal(&attach_uri),
-            escape_sql_literal(data_path)
-        ))
+        let attach_uri = ducklake_attach_uri(catalog_dsn);
+        retry_postgres_pause_resume(
+            || {
+                conn.execute_batch(&format!(
+                    "ATTACH '{}' AS spur_context (DATA_PATH '{}'); USE spur_context;",
+                    escape_sql_literal(&attach_uri),
+                    escape_sql_literal(data_path)
+                ))
+                .map_err(|error| anyhow!("{}", redact_libpq_secrets(&error.to_string())))
+                .map(|_| ())
+            },
+            thread::sleep,
+        )
         .context("failed to attach DuckLake catalog")
     }
 }
@@ -1437,7 +1459,7 @@ fn is_postgres_pause_resume_error(error: &str) -> bool {
         || lower.contains("server closed the connection unexpectedly")
 }
 
-fn retry_postgres_pause_resume<T, E>(
+pub(crate) fn retry_postgres_pause_resume<T, E>(
     mut op: impl FnMut() -> std::result::Result<T, E>,
     mut sleep: impl FnMut(Duration),
 ) -> std::result::Result<T, E>
@@ -1460,7 +1482,7 @@ where
     }
 }
 
-fn redact_libpq_secrets(message: &str) -> String {
+pub(crate) fn redact_libpq_secrets(message: &str) -> String {
     let mut redacted = String::with_capacity(message.len());
     let mut rest = message;
     while let Some(idx) = rest.find("password=") {
@@ -1828,6 +1850,67 @@ mod tests {
         assert!(
             !dsn.contains("connect_timeout=30"),
             "explicit connect_timeout must not be overwritten, got `{dsn}`"
+        );
+    }
+
+    #[test]
+    fn ducklake_attach_uri_sets_pause_resume_connect_timeout() {
+        // sol_1744e36a489a4b49 / sol_f9b97ca9d2a94eef: DuckLake ATTACH must
+        // reuse the 30s libpq connect_timeout so bronze lookup fail-fasts
+        // instead of hanging on an unguarded TCP timeout.
+        let uri = ducklake_attach_uri(
+            "postgres:host=aurora.example port=5432 dbname=spur_context user=spur_context sslmode=require",
+        );
+        assert!(
+            uri.starts_with("ducklake:"),
+            "DuckLake ATTACH URI must keep the ducklake: prefix, got `{uri}`"
+        );
+        assert!(
+            uri.contains("connect_timeout=30"),
+            "DuckLake postgres ATTACH must wait 30s per attempt, got `{uri}`"
+        );
+        assert!(uri.contains("host=aurora.example"));
+        assert!(uri.contains("sslmode=require"));
+    }
+
+    #[test]
+    fn ducklake_attach_uri_keeps_existing_connect_timeout() {
+        let uri = ducklake_attach_uri("ducklake:postgres:host=aurora connect_timeout=12");
+        assert!(uri.contains("connect_timeout=12"));
+        assert!(
+            !uri.contains("connect_timeout=30"),
+            "explicit connect_timeout must not be overwritten, got `{uri}`"
+        );
+    }
+
+    #[test]
+    fn ducklake_attach_uri_leaves_sqlite_catalogs_unchanged() {
+        let uri = ducklake_attach_uri("sqlite:/tmp/spur-context.db");
+        assert_eq!(uri, "ducklake:sqlite:/tmp/spur-context.db");
+        assert!(
+            !uri.contains("connect_timeout"),
+            "sqlite catalogs must not gain a postgres connect_timeout, got `{uri}`"
+        );
+    }
+
+    #[test]
+    fn attach_ducklake_retries_pause_resume_errors() {
+        let source = include_str!("catalog.rs");
+        let start = source
+            .find("fn attach_ducklake(")
+            .expect("catalog attach_ducklake must exist");
+        let body = &source[start..];
+        let end = body
+            .find("\nfn attach_frozen_snapshot")
+            .unwrap_or(body.len());
+        let body = &body[..end];
+        assert!(
+            body.contains("ducklake_attach_uri"),
+            "catalog DuckLake ATTACH must inject pause-resume connect_timeout via ducklake_attach_uri"
+        );
+        assert!(
+            body.contains("retry_postgres_pause_resume"),
+            "catalog DuckLake ATTACH must retry Aurora pause-resume errors"
         );
     }
 
