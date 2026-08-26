@@ -1,9 +1,10 @@
-use std::path::Path;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
-use crate::build_facts;
+use crate::GraphFacts;
 
-use super::retrieve::retrieve_task_hits;
-use super::{coverage_milli, MemoryTask, RECALL_K};
+use super::retrieve::{facts_for_task, retrieve_task_hits, RetrievalReport};
+use super::{coverage_milli, recall_at_k, MemoryTask, RECALL_K};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FactVerdict {
@@ -42,12 +43,12 @@ pub fn grade_key_fact(hypothesis: &str, gold: &str) -> FactVerdict {
 }
 
 pub fn extractive_qa(root: &Path, tasks: &[MemoryTask]) -> anyhow::Result<QaReport> {
-    let facts = build_facts(root, None)?.0;
+    let mut cache: HashMap<PathBuf, GraphFacts> = HashMap::new();
     let mut covered = 0u32;
     let mut partial = 0u32;
     let mut miss = 0u32;
     for task in tasks {
-        let hits = retrieve_task_hits(&facts, &task.question);
+        let hits = retrieve_task_hits(facts_for_task(&mut cache, root, task)?, &task.question);
         let context_hits = hits.len().min(RECALL_K);
         debug_assert!(context_hits <= RECALL_K);
         let hypothesis: String = hits
@@ -71,4 +72,48 @@ pub fn extractive_qa(root: &Path, tasks: &[MemoryTask]) -> anyhow::Result<QaRepo
         miss,
         coverage_milli: coverage_milli(covered, partial, n as u32),
     })
+}
+
+pub fn evaluate_tasks(
+    root: &Path,
+    tasks: &[MemoryTask],
+) -> anyhow::Result<(RetrievalReport, QaReport)> {
+    let mut cache: HashMap<PathBuf, GraphFacts> = HashMap::new();
+    let mut total = 0u64;
+    let mut covered = 0u32;
+    let mut partial = 0u32;
+    let mut miss = 0u32;
+    for task in tasks {
+        let hits = retrieve_task_hits(facts_for_task(&mut cache, root, task)?, &task.question);
+        let ids: Vec<&str> = hits.iter().map(|hit| hit.id.as_str()).collect();
+        total += u64::from(recall_at_k(&task.gold_ids, &ids, RECALL_K));
+        let hypothesis: String = hits
+            .iter()
+            .take(RECALL_K)
+            .map(|hit| hit.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        match grade_key_fact(&hypothesis, &task.gold_answer) {
+            FactVerdict::Covered => covered += 1,
+            FactVerdict::Partial => partial += 1,
+            FactVerdict::Miss => miss += 1,
+        }
+    }
+    let n = tasks.len();
+    let mean_recall_milli = if n == 0 { 0 } else { (total / n as u64) as u32 };
+    Ok((
+        RetrievalReport {
+            n,
+            k: RECALL_K,
+            mean_recall_milli,
+        },
+        QaReport {
+            n,
+            k: RECALL_K,
+            covered,
+            partial,
+            miss,
+            coverage_milli: coverage_milli(covered, partial, n as u32),
+        },
+    ))
 }

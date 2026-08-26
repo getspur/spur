@@ -4,11 +4,12 @@
 //! Graphify slice 300, LongMemEval retrieval n=470, Graphify slice 50).
 
 use spur_graph::memory_eval::{
-    coverage_milli, extractive_qa, grade_key_fact, graphify_slice, materialize_locomo,
-    materialize_longmemeval, parse_locomo, parse_longmemeval, recall_at_k, retrieve_seed_expand,
-    EvalSplit, FactVerdict, COVERED_WEIGHT, LME_ABSTENTION, LME_GRAPHIFY_N, LME_OFFICIAL_N,
-    LOCOMO_ADVERSARIAL_CATEGORY, LOCOMO_ADVERSARIAL_COUNT, LOCOMO_GRAPHIFY_N, LOCOMO_OFFICIAL_QA,
-    MISS_WEIGHT, PARTIAL_WEIGHT, RECALL_K,
+    coverage_milli, evaluate_tasks, extractive_qa, grade_key_fact, graphify_slice,
+    materialize_locomo, materialize_longmemeval, parse_locomo, parse_longmemeval, recall_at_k,
+    retrieve_seed_expand, retrieve_task_ids, EvalSplit, FactVerdict, COVERED_WEIGHT,
+    LME_ABSTENTION, LME_GRAPHIFY_N, LME_OFFICIAL_N, LOCOMO_ADVERSARIAL_CATEGORY,
+    LOCOMO_ADVERSARIAL_COUNT, LOCOMO_GRAPHIFY_N, LOCOMO_OFFICIAL_QA, MISS_WEIGHT, PARTIAL_WEIGHT,
+    RECALL_K,
 };
 
 const LOCOMO_FIXTURE: &str = r#"
@@ -134,7 +135,25 @@ fn coverage_milli_uses_graphify_partial_credit() {
     // coverage_milli * total = 1000 * covered + 500 * partial
     assert_eq!(coverage_milli(4, 1, 6), 750);
     // Floor division on the measured LoCoMo official extractive run.
-    assert_eq!(coverage_milli(235, 834, 1536), 424);
+    assert_eq!(coverage_milli(257, 839, 1536), 440);
+    // Floor division on the measured LongMemEval-S official extractive run.
+    assert_eq!(coverage_milli(134, 198, 470), 495);
+}
+
+#[test]
+fn longmemeval_parses_numeric_gold_answer() {
+    let json = r#"
+    [{
+      "question_id": "0a995998",
+      "question": "How many items of clothing do I need to pick up?",
+      "answer": 3,
+      "haystack_session_ids": ["answer_abc"],
+      "haystack_sessions": [[{"role": "user", "content": "I need to pick up 3 items."}]],
+      "answer_session_ids": ["answer_abc"]
+    }]
+    "#;
+    let tasks = parse_longmemeval(json, EvalSplit::Official).unwrap();
+    assert_eq!(tasks[0].gold_answer, "3");
 }
 
 #[test]
@@ -188,6 +207,18 @@ fn extractive_qa_covers_gold_from_retrieved_context() {
 }
 
 #[test]
+fn evaluate_tasks_matches_retrieve_and_extractive_qa() {
+    let tasks = parse_locomo(LOCOMO_FIXTURE, EvalSplit::Official).unwrap();
+    let root = tempfile::tempdir().unwrap();
+    materialize_locomo(LOCOMO_FIXTURE, root.path()).unwrap();
+    let retrieve = retrieve_seed_expand(root.path(), &tasks).unwrap();
+    let qa = extractive_qa(root.path(), &tasks).unwrap();
+    let (report, qa2) = evaluate_tasks(root.path(), &tasks).unwrap();
+    assert_eq!(report, retrieve);
+    assert_eq!(qa, qa2);
+}
+
+#[test]
 fn locomo_official_eval_drops_adversarial_count() {
     assert_eq!(LOCOMO_OFFICIAL_QA - LOCOMO_ADVERSARIAL_COUNT, 1540);
     assert_eq!(LME_OFFICIAL_N - LME_ABSTENTION, 470);
@@ -217,6 +248,74 @@ fn longmemeval_materialize_then_retrieve_hits_gold_session() {
     assert!(
         report.mean_recall_milli > 0,
         "expected a gold session hit, got {report:?}"
+    );
+}
+
+const LME_ISOLATION_FIXTURE: &str = r#"
+[
+  {
+    "question_id": "q1_saxophone",
+    "question_type": "single-session-user",
+    "question": "Where is the purple saxophone stored?",
+    "answer": "Reykjavik",
+    "haystack_session_ids": ["s1"],
+    "haystack_sessions": [
+      [{"role": "user", "content": "The purple saxophone is stored in Reykjavik."}]
+    ],
+    "answer_session_ids": ["s1"]
+  },
+  {
+    "question_id": "q2_hiking",
+    "question_type": "single-session-user",
+    "question": "Where is the purple saxophone stored?",
+    "answer": "Reykjavik",
+    "haystack_session_ids": ["s9"],
+    "haystack_sessions": [
+      [{"role": "user", "content": "I went hiking in Oregon. No musical instruments."}]
+    ],
+    "answer_session_ids": ["s9"]
+  }
+]
+"#;
+
+#[test]
+fn longmemeval_retrieve_hits_official_answer_session_ids() {
+    let json = r#"
+    [{
+      "question_id": "e47becba",
+      "question_type": "single-session-user",
+      "question": "What degree did I graduate with?",
+      "answer": "Business Administration",
+      "haystack_session_ids": ["sharegpt_yywfIrx_0", "answer_280352e9"],
+      "haystack_sessions": [
+        [{"role": "user", "content": "Rachel is planning a trip."}],
+        [{"role": "user", "content": "I graduated with a Business Administration degree."}]
+      ],
+      "answer_session_ids": ["answer_280352e9"]
+    }]
+    "#;
+    let tasks = parse_longmemeval(json, EvalSplit::Official).unwrap();
+    let root = tempfile::tempdir().unwrap();
+    materialize_longmemeval(json, root.path()).unwrap();
+    let hits = retrieve_task_ids(root.path(), &tasks[0]).unwrap();
+    assert!(
+        hits.iter().any(|id| id == "answer_280352e9"),
+        "expected official answer session id, got {hits:?}"
+    );
+}
+
+#[test]
+fn longmemeval_retrieve_does_not_leak_across_question_haystacks() {
+    // sol_4dcbe9f970c04f3d: hits.haystack_id must FK-match the queried haystack.
+    // sol_e63aad30cf0e4844: a foreign haystack hit is data_integrity.foreign_key.violation.
+    let tasks = parse_longmemeval(LME_ISOLATION_FIXTURE, EvalSplit::Official).unwrap();
+    assert_eq!(tasks.len(), 2);
+    let root = tempfile::tempdir().unwrap();
+    materialize_longmemeval(LME_ISOLATION_FIXTURE, root.path()).unwrap();
+    let q2_hits = retrieve_task_ids(root.path(), &tasks[1]).unwrap();
+    assert!(
+        !q2_hits.iter().any(|id| id == "s1"),
+        "q2 must not retrieve q1-only gold s1, got {q2_hits:?}"
     );
 }
 
@@ -254,10 +353,15 @@ fn longmemeval_official_from_env() {
         "expected at least the Graphify-sized slice, got {}",
         tasks.len()
     );
+    eprintln!("longmemeval parsed {} tasks", tasks.len());
     let root = tempfile::tempdir().unwrap();
     materialize_longmemeval(&json, root.path()).unwrap();
-    let report = retrieve_seed_expand(root.path(), &tasks).unwrap();
-    eprintln!("longmemeval official {report:?}");
+    eprintln!("longmemeval materialized under {}", root.path().display());
+    let (report, qa) = evaluate_tasks(root.path(), &tasks).unwrap();
+    eprintln!("longmemeval official retrieval {report:?}");
+    eprintln!("longmemeval official extractive qa {qa:?}");
     assert_eq!(report.n, tasks.len());
     assert_eq!(report.k, RECALL_K);
+    assert_eq!(qa.n, tasks.len());
+    assert_eq!(qa.covered + qa.partial + qa.miss, qa.n as u32);
 }

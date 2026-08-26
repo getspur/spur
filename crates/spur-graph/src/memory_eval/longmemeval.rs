@@ -7,7 +7,7 @@ struct LongMemEvalItem {
     question_id: String,
     question: String,
     #[serde(default)]
-    answer: String,
+    answer: serde_json::Value,
     #[serde(default)]
     answer_session_ids: Vec<String>,
 }
@@ -26,7 +26,7 @@ pub fn parse_longmemeval(json: &str, split: EvalSplit) -> anyhow::Result<Vec<Mem
             id: item.question_id,
             question: item.question,
             gold_ids: item.answer_session_ids,
-            gold_answer: item.answer,
+            gold_answer: super::stringify_answer(&item.answer),
         });
     }
     Ok(match split {

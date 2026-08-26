@@ -9,23 +9,37 @@ judge scores Graphify key-fact coverage
 (`coverage = (covered + 0.5 * partial) / total`).
 
 Constants: `sol_5f73941594ed4d15`, `sol_bca716ccfbdb404d`, `sol_805e26de169b45b3`.
+Haystack isolation: `sol_4dcbe9f970c04f3d` (isolated hits pass) /
+`sol_e63aad30cf0e4844` (foreign haystack hit is
+`data_integrity.foreign_key.violation`).
 
 ## Results at a glance
 
-Measured 2026-08-26 on `locomo10.json` SHA-256 `79fa87e90f040813…` (CC BY-NC).
-n=1536 after dropping adversarial category 5 and empty-evidence items
-(1986 − 446 − 4). Reader is extractive, not an LLM.
+Measured 2026-08-26. Reader is extractive, not an LLM. Retrieval is scoped to
+the task haystack (LoCoMo conversation directory; LongMemEval per-question
+directory).
+
+- LoCoMo `locomo10.json` SHA-256 `79fa87e90f040813…` (CC BY-NC). n=1536 after
+  dropping adversarial category 5 and empty-evidence items (1986 − 446 − 4).
+- LongMemEval-S cleaned `longmemeval_s_cleaned.json` SHA-256 `d6f21ea9d60a0d56…`
+  (MIT). n=470 after skipping 30 abstention (`*_abs`) items.
 
 | Suite | Dataset (n) | Metric | spur-graph | Field |
 |---|---|---|---|---|
-| Memory | LoCoMo official (1536) | recall@10 | **0.340** | Graphify graph-expand 0.497 |
-| Memory | LoCoMo official (1536) | extractive coverage | **42.4%** | Graphify LLM QA 45.3% |
+| Memory | LoCoMo official (1536) | recall@10 | **0.398** | Graphify graph-expand 0.497 (n=300) |
+| Memory | LoCoMo official (1536) | extractive coverage | **44.0%** | Graphify LLM QA 45.3% (n=300) |
 | Memory | LoCoMo Graphify-sized (300) | recall@10 | run harness | first 300 non-adversarial IDs |
-| Memory | LongMemEval-S official retrieval (470) | recall@10 | run harness | skip 30 abstention (`*_abs`) |
+| Memory | LongMemEval-S official (470) | recall@10 | **0.663** | Graphify graph-expand 0.844 (n=50) |
+| Memory | LongMemEval-S official (470) | extractive coverage | **49.5%** | Graphify LLM QA 76% (n=50) |
 | Memory | LongMemEval-S Graphify-sized (50) | recall@10 | run harness | first 50 retrieval IDs |
 | Cost | graph build | LLM credits | **0** | markdown + tree-sitter extract |
 
-LoCoMo extractive QA breakdown: covered 235, partial 834, miss 467.
+LoCoMo extractive QA breakdown: covered 257, partial 839, miss 440.
+LongMemEval-S extractive QA breakdown: covered 134, partial 198, miss 138.
+
+Graphify's published LongMemEval row is a 50-question English slice with an LLM
+reader/judge. The official 470 row here is session-level recall plus extractive
+coverage on the full cleaned retrieval split.
 
 ## Harness
 
@@ -37,6 +51,8 @@ ingest sessions → markdown worktree → spur-graph extract → search+expand@1
 - LongMemEval gold: `answer_session_ids` (session-level).
 - Adversarial LoCoMo (category 5) is excluded. LongMemEval abstention is skipped
   for retrieval, matching the official retrieval eval.
+- Hits for a task must come from that task's haystack directory. Mixed-root
+  graphs are not scored.
 
 ## Fairness rules
 
@@ -60,9 +76,17 @@ download the public corpora.
 mkdir -p .spur/memory-eval
 curl -fsSL https://raw.githubusercontent.com/snap-research/locomo/main/data/locomo10.json \
   -o .spur/memory-eval/locomo10.json
-# LongMemEval-S cleaned (MIT): huggingface.co/datasets/xiaowu0162/longmemeval-cleaned
+curl -fL https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned/resolve/main/longmemeval_s_cleaned.json \
+  -o .spur/memory-eval/longmemeval_s_cleaned.json
+
+SPUR_LOCOMO_JSON="$PWD/.spur/memory-eval/locomo10.json" \
+  scripts/spur-cargo test -p spur-graph --release --test memory_eval locomo_official_from_env \
+  -- --ignored --exact --nocapture
+
+SPUR_LONGMEMEVAL_JSON="$PWD/.spur/memory-eval/longmemeval_s_cleaned.json" \
+  scripts/spur-cargo test -p spur-graph --release --test memory_eval longmemeval_official_from_env \
+  -- --ignored --exact --nocapture
 ```
 
-Wire those files through `spur_graph::memory_eval::{parse_locomo, materialize_locomo, retrieve_seed_expand}`
-with `EvalSplit::Official` and `EvalSplit::Graphify`. Fill this table from the
-returned `RetrievalReport`; do not invent cells.
+Fill this table from the printed `RetrievalReport` / `QaReport`; do not invent
+cells.

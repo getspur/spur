@@ -1,7 +1,9 @@
 //! LoCoMo / LongMemEval-S retrieval harness (Phase 1).
 //!
 //! Bounds are from `sol_5f73941594ed4d15` and
-//! `sol_bca716ccfbdb404d`.
+//! `sol_bca716ccfbdb404d`. Haystack isolation: `sol_4dcbe9f970c04f3d`
+//! (isolated hits pass) / `sol_e63aad30cf0e4844` (foreign hit is a
+//! `data_integrity.foreign_key.violation`).
 
 mod locomo;
 mod longmemeval;
@@ -14,8 +16,8 @@ pub use locomo::parse_locomo;
 pub use longmemeval::parse_longmemeval;
 pub use materialize::{materialize_locomo, materialize_longmemeval};
 pub use metrics::{coverage_milli, graphify_slice, recall_at_k};
-pub use qa::{extractive_qa, grade_key_fact, FactVerdict, QaReport};
-pub use retrieve::{retrieve_seed_expand, RetrievalReport};
+pub use qa::{evaluate_tasks, extractive_qa, grade_key_fact, FactVerdict, QaReport};
+pub use retrieve::{retrieve_seed_expand, retrieve_task_ids, RetrievalReport};
 
 /// Graphify / IR recall cutoff. `sol_5f73941594ed4d15`.
 pub const RECALL_K: usize = 10;
@@ -54,4 +56,13 @@ pub struct MemoryTask {
     pub question: String,
     pub gold_ids: Vec<String>,
     pub gold_answer: String,
+}
+
+pub(crate) fn stringify_answer(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(text) => text.clone(),
+        serde_json::Value::Number(number) => number.to_string(),
+        serde_json::Value::Bool(flag) => flag.to_string(),
+        _ => String::new(),
+    }
 }
