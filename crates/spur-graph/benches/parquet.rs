@@ -1,8 +1,10 @@
 use std::cmp::Ordering;
+use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use parquet::file::reader::{FileReader, SerializedFileReader};
 use serde::Deserialize;
 use spur_graph::schema::GRAPH_INDEX_VERSION_TEMPORAL;
 use spur_graph::store::parquet::read_artifact_parquet_slim;
@@ -18,6 +20,9 @@ use spur_graph::{
 struct Baselines {
     fixture_path: String,
 }
+
+const SEARCH_BENCH_ROW_GROUP_ROWS: usize = 16_384;
+const SEARCH_BENCH_ROW_GROUP_COUNT: usize = 8;
 
 fn bench_write_artifact_parquet(c: &mut Criterion) {
     let fixture = load_fixture();
@@ -126,6 +131,45 @@ fn bench_search_symbols_parquet_vs_inmemory(c: &mut Criterion) {
             black_box(result);
         });
     });
+    group.finish();
+}
+
+fn bench_exact_search_row_group_pruning(c: &mut Criterion) {
+    let artifact = search_pruning_benchmark_artifact();
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let parquet_dir = write_artifact_parquet(
+        &artifact,
+        tempdir.path(),
+        WriteOptions::default(),
+        Vec::new(),
+    )
+    .expect("write multi-row-group parquet artifact");
+    let nodes = File::open(parquet_dir.join("nodes.parquet")).expect("open benchmark nodes table");
+    let nodes = SerializedFileReader::new(nodes).expect("read benchmark nodes metadata");
+    assert_eq!(
+        nodes.metadata().num_row_groups(),
+        SEARCH_BENCH_ROW_GROUP_COUNT,
+        "benchmark fixture must exercise the solved row-group count"
+    );
+    let parquet = ParquetClient::open(parquet_dir).expect("open parquet client");
+    let mut group = c.benchmark_group("bench_exact_search_row_group_pruning");
+
+    for (case, query) in [("hit", "target"), ("miss", "definitely_absent")] {
+        let options = SearchOptions {
+            query: query.to_owned(),
+            mode: SearchMode::Exact,
+            filters: SearchFilters::default(),
+            limit: 20,
+        };
+        group.bench_function(case, |b| {
+            b.iter(|| {
+                let result = parquet
+                    .search_symbols(black_box(&options))
+                    .expect("exact parquet search symbols");
+                black_box(result);
+            });
+        });
+    }
     group.finish();
 }
 
@@ -314,35 +358,83 @@ fn run_mcp_latency_session(client: &dyn GraphQueryClient, options: &SearchOption
 
 fn load_fixture() -> Fixture {
     let baselines = baselines();
-    let fixture_path = std::env::var_os("SPUR_GRAPH_PERF_FIXTURE")
-        .map(PathBuf::from)
+    let fixture_override = std::env::var_os("SPUR_GRAPH_PERF_FIXTURE").map(PathBuf::from);
+    let fixture_path = fixture_override
+        .clone()
         .unwrap_or_else(|| PathBuf::from(baselines.fixture_path));
-    let repo_root = fixture_path
-        .parent()
-        .and_then(Path::parent)
-        .and_then(Path::parent)
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| {
+    let artifact = if fixture_path.is_dir() {
+        read_artifact_parquet(&fixture_path).unwrap_or_else(|err| {
             panic!(
-                "fixture path `{}` is expected to live under <repo>/.spur/graph/<artifact>",
+                "failed to read Parquet fixture `{}`: {err:#}",
                 fixture_path.display()
             )
+        })
+    } else if fixture_override.is_some() {
+        panic!(
+            "SPUR_GRAPH_PERF_FIXTURE `{}` is not a Parquet artifact directory",
+            fixture_path.display()
+        )
+    } else {
+        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .expect("spur-graph manifest lives under <repo>/crates/spur-graph");
+        let (facts, _counts) = build_facts(repo_root, None).unwrap_or_else(|err| {
+            panic!(
+                "failed to build facts for `{}`: {err:#}",
+                repo_root.display()
+            )
         });
-    let (facts, _counts) = build_facts(&repo_root, None).unwrap_or_else(|err| {
-        panic!(
-            "failed to build facts for `{}`: {err:#}",
-            repo_root.display()
-        )
-    });
-    let artifact = artifact_from_facts(&facts, &repo_root).unwrap_or_else(|err| {
-        panic!(
-            "failed to build artifact for `{}`: {err:#}",
-            repo_root.display()
-        )
-    });
+        artifact_from_facts(&facts, repo_root).unwrap_or_else(|err| {
+            panic!(
+                "failed to build artifact for `{}`: {err:#}",
+                repo_root.display()
+            )
+        })
+    };
     Fixture {
         artifact,
         fixture_path,
+    }
+}
+
+fn search_pruning_benchmark_artifact() -> GraphIndexArtifact {
+    let symbol_count = SEARCH_BENCH_ROW_GROUP_ROWS * SEARCH_BENCH_ROW_GROUP_COUNT;
+    let mut symbols = Vec::with_capacity(symbol_count);
+    for group in 0..SEARCH_BENCH_ROW_GROUP_COUNT {
+        let file_path = format!("src/group_{group}.rs");
+        for row in 0..SEARCH_BENCH_ROW_GROUP_ROWS {
+            let id = format!("symbol-{group}-{row:05}");
+            let entity_name = if group == 0 && row == 0 {
+                "target".to_owned()
+            } else {
+                format!("noise_{group}_{row:05}")
+            };
+            symbols.push(symbol(&id, &file_path, &entity_name));
+        }
+    }
+    let symbol_node_ids = (1..=symbols.len())
+        .map(|id| NodeId(u64::try_from(id).expect("benchmark node id fits u64")))
+        .collect();
+
+    GraphIndexArtifact {
+        header: GraphIndexHeader {
+            graph_index_version: "bench".to_owned(),
+            content_hash_blake3: None,
+        },
+        manifest_version: "bench".to_owned(),
+        graph_content_hash: "search-pruning-benchmark".to_owned(),
+        file_manifests: Vec::new(),
+        files: Vec::new(),
+        file_node_ids: Vec::new(),
+        symbols,
+        symbol_node_ids,
+        edges: Vec::new(),
+        tombstones: Vec::new(),
+        diagnostics: Vec::new(),
+        commits: Vec::new(),
+        symbol_snapshots: Vec::new(),
+        temporal_edges: Vec::new(),
     }
 }
 
@@ -562,6 +654,7 @@ criterion_group!(
     bench_read_artifact_parquet,
     bench_read_artifact_parquet_slim,
     bench_search_symbols_parquet_vs_inmemory,
+    bench_exact_search_row_group_pruning,
     bench_find_caller_edges_parquet_vs_inmemory,
     bench_find_callee_edges_parquet_vs_inmemory,
     bench_resolve_selector_parquet_vs_inmemory,

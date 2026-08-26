@@ -1069,6 +1069,20 @@ impl ParquetClient {
 
     fn search_symbols_inner(&self, opts: &SearchOptions) -> anyhow::Result<SearchResult> {
         let nodes_path = self.dir.join("nodes.parquet");
+        let mut candidates = Vec::new();
+        if let Some(pruning) = exact_search_pruning_predicate(opts) {
+            let batches =
+                self.filtered_projected_batches(&nodes_path, SEARCH_COLUMNS, &pruning, |schema| {
+                    search_row_filter(schema, opts)
+                })?;
+            for batch in batches {
+                candidates.extend(search_symbols_from_batch(&batch)?);
+            }
+            candidates.sort_by(|left, right| compare_symbols(left, right, opts));
+            let total_matches = candidates.len();
+            return Ok(limited_search_result(candidates, total_matches, opts.limit));
+        }
+
         let file = File::open(&nodes_path)
             .with_context(|| format!("failed to open `{}`", nodes_path.display()))?;
         let row_filter = search_row_filter(
@@ -1091,7 +1105,6 @@ impl ParquetClient {
                     )
                 })?;
 
-        let mut candidates = Vec::new();
         for batch in reader {
             let batch =
                 batch.with_context(|| format!("failed to decode `{}`", nodes_path.display()))?;
@@ -1709,6 +1722,27 @@ fn search_row_filter(
         Ok(BooleanArray::from(keep))
     };
     RowFilter::new(vec![Box::new(ArrowPredicateFn::new(projection, predicate))])
+}
+
+fn exact_search_pruning_predicate(opts: &SearchOptions) -> Option<StringPruningPredicate> {
+    if !matches!(opts.mode, SearchMode::Exact) {
+        return None;
+    }
+
+    let mut predicates = vec![StringPruningPredicate::any([
+        StringPruningPredicate::eq("entity_name", opts.query.clone()),
+        StringPruningPredicate::eq("qualified_name", opts.query.clone()),
+    ])];
+    if let Some(file) = &opts.filters.file {
+        predicates.push(StringPruningPredicate::eq("file_path", file.clone()));
+    }
+    if let Some(symbol_kind) = &opts.filters.symbol_kind {
+        predicates.push(StringPruningPredicate::eq(
+            "symbol_kind",
+            symbol_kind.clone(),
+        ));
+    }
+    Some(StringPruningPredicate::all(predicates))
 }
 
 fn search_predicate_columns(opts: &SearchOptions) -> Vec<&'static str> {
@@ -2765,6 +2799,69 @@ mod tests {
             .expect("indexed pruning skips corrupt non-matching data");
 
         assert_eq!(actual.stable_symbol_id, target);
+        Ok(())
+    }
+
+    #[test]
+    fn exact_search_prunes_non_matching_row_groups() -> anyhow::Result<()> {
+        let tempdir = tempfile::tempdir()?;
+        let mut symbols = Vec::with_capacity(PARQUET_ROW_GROUP_SIZE + 2);
+        for index in 0..PARQUET_ROW_GROUP_SIZE {
+            let name = if index == 0 {
+                "target".to_owned()
+            } else {
+                format!("alpha_{index:05}")
+            };
+            let mut value = symbol(&format!("a-{index:05}"), &name);
+            value.file_path = "src/a.rs".to_owned();
+            symbols.push(value);
+        }
+        for (id, name) in [("z-low", "low"), ("z-high", "high")] {
+            let mut value = symbol(id, name);
+            value.file_path = "src/z.rs".to_owned();
+            symbols.push(value);
+        }
+
+        let mut graph = artifact(symbols);
+        graph.symbol_node_ids = (1..=graph.symbols.len())
+            .map(|id| NodeId(u64::try_from(id).expect("test node id fits u64")))
+            .collect();
+        let parquet_dir =
+            write_artifact_parquet(&graph, tempdir.path(), WriteOptions::default(), Vec::new())?;
+        let client = ParquetClient::open(&parquet_dir)?;
+        let nodes_path = parquet_dir.join("nodes.parquet");
+        let metadata = client.nodes_metadata.metadata();
+        assert_eq!(metadata.num_row_groups(), 2);
+
+        let entity_name_column = metadata
+            .file_metadata()
+            .schema_descr()
+            .columns()
+            .iter()
+            .position(|column| column.path().string() == "entity_name")
+            .expect("entity_name column exists");
+        let second_row_group_range = metadata
+            .row_group(1)
+            .column(entity_name_column)
+            .byte_range();
+        let mut file = OpenOptions::new().write(true).open(&nodes_path)?;
+        file.seek(SeekFrom::Start(second_row_group_range.0))?;
+        file.write_all(&vec![
+            0;
+            usize::try_from(second_row_group_range.1)
+                .expect("column chunk size fits usize")
+        ])?;
+        file.sync_all()?;
+
+        let result = client.search_symbols(&SearchOptions {
+            query: "target".to_owned(),
+            mode: SearchMode::Exact,
+            filters: SearchFilters::default(),
+            limit: 20,
+        })?;
+
+        assert_eq!(result.total_matches, 1);
+        assert_eq!(result.candidates[0].entity_name, "target");
         Ok(())
     }
 
