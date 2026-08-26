@@ -12,12 +12,12 @@ pub fn recall_at_k(gold: &[impl AsRef<str>], hits: &[impl AsRef<str>], k: usize)
     ((matched * 1000) / gold.len()) as u32
 }
 
-/// `coverage_milli * total = 1000 * covered + 500 * partial`.
+/// `coverage_milli * total = COVERED_WEIGHT * covered + PARTIAL_WEIGHT * partial`.
 pub fn coverage_milli(covered: u32, partial: u32, total: u32) -> u32 {
     if total == 0 {
         return 0;
     }
-    (covered * 1000 + partial * 500) / total
+    (covered * super::COVERED_WEIGHT + partial * super::PARTIAL_WEIGHT) / total
 }
 
 pub fn graphify_slice<T>(items: &[T], n: usize) -> &[T] {

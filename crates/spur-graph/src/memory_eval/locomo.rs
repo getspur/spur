@@ -1,4 +1,5 @@
 use serde::Deserialize;
+use serde_json::Value;
 
 use super::{
     graphify_slice, EvalSplit, MemoryTask, LOCOMO_ADVERSARIAL_CATEGORY, LOCOMO_GRAPHIFY_N,
@@ -13,6 +14,8 @@ struct LocomoSample {
 #[derive(Debug, Deserialize)]
 struct LocomoQa {
     question: String,
+    #[serde(default)]
+    answer: Value,
     category: u32,
     #[serde(default)]
     evidence: Vec<String>,
@@ -33,6 +36,7 @@ pub fn parse_locomo(json: &str, split: EvalSplit) -> anyhow::Result<Vec<MemoryTa
                 id: format!("{}#{index}", sample.sample_id),
                 question: qa.question,
                 gold_ids: qa.evidence,
+                gold_answer: stringify_answer(&qa.answer),
             });
         }
     }
@@ -40,4 +44,13 @@ pub fn parse_locomo(json: &str, split: EvalSplit) -> anyhow::Result<Vec<MemoryTa
         EvalSplit::Official => tasks,
         EvalSplit::Graphify => graphify_slice(&tasks, LOCOMO_GRAPHIFY_N).to_vec(),
     })
+}
+
+fn stringify_answer(value: &Value) -> String {
+    match value {
+        Value::String(text) => text.clone(),
+        Value::Number(number) => number.to_string(),
+        Value::Bool(flag) => flag.to_string(),
+        _ => String::new(),
+    }
 }

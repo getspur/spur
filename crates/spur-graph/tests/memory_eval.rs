@@ -4,10 +4,11 @@
 //! Graphify slice 300, LongMemEval retrieval n=470, Graphify slice 50).
 
 use spur_graph::memory_eval::{
-    coverage_milli, graphify_slice, materialize_locomo, materialize_longmemeval, parse_locomo,
-    parse_longmemeval, recall_at_k, retrieve_seed_expand, EvalSplit, LME_ABSTENTION,
-    LME_GRAPHIFY_N, LME_OFFICIAL_N, LOCOMO_ADVERSARIAL_CATEGORY, LOCOMO_ADVERSARIAL_COUNT,
-    LOCOMO_GRAPHIFY_N, LOCOMO_OFFICIAL_QA, RECALL_K,
+    coverage_milli, extractive_qa, grade_key_fact, graphify_slice, materialize_locomo,
+    materialize_longmemeval, parse_locomo, parse_longmemeval, recall_at_k, retrieve_seed_expand,
+    EvalSplit, FactVerdict, COVERED_WEIGHT, LME_ABSTENTION, LME_GRAPHIFY_N, LME_OFFICIAL_N,
+    LOCOMO_ADVERSARIAL_CATEGORY, LOCOMO_ADVERSARIAL_COUNT, LOCOMO_GRAPHIFY_N, LOCOMO_OFFICIAL_QA,
+    MISS_WEIGHT, PARTIAL_WEIGHT, RECALL_K,
 };
 
 const LOCOMO_FIXTURE: &str = r#"
@@ -97,6 +98,25 @@ fn locomo_drops_adversarial_category_five() {
         "What did the charity race raise awareness for?"
     );
     assert_eq!(tasks[0].gold_ids, vec!["D1:3"]);
+    assert_eq!(tasks[0].gold_answer, "mental health");
+}
+
+#[test]
+fn locomo_parses_numeric_gold_answer() {
+    let json = r#"
+    [{
+      "sample_id": "conv-num",
+      "conversation": {"session_1": []},
+      "qa": [{
+        "question": "When did Melanie paint a sunrise?",
+        "answer": 2022,
+        "category": 2,
+        "evidence": ["D1:1"]
+      }]
+    }]
+    "#;
+    let tasks = parse_locomo(json, EvalSplit::Official).unwrap();
+    assert_eq!(tasks[0].gold_answer, "2022");
 }
 
 #[test]
@@ -113,6 +133,8 @@ fn locomo_graphify_slice_is_at_most_three_hundred() {
 fn coverage_milli_uses_graphify_partial_credit() {
     // coverage_milli * total = 1000 * covered + 500 * partial
     assert_eq!(coverage_milli(4, 1, 6), 750);
+    // Floor division on the measured LoCoMo official extractive run.
+    assert_eq!(coverage_milli(235, 834, 1536), 424);
 }
 
 #[test]
@@ -122,6 +144,47 @@ fn longmemeval_skips_abstention_ids_for_retrieval() {
     assert_eq!(tasks[0].id, "gpt4_fe651585");
     assert_eq!(tasks[0].gold_ids, vec!["s2"]);
     assert_eq!(LME_GRAPHIFY_N, 50);
+}
+
+#[test]
+fn qa_verdict_weights_match_solved_coverage_formula() {
+    // sol_805e26de169b45b3: covered=1000, partial=500, miss=0 millipoints
+    assert_eq!(COVERED_WEIGHT, 1000);
+    assert_eq!(PARTIAL_WEIGHT, 500);
+    assert_eq!(MISS_WEIGHT, 0);
+    assert_eq!(coverage_milli(1, 0, 1), COVERED_WEIGHT);
+    assert_eq!(coverage_milli(0, 1, 1), PARTIAL_WEIGHT);
+    assert_eq!(coverage_milli(0, 0, 1), MISS_WEIGHT);
+}
+
+#[test]
+fn grade_key_fact_covers_partial_and_miss() {
+    assert_eq!(
+        grade_key_fact("It raised awareness for mental health.", "mental health"),
+        FactVerdict::Covered
+    );
+    assert_eq!(
+        grade_key_fact("She talked about mental wellbeing.", "mental health"),
+        FactVerdict::Partial
+    );
+    assert_eq!(
+        grade_key_fact("I ran a charity race.", "mental health"),
+        FactVerdict::Miss
+    );
+}
+
+#[test]
+fn extractive_qa_covers_gold_from_retrieved_context() {
+    let tasks = parse_locomo(LOCOMO_FIXTURE, EvalSplit::Official).unwrap();
+    let root = tempfile::tempdir().unwrap();
+    materialize_locomo(LOCOMO_FIXTURE, root.path()).unwrap();
+    let report = extractive_qa(root.path(), &tasks).unwrap();
+    assert_eq!(report.n, 1);
+    assert_eq!(report.k, RECALL_K);
+    assert_eq!(report.covered, 1);
+    assert_eq!(report.partial, 0);
+    assert_eq!(report.miss, 0);
+    assert_eq!(report.coverage_milli, COVERED_WEIGHT);
 }
 
 #[test]
@@ -171,9 +234,13 @@ fn locomo_official_from_env() {
     let root = tempfile::tempdir().unwrap();
     materialize_locomo(&json, root.path()).unwrap();
     let report = retrieve_seed_expand(root.path(), &tasks).unwrap();
-    eprintln!("locomo official {report:?}");
+    let qa = extractive_qa(root.path(), &tasks).unwrap();
+    eprintln!("locomo official retrieval {report:?}");
+    eprintln!("locomo official extractive qa {qa:?}");
     assert_eq!(report.n, tasks.len());
     assert_eq!(report.k, RECALL_K);
+    assert_eq!(qa.n, tasks.len());
+    assert_eq!(qa.covered + qa.partial + qa.miss, qa.n as u32);
 }
 
 #[test]

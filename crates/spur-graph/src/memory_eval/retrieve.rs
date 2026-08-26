@@ -24,8 +24,9 @@ pub fn retrieve_seed_expand(root: &Path, tasks: &[MemoryTask]) -> anyhow::Result
     }
     let mut total = 0u64;
     for task in tasks {
-        let hits = retrieve_task(&facts, &task.question);
-        total += u64::from(recall_at_k(&task.gold_ids, &hits, RECALL_K));
+        let hits = retrieve_task_hits(&facts, &task.question);
+        let ids: Vec<&str> = hits.iter().map(|hit| hit.id.as_str()).collect();
+        total += u64::from(recall_at_k(&task.gold_ids, &ids, RECALL_K));
     }
     Ok(RetrievalReport {
         n: tasks.len(),
@@ -34,17 +35,28 @@ pub fn retrieve_seed_expand(root: &Path, tasks: &[MemoryTask]) -> anyhow::Result
     })
 }
 
-fn retrieve_task(facts: &GraphFacts, question: &str) -> Vec<String> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RetrievalHit {
+    pub id: String,
+    pub text: String,
+}
+
+pub(crate) fn retrieve_task_hits(facts: &GraphFacts, question: &str) -> Vec<RetrievalHit> {
     let terms = query_terms(question);
-    let mut scored: Vec<(u32, NodeId, String)> = facts
+    let mut scored: Vec<(u32, NodeId, String, String)> = facts
         .nodes
         .iter()
         .filter(|node| node.kind == NodeKind::Section || node.kind == NodeKind::File)
         .map(|node| {
             let score = term_score(&node.label, &terms);
-            (score, node.node_id, turn_id(&node.label))
+            (
+                score,
+                node.node_id,
+                turn_id(&node.label),
+                node.label.clone(),
+            )
         })
-        .filter(|(score, _, _)| *score > 0)
+        .filter(|(score, _, _, _)| *score > 0)
         .collect();
     scored.sort_by(|left, right| right.0.cmp(&left.0).then(left.2.cmp(&right.2)));
 
@@ -52,14 +64,17 @@ fn retrieve_task(facts: &GraphFacts, question: &str) -> Vec<String> {
     let expanded = expand(facts, &seeds);
     let mut hits = Vec::new();
     let mut seen = BTreeSet::new();
-    for (_, node_id, turn) in &scored {
+    for (_, node_id, turn, text) in &scored {
         if !expanded.contains(node_id) {
             continue;
         }
         if turn.is_empty() || !seen.insert(turn.clone()) {
             continue;
         }
-        hits.push(turn.clone());
+        hits.push(RetrievalHit {
+            id: turn.clone(),
+            text: text.clone(),
+        });
         if hits.len() >= RECALL_K {
             break;
         }
@@ -73,7 +88,10 @@ fn retrieve_task(facts: &GraphFacts, question: &str) -> Vec<String> {
             if turn.is_empty() || !seen.insert(turn.clone()) {
                 continue;
             }
-            hits.push(turn);
+            hits.push(RetrievalHit {
+                id: turn,
+                text: node.label.clone(),
+            });
             if hits.len() >= RECALL_K {
                 break;
             }

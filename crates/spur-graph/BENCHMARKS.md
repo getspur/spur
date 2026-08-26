@@ -3,22 +3,29 @@
 How `spur-graph` retrieves over conversational long-term memory, measured with
 the same public datasets Graphify reports: **LoCoMo** and **LongMemEval-S**.
 
-Phase 1 (in-tree) is **retrieval-only**: ingest sessions as markdown, extract a
-deterministic AST/markdown graph (zero LLM credits), then seed + expand at
-`k=10`. Phase 2 (QA accuracy / key-fact coverage) needs an external reader and
-judge and is not claimed here until that harness is run.
+Phase 1 is **retrieval** (seed + expand at `k=10`). Phase 2 is **extractive QA**:
+the reader concatenates the retrieved section texts (no LLM) and a deterministic
+judge scores Graphify key-fact coverage
+(`coverage = (covered + 0.5 * partial) / total`).
 
-Constants: `sol_5f73941594ed4d15`, `sol_bca716ccfbdb404d`.
+Constants: `sol_5f73941594ed4d15`, `sol_bca716ccfbdb404d`, `sol_805e26de169b45b3`.
 
 ## Results at a glance
 
-| Suite | Dataset (n) | Metric | spur-graph | Notes |
+Measured 2026-08-26 on `locomo10.json` SHA-256 `79fa87e90f040813…` (CC BY-NC).
+n=1536 after dropping adversarial category 5 and empty-evidence items
+(1986 − 446 − 4). Reader is extractive, not an LLM.
+
+| Suite | Dataset (n) | Metric | spur-graph | Field |
 |---|---|---|---|---|
-| Memory | LoCoMo official (1540) | recall@10 | run harness | drop adversarial category 5 (446 of 1986) |
-| Memory | LoCoMo Graphify-sized (300) | recall@10 | run harness | first 300 non-adversarial IDs; not Graphify's unpublished sample |
+| Memory | LoCoMo official (1536) | recall@10 | **0.340** | Graphify graph-expand 0.497 |
+| Memory | LoCoMo official (1536) | extractive coverage | **42.4%** | Graphify LLM QA 45.3% |
+| Memory | LoCoMo Graphify-sized (300) | recall@10 | run harness | first 300 non-adversarial IDs |
 | Memory | LongMemEval-S official retrieval (470) | recall@10 | run harness | skip 30 abstention (`*_abs`) |
 | Memory | LongMemEval-S Graphify-sized (50) | recall@10 | run harness | first 50 retrieval IDs |
-| Cost | graph build | LLM credits | 0 | markdown + tree-sitter extract |
+| Cost | graph build | LLM credits | **0** | markdown + tree-sitter extract |
+
+LoCoMo extractive QA breakdown: covered 235, partial 834, miss 467.
 
 ## Harness
 
