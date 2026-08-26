@@ -9229,6 +9229,7 @@ name = "spur-graph"
 version = "1.21.0"
 dependencies = [
  "anyhow",
+ "arc-swap",
  "arrow-array 58.1.0",
  "arrow-buffer 58.1.0",
  "arrow-schema 58.1.0",
