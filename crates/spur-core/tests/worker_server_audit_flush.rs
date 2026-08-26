@@ -165,6 +165,7 @@ async fn flusher_emits_sentinel_for_stale_entry() {
     let config = WorkerMcpServerConfig {
         idle_threshold: Duration::from_millis(100),
         scan_interval: Duration::from_millis(50),
+        ..Default::default()
     };
 
     let server = WorkerMcpServer::start_with_config(
@@ -231,6 +232,7 @@ async fn flusher_exits_within_1s_of_cancellation() {
     let config = WorkerMcpServerConfig {
         idle_threshold: Duration::from_secs(30),
         scan_interval: Duration::from_secs(10),
+        ..Default::default()
     };
 
     let server =
@@ -260,6 +262,7 @@ async fn flusher_warns_when_all_entries_have_no_target_issue_id() {
     let config = WorkerMcpServerConfig {
         idle_threshold: Duration::from_millis(100),
         scan_interval: Duration::from_millis(50),
+        ..Default::default()
     };
 
     let server =

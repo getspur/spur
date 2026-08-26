@@ -412,6 +412,7 @@ async fn idle_flusher_drains_buffer_and_complete_emits_single_summary() {
     let config = WorkerMcpServerConfig {
         idle_threshold: Duration::from_millis(100),
         scan_interval: Duration::from_millis(50),
+        ..Default::default()
     };
     let server = WorkerMcpServer::start_with_config(
         "session-flush-async".into(),

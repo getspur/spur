@@ -58,6 +58,8 @@ enum ServerCatalogSection {
 #[derive(Debug, Clone, Copy)]
 enum WorkerCatalogSection {
     Prelude,
+    Graph,
+    Analyst,
     Remainder,
 }
 
@@ -95,6 +97,18 @@ impl WorkerCatalogMcpModule {
             section: WorkerCatalogSection::Remainder,
         }
     }
+
+    pub(crate) fn graph() -> Self {
+        Self {
+            section: WorkerCatalogSection::Graph,
+        }
+    }
+
+    pub(crate) fn analyst() -> Self {
+        Self {
+            section: WorkerCatalogSection::Analyst,
+        }
+    }
 }
 
 #[async_trait]
@@ -125,6 +139,8 @@ impl ToolModule for WorkerCatalogMcpModule {
     fn tools(&self) -> Vec<ToolDefinition> {
         match self.section {
             WorkerCatalogSection::Prelude => worker_prelude_tool_definitions(),
+            WorkerCatalogSection::Graph => worker_graph_tool_definitions(),
+            WorkerCatalogSection::Analyst => worker_analyst_tool_definitions(),
             WorkerCatalogSection::Remainder => worker_remainder_tool_definitions(),
         }
     }
@@ -167,18 +183,23 @@ fn worker_prelude_tool_definitions() -> Vec<ToolDefinition> {
     pm_tool_definitions_by_names(&["get_issue", "list_issues"])
 }
 
+fn worker_graph_tool_definitions() -> Vec<ToolDefinition> {
+    spur_graph::mcp::tool_definitions()
+        .into_iter()
+        .map(graph_tool_definition)
+        .collect()
+}
+
+fn worker_analyst_tool_definitions() -> Vec<ToolDefinition> {
+    spur_analyst::mcp::tool_definitions()
+        .into_iter()
+        .map(analyst_tool_definition)
+        .collect()
+}
+
 fn worker_remainder_tool_definitions() -> Vec<ToolDefinition> {
-    let mut definitions = Vec::new();
-    definitions.extend(
-        spur_graph::mcp::tool_definitions()
-            .into_iter()
-            .map(graph_tool_definition),
-    );
-    definitions.extend(
-        spur_analyst::mcp::tool_definitions()
-            .into_iter()
-            .map(analyst_tool_definition),
-    );
+    let mut definitions = worker_graph_tool_definitions();
+    definitions.extend(worker_analyst_tool_definitions());
     definitions
 }
 

@@ -34,6 +34,11 @@ pub struct ExecOpts {
     /// session and inject it into ACP `session/new`. Requires a configured
     /// PM service on the orchestrator.
     pub enable_mcp: bool,
+    /// `--mcp-family` tokens (leaves or aliases). Empty means all leaves
+    /// when MCP is on.
+    pub mcp_family: Vec<String>,
+    /// `--disable-mcp-family` tokens subtracted after expansion.
+    pub disable_mcp_family: Vec<String>,
 }
 
 /// Result of a completed run.

@@ -1,12 +1,15 @@
 pub(crate) mod catalog;
 pub mod context_service;
 pub mod delegation;
+pub mod families;
 pub mod local_projects;
 pub mod plan;
 pub mod review_verdict;
 pub mod signals;
 pub mod skills_catalog;
 pub mod worker;
+
+pub use families::{resolve_mcp_families, McpFamily, McpFamilyError};
 
 use std::{
     collections::HashMap,
@@ -214,30 +217,74 @@ fn worker_tool_registry_with_client_and_repo_root(
     context_service_client: Option<context_service::ContextServiceClient>,
     repo_root: Option<&Path>,
 ) -> Result<spur_mcp::ToolRegistry, spur_mcp::ToolRegistryError> {
-    let mut builder = spur_mcp::ToolRegistry::builder()
-        .with(catalog::WorkerCatalogMcpModule::prelude())?
-        .with(worker::WorkerReadMcpModule::plan(
+    worker_tool_registry_with_families_inner(
+        context_service_client,
+        repo_root,
+        &McpFamily::ALL.iter().copied().collect(),
+    )
+}
+
+fn worker_tool_registry_with_families_inner(
+    context_service_client: Option<context_service::ContextServiceClient>,
+    repo_root: Option<&Path>,
+    families: &std::collections::BTreeSet<McpFamily>,
+) -> Result<spur_mcp::ToolRegistry, spur_mcp::ToolRegistryError> {
+    let mut builder = spur_mcp::ToolRegistry::builder();
+    if families.contains(&McpFamily::Pm) {
+        builder = builder.with(catalog::WorkerCatalogMcpModule::prelude())?;
+    }
+    if families.contains(&McpFamily::Worker) {
+        builder = builder.with(worker::WorkerReadMcpModule::plan(
             worker::WorkerReadMcpDeps::catalog_only(),
-        ))?
-        .with(catalog::WorkerCatalogMcpModule::remainder())?
-        .with(worker::WorkerReadMcpModule::artifact(
+        ))?;
+    }
+    match (
+        families.contains(&McpFamily::Graph),
+        families.contains(&McpFamily::Analyst),
+    ) {
+        (true, true) => {
+            builder = builder.with(catalog::WorkerCatalogMcpModule::remainder())?;
+        }
+        (true, false) => {
+            builder = builder.with(catalog::WorkerCatalogMcpModule::graph())?;
+        }
+        (false, true) => {
+            builder = builder.with(catalog::WorkerCatalogMcpModule::analyst())?;
+        }
+        (false, false) => {}
+    }
+    if families.contains(&McpFamily::Worker) {
+        builder = builder.with(worker::WorkerReadMcpModule::artifact(
             worker::WorkerReadMcpDeps::catalog_only(),
-        ))?
-        .with(signals::SignalMcpModule::new(signals::SignalMcpDeps {
+        ))?;
+    }
+    if families.contains(&McpFamily::Signals) {
+        builder = builder.with(signals::SignalMcpModule::new(signals::SignalMcpDeps {
             pm_service: None,
             event_sink: None,
             feature_gate: crate::server::community_feature_gate(),
-        }))?
-        .with(review_verdict::ReviewVerdictMcpModule)?
-        .with(spur_solver::mcp::SolverMcpModule::new(
+        }))?;
+    }
+    if families.contains(&McpFamily::Review) {
+        builder = builder.with(review_verdict::ReviewVerdictMcpModule)?;
+    }
+    if families.contains(&McpFamily::Solver) {
+        builder = builder.with(spur_solver::mcp::SolverMcpModule::new(
             shared_solver_service(repo_root),
-        ))?
-        .with_alias("code_search", "code_symbol_search")?;
-    if let Some(context_service_client) = context_service_client {
-        builder = builder.with(context_service_client)?;
+        ))?;
+    }
+    if families.contains(&McpFamily::Graph) {
+        builder = builder.with_alias("code_search", "code_symbol_search")?;
+    }
+    if families.contains(&McpFamily::Context) {
+        if let Some(context_service_client) = context_service_client {
+            builder = builder.with(context_service_client)?;
+        }
+    }
+    if families.contains(&McpFamily::Skills) {
+        builder = builder.with(skills_catalog::SkillsCatalogMcpModule::new(repo_root))?;
     }
     Ok(builder
-        .with(skills_catalog::SkillsCatalogMcpModule::new(repo_root))?
         .with_denied_tool_calls(WORKER_DENIED_TOOL_CALLS.iter().copied())
         .build())
 }
@@ -270,16 +317,20 @@ fn shared_solver_service(repo_root: Option<&Path>) -> Arc<spur_solver::service::
     service
 }
 
-pub(crate) fn worker_tool_dispatch(
+pub(crate) fn worker_tool_dispatch_with_families(
     context_service_config: &ContextServiceConfig,
     repo_root: Option<&Path>,
+    families: &std::collections::BTreeSet<McpFamily>,
 ) -> (
     Result<spur_mcp::ToolRegistry, spur_mcp::ToolRegistryError>,
     Option<context_service::ContextServiceClient>,
 ) {
     let context_service_client = context_service_client(context_service_config);
-    let registry =
-        worker_tool_registry_with_client_and_repo_root(context_service_client.clone(), repo_root);
+    let registry = worker_tool_registry_with_families_inner(
+        context_service_client.clone(),
+        repo_root,
+        families,
+    );
     (registry, context_service_client)
 }
 
@@ -291,6 +342,13 @@ pub fn worker_tools_list() -> Vec<spur_mcp::ToolDefinition> {
     worker_tool_registry()
         .expect("core worker MCP tool registry must be valid")
         .list_tools()
+}
+
+/// Compose the worker catalog from an already-resolved leaf set.
+pub fn worker_tool_registry_for_families(
+    families: &std::collections::BTreeSet<McpFamily>,
+) -> Result<spur_mcp::ToolRegistry, spur_mcp::ToolRegistryError> {
+    worker_tool_registry_with_families_inner(None, None, families)
 }
 
 /// Claude-format tool names (`mcp__spur-worker-mcp__<tool>`) for every tool
@@ -1007,5 +1065,67 @@ mod tests {
                 err.message
             );
         }
+    }
+
+    fn listed_names(
+        families: &std::collections::BTreeSet<McpFamily>,
+    ) -> std::collections::BTreeSet<String> {
+        worker_tool_registry_for_families(families)
+            .expect("family-filtered worker registry")
+            .list_tools()
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect()
+    }
+
+    #[test]
+    fn solver_only_registry_omits_other_leaves() {
+        let families = resolve_mcp_families(true, &["solver"], &[] as &[&str])
+            .unwrap()
+            .unwrap();
+        let names = listed_names(&families);
+        assert!(names.contains("solve_rule_spec"));
+        assert!(names.contains("solve_constraints"));
+        assert!(!names.contains("code_read_symbol"));
+        assert!(!names.contains("query"));
+        assert!(!names.contains("get_issue"));
+        assert!(!names.contains("skill_navigate"));
+        assert!(!names.contains("report_signal"));
+        assert!(!names.contains("get_plan_status"));
+        assert!(!names.contains("submit_review_verdict"));
+        assert!(!names.contains("delegate_to_worker"));
+        assert!(!names.contains("code_search"));
+    }
+
+    #[test]
+    fn core_minus_pm_registry_keeps_solver_and_analyst() {
+        let families = resolve_mcp_families(true, &["core"], &["pm"])
+            .unwrap()
+            .unwrap();
+        let names = listed_names(&families);
+        assert!(names.contains("solve_rule_spec"));
+        assert!(names.contains("query"));
+        assert!(names.contains("skill_navigate"));
+        assert!(!names.contains("get_issue"));
+        assert!(!names.contains("list_issues"));
+        assert!(!names.contains("code_read_symbol"));
+        assert!(!names.contains("create_issue"));
+    }
+
+    #[tokio::test]
+    async fn omitted_family_tool_is_unknown() {
+        let families = resolve_mcp_families(true, &["solver"], &[] as &[&str])
+            .unwrap()
+            .unwrap();
+        let registry = worker_tool_registry_for_families(&families).unwrap();
+        let ctx = ToolCallContext::new(ServerKind::Worker, ToolAuthority::Worker, None, None);
+        let err = match registry
+            .call_tool(ctx, "code_read_symbol", json!({"selector": "x"}))
+            .await
+        {
+            Ok(_) => panic!("omitted graph tool must not dispatch"),
+            Err(err) => err,
+        };
+        assert_eq!(err.code, ErrorCode(-32601));
     }
 }

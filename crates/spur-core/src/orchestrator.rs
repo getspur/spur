@@ -740,9 +740,15 @@ impl Orchestrator {
         // short-lived spur-worker-mcp, inject it into session/new, then
         // complete_delegation + shutdown after the prompt finishes.
         let mut direct_mcp: Option<DirectMcpSession> = None;
-        let mcp_servers = if opts.enable_mcp {
+        let mcp_families = crate::mcp::resolve_mcp_families(
+            opts.enable_mcp,
+            &opts.mcp_family,
+            &opts.disable_mcp_family,
+        )
+        .context("invalid MCP family selection")?;
+        let mcp_servers = if let Some(families) = mcp_families {
             let session = self
-                .start_direct_worker_mcp(&session_id)
+                .start_direct_worker_mcp(&session_id, families)
                 .await
                 .context("Failed to start direct-session worker MCP")?;
             let servers = build_direct_mcp_servers_with(true, || {
@@ -884,7 +890,11 @@ impl Orchestrator {
     /// [`ExecOpts::enable_mcp`] is set. Uses the curated worker catalog
     /// (not brain). Synthetic brain/delegation ids are scoped to this
     /// direct session only.
-    async fn start_direct_worker_mcp(&self, session_id: &SessionId) -> Result<DirectMcpSession> {
+    async fn start_direct_worker_mcp(
+        &self,
+        session_id: &SessionId,
+        mcp_families: std::collections::BTreeSet<crate::mcp::McpFamily>,
+    ) -> Result<DirectMcpSession> {
         let pm = self.pm_service.clone().ok_or_else(|| {
             anyhow!(
                 "enable_mcp requires a PM service on the orchestrator \
@@ -926,10 +936,11 @@ impl Orchestrator {
         let brain_session_id = spur_acp::BrainSessionId::new(session_id.clone());
         let delegation_id = format!("direct-exec-{}", session_id);
 
-        let server = WorkerMcpServer::start_with_context_service_config(
+        let server = WorkerMcpServer::start_with_context_service_config_and_families(
             brain_session_id.to_string(),
             deps,
             self.config.context_service.clone(),
+            mcp_families,
         )
         .await
         .map_err(|e| anyhow!("direct WorkerMcpServer bind failed: {e}"))?;

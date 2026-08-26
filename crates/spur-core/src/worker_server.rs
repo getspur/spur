@@ -16,13 +16,15 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use async_trait::async_trait;
 
 /// Configuration for the background audit flusher and idle thresholds.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct WorkerMcpServerConfig {
     /// How long a read-audit buffer must be untouched before the background
     /// flusher considers it idle and emits a `ReadAggregate` sentinel.
     pub idle_threshold: Duration,
     /// How often the flusher scans the per-delegation buffer map.
     pub scan_interval: Duration,
+    /// Worker MCP leaf families to advertise. Default is all leaves.
+    pub mcp_families: std::collections::BTreeSet<crate::mcp::McpFamily>,
 }
 
 impl Default for WorkerMcpServerConfig {
@@ -30,6 +32,7 @@ impl Default for WorkerMcpServerConfig {
         Self {
             idle_threshold: Duration::from_secs(30),
             scan_interval: Duration::from_secs(10),
+            mcp_families: crate::mcp::McpFamily::ALL.iter().copied().collect(),
         }
     }
 }
@@ -1141,9 +1144,14 @@ impl WorkerToolHandler {
         deps: Arc<DispatcherDeps>,
         brain_session_id: String,
         context_service_config: &ContextServiceConfig,
+        mcp_families: &std::collections::BTreeSet<crate::mcp::McpFamily>,
     ) -> (Self, Vec<String>) {
         let (tool_registry, context_service_client) =
-            crate::mcp::worker_tool_dispatch(context_service_config, deps.repo_root.as_deref());
+            crate::mcp::worker_tool_dispatch_with_families(
+                context_service_config,
+                deps.repo_root.as_deref(),
+                mcp_families,
+            );
         let worker_mcp_tool_names = tool_registry
             .as_ref()
             .map(crate::mcp::worker_mcp_claude_tool_names_for_registry)
@@ -2219,10 +2227,28 @@ impl WorkerMcpServer {
         deps: WorkerMcpDeps,
         context_service_config: ContextServiceConfig,
     ) -> Result<Arc<Self>, BindError> {
+        Self::start_with_context_service_config_and_families(
+            brain_session_id,
+            deps,
+            context_service_config,
+            crate::mcp::McpFamily::ALL.iter().copied().collect(),
+        )
+        .await
+    }
+
+    pub async fn start_with_context_service_config_and_families(
+        brain_session_id: String,
+        deps: WorkerMcpDeps,
+        context_service_config: ContextServiceConfig,
+        mcp_families: std::collections::BTreeSet<crate::mcp::McpFamily>,
+    ) -> Result<Arc<Self>, BindError> {
         Self::start_with_configs(
             brain_session_id,
             deps,
-            WorkerMcpServerConfig::default(),
+            WorkerMcpServerConfig {
+                mcp_families,
+                ..WorkerMcpServerConfig::default()
+            },
             context_service_config,
         )
         .await
@@ -2294,6 +2320,7 @@ impl WorkerMcpServer {
             Arc::clone(&dispatcher_deps),
             brain_session_id.clone(),
             &context_service_config,
+            &config.mcp_families,
         );
         let handler = Arc::new(handler);
         let server = Arc::new(Self {
@@ -3782,6 +3809,7 @@ mod tests {
             &WorkerMcpServerConfig {
                 idle_threshold: Duration::from_secs(30),
                 scan_interval: Duration::from_secs(1),
+                ..Default::default()
             },
             &CancellationToken::new(),
         )

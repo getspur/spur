@@ -294,8 +294,22 @@ enum Commands {
         /// Default off — preserves the historical no-MCP direct path.
         /// Requires a PM backend (beads/github) so tool handlers can resolve
         /// issues and signals. Does not enable brain/delegation tools.
+        /// When set with no family flags, all worker families are enabled.
         #[arg(long)]
         enable_mcp: bool,
+        /// Worker MCP families to enable (leaves or aliases). Implies MCP on.
+        /// Leaves: graph, context, analyst, solver, pm, skills, signals, worker, review.
+        /// Aliases: all, core, code.
+        #[arg(long = "mcp-family", value_name = "FAMILY", value_delimiter = ',', num_args = 1..)]
+        mcp_family: Vec<String>,
+        /// Subtract families after `--mcp-family` (or default-all) expansion.
+        #[arg(
+            long = "disable-mcp-family",
+            value_name = "FAMILY",
+            value_delimiter = ',',
+            num_args = 1..
+        )]
+        disable_mcp_family: Vec<String>,
     },
     /// List and manage active sessions
     Sessions {
@@ -1265,15 +1279,26 @@ async fn run() -> Result<()> {
             agent,
             task,
             enable_mcp,
+            mcp_family,
+            disable_mcp_family,
         } => {
             require_cli_gate(spur_license::FeatureKey::CLI_CORE_EXEC)?;
-            let mut orch = if enable_mcp {
+            let wants_mcp = enable_mcp || !mcp_family.is_empty() || !disable_mcp_family.is_empty();
+            let mut orch = if wants_mcp {
                 load_orchestrator_with_pm(repo_root).await?
             } else {
                 load_orchestrator(repo_root)?
             };
             let result = orch
-                .exec_direct(&agent, &task, spur_core::ExecOpts { enable_mcp })
+                .exec_direct(
+                    &agent,
+                    &task,
+                    spur_core::ExecOpts {
+                        enable_mcp,
+                        mcp_family,
+                        disable_mcp_family,
+                    },
+                )
                 .await?;
             println!(
                 "[spur] Session {} {} ({})",
