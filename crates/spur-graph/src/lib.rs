@@ -8,6 +8,7 @@ pub mod identity;
 pub mod locking;
 pub mod mcp;
 pub mod overlay_generation;
+pub mod overlay_watch;
 pub mod query_client;
 pub mod schema;
 pub mod search;
