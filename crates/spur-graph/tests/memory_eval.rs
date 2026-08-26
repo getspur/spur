@@ -135,9 +135,9 @@ fn coverage_milli_uses_graphify_partial_credit() {
     // coverage_milli * total = 1000 * covered + 500 * partial
     assert_eq!(coverage_milli(4, 1, 6), 750);
     // Floor division on the measured LoCoMo official extractive run.
-    assert_eq!(coverage_milli(257, 839, 1536), 440);
+    assert_eq!(coverage_milli(264, 879, 1536), 458);
     // Floor division on the measured LongMemEval-S official extractive run.
-    assert_eq!(coverage_milli(134, 198, 470), 495);
+    assert_eq!(coverage_milli(199, 213, 470), 650);
 }
 
 #[test]
@@ -277,6 +277,66 @@ const LME_ISOLATION_FIXTURE: &str = r#"
   }
 ]
 "#;
+
+#[test]
+fn longmemeval_topk_ids_include_gold_outside_three_seed_files() {
+    // sol_07a8eb8af5064466: topk_ids=true, seed_k=10. Gold session ranks 4th
+    // by term score; 3-seed expand cannot leave its file.
+    let json = r#"
+    [{
+      "question_id": "q_topk",
+      "question_type": "single-session-user",
+      "question": "Where is the purple saxophone stored?",
+      "answer": "Reykjavik",
+      "haystack_session_ids": ["s1", "s2", "s3", "s4"],
+      "haystack_sessions": [
+        [{"role": "user", "content": "A purple saxophone stored in a closet."}],
+        [{"role": "user", "content": "A purple saxophone stored in a drawer."}],
+        [{"role": "user", "content": "A purple saxophone stored in a case."}],
+        [{"role": "user", "content": "A purple saxophone lives in Reykjavik."}]
+      ],
+      "answer_session_ids": ["s4"]
+    }]
+    "#;
+    let tasks = parse_longmemeval(json, EvalSplit::Official).unwrap();
+    let root = tempfile::tempdir().unwrap();
+    materialize_longmemeval(json, root.path()).unwrap();
+    let hits = retrieve_task_ids(root.path(), &tasks[0]).unwrap();
+    assert!(
+        hits.iter().any(|id| id == "s4"),
+        "expected gold session s4 in top-{RECALL_K} ids, got {hits:?}"
+    );
+}
+
+#[test]
+fn extractive_qa_uses_all_turns_of_a_retrieved_session() {
+    // sol_07a8eb8af5064466: full_session_text=true. Answer lives on the
+    // lower-scoring turn of the gold session.
+    let json = r#"
+    [{
+      "question_id": "q_full_text",
+      "question_type": "single-session-user",
+      "question": "What degree did I graduate with?",
+      "answer": "Business Administration",
+      "haystack_session_ids": ["s2"],
+      "haystack_sessions": [
+        [
+          {"role": "user", "content": "I want to graduate and get a degree someday."},
+          {"role": "user", "content": "Yesterday I finished Business Administration."}
+        ]
+      ],
+      "answer_session_ids": ["s2"]
+    }]
+    "#;
+    let tasks = parse_longmemeval(json, EvalSplit::Official).unwrap();
+    let root = tempfile::tempdir().unwrap();
+    materialize_longmemeval(json, root.path()).unwrap();
+    let qa = extractive_qa(root.path(), &tasks).unwrap();
+    assert_eq!(
+        qa.covered, 1,
+        "full session text must include the answer turn"
+    );
+}
 
 #[test]
 fn longmemeval_retrieve_hits_official_answer_session_ids() {

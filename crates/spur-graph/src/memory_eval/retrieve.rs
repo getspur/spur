@@ -1,10 +1,10 @@
-use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::memory_eval::RECALL_K;
-use crate::{build_facts, GraphFacts, NodeId, NodeKind};
+use crate::{build_facts, GraphFacts, NodeKind};
 
-use super::{recall_at_k, MemoryTask, EXPAND_DEPTH, HUB_DEGREE_FLOOR};
+use super::{recall_at_k, MemoryTask};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RetrievalReport {
@@ -75,112 +75,35 @@ pub(crate) struct RetrievalHit {
 }
 
 pub(crate) fn retrieve_task_hits(facts: &GraphFacts, question: &str) -> Vec<RetrievalHit> {
+    // sol_07a8eb8af5064466: topk_ids, full_session_text, seed_k=hit_k=10.
     let terms = query_terms(question);
-    let mut scored: Vec<(u32, NodeId, String, String)> = facts
-        .nodes
-        .iter()
-        .filter(|node| node.kind == NodeKind::Section || node.kind == NodeKind::File)
-        .map(|node| {
-            let score = term_score(&node.label, &terms);
-            (
-                score,
-                node.node_id,
-                turn_id(&node.label),
-                node.label.clone(),
-            )
-        })
-        .filter(|(score, _, _, _)| *score > 0)
-        .collect();
-    scored.sort_by(|left, right| right.0.cmp(&left.0).then(left.2.cmp(&right.2)));
-
-    let seeds: Vec<NodeId> = scored.iter().take(3).map(|row| row.1).collect();
-    let expanded = expand(facts, &seeds);
-    let mut hits = Vec::new();
-    let mut seen = BTreeSet::new();
-    for (_, node_id, turn, text) in &scored {
-        if !expanded.contains(node_id) {
-            continue;
-        }
-        if turn.is_empty() || !seen.insert(turn.clone()) {
-            continue;
-        }
-        hits.push(RetrievalHit {
-            id: turn.clone(),
-            text: text.clone(),
-        });
-        if hits.len() >= RECALL_K {
-            break;
-        }
-    }
-    if hits.is_empty() {
-        for node in &facts.nodes {
-            if !expanded.contains(&node.node_id) {
-                continue;
-            }
-            let turn = turn_id(&node.label);
-            if turn.is_empty() || !seen.insert(turn.clone()) {
-                continue;
-            }
-            hits.push(RetrievalHit {
-                id: turn,
-                text: node.label.clone(),
-            });
-            if hits.len() >= RECALL_K {
-                break;
-            }
-        }
-    }
-    hits
-}
-
-fn expand(facts: &GraphFacts, seeds: &[NodeId]) -> BTreeSet<NodeId> {
-    let mut adjacency: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
-    for edge in &facts.edges {
-        if let Some(target) = edge.target_node_id {
-            adjacency
-                .entry(edge.source_node_id)
-                .or_default()
-                .push(target);
-            adjacency
-                .entry(target)
-                .or_default()
-                .push(edge.source_node_id);
-        }
-    }
-    let mut by_file: HashMap<Option<crate::FileId>, Vec<NodeId>> = HashMap::new();
+    let mut by_id: HashMap<String, (u32, Vec<String>)> = HashMap::new();
     for node in &facts.nodes {
-        by_file.entry(node.file_id).or_default().push(node.node_id);
-    }
-    for ids in by_file.values() {
-        if ids.len() < 2 {
+        if node.kind != NodeKind::Section && node.kind != NodeKind::File {
             continue;
         }
-        for (index, left) in ids.iter().enumerate() {
-            for right in &ids[index + 1..] {
-                adjacency.entry(*left).or_default().push(*right);
-                adjacency.entry(*right).or_default().push(*left);
-            }
-        }
-    }
-
-    let degree = |id: NodeId| adjacency.get(&id).map(Vec::len).unwrap_or(0);
-    let mut visited: BTreeSet<NodeId> = seeds.iter().copied().collect();
-    let mut frontier: VecDeque<(NodeId, usize)> = seeds.iter().copied().map(|id| (id, 0)).collect();
-    let seed_set: BTreeSet<NodeId> = seeds.iter().copied().collect();
-    while let Some((node, depth)) = frontier.pop_front() {
-        if depth >= EXPAND_DEPTH {
+        let turn = turn_id(&node.label);
+        if turn.is_empty() {
             continue;
         }
-        if !seed_set.contains(&node) && degree(node) >= HUB_DEGREE_FLOOR {
-            continue;
+        let score = term_score(&node.label, &terms);
+        let entry = by_id.entry(turn).or_insert((0, Vec::new()));
+        if score > entry.0 {
+            entry.0 = score;
         }
-        for neighbor in adjacency.get(&node).into_iter().flatten() {
-            if visited.insert(*neighbor) {
-                frontier.push_back((*neighbor, depth + 1));
-            }
-        }
+        entry.1.push(node.label.clone());
     }
-    visited
+    let mut ranked: Vec<(u32, String, String)> = by_id
+        .into_iter()
+        .filter(|(_, (score, _))| *score > 0)
+        .map(|(id, (score, texts))| (score, id, texts.join(" ")))
+        .collect();
+    ranked.sort_by(|left, right| right.0.cmp(&left.0).then(left.1.cmp(&right.1)));
+    ranked
+        .into_iter()
+        .take(RECALL_K)
+        .map(|(_, id, text)| RetrievalHit { id, text })
+        .collect()
 }
 
 fn query_terms(question: &str) -> Vec<String> {

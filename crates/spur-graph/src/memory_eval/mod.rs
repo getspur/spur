@@ -3,7 +3,8 @@
 //! Bounds are from `sol_5f73941594ed4d15` and
 //! `sol_bca716ccfbdb404d`. Haystack isolation: `sol_4dcbe9f970c04f3d`
 //! (isolated hits pass) / `sol_e63aad30cf0e4844` (foreign hit is a
-//! `data_integrity.foreign_key.violation`).
+//! `data_integrity.foreign_key.violation`). Retrieval policy
+//! `sol_07a8eb8af5064466`: top-k unique ids, full session text, seed_k=10.
 
 mod locomo;
 mod longmemeval;

@@ -3,15 +3,17 @@
 How `spur-graph` retrieves over conversational long-term memory, measured with
 the same public datasets Graphify reports: **LoCoMo** and **LongMemEval-S**.
 
-Phase 1 is **retrieval** (seed + expand at `k=10`). Phase 2 is **extractive QA**:
-the reader concatenates the retrieved section texts (no LLM) and a deterministic
-judge scores Graphify key-fact coverage
+Phase 1 is **retrieval** (top-`k` unique turn/session ids at `k=10`). Phase 2
+is **extractive QA**: the reader concatenates every retrieved session's section
+texts (no LLM) and a deterministic judge scores Graphify key-fact coverage
 (`coverage = (covered + 0.5 * partial) / total`).
 
 Constants: `sol_5f73941594ed4d15`, `sol_bca716ccfbdb404d`, `sol_805e26de169b45b3`.
 Haystack isolation: `sol_4dcbe9f970c04f3d` (isolated hits pass) /
 `sol_e63aad30cf0e4844` (foreign haystack hit is
 `data_integrity.foreign_key.violation`).
+Retrieval policy `sol_07a8eb8af5064466` (Z3 Optimize, lex): `topk_ids`,
+`full_session_text`, `seed_k = hit_k = 10`, no LLM.
 
 ## Results at a glance
 
@@ -26,16 +28,16 @@ directory).
 
 | Suite | Dataset (n) | Metric | spur-graph | Field |
 |---|---|---|---|---|
-| Memory | LoCoMo official (1536) | recall@10 | **0.398** | Graphify graph-expand 0.497 (n=300) |
-| Memory | LoCoMo official (1536) | extractive coverage | **44.0%** | Graphify LLM QA 45.3% (n=300) |
+| Memory | LoCoMo official (1536) | recall@10 | **0.393** | Graphify graph-expand 0.497 (n=300) |
+| Memory | LoCoMo official (1536) | extractive coverage | **45.8%** | Graphify LLM QA 45.3% (n=300) |
 | Memory | LoCoMo Graphify-sized (300) | recall@10 | run harness | first 300 non-adversarial IDs |
-| Memory | LongMemEval-S official (470) | recall@10 | **0.663** | Graphify graph-expand 0.844 (n=50) |
-| Memory | LongMemEval-S official (470) | extractive coverage | **49.5%** | Graphify LLM QA 76% (n=50) |
+| Memory | LongMemEval-S official (470) | recall@10 | **0.865** | Graphify graph-expand 0.844 (n=50) |
+| Memory | LongMemEval-S official (470) | extractive coverage | **65.0%** | Graphify LLM QA 76% (n=50) |
 | Memory | LongMemEval-S Graphify-sized (50) | recall@10 | run harness | first 50 retrieval IDs |
 | Cost | graph build | LLM credits | **0** | markdown + tree-sitter extract |
 
-LoCoMo extractive QA breakdown: covered 257, partial 839, miss 440.
-LongMemEval-S extractive QA breakdown: covered 134, partial 198, miss 138.
+LoCoMo extractive QA breakdown: covered 264, partial 879, miss 393.
+LongMemEval-S extractive QA breakdown: covered 199, partial 213, miss 58.
 
 Graphify's published LongMemEval row is a 50-question English slice with an LLM
 reader/judge. The official 470 row here is session-level recall plus extractive
@@ -44,7 +46,7 @@ coverage on the full cleaned retrieval split.
 ## Harness
 
 ```
-ingest sessions → markdown worktree → spur-graph extract → search+expand@10 → recall@10
+ingest sessions → markdown worktree → spur-graph extract → top-k unique ids@10 → recall@10
 ```
 
 - LoCoMo gold: QA `evidence` dialog IDs (`D1:3`).
@@ -57,7 +59,9 @@ ingest sessions → markdown worktree → spur-graph extract → search+expand@1
 ## Fairness rules
 
 - `k = 10` on every quality row.
-- Same materialize + extract path for seed-only vs expand (expand is the default).
+- Hits are the top-`k` unique turn/session ids by max term score in the
+  isolated haystack (not 3-seed BFS). QA concatenates every section of those
+  ids.
 - Graph build uses no LLM. Do not vendor `locomo10.json` (CC BY-NC 4.0); fetch
   at run time and record SHA-256.
 
