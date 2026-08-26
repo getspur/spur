@@ -1093,6 +1093,16 @@ fn validate_task6_overlay_generation_matrix(matrix: &serde_json::Value) -> Resul
                 "full MCP request must report zero generation identity mismatches",
             ));
         }
+        if cell["full_mcp_request"]["validation_observations_per_request"].as_u64() != Some(2) {
+            errors.push(prefix(
+                "full MCP request must perform exactly two validation observations",
+            ));
+        }
+        if cell["full_mcp_request"]["response_metadata_scans_per_request"].as_u64() != Some(0) {
+            errors.push(prefix(
+                "full MCP request must perform zero response metadata scans",
+            ));
+        }
 
         for latency_case in LATENCY_CASES {
             let summary = &cell["latency"][latency_case];
