@@ -21,6 +21,7 @@ bench = false
 
 [dependencies]
 anyhow = { workspace = true }
+arc-swap = "1"
 async-trait = { workspace = true }
 blake3 = "1"
 chrono = { workspace = true }

@@ -241,6 +241,8 @@ impl spur_mcp::ToolModule for GraphMcpModule {
     }
 }
 
+#[allow(dead_code)]
+mod overlay_runtime;
 mod overlay_snapshot;
 #[allow(dead_code)]
 mod request_cache;
