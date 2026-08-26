@@ -82,6 +82,13 @@ scripts/spur-cargo test -p spur-graph --lib
 scripts/spur-cargo fmt -- --check
 ```
 
+**Evidence:**
+
+- RED commit: `627c5191f`; generation diagnostic was `Null` instead of the required two-observation contract.
+- GREEN route: Auto enters the exact overlay observer before legacy metadata preflight, uses the snapshot builder as the start certification, pins one generation, and retains the post-query identity fence.
+- SOLVE POST: `sol_12af9bd7108948a2`; the bounded `StartObserved -> GenerationPinned -> QueryComplete -> PostObserved` trace passes transition and safety rules without `DuplicateObservation`.
+- Verification: focused warm-reuse, generation-route family, authoritative-correction, and full `mcp::tests` filters passed.
+
 ## Task 3 — Derive metadata from the pinned generation (`bd-rvzl`)
 
 **Files:**

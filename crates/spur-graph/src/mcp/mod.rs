@@ -1436,7 +1436,7 @@ async fn attempt_refresh(
         match overlay_response_for_backend(
             backend,
             request_client,
-            &rebuild_candidate,
+            rebuild_candidate.worktree.clone(),
             source.clone(),
             args,
             response_format,
@@ -1519,6 +1519,42 @@ async fn code_graph_backend_response_with_refresh(
         .map_err(CodeGraphError::without_metadata)?;
     let source = backend.metadata_source();
     let request_client = RequestReplayClient::new(backend.client());
+
+    // Auto owns a complete exact overlay observer. Enter it before the legacy
+    // metadata preflight so one request does not discover the same Git state
+    // through two independent paths. The static base may be stale; the
+    // certified overlay generation is authoritative for this request.
+    if refresh_strategy == GraphRefreshStrategy::OverlayThenRebuild && overlay_fsmonitor_auto {
+        if let Some(worktree) = current_worktree_root() {
+            match overlay_response_for_backend(
+                &backend,
+                &request_client,
+                worktree,
+                source.clone(),
+                args,
+                response_format,
+                true,
+                &handler,
+            )
+            .await
+            {
+                Ok(OverlayAttempt::Fresh(fresh_body)) => return Ok(fresh_body),
+                Ok(OverlayAttempt::StaleBudgetExceeded) => {
+                    // Preserve the existing stale-budget behavior. The legacy
+                    // path below may serve the base only with actionable stale
+                    // metadata; it cannot bless an uncertified overlay.
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        target: "spur_graph::mcp",
+                        error = ?error,
+                        "direct code graph overlay observation failed; using legacy escalation"
+                    );
+                }
+            }
+        }
+    }
+
     // Establish freshness before the first handler call. A dirty request then
     // executes all of its nested graph operations against one pinned
     // generation (or one exact fallback client), never against the base first.
@@ -1582,14 +1618,13 @@ async fn code_graph_backend_response_with_refresh(
 async fn overlay_response_for_backend(
     backend: &CodeSearchBackend,
     request_client: &(dyn GraphQueryClient + Sync),
-    rebuild_candidate: &RebuildCandidate,
+    worktree: PathBuf,
     source: GraphMetadataSource,
     args: &Value,
     response_format: ResponseFormat,
     overlay_fsmonitor_auto: bool,
     handler: impl Fn(&Value, &dyn GraphQueryClient) -> CodeGraphResult,
 ) -> Result<OverlayAttempt, CodeGraphError> {
-    let worktree = rebuild_candidate.worktree.clone();
     let snapshot_base = backend.snapshot_base().map_err(|error| {
         CodeGraphError::without_metadata(McpHandlerError::Internal(format!(
             "failed to construct code graph overlay: {error}"
@@ -1602,7 +1637,15 @@ async fn overlay_response_for_backend(
     let prepare_base = snapshot_base.clone();
     let mut task = tokio::task::spawn_blocking(move || {
         if overlay_fsmonitor_auto {
-            prepare_stable_overlay_for_worktree(prepare_worktree, prepare_base, true)
+            prepare_overlay_for_worktree(prepare_worktree, prepare_base, true).map(|prepared| {
+                prepared.map(|mut prepared| {
+                    // The snapshot builder certifies the start observation.
+                    // The post-query identity fence closes the request window;
+                    // another full observer here would duplicate validation.
+                    prepared.stable = true;
+                    prepared
+                })
+            })
         } else {
             prepare_overlay_for_worktree(prepare_worktree, prepare_base, false).map(|prepared| {
                 prepared.map(|mut prepared| {
@@ -1816,40 +1859,10 @@ async fn overlay_response_for_backend(
             cache_built.load(Ordering::Relaxed),
             full_base_artifact_builds.load(Ordering::Relaxed),
             pinned.query_operations(),
+            2,
         ),
     );
     Ok(OverlayAttempt::Fresh(fresh_body))
-}
-
-fn prepare_stable_overlay_for_worktree(
-    worktree: PathBuf,
-    base: overlay_snapshot::SnapshotBase,
-    overlay_fsmonitor_auto: bool,
-) -> anyhow::Result<Option<PreparedOverlay>> {
-    let mut last = None;
-    for _attempt in 0..=1 {
-        let Some(mut prepared) =
-            prepare_overlay_for_worktree(worktree.clone(), base.clone(), overlay_fsmonitor_auto)?
-        else {
-            return Ok(None);
-        };
-        let Some(identity) = prepared.changed.identity.as_ref() else {
-            prepared.stable = true;
-            return Ok(Some(prepared));
-        };
-        let mut validation =
-            changed_paths_for_overlay_base(&worktree, base.clone(), overlay_fsmonitor_auto)?;
-        validation.identity = validation.identity.map(canonical_overlay_identity);
-        if validation.identity.as_ref() == Some(identity) {
-            prepared.stable = true;
-            return Ok(Some(prepared));
-        }
-        last = Some(prepared);
-    }
-    if let Some(prepared) = &mut last {
-        prepared.stable = false;
-    }
-    Ok(last)
 }
 
 async fn authoritative_overlay_identity(
@@ -1981,6 +1994,7 @@ fn overlay_generation_diagnostics_value(
     built: bool,
     full_base_artifact_builds: u64,
     query_operations: u64,
+    validation_observations: u64,
 ) -> Value {
     json!({
         "route": "generation",
@@ -1988,6 +2002,7 @@ fn overlay_generation_diagnostics_value(
         "generation_id": generation_id,
         "full_base_artifact_builds": full_base_artifact_builds,
         "query_operations": query_operations,
+        "validation_observations": validation_observations,
         "generation_identity_mismatches": 0,
         "finalization_stages": finalization_stages(OverlayFinalizationMeasurements::default()),
     })
