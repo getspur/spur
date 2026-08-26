@@ -1003,33 +1003,14 @@ fn normalize_ru_maxrss_to_kb(raw: u64) -> u64 {
 
 #[test]
 fn gate_task4b_overlay_generation_matrix_requires_full_runtime_evidence() {
-    let complete_matrix = serde_json::json!({
-        "schema_version": 1,
-        "protocol_id": "overlay-generation-task6-v1",
-        "repetitions": 3,
-        "cold_warm_separated": true,
-        "timing_gate": "structural_only_no_fixed_millisecond_threshold",
-        "release_eligible": true,
-        "fsmonitor_auto_safe": true,
-        "validation_lease_route": "exact_observation",
-        "complete_warm_under_10ms": false,
-        "token_lease_release_eligible": false,
-        "token_lease_blocker": "no_supported_synchronous_git_token_fence",
-        "configuration_default": "Off",
-        "configure_semantics_changed": false,
-        "cells": [
-            task6_release_cell("small_untracked_heavy", "gen_small"),
-            task6_release_cell("medium_dirty_rust", "gen_medium"),
-            task6_release_cell("large_mostly_clean_polyglot", "gen_large"),
-        ],
-    });
+    let complete_matrix = task4b_release_matrix(30);
 
     validate_task4b_overlay_generation_matrix(&complete_matrix)
         .expect("the release matrix must satisfy the full Task 4b runtime contract");
 }
 
 #[test]
-fn gate_task6_overlay_generation_matrix_rejects_missing_or_correlated_evidence() {
+fn gate_task4b_overlay_generation_matrix_rejects_the_legacy_contract() {
     let mut incomplete = task6_release_cell("small_untracked_heavy", "gen_small");
     incomplete["warm_generation"]["finalization"]["result_merges"] = serde_json::json!(1);
     incomplete["exact_fallback"]["digest"] = serde_json::json!("different");
@@ -1040,13 +1021,15 @@ fn gate_task6_overlay_generation_matrix_rejects_missing_or_correlated_evidence()
         "cells": [incomplete],
     });
 
-    let errors = validate_task6_overlay_generation_matrix(&matrix)
-        .expect_err("incomplete, mismatched evidence must fail closed");
-    assert!(errors.iter().any(|error| error.contains("three projects")));
+    let errors = validate_task4b_overlay_generation_matrix(&matrix)
+        .expect_err("the legacy three-project/three-run contract must fail closed");
+    assert!(errors.iter().any(|error| error.contains("at least 30")));
     assert!(errors
         .iter()
-        .any(|error| error.contains("warm finalization")));
-    assert!(errors.iter().any(|error| error.contains("fallback digest")));
+        .any(|error| error.contains("all four required project classes")));
+    assert!(errors
+        .iter()
+        .any(|error| error.contains("missing scenario provider_overflow")));
 }
 
 #[test]
@@ -1059,23 +1042,26 @@ fn gate_task6_fsmonitor_default_remains_off() {
 
 #[test]
 fn gate_task6_emitted_matrix_when_evidence_path_is_set() {
-    let Some(path) = std::env::var_os("SPUR_GRAPH_TASK6_EVIDENCE") else {
-        eprintln!("SPUR_GRAPH_TASK6_EVIDENCE is unset; deterministic contract tests remain active");
+    let Some(path) = std::env::var_os("SPUR_GRAPH_TASK4B_EVIDENCE") else {
+        eprintln!(
+            "SPUR_GRAPH_TASK4B_EVIDENCE is unset; deterministic contract tests remain active"
+        );
         return;
     };
     let bytes = fs::read(&path).unwrap_or_else(|error| {
         panic!(
-            "read SPUR_GRAPH_TASK6_EVIDENCE `{}`: {error}",
+            "read SPUR_GRAPH_TASK4B_EVIDENCE `{}`: {error}",
             PathBuf::from(&path).display()
         )
     });
     let matrix = serde_json::from_slice::<serde_json::Value>(&bytes)
-        .expect("parse SPUR_GRAPH_TASK6_EVIDENCE JSON");
-    validate_task6_overlay_generation_matrix(&matrix).unwrap_or_else(|errors| {
-        panic!("Task 6 emitted matrix failed structural release gates: {errors:#?}")
+        .expect("parse SPUR_GRAPH_TASK4B_EVIDENCE JSON");
+    validate_task4b_overlay_generation_matrix(&matrix).unwrap_or_else(|errors| {
+        panic!("Task 4b emitted matrix failed release evidence validation: {errors:#?}")
     });
 }
 
+#[allow(dead_code)]
 fn validate_task6_overlay_generation_matrix(matrix: &serde_json::Value) -> Result<(), Vec<String>> {
     const PROTOCOL: &str = "overlay-generation-task6-v1";
     const LATENCY_CASES: [&str; 7] = [
@@ -1773,4 +1759,145 @@ fn task4b_nearest_rank(samples: &[f64], percentile: f64) -> f64 {
     sorted.sort_by(f64::total_cmp);
     let rank = ((sorted.len() as f64 * percentile).ceil() as usize).clamp(1, sorted.len());
     sorted[rank - 1]
+}
+
+fn task4b_release_matrix(repetitions: usize) -> serde_json::Value {
+    serde_json::json!({
+        "schema_version": 2,
+        "protocol_id": TASK4B_PROTOCOL,
+        "repetitions": repetitions,
+        "percentile_method": "nearest_rank_ceiling",
+        "rebuild_semantics": "background_exact_rebuild",
+        "hard_gate_failures": [],
+        "verdict": "RELEASE",
+        "cells": [
+            task4b_release_cell("small_untracked_heavy", repetitions, false),
+            task4b_release_cell("medium_dirty_rust", repetitions, false),
+            task4b_release_cell("large_mostly_clean_polyglot", repetitions, false),
+            task4b_release_cell("linked_worktree_shared_commondir", repetitions, true),
+        ],
+    })
+}
+
+fn task4b_release_cell(project: &str, repetitions: usize, linked: bool) -> serde_json::Value {
+    let scenarios = TASK4B_SCENARIOS
+        .into_iter()
+        .map(|scenario| {
+            (
+                scenario.to_owned(),
+                task4b_release_scenario(project, scenario, repetitions),
+            )
+        })
+        .collect::<serde_json::Map<_, _>>();
+    serde_json::json!({
+        "project": project,
+        "protocol_id": TASK4B_PROTOCOL,
+        "repetitions": repetitions,
+        "fixture": {
+            "linked_worktree": linked,
+            "shared_commondir": linked,
+        },
+        "scenarios": scenarios,
+    })
+}
+
+fn task4b_release_scenario(project: &str, scenario: &str, repetitions: usize) -> serde_json::Value {
+    let digest = format!("digest_{project}");
+    let (route, trust, provider, exact, background, pins, finalization) = match scenario {
+        "exact_fallback" => (
+            "exact_fallback",
+            "unavailable",
+            serde_json::Value::Null,
+            2,
+            0,
+            0,
+            Some(4),
+        ),
+        "provider_loss" | "provider_overflow" => (
+            "exact_fallback",
+            "untrusted",
+            serde_json::json!("notify"),
+            2,
+            0,
+            0,
+            Some(4),
+        ),
+        "cold_restart"
+        | "one_file_event_to_publication"
+        | "recovery_after_loss"
+        | "recovery_after_overflow" => (
+            "generation",
+            "trusted",
+            serde_json::json!("notify"),
+            0,
+            1,
+            1,
+            Some(0),
+        ),
+        "healthy_warm" => (
+            "generation",
+            "trusted",
+            serde_json::json!("notify"),
+            0,
+            0,
+            1,
+            Some(0),
+        ),
+        "off_mode" => ("off", "off", serde_json::Value::Null, 2, 0, 0, None),
+        other => panic!("unknown Task 4b scenario {other}"),
+    };
+    let elapsed_ms = if scenario == "one_file_event_to_publication" {
+        2.0
+    } else {
+        1.0
+    };
+    let runs = (1..=repetitions)
+        .map(|run| {
+            let generation_id = if pins == 1 {
+                serde_json::json!(format!("gen_{project}_{scenario}_{run}"))
+            } else {
+                serde_json::Value::Null
+            };
+            serde_json::json!({
+                "run": run,
+                "elapsed_ms": elapsed_ms,
+                "request_elapsed_ms": 1.0,
+                "route": route,
+                "provider": provider,
+                "trust": trust,
+                "epoch": if route == "off" { serde_json::Value::Null } else { serde_json::json!(run) },
+                "generation_id": generation_id,
+                "generation_pins": pins,
+                "pinned_one_immutable_generation": pins == 1,
+                "exact_observations": exact,
+                "background_exact_observations": background,
+                "query_operations": 1,
+                "query_operations_source": "mcp_diagnostics",
+                "finalization": {
+                    "observed": finalization.is_some(),
+                    "source": if finalization.is_some() { "mcp_diagnostics" } else { "not_exposed_in_off_mode" },
+                    "total": finalization,
+                },
+                "oracle_digest": digest,
+                "response_digest": digest,
+                "oracle_match": true,
+            })
+        })
+        .collect::<Vec<_>>();
+    let samples = vec![elapsed_ms; repetitions];
+    let mut evidence = serde_json::json!({
+        "latency": {
+            "sample_count": repetitions,
+            "samples_ms": samples,
+            "p50_ms": elapsed_ms,
+            "p95_ms": elapsed_ms,
+        },
+        "runs": runs,
+    });
+    if scenario == "one_file_event_to_publication" {
+        evidence["freshness_slo_ms"] = serde_json::json!(100.0);
+        evidence["p50_within_slo"] = serde_json::json!(true);
+        evidence["p95_within_slo"] = serde_json::json!(true);
+    }
+    evidence
 }
