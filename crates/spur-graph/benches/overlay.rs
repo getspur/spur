@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use spur_graph::{
-    artifact_from_facts, build_facts, git_blob_oid, overlay_changed_oids, read_artifact_parquet,
+    artifact_from_facts, build_facts, overlay_changed_oids, read_artifact_parquet,
     with_worktree_root_for_request, write_artifact_parquet, write_current_pointer, GraphMcpDeps,
     GraphMcpModule, GraphQueryClient, OverlayClient, OverlayFinalizationMeasurements,
     OverlayGeneration, OverlayGenerationIdentity, OverlayPathState, ParquetClient,
@@ -1263,6 +1263,11 @@ fn bench_overlay_release_matrix(_criterion: &mut Criterion) {
     }
 
     let release_eligible = cells.iter().all(matrix_cell_structurally_eligible);
+    let complete_warm_under_10ms = cells.iter().all(|cell| {
+        cell["latency"]["full_end_to_end_mcp"]["p95_ms"]
+            .as_f64()
+            .is_some_and(|p95| p95 <= 10.0)
+    });
     let report = serde_json::json!({
         "schema_version": 1,
         "protocol_id": TASK6_PROTOCOL_ID,
@@ -1273,6 +1278,10 @@ fn bench_overlay_release_matrix(_criterion: &mut Criterion) {
         "cells": cells,
         "release_eligible": release_eligible,
         "fsmonitor_auto_safe": release_eligible,
+        "validation_lease_route": "exact_observation",
+        "complete_warm_under_10ms": complete_warm_under_10ms,
+        "token_lease_release_eligible": false,
+        "token_lease_blocker": "no_supported_synchronous_git_token_fence",
         "configuration_default": "Off",
         "configure_semantics_changed": false,
     });
@@ -1294,6 +1303,29 @@ fn bench_overlay_release_matrix(_criterion: &mut Criterion) {
         serde_json::to_vec_pretty(&report).expect("serialize Task 6 matrix"),
     )
     .expect("write Task 6 evidence");
+    let concise = report["cells"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|cell| {
+            serde_json::json!({
+                "project": cell["project"],
+                "full_mcp": cell["latency"]["full_end_to_end_mcp"],
+                "validation_observations_per_request": cell["full_mcp_request"]["validation_observations_per_request"],
+                "response_metadata_scans_per_request": cell["full_mcp_request"]["response_metadata_scans_per_request"],
+            })
+        })
+        .collect::<Vec<_>>();
+    eprintln!(
+        "SPUR_GRAPH_VALIDATION_LEASE_SUMMARY={}",
+        serde_json::json!({
+            "validation_lease_route": report["validation_lease_route"],
+            "complete_warm_under_10ms": report["complete_warm_under_10ms"],
+            "token_lease_release_eligible": report["token_lease_release_eligible"],
+            "token_lease_blocker": report["token_lease_blocker"],
+            "cells": concise,
+        })
+    );
     eprintln!("SPUR_GRAPH_TASK6_MATRIX={report}");
     eprintln!("SPUR_GRAPH_TASK6_EVIDENCE={}", evidence_path.display());
 }
@@ -1557,7 +1589,7 @@ fn measure_matrix_cell(
     );
 
     let mut query_execution_ms = Vec::with_capacity(repetitions);
-    let mut response_file_metadata_ms = Vec::with_capacity(repetitions);
+    let mut response_metadata_derivation_ms = Vec::with_capacity(repetitions);
     let mut response_construction_ms = Vec::with_capacity(repetitions);
     for _ in 0..repetitions {
         let started = Instant::now();
@@ -1567,12 +1599,13 @@ fn measure_matrix_cell(
         query_execution_ms.push(elapsed_ms_task6(started));
 
         let started = Instant::now();
-        black_box(response_file_metadata_probe(
-            &fixture.root,
-            &initial_generation,
+        black_box(certified_metadata_derivation_probe(
+            initial_generation
+                .identity()
+                .expect("Task 6 generation identity"),
             &search,
         ));
-        response_file_metadata_ms.push(elapsed_ms_task6(started));
+        response_metadata_derivation_ms.push(elapsed_ms_task6(started));
 
         let started = Instant::now();
         black_box(shape_response(&search));
@@ -1597,6 +1630,8 @@ fn measure_matrix_cell(
     let mut warm_build_count = 0u64;
     let mut warm_full_base_load_count = 0u64;
     let mut warm_query_operation_count = 0u64;
+    let mut validation_observations_per_request = None;
+    let mut response_metadata_scans_per_request = None;
     let mut warm_finalization = BTreeMap::from([
         ("shadow_filters", 0u64),
         ("result_merges", 0u64),
@@ -1614,6 +1649,16 @@ fn measure_matrix_cell(
             .as_u64()
             .unwrap_or_default();
         warm_query_operation_count += diagnostics["query_operations"].as_u64().unwrap_or_default();
+        let validation_observations = diagnostics["validation_observations"]
+            .as_u64()
+            .expect("generation diagnostics validation_observations");
+        let response_metadata_scans = diagnostics["response_metadata_scans"]
+            .as_u64()
+            .expect("generation diagnostics response_metadata_scans");
+        assert_eq!(validation_observations, 2);
+        assert_eq!(response_metadata_scans, 0);
+        validation_observations_per_request = Some(validation_observations);
+        response_metadata_scans_per_request = Some(response_metadata_scans);
         for (stage, total) in &mut warm_finalization {
             *total += diagnostics["finalization_stages"][stage]
                 .as_u64()
@@ -1816,6 +1861,8 @@ fn measure_matrix_cell(
             "digest": initial_generation_digest,
             "query_operation_count": warm_query_operation_count,
             "generation_identity_mismatch_count": 0,
+            "validation_observations_per_request": validation_observations_per_request,
+            "response_metadata_scans_per_request": response_metadata_scans_per_request,
         },
         "latency": {
             "direct_parquet": latency_summary(&direct_parquet_ms),
@@ -1832,7 +1879,7 @@ fn measure_matrix_cell(
             "freshness_git_validation": latency_summary(&freshness_git_validation_ms),
             "generation_lookup_build_cold": latency_summary(&cold_generation_build_ms),
             "query_execution_warm_generation": latency_summary(&query_execution_ms),
-            "response_file_metadata_analysis": latency_summary(&response_file_metadata_ms),
+            "response_metadata_derivation": latency_summary(&response_metadata_derivation_ms),
             "response_construction_serialization": latency_summary(&response_construction_ms),
             "overlay_finalization_exact_oracle": latency_summary(&exact_overlay_finalization_ms),
             "full_end_to_end_code_request": latency_summary(&full_end_to_end_ms),
@@ -1910,26 +1957,16 @@ fn dispatch_matrix_request(
     (response, elapsed_ms_task6(started))
 }
 
-fn response_file_metadata_probe(
-    root: &Path,
-    client: &dyn GraphQueryClient,
+fn certified_metadata_derivation_probe(
+    identity: &OverlayGenerationIdentity,
     search: &SearchResult,
 ) -> String {
     let mut hasher = blake3::Hasher::new();
-    hasher.update(&checked_git_output(root, &["rev-parse", "HEAD"]).stdout);
-    hasher.update(
-        &checked_git_output(
-            root,
-            &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
-        )
-        .stdout,
-    );
+    hasher.update(identity.indexed_graph_content_hash.as_bytes());
+    hasher.update(identity.current_head_oid.as_bytes());
+    hasher.update(&identity.normalized_changed_set_fingerprint);
     for candidate in &search.candidates {
-        let manifest = client.file_manifest_by_path(&candidate.file_path);
-        hasher.update(format!("{manifest:?}").as_bytes());
-        if let Ok(bytes) = fs::read(root.join(&candidate.file_path)) {
-            hasher.update(git_blob_oid(&bytes).as_bytes());
-        }
+        hasher.update(candidate.file_path.as_bytes());
     }
     hasher.finalize().to_hex().to_string()
 }
@@ -2062,6 +2099,8 @@ fn matrix_cell_structurally_eligible(cell: &serde_json::Value) -> bool {
         ]
         .iter()
         .all(|stage| cell["warm_generation"]["finalization"][stage].as_u64() == Some(0))
+        && cell["full_mcp_request"]["validation_observations_per_request"].as_u64() == Some(2)
+        && cell["full_mcp_request"]["response_metadata_scans_per_request"].as_u64() == Some(0)
         && cell["incremental_update"]["generation_id"].as_str() != cold_id
         && cell["incremental_update"]["full_base_load_count"].as_u64() == Some(0)
         && cell["exact_fallback"]["digest"].as_str() == oracle

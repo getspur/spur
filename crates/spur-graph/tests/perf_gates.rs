@@ -779,6 +779,10 @@ fn gate_task6_overlay_generation_matrix_requires_structural_release_evidence() {
         "timing_gate": "structural_only_no_fixed_millisecond_threshold",
         "release_eligible": true,
         "fsmonitor_auto_safe": true,
+        "validation_lease_route": "exact_observation",
+        "complete_warm_under_10ms": false,
+        "token_lease_release_eligible": false,
+        "token_lease_blocker": "no_supported_synchronous_git_token_fence",
         "configuration_default": "Off",
         "configure_semantics_changed": false,
         "cells": [
@@ -857,7 +861,7 @@ fn validate_task6_overlay_generation_matrix(matrix: &serde_json::Value) -> Resul
         "freshness_git_validation",
         "generation_lookup_build_cold",
         "query_execution_warm_generation",
-        "response_file_metadata_analysis",
+        "response_metadata_derivation",
         "response_construction_serialization",
         "overlay_finalization_exact_oracle",
         "full_end_to_end_code_request",
@@ -881,6 +885,16 @@ fn validate_task6_overlay_generation_matrix(matrix: &serde_json::Value) -> Resul
         || matrix["fsmonitor_auto_safe"].as_bool() != Some(true)
     {
         errors.push("matrix release and fsmonitor Auto verdicts must pass".to_owned());
+    }
+    if matrix["validation_lease_route"].as_str() != Some("exact_observation")
+        || matrix["token_lease_release_eligible"].as_bool() != Some(false)
+        || matrix["token_lease_blocker"].as_str()
+            != Some("no_supported_synchronous_git_token_fence")
+    {
+        errors.push(
+            "matrix must keep the unsupported token lease disabled and identify its blocker"
+                .to_owned(),
+        );
     }
     if matrix["configuration_default"].as_str() != Some("Off")
         || matrix["configure_semantics_changed"].as_bool() != Some(false)
@@ -1211,6 +1225,8 @@ fn task6_release_cell(project: &str, generation_id: &str) -> serde_json::Value {
             "digest": "digest_equal",
             "query_operation_count": 1,
             "generation_identity_mismatch_count": 0,
+            "validation_observations_per_request": 2,
+            "response_metadata_scans_per_request": 0,
         },
         "latency": {
             "direct_parquet": {"sample_count": 3, "p50_ms": 1.0, "p95_ms": 2.0},
@@ -1227,7 +1243,7 @@ fn task6_release_cell(project: &str, generation_id: &str) -> serde_json::Value {
             "freshness_git_validation": {"sample_count": 3, "p50_ms": 1.0, "p95_ms": 2.0},
             "generation_lookup_build_cold": {"sample_count": 3, "p50_ms": 1.0, "p95_ms": 2.0},
             "query_execution_warm_generation": {"sample_count": 3, "p50_ms": 1.0, "p95_ms": 2.0},
-            "response_file_metadata_analysis": {"sample_count": 3, "p50_ms": 1.0, "p95_ms": 2.0},
+            "response_metadata_derivation": {"sample_count": 3, "p50_ms": 1.0, "p95_ms": 2.0},
             "response_construction_serialization": {"sample_count": 3, "p50_ms": 1.0, "p95_ms": 2.0},
             "overlay_finalization_exact_oracle": {"sample_count": 3, "p50_ms": 1.0, "p95_ms": 2.0},
             "full_end_to_end_code_request": {"sample_count": 3, "p50_ms": 1.0, "p95_ms": 2.0},

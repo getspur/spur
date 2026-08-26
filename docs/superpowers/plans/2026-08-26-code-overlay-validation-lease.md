@@ -137,6 +137,25 @@ scripts/spur-cargo test -p spur-graph
 scripts/spur-cargo fmt -- --check
 ```
 
+**Evidence:**
+
+- RED commit: `7809d4602`; all three deterministic cells failed because the full-MCP structural fields were absent.
+- Matrix command: `SPUR_GRAPH_TASK6_MATRIX=1 SPUR_GRAPH_RELEASE_REPEATS=30 scripts/spur-cargo bench -p spur-graph --bench overlay -- task6_matrix_only --noplot`.
+- Raw report: `.spur/bench-evidence/task6-overlay-generation-matrix.json`; 2,332 lines, 68,265 bytes; SHA-256 `8bfd67aaf4bf0f82314904f3e59d77ec35ab58088715a269f5a968d35cbf947a`.
+
+| Project | Complete warm MCP p50 / p95 ms | One exact Git observation p50 / p95 ms | Metadata derivation p50 / p95 ms |
+|---|---:|---:|---:|
+| small untracked-heavy | 94.201 / 97.384 | 38.167 / 39.656 | 0.000292 / 0.000417 |
+| medium dirty Rust | 94.932 / 96.690 | 38.404 / 43.459 | 0.000292 / 0.000375 |
+| large mostly-clean polyglot | 96.840 / 100.471 | 38.530 / 40.540 | 0.000292 / 0.000417 |
+
+- All cells: 30/30 matching digests, zero identity mismatches, exactly two validation observations per request, zero response metadata scans, zero warm overlay finalization stages.
+- Compared with the prior 128–132 ms p50 and 132–139 ms p95 matrix, complete warm latency improved by roughly 26–28%. The remaining floor is the two 38–41 ms exact Git observations.
+- Release verdict: exact-observer Auto is structurally safe; `complete_warm_under_10ms=false`; token lease remains disabled with blocker `no_supported_synchronous_git_token_fence`.
+- SOLVE POST: `sol_070b930957e54d9d`; the measured decision trace reaches `ExactObserverReleased`, while `TokenLeaseReleased` remains outside the safe state set.
+- Verification: `scripts/spur-cargo test -p spur-graph --lib` passed 491 tests (3 ignored); `scripts/spur-cargo test -p spur-graph --test perf_gates` passed all 4 active gates (9 ignored); the emitted evidence validator passed all 4 Task 6 gates; formatting and diff checks passed.
+- Baseline caveat: the unfiltered crate command still fails seven extractor golden tests because structured JSON extraction indexes each fixture's `expected_graph_index.json`. The same failure was reproduced unchanged at the design baseline `fe6eaea1b`, so it is outside this task's three-file diff.
+
 ## Commit sequence
 
 Each task produces an intent-focused RED commit and a GREEN/evidence commit:
