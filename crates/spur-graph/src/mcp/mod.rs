@@ -8194,6 +8194,10 @@ mod tests {
         assert_eq!(first_diagnostics["full_base_artifact_builds"], 1);
         assert_eq!(second_diagnostics["full_base_artifact_builds"], 0);
         for diagnostics in [first_diagnostics, second_diagnostics] {
+            assert_eq!(
+                diagnostics["validation_observations"], 2,
+                "one certified start observation plus one post-query fence is the exact-observer budget"
+            );
             assert_eq!(diagnostics["finalization_stages"]["shadow_filters"], 0);
             assert_eq!(diagnostics["finalization_stages"]["result_merges"], 0);
             assert_eq!(diagnostics["finalization_stages"]["overlay_sorts"], 0);
