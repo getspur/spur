@@ -749,10 +749,11 @@ mod tests {
 
     use super::{
         detect, fsmonitor_capabilities_from_daemon_status, fsmonitor_status_route,
-        ls_files_with_oids, parse_porcelain_v2, parse_registered_worktree_roots,
-        registered_worktree_roots, rev_parse_common_dir, rev_parse_head, status_dirty_paths,
-        status_observation_with_runner, FsmonitorCapabilities, FsmonitorDaemonStatus,
-        FsmonitorFallbackReason, FsmonitorStatusRoute, GitStatusCode, PorcelainV2EntryKind,
+        fsmonitor_validation_route, ls_files_with_oids, parse_porcelain_v2,
+        parse_registered_worktree_roots, registered_worktree_roots, rev_parse_common_dir,
+        rev_parse_head, status_dirty_paths, status_observation_with_runner,
+        FsmonitorCapabilities, FsmonitorDaemonStatus, FsmonitorFallbackReason,
+        FsmonitorStatusRoute, FsmonitorValidationRoute, GitStatusCode, PorcelainV2EntryKind,
     };
 
     #[test]
@@ -854,6 +855,38 @@ mod tests {
                 route == FsmonitorStatusRoute::FsmonitorNative,
                 mask == 0b1111,
                 "unexpected route for capability mask {mask:04b}: {route:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn validation_lease_requires_a_supported_synchronous_token_fence() {
+        let capabilities = all_capabilities();
+
+        assert_eq!(
+            fsmonitor_validation_route(capabilities, false),
+            FsmonitorValidationRoute::ExactObservation
+        );
+        assert_eq!(
+            fsmonitor_validation_route(capabilities, true),
+            FsmonitorValidationRoute::TokenFence
+        );
+
+        for mask in 0_u8..16 {
+            let capabilities = FsmonitorCapabilities {
+                release_enabled: mask & 0b1000 != 0,
+                built_in_supported: mask & 0b0100 != 0,
+                local_filesystem: mask & 0b0010 != 0,
+                watcher_healthy: mask & 0b0001 != 0,
+            };
+            assert_eq!(
+                fsmonitor_validation_route(capabilities, true),
+                if mask == 0b1111 {
+                    FsmonitorValidationRoute::TokenFence
+                } else {
+                    FsmonitorValidationRoute::ExactObservation
+                },
+                "unexpected validation route for capability mask {mask:04b}"
             );
         }
     }
