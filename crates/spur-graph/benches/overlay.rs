@@ -9,7 +9,7 @@
 //! `SPUR_GRAPH_PERF_MEASUREMENT_SECONDS` control evidence naming and finite
 //! Criterion bounds. Omitting every variable preserves the Spur defaults.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
@@ -19,12 +19,13 @@ use std::time::{Duration, Instant};
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use spur_graph::{
-    artifact_from_facts, build_facts, overlay_changed_oids, read_artifact_parquet,
-    with_worktree_root_for_request, write_artifact_parquet, write_current_pointer, GraphMcpDeps,
-    GraphMcpModule, GraphQueryClient, OverlayClient, OverlayFinalizationMeasurements,
-    OverlayGeneration, OverlayGenerationIdentity, OverlayPathState, ParquetClient,
-    RebuildCoordinator, SearchFilters, SearchMode, SearchOptions, SearchResult, WriteOptions,
+    artifact_from_facts, build_facts, with_worktree_root_for_request, write_artifact_parquet,
+    write_current_pointer, GraphMcpDeps, GraphMcpModule, GraphQueryClient, OverlayClient,
+    ParquetClient, RebuildCoordinator, SearchFilters, SearchMode, SearchOptions, SearchResult,
+    WriteOptions,
 };
+#[cfg(feature = "test-support")]
+use spur_graph::{OverlayFileChange, OverlayProviderLoss, OverlayRuntimeSupport};
 
 const DEFAULT_QUERY: &str = "handle_code_search";
 const DEFAULT_OVERLAY_QUERY: &str = "overlay_client_for_backend";
@@ -32,6 +33,11 @@ const DEFAULT_CHANGED_FILE: &str = "crates/spur-graph/src/mcp/mod.rs";
 const REQUIRED_WARM_SAMPLES: usize = 30;
 const MAX_WARM_SAMPLES: usize = 1_000;
 const MAX_MEASUREMENT_SECONDS: u64 = 10;
+
+fn task_matrix_requested() -> bool {
+    std::env::var("SPUR_GRAPH_TASK6_MATRIX").as_deref() == Ok("1")
+        || std::env::var("SPUR_GRAPH_TASK4B_MATRIX").as_deref() == Ok("1")
+}
 
 #[derive(Debug, Clone)]
 struct ProbeConfig {
@@ -129,7 +135,7 @@ impl ProbeConfig {
 }
 
 fn bench_overlay_vs_direct_parquet(c: &mut Criterion) {
-    if std::env::var("SPUR_GRAPH_TASK6_MATRIX").as_deref() == Ok("1") {
+    if task_matrix_requested() {
         return;
     }
     let config = ProbeConfig::load();
@@ -315,7 +321,7 @@ fn bench_overlay_vs_direct_parquet(c: &mut Criterion) {
 }
 
 fn bench_overlay_construction(c: &mut Criterion) {
-    if std::env::var("SPUR_GRAPH_TASK6_MATRIX").as_deref() == Ok("1") {
+    if task_matrix_requested() {
         return;
     }
     let config = ProbeConfig::load();
@@ -400,7 +406,7 @@ fn bench_overlay_construction(c: &mut Criterion) {
 }
 
 fn bench_overlay_stage_probe(c: &mut Criterion) {
-    if std::env::var("SPUR_GRAPH_TASK6_MATRIX").as_deref() == Ok("1") {
+    if task_matrix_requested() {
         return;
     }
     let config = ProbeConfig::load();
@@ -1196,9 +1202,12 @@ fn diagnostic_stage_summary(samples: &[f64]) -> serde_json::Value {
 
 }
 
-const TASK6_PROTOCOL_ID: &str = "overlay-generation-task6-v1";
-const TASK6_QUERY: &str = "matrix_target";
+#[cfg(feature = "test-support")]
+const TASK4B_PROTOCOL_ID: &str = "overlay-watcher-generation-release-v2";
+#[cfg(feature = "test-support")]
+const TASK4B_QUERY: &str = "matrix_target";
 
+#[cfg(feature = "test-support")]
 #[derive(Clone, Copy)]
 struct MatrixFixtureSpec {
     label: &'static str,
@@ -1206,8 +1215,10 @@ struct MatrixFixtureSpec {
     javascript_files: usize,
     python_files: usize,
     initial_shape: &'static str,
+    linked_worktree: bool,
 }
 
+#[cfg(feature = "test-support")]
 struct MatrixFixture {
     _dir: tempfile::TempDir,
     root: PathBuf,
@@ -1215,18 +1226,23 @@ struct MatrixFixture {
     spec: MatrixFixtureSpec,
     tracked_files: usize,
     initial_changed_paths: Vec<String>,
-    bounded_path: String,
+    event_path: String,
+    gitdir: PathBuf,
+    commondir: PathBuf,
 }
 
+#[cfg(not(feature = "test-support"))]
+fn bench_overlay_release_matrix(_criterion: &mut Criterion) {}
+
+#[cfg(feature = "test-support")]
 fn bench_overlay_release_matrix(_criterion: &mut Criterion) {
-    if std::env::var("SPUR_GRAPH_TASK6_MATRIX").as_deref() != Ok("1") {
+    if std::env::var("SPUR_GRAPH_TASK4B_MATRIX").as_deref() != Ok("1") {
         return;
     }
-
     let repetitions = bounded_env_usize(
         "SPUR_GRAPH_RELEASE_REPEATS",
         REQUIRED_WARM_SAMPLES,
-        3,
+        REQUIRED_WARM_SAMPLES,
         MAX_WARM_SAMPLES,
     );
     let specs = [
@@ -1236,6 +1252,7 @@ fn bench_overlay_release_matrix(_criterion: &mut Criterion) {
             javascript_files: 0,
             python_files: 0,
             initial_shape: "twelve_untracked_rust_files",
+            linked_worktree: false,
         },
         MatrixFixtureSpec {
             label: "medium_dirty_rust",
@@ -1243,6 +1260,7 @@ fn bench_overlay_release_matrix(_criterion: &mut Criterion) {
             javascript_files: 0,
             python_files: 0,
             initial_shape: "five_modified_tracked_rust_files",
+            linked_worktree: false,
         },
         MatrixFixtureSpec {
             label: "large_mostly_clean_polyglot",
@@ -1250,155 +1268,197 @@ fn bench_overlay_release_matrix(_criterion: &mut Criterion) {
             javascript_files: 64,
             python_files: 64,
             initial_shape: "one_modified_python_file",
+            linked_worktree: false,
+        },
+        MatrixFixtureSpec {
+            label: "linked_worktree_shared_commondir",
+            rust_files: 16,
+            javascript_files: 8,
+            python_files: 8,
+            initial_shape: "one_modified_linked_worktree_rust_file",
+            linked_worktree: true,
         },
     ];
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .expect("Task 6 matrix Tokio runtime");
-    let mut cells = Vec::with_capacity(specs.len());
-    for spec in specs {
-        let fixture = create_matrix_fixture(spec);
-        cells.push(measure_matrix_cell(&runtime, &fixture, repetitions));
-    }
-
-    let release_eligible = cells.iter().all(matrix_cell_structurally_eligible);
-    let complete_warm_under_10ms = cells.iter().all(|cell| {
-        cell["latency"]["full_end_to_end_mcp"]["p95_ms"]
-            .as_f64()
-            .is_some_and(|p95| p95 <= 10.0)
-    });
+        .expect("Task 4b matrix Tokio runtime");
+    let cells = specs
+        .into_iter()
+        .map(|spec| {
+            let fixture = create_task4b_fixture(spec);
+            measure_task4b_cell(&runtime, &fixture, repetitions)
+        })
+        .collect::<Vec<_>>();
+    let hard_gate_failures = task4b_hard_gate_failures(&cells);
+    let verdict = if hard_gate_failures.is_empty() {
+        "RELEASE"
+    } else {
+        "DO NOT RELEASE"
+    };
     let report = serde_json::json!({
-        "schema_version": 1,
-        "protocol_id": TASK6_PROTOCOL_ID,
+        "schema_version": 2,
+        "protocol_id": TASK4B_PROTOCOL_ID,
         "repetitions": repetitions,
-        "cold_warm_separated": true,
-        "timing_gate": "structural_only_no_fixed_millisecond_threshold",
-        "fixtures": "deterministic_disposable_git_repositories",
-        "cells": cells,
-        "release_eligible": release_eligible,
-        "fsmonitor_auto_safe": release_eligible,
-        "validation_lease_route": "exact_observation",
-        "complete_warm_under_10ms": complete_warm_under_10ms,
-        "token_lease_release_eligible": false,
-        "token_lease_blocker": "no_supported_synchronous_git_token_fence",
+        "percentile_method": "nearest_rank_ceiling",
+        "percentile_definition": "sort ascending; percentile rank = ceil(p * N), one-based; select rank - 1",
+        "rebuild_semantics": "background_exact_rebuild",
+        "warm_mcp_gate_ms": 10.0,
+        "cold_restart_gate_ms": 100.0,
+        "event_freshness_slo_ms": 100.0,
         "configuration_default": "Off",
-        "configure_semantics_changed": false,
+        "fixtures": "deterministic_disposable_git_repositories",
+        "provider_origin": "Task 4a deterministic notify subscription driving the real OverlayRuntimeLifecycle actor",
+        "implementation_revision": task4b_git_stdout(&default_repo_root(), &["rev-parse", "HEAD"]),
+        "measurement_environment": {
+            "os": std::env::consts::OS,
+            "arch": std::env::consts::ARCH,
+            "profile": "optimized cargo bench",
+        },
+        "cells": cells,
+        "hard_gate_failures": hard_gate_failures,
+        "verdict": verdict,
     });
-    assert!(
-        release_eligible,
-        "Task 6 matrix failed a parity or structural release condition: {report:#}"
-    );
 
-    let evidence_path = std::env::var_os("SPUR_GRAPH_TASK6_EVIDENCE")
+    let evidence_path = std::env::var_os("SPUR_GRAPH_TASK4B_EVIDENCE")
         .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            default_repo_root().join(".spur/bench-evidence/task6-overlay-generation-matrix.json")
-        });
+        .unwrap_or_else(|| std::env::temp_dir().join("spur-task4b-overlay-release-matrix.json"));
     if let Some(parent) = evidence_path.parent() {
-        fs::create_dir_all(parent).expect("create Task 6 evidence directory");
+        fs::create_dir_all(parent).expect("create Task 4b evidence directory");
     }
     fs::write(
         &evidence_path,
-        serde_json::to_vec_pretty(&report).expect("serialize Task 6 matrix"),
+        serde_json::to_vec_pretty(&report).expect("serialize Task 4b matrix"),
     )
-    .expect("write Task 6 evidence");
-    let concise = report["cells"]
+    .expect("write Task 4b evidence");
+    let summary = report["cells"]
         .as_array()
         .into_iter()
         .flatten()
         .map(|cell| {
             serde_json::json!({
                 "project": cell["project"],
-                "full_mcp": cell["latency"]["full_end_to_end_mcp"],
-                "validation_observations_per_request": cell["full_mcp_request"]["validation_observations_per_request"],
-                "response_metadata_scans_per_request": cell["full_mcp_request"]["response_metadata_scans_per_request"],
+                "exact_fallback": cell["scenarios"]["exact_fallback"]["latency"],
+                "cold_restart": cell["scenarios"]["cold_restart"]["latency"],
+                "healthy_warm": cell["scenarios"]["healthy_warm"]["latency"],
+                "one_file_event_to_publication": cell["scenarios"]["one_file_event_to_publication"]["latency"],
             })
         })
         .collect::<Vec<_>>();
     eprintln!(
-        "SPUR_GRAPH_VALIDATION_LEASE_SUMMARY={}",
+        "SPUR_GRAPH_TASK4B_SUMMARY={}",
         serde_json::json!({
-            "validation_lease_route": report["validation_lease_route"],
-            "complete_warm_under_10ms": report["complete_warm_under_10ms"],
-            "token_lease_release_eligible": report["token_lease_release_eligible"],
-            "token_lease_blocker": report["token_lease_blocker"],
-            "cells": concise,
+            "verdict": report["verdict"],
+            "hard_gate_failures": report["hard_gate_failures"],
+            "cells": summary,
         })
     );
-    eprintln!("SPUR_GRAPH_TASK6_MATRIX={report}");
-    eprintln!("SPUR_GRAPH_TASK6_EVIDENCE={}", evidence_path.display());
+    eprintln!("SPUR_GRAPH_TASK4B_EVIDENCE={}", evidence_path.display());
 }
 
-fn create_matrix_fixture(spec: MatrixFixtureSpec) -> MatrixFixture {
-    let dir = tempfile::tempdir().expect("Task 6 fixture tempdir");
-    let root = dir.path().to_path_buf();
-    init_matrix_git_repo(&root);
-    write_matrix_source(&root, ".gitignore", ".spur/\n");
-    write_matrix_source(
-        &root,
+#[cfg(feature = "test-support")]
+fn create_task4b_fixture(spec: MatrixFixtureSpec) -> MatrixFixture {
+    let dir = tempfile::tempdir().expect("Task 4b fixture tempdir");
+    let main = if spec.linked_worktree {
+        dir.path().join("main")
+    } else {
+        dir.path().join("repo")
+    };
+    fs::create_dir_all(&main).expect("create Task 4b repository");
+    init_task4b_git_repo(&main);
+    write_task4b_source(&main, ".gitignore", ".spur/\n");
+    write_task4b_source(
+        &main,
         "src/lib.rs",
         "pub fn matrix_target() -> usize { matrix_leaf() }\n\
          pub fn matrix_leaf() -> usize { 1 }\n\
          pub fn matrix_caller() -> usize { matrix_target() }\n",
     );
     for index in 0..spec.rust_files.saturating_sub(1) {
-        write_matrix_source(
-            &root,
+        write_task4b_source(
+            &main,
             &format!("src/rust/rust_{index:03}.rs"),
             &format!("pub fn rust_{index:03}() -> usize {{ {index} }}\n"),
         );
     }
     for index in 0..spec.javascript_files {
-        write_matrix_source(
-            &root,
+        write_task4b_source(
+            &main,
             &format!("src/javascript/js_{index:03}.js"),
             &format!("export function js{index:03}() {{ return {index}; }}\n"),
         );
     }
     for index in 0..spec.python_files {
-        write_matrix_source(
-            &root,
+        write_task4b_source(
+            &main,
             &format!("src/python/py_{index:03}.py"),
             &format!("def py_{index:03}():\n    return {index}\n"),
         );
     }
+    checked_git_output(&main, &["add", "."]);
+    checked_git_output(&main, &["commit", "-q", "-m", "Task 4b fixture base"]);
+    let root = if spec.linked_worktree {
+        let linked = dir.path().join("linked");
+        checked_git_output(
+            &main,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "task4b-linked",
+                linked.to_str().expect("UTF-8 linked worktree path"),
+            ],
+        );
+        linked
+    } else {
+        main
+    };
 
     let facts = build_facts(&root, None)
-        .expect("extract Task 6 fixture facts")
+        .expect("extract Task 4b fixture facts")
         .0;
-    let artifact = artifact_from_facts(&facts, &root).expect("build Task 6 fixture artifact");
-    checked_git_output(&root, &["add", "."]);
-    checked_git_output(&root, &["commit", "-q", "-m", "index Task 6 fixture"]);
+    let artifact = artifact_from_facts(&facts, &root).expect("build Task 4b fixture artifact");
     let parquet_dir = write_artifact_parquet(
         &artifact,
         &root.join(".spur/graph"),
         WriteOptions::default(),
         Vec::new(),
     )
-    .expect("write Task 6 fixture artifact");
-    write_current_pointer(&root, &parquet_dir).expect("publish Task 6 CURRENT pointer");
+    .expect("write Task 4b fixture artifact");
+    let manifest_path = parquet_dir.join("manifest.json");
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(&manifest_path).expect("read Task 4b fixture manifest"))
+            .expect("decode Task 4b fixture manifest");
+    manifest["indexed_commit_oid"] =
+        serde_json::json!(task4b_git_stdout(&root, &["rev-parse", "HEAD"]));
+    fs::write(
+        &manifest_path,
+        serde_json::to_vec_pretty(&manifest).expect("encode Task 4b fixture manifest"),
+    )
+    .expect("write Task 4b fixture manifest");
+    write_current_pointer(&root, &parquet_dir).expect("publish Task 4b CURRENT pointer");
 
-    let (initial_changed_paths, bounded_path) = match spec.label {
+    let (initial_changed_paths, event_path) = match spec.label {
         "small_untracked_heavy" => {
             let paths = (0..12)
                 .map(|index| format!("src/untracked/untracked_{index:03}.rs"))
                 .collect::<Vec<_>>();
             for (index, path) in paths.iter().enumerate() {
-                write_matrix_source(
+                write_task4b_source(
                     &root,
                     path,
                     &format!("pub fn untracked_{index:03}() -> usize {{ {index} }}\n"),
                 );
             }
-            (paths, "src/untracked/untracked_000.rs".to_owned())
+            (paths, "src/lib.rs".to_owned())
         }
         "medium_dirty_rust" => {
             let paths = (0..5)
                 .map(|index| format!("src/rust/rust_{index:03}.rs"))
                 .collect::<Vec<_>>();
             for (index, path) in paths.iter().enumerate() {
-                append_matrix_source(
+                append_task4b_source(
                     &root,
                     path,
                     &format!("pub fn dirty_{index:03}() -> usize {{ {index} }}\n"),
@@ -1408,11 +1468,24 @@ fn create_matrix_fixture(spec: MatrixFixtureSpec) -> MatrixFixture {
         }
         "large_mostly_clean_polyglot" => {
             let path = "src/python/py_000.py".to_owned();
-            append_matrix_source(&root, &path, "\ndef dirty_python():\n    return 1\n");
+            append_task4b_source(&root, &path, "\ndef dirty_python():\n    return 1\n");
             (vec![path], "src/rust/rust_001.rs".to_owned())
         }
-        other => panic!("unknown Task 6 fixture {other}"),
+        "linked_worktree_shared_commondir" => {
+            let path = "src/rust/rust_000.rs".to_owned();
+            append_task4b_source(&root, &path, "pub fn linked_dirty() -> usize { 1 }\n");
+            (vec![path.clone()], path)
+        }
+        other => panic!("unknown Task 4b fixture {other}"),
     };
+    let gitdir = task4b_canonical_git_path(
+        &root,
+        &task4b_git_stdout(&root, &["rev-parse", "--absolute-git-dir"]),
+    );
+    let commondir = task4b_canonical_git_path(
+        &root,
+        &task4b_git_stdout(&root, &["rev-parse", "--git-common-dir"]),
+    );
     let tracked_files = nul_record_count(&checked_git_output(&root, &["ls-files", "-z"]).stdout);
     MatrixFixture {
         _dir: dir,
@@ -1421,373 +1494,266 @@ fn create_matrix_fixture(spec: MatrixFixtureSpec) -> MatrixFixture {
         spec,
         tracked_files,
         initial_changed_paths,
-        bounded_path,
+        event_path,
+        gitdir,
+        commondir,
     }
 }
 
-fn init_matrix_git_repo(root: &Path) {
-    checked_git_output(root, &["init", "-q"]);
-    checked_git_output(
-        root,
-        &["config", "user.email", "task6-benchmark@example.invalid"],
-    );
-    checked_git_output(root, &["config", "user.name", "Task 6 Benchmark"]);
-}
-
-fn write_matrix_source(root: &Path, relative: &str, source: &str) {
-    let path = root.join(relative);
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).expect("create Task 6 source parent");
-    }
-    fs::write(path, source).expect("write Task 6 source");
-}
-
-fn append_matrix_source(root: &Path, relative: &str, suffix: &str) {
-    let path = root.join(relative);
-    let mut source = fs::read_to_string(&path).expect("read Task 6 source for bounded edit");
-    source.push_str(suffix);
-    fs::write(path, source).expect("append Task 6 bounded edit");
-}
-
-fn measure_matrix_cell(
+#[cfg(feature = "test-support")]
+fn measure_task4b_cell(
     runtime: &tokio::runtime::Runtime,
     fixture: &MatrixFixture,
     repetitions: usize,
 ) -> serde_json::Value {
-    let options = SearchOptions {
-        query: TASK6_QUERY.to_owned(),
-        mode: SearchMode::Exact,
-        filters: SearchFilters::default(),
-        limit: 20,
-    };
     let args = serde_json::json!({
-        "query": TASK6_QUERY,
+        "query": TASK4B_QUERY,
         "mode": "exact",
         "limit": 20,
         "response_format": "compact",
     });
-    let parquet = ParquetClient::open(&fixture.parquet_dir).expect("open Task 6 Parquet fixture");
-    let initial_changed_oids = overlay_changed_oids(
-        &fixture.root,
-        parquet.file_oids().expect("Task 6 base file OIDs"),
-    )
-    .expect("discover Task 6 initial changed paths");
-    let initial_changed_paths = initial_changed_oids.keys().cloned().collect::<Vec<_>>();
-    assert_eq!(
-        initial_changed_paths
-            .iter()
-            .map(|path| path_as_slash(path))
-            .collect::<BTreeSet<_>>(),
-        fixture
-            .initial_changed_paths
-            .iter()
-            .cloned()
-            .collect::<BTreeSet<_>>(),
-        "fixture recipe and authoritative Git discovery must agree"
-    );
-
-    let direct_result = parquet
-        .search_symbols(&options)
-        .expect("Task 6 direct Parquet query");
-    let direct_digest = search_result_digest(&direct_result);
-    let exact_overlay = OverlayClient::new(&parquet, &fixture.root, &initial_changed_paths)
-        .expect("construct Task 6 exact oracle");
-    let exact_result = exact_overlay
-        .search_symbols(&options)
-        .expect("Task 6 exact oracle query");
-    let oracle_digest = search_result_digest(&exact_result);
-
-    let mut backend_open_ms = Vec::with_capacity(repetitions);
-    let mut backend_full_read_ms = Vec::with_capacity(repetitions);
-    let mut direct_parquet_ms = Vec::with_capacity(repetitions);
-    let mut freshness_git_validation_ms = Vec::with_capacity(repetitions);
-    let mut exact_overlay_oracle_ms = Vec::with_capacity(repetitions);
-    let mut exact_overlay_finalization_ms = Vec::with_capacity(repetitions);
-    let mut exact_measurements = OverlayFinalizationMeasurements::default();
-    for _ in 0..repetitions {
-        let started = Instant::now();
-        black_box(ParquetClient::open(&fixture.parquet_dir).expect("sample backend open"));
-        backend_open_ms.push(elapsed_ms_task6(started));
-
-        let started = Instant::now();
-        black_box(read_artifact_parquet(&fixture.parquet_dir).expect("sample full base read"));
-        backend_full_read_ms.push(elapsed_ms_task6(started));
-
-        let started = Instant::now();
-        black_box(
-            parquet
-                .search_symbols(&options)
-                .expect("sample direct Parquet query"),
-        );
-        direct_parquet_ms.push(elapsed_ms_task6(started));
-
-        let started = Instant::now();
-        black_box(
-            overlay_changed_oids(
-                &fixture.root,
-                parquet.file_oids().expect("sample base file OIDs"),
-            )
-            .expect("sample authoritative Git validation"),
-        );
-        freshness_git_validation_ms.push(elapsed_ms_task6(started));
-
-        let started = Instant::now();
-        let oracle = OverlayClient::new(&parquet, &fixture.root, &initial_changed_paths)
-            .expect("sample exact request-scoped oracle");
-        let mut measurements = OverlayFinalizationMeasurements::default();
-        let result = oracle
-            .search_symbols_with_measurements(&options, &mut measurements)
-            .expect("sample exact request-scoped oracle query");
-        assert_eq!(search_result_digest(&result), oracle_digest);
-        accumulate_finalization(&mut exact_measurements, measurements);
-        exact_overlay_oracle_ms.push(elapsed_ms_task6(started));
-
-        let started = Instant::now();
-        let mut measurements = OverlayFinalizationMeasurements::default();
-        black_box(
-            exact_overlay
-                .search_symbols_with_measurements(&options, &mut measurements)
-                .expect("sample isolated overlay finalization"),
-        );
-        exact_overlay_finalization_ms.push(elapsed_ms_task6(started));
-    }
-
-    let base_artifact =
-        Arc::new(read_artifact_parquet(&fixture.parquet_dir).expect("load Task 6 generation base"));
-    let (initial_delta, _) =
-        OverlayClient::<&ParquetClient>::extract_delta(&fixture.root, &initial_changed_paths)
-            .expect("extract Task 6 initial generation delta");
-    let initial_delta = Arc::new(initial_delta);
-    let initial_path_state = generation_path_state(&fixture.root, &initial_changed_oids);
-    let initial_identity =
-        generation_identity(&fixture.root, &parquet, &initial_path_state, "initial");
-    let mut cold_generation_build_ms = Vec::with_capacity(repetitions);
-    let mut initial_generation = None;
-    for _ in 0..repetitions {
-        let started = Instant::now();
-        let seed = Arc::new(
-            OverlayGeneration::seed(Arc::clone(&base_artifact))
-                .expect("seed Task 6 cold generation"),
-        );
-        let generation = Arc::new(
-            OverlayGeneration::update(
-                &seed,
-                initial_identity.clone(),
-                &initial_path_state,
-                Arc::clone(&initial_delta),
-            )
-            .expect("build Task 6 cold generation"),
-        );
-        cold_generation_build_ms.push(elapsed_ms_task6(started));
-        initial_generation = Some(generation);
-    }
-    let initial_generation = initial_generation.expect("measured cold generation");
-    let initial_generation_digest = search_result_digest(
-        &initial_generation
-            .search_symbols(&options)
-            .expect("query Task 6 initial generation"),
-    );
-
-    let mut query_execution_ms = Vec::with_capacity(repetitions);
-    let mut response_metadata_derivation_ms = Vec::with_capacity(repetitions);
-    let mut response_construction_ms = Vec::with_capacity(repetitions);
-    for _ in 0..repetitions {
-        let started = Instant::now();
-        let search = initial_generation
-            .search_symbols(&options)
-            .expect("sample Task 6 generation query");
-        query_execution_ms.push(elapsed_ms_task6(started));
-
-        let started = Instant::now();
-        black_box(certified_metadata_derivation_probe(
-            initial_generation
-                .identity()
-                .expect("Task 6 generation identity"),
-            &search,
-        ));
-        response_metadata_derivation_ms.push(elapsed_ms_task6(started));
-
-        let started = Instant::now();
-        black_box(shape_response(&search));
-        response_construction_ms.push(elapsed_ms_task6(started));
-    }
-
-    let auto_module = GraphMcpModule::new(GraphMcpDeps {
-        rebuild_coordinator: Arc::new(RebuildCoordinator::new()),
-        overlay_fsmonitor_auto: true,
-    });
-    let (cold_response, cold_request_ms) =
-        dispatch_matrix_request(runtime, &auto_module, &fixture.root, &args);
-    let cold_diagnostics = generation_diagnostics_task6(&cold_response);
-    assert_eq!(cold_diagnostics["route"], "generation");
-    assert_eq!(cold_diagnostics["cache"], "built");
-    let cold_generation_id = required_string(cold_diagnostics, "generation_id");
-    let cold_digest = response_digest_task6(&normalize_mcp_search(&cold_response));
-
-    let mut full_end_to_end_ms = Vec::with_capacity(repetitions);
-    let mut warm_generation_ids = Vec::with_capacity(repetitions);
-    let mut warm_digests = Vec::with_capacity(repetitions);
-    let mut warm_build_count = 0u64;
-    let mut warm_full_base_load_count = 0u64;
-    let mut warm_query_operation_count = 0u64;
-    let mut validation_observations_per_request = None;
-    let mut response_metadata_scans_per_request = None;
-    let mut warm_finalization = BTreeMap::from([
-        ("shadow_filters", 0u64),
-        ("result_merges", 0u64),
-        ("overlay_sorts", 0u64),
-        ("stable_id_deduplications", 0u64),
-    ]);
-    for _ in 0..repetitions {
-        let (response, elapsed) =
-            dispatch_matrix_request(runtime, &auto_module, &fixture.root, &args);
-        full_end_to_end_ms.push(elapsed);
-        let diagnostics = generation_diagnostics_task6(&response);
-        assert_eq!(diagnostics["route"], "generation");
-        warm_build_count += u64::from(diagnostics["cache"] == "built");
-        warm_full_base_load_count += diagnostics["full_base_artifact_builds"]
-            .as_u64()
-            .unwrap_or_default();
-        warm_query_operation_count += diagnostics["query_operations"].as_u64().unwrap_or_default();
-        let validation_observations = diagnostics["validation_observations"]
-            .as_u64()
-            .expect("generation diagnostics validation_observations");
-        let response_metadata_scans = diagnostics["response_metadata_scans"]
-            .as_u64()
-            .expect("generation diagnostics response_metadata_scans");
-        assert_eq!(validation_observations, 2);
-        assert_eq!(response_metadata_scans, 0);
-        validation_observations_per_request = Some(validation_observations);
-        response_metadata_scans_per_request = Some(response_metadata_scans);
-        for (stage, total) in &mut warm_finalization {
-            *total += diagnostics["finalization_stages"][stage]
-                .as_u64()
-                .unwrap_or_default();
-        }
-        warm_generation_ids.push(required_string(diagnostics, "generation_id"));
-        warm_digests.push(response_digest_task6(&normalize_mcp_search(&response)));
-    }
-
-    append_matrix_source(
-        &fixture.root,
-        &fixture.bounded_path,
-        "\n// bounded Task 6 incremental update\n",
-    );
-    let bounded_changed_oids = overlay_changed_oids(
-        &fixture.root,
-        parquet.file_oids().expect("Task 6 bounded base file OIDs"),
-    )
-    .expect("discover Task 6 bounded changed paths");
-    let bounded_changed_paths = bounded_changed_oids.keys().cloned().collect::<Vec<_>>();
-    let (bounded_delta, _) =
-        OverlayClient::<&ParquetClient>::extract_delta(&fixture.root, &bounded_changed_paths)
-            .expect("extract Task 6 bounded generation delta");
-    let bounded_delta = Arc::new(bounded_delta);
-    let bounded_path_state = generation_path_state(&fixture.root, &bounded_changed_oids);
-    let bounded_identity =
-        generation_identity(&fixture.root, &parquet, &bounded_path_state, "bounded");
-    let mut bounded_incremental_update_ms = Vec::with_capacity(repetitions);
-    let mut bounded_generation = None;
-    for _ in 0..repetitions {
-        let started = Instant::now();
-        let generation = Arc::new(
-            OverlayGeneration::update(
-                &initial_generation,
-                bounded_identity.clone(),
-                &bounded_path_state,
-                Arc::clone(&bounded_delta),
-            )
-            .expect("sample Task 6 bounded generation update"),
-        );
-        bounded_incremental_update_ms.push(elapsed_ms_task6(started));
-        bounded_generation = Some(generation);
-    }
-    let bounded_generation = bounded_generation.expect("measured bounded generation");
-    let bounded_digest = search_result_digest(
-        &bounded_generation
-            .search_symbols(&options)
-            .expect("query Task 6 bounded generation"),
-    );
-    let (incremental_response, incremental_request_ms) =
-        dispatch_matrix_request(runtime, &auto_module, &fixture.root, &args);
-    let incremental_diagnostics = generation_diagnostics_task6(&incremental_response);
-    assert_eq!(incremental_diagnostics["route"], "generation");
-    let incremental_generation_id = required_string(incremental_diagnostics, "generation_id");
-    let incremental_digest = response_digest_task6(&normalize_mcp_search(&incremental_response));
-
-    let updated_oracle = OverlayClient::new(&parquet, &fixture.root, &bounded_changed_paths)
-        .expect("construct updated Task 6 exact oracle")
-        .search_symbols(&options)
-        .expect("query updated Task 6 exact oracle");
-    let updated_oracle_digest = search_result_digest(&updated_oracle);
-    assert_eq!(
-        updated_oracle_digest, oracle_digest,
-        "bounded edit must preserve the identical query input/result contract"
-    );
-
     let off_module = GraphMcpModule::new(GraphMcpDeps {
         rebuild_coordinator: Arc::new(RebuildCoordinator::new()),
         overlay_fsmonitor_auto: false,
     });
-    let mut exact_fallback_ms = Vec::with_capacity(repetitions);
-    let mut fallback_digests = Vec::with_capacity(repetitions);
-    for _ in 0..repetitions {
-        let (response, elapsed) =
-            dispatch_matrix_request(runtime, &off_module, &fixture.root, &args);
-        exact_fallback_ms.push(elapsed);
-        fallback_digests.push(response_digest_task6(&normalize_mcp_search(&response)));
+    let (oracle_response, _) = dispatch_task4b_request(runtime, &off_module, &fixture.root, &args);
+    let oracle_digest = task4b_response_digest(&normalize_task4b_search(&oracle_response));
+    let support = runtime
+        .block_on(OverlayRuntimeSupport::start(&fixture.root))
+        .expect("start Task 4b runtime support");
+    let initial = support.state().expect("Task 4b initial runtime state");
+
+    let mut exact_fallback_runs = Vec::with_capacity(repetitions);
+    for run in 1..=repetitions {
+        let exact = support.observe_exact().expect("observe exact fallback");
+        let module = GraphMcpModule::new(GraphMcpDeps {
+            rebuild_coordinator: Arc::new(RebuildCoordinator::new()),
+            overlay_fsmonitor_auto: true,
+        });
+        let (response, elapsed) = dispatch_task4b_request(runtime, &module, &fixture.root, &args);
+        let exact_observations = exact.delta() as u64;
+        exact_fallback_runs.push(task4b_run(
+            run,
+            elapsed,
+            elapsed,
+            response,
+            exact_observations,
+            0,
+            &oracle_digest,
+        ));
+        drop(exact);
     }
-    let fallback_digest = fallback_digests
-        .first()
-        .cloned()
-        .expect("Task 6 fallback repetitions");
 
-    let mut all_digests = vec![
-        direct_digest.clone(),
-        oracle_digest.clone(),
-        initial_generation_digest.clone(),
-        cold_digest.clone(),
-        bounded_digest.clone(),
-        incremental_digest.clone(),
-    ];
-    all_digests.extend(warm_digests.iter().cloned());
-    all_digests.extend(fallback_digests.iter().cloned());
-    let mismatch_count = all_digests
-        .iter()
-        .filter(|digest| digest.as_str() != oracle_digest)
-        .count();
+    let mut cold_restart_runs = Vec::with_capacity(repetitions);
+    for run in 1..=repetitions {
+        let exact = support.observe_exact().expect("observe cold restart");
+        let started = Instant::now();
+        let cold = runtime
+            .block_on(OverlayRuntimeSupport::start(&fixture.root))
+            .expect("cold-start Task 4b runtime support");
+        let background = exact.delta() as u64;
+        let request = runtime
+            .block_on(cold.request("code_symbol_search", args.clone()))
+            .expect("cold Task 4b MCP request");
+        let request_exact = exact.delta() as u64 - background;
+        cold_restart_runs.push(task4b_run(
+            run,
+            started.elapsed(),
+            request.elapsed,
+            request.response,
+            request_exact,
+            background,
+            &oracle_digest,
+        ));
+        drop(exact);
+        drop(cold);
+    }
 
-    let rebuilt_paths = bounded_generation
-        .rebuilt_paths()
-        .iter()
-        .cloned()
-        .collect::<Vec<_>>();
-    let dependency_closure_paths = bounded_generation
-        .rewritten_query_paths()
-        .iter()
-        .cloned()
-        .collect::<Vec<_>>();
-    let bounded_only = BTreeSet::from([fixture.bounded_path.clone()]);
-    assert!(
-        rebuilt_paths.iter().all(|path| bounded_only.contains(path)),
-        "bounded update rebuilt outside the single changed dependency root: {rebuilt_paths:?}"
-    );
-    assert!(
-        rebuilt_paths
-            .iter()
-            .all(|path| dependency_closure_paths.contains(path)),
-        "rebuilt paths must be included in the dependency closure"
-    );
+    let mut healthy_warm_runs = Vec::with_capacity(repetitions);
+    for run in 1..=repetitions {
+        let exact = support.observe_exact().expect("observe healthy warm");
+        let background = exact.delta() as u64;
+        let request = runtime
+            .block_on(support.request("code_symbol_search", args.clone()))
+            .expect("healthy warm Task 4b MCP request");
+        let request_exact = exact.delta() as u64 - background;
+        healthy_warm_runs.push(task4b_run(
+            run,
+            request.elapsed,
+            request.elapsed,
+            request.response,
+            request_exact,
+            background,
+            &oracle_digest,
+        ));
+        drop(exact);
+    }
 
-    let warm_finalization_json = serde_json::json!({
-        "shadow_filters": warm_finalization["shadow_filters"],
-        "result_merges": warm_finalization["result_merges"],
-        "overlay_sorts": warm_finalization["overlay_sorts"],
-        "stable_id_deduplications": warm_finalization["stable_id_deduplications"],
-    });
+    let mut event_runs = Vec::with_capacity(repetitions);
+    for run in 1..=repetitions {
+        append_task4b_source(
+            &fixture.root,
+            &fixture.event_path,
+            &format!("// Task 4b one-file event {run}\n"),
+        );
+        let previous = support.state().expect("state before Task 4b event");
+        let exact = support.observe_exact().expect("observe one-file event");
+        let publication = runtime
+            .block_on(support.publish_file_change(
+                OverlayFileChange::Modify(fixture.root.join(&fixture.event_path)),
+                Duration::from_secs(30),
+            ))
+            .expect("publish Task 4b one-file event");
+        let background = exact.delta() as u64;
+        let request = runtime
+            .block_on(support.request("code_symbol_search", args.clone()))
+            .expect("MCP request after Task 4b one-file event");
+        let request_exact = exact.delta() as u64 - background;
+        let mut evidence = task4b_run(
+            run,
+            publication.elapsed,
+            request.elapsed,
+            request.response,
+            request_exact,
+            background,
+            &oracle_digest,
+        );
+        evidence["previous_epoch"] = serde_json::json!(previous.epoch);
+        evidence["previous_generation_id"] = serde_json::json!(previous.generation_id);
+        evidence["published_epoch"] = serde_json::json!(publication.state.epoch);
+        evidence["published_generation_id"] = serde_json::json!(publication.state.generation_id);
+        event_runs.push(evidence);
+        drop(exact);
+    }
+
+    let mut provider_loss_runs = Vec::with_capacity(repetitions);
+    let mut recovery_after_loss_runs = Vec::with_capacity(repetitions);
+    for run in 1..=repetitions {
+        let exact = support.observe_exact().expect("observe provider loss");
+        let lost = runtime
+            .block_on(
+                support.pause_recovery(OverlayProviderLoss::Disconnected, Duration::from_secs(30)),
+            )
+            .expect("publish Task 4b provider loss");
+        let background = exact.delta() as u64;
+        let request = runtime
+            .block_on(support.request("code_symbol_search", args.clone()))
+            .expect("MCP request while Task 4b provider is lost");
+        let request_exact = exact.delta() as u64 - background;
+        let mut evidence = task4b_run(
+            run,
+            request.elapsed,
+            request.elapsed,
+            request.response,
+            request_exact,
+            background,
+            &oracle_digest,
+        );
+        evidence["loss_publication_ms"] = serde_json::json!(task4b_duration_ms(lost.elapsed));
+        provider_loss_runs.push(evidence);
+        drop(exact);
+
+        let exact = support.observe_exact().expect("observe loss recovery");
+        let recovered = runtime
+            .block_on(support.resume_recovery(Duration::from_secs(30)))
+            .expect("recover Task 4b provider loss");
+        let background = exact.delta() as u64;
+        let request = runtime
+            .block_on(support.request("code_symbol_search", args.clone()))
+            .expect("MCP request after Task 4b loss recovery");
+        let request_exact = exact.delta() as u64 - background;
+        recovery_after_loss_runs.push(task4b_run(
+            run,
+            recovered.elapsed,
+            request.elapsed,
+            request.response,
+            request_exact,
+            background,
+            &oracle_digest,
+        ));
+        drop(exact);
+    }
+
+    let mut provider_overflow_runs = Vec::with_capacity(repetitions);
+    let mut recovery_after_overflow_runs = Vec::with_capacity(repetitions);
+    for run in 1..=repetitions {
+        let exact = support.observe_exact().expect("observe provider overflow");
+        let lost = runtime
+            .block_on(
+                support.pause_recovery(OverlayProviderLoss::Overflow, Duration::from_secs(30)),
+            )
+            .expect("publish Task 4b provider overflow");
+        let background = exact.delta() as u64;
+        let request = runtime
+            .block_on(support.request("code_symbol_search", args.clone()))
+            .expect("MCP request while Task 4b provider is overflowed");
+        let request_exact = exact.delta() as u64 - background;
+        let mut evidence = task4b_run(
+            run,
+            request.elapsed,
+            request.elapsed,
+            request.response,
+            request_exact,
+            background,
+            &oracle_digest,
+        );
+        evidence["loss_publication_ms"] = serde_json::json!(task4b_duration_ms(lost.elapsed));
+        provider_overflow_runs.push(evidence);
+        drop(exact);
+
+        let exact = support.observe_exact().expect("observe overflow recovery");
+        let recovered = runtime
+            .block_on(support.resume_recovery(Duration::from_secs(30)))
+            .expect("recover Task 4b provider overflow");
+        let background = exact.delta() as u64;
+        let request = runtime
+            .block_on(support.request("code_symbol_search", args.clone()))
+            .expect("MCP request after Task 4b overflow recovery");
+        let request_exact = exact.delta() as u64 - background;
+        recovery_after_overflow_runs.push(task4b_run(
+            run,
+            recovered.elapsed,
+            request.elapsed,
+            request.response,
+            request_exact,
+            background,
+            &oracle_digest,
+        ));
+        drop(exact);
+    }
+
+    let mut off_mode_runs = Vec::with_capacity(repetitions);
+    for run in 1..=repetitions {
+        let exact = support.observe_exact().expect("observe Off mode");
+        let (response, elapsed) =
+            dispatch_task4b_request(runtime, &off_module, &fixture.root, &args);
+        let exact_observations = exact.delta() as u64;
+        off_mode_runs.push(task4b_run(
+            run,
+            elapsed,
+            elapsed,
+            response,
+            exact_observations,
+            0,
+            &oracle_digest,
+        ));
+        drop(exact);
+    }
+
+    let mut event_scenario = task4b_scenario(event_runs);
+    let event_p50 = event_scenario["latency"]["p50_ms"]
+        .as_f64()
+        .expect("Task 4b event p50");
+    let event_p95 = event_scenario["latency"]["p95_ms"]
+        .as_f64()
+        .expect("Task 4b event p95");
+    event_scenario["freshness_slo_ms"] = serde_json::json!(100.0);
+    event_scenario["p50_within_slo"] = serde_json::json!(event_p50 < 100.0);
+    event_scenario["p95_within_slo"] = serde_json::json!(event_p95 < 100.0);
+
     serde_json::json!({
         "project": fixture.spec.label,
-        "protocol_id": TASK6_PROTOCOL_ID,
+        "protocol_id": TASK4B_PROTOCOL_ID,
         "repetitions": repetitions,
         "fixture": {
             "tracked_files": fixture.tracked_files,
@@ -1798,183 +1764,270 @@ fn measure_matrix_cell(
                 "python": fixture.spec.python_files,
             },
             "initial_change_shape": fixture.spec.initial_shape,
-            "initial_changed_paths": initial_changed_paths,
-            "initial_changed_segment_count": initial_generation.rebuilt_paths().len(),
-            "bounded_changed_path": fixture.bounded_path,
-            "artifact_graph_content_hash": parquet.manifest().graph_content_hash,
+            "initial_changed_paths": fixture.initial_changed_paths,
+            "event_path": fixture.event_path,
+            "artifact": fixture.parquet_dir,
+            "gitdir": fixture.gitdir,
+            "commondir": fixture.commondir,
+            "linked_worktree": fixture.spec.linked_worktree,
+            "shared_commondir": fixture.gitdir != fixture.commondir,
+        },
+        "initial_runtime": {
+            "provider": initial.provider,
+            "trust": initial.trust,
+            "epoch": initial.epoch,
+            "generation_id": initial.generation_id,
+            "index_identity": initial.index_identity,
         },
         "oracle_digest": oracle_digest,
-        "mismatch_count": mismatch_count,
-        "direct_parquet": {
-            "query_operation_count": repetitions,
-            "digest": direct_digest,
-        },
-        "exact_overlay_oracle": {
-            "query_operation_count": repetitions,
-            "digest": updated_oracle_digest,
-            "finalization": finalization_json(exact_measurements),
-        },
-        "cold_generation": {
-            "classification": "uncached_generation_build",
-            "generation_id": cold_generation_id,
-            "generation_build_count": u64::from(cold_diagnostics["cache"] == "built"),
-            "full_base_load_count": cold_diagnostics["full_base_artifact_builds"],
-            "changed_path_count": initial_changed_oids.len(),
-            "rebuilt_segment_count": initial_generation.rebuilt_paths().len(),
-            "digest": cold_digest,
-            "production_request_ms": cold_request_ms,
-        },
-        "warm_generation": {
-            "classification": "exact_generation_reuse_no_change",
-            "generation_ids": warm_generation_ids,
-            "digests": warm_digests,
-            "generation_build_count": warm_build_count,
-            "full_base_load_count": warm_full_base_load_count,
-            "query_operation_count": warm_query_operation_count,
-            "finalization": warm_finalization_json,
-        },
-        "incremental_update": {
-            "classification": "bounded_single_path_update",
-            "previous_generation_id": cold_generation_id,
-            "generation_id": incremental_generation_id,
-            "all_dirty_paths": bounded_changed_paths,
-            "changed_paths": [fixture.bounded_path.clone()],
-            "rebuilt_paths": rebuilt_paths,
-            "dependency_closure_paths": dependency_closure_paths,
-            "rebuilt_adjacency_symbols": bounded_generation.rebuilt_adjacency_symbols(),
-            "changed_segment_count": bounded_generation.rebuilt_paths().len(),
-            "dependency_closure_path_count": bounded_generation.rewritten_query_paths().len(),
-            "dependency_closure_symbol_count": bounded_generation.rebuilt_adjacency_symbols().len(),
-            "full_base_load_count": incremental_diagnostics["full_base_artifact_builds"],
-            "query_operation_count": incremental_diagnostics["query_operations"],
-            "digest": incremental_digest,
-            "production_request_ms": incremental_request_ms,
-        },
-        "exact_fallback": {
-            "route": "request_scoped_exact_overlay",
-            "reason": "configuration_off_exact_oracle",
-            "query_operation_count": repetitions,
-            "digest": fallback_digest,
-        },
-        "full_mcp_request": {
-            "route": "generation",
-            "digest": initial_generation_digest,
-            "query_operation_count": warm_query_operation_count,
-            "generation_identity_mismatch_count": 0,
-            "validation_observations_per_request": validation_observations_per_request,
-            "response_metadata_scans_per_request": response_metadata_scans_per_request,
-        },
-        "latency": {
-            "direct_parquet": latency_summary(&direct_parquet_ms),
-            "exact_overlay_oracle": latency_summary(&exact_overlay_oracle_ms),
-            "cold_generation_build": latency_summary(&cold_generation_build_ms),
-            "warm_generation_reuse": latency_summary(&query_execution_ms),
-            "bounded_incremental_update": latency_summary(&bounded_incremental_update_ms),
-            "exact_fallback": latency_summary(&exact_fallback_ms),
-            "full_end_to_end_mcp": latency_summary(&full_end_to_end_ms),
-        },
-        "phase_decomposition": {
-            "backend_open": latency_summary(&backend_open_ms),
-            "backend_full_base_read": latency_summary(&backend_full_read_ms),
-            "freshness_git_validation": latency_summary(&freshness_git_validation_ms),
-            "generation_lookup_build_cold": latency_summary(&cold_generation_build_ms),
-            "query_execution_warm_generation": latency_summary(&query_execution_ms),
-            "response_metadata_derivation": latency_summary(&response_metadata_derivation_ms),
-            "response_construction_serialization": latency_summary(&response_construction_ms),
-            "overlay_finalization_exact_oracle": latency_summary(&exact_overlay_finalization_ms),
-            "full_end_to_end_code_request": latency_summary(&full_end_to_end_ms),
+        "scenarios": {
+            "exact_fallback": task4b_scenario(exact_fallback_runs),
+            "cold_restart": task4b_scenario(cold_restart_runs),
+            "healthy_warm": task4b_scenario(healthy_warm_runs),
+            "one_file_event_to_publication": event_scenario,
+            "provider_loss": task4b_scenario(provider_loss_runs),
+            "recovery_after_loss": task4b_scenario(recovery_after_loss_runs),
+            "provider_overflow": task4b_scenario(provider_overflow_runs),
+            "recovery_after_overflow": task4b_scenario(recovery_after_overflow_runs),
+            "off_mode": task4b_scenario(off_mode_runs),
         },
     })
 }
 
-fn generation_path_state(
-    root: &Path,
-    changed_oids: &BTreeMap<PathBuf, [u8; 20]>,
-) -> BTreeMap<String, OverlayPathState> {
-    changed_oids
+#[cfg(feature = "test-support")]
+#[allow(clippy::too_many_arguments)]
+fn task4b_run(
+    run: usize,
+    elapsed: Duration,
+    request_elapsed: Duration,
+    response: serde_json::Value,
+    exact_observations: u64,
+    background_exact_observations: u64,
+    oracle_digest: &str,
+) -> serde_json::Value {
+    let diagnostics = response.get("overlay_generation");
+    let route = diagnostics
+        .and_then(|value| value["route"].as_str())
+        .unwrap_or("off");
+    let provider = diagnostics
+        .map(|value| value["provider"].clone())
+        .unwrap_or(serde_json::Value::Null);
+    let trust = diagnostics
+        .and_then(|value| value["trust"].as_str())
+        .unwrap_or("off");
+    let epoch = diagnostics
+        .map(|value| value["epoch"].clone())
+        .unwrap_or(serde_json::Value::Null);
+    let generation_id = diagnostics
+        .map(|value| value["generation_id"].clone())
+        .unwrap_or(serde_json::Value::Null);
+    let generation_pins = diagnostics
+        .and_then(|value| value["generation_pins"].as_u64())
+        .unwrap_or_default();
+    let query_operations_observed =
+        diagnostics.is_some_and(|value| value.get("query_operations").is_some());
+    let query_operations = diagnostics
+        .and_then(|value| value["query_operations"].as_u64())
+        .unwrap_or(1);
+    let finalization = diagnostics.and_then(|value| value.get("finalization_stages"));
+    let normalized = normalize_task4b_search(&response);
+    let response_digest = task4b_response_digest(&normalized);
+    serde_json::json!({
+        "run": run,
+        "elapsed_ms": task4b_duration_ms(elapsed),
+        "request_elapsed_ms": task4b_duration_ms(request_elapsed),
+        "route": route,
+        "provider": provider,
+        "trust": trust,
+        "epoch": epoch,
+        "generation_id": generation_id,
+        "generation_pins": generation_pins,
+        "pinned_one_immutable_generation": generation_pins == 1 && !generation_id.is_null(),
+        "fallback_reason": diagnostics.map(|value| value["fallback_reason"].clone()).unwrap_or(serde_json::Value::Null),
+        "exact_observations": exact_observations,
+        "background_exact_observations": background_exact_observations,
+        "query_operations": query_operations,
+        "query_operations_source": if query_operations_observed { "mcp_diagnostics" } else { "one_harness_code_symbol_search_dispatch" },
+        "finalization": {
+            "observed": finalization.is_some(),
+            "source": if finalization.is_some() { "mcp_diagnostics" } else { "not_exposed_in_off_mode" },
+            "shadow_filters": finalization.map(|value| value["shadow_filters"].clone()).unwrap_or(serde_json::Value::Null),
+            "result_merges": finalization.map(|value| value["result_merges"].clone()).unwrap_or(serde_json::Value::Null),
+            "overlay_sorts": finalization.map(|value| value["overlay_sorts"].clone()).unwrap_or(serde_json::Value::Null),
+            "stable_id_deduplications": finalization.map(|value| value["stable_id_deduplications"].clone()).unwrap_or(serde_json::Value::Null),
+            "total": finalization.map(|value| value["total"].clone()).unwrap_or(serde_json::Value::Null),
+        },
+        "oracle_digest": oracle_digest,
+        "response_digest": response_digest,
+        "oracle_match": response_digest == oracle_digest,
+    })
+}
+
+#[cfg(feature = "test-support")]
+fn task4b_scenario(runs: Vec<serde_json::Value>) -> serde_json::Value {
+    let samples = runs
         .iter()
-        .map(|(path, oid)| {
-            let state = if !root.join(path).exists() {
-                OverlayPathState::Deleted
-            } else if git_path_is_tracked(root, path) {
-                OverlayPathState::Tracked(hex_oid(oid))
-            } else {
-                OverlayPathState::Untracked(hex_oid(oid))
-            };
-            (path_as_slash(path), state)
-        })
-        .collect()
+        .map(|run| run["elapsed_ms"].as_f64().expect("Task 4b elapsed sample"))
+        .collect::<Vec<_>>();
+    serde_json::json!({
+        "latency": task4b_latency_summary(&samples),
+        "runs": runs,
+    })
 }
 
-fn git_path_is_tracked(root: &Path, path: &Path) -> bool {
-    Command::new("git")
-        .current_dir(root)
-        .env("GIT_OPTIONAL_LOCKS", "0")
-        .args(["ls-files", "--error-unmatch", "--"])
-        .arg(path)
-        .output()
-        .is_ok_and(|output| output.status.success())
+#[cfg(feature = "test-support")]
+fn task4b_latency_summary(samples: &[f64]) -> serde_json::Value {
+    let mut sorted = samples.to_vec();
+    sorted.sort_by(f64::total_cmp);
+    serde_json::json!({
+        "sample_count": samples.len(),
+        "samples_ms": samples,
+        "p50_ms": task4b_nearest_rank(&sorted, 0.50),
+        "p95_ms": task4b_nearest_rank(&sorted, 0.95),
+    })
 }
 
-fn hex_oid(oid: &[u8; 20]) -> String {
-    oid.iter().map(|byte| format!("{byte:02x}")).collect()
+#[cfg(feature = "test-support")]
+fn task4b_nearest_rank(sorted: &[f64], percentile: f64) -> f64 {
+    let rank = ((sorted.len() as f64 * percentile).ceil() as usize).clamp(1, sorted.len());
+    sorted[rank - 1]
 }
 
-fn generation_identity(
-    root: &Path,
-    parquet: &ParquetClient,
-    path_state: &BTreeMap<String, OverlayPathState>,
-    phase: &str,
-) -> OverlayGenerationIdentity {
-    let current_head_oid =
-        String::from_utf8_lossy(&checked_git_output(root, &["rev-parse", "HEAD"]).stdout)
-            .trim()
-            .to_owned();
-    OverlayGenerationIdentity {
-        canonical_worktree: root.canonicalize().expect("canonical Task 6 fixture"),
-        indexed_graph_content_hash: parquet.manifest().graph_content_hash.clone(),
-        indexed_head_oid: parquet.manifest().indexed_commit_oid.clone(),
-        current_head_oid,
-        index_identity: format!("task6:{phase}"),
-        normalized_changed_set_fingerprint: *blake3::hash(format!("{path_state:?}").as_bytes())
-            .as_bytes(),
+#[cfg(feature = "test-support")]
+fn task4b_duration_ms(duration: Duration) -> f64 {
+    duration.as_secs_f64() * 1_000.0
+}
+
+#[cfg(feature = "test-support")]
+fn task4b_hard_gate_failures(cells: &[serde_json::Value]) -> Vec<String> {
+    let mut failures = BTreeSet::new();
+    for cell in cells {
+        let project = cell["project"].as_str().unwrap_or("<missing-project>");
+        if project == "linked_worktree_shared_commondir"
+            && (cell["fixture"]["linked_worktree"].as_bool() != Some(true)
+                || cell["fixture"]["shared_commondir"].as_bool() != Some(true))
+        {
+            failures.insert(format!("{project}:linked_commondir"));
+        }
+        let scenarios = &cell["scenarios"];
+        for scenario in [
+            "exact_fallback",
+            "cold_restart",
+            "healthy_warm",
+            "one_file_event_to_publication",
+            "provider_loss",
+            "recovery_after_loss",
+            "provider_overflow",
+            "recovery_after_overflow",
+            "off_mode",
+        ] {
+            for run in scenarios[scenario]["runs"].as_array().into_iter().flatten() {
+                if run["oracle_match"].as_bool() != Some(true)
+                    || run["response_digest"].as_str() != run["oracle_digest"].as_str()
+                {
+                    failures.insert(format!("{project}:correctness"));
+                }
+            }
+        }
+        if scenarios["healthy_warm"]["latency"]["p95_ms"]
+            .as_f64()
+            .is_none_or(|p95| p95 >= 10.0)
+        {
+            failures.insert(format!("{project}:healthy_warm_mcp_p95"));
+        }
+        if scenarios["cold_restart"]["latency"]["p95_ms"]
+            .as_f64()
+            .is_none_or(|p95| p95 >= 100.0)
+        {
+            failures.insert(format!("{project}:cold_restart_mcp_p95"));
+        }
+        if scenarios["one_file_event_to_publication"]["latency"]["p95_ms"]
+            .as_f64()
+            .is_none_or(|p95| p95 >= 100.0)
+        {
+            failures.insert(format!("{project}:event_to_publication_p95"));
+        }
+        for run in scenarios["healthy_warm"]["runs"]
+            .as_array()
+            .into_iter()
+            .flatten()
+        {
+            if run["route"] != "generation"
+                || run["exact_observations"].as_u64() != Some(0)
+                || run["background_exact_observations"].as_u64() != Some(0)
+                || run["finalization"]["total"].as_u64() != Some(0)
+                || run["generation_pins"].as_u64() != Some(1)
+                || run["pinned_one_immutable_generation"].as_bool() != Some(true)
+            {
+                failures.insert(format!("{project}:healthy_warm_route"));
+            }
+        }
+        for scenario in ["exact_fallback", "provider_loss", "provider_overflow"] {
+            for run in scenarios[scenario]["runs"].as_array().into_iter().flatten() {
+                if run["route"] != "exact_fallback"
+                    || run["exact_observations"].as_u64().unwrap_or_default() == 0
+                {
+                    failures.insert(format!("{project}:{scenario}_route"));
+                }
+                if matches!(scenario, "provider_loss" | "provider_overflow")
+                    && run["trust"] != "untrusted"
+                {
+                    failures.insert(format!("{project}:{scenario}_trust"));
+                }
+            }
+        }
+        for scenario in ["recovery_after_loss", "recovery_after_overflow"] {
+            for run in scenarios[scenario]["runs"].as_array().into_iter().flatten() {
+                if run["route"] != "generation"
+                    || run["trust"] != "trusted"
+                    || run["exact_observations"].as_u64() != Some(0)
+                    || run["background_exact_observations"]
+                        .as_u64()
+                        .unwrap_or_default()
+                        == 0
+                    || run["generation_pins"].as_u64() != Some(1)
+                    || run["pinned_one_immutable_generation"].as_bool() != Some(true)
+                {
+                    failures.insert(format!("{project}:{scenario}"));
+                }
+            }
+        }
+        for run in scenarios["off_mode"]["runs"]
+            .as_array()
+            .into_iter()
+            .flatten()
+        {
+            if run["route"] != "off" || run["exact_observations"].as_u64().unwrap_or_default() == 0
+            {
+                failures.insert(format!("{project}:off_mode"));
+            }
+        }
     }
+    failures.into_iter().collect()
 }
 
-fn dispatch_matrix_request(
+#[cfg(feature = "test-support")]
+fn dispatch_task4b_request(
     runtime: &tokio::runtime::Runtime,
     module: &GraphMcpModule,
     root: &Path,
     args: &serde_json::Value,
-) -> (serde_json::Value, f64) {
+) -> (serde_json::Value, Duration) {
     let started = Instant::now();
     let response = runtime
         .block_on(with_worktree_root_for_request(
             root.to_path_buf(),
             module.dispatch("code_symbol_search", args.clone()),
         ))
-        .unwrap_or_else(|error| panic!("Task 6 MCP request failed: {error:?}"));
-    (response, elapsed_ms_task6(started))
+        .unwrap_or_else(|error| panic!("Task 4b MCP request failed: {error:?}"));
+    (response, started.elapsed())
 }
 
-fn certified_metadata_derivation_probe(
-    identity: &OverlayGenerationIdentity,
-    search: &SearchResult,
-) -> String {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(identity.indexed_graph_content_hash.as_bytes());
-    hasher.update(identity.current_head_oid.as_bytes());
-    hasher.update(&identity.normalized_changed_set_fingerprint);
-    for candidate in &search.candidates {
-        hasher.update(candidate.file_path.as_bytes());
-    }
-    hasher.finalize().to_hex().to_string()
-}
-
-fn normalize_mcp_search(value: &serde_json::Value) -> serde_json::Value {
+#[cfg(feature = "test-support")]
+fn normalize_task4b_search(value: &serde_json::Value) -> serde_json::Value {
     let candidates = value["candidates"]
         .as_array()
-        .unwrap_or_else(|| panic!("Task 6 response lacks candidates: {value:#}"))
+        .unwrap_or_else(|| panic!("Task 4b response lacks candidates: {value:#}"))
         .iter()
         .map(|candidate| {
             serde_json::json!({
@@ -1995,116 +2048,58 @@ fn normalize_mcp_search(value: &serde_json::Value) -> serde_json::Value {
     })
 }
 
-fn search_result_digest(search: &SearchResult) -> String {
-    let candidates = search
-        .candidates
-        .iter()
-        .map(|candidate| {
-            serde_json::json!({
-                "id": candidate.stable_symbol_id,
-                "entity_name": candidate.entity_name,
-                "qualified_name": candidate.qualified_name,
-                "file_path": candidate.file_path,
-                "line_range": candidate.line_range,
-                "symbol_kind": candidate.symbol_kind,
-                "enclosing_scope": candidate.enclosing_scope,
-            })
-        })
-        .collect::<Vec<_>>();
-    let value = serde_json::json!({
-        "total_matches": search.total_matches,
-        "truncated": search.truncated,
-        "candidates": candidates,
-    });
-    response_digest_task6(&value)
-}
-
-fn response_digest_task6(value: &serde_json::Value) -> String {
-    blake3::hash(&serde_json::to_vec(value).expect("serialize Task 6 response"))
+#[cfg(feature = "test-support")]
+fn task4b_response_digest(value: &serde_json::Value) -> String {
+    blake3::hash(&serde_json::to_vec(value).expect("serialize Task 4b response"))
         .to_hex()
         .to_string()
 }
 
-fn generation_diagnostics_task6(response: &serde_json::Value) -> &serde_json::Value {
-    response.get("overlay_generation").unwrap_or_else(|| {
-        panic!("Task 6 request lacks overlay generation diagnostics: {response:#}")
-    })
+#[cfg(feature = "test-support")]
+fn init_task4b_git_repo(root: &Path) {
+    checked_git_output(root, &["init", "-q", "-b", "main"]);
+    checked_git_output(
+        root,
+        &["config", "user.email", "task4b-benchmark@example.invalid"],
+    );
+    checked_git_output(root, &["config", "user.name", "Task 4b Benchmark"]);
 }
 
-fn required_string(value: &serde_json::Value, field: &str) -> String {
-    value[field]
-        .as_str()
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| panic!("Task 6 diagnostics lacks {field}: {value:#}"))
+#[cfg(feature = "test-support")]
+fn write_task4b_source(root: &Path, relative: &str, source: &str) {
+    let path = root.join(relative);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).expect("create Task 4b source parent");
+    }
+    fs::write(path, source).expect("write Task 4b source");
+}
+
+#[cfg(feature = "test-support")]
+fn append_task4b_source(root: &Path, relative: &str, suffix: &str) {
+    let path = root.join(relative);
+    let mut source = fs::read_to_string(&path).expect("read Task 4b source for edit");
+    source.push_str(suffix);
+    fs::write(path, source).expect("append Task 4b source");
+}
+
+#[cfg(feature = "test-support")]
+fn task4b_git_stdout(root: &Path, args: &[&str]) -> String {
+    String::from_utf8(checked_git_output(root, args).stdout)
+        .expect("Task 4b git output is UTF-8")
+        .trim()
         .to_owned()
 }
 
-fn accumulate_finalization(
-    total: &mut OverlayFinalizationMeasurements,
-    sample: OverlayFinalizationMeasurements,
-) {
-    total.shadow_filters += sample.shadow_filters;
-    total.result_merges += sample.result_merges;
-    total.overlay_sorts += sample.overlay_sorts;
-    total.stable_id_deduplications += sample.stable_id_deduplications;
-}
-
-fn finalization_json(measurements: OverlayFinalizationMeasurements) -> serde_json::Value {
-    serde_json::json!({
-        "shadow_filters": measurements.shadow_filters,
-        "result_merges": measurements.result_merges,
-        "overlay_sorts": measurements.overlay_sorts,
-        "stable_id_deduplications": measurements.stable_id_deduplications,
-        "total": measurements.total(),
-    })
-}
-
-fn latency_summary(samples: &[f64]) -> serde_json::Value {
-    assert!(!samples.is_empty(), "Task 6 latency case has no samples");
-    let mut sorted = samples.to_vec();
-    sorted.sort_by(f64::total_cmp);
-    serde_json::json!({
-        "sample_count": samples.len(),
-        "samples_ms": samples,
-        "p50_ms": nearest_rank(&sorted, 0.50),
-        "p95_ms": nearest_rank(&sorted, 0.95),
-    })
-}
-
-fn nearest_rank(sorted: &[f64], percentile: f64) -> f64 {
-    let rank = ((sorted.len() as f64 * percentile).ceil() as usize).clamp(1, sorted.len());
-    sorted[rank - 1]
-}
-
-fn elapsed_ms_task6(started: Instant) -> f64 {
-    started.elapsed().as_secs_f64() * 1_000.0
-}
-
-fn matrix_cell_structurally_eligible(cell: &serde_json::Value) -> bool {
-    let oracle = cell["oracle_digest"].as_str();
-    let warm_ids = cell["warm_generation"]["generation_ids"].as_array();
-    let cold_id = cell["cold_generation"]["generation_id"].as_str();
-    cell["mismatch_count"].as_u64() == Some(0)
-        && cold_id.is_some_and(|id| id.starts_with("gen_"))
-        && cell["cold_generation"]["generation_build_count"].as_u64() == Some(1)
-        && cell["cold_generation"]["full_base_load_count"].as_u64() == Some(1)
-        && cell["warm_generation"]["generation_build_count"].as_u64() == Some(0)
-        && cell["warm_generation"]["full_base_load_count"].as_u64() == Some(0)
-        && warm_ids.is_some_and(|ids| ids.len() >= 3 && ids.iter().all(|id| id.as_str() == cold_id))
-        && [
-            "shadow_filters",
-            "result_merges",
-            "overlay_sorts",
-            "stable_id_deduplications",
-        ]
-        .iter()
-        .all(|stage| cell["warm_generation"]["finalization"][stage].as_u64() == Some(0))
-        && cell["full_mcp_request"]["validation_observations_per_request"].as_u64() == Some(2)
-        && cell["full_mcp_request"]["response_metadata_scans_per_request"].as_u64() == Some(0)
-        && cell["incremental_update"]["generation_id"].as_str() != cold_id
-        && cell["incremental_update"]["full_base_load_count"].as_u64() == Some(0)
-        && cell["exact_fallback"]["digest"].as_str() == oracle
-        && cell["full_mcp_request"]["digest"].as_str() == oracle
+#[cfg(feature = "test-support")]
+fn task4b_canonical_git_path(root: &Path, raw: &str) -> PathBuf {
+    let path = PathBuf::from(raw);
+    let path = if path.is_absolute() {
+        path
+    } else {
+        root.join(path)
+    };
+    path.canonicalize()
+        .unwrap_or_else(|error| panic!("canonicalize Git path `{}`: {error}", path.display()))
 }
 
 criterion_group!(

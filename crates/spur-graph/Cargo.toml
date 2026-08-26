@@ -13,7 +13,7 @@ dist = false
 [features]
 default = ["embed"]
 embed = ["dep:fastembed", "dep:hf-hub"]
-perf-gates = []
+perf-gates = ["test-support"]
 test-support = []
 
 [lib]
@@ -21,6 +21,7 @@ bench = false
 
 [dependencies]
 anyhow = { workspace = true }
+arc-swap = "1"
 async-trait = { workspace = true }
 blake3 = "1"
 chrono = { workspace = true }
@@ -29,6 +30,7 @@ gix = { version = "0.77", default-features = false, features = ["max-performance
 globset = "0.4"
 ignore = "0.4.25"
 indicatif = "0.18"
+notify = "=8.2.0"
 arrow-array = { workspace = true }
 arrow-buffer = { workspace = true }
 arrow-schema = { workspace = true }
@@ -66,6 +68,7 @@ tree-sitter-typescript = "0.23"
 tree-sitter-yaml = "0.7.2"
 tree-sitter-mermaid = { path = "../tree-sitter-mermaid" }
 tracing = { workspace = true }
+watchman_client = "=0.9.0"
 
 [dev-dependencies]
 criterion = "0.5"

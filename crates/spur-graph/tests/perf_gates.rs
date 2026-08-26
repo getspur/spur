@@ -9,10 +9,14 @@ use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
 use serde::Deserialize;
+#[cfg(feature = "perf-gates")]
+use spur_graph::mcp::{OverlayFileChange, OverlayProviderLoss, OverlayRuntimeSupport};
 use spur_graph::{
     artifact_from_facts, artifact_from_facts_incremental, build_facts, read_artifact_parquet,
     write_artifact_parquet, GraphEdgeKind, GraphIndexArtifact, RelationKind, WriteOptions,
 };
+#[cfg(feature = "perf-gates")]
+use spur_graph::{write_current_pointer, GraphArtifactManifest};
 use tempfile::TempDir;
 
 const SAMPLE_COUNT: usize = 10;
@@ -326,6 +330,234 @@ fn gate_import_licensed_edges_are_witness_backed_on_spur_graph() {
         report.missing_witness, 0,
         "import_licensed calls must have a same-file workspace import witness"
     );
+}
+
+#[test]
+#[cfg(all(not(feature = "perf-gates"), not(feature = "test-support")))]
+fn overlay_runtime_test_support_is_disabled_without_opt_in() {
+    assert!(!cfg!(feature = "test-support"));
+}
+
+#[tokio::test]
+#[cfg(feature = "perf-gates")]
+async fn overlay_runtime_test_support_drives_the_real_actor_and_mcp_route() {
+    let _guard = perf_gate_guard();
+    assert!(
+        cfg!(feature = "test-support"),
+        "perf-gates must imply test-support"
+    );
+    let fixture = OverlaySupportFixture::new();
+    let support = OverlayRuntimeSupport::start(&fixture.root)
+        .await
+        .expect("start the real overlay runtime actor");
+    let initial = support.state().expect("initial published state");
+    assert_eq!(initial.provider, "notify");
+    assert_eq!(initial.trust, "trusted");
+
+    let exact = support
+        .observe_exact()
+        .expect("exclusive exact-observation scope");
+    let request = support
+        .request(
+            "code_symbol_search",
+            serde_json::json!({
+                "query": "alpha",
+                "mode": "exact",
+                "response_format": "full",
+            }),
+        )
+        .await
+        .expect("dispatch GraphMcpModule code_symbol_search");
+    assert_eq!(
+        request.response["total_matches"], 1,
+        "{:#}",
+        request.response
+    );
+    assert_eq!(request.diagnostics.route, "generation");
+    assert_eq!(request.diagnostics.generation_pins, 1);
+    assert_eq!(
+        request.diagnostics.generation_id,
+        Some(initial.generation_id.clone())
+    );
+    assert_eq!(exact.delta(), 0, "trusted request must not observe Git");
+    drop(exact);
+
+    let change_path = fixture.root.join("src/change.rs");
+    fs::write(&change_path, "pub fn added_support_symbol() {}\n").expect("write added file");
+    let added = support
+        .publish_file_change(
+            OverlayFileChange::Add(change_path.clone()),
+            Duration::from_secs(30),
+        )
+        .await
+        .expect("publish add");
+
+    fs::write(&change_path, "pub fn modified_support_symbol() {}\n").expect("write modified file");
+    let modified = support
+        .publish_file_change(
+            OverlayFileChange::Modify(change_path.clone()),
+            Duration::from_secs(30),
+        )
+        .await
+        .expect("publish modify");
+
+    let renamed_path = fixture.root.join("src/renamed.rs");
+    fs::rename(&change_path, &renamed_path).expect("rename changed file");
+    let renamed = support
+        .publish_file_change(
+            OverlayFileChange::Rename {
+                from: change_path,
+                to: renamed_path.clone(),
+            },
+            Duration::from_secs(30),
+        )
+        .await
+        .expect("publish rename");
+
+    fs::remove_file(&renamed_path).expect("delete renamed file");
+    let deleted = support
+        .publish_file_change(
+            OverlayFileChange::Delete(renamed_path),
+            Duration::from_secs(30),
+        )
+        .await
+        .expect("publish delete");
+    for pair in [
+        (&initial, &added.state),
+        (&added.state, &modified.state),
+        (&modified.state, &renamed.state),
+        (&renamed.state, &deleted.state),
+    ] {
+        assert!(pair.1.epoch > pair.0.epoch);
+        assert_ne!(pair.1.generation_id, pair.0.generation_id);
+    }
+
+    let disconnected = support
+        .pause_recovery(OverlayProviderLoss::Disconnected, Duration::from_secs(30))
+        .await
+        .expect("publish provider disconnection");
+    assert_eq!(disconnected.state.trust, "untrusted");
+    assert_eq!(
+        disconnected.state.generation_id,
+        deleted.state.generation_id
+    );
+
+    let exact = support
+        .observe_exact()
+        .expect("exclusive fallback observation scope");
+    let fallback = support
+        .request(
+            "code_symbol_search",
+            serde_json::json!({
+                "query": "alpha",
+                "mode": "exact",
+                "response_format": "full",
+            }),
+        )
+        .await
+        .expect("dispatch exact fallback through GraphMcpModule");
+    assert_eq!(fallback.diagnostics.route, "exact_fallback");
+    assert_eq!(fallback.diagnostics.generation_pins, 0);
+    assert!(exact.delta() > 0, "fallback request must observe Git");
+    drop(exact);
+
+    let recovered = support
+        .resume_recovery(Duration::from_secs(30))
+        .await
+        .expect("re-arm after disconnection");
+    assert_eq!(recovered.state.trust, "trusted");
+    assert!(recovered.state.arm_count > initial.arm_count);
+
+    for loss in [
+        OverlayProviderLoss::Overflow,
+        OverlayProviderLoss::FreshInstance,
+    ] {
+        let lost = support
+            .pause_recovery(loss, Duration::from_secs(30))
+            .await
+            .expect("publish deterministic provider trust loss");
+        assert_eq!(lost.state.trust, "untrusted");
+        let recovered = support
+            .resume_recovery(Duration::from_secs(30))
+            .await
+            .expect("recover and re-arm provider");
+        assert_eq!(recovered.state.trust, "trusted");
+        assert!(recovered.state.epoch > lost.state.epoch);
+    }
+}
+
+#[cfg(feature = "perf-gates")]
+struct OverlaySupportFixture {
+    _dir: TempDir,
+    root: PathBuf,
+}
+
+#[cfg(feature = "perf-gates")]
+impl OverlaySupportFixture {
+    fn new() -> Self {
+        let dir = tempfile::tempdir().expect("overlay support tempdir");
+        let root = dir.path().to_path_buf();
+        fs::create_dir_all(root.join("src")).expect("create source directory");
+        fs::write(root.join("src/lib.rs"), "pub fn alpha() {}\n").expect("write source");
+        fs::write(root.join(".gitignore"), ".spur/\n").expect("write graph ignore");
+        run_git(&root, &["init", "-q", "-b", "main"]);
+        run_git(
+            &root,
+            &["config", "user.email", "spur-graph@example.invalid"],
+        );
+        run_git(&root, &["config", "user.name", "Spur Graph Test"]);
+        run_git(&root, &["add", "src/lib.rs", ".gitignore"]);
+        run_git(&root, &["commit", "-q", "-m", "overlay support base"]);
+
+        let facts = build_facts(&root, None).expect("build support facts").0;
+        let artifact = artifact_from_facts(&facts, &root).expect("build support artifact");
+        let artifact_base = root.join(".spur/graph");
+        let written = write_artifact_parquet(
+            &artifact,
+            &artifact_base,
+            WriteOptions::default(),
+            Vec::new(),
+        )
+        .expect("write support artifact");
+        let manifest_path = written.join("manifest.json");
+        let mut manifest: GraphArtifactManifest =
+            serde_json::from_slice(&fs::read(&manifest_path).expect("read support manifest"))
+                .expect("decode support manifest");
+        manifest.indexed_commit_oid = Some(git_stdout(&root, &["rev-parse", "HEAD"]));
+        fs::write(
+            &manifest_path,
+            serde_json::to_vec_pretty(&manifest).expect("encode support manifest"),
+        )
+        .expect("write support manifest");
+        write_current_pointer(&root, &written).expect("write support CURRENT pointer");
+
+        Self { _dir: dir, root }
+    }
+}
+
+#[cfg(feature = "perf-gates")]
+fn run_git(root: &Path, args: &[&str]) {
+    let _ = git_stdout(root, args);
+}
+
+#[cfg(feature = "perf-gates")]
+fn git_stdout(root: &Path, args: &[&str]) -> String {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(args)
+        .output()
+        .unwrap_or_else(|error| panic!("failed to run git {args:?}: {error}"));
+    assert!(
+        output.status.success(),
+        "git {args:?} failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout)
+        .expect("git test output must be UTF-8")
+        .trim()
+        .to_owned()
 }
 
 #[test]
@@ -770,34 +1002,15 @@ fn normalize_ru_maxrss_to_kb(raw: u64) -> u64 {
 }
 
 #[test]
-fn gate_task6_overlay_generation_matrix_requires_structural_release_evidence() {
-    let complete_matrix = serde_json::json!({
-        "schema_version": 1,
-        "protocol_id": "overlay-generation-task6-v1",
-        "repetitions": 3,
-        "cold_warm_separated": true,
-        "timing_gate": "structural_only_no_fixed_millisecond_threshold",
-        "release_eligible": true,
-        "fsmonitor_auto_safe": true,
-        "validation_lease_route": "exact_observation",
-        "complete_warm_under_10ms": false,
-        "token_lease_release_eligible": false,
-        "token_lease_blocker": "no_supported_synchronous_git_token_fence",
-        "configuration_default": "Off",
-        "configure_semantics_changed": false,
-        "cells": [
-            task6_release_cell("small_untracked_heavy", "gen_small"),
-            task6_release_cell("medium_dirty_rust", "gen_medium"),
-            task6_release_cell("large_mostly_clean_polyglot", "gen_large"),
-        ],
-    });
+fn gate_task4b_overlay_generation_matrix_requires_full_runtime_evidence() {
+    let complete_matrix = task4b_release_matrix(30);
 
-    validate_task6_overlay_generation_matrix(&complete_matrix)
-        .expect("complete parity and structural evidence must pass without a wall-clock threshold");
+    validate_task4b_overlay_generation_matrix(&complete_matrix)
+        .expect("the release matrix must satisfy the full Task 4b runtime contract");
 }
 
 #[test]
-fn gate_task6_overlay_generation_matrix_rejects_missing_or_correlated_evidence() {
+fn gate_task4b_overlay_generation_matrix_rejects_the_legacy_contract() {
     let mut incomplete = task6_release_cell("small_untracked_heavy", "gen_small");
     incomplete["warm_generation"]["finalization"]["result_merges"] = serde_json::json!(1);
     incomplete["exact_fallback"]["digest"] = serde_json::json!("different");
@@ -808,13 +1021,15 @@ fn gate_task6_overlay_generation_matrix_rejects_missing_or_correlated_evidence()
         "cells": [incomplete],
     });
 
-    let errors = validate_task6_overlay_generation_matrix(&matrix)
-        .expect_err("incomplete, mismatched evidence must fail closed");
-    assert!(errors.iter().any(|error| error.contains("three projects")));
+    let errors = validate_task4b_overlay_generation_matrix(&matrix)
+        .expect_err("the legacy three-project/three-run contract must fail closed");
+    assert!(errors.iter().any(|error| error.contains("at least 30")));
     assert!(errors
         .iter()
-        .any(|error| error.contains("warm finalization")));
-    assert!(errors.iter().any(|error| error.contains("fallback digest")));
+        .any(|error| error.contains("all four required project classes")));
+    assert!(errors
+        .iter()
+        .any(|error| error.contains("missing scenario provider_overflow")));
 }
 
 #[test]
@@ -827,23 +1042,26 @@ fn gate_task6_fsmonitor_default_remains_off() {
 
 #[test]
 fn gate_task6_emitted_matrix_when_evidence_path_is_set() {
-    let Some(path) = std::env::var_os("SPUR_GRAPH_TASK6_EVIDENCE") else {
-        eprintln!("SPUR_GRAPH_TASK6_EVIDENCE is unset; deterministic contract tests remain active");
+    let Some(path) = std::env::var_os("SPUR_GRAPH_TASK4B_EVIDENCE") else {
+        eprintln!(
+            "SPUR_GRAPH_TASK4B_EVIDENCE is unset; deterministic contract tests remain active"
+        );
         return;
     };
     let bytes = fs::read(&path).unwrap_or_else(|error| {
         panic!(
-            "read SPUR_GRAPH_TASK6_EVIDENCE `{}`: {error}",
+            "read SPUR_GRAPH_TASK4B_EVIDENCE `{}`: {error}",
             PathBuf::from(&path).display()
         )
     });
     let matrix = serde_json::from_slice::<serde_json::Value>(&bytes)
-        .expect("parse SPUR_GRAPH_TASK6_EVIDENCE JSON");
-    validate_task6_overlay_generation_matrix(&matrix).unwrap_or_else(|errors| {
-        panic!("Task 6 emitted matrix failed structural release gates: {errors:#?}")
+        .expect("parse SPUR_GRAPH_TASK4B_EVIDENCE JSON");
+    validate_task4b_overlay_generation_matrix(&matrix).unwrap_or_else(|errors| {
+        panic!("Task 4b emitted matrix failed release evidence validation: {errors:#?}")
     });
 }
 
+#[allow(dead_code)]
 fn validate_task6_overlay_generation_matrix(matrix: &serde_json::Value) -> Result<(), Vec<String>> {
     const PROTOCOL: &str = "overlay-generation-task6-v1";
     const LATENCY_CASES: [&str; 7] = [
@@ -1249,4 +1467,437 @@ fn task6_release_cell(project: &str, generation_id: &str) -> serde_json::Value {
             "full_end_to_end_code_request": {"sample_count": 3, "p50_ms": 1.0, "p95_ms": 2.0},
         },
     })
+}
+
+const TASK4B_PROTOCOL: &str = "overlay-watcher-generation-release-v2";
+const TASK4B_SCENARIOS: [&str; 9] = [
+    "exact_fallback",
+    "cold_restart",
+    "healthy_warm",
+    "one_file_event_to_publication",
+    "provider_loss",
+    "recovery_after_loss",
+    "provider_overflow",
+    "recovery_after_overflow",
+    "off_mode",
+];
+
+fn validate_task4b_overlay_generation_matrix(
+    matrix: &serde_json::Value,
+) -> Result<(), Vec<String>> {
+    let mut errors = Vec::new();
+    if matrix["schema_version"].as_u64() != Some(2) {
+        errors.push("matrix schema_version must be 2".to_owned());
+    }
+    if matrix["protocol_id"].as_str() != Some(TASK4B_PROTOCOL) {
+        errors.push(format!("matrix protocol_id must be {TASK4B_PROTOCOL}"));
+    }
+    if matrix["percentile_method"].as_str() != Some("nearest_rank_ceiling") {
+        errors.push("matrix percentile_method must be nearest_rank_ceiling".to_owned());
+    }
+    if matrix["rebuild_semantics"].as_str() != Some("background_exact_rebuild") {
+        errors.push("matrix must call exact_scan-backed work background_exact_rebuild".to_owned());
+    }
+    let repetitions = matrix["repetitions"].as_u64().unwrap_or_default();
+    if repetitions < 30 {
+        errors.push("matrix requires at least 30 runs per scenario".to_owned());
+    }
+
+    let cells = matrix["cells"].as_array().cloned().unwrap_or_default();
+    let projects = cells
+        .iter()
+        .filter_map(|cell| cell["project"].as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    let required_projects = std::collections::BTreeSet::from([
+        "small_untracked_heavy",
+        "medium_dirty_rust",
+        "large_mostly_clean_polyglot",
+        "linked_worktree_shared_commondir",
+    ]);
+    if projects != required_projects {
+        errors.push("matrix must contain all four required project classes".to_owned());
+    }
+
+    let mut hard_gate_failures = std::collections::BTreeSet::new();
+    for cell in &cells {
+        let project = cell["project"].as_str().unwrap_or("<missing-project>");
+        let prefix = |message: &str| format!("{project}: {message}");
+        if cell["protocol_id"].as_str() != Some(TASK4B_PROTOCOL) {
+            errors.push(prefix("protocol differs from the matrix protocol"));
+        }
+        if cell["repetitions"].as_u64() != Some(repetitions) {
+            errors.push(prefix("repetition count differs from the matrix protocol"));
+        }
+        let linked = cell["fixture"]["linked_worktree"].as_bool() == Some(true);
+        let shared = cell["fixture"]["shared_commondir"].as_bool() == Some(true);
+        if project == "linked_worktree_shared_commondir" && !(linked && shared) {
+            hard_gate_failures.insert(format!("{project}:linked_commondir"));
+        }
+
+        let scenarios = cell["scenarios"].as_object().cloned().unwrap_or_default();
+        for scenario in TASK4B_SCENARIOS {
+            let Some(evidence) = scenarios.get(scenario) else {
+                errors.push(prefix(&format!("missing scenario {scenario}")));
+                continue;
+            };
+            validate_task4b_scenario(
+                project,
+                scenario,
+                evidence,
+                repetitions as usize,
+                &mut errors,
+            );
+        }
+
+        let scenario_p95 = |name: &str| {
+            scenarios
+                .get(name)
+                .and_then(|scenario| scenario["latency"]["p95_ms"].as_f64())
+        };
+        if scenario_p95("healthy_warm").is_none_or(|p95| p95 >= 10.0) {
+            hard_gate_failures.insert(format!("{project}:healthy_warm_mcp_p95"));
+        }
+        if scenario_p95("cold_restart").is_none_or(|p95| p95 >= 100.0) {
+            hard_gate_failures.insert(format!("{project}:cold_restart_mcp_p95"));
+        }
+        if scenario_p95("one_file_event_to_publication").is_none_or(|p95| p95 >= 100.0) {
+            hard_gate_failures.insert(format!("{project}:event_to_publication_p95"));
+        }
+
+        if let Some(event) = scenarios.get("one_file_event_to_publication") {
+            let p50 = event["latency"]["p50_ms"].as_f64();
+            let p95 = event["latency"]["p95_ms"].as_f64();
+            if event["freshness_slo_ms"].as_f64() != Some(100.0)
+                || event["p50_within_slo"].as_bool() != p50.map(|value| value < 100.0)
+                || event["p95_within_slo"].as_bool() != p95.map(|value| value < 100.0)
+            {
+                errors.push(prefix(
+                    "event p50/p95 must be explicitly and honestly compared with 100 ms",
+                ));
+            }
+        }
+
+        for (scenario, run) in scenarios.iter().flat_map(|(scenario, evidence)| {
+            evidence["runs"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(move |run| (scenario.as_str(), run))
+        }) {
+            let matches_oracle = run["oracle_match"].as_bool() == Some(true)
+                && run["oracle_digest"]
+                    .as_str()
+                    .is_some_and(|digest| !digest.is_empty())
+                && run["response_digest"].as_str() == run["oracle_digest"].as_str();
+            if !matches_oracle {
+                hard_gate_failures.insert(format!("{project}:correctness"));
+            }
+
+            let exact = run["exact_observations"].as_u64();
+            let background = run["background_exact_observations"].as_u64();
+            let route = run["route"].as_str();
+            let trust = run["trust"].as_str();
+            let pins = run["generation_pins"].as_u64();
+            let pinned = run["pinned_one_immutable_generation"].as_bool();
+            let finalization = run["finalization"]["total"].as_u64();
+            match scenario {
+                "healthy_warm" => {
+                    if route != Some("generation")
+                        || exact != Some(0)
+                        || background != Some(0)
+                        || finalization != Some(0)
+                        || pins != Some(1)
+                        || pinned != Some(true)
+                    {
+                        hard_gate_failures.insert(format!("{project}:healthy_warm_route"));
+                    }
+                }
+                "exact_fallback" | "provider_loss" | "provider_overflow" => {
+                    if route != Some("exact_fallback") || exact.is_none_or(|count| count == 0) {
+                        hard_gate_failures.insert(format!("{project}:{scenario}_route"));
+                    }
+                    if matches!(scenario, "provider_loss" | "provider_overflow")
+                        && trust != Some("untrusted")
+                    {
+                        hard_gate_failures.insert(format!("{project}:{scenario}_trust"));
+                    }
+                }
+                "recovery_after_loss" | "recovery_after_overflow" => {
+                    if route != Some("generation")
+                        || trust != Some("trusted")
+                        || exact != Some(0)
+                        || background.is_none_or(|count| count == 0)
+                        || pins != Some(1)
+                        || pinned != Some(true)
+                    {
+                        hard_gate_failures.insert(format!("{project}:{scenario}"));
+                    }
+                }
+                "off_mode" => {
+                    if route != Some("off") || exact.is_none_or(|count| count == 0) {
+                        hard_gate_failures.insert(format!("{project}:off_mode"));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let declared_failures = string_set(&matrix["hard_gate_failures"])
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<std::collections::BTreeSet<_>>();
+    if declared_failures != hard_gate_failures {
+        errors.push(format!(
+            "hard_gate_failures must exactly match measured failures: declared={declared_failures:?} measured={hard_gate_failures:?}"
+        ));
+    }
+    let expected_verdict = if hard_gate_failures.is_empty() {
+        "RELEASE"
+    } else {
+        "DO NOT RELEASE"
+    };
+    if matrix["verdict"].as_str() != Some(expected_verdict) {
+        errors.push(format!(
+            "matrix verdict must be {expected_verdict} for the measured hard gates"
+        ));
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors)
+    }
+}
+
+fn validate_task4b_scenario(
+    project: &str,
+    scenario: &str,
+    evidence: &serde_json::Value,
+    repetitions: usize,
+    errors: &mut Vec<String>,
+) {
+    let prefix = |message: &str| format!("{project}/{scenario}: {message}");
+    let runs = evidence["runs"].as_array().cloned().unwrap_or_default();
+    let latency = &evidence["latency"];
+    let samples = latency["samples_ms"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    if runs.len() != repetitions || samples.len() != repetitions {
+        errors.push(prefix("must contain every run and raw latency sample"));
+    }
+    if latency["sample_count"].as_u64() != Some(repetitions as u64) {
+        errors.push(prefix("latency sample_count differs from repetitions"));
+    }
+    let numeric_samples = samples
+        .iter()
+        .filter_map(serde_json::Value::as_f64)
+        .collect::<Vec<_>>();
+    if numeric_samples.len() == repetitions {
+        let p50 = task4b_nearest_rank(&numeric_samples, 0.50);
+        let p95 = task4b_nearest_rank(&numeric_samples, 0.95);
+        let recorded_p50 = latency["p50_ms"].as_f64();
+        let recorded_p95 = latency["p95_ms"].as_f64();
+        if recorded_p50.is_none_or(|value| (value - p50).abs() > f64::EPSILON)
+            || recorded_p95.is_none_or(|value| (value - p95).abs() > f64::EPSILON)
+        {
+            errors.push(prefix(
+                "p50/p95 must be nearest-rank values calculated from raw samples",
+            ));
+        }
+    }
+
+    for (index, run) in runs.iter().enumerate() {
+        if run["run"].as_u64() != Some(index as u64 + 1) || run["elapsed_ms"].as_f64().is_none() {
+            errors.push(prefix("run ordinal or elapsed_ms is missing"));
+        }
+        for field in [
+            "route",
+            "trust",
+            "query_operations_source",
+            "oracle_digest",
+            "response_digest",
+        ] {
+            if run[field].as_str().is_none_or(str::is_empty) {
+                errors.push(prefix(&format!("run field {field} is missing")));
+            }
+        }
+        for field in [
+            "exact_observations",
+            "background_exact_observations",
+            "query_operations",
+            "generation_pins",
+        ] {
+            if run[field].as_u64().is_none() {
+                errors.push(prefix(&format!("run count {field} is missing")));
+            }
+        }
+        if run.get("provider").is_none()
+            || run.get("epoch").is_none()
+            || run.get("generation_id").is_none()
+            || run["pinned_one_immutable_generation"].as_bool().is_none()
+            || run["oracle_match"].as_bool().is_none()
+        {
+            errors.push(prefix(
+                "provider/epoch/generation/pin/correctness evidence is incomplete",
+            ));
+        }
+        if run["finalization"]["observed"].as_bool().is_none()
+            || run["finalization"]["source"]
+                .as_str()
+                .is_none_or(str::is_empty)
+            || run["finalization"].get("total").is_none()
+        {
+            errors.push(prefix("finalization evidence is incomplete"));
+        }
+    }
+}
+
+fn task4b_nearest_rank(samples: &[f64], percentile: f64) -> f64 {
+    let mut sorted = samples.to_vec();
+    sorted.sort_by(f64::total_cmp);
+    let rank = ((sorted.len() as f64 * percentile).ceil() as usize).clamp(1, sorted.len());
+    sorted[rank - 1]
+}
+
+fn task4b_release_matrix(repetitions: usize) -> serde_json::Value {
+    serde_json::json!({
+        "schema_version": 2,
+        "protocol_id": TASK4B_PROTOCOL,
+        "repetitions": repetitions,
+        "percentile_method": "nearest_rank_ceiling",
+        "rebuild_semantics": "background_exact_rebuild",
+        "hard_gate_failures": [],
+        "verdict": "RELEASE",
+        "cells": [
+            task4b_release_cell("small_untracked_heavy", repetitions, false),
+            task4b_release_cell("medium_dirty_rust", repetitions, false),
+            task4b_release_cell("large_mostly_clean_polyglot", repetitions, false),
+            task4b_release_cell("linked_worktree_shared_commondir", repetitions, true),
+        ],
+    })
+}
+
+fn task4b_release_cell(project: &str, repetitions: usize, linked: bool) -> serde_json::Value {
+    let scenarios = TASK4B_SCENARIOS
+        .into_iter()
+        .map(|scenario| {
+            (
+                scenario.to_owned(),
+                task4b_release_scenario(project, scenario, repetitions),
+            )
+        })
+        .collect::<serde_json::Map<_, _>>();
+    serde_json::json!({
+        "project": project,
+        "protocol_id": TASK4B_PROTOCOL,
+        "repetitions": repetitions,
+        "fixture": {
+            "linked_worktree": linked,
+            "shared_commondir": linked,
+        },
+        "scenarios": scenarios,
+    })
+}
+
+fn task4b_release_scenario(project: &str, scenario: &str, repetitions: usize) -> serde_json::Value {
+    let digest = format!("digest_{project}");
+    let (route, trust, provider, exact, background, pins, finalization) = match scenario {
+        "exact_fallback" => (
+            "exact_fallback",
+            "unavailable",
+            serde_json::Value::Null,
+            2,
+            0,
+            0,
+            Some(4),
+        ),
+        "provider_loss" | "provider_overflow" => (
+            "exact_fallback",
+            "untrusted",
+            serde_json::json!("notify"),
+            2,
+            0,
+            0,
+            Some(4),
+        ),
+        "cold_restart"
+        | "one_file_event_to_publication"
+        | "recovery_after_loss"
+        | "recovery_after_overflow" => (
+            "generation",
+            "trusted",
+            serde_json::json!("notify"),
+            0,
+            1,
+            1,
+            Some(0),
+        ),
+        "healthy_warm" => (
+            "generation",
+            "trusted",
+            serde_json::json!("notify"),
+            0,
+            0,
+            1,
+            Some(0),
+        ),
+        "off_mode" => ("off", "off", serde_json::Value::Null, 2, 0, 0, None),
+        other => panic!("unknown Task 4b scenario {other}"),
+    };
+    let elapsed_ms = if scenario == "one_file_event_to_publication" {
+        2.0
+    } else {
+        1.0
+    };
+    let runs = (1..=repetitions)
+        .map(|run| {
+            let generation_id = if pins == 1 {
+                serde_json::json!(format!("gen_{project}_{scenario}_{run}"))
+            } else {
+                serde_json::Value::Null
+            };
+            serde_json::json!({
+                "run": run,
+                "elapsed_ms": elapsed_ms,
+                "request_elapsed_ms": 1.0,
+                "route": route,
+                "provider": provider,
+                "trust": trust,
+                "epoch": if route == "off" { serde_json::Value::Null } else { serde_json::json!(run) },
+                "generation_id": generation_id,
+                "generation_pins": pins,
+                "pinned_one_immutable_generation": pins == 1,
+                "exact_observations": exact,
+                "background_exact_observations": background,
+                "query_operations": 1,
+                "query_operations_source": "mcp_diagnostics",
+                "finalization": {
+                    "observed": finalization.is_some(),
+                    "source": if finalization.is_some() { "mcp_diagnostics" } else { "not_exposed_in_off_mode" },
+                    "total": finalization,
+                },
+                "oracle_digest": digest,
+                "response_digest": digest,
+                "oracle_match": true,
+            })
+        })
+        .collect::<Vec<_>>();
+    let samples = vec![elapsed_ms; repetitions];
+    let mut evidence = serde_json::json!({
+        "latency": {
+            "sample_count": repetitions,
+            "samples_ms": samples,
+            "p50_ms": elapsed_ms,
+            "p95_ms": elapsed_ms,
+        },
+        "runs": runs,
+    });
+    if scenario == "one_file_event_to_publication" {
+        evidence["freshness_slo_ms"] = serde_json::json!(100.0);
+        evidence["p50_within_slo"] = serde_json::json!(true);
+        evidence["p95_within_slo"] = serde_json::json!(true);
+    }
+    evidence
 }

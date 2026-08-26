@@ -9,6 +9,7 @@ pub mod locking;
 pub mod mcp;
 pub mod memory_eval;
 pub mod overlay_generation;
+pub mod overlay_watch;
 pub mod query_client;
 mod query_hot_index;
 pub mod schema;
