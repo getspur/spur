@@ -1,7 +1,9 @@
 use std::cmp::Ordering;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use parquet::file::reader::{FileReader, SerializedFileReader};
@@ -336,6 +338,155 @@ fn bench_end_to_end_mcp_latency_session(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_hot_query_operation_matrix(c: &mut Criterion) {
+    let fixture = load_fixture();
+    let artifact = current_query_benchmark_artifact(&fixture.artifact);
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let parquet_dir = write_artifact_parquet(
+        &artifact,
+        tempdir.path(),
+        WriteOptions::default(),
+        Vec::new(),
+    )
+    .expect("write current-query parquet artifact");
+    let exact_query = search_benchmark_query(&artifact);
+    let (prefix_query, prefix_match_count) = max_prefix_query(&artifact);
+    let (substring_query, substring_match_count) = max_substring_query(&artifact);
+    let options = |query: String, mode| SearchOptions {
+        query,
+        mode,
+        filters: SearchFilters::default(),
+        limit: 20,
+    };
+    let exact = options(exact_query.clone(), SearchMode::Exact);
+    let prefix = options(prefix_query, SearchMode::Prefix);
+    let substring = options(substring_query, SearchMode::Substring);
+    let (caller_target, caller_count) = max_caller_target(&artifact);
+    let (callee_source, callee_count) = max_callee_source(&artifact);
+    let (file_path, file_symbol_count) = max_symbol_file(&artifact);
+    let symbol_id = artifact
+        .symbols
+        .first()
+        .expect("query fixture has symbols")
+        .stable_symbol_id
+        .clone();
+    eprintln!(
+        "hot-query fixture symbols={} edges={} prefix={:?} prefix_matches={} \
+         substring={:?} substring_matches={} caller_target={} caller_records={} \
+         callee_source={} callee_records={} max_file={} file_symbols={}",
+        artifact.symbols.len(),
+        artifact.edges.len(),
+        prefix.query,
+        prefix_match_count,
+        substring.query,
+        substring_match_count,
+        caller_target,
+        caller_count,
+        callee_source,
+        callee_count,
+        file_path,
+        file_symbol_count,
+    );
+
+    let mut cold = c.benchmark_group("hot_query_index_cold");
+    cold.sample_size(10);
+    cold.warm_up_time(Duration::from_secs(2));
+    cold.measurement_time(Duration::from_secs(5));
+    cold.bench_function("open_build_and_prefix", |b| {
+        b.iter(|| {
+            let client =
+                ParquetClient::open(black_box(parquet_dir.as_path())).expect("open parquet client");
+            black_box(
+                client
+                    .search_symbols(black_box(&prefix))
+                    .expect("build hot index with prefix query"),
+            );
+        });
+    });
+    cold.bench_function("open_build_and_callers", |b| {
+        b.iter(|| {
+            let client =
+                ParquetClient::open(black_box(parquet_dir.as_path())).expect("open parquet client");
+            black_box(client.find_caller_edges(black_box(&caller_target)));
+        });
+    });
+    cold.finish();
+
+    let client = ParquetClient::open(&parquet_dir).expect("open steady parquet client");
+    black_box(
+        client
+            .search_symbols(&prefix)
+            .expect("prewarm current-query index"),
+    );
+    assert_eq!(
+        client
+            .search_symbols(&prefix)
+            .expect("validate broad prefix query")
+            .total_matches,
+        prefix_match_count,
+    );
+    assert_eq!(
+        client
+            .search_symbols(&substring)
+            .expect("validate broad substring query")
+            .total_matches,
+        substring_match_count,
+    );
+    assert_eq!(client.find_caller_edges(&caller_target).len(), caller_count);
+    assert_eq!(client.find_callee_edges(&callee_source).len(), callee_count);
+    let mut steady = c.benchmark_group("hot_query_steady_state");
+    steady.sample_size(20);
+    for (name, search) in [
+        ("search_exact", &exact),
+        ("search_prefix", &prefix),
+        ("search_substring", &substring),
+    ] {
+        steady.bench_function(name, |b| {
+            b.iter(|| {
+                black_box(
+                    client
+                        .search_symbols(black_box(search))
+                        .expect("steady search"),
+                );
+            });
+        });
+    }
+    steady.bench_function("symbol_by_id", |b| {
+        b.iter(|| {
+            black_box(
+                client
+                    .symbol_by_id(black_box(&symbol_id))
+                    .expect("steady symbol lookup"),
+            );
+        });
+    });
+    steady.bench_function("resolve", |b| {
+        b.iter(|| {
+            black_box(
+                client
+                    .resolve_selector(black_box(&exact_query))
+                    .expect("steady selector resolve"),
+            );
+        });
+    });
+    steady.bench_function("symbols_by_file", |b| {
+        b.iter(|| {
+            black_box(
+                client
+                    .symbols_by_file(black_box(&file_path))
+                    .expect("steady symbols by file"),
+            );
+        });
+    });
+    steady.bench_function("max_callers", |b| {
+        b.iter(|| black_box(client.find_caller_edges(black_box(&caller_target))));
+    });
+    steady.bench_function("max_callees", |b| {
+        b.iter(|| black_box(client.find_callee_edges(black_box(&callee_source))));
+    });
+    steady.finish();
+}
+
 fn run_mcp_latency_session(client: &dyn GraphQueryClient, options: &SearchOptions) {
     let search = client
         .search_symbols(options)
@@ -647,6 +798,143 @@ fn symbol_search_benchmark_artifact(artifact: &GraphIndexArtifact) -> GraphIndex
     }
 }
 
+fn current_query_benchmark_artifact(artifact: &GraphIndexArtifact) -> GraphIndexArtifact {
+    GraphIndexArtifact {
+        header: artifact.header.clone(),
+        manifest_version: artifact.manifest_version.clone(),
+        graph_content_hash: artifact.graph_content_hash.clone(),
+        file_manifests: artifact.file_manifests.clone(),
+        files: artifact.files.clone(),
+        file_node_ids: artifact.file_node_ids.clone(),
+        symbols: artifact.symbols.clone(),
+        symbol_node_ids: artifact.symbol_node_ids.clone(),
+        edges: artifact.edges.clone(),
+        tombstones: Vec::new(),
+        diagnostics: Vec::new(),
+        commits: Vec::new(),
+        symbol_snapshots: Vec::new(),
+        temporal_edges: Vec::new(),
+    }
+}
+
+fn max_prefix_query(artifact: &GraphIndexArtifact) -> (String, usize) {
+    let mut counts = HashMap::<char, usize>::new();
+    for symbol in &artifact.symbols {
+        if let Some(character) = symbol.entity_name.chars().next() {
+            *counts.entry(character).or_default() += 1;
+        }
+    }
+    max_query_character(counts, "prefix")
+}
+
+fn max_substring_query(artifact: &GraphIndexArtifact) -> (String, usize) {
+    let mut counts = HashMap::<char, usize>::new();
+    for symbol in &artifact.symbols {
+        for character in symbol.entity_name.chars().collect::<HashSet<_>>() {
+            *counts.entry(character).or_default() += 1;
+        }
+    }
+    max_query_character(counts, "substring")
+}
+
+fn max_query_character(counts: HashMap<char, usize>, mode: &str) -> (String, usize) {
+    counts
+        .into_iter()
+        .max_by(|left, right| left.1.cmp(&right.1).then_with(|| right.0.cmp(&left.0)))
+        .map(|(character, count)| (character.to_string(), count))
+        .unwrap_or_else(|| panic!("query fixture has a non-empty {mode} symbol"))
+}
+
+fn max_symbol_file(artifact: &GraphIndexArtifact) -> (String, usize) {
+    let mut counts = HashMap::<&str, usize>::new();
+    for symbol in &artifact.symbols {
+        *counts.entry(&symbol.file_path).or_default() += 1;
+    }
+    counts
+        .into_iter()
+        .max_by_key(|(_, count)| *count)
+        .map(|(path, count)| (path.to_owned(), count))
+        .expect("query fixture has a symbol file")
+}
+
+fn max_callee_source(artifact: &GraphIndexArtifact) -> (String, usize) {
+    let symbol_ids = artifact
+        .symbols
+        .iter()
+        .map(|symbol| symbol.stable_symbol_id.as_str())
+        .collect::<HashSet<_>>();
+    let mut counts = HashMap::<&str, usize>::new();
+    for edge in &artifact.edges {
+        let returned = edge
+            .target_stable_symbol_id
+            .as_deref()
+            .is_some_and(|target| symbol_ids.contains(target))
+            || (edge.target_stable_symbol_id.is_none() && edge.target_label.is_some());
+        if symbol_ids.contains(edge.source_stable_symbol_id.as_str())
+            && returned
+            && matches!(
+                edge.relation,
+                RelationKind::Calls | RelationKind::References
+            )
+        {
+            *counts.entry(&edge.source_stable_symbol_id).or_default() += 1;
+        }
+    }
+    counts
+        .into_iter()
+        .max_by_key(|(_, count)| *count)
+        .map(|(source, count)| (source.to_owned(), count))
+        .expect("query fixture has a caller edge")
+}
+
+fn max_caller_target(artifact: &GraphIndexArtifact) -> (String, usize) {
+    let symbol_ids = artifact
+        .symbols
+        .iter()
+        .map(|symbol| symbol.stable_symbol_id.as_str())
+        .collect::<HashSet<_>>();
+    let mut resolved = HashMap::<&str, usize>::new();
+    let mut unresolved = HashMap::<&str, usize>::new();
+    for edge in &artifact.edges {
+        if !symbol_ids.contains(edge.source_stable_symbol_id.as_str())
+            || !matches!(
+                edge.relation,
+                RelationKind::Calls | RelationKind::References
+            )
+        {
+            continue;
+        }
+        if let Some(target) = edge.target_stable_symbol_id.as_deref() {
+            *resolved.entry(target).or_default() += 1;
+        } else if let Some(label) = edge.target_label.as_deref() {
+            *unresolved.entry(label).or_default() += 1;
+        }
+    }
+    artifact
+        .symbols
+        .iter()
+        .map(|symbol| {
+            let unresolved_labels = [
+                symbol.stable_symbol_id.as_str(),
+                symbol.entity_name.as_str(),
+                symbol.qualified_name.as_str(),
+            ]
+            .into_iter()
+            .collect::<HashSet<_>>();
+            let count = resolved
+                .get(symbol.stable_symbol_id.as_str())
+                .copied()
+                .unwrap_or_default()
+                + unresolved_labels
+                    .into_iter()
+                    .map(|label| unresolved.get(label).copied().unwrap_or_default())
+                    .sum::<usize>();
+            (symbol.stable_symbol_id.clone(), count)
+        })
+        .max_by_key(|(_, count)| *count)
+        .expect("query fixture has symbols")
+}
+
 fn baselines() -> Baselines {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("benches/baselines.json");
     let content = std::fs::read_to_string(&path)
@@ -679,6 +967,7 @@ criterion_group!(
     bench_find_callee_edges_parquet_vs_inmemory,
     bench_resolve_selector_parquet_vs_inmemory,
     bench_temporal_index_first_call_parquet_vs_inmemory,
-    bench_end_to_end_mcp_latency_session
+    bench_end_to_end_mcp_latency_session,
+    bench_hot_query_operation_matrix
 );
 criterion_main!(benches);

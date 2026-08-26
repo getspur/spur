@@ -1026,6 +1026,54 @@ pub fn read_artifact_parquet_slim(dir: &Path) -> anyhow::Result<GraphIndexArtifa
     Ok(artifact)
 }
 
+/// Read only the current symbol rows needed by the hot query index.
+///
+/// This intentionally excludes edges and every non-symbol payload so symbol
+/// search keeps the same shard-level error isolation as direct Parquet search.
+pub(crate) fn read_current_query_symbols_parquet(
+    dir: &Path,
+) -> anyhow::Result<Vec<GraphSymbolArtifact>> {
+    let manifest = read_artifact_header_parquet(dir)?;
+    if !manifest.complete {
+        bail!(
+            "refusing to load incomplete Parquet artifact `{}`",
+            dir.display()
+        );
+    }
+    let nodes_path = dir.join("nodes.parquet");
+    let (symbols, _node_ids) = read_nodes(&nodes_path, manifest.row_counts.nodes)?;
+    Ok(symbols)
+}
+
+/// Read only current resolved and unresolved edges for the adjacency index.
+pub(crate) fn read_current_query_edges_parquet(
+    dir: &Path,
+) -> anyhow::Result<Vec<GraphEdgeArtifact>> {
+    let manifest = read_artifact_header_parquet(dir)?;
+    if !manifest.complete {
+        bail!(
+            "refusing to load incomplete Parquet artifact `{}`",
+            dir.display()
+        );
+    }
+    let edges_path = dir.join("edges.parquet");
+    let unresolved_edges_path = dir.join("edges_unresolved.parquet");
+    let row_counts = manifest.row_counts;
+
+    let (mut edges, unresolved_edges) = std::thread::scope(|scope| {
+        let edges = scope.spawn(|| read_edges(&edges_path, row_counts.edges));
+        let unresolved_edges = scope
+            .spawn(|| read_unresolved_edges(&unresolved_edges_path, row_counts.edges_unresolved));
+
+        Ok::<_, anyhow::Error>((
+            join_scoped(edges, "read hot-query edges.parquet")?,
+            join_scoped(unresolved_edges, "read hot-query edges_unresolved.parquet")?,
+        ))
+    })?;
+    edges.extend(unresolved_edges);
+    Ok(edges)
+}
+
 pub fn load_temporal_artifact_parquet(dir: &Path) -> anyhow::Result<GraphIndexArtifact> {
     read_temporal_artifact_parquet(dir)
 }

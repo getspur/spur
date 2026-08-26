@@ -15,8 +15,7 @@ use std::sync::{Arc, OnceLock};
 
 use anyhow::{anyhow, bail, Context as _};
 use arrow_array::{
-    Array as _, BooleanArray, Float32Array, Int32Array, Int64Array, ListArray, RecordBatch,
-    StringArray,
+    Array as _, BooleanArray, Int32Array, Int64Array, ListArray, RecordBatch, StringArray,
 };
 use arrow_schema::ArrowError;
 use globset::Glob;
@@ -26,12 +25,13 @@ use parquet::arrow::arrow_reader::{
 use parquet::arrow::ProjectionMask;
 use parquet::schema::types::SchemaDescriptor;
 
+use crate::query_hot_index::{HotAdjacencyIndex, HotQueryIndex};
 use crate::schema::GRAPH_INDEX_VERSION_TEMPORAL;
 use crate::store::parquet::{
-    confidence_from_str, edge_kind_from_str, read_filtered_projected_batches,
-    read_projected_batches, read_temporal_artifact_parquet,
-    read_temporal_artifact_parquet_for_symbol_history_with_cache, relation_from_str,
-    ParquetMetadataCache, StringPruningPredicate, PARQUET_ROW_GROUP_SIZE,
+    read_current_query_edges_parquet, read_current_query_symbols_parquet,
+    read_filtered_projected_batches, read_projected_batches, read_temporal_artifact_parquet,
+    read_temporal_artifact_parquet_for_symbol_history_with_cache, ParquetMetadataCache,
+    StringPruningPredicate, PARQUET_ROW_GROUP_SIZE,
 };
 use crate::temporal::{symbol_history_indexed, GitSha, TemporalIndex};
 use crate::{
@@ -931,36 +931,18 @@ const SYMBOL_COLUMNS: [&str; 11] = [
     "anchor_hash",
     "enclosing_scope",
 ];
-const RESOLVED_EDGE_COLUMNS: [&str; 10] = [
-    "source_stable_id",
-    "target_stable_id",
-    "target_label",
-    "relation",
-    "confidence",
-    "confidence_score",
-    "edge_kind",
-    "bind_method",
-    "receiver_text",
-    "scope_text",
-];
-const UNRESOLVED_EDGE_COLUMNS: [&str; 9] = [
-    "source_stable_id",
-    "target_label",
-    "relation",
-    "confidence",
-    "confidence_score",
-    "edge_kind",
-    "bind_method",
-    "receiver_text",
-    "scope_text",
-];
-
 pub struct ParquetClient {
     dir: PathBuf,
     manifest: GraphArtifactManifest,
     metadata_cache: ParquetMetadataCache,
     nodes_metadata: ArrowReaderMetadata,
     search_projection: ProjectionMask,
+    hot_query_index: OnceLock<Result<Arc<HotQueryIndex>, SharedHotQueryIndexError>>,
+    hot_adjacency_index: OnceLock<Result<Arc<HotAdjacencyIndex>, SharedHotQueryIndexError>>,
+    #[cfg(test)]
+    hot_query_index_build_count: std::sync::atomic::AtomicUsize,
+    #[cfg(test)]
+    hot_adjacency_index_build_count: std::sync::atomic::AtomicUsize,
     file_oids: OnceLock<Result<Vec<(String, String)>, SharedFileOidsError>>,
     #[cfg(test)]
     file_oids_load_count: std::sync::atomic::AtomicUsize,
@@ -969,6 +951,9 @@ pub struct ParquetClient {
 
 #[derive(Clone)]
 struct SharedFileOidsError(Arc<anyhow::Error>);
+
+#[derive(Clone)]
+struct SharedHotQueryIndexError(Arc<anyhow::Error>);
 
 impl SharedFileOidsError {
     fn new(error: anyhow::Error) -> Self {
@@ -989,6 +974,30 @@ impl fmt::Display for SharedFileOidsError {
 }
 
 impl std::error::Error for SharedFileOidsError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.0.source()
+    }
+}
+
+impl SharedHotQueryIndexError {
+    fn new(error: anyhow::Error) -> Self {
+        Self(Arc::new(error))
+    }
+}
+
+impl fmt::Debug for SharedHotQueryIndexError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(&self.0, formatter)
+    }
+}
+
+impl fmt::Display for SharedHotQueryIndexError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&self.0, formatter)
+    }
+}
+
+impl std::error::Error for SharedHotQueryIndexError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         self.0.source()
     }
@@ -1023,6 +1032,12 @@ impl ParquetClient {
             metadata_cache,
             nodes_metadata,
             search_projection,
+            hot_query_index: OnceLock::new(),
+            hot_adjacency_index: OnceLock::new(),
+            #[cfg(test)]
+            hot_query_index_build_count: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            hot_adjacency_index_build_count: std::sync::atomic::AtomicUsize::new(0),
             file_oids: OnceLock::new(),
             #[cfg(test)]
             file_oids_load_count: std::sync::atomic::AtomicUsize::new(0),
@@ -1036,6 +1051,51 @@ impl ParquetClient {
 
     pub fn manifest(&self) -> &GraphArtifactManifest {
         &self.manifest
+    }
+
+    fn hot_query_index(&self) -> anyhow::Result<Arc<HotQueryIndex>> {
+        match self.hot_query_index.get_or_init(|| {
+            #[cfg(test)]
+            self.hot_query_index_build_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            (|| -> anyhow::Result<Arc<HotQueryIndex>> {
+                let symbols = read_current_query_symbols_parquet(&self.dir)?;
+                Ok(Arc::new(HotQueryIndex::new(symbols)))
+            })()
+            .map_err(SharedHotQueryIndexError::new)
+        }) {
+            Ok(index) => Ok(Arc::clone(index)),
+            Err(error) => Err(anyhow::Error::new(error.clone())),
+        }
+    }
+
+    #[cfg(test)]
+    fn hot_query_index_build_count(&self) -> usize {
+        self.hot_query_index_build_count
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn hot_adjacency_index(&self) -> anyhow::Result<Arc<HotAdjacencyIndex>> {
+        match self.hot_adjacency_index.get_or_init(|| {
+            #[cfg(test)]
+            self.hot_adjacency_index_build_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            (|| -> anyhow::Result<Arc<HotAdjacencyIndex>> {
+                let symbols = self.hot_query_index()?;
+                let edges = read_current_query_edges_parquet(&self.dir)?;
+                Ok(Arc::new(HotAdjacencyIndex::new(symbols, edges)))
+            })()
+            .map_err(SharedHotQueryIndexError::new)
+        }) {
+            Ok(index) => Ok(Arc::clone(index)),
+            Err(error) => Err(anyhow::Error::new(error.clone())),
+        }
+    }
+
+    #[cfg(test)]
+    fn hot_adjacency_index_build_count(&self) -> usize {
+        self.hot_adjacency_index_build_count
+            .load(std::sync::atomic::Ordering::SeqCst)
     }
 
     pub fn file_oids(&self) -> anyhow::Result<Vec<(String, String)>> {
@@ -1127,6 +1187,9 @@ impl ParquetClient {
     }
 
     fn search_symbols_inner(&self, opts: &SearchOptions) -> anyhow::Result<SearchResult> {
+        if !matches!(opts.mode, SearchMode::Exact) {
+            return Ok(self.hot_query_index()?.search_symbols(opts));
+        }
         let nodes_path = self.dir.join("nodes.parquet");
         let mut candidates = Vec::new();
         if let Some(pruning) = exact_search_pruning_predicate(opts) {
@@ -1200,92 +1263,22 @@ impl ParquetClient {
     }
 
     fn find_caller_edges_inner(&self, target_sid: &str) -> anyhow::Result<Vec<OwnedCallerRecord>> {
-        let Some(target_symbol) = self.symbol_by_stable_id(target_sid)? else {
+        let symbols = self.hot_query_index()?;
+        let Some(target_symbol) = symbols.symbol_by_id(target_sid) else {
             return Ok(Vec::new());
         };
-        let unresolved_labels = unresolved_target_labels_for_symbol(&target_symbol);
-        let resolved_edges = self.resolved_edges_by_target(target_sid)?;
-        let unresolved_edges = self.unresolved_edges_by_target_labels(&unresolved_labels)?;
-        if resolved_edges.is_empty() && unresolved_edges.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let caller_ids = resolved_edges
-            .iter()
-            .chain(unresolved_edges.iter())
-            .filter(|edge| is_caller_relation(edge.relation))
-            .map(|edge| edge.source_stable_symbol_id.clone())
-            .collect::<HashSet<_>>();
-        let callers = self.symbols_by_ids(&caller_ids)?;
-
-        let mut records = Vec::with_capacity(resolved_edges.len() + unresolved_edges.len());
-        for edge in resolved_edges {
-            if !is_caller_relation(edge.relation) {
-                continue;
-            }
-            if let Some(caller) = callers.get(&edge.source_stable_symbol_id) {
-                records.push(OwnedCallerRecord::Resolved {
-                    caller: caller.clone(),
-                    edge,
-                });
-            }
-        }
-        for edge in unresolved_edges {
-            if !is_caller_relation(edge.relation) {
-                continue;
-            }
-            if let Some(caller) = callers.get(&edge.source_stable_symbol_id) {
-                records.push(OwnedCallerRecord::Unresolved {
-                    caller: caller.clone(),
-                    target_label: edge.target_label.clone().unwrap_or_default(),
-                    edge,
-                });
-            }
-        }
-        Ok(records)
+        let unresolved_labels = unresolved_target_labels_for_symbol(target_symbol);
+        let index = self.hot_adjacency_index()?;
+        Ok(index.caller_records(target_sid, &unresolved_labels))
     }
 
     fn find_callee_edges_inner(&self, source_sid: &str) -> anyhow::Result<Vec<OwnedCalleeRecord>> {
-        if self.symbol_by_stable_id(source_sid)?.is_none() {
+        if self.hot_query_index()?.symbol_by_id(source_sid).is_none() {
             return Ok(Vec::new());
         }
 
-        let resolved_edges = self.resolved_edges_by_source(source_sid)?;
-        let unresolved_edges = self.unresolved_edges_by_source(source_sid)?;
-        if resolved_edges.is_empty() && unresolved_edges.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let target_ids = resolved_edges
-            .iter()
-            .filter(|edge| is_caller_relation(edge.relation))
-            .filter_map(|edge| edge.target_stable_symbol_id.clone())
-            .collect::<HashSet<_>>();
-        let targets = self.symbols_by_ids(&target_ids)?;
-
-        let mut records = Vec::with_capacity(resolved_edges.len() + unresolved_edges.len());
-        for edge in resolved_edges {
-            if !is_caller_relation(edge.relation) {
-                continue;
-            }
-            if let Some(target_id) = edge.target_stable_symbol_id.as_deref() {
-                if let Some(symbol) = targets.get(target_id) {
-                    records.push(OwnedCalleeRecord::Resolved {
-                        symbol: symbol.clone(),
-                        edge,
-                    });
-                }
-            }
-        }
-        for edge in unresolved_edges {
-            if !is_caller_relation(edge.relation) {
-                continue;
-            }
-            if let Some(target_label) = edge.target_label.clone() {
-                records.push(OwnedCalleeRecord::Unresolved { edge, target_label });
-            }
-        }
-        Ok(records)
+        let index = self.hot_adjacency_index()?;
+        Ok(index.callee_records(source_sid))
     }
 
     fn symbol_by_stable_id(&self, sid: &str) -> anyhow::Result<Option<GraphSymbolArtifact>> {
@@ -1546,70 +1539,6 @@ impl ParquetClient {
     fn file_exists_inner(&self, path: &str) -> anyhow::Result<bool> {
         Ok(self.file_manifest_by_path_inner(path)?.is_some())
     }
-
-    fn resolved_edges_by_source(&self, source_sid: &str) -> anyhow::Result<Vec<GraphEdgeArtifact>> {
-        self.resolved_edges_where("edges.parquet", "source_stable_id", source_sid)
-    }
-
-    fn resolved_edges_by_target(&self, target_sid: &str) -> anyhow::Result<Vec<GraphEdgeArtifact>> {
-        self.resolved_edges_where("edges_by_dst.parquet", "target_stable_id", target_sid)
-    }
-
-    fn resolved_edges_where(
-        &self,
-        file_name: &str,
-        column: &str,
-        value: &str,
-    ) -> anyhow::Result<Vec<GraphEdgeArtifact>> {
-        let path = self.dir.join(file_name);
-        let pruning = StringPruningPredicate::eq(column, value);
-        let batches =
-            self.filtered_projected_batches(&path, RESOLVED_EDGE_COLUMNS, &pruning, |schema| {
-                string_eq_row_filter(schema, column, value.to_owned())
-            })?;
-        let mut edges = Vec::new();
-        for batch in batches {
-            edges.extend(resolved_edges_from_batch(&batch)?);
-        }
-        Ok(edges)
-    }
-
-    fn unresolved_edges_by_source(
-        &self,
-        source_sid: &str,
-    ) -> anyhow::Result<Vec<GraphEdgeArtifact>> {
-        let path = self.dir.join("edges_unresolved.parquet");
-        let pruning = StringPruningPredicate::eq("source_stable_id", source_sid);
-        let batches =
-            self.filtered_projected_batches(&path, UNRESOLVED_EDGE_COLUMNS, &pruning, |schema| {
-                string_eq_row_filter(schema, "source_stable_id", source_sid.to_owned())
-            })?;
-        let mut edges = Vec::new();
-        for batch in batches {
-            edges.extend(unresolved_edges_from_batch(&batch)?);
-        }
-        Ok(edges)
-    }
-
-    fn unresolved_edges_by_target_labels(
-        &self,
-        labels: &HashSet<String>,
-    ) -> anyhow::Result<Vec<GraphEdgeArtifact>> {
-        if labels.is_empty() {
-            return Ok(Vec::new());
-        }
-        let path = self.dir.join("edges_unresolved.parquet");
-        let pruning = StringPruningPredicate::any_value("target_label", labels.iter().cloned());
-        let batches =
-            self.filtered_projected_batches(&path, UNRESOLVED_EDGE_COLUMNS, &pruning, |schema| {
-                string_in_row_filter(schema, "target_label", labels.clone())
-            })?;
-        let mut edges = Vec::new();
-        for batch in batches {
-            edges.extend(unresolved_edges_from_batch(&batch)?);
-        }
-        Ok(edges)
-    }
 }
 
 impl GraphQueryClient for ParquetClient {
@@ -1626,33 +1555,14 @@ impl GraphQueryClient for ParquetClient {
         &self,
         target_labels: &HashSet<String>,
     ) -> Vec<OwnedCallerRecord> {
-        let edges = self
-            .unresolved_edges_by_target_labels(target_labels)
+        if target_labels.is_empty() {
+            return Vec::new();
+        }
+        self.hot_adjacency_index()
             .unwrap_or_else(|error| {
                 panic!("failed to query Parquet unresolved caller edges: {error:#}")
-            });
-        let caller_ids = edges
-            .iter()
-            .filter(|edge| is_caller_relation(edge.relation))
-            .map(|edge| edge.source_stable_symbol_id.clone())
-            .collect::<HashSet<_>>();
-        let callers = self
-            .symbols_by_ids(&caller_ids)
-            .unwrap_or_else(|error| panic!("failed to query Parquet callers: {error:#}"));
-        edges
-            .into_iter()
-            .filter(|edge| is_caller_relation(edge.relation))
-            .filter_map(|edge| {
-                callers
-                    .get(&edge.source_stable_symbol_id)
-                    .cloned()
-                    .map(|caller| OwnedCallerRecord::Unresolved {
-                        caller,
-                        target_label: edge.target_label.clone().unwrap_or_default(),
-                        edge,
-                    })
             })
-            .collect()
+            .unresolved_caller_records(target_labels)
     }
 
     fn find_callee_edges(&self, sid: &str) -> Vec<OwnedCalleeRecord> {
@@ -2178,87 +2088,6 @@ fn file_manifests_from_batch(batch: &RecordBatch) -> anyhow::Result<Vec<GraphFil
     Ok(manifests)
 }
 
-fn resolved_edges_from_batch(batch: &RecordBatch) -> anyhow::Result<Vec<GraphEdgeArtifact>> {
-    let source_stable_id = string_array_by_name(batch, "source_stable_id")?;
-    let target_stable_id = string_array_by_name(batch, "target_stable_id")?;
-    let target_label = string_array_by_name(batch, "target_label")?;
-    let relation = string_array_by_name(batch, "relation")?;
-    let confidence = string_array_by_name(batch, "confidence")?;
-    let confidence_score = f32_array_by_name(batch, "confidence_score")?;
-    let edge_kind = string_array_by_name(batch, "edge_kind")?;
-    let bind_method = string_array_by_name(batch, "bind_method")?;
-    let import_path = optional_string_array_by_name(batch, "import_path")?;
-    let receiver_text = optional_string_array_by_name(batch, "receiver_text")?;
-    let scope_text = optional_string_array_by_name(batch, "scope_text")?;
-
-    let mut edges = Vec::with_capacity(batch.num_rows());
-    for row in 0..batch.num_rows() {
-        edges.push(GraphEdgeArtifact {
-            source_stable_symbol_id: required_string_value(
-                source_stable_id,
-                row,
-                "source_stable_id",
-            )?
-            .to_owned(),
-            target_stable_symbol_id: Some(
-                required_string_value(target_stable_id, row, "target_stable_id")?.to_owned(),
-            ),
-            target_label: optional_string_value(target_label, row),
-            import_path: import_path.and_then(|values| optional_string_value(values, row)),
-            receiver_text: receiver_text.and_then(|values| optional_string_value(values, row)),
-            scope_text: scope_text.and_then(|values| optional_string_value(values, row)),
-            relation: relation_from_str(required_string_value(relation, row, "relation")?)?,
-            confidence: confidence_from_str(required_string_value(confidence, row, "confidence")?)?,
-            confidence_score: confidence_score.value(row),
-            change_kind: None,
-            edge_kind: optional_string_value(edge_kind, row)
-                .map(|value| edge_kind_from_str(&value))
-                .transpose()?,
-            bind_method: optional_string_value(bind_method, row),
-        });
-    }
-    Ok(edges)
-}
-
-fn unresolved_edges_from_batch(batch: &RecordBatch) -> anyhow::Result<Vec<GraphEdgeArtifact>> {
-    let source_stable_id = string_array_by_name(batch, "source_stable_id")?;
-    let target_label = string_array_by_name(batch, "target_label")?;
-    let relation = string_array_by_name(batch, "relation")?;
-    let confidence = string_array_by_name(batch, "confidence")?;
-    let confidence_score = f32_array_by_name(batch, "confidence_score")?;
-    let edge_kind = string_array_by_name(batch, "edge_kind")?;
-    let bind_method = string_array_by_name(batch, "bind_method")?;
-    let import_path = optional_string_array_by_name(batch, "import_path")?;
-    let receiver_text = optional_string_array_by_name(batch, "receiver_text")?;
-    let scope_text = optional_string_array_by_name(batch, "scope_text")?;
-
-    let mut edges = Vec::with_capacity(batch.num_rows());
-    for row in 0..batch.num_rows() {
-        edges.push(GraphEdgeArtifact {
-            source_stable_symbol_id: required_string_value(
-                source_stable_id,
-                row,
-                "source_stable_id",
-            )?
-            .to_owned(),
-            target_stable_symbol_id: None,
-            target_label: optional_string_value(target_label, row),
-            import_path: import_path.and_then(|values| optional_string_value(values, row)),
-            receiver_text: receiver_text.and_then(|values| optional_string_value(values, row)),
-            scope_text: scope_text.and_then(|values| optional_string_value(values, row)),
-            relation: relation_from_str(required_string_value(relation, row, "relation")?)?,
-            confidence: confidence_from_str(required_string_value(confidence, row, "confidence")?)?,
-            confidence_score: confidence_score.value(row),
-            change_kind: None,
-            edge_kind: optional_string_value(edge_kind, row)
-                .map(|value| edge_kind_from_str(&value))
-                .transpose()?,
-            bind_method: optional_string_value(bind_method, row),
-        });
-    }
-    Ok(edges)
-}
-
 fn string_array_by_name<'a>(
     batch: &'a RecordBatch,
     name: &str,
@@ -2268,21 +2097,6 @@ fn string_array_by_name<'a>(
         .column(index)
         .as_any()
         .downcast_ref::<StringArray>()
-        .ok_or_else(|| ArrowError::CastError(format!("expected string column `{name}`")))
-}
-
-fn optional_string_array_by_name<'a>(
-    batch: &'a RecordBatch,
-    name: &str,
-) -> Result<Option<&'a StringArray>, ArrowError> {
-    let Ok(index) = batch.schema().index_of(name) else {
-        return Ok(None);
-    };
-    batch
-        .column(index)
-        .as_any()
-        .downcast_ref::<StringArray>()
-        .map(Some)
         .ok_or_else(|| ArrowError::CastError(format!("expected string column `{name}`")))
 }
 
@@ -2302,18 +2116,6 @@ fn i64_array_by_name<'a>(batch: &'a RecordBatch, name: &str) -> Result<&'a Int64
         .as_any()
         .downcast_ref::<Int64Array>()
         .ok_or_else(|| ArrowError::CastError(format!("expected int64 column `{name}`")))
-}
-
-fn f32_array_by_name<'a>(
-    batch: &'a RecordBatch,
-    name: &str,
-) -> Result<&'a Float32Array, ArrowError> {
-    let index = batch.schema().index_of(name)?;
-    batch
-        .column(index)
-        .as_any()
-        .downcast_ref::<Float32Array>()
-        .ok_or_else(|| ArrowError::CastError(format!("expected float32 column `{name}`")))
 }
 
 fn list_array_by_name<'a>(batch: &'a RecordBatch, name: &str) -> Result<&'a ListArray, ArrowError> {
@@ -2379,10 +2181,10 @@ mod tests {
     use super::*;
     use crate::store::parquet::write_artifact_parquet;
     use crate::{
-        search_symbols, ChangeKind, CommitArtifact, CommitIndexArtifact, EdgeEndpoint,
-        GraphIndexHeader, GraphSymbolArtifact, RelationKind, RenamePrev, SearchFilters, SearchMode,
-        SnapshotKey, SymbolSnapshotArtifact, TemporalEdgeArtifact, WalkStrategy, WriteOptions,
-        GRAPH_INDEX_VERSION_TEMPORAL,
+        search_symbols, ChangeKind, CommitArtifact, CommitIndexArtifact, Confidence, EdgeEndpoint,
+        GraphEdgeKind, GraphIndexHeader, GraphSymbolArtifact, RelationKind, RenamePrev,
+        SearchFilters, SearchMode, SnapshotKey, SymbolSnapshotArtifact, TemporalEdgeArtifact,
+        WalkStrategy, WriteOptions, GRAPH_INDEX_VERSION_TEMPORAL,
     };
     use parquet::arrow::arrow_reader::{ArrowReaderMetadata, ArrowReaderOptions};
     use parquet::file::metadata::PageIndexPolicy;
@@ -2748,6 +2550,192 @@ mod tests {
         assert_eq!(symbols.len(), 1);
         assert_eq!(symbols[0].stable_symbol_id, "sym-b");
         assert_eq!(symbols[0].entity_name, "beta");
+    }
+
+    #[test]
+    fn parquet_client_reuses_one_hot_query_index_for_scan_searches() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let mut graph = artifact(vec![
+            symbol("sym-a", "alpha_target"),
+            symbol("sym-b", "beta_target"),
+        ]);
+        graph.symbol_node_ids = vec![NodeId(1), NodeId(2)];
+        let parquet_dir =
+            write_artifact_parquet(&graph, tempdir.path(), WriteOptions::default(), Vec::new())
+                .expect("write parquet artifact");
+        let client = ParquetClient::open(&parquet_dir).expect("open parquet client");
+
+        assert_eq!(client.hot_query_index_build_count(), 0);
+
+        for mode in [SearchMode::Prefix, SearchMode::Substring] {
+            let result = client
+                .search_symbols(&SearchOptions {
+                    query: "alpha".to_owned(),
+                    mode,
+                    filters: SearchFilters::default(),
+                    limit: 20,
+                })
+                .expect("scan search succeeds");
+            assert_eq!(result.total_matches, 1);
+            assert_eq!(result.candidates[0].stable_symbol_id, "sym-a");
+        }
+
+        assert_eq!(client.hot_query_index_build_count(), 1);
+    }
+
+    #[test]
+    fn parquet_hot_symbol_search_does_not_depend_on_edge_shards() -> anyhow::Result<()> {
+        let tempdir = tempfile::tempdir()?;
+        let mut graph = artifact(vec![symbol("sym-a", "alpha_target")]);
+        graph.symbol_node_ids = vec![NodeId(1)];
+        let parquet_dir =
+            write_artifact_parquet(&graph, tempdir.path(), WriteOptions::default(), Vec::new())?;
+        let client = ParquetClient::open(&parquet_dir)?;
+
+        std::fs::remove_file(parquet_dir.join("edges.parquet"))?;
+        std::fs::remove_file(parquet_dir.join("edges_by_dst.parquet"))?;
+        std::fs::remove_file(parquet_dir.join("edges_unresolved.parquet"))?;
+
+        let result = client.search_symbols(&SearchOptions {
+            query: "alpha".to_owned(),
+            mode: SearchMode::Prefix,
+            filters: SearchFilters::default(),
+            limit: 20,
+        })?;
+
+        assert_eq!(result.total_matches, 1);
+        assert_eq!(result.candidates[0].stable_symbol_id, "sym-a");
+        Ok(())
+    }
+
+    #[test]
+    fn parquet_empty_adjacency_queries_do_not_depend_on_edge_shards() -> anyhow::Result<()> {
+        let tempdir = tempfile::tempdir()?;
+        let mut graph = artifact(vec![symbol("sym-a", "alpha_target")]);
+        graph.symbol_node_ids = vec![NodeId(1)];
+        let parquet_dir =
+            write_artifact_parquet(&graph, tempdir.path(), WriteOptions::default(), Vec::new())?;
+        let client = ParquetClient::open(&parquet_dir)?;
+
+        std::fs::remove_file(parquet_dir.join("edges.parquet"))?;
+        std::fs::remove_file(parquet_dir.join("edges_by_dst.parquet"))?;
+        std::fs::remove_file(parquet_dir.join("edges_unresolved.parquet"))?;
+
+        assert!(client.try_find_caller_edges("missing")?.is_empty());
+        assert!(client.try_find_callee_edges("missing")?.is_empty());
+        assert!(client
+            .find_unresolved_caller_edges_by_labels(&HashSet::new())
+            .is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn parquet_hot_query_index_preserves_broad_search_ranking_and_counts() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let symbols = (0..512)
+            .map(|index| {
+                let name = format!("shared_symbol_{index:04}");
+                symbol(&format!("sym-{index:04}"), &name)
+            })
+            .collect::<Vec<_>>();
+        let mut graph = artifact(symbols);
+        graph.symbol_node_ids = (1..=graph.symbols.len())
+            .map(|id| NodeId(id as u64))
+            .collect();
+        let parquet_dir =
+            write_artifact_parquet(&graph, tempdir.path(), WriteOptions::default(), Vec::new())
+                .expect("write parquet artifact");
+        let client = ParquetClient::open(&parquet_dir).expect("open parquet client");
+
+        for (mode, query) in [(SearchMode::Prefix, "s"), (SearchMode::Substring, "a")] {
+            for limit in [0, 20, usize::MAX] {
+                let options = SearchOptions {
+                    query: query.to_owned(),
+                    mode,
+                    filters: SearchFilters::default(),
+                    limit,
+                };
+                assert_eq!(
+                    client
+                        .search_symbols(&options)
+                        .expect("hot broad search succeeds"),
+                    search_symbols(&graph, &options),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn parquet_hot_query_index_reuses_loaded_adjacency() -> anyhow::Result<()> {
+        let tempdir = tempfile::tempdir()?;
+        let mut graph = artifact(vec![
+            symbol("source", "alpha_source"),
+            symbol("target", "beta_target"),
+            symbol("unresolved", "unresolved_caller"),
+        ]);
+        graph.symbol_node_ids = vec![NodeId(1), NodeId(2), NodeId(3)];
+        graph.edges = vec![
+            GraphEdgeArtifact {
+                source_stable_symbol_id: "source".to_owned(),
+                target_stable_symbol_id: Some("target".to_owned()),
+                target_label: Some("beta_target".to_owned()),
+                import_path: None,
+                relation: RelationKind::Calls,
+                confidence: Confidence::SyntaxExact,
+                confidence_score: 1.0,
+                change_kind: None,
+                edge_kind: Some(GraphEdgeKind::Calls),
+                bind_method: None,
+                receiver_text: None,
+                scope_text: None,
+            },
+            GraphEdgeArtifact {
+                source_stable_symbol_id: "unresolved".to_owned(),
+                target_stable_symbol_id: None,
+                target_label: Some("beta_target".to_owned()),
+                import_path: None,
+                relation: RelationKind::Calls,
+                confidence: Confidence::SyntaxExact,
+                confidence_score: 1.0,
+                change_kind: None,
+                edge_kind: Some(GraphEdgeKind::Calls),
+                bind_method: None,
+                receiver_text: None,
+                scope_text: None,
+            },
+        ];
+        let parquet_dir =
+            write_artifact_parquet(&graph, tempdir.path(), WriteOptions::default(), Vec::new())?;
+        let client = ParquetClient::open(&parquet_dir)?;
+
+        client.search_symbols(&SearchOptions {
+            query: "alpha".to_owned(),
+            mode: SearchMode::Prefix,
+            filters: SearchFilters::default(),
+            limit: 20,
+        })?;
+        assert_eq!(client.hot_query_index_build_count(), 1);
+        assert_eq!(client.hot_adjacency_index_build_count(), 0);
+
+        let initial_callers = client.try_find_caller_edges("target")?;
+        let initial_callees = client.try_find_callee_edges("source")?;
+        assert_eq!(initial_callers.len(), 2);
+        assert_eq!(initial_callees.len(), 1);
+        assert_eq!(client.hot_adjacency_index_build_count(), 1);
+
+        std::fs::remove_file(parquet_dir.join("edges.parquet"))?;
+        std::fs::remove_file(parquet_dir.join("edges_by_dst.parquet"))?;
+        std::fs::remove_file(parquet_dir.join("edges_unresolved.parquet"))?;
+        std::fs::remove_file(parquet_dir.join("nodes.parquet"))?;
+
+        let callers = client.try_find_caller_edges("target")?;
+        let callees = client.try_find_callee_edges("source")?;
+
+        assert_eq!(callers.len(), 2);
+        assert_eq!(callees.len(), 1);
+        assert_eq!(client.hot_query_index_build_count(), 1);
+        assert_eq!(client.hot_adjacency_index_build_count(), 1);
+        Ok(())
     }
 
     #[test]
