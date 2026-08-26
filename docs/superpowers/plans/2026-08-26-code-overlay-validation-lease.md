@@ -107,6 +107,13 @@ scripts/spur-cargo test -p spur-graph --lib
 scripts/spur-cargo fmt -- --check
 ```
 
+**Evidence:**
+
+- RED commit: `61ebf1591`; certified-generation diagnostics lacked the zero-scan contract (`Null` versus `0`).
+- GREEN metadata: successful generation responses no longer collect response files for filesystem verification; they derive graph build/head fields from the matching pointer and freshness fields from the unchanged `SnapshotIdentity`.
+- SOLVE POST: `sol_0c0a3ede474748b6`; the complete six-step response trace reaches `ResponseReturned`, satisfies every transition and safety rule, and never enters `DuplicateValidation`.
+- Verification: focused generation metadata test passed; `spur-graph --lib` passed 491 tests with 3 ignored; formatting check passed.
+
 ## Task 4 — Measure the release gate (`bd-2pa0`)
 
 **Files:**

@@ -1846,11 +1846,7 @@ async fn overlay_response_for_backend(
     }
 
     let mut fresh_body = query_result?;
-    let fresh_files = response_file_set_from_client(&pinned, &fresh_body)?;
-    GraphResponseMetadata::analyze_source_inner(source, Some(&fresh_files), None)
-        .await
-        .metadata
-        .with_rebuild_status(RebuildStatus::Fresh)
+    GraphResponseMetadata::from_certified_overlay(source, &snapshot_identity)
         .insert_into_for_format(&mut fresh_body, response_format);
     insert_overlay_generation_diagnostics(
         &mut fresh_body,
@@ -1860,6 +1856,7 @@ async fn overlay_response_for_backend(
             full_base_artifact_builds.load(Ordering::Relaxed),
             pinned.query_operations(),
             2,
+            0,
         ),
     );
     Ok(OverlayAttempt::Fresh(fresh_body))
@@ -1995,6 +1992,7 @@ fn overlay_generation_diagnostics_value(
     full_base_artifact_builds: u64,
     query_operations: u64,
     validation_observations: u64,
+    response_metadata_scans: u64,
 ) -> Value {
     json!({
         "route": "generation",
@@ -2003,6 +2001,7 @@ fn overlay_generation_diagnostics_value(
         "full_base_artifact_builds": full_base_artifact_builds,
         "query_operations": query_operations,
         "validation_observations": validation_observations,
+        "response_metadata_scans": response_metadata_scans,
         "generation_identity_mismatches": 0,
         "finalization_stages": finalization_stages(OverlayFinalizationMeasurements::default()),
     })
@@ -3564,6 +3563,38 @@ impl LoadedRebuildKey {
 }
 
 impl GraphResponseMetadata {
+    /// Build response metadata from a generation whose exact snapshot identity
+    /// was unchanged at the post-query fence.
+    ///
+    /// Every file manifest returned by the pinned generation belongs to that
+    /// identity, so restatting or rehashing response files here would repeat
+    /// validation without strengthening the proof.
+    fn from_certified_overlay(
+        source: GraphMetadataSource,
+        identity: &overlay_snapshot::SnapshotIdentity,
+    ) -> Self {
+        debug_assert_eq!(
+            source.graph_content_hash, identity.indexed_graph_content_hash,
+            "overlay identity must belong to the opened graph source"
+        );
+        let pointer = matching_graph_pointer(&identity.canonical_worktree, &source);
+        let graph_built_at = pointer.as_ref().and_then(graph_built_at_from_pointer);
+        let indexed_head_oid = pointer
+            .as_ref()
+            .and_then(|pointer| non_empty_string(pointer.indexed_commit_oid.clone()))
+            .or_else(|| identity.indexed_head_oid.clone());
+
+        Self {
+            source,
+            graph_built_at,
+            indexed_head_oid,
+            worktree_head_oid: Some(identity.current_head_oid.clone()),
+            worktree_dirty: Some(false),
+            response_file_oids_match: Some(true),
+            rebuild_status: RebuildStatus::Fresh,
+        }
+    }
+
     #[allow(dead_code)]
     async fn from_artifact_with_files(
         artifact: &GraphIndexArtifact,
