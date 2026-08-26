@@ -37,7 +37,7 @@ use crate::jobs::{
     JobRecord, JobStore, JobsError, QueueConfig, QueueCursorSaveOutcome, QueuePageKey,
     QueueScanCursor,
 };
-use crate::mcp::{self, IndexExecutionStarter};
+use crate::mcp::{self, ExecutionStatusChecker, IndexExecutionStarter};
 
 /// Default maximum number of jobs a single drainer invocation will dispatch.
 /// Keeps one Lambda invocation from exhausting the global running capacity or
@@ -59,6 +59,9 @@ pub struct DrainSummary {
     /// Jobs that failed after dispatch (start or record error) and had their
     /// running quota released.
     pub failed: usize,
+    /// Leftover `RUNNING#` tokens repaired without a client status poll
+    /// (`sol_9bed32c0774d46bf`).
+    pub repaired: usize,
 }
 
 impl DrainSummary {
@@ -95,6 +98,7 @@ enum DispatchOutcome {
 pub struct Drainer<'a> {
     jobs: &'a dyn JobStore,
     starter: &'a dyn IndexExecutionStarter,
+    checker: Option<&'a dyn ExecutionStatusChecker>,
     config: QueueConfig,
     max_dispatches_per_run: usize,
     scan_limit_per_shard: usize,
@@ -111,6 +115,7 @@ impl<'a> Drainer<'a> {
         Self {
             jobs,
             starter,
+            checker: None,
             config,
             max_dispatches_per_run: DEFAULT_MAX_DISPATCHES_PER_RUN,
             scan_limit_per_shard: DEFAULT_SCAN_LIMIT_PER_SHARD,
@@ -140,6 +145,14 @@ impl<'a> Drainer<'a> {
         self
     }
 
+    /// Observe Step Functions executions when repairing stale running jobs.
+    /// Terminal leftover-token repair does not need a checker.
+    #[must_use]
+    pub fn with_checker(mut self, checker: &'a dyn ExecutionStatusChecker) -> Self {
+        self.checker = Some(checker);
+        self
+    }
+
     /// Run one drainer invocation: scan shards in rotated order, dispatch
     /// eligible queued jobs under the configured running caps, and start Step
     /// Functions for each accepted job.
@@ -165,6 +178,7 @@ impl<'a> Drainer<'a> {
     /// only by an absent DynamoDB `LastEvaluatedKey`, never by item count.
     pub async fn drain(&self, now_secs: u64) -> DrainSummary {
         let mut summary = DrainSummary::default();
+        self.reconcile_running_quota(&mut summary).await;
         let shard_count = self.config.shard_count.max(1);
         let rotation_tick = now_secs / self.rotation_interval_secs;
         let start_shard = rotation_tick.wrapping_rem(u64::from(shard_count));
@@ -191,6 +205,41 @@ impl<'a> Drainer<'a> {
         }
 
         summary
+    }
+
+    /// Repair leftover `RUNNING#` tokens and stale dispatching/running jobs
+    /// using the same path as `external_index_status` (`update_stale_job`).
+    /// Failures are logged and skipped so dispatch can still proceed.
+    async fn reconcile_running_quota(&self, summary: &mut DrainSummary) {
+        let limit = mcp::MAX_INDEX_GLOBAL_RUNNING_TOKENS as usize;
+        let job_ids = match self.jobs.list_running_token_job_ids(limit).await {
+            Ok(ids) => ids,
+            Err(error) => {
+                eprintln!("[drainer] list_running_token_job_ids failed: {error}");
+                return;
+            }
+        };
+        for job_id in job_ids {
+            let record = match self.jobs.lookup_job(&job_id).await {
+                Ok(Some(record)) => record,
+                Ok(None) => continue,
+                Err(error) => {
+                    eprintln!("[drainer] lookup_job {job_id} for quota repair failed: {error}");
+                    continue;
+                }
+            };
+            let before = record.status;
+            match mcp::update_stale_job(record, self.jobs, self.checker).await {
+                Ok(updated) => {
+                    if before.is_terminal_for_quota() || updated.status != before {
+                        summary.repaired += 1;
+                    }
+                }
+                Err(error) => {
+                    eprintln!("[drainer] quota repair for {job_id} failed: {error}");
+                }
+            }
+        }
     }
 
     /// Drain one bounded Query page from a shard.

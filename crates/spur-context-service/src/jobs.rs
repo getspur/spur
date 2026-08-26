@@ -590,6 +590,16 @@ pub trait JobStore: Send + Sync {
         Ok(())
     }
 
+    /// Job IDs that currently hold a `RUNNING#` release token.
+    ///
+    /// The EventBridge drainer uses this to repair leftover tokens without a
+    /// client `external_index_status` poll (`sol_9bed32c0774d46bf`). Default:
+    /// no tokens are visible.
+    async fn list_running_token_job_ids(&self, limit: usize) -> Result<Vec<String>> {
+        let _ = limit;
+        Ok(Vec::new())
+    }
+
     /// List queued jobs eligible for dispatch from a queue shard, in FIFO order
     /// (ascending `queue_sort_key`). Returns at most `limit` jobs whose
     /// `next_eligible_at <= now_unix_secs`. The drainer uses this to discover
@@ -1426,6 +1436,48 @@ impl JobStore for DynamoDbJobStore {
             jobs,
             last_evaluated_key,
         })
+    }
+
+    async fn list_running_token_job_ids(&self, limit: usize) -> Result<Vec<String>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let scan_limit = i32::try_from(limit).unwrap_or(i32::MAX);
+        let mut job_ids = Vec::new();
+        let mut exclusive_start_key = None;
+        for _ in 0..8 {
+            let mut request = self
+                .client
+                .scan()
+                .table_name(&self.table_name)
+                .filter_expression("item_type = :item_type")
+                .expression_attribute_values(
+                    ":item_type",
+                    AttributeValue::S("running_token".to_string()),
+                )
+                .projection_expression("job_id")
+                .limit(scan_limit);
+            if let Some(start_key) = exclusive_start_key.take() {
+                request = request.set_exclusive_start_key(Some(start_key));
+            }
+            let output = request.send().await.map_err(dynamodb_error)?;
+            for item in output.items.unwrap_or_default() {
+                let Ok(job_id) = string_attr(&item, "job_id") else {
+                    continue;
+                };
+                if !job_ids.iter().any(|existing| existing == &job_id) {
+                    job_ids.push(job_id);
+                    if job_ids.len() >= limit {
+                        return Ok(job_ids);
+                    }
+                }
+            }
+            match output.last_evaluated_key {
+                Some(key) => exclusive_start_key = Some(key),
+                None => break,
+            }
+        }
+        Ok(job_ids)
     }
 
     async fn queue_scan_cursor(&self, shard: &str) -> Result<QueueScanCursor> {

@@ -1077,6 +1077,14 @@ impl JobStore for FakeJobStore {
         Ok(())
     }
 
+    async fn list_running_token_job_ids(
+        &self,
+        limit: usize,
+    ) -> spur_context_service::jobs::Result<Vec<String>> {
+        let state = self.state.lock().expect("fake store lock");
+        Ok(state.running_tokens.iter().take(limit).cloned().collect())
+    }
+
     async fn list_queued_jobs(
         &self,
         shard: &str,
@@ -1566,6 +1574,51 @@ fn drainer_record_failure_marks_job_failed_and_releases_quota() -> Result<()> {
         assert!(
             !store.has_running_token(&enqueued.job_id),
             "running token removed after record failure"
+        );
+        Ok(())
+    })
+}
+
+#[test]
+fn drainer_repairs_terminal_job_with_leftover_running_token() -> Result<()> {
+    // sol_2f1e4b351f4f420f / sol_9bed32c0774d46bf: leftover RUNNING tokens
+    // must be released by the 1-minute drainer without a client status poll.
+    block_on(async {
+        let store = FakeJobStore::default();
+        let owner = BacklogOwner::caller("alice");
+        let config = drainer_queue_config(u32::MAX);
+        let dispatched = setup_dispatched_running_job(&store, &owner, &config).await;
+        assert_eq!(store.owner_running(&owner), 1);
+        assert!(store.has_running_token(&dispatched.job_id));
+
+        store
+            .mark_complete(&dispatched.job_id, 555, json!({ "nodes": 3 }))
+            .await
+            .context("raw mark_complete leaves the running token")?;
+        assert_eq!(
+            store.owner_running(&owner),
+            1,
+            "token still held after raw mark_complete"
+        );
+
+        let starter = FakeStarter::new();
+        let summary =
+            drainer::drain_queued_jobs_with_services(&store, &starter, config, now_secs_large())
+                .await;
+
+        assert_eq!(
+            summary.repaired, 1,
+            "drainer must repair leftover running quota without status_poll"
+        );
+        assert_eq!(starter.call_count(), 0, "repair must not start a new job");
+        assert_eq!(
+            store.owner_running(&owner),
+            0,
+            "owner running released by drainer"
+        );
+        assert!(
+            !store.has_running_token(&dispatched.job_id),
+            "running token removed by drainer"
         );
         Ok(())
     })

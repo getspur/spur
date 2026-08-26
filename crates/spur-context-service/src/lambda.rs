@@ -168,7 +168,8 @@ where
             "operation": "drain_queued_jobs",
             "dispatched": summary.dispatched,
             "skipped": summary.skipped,
-            "failed": summary.failed
+            "failed": summary.failed,
+            "repaired": summary.repaired
         }));
     }
 
@@ -1611,6 +1612,7 @@ fn sfn_client() -> Result<SfnIndexExecutionStarter, Error> {
 pub async fn drain_queued_jobs() -> Result<drainer::DrainSummary, Error> {
     let jobs = job_store();
     let starter = sfn_client()?;
+    let checker = status_checker();
     let config = mcp::index_queue_config();
     let limits = mcp::index_drainer_limits();
     let now_secs = std::time::SystemTime::now()
@@ -1620,6 +1622,7 @@ pub async fn drain_queued_jobs() -> Result<drainer::DrainSummary, Error> {
     Ok(drainer::Drainer::new(&jobs, &starter, config)
         .with_limits(limits.max_dispatches_per_run, limits.scan_limit_per_shard)
         .with_rotation_interval_secs(limits.rotation_interval_secs)
+        .with_checker(&checker)
         .drain(now_secs)
         .await)
 }
@@ -3164,6 +3167,7 @@ mod tests {
                 dispatched: 2,
                 skipped: 1,
                 failed: 0,
+                repaired: 0,
             })
         })
         .await
@@ -3176,6 +3180,7 @@ mod tests {
                 "dispatched": 2,
                 "skipped": 1,
                 "failed": 0,
+                "repaired": 0,
             })
         );
     }

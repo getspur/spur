@@ -1301,7 +1301,7 @@ where
     })
 }
 
-async fn update_stale_job(
+pub(crate) async fn update_stale_job(
     record: JobRecord,
     jobs: &dyn JobStore,
     checker: Option<&dyn ExecutionStatusChecker>,
