@@ -1,11 +1,15 @@
 //! Reproducible code-intelligence benchmark contracts for SPUR.
 
 mod contract;
+mod materialize;
 mod sources;
 
 pub use contract::{
     CaseStatus, CodeEvalCase, ContentPin, ContractError, GoldEvidence, Language, QueryPolicy,
     RepositoryPin, SourceIdentity, Suite,
+};
+pub use materialize::{
+    compute_materialization_hash, MaterializeError, MaterializedRoot, Materializer,
 };
 pub use sources::{
     validate_bytes, LanguageCapability, SchemaEvidence, SourceError, SourceFormat, SourceManifest,
