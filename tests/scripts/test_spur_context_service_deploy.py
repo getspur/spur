@@ -13,6 +13,10 @@ VERSIONS_TF = INFRA_DIR / "versions.tf"
 CONTEXT_SERVICE_WORKFLOW = ROOT / ".github" / "workflows" / "context-service.yml"
 STAGING_SMOKE = INFRA_DIR / "smoke-staging-e2e.py"
 STAGING_SMOKE_ENTRYPOINT = INFRA_DIR / "smoke-staging-e2e.sh"
+REMOVED_ROUTE_ADDRESS = re.compile(
+    r"\baws_apigatewayv2_route\.(?:default|oauth|api_key_mcp)"
+    r"(?![A-Za-z0-9_])"
+)
 
 
 def terraform_resource_block(text, resource_type, resource_name):
@@ -37,6 +41,21 @@ def terraform_resource_blocks(text, resource_type):
             rf'resource\s+"{re.escape(resource_type)}"\s+"([^"]+)"', text
         )
     }
+
+
+def terraform_output_block(text, output_name):
+    marker = f'output "{output_name}"'
+    start = text.index(marker)
+    brace = text.index("{", start)
+    depth = 0
+    for offset, character in enumerate(text[brace:], start=brace):
+        if character == "{":
+            depth += 1
+        elif character == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start : offset + 1]
+    raise AssertionError(f"unterminated Terraform output: {marker}")
 
 
 def terraform_assignment(block, name):
@@ -64,10 +83,6 @@ def test_main_module_route_contracts_drop_removed_addresses_and_unsuffixed_paths
     )
     assert all("poc" not in path.relative_to(INFRA_DIR).parts for path in contract_files)
 
-    removed_route_address = re.compile(
-        r"\baws_apigatewayv2_route\.(?:default|oauth|api_key_mcp)"
-        r"(?![A-Za-z0-9_])"
-    )
     unsuffixed_serving_path = re.compile(
         r"POST /mcp/(?:oauth|api-key)(?!/(?:code|knowledge)\b)"
         r"|`/mcp/(?:oauth|api-key)`"
@@ -79,7 +94,7 @@ def test_main_module_route_contracts_drop_removed_addresses_and_unsuffixed_paths
     for path in contract_files:
         for line_number, line in enumerate(path.read_text().splitlines(), start=1):
             reasons = []
-            if removed_route_address.search(line):
+            if REMOVED_ROUTE_ADDRESS.search(line):
                 reasons.append("removed route address")
             if unsuffixed_serving_path.search(line):
                 reasons.append("unsuffixed serving path")
@@ -94,6 +109,99 @@ def test_main_module_route_contracts_drop_removed_addresses_and_unsuffixed_paths
                 )
 
     assert not stale_contracts, "\n".join(stale_contracts)
+
+
+def test_second_route_correction_restores_direct_and_exact_output_contracts():
+    api_key_static = (INFRA_DIR / "tests" / "api_key_static.tftest.hcl").read_text()
+    cognito_static = (INFRA_DIR / "tests" / "cognito_static.tftest.hcl").read_text()
+    outputs_tf = (INFRA_DIR / "outputs.tf").read_text()
+    readme = (INFRA_DIR / "README.md").read_text()
+    problems = []
+
+    for address in (
+        "aws_apigatewayv2_route.api_key_mcp",
+        "aws_apigatewayv2_route.oauth_code",
+        "aws_apigatewayv2_route.oauth_knowledge",
+        "aws_apigatewayv2_route.api_key_mcp_knowledge",
+    ):
+        if REMOVED_ROUTE_ADDRESS.search(address):
+            problems.append(f"stale-address guard rejects valid route {address}")
+    for address in (
+        "aws_apigatewayv2_route.default",
+        "aws_apigatewayv2_route.oauth",
+    ):
+        if not REMOVED_ROUTE_ADDRESS.search(address):
+            problems.append(f"stale-address guard allows removed route {address}")
+
+    direct_api_key_assertions = (
+        "length(aws_apigatewayv2_route.api_key_mcp) == 0",
+        'aws_apigatewayv2_route.api_key_mcp[0].route_key == "POST /mcp/api-key/code"',
+        'aws_apigatewayv2_route.api_key_mcp[0].authorization_type == "CUSTOM"',
+        "aws_apigatewayv2_route.api_key_mcp[0].authorizer_id == aws_apigatewayv2_authorizer.api_key[0].id",
+        'aws_apigatewayv2_route.api_key_mcp[0].target == "integrations/${aws_apigatewayv2_integration.api_key[0].id}"',
+    )
+    for assertion in direct_api_key_assertions:
+        if assertion not in api_key_static:
+            problems.append(f"API-key Terraform test lacks direct assertion: {assertion}")
+    if 'strcontains(file("${path.module}/api_keys.tf")' in api_key_static:
+        problems.append("API-key Terraform test still uses source-text route assertions")
+
+    output_contracts = {
+        "oauth_api_urls": (
+            "var.cognito_auth_enabled",
+            "/mcp/oauth/code",
+            "/mcp/oauth/knowledge",
+        ),
+        "api_key_mcp_urls": (
+            "var.api_key_auth_enabled",
+            "/mcp/api-key/code",
+            "/mcp/api-key/knowledge",
+        ),
+    }
+    for output_name, required_fragments in output_contracts.items():
+        try:
+            block = terraform_output_block(outputs_tf, output_name)
+        except ValueError:
+            problems.append(f'outputs.tf lacks output "{output_name}"')
+            continue
+        for fragment in required_fragments:
+            if fragment not in block:
+                problems.append(f"{output_name} lacks {fragment}")
+        if ": null" not in block:
+            problems.append(f"{output_name} does not become null when disabled")
+
+    for output_name in ("oauth_api_url", "api_key_mcp_url"):
+        block = terraform_output_block(outputs_tf, output_name).lower()
+        if "deprecated" not in block or "not directly callable" not in block:
+            problems.append(
+                f"{output_name} is not described as a deprecated, non-callable prefix"
+            )
+
+    terraform_output_assertions = (
+        (cognito_static, "oauth_api_url", 2),
+        (cognito_static, "oauth_api_urls", 2),
+        (api_key_static, "api_key_mcp_url", 2),
+        (api_key_static, "api_key_mcp_urls", 2),
+    )
+    for test_source, output_name, minimum in terraform_output_assertions:
+        count = len(re.findall(rf"\boutput\.{output_name}\b", test_source))
+        if count < minimum:
+            problems.append(
+                f"Terraform tests assert output.{output_name} {count} time(s), "
+                f"need execute-api and custom-domain coverage"
+            )
+
+    for output_name in ("oauth_api_urls", "api_key_mcp_urls"):
+        if output_name not in readme:
+            problems.append(f"README does not direct operators to {output_name}")
+    for output_name in ("oauth_api_url", "api_key_mcp_url"):
+        if not re.search(
+            rf"(?is)(?:deprecated[^\n]*{output_name}|{output_name}[^\n]*deprecated)",
+            readme,
+        ):
+            problems.append(f"README does not mark {output_name} deprecated")
+
+    assert not problems, "\n".join(problems)
 
 
 def test_direct_routes_have_expected_auth_and_unique_terminal_integrations():
