@@ -45,7 +45,7 @@ default = ["service"]
 service = [
     "dep:anyhow",
     "dep:aws-config",
-    "dep:aws-sdk-s3",
+    "artifact-cache-s3",
     "dep:aws-sdk-secretsmanager",
     "dep:aws-sdk-sfn",
     "dep:clap",
@@ -53,6 +53,7 @@ service = [
     "dep:spur-context-source",
 ]
 analyst = ["service"]
+artifact-cache-s3 = ["dep:aws-sdk-s3"]
 lambda-http = ["dep:lambda_runtime"]
 lambda = ["service", "api-key-authorizer", "lambda-http"]
 api-key-authorizer = ["dep:lambda_runtime"]
