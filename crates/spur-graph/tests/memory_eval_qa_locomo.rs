@@ -1,3 +1,4 @@
+use nltk_porter::{Mode, PorterStemmer};
 use serde_json::{json, Value};
 use spur_graph::memory_eval::{
     contract::{BenchmarkDataset, SourcePin},
@@ -99,12 +100,9 @@ fn frozen_ranking(dataset: &BenchmarkDataset, question_index: usize) -> Ranking 
 #[test]
 fn locomo_prompt_is_origin_golden_and_keeps_date_speaker_caption_and_multiline_text() {
     let dataset = fixture_dataset();
-    let prompt = render_locomo_prompt(
-        &dataset.questions[0],
-        &frozen_ranking(&dataset, 0),
-        &dataset,
-    )
-    .unwrap();
+    let mut ranking = frozen_ranking(&dataset, 0);
+    ranking.hits[0].provenance_id = Some("graph-node:internal".into());
+    let prompt = render_locomo_prompt(&dataset.questions[0], &ranking, &dataset).unwrap();
 
     assert_eq!(
         prompt,
@@ -129,8 +127,7 @@ fn locomo_prompt_is_origin_golden_and_keeps_date_speaker_caption_and_multiline_t
 
 #[test]
 fn locomo_category_scorers_match_origin_golden_cases() {
-    assert_eq!(score_locomo(1, "Alice; Bob", json!(["Alice", "Bob"])), 1.0);
-    assert_eq!(score_locomo(2, "running races", json!("ran a race")), 1.0);
+    assert_eq!(score_locomo(1, "Alice, Bob", json!("Alice, Bob")), 1.0);
     assert_eq!(
         score_locomo(3, "blue bicycle", json!("blue bicycle; blue bike")),
         1.0
@@ -139,12 +136,70 @@ fn locomo_category_scorers_match_origin_golden_cases() {
         score_locomo(4, "The blue bicycles and cars.", json!("blue bicycle car")),
         1.0
     );
-    assert_eq!(score_locomo(5, "no", json!("no")), 1.0);
     assert_eq!(
         score_locomo(5, "Not mentioned in the conversation", Value::Null),
         1.0
     );
     assert_eq!(score_locomo(5, "Yes, on Mars", Value::Null), 0.0);
+}
+
+#[test]
+fn locomo_category_2_uses_nltk_porter_without_irregular_lemma_overrides() {
+    assert_eq!(score_locomo(2, "running races", json!("ran a race")), 0.5);
+}
+
+#[test]
+fn locomo_category_5_does_not_accept_bare_no() {
+    assert_eq!(score_locomo(5, "no", json!("no")), 0.0);
+}
+
+#[test]
+fn locomo_category_1_source_rows_split_on_commas_only() {
+    let score = score_locomo(1, "Alice; Bob", json!("Alice, Bob"));
+    assert!((score - (2.0 / 3.0)).abs() < f64::EPSILON, "{score}");
+}
+
+#[test]
+fn locomo_category_1_json_array_answers_remain_an_explicit_compatibility_path() {
+    assert_eq!(score_locomo(1, "Alice; Bob", json!(["Alice", "Bob"])), 1.0);
+}
+
+#[test]
+fn nltk_porter_mode_matches_a_bounded_nltk_3_8_1_upstream_corpus() {
+    // Bounded from nltk/stem/porter.py examples/irregular forms and
+    // nltk/test/unit/test_stem.py at NLTK 3.8.1.
+    let corpus = [
+        ("caresses", "caress"),
+        ("ponies", "poni"),
+        ("ties", "tie"),
+        ("cats", "cat"),
+        ("agreed", "agre"),
+        ("plastered", "plaster"),
+        ("motoring", "motor"),
+        ("sing", "sing"),
+        ("happy", "happi"),
+        ("sky", "sky"),
+        ("dying", "die"),
+        ("lying", "lie"),
+        ("tying", "tie"),
+        ("news", "news"),
+        ("inning", "inning"),
+        ("outing", "outing"),
+        ("canning", "canning"),
+        ("howe", "howe"),
+        ("proceed", "proceed"),
+        ("exceed", "exceed"),
+        ("succeed", "succeed"),
+        ("oed", "o"),
+        ("running", "run"),
+        ("races", "race"),
+        ("ran", "ran"),
+    ];
+    let stemmer = PorterStemmer::new(Mode::Nltk);
+
+    for (word, expected) in corpus {
+        assert_eq!(stemmer.stem(word), expected, "word: {word}");
+    }
 }
 
 #[test]

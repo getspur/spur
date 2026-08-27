@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{ensure, Context};
-use rust_stemmers::{Algorithm, Stemmer};
+use nltk_porter::{Mode, PorterStemmer};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -265,14 +265,22 @@ pub fn score_locomo(category: u32, prediction: &str, answer: Value) -> f64 {
 }
 
 fn multi_answer_f1(prediction: &str, answer: &Value) -> f64 {
-    let predictions = split_multi_answer(prediction);
-    let ground_truths = match answer {
-        Value::Array(answers) => answers
-            .iter()
-            .filter_map(Value::as_str)
-            .flat_map(split_multi_answer)
-            .collect::<Vec<_>>(),
-        _ => split_multi_answer(&answer_text(answer)),
+    let (predictions, ground_truths) = match answer {
+        // Canonical LoCoMo source rows store category-1 answers as one
+        // comma-delimited string. Retain array support only as an explicit
+        // compatibility path for callers using the earlier non-source shape.
+        Value::Array(answers) => (
+            split_multi_answer_array_compatibility(prediction),
+            answers
+                .iter()
+                .filter_map(Value::as_str)
+                .flat_map(split_multi_answer_array_compatibility)
+                .collect::<Vec<_>>(),
+        ),
+        _ => (
+            split_source_multi_answer(prediction),
+            split_source_multi_answer(&answer_text(answer)),
+        ),
     };
     if predictions.is_empty() || ground_truths.is_empty() {
         return 0.0;
@@ -289,7 +297,11 @@ fn multi_answer_f1(prediction: &str, answer: &Value) -> f64 {
         / ground_truths.len() as f64
 }
 
-fn split_multi_answer(text: &str) -> Vec<String> {
+fn split_source_multi_answer(text: &str) -> Vec<String> {
+    text.split(',').map(str::trim).map(str::to_owned).collect()
+}
+
+fn split_multi_answer_array_compatibility(text: &str) -> Vec<String> {
     text.split([',', ';'])
         .map(str::trim)
         .filter(|part| !part.is_empty())
@@ -298,7 +310,7 @@ fn split_multi_answer(text: &str) -> Vec<String> {
 }
 
 fn stemmed_token_f1(prediction: &str, ground_truth: &str) -> f64 {
-    let stemmer = Stemmer::create(Algorithm::English);
+    let stemmer = PorterStemmer::new(Mode::Nltk);
     let prediction_tokens = normalized_stems(prediction, &stemmer);
     let ground_truth_tokens = normalized_stems(ground_truth, &stemmer);
     let mut remaining = HashMap::<String, usize>::new();
@@ -320,7 +332,7 @@ fn stemmed_token_f1(prediction: &str, ground_truth: &str) -> f64 {
     2.0 * precision * recall / (precision + recall)
 }
 
-fn normalized_stems(text: &str, stemmer: &Stemmer) -> Vec<String> {
+fn normalized_stems(text: &str, stemmer: &PorterStemmer) -> Vec<String> {
     let normalized = text
         .chars()
         .filter(|character| !character.is_ascii_punctuation())
@@ -329,12 +341,7 @@ fn normalized_stems(text: &str, stemmer: &Stemmer) -> Vec<String> {
     normalized
         .split_whitespace()
         .filter(|token| !matches!(*token, "a" | "an" | "the" | "and"))
-        .map(|token| match stemmer.stem(token).as_ref() {
-            // Preserve the approved origin-golden equivalence for the common
-            // irregular past tense that a pure stemmer does not lemmatize.
-            "ran" => "run".to_owned(),
-            stem => stem.to_owned(),
-        })
+        .map(|token| stemmer.stem(token))
         .collect()
 }
 
@@ -354,9 +361,7 @@ fn answer_text(answer: &Value) -> String {
 
 fn is_adversarial_abstention(prediction: &str) -> bool {
     let lowered = prediction.trim().to_ascii_lowercase();
-    lowered.contains("no information available")
-        || lowered.contains("not mentioned")
-        || lowered == "no"
+    lowered.contains("no information available") || lowered.contains("not mentioned")
 }
 
 /// Hash the exact serialized frozen ranking consumed by QA.
@@ -507,7 +512,7 @@ fn ranked_turn<'a>(
     dataset: &'a BenchmarkDataset,
     hit: &RankedHit,
 ) -> anyhow::Result<(&'a SessionRecord, &'a TurnRecord)> {
-    let occurrence_id = hit.provenance_id.as_deref().unwrap_or(&hit.occurrence_id);
+    let occurrence_id = hit.occurrence_id.as_str();
     dataset
         .all_sessions()
         .find_map(|session| {

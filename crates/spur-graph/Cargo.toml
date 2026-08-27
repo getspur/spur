@@ -31,6 +31,7 @@ globset = "0.4"
 ignore = "0.4.25"
 indicatif = "0.18"
 notify = "=8.2.0"
+nltk-porter = "0.1.0"
 arrow-array = { workspace = true }
 arrow-buffer = { workspace = true }
 arrow-schema = { workspace = true }
@@ -42,7 +43,6 @@ fastembed = { version = "=5.8.0", default-features = false, features = ["hf-hub-
 hf-hub = { version = "=0.4.3", default-features = false, features = ["native-tls", "ureq"], optional = true }
 parquet = { workspace = true, features = ["arrow"] }
 petgraph = { workspace = true }
-rust-stemmers = "1.2.0"
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha1 = "0.10"
