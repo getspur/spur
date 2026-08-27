@@ -29,10 +29,16 @@ use crate::api_keys::{
     generate_api_key, ApiKeyRecord, ApiKeyScopes, ApiKeyStore, ApiKeyStoreError, CreateKeyRecord,
     DynamoDbApiKeyStore, KeyEnvironment, RevokeResult,
 };
-use crate::auth::{self, AuthConfig, AuthDecision, AuthFailure, IamContext, RequestRoute};
+use crate::auth::{self, AuthConfig, AuthDecision, AuthFailure, RequestRoute};
 use crate::catalog::{self, CatalogResolver};
 use crate::drainer;
 use crate::jobs::{DynamoDbJobStore, JobStore};
+use crate::lambda_http::{
+    authenticated_caller_id, classify_route, json_response, reject_api_key_auth_on_wrong_route,
+    reject_jwt_auth_on_wrong_route, ApiGatewayRequest, ApiGatewayResponse,
+};
+#[cfg(test)]
+use crate::lambda_http::{caller_id, ApiGatewayHttp, ApiGatewayRequestContext};
 use crate::mcp::{self, McpHandlerError};
 
 pub static CATALOG_RESOLVER: OnceLock<Mutex<Option<CatalogCacheEntry>>> = OnceLock::new();
@@ -59,89 +65,6 @@ enum PreparedCatalogSource {
     Direct {
         catalog_dsn: String,
     },
-}
-
-#[derive(Debug, Deserialize)]
-pub struct ApiGatewayRequest {
-    pub body: Option<String>,
-    #[serde(rename = "isBase64Encoded", default)]
-    pub is_base64_encoded: bool,
-    #[serde(default)]
-    pub path: Option<String>,
-    #[serde(rename = "rawPath", default)]
-    pub raw_path: Option<String>,
-    #[serde(rename = "rawQueryString", default)]
-    pub raw_query_string: Option<String>,
-    #[serde(rename = "queryStringParameters", default)]
-    pub query_string_parameters: Option<BTreeMap<String, String>>,
-    #[serde(rename = "requestContext", default)]
-    pub request_context: Option<ApiGatewayRequestContext>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct ApiGatewayRequestContext {
-    #[serde(default)]
-    pub authorizer: Option<ApiGatewayAuthorizer>,
-    #[serde(default)]
-    pub http: Option<ApiGatewayHttp>,
-    #[serde(default)]
-    pub identity: Option<ApiGatewayIdentity>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct ApiGatewayAuthorizer {
-    #[serde(rename = "principalId", default)]
-    pub principal_id: Option<String>,
-    #[serde(default)]
-    pub iam: Option<IamAuthorizer>,
-    #[serde(default)]
-    pub jwt: Option<JwtAuthorizer>,
-    #[serde(default)]
-    pub lambda: Option<Value>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct IamAuthorizer {
-    #[serde(rename = "userArn", default)]
-    pub user_arn: Option<String>,
-    #[serde(rename = "callerId", default)]
-    pub caller_id: Option<String>,
-    #[serde(rename = "userId", default)]
-    pub user_id: Option<String>,
-    #[serde(rename = "accountId", default)]
-    pub account_id: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct JwtAuthorizer {
-    #[serde(default)]
-    pub claims: Option<Value>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct ApiGatewayHttp {
-    #[serde(default)]
-    pub method: Option<String>,
-    #[serde(rename = "sourceIp", default)]
-    pub source_ip: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct ApiGatewayIdentity {
-    #[serde(rename = "userArn", default)]
-    pub user_arn: Option<String>,
-    #[serde(rename = "sourceIp", default)]
-    pub source_ip: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct ApiGatewayResponse {
-    #[serde(rename = "statusCode")]
-    pub status_code: u16,
-    pub headers: BTreeMap<String, String>,
-    pub body: String,
-    #[serde(rename = "isBase64Encoded")]
-    pub is_base64_encoded: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -194,7 +117,7 @@ async fn handle_api_gateway_request(
     if let Some(response) = handle_reserved_route_before_body(&api_gateway_request) {
         return response;
     }
-    let route = request_route(&api_gateway_request);
+    let route = classify_route(&api_gateway_request);
     if let Err(error) = reject_api_key_auth_on_wrong_route(&api_gateway_request) {
         return authorization_error_response(error);
     }
@@ -840,7 +763,7 @@ fn discovery_document(
 fn handle_reserved_route_before_body(
     request: &ApiGatewayRequest,
 ) -> Option<Result<ApiGatewayResponse, Error>> {
-    let route = request_route(request);
+    let route = classify_route(request);
     match route {
         RequestRoute::ReservedUnavailable => Some(reserved_route_disabled_response(route)),
         RequestRoute::Discovery => {
@@ -969,17 +892,6 @@ const fn hex_value(byte: u8) -> Option<u8> {
     }
 }
 
-fn request_route(request: &ApiGatewayRequest) -> RequestRoute {
-    auth::classify_route(
-        request.raw_path.as_deref().or(request.path.as_deref()),
-        request
-            .request_context
-            .as_ref()
-            .and_then(|context| context.http.as_ref())
-            .and_then(|http| http.method.as_deref()),
-    )
-}
-
 fn reserved_route_disabled_response(_route: RequestRoute) -> Result<ApiGatewayResponse, Error> {
     json_response(404, &json!({ "error": { "code": "route_unavailable" } }))
 }
@@ -1052,44 +964,7 @@ fn routed_tool_name(request: &ApiGatewayRequest) -> Option<&'static str> {
 
 #[cfg(test)]
 fn is_oauth_route(request: &ApiGatewayRequest) -> bool {
-    matches!(request_route(request), RequestRoute::OAuth)
-}
-
-fn reject_jwt_auth_on_wrong_route(request: &ApiGatewayRequest) -> Result<(), AuthFailure> {
-    let has_jwt_context = request
-        .request_context
-        .as_ref()
-        .and_then(|context| context.authorizer.as_ref())
-        .and_then(|authorizer| authorizer.jwt.as_ref())
-        .is_some();
-
-    if has_jwt_context
-        && !matches!(
-            request_route(request),
-            RequestRoute::OAuth
-                | RequestRoute::ApiKeyCreate
-                | RequestRoute::ApiKeyList
-                | RequestRoute::ApiKeyRevoke
-        )
-    {
-        Err(AuthFailure::WrongRoute)
-    } else {
-        Ok(())
-    }
-}
-
-fn reject_api_key_auth_on_wrong_route(request: &ApiGatewayRequest) -> Result<(), AuthFailure> {
-    let has_api_key_context = request
-        .request_context
-        .as_ref()
-        .and_then(|context| context.authorizer.as_ref())
-        .and_then(|authorizer| authorizer.lambda.as_ref())
-        .is_some();
-    if has_api_key_context && request_route(request) != RequestRoute::ApiKeyMcp {
-        Err(AuthFailure::WrongRoute)
-    } else {
-        Ok(())
-    }
+    matches!(classify_route(request), RequestRoute::OAuth)
 }
 
 fn api_key_context(
@@ -1728,46 +1603,6 @@ fn s3_client_from_env() -> aws_sdk_s3::Client {
     aws_sdk_s3::Client::from_conf(config.build())
 }
 
-#[cfg(test)]
-fn caller_id(request: &ApiGatewayRequest) -> String {
-    request
-        .request_context
-        .as_ref()
-        .and_then(|context| {
-            context
-                .authorizer
-                .as_ref()
-                .and_then(jwt_caller_id)
-                .or_else(|| context.authorizer.as_ref().and_then(iam_caller_id))
-                .or_else(|| {
-                    context
-                        .authorizer
-                        .as_ref()
-                        .and_then(|authorizer| non_blank(authorizer.principal_id.as_deref()))
-                })
-                .or_else(|| {
-                    context
-                        .http
-                        .as_ref()
-                        .and_then(|http| non_blank(http.source_ip.as_deref()))
-                })
-                .or_else(|| {
-                    context
-                        .identity
-                        .as_ref()
-                        .and_then(|identity| non_blank(identity.user_arn.as_deref()))
-                })
-                .or_else(|| {
-                    context
-                        .identity
-                        .as_ref()
-                        .and_then(|identity| non_blank(identity.source_ip.as_deref()))
-                })
-        })
-        .unwrap_or("anonymous")
-        .to_owned()
-}
-
 /// When set truthy, mutating tools (`external_index`/`external_index_status`)
 /// no longer require an authenticated caller and fall back to a shared anonymous
 /// identity. Intended for internal-team / trusted-network deployments where the
@@ -1788,78 +1623,6 @@ fn anonymous_mutations_allowed() -> bool {
             .map(str::trim),
         Some("1") | Some("true") | Some("TRUE") | Some("yes")
     )
-}
-
-fn authenticated_caller_id(
-    request: &ApiGatewayRequest,
-    allow_anonymous: bool,
-) -> Result<String, McpHandlerError> {
-    let caller = request
-        .request_context
-        .as_ref()
-        .and_then(|context| {
-            let authorizer = context.authorizer.as_ref();
-            let strict_iam_identity = authorizer.and_then(|authorizer| {
-                authorizer.iam.as_ref().and_then(|iam| {
-                    IamContext {
-                        account_id: iam.account_id.as_deref(),
-                        user_id: iam.user_id.as_deref(),
-                        user_arn: iam.user_arn.as_deref(),
-                    }
-                    .authenticate()
-                    .ok()
-                    .map(|identity| identity.caller_id().to_owned())
-                })
-            });
-
-            authorizer
-                .and_then(jwt_caller_id)
-                .map(str::to_owned)
-                .or(strict_iam_identity)
-                .or_else(|| authorizer.and_then(iam_caller_id).map(str::to_owned))
-                .or_else(|| {
-                    authorizer
-                        .and_then(|authorizer| non_blank(authorizer.principal_id.as_deref()))
-                        .map(str::to_owned)
-                })
-                .or_else(|| {
-                    context
-                        .identity
-                        .as_ref()
-                        .and_then(|identity| non_blank(identity.user_arn.as_deref()))
-                        .map(str::to_owned)
-                })
-        })
-        .or_else(|| {
-            allow_anonymous.then(|| auth::legacy_anonymous_identity().caller_id().to_owned())
-        });
-
-    caller.ok_or_else(|| {
-        McpHandlerError::InvalidParams(
-            "authenticated caller is required for mutating context-service tools".to_owned(),
-        )
-    })
-}
-
-fn jwt_caller_id(authorizer: &ApiGatewayAuthorizer) -> Option<&str> {
-    let claims = authorizer.jwt.as_ref()?.claims.as_ref()?;
-    claim_str(claims, "sub").or_else(|| claim_str(claims, "principal_id"))
-}
-
-fn iam_caller_id(authorizer: &ApiGatewayAuthorizer) -> Option<&str> {
-    let iam = authorizer.iam.as_ref()?;
-    non_blank(iam.user_arn.as_deref())
-        .or_else(|| non_blank(iam.caller_id.as_deref()))
-        .or_else(|| non_blank(iam.user_id.as_deref()))
-        .or_else(|| non_blank(iam.account_id.as_deref()))
-}
-
-fn claim_str<'a>(claims: &'a Value, key: &str) -> Option<&'a str> {
-    non_blank(claims.get(key).and_then(Value::as_str))
-}
-
-fn non_blank(value: Option<&str>) -> Option<&str> {
-    value.filter(|value| !value.trim().is_empty())
 }
 
 struct SfnIndexExecutionStarter {
@@ -1937,15 +1700,6 @@ fn authorization_error_response(error: AuthFailure) -> Result<ApiGatewayResponse
     )
 }
 
-fn json_response(status_code: u16, value: &Value) -> Result<ApiGatewayResponse, Error> {
-    Ok(ApiGatewayResponse {
-        status_code,
-        headers: json_headers(),
-        body: serde_json::to_string(value).map_err(Error::from)?,
-        is_base64_encoded: false,
-    })
-}
-
 fn one_time_secret_response(status_code: u16, value: &Value) -> Result<ApiGatewayResponse, Error> {
     let mut response = json_response(status_code, value)?;
     response
@@ -1955,10 +1709,6 @@ fn one_time_secret_response(status_code: u16, value: &Value) -> Result<ApiGatewa
         .headers
         .insert("pragma".to_owned(), "no-cache".to_owned());
     Ok(response)
-}
-
-fn json_headers() -> BTreeMap<String, String> {
-    BTreeMap::from([("content-type".to_owned(), "application/json".to_owned())])
 }
 
 fn lambda_error(message: impl Into<String>) -> Error {
