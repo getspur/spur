@@ -617,7 +617,7 @@ async fn parquet_backend_matches_read_and_edge_contracts() -> Result<()> {
 
     let corrupt_sidecar = ParquetBackendFixture::new("parquet-corrupt-sidecar")?;
     corrupt_sidecar.replace_object(
-        &corrupt_sidecar.member_uri("source-sidecar.parquet"),
+        &corrupt_sidecar.member_uri("source_files.parquet"),
         b"corrupt source sidecar".to_vec(),
     );
     assert_retryable_backend_error(
@@ -705,7 +705,7 @@ impl ParquetBackendFixture {
             "edges_unresolved.parquet",
             "files.parquet",
             "file_manifests.parquet",
-            "source-sidecar.parquet",
+            "source_files.parquet",
         ] {
             declared_members.insert(
                 path.to_owned(),
@@ -734,10 +734,10 @@ impl ParquetBackendFixture {
 
         let graph_manifest = artifact_ref(root_uri, &root_bytes);
         let source_sidecar_bytes = declared_members
-            .get("source-sidecar.parquet")
+            .get("source_files.parquet")
             .context("source sidecar fixture member")?;
         let source_sidecar = artifact_ref(
-            format!("{graph_prefix}source-sidecar.parquet"),
+            format!("{graph_prefix}source_files.parquet"),
             source_sidecar_bytes,
         );
         let registry = ServingRegistry {
@@ -812,14 +812,14 @@ impl ParquetBackendFixture {
     }
 
     fn replace_source_sidecar(&mut self, row: Option<(&str, &str, &str)>) -> Result<()> {
-        let replacement = self.root.join("replacement-source-sidecar.parquet");
+        let replacement = self.root.join("source_files.parquet");
         write_source_sidecar_fixture(&replacement, row)?;
         let body = fs::read(&replacement).context("read replacement source sidecar")?;
         self.declared_members
-            .insert("source-sidecar.parquet".to_owned(), body.clone());
-        self.replace_object(&self.member_uri("source-sidecar.parquet"), body.clone());
+            .insert("source_files.parquet".to_owned(), body.clone());
+        self.replace_object(&self.member_uri("source_files.parquet"), body.clone());
         self.registry.packages[0].source_sidecar =
-            artifact_ref(self.member_uri("source-sidecar.parquet"), &body);
+            artifact_ref(self.member_uri("source_files.parquet"), &body);
         let root = silver_root_for_members(&self.declared_members)?;
         self.replace_silver_root(root);
         Ok(())
@@ -1009,7 +1009,7 @@ fn write_graph_compatible_parquet_fixture(graph_dir: &std::path::Path) -> Result
     .context("write graph-compatible Parquet fixture")?;
 
     write_source_sidecar_fixture(
-        &graph_dir.join("source-sidecar.parquet"),
+        &graph_dir.join("source_files.parquet"),
         Some(("src/lib.rs", &content_oid, PARQUET_SOURCE)),
     )?;
 
