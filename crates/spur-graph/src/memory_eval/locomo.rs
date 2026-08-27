@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use anyhow::{bail, Context};
 use serde::Deserialize;
@@ -225,14 +225,20 @@ fn canonical_questions(
             let mut evidence = Vec::with_capacity(question.evidence.len());
             let mut gold_session_ids = Vec::new();
             let mut gold_turn_ids = Vec::new();
+            let mut seen_session_ids = HashSet::new();
+            let mut seen_turn_ids = HashSet::new();
 
             for raw_evidence in question.evidence {
                 let resolved = evidence_index
                     .get(&raw_evidence)
                     .and_then(|matches| (matches.len() == 1).then(|| &matches[0]));
                 if let Some(location) = resolved {
-                    gold_session_ids.push(location.session_id.clone());
-                    gold_turn_ids.push(location.turn_id.clone());
+                    if seen_session_ids.insert(&location.session_id) {
+                        gold_session_ids.push(location.session_id.clone());
+                    }
+                    if seen_turn_ids.insert(&location.turn_id) {
+                        gold_turn_ids.push(location.turn_id.clone());
+                    }
                 }
                 evidence.push(EvidenceRef {
                     raw: raw_evidence,

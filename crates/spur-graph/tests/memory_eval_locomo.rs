@@ -1,6 +1,8 @@
 use serde_json::{json, Value};
 use spur_graph::memory_eval::{
-    contract::{BenchmarkDataset, DatasetKind, Role, SourcePin},
+    contract::{
+        validate_dataset, BenchmarkContract, BenchmarkDataset, DatasetKind, Role, SourcePin,
+    },
     parse_locomo, EvalSplit, LOCOMO_ADVERSARIAL_CATEGORY, LOCOMO_GRAPHIFY_N,
 };
 
@@ -109,6 +111,34 @@ const LEGACY_LOCOMO_WITHOUT_CONVERSATION: &str = r#"
 ]
 "#;
 
+const LOCOMO_REPEATED_EVIDENCE: &str = r#"
+[
+  {
+    "sample_id": "conv-repeated",
+    "conversation": {
+      "speaker_a": "Alice",
+      "speaker_b": "Bob",
+      "session_4_date_time": "2023-01-04",
+      "session_4": [
+        {"speaker": "Alice", "dia_id": "D4:5", "text": "first evidence"}
+      ],
+      "session_5_date_time": "2023-01-05",
+      "session_5": [
+        {"speaker": "Bob", "dia_id": "D5:5", "text": "second evidence"}
+      ]
+    },
+    "qa": [
+      {
+        "question": "Which evidence annotations support the answer?",
+        "answer": "both",
+        "category": 1,
+        "evidence": ["D4:5", "D4:5", "D5:5"]
+      }
+    ]
+  }
+]
+"#;
+
 fn test_pin() -> SourcePin {
     SourcePin {
         origin: "https://github.com/snap-research/locomo".to_owned(),
@@ -198,6 +228,35 @@ fn locomo_keeps_missing_and_ambiguous_evidence_unresolved() {
     assert!(question.evidence[1].resolved_turn_id.is_none());
     assert!(question.gold_turn_ids.is_empty());
     assert!(question.gold_session_ids.is_empty());
+}
+
+#[test]
+fn locomo_preserves_repeated_evidence_but_derives_unique_ordered_gold_ids() {
+    let mut data = BenchmarkDataset::load_locomo(LOCOMO_REPEATED_EVIDENCE, test_pin()).unwrap();
+    data.source.sha256.clone_from(&data.raw_sha256);
+    let question = &data.questions[0];
+    let session_4 = &data.conversations[0].sessions[0];
+    let session_5 = &data.conversations[0].sessions[1];
+    let turn_d4_5 = &session_4.turns[0];
+    let turn_d5_5 = &session_5.turns[0];
+
+    assert_eq!(question.evidence.len(), 3);
+    assert_eq!(question.evidence[0].raw, "D4:5");
+    assert_eq!(question.evidence[1].raw, "D4:5");
+    assert_eq!(question.evidence[2].raw, "D5:5");
+    assert_eq!(question.raw["evidence"], json!(["D4:5", "D4:5", "D5:5"]));
+    assert_eq!(
+        question.gold_turn_ids,
+        vec![turn_d4_5.internal_id.clone(), turn_d5_5.internal_id.clone()]
+    );
+    assert_eq!(
+        question.gold_session_ids,
+        vec![session_4.internal_id.clone(), session_5.internal_id.clone()]
+    );
+
+    let report = validate_dataset(&data, &BenchmarkContract::audited("origin-native-v1"));
+    assert!(!report.has_fatal());
+    assert_eq!(report.cohorts.locomo_retrieval, vec![question.id.clone()]);
 }
 
 #[test]
