@@ -1,5 +1,7 @@
 //! Lossless, origin-faithful records shared by memory benchmark adapters.
 
+use std::{collections::HashSet, error::Error, fmt};
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -153,6 +155,348 @@ fn hash_component(hasher: &mut Sha256, component: &[u8]) {
 
 fn sha256_hex(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
+}
+
+/// A versioned aggregation identity that keeps audited and compatibility
+/// outputs in disjoint namespaces even when their human-readable names match.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(tag = "track", content = "name", rename_all = "snake_case")]
+pub enum ContractId {
+    Audited(String),
+    Compatibility(String),
+}
+
+/// The validation and aggregation contract for one benchmark run.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BenchmarkContract {
+    pub contract_id: ContractId,
+}
+
+impl BenchmarkContract {
+    pub fn audited(name: impl Into<String>) -> Self {
+        Self {
+            contract_id: ContractId::Audited(name.into()),
+        }
+    }
+
+    pub fn compatibility(name: impl Into<String>) -> Self {
+        Self {
+            contract_id: ContractId::Compatibility(name.into()),
+        }
+    }
+}
+
+/// Returned when records from different contract identities would be blended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContractMismatch {
+    pub left: ContractId,
+    pub right: ContractId,
+}
+
+impl fmt::Display for ContractMismatch {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "benchmark contract mismatch: {:?} cannot be aggregated with {:?}",
+            self.left, self.right
+        )
+    }
+}
+
+impl Error for ContractMismatch {}
+
+/// Admit aggregation only when both inputs carry the exact same contract ID.
+pub fn ensure_same_contract(
+    left: &BenchmarkContract,
+    right: &BenchmarkContract,
+) -> Result<ContractId, ContractMismatch> {
+    if left.contract_id == right.contract_id {
+        Ok(left.contract_id.clone())
+    } else {
+        Err(ContractMismatch {
+            left: left.contract_id.clone(),
+            right: right.contract_id.clone(),
+        })
+    }
+}
+
+/// The direct cohort consequence of a nonfatal source finding.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum EligibilityEffect {
+    ExcludedFromRetrieval,
+}
+
+/// One fatal or nonfatal source-validation result.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ValidationFinding {
+    pub code: String,
+    pub message: String,
+    pub question_id: Option<String>,
+    pub eligibility_effect: Option<EligibilityEffect>,
+}
+
+/// Dataset-specific retrieval and QA cohorts in original question order.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Cohorts {
+    pub locomo_retrieval: Vec<String>,
+    pub locomo_qa: Vec<String>,
+    pub longmemeval_retrieval: Vec<String>,
+    pub longmemeval_qa: Vec<String>,
+}
+
+impl Cohorts {
+    pub fn is_empty(&self) -> bool {
+        self.locomo_retrieval.is_empty()
+            && self.locomo_qa.is_empty()
+            && self.longmemeval_retrieval.is_empty()
+            && self.longmemeval_qa.is_empty()
+    }
+}
+
+/// Complete source validation for one dataset under one aggregation contract.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ValidationReport {
+    pub contract_id: ContractId,
+    pub fatal: Vec<ValidationFinding>,
+    pub findings: Vec<ValidationFinding>,
+    pub cohorts: Cohorts,
+}
+
+impl ValidationReport {
+    pub fn has_fatal(&self) -> bool {
+        !self.fatal.is_empty()
+    }
+}
+
+/// Validate source identity and canonical structure, then derive exact
+/// dataset-native retrieval and QA cohorts without changing source records.
+pub fn validate_dataset(
+    dataset: &BenchmarkDataset,
+    contract: &BenchmarkContract,
+) -> ValidationReport {
+    let mut fatal = Vec::new();
+    validate_source_hash(dataset, &mut fatal);
+    validate_schema(dataset, &mut fatal);
+    validate_internal_ids(dataset, &mut fatal);
+    if dataset.kind == DatasetKind::LongMemEval {
+        validate_longmemeval_parallel_arrays(dataset, &mut fatal);
+    }
+
+    let (findings, mut cohorts) = derive_eligibility(dataset);
+    if !fatal.is_empty() {
+        cohorts = Cohorts::default();
+    }
+
+    ValidationReport {
+        contract_id: contract.contract_id.clone(),
+        fatal,
+        findings,
+        cohorts,
+    }
+}
+
+fn validate_source_hash(dataset: &BenchmarkDataset, fatal: &mut Vec<ValidationFinding>) {
+    if !is_sha256_hex(&dataset.source.sha256)
+        || !is_sha256_hex(&dataset.raw_sha256)
+        || dataset.raw_sha256 != dataset.source.sha256
+    {
+        fatal.push(finding(
+            "source_hash_mismatch",
+            format!(
+                "source SHA-256 {} does not match observed raw SHA-256 {}",
+                dataset.source.sha256, dataset.raw_sha256
+            ),
+            None,
+            None,
+        ));
+    }
+}
+
+fn is_sha256_hex(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn validate_schema(dataset: &BenchmarkDataset, fatal: &mut Vec<ValidationFinding>) {
+    for conversation in &dataset.conversations {
+        if conversation.internal_id.is_empty() || !conversation.raw.is_object() {
+            fatal.push(finding(
+                "schema_mismatch",
+                "canonical conversation requires a nonempty internal ID and raw object",
+                None,
+                None,
+            ));
+        }
+        for session in &conversation.sessions {
+            if session.internal_id.is_empty() || !session.raw.is_array() {
+                fatal.push(finding(
+                    "schema_mismatch",
+                    "canonical session requires a nonempty internal ID and raw turn array",
+                    None,
+                    None,
+                ));
+            }
+            for turn in &session.turns {
+                if turn.internal_id.is_empty() || !turn.raw.is_object() {
+                    fatal.push(finding(
+                        "schema_mismatch",
+                        "canonical turn requires a nonempty internal ID and raw object",
+                        None,
+                        None,
+                    ));
+                }
+            }
+        }
+    }
+
+    for question in &dataset.questions {
+        if question.id.is_empty() || question.text.is_empty() || !question.raw.is_object() {
+            fatal.push(finding(
+                "schema_mismatch",
+                "canonical question requires a nonempty ID, text, and raw object",
+                Some(question.id.clone()),
+                None,
+            ));
+        }
+    }
+}
+
+fn validate_internal_ids(dataset: &BenchmarkDataset, fatal: &mut Vec<ValidationFinding>) {
+    let mut seen = HashSet::new();
+    for conversation in &dataset.conversations {
+        record_internal_id(&conversation.internal_id, &mut seen, fatal);
+        for session in &conversation.sessions {
+            record_internal_id(&session.internal_id, &mut seen, fatal);
+            for turn in &session.turns {
+                record_internal_id(&turn.internal_id, &mut seen, fatal);
+            }
+        }
+    }
+}
+
+fn record_internal_id<'a>(
+    internal_id: &'a str,
+    seen: &mut HashSet<&'a str>,
+    fatal: &mut Vec<ValidationFinding>,
+) {
+    if !seen.insert(internal_id) {
+        fatal.push(finding(
+            "duplicate_internal_id",
+            format!("internal occurrence ID {internal_id:?} appears more than once"),
+            None,
+            None,
+        ));
+    }
+}
+
+fn validate_longmemeval_parallel_arrays(
+    dataset: &BenchmarkDataset,
+    fatal: &mut Vec<ValidationFinding>,
+) {
+    for question in &dataset.questions {
+        let Some(raw) = question.raw.as_object() else {
+            continue;
+        };
+        let lengths = [
+            raw.get("haystack_session_ids")
+                .and_then(Value::as_array)
+                .map(Vec::len),
+            raw.get("haystack_dates")
+                .and_then(Value::as_array)
+                .map(Vec::len),
+            raw.get("haystack_sessions")
+                .and_then(Value::as_array)
+                .map(Vec::len),
+        ];
+        let [Some(ids), Some(dates), Some(sessions)] = lengths else {
+            fatal.push(finding(
+                "schema_mismatch",
+                "LongMemEval question requires all three haystack arrays",
+                Some(question.id.clone()),
+                None,
+            ));
+            continue;
+        };
+        if ids != dates || dates != sessions {
+            fatal.push(finding(
+                "broken_parallel_arrays",
+                format!(
+                    "parallel haystack arrays differ: ids={ids} dates={dates} sessions={sessions}"
+                ),
+                Some(question.id.clone()),
+                None,
+            ));
+        }
+    }
+}
+
+fn derive_eligibility(dataset: &BenchmarkDataset) -> (Vec<ValidationFinding>, Cohorts) {
+    let mut findings = Vec::new();
+    let mut cohorts = Cohorts::default();
+
+    match dataset.kind {
+        DatasetKind::Locomo => {
+            let turn_ids = dataset
+                .all_sessions()
+                .flat_map(|session| session.turns.iter())
+                .map(|turn| turn.internal_id.as_str())
+                .collect::<HashSet<_>>();
+            for question in &dataset.questions {
+                cohorts.locomo_qa.push(question.id.clone());
+                if question.evidence.is_empty() {
+                    findings.push(finding(
+                        "missing_evidence",
+                        "LoCoMo question has no retrieval evidence and remains QA-only",
+                        Some(question.id.clone()),
+                        Some(EligibilityEffect::ExcludedFromRetrieval),
+                    ));
+                    continue;
+                }
+                if question.evidence.iter().any(|evidence| {
+                    evidence
+                        .resolved_turn_id
+                        .as_deref()
+                        .is_none_or(|turn_id| !turn_ids.contains(turn_id))
+                }) {
+                    findings.push(finding(
+                        "unresolved_evidence",
+                        "LoCoMo evidence is not fully resolved and the question remains QA-only",
+                        Some(question.id.clone()),
+                        Some(EligibilityEffect::ExcludedFromRetrieval),
+                    ));
+                    continue;
+                }
+                cohorts.locomo_retrieval.push(question.id.clone());
+            }
+        }
+        DatasetKind::LongMemEval => {
+            for question in &dataset.questions {
+                cohorts.longmemeval_qa.push(question.id.clone());
+                if !question.id.ends_with("_abs") {
+                    cohorts.longmemeval_retrieval.push(question.id.clone());
+                }
+            }
+        }
+    }
+
+    (findings, cohorts)
+}
+
+fn finding(
+    code: impl Into<String>,
+    message: impl Into<String>,
+    question_id: Option<String>,
+    eligibility_effect: Option<EligibilityEffect>,
+) -> ValidationFinding {
+    ValidationFinding {
+        code: code.into(),
+        message: message.into(),
+        question_id,
+        eligibility_effect,
+    }
 }
 
 #[cfg(test)]
