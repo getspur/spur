@@ -1511,7 +1511,15 @@ fn persist_longmem_records(
             .entry(record.question_id.clone())
             .or_default()
             .push(record);
-        if let Some(hash) = &record.reader_prompt_sha256 {
+        if let Some(request) = &record.reader_request {
+            ensure!(
+                request.prompt_sha256 == sha256_hex(request.prompt.as_bytes()),
+                "LongMemEval reader prompt hash does not bind persisted call bytes"
+            );
+            ensure!(
+                record.reader_prompt_sha256.as_ref() == Some(&request.prompt_sha256),
+                "LongMemEval reader prompt summary disagrees with retained request"
+            );
             manifest.prompt_hashes.insert(
                 format!(
                     "{}:{}:{}:reader",
@@ -1519,10 +1527,18 @@ fn persist_longmem_records(
                     variant_name(record.variant),
                     granularity_name(record.granularity)
                 ),
-                hash.clone(),
+                request.prompt_sha256.clone(),
             );
         }
-        if let Some(hash) = &record.judge_prompt_sha256 {
+        if let Some(request) = &record.judge_request {
+            ensure!(
+                request.prompt_sha256 == sha256_hex(request.prompt.as_bytes()),
+                "LongMemEval judge prompt hash does not bind persisted call bytes"
+            );
+            ensure!(
+                record.judge_prompt_sha256.as_ref() == Some(&request.prompt_sha256),
+                "LongMemEval judge prompt summary disagrees with retained request"
+            );
             manifest.prompt_hashes.insert(
                 format!(
                     "{}:{}:{}:judge",
@@ -1530,18 +1546,91 @@ fn persist_longmem_records(
                     variant_name(record.variant),
                     granularity_name(record.granularity)
                 ),
-                hash.clone(),
+                request.prompt_sha256.clone(),
             );
         }
     }
     for (question_id, group) in grouped {
-        writer.write_qa_json(QaArtifactKind::Hypothesis, &question_id, &group)?;
-        writer.write_qa_json(QaArtifactKind::JudgeInput, &question_id, &group)?;
+        let prompts = group
+            .iter()
+            .filter_map(|record| {
+                record.reader_request.as_ref().map(|request| {
+                    json!({
+                        "question_id": record.question_id,
+                        "variant": variant_name(record.variant),
+                        "granularity": granularity_name(record.granularity),
+                        "reader_request": request,
+                    })
+                })
+            })
+            .collect::<Vec<_>>();
+        let hypotheses = group
+            .iter()
+            .filter_map(|record| {
+                record.reader_response.as_ref().map(|response| {
+                    json!({
+                        "question_id": record.question_id,
+                        "variant": variant_name(record.variant),
+                        "granularity": granularity_name(record.granularity),
+                        "hypothesis": record.hypothesis,
+                        "reader_response": response,
+                    })
+                })
+            })
+            .collect::<Vec<_>>();
+        let judge_inputs = group
+            .iter()
+            .filter_map(|record| {
+                record.judge_request.as_ref().map(|request| {
+                    json!({
+                        "question_id": record.question_id,
+                        "variant": variant_name(record.variant),
+                        "granularity": granularity_name(record.granularity),
+                        "judge_request": request,
+                    })
+                })
+            })
+            .collect::<Vec<_>>();
+        writer.write_qa_json(QaArtifactKind::Prompt, &question_id, &prompts)?;
+        writer.write_qa_json(QaArtifactKind::Hypothesis, &question_id, &hypotheses)?;
+        writer.write_qa_json(QaArtifactKind::JudgeInput, &question_id, &judge_inputs)?;
+
         if group
             .iter()
             .all(|record| record.status == QaStatus::Complete)
         {
-            writer.write_qa_label(manifest, &question_id, &group)?;
+            let labels = group
+                .iter()
+                .filter_map(|record| {
+                    record.judge_response.as_ref().zip(record.label).map(
+                        |(judge_response, final_label)| {
+                            json!({
+                                "question_id": record.question_id,
+                                "variant": variant_name(record.variant),
+                                "granularity": granularity_name(record.granularity),
+                                "status": record.status,
+                                "judge_response": judge_response,
+                                "final_label": final_label,
+                                "question_sha256": record.question_sha256,
+                                "ranking_sha256": record.ranking_sha256,
+                                "reader_prompt_sha256": record.reader_prompt_sha256,
+                                "judge_prompt_sha256": record.judge_prompt_sha256,
+                                "usage": record.usage,
+                                "cost_usd_micros": record.cost_usd_micros,
+                                "model": record.model,
+                            })
+                        },
+                    )
+                })
+                .collect::<Vec<_>>();
+            ensure!(
+                prompts.len() == group.len()
+                    && hypotheses.len() == group.len()
+                    && judge_inputs.len() == group.len()
+                    && labels.len() == group.len(),
+                "complete LongMemEval labels require complete semantic audit artifacts"
+            );
+            writer.write_qa_label(manifest, &question_id, &labels)?;
         }
     }
     Ok(())
@@ -1581,13 +1670,22 @@ fn persist_locomo_records(
 ) -> Result<()> {
     let mut grouped = BTreeMap::<String, Vec<&QaRecord>>::new();
     for record in records {
+        ensure!(
+            record.reader_request.prompt_sha256
+                == sha256_hex(record.reader_request.prompt.as_bytes()),
+            "LoCoMo reader prompt hash does not bind persisted call bytes"
+        );
+        ensure!(
+            record.prompt_sha256 == record.reader_request.prompt_sha256,
+            "LoCoMo prompt summary disagrees with retained request"
+        );
         manifest.prompt_hashes.insert(
             format!(
                 "{}:{}:reader",
                 record.question_id,
                 variant_name(record.variant)
             ),
-            record.prompt_sha256.clone(),
+            record.reader_request.prompt_sha256.clone(),
         );
         grouped
             .entry(record.question_id.clone())
@@ -1595,12 +1693,73 @@ fn persist_locomo_records(
             .push(record);
     }
     for (question_id, group) in grouped {
-        writer.write_qa_json(QaArtifactKind::Hypothesis, &question_id, &group)?;
+        let prompts = group
+            .iter()
+            .map(|record| {
+                json!({
+                    "question_id": record.question_id,
+                    "variant": variant_name(record.variant),
+                    "granularity": granularity_name(Granularity::Turn),
+                    "reader_request": record.reader_request,
+                })
+            })
+            .collect::<Vec<_>>();
+        let hypotheses = group
+            .iter()
+            .map(|record| {
+                json!({
+                    "question_id": record.question_id,
+                    "variant": variant_name(record.variant),
+                    "granularity": granularity_name(Granularity::Turn),
+                    "hypothesis": record.output_text,
+                    "reader_response": record.reader_response,
+                })
+            })
+            .collect::<Vec<_>>();
+        let judge_inputs = group
+            .iter()
+            .map(|record| {
+                json!({
+                    "question_id": record.question_id,
+                    "variant": variant_name(record.variant),
+                    "granularity": granularity_name(Granularity::Turn),
+                    "judge_input": record.judge_input,
+                })
+            })
+            .collect::<Vec<_>>();
+        writer.write_qa_json(QaArtifactKind::Prompt, &question_id, &prompts)?;
+        writer.write_qa_json(QaArtifactKind::Hypothesis, &question_id, &hypotheses)?;
+        writer.write_qa_json(QaArtifactKind::JudgeInput, &question_id, &judge_inputs)?;
         if group
             .iter()
             .all(|record| record.status == QaStatus::Complete)
         {
-            writer.write_qa_label(manifest, &question_id, &group)?;
+            let labels = group
+                .iter()
+                .map(|record| {
+                    json!({
+                        "question_id": record.question_id,
+                        "variant": variant_name(record.variant),
+                        "granularity": granularity_name(Granularity::Turn),
+                        "status": record.status,
+                        "judge_output": record.judge_output,
+                        "final_label": record.score,
+                        "prompt_sha256": record.prompt_sha256,
+                        "ranking_sha256": record.ranking_sha256,
+                        "recorded_seed": record.recorded_seed,
+                        "input_tokens": record.input_tokens,
+                        "output_tokens": record.output_tokens,
+                    })
+                })
+                .collect::<Vec<_>>();
+            ensure!(
+                prompts.len() == group.len()
+                    && hypotheses.len() == group.len()
+                    && judge_inputs.len() == group.len()
+                    && labels.len() == group.len(),
+                "complete LoCoMo labels require complete semantic audit artifacts"
+            );
+            writer.write_qa_label(manifest, &question_id, &labels)?;
         }
     }
     Ok(())

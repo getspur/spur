@@ -18,7 +18,12 @@ use sha2::{Digest, Sha256};
 use spur_graph::memory_eval::{
     artifacts::ArtifactWriter,
     contract::{BenchmarkDataset, SourcePin},
-    qa::{ranking_sha256, render_locomo_prompt_with_seed, QaRequest, QaResponse},
+    qa::{
+        build_longmem_reader_request, ranking_sha256, render_locomo_prompt_with_seed,
+        render_longmem_judge_prompt, LongMemQaRequest, LongMemQaResponse, QaCacheEntry, QaCacheKey,
+        QaRequest, QaResponse, QaStage, QaUsage, LONGMEMEVAL_INPUT_USD_MICROS_PER_MILLION,
+        LONGMEMEVAL_MODEL, LONGMEMEVAL_OUTPUT_USD_MICROS_PER_MILLION,
+    },
     ranking::Ranking,
 };
 
@@ -81,6 +86,25 @@ const LONGMEMEVAL_FIXTURE: &str = r#"
       [{"role": "user", "content": "No destination was selected."}]
     ],
     "answer_session_ids": []
+  }
+]
+"#;
+
+const LONGMEMEVAL_QA_FIXTURE: &str = r#"
+[
+  {
+    "question_id": "q-retrieval",
+    "question_type": "multi-session",
+    "question": "What travel choice was made?",
+    "answer": "Take the train",
+    "question_date": "2024-01-03",
+    "haystack_session_ids": ["earlier", "answer"],
+    "haystack_dates": ["2024-01-01", "2024-01-02"],
+    "haystack_sessions": [
+      [{"role": "user", "content": "I need to travel."}],
+      [{"role": "assistant", "content": "Take the train.", "has_answer": true}]
+    ],
+    "answer_session_ids": ["answer"]
   }
 ]
 "#;
@@ -542,6 +566,34 @@ fn resume_reconciles_a_durable_completed_cache_without_duplicate_network_calls()
 }
 
 #[test]
+fn completed_locomo_run_persists_semantic_audit_artifacts_hashes_and_no_secrets() {
+    let fixture = fixture();
+    let run = tempfile::tempdir().unwrap();
+    assert!(retrieve(&fixture, run.path()).status.success());
+    seed_completed_locomo_cache_with_last_uncovered(&fixture, run.path());
+
+    let (output, transmissions) = resume_with_counting_proxy(run.path());
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(transmissions, 0);
+    assert_semantic_audit_artifacts(run.path(), false);
+}
+
+#[test]
+fn completed_longmem_run_persists_complete_judge_transactions_and_exact_prompt_hashes() {
+    let fixture = longmemeval_qa_fixture();
+    let run = tempfile::tempdir().unwrap();
+    assert!(retrieve_longmemeval(&fixture, run.path()).status.success());
+    seed_completed_longmem_cache(&fixture, run.path());
+
+    let (output, transmissions) = resume_with_counting_proxy_limits(run.path(), "100", "100.00");
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(transmissions, 0);
+    assert_semantic_audit_artifacts(run.path(), true);
+}
+
+#[test]
 fn resume_does_not_bless_truncated_or_unrecognized_uncovered_cache_bytes() {
     let fixture = fixture();
     for bytes in [b"{".as_slice(), br#"{"unexpected":true}"#.as_slice()] {
@@ -617,6 +669,12 @@ fn fixture() -> tempfile::NamedTempFile {
 fn longmemeval_fixture() -> tempfile::NamedTempFile {
     let file = tempfile::NamedTempFile::new().unwrap();
     fs::write(file.path(), LONGMEMEVAL_FIXTURE).unwrap();
+    file
+}
+
+fn longmemeval_qa_fixture() -> tempfile::NamedTempFile {
+    let file = tempfile::NamedTempFile::new().unwrap();
+    fs::write(file.path(), LONGMEMEVAL_QA_FIXTURE).unwrap();
     file
 }
 
@@ -711,7 +769,249 @@ fn locomo_cache_artifacts(fixture: &tempfile::NamedTempFile, run: &Path) -> Vec<
     artifacts
 }
 
+fn seed_completed_longmem_cache(fixture: &tempfile::NamedTempFile, run: &Path) {
+    let dataset = BenchmarkDataset::load_longmemeval(
+        &fs::read_to_string(fixture.path()).unwrap(),
+        SourcePin {
+            origin: "https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned".into(),
+            revision: "98d7416c24c778c2fee6e6f3006e7a073259d48f".into(),
+            sha256: "d6f21ea9d60a0d56f34a05b609c79c88a451d2ae03597821ea3d5a9678c3a442".into(),
+        },
+    )
+    .unwrap();
+    let cache_root = run.join("qa/cache/longmemeval");
+    fs::create_dir_all(&cache_root).unwrap();
+
+    for variant in VARIANTS {
+        for line in fs::read_to_string(run.join(format!("rankings/{variant}.jsonl")))
+            .unwrap()
+            .lines()
+        {
+            let mut persisted: Value = serde_json::from_str(line).unwrap();
+            let question_id = persisted["question_id"].as_str().unwrap().to_owned();
+            persisted.as_object_mut().unwrap().remove("question_id");
+            let ranking: Ranking = serde_json::from_value(persisted).unwrap();
+            let question = dataset
+                .questions
+                .iter()
+                .find(|question| question.id == question_id)
+                .unwrap();
+            let reader_request =
+                build_longmem_reader_request(question, &ranking, &dataset).unwrap();
+            let hypothesis = if question.id.contains("_abs") {
+                "I do not know"
+            } else {
+                "Take the train"
+            };
+            let reader_response = longmem_response(hypothesis, 10, 1);
+            write_longmem_cache_entry(&cache_root, reader_request.clone(), reader_response, None);
+
+            let judge_prompt = render_longmem_judge_prompt(
+                question.question_type.as_deref().unwrap(),
+                &question.text,
+                &question.answer,
+                hypothesis,
+                question.id.contains("_abs"),
+            )
+            .unwrap();
+            let judge_request = LongMemQaRequest {
+                question_id: question.id.clone(),
+                variant: ranking.variant,
+                granularity: ranking.granularity,
+                stage: QaStage::Judge,
+                model: LONGMEMEVAL_MODEL.to_owned(),
+                question_sha256: reader_request.question_sha256,
+                prompt_sha256: format!("{:x}", Sha256::digest(judge_prompt.as_bytes())),
+                ranking_sha256: reader_request.ranking_sha256,
+                max_output_tokens: 10,
+                prompt: judge_prompt,
+            };
+            write_longmem_cache_entry(
+                &cache_root,
+                judge_request,
+                longmem_response("yes", 8, 1),
+                Some(true),
+            );
+        }
+    }
+}
+
+fn longmem_response(output_text: &str, input_tokens: u64, output_tokens: u64) -> LongMemQaResponse {
+    let usage = QaUsage {
+        input_tokens,
+        output_tokens,
+        total_tokens: input_tokens + output_tokens,
+    };
+    LongMemQaResponse {
+        output_text: output_text.to_owned(),
+        usage,
+        raw_response: serde_json::json!({
+            "status": "completed",
+            "output_text": output_text,
+            "usage": usage,
+        }),
+    }
+}
+
+fn write_longmem_cache_entry(
+    cache_root: &Path,
+    request: LongMemQaRequest,
+    response: LongMemQaResponse,
+    label: Option<bool>,
+) {
+    let key = QaCacheKey::from_request(&request);
+    let numerator = u128::from(response.usage.input_tokens)
+        * u128::from(LONGMEMEVAL_INPUT_USD_MICROS_PER_MILLION)
+        + u128::from(response.usage.output_tokens)
+            * u128::from(LONGMEMEVAL_OUTPUT_USD_MICROS_PER_MILLION);
+    let cost_usd_micros = u64::try_from((numerator + 999_999) / 1_000_000).unwrap();
+    let entry = QaCacheEntry {
+        key: key.clone(),
+        request,
+        response,
+        label,
+        cost_usd_micros,
+    };
+    fs::write(
+        cache_root.join(format!("{}.json", key.identity_sha256())),
+        serde_json::to_vec_pretty(&entry).unwrap(),
+    )
+    .unwrap();
+}
+
+fn assert_semantic_audit_artifacts(run: &Path, longmem: bool) {
+    let prompts = qa_artifact_entries(run, "prompts");
+    let hypotheses = qa_artifact_entries(run, "hypotheses");
+    let judge_inputs = qa_artifact_entries(run, "judge-inputs");
+    let labels = qa_artifact_entries(run, "labels");
+    assert!(!prompts.is_empty());
+    assert_eq!(hypotheses.len(), prompts.len());
+    assert_eq!(judge_inputs.len(), prompts.len());
+    assert_eq!(labels.len(), prompts.len());
+
+    let hypotheses = qa_artifact_index(hypotheses);
+    let judge_inputs = qa_artifact_index(judge_inputs);
+    let labels = qa_artifact_index(labels);
+    let manifest = read_json(run.join("manifest.json"));
+
+    for prompt in prompts {
+        let identity = qa_artifact_identity(&prompt);
+        let request = &prompt["reader_request"];
+        let persisted_prompt = request["prompt"].as_str().unwrap();
+        assert!(!persisted_prompt.is_empty());
+        let exact_hash = format!("{:x}", Sha256::digest(persisted_prompt.as_bytes()));
+        assert_eq!(request["prompt_sha256"], exact_hash);
+        let manifest_key = if longmem {
+            format!(
+                "{}:{}:{}:reader",
+                prompt["question_id"].as_str().unwrap(),
+                prompt["variant"].as_str().unwrap(),
+                prompt["granularity"].as_str().unwrap()
+            )
+        } else {
+            format!(
+                "{}:{}:reader",
+                prompt["question_id"].as_str().unwrap(),
+                prompt["variant"].as_str().unwrap()
+            )
+        };
+        assert_eq!(manifest["prompt_hashes"][manifest_key], exact_hash);
+
+        let hypothesis = &hypotheses[&identity];
+        let reader_response = &hypothesis["reader_response"];
+        assert!(!reader_response["output_text"].as_str().unwrap().is_empty());
+        let judge_input = &judge_inputs[&identity];
+        let label = &labels[&identity];
+        assert_eq!(label["status"], "complete");
+        assert!(!label["final_label"].is_null());
+        if longmem {
+            let judge_request = &judge_input["judge_request"];
+            let judge_prompt = judge_request["prompt"].as_str().unwrap();
+            assert!(!judge_prompt.is_empty());
+            let judge_hash = format!("{:x}", Sha256::digest(judge_prompt.as_bytes()));
+            assert_eq!(judge_request["prompt_sha256"], judge_hash);
+            let judge_manifest_key = format!(
+                "{}:{}:{}:judge",
+                prompt["question_id"].as_str().unwrap(),
+                prompt["variant"].as_str().unwrap(),
+                prompt["granularity"].as_str().unwrap()
+            );
+            assert_eq!(manifest["prompt_hashes"][judge_manifest_key], judge_hash);
+            assert!(!label["judge_response"]["output_text"]
+                .as_str()
+                .unwrap()
+                .is_empty());
+            assert!(!label["judge_response"]["raw_response"].is_null());
+        } else {
+            let deterministic_input = &judge_input["judge_input"];
+            assert_eq!(
+                deterministic_input["hypothesis"],
+                reader_response["output_text"]
+            );
+            assert!(deterministic_input.get("reference_answer").is_some());
+            assert_eq!(label["judge_output"]["score"], label["final_label"]);
+        }
+    }
+
+    ArtifactWriter::new(run)
+        .unwrap()
+        .verify_checksums()
+        .unwrap();
+    for (path, bytes) in directory_bytes(run) {
+        let text = String::from_utf8_lossy(&bytes);
+        for forbidden in [
+            "local-cache-only-test-key",
+            "OPENAI_API_KEY",
+            "Authorization",
+            "Bearer ",
+            "sk-regression-secret",
+        ] {
+            assert!(
+                !text.contains(forbidden),
+                "secret marker {forbidden:?} persisted in {}",
+                path.display()
+            );
+        }
+    }
+}
+
+fn qa_artifact_entries(run: &Path, directory: &str) -> Vec<Value> {
+    let mut paths = fs::read_dir(run.join("qa").join(directory))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect::<Vec<_>>();
+    paths.sort();
+    paths
+        .into_iter()
+        .flat_map(|path| read_json(path).as_array().unwrap().clone().into_iter())
+        .collect()
+}
+
+fn qa_artifact_index(entries: Vec<Value>) -> BTreeMap<String, Value> {
+    entries
+        .into_iter()
+        .map(|entry| (qa_artifact_identity(&entry), entry))
+        .collect()
+}
+
+fn qa_artifact_identity(entry: &Value) -> String {
+    format!(
+        "{}:{}:{}",
+        entry["question_id"].as_str().unwrap(),
+        entry["variant"].as_str().unwrap(),
+        entry["granularity"].as_str().unwrap()
+    )
+}
+
 fn resume_with_counting_proxy(run: &Path) -> (std::process::Output, usize) {
+    resume_with_counting_proxy_limits(run, "10", "1.00")
+}
+
+fn resume_with_counting_proxy_limits(
+    run: &Path,
+    max_requests: &str,
+    max_usd: &str,
+) -> (std::process::Output, usize) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
     let address = listener.local_addr().unwrap();
@@ -744,9 +1044,9 @@ fn resume_with_counting_proxy(run: &Path) -> (std::process::Output, usize) {
             run.to_str().unwrap(),
             "--paid-qa",
             "--max-requests",
-            "10",
+            max_requests,
             "--max-usd",
-            "1.00",
+            max_usd,
         ])
         .env("OPENAI_API_KEY", "local-cache-only-test-key")
         .env("HTTPS_PROXY", &proxy)

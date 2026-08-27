@@ -1,5 +1,6 @@
 use nltk_porter::{Mode, PorterStemmer};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use spur_graph::memory_eval::{
     contract::{BenchmarkDataset, SourcePin},
     qa::{
@@ -289,6 +290,37 @@ fn qa_backend_consumes_frozen_ranking_and_binds_request_and_record_to_its_hash()
     assert_eq!(records[0].score, 1.0);
     validate_qa_ranking_hash(&records[0], &expected_hash).unwrap();
     assert!(validate_qa_ranking_hash(&records[0], &"0".repeat(64)).is_err());
+}
+
+#[test]
+fn completed_locomo_record_retains_the_exact_reader_and_deterministic_judge_transaction() {
+    let dataset = fixture_dataset();
+    let ranking = frozen_ranking(&dataset, 0);
+    let rankings = one_question_rankings(&dataset, ranking);
+    let mut backend = RecordingBackend::default();
+
+    let records = evaluate_locomo(&dataset, &rankings, &mut backend, 17).unwrap();
+    let record = &records[0];
+
+    assert_eq!(&record.reader_request, &backend.requests[0]);
+    assert!(!record.reader_request.prompt.is_empty());
+    assert_eq!(
+        record.reader_request.prompt_sha256,
+        format!(
+            "{:x}",
+            Sha256::digest(record.reader_request.prompt.as_bytes())
+        )
+    );
+    assert_eq!(record.reader_response.output_text, record.output_text);
+    assert_eq!(record.reader_response.input_tokens, record.input_tokens);
+    assert_eq!(record.reader_response.output_tokens, record.output_tokens);
+    assert_eq!(record.judge_input.category, record.category);
+    assert_eq!(record.judge_input.hypothesis, record.output_text);
+    assert_eq!(
+        record.judge_input.reference_answer,
+        dataset.questions[0].answer
+    );
+    assert_eq!(record.judge_output.score, record.score);
 }
 
 #[test]

@@ -518,6 +518,60 @@ async fn successful_reader_and_judge_are_fully_cached_and_resume_without_backend
 }
 
 #[tokio::test]
+async fn completed_longmem_record_retains_exact_requests_responses_hashes_and_label() {
+    let dataset = fixture_dataset();
+    let rankings = frozen_rankings(&dataset);
+    let temp = tempfile::tempdir().unwrap();
+    let mut cache = JsonQaCache::open(temp.path()).unwrap();
+    let mut backend = FakeBackend::scripted([
+        Ok(response("Take the train", 100, 8)),
+        Ok(response("yes", 40, 1)),
+    ]);
+
+    let records = evaluate_longmem(
+        &dataset,
+        &rankings,
+        &mut backend,
+        &mut cache,
+        &mut budget(2),
+    )
+    .await
+    .unwrap();
+    let record = &records[0];
+    let reader_request = record.reader_request.as_ref().unwrap();
+    let reader_response = record.reader_response.as_ref().unwrap();
+    let judge_request = record.judge_request.as_ref().unwrap();
+    let judge_response = record.judge_response.as_ref().unwrap();
+
+    assert_eq!(reader_request, &backend.requests[0]);
+    assert_eq!(judge_request, &backend.requests[1]);
+    assert_eq!(reader_request.prompt_sha256, sha256(&reader_request.prompt));
+    assert_eq!(judge_request.prompt_sha256, sha256(&judge_request.prompt));
+    assert_eq!(
+        reader_response.output_text,
+        record.hypothesis.as_deref().unwrap()
+    );
+    assert_eq!(
+        reader_response.raw_response["output_text"],
+        "Take the train"
+    );
+    assert_eq!(judge_response.raw_response["output_text"], "yes");
+    assert_eq!(record.label, Some(true));
+    let serialized = serde_json::to_string(record).unwrap();
+    for forbidden in [
+        "OPENAI_API_KEY",
+        "Authorization",
+        "Bearer ",
+        "sk-regression-secret",
+    ] {
+        assert!(
+            !serialized.contains(forbidden),
+            "secret marker persisted: {forbidden}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn valid_reader_and_judge_reconcile_then_resume_without_backend_transmissions() {
     let dataset = fixture_dataset();
     let rankings = frozen_rankings(&dataset);

@@ -49,6 +49,20 @@ pub struct QaResponse {
     pub output_tokens: u64,
 }
 
+/// Exact deterministic scorer input used after the LoCoMo reader returns.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LocomoJudgeInput {
+    pub category: u32,
+    pub hypothesis: String,
+    pub reference_answer: Value,
+}
+
+/// Exact deterministic scorer output that becomes the final LoCoMo label.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct LocomoJudgeOutput {
+    pub score: f64,
+}
+
 /// Completion state shared with the resumable QA work in Task 10.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -71,6 +85,10 @@ pub struct QaRecord {
     pub recorded_seed: u64,
     pub input_tokens: u64,
     pub output_tokens: u64,
+    pub reader_request: QaRequest,
+    pub reader_response: QaResponse,
+    pub judge_input: LocomoJudgeInput,
+    pub judge_output: LocomoJudgeOutput,
 }
 
 /// Reader seam; HTTP, judge, retry, and cache behavior belong to Task 10.
@@ -441,18 +459,34 @@ pub fn evaluate_locomo(
             } else {
                 response.output_text.trim().to_owned()
             };
+            let judge_input = LocomoJudgeInput {
+                category,
+                hypothesis: output_text.clone(),
+                reference_answer: question.answer.clone(),
+            };
+            let judge_output = LocomoJudgeOutput {
+                score: score_locomo(
+                    judge_input.category,
+                    &judge_input.hypothesis,
+                    judge_input.reference_answer.clone(),
+                ),
+            };
             records.push(QaRecord {
                 question_id: question.id.clone(),
                 variant,
                 category,
                 status: QaStatus::Complete,
-                score: score_locomo(category, &output_text, question.answer.clone()),
-                output_text,
-                prompt_sha256: request.prompt_sha256,
+                score: judge_output.score,
+                output_text: output_text.clone(),
+                prompt_sha256: request.prompt_sha256.clone(),
                 ranking_sha256,
                 recorded_seed: seed,
                 input_tokens: response.input_tokens,
                 output_tokens: response.output_tokens,
+                reader_request: request,
+                reader_response: response,
+                judge_input,
+                judge_output,
             });
         }
     }
@@ -1468,6 +1502,18 @@ pub struct LongMemQaRecord {
     pub judge_prompt_sha256: Option<String>,
     pub usage: QaUsage,
     pub cost_usd_micros: u64,
+    pub reader_request: Option<LongMemQaRequest>,
+    pub reader_response: Option<LongMemQaResponse>,
+    pub judge_request: Option<LongMemQaRequest>,
+    pub judge_response: Option<LongMemQaResponse>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct LongMemQaAudit {
+    reader_request: Option<LongMemQaRequest>,
+    reader_response: Option<LongMemQaResponse>,
+    judge_request: Option<LongMemQaRequest>,
+    judge_response: Option<LongMemQaResponse>,
 }
 
 impl LongMemQaRecord {
@@ -1475,13 +1521,23 @@ impl LongMemQaRecord {
         question: &QuestionRecord,
         ranking: &Ranking,
         ranking_sha256: String,
-        reader_prompt_sha256: Option<String>,
-        judge_prompt_sha256: Option<String>,
-        hypothesis: Option<String>,
+        audit: LongMemQaAudit,
         usage: QaUsage,
         cost_usd_micros: u64,
         reason: impl Into<String>,
     ) -> Self {
+        let reader_prompt_sha256 = audit
+            .reader_request
+            .as_ref()
+            .map(|request| request.prompt_sha256.clone());
+        let judge_prompt_sha256 = audit
+            .judge_request
+            .as_ref()
+            .map(|request| request.prompt_sha256.clone());
+        let hypothesis = audit
+            .reader_response
+            .as_ref()
+            .map(|response| response.output_text.clone());
         Self {
             question_id: question.id.clone(),
             variant: ranking.variant,
@@ -1498,6 +1554,10 @@ impl LongMemQaRecord {
             judge_prompt_sha256,
             usage,
             cost_usd_micros,
+            reader_request: audit.reader_request,
+            reader_response: audit.reader_response,
+            judge_request: audit.judge_request,
+            judge_response: audit.judge_response,
         }
     }
 }
@@ -1531,9 +1591,7 @@ pub async fn evaluate_longmem(
                     question,
                     ranking,
                     raw_ranking_sha256,
-                    None,
-                    None,
-                    None,
+                    LongMemQaAudit::default(),
                     QaUsage::default(),
                     0,
                     format!("reader request: {error:#}"),
@@ -1541,17 +1599,20 @@ pub async fn evaluate_longmem(
                 continue;
             }
         };
+        let mut audit = LongMemQaAudit {
+            reader_request: Some(reader_request.clone()),
+            ..LongMemQaAudit::default()
+        };
         let reader_key = QaCacheKey::from_request(&reader_request);
         let reader_entry = match cache.get(&reader_key) {
             Ok(Some(entry)) => {
+                audit.reader_response = Some(entry.response.clone());
                 if let Err(error) = budget.restore_cached_call(&entry) {
                     records.push(LongMemQaRecord::pending(
                         question,
                         ranking,
                         reader_request.ranking_sha256.clone(),
-                        Some(reader_request.prompt_sha256.clone()),
-                        None,
-                        None,
+                        audit,
                         QaUsage::default(),
                         0,
                         format!("reader cache budget: {error:#}"),
@@ -1573,23 +1634,19 @@ pub async fn evaluate_longmem(
                 Ok(entry) => entry,
                 Err(failure) => {
                     let reason = format!("{:#}", failure.error);
-                    let (hypothesis, usage, cost_usd_micros) = failure
-                        .received
-                        .map(|received| {
-                            (
-                                Some(received.response.output_text),
-                                received.response.usage,
-                                received.cost_usd_micros.unwrap_or(0),
-                            )
-                        })
-                        .unwrap_or((None, QaUsage::default(), 0));
+                    let (usage, cost_usd_micros) = if let Some(received) = failure.received {
+                        let usage = received.response.usage;
+                        let cost_usd_micros = received.cost_usd_micros.unwrap_or(0);
+                        audit.reader_response = Some(received.response);
+                        (usage, cost_usd_micros)
+                    } else {
+                        (QaUsage::default(), 0)
+                    };
                     records.push(LongMemQaRecord::pending(
                         question,
                         ranking,
                         reader_request.ranking_sha256.clone(),
-                        Some(reader_request.prompt_sha256.clone()),
-                        None,
-                        hypothesis,
+                        audit,
                         usage,
                         cost_usd_micros,
                         format!("reader: {reason}"),
@@ -1602,9 +1659,7 @@ pub async fn evaluate_longmem(
                     question,
                     ranking,
                     reader_request.ranking_sha256.clone(),
-                    Some(reader_request.prompt_sha256.clone()),
-                    None,
-                    None,
+                    audit,
                     QaUsage::default(),
                     0,
                     format!("reader cache: {error:#}"),
@@ -1612,14 +1667,13 @@ pub async fn evaluate_longmem(
                 continue;
             }
         };
+        audit.reader_response = Some(reader_entry.response.clone());
         if reader_entry.request.stage != QaStage::Reader || reader_entry.label.is_some() {
             records.push(LongMemQaRecord::pending(
                 question,
                 ranking,
                 reader_request.ranking_sha256.clone(),
-                Some(reader_request.prompt_sha256.clone()),
-                None,
-                None,
+                audit,
                 QaUsage::default(),
                 0,
                 "reader cache entry has judge-only fields",
@@ -1635,9 +1689,7 @@ pub async fn evaluate_longmem(
                         question,
                         ranking,
                         reader_request.ranking_sha256.clone(),
-                        Some(reader_request.prompt_sha256.clone()),
-                        None,
-                        Some(hypothesis),
+                        audit,
                         reader_entry.response.usage,
                         reader_entry.cost_usd_micros,
                         format!("judge request: {error:#}"),
@@ -1645,17 +1697,17 @@ pub async fn evaluate_longmem(
                     continue;
                 }
             };
+        audit.judge_request = Some(judge_request.clone());
         let judge_key = QaCacheKey::from_request(&judge_request);
         let judge_entry = match cache.get(&judge_key) {
             Ok(Some(entry)) => {
+                audit.judge_response = Some(entry.response.clone());
                 if let Err(error) = budget.restore_cached_call(&entry) {
                     records.push(LongMemQaRecord::pending(
                         question,
                         ranking,
                         reader_request.ranking_sha256.clone(),
-                        Some(reader_request.prompt_sha256.clone()),
-                        Some(judge_request.prompt_sha256.clone()),
-                        Some(hypothesis),
+                        audit,
                         reader_entry.response.usage,
                         reader_entry.cost_usd_micros,
                         format!("judge cache budget: {error:#}"),
@@ -1678,16 +1730,16 @@ pub async fn evaluate_longmem(
                 Err(failure) => {
                     let reason = format!("{:#}", failure.error);
                     let (usage, cost_usd_micros) = if let Some(received) = failure.received {
-                        (
-                            reader_entry
-                                .response
-                                .usage
-                                .checked_add(received.response.usage)?,
-                            reader_entry
-                                .cost_usd_micros
-                                .checked_add(received.cost_usd_micros.unwrap_or(0))
-                                .context("pending QA cost overflow")?,
-                        )
+                        let usage = reader_entry
+                            .response
+                            .usage
+                            .checked_add(received.response.usage)?;
+                        let cost_usd_micros = reader_entry
+                            .cost_usd_micros
+                            .checked_add(received.cost_usd_micros.unwrap_or(0))
+                            .context("pending QA cost overflow")?;
+                        audit.judge_response = Some(received.response);
+                        (usage, cost_usd_micros)
                     } else {
                         (reader_entry.response.usage, reader_entry.cost_usd_micros)
                     };
@@ -1695,9 +1747,7 @@ pub async fn evaluate_longmem(
                         question,
                         ranking,
                         reader_request.ranking_sha256.clone(),
-                        Some(reader_request.prompt_sha256.clone()),
-                        Some(judge_request.prompt_sha256.clone()),
-                        Some(hypothesis),
+                        audit,
                         usage,
                         cost_usd_micros,
                         format!("judge: {reason}"),
@@ -1710,9 +1760,7 @@ pub async fn evaluate_longmem(
                     question,
                     ranking,
                     reader_request.ranking_sha256.clone(),
-                    Some(reader_request.prompt_sha256.clone()),
-                    Some(judge_request.prompt_sha256.clone()),
-                    Some(hypothesis),
+                    audit,
                     reader_entry.response.usage,
                     reader_entry.cost_usd_micros,
                     format!("judge cache: {error:#}"),
@@ -1720,14 +1768,13 @@ pub async fn evaluate_longmem(
                 continue;
             }
         };
+        audit.judge_response = Some(judge_entry.response.clone());
         let Some(label) = judge_entry.label else {
             records.push(LongMemQaRecord::pending(
                 question,
                 ranking,
                 reader_request.ranking_sha256.clone(),
-                Some(reader_request.prompt_sha256.clone()),
-                Some(judge_request.prompt_sha256.clone()),
-                Some(hypothesis),
+                audit,
                 reader_entry.response.usage,
                 reader_entry.cost_usd_micros,
                 "judge cache entry has no terminal label",
@@ -1756,6 +1803,10 @@ pub async fn evaluate_longmem(
                 .cost_usd_micros
                 .checked_add(judge_entry.cost_usd_micros)
                 .context("cached QA cost overflow")?,
+            reader_request: Some(reader_request),
+            reader_response: Some(reader_entry.response),
+            judge_request: Some(judge_request),
+            judge_response: Some(judge_entry.response),
         });
     }
     ensure!(
