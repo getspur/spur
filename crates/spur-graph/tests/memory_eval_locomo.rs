@@ -1,31 +1,8 @@
 use serde_json::{json, Value};
-use spur_graph::memory_eval::parse_locomo;
-
-// Task 12 owns changes to the memory_eval module exports. Compile the adapter
-// source here so this focused integration test can exercise its new API without
-// expanding Task 2's two-file scope.
-mod contract {
-    pub use spur_graph::memory_eval::contract::*;
-}
-
-pub use spur_graph::memory_eval::{graphify_slice, EvalSplit, MemoryTask};
-pub const LOCOMO_ADVERSARIAL_CATEGORY: u32 = spur_graph::memory_eval::LOCOMO_ADVERSARIAL_CATEGORY;
-pub const LOCOMO_GRAPHIFY_N: usize = spur_graph::memory_eval::LOCOMO_GRAPHIFY_N;
-
-pub(crate) fn stringify_answer(value: &Value) -> String {
-    match value {
-        Value::String(text) => text.clone(),
-        Value::Number(number) => number.to_string(),
-        Value::Bool(flag) => flag.to_string(),
-        _ => String::new(),
-    }
-}
-
-#[path = "../src/memory_eval/locomo.rs"]
-mod locomo_adapter;
-
-use contract::{DatasetKind, Role, SourcePin};
-use locomo_adapter::load_locomo;
+use spur_graph::memory_eval::{
+    contract::{BenchmarkDataset, DatasetKind, Role, SourcePin},
+    parse_locomo, EvalSplit, LOCOMO_ADVERSARIAL_CATEGORY, LOCOMO_GRAPHIFY_N,
+};
 
 const LOCOMO_ALL_FIELDS: &str = r#"
 [
@@ -104,6 +81,34 @@ const LOCOMO_UNRESOLVED_EVIDENCE: &str = r#"
 ]
 "#;
 
+const LEGACY_LOCOMO_WITHOUT_CONVERSATION: &str = r#"
+[
+  {
+    "sample_id": "legacy-only",
+    "qa": [
+      {
+        "question": "Which row remains eligible?",
+        "answer": "this one",
+        "category": 1,
+        "evidence": ["D1:1"]
+      },
+      {
+        "question": "Which row lacks evidence?",
+        "answer": "this one",
+        "category": 3,
+        "evidence": []
+      },
+      {
+        "question": "Which row is adversarial?",
+        "answer": "this one",
+        "category": 5,
+        "evidence": ["D1:2"]
+      }
+    ]
+  }
+]
+"#;
+
 fn test_pin() -> SourcePin {
     SourcePin {
         origin: "https://github.com/snap-research/locomo".to_owned(),
@@ -113,9 +118,9 @@ fn test_pin() -> SourcePin {
 }
 
 #[test]
-fn locomo_preserves_sessions_turns_fields_raw_json_and_all_qa_rows() {
+fn public_locomo_loader_preserves_sessions_turns_fields_raw_json_and_all_qa_rows() {
     let source = test_pin();
-    let data = load_locomo(LOCOMO_ALL_FIELDS, source.clone()).unwrap();
+    let data = BenchmarkDataset::load_locomo(LOCOMO_ALL_FIELDS, source.clone()).unwrap();
 
     assert_eq!(data.kind, DatasetKind::Locomo);
     assert_eq!(data.source, source);
@@ -183,7 +188,7 @@ fn locomo_preserves_sessions_turns_fields_raw_json_and_all_qa_rows() {
 
 #[test]
 fn locomo_keeps_missing_and_ambiguous_evidence_unresolved() {
-    let data = load_locomo(LOCOMO_UNRESOLVED_EVIDENCE, test_pin()).unwrap();
+    let data = BenchmarkDataset::load_locomo(LOCOMO_UNRESOLVED_EVIDENCE, test_pin()).unwrap();
     let question = &data.questions[0];
 
     assert_eq!(question.evidence.len(), 2);
@@ -201,11 +206,19 @@ fn parse_locomo_retains_the_legacy_retrieval_filter() {
     assert_eq!(LOCOMO_GRAPHIFY_N, 300);
 
     let tasks = parse_locomo(LOCOMO_ALL_FIELDS, EvalSplit::Official).unwrap();
-    let directly_compiled_tasks =
-        locomo_adapter::parse_locomo(LOCOMO_ALL_FIELDS, EvalSplit::Official).unwrap();
-    assert_eq!(tasks, directly_compiled_tasks);
     assert_eq!(tasks.len(), 1);
     assert_eq!(tasks[0].id, "conv-all#0");
     assert_eq!(tasks[0].gold_ids, vec!["D2:1"]);
     assert_eq!(tasks[0].gold_answer, "a race");
+}
+
+#[test]
+fn parse_locomo_accepts_legacy_input_without_conversation() {
+    let tasks = parse_locomo(LEGACY_LOCOMO_WITHOUT_CONVERSATION, EvalSplit::Official).unwrap();
+
+    assert_eq!(tasks.len(), 1);
+    assert_eq!(tasks[0].id, "legacy-only#0");
+    assert_eq!(tasks[0].question, "Which row remains eligible?");
+    assert_eq!(tasks[0].gold_ids, vec!["D1:1"]);
+    assert_eq!(tasks[0].gold_answer, "this one");
 }

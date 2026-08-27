@@ -19,6 +19,12 @@ struct LocomoSample {
     qa: Vec<Value>,
 }
 
+#[derive(Debug, Deserialize)]
+struct LegacyLocomoSample {
+    sample_id: String,
+    qa: Vec<LocomoQa>,
+}
+
 #[derive(Debug)]
 struct DecodedSample {
     sample_id: String,
@@ -55,11 +61,18 @@ struct TurnLocation {
     session_id: String,
 }
 
+impl BenchmarkDataset {
+    /// Decode LoCoMo into the canonical, lossless benchmark contract.
+    pub fn load_locomo(json: &str, source: SourcePin) -> anyhow::Result<Self> {
+        load_locomo(json, source)
+    }
+}
+
 /// Decode LoCoMo into the canonical, lossless benchmark contract.
 ///
 /// This layer preserves every source row. Retrieval eligibility is evaluated
 /// later from the retained evidence-resolution state.
-pub fn load_locomo(json: &str, source: SourcePin) -> anyhow::Result<BenchmarkDataset> {
+fn load_locomo(json: &str, source: SourcePin) -> anyhow::Result<BenchmarkDataset> {
     let raw: Value = serde_json::from_str(json).context("parse LoCoMo JSON")?;
     let samples = decode_samples(&raw)?;
     let mut conversations = Vec::with_capacity(samples.len());
@@ -265,31 +278,24 @@ fn session_date(
 /// Unlike [`load_locomo`], this intentionally retains the historical
 /// retrieval-only row filter until Task 12 removes the legacy harness.
 pub fn parse_locomo(json: &str, split: EvalSplit) -> anyhow::Result<Vec<MemoryTask>> {
-    let dataset = load_locomo(
-        json,
-        SourcePin {
-            origin: String::new(),
-            revision: String::new(),
-            sha256: String::new(),
-        },
-    )?;
-    let tasks = dataset
-        .questions
-        .into_iter()
-        .filter(|question| {
-            question.category != Some(LOCOMO_ADVERSARIAL_CATEGORY) && !question.evidence.is_empty()
-        })
-        .map(|question| MemoryTask {
-            id: question.id,
-            question: question.text,
-            gold_ids: question
-                .evidence
-                .into_iter()
-                .map(|evidence| evidence.raw)
-                .collect(),
-            gold_answer: super::stringify_answer(&question.answer),
-        })
-        .collect::<Vec<_>>();
+    let samples: Vec<LegacyLocomoSample> = serde_json::from_str(json)?;
+    let mut tasks = Vec::new();
+    for sample in samples {
+        for (index, qa) in sample.qa.into_iter().enumerate() {
+            if qa.category == LOCOMO_ADVERSARIAL_CATEGORY {
+                continue;
+            }
+            if qa.evidence.is_empty() {
+                continue;
+            }
+            tasks.push(MemoryTask {
+                id: format!("{}#{index}", sample.sample_id),
+                question: qa.question,
+                gold_ids: qa.evidence,
+                gold_answer: super::stringify_answer(&qa.answer),
+            });
+        }
+    }
     Ok(match split {
         EvalSplit::Official => tasks,
         EvalSplit::Graphify => graphify_slice(&tasks, LOCOMO_GRAPHIFY_N).to_vec(),
