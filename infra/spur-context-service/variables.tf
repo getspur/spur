@@ -53,7 +53,7 @@ variable "allow_anonymous_mutations" {
 }
 
 variable "api_authorization_type" {
-  description = "Authorization for the HTTP API $default route. AWS_IAM (SigV4, secure default) or NONE (public, unauthenticated — use only for demo/eval stacks). Valid: NONE, AWS_IAM, JWT, CUSTOM."
+  description = "Authorization for the direct POST /mcp/code and POST /mcp/knowledge compatibility routes. AWS_IAM (SigV4, secure default) or NONE (public, unauthenticated — use only for demo/eval stacks). Valid: NONE, AWS_IAM, JWT, CUSTOM."
   type        = string
   default     = "AWS_IAM"
 
@@ -69,7 +69,7 @@ variable "api_authorization_type" {
 # committed to tfvars, or exposed through an output.
 
 variable "cognito_auth_enabled" {
-  description = "Enable the additive Cognito Lite user pool, JWT authorizer, and exact POST /mcp/oauth route. Disabled by default so existing $default behavior is unchanged."
+  description = "Enable the additive Cognito Lite user pool, JWT authorizer, and exact POST /mcp/oauth/code and POST /mcp/oauth/knowledge routes. Disabled by default so the direct compatibility-route behavior is unchanged."
   type        = bool
   default     = false
 }
@@ -92,7 +92,7 @@ variable "disable_execute_api_endpoint" {
 }
 
 # ─── Additive personal API-key ingress ───────────────────────────────────────
-# API-key resources are independent of the legacy $default and OAuth routes and
+# API-key resources are independent of the direct compatibility and OAuth routes and
 # are omitted entirely unless this feature is explicitly enabled.
 
 variable "api_key_auth_enabled" {

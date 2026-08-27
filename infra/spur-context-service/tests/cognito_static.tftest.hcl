@@ -71,13 +71,21 @@ run "disabled_default_keeps_legacy_iam_without_cognito" {
   }
 
   assert {
-    condition     = length(aws_apigatewayv2_authorizer.cognito) == 0 && length(aws_apigatewayv2_route.oauth) == 0 && length(aws_apigatewayv2_route.login_redirect) == 0
-    error_message = "disabled mode must not create a JWT authorizer, OAuth route, or login facade"
+    condition = (
+      length(aws_apigatewayv2_authorizer.cognito) == 0 &&
+      length(aws_apigatewayv2_route.oauth_code) == 0 &&
+      length(aws_apigatewayv2_route.oauth_knowledge) == 0 &&
+      length(aws_apigatewayv2_route.login_redirect) == 0
+    )
+    error_message = "disabled mode must not create a JWT authorizer, either OAuth route, or login facade"
   }
 
   assert {
-    condition     = aws_apigatewayv2_route.default.authorization_type == "AWS_IAM"
-    error_message = "the existing default route must keep its AWS_IAM default"
+    condition = (
+      aws_apigatewayv2_route.compatibility_code.authorization_type == "AWS_IAM" &&
+      aws_apigatewayv2_route.compatibility_knowledge.authorization_type == "AWS_IAM"
+    )
+    error_message = "both direct compatibility routes must keep the AWS_IAM default"
   }
 
   assert {
@@ -99,8 +107,13 @@ run "disabled_demo_keeps_legacy_none_route" {
   }
 
   assert {
-    condition     = aws_apigatewayv2_route.default.authorization_type == "NONE" && length(aws_apigatewayv2_route.oauth) == 0
-    error_message = "the demo NONE route must remain unchanged while Cognito is disabled"
+    condition = (
+      aws_apigatewayv2_route.compatibility_code.authorization_type == "NONE" &&
+      aws_apigatewayv2_route.compatibility_knowledge.authorization_type == "NONE" &&
+      length(aws_apigatewayv2_route.oauth_code) == 0 &&
+      length(aws_apigatewayv2_route.oauth_knowledge) == 0
+    )
+    error_message = "the demo NONE compatibility routes must remain unchanged while Cognito is disabled"
   }
 }
 
@@ -140,8 +153,19 @@ run "enabled_staging_creates_cognito_jwt_route_and_nonsecret_lambda_config" {
   }
 
   assert {
-    condition     = aws_apigatewayv2_route.default.authorization_type == "AWS_IAM" && aws_apigatewayv2_route.oauth[0].route_key == "POST /mcp/oauth" && aws_apigatewayv2_route.oauth[0].authorization_type == "JWT"
-    error_message = "the JWT route must be exact and additive to the IAM default route"
+    condition = (
+      aws_apigatewayv2_route.compatibility_code.authorization_type == "AWS_IAM" &&
+      aws_apigatewayv2_route.compatibility_knowledge.authorization_type == "AWS_IAM" &&
+      aws_apigatewayv2_route.oauth_code[0].route_key == "POST /mcp/oauth/code" &&
+      aws_apigatewayv2_route.oauth_code[0].authorization_type == "JWT" &&
+      aws_apigatewayv2_route.oauth_code[0].authorizer_id == aws_apigatewayv2_authorizer.cognito[0].id &&
+      aws_apigatewayv2_route.oauth_code[0].target == "integrations/${aws_apigatewayv2_integration.code.id}" &&
+      aws_apigatewayv2_route.oauth_knowledge[0].route_key == "POST /mcp/oauth/knowledge" &&
+      aws_apigatewayv2_route.oauth_knowledge[0].authorization_type == "JWT" &&
+      aws_apigatewayv2_route.oauth_knowledge[0].authorizer_id == aws_apigatewayv2_authorizer.cognito[0].id &&
+      aws_apigatewayv2_route.oauth_knowledge[0].target == "integrations/${aws_apigatewayv2_integration.lambda.id}"
+    )
+    error_message = "the direct Code and Knowledge JWT routes must be exact and additive to the IAM compatibility routes"
   }
 
   assert {
@@ -150,8 +174,11 @@ run "enabled_staging_creates_cognito_jwt_route_and_nonsecret_lambda_config" {
   }
 
   assert {
-    condition     = toset(aws_apigatewayv2_route.oauth[0].authorization_scopes) == toset(["urn:spur:context-service/external.read", "urn:spur:context-service/external.index", "urn:spur:context-service/external.status"])
-    error_message = "the JWT edge gate must contain all three broad custom scopes"
+    condition = (
+      toset(aws_apigatewayv2_route.oauth_code[0].authorization_scopes) == toset(["urn:spur:context-service/external.read", "urn:spur:context-service/external.index", "urn:spur:context-service/external.status"]) &&
+      toset(aws_apigatewayv2_route.oauth_knowledge[0].authorization_scopes) == toset(["urn:spur:context-service/external.read", "urn:spur:context-service/external.index", "urn:spur:context-service/external.status"])
+    )
+    error_message = "both direct JWT edge gates must contain all three broad custom scopes"
   }
 
   assert {
@@ -274,8 +301,12 @@ run "enabled_production_keeps_iam_default_alongside_jwt_route" {
   }
 
   assert {
-    condition     = aws_apigatewayv2_route.default.authorization_type == "AWS_IAM" && aws_apigatewayv2_authorizer.cognito[0].authorizer_type == "JWT"
-    error_message = "production must retain $default AWS_IAM while adding a Cognito JWT authorizer"
+    condition = (
+      aws_apigatewayv2_route.compatibility_code.authorization_type == "AWS_IAM" &&
+      aws_apigatewayv2_route.compatibility_knowledge.authorization_type == "AWS_IAM" &&
+      aws_apigatewayv2_authorizer.cognito[0].authorizer_type == "JWT"
+    )
+    error_message = "production must retain both AWS_IAM compatibility routes while adding a Cognito JWT authorizer"
   }
 }
 
@@ -466,7 +497,6 @@ run "custom_domain_activation_builds_regional_api_and_cognito_domains" {
   assert {
     condition = (
       output.api_url == "https://context.getspur.dev" &&
-      output.oauth_api_url == "https://context.getspur.dev/mcp/oauth" &&
       output.cognito_domain_url == "https://auth.context.getspur.dev" &&
       output.cognito_authorization_endpoint == "https://auth.context.getspur.dev/oauth2/authorize" &&
       output.cognito_token_endpoint == "https://auth.context.getspur.dev/oauth2/token" &&

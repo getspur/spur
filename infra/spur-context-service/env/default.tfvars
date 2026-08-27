@@ -51,8 +51,8 @@ catalog_s3_uri = "s3://spur-context/data/gold/catalog-snapshot/current.json"
 # make staging/prod public too.
 api_authorization_type = "NONE"
 
-# Keep the demo/eval deployment on its legacy public $default route while
-# adding exact Cognito and personal-key routes for end-to-end evaluation.
+# Keep the demo/eval deployment on its public Code and Knowledge compatibility
+# routes while adding exact Cognito and personal-key routes for evaluation.
 cognito_auth_enabled   = true
 cognito_user_pool_name = "spur-context-default-cognito"
 cognito_domain_prefix  = "spur-context-default-auth-065285885105"

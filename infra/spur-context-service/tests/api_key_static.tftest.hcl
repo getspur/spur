@@ -76,7 +76,8 @@ run "disabled_default_has_no_api_key_infrastructure_or_endpoints" {
       length(aws_dynamodb_table.api_keys) == 0 &&
       length(aws_apigatewayv2_authorizer.api_key) == 0 &&
       length(aws_apigatewayv2_integration.api_key) == 0 &&
-      length(aws_apigatewayv2_route.api_key_mcp) == 0 &&
+      length(aws_apigatewayv2_integration.api_key_knowledge) == 0 &&
+      length(aws_apigatewayv2_route.api_key_mcp_knowledge) == 0 &&
       length(aws_apigatewayv2_route.api_key_discovery) == 0 &&
       length(aws_apigatewayv2_route.api_key_management) == 0
     )
@@ -126,8 +127,13 @@ run "disabled_default_has_no_api_key_infrastructure_or_endpoints" {
   }
 
   assert {
-    condition     = aws_apigatewayv2_route.default.authorization_type == "AWS_IAM" && length(aws_apigatewayv2_route.oauth) == 0
-    error_message = "disabled API-key mode must preserve the legacy IAM default and absent OAuth route"
+    condition = (
+      aws_apigatewayv2_route.compatibility_code.authorization_type == "AWS_IAM" &&
+      aws_apigatewayv2_route.compatibility_knowledge.authorization_type == "AWS_IAM" &&
+      length(aws_apigatewayv2_route.oauth_code) == 0 &&
+      length(aws_apigatewayv2_route.oauth_knowledge) == 0
+    )
+    error_message = "disabled API-key mode must preserve the direct IAM compatibility routes and omit both OAuth routes"
   }
 }
 
@@ -228,7 +234,12 @@ run "enabled_api_keys_create_exact_isolated_contract" {
     condition = (
       contains(aws_cognito_user_pool_client.human[0].allowed_oauth_scopes, "urn:spur:context-service/keys.manage") &&
       !contains(aws_cognito_user_pool_client.m2m["compatibility"].allowed_oauth_scopes, "urn:spur:context-service/keys.manage") &&
-      toset(aws_apigatewayv2_route.oauth[0].authorization_scopes) == toset([
+      toset(aws_apigatewayv2_route.oauth_code[0].authorization_scopes) == toset([
+        "urn:spur:context-service/external.read",
+        "urn:spur:context-service/external.index",
+        "urn:spur:context-service/external.status",
+      ]) &&
+      toset(aws_apigatewayv2_route.oauth_knowledge[0].authorization_scopes) == toset([
         "urn:spur:context-service/external.read",
         "urn:spur:context-service/external.index",
         "urn:spur:context-service/external.status",
@@ -239,15 +250,29 @@ run "enabled_api_keys_create_exact_isolated_contract" {
 
   assert {
     condition = (
-      aws_apigatewayv2_route.default.authorization_type == "AWS_IAM" &&
-      aws_apigatewayv2_route.oauth[0].route_key == "POST /mcp/oauth" &&
-      aws_apigatewayv2_route.oauth[0].authorization_type == "JWT" &&
+      aws_apigatewayv2_route.compatibility_code.authorization_type == "AWS_IAM" &&
+      aws_apigatewayv2_route.compatibility_knowledge.authorization_type == "AWS_IAM" &&
+      aws_apigatewayv2_route.oauth_code[0].route_key == "POST /mcp/oauth/code" &&
+      aws_apigatewayv2_route.oauth_code[0].authorization_type == "JWT" &&
+      aws_apigatewayv2_route.oauth_code[0].authorizer_id == aws_apigatewayv2_authorizer.cognito[0].id &&
+      aws_apigatewayv2_route.oauth_code[0].target == "integrations/${aws_apigatewayv2_integration.code.id}" &&
+      aws_apigatewayv2_route.oauth_knowledge[0].route_key == "POST /mcp/oauth/knowledge" &&
+      aws_apigatewayv2_route.oauth_knowledge[0].authorization_type == "JWT" &&
+      aws_apigatewayv2_route.oauth_knowledge[0].authorizer_id == aws_apigatewayv2_authorizer.cognito[0].id &&
+      aws_apigatewayv2_route.oauth_knowledge[0].target == "integrations/${aws_apigatewayv2_integration.lambda.id}" &&
       aws_apigatewayv2_route.api_key_discovery[0].route_key == "GET /.well-known/spur-context-service" &&
       aws_apigatewayv2_route.api_key_discovery[0].authorization_type == "NONE" &&
-      aws_apigatewayv2_route.api_key_mcp[0].route_key == "POST /mcp/api-key" &&
-      aws_apigatewayv2_route.api_key_mcp[0].authorization_type == "CUSTOM"
+      strcontains(file("${path.module}/api_keys.tf"), "resource \"aws_apigatewayv2_route\" \"api_key_mcp\"") &&
+      strcontains(file("${path.module}/api_keys.tf"), "route_key          = \"POST /mcp/api-key/code\"") &&
+      strcontains(file("${path.module}/api_keys.tf"), "target             = \"integrations/$${aws_apigatewayv2_integration.api_key[0].id}\"") &&
+      strcontains(file("${path.module}/api_keys.tf"), "authorization_type = \"CUSTOM\"") &&
+      strcontains(file("${path.module}/api_keys.tf"), "authorizer_id      = aws_apigatewayv2_authorizer.api_key[0].id") &&
+      aws_apigatewayv2_route.api_key_mcp_knowledge[0].route_key == "POST /mcp/api-key/knowledge" &&
+      aws_apigatewayv2_route.api_key_mcp_knowledge[0].authorization_type == "CUSTOM" &&
+      aws_apigatewayv2_route.api_key_mcp_knowledge[0].authorizer_id == aws_apigatewayv2_authorizer.api_key[0].id &&
+      aws_apigatewayv2_route.api_key_mcp_knowledge[0].target == "integrations/${aws_apigatewayv2_integration.api_key_knowledge[0].id}"
     )
-    error_message = "API-key discovery and MCP routes must be exact and additive to unchanged default/OAuth routes"
+    error_message = "OAuth and API-key Code/Knowledge routes must keep exact paths, authorizers, and terminal integrations"
   }
 
   assert {
