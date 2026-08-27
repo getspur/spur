@@ -41,4 +41,5 @@ pub struct SilverManifestFile {
     pub path: String,
     pub size_bytes: u64,
     pub etag: String,
+    pub sha256: String,
 }

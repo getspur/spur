@@ -1064,6 +1064,7 @@ fn silver_manifest_for_fixture() -> SilverManifest {
             "edges_unresolved.parquet",
             "files.parquet",
             "file_manifests.parquet",
+            "source_files.parquet",
             "code_symbols.parquet",
             "sections.parquet",
         ]
@@ -1072,6 +1073,7 @@ fn silver_manifest_for_fixture() -> SilverManifest {
             path: path.to_owned(),
             size_bytes: 1,
             etag: format!("\"{path}\""),
+            sha256: "0".repeat(64),
         })
         .collect(),
     }

@@ -16,7 +16,11 @@ use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result};
+use arrow_array::{RecordBatch, StringArray};
+use arrow_schema::{DataType, Field, Schema};
 use async_trait::async_trait;
+use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+use parquet::arrow::ArrowWriter;
 use serde_json::Value;
 use sha2::Digest as _;
 use spur_context_service::jobs::{
@@ -35,6 +39,8 @@ use spur_context_service::worker::{
 };
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
+const SIDECAR_LIB_SOURCE: &str = "pub fn answer() -> u32 { 42 }\n";
+const SIDECAR_UTIL_SOURCE: &str = "pub fn double(value: u32) -> u32 { value * 2 }\n";
 
 #[test]
 fn job_env_from_env_reads_catalog_dsn() -> Result<()> {
@@ -282,6 +288,9 @@ async fn silver_upload_writes_validates_manifest_before_registering() -> Result<
     let _env_guard = EnvGuard::set_all([("SPUR_CONTEXT_SILVER_BUCKET", "silver-test")]);
     let root = unique_temp_dir("worker-silver-upload")?;
     let artifact_dir = root.join("artifact");
+    let source_root = root.join("source");
+    fs::create_dir_all(source_root.join("src"))?;
+    fs::write(source_root.join("src/lib.rs"), "pub fn demo() {}\n")?;
     write_silver_artifact_fixture(&artifact_dir)?;
     let events = Arc::new(Mutex::new(Vec::new()));
     let store = FakeSilverArtifactStore::new(events.clone());
@@ -291,6 +300,7 @@ async fn silver_upload_writes_validates_manifest_before_registering() -> Result<
     let row = persist_silver_graph_artifact(
         &env,
         &artifact_dir,
+        &source_root,
         "bronze-sha256",
         "builder-v1",
         &store,
@@ -318,7 +328,7 @@ async fn silver_upload_writes_validates_manifest_before_registering() -> Result<
     assert_eq!(registered, [row]);
 
     let manifest = store.manifest().context("manifest should be uploaded")?;
-    assert_eq!(manifest.files.len(), 7);
+    assert_eq!(manifest.files.len(), 8);
     assert!(manifest.schema_hash.starts_with("sha256:"));
     assert!(manifest
         .files
@@ -341,6 +351,98 @@ async fn silver_upload_writes_validates_manifest_before_registering() -> Result<
         upload_manifest < validate && validate < register,
         "events must upload manifest, validate it, then register: {events:?}"
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn silver_persistence_includes_source_sidecar() -> Result<()> {
+    let root = unique_temp_dir("worker-source-sidecar")?;
+    let artifact_dir = root.join("artifact");
+    let artifact_dir_str = artifact_dir.display().to_string();
+    let _env_guard = EnvGuard::set_all([
+        (
+            "SPUR_CONTEXT_WORKER_ARTIFACT_DIR",
+            artifact_dir_str.as_str(),
+        ),
+        ("SPUR_GRAPH_BUILDER_VERSION", "builder-v1"),
+    ]);
+    let archive = source_sidecar_tarball(&root)?;
+    let archive_bytes = fs::read(&archive).context("read source-sidecar archive")?;
+    let bronze_store = FakeBronzeArchiveStore::default();
+    let content_sha256 = bronze_store.seed_object(
+        "bronze/registry:crates-io/demo/0.1.0/source.tar.gz",
+        archive_bytes,
+    );
+    let bronze_registry = FakeBronzeRegistry::with_row(bronze_row(
+        "http://127.0.0.1:1/unreachable.tar.gz",
+        &content_sha256,
+        fs::metadata(&archive)?.len(),
+    ));
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let silver_store = FakeSilverArtifactStore::new(events.clone());
+    let silver_registry = FakeSilverRegistry::new(events.clone());
+    let graph_builder = FakeGraphBuilder::writes_source_manifest();
+    let mut env = demo_job_env("http://127.0.0.1:1/unreachable.tar.gz");
+    env.from_layer = JobFromLayer::Bronze;
+
+    let prepared = prepare_job_with_services(
+        &env,
+        &StageTracker::new(),
+        &bronze_registry,
+        &bronze_store,
+        &silver_registry,
+        &silver_store,
+        &graph_builder,
+    )
+    .await?;
+
+    let sidecar = artifact_dir.join("source_files.parquet");
+    assert!(
+        sidecar.is_file(),
+        "silver persistence must write source_files.parquet"
+    );
+    assert_eq!(
+        read_source_sidecar(&sidecar)?,
+        vec![
+            SourceSidecarRow {
+                file_path: "src/lib.rs".to_owned(),
+                content_oid: sha256_hex(SIDECAR_LIB_SOURCE.as_bytes()),
+                source_text: SIDECAR_LIB_SOURCE.to_owned(),
+            },
+            SourceSidecarRow {
+                file_path: "src/util.rs".to_owned(),
+                content_oid: sha256_hex(SIDECAR_UTIL_SOURCE.as_bytes()),
+                source_text: SIDECAR_UTIL_SOURCE.to_owned(),
+            },
+        ]
+    );
+
+    let manifest = silver_store
+        .manifest()
+        .context("source sidecar manifest should be uploaded")?;
+    let manifest_json = serde_json::to_value(&manifest)?;
+    let files = manifest_json["files"]
+        .as_array()
+        .context("manifest files should be an array")?;
+    assert!(files.iter().any(|file| {
+        file["path"] == "source_files.parquet"
+            && file["sha256"].as_str().is_some_and(|hash| hash.len() == 64)
+    }));
+    assert!(files
+        .iter()
+        .all(|file| file["sha256"].as_str().is_some_and(|hash| hash.len() == 64)));
+
+    let events = events.lock().expect("events lock").clone();
+    let upload_sidecar = event_index(
+        &events,
+        "upload_file:silver/registry:crates-io/demo/0.1.0/builder-v1/source_files.parquet",
+    )
+    .context("upload source sidecar")?;
+    let upload_manifest = event_index(&events, "upload_manifest:").context("upload manifest")?;
+    assert!(upload_sidecar < upload_manifest);
+
+    drop(prepared);
+    fs::remove_dir_all(root).ok();
     Ok(())
 }
 
@@ -929,6 +1031,21 @@ fn demo_tarball(root: &Path) -> Result<PathBuf> {
     Ok(archive)
 }
 
+fn source_sidecar_tarball(root: &Path) -> Result<PathBuf> {
+    let fixture = root.join("sidecar-fixture").join("demo-0.1.0");
+    fs::create_dir_all(fixture.join("src")).context("create sidecar fixture")?;
+    fs::write(
+        fixture.join("Cargo.toml"),
+        "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n",
+    )
+    .context("write sidecar manifest")?;
+    fs::write(fixture.join("src/lib.rs"), SIDECAR_LIB_SOURCE).context("write sidecar lib")?;
+    fs::write(fixture.join("src/util.rs"), SIDECAR_UTIL_SOURCE).context("write sidecar util")?;
+    let archive = root.join("source-sidecar-demo.tar.gz");
+    create_tarball(root.join("sidecar-fixture").as_path(), &archive)?;
+    Ok(archive)
+}
+
 fn demo_job_env(source_url: &str) -> JobEnv {
     JobEnv {
         task_token: "task-token".to_owned(),
@@ -995,7 +1112,85 @@ fn write_silver_artifact_fixture(artifact_dir: &Path) -> Result<()> {
         .to_string(),
     )
     .context("write graph artifact manifest")?;
+    write_graph_file_manifest_fixture(
+        artifact_dir,
+        &[("src/lib.rs", sha256_hex(b"pub fn demo() {}\n"))],
+    )?;
     Ok(())
+}
+
+fn write_source_manifest_fixture(artifact_dir: &Path) -> Result<()> {
+    write_graph_file_manifest_fixture(
+        artifact_dir,
+        &[
+            ("src/lib.rs", sha256_hex(SIDECAR_LIB_SOURCE.as_bytes())),
+            ("src/util.rs", sha256_hex(SIDECAR_UTIL_SOURCE.as_bytes())),
+        ],
+    )
+}
+
+fn write_graph_file_manifest_fixture(artifact_dir: &Path, rows: &[(&str, String)]) -> Result<()> {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("path", DataType::Utf8, false),
+        Field::new("content_oid", DataType::Utf8, false),
+    ]));
+    let batch = RecordBatch::try_new(
+        Arc::clone(&schema),
+        vec![
+            Arc::new(StringArray::from_iter_values(
+                rows.iter().map(|(path, _)| *path),
+            )),
+            Arc::new(StringArray::from_iter_values(
+                rows.iter().map(|(_, content_oid)| content_oid.as_str()),
+            )),
+        ],
+    )?;
+    let file = fs::File::create(artifact_dir.join("file_manifests.parquet"))?;
+    let mut writer = ArrowWriter::try_new(file, schema, None)?;
+    writer.write(&batch)?;
+    writer.close()?;
+    Ok(())
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct SourceSidecarRow {
+    file_path: String,
+    content_oid: String,
+    source_text: String,
+}
+
+fn read_source_sidecar(path: &Path) -> Result<Vec<SourceSidecarRow>> {
+    let mut rows = Vec::new();
+    let reader = ParquetRecordBatchReaderBuilder::try_new(fs::File::open(path)?)?.build()?;
+    for batch in reader {
+        let batch = batch?;
+        let file_path = batch
+            .column_by_name("file_path")
+            .context("source sidecar file_path column")?
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .context("source sidecar file_path must be UTF-8")?;
+        let content_oid = batch
+            .column_by_name("content_oid")
+            .context("source sidecar content_oid column")?
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .context("source sidecar content_oid must be UTF-8")?;
+        let source_text = batch
+            .column_by_name("source_text")
+            .context("source sidecar source_text column")?
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .context("source sidecar source_text must be UTF-8")?;
+        for row in 0..batch.num_rows() {
+            rows.push(SourceSidecarRow {
+                file_path: file_path.value(row).to_owned(),
+                content_oid: content_oid.value(row).to_owned(),
+                source_text: source_text.value(row).to_owned(),
+            });
+        }
+    }
+    Ok(rows)
 }
 
 fn worker_silver_manifest() -> spur_context_service::medallion::SilverManifest {
@@ -1007,6 +1202,7 @@ fn worker_silver_manifest() -> spur_context_service::medallion::SilverManifest {
             "edges_unresolved.parquet",
             "files.parquet",
             "file_manifests.parquet",
+            "source_files.parquet",
             "code_symbols.parquet",
             "sections.parquet",
         ]
@@ -1015,6 +1211,7 @@ fn worker_silver_manifest() -> spur_context_service::medallion::SilverManifest {
             path: path.to_owned(),
             size_bytes: 1,
             etag: format!("\"{path}\""),
+            sha256: sha256_hex(path.as_bytes()),
         })
         .collect(),
     }
@@ -1076,6 +1273,7 @@ fn silver_row(manifest: &spur_context_service::medallion::SilverManifest) -> Sil
 struct FakeGraphBuilder {
     calls: AtomicUsize,
     write_fixture: bool,
+    write_source_manifest: bool,
 }
 
 impl FakeGraphBuilder {
@@ -1083,6 +1281,15 @@ impl FakeGraphBuilder {
         Self {
             calls: AtomicUsize::new(0),
             write_fixture: true,
+            write_source_manifest: false,
+        }
+    }
+
+    fn writes_source_manifest() -> Self {
+        Self {
+            calls: AtomicUsize::new(0),
+            write_fixture: true,
+            write_source_manifest: true,
         }
     }
 
@@ -1102,6 +1309,11 @@ impl GraphArtifactBuilder for FakeGraphBuilder {
         if self.write_fixture {
             write_silver_artifact_fixture(artifact_base)
                 .map_err(|error| WorkerError::Build(format!("write fake artifact: {error:#}")))?;
+            if self.write_source_manifest {
+                write_source_manifest_fixture(artifact_base).map_err(|error| {
+                    WorkerError::Build(format!("write fake source manifest: {error:#}"))
+                })?;
+            }
         }
         Ok(artifact_base.to_path_buf())
     }

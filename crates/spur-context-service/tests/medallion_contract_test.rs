@@ -83,11 +83,13 @@ fn silver_manifest_round_trips_file_sizes_etags_and_schema_hash() -> Result<()> 
                 path: "nodes.parquet".to_owned(),
                 size_bytes: 1_024,
                 etag: "\"nodes-etag\"".to_owned(),
+                sha256: "a".repeat(64),
             },
             SilverManifestFile {
                 path: "code_symbols.parquet".to_owned(),
                 size_bytes: 2_048,
                 etag: "\"symbols-etag\"".to_owned(),
+                sha256: "b".repeat(64),
             },
         ],
     };
@@ -102,12 +104,14 @@ fn silver_manifest_round_trips_file_sizes_etags_and_schema_hash() -> Result<()> 
                 {
                     "path": "nodes.parquet",
                     "size_bytes": 1024,
-                    "etag": "\"nodes-etag\""
+                    "etag": "\"nodes-etag\"",
+                    "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                 },
                 {
                     "path": "code_symbols.parquet",
                     "size_bytes": 2048,
-                    "etag": "\"symbols-etag\""
+                    "etag": "\"symbols-etag\"",
+                    "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
                 }
             ]
         })
