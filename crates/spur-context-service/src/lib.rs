@@ -23,6 +23,7 @@ pub mod mcp;
 pub mod medallion;
 #[cfg(feature = "service")]
 pub mod query;
+pub mod serving_registry;
 #[cfg(feature = "service")]
 pub mod staleness;
 #[cfg(feature = "service")]
