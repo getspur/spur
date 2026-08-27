@@ -3990,6 +3990,42 @@ mod knowledge {
             );
         }
 
+        #[tokio::test]
+        async fn public_knowledge_handler_preserves_scheduled_drainer_path() {
+            let event = LambdaEvent::new(
+                json!({
+                    "source": "aws.events",
+                    "detail-type": "Scheduled Event",
+                    "detail": {
+                        "operation": "drain_queued_jobs"
+                    }
+                }),
+                lambda_runtime::Context::default(),
+            );
+            let response = with_test_drainer_summary(
+                drainer::DrainSummary {
+                    dispatched: 3,
+                    skipped: 2,
+                    failed: 1,
+                    repaired: 4,
+                },
+                handler(event),
+            )
+            .await
+            .expect("public Knowledge handler should bypass HTTP parsing and auth");
+
+            assert_eq!(
+                response,
+                json!({
+                    "operation": "drain_queued_jobs",
+                    "dispatched": 3,
+                    "skipped": 2,
+                    "failed": 1,
+                    "repaired": 4,
+                })
+            );
+        }
+
         #[test]
         fn jwt_fixture_on_wrong_route_is_rejected_without_identity_downgrade() {
             let request = serde_json::from_value::<ApiGatewayRequest>(
