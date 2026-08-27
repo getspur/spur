@@ -156,6 +156,19 @@ resource "aws_apigatewayv2_integration" "api_key" {
   }
 }
 
+resource "aws_apigatewayv2_integration" "api_key_knowledge" {
+  count = var.api_key_auth_enabled ? 1 : 0
+
+  api_id                 = aws_apigatewayv2_api.http.id
+  integration_type       = "AWS_PROXY"
+  integration_method     = "POST"
+  integration_uri        = aws_lambda_alias.knowledge_live.invoke_arn
+  payload_format_version = "2.0"
+  request_parameters = {
+    "remove:header.X-SPUR-API-Key" = "''"
+  }
+}
+
 resource "aws_apigatewayv2_route" "api_key_discovery" {
   count = var.api_key_auth_enabled ? 1 : 0
 
@@ -169,8 +182,18 @@ resource "aws_apigatewayv2_route" "api_key_mcp" {
   count = var.api_key_auth_enabled ? 1 : 0
 
   api_id             = aws_apigatewayv2_api.http.id
-  route_key          = "POST /mcp/api-key"
+  route_key          = "POST /mcp/api-key/code"
   target             = "integrations/${aws_apigatewayv2_integration.api_key[0].id}"
+  authorization_type = "CUSTOM"
+  authorizer_id      = aws_apigatewayv2_authorizer.api_key[0].id
+}
+
+resource "aws_apigatewayv2_route" "api_key_mcp_knowledge" {
+  count = var.api_key_auth_enabled ? 1 : 0
+
+  api_id             = aws_apigatewayv2_api.http.id
+  route_key          = "POST /mcp/api-key/knowledge"
+  target             = "integrations/${aws_apigatewayv2_integration.api_key_knowledge[0].id}"
   authorization_type = "CUSTOM"
   authorizer_id      = aws_apigatewayv2_authorizer.api_key[0].id
 }
@@ -289,7 +312,7 @@ resource "aws_cloudwatch_log_metric_filter" "api_key_route_5xx" {
 
   name           = "spur-context-api-key-route-5xx"
   log_group_name = aws_cloudwatch_log_group.oauth_api_access[0].name
-  pattern        = "{ $.route_key = \"POST /mcp/api-key\" && $.status = 5* }"
+  pattern        = "{ ($.route_key = \"POST /mcp/api-key/code\" || $.route_key = \"POST /mcp/api-key/knowledge\") && $.status = 5* }"
 
   metric_transformation {
     name      = "ApiKeyRoute5xx"
@@ -302,7 +325,7 @@ resource "aws_cloudwatch_metric_alarm" "api_key_route_5xx" {
   count = var.api_key_auth_enabled ? 1 : 0
 
   alarm_name          = "spur-context-api-key-route-5xx"
-  alarm_description   = "POST /mcp/api-key returned one or more 5xx responses in five minutes."
+  alarm_description   = "A direct API-key MCP route returned one or more 5xx responses in five minutes."
   comparison_operator = "GreaterThanOrEqualToThreshold"
   evaluation_periods  = 1
   metric_name         = aws_cloudwatch_log_metric_filter.api_key_route_5xx[0].metric_transformation[0].name

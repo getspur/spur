@@ -476,8 +476,8 @@ resource "aws_apigatewayv2_integration" "lambda" {
   payload_format_version = "2.0"
 }
 
-# Task 13 owns the final tool-level route split. This compatibility integration
-# keeps control-plane discovery, login, and API-key lifecycle traffic on Code.
+# Code remains on demand and owns code tools plus control-plane discovery,
+# login, and API-key lifecycle traffic.
 resource "aws_apigatewayv2_integration" "code" {
   api_id                 = aws_apigatewayv2_api.http.id
   integration_type       = "AWS_PROXY"
@@ -486,9 +486,16 @@ resource "aws_apigatewayv2_integration" "code" {
   payload_format_version = "2.0"
 }
 
-resource "aws_apigatewayv2_route" "default" {
+resource "aws_apigatewayv2_route" "compatibility_code" {
   api_id             = aws_apigatewayv2_api.http.id
-  route_key          = "$default"
+  route_key          = "POST /mcp/code"
+  target             = "integrations/${aws_apigatewayv2_integration.code.id}"
+  authorization_type = var.api_authorization_type
+}
+
+resource "aws_apigatewayv2_route" "compatibility_knowledge" {
+  api_id             = aws_apigatewayv2_api.http.id
+  route_key          = "POST /mcp/knowledge"
   target             = "integrations/${aws_apigatewayv2_integration.lambda.id}"
   authorization_type = var.api_authorization_type
 }
@@ -836,11 +843,22 @@ resource "aws_apigatewayv2_authorizer" "cognito" {
   }
 }
 
-resource "aws_apigatewayv2_route" "oauth" {
+resource "aws_apigatewayv2_route" "oauth_code" {
   count = var.cognito_auth_enabled ? 1 : 0
 
   api_id               = aws_apigatewayv2_api.http.id
-  route_key            = "POST /mcp/oauth"
+  route_key            = "POST /mcp/oauth/code"
+  target               = "integrations/${aws_apigatewayv2_integration.code.id}"
+  authorization_type   = "JWT"
+  authorizer_id        = aws_apigatewayv2_authorizer.cognito[0].id
+  authorization_scopes = local.cognito_custom_scopes
+}
+
+resource "aws_apigatewayv2_route" "oauth_knowledge" {
+  count = var.cognito_auth_enabled ? 1 : 0
+
+  api_id               = aws_apigatewayv2_api.http.id
+  route_key            = "POST /mcp/oauth/knowledge"
   target               = "integrations/${aws_apigatewayv2_integration.lambda.id}"
   authorization_type   = "JWT"
   authorizer_id        = aws_apigatewayv2_authorizer.cognito[0].id
@@ -871,7 +889,7 @@ resource "aws_cloudwatch_log_metric_filter" "oauth_route_5xx" {
 
   name           = "spur-context-oauth-route-5xx"
   log_group_name = aws_cloudwatch_log_group.oauth_api_access[0].name
-  pattern        = "{ $.route_key = \"POST /mcp/oauth\" && $.status = 5* }"
+  pattern        = "{ ($.route_key = \"POST /mcp/oauth/code\" || $.route_key = \"POST /mcp/oauth/knowledge\") && $.status = 5* }"
 
   metric_transformation {
     name      = "OAuthRoute5xx"
@@ -884,7 +902,7 @@ resource "aws_cloudwatch_metric_alarm" "oauth_route_5xx" {
   count = var.cognito_auth_enabled ? 1 : 0
 
   alarm_name          = "spur-context-oauth-route-5xx"
-  alarm_description   = "POST /mcp/oauth returned one or more 5xx responses in five minutes."
+  alarm_description   = "A direct OAuth MCP route returned one or more 5xx responses in five minutes."
   comparison_operator = "GreaterThanOrEqualToThreshold"
   evaluation_periods  = 1
   metric_name         = aws_cloudwatch_log_metric_filter.oauth_route_5xx[0].metric_transformation[0].name
