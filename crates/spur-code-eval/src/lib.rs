@@ -2,6 +2,7 @@
 
 mod contract;
 mod materialize;
+mod query;
 mod sources;
 
 pub use contract::{
@@ -10,6 +11,11 @@ pub use contract::{
 };
 pub use materialize::{
     compute_materialization_hash, MaterializeError, MaterializedRoot, Materializer,
+};
+pub use query::{
+    retrieve, AnswerStatus, BackendCall, BackendResponse, EvidenceHit, EvidenceIssue,
+    EvidenceIssueKind, GoldCallEdge, LeakageKind, LeakagePolicy, QueryBackend, QueryBackendFuture,
+    QueryError, RetrievalRequest, RetrievalResult, SourceKind, SpurQueryBackend, Staleness,
 };
 pub use sources::{
     validate_bytes, LanguageCapability, SchemaEvidence, SourceError, SourceFormat, SourceManifest,
