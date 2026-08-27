@@ -30,6 +30,20 @@ def terraform_resource_block(text, resource_type, resource_name):
     raise AssertionError(f"unterminated Terraform resource: {marker}")
 
 
+def terraform_resource_blocks(text, resource_type):
+    return {
+        resource_name: terraform_resource_block(text, resource_type, resource_name)
+        for resource_name in re.findall(
+            rf'resource\s+"{re.escape(resource_type)}"\s+"([^"]+)"', text
+        )
+    }
+
+
+def terraform_assignment(block, name):
+    match = re.search(rf"^\s*{re.escape(name)}\s*=\s*(.+)$", block, re.MULTILINE)
+    return match.group(1).strip() if match else None
+
+
 def terraform_module_contract_files():
     return sorted(
         path
@@ -37,6 +51,212 @@ def terraform_module_contract_files():
         for path in INFRA_DIR.rglob(pattern)
         if ".terraform" not in path.parts
     )
+
+
+def test_direct_routes_have_expected_auth_and_unique_terminal_integrations():
+    main_tf = (INFRA_DIR / "main.tf").read_text()
+    api_keys_tf = (INFRA_DIR / "api_keys.tf").read_text()
+    iam_tf = (INFRA_DIR / "iam.tf").read_text()
+    problems = []
+
+    integration_blocks = {
+        **terraform_resource_blocks(main_tf, "aws_apigatewayv2_integration"),
+        **terraform_resource_blocks(api_keys_tf, "aws_apigatewayv2_integration"),
+    }
+    expected_integrations = {
+        "code": ("code", "aws_lambda_function.code.invoke_arn"),
+        "lambda": ("knowledge", "aws_lambda_alias.knowledge_live.invoke_arn"),
+        "api_key": ("code", "aws_lambda_function.code.invoke_arn"),
+        "api_key_knowledge": (
+            "knowledge",
+            "aws_lambda_alias.knowledge_live.invoke_arn",
+        ),
+    }
+    if set(integration_blocks) != set(expected_integrations):
+        problems.append(
+            "serving integrations differ: "
+            f"expected {sorted(expected_integrations)}, got {sorted(integration_blocks)}"
+        )
+
+    integration_backends = {}
+    for integration_name, (backend, expected_uri) in expected_integrations.items():
+        block = integration_blocks.get(integration_name)
+        if block is None:
+            continue
+        terminal_uris = re.findall(
+            r"integration_uri\s*=\s*"
+            r"(aws_lambda_(?:function|alias)\.[A-Za-z0-9_]+(?:\[0\])?\.invoke_arn)",
+            block,
+        )
+        if terminal_uris != [expected_uri]:
+            problems.append(
+                f"{integration_name} must have one terminal URI {expected_uri}; "
+                f"got {terminal_uris}"
+            )
+        integration_backends[integration_name] = backend
+
+    for integration_name in ("api_key", "api_key_knowledge"):
+        block = integration_blocks.get(integration_name)
+        if block is not None and (
+            '"remove:header.X-SPUR-API-Key" = "\'\'"' not in block
+        ):
+            problems.append(
+                f"{integration_name} does not remove X-SPUR-API-Key before serving"
+            )
+
+    expected_routes = {
+        "POST /mcp/code": ("code", "var.api_authorization_type", None, None),
+        "POST /mcp/knowledge": (
+            "knowledge",
+            "var.api_authorization_type",
+            None,
+            None,
+        ),
+        "POST /mcp/oauth/code": (
+            "code",
+            '"JWT"',
+            "aws_apigatewayv2_authorizer.cognito[0].id",
+            "local.cognito_custom_scopes",
+        ),
+        "POST /mcp/oauth/knowledge": (
+            "knowledge",
+            '"JWT"',
+            "aws_apigatewayv2_authorizer.cognito[0].id",
+            "local.cognito_custom_scopes",
+        ),
+        "POST /mcp/api-key/code": (
+            "code",
+            '"CUSTOM"',
+            "aws_apigatewayv2_authorizer.api_key[0].id",
+            None,
+        ),
+        "POST /mcp/api-key/knowledge": (
+            "knowledge",
+            '"CUSTOM"',
+            "aws_apigatewayv2_authorizer.api_key[0].id",
+            None,
+        ),
+        "GET /.well-known/spur-context-service": ("code", '"NONE"', None, None),
+        "GET /auth/login": ("code", '"NONE"', None, None),
+        "POST /auth/api-keys": (
+            "code",
+            '"JWT"',
+            "aws_apigatewayv2_authorizer.cognito[0].id",
+            "[local.api_key_management_scope]",
+        ),
+        "GET /auth/api-keys": (
+            "code",
+            '"JWT"',
+            "aws_apigatewayv2_authorizer.cognito[0].id",
+            "[local.api_key_management_scope]",
+        ),
+        "DELETE /auth/api-keys/{key_id}": (
+            "code",
+            '"JWT"',
+            "aws_apigatewayv2_authorizer.cognito[0].id",
+            "[local.api_key_management_scope]",
+        ),
+    }
+
+    route_entries = []
+    route_blocks = {
+        **terraform_resource_blocks(main_tf, "aws_apigatewayv2_route"),
+        **terraform_resource_blocks(api_keys_tf, "aws_apigatewayv2_route"),
+    }
+    for resource_name, block in route_blocks.items():
+        route_key_assignment = terraform_assignment(block, "route_key")
+        if route_key_assignment == "each.value":
+            for_each = re.search(r"for_each\s*=.*?toset\(\[(.*?)\]\)", block, re.DOTALL)
+            route_keys = (
+                re.findall(r'"((?:GET|POST|DELETE) [^"]+)"', for_each.group(1))
+                if for_each
+                else []
+            )
+        elif route_key_assignment and route_key_assignment.startswith('"'):
+            route_keys = [route_key_assignment.strip('"')]
+        else:
+            route_keys = []
+
+        target = terraform_assignment(block, "target") or ""
+        target_integrations = re.findall(
+            r"aws_apigatewayv2_integration\.([A-Za-z0-9_]+)"
+            r"(?:\[0\])?\.id",
+            target,
+        )
+        if len(target_integrations) != 1:
+            problems.append(
+                f"route resource {resource_name} must name one integration; "
+                f"got {target_integrations}"
+            )
+            integration_name = None
+        else:
+            integration_name = target_integrations[0]
+
+        for route_key in route_keys:
+            route_entries.append(
+                (
+                    route_key,
+                    integration_name,
+                    terraform_assignment(block, "authorization_type"),
+                    terraform_assignment(block, "authorizer_id"),
+                    terraform_assignment(block, "authorization_scopes"),
+                )
+            )
+
+    route_keys = [entry[0] for entry in route_entries]
+    duplicate_route_keys = sorted(
+        route_key for route_key in set(route_keys) if route_keys.count(route_key) != 1
+    )
+    if duplicate_route_keys:
+        problems.append(f"duplicate route keys: {duplicate_route_keys}")
+    if set(route_keys) != set(expected_routes):
+        problems.append(
+            "route table differs: "
+            f"missing {sorted(set(expected_routes) - set(route_keys))}; "
+            f"unexpected {sorted(set(route_keys) - set(expected_routes))}"
+        )
+
+    for route_key, integration_name, auth_type, authorizer_id, scopes in route_entries:
+        expected = expected_routes.get(route_key)
+        if expected is None:
+            continue
+        expected_backend, expected_auth, expected_authorizer, expected_scopes = expected
+        actual_backend = integration_backends.get(integration_name)
+        actual = (actual_backend, auth_type, authorizer_id, scopes)
+        if actual != expected:
+            problems.append(f"{route_key}: expected {expected}, got {actual}")
+
+    serving_role_policies = [
+        block
+        for block in terraform_resource_blocks(
+            iam_tf, "aws_iam_role_policy"
+        ).values()
+        if re.search(
+            r"role\s*=\s*aws_iam_role\.(?:code|knowledge)_lambda\.id", block
+        )
+    ]
+    if any("lambda:InvokeFunction" in block for block in serving_role_policies):
+        problems.append("a serving Lambda role can invoke another Lambda")
+
+    knowledge_permission = terraform_resource_block(
+        main_tf, "aws_lambda_permission", "apigw"
+    )
+    code_permission = terraform_resource_block(
+        main_tf, "aws_lambda_permission", "apigw_code"
+    )
+    if "function_name = aws_lambda_function.knowledge.function_name" not in knowledge_permission:
+        problems.append("Knowledge API Gateway permission changed function")
+    if "qualifier     = aws_lambda_alias.knowledge_live.name" not in knowledge_permission:
+        problems.append("Knowledge API Gateway permission lost alias qualifier")
+    if "function_name = aws_lambda_function.code.function_name" not in code_permission:
+        problems.append("Code API Gateway permission changed function")
+    if any(
+        'principal     = "apigateway.amazonaws.com"' not in permission
+        for permission in (knowledge_permission, code_permission)
+    ):
+        problems.append("serving Lambda permission principal changed")
+
+    assert not problems, "\n".join(problems)
 
 
 def test_serving_compute_correction_removes_deleted_service_addresses_and_routes_code_compatibility():
