@@ -1,3 +1,8 @@
+#![cfg_attr(
+    all(feature = "lambda-http", not(feature = "service")),
+    allow(dead_code)
+)]
+
 //! DuckLake-backed code context service for external packages.
 
 #[cfg(feature = "service")]
@@ -5,7 +10,7 @@ pub mod abuse;
 pub mod api_key_authorizer;
 pub mod api_key_cleanup;
 pub mod api_keys;
-#[cfg(feature = "service")]
+#[cfg(any(feature = "service", feature = "lambda-http"))]
 mod auth;
 #[cfg(feature = "service")]
 pub mod catalog;
@@ -17,7 +22,7 @@ pub mod jobs;
 pub mod knowledge;
 #[cfg(feature = "lambda")]
 pub mod lambda;
-#[cfg(feature = "lambda")]
+#[cfg(feature = "lambda-http")]
 mod lambda_http;
 #[cfg(feature = "service")]
 pub mod mcp;
@@ -33,12 +38,12 @@ pub mod translate;
 #[cfg(feature = "worker")]
 pub mod worker;
 
-#[cfg(all(test, feature = "lambda"))]
+#[cfg(all(test, feature = "lambda-http"))]
 mod lambda_http_contract {
     use serde_json::json;
 
     use crate::auth::RequestRoute;
-    use crate::lambda_http::{classify_route, ApiGatewayRequest};
+    use crate::lambda_http::{authenticated_caller_id, classify_route, ApiGatewayRequest};
 
     fn request(path: &str, method: &str) -> ApiGatewayRequest {
         serde_json::from_value(json!({
@@ -85,5 +90,22 @@ mod lambda_http_contract {
         for path in ["/mcp/index", "/mcp/index_status"] {
             assert_eq!(classify_route(&request(path, "POST")), RequestRoute::Legacy);
         }
+    }
+
+    #[test]
+    fn direct_unauthenticated_paths_keep_legacy_route_classification() {
+        for path in ["/mcp", "/mcp/code", "/mcp/knowledge"] {
+            assert_eq!(classify_route(&request(path, "POST")), RequestRoute::Legacy);
+        }
+    }
+
+    #[test]
+    fn unauthenticated_mutating_caller_error_keeps_legacy_message() {
+        assert_eq!(
+            authenticated_caller_id(&request("/mcp", "POST"), false)
+                .expect_err("unauthenticated mutation should be rejected")
+                .to_string(),
+            "authenticated caller is required for mutating context-service tools"
+        );
     }
 }

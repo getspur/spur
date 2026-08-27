@@ -5,7 +5,20 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::auth::{self, AuthFailure, IamContext, RequestRoute};
-use crate::mcp::McpHandlerError;
+
+#[derive(Debug, thiserror::Error)]
+#[error("{message}")]
+pub(crate) struct CallerIdentityError {
+    message: &'static str,
+}
+
+impl CallerIdentityError {
+    fn authenticated_caller_required() -> Self {
+        Self {
+            message: "authenticated caller is required for mutating context-service tools",
+        }
+    }
+}
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct ApiGatewayRequest {
@@ -185,7 +198,7 @@ pub(crate) fn caller_id(request: &ApiGatewayRequest) -> String {
 pub(crate) fn authenticated_caller_id(
     request: &ApiGatewayRequest,
     allow_anonymous: bool,
-) -> Result<String, McpHandlerError> {
+) -> Result<String, CallerIdentityError> {
     let caller = request
         .request_context
         .as_ref()
@@ -226,11 +239,7 @@ pub(crate) fn authenticated_caller_id(
             allow_anonymous.then(|| auth::legacy_anonymous_identity().caller_id().to_owned())
         });
 
-    caller.ok_or_else(|| {
-        McpHandlerError::InvalidParams(
-            "authenticated caller is required for mutating context-service tools".to_owned(),
-        )
-    })
+    caller.ok_or_else(CallerIdentityError::authenticated_caller_required)
 }
 
 fn jwt_caller_id(authorizer: &ApiGatewayAuthorizer) -> Option<&str> {

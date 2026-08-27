@@ -811,6 +811,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "service")]
     #[test]
     fn scope_policy_fails_closed_when_the_mcp_external_surface_drifts() {
         let policy_tools = external_tool_scopes()

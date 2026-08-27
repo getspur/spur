@@ -53,7 +53,8 @@ service = [
     "dep:spur-context-source",
 ]
 analyst = ["service"]
-lambda = ["service", "api-key-authorizer"]
+lambda-http = ["dep:lambda_runtime"]
+lambda = ["service", "api-key-authorizer", "lambda-http"]
 api-key-authorizer = ["dep:lambda_runtime"]
 api-key-cleanup = ["dep:lambda_runtime"]
 parquet-io = ["dep:arrow-array", "dep:arrow-schema", "dep:parquet", "dep:sha1"]

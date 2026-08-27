@@ -177,7 +177,11 @@ async fn handle_api_gateway_request(
             "external_index" | "external_index_status" => Some(
                 match authenticated_caller_id(&api_gateway_request, anonymous_mutations_allowed()) {
                     Ok(caller_id) => caller_id,
-                    Err(error) => return auth_error_response(error),
+                    Err(error) => {
+                        return auth_error_response(McpHandlerError::InvalidParams(
+                            error.to_string(),
+                        ))
+                    }
                 },
             ),
             _ => None,
