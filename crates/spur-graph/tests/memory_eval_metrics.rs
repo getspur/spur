@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use spur_graph::memory_eval::{
     contract::DatasetKind,
@@ -24,7 +24,7 @@ mod memory_eval {
 
 use memory_eval::metrics::{
     ndcg_at_k, recall_all_at_k, recall_any_at_k, score_locomo_retrieval,
-    score_longmemeval_retrieval, MetricValue, RetrievalMetricInput,
+    score_longmemeval_retrieval, MetricValue, RetrievalMetricInput, RetrievalMetrics,
 };
 
 fn ranking(variant: Variant, granularity: Granularity, k: usize, hits: &[(&str, f64)]) -> Ranking {
@@ -70,6 +70,42 @@ fn assert_metric(metric: &MetricValue, value: f64, numerator: f64, denominator: 
     assert!((metric.value - value).abs() < 1e-12, "{metric:?}");
     assert!((metric.numerator - numerator).abs() < 1e-12, "{metric:?}");
     assert_eq!(metric.denominator, denominator);
+}
+
+#[test]
+fn retrieval_metrics_json_roundtrip_preserves_finite_f64_bits() {
+    let computed = RetrievalMetrics {
+        dataset: DatasetKind::Locomo,
+        granularity: Granularity::Turn,
+        variant: Variant::FlatBm25,
+        overall: BTreeMap::from([(
+            "ndcg_any@10".to_owned(),
+            MetricValue {
+                value: 0.989_356_310_187_531_7,
+                numerator: 0.989_356_310_187_531_7,
+                denominator: 1,
+            },
+        )]),
+        slices: BTreeMap::new(),
+        exclusions: Vec::new(),
+    };
+
+    let bytes = serde_json::to_vec_pretty(&computed).expect("serialize computed metrics");
+    let persisted = serde_json::from_slice(&bytes).expect("parse persisted metric JSON");
+    let reloaded: RetrievalMetrics =
+        serde_json::from_value(persisted).expect("reload persisted metrics");
+
+    let computed_value = &computed.overall["ndcg_any@10"];
+    let reloaded_value = &reloaded.overall["ndcg_any@10"];
+    assert_eq!(
+        reloaded_value.value.to_bits(),
+        computed_value.value.to_bits()
+    );
+    assert_eq!(
+        reloaded_value.numerator.to_bits(),
+        computed_value.numerator.to_bits()
+    );
+    assert_eq!(reloaded, computed);
 }
 
 #[test]
