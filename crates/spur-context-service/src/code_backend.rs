@@ -3,14 +3,26 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::{json, Value};
-use spur_graph::{GraphQueryClient, ParquetClient, SearchFilters, SearchMode, SearchOptions};
+use spur_graph::{
+    graph_edge_kind_or_default, CodeSelectorResolution, GraphEdgeArtifact, GraphEdgeKind,
+    GraphQueryClient, GraphSymbolArtifact, OwnedCalleeRecord, OwnedCallerRecord, ParquetClient,
+    SearchFilters, SearchMode, SearchOptions,
+};
 use thiserror::Error;
+
+#[allow(
+    dead_code,
+    reason = "the shared source-sidecar module includes worker-only writer helpers"
+)]
+#[path = "source_sidecar.rs"]
+mod source_sidecar;
 
 use crate::artifact_cache::{
     ArtifactBundleIdentity, ArtifactCache, ArtifactCacheError, ArtifactIdentity,
     MaterializedArtifactBundle,
 };
 use crate::serving_registry::{ServingPackage, ServingRegistry};
+use source_sidecar::{read_verified_source, SourceSidecarReadError, SOURCE_SIDECAR_FILENAME};
 
 #[derive(Debug, Clone)]
 pub struct CatalogRequest {
@@ -33,6 +45,20 @@ pub struct CodeSearchRequest {
     pub limit: usize,
 }
 
+#[derive(Debug, Clone)]
+pub struct CodeReadRequest {
+    pub source: String,
+    pub selector: String,
+    pub context_lines: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct CodeEdgesRequest {
+    pub source: String,
+    pub selector: String,
+    pub include_unresolved: bool,
+}
+
 #[derive(Debug, Error)]
 pub enum CodeBackendError {
     #[error("invalid serving registry")]
@@ -42,11 +68,28 @@ pub enum CodeBackendError {
     #[error("invalid catalog cursor")]
     InvalidCursor,
     #[error("{0}")]
+    InvalidSelector(String),
+    #[error("ambiguous external selector `{selector}`; candidates: {candidates}")]
+    AmbiguousSelector {
+        selector: String,
+        candidates: String,
+    },
+    #[error("symbol not found: {0}")]
+    SymbolNotFound(String),
+    #[error("{0}")]
     Artifact(#[from] ArtifactCacheError),
     #[error("artifact open failed")]
     ArtifactOpen,
     #[error("artifact query failed")]
     ArtifactQuery,
+    #[error("source sidecar is corrupt")]
+    SourceSidecarCorrupt,
+    #[error("source text is unavailable")]
+    SourceTextUnavailable,
+    #[error("source content OID mismatch")]
+    SourceContentOidMismatch,
+    #[error("source range is invalid")]
+    SourceRangeInvalid,
 }
 
 impl CodeBackendError {
@@ -55,17 +98,34 @@ impl CodeBackendError {
             Self::InvalidRegistry => "invalid_serving_registry",
             Self::PackageUnavailable => "package_unavailable",
             Self::InvalidCursor => "invalid_catalog_cursor",
+            Self::InvalidSelector(_) => "invalid_external_selector",
+            Self::AmbiguousSelector { .. } => "ambiguous_external_selector",
+            Self::SymbolNotFound(_) => "symbol_not_found",
             Self::Artifact(error) => error.code(),
             Self::ArtifactOpen => "artifact_open_failed",
             Self::ArtifactQuery => "artifact_query_failed",
+            Self::SourceSidecarCorrupt => "source_sidecar_corrupt",
+            Self::SourceTextUnavailable => "source_text_unavailable",
+            Self::SourceContentOidMismatch => "source_content_oid_mismatch",
+            Self::SourceRangeInvalid => "source_range_invalid",
         }
     }
 
     pub fn is_retryable(&self) -> bool {
         match self {
-            Self::PackageUnavailable | Self::InvalidCursor => false,
+            Self::PackageUnavailable
+            | Self::InvalidCursor
+            | Self::InvalidSelector(_)
+            | Self::AmbiguousSelector { .. }
+            | Self::SymbolNotFound(_) => false,
             Self::Artifact(error) => error.is_retryable(),
-            Self::InvalidRegistry | Self::ArtifactOpen | Self::ArtifactQuery => true,
+            Self::InvalidRegistry
+            | Self::ArtifactOpen
+            | Self::ArtifactQuery
+            | Self::SourceSidecarCorrupt
+            | Self::SourceTextUnavailable
+            | Self::SourceContentOidMismatch
+            | Self::SourceRangeInvalid => true,
         }
     }
 }
@@ -182,6 +242,83 @@ impl CodeBackend {
             "total_matches": result.total_matches,
             "truncated": result.truncated,
         }))
+    }
+
+    pub async fn read(&self, request: CodeReadRequest) -> Result<Value, CodeBackendError> {
+        let (opened, symbol) = self
+            .resolve_external_selector(&request.source, &request.selector)
+            .await?;
+        let symbol = symbol.ok_or_else(|| CodeBackendError::SymbolNotFound(request.selector))?;
+        let file_manifest = opened
+            .client
+            .file_manifest_by_path(&symbol.file_path)
+            .map_err(|_| CodeBackendError::ArtifactQuery)?
+            .ok_or(CodeBackendError::ArtifactQuery)?;
+        let source_text = read_verified_source(
+            &opened._bundle.path().join(SOURCE_SIDECAR_FILENAME),
+            &opened.package.source_sidecar.sha256,
+            opened.package.source_sidecar.bytes,
+            &symbol.file_path,
+            &file_manifest.content_oid,
+        )
+        .map_err(source_sidecar_read_error)?;
+        let (source, line_range) = slice_symbol_source(
+            &source_text,
+            symbol.byte_range,
+            symbol.line_range,
+            request.context_lines,
+        )?;
+        let selector_name = symbol_selector_name(&symbol);
+        Ok(json!({
+            "selector": format!(
+                "pkg:{}@{}::{selector_name}",
+                opened.package.package, opened.package.revision
+            ),
+            "stable_symbol_id": symbol.stable_symbol_id,
+            "package_source": opened.package.source,
+            "package": opened.package.package,
+            "revision": opened.package.revision,
+            "file_path": symbol.file_path,
+            "byte_range": symbol.byte_range,
+            "line_range": line_range,
+            "source": source,
+        }))
+    }
+
+    pub async fn callers(&self, request: CodeEdgesRequest) -> Result<Value, CodeBackendError> {
+        let (opened, symbol) = self
+            .resolve_external_selector(&request.source, &request.selector)
+            .await?;
+        let Some(symbol) = symbol else {
+            return Ok(empty_edges("callers"));
+        };
+        let records = opened
+            .client
+            .try_find_caller_edges(&symbol.stable_symbol_id)
+            .map_err(|_| CodeBackendError::ArtifactQuery)?;
+        Ok(caller_response(
+            &opened.package,
+            records,
+            request.include_unresolved,
+        ))
+    }
+
+    pub async fn callees(&self, request: CodeEdgesRequest) -> Result<Value, CodeBackendError> {
+        let (opened, symbol) = self
+            .resolve_external_selector(&request.source, &request.selector)
+            .await?;
+        let Some(symbol) = symbol else {
+            return Ok(empty_edges("callees"));
+        };
+        let records = opened
+            .client
+            .try_find_callee_edges(&symbol.stable_symbol_id)
+            .map_err(|_| CodeBackendError::ArtifactQuery)?;
+        Ok(callee_response(
+            &opened.package,
+            records,
+            request.include_unresolved,
+        ))
     }
 
     pub async fn warm_index(
@@ -350,6 +487,70 @@ impl CodeBackend {
         self.open(selected).await
     }
 
+    async fn resolve_external_selector(
+        &self,
+        default_source: &str,
+        selector: &str,
+    ) -> Result<(OpenedPackage, Option<GraphSymbolArtifact>), CodeBackendError> {
+        match parse_external_selector(selector, default_source)? {
+            ExternalSelector::Stable {
+                source,
+                package,
+                revision,
+                stable_symbol_id,
+            } => {
+                let opened = self
+                    .open_selected(&source, &package, Some(&revision))
+                    .await?;
+                let symbol = opened
+                    .client
+                    .symbol_by_id(&stable_symbol_id)
+                    .map_err(|_| CodeBackendError::ArtifactQuery)?;
+                Ok((opened, symbol))
+            }
+            ExternalSelector::Named {
+                source,
+                package,
+                revision_or_ref,
+                qualified_name,
+            } => {
+                let opened = self
+                    .open_selected(&source, &package, revision_or_ref.as_deref())
+                    .await?;
+                let symbol = match opened
+                    .client
+                    .resolve_selector(&qualified_name)
+                    .map_err(|_| CodeBackendError::ArtifactQuery)?
+                {
+                    CodeSelectorResolution::Resolved(resolved) => opened
+                        .client
+                        .symbol_by_id(&resolved.stable_symbol_id)
+                        .map_err(|_| CodeBackendError::ArtifactQuery)?,
+                    CodeSelectorResolution::NotFound => None,
+                    CodeSelectorResolution::Ambiguous { candidates } => {
+                        let candidates = candidates
+                            .iter()
+                            .map(|candidate| {
+                                package_symbol_uri(
+                                    &opened.package.source,
+                                    &opened.package.package,
+                                    &opened.package.revision,
+                                    &candidate.id,
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        return Err(CodeBackendError::AmbiguousSelector {
+                            selector: selector.to_owned(),
+                            candidates,
+                        });
+                    }
+                };
+                Ok((opened, symbol))
+            }
+        }
+    }
+
     fn resolve_exact(
         &self,
         source: &str,
@@ -363,6 +564,13 @@ impl CodeBackend {
     }
 
     async fn open(&self, package: ServingPackage) -> Result<OpenedPackage, CodeBackendError> {
+        let expected_source_sidecar_uri =
+            format!("{}{SOURCE_SIDECAR_FILENAME}", package.graph_prefix_uri);
+        if package.source_sidecar.uri != expected_source_sidecar_uri {
+            return Err(CodeBackendError::Artifact(
+                ArtifactCacheError::InvalidIdentity,
+            ));
+        }
         self.cache
             .activate_generation(self.registry.generation)
             .await?;
@@ -385,6 +593,327 @@ impl CodeBackend {
             _bundle: bundle,
         })
     }
+}
+
+enum ExternalSelector {
+    Named {
+        source: String,
+        package: String,
+        revision_or_ref: Option<String>,
+        qualified_name: String,
+    },
+    Stable {
+        source: String,
+        package: String,
+        revision: String,
+        stable_symbol_id: String,
+    },
+}
+
+fn parse_external_selector(
+    selector: &str,
+    default_source: &str,
+) -> Result<ExternalSelector, CodeBackendError> {
+    let selector = selector.trim();
+    if let Some(body) = selector.strip_prefix("pkg-symbol://") {
+        let mut parts = body.rsplitn(4, '/');
+        let stable_symbol_id = parts.next().unwrap_or_default();
+        let revision = parts.next().unwrap_or_default();
+        let package = parts.next().unwrap_or_default();
+        let source = parts.next().unwrap_or_default();
+        if [source, package, revision, stable_symbol_id]
+            .iter()
+            .any(|part| part.is_empty())
+        {
+            return Err(CodeBackendError::InvalidSelector(format!(
+                "external package symbol URI is invalid: {selector}"
+            )));
+        }
+        return Ok(ExternalSelector::Stable {
+            source: decode_uri_component(source),
+            package: decode_uri_component(package),
+            revision: decode_uri_component(revision),
+            stable_symbol_id: decode_uri_component(stable_symbol_id),
+        });
+    }
+
+    let Some(body) = selector.strip_prefix("pkg:") else {
+        return Err(CodeBackendError::InvalidSelector(format!(
+            "external selector must start with 'pkg:': {selector}"
+        )));
+    };
+    let Some((package_revision, qualified_name)) = body.split_once("::") else {
+        return Err(CodeBackendError::InvalidSelector(format!(
+            "external selector must include a package and symbol path: {selector}"
+        )));
+    };
+    if qualified_name.is_empty() {
+        return Err(CodeBackendError::InvalidSelector(format!(
+            "external selector must include a symbol path: {selector}"
+        )));
+    }
+    let (package, revision_or_ref) = match package_revision.split_once('@') {
+        Some((package, revision_or_ref)) if !package.is_empty() && !revision_or_ref.is_empty() => {
+            (package.to_owned(), Some(revision_or_ref.to_owned()))
+        }
+        Some(_) => {
+            return Err(CodeBackendError::InvalidSelector(format!(
+                "external selector has an invalid package revision: {selector}"
+            )))
+        }
+        None if !package_revision.is_empty() => (package_revision.to_owned(), None),
+        None => {
+            return Err(CodeBackendError::InvalidSelector(format!(
+                "external selector must include a package: {selector}"
+            )))
+        }
+    };
+    Ok(ExternalSelector::Named {
+        source: default_source.to_owned(),
+        package,
+        revision_or_ref,
+        qualified_name: qualified_name.to_owned(),
+    })
+}
+
+fn source_sidecar_read_error(error: SourceSidecarReadError) -> CodeBackendError {
+    match error {
+        SourceSidecarReadError::IntegrityMismatch => {
+            CodeBackendError::Artifact(ArtifactCacheError::IntegrityMismatch)
+        }
+        SourceSidecarReadError::Corrupt => CodeBackendError::SourceSidecarCorrupt,
+        SourceSidecarReadError::TextUnavailable => CodeBackendError::SourceTextUnavailable,
+        SourceSidecarReadError::ContentOidMismatch => CodeBackendError::SourceContentOidMismatch,
+    }
+}
+
+fn symbol_selector_name(symbol: &GraphSymbolArtifact) -> &str {
+    if symbol.qualified_name.is_empty() {
+        &symbol.entity_name
+    } else {
+        &symbol.qualified_name
+    }
+}
+
+fn candidate_value(package: &ServingPackage, symbol: &GraphSymbolArtifact) -> Value {
+    let selector_name = symbol_selector_name(symbol);
+    json!({
+        "selector": format!(
+            "pkg:{}@{}::{selector_name}",
+            package.package, package.revision
+        ),
+        "uri": package_symbol_uri(
+            &package.source,
+            &package.package,
+            &package.revision,
+            &symbol.stable_symbol_id,
+        ),
+        "id": symbol.stable_symbol_id,
+        "stable_symbol_id": symbol.stable_symbol_id,
+        "source": package.source,
+        "package": package.package,
+        "revision": package.revision,
+        "entity_name": symbol.entity_name,
+        "qualified_name": symbol.qualified_name,
+        "file_path": symbol.file_path,
+        "line_range": symbol.line_range,
+        "symbol_kind": symbol.symbol_kind,
+        "enclosing_scope": symbol.enclosing_scope,
+    })
+}
+
+fn edge_kind_name(edge: &GraphEdgeArtifact) -> &'static str {
+    match graph_edge_kind_or_default(edge.relation, edge.edge_kind) {
+        GraphEdgeKind::Calls => "calls",
+        GraphEdgeKind::CallsDyn => "calls_dyn",
+        GraphEdgeKind::ReferencesHof => "references_hof",
+        GraphEdgeKind::ReferencesOther | GraphEdgeKind::ReferencesAddress => "references_other",
+    }
+}
+
+fn edge_value(edge: &GraphEdgeArtifact) -> Value {
+    json!({
+        "source_stable_id": edge.source_stable_symbol_id,
+        "target_stable_id": edge.target_stable_symbol_id,
+        "target_label": edge.target_label,
+        "target_package": null,
+        "relation": edge.relation,
+        "edge_kind": edge_kind_name(edge),
+        "confidence": edge.confidence,
+        "confidence_score": edge.confidence_score,
+        "bind_method": edge.bind_method,
+        "receiver_text": edge.receiver_text,
+        "scope_text": edge.scope_text,
+    })
+}
+
+fn caller_response(
+    package: &ServingPackage,
+    records: Vec<OwnedCallerRecord>,
+    include_unresolved: bool,
+) -> Value {
+    let mut rows = records
+        .into_iter()
+        .filter_map(|record| match record {
+            OwnedCallerRecord::Resolved { caller, edge } => Some(json!({
+                "caller": candidate_value(package, &caller),
+                "edge": edge_value(&edge),
+                "resolved": true,
+            })),
+            OwnedCallerRecord::Unresolved { caller, edge, .. } if include_unresolved => {
+                Some(json!({
+                    "caller": candidate_value(package, &caller),
+                    "edge": edge_value(&edge),
+                    "resolved": false,
+                }))
+            }
+            OwnedCallerRecord::Unresolved { .. } => None,
+        })
+        .collect::<Vec<_>>();
+    sort_edge_rows(&mut rows, "caller");
+    edge_response("callers", rows)
+}
+
+fn callee_response(
+    package: &ServingPackage,
+    records: Vec<OwnedCalleeRecord>,
+    include_unresolved: bool,
+) -> Value {
+    let mut rows = records
+        .into_iter()
+        .filter_map(|record| match record {
+            OwnedCalleeRecord::Resolved { symbol, edge } => Some(json!({
+                "callee": candidate_value(package, &symbol),
+                "edge": edge_value(&edge),
+                "resolved": true,
+            })),
+            OwnedCalleeRecord::Unresolved { edge, .. } if include_unresolved => Some(json!({
+                "callee": null,
+                "edge": edge_value(&edge),
+                "resolved": false,
+            })),
+            OwnedCalleeRecord::Unresolved { .. } => None,
+        })
+        .collect::<Vec<_>>();
+    sort_edge_rows(&mut rows, "callee");
+    edge_response("callees", rows)
+}
+
+fn sort_edge_rows(rows: &mut [Value], direction: &str) {
+    rows.sort_by_cached_key(|row| {
+        let resolved = row["resolved"].as_bool().unwrap_or(false);
+        let candidate = &row[direction];
+        format!(
+            "{}|{}|{:020}|{:020}|{}|{}",
+            if resolved { 0 } else { 1 },
+            candidate["file_path"].as_str().unwrap_or_default(),
+            candidate["line_range"][0].as_u64().unwrap_or_default(),
+            candidate["line_range"][1].as_u64().unwrap_or_default(),
+            candidate["qualified_name"].as_str().unwrap_or_default(),
+            row["edge"]["edge_kind"].as_str().unwrap_or_default(),
+        )
+    });
+}
+
+fn edge_response(direction: &str, rows: Vec<Value>) -> Value {
+    let mut calls = 0;
+    let mut calls_dyn = 0;
+    let mut references_hof = 0;
+    let mut references_other = 0;
+    let mut unresolved = 0;
+    let mut unresolved_labels = BTreeSet::new();
+    for row in &rows {
+        match row["edge"]["edge_kind"].as_str().unwrap_or_default() {
+            "calls" => calls += 1,
+            "calls_dyn" => calls_dyn += 1,
+            "references_hof" => references_hof += 1,
+            _ => references_other += 1,
+        }
+        if !row["resolved"].as_bool().unwrap_or(false) {
+            unresolved += 1;
+            if let Some(label) = row["edge"]["target_label"].as_str() {
+                unresolved_labels.insert(label.to_owned());
+            }
+        }
+    }
+    let mut unresolved_sample = Vec::new();
+    let mut sample_bytes = 0;
+    for label in unresolved_labels {
+        if unresolved_sample.len() >= 5 || sample_bytes + label.len() > 120 {
+            break;
+        }
+        sample_bytes += label.len();
+        unresolved_sample.push(label);
+    }
+    let mut response = json!({
+        "counts_by_kind": {
+            "calls": calls,
+            "calls_dyn": calls_dyn,
+            "references_hof": references_hof,
+            "references_other": references_other,
+            "unresolved": unresolved,
+        },
+        "unresolved_sample": unresolved_sample,
+    });
+    response[direction] = Value::Array(rows);
+    response
+}
+
+fn empty_edges(direction: &str) -> Value {
+    edge_response(direction, Vec::new())
+}
+
+fn slice_symbol_source(
+    source_text: &str,
+    byte_range: [usize; 2],
+    line_range: [usize; 2],
+    context_lines: usize,
+) -> Result<(String, [usize; 2]), CodeBackendError> {
+    let [byte_start, byte_end] = byte_range;
+    let [line_start, line_end] = line_range;
+    if byte_start > byte_end || byte_end > source_text.len() {
+        return Err(CodeBackendError::SourceRangeInvalid);
+    }
+    if context_lines == 0 {
+        let source = source_text
+            .get(byte_start..byte_end)
+            .ok_or(CodeBackendError::SourceRangeInvalid)?
+            .to_owned();
+        return Ok((source, line_range));
+    }
+
+    let line_starts = line_starts(source_text);
+    if line_starts.is_empty() {
+        return Ok((String::new(), [0, 0]));
+    }
+    let expanded_start = line_start.saturating_sub(context_lines).max(1);
+    let expanded_end = line_end
+        .saturating_add(context_lines)
+        .min(line_starts.len());
+    let start_byte = line_starts[expanded_start - 1];
+    let end_byte = if expanded_end < line_starts.len() {
+        line_starts[expanded_end]
+    } else {
+        source_text.len()
+    };
+    let source = source_text
+        .get(start_byte..end_byte)
+        .ok_or(CodeBackendError::SourceRangeInvalid)?
+        .to_owned();
+    Ok((source, [expanded_start, expanded_end]))
+}
+
+fn line_starts(source_text: &str) -> Vec<usize> {
+    if source_text.is_empty() {
+        return Vec::new();
+    }
+    let mut starts = vec![0];
+    for (index, byte) in source_text.bytes().enumerate() {
+        if byte == b'\n' && index + 1 < source_text.len() {
+            starts.push(index + 1);
+        }
+    }
+    starts
 }
 
 fn catalog_symbols(

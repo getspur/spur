@@ -22,6 +22,22 @@ pub(crate) enum SourceSidecarError {
     Build(String),
 }
 
+#[derive(Debug, Error)]
+#[allow(
+    dead_code,
+    reason = "the reader is used through code_backend's shared module view"
+)]
+pub(crate) enum SourceSidecarReadError {
+    #[error("source sidecar integrity mismatch")]
+    IntegrityMismatch,
+    #[error("source sidecar is corrupt")]
+    Corrupt,
+    #[error("source text is unavailable")]
+    TextUnavailable,
+    #[error("source content OID mismatch")]
+    ContentOidMismatch,
+}
+
 #[derive(Debug)]
 struct SourceSidecarRow {
     file_path: String,
@@ -96,6 +112,111 @@ pub(crate) fn write_source_sidecar(
             ))
         })?;
     Ok(sha256)
+}
+
+#[allow(
+    dead_code,
+    reason = "the reader is used through code_backend's shared module view"
+)]
+pub(crate) fn read_verified_source(
+    sidecar_path: &Path,
+    expected_sha256: &str,
+    expected_bytes: u64,
+    file_path: &str,
+    content_oid: &str,
+) -> Result<String, SourceSidecarReadError> {
+    let metadata =
+        fs::metadata(sidecar_path).map_err(|_| SourceSidecarReadError::IntegrityMismatch)?;
+    if metadata.len() != expected_bytes {
+        return Err(SourceSidecarReadError::IntegrityMismatch);
+    }
+    let actual_sha256 =
+        sha256_file(sidecar_path).map_err(|_| SourceSidecarReadError::IntegrityMismatch)?;
+    if !actual_sha256.eq_ignore_ascii_case(expected_sha256) {
+        return Err(SourceSidecarReadError::IntegrityMismatch);
+    }
+
+    let file =
+        fs::File::open(sidecar_path).map_err(|_| SourceSidecarReadError::IntegrityMismatch)?;
+    let builder = ParquetRecordBatchReaderBuilder::try_new(file)
+        .map_err(|_| SourceSidecarReadError::Corrupt)?;
+    let file_path_index = builder
+        .schema()
+        .index_of("file_path")
+        .map_err(|_| SourceSidecarReadError::Corrupt)?;
+    let content_oid_index = builder
+        .schema()
+        .index_of("content_oid")
+        .map_err(|_| SourceSidecarReadError::Corrupt)?;
+    let source_text_index = builder
+        .schema()
+        .index_of("source_text")
+        .map_err(|_| SourceSidecarReadError::Corrupt)?;
+    let projection = ProjectionMask::roots(
+        builder.parquet_schema(),
+        [file_path_index, content_oid_index, source_text_index],
+    );
+    let reader = builder
+        .with_projection(projection)
+        .build()
+        .map_err(|_| SourceSidecarReadError::Corrupt)?;
+
+    let mut exact_source = None;
+    let mut saw_path_with_other_oid = false;
+    for batch in reader {
+        let batch = batch.map_err(|_| SourceSidecarReadError::Corrupt)?;
+        let file_paths = required_read_column(&batch, "file_path")?;
+        let content_oids = required_read_column(&batch, "content_oid")?;
+        let source_texts = required_read_column(&batch, "source_text")?;
+        for row in 0..batch.num_rows() {
+            if file_paths.is_null(row) || content_oids.is_null(row) || source_texts.is_null(row) {
+                return Err(SourceSidecarReadError::Corrupt);
+            }
+            let row_path = file_paths.value(row);
+            let row_oid = content_oids.value(row);
+            let row_source = source_texts.value(row);
+            if validate_source_manifest_path(row_path).is_err() || row_oid.is_empty() {
+                return Err(SourceSidecarReadError::Corrupt);
+            }
+            if git_blob_oid(row_source.as_bytes()) != row_oid {
+                return Err(SourceSidecarReadError::ContentOidMismatch);
+            }
+            if row_path != file_path {
+                continue;
+            }
+            if row_oid != content_oid {
+                saw_path_with_other_oid = true;
+                continue;
+            }
+            if exact_source.replace(row_source.to_owned()).is_some() {
+                return Err(SourceSidecarReadError::Corrupt);
+            }
+        }
+    }
+
+    exact_source.ok_or_else(|| {
+        if saw_path_with_other_oid {
+            SourceSidecarReadError::ContentOidMismatch
+        } else {
+            SourceSidecarReadError::TextUnavailable
+        }
+    })
+}
+
+#[allow(
+    dead_code,
+    reason = "the reader is used through code_backend's shared module view"
+)]
+fn required_read_column<'a>(
+    batch: &'a RecordBatch,
+    name: &str,
+) -> Result<&'a StringArray, SourceSidecarReadError> {
+    batch
+        .column_by_name(name)
+        .ok_or(SourceSidecarReadError::Corrupt)?
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .ok_or(SourceSidecarReadError::Corrupt)
 }
 
 fn source_sidecar_rows(

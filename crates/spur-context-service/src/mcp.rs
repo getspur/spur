@@ -13,7 +13,10 @@ use thiserror::Error;
 
 use crate::abuse::{self, SourceKind, ValidateOptions};
 use crate::catalog::{readable_table, CatalogResolver, ResolvedRevision};
-use crate::code_backend::{CatalogRequest, CodeBackend, CodeBackendError, CodeSearchRequest};
+use crate::code_backend::{
+    CatalogRequest, CodeBackend, CodeBackendError, CodeEdgesRequest, CodeReadRequest,
+    CodeSearchRequest,
+};
 use crate::jobs::{
     BacklogOwner, CreateJobRequest, EnqueueOutcome, JobRecord, JobStatus, JobStore, JobsError,
     QueueConfig,
@@ -265,6 +268,39 @@ pub async fn handle_tool_with_code_backend(
             };
             backend.search(request).await.map_err(code_backend_error)
         }
+        "external_code_read" => {
+            let args: CodeReadArgs = parse_args(args)?;
+            backend
+                .read(CodeReadRequest {
+                    source: args.source().to_owned(),
+                    selector: args.selector,
+                    context_lines: args.context_lines.unwrap_or(0),
+                })
+                .await
+                .map_err(|error| code_backend_tool_error("external_code_read failed", error))
+        }
+        "external_code_callers" => {
+            let args: CodeCallersArgs = parse_args(args)?;
+            backend
+                .callers(CodeEdgesRequest {
+                    source: args.source().to_owned(),
+                    selector: args.selector,
+                    include_unresolved: args.include_unresolved.unwrap_or(false),
+                })
+                .await
+                .map_err(|error| code_backend_tool_error("external_code_callers failed", error))
+        }
+        "external_code_callees" => {
+            let args: CodeCalleesArgs = parse_args(args)?;
+            backend
+                .callees(CodeEdgesRequest {
+                    source: args.source().to_owned(),
+                    selector: args.selector,
+                    include_unresolved: args.include_unresolved.unwrap_or(false),
+                })
+                .await
+                .map_err(|error| code_backend_tool_error("external_code_callees failed", error))
+        }
         "external_index" => handle_index_with_code_backend(args, backend).await,
         "external_index_status" => {
             let args: ExternalIndexStatusArgs = parse_args(args)?;
@@ -333,6 +369,19 @@ fn code_backend_error(error: CodeBackendError) -> McpHandlerError {
             error.code(),
             error.is_retryable()
         )),
+    }
+}
+
+fn code_backend_tool_error(context: &'static str, error: CodeBackendError) -> McpHandlerError {
+    match error {
+        CodeBackendError::InvalidSelector(message) => McpHandlerError::InvalidParams(message),
+        CodeBackendError::AmbiguousSelector { .. } => {
+            McpHandlerError::InvalidParams(format!("{context}: {error}"))
+        }
+        CodeBackendError::SymbolNotFound(selector) => {
+            McpHandlerError::NotFound(format!("symbol not found: {selector}"))
+        }
+        error => code_backend_error(error),
     }
 }
 
