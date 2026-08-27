@@ -1,4 +1,8 @@
-use std::collections::VecDeque;
+use std::{
+    collections::VecDeque,
+    fs,
+    path::{Path, PathBuf},
+};
 
 use anyhow::anyhow;
 use async_trait::async_trait;
@@ -8,9 +12,11 @@ use spur_graph::memory_eval::{
     contract::{BenchmarkDataset, SourcePin},
     qa::{
         build_longmem_reader_request, evaluate_longmem, render_longmem_judge_prompt, JsonQaCache,
-        LongMemQaBackend, LongMemQaRequest, LongMemQaResponse, OpenAiResponsesBackend, QaBudget,
-        QaBudgetLimits, QaCache, QaCacheKey, QaStage, QaStatus, QaUsage,
-        LONGMEMEVAL_MAX_INPUT_TOKENS, LONGMEMEVAL_MODEL, OPENAI_RESPONSES_URL,
+        LongMemQaBackend, LongMemQaRecord, LongMemQaRequest, LongMemQaResponse,
+        OpenAiResponsesBackend, QaBudget, QaBudgetLimits, QaCache, QaCacheEntry, QaCacheKey,
+        QaStage, QaStatus, QaUsage, LONGMEMEVAL_INPUT_USD_MICROS_PER_MILLION,
+        LONGMEMEVAL_MAX_INPUT_TOKENS, LONGMEMEVAL_MODEL, LONGMEMEVAL_OUTPUT_USD_MICROS_PER_MILLION,
+        OPENAI_RESPONSES_URL,
     },
     ranking::{Granularity, QueryOccurrenceId, RankedHit, Ranking, RankingSet, Variant},
 };
@@ -147,6 +153,71 @@ impl LongMemQaBackend for FakeBackend {
             .pop_front()
             .unwrap_or_else(|| Err(anyhow!("unexpected backend request")))
     }
+}
+
+async fn seed_reconciliation_cache(
+    artifact_root: &Path,
+    dataset: &BenchmarkDataset,
+    rankings: &RankingSet,
+) -> (JsonQaCache, Vec<LongMemQaRecord>, QaCacheKey, QaCacheKey) {
+    let mut cache = JsonQaCache::open(artifact_root.join("qa/cache/longmemeval")).unwrap();
+    let mut backend = FakeBackend::scripted([
+        Ok(response("Take the train", 100, 8)),
+        Ok(response("yes", 40, 1)),
+    ]);
+    let mut paid_budget = QaBudget::new(QaBudgetLimits {
+        max_requests: 2,
+        max_total_tokens: u64::MAX,
+        max_usd_micros: u64::MAX,
+        reserve_tokens_per_request: 1,
+        reserve_usd_micros_per_request: 1,
+        input_usd_micros_per_million: LONGMEMEVAL_INPUT_USD_MICROS_PER_MILLION,
+        output_usd_micros_per_million: LONGMEMEVAL_OUTPUT_USD_MICROS_PER_MILLION,
+    });
+
+    let records = evaluate_longmem(
+        dataset,
+        rankings,
+        &mut backend,
+        &mut cache,
+        &mut paid_budget,
+    )
+    .await
+    .unwrap();
+    assert_eq!(records[0].status, QaStatus::Complete);
+    assert_eq!(backend.requests.len(), 2);
+    let reader_key = QaCacheKey::from_request(&backend.requests[0]);
+    let judge_key = QaCacheKey::from_request(&backend.requests[1]);
+    (cache, records, reader_key, judge_key)
+}
+
+fn cache_entry_path(artifact_root: &Path, key: &QaCacheKey) -> PathBuf {
+    artifact_root
+        .join("qa/cache/longmemeval")
+        .join(format!("{}.json", key.identity_sha256()))
+}
+
+fn mutate_cache_entry(
+    artifact_root: &Path,
+    key: &QaCacheKey,
+    mutate: impl FnOnce(&mut QaCacheEntry),
+) {
+    let path = cache_entry_path(artifact_root, key);
+    let mut entry: QaCacheEntry = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    mutate(&mut entry);
+    fs::write(path, serde_json::to_vec_pretty(&entry).unwrap()).unwrap();
+}
+
+fn reconciliation_error(
+    cache: &JsonQaCache,
+    artifact_root: &Path,
+    dataset: &BenchmarkDataset,
+    rankings: &RankingSet,
+) -> String {
+    cache
+        .validated_artifacts_for_run(artifact_root, dataset, rankings)
+        .unwrap_err()
+        .to_string()
 }
 
 #[derive(Default)]
@@ -426,6 +497,106 @@ async fn successful_reader_and_judge_are_fully_cached_and_resume_without_backend
     assert!(resume_backend.requests.is_empty());
     assert_eq!(resume_budget.requests(), 2);
     assert_eq!(resume_budget.usage().total_tokens, 149);
+}
+
+#[tokio::test]
+async fn valid_reader_and_judge_reconcile_then_resume_without_backend_transmissions() {
+    let dataset = fixture_dataset();
+    let rankings = frozen_rankings(&dataset);
+    let temp = tempfile::tempdir().unwrap();
+    let (mut cache, first, _, _) =
+        seed_reconciliation_cache(temp.path(), &dataset, &rankings).await;
+
+    let artifacts = cache
+        .validated_artifacts_for_run(temp.path(), &dataset, &rankings)
+        .unwrap();
+    assert_eq!(artifacts.len(), 2);
+
+    let mut resume_backend = FakeBackend::default();
+    let resumed = evaluate_longmem(
+        &dataset,
+        &rankings,
+        &mut resume_backend,
+        &mut cache,
+        &mut QaBudget::new(QaBudgetLimits {
+            max_requests: 2,
+            max_total_tokens: u64::MAX,
+            max_usd_micros: u64::MAX,
+            reserve_tokens_per_request: 1,
+            reserve_usd_micros_per_request: 1,
+            input_usd_micros_per_million: LONGMEMEVAL_INPUT_USD_MICROS_PER_MILLION,
+            output_usd_micros_per_million: LONGMEMEVAL_OUTPUT_USD_MICROS_PER_MILLION,
+        }),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(resumed, first);
+    assert!(resume_backend.requests.is_empty());
+}
+
+#[tokio::test]
+async fn reconciliation_rejects_judge_label_inconsistent_with_deterministic_output() {
+    let dataset = fixture_dataset();
+    let rankings = frozen_rankings(&dataset);
+    let temp = tempfile::tempdir().unwrap();
+    let (cache, _, _, judge_key) =
+        seed_reconciliation_cache(temp.path(), &dataset, &rankings).await;
+    mutate_cache_entry(temp.path(), &judge_key, |entry| entry.label = Some(false));
+
+    let error = reconciliation_error(&cache, temp.path(), &dataset, &rankings);
+
+    assert!(error.contains("judge label"), "unexpected error: {error}");
+}
+
+#[tokio::test]
+async fn reconciliation_rejects_cost_inconsistent_with_pinned_response_price() {
+    let dataset = fixture_dataset();
+    let rankings = frozen_rankings(&dataset);
+    let temp = tempfile::tempdir().unwrap();
+    let (cache, _, _, judge_key) =
+        seed_reconciliation_cache(temp.path(), &dataset, &rankings).await;
+    mutate_cache_entry(temp.path(), &judge_key, |entry| entry.cost_usd_micros = 0);
+
+    let error = reconciliation_error(&cache, temp.path(), &dataset, &rankings);
+
+    assert!(error.contains("pinned price"), "unexpected error: {error}");
+}
+
+#[tokio::test]
+async fn reconciliation_rejects_decoded_output_inconsistent_with_raw_response() {
+    let dataset = fixture_dataset();
+    let rankings = frozen_rankings(&dataset);
+    let temp = tempfile::tempdir().unwrap();
+    let (cache, _, reader_key, _) =
+        seed_reconciliation_cache(temp.path(), &dataset, &rankings).await;
+    mutate_cache_entry(temp.path(), &reader_key, |entry| {
+        entry.response.output_text = "Take the bus".into();
+    });
+
+    let error = reconciliation_error(&cache, temp.path(), &dataset, &rankings);
+
+    assert!(
+        error.contains("decoded output_text"),
+        "unexpected error: {error}"
+    );
+}
+
+#[tokio::test]
+async fn reconciliation_rejects_decoded_usage_inconsistent_with_raw_response() {
+    let dataset = fixture_dataset();
+    let rankings = frozen_rankings(&dataset);
+    let temp = tempfile::tempdir().unwrap();
+    let (cache, _, reader_key, _) =
+        seed_reconciliation_cache(temp.path(), &dataset, &rankings).await;
+    mutate_cache_entry(temp.path(), &reader_key, |entry| {
+        entry.response.usage.input_tokens += 1;
+        entry.response.usage.total_tokens += 1;
+    });
+
+    let error = reconciliation_error(&cache, temp.path(), &dataset, &rankings);
+
+    assert!(error.contains("decoded usage"), "unexpected error: {error}");
 }
 
 #[tokio::test]

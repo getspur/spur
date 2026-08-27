@@ -536,6 +536,10 @@ fn sha256_hex(bytes: &[u8]) -> String {
 
 /// Audited LongMemEval reader and judge snapshot.
 pub const LONGMEMEVAL_MODEL: &str = "gpt-4o-2024-08-06";
+/// Pinned standard input price for the audited LongMemEval model snapshot.
+pub const LONGMEMEVAL_INPUT_USD_MICROS_PER_MILLION: u64 = 2_500_000;
+/// Pinned standard output price for the audited LongMemEval model snapshot.
+pub const LONGMEMEVAL_OUTPUT_USD_MICROS_PER_MILLION: u64 = 10_000_000;
 /// Conservative ceiling for all billed Responses input, including provider
 /// framing, under the pinned model's documented 128,000-token context window.
 /// <https://developers.openai.com/api/docs/models/gpt-4o>
@@ -626,8 +630,54 @@ impl LongMemQaResponse {
         );
         self.output_text = self.output_text.trim().to_owned();
         self.usage = self.usage.validate()?;
+        let (decoded_output, decoded_usage) = decode_raw_response_fields(&self.raw_response)?;
+        ensure!(
+            self.output_text == decoded_output,
+            "decoded output_text does not match raw_response"
+        );
+        ensure!(
+            self.usage == decoded_usage,
+            "decoded usage does not match raw_response"
+        );
         Ok(self)
     }
+}
+
+fn decode_raw_response_fields(raw_response: &Value) -> anyhow::Result<(String, QaUsage)> {
+    ensure!(
+        raw_response.get("status").and_then(Value::as_str) == Some("completed"),
+        "OpenAI response status is not completed"
+    );
+    let output_text = raw_response
+        .get("output_text")
+        .and_then(Value::as_str)
+        .context("OpenAI response has no string output_text")?
+        .trim()
+        .to_owned();
+    ensure!(
+        !output_text.is_empty(),
+        "completed response has empty output_text"
+    );
+    let usage = raw_response
+        .get("usage")
+        .and_then(Value::as_object)
+        .context("OpenAI response has malformed usage")?;
+    let usage = QaUsage {
+        input_tokens: usage
+            .get("input_tokens")
+            .and_then(Value::as_u64)
+            .context("OpenAI usage.input_tokens is malformed")?,
+        output_tokens: usage
+            .get("output_tokens")
+            .and_then(Value::as_u64)
+            .context("OpenAI usage.output_tokens is malformed")?,
+        total_tokens: usage
+            .get("total_tokens")
+            .and_then(Value::as_u64)
+            .context("OpenAI usage.total_tokens is malformed")?,
+    }
+    .validate()?;
+    Ok((output_text, usage))
 }
 
 /// Complete cache identity for reader and judge artifacts.
@@ -770,7 +820,7 @@ impl JsonQaCache {
             let bytes = fs::read(&path).with_context(|| format!("read {}", path.display()))?;
             let entry: QaCacheEntry = serde_json::from_slice(&bytes)
                 .with_context(|| format!("decode LongMemEval QA cache {}", path.display()))?;
-            validate_cache_entry(&entry)?;
+            validate_reconciliation_cache_entry(&entry)?;
             let expected_name = format!("{}.json", entry.key.identity_sha256());
             ensure!(
                 path.file_name().and_then(|name| name.to_str()) == Some(expected_name.as_str()),
@@ -879,12 +929,33 @@ fn validate_cache_entry(entry: &QaCacheEntry) -> anyhow::Result<()> {
         "cache entry key does not match its complete request identity"
     );
     entry.response.clone().validate()?;
-    ensure!(
-        matches!(
-            (entry.request.stage, entry.label),
-            (QaStage::Reader, None) | (QaStage::Judge, Some(_))
+    match entry.request.stage {
+        QaStage::Reader => ensure!(
+            entry.label.is_none(),
+            "reader cache artifact has a judge label"
         ),
-        "cache artifact stage and label disagree"
+        QaStage::Judge => ensure!(
+            entry.label == Some(judge_label(&entry.response.output_text)),
+            "judge label does not match deterministic judge output"
+        ),
+    }
+    Ok(())
+}
+
+fn validate_reconciliation_cache_entry(entry: &QaCacheEntry) -> anyhow::Result<()> {
+    validate_cache_entry(entry)?;
+    ensure!(
+        entry.request.model == LONGMEMEVAL_MODEL,
+        "cache entry model does not match the pinned LongMemEval model"
+    );
+    let expected_cost = token_cost_usd_micros(
+        entry.response.usage,
+        LONGMEMEVAL_INPUT_USD_MICROS_PER_MILLION,
+        LONGMEMEVAL_OUTPUT_USD_MICROS_PER_MILLION,
+    )?;
+    ensure!(
+        entry.cost_usd_micros == expected_cost,
+        "cache entry cost does not match the pinned price of response usage"
     );
     Ok(())
 }
@@ -1129,33 +1200,7 @@ impl OpenAiResponsesBackend {
             "OpenAI Responses API HTTP status {status_code}"
         );
         let raw_response: Value = serde_json::from_slice(body).context("decode OpenAI response")?;
-        ensure!(
-            raw_response.get("status").and_then(Value::as_str) == Some("completed"),
-            "OpenAI response status is not completed"
-        );
-        let output_text = raw_response
-            .get("output_text")
-            .and_then(Value::as_str)
-            .context("OpenAI response has no string output_text")?
-            .to_owned();
-        let usage = raw_response
-            .get("usage")
-            .and_then(Value::as_object)
-            .context("OpenAI response has malformed usage")?;
-        let usage = QaUsage {
-            input_tokens: usage
-                .get("input_tokens")
-                .and_then(Value::as_u64)
-                .context("OpenAI usage.input_tokens is malformed")?,
-            output_tokens: usage
-                .get("output_tokens")
-                .and_then(Value::as_u64)
-                .context("OpenAI usage.output_tokens is malformed")?,
-            total_tokens: usage
-                .get("total_tokens")
-                .and_then(Value::as_u64)
-                .context("OpenAI usage.total_tokens is malformed")?,
-        };
+        let (output_text, usage) = decode_raw_response_fields(&raw_response)?;
         LongMemQaResponse {
             output_text,
             usage,

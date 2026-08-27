@@ -28,7 +28,10 @@ use spur_graph::memory_eval::{
     qa::{
         evaluate_locomo, evaluate_longmem, ranking_sha256, render_locomo_prompt_with_seed,
         JsonQaCache, LongMemQaRecord, OpenAiResponsesBackend, QaBackend, QaBudget, QaBudgetLimits,
-        QaRecord, QaRequest, QaResponse, QaStatus, LONGMEMEVAL_MAX_INPUT_TOKENS, LONGMEMEVAL_MODEL,
+        QaRecord, QaRequest, QaResponse, QaStatus,
+        LONGMEMEVAL_INPUT_USD_MICROS_PER_MILLION as INPUT_USD_MICROS_PER_MILLION,
+        LONGMEMEVAL_MAX_INPUT_TOKENS, LONGMEMEVAL_MODEL,
+        LONGMEMEVAL_OUTPUT_USD_MICROS_PER_MILLION as OUTPUT_USD_MICROS_PER_MILLION,
         OPENAI_RESPONSES_URL,
     },
     ranking::{
@@ -71,8 +74,6 @@ const LONGMEMEVAL_DEFAULT_K: usize = 50;
 const DEFAULT_SEED_K: usize = 10;
 const DEFAULT_MAX_DEPTH: usize = 3;
 const TOKENS_RESERVED_PER_REQUEST: u64 = 200_000;
-const INPUT_USD_MICROS_PER_MILLION: u64 = 2_500_000;
-const OUTPUT_USD_MICROS_PER_MILLION: u64 = 10_000_000;
 const LOCOMO_MAX_OUTPUT_TOKENS: u64 = 800;
 
 const VARIANTS: [Variant; 5] = [
