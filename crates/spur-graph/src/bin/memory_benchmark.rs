@@ -14,8 +14,8 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use spur_graph::memory_eval::{
     artifacts::{
-        ArtifactWriter, QaArtifactKind, QaProgress, ReleaseGates, RetrievalGateEvidence, RunEvent,
-        RunManifest, RunState,
+        ArtifactWriter, MetricValue, QaArtifactKind, QaProgress, ReleaseGates,
+        RetrievalGateEvidence, RetrievalMetrics, RunEvent, RunManifest, RunState,
     },
     contract::{
         validate_dataset, BenchmarkContract, BenchmarkDataset, DatasetKind, QuestionRecord,
@@ -36,6 +36,28 @@ use spur_graph::memory_eval::{
     },
 };
 
+// Task 7's scorer remains crate-private while Task 12 retains the legacy
+// memory_eval exports. Include that exact implementation here instead of
+// duplicating ranking/scoring logic in the Task 11 runner. The serialized
+// report is converted to Task 8's public artifact type below.
+#[allow(dead_code)]
+mod task7_scoring {
+    pub use spur_graph::memory_eval::{contract, ranking};
+    pub const COVERED_WEIGHT: u32 = 1000;
+    pub const PARTIAL_WEIGHT: u32 = 500;
+
+    pub mod metrics {
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/memory_eval/metrics.rs"
+        ));
+    }
+}
+
+use task7_scoring::metrics::{
+    score_locomo_retrieval, score_longmemeval_retrieval, RetrievalMetricInput,
+};
+
 const CONTRACT_NAME: &str = "origin-faithful-v1";
 const LOCOMO_ORIGIN: &str = "https://github.com/snap-research/locomo";
 const LOCOMO_REVISION: &str = "3eb6f2c585f5e1699204e3c3bdf7adc5c28cb376";
@@ -43,7 +65,8 @@ const LOCOMO_SHA256: &str = "79fa87e90f04081343b8c8debecb80a9a6842b76a7aa537dc9f
 const LONGMEMEVAL_ORIGIN: &str = "https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned";
 const LONGMEMEVAL_REVISION: &str = "98d7416c24c778c2fee6e6f3006e7a073259d48f";
 const LONGMEMEVAL_SHA256: &str = "d6f21ea9d60a0d56f34a05b609c79c88a451d2ae03597821ea3d5a9678c3a442";
-const DEFAULT_K: usize = 10;
+const LOCOMO_DEFAULT_K: usize = 10;
+const LONGMEMEVAL_DEFAULT_K: usize = 50;
 const DEFAULT_SEED_K: usize = 10;
 const DEFAULT_MAX_DEPTH: usize = 3;
 const TOKENS_RESERVED_PER_REQUEST: u64 = 200_000;
@@ -107,9 +130,10 @@ struct DatasetArgs {
     /// Optional revision label for compatibility or smoke inputs.
     #[arg(long)]
     source_revision: Option<String>,
-    /// Unique canonical provenance results retained per ranking.
-    #[arg(long, default_value_t = DEFAULT_K)]
-    k: usize,
+    /// Unique canonical provenance results retained per ranking. Defaults to
+    /// the largest dataset-native metric cutoff (LoCoMo 10, LongMemEval 50).
+    #[arg(long)]
+    k: Option<usize>,
     /// Lexical graph seeds used only by graph_traversal.
     #[arg(long, default_value_t = DEFAULT_SEED_K)]
     seed_k: usize,
@@ -175,7 +199,7 @@ fn validate_command(args: DatasetArgs) -> Result<()> {
         manifest.state = RunState::Blocked;
     }
     finish_telemetry(&mut manifest, &telemetry, 0, 0, 0);
-    writer.write_report(&render_report(&manifest, &validation))?;
+    writer.write_report(&render_report(&manifest, &validation, &[]))?;
     writer.write_manifest(&manifest)?;
     writer.verify_checksums()?;
     if validation.has_fatal() {
@@ -189,7 +213,6 @@ fn validate_command(args: DatasetArgs) -> Result<()> {
 }
 
 fn retrieve_command(args: RetrieveArgs) -> Result<()> {
-    ensure!(args.dataset.k > 0, "--k must be positive");
     ensure!(args.dataset.seed_k > 0, "--seed-k must be positive");
 
     let mut telemetry = RunTelemetry::new();
@@ -203,7 +226,7 @@ fn retrieve_command(args: RetrieveArgs) -> Result<()> {
     if validation.has_fatal() {
         manifest.state = RunState::Blocked;
         finish_telemetry(&mut manifest, &telemetry, 0, 0, 0);
-        writer.write_report(&render_report(&manifest, &validation))?;
+        writer.write_report(&render_report(&manifest, &validation, &[]))?;
         writer.write_manifest(&manifest)?;
         bail!("dataset validation failed with fatal findings");
     }
@@ -213,7 +236,13 @@ fn retrieve_command(args: RetrieveArgs) -> Result<()> {
     // Deliberately complete every variant in memory before publishing the
     // first ranking file. QA is a separate command and can only read these
     // frozen JSONL artifacts.
-    let retrieval = rank_dataset(&dataset, args.dataset.k, &traversal, &mut telemetry)?;
+    let retrieval = rank_dataset(
+        &dataset,
+        retrieval_k(&args.dataset, dataset.kind)?,
+        &traversal,
+        &mut telemetry,
+    )?;
+    let metrics = score_retrieval(&dataset, &validation, &retrieval.rankings)?;
     for variant in VARIANTS {
         writer.write_rankings(&mut manifest, variant, &retrieval.rankings)?;
     }
@@ -221,12 +250,24 @@ fn retrieve_command(args: RetrieveArgs) -> Result<()> {
         manifest.ranking_hashes.len() == VARIANTS.len(),
         "retrieval did not freeze exactly five variant artifacts"
     );
+    writer.write_metrics(&manifest, &metrics)?;
+    verify_frozen_rankings(&args.dataset.output, &manifest)?;
+    writer.verify_checksums()?;
+    let persisted_metrics = read_metric_artifacts(&args.dataset.output, &manifest, Some(&metrics))?;
+    manifest.gates = ReleaseGates::from_validation(
+        &validation,
+        retrieval_gate_evidence(
+            retrieval.gold_leak_free,
+            &persisted_metrics,
+            retrieval_cohort(&validation, dataset.kind).len(),
+        ),
+    );
     manifest.transition(RunEvent::RetrievalComplete)?;
     manifest.transition(RunEvent::PublishRetrieval)?;
     manifest.transition(RunEvent::QaPending)?;
 
     finish_telemetry(&mut manifest, &telemetry, retrieval.index_bytes, 0, 0);
-    writer.write_report(&render_report(&manifest, &validation))?;
+    writer.write_report(&render_report(&manifest, &validation, &persisted_metrics))?;
     writer.write_manifest(&manifest)?;
     writer.verify_checksums()?;
     Ok(())
@@ -246,9 +287,10 @@ fn qa_command(args: QaArgs) -> Result<()> {
     let writer = ArtifactWriter::new(&args.output)?;
     writer.verify_checksums()?;
     verify_frozen_rankings(&args.output, &manifest)?;
+    let metrics = read_metric_artifacts(&args.output, &manifest, None)?;
 
     let Some(paid) = paid else {
-        writer.write_report(&render_report(&manifest, &validation))?;
+        writer.write_report(&render_report(&manifest, &validation, &metrics))?;
         writer.write_manifest(&manifest)?;
         writer.verify_checksums()?;
         return Ok(());
@@ -276,7 +318,7 @@ fn qa_command(args: QaArgs) -> Result<()> {
         manifest.transition(RunEvent::QaComplete)?;
         manifest.transition(RunEvent::PublishFull)?;
         finish_telemetry(&mut manifest, &telemetry, 0, 0, 0);
-        writer.write_report(&render_report(&manifest, &validation))?;
+        writer.write_report(&render_report(&manifest, &validation, &metrics))?;
         writer.write_manifest(&manifest)?;
         return Ok(());
     }
@@ -304,7 +346,7 @@ fn qa_command(args: QaArgs) -> Result<()> {
         Ok(accounting) => accounting,
         Err(error) => {
             finish_telemetry(&mut manifest, &telemetry, 0, 0, 0);
-            writer.write_report(&render_report(&manifest, &validation))?;
+            writer.write_report(&render_report(&manifest, &validation, &metrics))?;
             // Refresh checksums after any cache records completed before the
             // API failure, without touching immutable ranking bytes.
             writer.write_manifest(&manifest)?;
@@ -330,7 +372,7 @@ fn qa_command(args: QaArgs) -> Result<()> {
         "qa_cost_usd_micros",
         accounting.cost_usd_micros,
     );
-    writer.write_report(&render_report(&manifest, &validation))?;
+    writer.write_report(&render_report(&manifest, &validation, &metrics))?;
     writer.write_manifest(&manifest)?;
     writer.verify_checksums()?;
     Ok(())
@@ -341,7 +383,9 @@ fn report_command(args: RunArgs) -> Result<()> {
     let validation = read_json::<ValidationReport>(&args.output.join("validation.json"))?;
     let writer = ArtifactWriter::new(&args.output)?;
     verify_frozen_rankings_if_present(&args.output, &manifest)?;
-    writer.write_report(&render_report(&manifest, &validation))?;
+    writer.verify_checksums()?;
+    let metrics = read_metric_artifacts_if_present(&args.output, &manifest)?;
+    writer.write_report(&render_report(&manifest, &validation, &metrics))?;
     writer.verify_checksums()?;
     Ok(())
 }
@@ -359,9 +403,9 @@ fn initialize_run(args: &DatasetArgs) -> Result<(BenchmarkDataset, ValidationRep
     let gates = ReleaseGates::from_validation(
         &validation,
         RetrievalGateEvidence {
-            gold_leak_free: true,
-            denominators_valid: !qa_question_ids.is_empty(),
-            metrics_finite: true,
+            gold_leak_free: false,
+            denominators_valid: false,
+            metrics_finite: false,
         },
     );
     let mut manifest = RunManifest::new(
@@ -393,7 +437,11 @@ fn initialize_run(args: &DatasetArgs) -> Result<(BenchmarkDataset, ValidationRep
         "source_track".to_owned(),
         source_track_name(args.track).to_owned(),
     );
-    record_variant_configuration(&mut manifest, args.k, &traversal_config(args))?;
+    record_variant_configuration(
+        &mut manifest,
+        retrieval_k(args, dataset.kind)?,
+        &traversal_config(args),
+    )?;
     Ok((dataset, validation, manifest))
 }
 
@@ -435,7 +483,11 @@ fn prepare_retrieval_run(
     let mut expected_configuration = manifest.clone();
     expected_configuration.variant_configuration.clear();
     expected_configuration.deterministic_seeds.clear();
-    record_variant_configuration(&mut expected_configuration, args.k, &traversal_config(args))?;
+    record_variant_configuration(
+        &mut expected_configuration,
+        retrieval_k(args, dataset.kind)?,
+        &traversal_config(args),
+    )?;
     ensure!(
         manifest.variant_configuration == expected_configuration.variant_configuration
             && manifest.deterministic_seeds == expected_configuration.deterministic_seeds,
@@ -572,6 +624,15 @@ fn traversal_config(args: &DatasetArgs) -> TraversalConfig {
     }
 }
 
+fn retrieval_k(args: &DatasetArgs, kind: DatasetKind) -> Result<usize> {
+    let k = args.k.unwrap_or(match kind {
+        DatasetKind::Locomo => LOCOMO_DEFAULT_K,
+        DatasetKind::LongMemEval => LONGMEMEVAL_DEFAULT_K,
+    });
+    ensure!(k > 0, "--k must be positive");
+    Ok(k)
+}
+
 fn qa_question_ids(
     dataset: &BenchmarkDataset,
     validation: &ValidationReport,
@@ -593,9 +654,307 @@ fn qa_question_ids(
     Ok(ids.clone())
 }
 
+fn retrieval_cohort(validation: &ValidationReport, kind: DatasetKind) -> &[String] {
+    match kind {
+        DatasetKind::Locomo => &validation.cohorts.locomo_retrieval,
+        DatasetKind::LongMemEval => &validation.cohorts.longmemeval_retrieval,
+    }
+}
+
+fn qa_cohort(validation: &ValidationReport, kind: DatasetKind) -> &[String] {
+    match kind {
+        DatasetKind::Locomo => &validation.cohorts.locomo_qa,
+        DatasetKind::LongMemEval => &validation.cohorts.longmemeval_qa,
+    }
+}
+
+fn score_retrieval(
+    dataset: &BenchmarkDataset,
+    validation: &ValidationReport,
+    rankings: &RankingSet,
+) -> Result<Vec<RetrievalMetrics>> {
+    let retrieval_ids = retrieval_cohort(validation, dataset.kind);
+    let qa_ids = qa_cohort(validation, dataset.kind);
+    ensure!(
+        !retrieval_ids.is_empty(),
+        "validated retrieval denominator must be positive"
+    );
+    let retrieval_id_set = retrieval_ids.iter().collect::<BTreeSet<_>>();
+    let qa_id_set = qa_ids.iter().collect::<BTreeSet<_>>();
+    ensure!(
+        retrieval_id_set.len() == retrieval_ids.len()
+            && qa_id_set.len() == qa_ids.len()
+            && retrieval_id_set.is_subset(&qa_id_set),
+        "validated retrieval cohort must be a unique subset of the full QA denominator"
+    );
+    let exclusions = qa_ids
+        .iter()
+        .filter(|question_id| !retrieval_id_set.contains(question_id))
+        .cloned()
+        .collect::<Vec<_>>();
+    ensure!(
+        retrieval_ids.len() + exclusions.len() == qa_ids.len(),
+        "retrieval exclusions must preserve the full QA denominator"
+    );
+
+    let questions = dataset
+        .questions
+        .iter()
+        .map(|question| (question.id.as_str(), question))
+        .collect::<BTreeMap<_, _>>();
+    let mut metrics = Vec::new();
+    for &granularity in granularities(dataset.kind) {
+        for variant in VARIANTS {
+            let inputs = retrieval_ids
+                .iter()
+                .map(|question_id| {
+                    let question = questions.get(question_id.as_str()).with_context(|| {
+                        format!("retrieval cohort contains unknown {question_id}")
+                    })?;
+                    let ranking = rankings
+                        .get(&(
+                            QueryOccurrenceId::new(question_id.clone()),
+                            variant,
+                            granularity,
+                        ))
+                        .with_context(|| {
+                            format!(
+                                "missing ranking for {question_id}/{}/{variant:?}",
+                                granularity_name(granularity)
+                            )
+                        })?
+                        .clone();
+                    Ok(RetrievalMetricInput {
+                        question_id: question.id.clone(),
+                        category: question.category,
+                        question_type: question.question_type.clone(),
+                        caption_evidence: question.gold_turn_ids.iter().any(|turn_id| {
+                            dataset
+                                .turn(turn_id)
+                                .is_some_and(|turn| turn.caption.is_some())
+                        }),
+                        session_gold_ids: question.gold_session_ids.clone(),
+                        turn_gold_ids: question.gold_turn_ids.clone(),
+                        ranking,
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?;
+            let scored = match dataset.kind {
+                DatasetKind::Locomo => score_locomo_retrieval(&inputs, exclusions.clone())?,
+                DatasetKind::LongMemEval => {
+                    score_longmemeval_retrieval(&inputs, exclusions.clone())?
+                }
+            };
+            metrics.push(serde_json::from_value(serde_json::to_value(scored)?)?);
+        }
+    }
+    validate_metric_collection(&metrics, dataset.kind, retrieval_ids.len(), &exclusions)?;
+    Ok(metrics)
+}
+
+fn read_metric_artifacts(
+    output: &Path,
+    manifest: &RunManifest,
+    expected: Option<&[RetrievalMetrics]>,
+) -> Result<Vec<RetrievalMetrics>> {
+    let kind = manifest_dataset_kind(manifest)?;
+    let mut metrics = Vec::new();
+    for &granularity in granularities(kind) {
+        let path = output.join(format!(
+            "metrics/{}-{}.json",
+            dataset_name(kind),
+            granularity_name(granularity)
+        ));
+        let artifact = read_json::<Value>(&path)
+            .with_context(|| format!("read required metric artifact {}", path.display()))?;
+        ensure!(
+            artifact.get("dataset") == Some(&serde_json::to_value(kind)?)
+                && artifact.get("granularity") == Some(&serde_json::to_value(granularity)?),
+            "metric artifact identity does not match {}",
+            path.display()
+        );
+        let variants = artifact
+            .get("variants")
+            .and_then(Value::as_array)
+            .context("metric artifact variants must be an array")?;
+        ensure!(
+            variants.len() == VARIANTS.len(),
+            "metric artifact must contain exactly five variants"
+        );
+        let mut seen = BTreeSet::new();
+        for value in variants {
+            let metric = serde_json::from_value::<RetrievalMetrics>(value.clone())?;
+            ensure!(
+                metric.dataset == kind && metric.granularity == granularity,
+                "persisted metric disagrees with its dataset/granularity file"
+            );
+            ensure!(
+                seen.insert(metric.variant),
+                "metric artifact contains duplicate variant {:?}",
+                metric.variant
+            );
+            let recorded_hash = manifest
+                .ranking_hashes
+                .get(&metric.variant)
+                .context("metric variant has no manifest ranking hash")?;
+            ensure!(
+                value.get("source_ranking_hash").and_then(Value::as_str)
+                    == Some(recorded_hash.as_str()),
+                "metric source ranking hash does not match immutable ranking bytes"
+            );
+            metrics.push(metric);
+        }
+        ensure!(
+            seen == VARIANTS.into_iter().collect(),
+            "metric artifact does not cover every controlled variant"
+        );
+    }
+    let exclusions = metrics
+        .first()
+        .context("metric evidence must not be empty")?
+        .exclusions
+        .clone();
+    let qa_denominator = manifest.qa_progress.denominator();
+    let retrieval_denominator = qa_denominator
+        .checked_sub(exclusions.len())
+        .context("metric exclusions exceed the full QA denominator")?;
+    validate_metric_collection(&metrics, kind, retrieval_denominator, &exclusions)?;
+    if let Some(expected) = expected {
+        ensure!(
+            metrics == expected,
+            "persisted metric artifact content does not match computed metrics"
+        );
+    }
+    Ok(metrics)
+}
+
+fn read_metric_artifacts_if_present(
+    output: &Path,
+    manifest: &RunManifest,
+) -> Result<Vec<RetrievalMetrics>> {
+    let has_metrics = fs::read_dir(output.join("metrics"))?.next().is_some();
+    if !has_metrics {
+        ensure!(
+            matches!(manifest.state, RunState::Validated | RunState::Blocked),
+            "published retrieval is missing metric evidence"
+        );
+        return Ok(Vec::new());
+    }
+    read_metric_artifacts(output, manifest, None)
+}
+
+fn manifest_dataset_kind(manifest: &RunManifest) -> Result<DatasetKind> {
+    match manifest.hardware.get("dataset_kind").map(String::as_str) {
+        Some("locomo") => Ok(DatasetKind::Locomo),
+        Some("longmemeval") => Ok(DatasetKind::LongMemEval),
+        value => bail!("manifest has invalid dataset kind {value:?}"),
+    }
+}
+
+fn validate_metric_collection(
+    metrics: &[RetrievalMetrics],
+    kind: DatasetKind,
+    retrieval_denominator: usize,
+    exclusions: &[String],
+) -> Result<()> {
+    ensure!(
+        retrieval_denominator > 0,
+        "metric denominator must be positive"
+    );
+    ensure!(
+        metrics.len() == granularities(kind).len() * VARIANTS.len(),
+        "metric evidence has incorrect variant/granularity cardinality"
+    );
+    ensure!(
+        exclusions.iter().all(|id| !id.is_empty())
+            && exclusions.iter().collect::<BTreeSet<_>>().len() == exclusions.len(),
+        "metric exclusions must be nonempty unique question IDs"
+    );
+    let mut aggregates = BTreeSet::new();
+    for metric in metrics {
+        ensure!(
+            metric.dataset == kind
+                && granularities(kind).contains(&metric.granularity)
+                && metric.exclusions == exclusions,
+            "metric aggregate identity or exclusions are invalid"
+        );
+        ensure!(
+            aggregates.insert((metric.granularity, metric.variant)),
+            "duplicate metric aggregate"
+        );
+        ensure!(
+            !metric.overall.is_empty() && !metric.slices.is_empty(),
+            "metric aggregate and slices must not be empty"
+        );
+        for value in metric.overall.values() {
+            ensure!(
+                metric_value_valid(value, retrieval_denominator, true),
+                "overall metric has an invalid denominator or non-finite value"
+            );
+        }
+        for slice in metric.slices.values() {
+            ensure!(!slice.is_empty(), "metric slice must not be empty");
+            for value in slice.values() {
+                ensure!(
+                    metric_value_valid(value, retrieval_denominator, false),
+                    "slice metric has an invalid denominator or non-finite value"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn metric_value_valid(value: &MetricValue, expected: usize, exact: bool) -> bool {
+    let denominator = usize::try_from(value.denominator).ok();
+    let denominator_valid = denominator.is_some_and(|denominator| {
+        denominator > 0 && denominator <= expected && (!exact || denominator == expected)
+    });
+    denominator_valid
+        && value.numerator.is_finite()
+        && value.value.is_finite()
+        && (0.0..=value.denominator as f64).contains(&value.numerator)
+        && (0.0..=1.0).contains(&value.value)
+        && (value.value - value.numerator / value.denominator as f64).abs() <= 1e-12
+}
+
+fn retrieval_gate_evidence(
+    gold_leak_free: bool,
+    metrics: &[RetrievalMetrics],
+    retrieval_denominator: usize,
+) -> RetrievalGateEvidence {
+    let denominators_valid = retrieval_denominator > 0
+        && !metrics.is_empty()
+        && metrics.iter().all(|metric| {
+            metric
+                .overall
+                .values()
+                .all(|value| metric_value_valid(value, retrieval_denominator, true))
+                && metric.slices.values().all(|slice| {
+                    slice
+                        .values()
+                        .all(|value| metric_value_valid(value, retrieval_denominator, false))
+                })
+        });
+    let metrics_finite = !metrics.is_empty()
+        && metrics.iter().all(|metric| {
+            metric
+                .overall
+                .values()
+                .chain(metric.slices.values().flat_map(|slice| slice.values()))
+                .all(|value| value.value.is_finite() && value.numerator.is_finite())
+        });
+    RetrievalGateEvidence {
+        gold_leak_free,
+        denominators_valid,
+        metrics_finite,
+    }
+}
+
 struct RetrievalRun {
     rankings: RankingSet,
     index_bytes: u128,
+    gold_leak_free: bool,
 }
 
 fn rank_dataset(
@@ -673,9 +1032,33 @@ fn rank_dataset(
         rankings.len() == expected,
         "not every controlled ranking completed"
     );
+    let expected_non_oracle = dataset
+        .questions
+        .len()
+        .checked_mul(granularities(dataset.kind).len())
+        .and_then(|value| value.checked_mul(VARIANTS.len() - 1))
+        .context("non-oracle ranking denominator overflow")?;
+    let gold_leak_free = rankings
+        .iter()
+        .filter(|((_, variant, _), _)| *variant != Variant::Oracle)
+        .count()
+        == expected_non_oracle
+        && rankings.iter().all(|((_, variant, granularity), ranking)| {
+            *variant == Variant::Oracle
+                || (ranking.variant == *variant
+                    && ranking.granularity == *granularity
+                    && !ranking.query_sha256.is_empty()
+                    && !ranking.corpus_sha256.is_empty()
+                    && !ranking.serialization_sha256.is_empty())
+        });
+    ensure!(
+        gold_leak_free,
+        "typed non-oracle ranking contract did not cover every question/variant/granularity"
+    );
     Ok(RetrievalRun {
         rankings,
         index_bytes,
+        gold_leak_free,
     })
 }
 
@@ -1326,7 +1709,11 @@ fn query_id_string(question_id: &QueryOccurrenceId) -> String {
         .unwrap_or_default()
 }
 
-fn render_report(manifest: &RunManifest, validation: &ValidationReport) -> String {
+fn render_report(
+    manifest: &RunManifest,
+    validation: &ValidationReport,
+    metrics: &[RetrievalMetrics],
+) -> String {
     let mut report = String::from("# Origin-faithful memory benchmark run\n\n");
     report.push_str(&format!("- Run: `{}`\n", manifest.run_id));
     report.push_str(&format!("- State: `{:?}`\n", manifest.state));
@@ -1348,6 +1735,49 @@ fn render_report(manifest: &RunManifest, validation: &ValidationReport) -> Strin
         "- Fatal validation findings: {}\n",
         validation.fatal.len()
     ));
+    report.push_str("\n## Retrieval quality\n\n");
+    if metrics.is_empty() {
+        report.push_str("- Not computed for this validated run.\n");
+    } else {
+        for metric in metrics {
+            report.push_str(&format!(
+                "### {}/{}/{}\n\n",
+                metric_dataset_name(metric.dataset),
+                granularity_name(metric.granularity),
+                variant_name(metric.variant)
+            ));
+            if let Some(hash) = manifest.ranking_hashes.get(&metric.variant) {
+                report.push_str(&format!("- Source ranking SHA-256: `{hash}`\n"));
+            }
+            report.push_str(&format!(
+                "- Scored denominator: {}\n",
+                metric
+                    .overall
+                    .values()
+                    .next()
+                    .map_or(0, |value| value.denominator)
+            ));
+            report.push_str(&format!(
+                "- Retrieval exclusions: {}\n",
+                metric.exclusions.len()
+            ));
+            for (name, value) in &metric.overall {
+                report.push_str(&format!(
+                    "- {name}: {:.12} (numerator {:.12} / denominator {})\n",
+                    value.value, value.numerator, value.denominator
+                ));
+            }
+            for (slice_name, values) in &metric.slices {
+                for (name, value) in values {
+                    report.push_str(&format!(
+                        "- slice {slice_name} / {name}: {:.12} (numerator {:.12} / denominator {})\n",
+                        value.value, value.numerator, value.denominator
+                    ));
+                }
+            }
+            report.push('\n');
+        }
+    }
     report.push_str("\n## Telemetry\n\n");
     for key in [
         "duration_nanoseconds",
@@ -1538,6 +1968,13 @@ const fn dataset_name(kind: DatasetKind) -> &'static str {
     match kind {
         DatasetKind::Locomo => "locomo",
         DatasetKind::LongMemEval => "longmemeval",
+    }
+}
+
+const fn metric_dataset_name(kind: DatasetKind) -> &'static str {
+    match kind {
+        DatasetKind::Locomo => "locomo",
+        DatasetKind::LongMemEval => "long_mem_eval",
     }
 }
 

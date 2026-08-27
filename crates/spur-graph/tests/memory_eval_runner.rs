@@ -6,6 +6,7 @@ use std::{
 };
 
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 const LOCOMO_FIXTURE: &str = r#"
 [
@@ -34,6 +35,38 @@ const LOCOMO_FIXTURE: &str = r#"
         "adversarial_answer": "Yes, Alice visited Mars"
       }
     ]
+  }
+]
+"#;
+
+const LONGMEMEVAL_FIXTURE: &str = r#"
+[
+  {
+    "question_id": "q-retrieval",
+    "question_type": "multi-session",
+    "question": "What travel choice was made?",
+    "answer": "Take the train",
+    "question_date": "2024-01-03",
+    "haystack_session_ids": ["earlier", "answer"],
+    "haystack_dates": ["2024-01-01", "2024-01-02"],
+    "haystack_sessions": [
+      [{"role": "user", "content": "I need to travel."}],
+      [{"role": "assistant", "content": "Take the train.", "has_answer": true}]
+    ],
+    "answer_session_ids": ["answer"]
+  },
+  {
+    "question_id": "q-abstention_abs",
+    "question_type": "single-session-user",
+    "question": "Was a destination selected?",
+    "answer": "No",
+    "question_date": "2024-01-03",
+    "haystack_session_ids": ["abstention"],
+    "haystack_dates": ["2024-01-01"],
+    "haystack_sessions": [
+      [{"role": "user", "content": "No destination was selected."}]
+    ],
+    "answer_session_ids": []
   }
 ]
 "#;
@@ -225,6 +258,28 @@ fn retrieval_only_run_publishes_five_frozen_variants_and_complete_qa_pending() {
     );
     assert_eq!(manifest["ranking_hashes"].as_object().unwrap().len(), 5);
 
+    assert_metric_file(
+        run.path(),
+        "locomo-turn.json",
+        "locomo",
+        "turn",
+        &[
+            "all_evidence_hit_at_1",
+            "all_evidence_hit_at_10",
+            "all_evidence_hit_at_5",
+            "evidence_recall_at_1",
+            "evidence_recall_at_10",
+            "evidence_recall_at_5",
+        ],
+        1,
+        1,
+    );
+    assert_eq!(
+        fs::read_dir(run.path().join("metrics")).unwrap().count(),
+        1,
+        "published LoCoMo retrieval must contain exactly one metric artifact"
+    );
+
     for variant in VARIANTS {
         let ranking = run.path().join(format!("rankings/{variant}.jsonl"));
         let lines = fs::read_to_string(&ranking).unwrap();
@@ -234,6 +289,103 @@ fn retrieval_only_run_publishes_five_frozen_variants_and_complete_qa_pending() {
         .unwrap()
         .next()
         .is_none());
+}
+
+#[test]
+fn release_gates_remain_false_until_nonempty_metrics_are_computed() {
+    let fixture = fixture();
+    let run = tempfile::tempdir().unwrap();
+    let output = validate(&fixture, run.path(), "smoke");
+    assert!(output.status.success(), "{}", stderr(&output));
+
+    let validated = read_json(run.path().join("manifest.json"));
+    assert_eq!(validated["state"], "validated");
+    assert_eq!(validated["gates"]["denominators_valid"], false);
+    assert_eq!(validated["gates"]["metrics_finite"], false);
+    assert!(fs::read_dir(run.path().join("metrics"))
+        .unwrap()
+        .next()
+        .is_none());
+
+    let output = retrieve(&fixture, run.path());
+    assert!(output.status.success(), "{}", stderr(&output));
+    let published = read_json(run.path().join("manifest.json"));
+    assert_eq!(published["state"], "published_retrieval");
+    assert_eq!(published["gates"]["denominators_valid"], true);
+    assert_eq!(published["gates"]["metrics_finite"], true);
+    assert!(fs::read_dir(run.path().join("metrics"))
+        .unwrap()
+        .next()
+        .is_some());
+}
+
+#[test]
+fn longmemeval_publishes_session_and_turn_metrics_for_only_the_validated_cohort() {
+    let fixture = longmemeval_fixture();
+    let run = tempfile::tempdir().unwrap();
+    let output = retrieve_longmemeval(&fixture, run.path());
+    assert!(output.status.success(), "{}", stderr(&output));
+
+    let manifest = read_json(run.path().join("manifest.json"));
+    assert_eq!(manifest["state"], "published_retrieval");
+    assert_eq!(
+        manifest["qa_progress"]["eligible_question_ids"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2,
+        "the full native QA denominator must be retained"
+    );
+
+    assert_metric_file(
+        run.path(),
+        "longmemeval-session.json",
+        "long_mem_eval",
+        "session",
+        &[
+            "ndcg_any@10",
+            "ndcg_any@5",
+            "recall_all@10",
+            "recall_all@5",
+            "recall_any@10",
+            "recall_any@5",
+        ],
+        1,
+        1,
+    );
+    assert_metric_file(
+        run.path(),
+        "longmemeval-turn.json",
+        "long_mem_eval",
+        "turn",
+        &[
+            "ndcg_any@10",
+            "ndcg_any@5",
+            "ndcg_any@50",
+            "recall_all@10",
+            "recall_all@5",
+            "recall_all@50",
+            "recall_any@10",
+            "recall_any@5",
+            "recall_any@50",
+        ],
+        1,
+        1,
+    );
+    assert_eq!(
+        fs::read_dir(run.path().join("metrics")).unwrap().count(),
+        2,
+        "published LongMemEval retrieval must contain both native granularities"
+    );
+
+    let report = fs::read_to_string(run.path().join("report.md")).unwrap();
+    assert!(report.contains("## Retrieval quality"), "{report}");
+    assert!(report.contains("long_mem_eval/session/oracle"), "{report}");
+    assert!(
+        report.contains("long_mem_eval/turn/graph_traversal"),
+        "{report}"
+    );
+    assert!(report.contains("## Telemetry"), "{report}");
 }
 
 #[test]
@@ -339,10 +491,28 @@ fn fixture() -> tempfile::NamedTempFile {
     file
 }
 
+fn longmemeval_fixture() -> tempfile::NamedTempFile {
+    let file = tempfile::NamedTempFile::new().unwrap();
+    fs::write(file.path(), LONGMEMEVAL_FIXTURE).unwrap();
+    file
+}
+
 fn retrieve(fixture: &tempfile::NamedTempFile, run: &Path) -> std::process::Output {
     run_cli([
         "retrieve",
         "--locomo",
+        fixture.path().to_str().unwrap(),
+        "--output",
+        run.to_str().unwrap(),
+        "--track",
+        "smoke",
+    ])
+}
+
+fn retrieve_longmemeval(fixture: &tempfile::NamedTempFile, run: &Path) -> std::process::Output {
+    run_cli([
+        "retrieve",
+        "--longmemeval",
         fixture.path().to_str().unwrap(),
         "--output",
         run.to_str().unwrap(),
@@ -382,6 +552,79 @@ fn binary() -> String {
 
 fn read_json(path: impl AsRef<Path>) -> Value {
     serde_json::from_slice(&fs::read(path).unwrap()).unwrap()
+}
+
+fn assert_metric_file(
+    run: &Path,
+    file_name: &str,
+    dataset: &str,
+    granularity: &str,
+    expected_metric_names: &[&str],
+    expected_exclusions: usize,
+    expected_denominator: u64,
+) {
+    let manifest = read_json(run.join("manifest.json"));
+    let metric_file = read_json(run.join("metrics").join(file_name));
+    assert_eq!(metric_file["dataset"], dataset);
+    assert_eq!(metric_file["granularity"], granularity);
+    let variants = metric_file["variants"].as_array().unwrap();
+    assert_eq!(variants.len(), VARIANTS.len());
+
+    let mut actual_variants = variants
+        .iter()
+        .map(|metric| metric["variant"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    actual_variants.sort_unstable();
+    let mut expected_variants = VARIANTS.to_vec();
+    expected_variants.sort_unstable();
+    assert_eq!(actual_variants, expected_variants);
+
+    for metric in variants {
+        let variant = metric["variant"].as_str().unwrap();
+        assert_eq!(metric["dataset"], dataset);
+        assert_eq!(metric["granularity"], granularity);
+        assert_eq!(
+            metric["source_ranking_hash"], manifest["ranking_hashes"][variant],
+            "{dataset}/{granularity}/{variant} must bind the exact ranking bytes"
+        );
+        let ranking_bytes = fs::read(run.join(format!("rankings/{variant}.jsonl"))).unwrap();
+        let ranking_sha256 = format!("{:x}", Sha256::digest(&ranking_bytes));
+        assert_eq!(metric["source_ranking_hash"], ranking_sha256);
+        let exclusions = metric["exclusions"].as_array().unwrap();
+        assert_eq!(exclusions.len(), expected_exclusions);
+        let eligible = manifest["qa_progress"]["eligible_question_ids"]
+            .as_array()
+            .unwrap();
+        assert_eq!(
+            expected_denominator as usize + exclusions.len(),
+            eligible.len(),
+            "scored and excluded cohorts must preserve the full QA denominator"
+        );
+        assert!(exclusions.iter().all(|id| eligible.contains(id)));
+        let overall = metric["overall"].as_object().unwrap();
+        assert_eq!(
+            overall.keys().map(String::as_str).collect::<Vec<_>>(),
+            expected_metric_names
+        );
+        assert!(!metric["slices"].as_object().unwrap().is_empty());
+        for values in std::iter::once(overall).chain(
+            metric["slices"]
+                .as_object()
+                .unwrap()
+                .values()
+                .map(|slice| slice.as_object().unwrap()),
+        ) {
+            for value in values.values() {
+                let score = value["value"].as_f64().unwrap();
+                let numerator = value["numerator"].as_f64().unwrap();
+                let denominator = value["denominator"].as_u64().unwrap();
+                assert!(score.is_finite() && (0.0..=1.0).contains(&score));
+                assert!(numerator.is_finite() && numerator >= 0.0);
+                assert_eq!(denominator, expected_denominator);
+                assert!((score - numerator / denominator as f64).abs() < 1e-12);
+            }
+        }
+    }
 }
 
 fn ranking_bytes(run: &Path) -> BTreeMap<String, Vec<u8>> {
