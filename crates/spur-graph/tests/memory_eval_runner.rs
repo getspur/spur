@@ -1,4 +1,9 @@
-use std::{collections::BTreeMap, fs, path::Path, process::Command};
+use std::{
+    collections::BTreeMap,
+    fs,
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 use serde_json::Value;
 
@@ -58,10 +63,147 @@ fn legal_subcommands_and_validate_lifecycle_are_available() {
         fixture.path().to_str().unwrap(),
         "--output",
         run.path().to_str().unwrap(),
+        "--track",
+        "smoke",
     ]);
     assert!(output.status.success(), "{}", stderr(&output));
     let manifest = read_json(run.path().join("manifest.json"));
     assert_eq!(manifest["state"], "validated");
+}
+
+#[test]
+fn local_fixture_is_explicitly_smoke_and_never_audited() {
+    let fixture = fixture();
+    let run = tempfile::tempdir().unwrap();
+    let output = run_cli([
+        "validate",
+        "--locomo",
+        fixture.path().to_str().unwrap(),
+        "--output",
+        run.path().to_str().unwrap(),
+        "--track",
+        "smoke",
+    ]);
+    assert!(output.status.success(), "{}", stderr(&output));
+
+    let manifest = read_json(run.path().join("manifest.json"));
+    assert_eq!(manifest["contract_id"]["track"], "compatibility");
+    assert_eq!(manifest["contract_id"]["name"], "origin-faithful-v1-smoke");
+    assert_ne!(manifest["contract_id"]["track"], "audited");
+}
+
+#[test]
+fn modified_or_unknown_source_cannot_publish_as_audited_run() {
+    let fixture = fixture();
+    let run = tempfile::tempdir().unwrap();
+    let output = run_cli([
+        "retrieve",
+        "--locomo",
+        fixture.path().to_str().unwrap(),
+        "--output",
+        run.path().to_str().unwrap(),
+        "--track",
+        "audited",
+    ]);
+
+    assert!(!output.status.success());
+    assert!(stderr(&output).contains("approved LoCoMo checksum"));
+    assert!(!run.path().join("manifest.json").exists());
+    assert!(!run.path().join("rankings").exists());
+}
+
+#[test]
+fn matching_validate_then_retrieve_continues_in_the_same_directory() {
+    let fixture = fixture();
+    let run = tempfile::tempdir().unwrap();
+    let validate = validate(&fixture, run.path(), "smoke");
+    assert!(validate.status.success(), "{}", stderr(&validate));
+
+    let retrieve = retrieve(&fixture, run.path());
+    assert!(retrieve.status.success(), "{}", stderr(&retrieve));
+    let manifest = read_json(run.path().join("manifest.json"));
+    assert_eq!(manifest["state"], "published_retrieval");
+    assert_eq!(manifest["contract_id"]["track"], "compatibility");
+}
+
+#[test]
+fn mismatched_validate_continuations_fail_without_mutation() {
+    let fixture = fixture();
+
+    let config_run = tempfile::tempdir().unwrap();
+    assert!(validate(&fixture, config_run.path(), "smoke")
+        .status
+        .success());
+    assert_rejected_without_mutation(config_run.path(), || {
+        run_cli([
+            "retrieve",
+            "--locomo",
+            fixture.path().to_str().unwrap(),
+            "--output",
+            config_run.path().to_str().unwrap(),
+            "--track",
+            "smoke",
+            "--k",
+            "9",
+        ])
+    });
+
+    let contract_run = tempfile::tempdir().unwrap();
+    assert!(validate(&fixture, contract_run.path(), "smoke")
+        .status
+        .success());
+    assert_rejected_without_mutation(contract_run.path(), || {
+        run_cli([
+            "retrieve",
+            "--locomo",
+            fixture.path().to_str().unwrap(),
+            "--output",
+            contract_run.path().to_str().unwrap(),
+            "--track",
+            "compatibility",
+        ])
+    });
+
+    let source = tempfile::NamedTempFile::new().unwrap();
+    fs::write(source.path(), LOCOMO_FIXTURE).unwrap();
+    let source_run = tempfile::tempdir().unwrap();
+    assert!(validate(&source, source_run.path(), "smoke")
+        .status
+        .success());
+    fs::write(source.path(), format!("{LOCOMO_FIXTURE}\n ")).unwrap();
+    assert_rejected_without_mutation(source_run.path(), || {
+        run_cli([
+            "retrieve",
+            "--locomo",
+            source.path().to_str().unwrap(),
+            "--output",
+            source_run.path().to_str().unwrap(),
+            "--track",
+            "smoke",
+        ])
+    });
+}
+
+#[test]
+fn terminal_retrieval_reuse_fails_without_mutation() {
+    let fixture = fixture();
+    let run = tempfile::tempdir().unwrap();
+    assert!(retrieve(&fixture, run.path()).status.success());
+    assert_rejected_without_mutation(run.path(), || retrieve(&fixture, run.path()));
+}
+
+#[test]
+fn cargo_lock_records_the_runner_clap_dependency() {
+    let lock =
+        fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../Cargo.lock")).unwrap();
+    let package = lock
+        .split("[[package]]")
+        .find(|package| package.contains("name = \"spur-graph\""))
+        .expect("spur-graph package must be present in Cargo.lock");
+    assert!(
+        package.lines().any(|line| line.trim() == "\"clap\","),
+        "fresh builds must not need to repair the spur-graph dependency edge"
+    );
 }
 
 #[test]
@@ -204,6 +346,20 @@ fn retrieve(fixture: &tempfile::NamedTempFile, run: &Path) -> std::process::Outp
         fixture.path().to_str().unwrap(),
         "--output",
         run.to_str().unwrap(),
+        "--track",
+        "smoke",
+    ])
+}
+
+fn validate(fixture: &tempfile::NamedTempFile, run: &Path, track: &str) -> std::process::Output {
+    run_cli([
+        "validate",
+        "--locomo",
+        fixture.path().to_str().unwrap(),
+        "--output",
+        run.to_str().unwrap(),
+        "--track",
+        track,
     ])
 }
 
@@ -236,6 +392,44 @@ fn ranking_bytes(run: &Path) -> BTreeMap<String, Vec<u8>> {
             (variant.to_owned(), fs::read(path).unwrap())
         })
         .collect()
+}
+
+fn directory_bytes(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+    fn collect(root: &Path, current: &Path, files: &mut BTreeMap<PathBuf, Vec<u8>>) {
+        let mut entries = fs::read_dir(current)
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        entries.sort_by_key(|entry| entry.file_name());
+        for entry in entries {
+            let path = entry.path();
+            if path.is_dir() {
+                collect(root, &path, files);
+            } else {
+                files.insert(
+                    path.strip_prefix(root).unwrap().to_owned(),
+                    fs::read(path).unwrap(),
+                );
+            }
+        }
+    }
+
+    let mut files = BTreeMap::new();
+    collect(root, root, &mut files);
+    files
+}
+
+fn assert_rejected_without_mutation(run: &Path, command: impl FnOnce() -> std::process::Output) {
+    let before = directory_bytes(run);
+    let output = command();
+    assert!(!output.status.success(), "command unexpectedly succeeded");
+    assert!(
+        stderr(&output).contains("does not match validated run")
+            || stderr(&output).contains("terminal run"),
+        "unexpected rejection: {}",
+        stderr(&output)
+    );
+    assert_eq!(directory_bytes(run), before);
 }
 
 fn stderr(output: &std::process::Output) -> String {

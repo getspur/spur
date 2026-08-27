@@ -8,7 +8,7 @@ use std::{
 
 use anyhow::{bail, ensure, Context, Result};
 use chrono::{SecondsFormat, Utc};
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -37,6 +37,12 @@ use spur_graph::memory_eval::{
 };
 
 const CONTRACT_NAME: &str = "origin-faithful-v1";
+const LOCOMO_ORIGIN: &str = "https://github.com/snap-research/locomo";
+const LOCOMO_REVISION: &str = "3eb6f2c585f5e1699204e3c3bdf7adc5c28cb376";
+const LOCOMO_SHA256: &str = "79fa87e90f04081343b8c8debecb80a9a6842b76a7aa537dc9fdf651ea698ff4";
+const LONGMEMEVAL_ORIGIN: &str = "https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned";
+const LONGMEMEVAL_REVISION: &str = "98d7416c24c778c2fee6e6f3006e7a073259d48f";
+const LONGMEMEVAL_SHA256: &str = "d6f21ea9d60a0d56f34a05b609c79c88a451d2ae03597821ea3d5a9678c3a442";
 const DEFAULT_K: usize = 10;
 const DEFAULT_SEED_K: usize = 10;
 const DEFAULT_MAX_DEPTH: usize = 3;
@@ -95,15 +101,12 @@ struct DatasetArgs {
     /// One run directory shared by validate/retrieve/qa/resume/report.
     #[arg(long, value_name = "DIR")]
     output: PathBuf,
-    /// Exact upstream source revision represented by the input bytes.
-    #[arg(long, default_value = "local-input")]
-    source_revision: String,
-}
-
-#[derive(Debug, Clone, Args)]
-struct RetrieveArgs {
-    #[command(flatten)]
-    dataset: DatasetArgs,
+    /// Explicit publication track. Only exact approved bytes qualify as audited.
+    #[arg(long, value_enum)]
+    track: SourceTrack,
+    /// Optional revision label for compatibility or smoke inputs.
+    #[arg(long)]
+    source_revision: Option<String>,
     /// Unique canonical provenance results retained per ranking.
     #[arg(long, default_value_t = DEFAULT_K)]
     k: usize,
@@ -113,6 +116,19 @@ struct RetrieveArgs {
     /// Traversal depth used only by graph_traversal.
     #[arg(long, default_value_t = DEFAULT_MAX_DEPTH)]
     max_depth: usize,
+}
+
+#[derive(Debug, Clone, Args)]
+struct RetrieveArgs {
+    #[command(flatten)]
+    dataset: DatasetArgs,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum SourceTrack {
+    Audited,
+    Compatibility,
+    Smoke,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -173,14 +189,17 @@ fn validate_command(args: DatasetArgs) -> Result<()> {
 }
 
 fn retrieve_command(args: RetrieveArgs) -> Result<()> {
-    ensure!(args.k > 0, "--k must be positive");
-    ensure!(args.seed_k > 0, "--seed-k must be positive");
-    ensure_new_run(&args.dataset.output)?;
+    ensure!(args.dataset.k > 0, "--k must be positive");
+    ensure!(args.dataset.seed_k > 0, "--seed-k must be positive");
 
     let mut telemetry = RunTelemetry::new();
-    let (dataset, validation, mut manifest) = initialize_run(&args.dataset)?;
+    let (dataset, validation, mut manifest, fresh) = prepare_retrieval_run(&args.dataset)?;
     let writer = ArtifactWriter::new(&args.dataset.output)?;
-    writer.write_validation(&validation)?;
+    if fresh {
+        writer.write_validation(&validation)?;
+    } else {
+        manifest.command = env::args().collect();
+    }
     if validation.has_fatal() {
         manifest.state = RunState::Blocked;
         finish_telemetry(&mut manifest, &telemetry, 0, 0, 0);
@@ -189,22 +208,12 @@ fn retrieve_command(args: RetrieveArgs) -> Result<()> {
         bail!("dataset validation failed with fatal findings");
     }
 
-    let traversal = TraversalConfig {
-        seed_k: args.seed_k,
-        max_depth: args.max_depth,
-        relations: BTreeSet::from([
-            MemoryRelation::Contains,
-            MemoryRelation::NextTurn,
-            MemoryRelation::PreviousTurn,
-            MemoryRelation::SpokenBy,
-        ]),
-    };
-    record_variant_configuration(&mut manifest, args.k, &traversal)?;
+    let traversal = traversal_config(&args.dataset);
 
     // Deliberately complete every variant in memory before publishing the
     // first ranking file. QA is a separate command and can only read these
     // frozen JSONL artifacts.
-    let retrieval = rank_dataset(&dataset, args.k, &traversal, &mut telemetry)?;
+    let retrieval = rank_dataset(&dataset, args.dataset.k, &traversal, &mut telemetry)?;
     for variant in VARIANTS {
         writer.write_rankings(&mut manifest, variant, &retrieval.rankings)?;
     }
@@ -339,7 +348,7 @@ fn report_command(args: RunArgs) -> Result<()> {
 
 fn initialize_run(args: &DatasetArgs) -> Result<(BenchmarkDataset, ValidationReport, RunManifest)> {
     let dataset = load_requested_dataset(args)?;
-    let contract = BenchmarkContract::audited(CONTRACT_NAME);
+    let contract = benchmark_contract(args.track);
     let validation = validate_dataset(&dataset, &contract);
     let qa_question_ids = qa_question_ids(&dataset, &validation)?;
     let RepositoryInfo {
@@ -376,7 +385,67 @@ fn initialize_run(args: &DatasetArgs) -> Result<(BenchmarkDataset, ValidationRep
     manifest
         .hardware
         .insert("repository_revision_kind".to_owned(), revision_kind);
+    manifest.hardware.insert(
+        "source_path".to_owned(),
+        requested_source_path(args)?.display().to_string(),
+    );
+    manifest.hardware.insert(
+        "source_track".to_owned(),
+        source_track_name(args.track).to_owned(),
+    );
+    record_variant_configuration(&mut manifest, args.k, &traversal_config(args))?;
     Ok((dataset, validation, manifest))
+}
+
+fn prepare_retrieval_run(
+    args: &DatasetArgs,
+) -> Result<(BenchmarkDataset, ValidationReport, RunManifest, bool)> {
+    let manifest_path = args.output.join("manifest.json");
+    if !manifest_path.exists() {
+        let (dataset, validation, manifest) = initialize_run(args)?;
+        return Ok((dataset, validation, manifest, true));
+    }
+
+    let manifest = read_json::<RunManifest>(&manifest_path)?;
+    ensure!(
+        manifest.state == RunState::Validated,
+        "retrieve cannot reuse terminal run in state {:?}",
+        manifest.state
+    );
+    let writer = ArtifactWriter::new(&args.output)?;
+    writer.verify_checksums()?;
+
+    let stored_validation = read_json::<ValidationReport>(&args.output.join("validation.json"))?;
+    let dataset = load_requested_dataset(args)?;
+    let contract = benchmark_contract(args.track);
+    let validation = validate_dataset(&dataset, &contract);
+    ensure!(
+        manifest.sources.as_slice() == [dataset.source.clone()],
+        "source identity does not match validated run"
+    );
+    ensure!(
+        manifest.contract_id == contract.contract_id,
+        "contract does not match validated run"
+    );
+    ensure!(
+        validation == stored_validation,
+        "source validation does not match validated run"
+    );
+
+    let mut expected_configuration = manifest.clone();
+    expected_configuration.variant_configuration.clear();
+    expected_configuration.deterministic_seeds.clear();
+    record_variant_configuration(&mut expected_configuration, args.k, &traversal_config(args))?;
+    ensure!(
+        manifest.variant_configuration == expected_configuration.variant_configuration
+            && manifest.deterministic_seeds == expected_configuration.deterministic_seeds,
+        "retrieval configuration does not match validated run"
+    );
+    ensure!(
+        manifest.qa_progress == QaProgress::new(qa_question_ids(&dataset, &validation)?)?,
+        "QA denominator does not match validated run"
+    );
+    Ok((dataset, validation, manifest, false))
 }
 
 fn load_requested_dataset(args: &DatasetArgs) -> Result<BenchmarkDataset> {
@@ -385,16 +454,43 @@ fn load_requested_dataset(args: &DatasetArgs) -> Result<BenchmarkDataset> {
         (None, Some(path)) => (DatasetKind::LongMemEval, path),
         _ => bail!("exactly one of --locomo or --longmemeval is required"),
     };
-    ensure!(
-        !args.source_revision.trim().is_empty(),
-        "--source-revision must not be empty"
-    );
     let path = fs::canonicalize(path).with_context(|| format!("resolve {}", path.display()))?;
     let raw = fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
-    let source = SourcePin {
-        origin: path.display().to_string(),
-        revision: args.source_revision.clone(),
-        sha256: sha256_hex(raw.as_bytes()),
+    let actual_sha256 = sha256_hex(raw.as_bytes());
+    let source = match args.track {
+        SourceTrack::Audited => {
+            let approved = approved_source(kind);
+            let dataset = match kind {
+                DatasetKind::Locomo => "LoCoMo",
+                DatasetKind::LongMemEval => "LongMemEval-S-cleaned",
+            };
+            ensure!(
+                actual_sha256 == approved.sha256,
+                "source bytes do not match the approved {dataset} checksum"
+            );
+            if let Some(revision) = &args.source_revision {
+                ensure!(
+                    revision == &approved.revision,
+                    "--source-revision does not match the approved {dataset} revision"
+                );
+            }
+            approved
+        }
+        SourceTrack::Compatibility | SourceTrack::Smoke => {
+            let revision = args
+                .source_revision
+                .clone()
+                .unwrap_or_else(|| "local-input".to_owned());
+            ensure!(
+                !revision.trim().is_empty(),
+                "--source-revision must not be empty"
+            );
+            SourcePin {
+                origin: path.display().to_string(),
+                revision,
+                sha256: actual_sha256,
+            }
+        }
     };
     match kind {
         DatasetKind::Locomo => BenchmarkDataset::load_locomo(&raw, source),
@@ -408,8 +504,12 @@ fn load_manifest_dataset(manifest: &RunManifest) -> Result<BenchmarkDataset> {
         .first()
         .context("manifest has no dataset source")?
         .clone();
-    let raw = fs::read_to_string(&source.origin)
-        .with_context(|| format!("read manifest source {}", source.origin))?;
+    let source_path = manifest
+        .hardware
+        .get("source_path")
+        .context("manifest has no local source_path")?;
+    let raw = fs::read_to_string(source_path)
+        .with_context(|| format!("read manifest source {source_path}"))?;
     ensure!(
         sha256_hex(raw.as_bytes()) == source.sha256,
         "manifest source bytes changed since retrieval"
@@ -418,6 +518,57 @@ fn load_manifest_dataset(manifest: &RunManifest) -> Result<BenchmarkDataset> {
         Some("locomo") => BenchmarkDataset::load_locomo(&raw, source),
         Some("longmemeval") => BenchmarkDataset::load_longmemeval(&raw, source),
         other => bail!("manifest has unknown dataset_kind {other:?}"),
+    }
+}
+
+fn requested_source_path(args: &DatasetArgs) -> Result<PathBuf> {
+    let path = match (&args.locomo, &args.longmemeval) {
+        (Some(path), None) | (None, Some(path)) => path,
+        _ => bail!("exactly one of --locomo or --longmemeval is required"),
+    };
+    fs::canonicalize(path).with_context(|| format!("resolve {}", path.display()))
+}
+
+fn approved_source(kind: DatasetKind) -> SourcePin {
+    let (origin, revision, sha256) = match kind {
+        DatasetKind::Locomo => (LOCOMO_ORIGIN, LOCOMO_REVISION, LOCOMO_SHA256),
+        DatasetKind::LongMemEval => (LONGMEMEVAL_ORIGIN, LONGMEMEVAL_REVISION, LONGMEMEVAL_SHA256),
+    };
+    SourcePin {
+        origin: origin.to_owned(),
+        revision: revision.to_owned(),
+        sha256: sha256.to_owned(),
+    }
+}
+
+fn benchmark_contract(track: SourceTrack) -> BenchmarkContract {
+    match track {
+        SourceTrack::Audited => BenchmarkContract::audited(CONTRACT_NAME),
+        SourceTrack::Compatibility => {
+            BenchmarkContract::compatibility(format!("{CONTRACT_NAME}-compatibility"))
+        }
+        SourceTrack::Smoke => BenchmarkContract::compatibility(format!("{CONTRACT_NAME}-smoke")),
+    }
+}
+
+const fn source_track_name(track: SourceTrack) -> &'static str {
+    match track {
+        SourceTrack::Audited => "audited",
+        SourceTrack::Compatibility => "compatibility",
+        SourceTrack::Smoke => "smoke",
+    }
+}
+
+fn traversal_config(args: &DatasetArgs) -> TraversalConfig {
+    TraversalConfig {
+        seed_k: args.seed_k,
+        max_depth: args.max_depth,
+        relations: BTreeSet::from([
+            MemoryRelation::Contains,
+            MemoryRelation::NextTurn,
+            MemoryRelation::PreviousTurn,
+            MemoryRelation::SpokenBy,
+        ]),
     }
 }
 
