@@ -53,6 +53,49 @@ def terraform_module_contract_files():
     )
 
 
+def test_main_module_route_contracts_drop_removed_addresses_and_unsuffixed_paths():
+    contract_files = sorted(
+        {
+            *INFRA_DIR.glob("*.tf"),
+            *INFRA_DIR.glob("tests/*.tftest.hcl"),
+            INFRA_DIR / "env" / "default.tfvars",
+            INFRA_DIR / "README.md",
+        }
+    )
+    assert all("poc" not in path.relative_to(INFRA_DIR).parts for path in contract_files)
+
+    removed_route_address = re.compile(
+        r"\baws_apigatewayv2_route\.(?:default|oauth|api_key_mcp)"
+        r"(?![A-Za-z0-9_])"
+    )
+    unsuffixed_serving_path = re.compile(
+        r"POST /mcp/(?:oauth|api-key)(?!/(?:code|knowledge)\b)"
+        r"|`/mcp/(?:oauth|api-key)`"
+        r'|https?://[^\s`"]+/mcp/(?:oauth|api-key)(?=[`\s".,;)]|$)'
+    )
+    valid_default_stage_name = re.compile(r'^\s*name\s*=\s*"\$default"\s*$')
+    stale_contracts = []
+
+    for path in contract_files:
+        for line_number, line in enumerate(path.read_text().splitlines(), start=1):
+            reasons = []
+            if removed_route_address.search(line):
+                reasons.append("removed route address")
+            if unsuffixed_serving_path.search(line):
+                reasons.append("unsuffixed serving path")
+            if "$default" in line and not (
+                path == INFRA_DIR / "main.tf" and valid_default_stage_name.fullmatch(line)
+            ):
+                reasons.append("removed catch-all route contract")
+            if reasons:
+                stale_contracts.append(
+                    f"{path.relative_to(ROOT)}:{line_number}: "
+                    f"{', '.join(reasons)}: {line.strip()}"
+                )
+
+    assert not stale_contracts, "\n".join(stale_contracts)
+
+
 def test_direct_routes_have_expected_auth_and_unique_terminal_integrations():
     main_tf = (INFRA_DIR / "main.tf").read_text()
     api_keys_tf = (INFRA_DIR / "api_keys.tf").read_text()
