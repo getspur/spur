@@ -356,6 +356,7 @@ async fn silver_upload_writes_validates_manifest_before_registering() -> Result<
 
 #[tokio::test]
 async fn silver_persistence_includes_source_sidecar() -> Result<()> {
+    let _guard = ENV_LOCK.lock().unwrap();
     let root = unique_temp_dir("worker-source-sidecar")?;
     let artifact_dir = root.join("artifact");
     let artifact_dir_str = artifact_dir.display().to_string();
@@ -365,6 +366,7 @@ async fn silver_persistence_includes_source_sidecar() -> Result<()> {
             artifact_dir_str.as_str(),
         ),
         ("SPUR_GRAPH_BUILDER_VERSION", "builder-v1"),
+        ("SPUR_CONTEXT_SILVER_BUCKET", "silver-test"),
     ]);
     let archive = source_sidecar_tarball(&root)?;
     let archive_bytes = fs::read(&archive).context("read source-sidecar archive")?;
@@ -691,7 +693,53 @@ async fn reprocess_from_silver_downloads_registered_silver_without_fetch_or_buil
 }
 
 #[tokio::test]
+async fn prepared_job_carries_serving_artifact_lineage() -> Result<()> {
+    let root = unique_temp_dir("worker-serving-artifact-lineage")?;
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let manifest = worker_silver_manifest();
+    let manifest_bytes = serde_json::to_vec_pretty(&manifest)?;
+    let source_sidecar = manifest
+        .files
+        .iter()
+        .find(|file| file.path == "source_files.parquet")
+        .context("source sidecar should be present")?;
+    let row = silver_row(&manifest);
+    let silver_store = FakeSilverArtifactStore::with_manifest(events.clone(), manifest.clone());
+    let silver_registry = FakeSilverRegistry::with_row(events, row.clone());
+    let mut env = demo_job_env("http://127.0.0.1:1/unreachable.tar.gz");
+    env.from_layer = JobFromLayer::Silver;
+
+    let prepared = prepare_job_with_services(
+        &env,
+        &StageTracker::new(),
+        &FakeBronzeRegistry::default(),
+        &FakeBronzeArchiveStore::default(),
+        &silver_registry,
+        &silver_store,
+        &FakeGraphBuilder::default(),
+    )
+    .await?;
+
+    let lineage = prepared.lineage().context("lineage should be stamped")?;
+    assert_eq!(lineage.graph_prefix_uri, row.artifact_s3_prefix);
+    assert_eq!(lineage.graph_manifest_uri, row.manifest_uri);
+    assert_eq!(lineage.graph_manifest_sha256, sha256_hex(&manifest_bytes));
+    assert_eq!(lineage.graph_manifest_bytes, manifest_bytes.len() as u64);
+    assert_eq!(
+        lineage.source_sidecar_uri,
+        format!("{}{}", lineage.graph_prefix_uri, source_sidecar.path)
+    );
+    assert_eq!(lineage.source_sidecar_sha256, source_sidecar.sha256);
+    assert_eq!(lineage.source_sidecar_bytes, source_sidecar.size_bytes);
+
+    drop(prepared);
+    fs::remove_dir_all(root).ok();
+    Ok(())
+}
+
+#[tokio::test]
 async fn reprocess_from_bronze_restores_bronze_and_persists_rebuilt_silver() -> Result<()> {
+    let _guard = ENV_LOCK.lock().unwrap();
     let root = unique_temp_dir("worker-reprocess-bronze")?;
     let artifact_dir = root.join("artifact");
     let artifact_dir_str = artifact_dir.display().to_string();
@@ -701,6 +749,7 @@ async fn reprocess_from_bronze_restores_bronze_and_persists_rebuilt_silver() -> 
             artifact_dir_str.as_str(),
         ),
         ("SPUR_GRAPH_BUILDER_VERSION", "builder-v1"),
+        ("SPUR_CONTEXT_SILVER_BUCKET", "silver-test"),
     ]);
     let archive = demo_tarball(&root)?;
     let archive_bytes = fs::read(&archive).context("read archive")?;

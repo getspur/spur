@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 use anyhow::{anyhow, bail, Context as _, Result};
 use duckdb::{params, Connection};
 use serde::Deserialize;
+use sha2::{Digest as _, Sha256};
 
 use crate::catalog::{
     attach_postgres_alias, catalog_dsn_with_env_password, ducklake_attach_uri, ducklake_data_path,
@@ -23,6 +24,7 @@ const DEFAULT_EMBEDDING_MODEL: &str = "NomicEmbedTextV15";
 pub const DEFAULT_EMBED_TEXT_VERSION: &str = "v5-nomic-embed-text-v1.5-search-document";
 pub const DEFAULT_TRANSLATE_SCHEMA_VERSION: &str = "translate-v1";
 pub(crate) const CATALOG_TABLES_SQL: &str = include_str!("../sql/catalog_tables.sql");
+const SOURCE_SIDECAR_MANIFEST_PATH: &str = "source_files.parquet";
 
 #[derive(Debug)]
 struct AwsCredentials {
@@ -148,6 +150,13 @@ pub struct TranslateLineage {
     pub builder_version: String,
     pub translate_schema_version: String,
     pub embed_text_version: String,
+    pub graph_prefix_uri: String,
+    pub graph_manifest_uri: String,
+    pub graph_manifest_sha256: String,
+    pub graph_manifest_bytes: u64,
+    pub source_sidecar_uri: String,
+    pub source_sidecar_sha256: String,
+    pub source_sidecar_bytes: u64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -362,6 +371,160 @@ fn validate_options(opts: &TranslateOptions) -> Result<()> {
     }
     if opts.catalog_dsn.trim().is_empty() {
         bail!("catalog_dsn must be non-empty");
+    }
+    if let Some(lineage) = &opts.lineage {
+        validate_serving_lineage(opts, lineage)?;
+    }
+    Ok(())
+}
+
+fn validate_serving_lineage(opts: &TranslateOptions, lineage: &TranslateLineage) -> Result<()> {
+    let manifest = opts
+        .artifact_manifest
+        .as_ref()
+        .ok_or_else(|| anyhow!("translate lineage requires artifact_manifest"))?;
+    for (name, value) in [
+        ("bronze_content_sha256", &lineage.bronze_content_sha256),
+        (
+            "silver_graph_content_hash",
+            &lineage.silver_graph_content_hash,
+        ),
+        ("builder_version", &lineage.builder_version),
+        (
+            "translate_schema_version",
+            &lineage.translate_schema_version,
+        ),
+        ("embed_text_version", &lineage.embed_text_version),
+        ("graph_prefix_uri", &lineage.graph_prefix_uri),
+        ("graph_manifest_uri", &lineage.graph_manifest_uri),
+        ("graph_manifest_sha256", &lineage.graph_manifest_sha256),
+        ("source_sidecar_uri", &lineage.source_sidecar_uri),
+        ("source_sidecar_sha256", &lineage.source_sidecar_sha256),
+    ] {
+        if value.trim().is_empty() {
+            bail!("translate lineage `{name}` must be non-empty");
+        }
+    }
+    validate_s3_prefix_uri("graph prefix", &lineage.graph_prefix_uri)?;
+    validate_s3_object_uri("graph manifest", &lineage.graph_manifest_uri)?;
+    validate_s3_object_uri("source sidecar", &lineage.source_sidecar_uri)?;
+    validate_sha256("graph manifest", &lineage.graph_manifest_sha256)?;
+    validate_sha256("source sidecar", &lineage.source_sidecar_sha256)?;
+    if lineage.graph_manifest_bytes == 0 {
+        bail!("translate lineage graph manifest must declare non-zero bytes");
+    }
+    if lineage.source_sidecar_bytes == 0 {
+        bail!("translate lineage source sidecar must declare non-zero bytes");
+    }
+    validate_object_under_prefix(
+        "graph manifest",
+        &lineage.graph_prefix_uri,
+        &lineage.graph_manifest_uri,
+    )?;
+    validate_object_under_prefix(
+        "source sidecar",
+        &lineage.graph_prefix_uri,
+        &lineage.source_sidecar_uri,
+    )?;
+
+    let manifest_bytes = serde_json::to_vec_pretty(manifest)
+        .context("failed to encode Silver manifest for lineage validation")?;
+    let manifest_size = u64::try_from(manifest_bytes.len())
+        .context("Silver manifest byte size does not fit in u64")?;
+    let manifest_sha256 = format!("{:x}", Sha256::digest(&manifest_bytes));
+    if lineage.graph_manifest_sha256 != manifest_sha256 {
+        bail!(
+            "graph-manifest SHA-256 mismatch: lineage {} != manifest {}",
+            lineage.graph_manifest_sha256,
+            manifest_sha256
+        );
+    }
+    if lineage.graph_manifest_bytes != manifest_size {
+        bail!(
+            "graph-manifest byte-size mismatch: lineage {} != manifest {}",
+            lineage.graph_manifest_bytes,
+            manifest_size
+        );
+    }
+
+    let source_sidecar = exact_manifest_file(manifest, SOURCE_SIDECAR_MANIFEST_PATH)?;
+    let expected_source_uri = format!("{}{}", lineage.graph_prefix_uri, source_sidecar.path);
+    if lineage.source_sidecar_uri != expected_source_uri {
+        bail!(
+            "source-sidecar URI mismatch: lineage {} != manifest {}",
+            lineage.source_sidecar_uri,
+            expected_source_uri
+        );
+    }
+    if lineage.source_sidecar_sha256 != source_sidecar.sha256 {
+        bail!(
+            "source-sidecar SHA-256 mismatch: lineage {} != manifest {}",
+            lineage.source_sidecar_sha256,
+            source_sidecar.sha256
+        );
+    }
+    if lineage.source_sidecar_bytes != source_sidecar.size_bytes {
+        bail!(
+            "source-sidecar byte-size mismatch: lineage {} != manifest {}",
+            lineage.source_sidecar_bytes,
+            source_sidecar.size_bytes
+        );
+    }
+    Ok(())
+}
+
+fn exact_manifest_file<'a>(
+    manifest: &'a SilverManifest,
+    expected_path: &str,
+) -> Result<&'a crate::medallion::SilverManifestFile> {
+    let mut matches = manifest
+        .files
+        .iter()
+        .filter(|file| file.path == expected_path);
+    let file = matches
+        .next()
+        .ok_or_else(|| anyhow!("Silver manifest missing required file `{expected_path}`"))?;
+    if matches.next().is_some() {
+        bail!("Silver manifest contains duplicate file `{expected_path}`");
+    }
+    Ok(file)
+}
+
+fn validate_sha256(name: &str, value: &str) -> Result<()> {
+    if value.len() != 64 || !value.as_bytes().iter().all(u8::is_ascii_hexdigit) {
+        bail!("translate lineage {name} SHA-256 must be 64 ASCII hexadecimal characters");
+    }
+    Ok(())
+}
+
+fn validate_s3_prefix_uri(name: &str, uri: &str) -> Result<()> {
+    let valid = uri
+        .strip_prefix("s3://")
+        .and_then(|rest| rest.split_once('/'))
+        .is_some_and(|(bucket, key)| !bucket.is_empty() && !key.is_empty() && uri.ends_with('/'));
+    if !valid {
+        bail!("translate lineage {name} must be an S3 prefix URI");
+    }
+    Ok(())
+}
+
+fn validate_s3_object_uri(name: &str, uri: &str) -> Result<()> {
+    let valid = uri
+        .strip_prefix("s3://")
+        .and_then(|rest| rest.split_once('/'))
+        .is_some_and(|(bucket, key)| !bucket.is_empty() && !key.is_empty() && !uri.ends_with('/'));
+    if !valid {
+        bail!("translate lineage {name} must be an S3 object URI");
+    }
+    Ok(())
+}
+
+fn validate_object_under_prefix(name: &str, prefix: &str, uri: &str) -> Result<()> {
+    let relative = uri
+        .strip_prefix(prefix)
+        .filter(|relative| !relative.is_empty() && !relative.contains('/'));
+    if relative.is_none() {
+        bail!("translate lineage {name} URI does not match the persisted graph prefix");
     }
     Ok(())
 }
@@ -1238,6 +1401,7 @@ fn write_catalog_metadata(
     } else {
         "skipped"
     };
+    let serving_lineage = opts.lineage.as_ref();
     let lineage = opts.lineage.clone().unwrap_or_else(default_lineage);
 
     run_transaction(conn, || {
@@ -1253,11 +1417,13 @@ fn write_catalog_metadata(
                 semver_major, semver_minor, semver_patch,
                 snapshot_id, indexed_at, index_status, embeddings_status, row_counts,
                 generation, bronze_content_sha256, silver_graph_content_hash,
-                builder_version, translate_schema_version, embed_text_version
+                builder_version, translate_schema_version, embed_text_version,
+                graph_manifest_uri, graph_manifest_sha256, graph_manifest_bytes,
+                source_sidecar_uri, source_sidecar_sha256, source_sidecar_bytes
             )
             VALUES (
                 ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, 'complete', ?, CAST(? AS JSON),
-                ?, ?, ?, ?, ?, ?
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
             )
             ",
             params![
@@ -1277,6 +1443,12 @@ fn write_catalog_metadata(
                 lineage.builder_version,
                 lineage.translate_schema_version,
                 lineage.embed_text_version,
+                serving_lineage.map(|lineage| lineage.graph_manifest_uri.as_str()),
+                serving_lineage.map(|lineage| lineage.graph_manifest_sha256.as_str()),
+                serving_lineage.map(|lineage| lineage.graph_manifest_bytes),
+                serving_lineage.map(|lineage| lineage.source_sidecar_uri.as_str()),
+                serving_lineage.map(|lineage| lineage.source_sidecar_sha256.as_str()),
+                serving_lineage.map(|lineage| lineage.source_sidecar_bytes),
             ],
         )
         .context("failed to insert package_catalog row")?;
@@ -1292,6 +1464,13 @@ fn default_lineage() -> TranslateLineage {
         builder_version: "unknown".to_owned(),
         translate_schema_version: DEFAULT_TRANSLATE_SCHEMA_VERSION.to_owned(),
         embed_text_version: DEFAULT_EMBED_TEXT_VERSION.to_owned(),
+        graph_prefix_uri: String::new(),
+        graph_manifest_uri: String::new(),
+        graph_manifest_sha256: String::new(),
+        graph_manifest_bytes: 0,
+        source_sidecar_uri: String::new(),
+        source_sidecar_sha256: String::new(),
+        source_sidecar_bytes: 0,
     }
 }
 
@@ -1929,6 +2108,9 @@ fn manifest_files_under(
     relative_dir: &str,
 ) -> Result<Vec<PathBuf>> {
     validate_manifest_relative_path(relative_dir)?;
+    if let Some(path) = manifest_file_path(opts, manifest, relative_dir)? {
+        return Ok(vec![path]);
+    }
     let prefix = format!("{}/", relative_dir.trim_end_matches('/'));
     let mut files = Vec::new();
     for file in &manifest.files {
@@ -2397,6 +2579,117 @@ mod tests {
             line,
             "[translate] phase load_ducklake_extensions+attach_ducklake elapsed_ms=42"
         );
+    }
+
+    #[test]
+    fn validate_options_rejects_serving_lineage_without_artifact_manifest_before_gold_write() {
+        let artifact_dir = std::env::temp_dir().join(format!(
+            "spur-translate-lineage-no-manifest-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&artifact_dir).expect("create artifact directory");
+        let graph_prefix_uri = "s3://silver-test/silver/demo/1.2.3/builder-v1/";
+        let catalog_path = artifact_dir.join("catalog.sqlite");
+        let options = TranslateOptions {
+            source: "registry:crates-io".to_owned(),
+            package: "demo".to_owned(),
+            revision: "1.2.3".to_owned(),
+            revision_kind: "semver".to_owned(),
+            artifact_dir: artifact_dir.clone(),
+            artifact_manifest: None,
+            source_root: None,
+            catalog_dsn: format!("sqlite:{}", catalog_path.display()),
+            lineage: Some(TranslateLineage {
+                bronze_content_sha256: "bronze-sha256".to_owned(),
+                silver_graph_content_hash: "graph-hash-123".to_owned(),
+                builder_version: "builder-v1".to_owned(),
+                translate_schema_version: DEFAULT_TRANSLATE_SCHEMA_VERSION.to_owned(),
+                embed_text_version: DEFAULT_EMBED_TEXT_VERSION.to_owned(),
+                graph_prefix_uri: graph_prefix_uri.to_owned(),
+                graph_manifest_uri: format!("{graph_prefix_uri}manifest.json"),
+                graph_manifest_sha256: "0".repeat(64),
+                graph_manifest_bytes: 1,
+                source_sidecar_uri: format!("{graph_prefix_uri}source_files.parquet"),
+                source_sidecar_sha256: "1".repeat(64),
+                source_sidecar_bytes: 1,
+            }),
+            allow_missing_embeddings: false,
+        };
+
+        let error = validate_options(&options)
+            .expect_err("serving lineage without a Silver manifest must fail validation");
+
+        assert!(
+            format!("{error:#}").contains("artifact_manifest"),
+            "unexpected error: {error:#}"
+        );
+        assert!(
+            !catalog_path.exists(),
+            "lineage validation must fail before any Gold catalog write"
+        );
+        std::fs::remove_dir_all(artifact_dir).ok();
+    }
+
+    #[test]
+    fn validate_options_rejects_mismatched_serving_artifact_identity_before_gold_write() {
+        let artifact_dir = std::env::temp_dir().join(format!(
+            "spur-translate-lineage-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&artifact_dir).expect("create artifact directory");
+        let source_sha256 = "a".repeat(64);
+        let manifest = SilverManifest {
+            schema_hash: "sha256:test-schema".to_owned(),
+            files: vec![crate::medallion::SilverManifestFile {
+                path: "source_files.parquet".to_owned(),
+                size_bytes: 7,
+                etag: "\"source-etag\"".to_owned(),
+                sha256: source_sha256,
+            }],
+        };
+        let manifest_bytes = serde_json::to_vec_pretty(&manifest).expect("encode manifest");
+        let graph_prefix_uri = "s3://silver-test/silver/demo/1.2.3/builder-v1/";
+        let catalog_path = artifact_dir.join("catalog.sqlite");
+        let options = TranslateOptions {
+            source: "registry:crates-io".to_owned(),
+            package: "demo".to_owned(),
+            revision: "1.2.3".to_owned(),
+            revision_kind: "semver".to_owned(),
+            artifact_dir: artifact_dir.clone(),
+            artifact_manifest: Some(manifest),
+            source_root: None,
+            catalog_dsn: format!("sqlite:{}", catalog_path.display()),
+            lineage: Some(TranslateLineage {
+                bronze_content_sha256: "bronze-sha256".to_owned(),
+                silver_graph_content_hash: "graph-hash-123".to_owned(),
+                builder_version: "builder-v1".to_owned(),
+                translate_schema_version: DEFAULT_TRANSLATE_SCHEMA_VERSION.to_owned(),
+                embed_text_version: DEFAULT_EMBED_TEXT_VERSION.to_owned(),
+                graph_prefix_uri: graph_prefix_uri.to_owned(),
+                graph_manifest_uri: format!("{graph_prefix_uri}manifest.json"),
+                graph_manifest_sha256: format!("{:x}", Sha256::digest(&manifest_bytes)),
+                graph_manifest_bytes: manifest_bytes.len() as u64,
+                source_sidecar_uri: format!("{graph_prefix_uri}source_files.parquet"),
+                source_sidecar_sha256: "b".repeat(64),
+                source_sidecar_bytes: 7,
+            }),
+            allow_missing_embeddings: false,
+        };
+
+        let error = validate_options(&options)
+            .expect_err("mismatched source-sidecar SHA-256 must fail validation");
+
+        assert!(
+            format!("{error:#}").contains("source-sidecar SHA-256 mismatch"),
+            "unexpected error: {error:#}"
+        );
+        assert!(
+            !catalog_path.exists(),
+            "lineage validation must fail before any Gold catalog write"
+        );
+        std::fs::remove_dir_all(artifact_dir).ok();
     }
 
     fn translate_artifact_to_ducklake_source() -> &'static str {

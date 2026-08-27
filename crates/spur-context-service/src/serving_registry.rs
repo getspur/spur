@@ -30,6 +30,21 @@ pub struct ServingRegistry {
     pub packages: Vec<ServingPackage>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServingCatalogRow {
+    pub source: String,
+    pub package: String,
+    pub revision: String,
+    pub generation: Option<i64>,
+    pub index_status: String,
+    pub graph_manifest_uri: Option<String>,
+    pub graph_manifest_sha256: Option<String>,
+    pub graph_manifest_bytes: Option<u64>,
+    pub source_sidecar_uri: Option<String>,
+    pub source_sidecar_sha256: Option<String>,
+    pub source_sidecar_bytes: Option<u64>,
+}
+
 #[derive(Debug, Error)]
 pub enum ServingRegistryError {
     #[error("unsupported serving-registry schema version {0}")]
@@ -52,6 +67,8 @@ pub enum ServingRegistryError {
     InvalidSha256(&'static str),
     #[error("artifact {0} declares zero bytes")]
     ZeroByteArtifact(&'static str),
+    #[error("serving generation {generation} is incomplete: {reason}")]
+    IncompleteServingGeneration { generation: i64, reason: String },
     #[error("failed to serialize serving registry: {0}")]
     Serialization(#[from] serde_json::Error),
 }
@@ -67,12 +84,101 @@ impl ServingRegistryError {
             Self::InvalidArtifactUri(_) => "invalid_artifact_uri",
             Self::InvalidSha256(_) => "invalid_sha256",
             Self::ZeroByteArtifact(_) => "zero_byte_artifact",
+            Self::IncompleteServingGeneration { .. } => "incomplete_serving_generation",
             Self::Serialization(_) => "serialization_error",
         }
     }
 }
 
 impl ServingRegistry {
+    pub fn from_current_rows(
+        generation: i64,
+        rows: impl IntoIterator<Item = ServingCatalogRow>,
+    ) -> Result<Self, ServingRegistryError> {
+        let rows = rows.into_iter().collect::<Vec<_>>();
+        if generation <= 0 || rows.is_empty() {
+            return Err(ServingRegistryError::IncompleteServingGeneration {
+                generation,
+                reason: "no current package rows for the serving view".to_owned(),
+            });
+        }
+
+        let mut packages = Vec::with_capacity(rows.len());
+        for row in rows {
+            let row_generation = row.generation.ok_or_else(|| {
+                ServingRegistryError::IncompleteServingGeneration {
+                    generation,
+                    reason: format!(
+                        "{}/{}/{} has no generation",
+                        row.source, row.package, row.revision
+                    ),
+                }
+            })?;
+            if row_generation <= 0 || row_generation > generation {
+                return Err(ServingRegistryError::IncompleteServingGeneration {
+                    generation,
+                    reason: format!(
+                        "{}/{}/{} has invalid row generation {row_generation}",
+                        row.source, row.package, row.revision
+                    ),
+                });
+            }
+            if row.index_status != "complete" {
+                return Err(ServingRegistryError::IncompleteServingGeneration {
+                    generation,
+                    reason: format!(
+                        "{}/{}/{} has index_status `{}`",
+                        row.source, row.package, row.revision, row.index_status
+                    ),
+                });
+            }
+
+            let graph_manifest = required_artifact(
+                generation,
+                "graph_manifest",
+                row.graph_manifest_uri,
+                row.graph_manifest_sha256,
+                row.graph_manifest_bytes,
+            )?;
+            let source_sidecar = required_artifact(
+                generation,
+                "source_sidecar",
+                row.source_sidecar_uri,
+                row.source_sidecar_sha256,
+                row.source_sidecar_bytes,
+            )?;
+            let graph_prefix_uri = graph_manifest
+                .uri
+                .rsplit_once('/')
+                .map(|(prefix, _)| format!("{prefix}/"))
+                .ok_or_else(|| ServingRegistryError::IncompleteServingGeneration {
+                    generation,
+                    reason: format!(
+                        "graph manifest URI `{}` has no object key",
+                        graph_manifest.uri
+                    ),
+                })?;
+
+            packages.push(ServingPackage {
+                source: row.source,
+                package: row.package,
+                revision: row.revision,
+                generation,
+                graph_prefix_uri,
+                graph_manifest,
+                source_sidecar,
+            });
+        }
+
+        let registry = Self {
+            schema_version: SERVING_REGISTRY_SCHEMA_VERSION,
+            generation,
+            packages,
+        };
+        registry.validate()?;
+        Ok(registry)
+    }
+
     pub fn validate(&self) -> Result<(), ServingRegistryError> {
         if self.schema_version != SERVING_REGISTRY_SCHEMA_VERSION {
             return Err(ServingRegistryError::UnsupportedSchemaVersion(
@@ -136,6 +242,26 @@ impl ServingRegistry {
             ))
         });
         Ok(serde_json::to_vec(&canonical)?)
+    }
+}
+
+fn required_artifact(
+    generation: i64,
+    name: &'static str,
+    uri: Option<String>,
+    sha256: Option<String>,
+    bytes: Option<u64>,
+) -> Result<ArtifactRef, ServingRegistryError> {
+    match (uri, sha256, bytes) {
+        (Some(uri), Some(sha256), Some(bytes))
+            if !uri.trim().is_empty() && !sha256.trim().is_empty() && bytes > 0 =>
+        {
+            Ok(ArtifactRef { uri, sha256, bytes })
+        }
+        _ => Err(ServingRegistryError::IncompleteServingGeneration {
+            generation,
+            reason: format!("missing {name} URI/SHA-256/byte metadata"),
+        }),
     }
 }
 
