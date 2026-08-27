@@ -689,6 +689,7 @@ pub struct QaCacheKey {
     pub model: String,
     pub model_sha256: String,
     pub ranking_sha256: String,
+    pub max_output_tokens: u64,
     pub variant: Variant,
     pub granularity: Granularity,
     pub stage: QaStage,
@@ -702,6 +703,7 @@ impl QaCacheKey {
         prompt_sha256: impl Into<String>,
         model: impl Into<String>,
         ranking_sha256: impl Into<String>,
+        max_output_tokens: u64,
         variant: Variant,
         granularity: Granularity,
         stage: QaStage,
@@ -714,6 +716,7 @@ impl QaCacheKey {
             model_sha256: sha256_hex(model.as_bytes()),
             model,
             ranking_sha256: ranking_sha256.into(),
+            max_output_tokens,
             variant,
             granularity,
             stage,
@@ -727,6 +730,7 @@ impl QaCacheKey {
             request.prompt_sha256.clone(),
             request.model.clone(),
             request.ranking_sha256.clone(),
+            request.max_output_tokens,
             request.variant,
             request.granularity,
             request.stage,
@@ -736,6 +740,7 @@ impl QaCacheKey {
     /// File-safe digest over every cache-key field.
     pub fn identity_sha256(&self) -> String {
         let mut hasher = Sha256::new();
+        let max_output_tokens = self.max_output_tokens.to_string();
         for component in [
             self.question_id.as_str(),
             self.question_sha256.as_str(),
@@ -743,6 +748,7 @@ impl QaCacheKey {
             self.model.as_str(),
             self.model_sha256.as_str(),
             self.ranking_sha256.as_str(),
+            max_output_tokens.as_str(),
             variant_name(self.variant),
             granularity_name(self.granularity),
             stage_name(self.stage),
@@ -861,6 +867,10 @@ impl JsonQaCache {
             let Some((reader_entry, _)) = entries.get(&reader_key) else {
                 continue;
             };
+            ensure!(
+                reader_entry.request == reader_request,
+                "reader cache request does not match the exact frozen request"
+            );
             recognized.insert(reader_key);
             let Ok(judge_request) = build_longmem_judge_request(
                 question,
@@ -870,9 +880,14 @@ impl JsonQaCache {
                 continue;
             };
             let judge_key = QaCacheKey::from_request(&judge_request);
-            if entries.contains_key(&judge_key) {
-                recognized.insert(judge_key);
-            }
+            let Some((judge_entry, _)) = entries.get(&judge_key) else {
+                continue;
+            };
+            ensure!(
+                judge_entry.request == judge_request,
+                "judge cache request does not match the exact frozen request"
+            );
+            recognized.insert(judge_key);
         }
         ensure!(
             recognized.len() == entries.len(),
@@ -924,6 +939,10 @@ impl QaCache for JsonQaCache {
 }
 
 fn validate_cache_entry(entry: &QaCacheEntry) -> anyhow::Result<()> {
+    ensure!(
+        entry.request.prompt_sha256 == sha256_hex(entry.request.prompt.as_bytes()),
+        "cache request prompt_sha256 does not match its prompt bytes"
+    );
     ensure!(
         entry.key == QaCacheKey::from_request(&entry.request),
         "cache entry key does not match its complete request identity"

@@ -353,13 +353,14 @@ fn responses_adapter_shape_and_decoder_enforce_the_audited_contract() {
 }
 
 #[test]
-fn cache_key_changes_for_question_prompt_model_ranking_and_stage() {
+fn cache_key_changes_for_question_prompt_model_ranking_max_output_tokens_and_stage() {
     let base = QaCacheKey::new(
         "q",
         "question-hash",
         "prompt-hash",
         LONGMEMEVAL_MODEL,
         "ranking-hash",
+        512,
         Variant::Recent,
         Granularity::Session,
         QaStage::Reader,
@@ -371,6 +372,7 @@ fn cache_key_changes_for_question_prompt_model_ranking_and_stage() {
             "prompt-hash",
             LONGMEMEVAL_MODEL,
             "ranking-hash",
+            512,
             Variant::Recent,
             Granularity::Session,
             QaStage::Reader,
@@ -381,6 +383,7 @@ fn cache_key_changes_for_question_prompt_model_ranking_and_stage() {
             "prompt-hash-2",
             LONGMEMEVAL_MODEL,
             "ranking-hash",
+            512,
             Variant::Recent,
             Granularity::Session,
             QaStage::Reader,
@@ -391,6 +394,7 @@ fn cache_key_changes_for_question_prompt_model_ranking_and_stage() {
             "prompt-hash",
             "different-model",
             "ranking-hash",
+            512,
             Variant::Recent,
             Granularity::Session,
             QaStage::Reader,
@@ -401,6 +405,7 @@ fn cache_key_changes_for_question_prompt_model_ranking_and_stage() {
             "prompt-hash",
             LONGMEMEVAL_MODEL,
             "ranking-hash-2",
+            512,
             Variant::Recent,
             Granularity::Session,
             QaStage::Reader,
@@ -411,6 +416,18 @@ fn cache_key_changes_for_question_prompt_model_ranking_and_stage() {
             "prompt-hash",
             LONGMEMEVAL_MODEL,
             "ranking-hash",
+            513,
+            Variant::Recent,
+            Granularity::Session,
+            QaStage::Reader,
+        ),
+        QaCacheKey::new(
+            "q",
+            "question-hash",
+            "prompt-hash",
+            LONGMEMEVAL_MODEL,
+            "ranking-hash",
+            512,
             Variant::Recent,
             Granularity::Session,
             QaStage::Judge,
@@ -422,6 +439,7 @@ fn cache_key_changes_for_question_prompt_model_ranking_and_stage() {
     assert_eq!(base.model, LONGMEMEVAL_MODEL);
     assert_eq!(base.model_sha256, sha256(LONGMEMEVAL_MODEL));
     assert_eq!(base.ranking_sha256, "ranking-hash");
+    assert_eq!(base.max_output_tokens, 512);
     assert!(changed.iter().all(|key| key != &base));
     assert_eq!(
         changed
@@ -533,6 +551,41 @@ async fn valid_reader_and_judge_reconcile_then_resume_without_backend_transmissi
 
     assert_eq!(resumed, first);
     assert!(resume_backend.requests.is_empty());
+}
+
+#[tokio::test]
+async fn reconciliation_rejects_reader_prompt_with_stale_self_hash() {
+    let dataset = fixture_dataset();
+    let rankings = frozen_rankings(&dataset);
+    let temp = tempfile::tempdir().unwrap();
+    let (cache, _, reader_key, _) =
+        seed_reconciliation_cache(temp.path(), &dataset, &rankings).await;
+    mutate_cache_entry(temp.path(), &reader_key, |entry| {
+        entry.request.prompt.push_str("\nmutated after hashing");
+    });
+
+    let error = reconciliation_error(&cache, temp.path(), &dataset, &rankings);
+
+    assert!(error.contains("prompt_sha256"), "unexpected error: {error}");
+}
+
+#[tokio::test]
+async fn reconciliation_rejects_changed_reader_max_output_tokens() {
+    let dataset = fixture_dataset();
+    let rankings = frozen_rankings(&dataset);
+    let temp = tempfile::tempdir().unwrap();
+    let (cache, _, reader_key, _) =
+        seed_reconciliation_cache(temp.path(), &dataset, &rankings).await;
+    mutate_cache_entry(temp.path(), &reader_key, |entry| {
+        entry.request.max_output_tokens += 1;
+    });
+
+    let error = reconciliation_error(&cache, temp.path(), &dataset, &rankings);
+
+    assert!(
+        error.contains("complete request identity"),
+        "unexpected error: {error}"
+    );
 }
 
 #[tokio::test]
