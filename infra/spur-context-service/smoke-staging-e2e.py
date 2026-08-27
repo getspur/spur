@@ -45,6 +45,9 @@ DEFAULT_POINTER_KEY = "gold/catalog-snapshot/current.json"
 VECTOR_DIMENSIONS = 768
 BRONZE_SOURCE_KEY_TEMPLATE = "bronze/{source}/{package}/{revision}/source.tar.gz"
 SILVER_MANIFEST_KEY_TEMPLATE = (
+    "silver/{source}/{package}/{revision}/{builder_version}/silver-manifest.json"
+)
+GRAPH_MANIFEST_KEY_TEMPLATE = (
     "silver/{source}/{package}/{revision}/{builder_version}/manifest.json"
 )
 
@@ -592,22 +595,39 @@ def assert_silver_artifact_manifest(
     region: str,
 ) -> None:
     keys = list_s3_keys(bucket, silver_prefix, region)
+    manifests_by_builder: dict[str, set[str]] = {}
     for key in keys:
         if not key.startswith(silver_prefix):
             continue
         relative = key[len(silver_prefix) :]
         parts = relative.split("/")
-        if len(parts) == 2 and parts[0] and parts[1] == "manifest.json":
-            print(f"[context-smoke] silver manifest=s3://{bucket}/{key}")
+        if len(parts) == 2 and parts[0] and parts[1] in {
+            "silver-manifest.json",
+            "manifest.json",
+        }:
+            manifests_by_builder.setdefault(parts[0], set()).add(parts[1])
+    for builder_version, basenames in manifests_by_builder.items():
+        if basenames == {"silver-manifest.json", "manifest.json"}:
+            print(
+                "[context-smoke] silver bundle="
+                f"s3://{bucket}/{silver_prefix}{builder_version}/"
+            )
             return
-    expected = SILVER_MANIFEST_KEY_TEMPLATE.format(
+    expected_root = SILVER_MANIFEST_KEY_TEMPLATE.format(
+        source=source,
+        package=package,
+        revision=revision,
+        builder_version="<builder-version>",
+    )
+    expected_graph = GRAPH_MANIFEST_KEY_TEMPLATE.format(
         source=source,
         package=package,
         revision=revision,
         builder_version="<builder-version>",
     )
     raise SmokeFailure(
-        f"expected silver artifact manifest at s3://{bucket}/{expected}; "
+        "expected complete Silver bundle objects at "
+        f"s3://{bucket}/{expected_root} and s3://{bucket}/{expected_graph}; "
         f"found {json.dumps(keys[:10])}"
     )
 

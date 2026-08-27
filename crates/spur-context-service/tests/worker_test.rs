@@ -29,13 +29,13 @@ use spur_context_service::jobs::{
 };
 use spur_context_service::mcp::{IndexExecutionRequest, IndexExecutionStarter, McpHandlerError};
 use spur_context_service::worker::{
-    acquire_catalog_lease_with_retry, build_graph, fetch_source, fetch_source_with_bronze_services,
-    handle_spot_interruption, persist_silver_graph_artifact, prepare_job_with_services,
-    retrieve_bronze_source_by_coordinate, run_job_and_record_with_services,
-    upload_with_owned_catalog_lease, BronzeArchiveStore, BronzeRawSource, BronzeRawSourceRegistry,
-    CatalogDownload, CatalogLease, CatalogLeaseStore, GraphArtifactBuilder, JobEnv, JobFromLayer,
-    SilverArtifactStore, SilverGraphArtifact, SilverGraphArtifactRegistry, SilverUploadedFile,
-    StageTracker, WorkerError,
+    acquire_catalog_lease_with_retry, build_graph, download_silver_artifact_from_manifest,
+    fetch_source, fetch_source_with_bronze_services, handle_spot_interruption,
+    persist_silver_graph_artifact, prepare_job_with_services, retrieve_bronze_source_by_coordinate,
+    run_job_and_record_with_services, upload_with_owned_catalog_lease, BronzeArchiveStore,
+    BronzeRawSource, BronzeRawSourceRegistry, CatalogDownload, CatalogLease, CatalogLeaseStore,
+    GraphArtifactBuilder, JobEnv, JobFromLayer, SilverArtifactStore, SilverGraphArtifact,
+    SilverGraphArtifactRegistry, SilverUploadedFile, StageTracker, WorkerError,
 };
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -283,7 +283,7 @@ async fn bronze_fetch_errors_when_existing_success_row_hash_drifts() -> Result<(
 }
 
 #[tokio::test]
-async fn silver_upload_writes_validates_manifest_before_registering() -> Result<()> {
+async fn silver_bundle_publication_uses_distinct_complete_versioned_root() -> Result<()> {
     let _guard = ENV_LOCK.lock().unwrap();
     let _env_guard = EnvGuard::set_all([("SPUR_CONTEXT_SILVER_BUCKET", "silver-test")]);
     let root = unique_temp_dir("worker-silver-upload")?;
@@ -314,7 +314,7 @@ async fn silver_upload_writes_validates_manifest_before_registering() -> Result<
     );
     assert_eq!(
         row.manifest_uri,
-        "s3://silver-test/silver/registry:crates-io/demo/0.1.0/builder-v1/manifest.json"
+        "s3://silver-test/silver/registry:crates-io/demo/0.1.0/builder-v1/silver-manifest.json"
     );
     assert_eq!(row.builder_version, "builder-v1");
     assert_eq!(row.graph_content_hash, "graph-hash-123");
@@ -328,7 +328,8 @@ async fn silver_upload_writes_validates_manifest_before_registering() -> Result<
     assert_eq!(registered, [row]);
 
     let manifest = store.manifest().context("manifest should be uploaded")?;
-    assert_eq!(manifest.files.len(), 8);
+    assert_eq!(serde_json::to_value(&manifest)?["schema_version"], 1);
+    assert_eq!(manifest.files.len(), 9);
     assert!(manifest.schema_hash.starts_with("sha256:"));
     assert!(manifest
         .files
@@ -338,19 +339,168 @@ async fn silver_upload_writes_validates_manifest_before_registering() -> Result<
         .files
         .iter()
         .any(|file| file.path == "code_symbols.parquet"));
-    assert!(!manifest
+    let graph_manifest_files = manifest
         .files
         .iter()
-        .any(|file| file.path == "manifest.json"));
+        .filter(|file| file.path == "manifest.json")
+        .collect::<Vec<_>>();
+    assert_eq!(graph_manifest_files.len(), 1);
+    let graph_manifest_bytes = fs::read(artifact_dir.join("manifest.json"))?;
+    assert_eq!(
+        graph_manifest_files[0].size_bytes,
+        graph_manifest_bytes.len() as u64
+    );
+    assert_eq!(
+        graph_manifest_files[0].sha256,
+        sha256_hex(&graph_manifest_bytes)
+    );
 
     let events = events.lock().expect("events lock").clone();
-    let upload_manifest = event_index(&events, "upload_manifest:").context("upload manifest")?;
+    let upload_graph_manifest = event_index(
+        &events,
+        "upload_file:silver/registry:crates-io/demo/0.1.0/builder-v1/manifest.json",
+    )
+    .context("upload graph manifest")?;
+    let upload_manifest = event_index(
+        &events,
+        "upload_manifest:silver/registry:crates-io/demo/0.1.0/builder-v1/silver-manifest.json",
+    )
+    .context("upload Silver root manifest")?;
     let validate = event_index(&events, "validate_manifest:").context("validate manifest")?;
     let register = event_index(&events, "register").context("register silver")?;
     assert!(
-        upload_manifest < validate && validate < register,
-        "events must upload manifest, validate it, then register: {events:?}"
+        upload_graph_manifest < upload_manifest
+            && upload_manifest < validate
+            && validate < register,
+        "events must upload graph manifest, upload Silver root, validate bytes, then register: {events:?}"
     );
+    Ok(())
+}
+
+#[test]
+fn silver_bundle_legacy_root_without_current_schema_version_fails_closed() -> Result<()> {
+    let manifest = worker_silver_manifest();
+    let mut legacy = serde_json::to_value(&manifest)?;
+    legacy
+        .as_object_mut()
+        .context("Silver manifest must serialize as an object")?
+        .remove("schema_version");
+    assert!(
+        serde_json::from_value::<spur_context_service::medallion::SilverManifest>(legacy).is_err()
+    );
+
+    let mut wrong_version = serde_json::to_value(&manifest)?;
+    wrong_version["schema_version"] = serde_json::json!(2);
+    assert!(
+        serde_json::from_value::<spur_context_service::medallion::SilverManifest>(wrong_version)
+            .is_err()
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn silver_bundle_download_rejects_duplicate_paths_before_member_io() -> Result<()> {
+    let root = unique_temp_dir("worker-silver-duplicate-path")?;
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let mut manifest = worker_silver_manifest();
+    let graph_manifest = manifest
+        .files
+        .iter()
+        .find(|file| file.path == "manifest.json")
+        .context("graph manifest fixture")?
+        .clone();
+    manifest.files.push(graph_manifest);
+    let store = FakeSilverArtifactStore::with_manifest(events.clone(), manifest.clone());
+
+    let error = download_silver_artifact_from_manifest(
+        "s3://silver-test/silver/registry:crates-io/demo/0.1.0/builder-v1/silver-manifest.json",
+        &manifest,
+        &root.join("artifact"),
+        &store,
+    )
+    .await
+    .unwrap_err();
+
+    assert!(error.to_string().contains("duplicate"));
+    assert_no_silver_member_downloads(&events);
+    fs::remove_dir_all(root).ok();
+    Ok(())
+}
+
+#[tokio::test]
+async fn silver_bundle_download_rejects_unconfined_paths_before_member_io() -> Result<()> {
+    let root = unique_temp_dir("worker-silver-unconfined-path")?;
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let mut manifest = worker_silver_manifest();
+    let unsafe_bytes = b"fixture:../escape.parquet";
+    manifest
+        .files
+        .push(spur_context_service::medallion::SilverManifestFile {
+            path: "../escape.parquet".to_owned(),
+            size_bytes: unsafe_bytes.len() as u64,
+            etag: "\"../escape.parquet\"".to_owned(),
+            sha256: sha256_hex(unsafe_bytes),
+        });
+    let store = FakeSilverArtifactStore::with_manifest(events.clone(), manifest.clone());
+
+    let error = download_silver_artifact_from_manifest(
+        "s3://silver-test/silver/registry:crates-io/demo/0.1.0/builder-v1/silver-manifest.json",
+        &manifest,
+        &root.join("artifact"),
+        &store,
+    )
+    .await
+    .unwrap_err();
+
+    assert!(error.to_string().contains("escapes artifact root"));
+    assert_no_silver_member_downloads(&events);
+    fs::remove_dir_all(root).ok();
+    Ok(())
+}
+
+#[tokio::test]
+async fn silver_bundle_download_rejects_missing_graph_manifest_before_member_io() -> Result<()> {
+    let root = unique_temp_dir("worker-silver-missing-graph-manifest")?;
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let mut manifest = worker_silver_manifest();
+    manifest.files.retain(|file| file.path != "manifest.json");
+    let store = FakeSilverArtifactStore::with_manifest(events.clone(), manifest.clone());
+
+    let error = download_silver_artifact_from_manifest(
+        "s3://silver-test/silver/registry:crates-io/demo/0.1.0/builder-v1/silver-manifest.json",
+        &manifest,
+        &root.join("artifact"),
+        &store,
+    )
+    .await
+    .unwrap_err();
+
+    assert!(error.to_string().contains("manifest.json"));
+    assert_no_silver_member_downloads(&events);
+    fs::remove_dir_all(root).ok();
+    Ok(())
+}
+
+#[tokio::test]
+async fn silver_bundle_download_rejects_corrupt_graph_manifest_bytes() -> Result<()> {
+    let root = unique_temp_dir("worker-silver-corrupt-graph-manifest")?;
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let manifest = worker_silver_manifest();
+    let store = FakeSilverArtifactStore::with_manifest(events, manifest.clone());
+    store.set_download_bytes("manifest.json", b"corrupt graph manifest".to_vec());
+
+    let error = download_silver_artifact_from_manifest(
+        "s3://silver-test/silver/registry:crates-io/demo/0.1.0/builder-v1/silver-manifest.json",
+        &manifest,
+        &root.join("artifact"),
+        &store,
+    )
+    .await
+    .unwrap_err();
+
+    assert!(error.to_string().contains("manifest.json"));
+    assert!(error.to_string().contains("mismatch"));
+    fs::remove_dir_all(root).ok();
     Ok(())
 }
 
@@ -676,6 +826,10 @@ async fn reprocess_from_silver_downloads_registered_silver_without_fetch_or_buil
     assert_eq!(silver_registry.registers(), 0);
     assert_eq!(prepared.source_path(), None);
     assert!(prepared.artifact_dir().join("nodes.parquet").is_file());
+    assert_eq!(
+        fs::read(prepared.artifact_dir().join("manifest.json"))?,
+        b"fixture:manifest.json"
+    );
     assert_eq!(prepared.artifact_manifest(), Some(&manifest));
     let lineage = prepared.lineage().context("lineage should be stamped")?;
     assert_eq!(lineage.bronze_content_sha256, "bronze-sha256");
@@ -1470,6 +1624,7 @@ fn worker_silver_manifest() -> spur_context_service::medallion::SilverManifest {
     spur_context_service::medallion::SilverManifest {
         schema_hash: "sha256:test-schema".to_owned(),
         files: [
+            "manifest.json",
             "nodes.parquet",
             "edges.parquet",
             "edges_unresolved.parquet",
@@ -1480,14 +1635,27 @@ fn worker_silver_manifest() -> spur_context_service::medallion::SilverManifest {
             "sections.parquet",
         ]
         .into_iter()
-        .map(|path| spur_context_service::medallion::SilverManifestFile {
-            path: path.to_owned(),
-            size_bytes: 1,
-            etag: format!("\"{path}\""),
-            sha256: sha256_hex(path.as_bytes()),
+        .map(|path| {
+            let bytes = format!("fixture:{path}");
+            spur_context_service::medallion::SilverManifestFile {
+                path: path.to_owned(),
+                size_bytes: bytes.len() as u64,
+                etag: format!("\"{path}\""),
+                sha256: sha256_hex(bytes.as_bytes()),
+            }
         })
         .collect(),
     }
+}
+
+fn assert_no_silver_member_downloads(events: &Arc<Mutex<Vec<String>>>) {
+    let events = events.lock().expect("events lock");
+    assert!(
+        events
+            .iter()
+            .all(|event| !event.starts_with("download_file:")),
+        "invalid Silver roots must fail before member I/O: {events:?}"
+    );
 }
 
 fn event_index(events: &[String], prefix: &str) -> Option<usize> {
@@ -1530,7 +1698,7 @@ fn silver_row(manifest: &spur_context_service::medallion::SilverManifest) -> Sil
         artifact_s3_prefix: "s3://silver-test/silver/registry:crates-io/demo/0.1.0/builder-v1/"
             .to_owned(),
         manifest_uri:
-            "s3://silver-test/silver/registry:crates-io/demo/0.1.0/builder-v1/manifest.json"
+            "s3://silver-test/silver/registry:crates-io/demo/0.1.0/builder-v1/silver-manifest.json"
                 .to_owned(),
         manifest_schema_hash: manifest.schema_hash.clone(),
         node_count: 7,
@@ -1595,6 +1763,7 @@ impl GraphArtifactBuilder for FakeGraphBuilder {
 struct FakeSilverArtifactStore {
     events: Arc<Mutex<Vec<String>>>,
     manifest: Mutex<Option<spur_context_service::medallion::SilverManifest>>,
+    download_bytes: Mutex<HashMap<String, Vec<u8>>>,
 }
 
 impl FakeSilverArtifactStore {
@@ -1602,6 +1771,7 @@ impl FakeSilverArtifactStore {
         Self {
             events,
             manifest: Mutex::new(None),
+            download_bytes: Mutex::new(HashMap::new()),
         }
     }
 
@@ -1609,23 +1779,49 @@ impl FakeSilverArtifactStore {
         events: Arc<Mutex<Vec<String>>>,
         manifest: spur_context_service::medallion::SilverManifest,
     ) -> Self {
+        let download_bytes = manifest
+            .files
+            .iter()
+            .map(|file| {
+                (
+                    file.path.clone(),
+                    format!("fixture:{}", file.path).into_bytes(),
+                )
+            })
+            .collect();
         Self {
             events,
             manifest: Mutex::new(Some(manifest)),
+            download_bytes: Mutex::new(download_bytes),
         }
     }
 
     fn manifest(&self) -> Option<spur_context_service::medallion::SilverManifest> {
         self.manifest.lock().expect("silver manifest lock").clone()
     }
+
+    fn set_download_bytes(&self, relative_path: &str, bytes: Vec<u8>) {
+        self.download_bytes
+            .lock()
+            .expect("silver download bytes lock")
+            .insert(relative_path.to_owned(), bytes);
+    }
 }
 
 #[async_trait]
 impl SilverArtifactStore for FakeSilverArtifactStore {
     async fn upload_file(&self, key: &str, path: &Path) -> Result<SilverUploadedFile, WorkerError> {
-        let size_bytes = fs::metadata(path)
-            .map_err(|error| WorkerError::Build(format!("fake silver stat: {error}")))?
-            .len();
+        let bytes = fs::read(path)
+            .map_err(|error| WorkerError::Build(format!("fake silver read: {error}")))?;
+        let size_bytes = bytes.len() as u64;
+        let relative_path = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| WorkerError::Build("fake silver path has no filename".to_owned()))?;
+        self.download_bytes
+            .lock()
+            .expect("silver download bytes lock")
+            .insert(relative_path.to_owned(), bytes);
         self.events
             .lock()
             .expect("events lock")
@@ -1692,7 +1888,16 @@ impl SilverArtifactStore for FakeSilverArtifactStore {
             fs::create_dir_all(parent)
                 .map_err(|error| WorkerError::Build(format!("fake mkdir: {error}")))?;
         }
-        fs::write(dest, format!("fixture:{relative_path}"))
+        let bytes = self
+            .download_bytes
+            .lock()
+            .expect("silver download bytes lock")
+            .get(relative_path)
+            .cloned()
+            .ok_or_else(|| {
+                WorkerError::Build(format!("missing fake silver file `{relative_path}`"))
+            })?;
+        fs::write(dest, bytes)
             .map_err(|error| WorkerError::Build(format!("fake silver download: {error}")))?;
         Ok(())
     }

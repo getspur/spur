@@ -2,7 +2,8 @@ use anyhow::Result;
 use serde_json::json;
 use spur_context_service::medallion::{
     BronzeIdentity, GoldIdentity, SilverIdentity, SilverManifest, SilverManifestFile,
-    BRONZE_PREFIX, GOLD_CATALOG_SNAPSHOT_PREFIX, GOLD_DATA_PREFIX, GOLD_PREFIX, SILVER_PREFIX,
+    BRONZE_PREFIX, GOLD_CATALOG_SNAPSHOT_PREFIX, GOLD_DATA_PREFIX, GOLD_PREFIX,
+    SILVER_BUNDLE_SCHEMA_VERSION, SILVER_PREFIX,
 };
 
 #[test]
@@ -99,6 +100,7 @@ fn silver_manifest_round_trips_file_sizes_etags_and_schema_hash() -> Result<()> 
     assert_eq!(
         serde_json::to_value(&manifest)?,
         json!({
+            "schema_version": SILVER_BUNDLE_SCHEMA_VERSION,
             "schema_hash": "schema-sha256",
             "files": [
                 {
@@ -117,4 +119,36 @@ fn silver_manifest_round_trips_file_sizes_etags_and_schema_hash() -> Result<()> 
         })
     );
     Ok(())
+}
+
+#[test]
+fn silver_manifest_rejects_missing_schema_version() {
+    let error = serde_json::from_value::<SilverManifest>(json!({
+        "schema_hash": "schema-sha256",
+        "files": []
+    }))
+    .expect_err("legacy Silver root without schema_version must fail closed");
+
+    assert!(
+        error.to_string().contains("schema_version"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn silver_manifest_rejects_unsupported_schema_version() {
+    let unsupported_version = SILVER_BUNDLE_SCHEMA_VERSION + 1;
+    let error = serde_json::from_value::<SilverManifest>(json!({
+        "schema_version": unsupported_version,
+        "schema_hash": "schema-sha256",
+        "files": []
+    }))
+    .expect_err("unsupported Silver root schema version must fail closed");
+
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "unsupported Silver bundle schema version {unsupported_version}; expected {SILVER_BUNDLE_SCHEMA_VERSION}"
+        )
+    );
 }
