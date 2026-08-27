@@ -240,6 +240,21 @@ impl RunManifest {
         self.artifacts.iter().map(|(kind, record)| (*kind, record))
     }
 
+    fn validate_initial(&self, path: &Path) -> Result<(), ArtifactError> {
+        if !matches!(self.phase, RunPhase::Prepared) || !self.artifacts.is_empty() {
+            return Err(invalid_manifest(
+                path,
+                format!(
+                    "new artifact store requires phase Prepared and an empty artifact index; \
+                     got phase {:?} with {} artifact(s)",
+                    self.phase,
+                    self.artifacts.len()
+                ),
+            ));
+        }
+        Ok(())
+    }
+
     fn validate(&self, path: &Path) -> Result<(), ArtifactError> {
         if self.schema_version != MANIFEST_SCHEMA_VERSION {
             return Err(invalid_manifest(
@@ -476,7 +491,7 @@ pub struct ArtifactStore {
 }
 
 impl ArtifactStore {
-    /// Initializes an empty run root and persists its prepared manifest.
+    /// Initializes an empty run root from a prepared manifest without artifacts.
     ///
     /// # Errors
     ///
@@ -484,6 +499,8 @@ impl ArtifactStore {
     /// canonicalized, synchronized, or initialized atomically.
     pub fn create(root: impl AsRef<Path>, manifest: RunManifest) -> Result<Self, ArtifactError> {
         let requested_root = root.as_ref();
+        let requested_manifest_path = requested_root.join(ArtifactKind::Manifest.relative_path());
+        manifest.validate_initial(&requested_manifest_path)?;
         if requested_root.exists()
             && fs::read_dir(requested_root)
                 .map_err(|error| filesystem("read directory", requested_root, &error))?

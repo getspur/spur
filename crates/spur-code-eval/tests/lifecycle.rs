@@ -83,6 +83,67 @@ fn store(root: &Path) -> ArtifactStore {
 }
 
 #[test]
+fn create_rejects_deserialized_frozen_manifest_before_parent_or_root_changes() {
+    let fixture = TempDirectory::new("create-frozen-manifest");
+    let root = fixture.run_root();
+    let before = snapshot_tree(&fixture.0);
+    let manifest = serde_json::from_value(serde_json::json!({
+        "schema_version": 1,
+        "run_id": "frozen-run",
+        "phase": "frozen",
+        "artifacts": {}
+    }))
+    .unwrap();
+
+    let error = ArtifactStore::create(&root, manifest)
+        .expect_err("create unexpectedly accepted a deserialized frozen manifest");
+
+    assert!(matches!(
+        error,
+        ArtifactError::InvalidManifest { message, .. }
+            if message
+                == "new artifact store requires phase Prepared and an empty artifact index; \
+                    got phase Frozen with 0 artifact(s)"
+    ));
+    assert!(!root.exists());
+    assert_eq!(snapshot_tree(&fixture.0), before);
+}
+
+#[test]
+fn create_rejects_deserialized_prepared_manifest_with_artifacts_before_parent_or_root_changes() {
+    let fixture = TempDirectory::new("create-populated-manifest");
+    let root = fixture.run_root();
+    let before = snapshot_tree(&fixture.0);
+    let manifest = serde_json::from_value(serde_json::json!({
+        "schema_version": 1,
+        "run_id": "prepared-run",
+        "phase": "prepared",
+        "artifacts": {
+            "rankings": {
+                "relative_path": "rankings.jsonl",
+                "sha256": content_sha256(b"not present"),
+                "bytes": 11,
+                "frozen": false
+            }
+        }
+    }))
+    .unwrap();
+
+    let error = ArtifactStore::create(&root, manifest)
+        .expect_err("create unexpectedly accepted a pre-populated prepared manifest");
+
+    assert!(matches!(
+        error,
+        ArtifactError::InvalidManifest { message, .. }
+            if message
+                == "new artifact store requires phase Prepared and an empty artifact index; \
+                    got phase Prepared with 1 artifact(s)"
+    ));
+    assert!(!root.exists());
+    assert_eq!(snapshot_tree(&fixture.0), before);
+}
+
+#[test]
 fn artifact_kinds_have_stable_canonical_paths() {
     assert_eq!(ArtifactKind::Manifest.relative_path(), "manifest.json");
     assert_eq!(ArtifactKind::Validation.relative_path(), "validation.json");
