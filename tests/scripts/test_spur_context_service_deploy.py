@@ -15,6 +15,215 @@ STAGING_SMOKE = INFRA_DIR / "smoke-staging-e2e.py"
 STAGING_SMOKE_ENTRYPOINT = INFRA_DIR / "smoke-staging-e2e.sh"
 
 
+def terraform_resource_block(text, resource_type, resource_name):
+    marker = f'resource "{resource_type}" "{resource_name}"'
+    start = text.index(marker)
+    brace = text.index("{", start)
+    depth = 0
+    for offset, character in enumerate(text[brace:], start=brace):
+        if character == "{":
+            depth += 1
+        elif character == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start : offset + 1]
+    raise AssertionError(f"unterminated Terraform resource: {marker}")
+
+
+def test_serving_compute_defines_exactly_code_and_knowledge_with_isolated_envs():
+    main_tf = (INFRA_DIR / "main.tf").read_text()
+    variables_tf = (INFRA_DIR / "variables.tf").read_text()
+
+    serving_resources = set(
+        re.findall(r'resource\s+"aws_lambda_function"\s+"([^"]+)"', main_tf)
+    )
+    assert serving_resources == {"code", "knowledge"}
+
+    code = terraform_resource_block(main_tf, "aws_lambda_function", "code")
+    knowledge = terraform_resource_block(
+        main_tf, "aws_lambda_function", "knowledge"
+    )
+    assert 'function_name = "spur-context-code"' in code
+    assert "role        = aws_iam_role.code_lambda.arn" in code
+    assert 'function_name = "spur-context-knowledge"' in knowledge
+    assert "role        = aws_iam_role.knowledge_lambda.arn" in knowledge
+
+    assert "SPUR_CONTEXT_CODE_CACHE_BYTES" in code
+    assert (
+        "tostring(local.code_lambda_ephemeral_storage_bytes)" in code
+    )
+    assert "size = var.code_lambda_ephemeral_storage_mb" in code
+    assert "SPUR_CONTEXT_DUCKDB_EXTENSION_DIR" not in code
+    assert "SPUR_CATALOG_DSN" not in code
+    assert "HOME" not in code
+
+    assert "SPUR_CATALOG_S3_URI" in knowledge
+    assert "SPUR_CONTEXT_DUCKDB_EXTENSION_DIR" in knowledge
+    assert 'HOME = "/tmp"' in knowledge
+    for code_only_env in (
+        "SPUR_CONTEXT_CODE_CACHE_BYTES",
+        "SPUR_INDEX_STATE_MACHINE_ARN",
+        "SPUR_INDEX_JOBS_TABLE",
+        "SPUR_CONTEXT_API_KEYS_TABLE",
+    ):
+        assert code_only_env not in knowledge
+
+    ephemeral_variable = variables_tf.split(
+        'variable "code_lambda_ephemeral_storage_mb"', 1
+    )[1].split("\n}", 1)[0]
+    assert "default     = 512" in ephemeral_variable
+    assert "var.code_lambda_ephemeral_storage_mb == 512" in ephemeral_variable
+    assert (
+        "code_lambda_ephemeral_storage_bytes = "
+        "var.code_lambda_ephemeral_storage_mb * 1024 * 1024"
+    ) in main_tf
+
+
+def test_serving_compute_roles_are_least_privilege_and_backend_specific():
+    iam_tf = (INFRA_DIR / "iam.tf").read_text()
+
+    assert 'resource "aws_iam_role" "code_lambda"' in iam_tf
+    assert 'resource "aws_iam_role" "knowledge_lambda"' in iam_tf
+
+    code_s3 = terraform_resource_block(
+        iam_tf, "aws_iam_role_policy", "code_s3_read"
+    )
+    assert "role = aws_iam_role.code_lambda.id" in code_s3
+    assert '"s3:GetObject"' in code_s3
+    assert '"${aws_s3_bucket.data.arn}/${local.catalog_s3_key}"' in code_s3
+    assert "serving-registry.json" in code_s3
+    assert '"${aws_s3_bucket.data.arn}/silver/*"' in code_s3
+    for forbidden in (
+        "s3:PutObject",
+        "s3:DeleteObject",
+        "s3:AbortMultipartUpload",
+        "secretsmanager:",
+    ):
+        assert forbidden not in code_s3
+
+    knowledge_s3 = terraform_resource_block(
+        iam_tf, "aws_iam_role_policy", "knowledge_s3_read"
+    )
+    assert "role = aws_iam_role.knowledge_lambda.id" in knowledge_s3
+    assert '"s3:GetObject"' in knowledge_s3
+    assert '"s3:GetObjectVersion"' in knowledge_s3
+    assert '"s3:ListBucket"' in knowledge_s3
+    assert "s3:PutObject" not in knowledge_s3
+    assert "s3:DeleteObject" not in knowledge_s3
+
+    knowledge_secret = terraform_resource_block(
+        iam_tf, "aws_iam_role_policy", "knowledge_catalog_secret"
+    )
+    assert "role = aws_iam_role.knowledge_lambda.id" in knowledge_secret
+    assert '"secretsmanager:GetSecretValue"' in knowledge_secret
+
+    code_role_resources = "\n".join(
+        terraform_resource_block(iam_tf, resource_type, resource_name)
+        for resource_type, resource_name in re.findall(
+            r'resource\s+"(aws_iam_[^"]+)"\s+"([^"]+)"', iam_tf
+        )
+        if "role = aws_iam_role.code_lambda" in terraform_resource_block(
+            iam_tf, resource_type, resource_name
+        )
+    )
+    assert "secretsmanager:" not in code_role_resources
+    for required in (
+        "dynamodb:",
+        "states:",
+        "logs:",
+        "xray:",
+        "ec2:",
+    ):
+        assert required in code_role_resources
+
+    api_key_management = terraform_resource_block(
+        iam_tf, "aws_iam_role_policy", "api_key_management"
+    )
+    assert "role = aws_iam_role.code_lambda.id" in api_key_management
+
+
+def test_serving_compute_drainer_and_warm_pool_target_the_owning_backends():
+    main_tf = (INFRA_DIR / "main.tf").read_text()
+    variables_tf = (INFRA_DIR / "variables.tf").read_text()
+
+    drainer = terraform_resource_block(
+        main_tf, "aws_cloudwatch_event_target", "index_queue_drainer"
+    )
+    assert "arn       = aws_lambda_function.code.arn" in drainer
+    assert 'operation = "drain_queued_jobs"' in drainer
+    drainer_permission = terraform_resource_block(
+        main_tf, "aws_lambda_permission", "eventbridge_drainer"
+    )
+    assert (
+        "function_name = aws_lambda_function.code.function_name"
+        in drainer_permission
+    )
+
+    warm_resources = re.findall(
+        r'resource\s+"aws_lambda_provisioned_concurrency_config"\s+"([^"]+)"',
+        main_tf,
+    )
+    assert warm_resources == ["knowledge_warm"]
+    knowledge_warm = terraform_resource_block(
+        main_tf,
+        "aws_lambda_provisioned_concurrency_config",
+        "knowledge_warm",
+    )
+    assert "function_name = aws_lambda_function.knowledge.function_name" in knowledge_warm
+    assert (
+        "provisioned_concurrent_executions = var.concurrent_warm_instances"
+        in knowledge_warm
+    )
+    assert "local.code_warm_instances == 0" in knowledge_warm
+    assert (
+        "local.total_serving_warm_instances == var.concurrent_warm_instances"
+        in knowledge_warm
+    )
+
+    serving_tf = main_tf + variables_tf
+    assert "reserved_concurrent_executions" not in serving_tf
+    assert 'variable "serving_reserved_concurrency"' not in serving_tf
+    # Reserved concurrency only bounds capacity. Provisioned concurrency is the
+    # billable pre-initialized pool, so the existing warm budget stays on
+    # Knowledge and Code deliberately has none.
+    assert "Reserved concurrency bounds capacity" in main_tf
+    assert "provisioned concurrency is the billable warm pool" in main_tf
+
+
+def test_serving_compute_outputs_and_preconditions_fail_closed():
+    main_tf = (INFRA_DIR / "main.tf").read_text()
+    outputs_tf = (INFRA_DIR / "outputs.tf").read_text()
+
+    code = terraform_resource_block(main_tf, "aws_lambda_function", "code")
+    knowledge = terraform_resource_block(
+        main_tf, "aws_lambda_function", "knowledge"
+    )
+    assert "local.serving_assignment_count == 2" in code
+    assert "local.serving_zip_paths_are_consistent" in code
+    assert "local.catalog_s3_path_is_consistent" in code
+    assert "local.catalog_s3_path_is_consistent" in knowledge
+
+    for output_name, resource_name in (
+        ("code_lambda_function_name", "code"),
+        ("code_lambda_function_arn", "code"),
+        ("knowledge_lambda_function_name", "knowledge"),
+        ("knowledge_lambda_function_arn", "knowledge"),
+    ):
+        output = outputs_tf.split(f'output "{output_name}"', 1)[1].split(
+            "\n}", 1
+        )[0]
+        assert f"aws_lambda_function.{resource_name}." in output
+
+    legacy_name = outputs_tf.split('output "lambda_function_name"', 1)[1].split(
+        "\n}", 1
+    )[0]
+    legacy_arn = outputs_tf.split('output "lambda_function_arn"', 1)[1].split(
+        "\n}", 1
+    )[0]
+    assert "aws_lambda_function.knowledge.function_name" in legacy_name
+    assert "aws_lambda_function.knowledge.arn" in legacy_arn
+
+
 def render_index_build_asl():
     template = (INFRA_DIR / "index_build_asl.json").read_text()
     values = {
