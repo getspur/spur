@@ -1,17 +1,24 @@
 use std::{
     collections::BTreeMap,
     fs,
+    io::Write,
+    net::TcpListener,
     path::{Path, PathBuf},
     process::Command,
+    sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc,
+    },
+    thread,
+    time::{Duration, Instant},
 };
 
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use spur_graph::memory_eval::{
+    artifacts::ArtifactWriter,
     contract::{BenchmarkDataset, SourcePin},
-    qa::{
-        ranking_sha256, render_locomo_prompt_with_seed, QaRequest, QaResponse, LONGMEMEVAL_MODEL,
-    },
+    qa::{ranking_sha256, render_locomo_prompt_with_seed, QaRequest, QaResponse},
     ranking::Ranking,
 };
 
@@ -508,6 +515,63 @@ fn locomo_failure_retains_completed_cache_accounting_and_pending_denominator() {
 }
 
 #[test]
+fn resume_reconciles_a_durable_completed_cache_without_duplicate_network_calls() {
+    let fixture = fixture();
+    let run = tempfile::tempdir().unwrap();
+    assert!(retrieve(&fixture, run.path()).status.success());
+    let frozen_before = ranking_bytes(run.path());
+    let uncovered = seed_completed_locomo_cache_with_last_uncovered(&fixture, run.path());
+    assert!(!fs::read_to_string(run.path().join("SHA256SUMS"))
+        .unwrap()
+        .contains(&uncovered));
+
+    let (output, transmissions) = resume_with_counting_proxy(run.path());
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(transmissions, 0, "resume retransmitted a completed call");
+    assert_eq!(ranking_bytes(run.path()), frozen_before);
+    assert!(fs::read_to_string(run.path().join("SHA256SUMS"))
+        .unwrap()
+        .contains(&uncovered));
+    ArtifactWriter::new(run.path())
+        .unwrap()
+        .verify_checksums()
+        .unwrap();
+    let manifest = read_json(run.path().join("manifest.json"));
+    assert_eq!(manifest["state"], "published_full");
+}
+
+#[test]
+fn resume_does_not_bless_truncated_or_unrecognized_uncovered_cache_bytes() {
+    let fixture = fixture();
+    for bytes in [b"{".as_slice(), br#"{"unexpected":true}"#.as_slice()] {
+        let run = tempfile::tempdir().unwrap();
+        assert!(retrieve(&fixture, run.path()).status.success());
+        let frozen_before = ranking_bytes(run.path());
+        let relative = format!("qa/cache/locomo/{}.json", "0".repeat(64));
+        let path = run.path().join(&relative);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let temporary = path.with_extension("tmp");
+        fs::write(&temporary, bytes).unwrap();
+        fs::rename(&temporary, &path).unwrap();
+
+        let (output, transmissions) = resume_with_counting_proxy(run.path());
+
+        assert!(!output.status.success());
+        assert!(
+            stderr(&output).contains("decode LoCoMo QA cache"),
+            "unexpected failure: {}",
+            stderr(&output)
+        );
+        assert_eq!(transmissions, 0);
+        assert_eq!(ranking_bytes(run.path()), frozen_before);
+        assert!(!fs::read_to_string(run.path().join("SHA256SUMS"))
+            .unwrap()
+            .contains(&relative));
+    }
+}
+
+#[test]
 fn report_records_reproducibility_and_complete_nonnegative_accounting() {
     let fixture = fixture();
     let run = tempfile::tempdir().unwrap();
@@ -557,6 +621,42 @@ fn longmemeval_fixture() -> tempfile::NamedTempFile {
 }
 
 fn seed_first_locomo_cache(fixture: &tempfile::NamedTempFile, run: &Path) {
+    let (relative, bytes) = locomo_cache_artifacts(fixture, run)
+        .into_iter()
+        .next()
+        .unwrap();
+    let path = run.join(&relative);
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(&path, &bytes).unwrap();
+    let mut sums = fs::read_to_string(run.join("SHA256SUMS")).unwrap();
+    sums.push_str(&format!("{:x}  {relative}\n", Sha256::digest(&bytes)));
+    fs::write(run.join("SHA256SUMS"), sums).unwrap();
+}
+
+fn seed_completed_locomo_cache_with_last_uncovered(
+    fixture: &tempfile::NamedTempFile,
+    run: &Path,
+) -> String {
+    let mut artifacts = locomo_cache_artifacts(fixture, run);
+    let (uncovered, uncovered_bytes) = artifacts.pop().unwrap();
+    let mut sums = fs::read_to_string(run.join("SHA256SUMS")).unwrap();
+    for (relative, bytes) in artifacts {
+        let path = run.join(&relative);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, &bytes).unwrap();
+        sums.push_str(&format!("{:x}  {relative}\n", Sha256::digest(&bytes)));
+    }
+    fs::write(run.join("SHA256SUMS"), sums).unwrap();
+
+    let path = run.join(&uncovered);
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let temporary = path.with_extension("tmp");
+    fs::write(&temporary, uncovered_bytes).unwrap();
+    fs::rename(temporary, path).unwrap();
+    uncovered
+}
+
+fn locomo_cache_artifacts(fixture: &tempfile::NamedTempFile, run: &Path) -> Vec<(String, Vec<u8>)> {
     let dataset = BenchmarkDataset::load_locomo(
         &fs::read_to_string(fixture.path()).unwrap(),
         SourcePin {
@@ -566,52 +666,98 @@ fn seed_first_locomo_cache(fixture: &tempfile::NamedTempFile, run: &Path) {
         },
     )
     .unwrap();
-    let line = fs::read_to_string(run.join("rankings/oracle.jsonl"))
-        .unwrap()
-        .lines()
-        .next()
-        .unwrap()
-        .to_owned();
-    let mut persisted: Value = serde_json::from_str(&line).unwrap();
-    let question_id = persisted["question_id"].as_str().unwrap().to_owned();
-    persisted.as_object_mut().unwrap().remove("question_id");
-    let ranking: Ranking = serde_json::from_value(persisted).unwrap();
-    let question = dataset
-        .questions
-        .iter()
-        .find(|question| question.id == question_id)
+    let mut artifacts = Vec::new();
+    for variant in VARIANTS {
+        for line in fs::read_to_string(run.join(format!("rankings/{variant}.jsonl")))
+            .unwrap()
+            .lines()
+        {
+            let mut persisted: Value = serde_json::from_str(line).unwrap();
+            let question_id = persisted["question_id"].as_str().unwrap().to_owned();
+            persisted.as_object_mut().unwrap().remove("question_id");
+            let ranking: Ranking = serde_json::from_value(persisted).unwrap();
+            let question = dataset
+                .questions
+                .iter()
+                .find(|question| question.id == question_id)
+                .unwrap();
+            let prompt = render_locomo_prompt_with_seed(question, &ranking, &dataset, 0).unwrap();
+            let request = QaRequest {
+                question_id,
+                variant: ranking.variant,
+                prompt_sha256: format!("{:x}", Sha256::digest(prompt.as_bytes())),
+                prompt,
+                ranking_sha256: ranking_sha256(&ranking).unwrap(),
+                recorded_seed: 0,
+            };
+            let identity = format!(
+                "{:x}",
+                Sha256::digest(serde_json::to_vec(&request).unwrap())
+            );
+            let relative = format!("qa/cache/locomo/{identity}.json");
+            let bytes = serde_json::to_vec_pretty(&serde_json::json!({
+                "request": request,
+                "response": QaResponse {
+                    output_text: "blue".into(),
+                    input_tokens: 10,
+                    output_tokens: 1,
+                },
+                "cost_usd_micros": 35,
+            }))
+            .unwrap();
+            artifacts.push((relative, bytes));
+        }
+    }
+    artifacts
+}
+
+fn resume_with_counting_proxy(run: &Path) -> (std::process::Output, usize) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let address = listener.local_addr().unwrap();
+    let transmissions = Arc::new(AtomicUsize::new(0));
+    let observed = Arc::clone(&transmissions);
+    let stop = Arc::new(AtomicBool::new(false));
+    let should_stop = Arc::clone(&stop);
+    let server = thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !should_stop.load(Ordering::SeqCst) && Instant::now() < deadline {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    observed.fetch_add(1, Ordering::SeqCst);
+                    stream
+                        .write_all(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n")
+                        .unwrap();
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(5));
+                }
+                Err(error) => panic!("counting proxy accept failed: {error}"),
+            }
+        }
+    });
+    let proxy = format!("http://{address}");
+    let output = Command::new(binary())
+        .args([
+            "resume",
+            "--output",
+            run.to_str().unwrap(),
+            "--paid-qa",
+            "--max-requests",
+            "10",
+            "--max-usd",
+            "1.00",
+        ])
+        .env("OPENAI_API_KEY", "local-cache-only-test-key")
+        .env("HTTPS_PROXY", &proxy)
+        .env("https_proxy", &proxy)
+        .env_remove("NO_PROXY")
+        .env_remove("no_proxy")
+        .output()
         .unwrap();
-    let prompt = render_locomo_prompt_with_seed(question, &ranking, &dataset, 0).unwrap();
-    let request = QaRequest {
-        question_id,
-        variant: ranking.variant,
-        prompt_sha256: format!("{:x}", Sha256::digest(prompt.as_bytes())),
-        prompt,
-        ranking_sha256: ranking_sha256(&ranking).unwrap(),
-        recorded_seed: 0,
-    };
-    let identity = format!(
-        "{:x}",
-        Sha256::digest(serde_json::to_vec(&request).unwrap())
-    );
-    let cache_root = run.join("qa/cache/locomo");
-    fs::create_dir_all(&cache_root).unwrap();
-    let relative = format!("qa/cache/locomo/{identity}.json");
-    let bytes = serde_json::to_vec_pretty(&serde_json::json!({
-        "request": request,
-        "response": QaResponse {
-            output_text: "blue".into(),
-            input_tokens: 10,
-            output_tokens: 1,
-        },
-        "cost_usd_micros": 35,
-        "model": LONGMEMEVAL_MODEL,
-    }))
-    .unwrap();
-    fs::write(run.join(&relative), &bytes).unwrap();
-    let mut sums = fs::read_to_string(run.join("SHA256SUMS")).unwrap();
-    sums.push_str(&format!("{:x}  {relative}\n", Sha256::digest(&bytes)));
-    fs::write(run.join("SHA256SUMS"), sums).unwrap();
+    stop.store(true, Ordering::SeqCst);
+    server.join().unwrap();
+    (output, transmissions.load(Ordering::SeqCst))
 }
 
 fn retrieve(fixture: &tempfile::NamedTempFile, run: &Path) -> std::process::Output {

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -13,6 +13,7 @@ use sha2::{Digest, Sha256};
 
 use crate::GraphFacts;
 
+use super::artifacts::ArtifactDigest;
 use super::contract::{
     BenchmarkDataset, ConversationRecord, QuestionRecord, Role, SessionRecord, TurnRecord,
 };
@@ -705,6 +706,7 @@ impl QaCacheKey {
 
 /// Complete successful cache artifact. Failed calls are deliberately not cached.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct QaCacheEntry {
     pub key: QaCacheKey,
     pub request: LongMemQaRequest,
@@ -744,6 +746,97 @@ impl JsonQaCache {
             .count())
     }
 
+    /// Validate every cache file and retain only records reachable from the
+    /// current frozen LongMemEval workload. The resulting digests are safe to
+    /// offer for checksum reconciliation after a crash.
+    pub fn validated_artifacts_for_run(
+        &self,
+        artifact_root: &Path,
+        dataset: &BenchmarkDataset,
+        rankings: &RankingSet,
+    ) -> anyhow::Result<Vec<ArtifactDigest>> {
+        let mut entries = HashMap::<QaCacheKey, (QaCacheEntry, ArtifactDigest)>::new();
+        for directory_entry in fs::read_dir(&self.root)
+            .with_context(|| format!("read QA cache {}", self.root.display()))?
+        {
+            let directory_entry = directory_entry?;
+            let path = directory_entry.path();
+            ensure!(
+                directory_entry.file_type()?.is_file()
+                    && path.extension().and_then(|extension| extension.to_str()) == Some("json"),
+                "unrecognized LongMemEval QA cache artifact {}",
+                path.display()
+            );
+            let bytes = fs::read(&path).with_context(|| format!("read {}", path.display()))?;
+            let entry: QaCacheEntry = serde_json::from_slice(&bytes)
+                .with_context(|| format!("decode LongMemEval QA cache {}", path.display()))?;
+            validate_cache_entry(&entry)?;
+            let expected_name = format!("{}.json", entry.key.identity_sha256());
+            ensure!(
+                path.file_name().and_then(|name| name.to_str()) == Some(expected_name.as_str()),
+                "LongMemEval QA cache filename does not match its complete identity"
+            );
+            let relative = path
+                .strip_prefix(artifact_root)
+                .with_context(|| format!("cache path {} is outside artifact root", path.display()))?
+                .to_path_buf();
+            let digest = ArtifactDigest {
+                relative_path: relative,
+                sha256: sha256_hex(&bytes),
+            };
+            ensure!(
+                entries.insert(entry.key.clone(), (entry, digest)).is_none(),
+                "duplicate LongMemEval QA cache identity"
+            );
+        }
+
+        let mut recognized = HashSet::new();
+        for ((question_id, variant, granularity), ranking) in rankings {
+            let question = dataset
+                .questions
+                .iter()
+                .find(|question| QueryOccurrenceId::new(question.id.clone()) == *question_id)
+                .with_context(|| {
+                    format!("ranking has unknown LongMemEval question {question_id:?}")
+                })?;
+            ensure!(
+                ranking.variant == *variant && ranking.granularity == *granularity,
+                "caller-owned ranking key disagrees with ranking payload"
+            );
+            let Ok(reader_request) = build_longmem_reader_request(question, ranking, dataset)
+            else {
+                continue;
+            };
+            let reader_key = QaCacheKey::from_request(&reader_request);
+            let Some((reader_entry, _)) = entries.get(&reader_key) else {
+                continue;
+            };
+            recognized.insert(reader_key);
+            let Ok(judge_request) = build_longmem_judge_request(
+                question,
+                &reader_request,
+                &reader_entry.response.output_text,
+            ) else {
+                continue;
+            };
+            let judge_key = QaCacheKey::from_request(&judge_request);
+            if entries.contains_key(&judge_key) {
+                recognized.insert(judge_key);
+            }
+        }
+        ensure!(
+            recognized.len() == entries.len(),
+            "unrecognized LongMemEval QA cache record is outside the frozen workload"
+        );
+
+        let mut artifacts = entries
+            .into_values()
+            .map(|(_, artifact)| artifact)
+            .collect::<Vec<_>>();
+        artifacts.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
+        Ok(artifacts)
+    }
+
     fn entry_path(&self, key: &QaCacheKey) -> PathBuf {
         self.root.join(format!("{}.json", key.identity_sha256()))
     }
@@ -759,34 +852,16 @@ impl QaCache for JsonQaCache {
         };
         let entry: QaCacheEntry =
             serde_json::from_slice(&bytes).with_context(|| format!("decode {}", path.display()))?;
+        validate_cache_entry(&entry)?;
         ensure!(
-            entry.key == *key && QaCacheKey::from_request(&entry.request) == *key,
+            entry.key == *key,
             "cache artifact identity does not match its requested key"
-        );
-        entry.response.clone().validate()?;
-        ensure!(
-            matches!(
-                (entry.request.stage, entry.label),
-                (QaStage::Reader, None) | (QaStage::Judge, Some(_))
-            ),
-            "cache artifact stage and label disagree"
         );
         Ok(Some(entry))
     }
 
     fn put(&mut self, entry: &QaCacheEntry) -> anyhow::Result<()> {
-        ensure!(
-            entry.key == QaCacheKey::from_request(&entry.request),
-            "cache entry key does not match its complete request identity"
-        );
-        entry.response.clone().validate()?;
-        ensure!(
-            matches!(
-                (entry.request.stage, entry.label),
-                (QaStage::Reader, None) | (QaStage::Judge, Some(_))
-            ),
-            "cache entry stage and label disagree"
-        );
+        validate_cache_entry(entry)?;
         let path = self.entry_path(&entry.key);
         let temporary = self
             .root
@@ -796,6 +871,22 @@ impl QaCache for JsonQaCache {
         fs::rename(&temporary, &path).with_context(|| format!("publish {}", path.display()))?;
         Ok(())
     }
+}
+
+fn validate_cache_entry(entry: &QaCacheEntry) -> anyhow::Result<()> {
+    ensure!(
+        entry.key == QaCacheKey::from_request(&entry.request),
+        "cache entry key does not match its complete request identity"
+    );
+    entry.response.clone().validate()?;
+    ensure!(
+        matches!(
+            (entry.request.stage, entry.label),
+            (QaStage::Reader, None) | (QaStage::Judge, Some(_))
+        ),
+        "cache artifact stage and label disagree"
+    );
+    Ok(())
 }
 
 /// Caller-declared paid-run ceilings and pre-request reservations.

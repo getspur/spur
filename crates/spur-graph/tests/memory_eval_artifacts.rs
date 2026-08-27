@@ -1,9 +1,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use spur_graph::memory_eval::{
     artifacts::{
-        ArtifactWriter, MetricValue, QaArtifactKind, QaProgress, ReleaseGates,
+        ArtifactDigest, ArtifactWriter, MetricValue, QaArtifactKind, QaProgress, ReleaseGates,
         RetrievalGateEvidence, RetrievalMetrics, RunEvent, RunManifest, RunState,
     },
     contract::{Cohorts, ContractId, DatasetKind, SourcePin, ValidationFinding, ValidationReport},
@@ -175,6 +176,37 @@ fn checksum_verification_detects_tampering() {
 
     let error = writer.verify_checksums().unwrap_err();
     assert!(error.to_string().contains("checksum mismatch"));
+}
+
+#[test]
+fn checksum_reconciliation_rejects_unvalidated_or_non_cache_artifacts() {
+    let root = tempfile::tempdir().unwrap();
+    let writer = ArtifactWriter::new(root.path()).unwrap();
+    writer.write_report("original\n").unwrap();
+    let bytes = br#"{"valid":"json"}"#;
+    std::fs::write(root.path().join("arbitrary.json"), bytes).unwrap();
+
+    let error = writer
+        .reconcile_qa_cache_checksums(&[ArtifactDigest {
+            relative_path: "arbitrary.json".into(),
+            sha256: format!("{:x}", Sha256::digest(bytes)),
+        }])
+        .unwrap_err();
+    assert!(error.to_string().contains("recognized QA cache paths"));
+
+    let root = tempfile::tempdir().unwrap();
+    let writer = ArtifactWriter::new(root.path()).unwrap();
+    writer.write_report("original\n").unwrap();
+    let path = root
+        .path()
+        .join(format!("qa/cache/locomo/{}.json", "0".repeat(64)));
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, bytes).unwrap();
+
+    let error = writer.reconcile_qa_cache_checksums(&[]).unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("not a validated QA cache record"));
 }
 
 #[test]

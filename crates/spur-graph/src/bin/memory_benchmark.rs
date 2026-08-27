@@ -14,7 +14,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use spur_graph::memory_eval::{
     artifacts::{
-        ArtifactWriter, MetricValue, QaArtifactKind, QaProgress, ReleaseGates,
+        ArtifactDigest, ArtifactWriter, MetricValue, QaArtifactKind, QaProgress, ReleaseGates,
         RetrievalGateEvidence, RetrievalMetrics, RunEvent, RunManifest, RunState,
     },
     contract::{
@@ -26,9 +26,10 @@ use spur_graph::memory_eval::{
         MemoryTurn, TraversalConfig,
     },
     qa::{
-        evaluate_locomo, evaluate_longmem, JsonQaCache, LongMemQaRecord, OpenAiResponsesBackend,
-        QaBackend, QaBudget, QaBudgetLimits, QaRecord, QaRequest, QaResponse, QaStatus,
-        LONGMEMEVAL_MAX_INPUT_TOKENS, LONGMEMEVAL_MODEL, OPENAI_RESPONSES_URL,
+        evaluate_locomo, evaluate_longmem, ranking_sha256, render_locomo_prompt_with_seed,
+        JsonQaCache, LongMemQaRecord, OpenAiResponsesBackend, QaBackend, QaBudget, QaBudgetLimits,
+        QaRecord, QaRequest, QaResponse, QaStatus, LONGMEMEVAL_MAX_INPUT_TOKENS, LONGMEMEVAL_MODEL,
+        OPENAI_RESPONSES_URL,
     },
     ranking::{
         oracle_ranking, Bm25Ranker, ChronologyKey, CorpusDocument, Granularity, OracleRequest,
@@ -286,8 +287,12 @@ fn qa_command(args: QaArgs) -> Result<()> {
     );
     let validation = read_json::<ValidationReport>(&args.output.join("validation.json"))?;
     let writer = ArtifactWriter::new(&args.output)?;
-    writer.verify_checksums()?;
+    writer.verify_recorded_checksums()?;
     verify_frozen_rankings(&args.output, &manifest)?;
+    let dataset = load_manifest_dataset(&manifest)?;
+    let rankings = read_frozen_rankings(&args.output)?;
+    let validated_cache = validated_qa_cache_artifacts(&args.output, &dataset, &rankings)?;
+    writer.reconcile_qa_cache_checksums(&validated_cache)?;
     let metrics = read_metric_artifacts(&args.output, &manifest, None)?;
 
     let Some(paid) = paid else {
@@ -302,8 +307,6 @@ fn qa_command(args: QaArgs) -> Result<()> {
     );
 
     let mut telemetry = RunTelemetry::new();
-    let dataset = load_manifest_dataset(&manifest)?;
-    let rankings = read_frozen_rankings(&args.output)?;
     let completed = manifest.qa_progress.completed_question_ids().clone();
     let pending_rankings = rankings
         .into_iter()
@@ -1291,6 +1294,111 @@ impl QaAccounting {
     }
 }
 
+fn validated_qa_cache_artifacts(
+    output: &Path,
+    dataset: &BenchmarkDataset,
+    rankings: &RankingSet,
+) -> Result<Vec<ArtifactDigest>> {
+    match dataset.kind {
+        DatasetKind::Locomo => validated_locomo_cache_artifacts(output, dataset, rankings),
+        DatasetKind::LongMemEval => JsonQaCache::open(output.join("qa/cache/longmemeval"))?
+            .validated_artifacts_for_run(output, dataset, rankings),
+    }
+}
+
+fn validated_locomo_cache_artifacts(
+    output: &Path,
+    dataset: &BenchmarkDataset,
+    rankings: &RankingSet,
+) -> Result<Vec<ArtifactDigest>> {
+    let cache_root = output.join("qa/cache/locomo");
+    if !cache_root.is_dir() {
+        return Ok(Vec::new());
+    }
+
+    let mut entries = BTreeMap::<String, (LocomoCacheEntry, ArtifactDigest)>::new();
+    for directory_entry in fs::read_dir(&cache_root)
+        .with_context(|| format!("read LoCoMo QA cache {}", cache_root.display()))?
+    {
+        let directory_entry = directory_entry?;
+        let path = directory_entry.path();
+        ensure!(
+            directory_entry.file_type()?.is_file()
+                && path.extension().and_then(|extension| extension.to_str()) == Some("json"),
+            "unrecognized LoCoMo QA cache artifact {}",
+            path.display()
+        );
+        let bytes = fs::read(&path).with_context(|| format!("read {}", path.display()))?;
+        let entry: LocomoCacheEntry = serde_json::from_slice(&bytes)
+            .with_context(|| format!("decode LoCoMo QA cache {}", path.display()))?;
+        let identity = sha256_hex(&serde_json::to_vec(&entry.request)?);
+        ensure!(
+            path.file_name().and_then(|name| name.to_str())
+                == Some(format!("{identity}.json").as_str()),
+            "LoCoMo QA cache filename does not match its complete request identity"
+        );
+        ensure!(
+            entry.cost_usd_micros
+                == token_cost_usd_micros(
+                    entry.response.input_tokens,
+                    entry.response.output_tokens,
+                )?,
+            "LoCoMo QA cache cost does not match its audited token usage"
+        );
+        let relative = path
+            .strip_prefix(output)
+            .with_context(|| format!("cache path {} is outside artifact root", path.display()))?
+            .to_path_buf();
+        let digest = ArtifactDigest {
+            relative_path: relative,
+            sha256: sha256_hex(&bytes),
+        };
+        ensure!(
+            entries.insert(identity, (entry, digest)).is_none(),
+            "duplicate LoCoMo QA cache identity"
+        );
+    }
+
+    let mut recognized = BTreeSet::new();
+    for ((question_id, variant, granularity), ranking) in rankings {
+        let question = dataset
+            .questions
+            .iter()
+            .find(|question| QueryOccurrenceId::new(question.id.clone()) == *question_id)
+            .with_context(|| format!("ranking has unknown LoCoMo question {question_id:?}"))?;
+        ensure!(
+            ranking.variant == *variant && ranking.granularity == *granularity,
+            "caller-owned ranking key disagrees with ranking payload"
+        );
+        let prompt = render_locomo_prompt_with_seed(question, ranking, dataset, 0)?;
+        let request = QaRequest {
+            question_id: question.id.clone(),
+            variant: *variant,
+            prompt_sha256: sha256_hex(prompt.as_bytes()),
+            prompt,
+            ranking_sha256: ranking_sha256(ranking)?,
+            recorded_seed: 0,
+        };
+        let identity = sha256_hex(&serde_json::to_vec(&request)?);
+        if let Some((entry, _)) = entries.get(&identity) {
+            ensure!(
+                entry.request == request,
+                "LoCoMo QA cache identity mismatch"
+            );
+            recognized.insert(identity);
+        }
+    }
+    ensure!(
+        recognized.len() == entries.len(),
+        "unrecognized LoCoMo QA cache record is outside the frozen workload"
+    );
+
+    Ok(entries
+        .into_values()
+        .map(|(_, artifact)| artifact)
+        .collect())
+}
+
 fn cache_accounting(root: &Path) -> Result<QaAccounting> {
     if !root.is_dir() {
         return Ok(QaAccounting::default());
@@ -1498,6 +1606,7 @@ fn persist_locomo_records(
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct LocomoCacheEntry {
     request: QaRequest,
     response: QaResponse,

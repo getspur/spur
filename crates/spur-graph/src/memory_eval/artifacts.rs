@@ -645,9 +645,101 @@ impl ArtifactWriter {
         self.write_atomic(Path::new("report.md"), report.as_bytes())
     }
 
+    /// Verify every checksum already committed, without accepting incomplete
+    /// coverage. Callers may use this as the immutable base for narrowly
+    /// validating crash-published QA cache records.
+    pub fn verify_recorded_checksums(&self) -> Result<()> {
+        self.read_verified_checksums().map(|_| ())
+    }
+
+    /// Extend checksum coverage only for caller-validated QA cache records.
+    /// Existing entries are verified first and never recomputed, so an
+    /// uncovered arbitrary file or a changed immutable artifact remains a
+    /// hard failure.
+    pub fn reconcile_qa_cache_checksums(&self, validated: &[ArtifactDigest]) -> Result<()> {
+        let mut recorded = self.read_verified_checksums()?;
+        let mut validated_by_path = BTreeMap::new();
+        for artifact in validated {
+            validate_relative_path(&artifact.relative_path)?;
+            ensure!(
+                is_qa_cache_artifact(&artifact.relative_path),
+                "checksum reconciliation only accepts recognized QA cache paths"
+            );
+            ensure!(
+                is_sha256_hex(&artifact.sha256),
+                "validated QA cache digest must be SHA-256"
+            );
+            ensure!(
+                validated_by_path
+                    .insert(artifact.relative_path.clone(), artifact.sha256.clone())
+                    .is_none(),
+                "duplicate validated QA cache artifact {}",
+                artifact.relative_path.display()
+            );
+            ensure!(
+                sha256_file(&self.root.join(&artifact.relative_path))? == artifact.sha256,
+                "validated QA cache artifact changed before checksum reconciliation: {}",
+                artifact.relative_path.display()
+            );
+        }
+
+        let actual_paths = collect_artifact_files(&self.root)?
+            .into_iter()
+            .map(|(relative, _)| relative)
+            .collect::<BTreeSet<_>>();
+        let recorded_paths = recorded.keys().cloned().collect::<BTreeSet<_>>();
+        let uncovered = actual_paths
+            .difference(&recorded_paths)
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let validated_paths = validated_by_path.keys().cloned().collect::<BTreeSet<_>>();
+        ensure!(
+            uncovered.is_subset(&validated_paths),
+            "uncovered artifact is not a validated QA cache record"
+        );
+        if uncovered.is_empty() {
+            return Ok(());
+        }
+
+        for relative in uncovered {
+            let digest = validated_by_path
+                .get(&relative)
+                .context("validated QA cache digest disappeared")?;
+            recorded.insert(relative, digest.clone());
+        }
+        ensure!(
+            recorded.keys().cloned().collect::<BTreeSet<_>>() == actual_paths,
+            "SHA256SUMS reconciliation does not cover every published file"
+        );
+
+        let mut contents = String::new();
+        for (relative, digest) in recorded {
+            contents.push_str(&digest);
+            contents.push_str("  ");
+            contents.push_str(&path_to_slash_string(&relative)?);
+            contents.push('\n');
+        }
+        replace_atomic(&self.root, Path::new(CHECKSUM_FILE), contents.as_bytes())?;
+        self.verify_checksums()
+    }
+
     /// Verify both digest values and coverage: every regular artifact file
     /// except `SHA256SUMS` itself must have exactly one checksum entry.
     pub fn verify_checksums(&self) -> Result<()> {
+        let recorded = self.read_verified_checksums()?;
+        let actual_paths = collect_artifact_files(&self.root)?
+            .into_iter()
+            .map(|(relative, _)| relative)
+            .collect::<BTreeSet<_>>();
+        let recorded_paths = recorded.into_keys().collect::<BTreeSet<_>>();
+        ensure!(
+            actual_paths == recorded_paths,
+            "SHA256SUMS does not cover every published file"
+        );
+        Ok(())
+    }
+
+    fn read_verified_checksums(&self) -> Result<BTreeMap<PathBuf, String>> {
         let checksum_path = self.root.join(CHECKSUM_FILE);
         let contents = fs::read_to_string(&checksum_path)
             .with_context(|| format!("read {}", checksum_path.display()))?;
@@ -675,17 +767,7 @@ impl ArtifactWriter {
                 relative.display()
             );
         }
-
-        let actual_paths = collect_artifact_files(&self.root)?
-            .into_iter()
-            .map(|(relative, _)| relative)
-            .collect::<BTreeSet<_>>();
-        let recorded_paths = recorded.into_keys().collect::<BTreeSet<_>>();
-        ensure!(
-            actual_paths == recorded_paths,
-            "SHA256SUMS does not cover every published file"
-        );
-        Ok(())
+        Ok(recorded)
     }
 
     fn write_json<T: Serialize>(&self, relative: &Path, value: &T) -> Result<ArtifactDigest> {
@@ -920,6 +1002,20 @@ fn is_sha256_hex(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn is_qa_cache_artifact(path: &Path) -> bool {
+    let components = path
+        .components()
+        .map(|component| component.as_os_str().to_str())
+        .collect::<Option<Vec<_>>>();
+    let Some(["qa", "cache", namespace, file_name]) = components.as_deref() else {
+        return false;
+    };
+    let Some(identity) = file_name.strip_suffix(".json") else {
+        return false;
+    };
+    matches!(*namespace, "locomo" | "longmemeval") && is_sha256_hex(identity)
 }
 
 fn ranking_path(variant: Variant) -> PathBuf {
