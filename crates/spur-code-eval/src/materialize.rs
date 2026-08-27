@@ -85,6 +85,14 @@ pub enum MaterializeError {
         /// Decode or version error.
         message: String,
     },
+    /// A supplied materialization root resolves outside the configured base.
+    #[error("materialization root {root} resolves outside base {base}")]
+    RootOutsideBase {
+        /// Canonical base that must contain every accepted root.
+        base: PathBuf,
+        /// Canonical root being rejected.
+        root: PathBuf,
+    },
     /// A root belongs to a different case, dataset revision, commit, or subtree.
     #[error("materialization root {root} has identity {actual:?}, expected {expected:?}")]
     MixedRepositoryRoot {
@@ -244,9 +252,16 @@ impl Materializer {
         verify_repository_state(case, &checkout)?;
         write_metadata(temporary_root.path(), &RootMetadata::from_case(case))?;
 
-        fs::rename(temporary_root.path(), &final_root)
-            .map_err(|error| filesystem("promote temporary root", &final_root, &error))?;
-        temporary_root.disarm();
+        match fs::rename(temporary_root.path(), &final_root) {
+            Ok(()) => temporary_root.disarm(),
+            Err(_) if final_root.exists() => {
+                drop(temporary_root);
+                return self.verify_existing(case, &final_root);
+            }
+            Err(error) => {
+                return Err(filesystem("promote temporary root", &final_root, &error));
+            }
+        }
         self.verify_existing(case, &final_root)
     }
 
@@ -262,38 +277,45 @@ impl Materializer {
         root: impl AsRef<Path>,
     ) -> Result<MaterializedRoot, MaterializeError> {
         validate_subdirectory(case.repository_pin().subdirectory())?;
-        let root = root.as_ref();
-        let metadata = read_metadata(root)?;
+        let root = fs::canonicalize(root.as_ref())
+            .map_err(|error| filesystem("canonicalize root", root.as_ref(), &error))?;
+        if !root.starts_with(&self.base) {
+            return Err(MaterializeError::RootOutsideBase {
+                base: self.base.clone(),
+                root,
+            });
+        }
+        let metadata = read_metadata(&root)?;
         let expected = RootMetadata::from_case(case);
         if !metadata.same_root_identity(&expected) {
             return Err(MaterializeError::MixedRepositoryRoot {
-                root: root.to_path_buf(),
+                root,
                 expected: expected.audit_identity(),
                 actual: metadata.audit_identity(),
             });
         }
         if metadata.repository_uri != expected.repository_uri {
             return Err(MaterializeError::OriginMismatch {
-                root: root.to_path_buf(),
+                root,
                 expected: expected.repository_uri,
                 actual: metadata.repository_uri,
             });
         }
         if metadata.dataset_content_hash != expected.dataset_content_hash {
             return Err(MaterializeError::DatasetHashMismatch {
-                root: root.to_path_buf(),
+                root,
                 expected: expected.dataset_content_hash,
                 actual: metadata.dataset_content_hash,
             });
         }
         if metadata.materialization_hash != expected.materialization_hash {
             return Err(MaterializeError::ContentHashMismatch {
-                root: root.to_path_buf(),
+                root,
                 expected: expected.materialization_hash,
                 actual: metadata.materialization_hash,
             });
         }
-        let materialized = materialized_root(root, case.repository_pin().subdirectory())?;
+        let materialized = materialized_root(&root, case.repository_pin().subdirectory())?;
         verify_repository_state(case, materialized.repository_root())?;
         Ok(materialized)
     }
@@ -582,7 +604,17 @@ fn run_git(
     current_dir: &Path,
     arguments: &[&OsStr],
 ) -> Result<Output, MaterializeError> {
-    let output = Command::new("git")
+    let mut command = Command::new("git");
+    for (name, _) in std::env::vars_os() {
+        if name
+            .to_string_lossy()
+            .get(..4)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("GIT_"))
+        {
+            command.env_remove(name);
+        }
+    }
+    let output = command
         .args([
             "-c",
             "credential.interactive=never",

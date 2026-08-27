@@ -12,6 +12,7 @@ use spur_code_eval::{
 };
 
 static NEXT_TEMP_DIRECTORY: AtomicU64 = AtomicU64::new(0);
+const ISOLATED_TEST_MODE: &str = "SPUR_CODE_EVAL_ISOLATED_TEST_MODE";
 
 struct TempDirectory(PathBuf);
 
@@ -139,6 +140,279 @@ fn with_dataset_hash(case: &CodeEvalCase, dataset_hash: &str) -> CodeEvalCase {
         case.raw_upstream().clone(),
     )
     .unwrap()
+}
+
+fn is_isolated_test(mode: &str) -> bool {
+    matches!(std::env::var(ISOLATED_TEST_MODE), Ok(value) if value == mode)
+}
+
+fn required_env_path(name: &str) -> PathBuf {
+    PathBuf::from(
+        std::env::var_os(name).unwrap_or_else(|| panic!("missing isolated-test path {name}")),
+    )
+}
+
+fn required_env_string(name: &str) -> String {
+    std::env::var(name).unwrap_or_else(|_| panic!("missing isolated-test value {name}"))
+}
+
+#[cfg(unix)]
+fn run_concurrent_materialization_child(
+    mode: &str,
+    base_env: &str,
+    commit_env: &str,
+    hash_env: &str,
+    repository_env: &str,
+) {
+    use std::sync::{Arc, Barrier};
+
+    let repository = required_env_path(repository_env);
+    let commit = required_env_string(commit_env);
+    let case = Arc::new(code_eval_case_with_hash(
+        mode,
+        &repository,
+        &commit,
+        required_env_string(hash_env),
+    ));
+    let materializer = Arc::new(Materializer::new(required_env_path(base_env)).unwrap());
+    let start = Arc::new(Barrier::new(3));
+    let callers = (0..2)
+        .map(|_| {
+            let case = Arc::clone(&case);
+            let materializer = Arc::clone(&materializer);
+            let start = Arc::clone(&start);
+            std::thread::spawn(move || {
+                start.wait();
+                materializer.materialize(&case)
+            })
+        })
+        .collect::<Vec<_>>();
+
+    start.wait();
+    let roots = callers
+        .into_iter()
+        .map(|caller| caller.join().unwrap().unwrap())
+        .collect::<Vec<_>>();
+    let expected_root = materializer.root_for(&case);
+
+    assert_eq!(
+        roots[0].root(),
+        expected_root,
+        "the first caller must return the promoted root"
+    );
+    assert_eq!(
+        roots[1].root(),
+        expected_root,
+        "the second caller must validate and return the same root"
+    );
+    let entries = fs::read_dir(expected_root.parent().unwrap())
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(
+        entries.len(),
+        1,
+        "the losing temporary root must be removed"
+    );
+    assert_eq!(
+        entries[0].path(),
+        expected_root,
+        "only the promoted root may remain below the base"
+    );
+}
+
+#[test]
+fn git_commands_ignore_ambient_repository_selection() {
+    const MODE: &str = "ambient-git";
+    const BASE_ENV: &str = "SPUR_CODE_EVAL_TEST_BASE";
+    const COMMIT_ENV: &str = "SPUR_CODE_EVAL_TEST_COMMIT";
+    const HASH_ENV: &str = "SPUR_CODE_EVAL_TEST_HASH";
+    const REPOSITORY_ENV: &str = "SPUR_CODE_EVAL_TEST_REPOSITORY";
+    const ROOT_ENV: &str = "SPUR_CODE_EVAL_TEST_ROOT";
+
+    if is_isolated_test(MODE) {
+        let repository = required_env_path(REPOSITORY_ENV);
+        let commit = required_env_string(COMMIT_ENV);
+        let case =
+            code_eval_case_with_hash(MODE, &repository, &commit, required_env_string(HASH_ENV));
+        let materializer = Materializer::new(required_env_path(BASE_ENV)).unwrap();
+        let expected_root = required_env_path(ROOT_ENV).canonicalize().unwrap();
+
+        let root = materializer
+            .verify_existing(&case, required_env_path(ROOT_ENV))
+            .unwrap();
+
+        assert_eq!(root.root(), expected_root);
+        return;
+    }
+
+    let fixture = TempDirectory::new("ambient-git");
+    let (source_repository, commit) = repository(
+        fixture.path(),
+        "repository",
+        "fn selected_repository() {}\n",
+    );
+    let materialization_hash = compute_materialization_hash(&source_repository, None).unwrap();
+    let case = code_eval_case_with_hash(
+        MODE,
+        &source_repository,
+        &commit,
+        materialization_hash.clone(),
+    );
+    let base = fixture.path().join("materialized");
+    let materializer = Materializer::new(&base).unwrap();
+    let root = materializer.materialize(&case).unwrap();
+    let (hostile_repository, _) = repository(
+        fixture.path(),
+        "hostile-repository",
+        "fn unrelated_worktree() {}\n",
+    );
+    git(
+        &hostile_repository,
+        &[
+            "remote",
+            "add",
+            "origin",
+            "https://example.invalid/hostile.git",
+        ],
+    );
+
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "git_commands_ignore_ambient_repository_selection",
+            "--nocapture",
+        ])
+        .env(ISOLATED_TEST_MODE, MODE)
+        .env(BASE_ENV, &base)
+        .env(COMMIT_ENV, &commit)
+        .env(HASH_ENV, &materialization_hash)
+        .env(REPOSITORY_ENV, &source_repository)
+        .env(ROOT_ENV, root.root())
+        .env("GIT_DIR", hostile_repository.join(".git"))
+        .env("GIT_WORK_TREE", &hostile_repository)
+        .env("GIT_COMMON_DIR", hostile_repository.join(".git"))
+        .env("GIT_INDEX_FILE", hostile_repository.join(".git/index"))
+        .env(
+            "GIT_OBJECT_DIRECTORY",
+            hostile_repository.join(".git/objects"),
+        )
+        .env(
+            "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+            hostile_repository.join(".git/objects"),
+        )
+        .env("GIT_CONFIG_COUNT", "1")
+        .env("GIT_CONFIG_KEY_0", "remote.origin.url")
+        .env("GIT_CONFIG_VALUE_0", "https://example.invalid/injected.git")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "isolated ambient-Git regression failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn concurrent_same_case_materialization_returns_valid_winner() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    const MODE: &str = "concurrent-same-case";
+    const BASE_ENV: &str = "SPUR_CODE_EVAL_TEST_BASE";
+    const COMMIT_ENV: &str = "SPUR_CODE_EVAL_TEST_COMMIT";
+    const HASH_ENV: &str = "SPUR_CODE_EVAL_TEST_HASH";
+    const REPOSITORY_ENV: &str = "SPUR_CODE_EVAL_TEST_REPOSITORY";
+
+    if is_isolated_test(MODE) {
+        run_concurrent_materialization_child(MODE, BASE_ENV, COMMIT_ENV, HASH_ENV, REPOSITORY_ENV);
+        return;
+    }
+
+    let fixture = TempDirectory::new("concurrent-same-case");
+    let (source_repository, commit) = repository(
+        fixture.path(),
+        "repository",
+        "fn concurrent_materialization() {}\n",
+    );
+    let materialization_hash = compute_materialization_hash(&source_repository, None).unwrap();
+    let binary_directory = fixture.path().join("bin");
+    let rendezvous = fixture.path().join("git-rendezvous");
+    fs::create_dir(&binary_directory).unwrap();
+    fs::create_dir(&rendezvous).unwrap();
+    let real_git = std::env::split_paths(&std::env::var_os("PATH").unwrap())
+        .map(|directory| directory.join("git"))
+        .find(|candidate| candidate.is_file())
+        .expect("git executable must be present on PATH");
+    let git_shim = binary_directory.join("git");
+    fs::write(
+        &git_shim,
+        format!(
+            "#!/bin/sh\nfor argument in \"$@\"; do\n  if [ \"$argument\" = clone ]; then\n    if mkdir '{rendezvous}/first' 2>/dev/null; then\n      while [ ! -e '{rendezvous}/second' ]; do sleep 0.01; done\n    else\n      : > '{rendezvous}/second'\n    fi\n    break\n  fi\ndone\nexec '{real_git}' \"$@\"\n",
+            rendezvous = rendezvous.display(),
+            real_git = real_git.display(),
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&git_shim, fs::Permissions::from_mode(0o755)).unwrap();
+    let child_path = std::env::join_paths(
+        std::iter::once(binary_directory)
+            .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+    )
+    .unwrap();
+    let base = fixture.path().join("materialized");
+
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "concurrent_same_case_materialization_returns_valid_winner",
+            "--nocapture",
+        ])
+        .env(ISOLATED_TEST_MODE, MODE)
+        .env(BASE_ENV, &base)
+        .env(COMMIT_ENV, &commit)
+        .env(HASH_ENV, &materialization_hash)
+        .env(REPOSITORY_ENV, &source_repository)
+        .env("PATH", child_path)
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "isolated concurrent-materialization regression failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(rendezvous.join("first").is_dir());
+    assert!(rendezvous.join("second").is_file());
+}
+
+#[cfg(unix)]
+#[test]
+fn rejects_materialization_root_symlink_outside_base() {
+    use std::os::unix::fs::symlink;
+
+    let fixture = TempDirectory::new("root-outside-base");
+    let (repository, commit) = repository(
+        fixture.path(),
+        "repository",
+        "fn externally_materialized() {}\n",
+    );
+    let case = code_eval_case("root-outside-base", &repository, &commit);
+    let external_materializer =
+        Materializer::new(fixture.path().join("external-materializations")).unwrap();
+    let external_root = external_materializer.materialize(&case).unwrap();
+    let materializer = Materializer::new(fixture.path().join("materialized")).unwrap();
+    let linked_root = materializer.root_for(&case);
+    symlink(external_root.root(), &linked_root).unwrap();
+
+    let error = materializer
+        .verify_existing(&case, &linked_root)
+        .unwrap_err();
+
+    assert!(matches!(error, MaterializeError::RootOutsideBase { .. }));
 }
 
 #[test]
@@ -482,7 +756,7 @@ fn missing_and_invalid_audit_metadata_are_typed() {
     let (repository, commit) = repository(fixture.path(), "repository", "fn metadata() {}\n");
     let case = code_eval_case("metadata-errors", &repository, &commit);
     let materializer = Materializer::new(fixture.path().join("materialized")).unwrap();
-    let root = fixture.path().join("arbitrary-root");
+    let root = materializer.root_for(&case);
     fs::create_dir(&root).unwrap();
 
     let missing = materializer.verify_existing(&case, &root).unwrap_err();
