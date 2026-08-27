@@ -342,6 +342,69 @@ fn package_catalog_records_serving_artifacts() -> Result<()> {
 }
 
 #[test]
+fn package_catalog_records_null_serving_artifacts_when_lineage_absent() -> Result<()> {
+    let root = unique_temp_dir("package-catalog-null-serving-artifacts")?;
+    let artifact_dir = root.join("artifact");
+    let data_path = root.join("data");
+    fs::create_dir_all(&artifact_dir).context("create artifact dir")?;
+    fs::create_dir_all(&data_path).context("create ducklake data dir")?;
+
+    let catalog_dsn = format!("sqlite:{}", root.join("catalog.sqlite").display());
+    let data_path = data_path.display().to_string();
+    initialize_catalog(&catalog_dsn, &data_path)?;
+    write_artifact_fixture(&artifact_dir)?;
+
+    translate_artifact_to_ducklake(&TranslateOptions {
+        source: SOURCE.to_owned(),
+        package: PACKAGE.to_owned(),
+        revision: REVISION.to_owned(),
+        revision_kind: "semver".to_owned(),
+        artifact_dir,
+        artifact_manifest: None,
+        source_root: None,
+        catalog_dsn: catalog_dsn.clone(),
+        lineage: None,
+        allow_missing_embeddings: false,
+    })?;
+
+    let conn = attach_ducklake(&catalog_dsn, &data_path)?;
+    let actual: (
+        Option<String>,
+        Option<String>,
+        Option<u64>,
+        Option<String>,
+        Option<String>,
+        Option<u64>,
+    ) = conn.query_row(
+        r"
+        SELECT
+            graph_manifest_uri,
+            graph_manifest_sha256,
+            graph_manifest_bytes,
+            source_sidecar_uri,
+            source_sidecar_sha256,
+            source_sidecar_bytes
+        FROM gold.package_catalog
+        WHERE source = ? AND package = ? AND revision = ?
+        ",
+        params![SOURCE, PACKAGE, REVISION],
+        |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+            ))
+        },
+    )?;
+
+    assert_eq!(actual, (None, None, None, None, None, None));
+    Ok(())
+}
+
+#[test]
 fn concurrent_translates_publish_distinct_generations_and_complete_snapshot() -> Result<()> {
     let root = unique_temp_dir("translate-concurrent-publish")?;
     let (catalog_dsn, data_path) = match (

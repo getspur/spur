@@ -1401,6 +1401,7 @@ fn write_catalog_metadata(
     } else {
         "skipped"
     };
+    let serving_lineage = opts.lineage.as_ref();
     let lineage = opts.lineage.clone().unwrap_or_else(default_lineage);
 
     run_transaction(conn, || {
@@ -1442,12 +1443,12 @@ fn write_catalog_metadata(
                 lineage.builder_version,
                 lineage.translate_schema_version,
                 lineage.embed_text_version,
-                lineage.graph_manifest_uri,
-                lineage.graph_manifest_sha256,
-                lineage.graph_manifest_bytes,
-                lineage.source_sidecar_uri,
-                lineage.source_sidecar_sha256,
-                lineage.source_sidecar_bytes,
+                serving_lineage.map(|lineage| lineage.graph_manifest_uri.as_str()),
+                serving_lineage.map(|lineage| lineage.graph_manifest_sha256.as_str()),
+                serving_lineage.map(|lineage| lineage.graph_manifest_bytes),
+                serving_lineage.map(|lineage| lineage.source_sidecar_uri.as_str()),
+                serving_lineage.map(|lineage| lineage.source_sidecar_sha256.as_str()),
+                serving_lineage.map(|lineage| lineage.source_sidecar_bytes),
             ],
         )
         .context("failed to insert package_catalog row")?;
