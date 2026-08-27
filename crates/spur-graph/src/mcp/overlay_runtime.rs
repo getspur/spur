@@ -3,7 +3,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, Weak};
 
-use anyhow::{anyhow, bail, Context as _};
+use anyhow::{anyhow, bail};
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use tokio::sync::{mpsc, oneshot, Mutex as AsyncMutex};
@@ -116,6 +116,62 @@ pub(super) enum PublishedTrust {
     Trusted,
     Rebuilding,
     Untrusted(PublishedUntrustedReason),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum RuntimeStartupCause {
+    SourceResolution,
+    SubscriptionConstruction,
+    SubscriptionArm,
+    ProviderUnavailable,
+    ExactSeed,
+    ReplayTrustLost,
+    ReplayRebuild,
+}
+
+impl RuntimeStartupCause {
+    pub(super) fn diagnostic(self) -> &'static str {
+        match self {
+            Self::SourceResolution => "source_resolution",
+            Self::SubscriptionConstruction => "subscription_construction",
+            Self::SubscriptionArm => "subscription_arm",
+            Self::ProviderUnavailable => "provider_unavailable",
+            Self::ExactSeed => "exact_seed",
+            Self::ReplayTrustLost => "replay_trust_lost",
+            Self::ReplayRebuild => "replay_rebuild",
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(super) struct RuntimeStartupError {
+    cause: RuntimeStartupCause,
+    source: anyhow::Error,
+}
+
+impl RuntimeStartupError {
+    pub(super) fn new(cause: RuntimeStartupCause, source: impl Into<anyhow::Error>) -> Self {
+        Self {
+            cause,
+            source: source.into(),
+        }
+    }
+
+    pub(super) fn cause(&self) -> RuntimeStartupCause {
+        self.cause
+    }
+}
+
+impl fmt::Display for RuntimeStartupError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{:#}", self.source)
+    }
+}
+
+impl std::error::Error for RuntimeStartupError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.source.as_ref())
+    }
 }
 
 pub(super) struct PublishedState {
@@ -334,7 +390,7 @@ impl OverlayRuntimeRegistry {
         key: OverlayRuntimeKey,
         subscriptions: Arc<dyn RuntimeSubscriptionFactory>,
         builder: Arc<dyn OverlayGenerationBuilder>,
-    ) -> anyhow::Result<OverlayRuntimeHandle> {
+    ) -> Result<OverlayRuntimeHandle, RuntimeStartupError> {
         if let Some(entry) = self.existing(&key) {
             return Ok(OverlayRuntimeHandle { entry });
         }
@@ -345,14 +401,8 @@ impl OverlayRuntimeRegistry {
             return Ok(OverlayRuntimeHandle { entry });
         }
 
-        let initialized = initialize_runtime(&key, subscriptions.as_ref(), builder.as_ref())
-            .await
-            .with_context(|| {
-                format!(
-                    "failed to initialize overlay runtime for `{}`",
-                    key.canonical_worktree.display()
-                )
-            })?;
+        let initialized =
+            initialize_runtime(&key, subscriptions.as_ref(), builder.as_ref()).await?;
         let entry = Arc::new(RuntimeEntry {
             key: key.clone(),
             published: ArcSwap::from_pointee(PublishedState::initial(
@@ -466,11 +516,18 @@ impl ActiveSubscription {
     async fn arm(
         key: &OverlayRuntimeKey,
         subscriptions: &dyn RuntimeSubscriptionFactory,
-    ) -> anyhow::Result<Self> {
-        let mut stream = subscriptions.arm(key).await?;
+    ) -> Result<Self, RuntimeStartupError> {
+        let mut stream = subscriptions.arm(key).await.map_err(|error| {
+            RuntimeStartupError::new(RuntimeStartupCause::SubscriptionArm, error)
+        })?;
         let provider = stream.provider();
         if provider == ChangeProviderKind::ExactOnly {
-            bail!("change providers unavailable; exact-only runtime cannot publish trusted state");
+            return Err(RuntimeStartupError::new(
+                RuntimeStartupCause::ProviderUnavailable,
+                anyhow!(
+                    "change providers unavailable; exact-only runtime cannot publish trusted state"
+                ),
+            ));
         }
         let armed_cursor = stream.initial_cursor().clone();
         let pump_cursor = armed_cursor.clone();
@@ -539,16 +596,32 @@ async fn initialize_runtime(
     key: &OverlayRuntimeKey,
     subscriptions: &dyn RuntimeSubscriptionFactory,
     builder: &dyn OverlayGenerationBuilder,
-) -> anyhow::Result<InitializedRuntime> {
+) -> Result<InitializedRuntime, RuntimeStartupError> {
     let mut active = ActiveSubscription::arm(key, subscriptions).await?;
-    let mut built = builder.exact_scan(key).await?;
+    let mut built = builder
+        .exact_scan(key)
+        .await
+        .map_err(|error| RuntimeStartupError::new(RuntimeStartupCause::ExactSeed, error))?;
     let mut current_cursor = active.armed_cursor.clone();
 
     loop {
         active.flush_immediately_available().await;
         let mut changed_paths = BTreeSet::new();
-        drain_available(&mut active, &mut current_cursor, &mut changed_paths)
-            .map_err(|reason| anyhow!("trust lost while replaying after exact scan: {reason:?}"))?;
+        let requires_exact_replay =
+            drain_startup_available(&mut active, &mut current_cursor, &mut changed_paths).map_err(
+                |reason| {
+                    RuntimeStartupError::new(
+                        RuntimeStartupCause::ReplayTrustLost,
+                        anyhow!("trust lost while replaying after exact scan: {reason:?}"),
+                    )
+                },
+            )?;
+        if requires_exact_replay {
+            built = builder.exact_scan(key).await.map_err(|error| {
+                RuntimeStartupError::new(RuntimeStartupCause::ReplayRebuild, error)
+            })?;
+            continue;
+        }
         if changed_paths.is_empty() {
             return Ok(InitializedRuntime {
                 active,
@@ -558,7 +631,8 @@ async fn initialize_runtime(
         }
         built = builder
             .rebuild_incremental(key, built, changed_paths)
-            .await?;
+            .await
+            .map_err(|error| RuntimeStartupError::new(RuntimeStartupCause::ReplayRebuild, error))?;
     }
 }
 
@@ -601,6 +675,9 @@ async fn process_batch(
     builder: &dyn OverlayGenerationBuilder,
     first_batch: ChangeBatch,
 ) -> ProcessOutcome {
+    if matches!(first_batch, ChangeBatch::Ignored { .. }) {
+        return ProcessOutcome::Continue;
+    }
     let mut current_cursor = first_batch.cursor().clone();
     let mut changed_paths = BTreeSet::new();
     if let Err(reason) = absorb_batch(first_batch, &mut current_cursor, &mut changed_paths) {
@@ -807,6 +884,67 @@ fn drain_available(
     }
 }
 
+fn drain_startup_available(
+    active: &mut ActiveSubscription,
+    current_cursor: &mut CompositeCursor,
+    changed_paths: &mut BTreeSet<PathBuf>,
+) -> Result<bool, PublishedUntrustedReason> {
+    let mut requires_exact_replay = false;
+    loop {
+        match active.receiver.try_recv() {
+            Ok(batch) => absorb_startup_batch(
+                batch,
+                current_cursor,
+                changed_paths,
+                &mut requires_exact_replay,
+            )?,
+            Err(mpsc::error::TryRecvError::Empty) => return Ok(requires_exact_replay),
+            Err(mpsc::error::TryRecvError::Disconnected) => {
+                return Err(PublishedUntrustedReason::Provider(
+                    TrustLoss::ChannelDisconnected {
+                        provider: active.provider,
+                    },
+                ));
+            }
+        }
+    }
+}
+
+fn absorb_startup_batch(
+    batch: ChangeBatch,
+    current_cursor: &mut CompositeCursor,
+    changed_paths: &mut BTreeSet<PathBuf>,
+    requires_exact_replay: &mut bool,
+) -> Result<(), PublishedUntrustedReason> {
+    *current_cursor = batch.cursor().clone();
+    match batch {
+        ChangeBatch::Ignored { .. } => Ok(()),
+        ChangeBatch::TrustLost { reason, .. } => Err(PublishedUntrustedReason::Provider(reason)),
+        ChangeBatch::Changes {
+            added,
+            modified,
+            deleted,
+            renamed,
+            git_metadata,
+            ..
+        } => {
+            *requires_exact_replay |= !git_metadata.is_empty();
+            let mut batch_paths = BTreeSet::new();
+            batch_paths.extend(added);
+            batch_paths.extend(modified);
+            batch_paths.extend(deleted);
+            for (from, to) in renamed {
+                batch_paths.extend([from, to]);
+            }
+            if batch_paths.is_empty() && git_metadata.is_empty() {
+                return Err(PublishedUntrustedReason::EmptyChangeBatch);
+            }
+            changed_paths.extend(batch_paths);
+            Ok(())
+        }
+    }
+}
+
 fn absorb_batch(
     batch: ChangeBatch,
     current_cursor: &mut CompositeCursor,
@@ -814,6 +952,7 @@ fn absorb_batch(
 ) -> Result<(), PublishedUntrustedReason> {
     *current_cursor = batch.cursor().clone();
     match batch {
+        ChangeBatch::Ignored { .. } => Ok(()),
         ChangeBatch::TrustLost { reason, .. } => Err(PublishedUntrustedReason::Provider(reason)),
         ChangeBatch::Changes {
             added,
@@ -1158,6 +1297,12 @@ mod tests {
         }
     }
 
+    fn ignored(sequence: u64) -> ChangeBatch {
+        ChangeBatch::Ignored {
+            cursor: cursor(sequence),
+        }
+    }
+
     fn loss(sequence: u64) -> ChangeBatch {
         ChangeBatch::TrustLost {
             cursor: cursor(sequence),
@@ -1205,7 +1350,7 @@ mod tests {
         subscriber: Arc<FakeSubscriber>,
         builder: Arc<FakeBuilder>,
     ) -> anyhow::Result<OverlayRuntimeHandle> {
-        registry.get_or_start(key, subscriber, builder).await
+        Ok(registry.get_or_start(key, subscriber, builder).await?)
     }
 
     #[tokio::test]
@@ -1273,6 +1418,32 @@ mod tests {
             state.snapshot_identity().normalized_changed_set_fingerprint[0],
             2
         );
+    }
+
+    #[tokio::test]
+    async fn overlay_runtime_ignored_activity_does_not_trigger_an_empty_rebuild() {
+        let registry = OverlayRuntimeRegistry::new();
+        let subscriber = Arc::new(FakeSubscriber::default());
+        let builder = Arc::new(FakeBuilder::standalone());
+        let handle = start(
+            &registry,
+            key("/worktree", "base"),
+            Arc::clone(&subscriber),
+            Arc::clone(&builder),
+        )
+        .await
+        .expect("runtime starts");
+
+        subscriber.send(0, ignored(1));
+        subscriber.send(0, changes(2, &["/worktree/real.rs"]));
+        wait_for(|| handle.acquire_published().current_cursor() == &cursor(2)).await;
+
+        assert_eq!(builder.incremental_calls(), 1);
+        assert_eq!(
+            builder.incremental_paths(),
+            vec![BTreeSet::from([PathBuf::from("/worktree/real.rs")])]
+        );
+        assert_eq!(handle.acquire_published().trust(), &PublishedTrust::Trusted);
     }
 
     #[tokio::test]

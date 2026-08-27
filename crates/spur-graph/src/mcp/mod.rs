@@ -271,7 +271,7 @@ use crate::overlay_watch::{ChangeProviderKind, ChangeSourceSet};
 use overlay_runtime::{
     BuiltOverlayGeneration, CompositeSubscriptionFactory, OverlayGenerationBuilder,
     OverlayRuntimeHandle, OverlayRuntimeKey, OverlayRuntimeRegistry, PublishedState,
-    PublishedTrust, RuntimeSubscriptionFactory,
+    PublishedTrust, RuntimeStartupCause, RuntimeStartupError, RuntimeSubscriptionFactory,
 };
 
 #[derive(Default)]
@@ -279,7 +279,15 @@ struct OverlayRuntimeLifecycle {
     registry: OverlayRuntimeRegistry,
     handles: Mutex<HashMap<OverlayRuntimeKey, RuntimeLifecycleHandle>>,
     starting: Mutex<HashSet<OverlayRuntimeKey>>,
+    startup_states: Mutex<HashMap<OverlayRuntimeKey, OverlayRuntimeStartupState>>,
     active_keys: Mutex<HashMap<PathBuf, OverlayRuntimeKey>>,
+}
+
+#[derive(Clone, Copy)]
+enum OverlayRuntimeStartupState {
+    Starting,
+    Ready,
+    Failed(RuntimeStartupCause),
 }
 
 struct RuntimeLifecycleHandle {
@@ -326,6 +334,10 @@ impl OverlayRuntimeLifecycle {
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .remove(key);
+                self.startup_states
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .remove(key);
             }
             return false;
         }
@@ -348,6 +360,10 @@ impl OverlayRuntimeLifecycle {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .retain(|candidate| candidate.canonical_worktree() != worktree || candidate == key);
+        self.startup_states
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .retain(|candidate, _| candidate.canonical_worktree() != worktree || candidate == key);
         true
     }
 
@@ -386,6 +402,10 @@ impl OverlayRuntimeLifecycle {
                 handle: Arc::new(handle),
                 subscriptions,
             });
+        self.startup_states
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(key.clone(), OverlayRuntimeStartupState::Ready);
     }
 
     fn acquire(&self, key: &OverlayRuntimeKey) -> Option<AcquiredOverlayRuntime> {
@@ -397,6 +417,66 @@ impl OverlayRuntimeLifecycle {
             .map(|entry| Arc::clone(&entry.handle))?;
         let published = handle.acquire_published();
         Some(AcquiredOverlayRuntime { handle, published })
+    }
+
+    fn startup_diagnostics(
+        &self,
+        key: &OverlayRuntimeKey,
+        published: bool,
+    ) -> (&'static str, Option<&'static str>) {
+        if published {
+            return ("ready", None);
+        }
+        match self
+            .startup_states
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(key)
+            .copied()
+        {
+            Some(OverlayRuntimeStartupState::Starting) => ("starting", None),
+            Some(OverlayRuntimeStartupState::Ready) => ("ready", None),
+            Some(OverlayRuntimeStartupState::Failed(cause)) => ("failed", Some(cause.diagnostic())),
+            None => ("not_started", None),
+        }
+    }
+
+    fn record_startup_failure_if_active(
+        &self,
+        key: &OverlayRuntimeKey,
+        cause: RuntimeStartupCause,
+    ) {
+        let active_keys = self
+            .active_keys
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if active_keys
+            .get(key.canonical_worktree())
+            .is_some_and(|active| active == key)
+        {
+            self.startup_states
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .insert(key.clone(), OverlayRuntimeStartupState::Failed(cause));
+        }
+    }
+
+    fn record_starting_if_active(&self, key: &OverlayRuntimeKey) -> bool {
+        let active_keys = self
+            .active_keys
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if active_keys
+            .get(key.canonical_worktree())
+            .is_none_or(|active| active != key)
+        {
+            return false;
+        }
+        self.startup_states
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(key.clone(), OverlayRuntimeStartupState::Starting);
+        true
     }
 
     fn schedule_start(
@@ -442,6 +522,13 @@ impl OverlayRuntimeLifecycle {
             return;
         }
         drop(starting);
+        if !self.record_starting_if_active(&key) {
+            self.starting
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .remove(&key);
+            return;
+        }
 
         let lifecycle = Arc::clone(self);
         tokio::spawn(async move {
@@ -454,27 +541,37 @@ impl OverlayRuntimeLifecycle {
                     tokio::task::yield_now().await;
                 }
             }
-            let subscriptions = match restart_subscriptions {
-                Some(subscriptions) => Ok(subscriptions),
-                None => {
-                    let source_root = key.canonical_worktree().to_path_buf();
-                    let sources =
-                        tokio::task::spawn_blocking(move || ChangeSourceSet::resolve(&source_root))
-                            .await
-                            .context("overlay change-source resolver task failed")
-                            .and_then(|resolved| resolved);
-                    match sources {
-                        Ok(sources) => {
-                            CompositeSubscriptionFactory::new(&key, sources).map(|factory| {
-                                let subscriptions: Arc<dyn RuntimeSubscriptionFactory> =
-                                    Arc::new(factory);
-                                subscriptions
-                            })
+            let subscriptions: Result<Arc<dyn RuntimeSubscriptionFactory>, RuntimeStartupError> =
+                match restart_subscriptions {
+                    Some(subscriptions) => Ok(subscriptions),
+                    None => {
+                        let source_root = key.canonical_worktree().to_path_buf();
+                        let sources = tokio::task::spawn_blocking(move || {
+                            ChangeSourceSet::resolve(&source_root)
+                        })
+                        .await
+                        .context("overlay change-source resolver task failed")
+                        .and_then(|resolved| resolved)
+                        .map_err(|error| {
+                            RuntimeStartupError::new(RuntimeStartupCause::SourceResolution, error)
+                        });
+                        match sources {
+                            Ok(sources) => CompositeSubscriptionFactory::new(&key, sources)
+                                .map(|factory| {
+                                    let subscriptions: Arc<dyn RuntimeSubscriptionFactory> =
+                                        Arc::new(factory);
+                                    subscriptions
+                                })
+                                .map_err(|error| {
+                                    RuntimeStartupError::new(
+                                        RuntimeStartupCause::SubscriptionConstruction,
+                                        error,
+                                    )
+                                }),
+                            Err(error) => Err(error),
                         }
-                        Err(error) => Err(error),
                     }
-                }
-            };
+                };
             let handle = match subscriptions {
                 Ok(subscriptions) => lifecycle
                     .registry
@@ -488,9 +585,11 @@ impl OverlayRuntimeLifecycle {
                     lifecycle.install_if_active(&key, handle, subscriptions);
                 }
                 Err(error) => {
+                    lifecycle.record_startup_failure_if_active(&key, error.cause());
                     tracing::warn!(
                         target: "spur_graph::mcp",
                         worktree = %key.canonical_worktree().display(),
+                        cause = error.cause().diagnostic(),
                         error = %error,
                         "asynchronous overlay runtime start failed"
                     );
@@ -1649,6 +1748,8 @@ struct RuntimeExactFallback {
     acquired: Option<AcquiredOverlayRuntime>,
     reason: &'static str,
     seed_runtime: bool,
+    startup_status: &'static str,
+    startup_cause: Option<&'static str>,
 }
 
 impl RuntimeExactFallback {
@@ -1660,6 +1761,8 @@ impl RuntimeExactFallback {
             acquired,
             reason: _,
             seed_runtime,
+            startup_status: _,
+            startup_cause: _,
         } = self;
         if !seed_runtime {
             return;
@@ -1714,6 +1817,8 @@ fn published_generation_route(
             acquired: None,
             reason: "base_superseded",
             seed_runtime: false,
+            startup_status: "inactive",
+            startup_cause: None,
         });
     }
     let acquired = lifecycle.acquire(&key);
@@ -1728,6 +1833,7 @@ fn published_generation_route(
             PublishedTrust::Rebuilding => "runtime_warming",
             PublishedTrust::Untrusted(_) => "runtime_untrusted",
         };
+        let (startup_status, startup_cause) = lifecycle.startup_diagnostics(&key, true);
         return PublishedGenerationRoute::Exact(RuntimeExactFallback {
             lifecycle,
             key,
@@ -1735,8 +1841,11 @@ fn published_generation_route(
             acquired: Some(acquired),
             reason,
             seed_runtime: true,
+            startup_status,
+            startup_cause,
         });
     }
+    let (startup_status, startup_cause) = lifecycle.startup_diagnostics(&key, false);
     PublishedGenerationRoute::Exact(RuntimeExactFallback {
         lifecycle,
         key,
@@ -1744,6 +1853,8 @@ fn published_generation_route(
         acquired: None,
         reason: "runtime_unavailable",
         seed_runtime: true,
+        startup_status,
+        startup_cause,
     })
 }
 
@@ -2463,6 +2574,8 @@ fn published_generation_diagnostics_value(
         "generation_id": generation_id,
         "generation_pins": 1,
         "fallback_reason": Value::Null,
+        "startup_status": "ready",
+        "startup_cause": Value::Null,
         "full_base_artifact_builds": 0,
         "query_operations": query_operations,
         "validation_observations": 0,
@@ -2486,6 +2599,8 @@ fn runtime_exact_fallback_diagnostics_value(
         "generation_id": Value::Null,
         "generation_pins": 0,
         "fallback_reason": fallback.reason,
+        "startup_status": fallback.startup_status,
+        "startup_cause": fallback.startup_cause,
         "full_base_artifact_builds": 0,
         "validation_observations": 2,
         "response_metadata_scans": 1,
@@ -9662,6 +9777,211 @@ mod tests {
         let warm = fixture.search("alpha", true).await;
         assert_eq!(generation_diagnostics(&warm)["route"], "generation");
         assert_eq!(warm["total_matches"], 1, "{warm:#}");
+    }
+
+    #[tokio::test]
+    async fn generation_route_production_lifecycle_publishes_after_cold_exact_seed() {
+        let _rebuild_guard = rebuild_test_guard().await;
+        let _budget = set_graph_rebuild_latency_budget_for_test(Duration::from_secs(30));
+        let fixture = OverlayGenerationMcpFixture::new("pub fn alpha() {}\n");
+        let module = GraphMcpModule::new(GraphMcpDeps {
+            rebuild_coordinator: Arc::clone(&fixture.rebuild_coordinator),
+            overlay_fsmonitor_auto: true,
+        });
+
+        let first = SCOPED_CODE_GRAPH_WORKTREE_ROOT
+            .scope(
+                fixture.root.clone(),
+                module.dispatch(
+                    "code_symbol_search",
+                    json!({
+                        "query": "alpha",
+                        "mode": "exact",
+                        "response_format": "full",
+                    }),
+                ),
+            )
+            .await
+            .expect("cold production-shaped search");
+        assert_eq!(first["total_matches"], 1, "{first:#}");
+        assert_eq!(
+            generation_diagnostics(&first)["route"],
+            "exact_fallback",
+            "the cold request may seed only through the exact route"
+        );
+        assert_eq!(
+            generation_diagnostics(&first)["startup_status"],
+            "not_started"
+        );
+        assert_eq!(generation_diagnostics(&first)["startup_cause"], Value::Null);
+
+        let lifecycle = overlay_runtime_lifecycle_for(&fixture.rebuild_coordinator);
+        let key = lifecycle
+            .active_keys
+            .lock()
+            .expect("active production runtime key")
+            .get(&fixture.root)
+            .cloned()
+            .expect("cold request must activate its runtime key");
+        let published = tokio::time::timeout(graph_rebuild_latency_budget(), async {
+            loop {
+                if let Some(acquired) = lifecycle.acquire(&key) {
+                    return Some(acquired.published);
+                }
+                if !lifecycle
+                    .starting
+                    .lock()
+                    .expect("production runtime startup state")
+                    .contains(&key)
+                {
+                    return None;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("production runtime startup must reach an observable terminal condition");
+        let published = match published {
+            Some(published) => published,
+            None => {
+                let sources = ChangeSourceSet::resolve(&fixture.root)
+                    .expect("diagnostic production source resolution");
+                let subscriptions: Arc<dyn RuntimeSubscriptionFactory> = Arc::new(
+                    CompositeSubscriptionFactory::new(&key, sources)
+                        .expect("diagnostic production subscription factory"),
+                );
+                let builder: Arc<dyn OverlayGenerationBuilder> = SCOPED_CODE_GRAPH_WORKTREE_ROOT
+                    .scope(fixture.root.clone(), async {
+                        let backend = open_code_search_backend_for_request(Some(Arc::clone(
+                            &fixture.rebuild_coordinator,
+                        )))
+                        .await
+                        .expect("diagnostic production backend");
+                        Arc::new(McpOverlayGenerationBuilder {
+                            worktree: fixture.root.clone(),
+                            snapshot_base: backend
+                                .snapshot_base()
+                                .expect("diagnostic production snapshot base"),
+                            full_base_source: backend.full_base_artifact_source(),
+                            use_request_cache: true,
+                        }) as Arc<dyn OverlayGenerationBuilder>
+                    })
+                    .await;
+                match lifecycle
+                    .registry
+                    .get_or_start(key.clone(), subscriptions, builder)
+                    .await
+                {
+                    Ok(_) => panic!(
+                        "asynchronous production startup completed without installing a handle, \
+                         although the same direct startup succeeded"
+                    ),
+                    Err(error) => panic!("production startup boundary failed: {error:#}"),
+                }
+            }
+        };
+        assert!(matches!(published.trust(), PublishedTrust::Trusted));
+        assert_ne!(published.provider(), ChangeProviderKind::ExactOnly);
+
+        reset_exact_overlay_observations_for_test();
+        let warm = SCOPED_CODE_GRAPH_WORKTREE_ROOT
+            .scope(
+                fixture.root.clone(),
+                module.dispatch(
+                    "code_symbol_search",
+                    json!({
+                        "query": "alpha",
+                        "mode": "exact",
+                        "response_format": "full",
+                    }),
+                ),
+            )
+            .await
+            .expect("warm production-shaped search");
+        let diagnostics = generation_diagnostics(&warm);
+        assert_eq!(diagnostics["route"], "generation", "{warm:#}");
+        assert_eq!(diagnostics["trust"], "trusted", "{warm:#}");
+        assert_eq!(diagnostics["startup_status"], "ready", "{warm:#}");
+        assert_eq!(diagnostics["startup_cause"], Value::Null, "{warm:#}");
+        assert_eq!(diagnostics["generation_pins"], 1, "{warm:#}");
+        assert_eq!(diagnostics["validation_observations"], 0, "{warm:#}");
+        assert_eq!(diagnostics["finalization_stages"]["total"], 0, "{warm:#}");
+        assert_eq!(exact_overlay_observations_for_test(), 0);
+    }
+
+    #[tokio::test]
+    async fn generation_route_startup_failure_reports_bounded_cause() {
+        let _rebuild_guard = rebuild_test_guard().await;
+        let _budget = set_graph_rebuild_latency_budget_for_test(Duration::from_secs(30));
+        let fixture = OverlayGenerationMcpFixture::new("pub fn alpha() {}\n");
+        let module = GraphMcpModule::new(GraphMcpDeps {
+            rebuild_coordinator: Arc::clone(&fixture.rebuild_coordinator),
+            overlay_fsmonitor_auto: true,
+        });
+        let _failure = set_overlay_generation_failures_for_test(1);
+
+        let first = SCOPED_CODE_GRAPH_WORKTREE_ROOT
+            .scope(
+                fixture.root.clone(),
+                module.dispatch(
+                    "code_symbol_search",
+                    json!({
+                        "query": "alpha",
+                        "mode": "exact",
+                        "response_format": "full",
+                    }),
+                ),
+            )
+            .await
+            .expect("cold exact fallback before scripted startup failure");
+        assert_eq!(generation_diagnostics(&first)["route"], "exact_fallback");
+
+        let lifecycle = overlay_runtime_lifecycle_for(&fixture.rebuild_coordinator);
+        let key = lifecycle
+            .active_keys
+            .lock()
+            .expect("active failed-start key")
+            .get(&fixture.root)
+            .cloned()
+            .expect("cold request must activate failed-start key");
+        tokio::time::timeout(graph_rebuild_latency_budget(), async {
+            while lifecycle
+                .starting
+                .lock()
+                .expect("failed runtime startup state")
+                .contains(&key)
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("scripted startup failure must become observable");
+        assert!(lifecycle.acquire(&key).is_none());
+
+        let failed = SCOPED_CODE_GRAPH_WORKTREE_ROOT
+            .scope(
+                fixture.root.clone(),
+                module.dispatch(
+                    "code_symbol_search",
+                    json!({
+                        "query": "alpha",
+                        "mode": "exact",
+                        "response_format": "full",
+                    }),
+                ),
+            )
+            .await
+            .expect("exact fallback after scripted startup failure");
+        let diagnostics = generation_diagnostics(&failed);
+        assert_eq!(diagnostics["route"], "exact_fallback", "{failed:#}");
+        assert_eq!(diagnostics["startup_status"], "failed", "{failed:#}");
+        assert_eq!(diagnostics["startup_cause"], "exact_seed", "{failed:#}");
+        assert!(
+            diagnostics["startup_cause"]
+                .as_str()
+                .is_some_and(|cause| cause.len() <= 32),
+            "startup cause must remain a bounded category: {failed:#}"
+        );
     }
 
     #[tokio::test]

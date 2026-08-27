@@ -177,6 +177,9 @@ pub enum TrustLoss {
 /// A provider-neutral, sorted, de-duplicated change observation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChangeBatch {
+    /// Provider activity that advances the cursor but cannot change Git or
+    /// worktree semantics, such as Git's transient `*.lock` files.
+    Ignored { cursor: CompositeCursor },
     Changes {
         cursor: CompositeCursor,
         added: BTreeSet<PathBuf>,
@@ -194,7 +197,9 @@ pub enum ChangeBatch {
 impl ChangeBatch {
     pub fn cursor(&self) -> &CompositeCursor {
         match self {
-            Self::Changes { cursor, .. } | Self::TrustLost { cursor, .. } => cursor,
+            Self::Ignored { cursor }
+            | Self::Changes { cursor, .. }
+            | Self::TrustLost { cursor, .. } => cursor,
         }
     }
 }
@@ -220,6 +225,8 @@ fn normalize_raw_batch(
     let mut renamed = BTreeSet::new();
     let mut git_metadata = BTreeSet::new();
     let mut observed = false;
+    let mut effective = false;
+    let mut ignored_transient_git_lock = false;
 
     for change in changes {
         observed = true;
@@ -228,8 +235,14 @@ fn normalize_raw_batch(
             RawChange::Added(path) => {
                 let path = normalize_path(sources.worktree(), path);
                 if sources.is_git_metadata(&path) {
-                    git_metadata.insert(path);
+                    if is_transient_git_lock(&path) {
+                        ignored_transient_git_lock = true;
+                    } else {
+                        effective = true;
+                        git_metadata.insert(path);
+                    }
                 } else {
+                    effective = true;
                     deleted.remove(&path);
                     modified.remove(&path);
                     added.insert(path);
@@ -239,8 +252,14 @@ fn normalize_raw_batch(
             RawChange::Modified(path) => {
                 let path = normalize_path(sources.worktree(), path);
                 if sources.is_git_metadata(&path) {
-                    git_metadata.insert(path);
+                    if is_transient_git_lock(&path) {
+                        ignored_transient_git_lock = true;
+                    } else {
+                        effective = true;
+                        git_metadata.insert(path);
+                    }
                 } else if !added.contains(&path) && !deleted.contains(&path) {
+                    effective = true;
                     modified.insert(path);
                 }
                 None
@@ -248,8 +267,14 @@ fn normalize_raw_batch(
             RawChange::Deleted(path) => {
                 let path = normalize_path(sources.worktree(), path);
                 if sources.is_git_metadata(&path) {
-                    git_metadata.insert(path);
+                    if is_transient_git_lock(&path) {
+                        ignored_transient_git_lock = true;
+                    } else {
+                        effective = true;
+                        git_metadata.insert(path);
+                    }
                 } else {
+                    effective = true;
                     added.remove(&path);
                     modified.remove(&path);
                     deleted.insert(path);
@@ -260,8 +285,16 @@ fn normalize_raw_batch(
                 let from = normalize_path(sources.worktree(), from);
                 let to = normalize_path(sources.worktree(), to);
                 if sources.is_git_metadata(&from) || sources.is_git_metadata(&to) {
-                    git_metadata.extend([from, to]);
+                    for path in [from, to] {
+                        if sources.is_git_metadata(&path) && is_transient_git_lock(&path) {
+                            ignored_transient_git_lock = true;
+                        } else {
+                            effective = true;
+                            git_metadata.insert(path);
+                        }
+                    }
                 } else {
+                    effective = true;
                     added.remove(&from);
                     added.remove(&to);
                     modified.remove(&from);
@@ -287,6 +320,9 @@ fn normalize_raw_batch(
             },
         };
     }
+    if ignored_transient_git_lock && !effective {
+        return ChangeBatch::Ignored { cursor };
+    }
 
     ChangeBatch::Changes {
         cursor,
@@ -296,6 +332,11 @@ fn normalize_raw_batch(
         renamed,
         git_metadata,
     }
+}
+
+fn is_transient_git_lock(path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|extension| extension == "lock")
 }
 
 fn normalize_path(worktree: &Path, path: PathBuf) -> PathBuf {
@@ -770,6 +811,24 @@ fn raw_changes_from_notify(sources: &ChangeSourceSet, event: Event) -> Vec<RawCh
                 to: paths[1].clone(),
             }]
         }
+        EventKind::Modify(ModifyKind::Name(_))
+            if paths.len() == 1 && sources.is_git_metadata(&paths[0]) =>
+        {
+            let path = paths.into_iter().next().expect("one Git metadata path");
+            if is_transient_git_lock(&path) {
+                // A one-sided rename at `index.lock` may be the only event a
+                // backend reports for Git's atomic `index.lock -> index`
+                // update. Infer the authoritative endpoint so the runtime
+                // reconciles exactly instead of overlooking the update.
+                vec![RawChange::Modified(path.with_extension(""))]
+            } else {
+                // Some notify backends expose one half of Git's atomic
+                // lock-to-target rename. The authoritative metadata endpoint
+                // is enough to force an exact rebuild; source-file one-sided
+                // renames remain ambiguous and revoke trust below.
+                vec![RawChange::Modified(path)]
+            }
+        }
         EventKind::Modify(ModifyKind::Name(_)) => {
             vec![RawChange::TrustLost(TrustLoss::AmbiguousEvent {
                 provider: ChangeProviderKind::Notify,
@@ -1065,6 +1124,48 @@ mod tests {
     }
 
     #[test]
+    fn overlay_watch_ignores_transient_git_locks_but_keeps_authoritative_target() {
+        let (_temp, repository) = repository_fixture();
+        let sources = ChangeSourceSet::resolve(&repository).expect("sources");
+        let cursor = CompositeCursor::default();
+        let index_lock = sources.git_dir().join("index.lock");
+        let index = sources.git_dir().join("index");
+
+        assert_eq!(
+            normalize_raw_batch(
+                &sources,
+                ChangeProviderKind::Notify,
+                cursor.clone(),
+                [RawChange::Added(index_lock.clone())],
+            ),
+            ChangeBatch::Ignored {
+                cursor: cursor.clone(),
+            },
+            "a transient lock alone cannot change repository semantics"
+        );
+        assert_eq!(
+            normalize_raw_batch(
+                &sources,
+                ChangeProviderKind::Notify,
+                cursor.clone(),
+                [RawChange::Renamed {
+                    from: index_lock,
+                    to: index.clone(),
+                }],
+            ),
+            ChangeBatch::Changes {
+                cursor,
+                added: BTreeSet::new(),
+                modified: BTreeSet::new(),
+                deleted: BTreeSet::new(),
+                renamed: BTreeSet::new(),
+                git_metadata: BTreeSet::from([index]),
+            },
+            "Git's atomic lock-to-index rename must retain the authoritative target"
+        );
+    }
+
+    #[test]
     fn overlay_watch_provider_loss_never_becomes_empty_success() {
         let (_temp, repository) = repository_fixture();
         let sources = ChangeSourceSet::resolve(&repository).expect("sources");
@@ -1159,6 +1260,58 @@ mod tests {
                 }
             ));
         }
+    }
+
+    #[test]
+    fn overlay_watch_notify_one_sided_git_lock_rename_is_bounded_and_safe() {
+        let (_temp, repository) = repository_fixture();
+        let sources = ChangeSourceSet::resolve(&repository).expect("sources");
+        let index_lock = sources.git_dir().join("index.lock");
+        let index = sources.git_dir().join("index");
+
+        let lock_endpoint = raw_changes_from_notify(
+            &sources,
+            Event::new(EventKind::Modify(ModifyKind::Name(RenameMode::From))).add_path(index_lock),
+        );
+        assert_eq!(
+            normalize_raw_batch(
+                &sources,
+                ChangeProviderKind::Notify,
+                CompositeCursor::default(),
+                lock_endpoint,
+            ),
+            ChangeBatch::Changes {
+                cursor: CompositeCursor::default(),
+                added: BTreeSet::new(),
+                modified: BTreeSet::new(),
+                deleted: BTreeSet::new(),
+                renamed: BTreeSet::new(),
+                git_metadata: BTreeSet::from([index.clone()]),
+            },
+            "a one-sided lock rename must infer and invalidate the authoritative target"
+        );
+
+        let authoritative = raw_changes_from_notify(
+            &sources,
+            Event::new(EventKind::Modify(ModifyKind::Name(RenameMode::To))).add_path(index.clone()),
+        );
+        assert_eq!(
+            normalize_raw_batch(
+                &sources,
+                ChangeProviderKind::Notify,
+                CompositeCursor::default(),
+                authoritative,
+            ),
+            ChangeBatch::Changes {
+                cursor: CompositeCursor::default(),
+                added: BTreeSet::new(),
+                modified: BTreeSet::new(),
+                deleted: BTreeSet::new(),
+                renamed: BTreeSet::new(),
+                git_metadata: BTreeSet::from([index]),
+            },
+            "the authoritative rename endpoint must still force exact recovery"
+        );
     }
 
     #[tokio::test]
