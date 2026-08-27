@@ -2,8 +2,9 @@ use std::collections::HashMap;
 use std::future::{poll_fn, Future};
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Barrier as SyncBarrier, Mutex};
+use std::sync::{Arc, Mutex};
 use std::task::Poll;
 
 use async_trait::async_trait;
@@ -13,7 +14,7 @@ use spur_context_service::artifact_cache::{
     ArtifactStream,
 };
 use spur_context_service::serving_registry::ArtifactRef;
-use tokio::sync::Notify;
+use tokio::sync::{oneshot, Notify, Semaphore};
 
 #[derive(Clone)]
 enum FetchResponse {
@@ -24,31 +25,31 @@ enum FetchResponse {
 #[derive(Clone)]
 struct FetchPause {
     uri: String,
-    started: Arc<SyncBarrier>,
-    release: Arc<SyncBarrier>,
+    started: Arc<Semaphore>,
+    release: Arc<Semaphore>,
+    armed: Arc<AtomicUsize>,
 }
 
 impl FetchPause {
     fn new(uri: impl Into<String>) -> Self {
         Self {
             uri: uri.into(),
-            started: Arc::new(SyncBarrier::new(2)),
-            release: Arc::new(SyncBarrier::new(2)),
+            started: Arc::new(Semaphore::new(0)),
+            release: Arc::new(Semaphore::new(0)),
+            armed: Arc::new(AtomicUsize::new(1)),
         }
     }
 
     async fn wait_started(&self) {
-        let barrier = Arc::clone(&self.started);
-        tokio::task::spawn_blocking(move || barrier.wait())
+        self.started
+            .acquire()
             .await
-            .expect("started barrier should not panic");
+            .expect("fetch start semaphore should remain open")
+            .forget();
     }
 
     async fn release(&self) {
-        let barrier = Arc::clone(&self.release);
-        tokio::task::spawn_blocking(move || barrier.wait())
-            .await
-            .expect("release barrier should not panic");
+        self.release.add_permits(1);
     }
 }
 
@@ -111,15 +112,14 @@ impl ArtifactFetcher for TestFetcher {
             .expect("pause mutex should not be poisoned")
             .clone()
             .filter(|pause| pause.uri == uri);
-        if let Some(pause) = pause {
-            let started = Arc::clone(&pause.started);
-            tokio::task::spawn_blocking(move || started.wait())
+        if let Some(pause) = pause.filter(|pause| pause.armed.swap(0, Ordering::SeqCst) == 1) {
+            pause.started.add_permits(1);
+            pause
+                .release
+                .acquire()
                 .await
-                .expect("fetch-start barrier should not panic");
-            let release = Arc::clone(&pause.release);
-            tokio::task::spawn_blocking(move || release.wait())
-                .await
-                .expect("fetch-release barrier should not panic");
+                .expect("fetch release semaphore should remain open")
+                .forget();
         }
 
         match response {
@@ -129,9 +129,71 @@ impl ArtifactFetcher for TestFetcher {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FilesystemOperation {
+    CreateDirectory,
+    OpenNew,
+    Rename,
+    RemoveDirectory,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CompletionGate {
+    BeforeMutation,
+    AfterMutation,
+}
+
+#[derive(Clone)]
+struct FilesystemPause {
+    operation: FilesystemOperation,
+    gate: CompletionGate,
+    panic_after_release: bool,
+    started: Arc<Semaphore>,
+    release: Arc<Semaphore>,
+    completed: Arc<Semaphore>,
+}
+
+impl FilesystemPause {
+    fn new(
+        operation: FilesystemOperation,
+        gate: CompletionGate,
+        panic_after_release: bool,
+    ) -> Self {
+        Self {
+            operation,
+            gate,
+            panic_after_release,
+            started: Arc::new(Semaphore::new(0)),
+            release: Arc::new(Semaphore::new(0)),
+            completed: Arc::new(Semaphore::new(0)),
+        }
+    }
+
+    async fn wait_started(&self) {
+        self.started
+            .acquire()
+            .await
+            .expect("filesystem start semaphore should remain open")
+            .forget();
+    }
+
+    fn release(&self) {
+        self.release.add_permits(1);
+    }
+
+    async fn wait_completed(&self) {
+        self.completed
+            .acquire()
+            .await
+            .expect("filesystem completion semaphore should remain open")
+            .forget();
+    }
+}
+
 #[derive(Clone)]
 struct CleanupPause {
     started: Arc<Notify>,
+    release: Arc<Semaphore>,
     armed: Arc<AtomicUsize>,
 }
 
@@ -139,12 +201,17 @@ impl CleanupPause {
     fn new() -> Self {
         Self {
             started: Arc::new(Notify::new()),
+            release: Arc::new(Semaphore::new(0)),
             armed: Arc::new(AtomicUsize::new(1)),
         }
     }
 
     async fn wait_started(&self) {
         self.started.notified().await;
+    }
+
+    fn release(&self) {
+        self.release.add_permits(1);
     }
 }
 
@@ -153,7 +220,9 @@ struct ControlledFilesystem {
     generation_cleanup_calls: Arc<AtomicUsize>,
     fail_generation_cleanups: Arc<AtomicUsize>,
     fail_temp_cleanups: Arc<AtomicUsize>,
+    panic_file_cleanups: Arc<AtomicUsize>,
     cleanup_pause: Arc<Mutex<Option<CleanupPause>>>,
+    operation_pauses: Arc<Mutex<Vec<FilesystemPause>>>,
 }
 
 impl ControlledFilesystem {
@@ -163,6 +232,10 @@ impl ControlledFilesystem {
 
     fn fail_next_temp_cleanup(&self) {
         self.fail_temp_cleanups.store(1, Ordering::SeqCst);
+    }
+
+    fn panic_next_file_cleanup(&self) {
+        self.panic_file_cleanups.store(1, Ordering::SeqCst);
     }
 
     fn pause_next_generation_cleanup(&self, pause: CleanupPause) {
@@ -175,10 +248,128 @@ impl ControlledFilesystem {
     fn generation_cleanup_calls(&self) -> usize {
         self.generation_cleanup_calls.load(Ordering::SeqCst)
     }
+
+    fn pause_next_operation(
+        &self,
+        operation: FilesystemOperation,
+        gate: CompletionGate,
+    ) -> FilesystemPause {
+        self.queue_operation_pause(operation, gate, false)
+    }
+
+    fn panic_next_operation_after_mutation(
+        &self,
+        operation: FilesystemOperation,
+    ) -> FilesystemPause {
+        self.queue_operation_pause(operation, CompletionGate::AfterMutation, true)
+    }
+
+    fn queue_operation_pause(
+        &self,
+        operation: FilesystemOperation,
+        gate: CompletionGate,
+        panic_after_release: bool,
+    ) -> FilesystemPause {
+        let pause = FilesystemPause::new(operation, gate, panic_after_release);
+        self.operation_pauses
+            .lock()
+            .expect("operation-pause mutex should not be poisoned")
+            .push(pause.clone());
+        pause
+    }
+
+    fn take_operation_pause(&self, operation: FilesystemOperation) -> Option<FilesystemPause> {
+        let mut pauses = self
+            .operation_pauses
+            .lock()
+            .expect("operation-pause mutex should not be poisoned");
+        let index = pauses
+            .iter()
+            .position(|pause| pause.operation == operation)?;
+        Some(pauses.remove(index))
+    }
+
+    async fn run_operation<T, F>(
+        &self,
+        operation: FilesystemOperation,
+        mutation: F,
+    ) -> std::io::Result<T>
+    where
+        T: Send + 'static,
+        F: Future<Output = std::io::Result<T>> + Send + 'static,
+    {
+        let Some(pause) = self.take_operation_pause(operation) else {
+            return mutation.await;
+        };
+        let (sender, receiver) = oneshot::channel();
+        tokio::spawn(async move {
+            if pause.gate == CompletionGate::BeforeMutation {
+                pause.started.add_permits(1);
+                pause
+                    .release
+                    .acquire()
+                    .await
+                    .expect("filesystem release semaphore should remain open")
+                    .forget();
+            }
+            let result = mutation.await;
+            if pause.gate == CompletionGate::AfterMutation {
+                pause.started.add_permits(1);
+                pause
+                    .release
+                    .acquire()
+                    .await
+                    .expect("filesystem release semaphore should remain open")
+                    .forget();
+            }
+            pause.completed.add_permits(1);
+            let _ = sender.send((result, pause.panic_after_release));
+        });
+        let (result, panic_after_release) = receiver.await.map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "detached filesystem operation lost its result",
+            )
+        })?;
+        assert!(
+            !panic_after_release,
+            "deterministic filesystem panic after successful mutation"
+        );
+        result
+    }
 }
 
 #[async_trait]
 impl ArtifactCacheFilesystem for ControlledFilesystem {
+    async fn create_dir_all(&self, path: &Path) -> std::io::Result<()> {
+        let path = path.to_path_buf();
+        self.run_operation(FilesystemOperation::CreateDirectory, async move {
+            std::fs::create_dir_all(path)
+        })
+        .await
+    }
+
+    async fn open_new(&self, path: &Path) -> std::io::Result<tokio::fs::File> {
+        let path = path.to_path_buf();
+        self.run_operation(FilesystemOperation::OpenNew, async move {
+            std::fs::OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(path)
+                .map(tokio::fs::File::from_std)
+        })
+        .await
+    }
+
+    async fn rename(&self, from: &Path, to: &Path) -> std::io::Result<()> {
+        let from = from.to_path_buf();
+        let to = to.to_path_buf();
+        self.run_operation(FilesystemOperation::Rename, async move {
+            std::fs::rename(from, to)
+        })
+        .await
+    }
+
     async fn remove_dir_all(&self, path: &Path) -> std::io::Result<()> {
         self.generation_cleanup_calls.fetch_add(1, Ordering::SeqCst);
         if self
@@ -201,13 +392,31 @@ impl ArtifactCacheFilesystem for ControlledFilesystem {
         if let Some(pause) = pause {
             if pause.armed.swap(0, Ordering::SeqCst) == 1 {
                 pause.started.notify_one();
-                std::future::pending::<()>().await;
+                pause
+                    .release
+                    .acquire()
+                    .await
+                    .expect("cleanup release semaphore should remain open")
+                    .forget();
             }
         }
-        tokio::fs::remove_dir_all(path).await
+        let path = path.to_path_buf();
+        self.run_operation(FilesystemOperation::RemoveDirectory, async move {
+            std::fs::remove_dir_all(path)
+        })
+        .await
     }
 
     fn remove_file(&self, path: &Path) -> std::io::Result<()> {
+        if self
+            .panic_file_cleanups
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                remaining.checked_sub(1)
+            })
+            .is_ok()
+        {
+            panic!("deterministic file cleanup panic before mutation");
+        }
         if self
             .fail_temp_cleanups
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
@@ -222,6 +431,16 @@ impl ArtifactCacheFilesystem for ControlledFilesystem {
         }
         std::fs::remove_file(path)
     }
+}
+
+async fn poll_once<F: Future>(mut future: Pin<&mut F>) -> Option<F::Output> {
+    poll_fn(|context| {
+        Poll::Ready(match future.as_mut().poll(context) {
+            Poll::Ready(output) => Some(output),
+            Poll::Pending => None,
+        })
+    })
+    .await
 }
 
 struct TestDir(PathBuf);
@@ -293,6 +512,15 @@ fn temp_files(root: &Path) -> Vec<PathBuf> {
         }
     }
     files
+}
+
+fn generation_directory(cache: &ArtifactCache, artifact: &ArtifactIdentity) -> PathBuf {
+    cache
+        .final_path(artifact)
+        .parent()
+        .and_then(Path::parent)
+        .expect("artifact path should be nested below its generation")
+        .to_path_buf()
 }
 
 async fn activate(cache: &ArtifactCache, generation: i64) {
@@ -411,6 +639,36 @@ async fn object_larger_than_declaration_leaves_no_final_or_reusable_temp_file() 
     let declared = b"right";
     let oversized = b"right-extra-bytes";
     let fetcher = TestFetcher::default().with_body(uri, oversized.to_vec());
+    let artifact = artifact(4, "crates.io", "package", "rev", uri, declared);
+    let cache = ArtifactCache::new(
+        root.path(),
+        artifact.artifact.bytes,
+        Arc::new(fetcher.clone()),
+    )
+    .expect("cache should initialize");
+    activate(&cache, artifact.generation).await;
+
+    let error = cache.materialize(&artifact).await.unwrap_err();
+    assert_eq!(error.code(), "artifact_integrity_mismatch");
+    assert!(error.is_retryable());
+    assert_eq!(error.to_string(), "artifact failed integrity validation");
+    assert!(!cache.final_path(&artifact).exists());
+    assert!(temp_files(root.path()).is_empty());
+
+    fetcher.set_body(uri, declared.to_vec());
+    let retried = cache.materialize(&artifact).await.unwrap();
+    assert_eq!(std::fs::read(retried.path()).unwrap(), declared);
+    assert_eq!(fetcher.fetch_count(), 2);
+    assert!(temp_files(root.path()).is_empty());
+}
+
+#[tokio::test]
+async fn object_shorter_than_declaration_leaves_no_final_or_reusable_temp_file() {
+    let root = TestDir::new("undersized-object");
+    let uri = "s3://artifacts/undersized-object";
+    let declared = b"right-sized";
+    let undersized = b"right";
+    let fetcher = TestFetcher::default().with_body(uri, undersized.to_vec());
     let artifact = artifact(4, "crates.io", "package", "rev", uri, declared);
     let cache = ArtifactCache::new(
         root.path(),
@@ -620,8 +878,11 @@ async fn cancelled_generation_cleanup_remains_pending_until_retry() {
 
     assert!(old_path.exists());
     assert_eq!(cache.usage().resident_bytes, old_body.len() as u64);
+    let mut blocked = Box::pin(cache.materialize(&old));
+    assert!(poll_once(blocked.as_mut()).await.is_none());
+    pause.release();
     assert_eq!(
-        cache.materialize(&old).await.unwrap_err().code(),
+        blocked.await.unwrap_err().code(),
         "artifact_generation_unavailable"
     );
 
@@ -808,6 +1069,594 @@ async fn invalid_identity_is_rejected_before_fetch() {
     assert!(error.is_retryable());
     assert_eq!(fetcher.fetch_count(), 0);
     assert!(!cache.final_path(&artifact).exists());
+}
+
+#[tokio::test]
+async fn cancellation_safe_started_open_is_reconciled_before_retry() {
+    let root = TestDir::new("cancel-started-open");
+    let uri = "s3://artifacts/cancel-started-open";
+    let body = b"owned-open";
+    let fetcher = TestFetcher::default().with_body(uri, body.to_vec());
+    let filesystem = ControlledFilesystem::default();
+    let cache = ArtifactCache::new_with_filesystem(
+        root.path(),
+        body.len() as u64,
+        Arc::new(fetcher.clone()),
+        Arc::new(filesystem.clone()),
+    )
+    .expect("cache should initialize");
+    let artifact = artifact(31, "crates.io", "package", "rev", uri, body);
+    activate(&cache, artifact.generation).await;
+
+    let pause = filesystem
+        .pause_next_operation(FilesystemOperation::OpenNew, CompletionGate::AfterMutation);
+    let first_cache = cache.clone();
+    let first_artifact = artifact.clone();
+    let first = tokio::spawn(async move { first_cache.materialize(&first_artifact).await });
+    pause.wait_started().await;
+    assert_eq!(
+        temp_files(root.path()).len(),
+        1,
+        "the open mutation must happen before caller cancellation"
+    );
+    first.abort();
+    assert!(first.await.unwrap_err().is_cancelled());
+    let usage_after_abort = cache.usage();
+
+    let mut retry = Box::pin(cache.materialize(&artifact));
+    let observed_retry = poll_once(retry.as_mut()).await;
+    let retry_was_pending = observed_retry.is_none();
+    let fetches_before_release = fetcher.fetch_count();
+    pause.release();
+    pause.wait_completed().await;
+    let materialized = match observed_retry {
+        Some(result) => result,
+        None => retry.await,
+    }
+    .expect("retry should join the reconciled open operation");
+
+    assert_eq!(
+        usage_after_abort.incoming_temp_bytes, artifact.artifact.bytes,
+        "a started open must retain its reservation after caller cancellation"
+    );
+    assert!(retry_was_pending, "retry served before open reconciliation");
+    assert_eq!(fetches_before_release, 0, "retry started a second fetch");
+    assert_eq!(std::fs::read(materialized.path()).unwrap(), body);
+    assert!(temp_files(root.path()).is_empty());
+    assert_eq!(cache.usage().resident_bytes, body.len() as u64);
+    assert_eq!(cache.usage().incoming_temp_bytes, 0);
+}
+
+#[tokio::test]
+async fn cancellation_safe_started_rename_keeps_publication_accounted() {
+    let root = TestDir::new("cancel-started-rename");
+    let uri = "s3://artifacts/cancel-started-rename";
+    let body = b"owned-rename";
+    let fetcher = TestFetcher::default().with_body(uri, body.to_vec());
+    let filesystem = ControlledFilesystem::default();
+    let cache = ArtifactCache::new_with_filesystem(
+        root.path(),
+        body.len() as u64,
+        Arc::new(fetcher.clone()),
+        Arc::new(filesystem.clone()),
+    )
+    .expect("cache should initialize");
+    let artifact = artifact(32, "crates.io", "package", "rev", uri, body);
+    activate(&cache, artifact.generation).await;
+
+    let pause =
+        filesystem.pause_next_operation(FilesystemOperation::Rename, CompletionGate::AfterMutation);
+    let first_cache = cache.clone();
+    let first_artifact = artifact.clone();
+    let first = tokio::spawn(async move { first_cache.materialize(&first_artifact).await });
+    pause.wait_started().await;
+    assert!(temp_files(root.path()).is_empty());
+    assert!(cache.final_path(&artifact).exists());
+    first.abort();
+    assert!(first.await.unwrap_err().is_cancelled());
+    let usage_after_abort = cache.usage();
+
+    let mut retry = Box::pin(cache.materialize(&artifact));
+    let observed_retry = poll_once(retry.as_mut()).await;
+    let retry_was_pending = observed_retry.is_none();
+    pause.release();
+    pause.wait_completed().await;
+    let materialized = match observed_retry {
+        Some(result) => result,
+        None => retry.await,
+    }
+    .expect("retry should join the reconciled rename operation");
+
+    assert_eq!(
+        usage_after_abort.incoming_temp_bytes, artifact.artifact.bytes,
+        "a started rename must retain its reservation after cancellation"
+    );
+    assert!(!usage_after_abort.poisoned);
+    assert!(
+        retry_was_pending,
+        "retry served before rename reconciliation"
+    );
+    assert_eq!(std::fs::read(materialized.path()).unwrap(), body);
+    assert!(temp_files(root.path()).is_empty());
+    assert_eq!(cache.usage().resident_bytes, body.len() as u64);
+    assert_eq!(cache.usage().incoming_temp_bytes, 0);
+}
+
+#[tokio::test]
+async fn cancellation_safe_generation_removal_blocks_retry_and_serving() {
+    let root = TestDir::new("cancel-started-generation-remove");
+    let old_uri = "s3://artifacts/cancel-remove-old";
+    let next_uri = "s3://artifacts/cancel-remove-next";
+    let old_body = b"old";
+    let next_body = b"next";
+    let fetcher = TestFetcher::default()
+        .with_body(old_uri, old_body.to_vec())
+        .with_body(next_uri, next_body.to_vec());
+    let filesystem = ControlledFilesystem::default();
+    let cache = ArtifactCache::new_with_filesystem(
+        root.path(),
+        next_body.len() as u64,
+        Arc::new(fetcher.clone()),
+        Arc::new(filesystem.clone()),
+    )
+    .expect("cache should initialize");
+    let old = artifact(40, "crates.io", "package", "rev", old_uri, old_body);
+    let next = artifact(41, "crates.io", "package", "rev", next_uri, next_body);
+    activate(&cache, old.generation).await;
+    drop(cache.materialize(&old).await.unwrap());
+    let old_generation = generation_directory(&cache, &old);
+    let next_generation = generation_directory(&cache, &next);
+
+    let pause = filesystem.pause_next_operation(
+        FilesystemOperation::RemoveDirectory,
+        CompletionGate::AfterMutation,
+    );
+    let transition_cache = cache.clone();
+    let transition =
+        tokio::spawn(async move { transition_cache.activate_generation(next.generation).await });
+    pause.wait_started().await;
+    assert!(
+        !old_generation.exists(),
+        "the removal mutation must happen before caller cancellation"
+    );
+    assert!(
+        !next_generation.exists(),
+        "the next generation must not be created before removal reconciliation"
+    );
+    transition.abort();
+    assert!(transition.await.unwrap_err().is_cancelled());
+
+    let mut retry = Box::pin(cache.activate_generation(next.generation));
+    let observed_retry = poll_once(retry.as_mut()).await;
+    let retry_was_pending = observed_retry.is_none();
+    let mut serve = Box::pin(cache.materialize(&next));
+    let observed_serve = poll_once(serve.as_mut()).await;
+    let serve_was_pending = observed_serve.is_none();
+    let fetches_before_release = fetcher.fetch_count();
+    pause.release();
+    pause.wait_completed().await;
+    match observed_retry {
+        Some(result) => result,
+        None => retry.await,
+    }
+    .expect("retry should join generation removal reconciliation");
+    let next_artifact = match observed_serve {
+        Some(result) => result,
+        None => serve.await,
+    }
+    .expect("serving should resume after generation reconciliation");
+
+    assert!(retry_was_pending, "retry bypassed the started removal");
+    assert!(
+        serve_was_pending,
+        "serving began before removal reconciliation"
+    );
+    assert_eq!(fetches_before_release, 1);
+    assert!(!old_generation.exists());
+    assert!(next_generation.exists());
+    assert_eq!(std::fs::read(next_artifact.path()).unwrap(), next_body);
+}
+
+#[tokio::test]
+async fn cancellation_safe_same_generation_poison_recovery_cannot_delete_active_directory() {
+    let root = TestDir::new("cancel-same-generation-recovery");
+    let uri = "s3://artifacts/cancel-same-generation-recovery";
+    let expected = b"right";
+    let fetcher = TestFetcher::default().with_body(uri, b"wrong".to_vec());
+    let filesystem = ControlledFilesystem::default();
+    let cache = ArtifactCache::new_with_filesystem(
+        root.path(),
+        expected.len() as u64,
+        Arc::new(fetcher.clone()),
+        Arc::new(filesystem.clone()),
+    )
+    .expect("cache should initialize");
+    let artifact = artifact(42, "crates.io", "package", "rev", uri, expected);
+    activate(&cache, artifact.generation).await;
+    filesystem.fail_next_temp_cleanup();
+    assert_eq!(
+        cache.materialize(&artifact).await.unwrap_err().code(),
+        "artifact_integrity_mismatch"
+    );
+    assert!(cache.usage().poisoned);
+    fetcher.set_body(uri, expected.to_vec());
+    let generation = generation_directory(&cache, &artifact);
+
+    let pause = filesystem.pause_next_operation(
+        FilesystemOperation::RemoveDirectory,
+        CompletionGate::AfterMutation,
+    );
+    let recovery_cache = cache.clone();
+    let recovery = tokio::spawn(async move {
+        recovery_cache
+            .activate_generation(artifact.generation)
+            .await
+    });
+    pause.wait_started().await;
+    assert!(
+        !generation.exists(),
+        "poison recovery removal must happen before caller cancellation"
+    );
+    recovery.abort();
+    assert!(recovery.await.unwrap_err().is_cancelled());
+
+    let mut retry = Box::pin(cache.activate_generation(artifact.generation));
+    let observed_retry = poll_once(retry.as_mut()).await;
+    let retry_was_pending = observed_retry.is_none();
+    let mut serve = Box::pin(cache.materialize(&artifact));
+    let observed_serve = poll_once(serve.as_mut()).await;
+    let serve_was_pending = observed_serve.is_none();
+    let fetches_before_release = fetcher.fetch_count();
+    pause.release();
+    pause.wait_completed().await;
+    match observed_retry {
+        Some(result) => result,
+        None => retry.await,
+    }
+    .expect("retry should join poison recovery reconciliation");
+    let recovered = match observed_serve {
+        Some(result) => result,
+        None => serve.await,
+    }
+    .expect("serving should resume after poison recovery");
+
+    assert!(
+        retry_was_pending,
+        "retry recreated before prior removal completed"
+    );
+    assert!(
+        serve_was_pending,
+        "serving began while poison recovery was pending"
+    );
+    assert_eq!(fetches_before_release, 1);
+    assert!(
+        generation.exists(),
+        "late removal deleted the active generation"
+    );
+    assert_eq!(std::fs::read(recovered.path()).unwrap(), expected);
+    assert!(!cache.usage().poisoned);
+}
+
+#[tokio::test]
+async fn cancellation_safe_recovery_creation_blocks_retry_and_serving() {
+    let root = TestDir::new("cancel-recovery-create");
+    let uri = "s3://artifacts/cancel-recovery-create";
+    let expected = b"right";
+    let fetcher = TestFetcher::default().with_body(uri, b"wrong".to_vec());
+    let filesystem = ControlledFilesystem::default();
+    let cache = ArtifactCache::new_with_filesystem(
+        root.path(),
+        expected.len() as u64,
+        Arc::new(fetcher.clone()),
+        Arc::new(filesystem.clone()),
+    )
+    .expect("cache should initialize");
+    let artifact = artifact(45, "crates.io", "package", "rev", uri, expected);
+    activate(&cache, artifact.generation).await;
+    filesystem.fail_next_temp_cleanup();
+    assert_eq!(
+        cache.materialize(&artifact).await.unwrap_err().code(),
+        "artifact_integrity_mismatch"
+    );
+    assert!(cache.usage().poisoned);
+    fetcher.set_body(uri, expected.to_vec());
+    let generation = generation_directory(&cache, &artifact);
+
+    let pause = filesystem.pause_next_operation(
+        FilesystemOperation::CreateDirectory,
+        CompletionGate::AfterMutation,
+    );
+    let recovery_cache = cache.clone();
+    let recovery_generation = artifact.generation;
+    let recovery = tokio::spawn(async move {
+        recovery_cache
+            .activate_generation(recovery_generation)
+            .await
+    });
+    pause.wait_started().await;
+    assert!(
+        generation.exists(),
+        "the recovery create mutation must happen before caller cancellation"
+    );
+    recovery.abort();
+    assert!(recovery.await.unwrap_err().is_cancelled());
+
+    let mut retry = Box::pin(cache.activate_generation(artifact.generation));
+    assert!(
+        poll_once(retry.as_mut()).await.is_none(),
+        "retry activated before recovery creation reconciled"
+    );
+    let mut serve = Box::pin(cache.materialize(&artifact));
+    assert!(
+        poll_once(serve.as_mut()).await.is_none(),
+        "serving began before recovery creation reconciled"
+    );
+    assert_eq!(fetcher.fetch_count(), 1);
+
+    pause.release();
+    pause.wait_completed().await;
+    retry
+        .await
+        .expect("retry should join recovery creation reconciliation");
+    let recovered = serve
+        .await
+        .expect("serving should resume after recovery creation reconciliation");
+
+    assert!(generation.exists());
+    assert_eq!(std::fs::read(recovered.path()).unwrap(), expected);
+    assert!(!cache.usage().poisoned);
+}
+
+#[tokio::test]
+async fn cancellation_safe_same_key_waiter_does_not_reinitialize_after_poison() {
+    let root = TestDir::new("same-key-poison-waiter");
+    let uri = "s3://artifacts/same-key-poison-waiter";
+    let expected = b"right";
+    let pause = FetchPause::new(uri);
+    let fetcher = TestFetcher::default()
+        .with_body(uri, b"wrong".to_vec())
+        .with_pause(pause.clone());
+    let filesystem = ControlledFilesystem::default();
+    let cache = ArtifactCache::new_with_filesystem(
+        root.path(),
+        expected.len() as u64,
+        Arc::new(fetcher.clone()),
+        Arc::new(filesystem.clone()),
+    )
+    .expect("cache should initialize");
+    let artifact = artifact(43, "crates.io", "package", "rev", uri, expected);
+    activate(&cache, artifact.generation).await;
+
+    let initializer_cache = cache.clone();
+    let initializer_artifact = artifact.clone();
+    let initializer =
+        tokio::spawn(async move { initializer_cache.materialize(&initializer_artifact).await });
+    pause.wait_started().await;
+    let mut waiter = Box::pin(cache.materialize(&artifact));
+    assert!(poll_once(waiter.as_mut()).await.is_none());
+    filesystem.fail_next_temp_cleanup();
+    initializer.abort();
+    assert!(initializer.await.unwrap_err().is_cancelled());
+    pause.release().await;
+
+    let error = waiter.await.unwrap_err();
+    assert_eq!(error.code(), "artifact_integrity_mismatch");
+    assert_eq!(fetcher.fetch_count(), 1);
+    assert!(cache.usage().poisoned);
+    assert!(!cache.final_path(&artifact).exists());
+}
+
+#[tokio::test]
+async fn cancellation_safe_different_key_publication_fails_after_poison() {
+    let root = TestDir::new("different-key-poison-publication");
+    let good_uri = "s3://artifacts/different-key-good";
+    let bad_uri = "s3://artifacts/different-key-bad";
+    let good_body = b"publish-me";
+    let expected_bad = b"right";
+    let fetcher = TestFetcher::default()
+        .with_body(good_uri, good_body.to_vec())
+        .with_body(bad_uri, b"wrong".to_vec());
+    let filesystem = ControlledFilesystem::default();
+    let cache = ArtifactCache::new_with_filesystem(
+        root.path(),
+        (good_body.len() + expected_bad.len()) as u64,
+        Arc::new(fetcher.clone()),
+        Arc::new(filesystem.clone()),
+    )
+    .expect("cache should initialize");
+    let good = artifact(44, "crates.io", "good", "rev", good_uri, good_body);
+    let bad = artifact(44, "crates.io", "bad", "rev", bad_uri, expected_bad);
+    activate(&cache, good.generation).await;
+
+    let pause =
+        filesystem.pause_next_operation(FilesystemOperation::Rename, CompletionGate::AfterMutation);
+    let good_cache = cache.clone();
+    let good_clone = good.clone();
+    let good_task = tokio::spawn(async move { good_cache.materialize(&good_clone).await });
+    pause.wait_started().await;
+    filesystem.fail_next_temp_cleanup();
+    assert_eq!(
+        cache.materialize(&bad).await.unwrap_err().code(),
+        "artifact_integrity_mismatch"
+    );
+    assert!(cache.usage().poisoned);
+
+    pause.release();
+    pause.wait_completed().await;
+    let error = good_task
+        .await
+        .expect("different-key task should join")
+        .unwrap_err();
+
+    assert_eq!(error.code(), "artifact_cache_unavailable");
+    assert_eq!(fetcher.fetch_count(), 2);
+    assert!(!cache.final_path(&good).exists());
+    assert!(!cache.final_path(&bad).exists());
+    assert_eq!(cache.usage().resident_bytes, 0);
+    assert_eq!(cache.usage().incoming_temp_bytes, 0);
+}
+
+#[tokio::test]
+async fn rename_panic_after_mutation_never_leaves_unaccounted_final_bytes() {
+    let root = TestDir::new("rename-panic-after-mutation");
+    let uri = "s3://artifacts/rename-panic-after-mutation";
+    let body = b"panic-published";
+    let fetcher = TestFetcher::default().with_body(uri, body.to_vec());
+    let filesystem = ControlledFilesystem::default();
+    let cache = ArtifactCache::new_with_filesystem(
+        root.path(),
+        body.len() as u64,
+        Arc::new(fetcher.clone()),
+        Arc::new(filesystem.clone()),
+    )
+    .expect("cache should initialize");
+    let artifact = artifact(46, "crates.io", "package", "rev", uri, body);
+    activate(&cache, artifact.generation).await;
+
+    let pause = filesystem.panic_next_operation_after_mutation(FilesystemOperation::Rename);
+    let materialize_cache = cache.clone();
+    let materialize_artifact = artifact.clone();
+    let materialize =
+        tokio::spawn(async move { materialize_cache.materialize(&materialize_artifact).await });
+    pause.wait_started().await;
+    assert!(cache.final_path(&artifact).exists());
+    assert!(temp_files(root.path()).is_empty());
+    assert_eq!(cache.usage().incoming_temp_bytes, body.len() as u64);
+    assert_eq!(cache.usage().resident_bytes, 0);
+
+    pause.release();
+    pause.wait_completed().await;
+    let error = materialize
+        .await
+        .expect("materialization caller should join")
+        .unwrap_err();
+
+    assert_eq!(error.code(), "artifact_cache_unavailable");
+    let usage = cache.usage();
+    assert!(usage.poisoned);
+    assert_eq!(usage.incoming_temp_bytes, 0);
+    assert!(
+        !cache.final_path(&artifact).exists() || usage.resident_bytes == artifact.artifact.bytes,
+        "a published final must be removed or conservatively resident-accounted"
+    );
+    assert_eq!(
+        cache.materialize(&artifact).await.unwrap_err().code(),
+        "artifact_cache_unavailable"
+    );
+    assert_eq!(fetcher.fetch_count(), 1);
+}
+
+#[tokio::test]
+async fn rejected_publication_cleanup_panic_is_reconciled_before_completion() {
+    let root = TestDir::new("rejected-publication-cleanup-panic");
+    let good_uri = "s3://artifacts/rejected-cleanup-good";
+    let bad_uri = "s3://artifacts/rejected-cleanup-bad";
+    let good_body = b"publish-me";
+    let expected_bad = b"right";
+    let fetcher = TestFetcher::default()
+        .with_body(good_uri, good_body.to_vec())
+        .with_body(bad_uri, b"wrong".to_vec());
+    let filesystem = ControlledFilesystem::default();
+    let cache = ArtifactCache::new_with_filesystem(
+        root.path(),
+        (good_body.len() + expected_bad.len()) as u64,
+        Arc::new(fetcher.clone()),
+        Arc::new(filesystem.clone()),
+    )
+    .expect("cache should initialize");
+    let good = artifact(47, "crates.io", "good", "rev", good_uri, good_body);
+    let bad = artifact(47, "crates.io", "bad", "rev", bad_uri, expected_bad);
+    activate(&cache, good.generation).await;
+
+    let pause =
+        filesystem.pause_next_operation(FilesystemOperation::Rename, CompletionGate::AfterMutation);
+    let good_cache = cache.clone();
+    let good_clone = good.clone();
+    let good_task = tokio::spawn(async move { good_cache.materialize(&good_clone).await });
+    pause.wait_started().await;
+    assert!(cache.final_path(&good).exists());
+    filesystem.fail_next_temp_cleanup();
+    assert_eq!(
+        cache.materialize(&bad).await.unwrap_err().code(),
+        "artifact_integrity_mismatch"
+    );
+    assert!(cache.usage().poisoned);
+    let resident_before_good_reconciliation = cache.usage().resident_bytes;
+    filesystem.panic_next_file_cleanup();
+
+    pause.release();
+    pause.wait_completed().await;
+    let error = good_task
+        .await
+        .expect("rejected publication caller should join")
+        .unwrap_err();
+
+    assert_eq!(error.code(), "artifact_cache_unavailable");
+    let usage = cache.usage();
+    assert!(usage.poisoned);
+    assert_eq!(usage.incoming_temp_bytes, 0);
+    assert!(
+        !cache.final_path(&good).exists()
+            || usage.resident_bytes == resident_before_good_reconciliation + good.artifact.bytes,
+        "cleanup panic must not leave an unaccounted final"
+    );
+    assert_eq!(
+        cache.materialize(&good).await.unwrap_err().code(),
+        "artifact_cache_unavailable"
+    );
+}
+
+#[tokio::test]
+async fn first_generation_create_panic_recovers_in_one_activation() {
+    let root = TestDir::new("first-create-panic-retry");
+    let uri = "s3://artifacts/first-create-panic-retry";
+    let body = b"activate-once";
+    let fetcher = TestFetcher::default().with_body(uri, body.to_vec());
+    let filesystem = ControlledFilesystem::default();
+    let cache = ArtifactCache::new_with_filesystem(
+        root.path(),
+        body.len() as u64,
+        Arc::new(fetcher.clone()),
+        Arc::new(filesystem.clone()),
+    )
+    .expect("cache should initialize");
+    let artifact = artifact(48, "crates.io", "package", "rev", uri, body);
+    let generation = generation_directory(&cache, &artifact);
+
+    let pause =
+        filesystem.panic_next_operation_after_mutation(FilesystemOperation::CreateDirectory);
+    let activation_cache = cache.clone();
+    let activation_generation = artifact.generation;
+    let activation = tokio::spawn(async move {
+        activation_cache
+            .activate_generation(activation_generation)
+            .await
+    });
+    pause.wait_started().await;
+    assert!(
+        generation.exists(),
+        "initial create mutation must happen before its injected panic"
+    );
+    pause.release();
+    pause.wait_completed().await;
+    let error = activation
+        .await
+        .expect("initial activation caller should join")
+        .unwrap_err();
+    assert_eq!(error.code(), "artifact_cache_unavailable");
+    assert!(cache.usage().poisoned);
+
+    cache
+        .activate_generation(artifact.generation)
+        .await
+        .expect("one successful retry should fully reconcile activation");
+    assert!(!cache.usage().poisoned);
+    let materialized = cache
+        .materialize(&artifact)
+        .await
+        .expect("successful activation retry should permit serving");
+    assert_eq!(std::fs::read(materialized.path()).unwrap(), body);
+    assert_eq!(fetcher.fetch_count(), 1);
 }
 
 #[cfg(feature = "artifact-cache-s3")]

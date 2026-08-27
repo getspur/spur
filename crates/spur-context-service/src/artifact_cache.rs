@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tokio::fs::OpenOptions;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
-use tokio::sync::{OnceCell, OwnedRwLockReadGuard, RwLock};
+use tokio::sync::{Notify, OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock};
 
 use crate::serving_registry::ArtifactRef;
 
@@ -41,6 +41,9 @@ pub trait ArtifactFetcher: Send + Sync {
 
 #[async_trait]
 pub trait ArtifactCacheFilesystem: Send + Sync {
+    async fn create_dir_all(&self, path: &Path) -> std::io::Result<()>;
+    async fn open_new(&self, path: &Path) -> std::io::Result<tokio::fs::File>;
+    async fn rename(&self, from: &Path, to: &Path) -> std::io::Result<()>;
     async fn remove_dir_all(&self, path: &Path) -> std::io::Result<()>;
     fn remove_file(&self, path: &Path) -> std::io::Result<()>;
 }
@@ -50,6 +53,22 @@ struct LocalArtifactCacheFilesystem;
 
 #[async_trait]
 impl ArtifactCacheFilesystem for LocalArtifactCacheFilesystem {
+    async fn create_dir_all(&self, path: &Path) -> std::io::Result<()> {
+        tokio::fs::create_dir_all(path).await
+    }
+
+    async fn open_new(&self, path: &Path) -> std::io::Result<tokio::fs::File> {
+        OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(path)
+            .await
+    }
+
+    async fn rename(&self, from: &Path, to: &Path) -> std::io::Result<()> {
+        tokio::fs::rename(from, to).await
+    }
+
     async fn remove_dir_all(&self, path: &Path) -> std::io::Result<()> {
         tokio::fs::remove_dir_all(path).await
     }
@@ -159,6 +178,7 @@ struct ArtifactCacheInner {
 struct GenerationState {
     active: Option<i64>,
     pending: Option<PendingGenerationCleanup>,
+    epoch: u64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -172,7 +192,38 @@ struct CacheState {
     resident_bytes: u64,
     incoming_temp_bytes: u64,
     poisoned: bool,
-    entries: HashMap<CacheKey, Arc<OnceCell<Result<PathBuf, ArtifactCacheError>>>>,
+    entries: HashMap<CacheKey, Arc<OwnedOperation<Result<PathBuf, ArtifactCacheError>>>>,
+}
+
+struct OwnedOperation<T> {
+    result: Mutex<Option<T>>,
+    completed: Notify,
+}
+
+impl<T> OwnedOperation<T> {
+    fn new() -> Self {
+        Self {
+            result: Mutex::new(None),
+            completed: Notify::new(),
+        }
+    }
+
+    fn complete(&self, result: T) {
+        *lock_mutex(&self.result) = Some(result);
+        self.completed.notify_waiters();
+    }
+}
+
+impl<T: Clone> OwnedOperation<T> {
+    async fn wait(&self) -> T {
+        loop {
+            let completed = self.completed.notified();
+            if let Some(result) = lock_mutex(&self.result).clone() {
+                return result;
+            }
+            completed.await;
+        }
+    }
 }
 
 pub struct MaterializedArtifact {
@@ -321,7 +372,39 @@ impl ArtifactCache {
     }
 
     pub async fn activate_generation(&self, generation: i64) -> Result<(), ArtifactCacheError> {
-        let mut authority = self.inner.generation.write().await;
+        let authority = Arc::clone(&self.inner.generation).write_owned().await;
+        let poisoned = lock_state(&self.inner.state).poisoned;
+        if authority.pending.is_none() && authority.active == Some(generation) && !poisoned {
+            return Ok(());
+        }
+
+        let operation = Arc::new(OwnedOperation::new());
+        let operation_task = Arc::clone(&operation);
+        let cache = self.clone();
+        tokio::spawn(async move {
+            let worker_cache = cache.clone();
+            let worker = tokio::spawn(async move {
+                worker_cache
+                    .reconcile_generation(authority, generation)
+                    .await
+            });
+            let result = match worker.await {
+                Ok(result) => result,
+                Err(_) => {
+                    lock_state(&cache.inner.state).poisoned = true;
+                    Err(ArtifactCacheError::Filesystem)
+                }
+            };
+            operation_task.complete(result);
+        });
+        operation.wait().await
+    }
+
+    async fn reconcile_generation(
+        &self,
+        mut authority: OwnedRwLockWriteGuard<GenerationState>,
+        generation: i64,
+    ) -> Result<(), ArtifactCacheError> {
         loop {
             let poisoned = lock_state(&self.inner.state).poisoned;
             if authority.pending.is_none() && authority.active == Some(generation) && !poisoned {
@@ -329,9 +412,27 @@ impl ArtifactCache {
             }
 
             let Some(active) = authority.active else {
-                tokio::fs::create_dir_all(self.generation_dir(generation))
+                if poisoned {
+                    match self
+                        .inner
+                        .filesystem
+                        .remove_dir_all(&self.generation_dir(generation))
+                        .await
+                    {
+                        Ok(()) => {}
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(_) => return Err(ArtifactCacheError::Filesystem),
+                    }
+                }
+                self.inner
+                    .filesystem
+                    .create_dir_all(&self.generation_dir(generation))
                     .await
                     .map_err(|_| ArtifactCacheError::Filesystem)?;
+                if poisoned {
+                    *lock_state(&self.inner.state) = CacheState::default();
+                }
+                authority.epoch = self.next_generation_epoch(authority.epoch)?;
                 authority.active = Some(generation);
                 return Ok(());
             };
@@ -356,9 +457,12 @@ impl ArtifactCache {
                 let mut state = lock_state(&self.inner.state);
                 *state = CacheState::default();
             }
-            tokio::fs::create_dir_all(self.generation_dir(pending.target))
+            self.inner
+                .filesystem
+                .create_dir_all(&self.generation_dir(pending.target))
                 .await
                 .map_err(|_| ArtifactCacheError::Filesystem)?;
+            authority.epoch = self.next_generation_epoch(authority.epoch)?;
             authority.active = Some(pending.target);
             authority.pending = None;
             if pending.target == generation {
@@ -367,62 +471,170 @@ impl ArtifactCache {
         }
     }
 
+    fn next_generation_epoch(&self, epoch: u64) -> Result<u64, ArtifactCacheError> {
+        epoch.checked_add(1).ok_or_else(|| {
+            lock_state(&self.inner.state).poisoned = true;
+            ArtifactCacheError::Filesystem
+        })
+    }
+
     pub async fn materialize(
         &self,
         identity: &ArtifactIdentity,
     ) -> Result<MaterializedArtifact, ArtifactCacheError> {
         validate_identity(identity)?;
-        let generation_lease = Arc::clone(&self.inner.generation).read_owned().await;
-        if generation_lease.pending.is_some()
-            || generation_lease.active != Some(identity.generation)
-        {
-            return Err(ArtifactCacheError::GenerationUnavailable);
-        }
+        let initial_lease = Arc::clone(&self.inner.generation).read_owned().await;
+        let generation_epoch = self.validate_generation_authority(&initial_lease, identity)?;
         let key = CacheKey::from(identity);
-        let cell = {
+        let (operation, created) = {
             let mut state = lock_state(&self.inner.state);
             if state.poisoned {
                 return Err(ArtifactCacheError::Filesystem);
             }
-            Arc::clone(
-                state
-                    .entries
-                    .entry(key.clone())
-                    .or_insert_with(|| Arc::new(OnceCell::new())),
-            )
+            match state.entries.get(&key) {
+                Some(operation) => (Arc::clone(operation), false),
+                None => {
+                    let operation = Arc::new(OwnedOperation::new());
+                    state.entries.insert(key.clone(), Arc::clone(&operation));
+                    (operation, true)
+                }
+            }
         };
 
-        let result = cell
-            .get_or_init(|| async { self.fetch_and_publish(identity).await })
-            .await
-            .clone();
-        if result.is_err() {
-            let mut state = lock_state(&self.inner.state);
-            if state
-                .entries
-                .get(&key)
-                .is_some_and(|current| Arc::ptr_eq(current, &cell))
-            {
-                state.entries.remove(&key);
-            }
+        let mut caller_lease = Some(initial_lease);
+        if created {
+            self.start_materialization_operation(
+                key.clone(),
+                identity.clone(),
+                generation_epoch,
+                caller_lease
+                    .take()
+                    .expect("new operation must transfer its generation lease"),
+                Arc::clone(&operation),
+            );
         }
-        result.map(|path| MaterializedArtifact {
+
+        let path = operation.wait().await?;
+        let generation_lease = match caller_lease {
+            Some(lease) => lease,
+            None => Arc::clone(&self.inner.generation).read_owned().await,
+        };
+        if self.validate_generation_authority(&generation_lease, identity)? != generation_epoch {
+            return Err(ArtifactCacheError::GenerationUnavailable);
+        }
+        let state = lock_state(&self.inner.state);
+        if state.poisoned {
+            return Err(ArtifactCacheError::Filesystem);
+        }
+        if !state
+            .entries
+            .get(&key)
+            .is_some_and(|current| Arc::ptr_eq(current, &operation))
+        {
+            return Err(ArtifactCacheError::GenerationUnavailable);
+        }
+        Ok(MaterializedArtifact {
             path,
             generation: identity.generation,
             _generation_lease: generation_lease,
         })
     }
 
+    fn start_materialization_operation(
+        &self,
+        key: CacheKey,
+        identity: ArtifactIdentity,
+        generation_epoch: u64,
+        generation_lease: OwnedRwLockReadGuard<GenerationState>,
+        operation: Arc<OwnedOperation<Result<PathBuf, ArtifactCacheError>>>,
+    ) {
+        let cache = self.clone();
+        let journal = Arc::new(PublicationJournal::new(
+            cache.final_path(&identity),
+            Arc::clone(&cache.inner.filesystem),
+            Arc::clone(&cache.inner.state),
+        ));
+        tokio::spawn(async move {
+            let worker_cache = cache.clone();
+            let worker_journal = Arc::clone(&journal);
+            let worker = tokio::spawn(async move {
+                worker_cache
+                    .fetch_and_publish(
+                        &identity,
+                        generation_epoch,
+                        &generation_lease,
+                        &worker_journal,
+                    )
+                    .await
+            });
+            let (result, panicked) = match worker.await {
+                Ok(result) => (result, false),
+                Err(_) => (Err(ArtifactCacheError::Filesystem), true),
+            };
+            if panicked {
+                lock_state(&cache.inner.state).poisoned = true;
+            }
+            if result.is_err() {
+                journal.reconcile_failure();
+            }
+            {
+                let mut state = lock_state(&cache.inner.state);
+                if result.is_err()
+                    && state
+                        .entries
+                        .get(&key)
+                        .is_some_and(|current| Arc::ptr_eq(current, &operation))
+                {
+                    state.entries.remove(&key);
+                }
+            }
+            operation.complete(result);
+        });
+    }
+
+    fn validate_generation_authority(
+        &self,
+        generation: &GenerationState,
+        identity: &ArtifactIdentity,
+    ) -> Result<u64, ArtifactCacheError> {
+        if generation.pending.is_some() || generation.active != Some(identity.generation) {
+            return Err(ArtifactCacheError::GenerationUnavailable);
+        }
+        Ok(generation.epoch)
+    }
+
+    fn validate_materialization_admission(
+        &self,
+        generation: &GenerationState,
+        identity: &ArtifactIdentity,
+        generation_epoch: u64,
+    ) -> Result<(), ArtifactCacheError> {
+        if self.validate_generation_authority(generation, identity)? != generation_epoch {
+            return Err(ArtifactCacheError::GenerationUnavailable);
+        }
+        if lock_state(&self.inner.state).poisoned {
+            return Err(ArtifactCacheError::Filesystem);
+        }
+        Ok(())
+    }
+
     async fn fetch_and_publish(
         &self,
         identity: &ArtifactIdentity,
+        generation_epoch: u64,
+        generation_lease: &GenerationState,
+        journal: &PublicationJournal,
     ) -> Result<PathBuf, ArtifactCacheError> {
-        let final_path = self.final_path(identity);
+        self.validate_materialization_admission(generation_lease, identity, generation_epoch)?;
+        let final_path = journal.final_path();
         let parent = final_path.parent().ok_or(ArtifactCacheError::Filesystem)?;
-        tokio::fs::create_dir_all(parent)
+        self.inner
+            .filesystem
+            .create_dir_all(parent)
             .await
             .map_err(|_| ArtifactCacheError::Filesystem)?;
 
+        self.validate_materialization_admission(generation_lease, identity, generation_epoch)?;
         let reservation = CapacityReservation::reserve(
             Arc::clone(&self.inner.state),
             self.inner.tmp_capacity_bytes,
@@ -433,17 +645,15 @@ impl ArtifactCache {
             identity.artifact.sha256,
             uuid::Uuid::new_v4()
         ));
-        let mut temp_guard = TempFileGuard::new(
-            temp_path.clone(),
-            Arc::clone(&self.inner.filesystem),
-            Arc::clone(&self.inner.state),
-        );
-        let file = OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&temp_path)
+        journal.track_temp(temp_path.clone(), reservation);
+        self.validate_materialization_admission(generation_lease, identity, generation_epoch)?;
+        let file = self
+            .inner
+            .filesystem
+            .open_new(&temp_path)
             .await
             .map_err(|_| ArtifactCacheError::Filesystem)?;
+        self.validate_materialization_admission(generation_lease, identity, generation_epoch)?;
         let mut stream = self
             .inner
             .fetcher
@@ -474,11 +684,22 @@ impl ArtifactCache {
             return Err(ArtifactCacheError::IntegrityMismatch);
         }
 
-        tokio::fs::rename(&temp_path, &final_path)
+        self.validate_materialization_admission(generation_lease, identity, generation_epoch)?;
+        journal.start_publication();
+        self.inner
+            .filesystem
+            .rename(&temp_path, &final_path)
             .await
             .map_err(|_| ArtifactCacheError::Filesystem)?;
-        temp_guard.disarm();
-        reservation.commit();
+        if self.validate_generation_authority(generation_lease, identity)? != generation_epoch {
+            journal.reconcile_failure();
+            return Err(ArtifactCacheError::GenerationUnavailable);
+        }
+        if let Err(error) = journal.commit_if_available() {
+            journal.reconcile_failure();
+            return Err(error);
+        }
+        journal.complete_success();
         Ok(final_path)
     }
 
@@ -530,10 +751,14 @@ fn identity_directory(identity: &ArtifactIdentity) -> String {
     format!("{:x}", hasher.finalize())
 }
 
-fn lock_state(state: &Mutex<CacheState>) -> MutexGuard<'_, CacheState> {
-    state
+fn lock_mutex<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn lock_state(state: &Mutex<CacheState>) -> MutexGuard<'_, CacheState> {
+    lock_mutex(state)
 }
 
 struct CapacityReservation {
@@ -550,6 +775,9 @@ impl CapacityReservation {
     ) -> Result<Self, ArtifactCacheError> {
         {
             let mut usage = lock_state(&state);
+            if usage.poisoned {
+                return Err(ArtifactCacheError::Filesystem);
+            }
             let required = usage
                 .resident_bytes
                 .checked_add(usage.incoming_temp_bytes)
@@ -567,7 +795,18 @@ impl CapacityReservation {
         })
     }
 
-    fn commit(mut self) {
+    fn commit_if_available(&mut self) -> Result<(), ArtifactCacheError> {
+        let mut state = lock_state(&self.state);
+        if state.poisoned {
+            return Err(ArtifactCacheError::Filesystem);
+        }
+        state.incoming_temp_bytes -= self.bytes;
+        state.resident_bytes += self.bytes;
+        self.active = false;
+        Ok(())
+    }
+
+    fn commit(&mut self) {
         let mut state = lock_state(&self.state);
         state.incoming_temp_bytes -= self.bytes;
         state.resident_bytes += self.bytes;
@@ -584,39 +823,113 @@ impl Drop for CapacityReservation {
     }
 }
 
-struct TempFileGuard {
-    path: PathBuf,
+struct PublicationJournal {
     filesystem: Arc<dyn ArtifactCacheFilesystem>,
-    state: Arc<Mutex<CacheState>>,
-    active: bool,
+    cache_state: Arc<Mutex<CacheState>>,
+    state: Mutex<PublicationJournalState>,
 }
 
-impl TempFileGuard {
+struct PublicationJournalState {
+    final_path: PathBuf,
+    temp_path: Option<PathBuf>,
+    reservation: Option<CapacityReservation>,
+    publication_started: bool,
+    committed: bool,
+}
+
+impl PublicationJournal {
     fn new(
-        path: PathBuf,
+        final_path: PathBuf,
         filesystem: Arc<dyn ArtifactCacheFilesystem>,
-        state: Arc<Mutex<CacheState>>,
+        cache_state: Arc<Mutex<CacheState>>,
     ) -> Self {
         Self {
-            path,
             filesystem,
-            state,
-            active: true,
+            cache_state,
+            state: Mutex::new(PublicationJournalState {
+                final_path,
+                temp_path: None,
+                reservation: None,
+                publication_started: false,
+                committed: false,
+            }),
         }
     }
 
-    fn disarm(&mut self) {
-        self.active = false;
+    fn final_path(&self) -> PathBuf {
+        lock_mutex(&self.state).final_path.clone()
     }
-}
 
-impl Drop for TempFileGuard {
-    fn drop(&mut self) {
-        if self.active {
-            match self.filesystem.remove_file(&self.path) {
-                Ok(()) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(_) => lock_state(&self.state).poisoned = true,
+    fn track_temp(&self, temp_path: PathBuf, reservation: CapacityReservation) {
+        let mut state = lock_mutex(&self.state);
+        state.temp_path = Some(temp_path);
+        state.reservation = Some(reservation);
+    }
+
+    fn start_publication(&self) {
+        lock_mutex(&self.state).publication_started = true;
+    }
+
+    fn commit_if_available(&self) -> Result<(), ArtifactCacheError> {
+        let mut state = lock_mutex(&self.state);
+        state
+            .reservation
+            .as_mut()
+            .ok_or(ArtifactCacheError::Filesystem)?
+            .commit_if_available()?;
+        state.committed = true;
+        Ok(())
+    }
+
+    fn complete_success(&self) {
+        let mut state = lock_mutex(&self.state);
+        state.temp_path = None;
+        state.reservation = None;
+    }
+
+    fn reconcile_failure(&self) {
+        let (final_path, temp_path, publication_started, committed) = {
+            let state = lock_mutex(&self.state);
+            (
+                state.final_path.clone(),
+                state.temp_path.clone(),
+                state.publication_started,
+                state.committed,
+            )
+        };
+        if committed {
+            return;
+        }
+
+        let final_cleanup_failed = publication_started && !self.remove_file(&final_path);
+        if let Some(temp_path) = temp_path {
+            self.remove_file(&temp_path);
+        }
+
+        let mut state = lock_mutex(&self.state);
+        if state.committed {
+            return;
+        }
+        state.temp_path = None;
+        if final_cleanup_failed {
+            if let Some(mut reservation) = state.reservation.take() {
+                reservation.commit();
+            }
+            state.committed = true;
+        } else {
+            state.reservation = None;
+        }
+    }
+
+    fn remove_file(&self, path: &Path) -> bool {
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.filesystem.remove_file(path)
+        })) {
+            Ok(Ok(())) => true,
+            Ok(Err(error)) if error.kind() == std::io::ErrorKind::NotFound => true,
+            Ok(Err(_)) | Err(_) => {
+                lock_state(&self.cache_state).poisoned = true;
+                false
             }
         }
     }
