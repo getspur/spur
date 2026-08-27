@@ -30,6 +30,136 @@ def terraform_resource_block(text, resource_type, resource_name):
     raise AssertionError(f"unterminated Terraform resource: {marker}")
 
 
+def terraform_module_contract_files():
+    return (
+        sorted(INFRA_DIR.glob("*.tf"))
+        + sorted((INFRA_DIR / "tests").glob("*.tftest.hcl"))
+        + [INFRA_DIR / "README.md"]
+    )
+
+
+def test_serving_compute_correction_removes_deleted_service_addresses_and_routes_code_compatibility():
+    address_pattern = re.compile(r"aws_lambda_(?:function|alias)\.service\b")
+    dangling = []
+    for path in terraform_module_contract_files():
+        for line_number, line in enumerate(path.read_text().splitlines(), start=1):
+            if address_pattern.search(line):
+                dangling.append(f"{path.relative_to(ROOT)}:{line_number}: {line.strip()}")
+
+    main_tf = (INFRA_DIR / "main.tf").read_text()
+    api_keys_tf = (INFRA_DIR / "api_keys.tf").read_text()
+    problems = [f"deleted serving address remains: {entry}" for entry in dangling]
+
+    code_integration_marker = 'resource "aws_apigatewayv2_integration" "code"'
+    if code_integration_marker not in main_tf:
+        problems.append("missing stable Code compatibility integration")
+    else:
+        code_integration = terraform_resource_block(
+            main_tf, "aws_apigatewayv2_integration", "code"
+        )
+        if "integration_uri        = aws_lambda_function.code.invoke_arn" not in code_integration:
+            problems.append("Code compatibility integration does not invoke Code")
+
+    for text, resource_name in (
+        (api_keys_tf, "api_key_discovery"),
+        (api_keys_tf, "api_key_management"),
+        (main_tf, "login_redirect"),
+    ):
+        route = terraform_resource_block(text, "aws_apigatewayv2_route", resource_name)
+        if "aws_apigatewayv2_integration.code.id" not in route:
+            problems.append(f"{resource_name} does not target the Code integration")
+
+    api_key_integration = terraform_resource_block(
+        api_keys_tf, "aws_apigatewayv2_integration", "api_key"
+    )
+    if "integration_uri        = aws_lambda_function.code.invoke_arn" not in api_key_integration:
+        problems.append("API-key integration does not invoke Code")
+
+    assert not problems, "\n".join(problems)
+
+
+def test_serving_compute_correction_attaches_knowledge_warm_pool_to_alias_traffic():
+    main_tf = (INFRA_DIR / "main.tf").read_text()
+    knowledge = terraform_resource_block(main_tf, "aws_lambda_function", "knowledge")
+    warm = terraform_resource_block(
+        main_tf,
+        "aws_lambda_provisioned_concurrency_config",
+        "knowledge_warm",
+    )
+    integration = terraform_resource_block(
+        main_tf, "aws_apigatewayv2_integration", "lambda"
+    )
+    permission = terraform_resource_block(main_tf, "aws_lambda_permission", "apigw")
+    problems = []
+
+    if not re.search(r"\bpublish\s*=\s*true\b", knowledge):
+        problems.append("Knowledge does not publish immutable versions")
+
+    alias_marker = 'resource "aws_lambda_alias" "knowledge_live"'
+    if alias_marker not in main_tf:
+        problems.append("missing stable Knowledge alias")
+    else:
+        alias = terraform_resource_block(main_tf, "aws_lambda_alias", "knowledge_live")
+        if "function_name    = aws_lambda_function.knowledge.function_name" not in alias:
+            problems.append("Knowledge alias does not name the Knowledge function")
+        if "function_version = aws_lambda_function.knowledge.version" not in alias:
+            problems.append("Knowledge alias does not track the published version")
+
+    if "qualifier                         = aws_lambda_alias.knowledge_live.name" not in warm:
+        problems.append("Knowledge provisioned concurrency does not qualify the alias")
+    if 'qualifier                         = "$LATEST"' in warm:
+        problems.append("Knowledge provisioned concurrency still uses $LATEST")
+    if "integration_uri        = aws_lambda_alias.knowledge_live.invoke_arn" not in integration:
+        problems.append("Knowledge API integration does not invoke the alias")
+    if "function_name = aws_lambda_function.knowledge.function_name" not in permission:
+        problems.append("Knowledge API permission names a different function")
+    if "qualifier     = aws_lambda_alias.knowledge_live.name" not in permission:
+        problems.append("Knowledge API permission does not match the alias qualifier")
+
+    assert not problems, "\n".join(problems)
+
+
+def test_serving_compute_correction_removes_unused_eni_permissions_without_vpc_config():
+    main_tf = (INFRA_DIR / "main.tf").read_text()
+    iam_tf = (INFRA_DIR / "iam.tf").read_text()
+    problems = []
+
+    for function_name in ("code", "knowledge"):
+        function = terraform_resource_block(
+            main_tf, "aws_lambda_function", function_name
+        )
+        runtime = terraform_resource_block(
+            iam_tf, "aws_iam_role_policy", f"{function_name}_lambda_runtime"
+        )
+        if "vpc_config" in function:
+            problems.append(f"{function_name} unexpectedly has vpc_config")
+        eni_actions = sorted(set(re.findall(r'"(ec2:[^"]+)"', runtime)))
+        if eni_actions:
+            problems.append(
+                f"{function_name} has unused EC2 ENI permissions: {', '.join(eni_actions)}"
+            )
+
+    assert not problems, "\n".join(problems)
+
+
+def test_serving_compute_correction_removes_unused_knowledge_catalog_secret_contract():
+    main_tf = (INFRA_DIR / "main.tf").read_text()
+    iam_tf = (INFRA_DIR / "iam.tf").read_text()
+    knowledge = terraform_resource_block(main_tf, "aws_lambda_function", "knowledge")
+    problems = []
+
+    if 'resource "aws_iam_role_policy" "knowledge_catalog_secret"' in iam_tf:
+        problems.append("unused knowledge_catalog_secret IAM policy remains")
+    if "aws_iam_role_policy.knowledge_catalog_secret" in knowledge:
+        problems.append("Knowledge still depends on knowledge_catalog_secret")
+    if "SPUR_CATALOG_SECRET_ARN" in knowledge:
+        problems.append("Knowledge unexpectedly declares SPUR_CATALOG_SECRET_ARN")
+    if "secretsmanager:" in knowledge:
+        problems.append("Knowledge environment unexpectedly embeds secret access")
+
+    assert not problems, "\n".join(problems)
+
+
 def test_serving_compute_defines_exactly_code_and_knowledge_with_isolated_envs():
     main_tf = (INFRA_DIR / "main.tf").read_text()
     variables_tf = (INFRA_DIR / "variables.tf").read_text()
@@ -111,11 +241,7 @@ def test_serving_compute_roles_are_least_privilege_and_backend_specific():
     assert "s3:PutObject" not in knowledge_s3
     assert "s3:DeleteObject" not in knowledge_s3
 
-    knowledge_secret = terraform_resource_block(
-        iam_tf, "aws_iam_role_policy", "knowledge_catalog_secret"
-    )
-    assert "role = aws_iam_role.knowledge_lambda.id" in knowledge_secret
-    assert '"secretsmanager:GetSecretValue"' in knowledge_secret
+    assert 'resource "aws_iam_role_policy" "knowledge_catalog_secret"' not in iam_tf
 
     code_role_resources = "\n".join(
         terraform_resource_block(iam_tf, resource_type, resource_name)
@@ -132,7 +258,6 @@ def test_serving_compute_roles_are_least_privilege_and_backend_specific():
         "states:",
         "logs:",
         "xray:",
-        "ec2:",
     ):
         assert required in code_role_resources
 
@@ -173,6 +298,7 @@ def test_serving_compute_drainer_and_warm_pool_target_the_owning_backends():
         r"function_name\s*=\s*aws_lambda_function\.knowledge\.function_name",
         knowledge_warm,
     )
+    assert "qualifier                         = aws_lambda_alias.knowledge_live.name" in knowledge_warm
     assert (
         "provisioned_concurrent_executions = var.concurrent_warm_instances"
         in knowledge_warm
