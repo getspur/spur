@@ -35,6 +35,32 @@ pub fn tool_is_eligible(backend: BackendKind, tool: &str) -> bool {
     }
 }
 
+pub(crate) fn control_route_is_eligible(
+    backend: BackendKind,
+    route: crate::auth::RequestRoute,
+) -> bool {
+    match backend {
+        BackendKind::Code => matches!(
+            route,
+            crate::auth::RequestRoute::Legacy
+                | crate::auth::RequestRoute::OAuth
+                | crate::auth::RequestRoute::ApiKeyMcp
+        ),
+        BackendKind::Knowledge => matches!(
+            route,
+            crate::auth::RequestRoute::Legacy
+                | crate::auth::RequestRoute::OAuth
+                | crate::auth::RequestRoute::ApiKeyMcp
+        ),
+    }
+}
+
+#[cfg(test)]
+static CODE_HANDLER_CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+#[cfg(test)]
+static KNOWLEDGE_HANDLER_CALLS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
 pub fn dispatch_to_serving_handler<T>(
     backend: BackendKind,
     handler: impl FnOnce(BackendKind) -> T,
@@ -75,6 +101,49 @@ fn unavailable_backend(name: &str) -> Error {
         "{name} Lambda backend is not enabled in this binary"
     ))
     .into()
+}
+
+#[cfg(all(test, feature = "code-lambda", feature = "knowledge-lambda"))]
+mod handler_selection_tests {
+    use std::sync::atomic::Ordering;
+
+    use lambda_runtime::{Context, LambdaEvent};
+    use serde_json::json;
+
+    use super::{handler_for, BackendKind, CODE_HANDLER_CALLS, KNOWLEDGE_HANDLER_CALLS};
+
+    fn event(tool: &str) -> LambdaEvent<serde_json::Value> {
+        LambdaEvent::new(
+            json!({
+                "__spur_count_handler": true,
+                "rawPath": "/mcp",
+                "requestContext": { "http": { "method": "POST" } },
+                "body": serde_json::to_string(&json!({ "tool": tool, "args": {} }))
+                    .expect("tool body should serialize"),
+                "isBase64Encoded": false
+            }),
+            Context::default(),
+        )
+    }
+
+    #[tokio::test]
+    async fn each_api_request_executes_exactly_one_selected_real_handler() {
+        CODE_HANDLER_CALLS.store(0, Ordering::SeqCst);
+        KNOWLEDGE_HANDLER_CALLS.store(0, Ordering::SeqCst);
+        handler_for(BackendKind::Code, event("external_knowledge_context"))
+            .await
+            .expect("Code rejection should be a bounded proxy response");
+        assert_eq!(CODE_HANDLER_CALLS.load(Ordering::SeqCst), 1);
+        assert_eq!(KNOWLEDGE_HANDLER_CALLS.load(Ordering::SeqCst), 0);
+
+        CODE_HANDLER_CALLS.store(0, Ordering::SeqCst);
+        KNOWLEDGE_HANDLER_CALLS.store(0, Ordering::SeqCst);
+        handler_for(BackendKind::Knowledge, event("external_catalog"))
+            .await
+            .expect("Knowledge rejection should be a bounded proxy response");
+        assert_eq!(CODE_HANDLER_CALLS.load(Ordering::SeqCst), 0);
+        assert_eq!(KNOWLEDGE_HANDLER_CALLS.load(Ordering::SeqCst), 1);
+    }
 }
 
 #[cfg(feature = "code-lambda")]
@@ -162,6 +231,15 @@ mod code {
     }
 
     pub async fn handler(event: LambdaEvent<Value>) -> Result<Value, Error> {
+        #[cfg(test)]
+        if event
+            .payload
+            .get("__spur_count_handler")
+            .and_then(Value::as_bool)
+            == Some(true)
+        {
+            super::CODE_HANDLER_CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
         let request =
             serde_json::from_value::<ApiGatewayRequest>(event.payload).map_err(|error| {
                 lambda_error(format!(
@@ -787,6 +865,128 @@ mod code {
     fn lambda_error(message: impl Into<String>) -> Error {
         std::io::Error::other(message.into()).into()
     }
+
+    #[cfg(test)]
+    mod correction_tests {
+        use std::path::PathBuf;
+        use std::sync::Arc;
+
+        use async_trait::async_trait;
+        use serde_json::json;
+
+        use super::*;
+        use crate::artifact_cache::{ArtifactFetchError, ArtifactFetcher, ArtifactStream};
+        use crate::serving_registry::SERVING_REGISTRY_SCHEMA_VERSION;
+
+        struct EmptyFetcher;
+
+        #[async_trait]
+        impl ArtifactFetcher for EmptyFetcher {
+            async fn fetch(&self, _uri: &str) -> Result<ArtifactStream, ArtifactFetchError> {
+                Ok(Box::pin(tokio::io::empty()))
+            }
+        }
+
+        fn backend(generation: i64) -> CodeBackend {
+            let cache = ArtifactCache::new(
+                PathBuf::from(format!("/tmp/spur-code-lambda-red-{generation}")),
+                1,
+                Arc::new(EmptyFetcher),
+            )
+            .expect("test cache should initialize");
+            CodeBackend::new(
+                ServingRegistry {
+                    schema_version: SERVING_REGISTRY_SCHEMA_VERSION,
+                    generation,
+                    packages: Vec::new(),
+                },
+                cache,
+            )
+            .expect("test backend should initialize")
+        }
+
+        fn request(path: &str, method: &str, body: Option<Value>) -> ApiGatewayRequest {
+            serde_json::from_value(json!({
+                "rawPath": path,
+                "requestContext": { "http": { "method": method } },
+                "body": body.map(|value| serde_json::to_string(&value).unwrap()),
+                "isBase64Encoded": false
+            }))
+            .expect("request should deserialize")
+        }
+
+        #[tokio::test]
+        async fn code_preserves_discovery_login_and_api_key_route_semantics() {
+            for (path, method) in [
+                ("/.well-known/oauth-protected-resource", "GET"),
+                ("/auth/login", "GET"),
+                ("/auth/api-keys", "POST"),
+                ("/auth/api-keys", "GET"),
+                ("/auth/api-keys/key-123", "DELETE"),
+            ] {
+                let response = handle_api_gateway_request(request(path, method, None))
+                    .await
+                    .expect("control route should return a bounded response");
+                assert_eq!(
+                    response.status_code, 404,
+                    "unconfigured Code control route must preserve fail-closed semantics for {method} {path}"
+                );
+            }
+        }
+
+        #[tokio::test]
+        async fn cold_and_forced_index_use_the_control_plane_instead_of_registry_failure() {
+            let backend = backend(1);
+            for force in [false, true] {
+                let result = handle_tool(
+                    "external_index",
+                    &json!({
+                        "package": "demo",
+                        "revision": "1.0.0",
+                        "source_url": "https://example.com/demo.tar.gz",
+                        "source_kind": "tarball",
+                        "force": force
+                    }),
+                    &backend,
+                )
+                .await;
+                assert!(
+                    !result.as_ref().err().is_some_and(|error| error
+                        .to_string()
+                        .contains("index_dispatch_unavailable")),
+                    "cold/forced index must reach enqueue and Step Functions dispatch"
+                );
+            }
+        }
+
+        #[tokio::test]
+        async fn index_status_uses_job_store_reconciliation() {
+            let result = handle_tool(
+                "external_index_status",
+                &json!({ "job_id": "job-123" }),
+                &backend(1),
+            )
+            .await
+            .expect("status should return a bounded response");
+            assert_eq!(result["status"], "running");
+            assert_eq!(result["job_id"], "job-123");
+        }
+
+        #[tokio::test]
+        async fn live_pointer_generation_advancement_replaces_the_backend() {
+            let first = CODE_BACKEND
+                .get_or_try_init(|| async { Ok::<_, CodeToolError>(backend(1)) })
+                .await
+                .expect("g should initialize");
+            assert_eq!(first.generation(), 1);
+
+            let advanced = CODE_BACKEND
+                .get_or_try_init(|| async { Ok::<_, CodeToolError>(backend(2)) })
+                .await
+                .expect("g+1 should activate");
+            assert_eq!(advanced.generation(), 2, "g+1 must replace g");
+        }
+    }
 }
 
 #[cfg(feature = "knowledge-lambda")]
@@ -866,6 +1066,15 @@ mod knowledge {
     }
 
     pub async fn handler(event: LambdaEvent<Value>) -> Result<Value, Error> {
+        #[cfg(test)]
+        if event
+            .payload
+            .get("__spur_count_handler")
+            .and_then(Value::as_bool)
+            == Some(true)
+        {
+            super::KNOWLEDGE_HANDLER_CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
         handle_event_with_drainer(event, drain_queued_jobs()).await
     }
 

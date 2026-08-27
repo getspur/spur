@@ -37,9 +37,8 @@ pub mod worker;
 
 #[cfg(all(test, feature = "code-lambda"))]
 mod serving_lambda_contract {
-    use std::cell::Cell;
-
-    use crate::lambda::{dispatch_to_serving_handler, tool_is_eligible, BackendKind};
+    use crate::auth::RequestRoute;
+    use crate::lambda::{control_route_is_eligible, tool_is_eligible, BackendKind};
 
     const CODE_TOOLS: [&str; 7] = [
         "external_catalog",
@@ -71,20 +70,30 @@ mod serving_lambda_contract {
             )
             .chain([(BackendKind::Knowledge, KNOWLEDGE_TOOL, true)])
         {
-            let handler_calls = Cell::new(0);
-            let allowed = dispatch_to_serving_handler(backend, |selected| {
-                handler_calls.set(handler_calls.get() + 1);
-                tool_is_eligible(selected, tool)
-            });
-
             assert_eq!(
-                allowed, expected,
+                tool_is_eligible(backend, tool),
+                expected,
                 "wrong eligibility for {backend:?}/{tool}"
             );
-            assert_eq!(
-                handler_calls.get(),
-                1,
-                "direct routing must invoke exactly one serving handler for {backend:?}/{tool}"
+        }
+    }
+
+    #[test]
+    fn code_owns_control_routes_and_knowledge_rejects_them() {
+        for route in [
+            RequestRoute::Discovery,
+            RequestRoute::Login,
+            RequestRoute::ApiKeyCreate,
+            RequestRoute::ApiKeyList,
+            RequestRoute::ApiKeyRevoke,
+        ] {
+            assert!(
+                control_route_is_eligible(BackendKind::Code, route),
+                "Code must own {route:?}"
+            );
+            assert!(
+                !control_route_is_eligible(BackendKind::Knowledge, route),
+                "Knowledge must reject {route:?}"
             );
         }
     }
