@@ -1,5 +1,8 @@
 import json
+import os
 import re
+import subprocess
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -69,6 +72,20 @@ def terraform_module_contract_files():
         for path in INFRA_DIR.rglob(pattern)
         if ".terraform" not in path.parts
     )
+
+
+def shell_function(source, name):
+    match = re.search(
+        rf"(?ms)^{re.escape(name)}\(\) \{{\n(.*?)(?=^[a-zA-Z_][a-zA-Z0-9_]*\(\) \{{|\Z)",
+        source,
+    )
+    assert match is not None, f"missing shell function: {name}"
+    return match.group(1)
+
+
+def write_executable(path, source):
+    path.write_text(source)
+    path.chmod(0o755)
 
 
 def test_main_module_route_contracts_drop_removed_addresses_and_unsuffixed_paths():
@@ -769,19 +786,45 @@ def render_index_build_asl():
     return json.loads(rendered)
 
 
-def test_deploy_builds_standalone_context_service_from_crate_workdir():
+def test_deploy_builds_named_serving_lambdas_from_exact_feature_closures():
+    script = DEPLOY_SH.read_text()
+    cargo_toml = (ROOT / "crates" / "spur-context-service" / "Cargo.toml").read_text()
+
+    code_command = (
+        "--workdir crates/spur-context-service build --no-default-features "
+        "--features code-lambda --bin spur-context-code-lambda --release"
+    )
+    knowledge_command = (
+        "--workdir crates/spur-context-service build --no-default-features "
+        "--features knowledge-lambda --bin spur-context-knowledge-lambda --release"
+    )
+
+    assert 'name = "spur-context-code-lambda"' in cargo_toml
+    assert 'required-features = ["code-lambda"]' in cargo_toml
+    assert 'name = "spur-context-knowledge-lambda"' in cargo_toml
+    assert 'required-features = ["knowledge-lambda"]' in cargo_toml
+    assert script.count(code_command) == 2
+    assert script.count(knowledge_command) == 2
+    assert 'run_graviton2_safe_cargo "Code Lambda bootstrap"' in script
+    assert 'run_graviton2_safe_cargo "Knowledge Lambda bootstrap"' in script
+    assert (
+        'fetch_remote_target_file release/spur-context-code-lambda '
+        '"$BUILD_DIR/code-lambda/bootstrap"'
+    ) in script
+    assert (
+        'fetch_remote_target_file release/spur-context-knowledge-lambda '
+        '"$BUILD_DIR/knowledge-lambda/bootstrap"'
+    ) in script
+    assert "build --features lambda --release" not in script
+
+
+def test_deploy_preserves_worker_builds_while_splitting_serving_lambdas():
     script = DEPLOY_SH.read_text()
 
-    assert 'run_graviton2_safe_cargo "serving Lambda bootstrap"' in script
-    assert "--workdir crates/spur-context-service build --features lambda --release" in script
     assert 'run_graviton2_safe_cargo "Fargate worker binary"' in script
     assert "--workdir crates/spur-context-service build --features worker --release" in script
     assert 'run_graviton2_safe_cargo "spur CLI worker image dependency"' in script
     assert "build -p spur-cli --release" in script
-    assert (
-        'fetch_remote_target_file release/spur-context-service '
-        '"$BUILD_DIR/bootstrap"'
-    ) in script
     assert (
         '--remote-binary "$(remote_target_path release/spur-context-worker)"'
     ) in script
@@ -796,6 +839,33 @@ def test_deploy_builds_standalone_context_service_from_crate_workdir():
     assert 'worker_image_uri="$(build_and_push_worker_image)"' not in script
     assert "scripts/spur-cargo run --workdir crates/spur-context-service" not in script
     assert "scripts/spur-cargo build -p spur-context-service" not in script
+
+
+def test_serving_zip_packagers_isolate_code_and_verify_knowledge_before_copy():
+    script = DEPLOY_SH.read_text()
+    code_package = shell_function(script, "package_code_zip")
+    knowledge_copy = shell_function(script, "copy_knowledge_extensions")
+    knowledge_package = shell_function(script, "package_knowledge_zip")
+    main = shell_function(script, "main")
+
+    assert 'zip -r "$zip_path" bootstrap' in code_package
+    for forbidden in (
+        ".duckdb",
+        "duckdb_extension",
+        "ducklake",
+        "httpfs",
+        "aws.duckdb_extension",
+        "catalog",
+        "spur-context-knowledge-lambda",
+    ):
+        assert forbidden not in code_package
+
+    assert 'cp -R "$BUILD_DIR/.duckdb" "$knowledge_dir/.duckdb"' in knowledge_copy
+    assert 'zip -r "$zip_path" bootstrap .duckdb/' in knowledge_package
+    assert '"*/lance.duckdb_extension"' in knowledge_package
+    assert main.index("download_extensions") < main.index(
+        "copy_knowledge_extensions"
+    )
 
 
 def test_deploy_has_selectable_self_contained_buildx_path_with_baseline_flags():
@@ -934,22 +1004,31 @@ def test_deploy_builds_source_fetcher_lambda_image_and_passes_to_terraform():
     assert 'output "source_fetcher_lambda_image_uri"' in outputs_tf
 
 
-def test_deploy_rebuilds_lambda_zip_by_default():
+def test_deploy_rebuilds_distinct_serving_lambda_zips_by_default():
     script = DEPLOY_SH.read_text()
     main_tf = (INFRA_DIR / "main.tf").read_text()
 
-    assert 'local tf_zip_path="../../target/lambda/spur-context-service.zip"' in script
-    assert 'tf_zip_path="$local_zip"' in script
-    assert 'tf_vars=(-var-file="$var_file" -var "lambda_zip_path=$tf_zip_path")' in script
-    assert 'elif [[ ! -f "$zip_path" ]]' not in script
-    assert 'rm -f "$zip_path"' in script
+    code_zip = "../../target/lambda/spur-context-code-lambda.zip"
+    knowledge_zip = "../../target/lambda/spur-context-knowledge-lambda.zip"
+    assert code_zip != knowledge_zip
+    assert f'local tf_code_zip_path="{code_zip}"' in script
+    assert f'local tf_knowledge_zip_path="{knowledge_zip}"' in script
+    assert 'tf_code_zip_path="$local_code_zip"' in script
+    assert 'tf_knowledge_zip_path="$local_knowledge_zip"' in script
+    assert '-var "code_lambda_zip_path=$tf_code_zip_path"' in script
+    assert '-var "knowledge_lambda_zip_path=$tf_knowledge_zip_path"' in script
+    assert 'elif [[ ! -f "$code_zip_path" ]]' not in script
+    assert 'elif [[ ! -f "$knowledge_zip_path" ]]' not in script
+    assert 'rm -f "$code_zip_path" "$knowledge_zip_path"' in script
     lambda_zip = main_tf.split('resource "aws_s3_object" "lambda_zip"', 1)[1]
     assert "source_hash = filemd5(local.knowledge_lambda_zip_path)" in lambda_zip
+    assert "source_code_hash = filebase64sha256(local.knowledge_lambda_zip_path)" in main_tf
     assert "etag   = filemd5(var.lambda_zip_path)" not in lambda_zip
     code_lambda_zip = terraform_resource_block(
         main_tf, "aws_s3_object", "code_lambda_zip"
     )
     assert "source_hash = filemd5(local.code_lambda_zip_path)" in code_lambda_zip
+    assert "source_code_hash = filebase64sha256(local.code_lambda_zip_path)" in main_tf
     assert (
         "knowledge_lambda_zip_path = coalesce("
         "var.knowledge_lambda_zip_path, var.lambda_zip_path)"
@@ -968,6 +1047,158 @@ def test_deploy_can_package_lambda_without_terraform_apply():
     assert "--package-only) package_only=true" in script
     assert 'if [[ "$package_only" == "true" ]]' in script
     assert script.index('if [[ "$package_only" == "true" ]]') < script.index("terraform init")
+
+
+def test_package_only_builds_two_isolated_zip_manifests_with_stubbed_tools(tmp_path):
+    repo_root = tmp_path / "repo"
+    script_dir = repo_root / "infra" / "spur-context-service"
+    script_dir.mkdir(parents=True)
+    deploy = script_dir / "deploy.sh"
+    deploy.write_text(DEPLOY_SH.read_text())
+    deploy.chmod(0o755)
+    (script_dir / "graviton2-baseline.sh").write_text(
+        (DEPLOY_SH.parent / "graviton2-baseline.sh").read_text()
+    )
+
+    tool_dir = tmp_path / "bin"
+    tool_dir.mkdir()
+    aws_marker = tmp_path / "aws-called"
+    terraform_marker = tmp_path / "terraform-mutations"
+
+    write_executable(
+        tool_dir / "terraform",
+        """#!/usr/bin/env bash
+if [[ "$*" == "output -raw aws_region" ]]; then
+    echo ap-southeast-5
+else
+    printf '%s\n' "$*" >> "$TERRAFORM_MARKER"
+    exit 97
+fi
+""",
+    )
+    write_executable(
+        tool_dir / "aws",
+        """#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$AWS_MARKER"
+exit 98
+""",
+    )
+    write_executable(
+        tool_dir / "git",
+        """#!/usr/bin/env bash
+case "$*" in
+    *"rev-parse --short HEAD"*) echo deadbeef ;;
+    *"status --porcelain"*) ;;
+    *"archive --format=tar HEAD"*) /usr/bin/tar -cf - --files-from /dev/null ;;
+    *) echo "unexpected git call: $*" >&2; exit 96 ;;
+esac
+""",
+    )
+    write_executable(
+        tool_dir / "docker",
+        """#!/usr/bin/env bash
+output=""
+while [[ $# -gt 0 ]]; do
+    if [[ "$1" == "--output" ]]; then
+        output="$2"
+        shift 2
+    else
+        shift
+    fi
+done
+dest="${output#type=local,dest=}"
+mkdir -p "$dest"
+printf code-binary > "$dest/spur-context-code-lambda"
+printf knowledge-binary > "$dest/spur-context-knowledge-lambda"
+printf worker > "$dest/spur-context-worker"
+printf worker-lambda > "$dest/spur-context-worker-lambda"
+printf fetcher > "$dest/spur-context-fetcher-lambda"
+printf spur > "$dest/spur"
+""",
+    )
+    write_executable(
+        tool_dir / "curl",
+        """#!/usr/bin/env bash
+printf extension-payload
+""",
+    )
+    write_executable(tool_dir / "gunzip", "#!/usr/bin/env bash\ncat\n")
+    write_executable(
+        tool_dir / "sha256sum",
+        """#!/usr/bin/env bash
+case "$1" in
+    *httpfs.duckdb_extension*) sha=6d30a487968cbe5553b7272fd5bad0e4485c4117db96e21fd1e5e2a225a5a538 ;;
+    *ducklake.duckdb_extension*) sha=f73ec9ab68a6de5c3c190cd1ecbba553a5791bf5821a991d70ea65abc5e45562 ;;
+    *postgres_scanner.duckdb_extension*) sha=102f71e6d2e603b1056407410f981c7ec141375e1edd16f2cb61e901e9c6d617 ;;
+    *sqlite_scanner.duckdb_extension*) sha=81135f8c3b4064bc5031c3bc08473a7224851461fa9a2b645ea8f851eba4a621 ;;
+    *aws.duckdb_extension*) sha=8244ac8560925c3caf71f2087b45e3e37aa84a8a79712b9b8f3312524bd3f483 ;;
+    *parquet.duckdb_extension*) sha=d1aa523e5ae55731da2f67fca02ea1460e35fe4f8d824627fb565019e3eece1c ;;
+    *json.duckdb_extension*) sha=10ce8205acd23bfbc98c934803d69f1e6768fe9bfcb4c7958406144a1ea898bd ;;
+    *lance.duckdb_extension*) sha=81a9f544f9f56be18db46060baf596ab973e17b50785a1eb1edd4885908b2158 ;;
+    *) exit 95 ;;
+esac
+printf '%s  %s\n' "$sha" "$1"
+""",
+    )
+
+    result = subprocess.run(
+        [
+            "bash",
+            str(deploy),
+            "--skip-worker",
+            "--package-only",
+            "--build-mode",
+            "self-contained",
+            "--no-push",
+        ],
+        cwd=repo_root,
+        env={
+            **os.environ,
+            "PATH": f"{tool_dir}:{os.environ['PATH']}",
+            "AWS_MARKER": str(aws_marker),
+            "TERRAFORM_MARKER": str(terraform_marker),
+        },
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert not aws_marker.exists()
+    assert not terraform_marker.exists()
+
+    code_zip = repo_root / "target" / "lambda" / "spur-context-code-lambda.zip"
+    knowledge_zip = (
+        repo_root / "target" / "lambda" / "spur-context-knowledge-lambda.zip"
+    )
+    assert code_zip != knowledge_zip
+    assert code_zip.read_bytes() != knowledge_zip.read_bytes()
+
+    with zipfile.ZipFile(code_zip) as archive:
+        assert archive.namelist() == ["bootstrap"]
+        assert archive.read("bootstrap") == b"code-binary"
+        assert all(
+            forbidden not in name.lower()
+            for name in archive.namelist()
+            for forbidden in ("duckdb", "ducklake", "httpfs", "aws", "catalog", "knowledge")
+        )
+
+    with zipfile.ZipFile(knowledge_zip) as archive:
+        files = {name for name in archive.namelist() if not name.endswith("/")}
+        extension_root = ".duckdb/extensions/v1.5.4/linux_arm64"
+        assert files == {
+            "bootstrap",
+            *(f"{extension_root}/{name}.duckdb_extension" for name in (
+                "httpfs",
+                "ducklake",
+                "postgres_scanner",
+                "sqlite_scanner",
+                "aws",
+                "parquet",
+                "json",
+            )),
+        }
+        assert archive.read("bootstrap") == b"knowledge-binary"
 
 
 def test_terraform_uses_partial_s3_backend_and_environment_files():
@@ -1000,7 +1231,8 @@ def test_deploy_passes_backend_config_and_var_file_to_terraform():
     assert 'backend_config="${backend_config:-backends/${environment}.s3.tfbackend}"' in script
     assert 'var_file="${var_file:-env/${environment}.tfvars}"' in script
     assert 'terraform init -upgrade -backend-config="$backend_config"' in script
-    assert 'tf_vars=(-var-file="$var_file" -var "lambda_zip_path=$tf_zip_path")' in script
+    assert '-var "code_lambda_zip_path=$tf_code_zip_path"' in script
+    assert '-var "knowledge_lambda_zip_path=$tf_knowledge_zip_path"' in script
     assert 'terraform plan "${tf_vars[@]}"' in script
     assert 'terraform apply "${tf_vars[@]}" -auto-approve' in script
 
