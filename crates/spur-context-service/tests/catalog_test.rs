@@ -87,6 +87,23 @@ fn catalog_tables_sql_creates_medallion_schemas_and_gold_catalog_columns() -> Re
         );
     }
 
+    for schema in ["main", "gold"] {
+        for column in [
+            "graph_manifest_uri",
+            "graph_manifest_sha256",
+            "graph_manifest_bytes",
+            "source_sidecar_uri",
+            "source_sidecar_sha256",
+            "source_sidecar_bytes",
+        ] {
+            assert_eq!(
+                nullable_column_count(&conn, schema, "package_catalog", column)?,
+                1,
+                "{schema}.package_catalog must have nullable serving-artifact column {column}"
+            );
+        }
+    }
+
     for table in [
         "nodes",
         "edges",

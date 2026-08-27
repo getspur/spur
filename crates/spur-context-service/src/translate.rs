@@ -1416,11 +1416,13 @@ fn write_catalog_metadata(
                 semver_major, semver_minor, semver_patch,
                 snapshot_id, indexed_at, index_status, embeddings_status, row_counts,
                 generation, bronze_content_sha256, silver_graph_content_hash,
-                builder_version, translate_schema_version, embed_text_version
+                builder_version, translate_schema_version, embed_text_version,
+                graph_manifest_uri, graph_manifest_sha256, graph_manifest_bytes,
+                source_sidecar_uri, source_sidecar_sha256, source_sidecar_bytes
             )
             VALUES (
                 ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, 'complete', ?, CAST(? AS JSON),
-                ?, ?, ?, ?, ?, ?
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
             )
             ",
             params![
@@ -1440,6 +1442,12 @@ fn write_catalog_metadata(
                 lineage.builder_version,
                 lineage.translate_schema_version,
                 lineage.embed_text_version,
+                lineage.graph_manifest_uri,
+                lineage.graph_manifest_sha256,
+                lineage.graph_manifest_bytes,
+                lineage.source_sidecar_uri,
+                lineage.source_sidecar_sha256,
+                lineage.source_sidecar_bytes,
             ],
         )
         .context("failed to insert package_catalog row")?;

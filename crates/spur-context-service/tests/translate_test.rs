@@ -272,6 +272,76 @@ fn translate_publishes_schema_qualified_gold_generation_with_lineage_and_snapsho
 }
 
 #[test]
+fn package_catalog_records_serving_artifacts() -> Result<()> {
+    let root = unique_temp_dir("package-catalog-serving-artifacts")?;
+    let artifact_dir = root.join("artifact");
+    let source_root = root.join("source");
+    let data_path = root.join("data");
+    fs::create_dir_all(&artifact_dir).context("create artifact dir")?;
+    fs::create_dir_all(source_root.join("src")).context("create source src dir")?;
+    fs::create_dir_all(&data_path).context("create ducklake data dir")?;
+    fs::write(source_root.join("src/lib.rs"), "pub fn alpha() {}\n")
+        .context("write source file")?;
+
+    let catalog_dsn = format!("sqlite:{}", root.join("catalog.sqlite").display());
+    let data_path = data_path.display().to_string();
+    initialize_catalog(&catalog_dsn, &data_path)?;
+    write_artifact_fixture(&artifact_dir)?;
+    let manifest = silver_manifest_for_fixture();
+    let lineage = translate_lineage(&manifest);
+    let expected = (
+        lineage.graph_manifest_uri.clone(),
+        lineage.graph_manifest_sha256.clone(),
+        lineage.graph_manifest_bytes,
+        lineage.source_sidecar_uri.clone(),
+        lineage.source_sidecar_sha256.clone(),
+        lineage.source_sidecar_bytes,
+    );
+
+    translate_artifact_to_ducklake(&TranslateOptions {
+        source: SOURCE.to_owned(),
+        package: PACKAGE.to_owned(),
+        revision: REVISION.to_owned(),
+        revision_kind: "semver".to_owned(),
+        artifact_dir,
+        artifact_manifest: Some(manifest),
+        source_root: Some(source_root),
+        catalog_dsn: catalog_dsn.clone(),
+        lineage: Some(lineage),
+        allow_missing_embeddings: false,
+    })?;
+
+    let conn = attach_ducklake(&catalog_dsn, &data_path)?;
+    let actual: (String, String, u64, String, String, u64) = conn.query_row(
+        r"
+        SELECT
+            graph_manifest_uri,
+            graph_manifest_sha256,
+            graph_manifest_bytes,
+            source_sidecar_uri,
+            source_sidecar_sha256,
+            source_sidecar_bytes
+        FROM gold.package_catalog
+        WHERE source = ? AND package = ? AND revision = ?
+        ",
+        params![SOURCE, PACKAGE, REVISION],
+        |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+            ))
+        },
+    )?;
+
+    assert_eq!(actual, expected);
+    Ok(())
+}
+
+#[test]
 fn concurrent_translates_publish_distinct_generations_and_complete_snapshot() -> Result<()> {
     let root = unique_temp_dir("translate-concurrent-publish")?;
     let (catalog_dsn, data_path) = match (

@@ -263,7 +263,13 @@ CREATE TABLE IF NOT EXISTS package_catalog (
     silver_graph_content_hash VARCHAR,
     builder_version VARCHAR,
     translate_schema_version VARCHAR,
-    embed_text_version VARCHAR
+    embed_text_version VARCHAR,
+    graph_manifest_uri VARCHAR,
+    graph_manifest_sha256 VARCHAR,
+    graph_manifest_bytes UBIGINT,
+    source_sidecar_uri VARCHAR,
+    source_sidecar_sha256 VARCHAR,
+    source_sidecar_bytes UBIGINT
 );
 ALTER TABLE package_catalog ADD COLUMN IF NOT EXISTS generation BIGINT;
 ALTER TABLE package_catalog ADD COLUMN IF NOT EXISTS bronze_content_sha256 VARCHAR;
@@ -271,6 +277,12 @@ ALTER TABLE package_catalog ADD COLUMN IF NOT EXISTS silver_graph_content_hash V
 ALTER TABLE package_catalog ADD COLUMN IF NOT EXISTS builder_version VARCHAR;
 ALTER TABLE package_catalog ADD COLUMN IF NOT EXISTS translate_schema_version VARCHAR;
 ALTER TABLE package_catalog ADD COLUMN IF NOT EXISTS embed_text_version VARCHAR;
+ALTER TABLE package_catalog ADD COLUMN IF NOT EXISTS graph_manifest_uri VARCHAR;
+ALTER TABLE package_catalog ADD COLUMN IF NOT EXISTS graph_manifest_sha256 VARCHAR;
+ALTER TABLE package_catalog ADD COLUMN IF NOT EXISTS graph_manifest_bytes UBIGINT;
+ALTER TABLE package_catalog ADD COLUMN IF NOT EXISTS source_sidecar_uri VARCHAR;
+ALTER TABLE package_catalog ADD COLUMN IF NOT EXISTS source_sidecar_sha256 VARCHAR;
+ALTER TABLE package_catalog ADD COLUMN IF NOT EXISTS source_sidecar_bytes UBIGINT;
 ALTER TABLE package_catalog SET PARTITIONED BY (source, package);
 
 CREATE TABLE IF NOT EXISTS refs (
@@ -325,6 +337,12 @@ ALTER TABLE gold.package_catalog ADD COLUMN IF NOT EXISTS silver_graph_content_h
 ALTER TABLE gold.package_catalog ADD COLUMN IF NOT EXISTS builder_version VARCHAR;
 ALTER TABLE gold.package_catalog ADD COLUMN IF NOT EXISTS translate_schema_version VARCHAR;
 ALTER TABLE gold.package_catalog ADD COLUMN IF NOT EXISTS embed_text_version VARCHAR;
+ALTER TABLE gold.package_catalog ADD COLUMN IF NOT EXISTS graph_manifest_uri VARCHAR;
+ALTER TABLE gold.package_catalog ADD COLUMN IF NOT EXISTS graph_manifest_sha256 VARCHAR;
+ALTER TABLE gold.package_catalog ADD COLUMN IF NOT EXISTS graph_manifest_bytes UBIGINT;
+ALTER TABLE gold.package_catalog ADD COLUMN IF NOT EXISTS source_sidecar_uri VARCHAR;
+ALTER TABLE gold.package_catalog ADD COLUMN IF NOT EXISTS source_sidecar_sha256 VARCHAR;
+ALTER TABLE gold.package_catalog ADD COLUMN IF NOT EXISTS source_sidecar_bytes UBIGINT;
 ALTER TABLE gold.package_catalog SET PARTITIONED BY (source, package);
 ALTER TABLE gold.refs SET PARTITIONED BY (source, package);
 INSERT INTO gold.generation_allocator (allocator_id, next_generation)
