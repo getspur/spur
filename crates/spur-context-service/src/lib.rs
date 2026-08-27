@@ -1,6 +1,6 @@
 //! DuckLake-backed code context service for external packages.
 
-#[cfg(feature = "service")]
+#[cfg(any(feature = "service", feature = "code-control"))]
 pub mod abuse;
 pub mod api_key_authorizer;
 pub mod api_key_cleanup;
@@ -12,9 +12,9 @@ mod auth;
 pub mod catalog;
 #[cfg(feature = "code-backend")]
 pub mod code_backend;
-#[cfg(feature = "service")]
+#[cfg(any(feature = "service", feature = "code-control"))]
 pub mod drainer;
-#[cfg(feature = "service")]
+#[cfg(any(feature = "service", feature = "code-control"))]
 pub mod jobs;
 #[cfg(feature = "service")]
 pub mod knowledge;
@@ -24,6 +24,8 @@ pub mod lambda;
 mod lambda_http;
 #[cfg(feature = "service")]
 pub mod mcp;
+#[cfg(all(feature = "code-control", not(feature = "service")))]
+pub(crate) use crate::lambda::code_control as mcp;
 pub mod medallion;
 #[cfg(feature = "service")]
 pub mod query;

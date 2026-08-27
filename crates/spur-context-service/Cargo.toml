@@ -53,8 +53,14 @@ required-features = ["worker-lambda"]
 [features]
 default = ["service"]
 serving-lambda = ["dep:aws-config", "artifact-cache-s3", "lambda-http"]
-code-lambda = ["serving-lambda", "api-key-authorizer", "code-backend"]
+code-lambda = [
+    "serving-lambda",
+    "api-key-authorizer",
+    "code-backend",
+    "code-control",
+]
 knowledge-lambda = ["serving-lambda", "api-key-authorizer", "service"]
+code-control = ["dep:aws-sdk-sfn", "dep:spur-context-source"]
 service = [
     "dep:anyhow",
     "dep:aws-config",
