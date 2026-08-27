@@ -1,16 +1,18 @@
 use std::collections::HashMap;
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{ensure, Context};
+use async_trait::async_trait;
 use nltk_porter::{Mode, PorterStemmer};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 use crate::GraphFacts;
 
 use super::contract::{
-    BenchmarkDataset, ConversationRecord, QuestionRecord, SessionRecord, TurnRecord,
+    BenchmarkDataset, ConversationRecord, QuestionRecord, Role, SessionRecord, TurnRecord,
 };
 use super::ranking::{Granularity, QueryOccurrenceId, RankedHit, Ranking, RankingSet, Variant};
 use super::retrieve::{facts_for_task, retrieve_task_hits, RetrievalReport};
@@ -527,6 +529,1054 @@ fn ranked_turn<'a>(
 
 fn sha256_hex(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
+}
+
+/// Audited LongMemEval reader and judge snapshot.
+pub const LONGMEMEVAL_MODEL: &str = "gpt-4o-2024-08-06";
+/// Official Responses API create endpoint.
+pub const OPENAI_RESPONSES_URL: &str = "https://api.openai.com/v1/responses";
+
+const LONGMEM_READER_MAX_OUTPUT_TOKENS: u64 = 800;
+const LONGMEM_JUDGE_MAX_OUTPUT_TOKENS: u64 = 10;
+const LONGMEM_READER_PROMPT: &str = "I will give you several history chats between you and a user. Please answer the question based on the relevant chat history. Answer the question step by step: first extract all the relevant information, and then reason over the information to get the answer.\n\n\nHistory Chats:\n\n{history}\n\nCurrent Date: {question_date}\nQuestion: {question}\nAnswer (step by step):";
+
+/// Which origin-native LongMemEval call produced a cache artifact.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum QaStage {
+    Reader,
+    Judge,
+}
+
+/// Audited Responses API token accounting.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct QaUsage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub total_tokens: u64,
+}
+
+impl QaUsage {
+    fn validate(self) -> anyhow::Result<Self> {
+        ensure!(
+            self.input_tokens.checked_add(self.output_tokens) == Some(self.total_tokens),
+            "malformed usage: total_tokens does not equal input_tokens + output_tokens"
+        );
+        Ok(self)
+    }
+
+    fn checked_add(self, other: Self) -> anyhow::Result<Self> {
+        Ok(Self {
+            input_tokens: self
+                .input_tokens
+                .checked_add(other.input_tokens)
+                .context("input token usage overflow")?,
+            output_tokens: self
+                .output_tokens
+                .checked_add(other.output_tokens)
+                .context("output token usage overflow")?,
+            total_tokens: self
+                .total_tokens
+                .checked_add(other.total_tokens)
+                .context("total token usage overflow")?,
+        })
+    }
+}
+
+/// One pinned reader or judge request bound to immutable retrieval.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LongMemQaRequest {
+    pub question_id: String,
+    pub variant: Variant,
+    pub granularity: Granularity,
+    pub stage: QaStage,
+    pub model: String,
+    pub prompt: String,
+    pub question_sha256: String,
+    pub prompt_sha256: String,
+    pub ranking_sha256: String,
+    pub max_output_tokens: u64,
+}
+
+/// One completed backend response, including the complete provider payload.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LongMemQaResponse {
+    pub output_text: String,
+    pub usage: QaUsage,
+    pub raw_response: Value,
+}
+
+impl LongMemQaResponse {
+    fn validate(mut self) -> anyhow::Result<Self> {
+        ensure!(
+            !self.output_text.trim().is_empty(),
+            "completed response has empty output_text"
+        );
+        self.output_text = self.output_text.trim().to_owned();
+        self.usage = self.usage.validate()?;
+        Ok(self)
+    }
+}
+
+/// Complete cache identity for reader and judge artifacts.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub struct QaCacheKey {
+    pub question_id: String,
+    pub question_sha256: String,
+    pub prompt_sha256: String,
+    pub model: String,
+    pub model_sha256: String,
+    pub ranking_sha256: String,
+    pub variant: Variant,
+    pub granularity: Granularity,
+    pub stage: QaStage,
+}
+
+impl QaCacheKey {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        question_id: impl Into<String>,
+        question_sha256: impl Into<String>,
+        prompt_sha256: impl Into<String>,
+        model: impl Into<String>,
+        ranking_sha256: impl Into<String>,
+        variant: Variant,
+        granularity: Granularity,
+        stage: QaStage,
+    ) -> Self {
+        let model = model.into();
+        Self {
+            question_id: question_id.into(),
+            question_sha256: question_sha256.into(),
+            prompt_sha256: prompt_sha256.into(),
+            model_sha256: sha256_hex(model.as_bytes()),
+            model,
+            ranking_sha256: ranking_sha256.into(),
+            variant,
+            granularity,
+            stage,
+        }
+    }
+
+    pub fn from_request(request: &LongMemQaRequest) -> Self {
+        Self::new(
+            request.question_id.clone(),
+            request.question_sha256.clone(),
+            request.prompt_sha256.clone(),
+            request.model.clone(),
+            request.ranking_sha256.clone(),
+            request.variant,
+            request.granularity,
+            request.stage,
+        )
+    }
+
+    /// File-safe digest over every cache-key field.
+    pub fn identity_sha256(&self) -> String {
+        let mut hasher = Sha256::new();
+        for component in [
+            self.question_id.as_str(),
+            self.question_sha256.as_str(),
+            self.prompt_sha256.as_str(),
+            self.model.as_str(),
+            self.model_sha256.as_str(),
+            self.ranking_sha256.as_str(),
+            variant_name(self.variant),
+            granularity_name(self.granularity),
+            stage_name(self.stage),
+        ] {
+            hasher.update((component.len() as u64).to_be_bytes());
+            hasher.update(component.as_bytes());
+        }
+        format!("{:x}", hasher.finalize())
+    }
+}
+
+/// Complete successful cache artifact. Failed calls are deliberately not cached.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct QaCacheEntry {
+    pub key: QaCacheKey,
+    pub request: LongMemQaRequest,
+    pub response: LongMemQaResponse,
+    pub label: Option<bool>,
+    pub cost_usd_micros: u64,
+}
+
+/// Cache seam used by the resumable evaluator.
+pub trait QaCache {
+    fn get(&self, key: &QaCacheKey) -> anyhow::Result<Option<QaCacheEntry>>;
+    fn put(&mut self, entry: &QaCacheEntry) -> anyhow::Result<()>;
+}
+
+/// JSON artifact cache whose filenames are complete cache-identity digests.
+#[derive(Debug, Clone)]
+pub struct JsonQaCache {
+    root: PathBuf,
+}
+
+impl JsonQaCache {
+    pub fn open(root: impl AsRef<Path>) -> anyhow::Result<Self> {
+        fs::create_dir_all(root.as_ref())
+            .with_context(|| format!("create LongMemEval QA cache {}", root.as_ref().display()))?;
+        Ok(Self {
+            root: root.as_ref().to_path_buf(),
+        })
+    }
+
+    pub fn entry_count(&self) -> anyhow::Result<usize> {
+        Ok(fs::read_dir(&self.root)
+            .with_context(|| format!("read QA cache {}", self.root.display()))?
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry.path().extension().and_then(|value| value.to_str()) == Some("json")
+            })
+            .count())
+    }
+
+    fn entry_path(&self, key: &QaCacheKey) -> PathBuf {
+        self.root.join(format!("{}.json", key.identity_sha256()))
+    }
+}
+
+impl QaCache for JsonQaCache {
+    fn get(&self, key: &QaCacheKey) -> anyhow::Result<Option<QaCacheEntry>> {
+        let path = self.entry_path(key);
+        let bytes = match fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error).with_context(|| format!("read {}", path.display())),
+        };
+        let entry: QaCacheEntry =
+            serde_json::from_slice(&bytes).with_context(|| format!("decode {}", path.display()))?;
+        ensure!(
+            entry.key == *key && QaCacheKey::from_request(&entry.request) == *key,
+            "cache artifact identity does not match its requested key"
+        );
+        entry.response.clone().validate()?;
+        ensure!(
+            matches!(
+                (entry.request.stage, entry.label),
+                (QaStage::Reader, None) | (QaStage::Judge, Some(_))
+            ),
+            "cache artifact stage and label disagree"
+        );
+        Ok(Some(entry))
+    }
+
+    fn put(&mut self, entry: &QaCacheEntry) -> anyhow::Result<()> {
+        ensure!(
+            entry.key == QaCacheKey::from_request(&entry.request),
+            "cache entry key does not match its complete request identity"
+        );
+        entry.response.clone().validate()?;
+        ensure!(
+            matches!(
+                (entry.request.stage, entry.label),
+                (QaStage::Reader, None) | (QaStage::Judge, Some(_))
+            ),
+            "cache entry stage and label disagree"
+        );
+        let path = self.entry_path(&entry.key);
+        let temporary = self
+            .root
+            .join(format!(".{}.tmp", entry.key.identity_sha256()));
+        fs::write(&temporary, serde_json::to_vec_pretty(entry)?)
+            .with_context(|| format!("write {}", temporary.display()))?;
+        fs::rename(&temporary, &path).with_context(|| format!("publish {}", path.display()))?;
+        Ok(())
+    }
+}
+
+/// Caller-declared paid-run ceilings and pre-request reservations.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct QaBudgetLimits {
+    pub max_requests: u64,
+    pub max_total_tokens: u64,
+    pub max_usd_micros: u64,
+    pub reserve_tokens_per_request: u64,
+    pub reserve_usd_micros_per_request: u64,
+    pub input_usd_micros_per_million: u64,
+    pub output_usd_micros_per_million: u64,
+}
+
+/// Mutable accounting state checked before every non-cached request.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct QaBudget {
+    limits: QaBudgetLimits,
+    requests: u64,
+    usage: QaUsage,
+    cost_usd_micros: u64,
+}
+
+impl QaBudget {
+    pub fn new(limits: QaBudgetLimits) -> Self {
+        Self {
+            limits,
+            requests: 0,
+            usage: QaUsage::default(),
+            cost_usd_micros: 0,
+        }
+    }
+
+    pub fn limits(&self) -> &QaBudgetLimits {
+        &self.limits
+    }
+
+    pub fn requests(&self) -> u64 {
+        self.requests
+    }
+
+    pub fn usage(&self) -> QaUsage {
+        self.usage
+    }
+
+    pub fn cost_usd_micros(&self) -> u64 {
+        self.cost_usd_micros
+    }
+
+    fn admit_request(&mut self) -> anyhow::Result<()> {
+        let requests = self
+            .requests
+            .checked_add(1)
+            .context("request count overflow")?;
+        ensure!(
+            requests <= self.limits.max_requests,
+            "QA max request budget exhausted"
+        );
+        ensure!(
+            self.usage
+                .total_tokens
+                .checked_add(self.limits.reserve_tokens_per_request)
+                .is_some_and(|total| total <= self.limits.max_total_tokens),
+            "QA token budget exhausted"
+        );
+        ensure!(
+            self.cost_usd_micros
+                .checked_add(self.limits.reserve_usd_micros_per_request)
+                .is_some_and(|cost| cost <= self.limits.max_usd_micros),
+            "QA USD budget exhausted"
+        );
+        self.requests = requests;
+        Ok(())
+    }
+
+    fn record_usage(&mut self, usage: QaUsage) -> anyhow::Result<u64> {
+        let usage = usage.validate()?;
+        let call_cost = token_cost_usd_micros(
+            usage,
+            self.limits.input_usd_micros_per_million,
+            self.limits.output_usd_micros_per_million,
+        )?;
+        let next_usage = self.usage.checked_add(usage)?;
+        let next_cost = self
+            .cost_usd_micros
+            .checked_add(call_cost)
+            .context("QA USD accounting overflow")?;
+        self.usage = next_usage;
+        self.cost_usd_micros = next_cost;
+        ensure!(
+            self.usage.total_tokens <= self.limits.max_total_tokens,
+            "QA response exceeded the declared token ceiling"
+        );
+        ensure!(
+            self.cost_usd_micros <= self.limits.max_usd_micros,
+            "QA response exceeded the declared USD ceiling"
+        );
+        Ok(call_cost)
+    }
+
+    fn restore_cached_call(&mut self, entry: &QaCacheEntry) -> anyhow::Result<()> {
+        let requests = self
+            .requests
+            .checked_add(1)
+            .context("cached request count overflow")?;
+        let usage = self.usage.checked_add(entry.response.usage.validate()?)?;
+        let cost = self
+            .cost_usd_micros
+            .checked_add(entry.cost_usd_micros)
+            .context("cached QA USD accounting overflow")?;
+        ensure!(
+            requests <= self.limits.max_requests,
+            "cached QA max request budget exhausted"
+        );
+        ensure!(
+            usage.total_tokens <= self.limits.max_total_tokens,
+            "cached QA token budget exhausted"
+        );
+        ensure!(
+            cost <= self.limits.max_usd_micros,
+            "cached QA USD budget exhausted"
+        );
+        self.requests = requests;
+        self.usage = usage;
+        self.cost_usd_micros = cost;
+        Ok(())
+    }
+}
+
+fn token_cost_usd_micros(usage: QaUsage, input_rate: u64, output_rate: u64) -> anyhow::Result<u64> {
+    let numerator = u128::from(usage.input_tokens)
+        .checked_mul(u128::from(input_rate))
+        .and_then(|value| {
+            u128::from(usage.output_tokens)
+                .checked_mul(u128::from(output_rate))
+                .and_then(|output| value.checked_add(output))
+        })
+        .context("QA cost multiplication overflow")?;
+    let rounded_up = numerator
+        .checked_add(999_999)
+        .context("QA cost rounding overflow")?
+        / 1_000_000;
+    u64::try_from(rounded_up).context("QA cost exceeds u64")
+}
+
+/// Async seam for fake and paid LongMemEval reader/judge backends.
+#[async_trait]
+pub trait LongMemQaBackend: Send {
+    async fn complete(&mut self, request: &LongMemQaRequest) -> anyhow::Result<LongMemQaResponse>;
+}
+
+/// Single-attempt OpenAI Responses API adapter. Budgeting is owned by the
+/// evaluator and no implicit retry policy is installed here.
+#[derive(Debug, Clone)]
+pub struct OpenAiResponsesBackend {
+    client: reqwest::Client,
+    api_key: Option<String>,
+}
+
+impl OpenAiResponsesBackend {
+    pub fn new(api_key: Option<String>) -> Self {
+        Self {
+            client: reqwest::Client::new(),
+            api_key,
+        }
+    }
+
+    pub fn from_env() -> Self {
+        Self::new(std::env::var("OPENAI_API_KEY").ok())
+    }
+
+    pub fn credentials_available(&self) -> bool {
+        self.api_key
+            .as_deref()
+            .is_some_and(|key| !key.trim().is_empty())
+    }
+
+    pub fn request_json(request: &LongMemQaRequest) -> anyhow::Result<Value> {
+        ensure!(
+            request.model == LONGMEMEVAL_MODEL,
+            "LongMemEval audited model pin changed"
+        );
+        ensure!(!request.prompt.is_empty(), "LongMemEval prompt is empty");
+        Ok(json!({
+            "model": request.model,
+            "input": request.prompt,
+            "store": false,
+            "temperature": 0,
+            "max_output_tokens": request.max_output_tokens,
+        }))
+    }
+
+    pub fn decode_response(status_code: u16, body: &[u8]) -> anyhow::Result<LongMemQaResponse> {
+        ensure!(
+            status_code == 200,
+            "OpenAI Responses API HTTP status {status_code}"
+        );
+        let raw_response: Value = serde_json::from_slice(body).context("decode OpenAI response")?;
+        ensure!(
+            raw_response.get("status").and_then(Value::as_str) == Some("completed"),
+            "OpenAI response status is not completed"
+        );
+        let output_text = raw_response
+            .get("output_text")
+            .and_then(Value::as_str)
+            .context("OpenAI response has no string output_text")?
+            .to_owned();
+        let usage = raw_response
+            .get("usage")
+            .and_then(Value::as_object)
+            .context("OpenAI response has malformed usage")?;
+        let usage = QaUsage {
+            input_tokens: usage
+                .get("input_tokens")
+                .and_then(Value::as_u64)
+                .context("OpenAI usage.input_tokens is malformed")?,
+            output_tokens: usage
+                .get("output_tokens")
+                .and_then(Value::as_u64)
+                .context("OpenAI usage.output_tokens is malformed")?,
+            total_tokens: usage
+                .get("total_tokens")
+                .and_then(Value::as_u64)
+                .context("OpenAI usage.total_tokens is malformed")?,
+        };
+        LongMemQaResponse {
+            output_text,
+            usage,
+            raw_response,
+        }
+        .validate()
+    }
+}
+
+#[async_trait]
+impl LongMemQaBackend for OpenAiResponsesBackend {
+    async fn complete(&mut self, request: &LongMemQaRequest) -> anyhow::Result<LongMemQaResponse> {
+        let api_key = self
+            .api_key
+            .as_deref()
+            .filter(|key| !key.trim().is_empty())
+            .context("missing OPENAI_API_KEY")?;
+        let response = self
+            .client
+            .post(OPENAI_RESPONSES_URL)
+            .bearer_auth(api_key)
+            .json(&Self::request_json(request)?)
+            .send()
+            .await
+            .context("send OpenAI Responses API request")?;
+        let status = response.status().as_u16();
+        let body = response
+            .bytes()
+            .await
+            .context("read OpenAI Responses API response")?;
+        Self::decode_response(status, &body)
+    }
+}
+
+/// Render the origin extract-then-reason LongMemEval reader request.
+pub fn build_longmem_reader_request(
+    question: &QuestionRecord,
+    ranking: &Ranking,
+    dataset: &BenchmarkDataset,
+) -> anyhow::Result<LongMemQaRequest> {
+    ensure!(
+        ranking.hits.len() <= ranking.k,
+        "frozen ranking contains more hits than its declared k"
+    );
+    ensure!(
+        ranking.query_sha256 == sha256_hex(question.text.as_bytes()),
+        "caller-owned question key is bound to a ranking with a different query hash"
+    );
+    let conversation = dataset
+        .conversations
+        .iter()
+        .find(|conversation| conversation.source_id.as_deref() == Some(question.id.as_str()))
+        .with_context(|| format!("no canonical LongMemEval conversation for {}", question.id))?;
+    let mut chunks = ranking
+        .hits
+        .iter()
+        .map(|hit| longmem_prompt_chunk(conversation, hit, ranking.granularity))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    ensure!(!chunks.is_empty(), "LongMemEval reader history is empty");
+    chunks.sort_by(|left, right| left.0.cmp(&right.0));
+
+    let mut history = String::new();
+    for (index, (date, turns)) in chunks.into_iter().enumerate() {
+        history.push_str("\n### Session ");
+        history.push_str(&(index + 1).to_string());
+        history.push_str(":\nSession Date: ");
+        history.push_str(&date);
+        history.push_str("\nSession Content:\n\n");
+        history.push_str(&serde_json::to_string(&turns)?);
+        history.push('\n');
+    }
+
+    let question_date = question
+        .question_date
+        .as_deref()
+        .context("LongMemEval question has no question date")?;
+    let prompt = LONGMEM_READER_PROMPT
+        .replace("{history}", &history)
+        .replace("{question_date}", question_date)
+        .replace("{question}", &question.text);
+    Ok(LongMemQaRequest {
+        question_id: question.id.clone(),
+        variant: ranking.variant,
+        granularity: ranking.granularity,
+        stage: QaStage::Reader,
+        model: LONGMEMEVAL_MODEL.to_owned(),
+        question_sha256: sha256_hex(question.text.as_bytes()),
+        prompt_sha256: sha256_hex(prompt.as_bytes()),
+        ranking_sha256: ranking_sha256(ranking)?,
+        max_output_tokens: LONGMEM_READER_MAX_OUTPUT_TOKENS,
+        prompt,
+    })
+}
+
+fn longmem_prompt_chunk(
+    conversation: &ConversationRecord,
+    hit: &RankedHit,
+    granularity: Granularity,
+) -> anyhow::Result<(String, Vec<Value>)> {
+    match granularity {
+        Granularity::Session => {
+            let session = conversation
+                .sessions
+                .iter()
+                .find(|session| session.internal_id == hit.occurrence_id)
+                .with_context(|| {
+                    format!(
+                        "frozen LongMemEval ranking references unknown session {}",
+                        hit.occurrence_id
+                    )
+                })?;
+            Ok((
+                longmem_session_date(session)?,
+                session.turns.iter().map(longmem_turn_json).collect(),
+            ))
+        }
+        Granularity::Turn => {
+            for session in &conversation.sessions {
+                if let Some(index) = session
+                    .turns
+                    .iter()
+                    .position(|turn| turn.internal_id == hit.occurrence_id)
+                {
+                    let end = (index + 2).min(session.turns.len());
+                    return Ok((
+                        longmem_session_date(session)?,
+                        session.turns[index..end]
+                            .iter()
+                            .map(longmem_turn_json)
+                            .collect(),
+                    ));
+                }
+            }
+            anyhow::bail!(
+                "frozen LongMemEval ranking references unknown turn {}",
+                hit.occurrence_id
+            )
+        }
+    }
+}
+
+fn longmem_session_date(session: &SessionRecord) -> anyhow::Result<String> {
+    session
+        .occurred_at
+        .clone()
+        .context("ranked LongMemEval session has no date")
+}
+
+fn longmem_turn_json(turn: &TurnRecord) -> Value {
+    json!({
+        "role": match turn.role {
+            Role::User => "user",
+            Role::Assistant => "assistant",
+            Role::System => "system",
+            Role::Other => "other",
+        },
+        "content": turn.content,
+    })
+}
+
+/// Render the pinned origin LongMemEval answer-check prompt.
+pub fn render_longmem_judge_prompt(
+    question_type: &str,
+    question: &str,
+    answer: &Value,
+    hypothesis: &str,
+    abstention: bool,
+) -> anyhow::Result<String> {
+    let answer = longmem_answer_text(answer)?;
+    let prompt = if abstention {
+        format!(
+            "I will give you an unanswerable question, an explanation, and a response from a model. Please answer yes if the model correctly identifies the question as unanswerable. The model could say that the information is incomplete, or some other information is given but the asked information is not.\n\nQuestion: {question}\n\nExplanation: {answer}\n\nModel Response: {hypothesis}\n\nDoes the model correctly identify the question as unanswerable? Answer yes or no only."
+        )
+    } else {
+        match question_type {
+            "single-session-user" | "single-session-assistant" | "multi-session" => format!(
+                "I will give you a question, a correct answer, and a response from a model. Please answer yes if the response contains the correct answer. Otherwise, answer no. If the response is equivalent to the correct answer or contains all the intermediate steps to get the correct answer, you should also answer yes. If the response only contains a subset of the information required by the answer, answer no.\n\nQuestion: {question}\n\nCorrect Answer: {answer}\n\nModel Response: {hypothesis}\n\nIs the model response correct? Answer yes or no only."
+            ),
+            "temporal-reasoning" => format!(
+                "I will give you a question, a correct answer, and a response from a model. Please answer yes if the response contains the correct answer. Otherwise, answer no. If the response is equivalent to the correct answer or contains all the intermediate steps to get the correct answer, you should also answer yes. If the response only contains a subset of the information required by the answer, answer no. In addition, do not penalize off-by-one errors for the number of days.\nIf the question asks for the number of days/weeks/months, etc., and the model makes off-by-one errors (e.g., predicting 19 days when the answer is 18), the model's response is still correct. \n\nQuestion: {question}\n\nCorrect Answer: {answer}\n\nModel Response: {hypothesis}\n\nIs the model response correct? Answer yes or no only."
+            ),
+            "knowledge-update" => format!(
+                "I will give you a question, a correct answer, and a response from a model. Please answer yes if the response contains the correct answer. Otherwise, answer no. If the response contains some previous information along with an updated answer, the response should be considered as correct as long as the updated answer is the required answer.\n\nQuestion: {question}\n\nCorrect Answer: {answer}\n\nModel Response: {hypothesis}\n\nIs the model response correct? Answer yes or no only."
+            ),
+            "single-session-preference" => format!(
+                "I will give you a question, a rubric for desired personalized response, and a response from a model. Please answer yes if the response satisfies the desired response. Otherwise, answer no. The model does not need to reflect all the points in the rubric. The response is correct as long as it recalls and utilizes the user's personal information correctly.\n\nQuestion: {question}\n\nRubric: {answer}\n\nModel Response: {hypothesis}\n\nIs the model response correct? Answer yes or no only."
+            ),
+            _ => anyhow::bail!("unsupported LongMemEval question type {question_type}"),
+        }
+    };
+    Ok(prompt)
+}
+
+fn longmem_answer_text(answer: &Value) -> anyhow::Result<String> {
+    match answer {
+        Value::String(text) => Ok(text.clone()),
+        _ => serde_json::to_string(answer).context("serialize LongMemEval answer"),
+    }
+}
+
+fn build_longmem_judge_request(
+    question: &QuestionRecord,
+    reader: &LongMemQaRequest,
+    hypothesis: &str,
+) -> anyhow::Result<LongMemQaRequest> {
+    let question_type = question
+        .question_type
+        .as_deref()
+        .context("LongMemEval question has no question type")?;
+    let prompt = render_longmem_judge_prompt(
+        question_type,
+        &question.text,
+        &question.answer,
+        hypothesis,
+        question.id.contains("_abs"),
+    )?;
+    Ok(LongMemQaRequest {
+        question_id: question.id.clone(),
+        variant: reader.variant,
+        granularity: reader.granularity,
+        stage: QaStage::Judge,
+        model: LONGMEMEVAL_MODEL.to_owned(),
+        question_sha256: sha256_hex(question.text.as_bytes()),
+        prompt_sha256: sha256_hex(prompt.as_bytes()),
+        ranking_sha256: reader.ranking_sha256.clone(),
+        max_output_tokens: LONGMEM_JUDGE_MAX_OUTPUT_TOKENS,
+        prompt,
+    })
+}
+
+/// One denominator-preserving LongMemEval QA result.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LongMemQaRecord {
+    pub question_id: String,
+    pub variant: Variant,
+    pub granularity: Granularity,
+    pub question_type: String,
+    pub status: QaStatus,
+    pub label: Option<bool>,
+    pub hypothesis: Option<String>,
+    pub pending_reason: Option<String>,
+    pub model: String,
+    pub question_sha256: String,
+    pub ranking_sha256: String,
+    pub reader_prompt_sha256: Option<String>,
+    pub judge_prompt_sha256: Option<String>,
+    pub usage: QaUsage,
+    pub cost_usd_micros: u64,
+}
+
+impl LongMemQaRecord {
+    fn pending(
+        question: &QuestionRecord,
+        ranking: &Ranking,
+        ranking_sha256: String,
+        reader_prompt_sha256: Option<String>,
+        judge_prompt_sha256: Option<String>,
+        hypothesis: Option<String>,
+        usage: QaUsage,
+        cost_usd_micros: u64,
+        reason: impl Into<String>,
+    ) -> Self {
+        Self {
+            question_id: question.id.clone(),
+            variant: ranking.variant,
+            granularity: ranking.granularity,
+            question_type: question.question_type.clone().unwrap_or_default(),
+            status: QaStatus::Pending,
+            label: None,
+            hypothesis,
+            pending_reason: Some(reason.into()),
+            model: LONGMEMEVAL_MODEL.to_owned(),
+            question_sha256: sha256_hex(question.text.as_bytes()),
+            ranking_sha256,
+            reader_prompt_sha256,
+            judge_prompt_sha256,
+            usage,
+            cost_usd_micros,
+        }
+    }
+}
+
+/// Replay pinned reader then pinned judge over each supplied frozen ranking.
+/// Operational failure is represented by one `QaPending` record, never by a
+/// missing row or a fabricated label.
+pub async fn evaluate_longmem(
+    dataset: &BenchmarkDataset,
+    rankings: &RankingSet,
+    backend: &mut dyn LongMemQaBackend,
+    cache: &mut dyn QaCache,
+    budget: &mut QaBudget,
+) -> anyhow::Result<Vec<LongMemQaRecord>> {
+    let mut records = Vec::with_capacity(rankings.len());
+    for ((question_id, variant, granularity), ranking) in rankings {
+        let question = dataset
+            .questions
+            .iter()
+            .find(|question| QueryOccurrenceId::new(question.id.clone()) == *question_id)
+            .with_context(|| format!("ranking has unknown LongMemEval question {question_id:?}"))?;
+        ensure!(
+            ranking.variant == *variant && ranking.granularity == *granularity,
+            "caller-owned ranking key disagrees with ranking payload"
+        );
+        let raw_ranking_sha256 = ranking_sha256(ranking)?;
+        let reader_request = match build_longmem_reader_request(question, ranking, dataset) {
+            Ok(request) => request,
+            Err(error) => {
+                records.push(LongMemQaRecord::pending(
+                    question,
+                    ranking,
+                    raw_ranking_sha256,
+                    None,
+                    None,
+                    None,
+                    QaUsage::default(),
+                    0,
+                    format!("reader request: {error:#}"),
+                ));
+                continue;
+            }
+        };
+        let reader_key = QaCacheKey::from_request(&reader_request);
+        let reader_entry = match cache.get(&reader_key) {
+            Ok(Some(entry)) => {
+                if let Err(error) = budget.restore_cached_call(&entry) {
+                    records.push(LongMemQaRecord::pending(
+                        question,
+                        ranking,
+                        reader_request.ranking_sha256.clone(),
+                        Some(reader_request.prompt_sha256.clone()),
+                        None,
+                        None,
+                        QaUsage::default(),
+                        0,
+                        format!("reader cache budget: {error:#}"),
+                    ));
+                    continue;
+                }
+                entry
+            }
+            Ok(None) => match execute_cached_call(
+                backend,
+                cache,
+                budget,
+                reader_key,
+                reader_request.clone(),
+                None,
+            )
+            .await
+            {
+                Ok(entry) => entry,
+                Err(error) => {
+                    records.push(LongMemQaRecord::pending(
+                        question,
+                        ranking,
+                        reader_request.ranking_sha256.clone(),
+                        Some(reader_request.prompt_sha256.clone()),
+                        None,
+                        None,
+                        QaUsage::default(),
+                        0,
+                        format!("reader: {error:#}"),
+                    ));
+                    continue;
+                }
+            },
+            Err(error) => {
+                records.push(LongMemQaRecord::pending(
+                    question,
+                    ranking,
+                    reader_request.ranking_sha256.clone(),
+                    Some(reader_request.prompt_sha256.clone()),
+                    None,
+                    None,
+                    QaUsage::default(),
+                    0,
+                    format!("reader cache: {error:#}"),
+                ));
+                continue;
+            }
+        };
+        if reader_entry.request.stage != QaStage::Reader || reader_entry.label.is_some() {
+            records.push(LongMemQaRecord::pending(
+                question,
+                ranking,
+                reader_request.ranking_sha256.clone(),
+                Some(reader_request.prompt_sha256.clone()),
+                None,
+                None,
+                QaUsage::default(),
+                0,
+                "reader cache entry has judge-only fields",
+            ));
+            continue;
+        }
+        let hypothesis = reader_entry.response.output_text.clone();
+        let judge_request =
+            match build_longmem_judge_request(question, &reader_request, &hypothesis) {
+                Ok(request) => request,
+                Err(error) => {
+                    records.push(LongMemQaRecord::pending(
+                        question,
+                        ranking,
+                        reader_request.ranking_sha256.clone(),
+                        Some(reader_request.prompt_sha256.clone()),
+                        None,
+                        Some(hypothesis),
+                        reader_entry.response.usage,
+                        reader_entry.cost_usd_micros,
+                        format!("judge request: {error:#}"),
+                    ));
+                    continue;
+                }
+            };
+        let judge_key = QaCacheKey::from_request(&judge_request);
+        let judge_entry = match cache.get(&judge_key) {
+            Ok(Some(entry)) => {
+                if let Err(error) = budget.restore_cached_call(&entry) {
+                    records.push(LongMemQaRecord::pending(
+                        question,
+                        ranking,
+                        reader_request.ranking_sha256.clone(),
+                        Some(reader_request.prompt_sha256.clone()),
+                        Some(judge_request.prompt_sha256.clone()),
+                        Some(hypothesis),
+                        reader_entry.response.usage,
+                        reader_entry.cost_usd_micros,
+                        format!("judge cache budget: {error:#}"),
+                    ));
+                    continue;
+                }
+                entry
+            }
+            Ok(None) => match execute_cached_call(
+                backend,
+                cache,
+                budget,
+                judge_key,
+                judge_request.clone(),
+                Some(judge_label),
+            )
+            .await
+            {
+                Ok(entry) => entry,
+                Err(error) => {
+                    records.push(LongMemQaRecord::pending(
+                        question,
+                        ranking,
+                        reader_request.ranking_sha256.clone(),
+                        Some(reader_request.prompt_sha256.clone()),
+                        Some(judge_request.prompt_sha256.clone()),
+                        Some(hypothesis),
+                        reader_entry.response.usage,
+                        reader_entry.cost_usd_micros,
+                        format!("judge: {error:#}"),
+                    ));
+                    continue;
+                }
+            },
+            Err(error) => {
+                records.push(LongMemQaRecord::pending(
+                    question,
+                    ranking,
+                    reader_request.ranking_sha256.clone(),
+                    Some(reader_request.prompt_sha256.clone()),
+                    Some(judge_request.prompt_sha256.clone()),
+                    Some(hypothesis),
+                    reader_entry.response.usage,
+                    reader_entry.cost_usd_micros,
+                    format!("judge cache: {error:#}"),
+                ));
+                continue;
+            }
+        };
+        let Some(label) = judge_entry.label else {
+            records.push(LongMemQaRecord::pending(
+                question,
+                ranking,
+                reader_request.ranking_sha256.clone(),
+                Some(reader_request.prompt_sha256.clone()),
+                Some(judge_request.prompt_sha256.clone()),
+                Some(hypothesis),
+                reader_entry.response.usage,
+                reader_entry.cost_usd_micros,
+                "judge cache entry has no terminal label",
+            ));
+            continue;
+        };
+        records.push(LongMemQaRecord {
+            question_id: question.id.clone(),
+            variant: ranking.variant,
+            granularity: ranking.granularity,
+            question_type: question.question_type.clone().unwrap_or_default(),
+            status: QaStatus::Complete,
+            label: Some(label),
+            hypothesis: Some(hypothesis),
+            pending_reason: None,
+            model: LONGMEMEVAL_MODEL.to_owned(),
+            question_sha256: reader_request.question_sha256.clone(),
+            ranking_sha256: reader_request.ranking_sha256.clone(),
+            reader_prompt_sha256: Some(reader_request.prompt_sha256.clone()),
+            judge_prompt_sha256: Some(judge_request.prompt_sha256.clone()),
+            usage: reader_entry
+                .response
+                .usage
+                .checked_add(judge_entry.response.usage)?,
+            cost_usd_micros: reader_entry
+                .cost_usd_micros
+                .checked_add(judge_entry.cost_usd_micros)
+                .context("cached QA cost overflow")?,
+        });
+    }
+    ensure!(
+        records.len() == rankings.len(),
+        "LongMemEval QA did not retain its frozen-ranking denominator"
+    );
+    Ok(records)
+}
+
+async fn execute_cached_call(
+    backend: &mut dyn LongMemQaBackend,
+    cache: &mut dyn QaCache,
+    budget: &mut QaBudget,
+    key: QaCacheKey,
+    request: LongMemQaRequest,
+    labeler: Option<fn(&str) -> bool>,
+) -> anyhow::Result<QaCacheEntry> {
+    budget.admit_request()?;
+    let response = backend.complete(&request).await?.validate()?;
+    let cost_usd_micros = budget.record_usage(response.usage)?;
+    let entry = QaCacheEntry {
+        key,
+        request,
+        label: labeler.map(|labeler| labeler(&response.output_text)),
+        response,
+        cost_usd_micros,
+    };
+    cache.put(&entry)?;
+    Ok(entry)
+}
+
+fn judge_label(output: &str) -> bool {
+    output.to_ascii_lowercase().contains("yes")
+}
+
+fn variant_name(variant: Variant) -> &'static str {
+    match variant {
+        Variant::Oracle => "oracle",
+        Variant::Recent => "recent",
+        Variant::FlatBm25 => "flat_bm25",
+        Variant::GraphIndexOnly => "graph_index_only",
+        Variant::GraphTraversal => "graph_traversal",
+    }
+}
+
+fn granularity_name(granularity: Granularity) -> &'static str {
+    match granularity {
+        Granularity::Session => "session",
+        Granularity::Turn => "turn",
+    }
+}
+
+fn stage_name(stage: QaStage) -> &'static str {
+    match stage {
+        QaStage::Reader => "reader",
+        QaStage::Judge => "judge",
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
