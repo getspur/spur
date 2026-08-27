@@ -947,8 +947,8 @@ pub trait LongMemQaBackend: Send {
     async fn complete(&mut self, request: &LongMemQaRequest) -> anyhow::Result<LongMemQaResponse>;
 }
 
-/// Single-attempt OpenAI Responses API adapter. Budgeting is owned by the
-/// evaluator, and reqwest's implicit protocol retries are explicitly disabled.
+/// Single-transmission OpenAI Responses API adapter. Budgeting is owned by the
+/// evaluator, and reqwest's implicit retries and redirects are explicitly disabled.
 #[derive(Clone)]
 pub struct OpenAiResponsesBackend {
     client: reqwest::Client,
@@ -965,6 +965,7 @@ impl fmt::Debug for OpenAiResponsesBackend {
                 &OPENAI_PHYSICAL_TRANSMISSIONS_PER_CALL,
             )
             .field("retry_policy", &"never")
+            .field("redirect_policy", &"none")
             .field("total_timeout", &OPENAI_TOTAL_TIMEOUT)
             .field("connect_timeout", &OPENAI_CONNECT_TIMEOUT)
             .field("read_timeout", &OPENAI_READ_TIMEOUT)
@@ -977,6 +978,7 @@ impl OpenAiResponsesBackend {
         Self {
             client: reqwest::Client::builder()
                 .retry(reqwest::retry::never())
+                .redirect(reqwest::redirect::Policy::none())
                 .timeout(OPENAI_TOTAL_TIMEOUT)
                 .connect_timeout(OPENAI_CONNECT_TIMEOUT)
                 .read_timeout(OPENAI_READ_TIMEOUT)

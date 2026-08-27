@@ -668,6 +668,7 @@ fn paid_backend_debug_exposes_single_attempt_and_finite_timeout_policy() {
 
     assert!(debug.contains("physical_transmissions_per_call: 1"));
     assert!(debug.contains("retry_policy: \"never\""));
+    assert!(debug.contains("redirect_policy: \"none\""));
     assert!(debug.contains("total_timeout: 120s"));
     assert!(debug.contains("connect_timeout: 10s"));
     assert!(debug.contains("read_timeout: 60s"));
