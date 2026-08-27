@@ -22,6 +22,7 @@ members = [
     "crates/spur-context-source",
     "crates/spur-context-fetcher",
     "crates/spur-context-auth",
+    "crates/spur-code-eval",
     "crates/spur-graph",
     "crates/tree-sitter-mermaid",
     "xtask",

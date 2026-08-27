@@ -1,0 +1,17 @@
+[package]
+name = "spur-code-eval"
+description = "Reproducible code-intelligence benchmarks for SPUR"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+autobenches = false
+
+[package.metadata.dist]
+dist = false
+
+[lib]
+bench = false
+
+[lints]
+workspace = true

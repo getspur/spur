@@ -9085,6 +9085,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "spur-code-eval"
+version = "1.21.0"
+
+[[package]]
 name = "spur-context"
 version = "1.21.0"
 dependencies = [
