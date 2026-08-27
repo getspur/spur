@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::ops::Deref;
@@ -14,6 +14,7 @@ use tokio::fs::OpenOptions;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::sync::{Notify, OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock};
 
+use crate::medallion::{SilverManifest, SILVER_MANIFEST_FILENAME};
 use crate::serving_registry::ArtifactRef;
 
 const OWNED_CACHE_DIRECTORY: &str = "spur-artifact-cache";
@@ -117,6 +118,12 @@ pub struct ArtifactIdentity {
     pub package: String,
     pub revision: String,
     pub artifact: ArtifactRef,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArtifactBundleIdentity {
+    pub root: ArtifactIdentity,
+    pub graph_prefix: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -232,6 +239,42 @@ pub struct MaterializedArtifact {
     _generation_lease: OwnedRwLockReadGuard<GenerationState>,
 }
 
+pub struct MaterializedArtifactBundle {
+    path: PathBuf,
+    _root_lease: MaterializedArtifact,
+    _member_leases: Vec<MaterializedArtifact>,
+}
+
+impl MaterializedArtifactBundle {
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl AsRef<Path> for MaterializedArtifactBundle {
+    fn as_ref(&self) -> &Path {
+        self.path()
+    }
+}
+
+impl Deref for MaterializedArtifactBundle {
+    type Target = Path;
+
+    fn deref(&self) -> &Self::Target {
+        self.path()
+    }
+}
+
+impl fmt::Debug for MaterializedArtifactBundle {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("MaterializedArtifactBundle")
+            .field("path", &self.path)
+            .field("members", &self._member_leases.len())
+            .finish_non_exhaustive()
+    }
+}
+
 impl MaterializedArtifact {
     pub fn path(&self) -> &Path {
         &self.path
@@ -271,6 +314,16 @@ struct CacheKey {
     uri: String,
     sha256: String,
     bytes: u64,
+    layout: CacheLayout,
+}
+
+#[derive(Clone, Eq, PartialEq, Hash)]
+enum CacheLayout {
+    Object,
+    BundleMember {
+        bundle_identity: String,
+        relative_path: String,
+    },
 }
 
 impl PartialEq for CacheKey {
@@ -282,6 +335,7 @@ impl PartialEq for CacheKey {
             && self.uri == other.uri
             && self.sha256 == other.sha256
             && self.bytes == other.bytes
+            && self.layout == other.layout
     }
 }
 
@@ -294,6 +348,7 @@ impl Hash for CacheKey {
         self.uri.hash(state);
         self.sha256.hash(state);
         self.bytes.hash(state);
+        self.layout.hash(state);
     }
 }
 
@@ -307,8 +362,29 @@ impl From<&ArtifactIdentity> for CacheKey {
             uri: identity.artifact.uri.clone(),
             sha256: identity.artifact.sha256.clone(),
             bytes: identity.artifact.bytes,
+            layout: CacheLayout::Object,
         }
     }
+}
+
+impl CacheKey {
+    fn for_bundle_member(
+        identity: &ArtifactIdentity,
+        bundle_identity: &str,
+        relative_path: &str,
+    ) -> Self {
+        let mut key = Self::from(identity);
+        key.layout = CacheLayout::BundleMember {
+            bundle_identity: bundle_identity.to_owned(),
+            relative_path: relative_path.to_owned(),
+        };
+        key
+    }
+}
+
+struct ValidatedBundleMember {
+    relative_path: String,
+    identity: ArtifactIdentity,
 }
 
 impl ArtifactCache {
@@ -483,9 +559,68 @@ impl ArtifactCache {
         identity: &ArtifactIdentity,
     ) -> Result<MaterializedArtifact, ArtifactCacheError> {
         validate_identity(identity)?;
+        self.materialize_at(
+            identity,
+            CacheKey::from(identity),
+            self.final_path(identity),
+        )
+        .await
+    }
+
+    pub async fn materialize_bundle(
+        &self,
+        bundle: &ArtifactBundleIdentity,
+    ) -> Result<MaterializedArtifactBundle, ArtifactCacheError> {
+        validate_bundle_identity(bundle)?;
+        let root_lease = self.materialize(&bundle.root).await?;
+        let root_bytes = tokio::fs::read(root_lease.path())
+            .await
+            .map_err(|_| ArtifactCacheError::Filesystem)?;
+        verify_bytes(&root_bytes, &bundle.root.artifact)?;
+        let manifest: SilverManifest =
+            serde_json::from_slice(&root_bytes).map_err(|_| ArtifactCacheError::InvalidIdentity)?;
+        let members = validate_bundle_members(bundle, &manifest)?;
+        let bundle_identity = identity_directory(&bundle.root);
+        let bundle_root = self
+            .generation_dir(bundle.root.generation)
+            .join("bundles")
+            .join(&bundle_identity);
+        let mut member_leases = Vec::with_capacity(members.len());
+        for member in members {
+            let final_path = bundle_root.join(relative_path_buf(&member.relative_path));
+            let key = CacheKey::for_bundle_member(
+                &member.identity,
+                &bundle_identity,
+                &member.relative_path,
+            );
+            member_leases.push(
+                self.materialize_at(&member.identity, key, final_path)
+                    .await?,
+            );
+        }
+
+        let generation = Arc::clone(&self.inner.generation).read_owned().await;
+        self.validate_generation_authority(&generation, &bundle.root)?;
+        if lock_state(&self.inner.state).poisoned {
+            return Err(ArtifactCacheError::Filesystem);
+        }
+        drop(generation);
+
+        Ok(MaterializedArtifactBundle {
+            path: bundle_root,
+            _root_lease: root_lease,
+            _member_leases: member_leases,
+        })
+    }
+
+    async fn materialize_at(
+        &self,
+        identity: &ArtifactIdentity,
+        key: CacheKey,
+        final_path: PathBuf,
+    ) -> Result<MaterializedArtifact, ArtifactCacheError> {
         let initial_lease = Arc::clone(&self.inner.generation).read_owned().await;
         let generation_epoch = self.validate_generation_authority(&initial_lease, identity)?;
-        let key = CacheKey::from(identity);
         let (operation, created) = {
             let mut state = lock_state(&self.inner.state);
             if state.poisoned {
@@ -506,6 +641,7 @@ impl ArtifactCache {
             self.start_materialization_operation(
                 key.clone(),
                 identity.clone(),
+                final_path,
                 generation_epoch,
                 caller_lease
                     .take()
@@ -544,13 +680,14 @@ impl ArtifactCache {
         &self,
         key: CacheKey,
         identity: ArtifactIdentity,
+        final_path: PathBuf,
         generation_epoch: u64,
         generation_lease: OwnedRwLockReadGuard<GenerationState>,
         operation: Arc<OwnedOperation<Result<PathBuf, ArtifactCacheError>>>,
     ) {
         let cache = self.clone();
         let journal = Arc::new(PublicationJournal::new(
-            cache.final_path(&identity),
+            final_path,
             Arc::clone(&cache.inner.filesystem),
             Arc::clone(&cache.inner.state),
         ));
@@ -708,6 +845,97 @@ impl ArtifactCache {
             .owned_root
             .join(format!("generation-{generation}"))
     }
+}
+
+fn validate_bundle_identity(bundle: &ArtifactBundleIdentity) -> Result<(), ArtifactCacheError> {
+    validate_identity(&bundle.root)?;
+    let prefix = bundle
+        .graph_prefix
+        .strip_suffix('/')
+        .ok_or(ArtifactCacheError::InvalidIdentity)?;
+    let (_, key) = parse_s3_uri(prefix).ok_or(ArtifactCacheError::InvalidIdentity)?;
+    if key
+        .split('/')
+        .any(|part| part.is_empty() || part == "." || part == ".." || part.contains('\\'))
+        || bundle.graph_prefix.contains('\0')
+    {
+        return Err(ArtifactCacheError::InvalidIdentity);
+    }
+    let expected_root_uri = format!("{}{SILVER_MANIFEST_FILENAME}", bundle.graph_prefix);
+    if bundle.root.artifact.uri != expected_root_uri {
+        return Err(ArtifactCacheError::InvalidIdentity);
+    }
+    Ok(())
+}
+
+fn validate_bundle_members(
+    bundle: &ArtifactBundleIdentity,
+    manifest: &SilverManifest,
+) -> Result<Vec<ValidatedBundleMember>, ArtifactCacheError> {
+    let mut paths = HashSet::with_capacity(manifest.files.len());
+    let mut members = Vec::with_capacity(manifest.files.len());
+    for file in &manifest.files {
+        validate_relative_path(&file.path)?;
+        if !paths.insert(file.path.clone()) {
+            return Err(ArtifactCacheError::InvalidIdentity);
+        }
+        let identity = ArtifactIdentity {
+            generation: bundle.root.generation,
+            source: bundle.root.source.clone(),
+            package: bundle.root.package.clone(),
+            revision: bundle.root.revision.clone(),
+            artifact: ArtifactRef {
+                uri: format!("{}{}", bundle.graph_prefix, file.path),
+                sha256: file.sha256.clone(),
+                bytes: file.size_bytes,
+            },
+        };
+        validate_identity(&identity)?;
+        members.push(ValidatedBundleMember {
+            relative_path: file.path.clone(),
+            identity,
+        });
+    }
+
+    if !paths.contains("manifest.json") {
+        return Err(ArtifactCacheError::InvalidIdentity);
+    }
+    for path in &paths {
+        for (separator, _) in path.match_indices('/') {
+            if paths.contains(&path[..separator]) {
+                return Err(ArtifactCacheError::InvalidIdentity);
+            }
+        }
+    }
+    Ok(members)
+}
+
+fn validate_relative_path(path: &str) -> Result<(), ArtifactCacheError> {
+    if path.trim().is_empty()
+        || path.starts_with('/')
+        || path.contains('\\')
+        || path.contains('\0')
+        || path
+            .split('/')
+            .any(|part| part.is_empty() || part == "." || part == "..")
+    {
+        return Err(ArtifactCacheError::InvalidIdentity);
+    }
+    Ok(())
+}
+
+fn relative_path_buf(relative_path: &str) -> PathBuf {
+    relative_path.split('/').collect()
+}
+
+fn verify_bytes(bytes: &[u8], artifact: &ArtifactRef) -> Result<(), ArtifactCacheError> {
+    let actual_bytes =
+        u64::try_from(bytes.len()).map_err(|_| ArtifactCacheError::IntegrityMismatch)?;
+    let actual_sha256 = format!("{:x}", Sha256::digest(bytes));
+    if actual_bytes != artifact.bytes || !actual_sha256.eq_ignore_ascii_case(&artifact.sha256) {
+        return Err(ArtifactCacheError::IntegrityMismatch);
+    }
+    Ok(())
 }
 
 fn validate_identity(identity: &ArtifactIdentity) -> Result<(), ArtifactCacheError> {

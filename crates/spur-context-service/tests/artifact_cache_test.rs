@@ -10,8 +10,11 @@ use std::task::Poll;
 use async_trait::async_trait;
 use sha2::{Digest, Sha256};
 use spur_context_service::artifact_cache::{
-    ArtifactCache, ArtifactCacheFilesystem, ArtifactFetchError, ArtifactFetcher, ArtifactIdentity,
-    ArtifactStream,
+    ArtifactBundleIdentity, ArtifactCache, ArtifactCacheFilesystem, ArtifactFetchError,
+    ArtifactFetcher, ArtifactIdentity, ArtifactStream, MaterializedArtifactBundle,
+};
+use spur_context_service::medallion::{
+    SilverManifest, SilverManifestFile, SILVER_MANIFEST_FILENAME,
 };
 use spur_context_service::serving_registry::ArtifactRef;
 use tokio::sync::{oneshot, Notify, Semaphore};
@@ -528,6 +531,130 @@ async fn activate(cache: &ArtifactCache, generation: i64) {
         .activate_generation(generation)
         .await
         .expect("validated live generation should activate");
+}
+
+type BundleInput = ArtifactBundleIdentity;
+
+#[derive(Clone)]
+struct BundleFixture {
+    input: BundleInput,
+    root_bytes: Vec<u8>,
+    members: Vec<(String, Vec<u8>)>,
+}
+
+impl BundleFixture {
+    fn new(generation: i64, members: Vec<(String, Vec<u8>)>) -> Self {
+        let graph_prefix =
+            format!("s3://artifacts/silver/crates.io/package/revision/generation-{generation}/");
+        let manifest = SilverManifest {
+            schema_hash: "sha256:test-schema".to_owned(),
+            files: members
+                .iter()
+                .map(|(path, body)| SilverManifestFile {
+                    path: path.clone(),
+                    size_bytes: body.len() as u64,
+                    etag: format!("etag-{path}"),
+                    sha256: sha256(body),
+                })
+                .collect(),
+        };
+        let root_bytes = serde_json::to_vec(&manifest).expect("Silver manifest should serialize");
+        let root_uri = format!("{graph_prefix}{SILVER_MANIFEST_FILENAME}");
+        Self {
+            input: BundleInput {
+                root: artifact(
+                    generation,
+                    "crates.io",
+                    "package",
+                    "revision",
+                    &root_uri,
+                    &root_bytes,
+                ),
+                graph_prefix,
+            },
+            root_bytes,
+            members,
+        }
+    }
+
+    fn required(generation: i64) -> Self {
+        Self::new(generation, required_bundle_members())
+    }
+
+    fn fetcher(&self) -> TestFetcher {
+        let fetcher = TestFetcher::default()
+            .with_body(&self.input.root.artifact.uri, self.root_bytes.clone());
+        for (path, body) in &self.members {
+            fetcher.set_body(&self.member_uri(path), body.clone());
+        }
+        fetcher
+    }
+
+    fn member_uri(&self, path: &str) -> String {
+        format!("{}{path}", self.input.graph_prefix)
+    }
+
+    fn total_bytes(&self) -> u64 {
+        self.root_bytes.len() as u64
+            + self
+                .members
+                .iter()
+                .map(|(_, body)| body.len() as u64)
+                .sum::<u64>()
+    }
+
+    fn set_root_bytes(&mut self, bytes: Vec<u8>) {
+        self.root_bytes = bytes;
+        self.input.root.artifact.bytes = self.root_bytes.len() as u64;
+        self.input.root.artifact.sha256 = sha256(&self.root_bytes);
+    }
+}
+
+fn required_bundle_members() -> Vec<(String, Vec<u8>)> {
+    [
+        ("manifest.json", "graph-manifest"),
+        ("nodes.parquet", "nodes"),
+        ("edges.parquet", "edges"),
+        ("edges_unresolved.parquet", "unresolved"),
+        ("files.parquet", "files"),
+        ("file_manifests.parquet", "file-manifests"),
+        ("source_files.parquet", "source-files"),
+    ]
+    .into_iter()
+    .map(|(path, body)| (path.to_owned(), body.as_bytes().to_vec()))
+    .collect()
+}
+
+fn files_below(root: &Path) -> Vec<String> {
+    let mut directories = vec![root.to_path_buf()];
+    let mut files = Vec::new();
+    while let Some(directory) = directories.pop() {
+        for entry in std::fs::read_dir(&directory)
+            .expect("bundle directory should be readable")
+            .flatten()
+        {
+            let path = entry.path();
+            if path.is_dir() {
+                directories.push(path);
+            } else {
+                files.push(
+                    path.strip_prefix(root)
+                        .expect("bundle file should remain confined")
+                        .to_string_lossy()
+                        .replace('\\', "/"),
+                );
+            }
+        }
+    }
+    files.sort();
+    files
+}
+
+async fn materialize_bundle(
+    cache: &ArtifactCache,
+    bundle: &BundleInput,
+) -> Result<MaterializedArtifactBundle, spur_context_service::artifact_cache::ArtifactCacheError> {
+    cache.materialize_bundle(bundle).await
 }
 
 #[tokio::test]
@@ -1659,6 +1786,554 @@ async fn first_generation_create_panic_recovers_in_one_activation() {
     assert_eq!(fetcher.fetch_count(), 1);
 }
 
+#[tokio::test]
+async fn verified_bundle_materializes_exact_relative_layout() {
+    let root = TestDir::new("bundle-layout");
+    let mut members = required_bundle_members();
+    members.push((
+        "segments/temporal_edges.parquet".to_owned(),
+        b"temporal".to_vec(),
+    ));
+    let fixture = BundleFixture::new(60, members);
+    let fetcher = fixture.fetcher();
+    let cache = ArtifactCache::new(
+        root.path(),
+        fixture.total_bytes(),
+        Arc::new(fetcher.clone()),
+    )
+    .expect("cache should initialize");
+    activate(&cache, fixture.input.root.generation).await;
+
+    let bundle = materialize_bundle(&cache, &fixture.input)
+        .await
+        .expect("verified bundle should materialize");
+
+    assert!(
+        bundle.path().is_dir(),
+        "bundle handle must name a directory"
+    );
+    let mut expected = fixture
+        .members
+        .iter()
+        .map(|(path, _)| path.clone())
+        .collect::<Vec<_>>();
+    expected.sort();
+    assert_eq!(files_below(bundle.path()), expected);
+    for (path, body) in &fixture.members {
+        assert_eq!(
+            std::fs::read(bundle.path().join(path)).expect("bundle member should be readable"),
+            *body,
+            "bundle member `{path}` must retain exact bytes"
+        );
+    }
+    assert_eq!(fetcher.fetch_count(), fixture.members.len() + 1);
+    assert_eq!(cache.usage().resident_bytes, fixture.total_bytes());
+    assert_eq!(cache.usage().incoming_temp_bytes, 0);
+}
+
+#[tokio::test]
+async fn bundle_root_sha_and_size_are_verified_before_manifest_parsing() {
+    let root = TestDir::new("bundle-root-integrity");
+    let fixture = BundleFixture::required(61);
+    let corrupt_root = vec![b' '; fixture.root_bytes.len()];
+    let fetcher = fixture
+        .fetcher()
+        .with_body(&fixture.input.root.artifact.uri, corrupt_root);
+    let cache = ArtifactCache::new(
+        root.path(),
+        fixture.total_bytes(),
+        Arc::new(fetcher.clone()),
+    )
+    .expect("cache should initialize");
+    activate(&cache, fixture.input.root.generation).await;
+
+    let error = materialize_bundle(&cache, &fixture.input)
+        .await
+        .expect_err("corrupt root bytes must fail before parsing or member fetches");
+
+    assert_eq!(error.code(), "artifact_integrity_mismatch");
+    assert_eq!(fetcher.fetch_count(), 1);
+    assert_eq!(cache.usage().resident_bytes, 0);
+    assert_eq!(cache.usage().incoming_temp_bytes, 0);
+    assert!(temp_files(root.path()).is_empty());
+}
+
+#[tokio::test]
+async fn bundle_schema_and_graph_prefix_fail_before_member_io() {
+    let root = TestDir::new("bundle-contract-preflight");
+    let mut wrong_schema = BundleFixture::required(62);
+    let mut root_json: serde_json::Value =
+        serde_json::from_slice(&wrong_schema.root_bytes).expect("root should be JSON");
+    root_json["schema_version"] = serde_json::json!(999);
+    wrong_schema.set_root_bytes(
+        serde_json::to_vec(&root_json).expect("wrong-version root should serialize"),
+    );
+    let wrong_schema_fetcher = wrong_schema.fetcher();
+    let wrong_schema_cache = ArtifactCache::new(
+        root.path().join("schema"),
+        wrong_schema.total_bytes(),
+        Arc::new(wrong_schema_fetcher.clone()),
+    )
+    .expect("cache should initialize");
+    activate(&wrong_schema_cache, wrong_schema.input.root.generation).await;
+
+    let schema_error = materialize_bundle(&wrong_schema_cache, &wrong_schema.input)
+        .await
+        .expect_err("unknown bundle schema must fail closed");
+    assert_eq!(schema_error.code(), "invalid_artifact_identity");
+    assert_eq!(wrong_schema_fetcher.fetch_count(), 1);
+
+    let mut wrong_prefix = BundleFixture::required(63);
+    wrong_prefix.input.graph_prefix = "s3://artifacts/silver/wrong-prefix/".to_owned();
+    let wrong_prefix_fetcher = wrong_prefix.fetcher();
+    let wrong_prefix_cache = ArtifactCache::new(
+        root.path().join("prefix"),
+        wrong_prefix.total_bytes(),
+        Arc::new(wrong_prefix_fetcher.clone()),
+    )
+    .expect("cache should initialize");
+    activate(&wrong_prefix_cache, wrong_prefix.input.root.generation).await;
+
+    let prefix_error = materialize_bundle(&wrong_prefix_cache, &wrong_prefix.input)
+        .await
+        .expect_err("root URI must bind the exact graph prefix");
+    assert_eq!(prefix_error.code(), "invalid_artifact_identity");
+    assert_eq!(wrong_prefix_fetcher.fetch_count(), 0);
+}
+
+#[tokio::test]
+async fn bundle_rejects_duplicate_and_conflicting_paths_before_member_io() {
+    let cases = [
+        (
+            "duplicate",
+            vec![
+                ("manifest.json".to_owned(), b"manifest".to_vec()),
+                ("nodes.parquet".to_owned(), b"nodes-one".to_vec()),
+                ("nodes.parquet".to_owned(), b"nodes-two".to_vec()),
+            ],
+        ),
+        (
+            "prefix-collision",
+            vec![
+                ("manifest.json".to_owned(), b"manifest".to_vec()),
+                ("segments".to_owned(), b"file".to_vec()),
+                ("segments/part.parquet".to_owned(), b"nested".to_vec()),
+            ],
+        ),
+    ];
+
+    for (offset, (label, members)) in cases.into_iter().enumerate() {
+        let root = TestDir::new(label);
+        let fixture = BundleFixture::new(64 + offset as i64, members);
+        let fetcher = fixture.fetcher();
+        let cache = ArtifactCache::new(
+            root.path(),
+            fixture.total_bytes(),
+            Arc::new(fetcher.clone()),
+        )
+        .expect("cache should initialize");
+        activate(&cache, fixture.input.root.generation).await;
+
+        let error = materialize_bundle(&cache, &fixture.input)
+            .await
+            .expect_err("duplicate or prefix-conflicting members must fail closed");
+
+        assert_eq!(error.code(), "invalid_artifact_identity", "case {label}");
+        assert_eq!(fetcher.fetch_count(), 1, "case {label}");
+    }
+}
+
+#[tokio::test]
+async fn bundle_rejects_absolute_parent_backslash_and_empty_paths_before_member_io() {
+    for (offset, path) in [
+        "/absolute.parquet",
+        "../parent.parquet",
+        "nested/../parent.parquet",
+        "bad\\path.parquet",
+        "",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let root = TestDir::new(&format!("invalid-bundle-path-{offset}"));
+        let fixture = BundleFixture::new(
+            70 + offset as i64,
+            vec![
+                ("manifest.json".to_owned(), b"manifest".to_vec()),
+                (path.to_owned(), b"invalid".to_vec()),
+            ],
+        );
+        let fetcher = fixture.fetcher();
+        let cache = ArtifactCache::new(
+            root.path(),
+            fixture.total_bytes(),
+            Arc::new(fetcher.clone()),
+        )
+        .expect("cache should initialize");
+        activate(&cache, fixture.input.root.generation).await;
+
+        let error = materialize_bundle(&cache, &fixture.input)
+            .await
+            .expect_err("unconfined path must fail closed");
+
+        assert_eq!(error.code(), "invalid_artifact_identity", "path `{path}`");
+        assert_eq!(fetcher.fetch_count(), 1, "path `{path}`");
+    }
+}
+
+#[tokio::test]
+async fn bundle_requires_original_graph_manifest_member() {
+    let root = TestDir::new("missing-graph-manifest");
+    let fixture = BundleFixture::new(80, vec![("nodes.parquet".to_owned(), b"nodes".to_vec())]);
+    let fetcher = fixture.fetcher();
+    let cache = ArtifactCache::new(
+        root.path(),
+        fixture.total_bytes(),
+        Arc::new(fetcher.clone()),
+    )
+    .expect("cache should initialize");
+    activate(&cache, fixture.input.root.generation).await;
+
+    let error = materialize_bundle(&cache, &fixture.input)
+        .await
+        .expect_err("bundle must not fabricate graph manifest.json");
+
+    assert_eq!(error.code(), "invalid_artifact_identity");
+    assert_eq!(fetcher.fetch_count(), 1);
+}
+
+#[tokio::test]
+async fn every_bundle_member_is_sha_and_size_verified() {
+    for (offset, replacement) in [b"wrong".to_vec(), b"node".to_vec(), b"nodes-extra".to_vec()]
+        .into_iter()
+        .enumerate()
+    {
+        let root = TestDir::new(&format!("bundle-member-integrity-{offset}"));
+        let fixture = BundleFixture::new(
+            81 + offset as i64,
+            vec![
+                ("manifest.json".to_owned(), b"manifest".to_vec()),
+                ("nodes.parquet".to_owned(), b"nodes".to_vec()),
+            ],
+        );
+        let fetcher = fixture
+            .fetcher()
+            .with_body(&fixture.member_uri("nodes.parquet"), replacement);
+        let cache = ArtifactCache::new(
+            root.path(),
+            fixture.total_bytes(),
+            Arc::new(fetcher.clone()),
+        )
+        .expect("cache should initialize");
+        activate(&cache, fixture.input.root.generation).await;
+
+        let error = materialize_bundle(&cache, &fixture.input)
+            .await
+            .expect_err("corrupt, short, or long member must prevent bundle return");
+
+        assert_eq!(error.code(), "artifact_integrity_mismatch");
+        assert_eq!(fetcher.fetch_count(), 3);
+        assert_eq!(
+            cache.usage().resident_bytes,
+            fixture.root_bytes.len() as u64 + b"manifest".len() as u64,
+            "the valid partial member remains resident and accounted for retry"
+        );
+        assert_eq!(cache.usage().incoming_temp_bytes, 0);
+    }
+}
+
+#[tokio::test]
+async fn concurrent_bundle_callers_fetch_each_object_once() {
+    let root = TestDir::new("bundle-coalesce");
+    let fixture = BundleFixture::required(90);
+    let pause = FetchPause::new(&fixture.input.root.artifact.uri);
+    let fetcher = fixture.fetcher().with_pause(pause.clone());
+    let cache = ArtifactCache::new(
+        root.path(),
+        fixture.total_bytes(),
+        Arc::new(fetcher.clone()),
+    )
+    .expect("cache should initialize");
+    activate(&cache, fixture.input.root.generation).await;
+
+    let first_cache = cache.clone();
+    let first_input = fixture.input.clone();
+    let first = tokio::spawn(async move { materialize_bundle(&first_cache, &first_input).await });
+    let second_cache = cache.clone();
+    let second_input = fixture.input.clone();
+    let second =
+        tokio::spawn(async move { materialize_bundle(&second_cache, &second_input).await });
+
+    pause.wait_started().await;
+    assert_eq!(fetcher.fetch_count(), 1);
+    pause.release().await;
+
+    let first = first.await.expect("first caller should join").unwrap();
+    let second = second.await.expect("second caller should join").unwrap();
+    assert_eq!(first.path(), second.path());
+    assert_eq!(fetcher.fetch_count(), fixture.members.len() + 1);
+}
+
+#[tokio::test]
+async fn aggregate_bundle_capacity_counts_named_member_temp_at_exact_boundary() {
+    let root = TestDir::new("bundle-capacity-boundary");
+    let fixture = BundleFixture::new(91, vec![("manifest.json".to_owned(), b"manifest".to_vec())]);
+    let pause = FetchPause::new(fixture.member_uri("manifest.json"));
+    let fetcher = fixture.fetcher().with_pause(pause.clone());
+    let cache = ArtifactCache::new(
+        root.path(),
+        fixture.total_bytes(),
+        Arc::new(fetcher.clone()),
+    )
+    .expect("cache should initialize");
+    activate(&cache, fixture.input.root.generation).await;
+    drop(
+        cache
+            .materialize(&fixture.input.root)
+            .await
+            .expect("root should be resident before named-member admission"),
+    );
+
+    let bundle_cache = cache.clone();
+    let bundle_input = fixture.input.clone();
+    let mut bundle_task =
+        tokio::spawn(async move { materialize_bundle(&bundle_cache, &bundle_input).await });
+    tokio::select! {
+        _ = pause.wait_started() => {}
+        result = &mut bundle_task => panic!("bundle returned before named member fetch: {result:?}"),
+    }
+
+    let usage = cache.usage();
+    assert_eq!(usage.resident_bytes, fixture.root_bytes.len() as u64);
+    assert_eq!(usage.incoming_temp_bytes, b"manifest".len() as u64);
+    assert_eq!(
+        usage.resident_bytes + usage.incoming_temp_bytes,
+        usage.tmp_capacity_bytes
+    );
+    pause.release().await;
+
+    let bundle = bundle_task
+        .await
+        .expect("bundle task should join")
+        .expect("exact aggregate boundary should pass");
+    assert_eq!(
+        std::fs::read(bundle.path().join("manifest.json")).unwrap(),
+        b"manifest"
+    );
+    assert_eq!(cache.usage().resident_bytes, fixture.total_bytes());
+    assert_eq!(cache.usage().incoming_temp_bytes, 0);
+}
+
+#[tokio::test]
+async fn aggregate_bundle_capacity_rejects_one_byte_over_without_bundle_handle() {
+    let root = TestDir::new("bundle-capacity-over");
+    let fixture = BundleFixture::new(92, vec![("manifest.json".to_owned(), b"manifest".to_vec())]);
+    let fetcher = fixture.fetcher();
+    let cache = ArtifactCache::new(
+        root.path(),
+        fixture.total_bytes() - 1,
+        Arc::new(fetcher.clone()),
+    )
+    .expect("cache should initialize");
+    activate(&cache, fixture.input.root.generation).await;
+
+    let error = materialize_bundle(&cache, &fixture.input)
+        .await
+        .expect_err("aggregate root plus members must fit before a handle can escape");
+
+    assert_eq!(error.code(), "artifact_capacity_exceeded");
+    assert_eq!(
+        cache.usage().resident_bytes,
+        fixture.root_bytes.len() as u64
+    );
+    assert_eq!(cache.usage().incoming_temp_bytes, 0);
+}
+
+#[tokio::test]
+async fn stale_generation_never_returns_a_bundle() {
+    let root = TestDir::new("stale-bundle-generation");
+    let fixture = BundleFixture::required(93);
+    let fetcher = fixture.fetcher();
+    let cache = ArtifactCache::new(
+        root.path(),
+        fixture.total_bytes(),
+        Arc::new(fetcher.clone()),
+    )
+    .expect("cache should initialize");
+    activate(&cache, fixture.input.root.generation).await;
+    activate(&cache, fixture.input.root.generation + 1).await;
+
+    let error = materialize_bundle(&cache, &fixture.input)
+        .await
+        .expect_err("stale generation must fail before root or member I/O");
+
+    assert_eq!(error.code(), "artifact_generation_unavailable");
+    assert_eq!(fetcher.fetch_count(), 0);
+}
+
+#[tokio::test]
+async fn generation_transition_waits_for_bundle_lease_and_cleans_only_prior_generation() {
+    let root = TestDir::new("bundle-generation-lease");
+    let fixture = BundleFixture::required(94);
+    let fetcher = fixture.fetcher();
+    let cache = ArtifactCache::new(root.path(), fixture.total_bytes(), Arc::new(fetcher))
+        .expect("cache should initialize");
+    activate(&cache, fixture.input.root.generation).await;
+    let bundle = materialize_bundle(&cache, &fixture.input)
+        .await
+        .expect("bundle should materialize");
+    let bundle_path = bundle.path().to_path_buf();
+    let prior_generation = generation_directory(&cache, &fixture.input.root);
+    let owned_root = prior_generation
+        .parent()
+        .expect("generation should be under owned root")
+        .to_path_buf();
+    let unrelated_generation = owned_root.join("generation-999999");
+    std::fs::create_dir_all(&unrelated_generation).unwrap();
+    std::fs::write(unrelated_generation.join("sentinel"), b"keep").unwrap();
+
+    let next_generation = fixture.input.root.generation + 1;
+    let mut transition = Box::pin(cache.activate_generation(next_generation));
+    assert!(
+        poll_once(transition.as_mut()).await.is_none(),
+        "transition must wait while the complete bundle lease is held"
+    );
+    assert!(bundle_path.exists());
+    drop(bundle);
+    transition
+        .await
+        .expect("transition should continue after bundle handle drops");
+
+    assert!(!prior_generation.exists());
+    assert!(owned_root
+        .join(format!("generation-{next_generation}"))
+        .is_dir());
+    assert_eq!(
+        std::fs::read(unrelated_generation.join("sentinel")).unwrap(),
+        b"keep"
+    );
+}
+
+async fn assert_cancelled_named_member_operation_reconciles(
+    label: &str,
+    operation: FilesystemOperation,
+) {
+    let root = TestDir::new(label);
+    let fixture = BundleFixture::new(
+        95,
+        vec![("manifest.json".to_owned(), b"graph-manifest".to_vec())],
+    );
+    let fetcher = fixture.fetcher();
+    let filesystem = ControlledFilesystem::default();
+    let cache = ArtifactCache::new_with_filesystem(
+        root.path(),
+        fixture.total_bytes(),
+        Arc::new(fetcher.clone()),
+        Arc::new(filesystem.clone()),
+    )
+    .expect("cache should initialize");
+    activate(&cache, fixture.input.root.generation).await;
+    drop(
+        cache
+            .materialize(&fixture.input.root)
+            .await
+            .expect("root should be resident before named-member seam"),
+    );
+
+    let pause = filesystem.pause_next_operation(operation, CompletionGate::AfterMutation);
+    let caller_cache = cache.clone();
+    let caller_input = fixture.input.clone();
+    let mut caller =
+        tokio::spawn(async move { materialize_bundle(&caller_cache, &caller_input).await });
+    tokio::select! {
+        _ = pause.wait_started() => {}
+        result = &mut caller => panic!("bundle returned before named {operation:?}: {result:?}"),
+    }
+    assert_eq!(
+        cache.usage().incoming_temp_bytes,
+        b"graph-manifest".len() as u64,
+        "started named-member mutation must retain its reservation"
+    );
+    if operation == FilesystemOperation::OpenNew {
+        assert_eq!(temp_files(root.path()).len(), 1);
+    } else {
+        assert!(temp_files(root.path()).is_empty());
+    }
+
+    caller.abort();
+    assert!(caller.await.unwrap_err().is_cancelled());
+    let mut retry = Box::pin(materialize_bundle(&cache, &fixture.input));
+    assert!(
+        poll_once(retry.as_mut()).await.is_none(),
+        "retry must join the owned named-member operation"
+    );
+
+    pause.release();
+    pause.wait_completed().await;
+    let bundle = retry
+        .await
+        .expect("retry should return only after named-member reconciliation");
+
+    assert_eq!(
+        std::fs::read(bundle.path().join("manifest.json")).unwrap(),
+        b"graph-manifest"
+    );
+    assert_eq!(fetcher.fetch_count(), 2);
+    assert_eq!(cache.usage().resident_bytes, fixture.total_bytes());
+    assert_eq!(cache.usage().incoming_temp_bytes, 0);
+    assert!(temp_files(root.path()).is_empty());
+}
+
+#[tokio::test]
+async fn cancellation_during_named_member_open_never_serves_partial_bundle() {
+    assert_cancelled_named_member_operation_reconciles(
+        "bundle-cancel-open",
+        FilesystemOperation::OpenNew,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn cancellation_during_named_member_rename_never_serves_unaccounted_bundle() {
+    assert_cancelled_named_member_operation_reconciles(
+        "bundle-cancel-rename",
+        FilesystemOperation::Rename,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn poison_blocks_bundle_return_and_retry() {
+    let root = TestDir::new("bundle-poison");
+    let fixture = BundleFixture::new(96, vec![("manifest.json".to_owned(), b"right".to_vec())]);
+    let fetcher = fixture
+        .fetcher()
+        .with_body(&fixture.member_uri("manifest.json"), b"wrong".to_vec());
+    let filesystem = ControlledFilesystem::default();
+    let cache = ArtifactCache::new_with_filesystem(
+        root.path(),
+        fixture.total_bytes(),
+        Arc::new(fetcher.clone()),
+        Arc::new(filesystem.clone()),
+    )
+    .expect("cache should initialize");
+    activate(&cache, fixture.input.root.generation).await;
+    filesystem.fail_next_temp_cleanup();
+
+    let error = materialize_bundle(&cache, &fixture.input)
+        .await
+        .expect_err("failed member cleanup must poison and block the bundle");
+    assert_eq!(error.code(), "artifact_integrity_mismatch");
+    assert!(cache.usage().poisoned);
+    let fetches_after_poison = fetcher.fetch_count();
+
+    let retry_error = materialize_bundle(&cache, &fixture.input)
+        .await
+        .expect_err("poisoned cache must not return a bundle");
+    assert_eq!(retry_error.code(), "artifact_cache_unavailable");
+    assert_eq!(fetcher.fetch_count(), fetches_after_poison);
+}
+
 #[cfg(feature = "artifact-cache-s3")]
 #[test]
 fn s3_fetcher_is_importable_without_service_feature() {
@@ -1666,4 +2341,19 @@ fn s3_fetcher_is_importable_without_service_feature() {
 
     fn assert_send_sync<T: Send + Sync>() {}
     assert_send_sync::<S3ArtifactFetcher>();
+}
+
+#[cfg(feature = "artifact-cache-s3")]
+#[test]
+fn silver_medallion_contract_is_importable_without_service_or_duckdb() {
+    let manifest = SilverManifest {
+        schema_hash: "sha256:tree-proof".to_owned(),
+        files: vec![SilverManifestFile {
+            path: "manifest.json".to_owned(),
+            size_bytes: 1,
+            etag: "etag".to_owned(),
+            sha256: "0".repeat(64),
+        }],
+    };
+    assert_eq!(serde_json::to_value(manifest).unwrap()["schema_version"], 1);
 }

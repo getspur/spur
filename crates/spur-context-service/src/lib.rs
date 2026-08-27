@@ -22,7 +22,6 @@ pub mod lambda;
 mod lambda_http;
 #[cfg(feature = "service")]
 pub mod mcp;
-#[cfg(feature = "service")]
 pub mod medallion;
 #[cfg(feature = "service")]
 pub mod query;
