@@ -278,6 +278,10 @@ fn catalog_resolver_does_not_create_memory_index_jobs() -> Result<()> {
 const GRAPH_MANIFEST_URI: &str = "s3://silver-test/silver/serde/1.0.194/builder-v1/manifest.json";
 const SOURCE_SIDECAR_URI: &str =
     "s3://silver-test/silver/serde/1.0.194/builder-v1/source_files.parquet";
+const OLDER_GRAPH_MANIFEST_URI: &str =
+    "s3://silver-test/silver/serde_json/1.0.120/builder-v1/manifest.json";
+const OLDER_SOURCE_SIDECAR_URI: &str =
+    "s3://silver-test/silver/serde_json/1.0.120/builder-v1/source_files.parquet";
 const SNAPSHOT_URI: &str =
     "s3://catalog-test/gold/catalog-snapshot/generations/00000000000000000007/spur_context.ducklake";
 const SNAPSHOT_MANIFEST_URI: &str =
@@ -287,6 +291,8 @@ const SERVING_REGISTRY_URI: &str =
 const POINTER_URI: &str = "s3://catalog-test/gold/catalog-snapshot/current.json";
 const GRAPH_MANIFEST_BYTES: &[u8] = br#"{"schema_version":1,"files":[]}"#;
 const SOURCE_SIDECAR_BYTES: &[u8] = b"PAR1 source sidecar fixture";
+const OLDER_GRAPH_MANIFEST_BYTES: &[u8] = br#"{"schema_version":1,"files":["older"]}"#;
+const OLDER_SOURCE_SIDECAR_BYTES: &[u8] = b"PAR1 older source sidecar fixture";
 const SNAPSHOT_BYTES: &[u8] = b"DuckLake snapshot fixture";
 
 #[test]
@@ -301,6 +307,58 @@ fn incomplete_registry_does_not_advance_pointer() -> Result<()> {
         .expect_err("an incomplete exact generation must not publish");
 
     assert_eq!(error.code(), "incomplete_serving_generation");
+    assert_eq!(store.object(POINTER_URI).unwrap().bytes, previous);
+    assert_eq!(store.pointer_write_count(), 0);
+    Ok(())
+}
+
+#[test]
+fn missing_lineage_on_unchanged_older_package_does_not_advance_pointer() -> Result<()> {
+    let mut older = older_complete_publication_row(6);
+    older.graph_manifest_uri = None;
+    let conn = publication_catalog(&[older, complete_publication_row(7)])?;
+    let store = complete_publication_store();
+    let previous = seed_pointer(&store, 6, SNAPSHOT_URI, SERVING_REGISTRY_URI);
+
+    let error = publish_generation(&store, &conn, publication_request(7))
+        .expect_err("missing lineage on any current package must reject the global view");
+
+    assert_eq!(error.code(), "incomplete_serving_generation");
+    assert_eq!(store.object(POINTER_URI).unwrap().bytes, previous);
+    assert_eq!(store.pointer_write_count(), 0);
+    Ok(())
+}
+
+#[test]
+fn null_generation_on_current_package_does_not_advance_pointer() -> Result<()> {
+    let mut legacy = older_complete_publication_row(6);
+    legacy.generation = None;
+    let conn = publication_catalog(&[legacy, complete_publication_row(7)])?;
+    let store = complete_publication_store();
+    let previous = seed_pointer(&store, 6, SNAPSHOT_URI, SERVING_REGISTRY_URI);
+
+    let error = publish_generation(&store, &conn, publication_request(7))
+        .expect_err("a current package with NULL generation must not be skipped");
+
+    assert_eq!(error.code(), "incomplete_serving_generation");
+    assert_eq!(store.object(POINTER_URI).unwrap().bytes, previous);
+    assert_eq!(store.pointer_write_count(), 0);
+    Ok(())
+}
+
+#[test]
+fn publication_generation_must_equal_frozen_catalog_maximum() -> Result<()> {
+    let conn = publication_catalog(&[
+        older_complete_publication_row(6),
+        complete_publication_row(7),
+    ])?;
+    let store = complete_publication_store();
+    let previous = seed_pointer(&store, 5, SNAPSHOT_URI, SERVING_REGISTRY_URI);
+
+    let error = publish_generation(&store, &conn, publication_request(6))
+        .expect_err("a publication below the catalog MAX generation must be rejected");
+
+    assert_eq!(error.code(), "catalog_generation_mismatch");
     assert_eq!(store.object(POINTER_URI).unwrap().bytes, previous);
     assert_eq!(store.pointer_write_count(), 0);
     Ok(())
@@ -414,18 +472,10 @@ fn stale_expected_pointer_does_not_advance_pointer() -> Result<()> {
 
 #[test]
 fn exact_complete_generation_publishes_once_in_order() -> Result<()> {
-    let older_legacy_row = PublicationCatalogRow {
-        generation: Some(6),
-        index_status: "complete".to_owned(),
-        graph_manifest_uri: None,
-        graph_manifest_sha256: None,
-        graph_manifest_bytes: None,
-        source_sidecar_uri: None,
-        source_sidecar_sha256: None,
-        source_sidecar_bytes: None,
-        ..complete_publication_row(6)
-    };
-    let conn = publication_catalog(&[older_legacy_row, complete_publication_row(7)])?;
+    let conn = publication_catalog(&[
+        older_complete_publication_row(6),
+        complete_publication_row(7),
+    ])?;
     let store = complete_publication_store();
 
     publish_generation(&store, &conn, publication_request(7))?;
@@ -449,9 +499,19 @@ fn exact_complete_generation_publishes_once_in_order() -> Result<()> {
             .bytes,
     )?;
     assert_eq!(registry.generation, 7);
-    assert_eq!(registry.packages.len(), 1);
-    assert_eq!(registry.packages[0].generation, 7);
-    assert_eq!(registry.packages[0].package, PACKAGE);
+    assert_eq!(registry.packages.len(), 2);
+    assert!(registry
+        .packages
+        .iter()
+        .all(|package| package.generation == 7));
+    assert_eq!(
+        registry
+            .packages
+            .iter()
+            .map(|package| package.package.as_str())
+            .collect::<Vec<_>>(),
+        ["serde", "serde_json"]
+    );
     Ok(())
 }
 
@@ -487,7 +547,7 @@ fn live_pointer_payload_contains_snapshot_and_registry_strong_refs() -> Result<(
 }
 
 #[test]
-fn pointer_write_uses_observed_etag_and_version_precondition() -> Result<()> {
+fn pointer_write_uses_observed_etag_precondition() -> Result<()> {
     let conn = publication_catalog(&[complete_publication_row(7)])?;
     let store = complete_publication_store();
     seed_pointer(&store, 6, SNAPSHOT_URI, SERVING_REGISTRY_URI);
@@ -495,13 +555,150 @@ fn pointer_write_uses_observed_etag_and_version_precondition() -> Result<()> {
 
     publish_generation(&store, &conn, publication_request(7))?;
 
+    let preconditions = store.pointer_preconditions();
+    assert_eq!(preconditions.len(), 1);
+    match &preconditions[0] {
+        PointerPrecondition::Matches { etag, .. } => assert_eq!(etag, &observed.etag),
+        PointerPrecondition::Absent => panic!("an observed pointer requires If-Match"),
+    }
+    Ok(())
+}
+
+#[test]
+fn same_generation_with_different_data_path_is_a_conflict() -> Result<()> {
+    let conn = publication_catalog(&[complete_publication_row(7)])?;
+    let store = complete_publication_store();
+    publish_generation(&store, &conn, publication_request(7))?;
+
+    let mut pointer = store.object(POINTER_URI).context("live pointer missing")?;
+    let mut payload: serde_json::Value = serde_json::from_slice(&pointer.bytes)?;
+    payload["data_path"] = json!("s3://catalog-test/conflicting/gold/data");
+    pointer.bytes = serde_json::to_vec_pretty(&payload)?;
+    store.seed(POINTER_URI, &pointer.bytes);
+    let previous = store.object(POINTER_URI).unwrap().bytes;
+    store.clear_events();
+
+    let error = publish_generation(&store, &conn, publication_request(7))
+        .expect_err("data_path changes serving behavior and must conflict");
+
+    assert_eq!(error.code(), "same_generation_conflict");
+    assert_eq!(store.object(POINTER_URI).unwrap().bytes, previous);
+    assert!(store.write_uris().is_empty());
+    Ok(())
+}
+
+#[test]
+fn idempotent_publication_rejects_each_missing_immutable_output() -> Result<()> {
+    for uri in [SNAPSHOT_URI, SNAPSHOT_MANIFEST_URI, SERVING_REGISTRY_URI] {
+        let conn = publication_catalog(&[complete_publication_row(7)])?;
+        let store = complete_publication_store();
+        publish_generation(&store, &conn, publication_request(7))?;
+        let previous = store
+            .object(POINTER_URI)
+            .context("live pointer missing")?
+            .bytes;
+        store.remove(uri);
+        store.clear_events();
+
+        let error = publish_generation(&store, &conn, publication_request(7))
+            .expect_err("idempotence must verify every referenced immutable output exists");
+
+        assert_eq!(error.code(), "missing_immutable_output", "URI {uri}");
+        assert_eq!(store.object(POINTER_URI).unwrap().bytes, previous);
+        assert!(store.write_uris().is_empty());
+    }
+    Ok(())
+}
+
+#[test]
+fn idempotent_publication_rejects_each_corrupt_immutable_output() -> Result<()> {
+    for uri in [SNAPSHOT_URI, SNAPSHOT_MANIFEST_URI, SERVING_REGISTRY_URI] {
+        let conn = publication_catalog(&[complete_publication_row(7)])?;
+        let store = complete_publication_store();
+        publish_generation(&store, &conn, publication_request(7))?;
+        let previous = store
+            .object(POINTER_URI)
+            .context("live pointer missing")?
+            .bytes;
+        store.seed(uri, b"corrupt immutable output");
+        store.clear_events();
+
+        let error = publish_generation(&store, &conn, publication_request(7))
+            .expect_err("idempotence must verify every referenced immutable output exactly");
+
+        assert_eq!(error.code(), "immutable_output_mismatch", "URI {uri}");
+        assert_eq!(store.object(POINTER_URI).unwrap().bytes, previous);
+        assert!(store.write_uris().is_empty());
+    }
+    Ok(())
+}
+
+#[test]
+fn missing_live_pointer_is_the_absent_s3_precondition() -> Result<()> {
+    let conn = publication_catalog(&[complete_publication_row(7)])?;
+    let store = complete_publication_store();
+
+    publish_generation(&store, &conn, publication_request(7))?;
+
+    assert_eq!(store.pointer_preconditions(), [PointerPrecondition::Absent]);
+    Ok(())
+}
+
+#[test]
+fn same_etag_with_different_version_satisfies_pointer_cas() -> Result<()> {
+    let store = FakeS3::default();
+    let observed = store.seed(POINTER_URI, b"old pointer");
+    let precondition = PointerPrecondition::Matches {
+        etag: observed.etag,
+    };
+    store.set_version_id(POINTER_URI, "diagnostic-version-changed");
+
+    store.compare_and_swap_pointer(
+        POINTER_URI,
+        b"new pointer",
+        "application/json",
+        &precondition,
+    )?;
+
+    assert_eq!(store.object(POINTER_URI).unwrap().bytes, b"new pointer");
+    Ok(())
+}
+
+#[test]
+fn conditional_pointer_404_409_and_412_are_stale_outcomes() -> Result<()> {
+    for status in [404, 409, 412] {
+        let conn = publication_catalog(&[complete_publication_row(7)])?;
+        let store = complete_publication_store();
+        let previous = seed_pointer(&store, 6, SNAPSHOT_URI, SERVING_REGISTRY_URI);
+        store.fail_next_conditional_status(status);
+
+        let error = publish_generation(&store, &conn, publication_request(7))
+            .expect_err("conditional S3 status must be classified before cause erasure");
+
+        assert_eq!(error.code(), "stale_pointer", "HTTP status {status}");
+        assert_eq!(store.object(POINTER_URI).unwrap().bytes, previous);
+    }
+    Ok(())
+}
+
+#[test]
+fn public_storage_errors_are_stable_and_sanitized() -> Result<()> {
+    const SECRET: &str =
+        "bucket=private-bucket key=secret-key credential=AKIA_TEST request_id=req-secret";
+    let store_error = PublicationStoreError::Storage;
+    assert_eq!(store_error.code(), "storage_error");
     assert_eq!(
-        store.pointer_preconditions(),
-        [PointerPrecondition::Matches {
-            etag: observed.etag,
-            version_id: observed.version_id,
-        }]
+        store_error.to_string(),
+        "publication storage operation failed"
     );
+    assert!(!format!("{store_error:?}").contains(SECRET));
+
+    let conn = publication_catalog(&[complete_publication_row(7)])?;
+    let error = publish_generation(&SecretFailingStore, &conn, publication_request(7))
+        .expect_err("secret-bearing storage cause must remain internal");
+    assert_eq!(error.code(), "storage_error");
+    assert!(!error.to_string().contains(SECRET));
+    assert!(!format!("{error:?}").contains(SECRET));
     Ok(())
 }
 
@@ -533,6 +730,20 @@ fn complete_publication_row(generation: i64) -> PublicationCatalogRow {
         source_sidecar_uri: Some(SOURCE_SIDECAR_URI.to_owned()),
         source_sidecar_sha256: Some(sha256_bytes(SOURCE_SIDECAR_BYTES)),
         source_sidecar_bytes: Some(SOURCE_SIDECAR_BYTES.len() as i64),
+    }
+}
+
+fn older_complete_publication_row(generation: i64) -> PublicationCatalogRow {
+    PublicationCatalogRow {
+        package: "serde_json".to_owned(),
+        revision: "1.0.120".to_owned(),
+        graph_manifest_uri: Some(OLDER_GRAPH_MANIFEST_URI.to_owned()),
+        graph_manifest_sha256: Some(sha256_bytes(OLDER_GRAPH_MANIFEST_BYTES)),
+        graph_manifest_bytes: Some(OLDER_GRAPH_MANIFEST_BYTES.len() as i64),
+        source_sidecar_uri: Some(OLDER_SOURCE_SIDECAR_URI.to_owned()),
+        source_sidecar_sha256: Some(sha256_bytes(OLDER_SOURCE_SIDECAR_BYTES)),
+        source_sidecar_bytes: Some(OLDER_SOURCE_SIDECAR_BYTES.len() as i64),
+        ..complete_publication_row(generation)
     }
 }
 
@@ -580,13 +791,15 @@ fn publication_catalog(rows: &[PublicationCatalogRow]) -> Result<Connection> {
 }
 
 fn publication_request(generation: i64) -> GenerationPublication {
+    let generation_prefix =
+        format!("s3://catalog-test/gold/catalog-snapshot/generations/{generation:020}");
     GenerationPublication {
         generation,
         data_path: "s3://catalog-test/gold/data".to_owned(),
-        snapshot_uri: SNAPSHOT_URI.to_owned(),
+        snapshot_uri: format!("{generation_prefix}/spur_context.ducklake"),
         snapshot_bytes: SNAPSHOT_BYTES.to_vec(),
-        snapshot_manifest_uri: SNAPSHOT_MANIFEST_URI.to_owned(),
-        serving_registry_uri: SERVING_REGISTRY_URI.to_owned(),
+        snapshot_manifest_uri: format!("{generation_prefix}/manifest.json"),
+        serving_registry_uri: format!("{generation_prefix}/serving-registry.json"),
         pointer_uri: POINTER_URI.to_owned(),
     }
 }
@@ -610,7 +823,7 @@ struct FakeS3State {
     objects: BTreeMap<String, PublicationObject>,
     events: Vec<PublicationEvent>,
     next_version: u64,
-    fail_next_conditional_write: bool,
+    fail_next_conditional_status: Option<u16>,
 }
 
 impl FakeS3 {
@@ -624,7 +837,29 @@ impl FakeS3 {
     }
 
     fn fail_next_conditional_write(&self) {
-        self.state.lock().unwrap().fail_next_conditional_write = true;
+        self.fail_next_conditional_status(412);
+    }
+
+    fn fail_next_conditional_status(&self, status: u16) {
+        self.state.lock().unwrap().fail_next_conditional_status = Some(status);
+    }
+
+    fn remove(&self, uri: &str) {
+        self.state.lock().unwrap().objects.remove(uri);
+    }
+
+    fn clear_events(&self) {
+        self.state.lock().unwrap().events.clear();
+    }
+
+    fn set_version_id(&self, uri: &str, version_id: &str) {
+        self.state
+            .lock()
+            .unwrap()
+            .objects
+            .get_mut(uri)
+            .expect("object must exist")
+            .version_id = Some(version_id.to_owned());
     }
 
     fn write_uris(&self) -> Vec<String> {
@@ -680,9 +915,7 @@ impl PublicationStore for FakeS3 {
     ) -> std::result::Result<(), PublicationStoreError> {
         let mut state = self.state.lock().unwrap();
         if state.objects.contains_key(uri) {
-            return Err(PublicationStoreError::Other(format!(
-                "immutable object already exists: {uri}"
-            )));
+            return Err(PublicationStoreError::Storage);
         }
         state
             .events
@@ -703,14 +936,15 @@ impl PublicationStore for FakeS3 {
             uri: uri.to_owned(),
             precondition: precondition.clone(),
         });
-        if std::mem::take(&mut state.fail_next_conditional_write) {
-            return Err(PublicationStoreError::PreconditionFailed);
+        if let Some(status) = state.fail_next_conditional_status.take() {
+            return Err(match status {
+                404 | 409 | 412 => PublicationStoreError::PreconditionFailed,
+                _ => PublicationStoreError::Storage,
+            });
         }
         let matches = match (precondition, state.objects.get(uri)) {
             (PointerPrecondition::Absent, None) => true,
-            (PointerPrecondition::Matches { etag, version_id }, Some(current)) => {
-                current.etag == *etag && current.version_id == *version_id
-            }
+            (PointerPrecondition::Matches { etag }, Some(current)) => current.etag == *etag,
             _ => false,
         };
         if !matches {
@@ -736,7 +970,41 @@ fn complete_publication_store() -> FakeS3 {
     let store = FakeS3::default();
     store.seed(GRAPH_MANIFEST_URI, GRAPH_MANIFEST_BYTES);
     store.seed(SOURCE_SIDECAR_URI, SOURCE_SIDECAR_BYTES);
+    store.seed(OLDER_GRAPH_MANIFEST_URI, OLDER_GRAPH_MANIFEST_BYTES);
+    store.seed(OLDER_SOURCE_SIDECAR_URI, OLDER_SOURCE_SIDECAR_BYTES);
     store
+}
+
+struct SecretFailingStore;
+
+impl PublicationStore for SecretFailingStore {
+    fn read_object(
+        &self,
+        _uri: &str,
+    ) -> std::result::Result<Option<PublicationObject>, PublicationStoreError> {
+        let _internal_cause =
+            "bucket=private-bucket key=secret-key credential=AKIA_TEST request_id=req-secret";
+        Err(PublicationStoreError::Storage)
+    }
+
+    fn put_immutable_object(
+        &self,
+        _uri: &str,
+        _bytes: &[u8],
+        _content_type: &str,
+    ) -> std::result::Result<(), PublicationStoreError> {
+        unreachable!("read failure must stop publication")
+    }
+
+    fn compare_and_swap_pointer(
+        &self,
+        _uri: &str,
+        _bytes: &[u8],
+        _content_type: &str,
+        _precondition: &PointerPrecondition,
+    ) -> std::result::Result<(), PublicationStoreError> {
+        unreachable!("read failure must stop publication")
+    }
 }
 
 fn seed_pointer(

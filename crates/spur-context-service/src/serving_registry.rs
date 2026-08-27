@@ -35,7 +35,7 @@ pub struct ServingCatalogRow {
     pub source: String,
     pub package: String,
     pub revision: String,
-    pub generation: i64,
+    pub generation: Option<i64>,
     pub index_status: String,
     pub graph_manifest_uri: Option<String>,
     pub graph_manifest_sha256: Option<String>,
@@ -91,7 +91,7 @@ impl ServingRegistryError {
 }
 
 impl ServingRegistry {
-    pub fn from_exact_generation_rows(
+    pub fn from_current_rows(
         generation: i64,
         rows: impl IntoIterator<Item = ServingCatalogRow>,
     ) -> Result<Self, ServingRegistryError> {
@@ -99,16 +99,28 @@ impl ServingRegistry {
         if generation <= 0 || rows.is_empty() {
             return Err(ServingRegistryError::IncompleteServingGeneration {
                 generation,
-                reason: "no exact-generation package rows".to_owned(),
+                reason: "no current package rows for the serving view".to_owned(),
             });
         }
 
         let mut packages = Vec::with_capacity(rows.len());
         for row in rows {
-            if row.generation != generation {
-                return Err(ServingRegistryError::GenerationMismatch {
-                    expected: generation,
-                    actual: row.generation,
+            let row_generation = row.generation.ok_or_else(|| {
+                ServingRegistryError::IncompleteServingGeneration {
+                    generation,
+                    reason: format!(
+                        "{}/{}/{} has no generation",
+                        row.source, row.package, row.revision
+                    ),
+                }
+            })?;
+            if row_generation <= 0 || row_generation > generation {
+                return Err(ServingRegistryError::IncompleteServingGeneration {
+                    generation,
+                    reason: format!(
+                        "{}/{}/{} has invalid row generation {row_generation}",
+                        row.source, row.package, row.revision
+                    ),
                 });
             }
             if row.index_status != "complete" {
