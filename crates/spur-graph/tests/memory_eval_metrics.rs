@@ -73,9 +73,9 @@ fn assert_metric(metric: &MetricValue, value: f64, numerator: f64, denominator: 
 }
 
 #[test]
-fn ndcg_uses_binary_relevance_and_the_exact_ideal_denominator() {
+fn ndcg_matches_longmemeval_origin_discount_offsets() {
     let metric = ndcg_at_k(&["a", "b"], &["a", "x", "b"], 3);
-    assert!((metric - 0.919_720_789_148_187_6).abs() < 1e-12);
+    assert!((metric - 0.815_464_876_785_728_8).abs() < 1e-12);
 
     // A duplicate ranked occurrence cannot consume relevance twice.
     assert!((ndcg_at_k(&["a", "b"], &["a", "a", "b"], 3) - metric).abs() < 1e-12);
@@ -190,24 +190,25 @@ fn longmem_session_and_turn_gold_remain_independent_at_exact_cutoffs() {
 
     assert_eq!(sessions.dataset, DatasetKind::LongMemEval);
     assert_eq!(sessions.granularity, Granularity::Session);
-    assert_metric(&sessions.overall["recall_all_at_5"], 0.5, 1.0, 2);
-    assert_metric(&sessions.overall["recall_any_at_5"], 0.5, 1.0, 2);
+    assert_metric(&sessions.overall["recall_all@5"], 0.5, 1.0, 2);
+    assert_metric(&sessions.overall["recall_any@5"], 0.5, 1.0, 2);
     assert_metric(
-        &sessions.overall["ndcg_at_5"],
-        0.919_720_789_148_187_6 / 2.0,
-        0.919_720_789_148_187_6,
+        &sessions.overall["ndcg_any@5"],
+        0.815_464_876_785_728_8 / 2.0,
+        0.815_464_876_785_728_8,
         2,
     );
-    assert!(sessions.overall.contains_key("recall_all_at_10"));
-    assert!(!sessions.overall.contains_key("recall_all_at_50"));
+    assert!(sessions.overall.contains_key("recall_all@10"));
+    assert!(sessions.overall.contains_key("ndcg_any@10"));
+    assert!(!sessions.overall.contains_key("recall_all@50"));
     assert_metric(
-        &sessions.slices["question_type:multi-session"]["recall_all_at_5"],
+        &sessions.slices["question_type:multi-session"]["recall_all@5"],
         1.0,
         1.0,
         1,
     );
     assert_metric(
-        &sessions.slices["question_type:single-session-user"]["recall_any_at_5"],
+        &sessions.slices["question_type:single-session-user"]["recall_any@5"],
         0.0,
         0.0,
         1,
@@ -245,9 +246,9 @@ fn longmem_session_and_turn_gold_remain_independent_at_exact_cutoffs() {
     ];
     let turns = score_longmemeval_retrieval(&turn_cases, Vec::new()).expect("score turns");
     assert_eq!(turns.granularity, Granularity::Turn);
-    assert_metric(&turns.overall["recall_all_at_50"], 0.5, 1.0, 2);
-    assert_metric(&turns.overall["recall_any_at_50"], 0.5, 1.0, 2);
-    assert_metric(&turns.overall["ndcg_at_50"], 0.5, 1.0, 2);
+    assert_metric(&turns.overall["recall_all@50"], 0.5, 1.0, 2);
+    assert_metric(&turns.overall["recall_any@50"], 0.5, 1.0, 2);
+    assert_metric(&turns.overall["ndcg_any@50"], 0.5, 1.0, 2);
 }
 
 #[test]

@@ -153,8 +153,9 @@ pub fn recall_any_at_k(gold: &[impl AsRef<str>], hits: &[impl AsRef<str>], k: us
     f64::from(!gold.is_disjoint(&hits))
 }
 
-/// Binary-relevance NDCG with the ideal denominator computed from the number
-/// of unique gold occurrences that can fit in k positions.
+/// LongMemEval binary-relevance NDCG: the first relevance is undiscounted and
+/// later zero-based rank `i` is divided by `log2(i + 1)`. The ideal denominator
+/// uses the number of unique gold occurrences that can fit in k positions.
 #[allow(dead_code)]
 pub fn ndcg_at_k(gold: &[impl AsRef<str>], hits: &[impl AsRef<str>], k: usize) -> f64 {
     let gold = gold.iter().map(AsRef::as_ref).collect::<BTreeSet<_>>();
@@ -346,15 +347,9 @@ fn longmem_metric_map(
                 ndcg_at_k(longmem_gold(input, granularity), &hit_ids(input), k)
             })
             .collect::<Vec<_>>();
-        metrics.insert(
-            format!("recall_all_at_{k}"),
-            MetricValue::from_scores(&all)?,
-        );
-        metrics.insert(
-            format!("recall_any_at_{k}"),
-            MetricValue::from_scores(&any)?,
-        );
-        metrics.insert(format!("ndcg_at_{k}"), MetricValue::from_scores(&ndcg)?);
+        metrics.insert(format!("recall_all@{k}"), MetricValue::from_scores(&all)?);
+        metrics.insert(format!("recall_any@{k}"), MetricValue::from_scores(&any)?);
+        metrics.insert(format!("ndcg_any@{k}"), MetricValue::from_scores(&ndcg)?);
     }
     Ok(metrics)
 }
@@ -483,7 +478,11 @@ fn evidence_recall_at_k(gold: &[impl AsRef<str>], hits: &[impl AsRef<str>], k: u
 
 #[allow(dead_code)]
 fn discount(zero_based_rank: usize) -> f64 {
-    1.0 / (zero_based_rank as f64 + 2.0).log2()
+    if zero_based_rank == 0 {
+        1.0
+    } else {
+        1.0 / (zero_based_rank as f64 + 1.0).log2()
+    }
 }
 
 /// `coverage_milli * total = COVERED_WEIGHT * covered + PARTIAL_WEIGHT * partial`.
