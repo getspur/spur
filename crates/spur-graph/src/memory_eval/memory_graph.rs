@@ -294,6 +294,10 @@ impl MemoryGraphBuilder {
 
     fn add_edge(&mut self, source: NodeId, target: NodeId, relation: MemoryRelation) {
         let edge_id = EdgeId(u64::try_from(self.edges.len() + 1).expect("edge count fits u64"));
+        let directed = !matches!(
+            relation,
+            MemoryRelation::Contains | MemoryRelation::SpokenBy
+        );
         self.edges.push(GraphEdge {
             edge_id,
             source_node_id: source,
@@ -308,7 +312,7 @@ impl MemoryGraphBuilder {
             edge_kind: None,
             bind_method: Some("memory_corpus".to_owned()),
             evidence_id: EvidenceId(edge_id.get()),
-            directed: true,
+            directed,
             change_kind: None,
         });
         self.relations.push(relation);
@@ -316,10 +320,7 @@ impl MemoryGraphBuilder {
             .entry((source, relation))
             .or_default()
             .push(target);
-        if matches!(
-            relation,
-            MemoryRelation::Contains | MemoryRelation::SpokenBy
-        ) {
+        if !directed {
             self.adjacency
                 .entry((target, relation))
                 .or_default()

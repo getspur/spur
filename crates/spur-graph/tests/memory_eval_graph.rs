@@ -8,6 +8,7 @@ use spur_graph::memory_eval::memory_graph::{
 use spur_graph::memory_eval::ranking::{
     Bm25Ranker, ChronologyKey, CorpusDocument, Granularity, RankRequest, Ranker, Variant,
 };
+use spur_graph::RelationKind;
 
 #[derive(Clone)]
 struct FixtureCorpus {
@@ -141,12 +142,92 @@ fn graph_facts_have_deterministic_session_turn_speaker_and_chronology_shape() {
             MemoryRelation::SpokenBy,
         ]
     );
+    let direction_flags = graph
+        .relations()
+        .zip(&graph.facts.edges)
+        .map(|(relation, edge)| (relation, edge.directed))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        direction_flags,
+        vec![
+            (MemoryRelation::Contains, false),
+            (MemoryRelation::Contains, false),
+            (MemoryRelation::SpokenBy, false),
+            (MemoryRelation::Contains, false),
+            (MemoryRelation::NextTurn, true),
+            (MemoryRelation::PreviousTurn, true),
+            (MemoryRelation::SpokenBy, false),
+            (MemoryRelation::Contains, false),
+            (MemoryRelation::Contains, false),
+            (MemoryRelation::SpokenBy, false),
+        ]
+    );
+    assert_eq!(
+        serde_json::to_string(&direction_flags).unwrap(),
+        r#"[["contains",false],["contains",false],["spoken_by",false],["contains",false],["next_turn",true],["previous_turn",true],["spoken_by",false],["contains",false],["contains",false],["spoken_by",false]]"#
+    );
     assert_eq!(
         graph.content_hash(),
         MemoryGraph::build(fixture_corpus().records())
             .unwrap()
             .content_hash()
     );
+}
+
+#[test]
+fn reviewer_runtime_traversal_has_no_reverse_arcs_hidden_from_graph_facts() {
+    let graph = MemoryGraph::build(fixture_corpus().records()).unwrap();
+    let alice_node = graph
+        .facts
+        .nodes
+        .iter()
+        .find(|node| node.stable_key == "memory:speaker:Alice")
+        .unwrap()
+        .node_id;
+    let mut recorded_neighbors = BTreeSet::new();
+
+    for edge in &graph.facts.edges {
+        if edge.relation != RelationKind::Binds {
+            continue;
+        }
+        let target = edge.target_node_id.unwrap();
+        if edge.source_node_id == alice_node {
+            recorded_neighbors.insert(target);
+        }
+        if !edge.directed && target == alice_node {
+            recorded_neighbors.insert(edge.source_node_id);
+        }
+    }
+
+    let ranker = GraphTraversalRanker::new(
+        graph,
+        TraversalConfig {
+            seed_k: 1,
+            max_depth: 1,
+            relations: BTreeSet::from([MemoryRelation::SpokenBy]),
+        },
+    )
+    .unwrap();
+    let request = turn_request(ranker.graph(), "Alice");
+    let (ranking, telemetry) = ranker.rank_with_telemetry(&request, 2).unwrap();
+
+    assert_eq!(ranking.hits.len(), 2);
+    for hit in &ranking.hits {
+        let stable_key = hit.provenance_id.as_deref().unwrap();
+        let node_id = ranker
+            .graph()
+            .facts
+            .nodes
+            .iter()
+            .find(|node| node.stable_key == stable_key)
+            .unwrap()
+            .node_id;
+        assert!(
+            recorded_neighbors.contains(&node_id),
+            "runtime returned {stable_key} through an arc absent from GraphFacts"
+        );
+    }
+    assert_eq!(telemetry.traversed_edges, recorded_neighbors.len());
 }
 
 #[test]
