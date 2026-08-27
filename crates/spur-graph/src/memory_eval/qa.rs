@@ -1,6 +1,8 @@
 use std::collections::HashMap;
+use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::{ensure, Context};
 use async_trait::async_trait;
@@ -536,6 +538,11 @@ pub const LONGMEMEVAL_MODEL: &str = "gpt-4o-2024-08-06";
 /// Official Responses API create endpoint.
 pub const OPENAI_RESPONSES_URL: &str = "https://api.openai.com/v1/responses";
 
+const OPENAI_TOTAL_TIMEOUT: Duration = Duration::from_secs(120);
+const OPENAI_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const OPENAI_READ_TIMEOUT: Duration = Duration::from_secs(60);
+const OPENAI_PHYSICAL_TRANSMISSIONS_PER_CALL: u64 = 1;
+
 const LONGMEM_READER_MAX_OUTPUT_TOKENS: u64 = 800;
 const LONGMEM_JUDGE_MAX_OUTPUT_TOKENS: u64 = 10;
 const LONGMEM_READER_PROMPT: &str = "I will give you several history chats between you and a user. Please answer the question based on the relevant chat history. Answer the question step by step: first extract all the relevant information, and then reason over the information to get the answer.\n\n\nHistory Chats:\n\n{history}\n\nCurrent Date: {question_date}\nQuestion: {question}\nAnswer (step by step):";
@@ -860,13 +867,17 @@ impl QaBudget {
         Ok(())
     }
 
-    fn record_usage(&mut self, usage: QaUsage) -> anyhow::Result<u64> {
+    fn price_usage(&self, usage: QaUsage) -> anyhow::Result<u64> {
         let usage = usage.validate()?;
-        let call_cost = token_cost_usd_micros(
+        token_cost_usd_micros(
             usage,
             self.limits.input_usd_micros_per_million,
             self.limits.output_usd_micros_per_million,
-        )?;
+        )
+    }
+
+    fn record_usage(&mut self, usage: QaUsage, call_cost: u64) -> anyhow::Result<()> {
+        let usage = usage.validate()?;
         let next_usage = self.usage.checked_add(usage)?;
         let next_cost = self
             .cost_usd_micros
@@ -882,7 +893,7 @@ impl QaBudget {
             self.cost_usd_micros <= self.limits.max_usd_micros,
             "QA response exceeded the declared USD ceiling"
         );
-        Ok(call_cost)
+        Ok(())
     }
 
     fn restore_cached_call(&mut self, entry: &QaCacheEntry) -> anyhow::Result<()> {
@@ -937,17 +948,40 @@ pub trait LongMemQaBackend: Send {
 }
 
 /// Single-attempt OpenAI Responses API adapter. Budgeting is owned by the
-/// evaluator and no implicit retry policy is installed here.
-#[derive(Debug, Clone)]
+/// evaluator, and reqwest's implicit protocol retries are explicitly disabled.
+#[derive(Clone)]
 pub struct OpenAiResponsesBackend {
     client: reqwest::Client,
     api_key: Option<String>,
 }
 
+impl fmt::Debug for OpenAiResponsesBackend {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("OpenAiResponsesBackend")
+            .field("credentials_available", &self.credentials_available())
+            .field(
+                "physical_transmissions_per_call",
+                &OPENAI_PHYSICAL_TRANSMISSIONS_PER_CALL,
+            )
+            .field("retry_policy", &"never")
+            .field("total_timeout", &OPENAI_TOTAL_TIMEOUT)
+            .field("connect_timeout", &OPENAI_CONNECT_TIMEOUT)
+            .field("read_timeout", &OPENAI_READ_TIMEOUT)
+            .finish_non_exhaustive()
+    }
+}
+
 impl OpenAiResponsesBackend {
     pub fn new(api_key: Option<String>) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .retry(reqwest::retry::never())
+                .timeout(OPENAI_TOTAL_TIMEOUT)
+                .connect_timeout(OPENAI_CONNECT_TIMEOUT)
+                .read_timeout(OPENAI_READ_TIMEOUT)
+                .build()
+                .expect("static OpenAI Responses HTTP policy must build"),
             api_key,
         }
     }
@@ -1361,17 +1395,28 @@ pub async fn evaluate_longmem(
             .await
             {
                 Ok(entry) => entry,
-                Err(error) => {
+                Err(failure) => {
+                    let reason = format!("{:#}", failure.error);
+                    let (hypothesis, usage, cost_usd_micros) = failure
+                        .received
+                        .map(|received| {
+                            (
+                                Some(received.response.output_text),
+                                received.response.usage,
+                                received.cost_usd_micros.unwrap_or(0),
+                            )
+                        })
+                        .unwrap_or((None, QaUsage::default(), 0));
                     records.push(LongMemQaRecord::pending(
                         question,
                         ranking,
                         reader_request.ranking_sha256.clone(),
                         Some(reader_request.prompt_sha256.clone()),
                         None,
-                        None,
-                        QaUsage::default(),
-                        0,
-                        format!("reader: {error:#}"),
+                        hypothesis,
+                        usage,
+                        cost_usd_micros,
+                        format!("reader: {reason}"),
                     ));
                     continue;
                 }
@@ -1454,7 +1499,22 @@ pub async fn evaluate_longmem(
             .await
             {
                 Ok(entry) => entry,
-                Err(error) => {
+                Err(failure) => {
+                    let reason = format!("{:#}", failure.error);
+                    let (usage, cost_usd_micros) = if let Some(received) = failure.received {
+                        (
+                            reader_entry
+                                .response
+                                .usage
+                                .checked_add(received.response.usage)?,
+                            reader_entry
+                                .cost_usd_micros
+                                .checked_add(received.cost_usd_micros.unwrap_or(0))
+                                .context("pending QA cost overflow")?,
+                        )
+                    } else {
+                        (reader_entry.response.usage, reader_entry.cost_usd_micros)
+                    };
                     records.push(LongMemQaRecord::pending(
                         question,
                         ranking,
@@ -1462,9 +1522,9 @@ pub async fn evaluate_longmem(
                         Some(reader_request.prompt_sha256.clone()),
                         Some(judge_request.prompt_sha256.clone()),
                         Some(hypothesis),
-                        reader_entry.response.usage,
-                        reader_entry.cost_usd_micros,
-                        format!("judge: {error:#}"),
+                        usage,
+                        cost_usd_micros,
+                        format!("judge: {reason}"),
                     ));
                     continue;
                 }
@@ -1536,10 +1596,25 @@ async fn execute_cached_call(
     key: QaCacheKey,
     request: LongMemQaRequest,
     labeler: Option<fn(&str) -> bool>,
-) -> anyhow::Result<QaCacheEntry> {
-    budget.admit_request()?;
-    let response = backend.complete(&request).await?.validate()?;
-    let cost_usd_micros = budget.record_usage(response.usage)?;
+) -> Result<QaCacheEntry, QaCallFailure> {
+    budget
+        .admit_request()
+        .map_err(QaCallFailure::before_response)?;
+    let response = backend
+        .complete(&request)
+        .await
+        .and_then(LongMemQaResponse::validate)
+        .map_err(QaCallFailure::before_response)?;
+    let cost_usd_micros = budget
+        .price_usage(response.usage)
+        .map_err(|error| QaCallFailure::after_response(error, response.clone(), None))?;
+    if let Err(error) = budget.record_usage(response.usage, cost_usd_micros) {
+        return Err(QaCallFailure::after_response(
+            error,
+            response,
+            Some(cost_usd_micros),
+        ));
+    }
     let entry = QaCacheEntry {
         key,
         request,
@@ -1547,8 +1622,49 @@ async fn execute_cached_call(
         response,
         cost_usd_micros,
     };
-    cache.put(&entry)?;
+    if let Err(error) = cache.put(&entry) {
+        return Err(QaCallFailure::after_response(
+            error,
+            entry.response,
+            Some(cost_usd_micros),
+        ));
+    }
     Ok(entry)
+}
+
+#[derive(Debug)]
+struct QaCallFailure {
+    error: anyhow::Error,
+    received: Option<QaReceivedCall>,
+}
+
+impl QaCallFailure {
+    fn before_response(error: anyhow::Error) -> Self {
+        Self {
+            error,
+            received: None,
+        }
+    }
+
+    fn after_response(
+        error: anyhow::Error,
+        response: LongMemQaResponse,
+        cost_usd_micros: Option<u64>,
+    ) -> Self {
+        Self {
+            error,
+            received: Some(QaReceivedCall {
+                response,
+                cost_usd_micros,
+            }),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct QaReceivedCall {
+    response: LongMemQaResponse,
+    cost_usd_micros: Option<u64>,
 }
 
 fn judge_label(output: &str) -> bool {

@@ -149,6 +149,22 @@ impl LongMemQaBackend for FakeBackend {
     }
 }
 
+#[derive(Default)]
+struct FailingPutCache;
+
+impl QaCache for FailingPutCache {
+    fn get(
+        &self,
+        _key: &QaCacheKey,
+    ) -> anyhow::Result<Option<spur_graph::memory_eval::qa::QaCacheEntry>> {
+        Ok(None)
+    }
+
+    fn put(&mut self, _entry: &spur_graph::memory_eval::qa::QaCacheEntry) -> anyhow::Result<()> {
+        Err(anyhow!("injected cache put failure"))
+    }
+}
+
 #[test]
 fn longmem_prompt_is_chronological_json_with_both_roles_and_all_dates() {
     let dataset = fixture_dataset();
@@ -506,6 +522,101 @@ async fn request_token_and_usd_exhaustion_are_pending_without_calls_or_labels() 
 }
 
 #[tokio::test]
+async fn one_admitted_request_produces_at_most_one_backend_transmission() {
+    let dataset = fixture_dataset();
+    let rankings = frozen_rankings(&dataset);
+    let temp = tempfile::tempdir().unwrap();
+    let mut cache = JsonQaCache::open(temp.path()).unwrap();
+    let mut backend = FakeBackend::scripted([
+        Ok(response("Take the train", 100, 8)),
+        Ok(response("yes", 40, 1)),
+    ]);
+    let mut request_budget = budget(1);
+
+    let records = evaluate_longmem(
+        &dataset,
+        &rankings,
+        &mut backend,
+        &mut cache,
+        &mut request_budget,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(backend.requests.len(), 1);
+    assert_eq!(request_budget.requests(), 1);
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].status, QaStatus::Pending);
+    assert_eq!(records[0].label, None);
+}
+
+#[tokio::test]
+async fn received_usage_and_cost_survive_budget_recording_failure() {
+    let dataset = fixture_dataset();
+    let rankings = frozen_rankings(&dataset);
+    let temp = tempfile::tempdir().unwrap();
+    let mut cache = JsonQaCache::open(temp.path()).unwrap();
+    let mut backend = FakeBackend::scripted([Ok(response("Take the train", 100, 8))]);
+    let mut over_ceiling = QaBudget::new(QaBudgetLimits {
+        max_total_tokens: 100,
+        ..budget(2).limits().clone()
+    });
+
+    let records = evaluate_longmem(
+        &dataset,
+        &rankings,
+        &mut backend,
+        &mut cache,
+        &mut over_ceiling,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].status, QaStatus::Pending);
+    assert_eq!(records[0].label, None);
+    assert_eq!(records[0].hypothesis.as_deref(), Some("Take the train"));
+    assert_eq!(records[0].usage, response("unused", 100, 8).usage);
+    assert_eq!(records[0].cost_usd_micros, 1);
+    assert_eq!(over_ceiling.usage(), records[0].usage);
+    assert_eq!(over_ceiling.cost_usd_micros(), 1);
+    assert_eq!(cache.entry_count().unwrap(), 0);
+}
+
+#[tokio::test]
+async fn received_usage_and_cost_survive_cache_persistence_failure() {
+    let dataset = fixture_dataset();
+    let rankings = frozen_rankings(&dataset);
+    let mut cache = FailingPutCache;
+    let mut backend = FakeBackend::scripted([Ok(response("Take the train", 100, 8))]);
+    let mut paid_budget = budget(2);
+
+    let records = evaluate_longmem(
+        &dataset,
+        &rankings,
+        &mut backend,
+        &mut cache,
+        &mut paid_budget,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].status, QaStatus::Pending);
+    assert_eq!(records[0].label, None);
+    assert_eq!(records[0].hypothesis.as_deref(), Some("Take the train"));
+    assert_eq!(records[0].usage, response("unused", 100, 8).usage);
+    assert_eq!(records[0].cost_usd_micros, 1);
+    assert_eq!(paid_budget.usage(), records[0].usage);
+    assert_eq!(paid_budget.cost_usd_micros(), 1);
+    assert!(records[0]
+        .pending_reason
+        .as_deref()
+        .unwrap()
+        .contains("injected cache put failure"));
+}
+
+#[tokio::test]
 async fn malformed_fake_usage_is_pending_and_never_cached_as_a_hypothesis() {
     let dataset = fixture_dataset();
     let rankings = frozen_rankings(&dataset);
@@ -536,6 +647,30 @@ async fn malformed_fake_usage_is_pending_and_never_cached_as_a_hypothesis() {
 fn missing_api_key_is_rejected_before_the_paid_backend_can_send() {
     let backend = OpenAiResponsesBackend::new(None);
     assert!(!backend.credentials_available());
+}
+
+#[test]
+fn paid_backend_debug_redacts_api_key() {
+    let api_key = "sk-regression-secret";
+    let backend = OpenAiResponsesBackend::new(Some(api_key.into()));
+
+    let debug = format!("{backend:?}");
+
+    assert!(!debug.contains(api_key), "credential leaked via Debug");
+    assert!(debug.contains("credentials_available: true"));
+}
+
+#[test]
+fn paid_backend_debug_exposes_single_attempt_and_finite_timeout_policy() {
+    let backend = OpenAiResponsesBackend::new(None);
+
+    let debug = format!("{backend:?}");
+
+    assert!(debug.contains("physical_transmissions_per_call: 1"));
+    assert!(debug.contains("retry_policy: \"never\""));
+    assert!(debug.contains("total_timeout: 120s"));
+    assert!(debug.contains("connect_timeout: 10s"));
+    assert!(debug.contains("read_timeout: 60s"));
 }
 
 #[test]

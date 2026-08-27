@@ -9259,6 +9259,7 @@ dependencies = [
  "parquet",
  "petgraph",
  "pretty_assertions",
+ "reqwest 0.12.28",
  "serde",
  "serde_json",
  "sha1 0.10.6",
