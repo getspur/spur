@@ -28,7 +28,7 @@ use spur_graph::memory_eval::{
     qa::{
         evaluate_locomo, evaluate_longmem, JsonQaCache, LongMemQaRecord, OpenAiResponsesBackend,
         QaBackend, QaBudget, QaBudgetLimits, QaRecord, QaRequest, QaResponse, QaStatus,
-        LONGMEMEVAL_MODEL, OPENAI_RESPONSES_URL,
+        LONGMEMEVAL_MAX_INPUT_TOKENS, LONGMEMEVAL_MODEL, OPENAI_RESPONSES_URL,
     },
     ranking::{
         oracle_ranking, Bm25Ranker, ChronologyKey, CorpusDocument, Granularity, OracleRequest,
@@ -1541,7 +1541,7 @@ impl LocomoOpenAiBackend {
         })
     }
 
-    fn admit(&mut self, request: &QaRequest) -> Result<()> {
+    fn admit(&mut self, _request: &QaRequest) -> Result<()> {
         let requests = self
             .requests
             .checked_add(1)
@@ -1550,11 +1550,8 @@ impl LocomoOpenAiBackend {
             requests <= self.limits.max_requests,
             "QA max request budget exhausted"
         );
-        // GPT-4o tokenization starts from UTF-8 bytes, so byte length is a
-        // conservative input-token ceiling rather than an average estimate.
-        let maximum_input_tokens =
-            u64::try_from(request.prompt.len()).context("LoCoMo prompt byte length exceeds u64")?;
-        let reserve = token_cost_usd_micros(maximum_input_tokens, LOCOMO_MAX_OUTPUT_TOKENS)?;
+        let reserve =
+            token_cost_usd_micros(LONGMEMEVAL_MAX_INPUT_TOKENS, LOCOMO_MAX_OUTPUT_TOKENS)?;
         ensure!(
             self.cost_usd_micros
                 .checked_add(reserve)
@@ -2098,7 +2095,7 @@ mod paid_boundary_tests {
     }
 
     #[test]
-    fn locomo_underestimated_prompt_is_rejected_without_a_physical_transmission() {
+    fn locomo_billed_request_overhead_is_rejected_without_a_physical_transmission() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let address = listener.local_addr().unwrap();
@@ -2134,13 +2131,15 @@ mod paid_boundary_tests {
             temp.path().to_path_buf(),
             PaidAuthorization {
                 max_requests: 1,
-                max_usd_micros: 20_000,
+                // Exactly enough for the old one-byte visible prompt plus
+                // the configured output cap, but not request framing.
+                max_usd_micros: token_cost_usd_micros(1, LOCOMO_MAX_OUTPUT_TOKENS).unwrap(),
             },
             client,
         );
 
         let error = backend
-            .complete(&request("x".repeat(12_000), Variant::Oracle))
+            .complete(&request("x".into(), Variant::Oracle))
             .unwrap_err();
         proxy.join().unwrap();
 

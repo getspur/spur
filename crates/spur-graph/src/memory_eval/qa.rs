@@ -535,6 +535,10 @@ fn sha256_hex(bytes: &[u8]) -> String {
 
 /// Audited LongMemEval reader and judge snapshot.
 pub const LONGMEMEVAL_MODEL: &str = "gpt-4o-2024-08-06";
+/// Conservative ceiling for all billed Responses input, including provider
+/// framing, under the pinned model's documented 128,000-token context window.
+/// <https://developers.openai.com/api/docs/models/gpt-4o>
+pub const LONGMEMEVAL_MAX_INPUT_TOKENS: u64 = 128_000;
 /// Official Responses API create endpoint.
 pub const OPENAI_RESPONSES_URL: &str = "https://api.openai.com/v1/responses";
 
@@ -842,6 +846,10 @@ impl QaBudget {
     }
 
     fn admit_request(&mut self, request: &LongMemQaRequest) -> anyhow::Result<()> {
+        ensure!(
+            request.model == LONGMEMEVAL_MODEL,
+            "unsupported LongMemEval model for bounded QA admission"
+        );
         let requests = self
             .requests
             .checked_add(1)
@@ -850,11 +858,7 @@ impl QaBudget {
             requests <= self.limits.max_requests,
             "QA max request budget exhausted"
         );
-        // The tokenizer is byte based, so the UTF-8 byte count is a strict
-        // upper bound on prompt tokens; the response is explicitly capped.
-        let maximum_input_tokens =
-            u64::try_from(request.prompt.len()).context("QA prompt byte length exceeds u64")?;
-        let maximum_total_tokens = maximum_input_tokens
+        let maximum_total_tokens = LONGMEMEVAL_MAX_INPUT_TOKENS
             .checked_add(request.max_output_tokens)
             .context("QA maximum call token count overflow")?;
         let reserved_tokens = maximum_total_tokens.max(self.limits.reserve_tokens_per_request);
@@ -867,7 +871,7 @@ impl QaBudget {
         );
         let maximum_call_cost = self
             .price_usage(QaUsage {
-                input_tokens: maximum_input_tokens,
+                input_tokens: LONGMEMEVAL_MAX_INPUT_TOKENS,
                 output_tokens: request.max_output_tokens,
                 total_tokens: maximum_total_tokens,
             })?

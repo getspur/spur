@@ -9,8 +9,8 @@ use spur_graph::memory_eval::{
     qa::{
         build_longmem_reader_request, evaluate_longmem, render_longmem_judge_prompt, JsonQaCache,
         LongMemQaBackend, LongMemQaRequest, LongMemQaResponse, OpenAiResponsesBackend, QaBudget,
-        QaBudgetLimits, QaCache, QaCacheKey, QaStage, QaStatus, QaUsage, LONGMEMEVAL_MODEL,
-        OPENAI_RESPONSES_URL,
+        QaBudgetLimits, QaCache, QaCacheKey, QaStage, QaStatus, QaUsage,
+        LONGMEMEVAL_MAX_INPUT_TOKENS, LONGMEMEVAL_MODEL, OPENAI_RESPONSES_URL,
     },
     ranking::{Granularity, QueryOccurrenceId, RankedHit, Ranking, RankingSet, Variant},
 };
@@ -115,7 +115,7 @@ fn response(output_text: &str, input: u64, output: u64) -> LongMemQaResponse {
 fn budget(max_requests: u64) -> QaBudget {
     QaBudget::new(QaBudgetLimits {
         max_requests,
-        max_total_tokens: 10_000,
+        max_total_tokens: u64::MAX,
         max_usd_micros: 10_000,
         reserve_tokens_per_request: 1,
         reserve_usd_micros_per_request: 1,
@@ -522,17 +522,27 @@ async fn request_token_and_usd_exhaustion_are_pending_without_calls_or_labels() 
 }
 
 #[tokio::test]
-async fn conservative_prompt_charge_rejects_before_longmem_transmission() {
+async fn complete_billed_request_overhead_is_rejected_before_longmem_transmission() {
     let dataset = fixture_dataset();
     let rankings = frozen_rankings(&dataset);
+    let reader_request = build_longmem_reader_request(
+        &dataset.questions[0],
+        &frozen_session_ranking(&dataset),
+        &dataset,
+    )
+    .unwrap();
     let temp = tempfile::tempdir().unwrap();
     let mut cache = JsonQaCache::open(temp.path()).unwrap();
-    let mut backend = FakeBackend::scripted([Ok(response("Take the train", 100, 8))]);
+    let visible_prompt_tokens = u64::try_from(reader_request.prompt.len()).unwrap();
+    let mut backend =
+        FakeBackend::scripted([Ok(response("Take the train", visible_prompt_tokens + 1, 0))]);
     let mut limits = budget(2).limits().clone();
-    limits.max_usd_micros = 1;
-    limits.reserve_usd_micros_per_request = 1;
+    // This is exactly enough for the old visible-prompt-only estimate, but
+    // not for even one additional billed request-framing token.
+    limits.max_usd_micros = visible_prompt_tokens;
+    limits.reserve_usd_micros_per_request = 0;
     limits.input_usd_micros_per_million = 1_000_000;
-    limits.output_usd_micros_per_million = 1_000_000;
+    limits.output_usd_micros_per_million = 0;
     let mut paid_budget = QaBudget::new(limits);
 
     let records = evaluate_longmem(
@@ -638,11 +648,19 @@ async fn one_admitted_request_produces_at_most_one_backend_transmission() {
 async fn received_usage_and_cost_survive_budget_recording_failure() {
     let dataset = fixture_dataset();
     let rankings = frozen_rankings(&dataset);
+    let reader_request = build_longmem_reader_request(
+        &dataset.questions[0],
+        &frozen_session_ranking(&dataset),
+        &dataset,
+    )
+    .unwrap();
+    let maximum_call_tokens = LONGMEMEVAL_MAX_INPUT_TOKENS + reader_request.max_output_tokens;
     let temp = tempfile::tempdir().unwrap();
     let mut cache = JsonQaCache::open(temp.path()).unwrap();
-    let mut backend = FakeBackend::scripted([Ok(response("Take the train", 100_000, 8))]);
+    let mut backend =
+        FakeBackend::scripted([Ok(response("Take the train", maximum_call_tokens, 8))]);
     let mut over_ceiling = QaBudget::new(QaBudgetLimits {
-        max_total_tokens: 100_000,
+        max_total_tokens: maximum_call_tokens,
         ..budget(2).limits().clone()
     });
 
@@ -660,7 +678,10 @@ async fn received_usage_and_cost_survive_budget_recording_failure() {
     assert_eq!(records[0].status, QaStatus::Pending);
     assert_eq!(records[0].label, None);
     assert_eq!(records[0].hypothesis.as_deref(), Some("Take the train"));
-    assert_eq!(records[0].usage, response("unused", 100_000, 8).usage);
+    assert_eq!(
+        records[0].usage,
+        response("unused", maximum_call_tokens, 8).usage
+    );
     assert_eq!(records[0].cost_usd_micros, 1);
     assert_eq!(over_ceiling.usage(), records[0].usage);
     assert_eq!(over_ceiling.cost_usd_micros(), 1);
