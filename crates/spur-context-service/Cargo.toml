@@ -41,7 +41,7 @@ path = "src/bin/worker_lambda.rs"
 required-features = ["worker-lambda"]
 
 [features]
-default = ["worker"]
+default = ["service"]
 service = [
     "dep:anyhow",
     "dep:aws-config",
@@ -56,13 +56,14 @@ analyst = ["service"]
 lambda = ["service", "api-key-authorizer"]
 api-key-authorizer = ["dep:lambda_runtime"]
 api-key-cleanup = ["dep:lambda_runtime"]
-worker = ["service"]
+parquet-io = ["dep:arrow-array", "dep:arrow-schema", "dep:parquet"]
+worker = ["service", "parquet-io"]
 worker-lambda = ["worker", "dep:lambda_runtime"]
 
 [dependencies]
 anyhow = { version = "1", optional = true }
-arrow-array = "58"
-arrow-schema = "58"
+arrow-array = { version = "58", optional = true }
+arrow-schema = { version = "58", optional = true }
 async-trait = "0.1"
 aws-config = { version = "1", optional = true }
 aws-sdk-dynamodb = "1"
@@ -74,7 +75,7 @@ clap = { version = "4", features = ["derive", "env"], optional = true }
 # Isolated from the workspace's duckdb v1.4.4 (needed by spur-analyst for DuckPGQ).
 duckdb = { version = "=1.10504.0", features = ["bundled"], optional = true }
 lambda_runtime = { version = "1.2.1", optional = true, features = ["concurrency-tokio"] }
-parquet = { version = "58", default-features = false, features = ["arrow", "zstd"] }
+parquet = { version = "58", default-features = false, features = ["arrow", "zstd"], optional = true }
 rand = "0.8"
 secrecy = "0.10"
 serde = { version = "1", features = ["derive"] }

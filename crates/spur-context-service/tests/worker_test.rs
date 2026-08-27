@@ -420,17 +420,17 @@ async fn silver_persistence_includes_source_sidecar() -> Result<()> {
     let manifest = silver_store
         .manifest()
         .context("source sidecar manifest should be uploaded")?;
-    let manifest_json = serde_json::to_value(&manifest)?;
-    let files = manifest_json["files"]
-        .as_array()
-        .context("manifest files should be an array")?;
-    assert!(files.iter().any(|file| {
-        file["path"] == "source_files.parquet"
-            && file["sha256"].as_str().is_some_and(|hash| hash.len() == 64)
-    }));
-    assert!(files
+    let sidecar_manifest_file = manifest
+        .files
         .iter()
-        .all(|file| file["sha256"].as_str().is_some_and(|hash| hash.len() == 64)));
+        .find(|file| file.path == "source_files.parquet")
+        .context("source sidecar should be listed in manifest")?;
+    assert_eq!(
+        sidecar_manifest_file.sha256,
+        sha256_hex(&fs::read(&sidecar)?),
+        "manifest must contain the SHA-256 of the generated sidecar bytes"
+    );
+    assert!(manifest.files.iter().all(|file| file.sha256.len() == 64));
 
     let events = events.lock().expect("events lock").clone();
     let upload_sidecar = event_index(
@@ -442,6 +442,93 @@ async fn silver_persistence_includes_source_sidecar() -> Result<()> {
     assert!(upload_sidecar < upload_manifest);
 
     drop(prepared);
+    fs::remove_dir_all(root).ok();
+    Ok(())
+}
+
+#[tokio::test]
+async fn source_sidecar_rejects_missing_manifest_source_before_upload() -> Result<()> {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let _env_guard = EnvGuard::set_all([("SPUR_CONTEXT_SILVER_BUCKET", "silver-test")]);
+    let root = unique_temp_dir("worker-source-sidecar-missing")?;
+    let artifact_dir = root.join("artifact");
+    let source_root = root.join("source");
+    fs::create_dir_all(source_root.join("src"))?;
+    write_silver_artifact_fixture(&artifact_dir)?;
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let store = FakeSilverArtifactStore::new(events.clone());
+    let registry = FakeSilverRegistry::new(events.clone());
+    let env = demo_job_env("http://127.0.0.1:1/unreachable.tar.gz");
+
+    let error = persist_silver_graph_artifact(
+        &env,
+        &artifact_dir,
+        &source_root,
+        "bronze-sha256",
+        "builder-v1",
+        &store,
+        &registry,
+    )
+    .await
+    .unwrap_err();
+
+    assert!(matches!(
+        error,
+        WorkerError::Build(detail)
+            if detail.contains("read referenced source") && detail.contains("src/lib.rs")
+    ));
+    assert!(
+        events.lock().expect("events lock").is_empty(),
+        "source validation must fail before any Silver file or manifest upload"
+    );
+    assert!(store.manifest().is_none());
+    assert_eq!(registry.registers(), 0);
+    assert!(!artifact_dir.join("source_files.parquet").exists());
+
+    fs::remove_dir_all(root).ok();
+    Ok(())
+}
+
+#[tokio::test]
+async fn source_sidecar_rejects_non_utf8_manifest_source_before_upload() -> Result<()> {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let _env_guard = EnvGuard::set_all([("SPUR_CONTEXT_SILVER_BUCKET", "silver-test")]);
+    let root = unique_temp_dir("worker-source-sidecar-non-utf8")?;
+    let artifact_dir = root.join("artifact");
+    let source_root = root.join("source");
+    fs::create_dir_all(source_root.join("src"))?;
+    fs::write(source_root.join("src/lib.rs"), [0xff, 0xfe, 0xfd])?;
+    write_silver_artifact_fixture(&artifact_dir)?;
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let store = FakeSilverArtifactStore::new(events.clone());
+    let registry = FakeSilverRegistry::new(events.clone());
+    let env = demo_job_env("http://127.0.0.1:1/unreachable.tar.gz");
+
+    let error = persist_silver_graph_artifact(
+        &env,
+        &artifact_dir,
+        &source_root,
+        "bronze-sha256",
+        "builder-v1",
+        &store,
+        &registry,
+    )
+    .await
+    .unwrap_err();
+
+    assert!(matches!(
+        error,
+        WorkerError::Build(detail)
+            if detail.contains("read referenced source") && detail.contains("as UTF-8")
+    ));
+    assert!(
+        events.lock().expect("events lock").is_empty(),
+        "source validation must fail before any Silver file or manifest upload"
+    );
+    assert!(store.manifest().is_none());
+    assert_eq!(registry.registers(), 0);
+    assert!(!artifact_dir.join("source_files.parquet").exists());
+
     fs::remove_dir_all(root).ok();
     Ok(())
 }
