@@ -6,11 +6,16 @@
 //! `data_integrity.foreign_key.violation`). Retrieval policy
 //! `sol_07a8eb8af5064466`: top-k unique ids, full session text, seed_k=10.
 
+pub mod artifacts;
+pub mod contract;
+pub mod memory_graph;
+pub mod qa;
+pub mod ranking;
+
 mod locomo;
 mod longmemeval;
 mod materialize;
 mod metrics;
-mod qa;
 mod retrieve;
 
 pub use locomo::parse_locomo;

@@ -6140,6 +6140,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "nltk-porter"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3ae1d11f98838ac2dc9ca188e86eda22ed083f79eaebf5a41ecacf59228d2e0c"
+
+[[package]]
 name = "no_std_io2"
 version = "0.9.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9237,6 +9243,7 @@ dependencies = [
  "base64 0.22.1",
  "blake3",
  "chrono",
+ "clap",
  "criterion",
  "fastembed",
  "fs2",
@@ -9248,10 +9255,12 @@ dependencies = [
  "indicatif 0.18.4",
  "insta",
  "libc",
+ "nltk-porter",
  "notify",
  "parquet",
  "petgraph",
  "pretty_assertions",
+ "reqwest 0.12.28",
  "serde",
  "serde_json",
  "sha1 0.10.6",
