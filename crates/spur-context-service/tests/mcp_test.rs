@@ -16,22 +16,23 @@ use duckdb::{params, Connection};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use spur_context_service::artifact_cache::{
-    ArtifactBundleIdentity, ArtifactCache, ArtifactCacheError, ArtifactFetchError, ArtifactFetcher,
-    ArtifactIdentity, ArtifactStream,
+    ArtifactCache, ArtifactFetchError, ArtifactFetcher, ArtifactStream,
 };
 use spur_context_service::catalog::{
     compact_gold_and_export_snapshot, connect_frozen_snapshot, CatalogResolver,
     FrozenSnapshotManifest, SnapshotCleanupOptions,
 };
+use spur_context_service::code_backend::CodeBackend;
 use spur_context_service::jobs::{
     BacklogOwner, BacklogOwnerKind, CreateJobOutcome, CreateJobRequest, EnqueueOutcome, JobKey,
     JobRecord, JobStatus, JobStore, JobsError, QueueConfig,
 };
 use spur_context_service::mcp::{
-    handle_tool, handle_tool_without_catalog, index_drainer_limits, index_queue_config,
-    route_index, route_index_status, route_index_status_for_caller, route_index_warm_lookup,
-    route_index_without_catalog, tool_definitions, ExecutionOutcome, ExecutionOutcomeStatus,
-    ExecutionStatusChecker, IndexExecutionRequest, IndexExecutionStarter, McpHandlerError,
+    handle_tool, handle_tool_with_code_backend, handle_tool_without_catalog, index_drainer_limits,
+    index_queue_config, route_index, route_index_status, route_index_status_for_caller,
+    route_index_warm_lookup, route_index_without_catalog, tool_definitions, ExecutionOutcome,
+    ExecutionOutcomeStatus, ExecutionStatusChecker, IndexExecutionRequest, IndexExecutionStarter,
+    McpHandlerError,
 };
 use spur_context_service::medallion::{
     SilverManifest, SilverManifestFile, SILVER_MANIFEST_FILENAME,
@@ -597,46 +598,15 @@ async fn call_parquet_backend(
     name: &str,
     args: &Value,
 ) -> Result<Value, McpHandlerError> {
-    fixture
-        .registry
-        .validate()
-        .map_err(|_| retryable_backend_error("invalid_serving_registry"))?;
-    let package = fixture
-        .registry
-        .resolve("registry:crates-io", PACKAGE, REVISION)
-        .map_err(|_| retryable_backend_error("invalid_serving_registry"))?
-        .ok_or_else(|| retryable_backend_error("package_unavailable"))?;
-    fixture
-        .cache
-        .activate_generation(fixture.registry.generation)
-        .await
-        .map_err(cache_backend_error)?;
-    let bundle = ArtifactBundleIdentity {
-        root: ArtifactIdentity {
-            generation: package.generation,
-            source: package.source.clone(),
-            package: package.package.clone(),
-            revision: package.revision.clone(),
-            artifact: package.graph_manifest.clone(),
-        },
-        graph_prefix: package.graph_prefix_uri.clone(),
-    };
-    let _bundle = fixture
-        .cache
-        .materialize_bundle(&bundle)
-        .await
-        .map_err(cache_backend_error)?;
-    handle_tool_without_catalog(name, args)
+    let backend = CodeBackend::new(fixture.registry.clone(), fixture.cache.clone())
+        .map_err(|error| retryable_backend_error(error.code()))?;
+    handle_tool_with_code_backend(name, args, &backend).await
 }
 
 fn retryable_backend_error(code: &'static str) -> McpHandlerError {
     McpHandlerError::Internal(format!(
         "code backend temporarily unavailable: {code} (retryable=true)"
     ))
-}
-
-fn cache_backend_error(error: ArtifactCacheError) -> McpHandlerError {
-    retryable_backend_error(error.code())
 }
 
 fn assert_retryable_backend_error(result: Result<Value, McpHandlerError>, expected_code: &str) {
@@ -745,10 +715,8 @@ fn write_graph_compatible_parquet_fixture(graph_dir: &std::path::Path) -> Result
             },
             "sidecar_complete": false,
             "sidecar_row_counts": {
-                "source_files": 0,
-                "section_metadata": 0,
-                "symbol_embeddings": 0,
-                "section_embeddings": 0
+                "section_bodies": 0,
+                "code_symbols": 0
             },
             "parquet_writer": {
                 "compression": "zstd-3",

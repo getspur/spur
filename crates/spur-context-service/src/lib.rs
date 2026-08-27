@@ -10,6 +10,8 @@ pub mod artifact_cache;
 mod auth;
 #[cfg(feature = "service")]
 pub mod catalog;
+#[cfg(feature = "code-backend")]
+pub mod code_backend;
 #[cfg(feature = "service")]
 pub mod drainer;
 #[cfg(feature = "service")]
