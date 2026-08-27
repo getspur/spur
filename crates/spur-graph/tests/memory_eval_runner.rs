@@ -7,6 +7,13 @@ use std::{
 
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use spur_graph::memory_eval::{
+    contract::{BenchmarkDataset, SourcePin},
+    qa::{
+        ranking_sha256, render_locomo_prompt_with_seed, QaRequest, QaResponse, LONGMEMEVAL_MODEL,
+    },
+    ranking::Ranking,
+};
 
 const LOCOMO_FIXTURE: &str = r#"
 [
@@ -449,6 +456,58 @@ fn paid_qa_requires_flag_both_bounds_and_openai_key_without_mutating_rankings() 
 }
 
 #[test]
+fn locomo_failure_retains_completed_cache_accounting_and_pending_denominator() {
+    let fixture = fixture();
+    let run = tempfile::tempdir().unwrap();
+    assert!(retrieve(&fixture, run.path()).status.success());
+    let frozen_before = ranking_bytes(run.path());
+    seed_first_locomo_cache(&fixture, run.path());
+
+    let output = Command::new(binary())
+        .args([
+            "qa",
+            "--output",
+            run.path().to_str().unwrap(),
+            "--paid-qa",
+            "--max-requests",
+            "1",
+            "--max-usd",
+            "1.00",
+        ])
+        .env("OPENAI_API_KEY", "local-cache-only-test-key")
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    assert!(
+        stderr(&output).contains("QA max request budget exhausted"),
+        "unexpected failure: {}",
+        stderr(&output)
+    );
+    assert_eq!(ranking_bytes(run.path()), frozen_before);
+    let manifest = read_json(run.path().join("manifest.json"));
+    assert_eq!(manifest["state"], "published_retrieval");
+    assert_eq!(manifest["qa_state"], "qa_pending");
+    assert_eq!(
+        manifest["qa_progress"]["completed_question_ids"]
+            .as_array()
+            .unwrap()
+            .len(),
+        0
+    );
+    assert!(
+        manifest["qa_progress"]["eligible_question_ids"]
+            .as_array()
+            .unwrap()
+            .len()
+            > 0
+    );
+    assert_eq!(manifest["hardware"]["context_tokens"], "11");
+    assert_eq!(manifest["hardware"]["qa_requests"], "1");
+    assert_eq!(manifest["hardware"]["qa_cost_usd_micros"], "35");
+}
+
+#[test]
 fn report_records_reproducibility_and_complete_nonnegative_accounting() {
     let fixture = fixture();
     let run = tempfile::tempdir().unwrap();
@@ -495,6 +554,64 @@ fn longmemeval_fixture() -> tempfile::NamedTempFile {
     let file = tempfile::NamedTempFile::new().unwrap();
     fs::write(file.path(), LONGMEMEVAL_FIXTURE).unwrap();
     file
+}
+
+fn seed_first_locomo_cache(fixture: &tempfile::NamedTempFile, run: &Path) {
+    let dataset = BenchmarkDataset::load_locomo(
+        &fs::read_to_string(fixture.path()).unwrap(),
+        SourcePin {
+            origin: "https://github.com/snap-research/locomo".into(),
+            revision: "3eb6f2c585f5e1699204e3c3bdf7adc5c28cb376".into(),
+            sha256: "79fa87e90f04081343b8c8debecb80a9a6842b76a7aa537dc9fdf651ea698ff4".into(),
+        },
+    )
+    .unwrap();
+    let line = fs::read_to_string(run.join("rankings/oracle.jsonl"))
+        .unwrap()
+        .lines()
+        .next()
+        .unwrap()
+        .to_owned();
+    let mut persisted: Value = serde_json::from_str(&line).unwrap();
+    let question_id = persisted["question_id"].as_str().unwrap().to_owned();
+    persisted.as_object_mut().unwrap().remove("question_id");
+    let ranking: Ranking = serde_json::from_value(persisted).unwrap();
+    let question = dataset
+        .questions
+        .iter()
+        .find(|question| question.id == question_id)
+        .unwrap();
+    let prompt = render_locomo_prompt_with_seed(question, &ranking, &dataset, 0).unwrap();
+    let request = QaRequest {
+        question_id,
+        variant: ranking.variant,
+        prompt_sha256: format!("{:x}", Sha256::digest(prompt.as_bytes())),
+        prompt,
+        ranking_sha256: ranking_sha256(&ranking).unwrap(),
+        recorded_seed: 0,
+    };
+    let identity = format!(
+        "{:x}",
+        Sha256::digest(serde_json::to_vec(&request).unwrap())
+    );
+    let cache_root = run.join("qa/cache/locomo");
+    fs::create_dir_all(&cache_root).unwrap();
+    let relative = format!("qa/cache/locomo/{identity}.json");
+    let bytes = serde_json::to_vec_pretty(&serde_json::json!({
+        "request": request,
+        "response": QaResponse {
+            output_text: "blue".into(),
+            input_tokens: 10,
+            output_tokens: 1,
+        },
+        "cost_usd_micros": 35,
+        "model": LONGMEMEVAL_MODEL,
+    }))
+    .unwrap();
+    fs::write(run.join(&relative), &bytes).unwrap();
+    let mut sums = fs::read_to_string(run.join("SHA256SUMS")).unwrap();
+    sums.push_str(&format!("{:x}  {relative}\n", Sha256::digest(&bytes)));
+    fs::write(run.join("SHA256SUMS"), sums).unwrap();
 }
 
 fn retrieve(fixture: &tempfile::NamedTempFile, run: &Path) -> std::process::Output {

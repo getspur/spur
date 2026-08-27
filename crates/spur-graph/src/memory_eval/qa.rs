@@ -841,7 +841,7 @@ impl QaBudget {
         self.cost_usd_micros
     }
 
-    fn admit_request(&mut self) -> anyhow::Result<()> {
+    fn admit_request(&mut self, request: &LongMemQaRequest) -> anyhow::Result<()> {
         let requests = self
             .requests
             .checked_add(1)
@@ -850,16 +850,31 @@ impl QaBudget {
             requests <= self.limits.max_requests,
             "QA max request budget exhausted"
         );
+        // The tokenizer is byte based, so the UTF-8 byte count is a strict
+        // upper bound on prompt tokens; the response is explicitly capped.
+        let maximum_input_tokens =
+            u64::try_from(request.prompt.len()).context("QA prompt byte length exceeds u64")?;
+        let maximum_total_tokens = maximum_input_tokens
+            .checked_add(request.max_output_tokens)
+            .context("QA maximum call token count overflow")?;
+        let reserved_tokens = maximum_total_tokens.max(self.limits.reserve_tokens_per_request);
         ensure!(
             self.usage
                 .total_tokens
-                .checked_add(self.limits.reserve_tokens_per_request)
+                .checked_add(reserved_tokens)
                 .is_some_and(|total| total <= self.limits.max_total_tokens),
             "QA token budget exhausted"
         );
+        let maximum_call_cost = self
+            .price_usage(QaUsage {
+                input_tokens: maximum_input_tokens,
+                output_tokens: request.max_output_tokens,
+                total_tokens: maximum_total_tokens,
+            })?
+            .max(self.limits.reserve_usd_micros_per_request);
         ensure!(
             self.cost_usd_micros
-                .checked_add(self.limits.reserve_usd_micros_per_request)
+                .checked_add(maximum_call_cost)
                 .is_some_and(|cost| cost <= self.limits.max_usd_micros),
             "QA USD budget exhausted"
         );
@@ -1600,7 +1615,7 @@ async fn execute_cached_call(
     labeler: Option<fn(&str) -> bool>,
 ) -> Result<QaCacheEntry, QaCallFailure> {
     budget
-        .admit_request()
+        .admit_request(&request)
         .map_err(QaCallFailure::before_response)?;
     let response = backend
         .complete(&request)

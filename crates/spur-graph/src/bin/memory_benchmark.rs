@@ -72,6 +72,7 @@ const DEFAULT_MAX_DEPTH: usize = 3;
 const TOKENS_RESERVED_PER_REQUEST: u64 = 200_000;
 const INPUT_USD_MICROS_PER_MILLION: u64 = 2_500_000;
 const OUTPUT_USD_MICROS_PER_MILLION: u64 = 10_000_000;
+const LOCOMO_MAX_OUTPUT_TOKENS: u64 = 800;
 
 const VARIANTS: [Variant; 5] = [
     Variant::Oracle,
@@ -345,11 +346,29 @@ fn qa_command(args: QaArgs) -> Result<()> {
     let mut accounting = match result {
         Ok(accounting) => accounting,
         Err(error) => {
-            finish_telemetry(&mut manifest, &telemetry, 0, 0, 0);
+            let mut accounting = error
+                .downcast_ref::<QaRunError>()
+                .map(|failure| failure.accounting)
+                .unwrap_or_default();
+            accounting.merge_max(cache_accounting(&args.output.join("qa/cache"))?);
+            telemetry.sample_rss();
+            finish_telemetry(
+                &mut manifest,
+                &telemetry,
+                0,
+                accounting.context_tokens,
+                accounting.requests,
+            );
+            record_max_hardware(
+                &mut manifest,
+                "qa_cost_usd_micros",
+                accounting.cost_usd_micros,
+            );
             writer.write_report(&render_report(&manifest, &validation, &metrics))?;
             // Refresh checksums after any cache records completed before the
             // API failure, without touching immutable ranking bytes.
             writer.write_manifest(&manifest)?;
+            writer.verify_checksums()?;
             return Err(error);
         }
     };
@@ -1243,12 +1262,26 @@ fn parse_usd_micros(value: &str) -> Result<u64> {
         .context("--max-usd is too large")
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Copy, Default)]
 struct QaAccounting {
     context_tokens: u128,
     requests: u128,
     cost_usd_micros: u128,
 }
+
+#[derive(Debug)]
+struct QaRunError {
+    error: anyhow::Error,
+    accounting: QaAccounting,
+}
+
+impl std::fmt::Display for QaRunError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{:#}", self.error)
+    }
+}
+
+impl std::error::Error for QaRunError {}
 
 impl QaAccounting {
     fn merge_max(&mut self, other: Self) {
@@ -1326,7 +1359,6 @@ fn run_longmem_qa(
     let api_key = env::var("OPENAI_API_KEY").context("read OPENAI_API_KEY")?;
     let mut backend = OpenAiResponsesBackend::new(Some(api_key));
     let mut cache = JsonQaCache::open(output.join("qa/cache/longmemeval"))?;
-    let reserve_usd = (paid.max_usd_micros / paid.max_requests).max(1);
     let mut budget = QaBudget::new(QaBudgetLimits {
         max_requests: paid.max_requests,
         max_total_tokens: paid
@@ -1335,7 +1367,7 @@ fn run_longmem_qa(
             .context("QA token ceiling overflow")?,
         max_usd_micros: paid.max_usd_micros,
         reserve_tokens_per_request: TOKENS_RESERVED_PER_REQUEST,
-        reserve_usd_micros_per_request: reserve_usd,
+        reserve_usd_micros_per_request: 0,
         input_usd_micros_per_million: INPUT_USD_MICROS_PER_MILLION,
         output_usd_micros_per_million: OUTPUT_USD_MICROS_PER_MILLION,
     });
@@ -1415,7 +1447,15 @@ fn run_locomo_qa(
     writer: &ArtifactWriter,
 ) -> Result<QaAccounting> {
     let mut backend = LocomoOpenAiBackend::open(output.join("qa/cache/locomo"), *paid)?;
-    let records = evaluate_locomo(dataset, rankings, &mut backend, 0)?;
+    let records =
+        evaluate_locomo(dataset, rankings, &mut backend, 0).map_err(|error| QaRunError {
+            error,
+            accounting: QaAccounting {
+                context_tokens: backend.context_tokens,
+                requests: u128::from(backend.requests),
+                cost_usd_micros: u128::from(backend.cost_usd_micros),
+            },
+        })?;
     persist_locomo_records(manifest, writer, &records)?;
     manifest.model = Some(LONGMEMEVAL_MODEL.to_owned());
     Ok(QaAccounting {
@@ -1502,23 +1542,26 @@ impl LocomoOpenAiBackend {
     }
 
     fn admit(&mut self, request: &QaRequest) -> Result<()> {
-        self.requests = self
+        let requests = self
             .requests
             .checked_add(1)
             .context("LoCoMo request count overflow")?;
         ensure!(
-            self.requests <= self.limits.max_requests,
+            requests <= self.limits.max_requests,
             "QA max request budget exhausted"
         );
-        let estimated_input = u64::try_from(request.prompt.len().div_ceil(4))
-            .context("LoCoMo prompt token estimate overflow")?;
-        let reserve = token_cost_usd_micros(estimated_input, 800)?;
+        // GPT-4o tokenization starts from UTF-8 bytes, so byte length is a
+        // conservative input-token ceiling rather than an average estimate.
+        let maximum_input_tokens =
+            u64::try_from(request.prompt.len()).context("LoCoMo prompt byte length exceeds u64")?;
+        let reserve = token_cost_usd_micros(maximum_input_tokens, LOCOMO_MAX_OUTPUT_TOKENS)?;
         ensure!(
             self.cost_usd_micros
                 .checked_add(reserve)
                 .is_some_and(|cost| cost <= self.limits.max_usd_micros),
             "QA USD budget exhausted"
         );
+        self.requests = requests;
         Ok(())
     }
 
@@ -1560,7 +1603,7 @@ impl QaBackend for LocomoOpenAiBackend {
             "input": request.prompt,
             "store": false,
             "temperature": 0,
-            "max_output_tokens": 800,
+            "max_output_tokens": LOCOMO_MAX_OUTPUT_TOKENS,
         });
         let response = self.runtime.block_on(async {
             let response = self
@@ -1607,10 +1650,20 @@ impl QaBackend for LocomoOpenAiBackend {
             })
         })?;
         let cost_usd_micros = token_cost_usd_micros(response.input_tokens, response.output_tokens)?;
+        let tokens = response
+            .input_tokens
+            .checked_add(response.output_tokens)
+            .context("LoCoMo token accounting overflow")?;
+        self.context_tokens = self
+            .context_tokens
+            .checked_add(u128::from(tokens))
+            .context("LoCoMo context-token accounting overflow")?;
+        self.cost_usd_micros = self
+            .cost_usd_micros
+            .checked_add(cost_usd_micros)
+            .context("LoCoMo cost accounting overflow")?;
         ensure!(
-            self.cost_usd_micros
-                .checked_add(cost_usd_micros)
-                .is_some_and(|cost| cost <= self.limits.max_usd_micros),
+            self.cost_usd_micros <= self.limits.max_usd_micros,
             "QA response exceeded the declared USD ceiling"
         );
         let entry = LocomoCacheEntry {
@@ -1621,7 +1674,7 @@ impl QaBackend for LocomoOpenAiBackend {
         let temporary = self.cache_root.join(format!(".{identity}.tmp"));
         fs::write(&temporary, serde_json::to_vec_pretty(&entry)?)?;
         fs::rename(&temporary, &path)?;
-        self.restore(&entry)
+        Ok(entry.response)
     }
 }
 
@@ -1997,4 +2050,149 @@ const fn granularity_name(granularity: Granularity) -> &'static str {
 
 fn sha256_hex(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
+}
+
+#[cfg(test)]
+mod paid_boundary_tests {
+    use super::*;
+    use std::{
+        io::Write,
+        net::TcpListener,
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        },
+        thread,
+        time::Instant,
+    };
+
+    fn backend(
+        cache_root: PathBuf,
+        limits: PaidAuthorization,
+        client: reqwest::Client,
+    ) -> LocomoOpenAiBackend {
+        LocomoOpenAiBackend {
+            runtime: tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap(),
+            client,
+            api_key: "local-test-key".into(),
+            cache_root,
+            limits,
+            requests: 0,
+            context_tokens: 0,
+            cost_usd_micros: 0,
+        }
+    }
+
+    fn request(prompt: String, variant: Variant) -> QaRequest {
+        QaRequest {
+            question_id: "q-paid-boundary".into(),
+            variant,
+            prompt_sha256: sha256_hex(prompt.as_bytes()),
+            prompt,
+            ranking_sha256: "ranking-hash".into(),
+            recorded_seed: 0,
+        }
+    }
+
+    #[test]
+    fn locomo_underestimated_prompt_is_rejected_without_a_physical_transmission() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let address = listener.local_addr().unwrap();
+        let transmissions = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&transmissions);
+        let proxy = thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while Instant::now() < deadline {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        observed.fetch_add(1, Ordering::SeqCst);
+                        let _ = stream.write_all(
+                            b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                        );
+                        return;
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(error) => panic!("mock proxy accept failed: {error}"),
+                }
+            }
+        });
+        let client = reqwest::Client::builder()
+            .proxy(reqwest::Proxy::all(format!("http://{address}")).unwrap())
+            .retry(reqwest::retry::never())
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(Duration::from_secs(1))
+            .build()
+            .unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let mut backend = backend(
+            temp.path().to_path_buf(),
+            PaidAuthorization {
+                max_requests: 1,
+                max_usd_micros: 20_000,
+            },
+            client,
+        );
+
+        let error = backend
+            .complete(&request("x".repeat(12_000), Variant::Oracle))
+            .unwrap_err();
+        proxy.join().unwrap();
+
+        assert!(format!("{error:#}").contains("QA USD budget exhausted"));
+        assert_eq!(transmissions.load(Ordering::SeqCst), 0);
+        assert_eq!(backend.requests, 0);
+        assert_eq!(backend.context_tokens, 0);
+        assert_eq!(backend.cost_usd_micros, 0);
+    }
+
+    #[test]
+    fn locomo_cached_success_then_request_rejection_keeps_monotonic_accounting() {
+        let temp = tempfile::tempdir().unwrap();
+        let first = request("cached prompt".into(), Variant::Oracle);
+        let entry = LocomoCacheEntry {
+            request: first.clone(),
+            response: QaResponse {
+                output_text: "blue".into(),
+                input_tokens: 10,
+                output_tokens: 1,
+            },
+            cost_usd_micros: 35,
+        };
+        let identity = sha256_hex(&serde_json::to_vec(&first).unwrap());
+        fs::write(
+            temp.path().join(format!("{identity}.json")),
+            serde_json::to_vec_pretty(&entry).unwrap(),
+        )
+        .unwrap();
+        let client = reqwest::Client::builder()
+            .retry(reqwest::retry::never())
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap();
+        let mut backend = backend(
+            temp.path().to_path_buf(),
+            PaidAuthorization {
+                max_requests: 1,
+                max_usd_micros: 1_000_000,
+            },
+            client,
+        );
+
+        let response = backend.complete(&first).unwrap();
+        assert_eq!(response.output_text, "blue");
+        let error = backend
+            .complete(&request("rejected prompt".into(), Variant::Recent))
+            .unwrap_err();
+
+        assert!(format!("{error:#}").contains("QA max request budget exhausted"));
+        assert_eq!(backend.requests, 1);
+        assert_eq!(backend.context_tokens, 11);
+        assert_eq!(backend.cost_usd_micros, 35);
+    }
 }

@@ -522,6 +522,90 @@ async fn request_token_and_usd_exhaustion_are_pending_without_calls_or_labels() 
 }
 
 #[tokio::test]
+async fn conservative_prompt_charge_rejects_before_longmem_transmission() {
+    let dataset = fixture_dataset();
+    let rankings = frozen_rankings(&dataset);
+    let temp = tempfile::tempdir().unwrap();
+    let mut cache = JsonQaCache::open(temp.path()).unwrap();
+    let mut backend = FakeBackend::scripted([Ok(response("Take the train", 100, 8))]);
+    let mut limits = budget(2).limits().clone();
+    limits.max_usd_micros = 1;
+    limits.reserve_usd_micros_per_request = 1;
+    limits.input_usd_micros_per_million = 1_000_000;
+    limits.output_usd_micros_per_million = 1_000_000;
+    let mut paid_budget = QaBudget::new(limits);
+
+    let records = evaluate_longmem(
+        &dataset,
+        &rankings,
+        &mut backend,
+        &mut cache,
+        &mut paid_budget,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].status, QaStatus::Pending);
+    assert_eq!(records[0].label, None);
+    assert!(backend.requests.is_empty());
+    assert_eq!(paid_budget.requests(), 0);
+    assert_eq!(paid_budget.cost_usd_micros(), 0);
+    assert_eq!(cache.entry_count().unwrap(), 0);
+}
+
+#[tokio::test]
+async fn cached_reader_accounting_survives_rejected_longmem_judge_admission() {
+    let dataset = fixture_dataset();
+    let rankings = frozen_rankings(&dataset);
+    let temp = tempfile::tempdir().unwrap();
+    let mut cache = JsonQaCache::open(temp.path()).unwrap();
+    let mut seed_backend = FakeBackend::scripted([Ok(response("Take the train", 100, 8))]);
+
+    let seeded = evaluate_longmem(
+        &dataset,
+        &rankings,
+        &mut seed_backend,
+        &mut cache,
+        &mut budget(1),
+    )
+    .await
+    .unwrap();
+    assert_eq!(seeded[0].status, QaStatus::Pending);
+    assert_eq!(cache.entry_count().unwrap(), 1);
+
+    let mut limits = budget(2).limits().clone();
+    limits.max_usd_micros = 1;
+    limits.reserve_usd_micros_per_request = 0;
+    limits.input_usd_micros_per_million = 1_000_000;
+    limits.output_usd_micros_per_million = 1_000_000;
+    let mut resume_budget = QaBudget::new(limits);
+    let mut rejected_judge = FakeBackend::scripted([Ok(response("yes", 40, 1))]);
+
+    let records = evaluate_longmem(
+        &dataset,
+        &rankings,
+        &mut rejected_judge,
+        &mut cache,
+        &mut resume_budget,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].status, QaStatus::Pending);
+    assert_eq!(records[0].label, None);
+    assert_eq!(records[0].hypothesis.as_deref(), Some("Take the train"));
+    assert_eq!(records[0].usage, response("unused", 100, 8).usage);
+    assert_eq!(records[0].cost_usd_micros, 1);
+    assert!(rejected_judge.requests.is_empty());
+    assert_eq!(resume_budget.requests(), 1);
+    assert_eq!(resume_budget.usage(), records[0].usage);
+    assert_eq!(resume_budget.cost_usd_micros(), 1);
+    assert_eq!(cache.entry_count().unwrap(), 1);
+}
+
+#[tokio::test]
 async fn one_admitted_request_produces_at_most_one_backend_transmission() {
     let dataset = fixture_dataset();
     let rankings = frozen_rankings(&dataset);
@@ -556,9 +640,9 @@ async fn received_usage_and_cost_survive_budget_recording_failure() {
     let rankings = frozen_rankings(&dataset);
     let temp = tempfile::tempdir().unwrap();
     let mut cache = JsonQaCache::open(temp.path()).unwrap();
-    let mut backend = FakeBackend::scripted([Ok(response("Take the train", 100, 8))]);
+    let mut backend = FakeBackend::scripted([Ok(response("Take the train", 100_000, 8))]);
     let mut over_ceiling = QaBudget::new(QaBudgetLimits {
-        max_total_tokens: 100,
+        max_total_tokens: 100_000,
         ..budget(2).limits().clone()
     });
 
@@ -576,7 +660,7 @@ async fn received_usage_and_cost_survive_budget_recording_failure() {
     assert_eq!(records[0].status, QaStatus::Pending);
     assert_eq!(records[0].label, None);
     assert_eq!(records[0].hypothesis.as_deref(), Some("Take the train"));
-    assert_eq!(records[0].usage, response("unused", 100, 8).usage);
+    assert_eq!(records[0].usage, response("unused", 100_000, 8).usage);
     assert_eq!(records[0].cost_usd_micros, 1);
     assert_eq!(over_ceiling.usage(), records[0].usage);
     assert_eq!(over_ceiling.cost_usd_micros(), 1);
