@@ -16,6 +16,53 @@ pub const TOKENIZATION_CONTRACT: &str =
 const BM25_K1: f64 = 1.2;
 const BM25_B: f64 = 0.75;
 
+/// An opaque query occurrence identifier safe to cross the ranker boundary.
+///
+/// Dataset adapters hash source question IDs and keep the reverse mapping. This
+/// type accepts only that hashed representation, so raw source IDs cannot be
+/// represented in a serialized [`RankRequest`].
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(transparent)]
+pub struct QueryOccurrenceId(String);
+
+impl QueryOccurrenceId {
+    pub fn from_sha256(value: String) -> Result<Self> {
+        ensure!(
+            value.len() == 64
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+            "query occurrence ID must be a lowercase SHA-256 digest"
+        );
+        Ok(Self(value))
+    }
+}
+
+impl<'de> Deserialize<'de> for QueryOccurrenceId {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::from_sha256(value).map_err(serde::de::Error::custom)
+    }
+}
+
+/// A dataset-adapter chronology coordinate, ordered from older to newer.
+///
+/// Adapters normalize source dates and timestamps into this numeric key before
+/// constructing the question-blind corpus. The ranker never compares raw date
+/// strings, and the key is part of the corpus serialization hash.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(transparent)]
+pub struct ChronologyKey(i64);
+
+impl ChronologyKey {
+    pub const fn new(value: i64) -> Self {
+        Self(value)
+    }
+}
+
 /// A controlled benchmark retrieval variant.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(rename_all = "snake_case")]
@@ -45,14 +92,14 @@ pub struct CorpusDocument {
     pub occurrence_id: String,
     /// Shared text serialization used by every lexical variant.
     pub text: String,
-    /// Source chronology used only by the recent baseline.
-    pub occurred_at: Option<String>,
+    /// Normalized source chronology used only by the recent baseline.
+    pub chronology_key: Option<ChronologyKey>,
 }
 
 /// The complete input that a non-oracle ranker is allowed to receive.
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct RankRequest<'a> {
-    pub question_id: &'a str,
+    pub query_occurrence_id: QueryOccurrenceId,
     pub query: &'a str,
     pub granularity: Granularity,
     pub corpus: &'a [CorpusDocument],
@@ -62,7 +109,7 @@ pub struct RankRequest<'a> {
 ///
 /// Non-oracle implementations accept [`RankRequest`] directly and therefore
 /// cannot receive this type by accident.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct OracleRequest<'a> {
     pub request: RankRequest<'a>,
     pub gold_occurrence_ids: &'a [String],
@@ -81,7 +128,7 @@ pub struct RankedHit {
 /// An immutable ranking artifact for exactly one granularity and cutoff.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Ranking {
-    pub question_id: String,
+    pub query_occurrence_id: QueryOccurrenceId,
     pub variant: Variant,
     pub granularity: Granularity,
     pub k: usize,
@@ -92,7 +139,7 @@ pub struct Ranking {
 }
 
 /// Rankings are keyed separately by question, variant, and granularity.
-pub type RankingSet = BTreeMap<(String, Variant, Granularity), Ranking>;
+pub type RankingSet = BTreeMap<(QueryOccurrenceId, Variant, Granularity), Ranking>;
 
 /// A non-oracle retrieval implementation.
 pub trait Ranker {
@@ -114,12 +161,7 @@ impl Ranker for RecentRanker {
         let mut candidates = request
             .corpus
             .iter()
-            .map(|document| {
-                (
-                    document.occurrence_id.as_str(),
-                    document.occurred_at.as_deref(),
-                )
-            })
+            .map(|document| (document.occurrence_id.as_str(), document.chronology_key))
             .collect::<Vec<_>>();
         candidates.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(right.0)));
 
@@ -297,7 +339,7 @@ fn ranking(
 ) -> Result<Ranking> {
     let hashes = ranking_hashes(request)?;
     Ok(Ranking {
-        question_id: request.question_id.to_owned(),
+        query_occurrence_id: request.query_occurrence_id.clone(),
         variant,
         granularity: request.granularity,
         k,
