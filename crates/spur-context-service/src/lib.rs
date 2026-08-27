@@ -5,6 +5,7 @@ pub mod abuse;
 pub mod api_key_authorizer;
 pub mod api_key_cleanup;
 pub mod api_keys;
+pub mod artifact_cache;
 #[cfg(any(feature = "service", feature = "lambda-http"))]
 mod auth;
 #[cfg(feature = "service")]
