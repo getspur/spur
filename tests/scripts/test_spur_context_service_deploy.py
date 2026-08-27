@@ -59,7 +59,7 @@ def test_serving_compute_defines_exactly_code_and_knowledge_with_isolated_envs()
 
     assert "SPUR_CATALOG_S3_URI" in knowledge
     assert "SPUR_CONTEXT_DUCKDB_EXTENSION_DIR" in knowledge
-    assert 'HOME = "/tmp"' in knowledge
+    assert re.search(r'\bHOME\s*=\s*"/tmp"', knowledge)
     for code_only_env in (
         "SPUR_CONTEXT_CODE_CACHE_BYTES",
         "SPUR_INDEX_STATE_MACHINE_ARN",
@@ -169,7 +169,10 @@ def test_serving_compute_drainer_and_warm_pool_target_the_owning_backends():
         "aws_lambda_provisioned_concurrency_config",
         "knowledge_warm",
     )
-    assert "function_name = aws_lambda_function.knowledge.function_name" in knowledge_warm
+    assert re.search(
+        r"function_name\s*=\s*aws_lambda_function\.knowledge\.function_name",
+        knowledge_warm,
+    )
     assert (
         "provisioned_concurrent_executions = var.concurrent_warm_instances"
         in knowledge_warm
@@ -436,8 +439,20 @@ def test_deploy_rebuilds_lambda_zip_by_default():
     assert 'elif [[ ! -f "$zip_path" ]]' not in script
     assert 'rm -f "$zip_path"' in script
     lambda_zip = main_tf.split('resource "aws_s3_object" "lambda_zip"', 1)[1]
-    assert "source_hash = filemd5(var.lambda_zip_path)" in lambda_zip
+    assert "source_hash = filemd5(local.knowledge_lambda_zip_path)" in lambda_zip
     assert "etag   = filemd5(var.lambda_zip_path)" not in lambda_zip
+    code_lambda_zip = terraform_resource_block(
+        main_tf, "aws_s3_object", "code_lambda_zip"
+    )
+    assert "source_hash = filemd5(local.code_lambda_zip_path)" in code_lambda_zip
+    assert (
+        "knowledge_lambda_zip_path = coalesce("
+        "var.knowledge_lambda_zip_path, var.lambda_zip_path)"
+    ) in main_tf
+    assert (
+        "code_lambda_zip_path      = coalesce("
+        "var.code_lambda_zip_path, var.lambda_zip_path)"
+    ) in main_tf
 
 
 def test_deploy_can_package_lambda_without_terraform_apply():

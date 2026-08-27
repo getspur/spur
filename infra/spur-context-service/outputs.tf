@@ -14,13 +14,33 @@ output "api_invoke_policy_arn" {
 }
 
 output "lambda_function_name" {
-  description = "Lambda function name"
-  value       = aws_lambda_function.service.function_name
+  description = "Legacy serving Lambda function name (Knowledge until direct route/packaging migration completes)"
+  value       = aws_lambda_function.knowledge.function_name
 }
 
 output "lambda_function_arn" {
-  description = "Lambda function ARN"
-  value       = aws_lambda_function.service.arn
+  description = "Legacy serving Lambda function ARN (Knowledge until direct route/packaging migration completes)"
+  value       = aws_lambda_function.knowledge.arn
+}
+
+output "code_lambda_function_name" {
+  description = "Code serving Lambda function name"
+  value       = aws_lambda_function.code.function_name
+}
+
+output "code_lambda_function_arn" {
+  description = "Code serving Lambda function ARN"
+  value       = aws_lambda_function.code.arn
+}
+
+output "knowledge_lambda_function_name" {
+  description = "Knowledge serving Lambda function name"
+  value       = aws_lambda_function.knowledge.function_name
+}
+
+output "knowledge_lambda_function_arn" {
+  description = "Knowledge serving Lambda function ARN"
+  value       = aws_lambda_function.knowledge.arn
 }
 
 output "s3_bucket_name" {
@@ -69,8 +89,18 @@ output "worker_checkpoint_uri_template" {
 }
 
 output "cloudwatch_log_group" {
-  description = "CloudWatch log group for Lambda"
-  value       = aws_cloudwatch_log_group.lambda.name
+  description = "Legacy CloudWatch log-group output for the Knowledge Lambda"
+  value       = aws_cloudwatch_log_group.knowledge_lambda.name
+}
+
+output "code_cloudwatch_log_group" {
+  description = "CloudWatch log group for the Code Lambda"
+  value       = aws_cloudwatch_log_group.code_lambda.name
+}
+
+output "knowledge_cloudwatch_log_group" {
+  description = "CloudWatch log group for the Knowledge Lambda"
+  value       = aws_cloudwatch_log_group.knowledge_lambda.name
 }
 
 output "state_machine_arn" {

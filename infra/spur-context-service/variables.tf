@@ -11,9 +11,33 @@ variable "bucket_name" {
 }
 
 variable "lambda_zip_path" {
-  description = "Local path to the Lambda deployment zip"
+  description = "Legacy serving Lambda zip path used only while both distinct serving ZIP overrides are omitted"
   type        = string
   default     = "../../target/lambda/spur-context-service.zip"
+}
+
+variable "code_lambda_zip_path" {
+  description = "Optional local path to the DuckDB-free Code Lambda zip; Task 14 supplies it together with knowledge_lambda_zip_path"
+  type        = string
+  default     = null
+  nullable    = true
+
+  validation {
+    condition     = var.code_lambda_zip_path == null ? true : length(trimspace(var.code_lambda_zip_path)) > 0
+    error_message = "code_lambda_zip_path must be null or a non-empty path."
+  }
+}
+
+variable "knowledge_lambda_zip_path" {
+  description = "Optional local path to the extension-bearing Knowledge Lambda zip; Task 14 supplies it together with code_lambda_zip_path"
+  type        = string
+  default     = null
+  nullable    = true
+
+  validation {
+    condition     = var.knowledge_lambda_zip_path == null ? true : length(trimspace(var.knowledge_lambda_zip_path)) > 0
+    error_message = "knowledge_lambda_zip_path must be null or a non-empty path."
+  }
 }
 
 variable "catalog_s3_uri" {
@@ -710,10 +734,26 @@ variable "lambda_max_concurrency" {
   default     = 4
 }
 
+variable "code_lambda_ephemeral_storage_mb" {
+  description = "Code Lambda /tmp capacity in MiB. Fixed to AWS Lambda's 512 MiB platform minimum; cache bytes are derived exactly with no separate reserve."
+  type        = number
+  default     = 512
+
+  validation {
+    condition     = var.code_lambda_ephemeral_storage_mb == 512
+    error_message = "code_lambda_ephemeral_storage_mb must remain at the AWS Lambda platform minimum of 512 MiB."
+  }
+}
+
 variable "concurrent_warm_instances" {
-  description = "Provisioned concurrency (0 = disabled, eliminates cold start when > 0)"
+  description = "Existing billable provisioned-concurrency budget, attached only to Knowledge (0 disables the warm pool)"
   type        = number
   default     = 0
+
+  validation {
+    condition     = var.concurrent_warm_instances >= 0 && floor(var.concurrent_warm_instances) == var.concurrent_warm_instances
+    error_message = "concurrent_warm_instances must be a non-negative integer."
+  }
 }
 
 # ─── Public API Abuse Controls ────────────────────────────────────────────────

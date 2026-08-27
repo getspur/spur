@@ -39,6 +39,242 @@ resource "aws_iam_role_policy_attachment" "lambda_vpc_access" {
   policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole"
 }
 
+resource "aws_iam_role" "code_lambda" {
+  name = "spur-context-code-lambda"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect    = "Allow"
+      Principal = { Service = "lambda.amazonaws.com" }
+      Action    = "sts:AssumeRole"
+    }]
+  })
+}
+
+resource "aws_iam_role" "knowledge_lambda" {
+  name = "spur-context-knowledge-lambda"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect    = "Allow"
+      Principal = { Service = "lambda.amazonaws.com" }
+      Action    = "sts:AssumeRole"
+    }]
+  })
+}
+
+# Lambda's logging and X-Ray APIs plus the existing VPC ENI envelope require
+# account-scoped actions, while log writes remain restricted per function.
+resource "aws_iam_role_policy" "code_lambda_runtime" {
+  name = "CodeLambdaRuntimeAccess"
+  role = aws_iam_role.code_lambda.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "DedicatedCodeLogs"
+        Effect = "Allow"
+        Action = [
+          "logs:CreateLogStream",
+          "logs:PutLogEvents"
+        ]
+        Resource = "${aws_cloudwatch_log_group.code_lambda.arn}:*"
+      },
+      {
+        Sid    = "ActiveXRayTracing"
+        Effect = "Allow"
+        Action = [
+          "xray:PutTraceSegments",
+          "xray:PutTelemetryRecords"
+        ]
+        Resource = "*"
+      },
+      {
+        Sid    = "LambdaVpcNetworkInterfaces"
+        Effect = "Allow"
+        Action = [
+          "ec2:CreateNetworkInterface",
+          "ec2:DescribeNetworkInterfaces",
+          "ec2:DeleteNetworkInterface",
+          "ec2:AssignPrivateIpAddresses",
+          "ec2:UnassignPrivateIpAddresses"
+        ]
+        Resource = "*"
+      }
+    ]
+  })
+}
+
+resource "aws_iam_role_policy" "knowledge_lambda_runtime" {
+  name = "KnowledgeLambdaRuntimeAccess"
+  role = aws_iam_role.knowledge_lambda.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "DedicatedKnowledgeLogs"
+        Effect = "Allow"
+        Action = [
+          "logs:CreateLogStream",
+          "logs:PutLogEvents"
+        ]
+        Resource = "${aws_cloudwatch_log_group.knowledge_lambda.arn}:*"
+      },
+      {
+        Sid    = "ActiveXRayTracing"
+        Effect = "Allow"
+        Action = [
+          "xray:PutTraceSegments",
+          "xray:PutTelemetryRecords"
+        ]
+        Resource = "*"
+      },
+      {
+        Sid    = "LambdaVpcNetworkInterfaces"
+        Effect = "Allow"
+        Action = [
+          "ec2:CreateNetworkInterface",
+          "ec2:DescribeNetworkInterfaces",
+          "ec2:DeleteNetworkInterface",
+          "ec2:AssignPrivateIpAddresses",
+          "ec2:UnassignPrivateIpAddresses"
+        ]
+        Resource = "*"
+      }
+    ]
+  })
+}
+
+# Code can read only the shared pointer, immutable serving registries, and
+# immutable Silver graph/source artifacts. It cannot list or mutate the bucket.
+resource "aws_iam_role_policy" "code_s3_read" {
+  name = "CodeServingArtifactRead"
+  role = aws_iam_role.code_lambda.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Action = [
+        "s3:GetObject",
+        "s3:GetObjectVersion"
+      ]
+      Resource = [
+        "${aws_s3_bucket.data.arn}/${local.catalog_s3_key}",
+        "${aws_s3_bucket.data.arn}/${local.catalog_snapshot_s3_prefix}/generations/*/serving-registry.json",
+        "${aws_s3_bucket.data.arn}/silver/*"
+      ]
+    }]
+  })
+}
+
+# Knowledge reads the frozen pointer/snapshot and immutable query data. It has
+# no S3 mutation permission.
+resource "aws_iam_role_policy" "knowledge_s3_read" {
+  name = "KnowledgeFrozenCatalogRead"
+  role = aws_iam_role.knowledge_lambda.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "s3:GetObject",
+          "s3:GetObjectVersion"
+        ]
+        Resource = "${aws_s3_bucket.data.arn}/*"
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "s3:ListBucket"
+        ]
+        Resource = aws_s3_bucket.data.arn
+      }
+    ]
+  })
+}
+
+resource "aws_iam_role_policy" "knowledge_catalog_secret" {
+  name = "KnowledgeCatalogSecretAccess"
+  role = aws_iam_role.knowledge_lambda.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Action = [
+        "secretsmanager:GetSecretValue"
+      ]
+      Resource = local.aurora_master_secret_arn
+    }]
+  })
+}
+
+resource "aws_iam_role_policy" "code_lambda_dynamodb" {
+  name = "CodeDynamoDbControlPlaneAccess"
+  role = aws_iam_role.code_lambda.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "dynamodb:GetItem",
+          "dynamodb:PutItem",
+          "dynamodb:UpdateItem",
+          "dynamodb:DeleteItem",
+          "dynamodb:TransactWriteItems",
+          "dynamodb:Scan"
+        ]
+        Resource = [
+          aws_dynamodb_table.index_jobs.arn,
+          aws_dynamodb_table.catalog_leases.arn
+        ]
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "dynamodb:Query"
+        ]
+        Resource = "${aws_dynamodb_table.index_jobs.arn}/index/${var.index_queue_gsi_name}"
+      }
+    ]
+  })
+}
+
+resource "aws_iam_role_policy" "code_lambda_sfn" {
+  name = "CodeStepFunctionsControl"
+  role = aws_iam_role.code_lambda.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "states:StartExecution"
+        ]
+        Resource = aws_sfn_state_machine.index_build.arn
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "states:DescribeExecution",
+          "states:StopExecution"
+        ]
+        Resource = "*"
+      }
+    ]
+  })
+}
+
 resource "aws_iam_role" "source_fetcher_lambda" {
   name = "spur-context-source-fetcher-lambda"
 
@@ -219,7 +455,7 @@ resource "aws_iam_role_policy" "api_key_management" {
   count = var.api_key_auth_enabled ? 1 : 0
 
   name = "ApiKeyManagementAccess"
-  role = aws_iam_role.lambda.id
+  role = aws_iam_role.code_lambda.id
 
   policy = jsonencode({
     Version = "2012-10-17"

@@ -156,41 +156,96 @@ resource "aws_rds_cluster_instance" "catalog_writer" {
   publicly_accessible  = false
 }
 
-resource "aws_cloudwatch_log_group" "lambda" {
-  name              = "/aws/lambda/spur-context-service"
+locals {
+  # Task 14 will supply both distinct packages together. Until then, omitting
+  # both overrides deliberately preserves the legacy package path so this
+  # compute-only change does not also mutate packaging/deploy.sh.
+  code_lambda_zip_path      = coalesce(var.code_lambda_zip_path, var.lambda_zip_path)
+  knowledge_lambda_zip_path = coalesce(var.knowledge_lambda_zip_path, var.lambda_zip_path)
+  serving_zip_override_count = length(compact([
+    var.code_lambda_zip_path,
+    var.knowledge_lambda_zip_path,
+  ]))
+  serving_zip_paths_are_consistent = (
+    local.serving_zip_override_count == 0 ||
+    (
+      local.serving_zip_override_count == 2 &&
+      local.code_lambda_zip_path != local.knowledge_lambda_zip_path
+    )
+  )
+
+  serving_assignment_count            = length(["code", "knowledge"])
+  code_warm_instances                 = 0
+  knowledge_warm_instances            = var.concurrent_warm_instances
+  total_serving_warm_instances        = local.code_warm_instances + local.knowledge_warm_instances
+  code_lambda_ephemeral_storage_bytes = var.code_lambda_ephemeral_storage_mb * 1024 * 1024
+
+  catalog_s3_prefix = "s3://${var.bucket_name}/"
+  catalog_s3_path_is_consistent = (
+    startswith(var.catalog_s3_uri, local.catalog_s3_prefix) &&
+    endswith(var.catalog_s3_uri, "/gold/catalog-snapshot/current.json")
+  )
+  catalog_s3_key             = trimprefix(var.catalog_s3_uri, local.catalog_s3_prefix)
+  catalog_snapshot_s3_prefix = trimsuffix(local.catalog_s3_key, "/current.json")
+}
+
+resource "aws_cloudwatch_log_group" "code_lambda" {
+  name              = "/aws/lambda/spur-context-code"
   retention_in_days = 14
 }
 
-resource "aws_s3_object" "lambda_zip" {
-  bucket      = aws_s3_bucket.data.bucket
-  key         = "lambda/spur-context-service-${filemd5(var.lambda_zip_path)}.zip"
-  source      = var.lambda_zip_path
-  source_hash = filemd5(var.lambda_zip_path)
+resource "aws_cloudwatch_log_group" "knowledge_lambda" {
+  name              = "/aws/lambda/spur-context-knowledge"
+  retention_in_days = 14
 }
 
-resource "aws_lambda_function" "service" {
-  function_name = "spur-context-service"
-  description   = "DuckLake-served code context MCP service"
+# Kept under the legacy Terraform address until Task 14 switches deploy.sh to
+# pass the distinct Knowledge ZIP path explicitly.
+resource "aws_s3_object" "lambda_zip" {
+  bucket      = aws_s3_bucket.data.bucket
+  key         = "lambda/spur-context-knowledge-${filemd5(local.knowledge_lambda_zip_path)}.zip"
+  source      = local.knowledge_lambda_zip_path
+  source_hash = filemd5(local.knowledge_lambda_zip_path)
+}
 
-  # Deploy via S3 (direct UpdateFunctionCode is capped at ~70 MB; the bundled
-  # libduckdb + ducklake/httpfs extensions push the zip past that). S3-backed
-  # deployment supports up to 250 MB.
+resource "aws_s3_object" "code_lambda_zip" {
+  bucket      = aws_s3_bucket.data.bucket
+  key         = "lambda/spur-context-code-${filemd5(local.code_lambda_zip_path)}.zip"
+  source      = local.code_lambda_zip_path
+  source_hash = filemd5(local.code_lambda_zip_path)
+}
+
+resource "aws_lambda_function" "code" {
+  function_name = "spur-context-code"
+  description   = "Parquet-backed external code and context-service control plane"
+
+  # Task 14 replaces the compatibility package with the DuckDB-free Code ZIP.
+  # S3-backed deployment keeps the artifact transport consistent meanwhile.
   s3_bucket        = aws_s3_bucket.data.bucket
-  s3_key           = aws_s3_object.lambda_zip.key
-  source_code_hash = filebase64sha256(var.lambda_zip_path)
+  s3_key           = aws_s3_object.code_lambda_zip.key
+  source_code_hash = filebase64sha256(local.code_lambda_zip_path)
 
   runtime       = "provided.al2023"
   architectures = ["arm64"]
   handler       = "bootstrap"
 
-  role        = aws_iam_role.lambda.arn
+  role        = aws_iam_role.code_lambda.arn
   timeout     = var.lambda_timeout_sec
   memory_size = var.lambda_memory_mb
+
+  ephemeral_storage {
+    size = var.code_lambda_ephemeral_storage_mb
+  }
+
+  tracing_config {
+    mode = "Active"
+  }
 
   environment {
     variables = {
       AWS_LAMBDA_MAX_CONCURRENCY                = tostring(var.lambda_max_concurrency)
       SPUR_CATALOG_S3_URI                       = var.catalog_s3_uri
+      SPUR_CONTEXT_CODE_CACHE_BYTES             = tostring(local.code_lambda_ephemeral_storage_bytes)
       SPUR_INDEX_STATE_MACHINE_ARN              = aws_sfn_state_machine.index_build.arn
       SPUR_INDEX_JOBS_TABLE                     = aws_dynamodb_table.index_jobs.name
       SPUR_INDEX_QUEUE_GSI_NAME                 = var.index_queue_gsi_name
@@ -240,8 +295,11 @@ resource "aws_lambda_function" "service" {
   }
 
   depends_on = [
-    aws_iam_role_policy_attachment.lambda_basic,
-    aws_cloudwatch_log_group.lambda,
+    aws_iam_role_policy.code_lambda_runtime,
+    aws_iam_role_policy.code_s3_read,
+    aws_iam_role_policy.code_lambda_dynamodb,
+    aws_iam_role_policy.code_lambda_sfn,
+    aws_cloudwatch_log_group.code_lambda,
     aws_iam_role_policy.api_key_management,
     # Do not advertise the custom API/OAuth endpoints until their API mapping
     # and DNS aliases exist. This also keeps the login facade unavailable during
@@ -251,6 +309,98 @@ resource "aws_lambda_function" "service" {
     aws_route53_record.api_custom_domain_ipv6,
     aws_route53_record.cognito_custom_domain,
   ]
+
+  lifecycle {
+    precondition {
+      condition     = local.serving_assignment_count == 2
+      error_message = "Serving compute must contain exactly the Code and Knowledge assignments."
+    }
+
+    precondition {
+      condition     = local.serving_zip_paths_are_consistent
+      error_message = "Code and Knowledge ZIP overrides must be omitted together or supplied as two distinct paths."
+    }
+
+    precondition {
+      condition     = local.catalog_s3_path_is_consistent
+      error_message = "catalog_s3_uri must be the current frozen-snapshot pointer in bucket_name."
+    }
+
+    precondition {
+      condition     = local.code_warm_instances == 0 && local.total_serving_warm_instances == var.concurrent_warm_instances
+      error_message = "Code must have zero warm instances and the split must preserve the existing total warm budget."
+    }
+
+    precondition {
+      condition     = local.code_lambda_ephemeral_storage_bytes == var.code_lambda_ephemeral_storage_mb * 1024 * 1024
+      error_message = "Code artifact-cache bytes must equal the Lambda /tmp capacity without a hidden reserve."
+    }
+  }
+}
+
+resource "aws_lambda_function" "knowledge" {
+  function_name = "spur-context-knowledge"
+  description   = "Frozen DuckLake external knowledge context service"
+
+  # Knowledge retains the extension-bearing compatibility package until Task
+  # 14 supplies its named binary ZIP.
+  s3_bucket        = aws_s3_bucket.data.bucket
+  s3_key           = aws_s3_object.lambda_zip.key
+  source_code_hash = filebase64sha256(local.knowledge_lambda_zip_path)
+
+  runtime       = "provided.al2023"
+  architectures = ["arm64"]
+  handler       = "bootstrap"
+
+  role        = aws_iam_role.knowledge_lambda.arn
+  timeout     = var.lambda_timeout_sec
+  memory_size = var.lambda_memory_mb
+
+  tracing_config {
+    mode = "Active"
+  }
+
+  environment {
+    variables = {
+      AWS_LAMBDA_MAX_CONCURRENCY        = tostring(var.lambda_max_concurrency)
+      HOME                              = "/tmp"
+      SPUR_CATALOG_S3_URI               = var.catalog_s3_uri
+      SPUR_CONTEXT_DUCKDB_EXTENSION_DIR = "/tmp/.duckdb/extensions"
+    }
+  }
+
+  depends_on = [
+    aws_iam_role_policy.knowledge_lambda_runtime,
+    aws_iam_role_policy.knowledge_s3_read,
+    aws_iam_role_policy.knowledge_catalog_secret,
+    aws_cloudwatch_log_group.knowledge_lambda,
+    aws_apigatewayv2_api_mapping.context_service,
+    aws_route53_record.api_custom_domain_ipv4,
+    aws_route53_record.api_custom_domain_ipv6,
+    aws_route53_record.cognito_custom_domain,
+  ]
+
+  lifecycle {
+    precondition {
+      condition     = local.serving_assignment_count == 2
+      error_message = "Serving compute must contain exactly the Code and Knowledge assignments."
+    }
+
+    precondition {
+      condition     = local.serving_zip_paths_are_consistent
+      error_message = "Code and Knowledge ZIP overrides must be omitted together or supplied as two distinct paths."
+    }
+
+    precondition {
+      condition     = local.catalog_s3_path_is_consistent
+      error_message = "catalog_s3_uri must be the current frozen-snapshot pointer in bucket_name."
+    }
+
+    precondition {
+      condition     = local.knowledge_warm_instances <= var.concurrent_warm_instances && local.total_serving_warm_instances == var.concurrent_warm_instances
+      error_message = "Knowledge may consume at most the existing warm budget and total serving warm capacity must remain unchanged."
+    }
+  }
 }
 
 # A successful admission kick is only a latency optimization. This scheduled
@@ -265,7 +415,7 @@ resource "aws_cloudwatch_event_rule" "index_queue_drainer" {
 resource "aws_cloudwatch_event_target" "index_queue_drainer" {
   rule      = aws_cloudwatch_event_rule.index_queue_drainer.name
   target_id = "spur-context-service-drainer"
-  arn       = aws_lambda_function.service.arn
+  arn       = aws_lambda_function.code.arn
   input = jsonencode({
     source      = "aws.events"
     detail-type = "Scheduled Event"
@@ -275,11 +425,20 @@ resource "aws_cloudwatch_event_target" "index_queue_drainer" {
   })
 }
 
-resource "aws_lambda_provisioned_concurrency_config" "warm" {
+# Reserved concurrency bounds capacity; provisioned concurrency is the billable warm pool.
+# The existing pool is conserved on Knowledge only; Code remains on-demand.
+resource "aws_lambda_provisioned_concurrency_config" "knowledge_warm" {
   count                             = var.concurrent_warm_instances > 0 ? 1 : 0
-  function_name                     = aws_lambda_function.service.function_name
+  function_name                     = aws_lambda_function.knowledge.function_name
   provisioned_concurrent_executions = var.concurrent_warm_instances
   qualifier                         = "$LATEST"
+
+  lifecycle {
+    precondition {
+      condition     = local.code_warm_instances == 0 && local.knowledge_warm_instances <= var.concurrent_warm_instances && local.total_serving_warm_instances == var.concurrent_warm_instances
+      error_message = "Provisioned concurrency must remain Knowledge-only and within the existing serving warm budget."
+    }
+  }
 }
 
 resource "aws_apigatewayv2_api" "http" {
@@ -304,7 +463,7 @@ resource "aws_apigatewayv2_integration" "lambda" {
   api_id                 = aws_apigatewayv2_api.http.id
   integration_type       = "AWS_PROXY"
   integration_method     = "POST"
-  integration_uri        = aws_lambda_function.service.invoke_arn
+  integration_uri        = aws_lambda_function.knowledge.invoke_arn
   payload_format_version = "2.0"
 }
 
@@ -747,7 +906,7 @@ resource "aws_budgets_budget" "cognito" {
 resource "aws_lambda_permission" "apigw" {
   statement_id  = "apigateway-invocation"
   action        = "lambda:InvokeFunction"
-  function_name = aws_lambda_function.service.function_name
+  function_name = aws_lambda_function.knowledge.function_name
   principal     = "apigateway.amazonaws.com"
   source_arn    = "${aws_apigatewayv2_api.http.execution_arn}/*/*"
 }
@@ -755,7 +914,7 @@ resource "aws_lambda_permission" "apigw" {
 resource "aws_lambda_permission" "eventbridge_drainer" {
   statement_id  = "eventbridge-index-queue-drainer"
   action        = "lambda:InvokeFunction"
-  function_name = aws_lambda_function.service.function_name
+  function_name = aws_lambda_function.code.function_name
   principal     = "events.amazonaws.com"
   source_arn    = aws_cloudwatch_event_rule.index_queue_drainer.arn
 }
