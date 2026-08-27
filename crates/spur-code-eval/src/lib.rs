@@ -1,10 +1,15 @@
 //! Reproducible code-intelligence benchmark contracts for SPUR.
 
+mod artifacts;
 mod contract;
 mod materialize;
 mod query;
 mod sources;
 
+pub use artifacts::{
+    content_sha256, ArtifactError, ArtifactKind, ArtifactRecord, ArtifactStore, RunManifest,
+    RunPhase,
+};
 pub use contract::{
     CaseStatus, CodeEvalCase, ContentPin, ContractError, GoldEvidence, Language, QueryPolicy,
     RepositoryPin, SourceIdentity, Suite,
