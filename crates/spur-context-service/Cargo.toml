@@ -16,6 +16,16 @@ path = "src/main.rs"
 required-features = ["lambda"]
 
 [[bin]]
+name = "spur-context-code-lambda"
+path = "src/bin/code_lambda.rs"
+required-features = ["code-lambda"]
+
+[[bin]]
+name = "spur-context-knowledge-lambda"
+path = "src/bin/knowledge_lambda.rs"
+required-features = ["knowledge-lambda"]
+
+[[bin]]
 name = "spur-context-api-key-authorizer"
 path = "src/bin/api_key_authorizer.rs"
 required-features = ["api-key-authorizer"]
@@ -42,8 +52,9 @@ required-features = ["worker-lambda"]
 
 [features]
 default = ["service"]
-code-lambda = []
-knowledge-lambda = []
+serving-lambda = ["dep:aws-config", "artifact-cache-s3", "lambda-http"]
+code-lambda = ["serving-lambda", "api-key-authorizer", "code-backend"]
+knowledge-lambda = ["serving-lambda", "api-key-authorizer", "service"]
 service = [
     "dep:anyhow",
     "dep:aws-config",
@@ -59,7 +70,9 @@ code-backend = ["parquet-io", "dep:spur-graph"]
 analyst = ["service"]
 artifact-cache-s3 = ["dep:aws-sdk-s3"]
 lambda-http = ["dep:lambda_runtime"]
-lambda = ["service", "api-key-authorizer", "lambda-http"]
+# Temporary compatibility alias until deployment packaging selects the named
+# Knowledge binary directly.
+lambda = ["knowledge-lambda"]
 api-key-authorizer = ["dep:lambda_runtime"]
 api-key-cleanup = ["dep:lambda_runtime"]
 parquet-io = ["dep:arrow-array", "dep:arrow-schema", "dep:parquet", "dep:sha1"]

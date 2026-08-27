@@ -18,7 +18,7 @@ pub mod drainer;
 pub mod jobs;
 #[cfg(feature = "service")]
 pub mod knowledge;
-#[cfg(feature = "lambda")]
+#[cfg(any(feature = "code-lambda", feature = "knowledge-lambda"))]
 pub mod lambda;
 #[cfg(feature = "lambda-http")]
 mod lambda_http;
@@ -77,7 +77,10 @@ mod serving_lambda_contract {
                 tool_is_eligible(selected, tool)
             });
 
-            assert_eq!(allowed, expected, "wrong eligibility for {backend:?}/{tool}");
+            assert_eq!(
+                allowed, expected,
+                "wrong eligibility for {backend:?}/{tool}"
+            );
             assert_eq!(
                 handler_calls.get(),
                 1,
