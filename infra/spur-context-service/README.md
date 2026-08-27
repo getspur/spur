@@ -225,7 +225,10 @@ plans and `init -backend=false`; it never needs AWS credentials.
    `cognito_issuer`, `cognito_domain_url`, `cognito_authorization_endpoint`,
    `cognito_token_endpoint`, `cognito_human_client_id`,
    `cognito_m2m_client_ids`, `cognito_resource_server_identifier`, and
-   `oauth_api_url`. Use `cognito_issuer` for OIDC discovery and JWKS
+   `oauth_api_urls`. Use the `code` and `knowledge` entries in
+   `oauth_api_urls` for calls and smoke tests. The legacy `oauth_api_url` output
+   is deprecated, is not directly callable, and remains only as a route prefix
+   for client compatibility. Use `cognito_issuer` for OIDC discovery and JWKS
    (`/.well-known/openid-configuration` and `/.well-known/jwks.json`). Use
    `cognito_domain_url` for hosted `/oauth2/authorize`, `/oauth2/token`, and
    logout endpoints. No output contains an M2M secret.
@@ -435,7 +438,10 @@ It must leave both direct OAuth and compatibility routes, M2M clients, IAM/demo
 settings, and the queue-drainer EventBridge input unchanged. After a separately
 approved apply, publish only discovery outputs and verify that the document's
 issuer, human client ID, endpoints, scopes, feature status, and exact Code and
-Knowledge URLs match the reviewed environment. Discovery contains no account
+Knowledge URLs match `api_key_mcp_urls` in the reviewed environment. Use its
+`code` and `knowledge` entries for operator and smoke-test calls. The legacy
+`api_key_mcp_url` output is deprecated, is not directly callable, and remains
+only as a route prefix for client compatibility. Discovery contains no account
 ID, client secret, token, key, digest, ARN, or user data.
 
 ### CLI-managed personal keys
@@ -732,10 +738,12 @@ wait for DNS propagation, then generate and review a fresh saved plan with the
 same approved inputs. Do not reuse the partially applied plan, invent a
 temporary validation address, or commit DNS values.
 
-Do not release clients yet. The Terraform outputs `api_url`, `oauth_api_url`,
-`api_key_mcp_url`, `api_key_management_url`, `cognito_domain_url`,
+Do not release clients yet. The Terraform outputs `api_url`, `oauth_api_urls`,
+`api_key_mcp_urls`, `api_key_management_url`, `cognito_domain_url`,
 `cognito_authorization_endpoint`, and `cognito_token_endpoint` switch to custom
-domains only while activation is enabled.
+domains only while activation is enabled. The legacy `oauth_api_url` and
+`api_key_mcp_url` outputs are deprecated, are not directly callable, and switch
+bases only to preserve their route-prefix compatibility contract.
 
 ### Phase 4: run OAuth, API-key, and MCP E2E; then release clients
 
@@ -744,9 +752,11 @@ Cognito prefix domain still provide rollback paths:
 
 1. Fetch `https://context.getspur.dev/.well-known/spur-context-service` and
    compare its issuer, client ID, scopes, and exact route URLs with the reviewed
-   Terraform outputs. Fetch OIDC discovery from the regional `cognito_issuer`
-   and require its advertised authorization and token endpoints to equal
-   `cognito_authorization_endpoint` and `cognito_token_endpoint`.
+   `oauth_api_urls` and `api_key_mcp_urls` Terraform outputs. Use only their
+   `code` and `knowledge` entries for the route smoke tests. Fetch OIDC discovery
+   from the regional `cognito_issuer` and require its advertised authorization
+   and token endpoints to equal `cognito_authorization_endpoint` and
+   `cognito_token_endpoint`.
 2. Complete human authorization-code plus PKCE through
    `https://auth.context.getspur.dev/oauth2/authorize`, exchange the code at
    `https://auth.context.getspur.dev/oauth2/token`, invoke one allowed Code MCP

@@ -92,9 +92,11 @@ run "disabled_default_keeps_legacy_iam_without_cognito" {
     condition = (
       output.cognito_domain_url == null &&
       output.cognito_authorization_endpoint == null &&
-      output.cognito_token_endpoint == null
+      output.cognito_token_endpoint == null &&
+      output.oauth_api_url == null &&
+      output.oauth_api_urls == null
     )
-    error_message = "disabled mode must not publish Cognito OAuth endpoints"
+    error_message = "disabled mode must not publish Cognito OAuth or serving endpoints"
   }
 }
 
@@ -447,8 +449,14 @@ run "custom_domains_disabled_preserves_cognito_prefix_domain" {
   }
 
   assert {
-    condition     = output.oauth_api_url == "${aws_apigatewayv2_api.http.api_endpoint}/mcp/oauth"
-    error_message = "OAuth API discovery must continue using execute-api before activation"
+    condition = (
+      output.oauth_api_url == "${aws_apigatewayv2_api.http.api_endpoint}/mcp/oauth" &&
+      output.oauth_api_urls == {
+        code      = "${aws_apigatewayv2_api.http.api_endpoint}/mcp/oauth/code"
+        knowledge = "${aws_apigatewayv2_api.http.api_endpoint}/mcp/oauth/knowledge"
+      }
+    )
+    error_message = "OAuth API outputs must retain the legacy prefix and publish exact execute-api routes before activation"
   }
 }
 
@@ -505,6 +513,17 @@ run "custom_domain_activation_builds_regional_api_and_cognito_domains" {
       aws_lambda_function.code.environment[0].variables["SPUR_COGNITO_TOKEN_ENDPOINT"] == "https://auth.context.getspur.dev/oauth2/token"
     )
     error_message = "activation must switch effective API and Cognito OAuth discovery to custom domains"
+  }
+
+  assert {
+    condition = (
+      output.oauth_api_url == "https://context.getspur.dev/mcp/oauth" &&
+      output.oauth_api_urls == {
+        code      = "https://context.getspur.dev/mcp/oauth/code"
+        knowledge = "https://context.getspur.dev/mcp/oauth/knowledge"
+      }
+    )
+    error_message = "OAuth API outputs must retain the legacy prefix and publish exact custom-domain routes after activation"
   }
 
   assert {

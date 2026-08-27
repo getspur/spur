@@ -14,8 +14,7 @@ CONTEXT_SERVICE_WORKFLOW = ROOT / ".github" / "workflows" / "context-service.yml
 STAGING_SMOKE = INFRA_DIR / "smoke-staging-e2e.py"
 STAGING_SMOKE_ENTRYPOINT = INFRA_DIR / "smoke-staging-e2e.sh"
 REMOVED_ROUTE_ADDRESS = re.compile(
-    r"\baws_apigatewayv2_route\.(?:default|oauth|api_key_mcp)"
-    r"(?![A-Za-z0-9_])"
+    r"\baws_apigatewayv2_route\.(?:default|oauth)(?![A-Za-z0-9_])"
 )
 
 
@@ -83,10 +82,8 @@ def test_main_module_route_contracts_drop_removed_addresses_and_unsuffixed_paths
     )
     assert all("poc" not in path.relative_to(INFRA_DIR).parts for path in contract_files)
 
-    unsuffixed_serving_path = re.compile(
-        r"POST /mcp/(?:oauth|api-key)(?!/(?:code|knowledge)\b)"
-        r"|`/mcp/(?:oauth|api-key)`"
-        r'|https?://[^\s`"]+/mcp/(?:oauth|api-key)(?=[`\s".,;)]|$)'
+    unsuffixed_serving_route = re.compile(
+        r'^\s*route_key\s*=\s*"POST /mcp/(?:oauth|api-key)"\s*$'
     )
     valid_default_stage_name = re.compile(r'^\s*name\s*=\s*"\$default"\s*$')
     stale_contracts = []
@@ -96,8 +93,8 @@ def test_main_module_route_contracts_drop_removed_addresses_and_unsuffixed_paths
             reasons = []
             if REMOVED_ROUTE_ADDRESS.search(line):
                 reasons.append("removed route address")
-            if unsuffixed_serving_path.search(line):
-                reasons.append("unsuffixed serving path")
+            if unsuffixed_serving_route.search(line):
+                reasons.append("unsuffixed serving route")
             if "$default" in line and not (
                 path == INFRA_DIR / "main.tf" and valid_default_stage_name.fullmatch(line)
             ):
@@ -196,7 +193,7 @@ def test_second_route_correction_restores_direct_and_exact_output_contracts():
             problems.append(f"README does not direct operators to {output_name}")
     for output_name in ("oauth_api_url", "api_key_mcp_url"):
         if not re.search(
-            rf"(?is)(?:deprecated[^\n]*{output_name}|{output_name}[^\n]*deprecated)",
+            rf"(?is)(?:deprecated.{{0,200}}{output_name}|{output_name}.{{0,200}}deprecated)",
             readme,
         ):
             problems.append(f"README does not mark {output_name} deprecated")

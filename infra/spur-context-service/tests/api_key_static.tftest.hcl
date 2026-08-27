@@ -4,6 +4,19 @@
 
 mock_provider "aws" {}
 
+mock_provider "aws" {
+  alias = "us_east_1"
+}
+
+override_resource {
+  target = aws_apigatewayv2_api.http
+  values = {
+    api_endpoint  = "https://example.execute-api.ap-southeast-5.amazonaws.com"
+    execution_arn = "arn:aws:execute-api:ap-southeast-5:111122223333:example"
+  }
+  override_during = plan
+}
+
 # Keep policy documents plan-known so least-privilege Resource assertions do
 # not require apply. These are synthetic values used only by the mock provider.
 override_resource {
@@ -77,6 +90,7 @@ run "disabled_default_has_no_api_key_infrastructure_or_endpoints" {
       length(aws_apigatewayv2_authorizer.api_key) == 0 &&
       length(aws_apigatewayv2_integration.api_key) == 0 &&
       length(aws_apigatewayv2_integration.api_key_knowledge) == 0 &&
+      length(aws_apigatewayv2_route.api_key_mcp) == 0 &&
       length(aws_apigatewayv2_route.api_key_mcp_knowledge) == 0 &&
       length(aws_apigatewayv2_route.api_key_discovery) == 0 &&
       length(aws_apigatewayv2_route.api_key_management) == 0
@@ -120,6 +134,7 @@ run "disabled_default_has_no_api_key_infrastructure_or_endpoints" {
       output.api_key_auth_enabled == false &&
       output.api_key_table_name == null &&
       output.api_key_mcp_url == null &&
+      output.api_key_mcp_urls == null &&
       output.api_key_management_url == null &&
       output.api_key_authorizer_function_name == null
     )
@@ -262,11 +277,10 @@ run "enabled_api_keys_create_exact_isolated_contract" {
       aws_apigatewayv2_route.oauth_knowledge[0].target == "integrations/${aws_apigatewayv2_integration.lambda.id}" &&
       aws_apigatewayv2_route.api_key_discovery[0].route_key == "GET /.well-known/spur-context-service" &&
       aws_apigatewayv2_route.api_key_discovery[0].authorization_type == "NONE" &&
-      strcontains(file("${path.module}/api_keys.tf"), "resource \"aws_apigatewayv2_route\" \"api_key_mcp\"") &&
-      strcontains(file("${path.module}/api_keys.tf"), "route_key          = \"POST /mcp/api-key/code\"") &&
-      strcontains(file("${path.module}/api_keys.tf"), "target             = \"integrations/$${aws_apigatewayv2_integration.api_key[0].id}\"") &&
-      strcontains(file("${path.module}/api_keys.tf"), "authorization_type = \"CUSTOM\"") &&
-      strcontains(file("${path.module}/api_keys.tf"), "authorizer_id      = aws_apigatewayv2_authorizer.api_key[0].id") &&
+      aws_apigatewayv2_route.api_key_mcp[0].route_key == "POST /mcp/api-key/code" &&
+      aws_apigatewayv2_route.api_key_mcp[0].authorization_type == "CUSTOM" &&
+      aws_apigatewayv2_route.api_key_mcp[0].authorizer_id == aws_apigatewayv2_authorizer.api_key[0].id &&
+      aws_apigatewayv2_route.api_key_mcp[0].target == "integrations/${aws_apigatewayv2_integration.api_key[0].id}" &&
       aws_apigatewayv2_route.api_key_mcp_knowledge[0].route_key == "POST /mcp/api-key/knowledge" &&
       aws_apigatewayv2_route.api_key_mcp_knowledge[0].authorization_type == "CUSTOM" &&
       aws_apigatewayv2_route.api_key_mcp_knowledge[0].authorizer_id == aws_apigatewayv2_authorizer.api_key[0].id &&
@@ -423,9 +437,14 @@ run "enabled_api_keys_create_exact_isolated_contract" {
     condition = (
       output.api_key_auth_enabled == true &&
       output.api_key_table_name == aws_dynamodb_table.api_keys[0].name &&
-      output.api_key_authorizer_function_name == "spur-context-api-key-authorizer"
+      output.api_key_authorizer_function_name == "spur-context-api-key-authorizer" &&
+      output.api_key_mcp_url == "${aws_apigatewayv2_api.http.api_endpoint}/mcp/api-key" &&
+      output.api_key_mcp_urls == {
+        code      = "${aws_apigatewayv2_api.http.api_endpoint}/mcp/api-key/code"
+        knowledge = "${aws_apigatewayv2_api.http.api_endpoint}/mcp/api-key/knowledge"
+      }
     )
-    error_message = "enabled outputs must be useful discovery metadata without credentials or hashes"
+    error_message = "enabled outputs must include the legacy prefix and exact execute-api routes without credentials or hashes"
   }
 
   assert {
@@ -440,5 +459,30 @@ run "enabled_api_keys_create_exact_isolated_contract" {
       aws_iam_role_policy.lambda_dynamodb.name == "DynamoDbControlPlaneAccess"
     )
     error_message = "API-key provisioning must not change EventBridge drainer input or fold key access into the legacy Lambda DynamoDB policy"
+  }
+}
+
+run "custom_domain_outputs_preserve_prefix_and_publish_exact_api_key_routes" {
+  command = plan
+
+  variables {
+    custom_domains_enabled      = true
+    api_key_auth_enabled        = true
+    cognito_auth_enabled        = true
+    cognito_user_pool_name      = "spur-context-api-key-domain-test"
+    cognito_domain_prefix       = "spur-context-api-key-domain-test"
+    cognito_human_callback_urls = ["http://127.0.0.1:8765/callback"]
+    cognito_human_logout_urls   = ["https://context.example.test/logout"]
+  }
+
+  assert {
+    condition = (
+      output.api_key_mcp_url == "https://context.getspur.dev/mcp/api-key" &&
+      output.api_key_mcp_urls == {
+        code      = "https://context.getspur.dev/mcp/api-key/code"
+        knowledge = "https://context.getspur.dev/mcp/api-key/knowledge"
+      }
+    )
+    error_message = "API-key outputs must retain the legacy prefix and publish exact custom-domain routes after activation"
   }
 }

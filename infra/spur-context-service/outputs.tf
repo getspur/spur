@@ -209,8 +209,16 @@ output "cognito_resource_server_identifier" {
 }
 
 output "oauth_api_url" {
-  description = "Exact JWT-protected OAuth API URL, or null when Cognito is disabled."
+  description = "Deprecated OAuth route prefix retained for compatibility; not directly callable. Null when Cognito is disabled."
   value       = var.cognito_auth_enabled ? "${local.context_service_base_url}/mcp/oauth" : null
+}
+
+output "oauth_api_urls" {
+  description = "Exact JWT-protected OAuth API URLs for the Code and Knowledge routes, or null when Cognito is disabled."
+  value = var.cognito_auth_enabled ? {
+    code      = "${local.context_service_base_url}/mcp/oauth/code"
+    knowledge = "${local.context_service_base_url}/mcp/oauth/knowledge"
+  } : null
 }
 
 # API-key outputs deliberately expose discovery metadata only. Raw keys,
@@ -226,8 +234,16 @@ output "api_key_table_name" {
 }
 
 output "api_key_mcp_url" {
-  description = "Exact CUSTOM-authorized personal API-key MCP URL, or null when API-key auth is disabled."
+  description = "Deprecated personal API-key route prefix retained for compatibility; not directly callable. Null when API-key auth is disabled."
   value       = var.api_key_auth_enabled ? "${local.context_service_base_url}/mcp/api-key" : null
+}
+
+output "api_key_mcp_urls" {
+  description = "Exact CUSTOM-authorized personal API-key MCP URLs for the Code and Knowledge routes, or null when API-key auth is disabled."
+  value = var.api_key_auth_enabled ? {
+    code      = "${local.context_service_base_url}/mcp/api-key/code"
+    knowledge = "${local.context_service_base_url}/mcp/api-key/knowledge"
+  } : null
 }
 
 output "api_key_management_url" {
