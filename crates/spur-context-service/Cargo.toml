@@ -42,6 +42,8 @@ required-features = ["worker-lambda"]
 
 [features]
 default = ["service"]
+code-lambda = []
+knowledge-lambda = []
 service = [
     "dep:anyhow",
     "dep:aws-config",

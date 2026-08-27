@@ -35,6 +35,58 @@ pub mod translate;
 #[cfg(feature = "worker")]
 pub mod worker;
 
+#[cfg(all(test, feature = "code-lambda"))]
+mod serving_lambda_contract {
+    use std::cell::Cell;
+
+    use crate::lambda::{dispatch_to_serving_handler, tool_is_eligible, BackendKind};
+
+    const CODE_TOOLS: [&str; 7] = [
+        "external_catalog",
+        "external_index",
+        "external_index_status",
+        "external_code_search",
+        "external_code_read",
+        "external_code_callers",
+        "external_code_callees",
+    ];
+    const KNOWLEDGE_TOOL: &str = "external_knowledge_context";
+
+    #[test]
+    fn code_lambda_tool_eligibility() {
+        assert!(cfg!(feature = "code-lambda"));
+        assert!(
+            !cfg!(feature = "service"),
+            "the Code Lambda feature must not enable the DuckDB-bearing service closure"
+        );
+
+        for (backend, tool, expected) in CODE_TOOLS
+            .into_iter()
+            .map(|tool| (BackendKind::Code, tool, true))
+            .chain([(BackendKind::Code, KNOWLEDGE_TOOL, false)])
+            .chain(
+                CODE_TOOLS
+                    .into_iter()
+                    .map(|tool| (BackendKind::Knowledge, tool, false)),
+            )
+            .chain([(BackendKind::Knowledge, KNOWLEDGE_TOOL, true)])
+        {
+            let handler_calls = Cell::new(0);
+            let allowed = dispatch_to_serving_handler(backend, |selected| {
+                handler_calls.set(handler_calls.get() + 1);
+                tool_is_eligible(selected, tool)
+            });
+
+            assert_eq!(allowed, expected, "wrong eligibility for {backend:?}/{tool}");
+            assert_eq!(
+                handler_calls.get(),
+                1,
+                "direct routing must invoke exactly one serving handler for {backend:?}/{tool}"
+            );
+        }
+    }
+}
+
 #[cfg(all(test, feature = "lambda-http"))]
 mod lambda_http_contract {
     use serde_json::json;
