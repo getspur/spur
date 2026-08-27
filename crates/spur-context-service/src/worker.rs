@@ -579,13 +579,12 @@ async fn build_persist_and_prepare_default(
     .await?;
     log_stage_completed("persist_silver", stage_started);
 
-    Ok(prepared_job_from_silver(
+    prepared_job_from_silver(
         workspace,
         source_path,
         silver_artifact_dir,
-        persisted_silver.row,
-        persisted_silver.manifest,
-    ))
+        persisted_silver,
+    )
 }
 
 pub async fn prepare_job_with_services(
@@ -727,13 +726,12 @@ async fn build_persist_and_prepare_with_services(
     .await?;
     log_stage_completed("persist_silver", stage_started);
 
-    Ok(prepared_job_from_silver(
+    prepared_job_from_silver(
         workspace,
         Some(source_path),
         silver_artifact_dir,
-        persisted_silver.row,
-        persisted_silver.manifest,
-    ))
+        persisted_silver,
+    )
 }
 
 async fn prepare_from_silver_row(
@@ -763,37 +761,115 @@ async fn prepare_from_silver_row(
         )));
     }
 
-    Ok(prepared_job_from_silver(
+    prepared_job_from_silver(
         workspace,
         source_path,
         silver_artifact_dir,
-        row,
-        manifest,
-    ))
+        PersistedSilverArtifact { row, manifest },
+    )
 }
 
 fn prepared_job_from_silver(
     workspace: TempWorkspace,
     source_path: Option<PathBuf>,
     artifact_dir: PathBuf,
-    row: SilverGraphArtifact,
-    manifest: SilverManifest,
-) -> PreparedJob {
-    let allow_missing_embeddings = WORKER_SKIPS_EMBEDDINGS || row.embedding_count == 0;
-    PreparedJob {
+    persisted: PersistedSilverArtifact,
+) -> Result<PreparedJob, WorkerError> {
+    let lineage = translate_lineage_from_persisted_silver(&persisted)?;
+    let allow_missing_embeddings = WORKER_SKIPS_EMBEDDINGS || persisted.row.embedding_count == 0;
+    Ok(PreparedJob {
         _workspace: workspace,
         source_path,
         artifact_dir,
-        artifact_manifest: Some(manifest),
-        lineage: Some(TranslateLineage {
-            bronze_content_sha256: row.bronze_content_sha256,
-            silver_graph_content_hash: row.graph_content_hash,
-            builder_version: row.builder_version,
-            translate_schema_version: DEFAULT_TRANSLATE_SCHEMA_VERSION.to_owned(),
-            embed_text_version: DEFAULT_EMBED_TEXT_VERSION.to_owned(),
-        }),
+        artifact_manifest: Some(persisted.manifest),
+        lineage: Some(lineage),
         allow_missing_embeddings,
+    })
+}
+
+fn translate_lineage_from_persisted_silver(
+    persisted: &PersistedSilverArtifact,
+) -> Result<TranslateLineage, WorkerError> {
+    let row = &persisted.row;
+    let manifest = &persisted.manifest;
+    if row.build_status != "success" {
+        return Err(WorkerError::Build(format!(
+            "cannot translate Silver artifact with build status `{}`",
+            row.build_status
+        )));
     }
+    if row.artifact_s3_prefix.trim().is_empty()
+        || !row.artifact_s3_prefix.starts_with("s3://")
+        || !row.artifact_s3_prefix.ends_with('/')
+    {
+        return Err(WorkerError::Build(
+            "persisted Silver graph prefix must be a non-empty S3 prefix URI".to_owned(),
+        ));
+    }
+    let manifest_object = row
+        .manifest_uri
+        .strip_prefix(&row.artifact_s3_prefix)
+        .filter(|relative| !relative.is_empty() && !relative.contains('/'));
+    if manifest_object.is_none() {
+        return Err(WorkerError::Build(
+            "persisted Silver manifest URI does not match graph prefix".to_owned(),
+        ));
+    }
+    if row.manifest_schema_hash != manifest.schema_hash {
+        return Err(WorkerError::Build(format!(
+            "persisted Silver manifest schema mismatch: registry {} != manifest {}",
+            row.manifest_schema_hash, manifest.schema_hash
+        )));
+    }
+
+    let mut sidecars = manifest
+        .files
+        .iter()
+        .filter(|file| file.path == SOURCE_SIDECAR_FILENAME);
+    let source_sidecar = sidecars.next().ok_or_else(|| {
+        WorkerError::Build(format!(
+            "Silver manifest missing required file `{SOURCE_SIDECAR_FILENAME}`"
+        ))
+    })?;
+    if sidecars.next().is_some() {
+        return Err(WorkerError::Build(format!(
+            "Silver manifest contains duplicate file `{SOURCE_SIDECAR_FILENAME}`"
+        )));
+    }
+    if source_sidecar.size_bytes == 0
+        || source_sidecar.sha256.len() != 64
+        || !source_sidecar
+            .sha256
+            .as_bytes()
+            .iter()
+            .all(u8::is_ascii_hexdigit)
+    {
+        return Err(WorkerError::Build(
+            "Silver source sidecar identity is incomplete".to_owned(),
+        ));
+    }
+
+    let manifest_bytes = serde_json::to_vec_pretty(manifest)
+        .map_err(|error| WorkerError::Build(format!("encode Silver manifest: {error}")))?;
+    let graph_manifest_bytes = u64::try_from(manifest_bytes.len()).map_err(|_| {
+        WorkerError::Build("Silver manifest byte size does not fit in u64".to_owned())
+    })?;
+    let graph_manifest_sha256 = format!("{:x}", Sha256::digest(&manifest_bytes));
+
+    Ok(TranslateLineage {
+        bronze_content_sha256: row.bronze_content_sha256.clone(),
+        silver_graph_content_hash: row.graph_content_hash.clone(),
+        builder_version: row.builder_version.clone(),
+        translate_schema_version: DEFAULT_TRANSLATE_SCHEMA_VERSION.to_owned(),
+        embed_text_version: DEFAULT_EMBED_TEXT_VERSION.to_owned(),
+        graph_prefix_uri: row.artifact_s3_prefix.clone(),
+        graph_manifest_uri: row.manifest_uri.clone(),
+        graph_manifest_sha256,
+        graph_manifest_bytes,
+        source_sidecar_uri: format!("{}{}", row.artifact_s3_prefix, source_sidecar.path),
+        source_sidecar_sha256: source_sidecar.sha256.clone(),
+        source_sidecar_bytes: source_sidecar.size_bytes,
+    })
 }
 
 fn translate_prepared_blocking(
