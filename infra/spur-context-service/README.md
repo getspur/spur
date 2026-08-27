@@ -78,7 +78,9 @@ ARN is present.
 | `aws_s3_bucket.data` | DuckLake catalog (.ducklake) + Parquet data files |
 | `aws_dynamodb_table.index_jobs` | Job records, sparse queue GSI, active dedupe pointers, owner/global quota counters, running-release tokens, execution ARNs |
 | `aws_dynamodb_table.catalog_leases` | Serialized DuckLake catalog write leases |
-| `aws_lambda_function.service` | ARM64 Lambda, 1024MB, 30s timeout |
+| `aws_lambda_function.code` | On-demand ARM64 Code/control-plane Lambda with a 512 MiB `/tmp` artifact cache |
+| `aws_lambda_function.knowledge` | ARM64 frozen DuckLake Knowledge Lambda with published versions |
+| `aws_lambda_alias.knowledge_live` | Stable Knowledge traffic target carrying the conserved provisioned-concurrency pool |
 | `aws_sfn_state_machine.index_build` | Lambda-first on-demand indexing orchestration |
 | `aws_lambda_function.worker` | Fast-start indexing worker image |
 | `aws_lambda_function.source_fetcher` | Non-VPC public source fetcher image |
@@ -86,9 +88,12 @@ ARN is present.
 | `aws_apigatewayv2_api.http` | HTTP API front door |
 | `aws_cloudwatch_event_rule.index_queue_drainer` | Scheduled correctness path for dispatching queued jobs |
 | `aws_iam_policy.context_service_invoke` | Same-account SigV4 invoke policy for allowed callers |
-| `aws_iam_role.lambda` | Execution role with S3 read, DynamoDB, SFN + CloudWatch Logs |
+| `aws_iam_role.lambda` | Existing indexing-worker Lambda execution role |
+| `aws_iam_role.code_lambda` | Code serving role with registry/artifact reads plus control-plane DynamoDB/SFN, logs, and X-Ray |
+| `aws_iam_role.knowledge_lambda` | Knowledge serving role with frozen S3/DuckLake reads, logs, and X-Ray |
 | `aws_iam_role.worker_task` | ECS fallback worker role with S3, DynamoDB, SFN callback permissions |
-| `aws_cloudwatch_log_group.lambda` | 14-day retention |
+| `aws_cloudwatch_log_group.code_lambda` | Code Lambda logs with 14-day retention |
+| `aws_cloudwatch_log_group.knowledge_lambda` | Knowledge Lambda logs with 14-day retention |
 | `aws_cloudwatch_log_group.worker_lambda` | Lambda worker logs |
 | `aws_cloudwatch_log_group.source_fetcher_lambda` | Source fetcher Lambda logs |
 | `aws_cloudwatch_log_group.worker` | Worker task logs |
@@ -972,14 +977,17 @@ bash infra/spur-context-service/test-graviton2-baseline.sh
 ## Serving Lambda Concurrency
 
 `lambda_max_concurrency` defaults to `4` and sets
-`AWS_LAMBDA_MAX_CONCURRENCY` on the serving Lambda. Values greater than `1`
+`AWS_LAMBDA_MAX_CONCURRENCY` on both serving Lambdas. Values greater than `1`
 enable concurrent in-process request handling. Set it to `1`, or leave the
 environment variable unset outside Terraform, to use the sequential fallback.
 
 This is separate from AWS provisioned concurrency. `lambda_max_concurrency`
 controls request parallelism within each execution environment, while
 `concurrent_warm_instances` controls how many execution environments AWS keeps
-pre-initialized to avoid cold starts.
+pre-initialized to avoid cold starts. The entire existing provisioned-concurrency
+budget is attached to the published `knowledge_live` alias; Code remains
+on-demand with zero provisioned concurrency. Reserved concurrency, if used
+elsewhere, is a capacity limit rather than a billable warm pool.
 
 ## Provisioned Concurrency
 

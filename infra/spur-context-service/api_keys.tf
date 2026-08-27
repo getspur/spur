@@ -141,7 +141,7 @@ resource "aws_apigatewayv2_authorizer" "api_key" {
 }
 
 # A route-specific integration provides defense-in-depth by removing the raw
-# key before invoking the serving Lambda. Serving trusts only the typed
+# key before invoking the Code Lambda. Code trusts only the typed
 # authorizer context and remains correct if a live POC finds removal unsupported.
 resource "aws_apigatewayv2_integration" "api_key" {
   count = var.api_key_auth_enabled ? 1 : 0
@@ -149,7 +149,7 @@ resource "aws_apigatewayv2_integration" "api_key" {
   api_id                 = aws_apigatewayv2_api.http.id
   integration_type       = "AWS_PROXY"
   integration_method     = "POST"
-  integration_uri        = aws_lambda_function.service.invoke_arn
+  integration_uri        = aws_lambda_function.code.invoke_arn
   payload_format_version = "2.0"
   request_parameters = {
     "remove:header.X-SPUR-API-Key" = "''"
@@ -161,7 +161,7 @@ resource "aws_apigatewayv2_route" "api_key_discovery" {
 
   api_id             = aws_apigatewayv2_api.http.id
   route_key          = "GET /.well-known/spur-context-service"
-  target             = "integrations/${aws_apigatewayv2_integration.lambda.id}"
+  target             = "integrations/${aws_apigatewayv2_integration.code.id}"
   authorization_type = "NONE"
 }
 
@@ -184,7 +184,7 @@ resource "aws_apigatewayv2_route" "api_key_management" {
 
   api_id               = aws_apigatewayv2_api.http.id
   route_key            = each.value
-  target               = "integrations/${aws_apigatewayv2_integration.lambda.id}"
+  target               = "integrations/${aws_apigatewayv2_integration.code.id}"
   authorization_type   = "JWT"
   authorizer_id        = aws_apigatewayv2_authorizer.cognito[0].id
   authorization_scopes = [local.api_key_management_scope]

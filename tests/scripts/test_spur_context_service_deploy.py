@@ -31,10 +31,11 @@ def terraform_resource_block(text, resource_type, resource_name):
 
 
 def terraform_module_contract_files():
-    return (
-        sorted(INFRA_DIR.glob("*.tf"))
-        + sorted((INFRA_DIR / "tests").glob("*.tftest.hcl"))
-        + [INFRA_DIR / "README.md"]
+    return sorted(
+        path
+        for pattern in ("*.tf", "*.tftest.hcl", "*.md")
+        for path in INFRA_DIR.rglob(pattern)
+        if ".terraform" not in path.parts
     )
 
 
@@ -74,6 +75,16 @@ def test_serving_compute_correction_removes_deleted_service_addresses_and_routes
     )
     if "integration_uri        = aws_lambda_function.code.invoke_arn" not in api_key_integration:
         problems.append("API-key integration does not invoke Code")
+
+    code_permission_marker = 'resource "aws_lambda_permission" "apigw_code"'
+    if code_permission_marker not in main_tf:
+        problems.append("missing API Gateway permission for the Code integration")
+    else:
+        code_permission = terraform_resource_block(
+            main_tf, "aws_lambda_permission", "apigw_code"
+        )
+        if "function_name = aws_lambda_function.code.function_name" not in code_permission:
+            problems.append("Code API permission names a different function")
 
     assert not problems, "\n".join(problems)
 
@@ -724,8 +735,9 @@ def test_context_service_workflow_releases_serving_lambda_on_main_push():
 
     # Code-only rollout through the canonical deploy path: worker images pushed
     # from the VM (immutable tag + latest pointer), zip packaged from the
-    # fetched serving binary, then update-function-code on the serving Lambda,
-    # which API Gateway invokes unqualified ($LATEST).
+    # fetched legacy serving binary, then update-function-code on the staging
+    # function. Task 14 owns publishing the named packages and advancing the
+    # Knowledge alias; this guard deliberately does not model that later cutover.
     assert "infra/spur-context-service/build-and-push-remote.sh" in release
     assert (
         "infra/spur-context-service/deploy.sh --skip-worker --package-only"

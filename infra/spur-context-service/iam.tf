@@ -65,8 +65,8 @@ resource "aws_iam_role" "knowledge_lambda" {
   })
 }
 
-# Lambda's logging and X-Ray APIs plus the existing VPC ENI envelope require
-# account-scoped actions, while log writes remain restricted per function.
+# X-Ray writes are account-scoped, while log writes remain restricted to each
+# function's dedicated log group. Neither serving function is VPC-attached.
 resource "aws_iam_role_policy" "code_lambda_runtime" {
   name = "CodeLambdaRuntimeAccess"
   role = aws_iam_role.code_lambda.id
@@ -89,18 +89,6 @@ resource "aws_iam_role_policy" "code_lambda_runtime" {
         Action = [
           "xray:PutTraceSegments",
           "xray:PutTelemetryRecords"
-        ]
-        Resource = "*"
-      },
-      {
-        Sid    = "LambdaVpcNetworkInterfaces"
-        Effect = "Allow"
-        Action = [
-          "ec2:CreateNetworkInterface",
-          "ec2:DescribeNetworkInterfaces",
-          "ec2:DeleteNetworkInterface",
-          "ec2:AssignPrivateIpAddresses",
-          "ec2:UnassignPrivateIpAddresses"
         ]
         Resource = "*"
       }
@@ -130,18 +118,6 @@ resource "aws_iam_role_policy" "knowledge_lambda_runtime" {
         Action = [
           "xray:PutTraceSegments",
           "xray:PutTelemetryRecords"
-        ]
-        Resource = "*"
-      },
-      {
-        Sid    = "LambdaVpcNetworkInterfaces"
-        Effect = "Allow"
-        Action = [
-          "ec2:CreateNetworkInterface",
-          "ec2:DescribeNetworkInterfaces",
-          "ec2:DeleteNetworkInterface",
-          "ec2:AssignPrivateIpAddresses",
-          "ec2:UnassignPrivateIpAddresses"
         ]
         Resource = "*"
       }
@@ -197,22 +173,6 @@ resource "aws_iam_role_policy" "knowledge_s3_read" {
         Resource = aws_s3_bucket.data.arn
       }
     ]
-  })
-}
-
-resource "aws_iam_role_policy" "knowledge_catalog_secret" {
-  name = "KnowledgeCatalogSecretAccess"
-  role = aws_iam_role.knowledge_lambda.id
-
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [{
-      Effect = "Allow"
-      Action = [
-        "secretsmanager:GetSecretValue"
-      ]
-      Resource = local.aurora_master_secret_arn
-    }]
   })
 }
 

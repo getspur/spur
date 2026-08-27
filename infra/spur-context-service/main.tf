@@ -351,6 +351,7 @@ resource "aws_lambda_function" "knowledge" {
   runtime       = "provided.al2023"
   architectures = ["arm64"]
   handler       = "bootstrap"
+  publish       = true
 
   role        = aws_iam_role.knowledge_lambda.arn
   timeout     = var.lambda_timeout_sec
@@ -372,7 +373,6 @@ resource "aws_lambda_function" "knowledge" {
   depends_on = [
     aws_iam_role_policy.knowledge_lambda_runtime,
     aws_iam_role_policy.knowledge_s3_read,
-    aws_iam_role_policy.knowledge_catalog_secret,
     aws_cloudwatch_log_group.knowledge_lambda,
     aws_apigatewayv2_api_mapping.context_service,
     aws_route53_record.api_custom_domain_ipv4,
@@ -403,6 +403,13 @@ resource "aws_lambda_function" "knowledge" {
   }
 }
 
+resource "aws_lambda_alias" "knowledge_live" {
+  name             = "live"
+  description      = "Stable API Gateway target for published Knowledge versions"
+  function_name    = aws_lambda_function.knowledge.function_name
+  function_version = aws_lambda_function.knowledge.version
+}
+
 # A successful admission kick is only a latency optimization. This scheduled
 # invocation is the correctness path that eventually drains queued work after
 # running capacity becomes available.
@@ -431,7 +438,9 @@ resource "aws_lambda_provisioned_concurrency_config" "knowledge_warm" {
   count                             = var.concurrent_warm_instances > 0 ? 1 : 0
   function_name                     = aws_lambda_function.knowledge.function_name
   provisioned_concurrent_executions = var.concurrent_warm_instances
-  qualifier                         = "$LATEST"
+  qualifier                         = aws_lambda_alias.knowledge_live.name
+
+  depends_on = [aws_lambda_alias.knowledge_live]
 
   lifecycle {
     precondition {
@@ -463,7 +472,17 @@ resource "aws_apigatewayv2_integration" "lambda" {
   api_id                 = aws_apigatewayv2_api.http.id
   integration_type       = "AWS_PROXY"
   integration_method     = "POST"
-  integration_uri        = aws_lambda_function.knowledge.invoke_arn
+  integration_uri        = aws_lambda_alias.knowledge_live.invoke_arn
+  payload_format_version = "2.0"
+}
+
+# Task 13 owns the final tool-level route split. This compatibility integration
+# keeps control-plane discovery, login, and API-key lifecycle traffic on Code.
+resource "aws_apigatewayv2_integration" "code" {
+  api_id                 = aws_apigatewayv2_api.http.id
+  integration_type       = "AWS_PROXY"
+  integration_method     = "POST"
+  integration_uri        = aws_lambda_function.code.invoke_arn
   payload_format_version = "2.0"
 }
 
@@ -836,7 +855,7 @@ resource "aws_apigatewayv2_route" "login_redirect" {
 
   api_id             = aws_apigatewayv2_api.http.id
   route_key          = "GET /auth/login"
-  target             = "integrations/${aws_apigatewayv2_integration.lambda.id}"
+  target             = "integrations/${aws_apigatewayv2_integration.code.id}"
   authorization_type = "NONE"
 }
 
@@ -907,6 +926,15 @@ resource "aws_lambda_permission" "apigw" {
   statement_id  = "apigateway-invocation"
   action        = "lambda:InvokeFunction"
   function_name = aws_lambda_function.knowledge.function_name
+  qualifier     = aws_lambda_alias.knowledge_live.name
+  principal     = "apigateway.amazonaws.com"
+  source_arn    = "${aws_apigatewayv2_api.http.execution_arn}/*/*"
+}
+
+resource "aws_lambda_permission" "apigw_code" {
+  statement_id  = "apigateway-code-invocation"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.code.function_name
   principal     = "apigateway.amazonaws.com"
   source_arn    = "${aws_apigatewayv2_api.http.execution_arn}/*/*"
 }
