@@ -9087,6 +9087,10 @@ dependencies = [
 [[package]]
 name = "spur-code-eval"
 version = "1.21.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "spur-context"

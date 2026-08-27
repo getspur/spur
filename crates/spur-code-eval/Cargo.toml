@@ -13,5 +13,9 @@ dist = false
 [lib]
 bench = false
 
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+
 [lints]
 workspace = true
