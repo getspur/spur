@@ -1,13 +1,12 @@
 use std::collections::BTreeSet;
 
-use sha2::{Digest, Sha256};
 use spur_graph::memory_eval::ranking::{
     oracle_ranking, Bm25Ranker, ChronologyKey, CorpusDocument, Granularity, OracleRequest,
     QueryOccurrenceId, RankRequest, Ranker, RankingSet, RecentRanker, Variant,
 };
 
 fn query_occurrence_id(source_id: &str) -> QueryOccurrenceId {
-    QueryOccurrenceId::from_sha256(format!("{:x}", Sha256::digest(source_id.as_bytes()))).unwrap()
+    QueryOccurrenceId::new(source_id)
 }
 
 fn fixture_corpus() -> Vec<CorpusDocument> {
@@ -37,7 +36,6 @@ fn fixture_corpus() -> Vec<CorpusDocument> {
 
 fn request<'a>(corpus: &'a [CorpusDocument], granularity: Granularity) -> RankRequest<'a> {
     RankRequest {
-        query_occurrence_id: query_occurrence_id("q-1"),
         query: "shared token",
         granularity,
         corpus,
@@ -71,26 +69,74 @@ fn non_oracle_request_serialization_contains_no_gold_fields() {
 }
 
 #[test]
-fn non_oracle_request_serialization_does_not_disclose_source_question_id() {
+fn ranker_boundary_is_identifier_free_until_the_caller_keys_the_artifact() {
+    const Q_001_ABS_SHA256: &str =
+        "ffc684fdb2f7486421672e52aa7bce75fe3301d8ae14d0efc74d551474d8c2d9";
+
     let corpus = fixture_corpus();
-    let query_occurrence_id = query_occurrence_id("q-001_abs");
     let rank_request = RankRequest {
-        query_occurrence_id: query_occurrence_id.clone(),
         query: "shared token",
         granularity: Granularity::Turn,
         corpus: &corpus,
     };
 
     let json = serde_json::to_string(&rank_request).unwrap();
+    let serialized_request = serde_json::from_str::<serde_json::Value>(&json).unwrap();
+    let fields = serialized_request
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
 
-    assert!(!json.contains("q-001_abs"), "leaked source ID: {json}");
-    assert!(!json.contains("_abs"), "leaked abstention marker: {json}");
-    assert!(QueryOccurrenceId::from_sha256("q-001_abs".to_owned()).is_err());
-    assert!(serde_json::from_str::<QueryOccurrenceId>(r#""q-001_abs""#).is_err());
-    let round_trip: QueryOccurrenceId =
-        serde_json::from_str(&serde_json::to_string(&query_occurrence_id).unwrap())
-            .expect("hashed query occurrence ID should round-trip");
-    assert_eq!(query_occurrence_id, round_trip);
+    assert_eq!(fields, BTreeSet::from(["corpus", "granularity", "query"]));
+    assert!(
+        !json.contains("query_occurrence_id"),
+        "leaked ID field: {json}"
+    );
+    assert!(!json.contains(Q_001_ABS_SHA256), "leaked ID digest: {json}");
+
+    let ranking = RecentRanker.rank(&rank_request, 2).unwrap();
+    let ranking_json = serde_json::to_string(&ranking).unwrap();
+    assert!(
+        !ranking_json.contains("query_occurrence_id"),
+        "ranker keyed its output: {ranking_json}"
+    );
+    assert!(
+        !ranking_json.contains(Q_001_ABS_SHA256),
+        "ranker copied the ID digest: {ranking_json}"
+    );
+
+    let gold = vec!["occ_a".to_owned()];
+    let oracle = oracle_ranking(
+        &OracleRequest {
+            request: rank_request,
+            gold_occurrence_ids: &gold,
+        },
+        1,
+    );
+    let oracle_json = serde_json::to_string(&oracle).unwrap();
+    assert!(
+        !oracle_json.contains("query_occurrence_id"),
+        "oracle keyed its output: {oracle_json}"
+    );
+    assert!(
+        !oracle_json.contains(Q_001_ABS_SHA256),
+        "oracle copied the ID digest: {oracle_json}"
+    );
+
+    let query_occurrence_id = query_occurrence_id("q-001_abs");
+    let mut rankings = RankingSet::new();
+    assert!(rankings.is_empty());
+    rankings.insert(
+        (
+            query_occurrence_id.clone(),
+            Variant::Recent,
+            Granularity::Turn,
+        ),
+        ranking,
+    );
+    assert!(rankings.contains_key(&(query_occurrence_id, Variant::Recent, Granularity::Turn,)));
 }
 
 #[test]
@@ -122,7 +168,6 @@ fn bm25_prefers_matching_documents() {
     corpus[2].text = "orchid orchid orchid".to_owned();
     let ranker = Bm25Ranker::build(corpus.clone()).unwrap();
     let rank_request = RankRequest {
-        query_occurrence_id: query_occurrence_id("q-orchid"),
         query: "orchid",
         granularity: Granularity::Turn,
         corpus: &corpus,
@@ -267,7 +312,6 @@ fn hashes_are_stable_shared_between_non_oracles_and_bind_query_and_corpus() {
     }
 
     let changed_query = RankRequest {
-        query_occurrence_id: query_occurrence_id("q-1"),
         query: "different tokens",
         granularity: Granularity::Turn,
         corpus: &corpus,

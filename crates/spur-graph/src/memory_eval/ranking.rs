@@ -16,35 +16,17 @@ pub const TOKENIZATION_CONTRACT: &str =
 const BM25_K1: f64 = 1.2;
 const BM25_B: f64 = 0.75;
 
-/// An opaque query occurrence identifier safe to cross the ranker boundary.
+/// Caller-owned query identity for externally keyed ranking artifacts.
 ///
-/// Dataset adapters hash source question IDs and keep the reverse mapping. This
-/// type accepts only that hashed representation, so raw source IDs cannot be
-/// represented in a serialized [`RankRequest`].
-#[derive(Debug, Clone, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+/// Rank execution never receives or produces this value. Callers attach it to
+/// an unkeyed [`Ranking`] only after the ranker returns.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(transparent)]
 pub struct QueryOccurrenceId(String);
 
 impl QueryOccurrenceId {
-    pub fn from_sha256(value: String) -> Result<Self> {
-        ensure!(
-            value.len() == 64
-                && value
-                    .bytes()
-                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
-            "query occurrence ID must be a lowercase SHA-256 digest"
-        );
-        Ok(Self(value))
-    }
-}
-
-impl<'de> Deserialize<'de> for QueryOccurrenceId {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let value = String::deserialize(deserializer)?;
-        Self::from_sha256(value).map_err(serde::de::Error::custom)
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
     }
 }
 
@@ -99,7 +81,6 @@ pub struct CorpusDocument {
 /// The complete input that a non-oracle ranker is allowed to receive.
 #[derive(Debug, Clone, Serialize)]
 pub struct RankRequest<'a> {
-    pub query_occurrence_id: QueryOccurrenceId,
     pub query: &'a str,
     pub granularity: Granularity,
     pub corpus: &'a [CorpusDocument],
@@ -125,10 +106,9 @@ pub struct RankedHit {
     pub score: f64,
 }
 
-/// An immutable ranking artifact for exactly one granularity and cutoff.
+/// An unkeyed immutable ranking artifact for exactly one granularity and cutoff.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Ranking {
-    pub query_occurrence_id: QueryOccurrenceId,
     pub variant: Variant,
     pub granularity: Granularity,
     pub k: usize,
@@ -339,7 +319,6 @@ fn ranking(
 ) -> Result<Ranking> {
     let hashes = ranking_hashes(request)?;
     Ok(Ranking {
-        query_occurrence_id: request.query_occurrence_id.clone(),
         variant,
         granularity: request.granularity,
         k,
