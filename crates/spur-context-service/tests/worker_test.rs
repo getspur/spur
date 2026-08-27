@@ -1,6 +1,6 @@
 #![cfg(feature = "worker")]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fs;
 use std::future::Future;
 use std::io::{Read as _, Write as _};
@@ -12,6 +12,7 @@ use std::sync::{
     atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     Arc, Mutex,
 };
+use std::task::{Context as TaskContext, Poll};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -32,11 +33,13 @@ use spur_context_service::worker::{
     acquire_catalog_lease_with_retry, build_graph, download_silver_artifact_from_manifest,
     fetch_source, fetch_source_with_bronze_services, handle_spot_interruption,
     persist_silver_graph_artifact, prepare_job_with_services, retrieve_bronze_source_by_coordinate,
-    run_job_and_record_with_services, upload_with_owned_catalog_lease, BronzeArchiveStore,
-    BronzeRawSource, BronzeRawSourceRegistry, CatalogDownload, CatalogLease, CatalogLeaseStore,
+    run_job_and_record_with_services, upload_with_owned_catalog_lease,
+    write_verified_silver_manifest_file_stream, BronzeArchiveStore, BronzeRawSource,
+    BronzeRawSourceRegistry, CatalogDownload, CatalogLease, CatalogLeaseStore,
     GraphArtifactBuilder, JobEnv, JobFromLayer, SilverArtifactStore, SilverGraphArtifact,
     SilverGraphArtifactRegistry, SilverUploadedFile, StageTracker, WorkerError,
 };
+use tokio::io::{AsyncRead, ReadBuf};
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 const SIDECAR_LIB_SOURCE: &str = "pub fn answer() -> u32 { 42 }\n";
@@ -501,6 +504,188 @@ async fn silver_bundle_download_rejects_corrupt_graph_manifest_bytes() -> Result
     assert!(error.to_string().contains("manifest.json"));
     assert!(error.to_string().contains("mismatch"));
     fs::remove_dir_all(root).ok();
+    Ok(())
+}
+
+#[tokio::test]
+async fn silver_bundle_streaming_chunked_download_publishes_exact_member() -> Result<()> {
+    let root = unique_temp_dir("worker-silver-stream-success")?;
+    let artifact_dir = root.join("artifact");
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let manifest = worker_silver_manifest();
+    let store = FakeSilverArtifactStore::with_manifest(events, manifest.clone());
+    let reads = store.set_download_chunks(
+        "manifest.json",
+        vec![
+            b"fixture:".to_vec(),
+            b"manifest".to_vec(),
+            b".json".to_vec(),
+        ],
+    );
+
+    download_silver_artifact_from_manifest(
+        "s3://silver-test/silver/registry:crates-io/demo/0.1.0/builder-v1/silver-manifest.json",
+        &manifest,
+        &artifact_dir,
+        &store,
+    )
+    .await?;
+
+    assert_eq!(
+        fs::read(artifact_dir.join("manifest.json"))?,
+        b"fixture:manifest.json"
+    );
+    assert_eq!(reads.load(Ordering::SeqCst), 3);
+    assert!(silver_download_temp_siblings(&artifact_dir)?.is_empty());
+    fs::remove_dir_all(root).ok();
+    Ok(())
+}
+
+#[tokio::test]
+async fn silver_bundle_streaming_short_member_leaves_no_final_or_temp() -> Result<()> {
+    let root = unique_temp_dir("worker-silver-stream-short")?;
+    let artifact_dir = root.join("artifact");
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let manifest = worker_silver_manifest();
+    let store = FakeSilverArtifactStore::with_manifest(events, manifest.clone());
+    store.set_download_chunks(
+        "manifest.json",
+        vec![b"fixture:".to_vec(), b"manifest".to_vec()],
+    );
+
+    let error = download_silver_artifact_from_manifest(
+        "s3://silver-test/silver/registry:crates-io/demo/0.1.0/builder-v1/silver-manifest.json",
+        &manifest,
+        &artifact_dir,
+        &store,
+    )
+    .await
+    .unwrap_err();
+
+    assert!(error.to_string().contains("size mismatch"));
+    assert!(!artifact_dir.join("manifest.json").exists());
+    assert!(silver_download_temp_siblings(&artifact_dir)?.is_empty());
+    fs::remove_dir_all(root).ok();
+    Ok(())
+}
+
+#[tokio::test]
+async fn silver_bundle_streaming_long_member_rejects_early_without_final() -> Result<()> {
+    let root = unique_temp_dir("worker-silver-stream-long")?;
+    let artifact_dir = root.join("artifact");
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let manifest = worker_silver_manifest();
+    let store = FakeSilverArtifactStore::with_manifest(events, manifest.clone());
+    let reads = store.set_download_chunks(
+        "manifest.json",
+        vec![
+            b"fixture:manifest.json".to_vec(),
+            b"!".to_vec(),
+            b"must-not-be-read".to_vec(),
+        ],
+    );
+
+    let error = download_silver_artifact_from_manifest(
+        "s3://silver-test/silver/registry:crates-io/demo/0.1.0/builder-v1/silver-manifest.json",
+        &manifest,
+        &artifact_dir,
+        &store,
+    )
+    .await
+    .unwrap_err();
+
+    assert!(error.to_string().contains("size mismatch"));
+    assert_eq!(
+        reads.load(Ordering::SeqCst),
+        2,
+        "the stream must stop as soon as the checked size exceeds the manifest"
+    );
+    assert!(!artifact_dir.join("manifest.json").exists());
+    assert!(silver_download_temp_siblings(&artifact_dir)?.is_empty());
+    fs::remove_dir_all(root).ok();
+    Ok(())
+}
+
+#[tokio::test]
+async fn silver_bundle_streaming_corrupt_member_does_not_reuse_temp() -> Result<()> {
+    let root = unique_temp_dir("worker-silver-stream-corrupt")?;
+    let artifact_dir = root.join("artifact");
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let manifest = worker_silver_manifest();
+    let store = FakeSilverArtifactStore::with_manifest(events, manifest.clone());
+    store.set_download_chunks(
+        "manifest.json",
+        vec![b"Fixture:".to_vec(), b"manifest.json".to_vec()],
+    );
+    store.seed_stale_temp_on_download("manifest.json", b"do-not-reuse".to_vec());
+
+    let error = download_silver_artifact_from_manifest(
+        "s3://silver-test/silver/registry:crates-io/demo/0.1.0/builder-v1/silver-manifest.json",
+        &manifest,
+        &artifact_dir,
+        &store,
+    )
+    .await
+    .unwrap_err();
+
+    let stale_temp = artifact_dir.join(".manifest.json.spur-download-stale.tmp");
+    assert!(error.to_string().contains("SHA-256 mismatch"));
+    assert!(!artifact_dir.join("manifest.json").exists());
+    assert_eq!(fs::read(&stale_temp)?, b"do-not-reuse");
+    assert_eq!(silver_download_temp_siblings(&artifact_dir)?, [stale_temp]);
+    fs::remove_dir_all(root).ok();
+    Ok(())
+}
+
+#[test]
+fn s3_silver_member_validation_and_download_do_not_collect_complete_bodies() -> Result<()> {
+    let source = include_str!("../src/worker.rs");
+    let implementation = source
+        .split_once("impl SilverArtifactStore for S3SilverArtifactStore")
+        .context("S3 Silver store implementation")?
+        .1;
+    let validate_manifest = implementation
+        .split_once("async fn validate_manifest(")
+        .context("S3 validate_manifest")?
+        .1
+        .split_once("async fn download_manifest(")
+        .context("end of S3 validate_manifest")?
+        .0;
+    let member_validation = validate_manifest
+        .split_once("for file in &manifest.files")
+        .context("S3 member validation loop")?
+        .1;
+    let download_manifest_file = implementation
+        .split_once("async fn download_manifest_file(")
+        .context("S3 download_manifest_file")?
+        .1
+        .split_once("\n    }\n}")
+        .context("end of S3 download_manifest_file")?
+        .0;
+    let atomic_stream_writer = source
+        .split_once("pub async fn write_verified_silver_manifest_file_stream")
+        .context("verified Silver stream writer")?
+        .1
+        .split_once("fn validate_downloaded_silver_manifest_file")
+        .context("end of verified Silver stream writer")?
+        .0;
+
+    assert!(
+        !member_validation.contains(".collect()"),
+        "S3 Silver member validation must hash the SDK body incrementally"
+    );
+    assert!(
+        !download_manifest_file.contains(".collect()"),
+        "S3 Silver member download must not buffer the complete object"
+    );
+    assert!(
+        download_manifest_file.contains("write_verified_silver_manifest_file_stream"),
+        "S3 member download must use the verified streaming writer"
+    );
+    assert!(
+        atomic_stream_writer.contains("rename("),
+        "verified member download must publish with an atomic rename"
+    );
     Ok(())
 }
 
@@ -1658,6 +1843,19 @@ fn assert_no_silver_member_downloads(events: &Arc<Mutex<Vec<String>>>) {
     );
 }
 
+fn silver_download_temp_siblings(dir: &Path) -> Result<Vec<PathBuf>> {
+    let mut paths = fs::read_dir(dir)?
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.contains(".spur-download-") && name.ends_with(".tmp"))
+        })
+        .collect::<Vec<_>>();
+    paths.sort();
+    Ok(paths)
+}
+
 fn event_index(events: &[String], prefix: &str) -> Option<usize> {
     events
         .iter()
@@ -1763,7 +1961,51 @@ impl GraphArtifactBuilder for FakeGraphBuilder {
 struct FakeSilverArtifactStore {
     events: Arc<Mutex<Vec<String>>>,
     manifest: Mutex<Option<spur_context_service::medallion::SilverManifest>>,
-    download_bytes: Mutex<HashMap<String, Vec<u8>>>,
+    download_chunks: Mutex<HashMap<String, Vec<Vec<u8>>>>,
+    download_reads: Mutex<HashMap<String, Arc<AtomicUsize>>>,
+    stale_temps: Mutex<HashMap<String, Vec<u8>>>,
+}
+
+struct ChunkedReader {
+    chunks: VecDeque<Vec<u8>>,
+    offset: usize,
+    reads: Option<Arc<AtomicUsize>>,
+}
+
+impl ChunkedReader {
+    fn new(chunks: Vec<Vec<u8>>, reads: Option<Arc<AtomicUsize>>) -> Self {
+        Self {
+            chunks: chunks.into(),
+            offset: 0,
+            reads,
+        }
+    }
+}
+
+impl AsyncRead for ChunkedReader {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        _cx: &mut TaskContext<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let Some(chunk_len) = self.chunks.front().map(Vec::len) else {
+            return Poll::Ready(Ok(()));
+        };
+        if self.offset == 0 {
+            if let Some(reads) = &self.reads {
+                reads.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        let start = self.offset;
+        let end = start + buf.remaining().min(chunk_len - start);
+        buf.put_slice(&self.chunks.front().expect("chunk exists")[start..end]);
+        self.offset = end;
+        if self.offset == chunk_len {
+            self.chunks.pop_front();
+            self.offset = 0;
+        }
+        Poll::Ready(Ok(()))
+    }
 }
 
 impl FakeSilverArtifactStore {
@@ -1771,7 +2013,9 @@ impl FakeSilverArtifactStore {
         Self {
             events,
             manifest: Mutex::new(None),
-            download_bytes: Mutex::new(HashMap::new()),
+            download_chunks: Mutex::new(HashMap::new()),
+            download_reads: Mutex::new(HashMap::new()),
+            stale_temps: Mutex::new(HashMap::new()),
         }
     }
 
@@ -1779,20 +2023,22 @@ impl FakeSilverArtifactStore {
         events: Arc<Mutex<Vec<String>>>,
         manifest: spur_context_service::medallion::SilverManifest,
     ) -> Self {
-        let download_bytes = manifest
+        let download_chunks = manifest
             .files
             .iter()
             .map(|file| {
                 (
                     file.path.clone(),
-                    format!("fixture:{}", file.path).into_bytes(),
+                    vec![format!("fixture:{}", file.path).into_bytes()],
                 )
             })
             .collect();
         Self {
             events,
             manifest: Mutex::new(Some(manifest)),
-            download_bytes: Mutex::new(download_bytes),
+            download_chunks: Mutex::new(download_chunks),
+            download_reads: Mutex::new(HashMap::new()),
+            stale_temps: Mutex::new(HashMap::new()),
         }
     }
 
@@ -1801,9 +2047,26 @@ impl FakeSilverArtifactStore {
     }
 
     fn set_download_bytes(&self, relative_path: &str, bytes: Vec<u8>) {
-        self.download_bytes
+        self.set_download_chunks(relative_path, vec![bytes]);
+    }
+
+    fn set_download_chunks(&self, relative_path: &str, chunks: Vec<Vec<u8>>) -> Arc<AtomicUsize> {
+        self.download_chunks
             .lock()
-            .expect("silver download bytes lock")
+            .expect("silver download chunks lock")
+            .insert(relative_path.to_owned(), chunks);
+        let reads = Arc::new(AtomicUsize::new(0));
+        self.download_reads
+            .lock()
+            .expect("silver download reads lock")
+            .insert(relative_path.to_owned(), reads.clone());
+        reads
+    }
+
+    fn seed_stale_temp_on_download(&self, relative_path: &str, bytes: Vec<u8>) {
+        self.stale_temps
+            .lock()
+            .expect("silver stale temps lock")
             .insert(relative_path.to_owned(), bytes);
     }
 }
@@ -1818,10 +2081,10 @@ impl SilverArtifactStore for FakeSilverArtifactStore {
             .file_name()
             .and_then(|name| name.to_str())
             .ok_or_else(|| WorkerError::Build("fake silver path has no filename".to_owned()))?;
-        self.download_bytes
+        self.download_chunks
             .lock()
-            .expect("silver download bytes lock")
-            .insert(relative_path.to_owned(), bytes);
+            .expect("silver download chunks lock")
+            .insert(relative_path.to_owned(), vec![bytes]);
         self.events
             .lock()
             .expect("events lock")
@@ -1877,9 +2140,10 @@ impl SilverArtifactStore for FakeSilverArtifactStore {
     async fn download_manifest_file(
         &self,
         manifest_uri: &str,
-        relative_path: &str,
+        file: &spur_context_service::medallion::SilverManifestFile,
         dest: &Path,
     ) -> Result<(), WorkerError> {
+        let relative_path = &file.path;
         self.events
             .lock()
             .expect("events lock")
@@ -1888,18 +2152,38 @@ impl SilverArtifactStore for FakeSilverArtifactStore {
             fs::create_dir_all(parent)
                 .map_err(|error| WorkerError::Build(format!("fake mkdir: {error}")))?;
         }
-        let bytes = self
-            .download_bytes
+        if let Some(bytes) = self
+            .stale_temps
             .lock()
-            .expect("silver download bytes lock")
+            .expect("silver stale temps lock")
+            .get(relative_path)
+            .cloned()
+        {
+            let file_name = dest
+                .file_name()
+                .and_then(|name| name.to_str())
+                .ok_or_else(|| WorkerError::Build("fake destination has no filename".to_owned()))?;
+            let stale_temp = dest.with_file_name(format!(".{file_name}.spur-download-stale.tmp"));
+            fs::write(stale_temp, bytes)
+                .map_err(|error| WorkerError::Build(format!("fake stale temp: {error}")))?;
+        }
+        let chunks = self
+            .download_chunks
+            .lock()
+            .expect("silver download chunks lock")
             .get(relative_path)
             .cloned()
             .ok_or_else(|| {
                 WorkerError::Build(format!("missing fake silver file `{relative_path}`"))
             })?;
-        fs::write(dest, bytes)
-            .map_err(|error| WorkerError::Build(format!("fake silver download: {error}")))?;
-        Ok(())
+        let reads = self
+            .download_reads
+            .lock()
+            .expect("silver download reads lock")
+            .get(relative_path)
+            .cloned();
+        write_verified_silver_manifest_file_stream(ChunkedReader::new(chunks, reads), file, dest)
+            .await
     }
 }
 

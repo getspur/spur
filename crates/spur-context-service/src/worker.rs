@@ -24,6 +24,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use uuid::Uuid;
 
 use crate::abuse;
@@ -988,7 +989,7 @@ pub trait SilverArtifactStore: Send + Sync {
     async fn download_manifest_file(
         &self,
         manifest_uri: &str,
-        relative_path: &str,
+        file: &SilverManifestFile,
         dest: &Path,
     ) -> Result<(), WorkerError>;
 }
@@ -2012,10 +2013,9 @@ impl SilverArtifactStore for S3SilverArtifactStore {
                     file.path, file.etag, etag
                 )));
             }
-            let body = object.body.collect().await.map_err(|error| {
-                WorkerError::Build(format!("read silver file `{key}`: {error}"))
-            })?;
-            validate_silver_manifest_file_bytes(file, &body.into_bytes())?;
+            let mut body = object.body.into_async_read();
+            let mut sink = tokio::io::sink();
+            stream_verified_silver_manifest_file(&mut body, &mut sink, file, "object").await?;
         }
         Ok(())
     }
@@ -2044,13 +2044,13 @@ impl SilverArtifactStore for S3SilverArtifactStore {
     async fn download_manifest_file(
         &self,
         manifest_uri: &str,
-        relative_path: &str,
+        file: &SilverManifestFile,
         dest: &Path,
     ) -> Result<(), WorkerError> {
-        validate_silver_manifest_path(relative_path)?;
+        validate_silver_manifest_path(&file.path)?;
         let parsed = parse_s3_uri(manifest_uri)
             .map_err(|error| WorkerError::Build(format!("invalid silver manifest URI: {error}")))?;
-        let key = silver_manifest_file_key(&parsed.key, relative_path)?;
+        let key = silver_manifest_file_key(&parsed.key, &file.path)?;
         let resp = s3_client()
             .get_object()
             .bucket(&parsed.bucket)
@@ -2060,27 +2060,7 @@ impl SilverArtifactStore for S3SilverArtifactStore {
             .map_err(|error| {
                 WorkerError::Build(format!("download silver file `{key}`: {error}"))
             })?;
-        let body =
-            resp.body.collect().await.map_err(|error| {
-                WorkerError::Build(format!("read silver file `{key}`: {error}"))
-            })?;
-        if let Some(parent) = dest.parent() {
-            tokio::fs::create_dir_all(parent).await.map_err(|error| {
-                WorkerError::Build(format!(
-                    "failed to create silver download dir `{}`: {error}",
-                    parent.display()
-                ))
-            })?;
-        }
-        tokio::fs::write(dest, body.into_bytes())
-            .await
-            .map_err(|error| {
-                WorkerError::Build(format!(
-                    "failed to write silver download `{}`: {error}",
-                    dest.display()
-                ))
-            })?;
-        Ok(())
+        write_verified_silver_manifest_file_stream(resp.body.into_async_read(), file, dest).await
     }
 }
 
@@ -2196,9 +2176,12 @@ pub async fn download_silver_artifact_from_manifest(
     for file in &manifest.files {
         let dest_path = dest.join(path_from_manifest_relative(&file.path));
         store
-            .download_manifest_file(manifest_uri, &file.path, &dest_path)
+            .download_manifest_file(manifest_uri, file, &dest_path)
             .await?;
-        validate_downloaded_silver_manifest_file(file, &dest_path)?;
+        if let Err(error) = validate_downloaded_silver_manifest_file(file, &dest_path) {
+            let _ = fs::remove_file(&dest_path);
+            return Err(error);
+        }
     }
     Ok(())
 }
@@ -2368,25 +2351,163 @@ fn validate_silver_manifest(manifest: &SilverManifest) -> Result<(), WorkerError
     validate_required_silver_files(&manifest.files)
 }
 
-fn validate_silver_manifest_file_bytes(
+async fn stream_verified_silver_manifest_file<R, W>(
+    reader: &mut R,
+    writer: &mut W,
     file: &SilverManifestFile,
-    bytes: &[u8],
-) -> Result<(), WorkerError> {
-    let actual_size = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
-    if actual_size != file.size_bytes {
-        return Err(WorkerError::Build(format!(
-            "silver manifest size mismatch for `{}`: manifest {} != object {}",
-            file.path, file.size_bytes, actual_size
-        )));
+    actual_kind: &str,
+) -> Result<(), WorkerError>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    let mut actual_size = 0_u64;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = reader.read(&mut buffer).await.map_err(|error| {
+            WorkerError::Build(format!("read silver file `{}`: {error}", file.path))
+        })?;
+        if read == 0 {
+            break;
+        }
+        actual_size = actual_size
+            .checked_add(u64::try_from(read).unwrap_or(u64::MAX))
+            .unwrap_or(u64::MAX);
+        if actual_size > file.size_bytes {
+            return Err(silver_manifest_size_mismatch(
+                file,
+                actual_size,
+                actual_kind,
+            ));
+        }
+        writer.write_all(&buffer[..read]).await.map_err(|error| {
+            WorkerError::Build(format!(
+                "failed to write silver download `{}`: {error}",
+                file.path
+            ))
+        })?;
+        hasher.update(&buffer[..read]);
     }
-    let actual_sha256 = format!("{:x}", Sha256::digest(bytes));
+    if actual_size != file.size_bytes {
+        return Err(silver_manifest_size_mismatch(
+            file,
+            actual_size,
+            actual_kind,
+        ));
+    }
+    let actual_sha256 = format!("{:x}", hasher.finalize());
     if actual_sha256 != file.sha256 {
         return Err(WorkerError::Build(format!(
-            "silver manifest SHA-256 mismatch for `{}`: manifest {} != object {}",
-            file.path, file.sha256, actual_sha256
+            "silver manifest SHA-256 mismatch for `{}`: manifest {} != {actual_kind} {}",
+            file.path, file.sha256, actual_sha256,
         )));
     }
     Ok(())
+}
+
+fn silver_manifest_size_mismatch(
+    file: &SilverManifestFile,
+    actual_size: u64,
+    actual_kind: &str,
+) -> WorkerError {
+    WorkerError::Build(format!(
+        "silver manifest size mismatch for `{}`: manifest {} != {actual_kind} {}",
+        file.path, file.size_bytes, actual_size
+    ))
+}
+
+#[doc(hidden)]
+pub async fn write_verified_silver_manifest_file_stream<R>(
+    mut reader: R,
+    file: &SilverManifestFile,
+    dest: &Path,
+) -> Result<(), WorkerError>
+where
+    R: AsyncRead + Unpin,
+{
+    let parent = dest
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    tokio::fs::create_dir_all(parent).await.map_err(|error| {
+        WorkerError::Build(format!(
+            "failed to create silver download dir `{}`: {error}",
+            parent.display()
+        ))
+    })?;
+    let file_name = dest.file_name().ok_or_else(|| {
+        WorkerError::Build(format!(
+            "silver download destination `{}` has no filename",
+            dest.display()
+        ))
+    })?;
+    let temp_path = parent.join(format!(
+        ".{}.spur-download-{}.tmp",
+        file_name.to_string_lossy(),
+        Uuid::new_v4()
+    ));
+    let mut temp_file = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temp_path)
+        .await
+        .map_err(|error| {
+            WorkerError::Build(format!(
+                "failed to create silver download temp for `{}`: {error}",
+                dest.display()
+            ))
+        })?;
+
+    if let Err(error) =
+        stream_verified_silver_manifest_file(&mut reader, &mut temp_file, file, "downloaded").await
+    {
+        drop(temp_file);
+        return Err(remove_silver_download_temp_after_error(&temp_path, error).await);
+    }
+    if let Err(error) = temp_file.flush().await {
+        drop(temp_file);
+        let error = WorkerError::Build(format!(
+            "failed to flush silver download `{}`: {error}",
+            dest.display()
+        ));
+        return Err(remove_silver_download_temp_after_error(&temp_path, error).await);
+    }
+    if let Err(error) = temp_file.sync_all().await {
+        drop(temp_file);
+        let error = WorkerError::Build(format!(
+            "failed to sync silver download `{}`: {error}",
+            dest.display()
+        ));
+        return Err(remove_silver_download_temp_after_error(&temp_path, error).await);
+    }
+    drop(temp_file);
+
+    if let Err(error) = tokio::fs::rename(&temp_path, dest).await {
+        let error = WorkerError::Build(format!(
+            "failed to publish silver download `{}`: {error}",
+            dest.display()
+        ));
+        return Err(remove_silver_download_temp_after_error(&temp_path, error).await);
+    }
+    Ok(())
+}
+
+async fn remove_silver_download_temp_after_error(
+    temp_path: &Path,
+    error: WorkerError,
+) -> WorkerError {
+    match tokio::fs::remove_file(temp_path).await {
+        Ok(()) => error,
+        Err(cleanup_error) if cleanup_error.kind() == std::io::ErrorKind::NotFound => error,
+        Err(cleanup_error) => match error {
+            WorkerError::Build(message) => WorkerError::Build(format!(
+                "{message}; failed to remove silver download temp `{}`: {cleanup_error}",
+                temp_path.display()
+            )),
+            other => other,
+        },
+    }
 }
 
 fn validate_downloaded_silver_manifest_file(
