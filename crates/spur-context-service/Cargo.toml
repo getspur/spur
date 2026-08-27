@@ -56,7 +56,7 @@ analyst = ["service"]
 lambda = ["service", "api-key-authorizer"]
 api-key-authorizer = ["dep:lambda_runtime"]
 api-key-cleanup = ["dep:lambda_runtime"]
-parquet-io = ["dep:arrow-array", "dep:arrow-schema", "dep:parquet"]
+parquet-io = ["dep:arrow-array", "dep:arrow-schema", "dep:parquet", "dep:sha1"]
 worker = ["service", "parquet-io"]
 worker-lambda = ["worker", "dep:lambda_runtime"]
 
@@ -80,6 +80,7 @@ rand = "0.8"
 secrecy = "0.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha1 = { version = "0.10", optional = true }
 sha2 = "0.10"
 spur-context-source = { path = "../spur-context-source", optional = true }
 subtle = "2"

@@ -7,7 +7,7 @@ use std::io::{Read as _, Write as _};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     Arc, Mutex,
@@ -406,12 +406,12 @@ async fn silver_persistence_includes_source_sidecar() -> Result<()> {
         vec![
             SourceSidecarRow {
                 file_path: "src/lib.rs".to_owned(),
-                content_oid: sha256_hex(SIDECAR_LIB_SOURCE.as_bytes()),
+                content_oid: git_blob_oid(SIDECAR_LIB_SOURCE.as_bytes())?,
                 source_text: SIDECAR_LIB_SOURCE.to_owned(),
             },
             SourceSidecarRow {
                 file_path: "src/util.rs".to_owned(),
-                content_oid: sha256_hex(SIDECAR_UTIL_SOURCE.as_bytes()),
+                content_oid: git_blob_oid(SIDECAR_UTIL_SOURCE.as_bytes())?,
                 source_text: SIDECAR_UTIL_SOURCE.to_owned(),
             },
         ]
@@ -496,9 +496,14 @@ async fn source_sidecar_rejects_non_utf8_manifest_source_before_upload() -> Resu
     let root = unique_temp_dir("worker-source-sidecar-non-utf8")?;
     let artifact_dir = root.join("artifact");
     let source_root = root.join("source");
+    let source_bytes = [0xff, 0xfe, 0xfd];
     fs::create_dir_all(source_root.join("src"))?;
-    fs::write(source_root.join("src/lib.rs"), [0xff, 0xfe, 0xfd])?;
+    fs::write(source_root.join("src/lib.rs"), source_bytes)?;
     write_silver_artifact_fixture(&artifact_dir)?;
+    write_graph_file_manifest_fixture(
+        &artifact_dir,
+        &[("src/lib.rs", git_blob_oid(&source_bytes)?)],
+    )?;
     let events = Arc::new(Mutex::new(Vec::new()));
     let store = FakeSilverArtifactStore::new(events.clone());
     let registry = FakeSilverRegistry::new(events.clone());
@@ -524,6 +529,111 @@ async fn source_sidecar_rejects_non_utf8_manifest_source_before_upload() -> Resu
     assert!(
         events.lock().expect("events lock").is_empty(),
         "source validation must fail before any Silver file or manifest upload"
+    );
+    assert!(store.manifest().is_none());
+    assert_eq!(registry.registers(), 0);
+    assert!(!artifact_dir.join("source_files.parquet").exists());
+
+    fs::remove_dir_all(root).ok();
+    Ok(())
+}
+
+#[tokio::test]
+async fn source_sidecar_rejects_mismatched_content_oid_before_upload() -> Result<()> {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let _env_guard = EnvGuard::set_all([("SPUR_CONTEXT_SILVER_BUCKET", "silver-test")]);
+    let root = unique_temp_dir("worker-source-sidecar-content-mismatch")?;
+    let artifact_dir = root.join("artifact");
+    let source_root = root.join("source");
+    fs::create_dir_all(source_root.join("src"))?;
+    fs::write(source_root.join("src/lib.rs"), "pub fn demo() {}\n")?;
+    write_silver_artifact_fixture(&artifact_dir)?;
+    write_graph_file_manifest_fixture(
+        &artifact_dir,
+        &[(
+            "src/lib.rs",
+            "0000000000000000000000000000000000000000".to_owned(),
+        )],
+    )?;
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let store = FakeSilverArtifactStore::new(events.clone());
+    let registry = FakeSilverRegistry::new(events.clone());
+    let env = demo_job_env("http://127.0.0.1:1/unreachable.tar.gz");
+
+    let error = persist_silver_graph_artifact(
+        &env,
+        &artifact_dir,
+        &source_root,
+        "bronze-sha256",
+        "builder-v1",
+        &store,
+        &registry,
+    )
+    .await
+    .unwrap_err();
+
+    assert!(matches!(
+        error,
+        WorkerError::Build(detail)
+            if detail.contains("content_oid mismatch") && detail.contains("src/lib.rs")
+    ));
+    assert!(
+        events.lock().expect("events lock").is_empty(),
+        "content identity validation must fail before any Silver file or manifest upload"
+    );
+    assert!(store.manifest().is_none());
+    assert_eq!(registry.registers(), 0);
+    assert!(!artifact_dir.join("source_files.parquet").exists());
+
+    fs::remove_dir_all(root).ok();
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn source_sidecar_rejects_symlink_escape_before_upload() -> Result<()> {
+    use std::os::unix::fs::symlink;
+
+    let _guard = ENV_LOCK.lock().unwrap();
+    let _env_guard = EnvGuard::set_all([("SPUR_CONTEXT_SILVER_BUCKET", "silver-test")]);
+    let root = unique_temp_dir("worker-source-sidecar-symlink-escape")?;
+    let artifact_dir = root.join("artifact");
+    let source_root = root.join("source");
+    let outside_source = root.join("outside.rs");
+    let outside_bytes = b"pub fn escaped() {}\n";
+    fs::create_dir_all(source_root.join("src"))?;
+    fs::write(&outside_source, outside_bytes)?;
+    symlink(&outside_source, source_root.join("src/lib.rs"))?;
+    write_silver_artifact_fixture(&artifact_dir)?;
+    write_graph_file_manifest_fixture(
+        &artifact_dir,
+        &[("src/lib.rs", git_blob_oid(outside_bytes)?)],
+    )?;
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let store = FakeSilverArtifactStore::new(events.clone());
+    let registry = FakeSilverRegistry::new(events.clone());
+    let env = demo_job_env("http://127.0.0.1:1/unreachable.tar.gz");
+
+    let error = persist_silver_graph_artifact(
+        &env,
+        &artifact_dir,
+        &source_root,
+        "bronze-sha256",
+        "builder-v1",
+        &store,
+        &registry,
+    )
+    .await
+    .unwrap_err();
+
+    assert!(matches!(
+        error,
+        WorkerError::Build(detail)
+            if detail.contains("resolves outside source root") && detail.contains("src/lib.rs")
+    ));
+    assert!(
+        events.lock().expect("events lock").is_empty(),
+        "path confinement validation must fail before any Silver file or manifest upload"
     );
     assert!(store.manifest().is_none());
     assert_eq!(registry.registers(), 0);
@@ -1090,6 +1200,33 @@ fn git_output<const N: usize>(cwd: &Path, args: [&str; N]) -> Result<String> {
     String::from_utf8(output.stdout).context("git output utf-8")
 }
 
+fn git_blob_oid(bytes: &[u8]) -> Result<String> {
+    let mut child = Command::new("git")
+        .args(["hash-object", "--stdin"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .context("spawn git hash-object")?;
+    child
+        .stdin
+        .as_mut()
+        .context("git hash-object stdin")?
+        .write_all(bytes)
+        .context("write git hash-object stdin")?;
+    let output = child
+        .wait_with_output()
+        .context("wait for git hash-object")?;
+    anyhow::ensure!(
+        output.status.success(),
+        "git hash-object exited with {}",
+        output.status
+    );
+    Ok(String::from_utf8(output.stdout)
+        .context("git hash-object output UTF-8")?
+        .trim_end()
+        .to_owned())
+}
+
 fn unique_temp_dir(name: &str) -> Result<PathBuf> {
     let mut path = std::env::temp_dir();
     path.push(format!(
@@ -1201,7 +1338,7 @@ fn write_silver_artifact_fixture(artifact_dir: &Path) -> Result<()> {
     .context("write graph artifact manifest")?;
     write_graph_file_manifest_fixture(
         artifact_dir,
-        &[("src/lib.rs", sha256_hex(b"pub fn demo() {}\n"))],
+        &[("src/lib.rs", git_blob_oid(b"pub fn demo() {}\n")?)],
     )?;
     Ok(())
 }
@@ -1210,8 +1347,8 @@ fn write_source_manifest_fixture(artifact_dir: &Path) -> Result<()> {
     write_graph_file_manifest_fixture(
         artifact_dir,
         &[
-            ("src/lib.rs", sha256_hex(SIDECAR_LIB_SOURCE.as_bytes())),
-            ("src/util.rs", sha256_hex(SIDECAR_UTIL_SOURCE.as_bytes())),
+            ("src/lib.rs", git_blob_oid(SIDECAR_LIB_SOURCE.as_bytes())?),
+            ("src/util.rs", git_blob_oid(SIDECAR_UTIL_SOURCE.as_bytes())?),
         ],
     )
 }

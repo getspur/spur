@@ -10,7 +10,8 @@ use arrow_array::{Array as _, RecordBatch, StringArray};
 use arrow_schema::{DataType, Field, Schema};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::arrow::{ArrowWriter, ProjectionMask};
-use sha2::{Digest, Sha256};
+use sha1::Sha1;
+use sha2::{Digest as _, Sha256};
 use thiserror::Error;
 
 pub(crate) const SOURCE_SIDECAR_FILENAME: &str = "source_files.parquet";
@@ -101,6 +102,12 @@ fn source_sidecar_rows(
     artifact_dir: &Path,
     source_root: &Path,
 ) -> Result<Vec<SourceSidecarRow>, SourceSidecarError> {
+    let canonical_source_root = fs::canonicalize(source_root).map_err(|error| {
+        build_error(format!(
+            "canonicalize source root `{}`: {error}",
+            source_root.display()
+        ))
+    })?;
     let manifest_path = artifact_dir.join("file_manifests.parquet");
     let file = fs::File::open(&manifest_path).map_err(|error| {
         build_error(format!(
@@ -164,10 +171,35 @@ fn source_sidecar_rows(
                 )));
             }
             let source_path = source_root.join(path_from_manifest_relative(&file_path));
-            let source_text = fs::read_to_string(&source_path).map_err(|error| {
+            let resolved_source_path = fs::canonicalize(&source_path).map_err(|error| {
+                build_error(format!(
+                    "read referenced source `{}`: resolve path: {error}",
+                    source_path.display()
+                ))
+            })?;
+            if !resolved_source_path.starts_with(&canonical_source_root) {
+                return Err(build_error(format!(
+                    "referenced source `{file_path}` resolves outside source root `{}`: `{}`",
+                    canonical_source_root.display(),
+                    resolved_source_path.display()
+                )));
+            }
+            let source_bytes = fs::read(&resolved_source_path).map_err(|error| {
+                build_error(format!(
+                    "read referenced source `{}`: {error}",
+                    resolved_source_path.display()
+                ))
+            })?;
+            let actual_content_oid = git_blob_oid(&source_bytes);
+            if actual_content_oid != content_oid {
+                return Err(build_error(format!(
+                    "graph file manifest content_oid mismatch for `{file_path}`: expected `{content_oid}`, got `{actual_content_oid}`"
+                )));
+            }
+            let source_text = String::from_utf8(source_bytes).map_err(|error| {
                 build_error(format!(
                     "read referenced source `{}` as UTF-8: {error}",
-                    source_path.display()
+                    resolved_source_path.display()
                 ))
             })?;
             rows.push(SourceSidecarRow {
@@ -231,6 +263,15 @@ fn path_from_manifest_relative(relative_path: &str) -> PathBuf {
         path.push(part);
     }
     path
+}
+
+fn git_blob_oid(bytes: &[u8]) -> String {
+    let mut hasher = Sha1::new();
+    hasher.update(b"blob ");
+    hasher.update(bytes.len().to_string().as_bytes());
+    hasher.update(b"\0");
+    hasher.update(bytes);
+    format!("{:x}", hasher.finalize())
 }
 
 fn sha256_file(path: &Path) -> Result<String, SourceSidecarError> {
