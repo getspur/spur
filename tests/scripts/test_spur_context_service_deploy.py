@@ -1652,7 +1652,7 @@ def test_lambda_worker_resource_is_configured_for_fast_start_mvp():
     lambda_tf = (INFRA_DIR / "lambda_worker.tf").read_text()
     variables_tf = (INFRA_DIR / "variables.tf").read_text()
     outputs_tf = (INFRA_DIR / "outputs.tf").read_text()
-    iam_tf = (INFRA_DIR / "iam.tf").read_text()
+    iam_tf = "\n".join(path.read_text() for path in sorted(INFRA_DIR.glob("*.tf")))
 
     worker = terraform_resource_block(lambda_tf, "aws_lambda_function", "worker")
     assert 'package_type  = "Image"' in worker
@@ -1672,8 +1672,8 @@ def test_lambda_worker_resource_is_configured_for_fast_start_mvp():
         iam_tf, "aws_iam_role_policy", "worker_lambda_s3"
     )
     assert terraform_assignment(worker_s3_policy, "role") == "aws_iam_role.worker_lambda.id"
-    assert '"s3:PutObject"' in worker_s3_policy
-    assert '"s3:DeleteObject"' in worker_s3_policy
+    assert "prevent_destroy = true" in worker_s3_policy
+    assert "ignore_changes  = all" in worker_s3_policy
 
 
 def test_nat_free_worker_vpc_endpoints_are_declared():

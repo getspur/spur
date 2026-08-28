@@ -18,7 +18,7 @@ resource "aws_lambda_function" "worker" {
   package_type  = "Image"
   image_uri     = var.worker_lambda_image
   architectures = ["arm64"]
-  role          = aws_iam_role.lambda.arn
+  role          = aws_iam_role.worker_lambda.arn
   timeout       = var.worker_lambda_timeout_sec
   memory_size   = var.worker_lambda_memory_mb
   publish       = true
