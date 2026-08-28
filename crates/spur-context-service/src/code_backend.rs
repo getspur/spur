@@ -302,6 +302,7 @@ impl CodeBackend {
             .map_err(|_| CodeBackendError::ArtifactQuery)?;
         Ok(caller_response(
             &opened.package,
+            &symbol.stable_symbol_id,
             records,
             request.include_unresolved,
         ))
@@ -320,6 +321,7 @@ impl CodeBackend {
             .map_err(|_| CodeBackendError::ArtifactQuery)?;
         Ok(callee_response(
             &opened.package,
+            &symbol.stable_symbol_id,
             records,
             request.include_unresolved,
         ))
@@ -753,6 +755,7 @@ fn edge_value(edge: &GraphEdgeArtifact) -> Value {
 
 fn caller_response(
     package: &ServingPackage,
+    stable_symbol_id: &str,
     records: Vec<OwnedCallerRecord>,
     include_unresolved: bool,
 ) -> Value {
@@ -775,11 +778,12 @@ fn caller_response(
         })
         .collect::<Vec<_>>();
     sort_edge_rows(&mut rows, "caller");
-    edge_response("callers", rows, package.generation)
+    edge_response("callers", rows, package.generation, Some(stable_symbol_id))
 }
 
 fn callee_response(
     package: &ServingPackage,
+    stable_symbol_id: &str,
     records: Vec<OwnedCalleeRecord>,
     include_unresolved: bool,
 ) -> Value {
@@ -800,7 +804,7 @@ fn callee_response(
         })
         .collect::<Vec<_>>();
     sort_edge_rows(&mut rows, "callee");
-    edge_response("callees", rows, package.generation)
+    edge_response("callees", rows, package.generation, Some(stable_symbol_id))
 }
 
 fn sort_edge_rows(rows: &mut [Value], direction: &str) {
@@ -819,7 +823,12 @@ fn sort_edge_rows(rows: &mut [Value], direction: &str) {
     });
 }
 
-fn edge_response(direction: &str, rows: Vec<Value>, catalog_generation: i64) -> Value {
+fn edge_response(
+    direction: &str,
+    rows: Vec<Value>,
+    catalog_generation: i64,
+    stable_symbol_id: Option<&str>,
+) -> Value {
     let mut calls = 0;
     let mut calls_dyn = 0;
     let mut references_hof = 0;
@@ -859,13 +868,14 @@ fn edge_response(direction: &str, rows: Vec<Value>, catalog_generation: i64) -> 
         },
         "unresolved_sample": unresolved_sample,
         "catalog_generation": catalog_generation,
+        "stable_symbol_id": stable_symbol_id,
     });
     response[direction] = Value::Array(rows);
     response
 }
 
 fn empty_edges(direction: &str, catalog_generation: i64) -> Value {
-    edge_response(direction, Vec::new(), catalog_generation)
+    edge_response(direction, Vec::new(), catalog_generation, None)
 }
 
 fn slice_symbol_source(
