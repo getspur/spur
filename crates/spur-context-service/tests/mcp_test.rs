@@ -460,6 +460,7 @@ async fn parquet_backend_matches_catalog_and_search_contracts() -> Result<()> {
 #[tokio::test]
 async fn parquet_backend_resolves_semantic_latest_and_named_refs_from_registry() -> Result<()> {
     let mut fixture = ParquetBackendFixture::new("parquet-registry-ref-contracts")?;
+    fixture.expand_cache_capacity(2)?;
     let mut revision_9 = fixture.registry.packages[0].clone();
     revision_9.revision = "9.0.0".to_owned();
     revision_9.refs.clear();
@@ -827,6 +828,23 @@ impl ParquetBackendFixture {
 
     fn root_uri(&self) -> String {
         format!("{}{SILVER_MANIFEST_FILENAME}", self.graph_prefix)
+    }
+
+    fn expand_cache_capacity(&mut self, bundle_count: u64) -> Result<()> {
+        let root_bytes = silver_root_for_members(&self.declared_members)?;
+        let one_bundle = root_bytes.len() as u64
+            + self
+                .declared_members
+                .values()
+                .map(|body| body.len() as u64)
+                .sum::<u64>();
+        self.cache = ArtifactCache::new(
+            self.root.join(format!("cache-{bundle_count}")),
+            one_bundle * bundle_count,
+            Arc::new(self.fetcher.clone()),
+        )
+        .map_err(|error| anyhow::anyhow!(error))?;
+        Ok(())
     }
 
     fn member_uri(&self, path: &str) -> String {

@@ -3,7 +3,7 @@ use std::collections::BTreeSet;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-pub const SERVING_REGISTRY_SCHEMA_VERSION: u32 = 1;
+pub const SERVING_REGISTRY_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ArtifactRef {
@@ -17,6 +17,8 @@ pub struct ServingPackage {
     pub source: String,
     pub package: String,
     pub revision: String,
+    pub revision_kind: String,
+    pub refs: Vec<String>,
     pub generation: i64,
     pub graph_prefix_uri: String,
     pub graph_manifest: ArtifactRef,
@@ -35,6 +37,8 @@ pub struct ServingCatalogRow {
     pub source: String,
     pub package: String,
     pub revision: String,
+    pub revision_kind: String,
+    pub refs: Vec<String>,
     pub generation: Option<i64>,
     pub index_status: String,
     pub graph_manifest_uri: Option<String>,
@@ -59,6 +63,14 @@ pub enum ServingRegistryError {
         package: String,
         revision: String,
     },
+    #[error("package ref ({identity_source}, {package}, {ref_name}) is duplicated")]
+    DuplicatePackageRef {
+        identity_source: String,
+        package: String,
+        ref_name: String,
+    },
+    #[error("package ref is empty")]
+    EmptyPackageRef,
     #[error("artifact reference {0} is incomplete")]
     MissingArtifactRef(&'static str),
     #[error("artifact URI {0} is not an S3 object URI")]
@@ -80,6 +92,8 @@ impl ServingRegistryError {
             Self::GenerationMismatch { .. } => "generation_mismatch",
             Self::EmptyPackageField(_) => "empty_package_field",
             Self::DuplicatePackageIdentity { .. } => "duplicate_package_identity",
+            Self::DuplicatePackageRef { .. } => "duplicate_package_ref",
+            Self::EmptyPackageRef => "empty_package_ref",
             Self::MissingArtifactRef(_) => "missing_artifact_ref",
             Self::InvalidArtifactUri(_) => "invalid_artifact_uri",
             Self::InvalidSha256(_) => "invalid_sha256",
@@ -163,6 +177,8 @@ impl ServingRegistry {
                 source: row.source,
                 package: row.package,
                 revision: row.revision,
+                revision_kind: row.revision_kind,
+                refs: row.refs,
                 generation,
                 graph_prefix_uri,
                 graph_manifest,
@@ -187,6 +203,7 @@ impl ServingRegistry {
         }
 
         let mut identities = BTreeSet::new();
+        let mut package_refs = BTreeSet::new();
         for package in &self.packages {
             if package.generation != self.generation {
                 return Err(ServingRegistryError::GenerationMismatch {
@@ -198,6 +215,7 @@ impl ServingRegistry {
             validate_package_field("source", &package.source)?;
             validate_package_field("package", &package.package)?;
             validate_package_field("revision", &package.revision)?;
+            validate_package_field("revision_kind", &package.revision_kind)?;
             validate_s3_uri("graph_prefix", &package.graph_prefix_uri)?;
             validate_artifact("graph_manifest", &package.graph_manifest)?;
             validate_artifact("source_sidecar", &package.source_sidecar)?;
@@ -213,6 +231,26 @@ impl ServingRegistry {
                     package: package.package.clone(),
                     revision: package.revision.clone(),
                 });
+            }
+
+            let mut local_refs = BTreeSet::new();
+            for reference in &package.refs {
+                if reference.trim().is_empty() {
+                    return Err(ServingRegistryError::EmptyPackageRef);
+                }
+                if !local_refs.insert(reference.as_str())
+                    || !package_refs.insert((
+                        package.source.as_str(),
+                        package.package.as_str(),
+                        reference.as_str(),
+                    ))
+                {
+                    return Err(ServingRegistryError::DuplicatePackageRef {
+                        identity_source: package.source.clone(),
+                        package: package.package.clone(),
+                        ref_name: reference.clone(),
+                    });
+                }
             }
         }
 
@@ -231,9 +269,39 @@ impl ServingRegistry {
         }))
     }
 
+    pub fn resolve_revision_or_ref(
+        &self,
+        source: &str,
+        package: &str,
+        revision_or_ref: &str,
+    ) -> Result<Option<&ServingPackage>, ServingRegistryError> {
+        self.validate()?;
+        Ok(self
+            .packages
+            .iter()
+            .find(|entry| {
+                entry.source == source
+                    && entry.package == package
+                    && entry
+                        .refs
+                        .iter()
+                        .any(|reference| reference == revision_or_ref)
+            })
+            .or_else(|| {
+                self.packages.iter().find(|entry| {
+                    entry.source == source
+                        && entry.package == package
+                        && entry.revision == revision_or_ref
+                })
+            }))
+    }
+
     pub fn to_canonical_json(&self) -> Result<Vec<u8>, ServingRegistryError> {
         self.validate()?;
         let mut canonical = self.clone();
+        for package in &mut canonical.packages {
+            package.refs.sort();
+        }
         canonical.packages.sort_by(|left, right| {
             (&left.source, &left.package, &left.revision).cmp(&(
                 &right.source,

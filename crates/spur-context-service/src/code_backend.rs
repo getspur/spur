@@ -368,7 +368,7 @@ impl CodeBackend {
     }
 
     async fn catalog_packages(&self, request: &CatalogRequest) -> Result<Value, CodeBackendError> {
-        let mut revisions_by_package = BTreeMap::<String, Vec<String>>::new();
+        let mut revisions_by_package = BTreeMap::<String, (Vec<String>, Option<String>)>::new();
         for package in self.registry.packages.iter().filter(|candidate| {
             candidate.source == request.source
                 && request
@@ -377,10 +377,18 @@ impl CodeBackend {
                     .is_none_or(|filter| candidate.package.contains(filter))
         }) {
             let opened = self.open(package.clone()).await?;
-            revisions_by_package
+            let entry = revisions_by_package
                 .entry(package.package.clone())
-                .or_default()
-                .push(opened.package.revision.clone());
+                .or_default();
+            entry.0.push(opened.package.revision.clone());
+            if opened
+                .package
+                .refs
+                .iter()
+                .any(|reference| reference == "latest")
+            {
+                entry.1 = Some(opened.package.revision.clone());
+            }
         }
 
         let cursor = decode_cursor(request.cursor.as_deref(), 2)?;
@@ -393,8 +401,7 @@ impl CodeBackend {
                         > (parts[0].as_str(), parts[1].as_str())
                 })
             })
-            .map(|(package, revisions)| {
-                let latest_revision = revisions.iter().max().cloned();
+            .map(|(package, (revisions, latest_revision))| {
                 json!({
                     "source": request.source,
                     "package": package,
@@ -434,17 +441,16 @@ impl CodeBackend {
             .filter(|candidate| candidate.source == source && candidate.package == package)
         {
             let opened = self.open(selected.clone()).await?;
-            let semver = normalized_semver(&opened.package.revision);
             rows.push(json!({
                 "revision": opened.package.revision,
-                "revision_kind": if semver.is_some() { "semver" } else { "opaque" },
-                "semver": semver,
+                "revision_kind": opened.package.revision_kind,
+                "semver": normalized_semver(&opened.package.revision),
                 "indexed_at": "",
                 "embeddings_status": "skipped",
                 "row_counts": opened.client.manifest().row_counts,
                 "generation": opened.package.generation,
                 "snapshot_id": opened.package.generation,
-                "refs": [],
+                "refs": opened.package.refs,
             }));
         }
         if rows.is_empty() {
@@ -479,17 +485,12 @@ impl CodeBackend {
         package: &str,
         revision_or_ref: Option<&str>,
     ) -> Result<OpenedPackage, CodeBackendError> {
-        let selected = if let Some(revision) = revision_or_ref.filter(|value| *value != "latest") {
-            self.resolve_exact(source, package, revision)?
-        } else {
-            self.registry
-                .packages
-                .iter()
-                .filter(|candidate| candidate.source == source && candidate.package == package)
-                .max_by(|left, right| left.revision.cmp(&right.revision))
-                .cloned()
-        }
-        .ok_or(CodeBackendError::PackageUnavailable)?;
+        let selected = self
+            .registry
+            .resolve_revision_or_ref(source, package, revision_or_ref.unwrap_or("latest"))
+            .map(|package| package.cloned())
+            .map_err(|_| CodeBackendError::InvalidRegistry)?
+            .ok_or(CodeBackendError::PackageUnavailable)?;
         self.open(selected).await
     }
 

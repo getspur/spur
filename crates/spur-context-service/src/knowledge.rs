@@ -198,26 +198,16 @@ pub fn query_knowledge_context(
     })
 }
 
-fn query_catalog_generation(db: &Connection, opts: &KnowledgeContextOptions) -> Option<i64> {
+fn query_catalog_generation(db: &Connection, _opts: &KnowledgeContextOptions) -> Option<i64> {
     let tables = KnowledgeTables::load(db).ok()?;
     let sql = format!(
         r"
-        SELECT generation
+        SELECT MAX(generation)::BIGINT
         FROM {package_catalog}
-        WHERE source = $1
-          AND package = $2
-          AND revision = $3
-        ORDER BY generation DESC
-        LIMIT 1
         ",
         package_catalog = tables.package_catalog
     );
-    db.query_row(
-        &sql,
-        params![opts.source, opts.package, opts.revision],
-        |row| row.get(0),
-    )
-    .ok()
+    db.query_row(&sql, [], |row| row.get(0)).ok()
 }
 
 fn query_bm25_candidates(

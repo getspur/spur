@@ -28,6 +28,7 @@ def run_latest_tag_harness(*, source_digest: str, latest_digest: str, put_exit: 
             "aws_account_id",
             "ecr_image_tag",
             "ecr_latest_image_tag",
+            "ecr_image_digest",
             "tag_ecr_image_as_latest",
         )
     )

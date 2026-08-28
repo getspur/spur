@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::thread;
@@ -900,6 +901,7 @@ fn serving_registry_for_generation(
             source,
             package,
             revision,
+            revision_kind,
             generation,
             index_status,
             graph_manifest_uri,
@@ -923,31 +925,74 @@ fn serving_registry_for_generation(
     let mut stmt = catalog
         .prepare(&sql)
         .map_err(|_| GenerationPublicationError::Catalog)?;
-    let rows = stmt
+    let mut rows = stmt
         .query_map([], |row| {
             let graph_manifest_bytes = row
-                .get::<_, Option<i64>>(7)?
+                .get::<_, Option<i64>>(8)?
                 .and_then(|bytes| u64::try_from(bytes).ok());
             let source_sidecar_bytes = row
-                .get::<_, Option<i64>>(10)?
+                .get::<_, Option<i64>>(11)?
                 .and_then(|bytes| u64::try_from(bytes).ok());
             Ok(ServingCatalogRow {
                 source: row.get(0)?,
                 package: row.get(1)?,
                 revision: row.get(2)?,
-                generation: row.get::<_, Option<i64>>(3)?,
-                index_status: row.get(4)?,
-                graph_manifest_uri: row.get(5)?,
-                graph_manifest_sha256: row.get(6)?,
+                revision_kind: row.get(3)?,
+                refs: Vec::new(),
+                generation: row.get::<_, Option<i64>>(4)?,
+                index_status: row.get(5)?,
+                graph_manifest_uri: row.get(6)?,
+                graph_manifest_sha256: row.get(7)?,
                 graph_manifest_bytes,
-                source_sidecar_uri: row.get(8)?,
-                source_sidecar_sha256: row.get(9)?,
+                source_sidecar_uri: row.get(9)?,
+                source_sidecar_sha256: row.get(10)?,
                 source_sidecar_bytes,
             })
         })
         .map_err(|_| GenerationPublicationError::Catalog)?
         .collect::<std::result::Result<Vec<_>, _>>()
         .map_err(|_| GenerationPublicationError::Catalog)?;
+
+    let refs_table =
+        readable_table(catalog, "refs").map_err(|_| GenerationPublicationError::Catalog)?;
+    let refs_sql = format!(
+        r"
+        SELECT source, package, revision, ref_name
+        FROM {refs_table}
+        ORDER BY source, package, revision, ref_name
+        "
+    );
+    let mut refs_stmt = catalog
+        .prepare(&refs_sql)
+        .map_err(|_| GenerationPublicationError::Catalog)?;
+    let refs = refs_stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })
+        .map_err(|_| GenerationPublicationError::Catalog)?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|_| GenerationPublicationError::Catalog)?;
+    let mut refs_by_revision = BTreeMap::<(String, String, String), Vec<String>>::new();
+    for (source, package, revision, reference) in refs {
+        refs_by_revision
+            .entry((source, package, revision))
+            .or_default()
+            .push(reference);
+    }
+    for row in &mut rows {
+        row.refs = refs_by_revision
+            .remove(&(
+                row.source.clone(),
+                row.package.clone(),
+                row.revision.clone(),
+            ))
+            .unwrap_or_default();
+    }
     ServingRegistry::from_current_rows(generation, rows).map_err(Into::into)
 }
 

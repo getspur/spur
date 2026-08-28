@@ -192,11 +192,24 @@ ecr_latest_image_tag() {
     ecr_image_tag "$repo" "$LATEST_IMAGE_TAG"
 }
 
+ecr_image_digest() {
+    local repo="$1"
+    local image_tag="$2"
+    aws ecr batch-get-image \
+        --repository-name "$repo" \
+        --image-ids "imageTag=$image_tag" \
+        --region "$AWS_REGION_VAL" \
+        --query 'images[0].imageId.imageDigest' \
+        --output text
+}
+
 tag_ecr_image_as_latest() {
     local repo="$1"
     local image_tag="$2"
     local latest_tag
     local image_manifest
+    local source_digest
+    local latest_digest
 
     latest_tag="$(ecr_latest_image_tag "$repo")"
     image_manifest="$(aws ecr batch-get-image \
@@ -209,6 +222,17 @@ tag_ecr_image_as_latest() {
     if [[ -z "$image_manifest" || "$image_manifest" == "None" ]]; then
         log "failed to resolve ECR image manifest for $repo:$image_tag"
         exit 1
+    fi
+
+    source_digest="$(ecr_image_digest "$repo" "$image_tag")"
+    if [[ -z "$source_digest" || "$source_digest" == "None" ]]; then
+        log "failed to resolve ECR image digest for $repo:$image_tag"
+        exit 1
+    fi
+    latest_digest="$(ecr_image_digest "$repo" "$LATEST_IMAGE_TAG")"
+    if [[ "$latest_digest" == "$source_digest" ]]; then
+        log "latest image pointer already current: $latest_tag"
+        return 0
     fi
 
     aws ecr put-image \
