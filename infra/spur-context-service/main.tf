@@ -243,7 +243,7 @@ resource "aws_lambda_function" "code" {
 
   role        = aws_iam_role.code_lambda.arn
   timeout     = var.lambda_timeout_sec
-  memory_size = var.lambda_memory_mb
+  memory_size = var.code_lambda_memory_mb
 
   ephemeral_storage {
     size = var.code_lambda_ephemeral_storage_mb

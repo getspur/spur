@@ -716,8 +716,14 @@ variable "catalog_leases_table_name" {
   default     = "spur-context-catalog-leases"
 }
 
+variable "code_lambda_memory_mb" {
+  description = "DuckDB-free Code Lambda memory allocation"
+  type        = number
+  default     = 256
+}
+
 variable "lambda_memory_mb" {
-  description = "Lambda memory allocation"
+  description = "Knowledge and legacy compatibility Lambda memory allocation"
   type        = number
   default     = 1024
 }

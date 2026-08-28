@@ -3,6 +3,7 @@
 # Do not commit real account, network, image, or secret values.
 #
 # Lambda configuration
+code_lambda_memory_mb     = 256
 lambda_memory_mb          = 2048
 lambda_timeout_sec        = 30
 # In-process request concurrency per serving Lambda environment. Set to 1 for

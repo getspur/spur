@@ -1026,7 +1026,8 @@ terraform apply -var concurrent_warm_instances=1
 | `context_ducklake_data_path` | `s3://<bucket_name>/data/` | DuckLake data path passed to worker jobs |
 | `index_jobs_table_name` | `spur-context-index-jobs` | DynamoDB table for job records and dedupe |
 | `catalog_leases_table_name` | `spur-context-catalog-leases` | DynamoDB table for catalog leases |
-| `lambda_memory_mb` | `1024` | Lambda memory |
+| `code_lambda_memory_mb` | `256` | DuckDB-free Code Lambda memory |
+| `lambda_memory_mb` | `1024` | Knowledge and legacy compatibility Lambda memory |
 | `lambda_timeout_sec` | `30` | Lambda timeout |
 | `lambda_max_concurrency` | `4` | Maximum in-process request concurrency per serving Lambda environment; `1` is sequential |
 | `concurrent_warm_instances` | `0` | Provisioned concurrency |
