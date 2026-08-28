@@ -300,7 +300,8 @@ async fn parquet_backend_matches_catalog_and_search_contracts() -> Result<()> {
                 "enclosing_scope": null
             }],
             "total_matches": 1,
-            "truncated": false
+            "truncated": false,
+            "catalog_generation": ParquetBackendFixture::GENERATION
         })
     );
 
@@ -319,7 +320,8 @@ async fn parquet_backend_matches_catalog_and_search_contracts() -> Result<()> {
         json!({
             "candidates": [],
             "total_matches": 0,
-            "truncated": false
+            "truncated": false,
+            "catalog_generation": ParquetBackendFixture::GENERATION
         })
     );
 
@@ -480,7 +482,8 @@ async fn parquet_backend_matches_read_and_edge_contracts() -> Result<()> {
             "file_path": "src/lib.rs",
             "byte_range": beta_byte_range,
             "line_range": [6, 7],
-            "source": "pub fn beta() {\n}\n"
+            "source": "pub fn beta() {\n}\n",
+            "catalog_generation": ParquetBackendFixture::GENERATION
         })
     );
 
@@ -509,7 +512,8 @@ async fn parquet_backend_matches_read_and_edge_contracts() -> Result<()> {
                 "references_other": 1,
                 "unresolved": 0
             },
-            "unresolved_sample": []
+            "unresolved_sample": [],
+            "catalog_generation": ParquetBackendFixture::GENERATION
         })
     );
 
@@ -539,7 +543,8 @@ async fn parquet_backend_matches_read_and_edge_contracts() -> Result<()> {
                 "references_other": 1,
                 "unresolved": 1
             },
-            "unresolved_sample": ["external::Thing"]
+            "unresolved_sample": ["external::Thing"],
+            "catalog_generation": ParquetBackendFixture::GENERATION
         })
     );
 
