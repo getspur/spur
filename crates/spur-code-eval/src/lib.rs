@@ -2,8 +2,18 @@
 
 mod artifacts;
 mod contract;
+pub mod crosscodeeval;
+pub mod jcg;
 mod materialize;
+pub mod metrics;
+#[expect(
+    clippy::missing_errors_doc,
+    reason = "the exported Task 11 backend trait predates the Task 12 public module wiring"
+)]
+pub mod model;
 mod query;
+pub mod repoqa;
+pub mod report;
 mod sources;
 
 pub use artifacts::{
