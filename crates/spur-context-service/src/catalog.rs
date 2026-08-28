@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::thread;
@@ -977,8 +977,30 @@ fn serving_registry_for_generation(
         .map_err(|_| GenerationPublicationError::Catalog)?
         .collect::<std::result::Result<Vec<_>, _>>()
         .map_err(|_| GenerationPublicationError::Catalog)?;
+    let identities_sql = format!("SELECT source, package, revision FROM {table}");
+    let mut identities_stmt = catalog
+        .prepare(&identities_sql)
+        .map_err(|_| GenerationPublicationError::Catalog)?;
+    let identities = identities_stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })
+        .map_err(|_| GenerationPublicationError::Catalog)?
+        .collect::<std::result::Result<BTreeSet<_>, _>>()
+        .map_err(|_| GenerationPublicationError::Catalog)?;
     let mut refs_by_revision = BTreeMap::<(String, String, String), Vec<String>>::new();
     for (source, package, revision, reference) in refs {
+        if !identities.contains(&(source.clone(), package.clone(), revision.clone())) {
+            return Err(ServingRegistryError::IncompleteServingGeneration {
+                generation,
+                reason: "a package ref targets an absent package revision".to_owned(),
+            }
+            .into());
+        }
         refs_by_revision
             .entry((source, package, revision))
             .or_default()

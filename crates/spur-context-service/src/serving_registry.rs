@@ -1,5 +1,6 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
+use semver::Version;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -30,6 +31,29 @@ pub struct ServingRegistry {
     pub schema_version: u32,
     pub generation: i64,
     pub packages: Vec<ServingPackage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ServingRegistryEnvelope {
+    schema_version: u32,
+}
+
+#[derive(Debug, Deserialize)]
+struct LegacyServingPackageV1 {
+    source: String,
+    package: String,
+    revision: String,
+    generation: i64,
+    graph_prefix_uri: String,
+    graph_manifest: ArtifactRef,
+    source_sidecar: ArtifactRef,
+}
+
+#[derive(Debug, Deserialize)]
+struct LegacyServingRegistryV1 {
+    schema_version: u32,
+    generation: i64,
+    packages: Vec<LegacyServingPackageV1>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -105,6 +129,79 @@ impl ServingRegistryError {
 }
 
 impl ServingRegistry {
+    pub fn from_json_slice(bytes: &[u8]) -> Result<Self, ServingRegistryError> {
+        let envelope: ServingRegistryEnvelope = serde_json::from_slice(bytes)?;
+        let registry = match envelope.schema_version {
+            SERVING_REGISTRY_SCHEMA_VERSION => serde_json::from_slice(bytes)?,
+            1 => Self::upgrade_v1(serde_json::from_slice(bytes)?)?,
+            unsupported => {
+                return Err(ServingRegistryError::UnsupportedSchemaVersion(unsupported));
+            }
+        };
+        registry.validate()?;
+        Ok(registry)
+    }
+
+    fn upgrade_v1(legacy: LegacyServingRegistryV1) -> Result<Self, ServingRegistryError> {
+        debug_assert_eq!(legacy.schema_version, 1);
+        let mut packages = legacy
+            .packages
+            .into_iter()
+            .map(|package| {
+                let revision_kind = if parse_semver_revision(&package.revision).is_some() {
+                    "semver"
+                } else {
+                    "git_sha"
+                };
+                ServingPackage {
+                    source: package.source,
+                    package: package.package,
+                    revision: package.revision,
+                    revision_kind: revision_kind.to_owned(),
+                    refs: Vec::new(),
+                    generation: package.generation,
+                    graph_prefix_uri: package.graph_prefix_uri,
+                    graph_manifest: package.graph_manifest,
+                    source_sidecar: package.source_sidecar,
+                }
+            })
+            .collect::<Vec<_>>();
+
+        let mut package_groups = BTreeMap::<(String, String), Vec<usize>>::new();
+        for (index, package) in packages.iter().enumerate() {
+            package_groups
+                .entry((package.source.clone(), package.package.clone()))
+                .or_default()
+                .push(index);
+        }
+        for indices in package_groups.values() {
+            let semantic_latest = indices
+                .iter()
+                .filter_map(|index| {
+                    let package = &packages[*index];
+                    parse_semver_revision(&package.revision)
+                        .map(|version| (version, package.revision.clone(), *index))
+                })
+                .max()
+                .map(|(_, _, index)| index);
+            let latest = semantic_latest.or_else(|| {
+                indices
+                    .iter()
+                    .copied()
+                    .max_by_key(|index| packages[*index].revision.clone())
+            });
+            if let Some(index) = latest {
+                packages[index].refs.push("latest".to_owned());
+            }
+        }
+
+        Ok(Self {
+            schema_version: SERVING_REGISTRY_SCHEMA_VERSION,
+            generation: legacy.generation,
+            packages,
+        })
+    }
+
     pub fn from_current_rows(
         generation: i64,
         rows: impl IntoIterator<Item = ServingCatalogRow>,
@@ -311,6 +408,10 @@ impl ServingRegistry {
         });
         Ok(serde_json::to_vec(&canonical)?)
     }
+}
+
+pub(crate) fn parse_semver_revision(revision: &str) -> Option<Version> {
+    Version::parse(revision.strip_prefix('v').unwrap_or(revision)).ok()
 }
 
 fn required_artifact(

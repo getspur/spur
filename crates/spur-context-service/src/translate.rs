@@ -19,6 +19,7 @@ use crate::catalog::{
     postgres_metadata_dsn, redact_libpq_secrets, retry_postgres_pause_resume,
 };
 use crate::medallion::SilverManifest;
+use crate::serving_registry::parse_semver_revision;
 
 const DEFAULT_EMBEDDING_MODEL: &str = "NomicEmbedTextV15";
 pub const DEFAULT_EMBED_TEXT_VERSION: &str = "v5-nomic-embed-text-v1.5-search-document";
@@ -1759,24 +1760,21 @@ fn update_latest_semver_ref(
     package: &str,
     revision: &str,
 ) -> Result<()> {
-    let latest = optional_string(
-        db.query_row(
+    let mut statement = db
+        .prepare(
             r"
             SELECT revision
             FROM gold.package_catalog
             WHERE source = ? AND package = ? AND revision_kind = 'semver'
-            ORDER BY
-                semver_major DESC NULLS LAST,
-                semver_minor DESC NULLS LAST,
-                semver_patch DESC NULLS LAST,
-                revision DESC
-            LIMIT 1
             ",
-            params![source, package],
-            |row| row.get(0),
-        ),
-        "failed to find latest semver revision",
-    )?;
+        )
+        .context("failed to prepare latest semver revision query")?;
+    let revisions = statement
+        .query_map(params![source, package], |row| row.get::<_, String>(0))
+        .context("failed to query latest semver revisions")?
+        .collect::<duckdb::Result<Vec<_>>>()
+        .context("failed to read latest semver revisions")?;
+    let latest = semantic_latest_revision(revisions)?;
 
     if latest.as_deref() == Some(revision) {
         replace_ref(db, source, package, "latest", revision)?;
@@ -2331,17 +2329,25 @@ fn optional_string(
 }
 
 fn parse_semver_triplet(revision: &str) -> Option<(i32, i32, i32)> {
-    let version = revision.strip_prefix('v').unwrap_or(revision);
-    let mut parts = version.split('.');
-    let major = parts.next()?.parse().ok()?;
-    let minor = parts.next()?.parse().ok()?;
-    let patch_part = parts.next()?;
-    let patch_digits = patch_part
-        .chars()
-        .take_while(|ch| ch.is_ascii_digit())
-        .collect::<String>();
-    let patch = patch_digits.parse().ok()?;
-    Some((major, minor, patch))
+    let version = parse_semver_revision(revision)?;
+    Some((
+        i32::try_from(version.major).ok()?,
+        i32::try_from(version.minor).ok()?,
+        i32::try_from(version.patch).ok()?,
+    ))
+}
+
+fn semantic_latest_revision(revisions: impl IntoIterator<Item = String>) -> Result<Option<String>> {
+    let mut latest = None::<(semver::Version, String)>;
+    for revision in revisions {
+        let version = parse_semver_revision(&revision)
+            .ok_or_else(|| anyhow!("package catalog contains an invalid semver revision"))?;
+        let candidate = (version, revision);
+        if latest.as_ref().is_none_or(|current| candidate > *current) {
+            latest = Some(candidate);
+        }
+    }
+    Ok(latest.map(|(_, revision)| revision))
 }
 
 fn sql_string(value: &str) -> String {

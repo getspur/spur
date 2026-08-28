@@ -2085,10 +2085,7 @@ mod code {
         let registry_ref = pointer.registry_identity()?;
         let registry_bytes = download_s3_object(s3, &registry_ref.uri).await?;
         verify_object(&registry_bytes, &registry_ref)?;
-        let registry: ServingRegistry = serde_json::from_slice(&registry_bytes)
-            .map_err(|_| CodeToolError::retryable("serving_registry_unavailable"))?;
-        registry
-            .validate()
+        let registry = ServingRegistry::from_json_slice(&registry_bytes)
             .map_err(|_| CodeToolError::retryable("serving_registry_unavailable"))?;
         if registry.generation != pointer.generation {
             return Err(CodeToolError::retryable("serving_registry_unavailable"));

@@ -5537,6 +5537,7 @@ dependencies = [
  "parquet",
  "rand 0.8.7",
  "secrecy",
+ "semver",
  "serde",
  "serde_json",
  "sha1 0.10.7",
