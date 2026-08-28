@@ -1654,12 +1654,13 @@ def test_lambda_worker_resource_is_configured_for_fast_start_mvp():
     outputs_tf = (INFRA_DIR / "outputs.tf").read_text()
     iam_tf = (INFRA_DIR / "iam.tf").read_text()
 
-    assert 'resource "aws_lambda_function" "worker"' in lambda_tf
-    assert 'package_type  = "Image"' in lambda_tf
-    assert "image_uri     = var.worker_lambda_image" in lambda_tf
-    assert "timeout       = var.worker_lambda_timeout_sec" in lambda_tf
-    assert "memory_size   = var.worker_lambda_memory_mb" in lambda_tf
-    assert "ephemeral_storage" in lambda_tf
+    worker = terraform_resource_block(lambda_tf, "aws_lambda_function", "worker")
+    assert 'package_type  = "Image"' in worker
+    assert "image_uri     = var.worker_lambda_image" in worker
+    assert "timeout       = var.worker_lambda_timeout_sec" in worker
+    assert "memory_size   = var.worker_lambda_memory_mb" in worker
+    assert "ephemeral_storage" in worker
+    assert terraform_assignment(worker, "role") == "aws_iam_role.worker_lambda.arn"
     assert "AWS_REGION" not in lambda_tf
     assert "worker_lambda_memory_mb" in variables_tf
     assert "default     = 3008" in variables_tf
@@ -1667,8 +1668,12 @@ def test_lambda_worker_resource_is_configured_for_fast_start_mvp():
     assert 'output "worker_image_uri"' in outputs_tf
     assert 'output "worker_lambda_image_uri"' in outputs_tf
     assert 'output "worker_lambda_function_name"' in outputs_tf
-    lambda_s3_policy = iam_tf.split('resource "aws_iam_role_policy" "s3_access"', 1)[1]
-    assert '"s3:DeleteObject"' in lambda_s3_policy
+    worker_s3_policy = terraform_resource_block(
+        iam_tf, "aws_iam_role_policy", "worker_lambda_s3"
+    )
+    assert terraform_assignment(worker_s3_policy, "role") == "aws_iam_role.worker_lambda.id"
+    assert '"s3:PutObject"' in worker_s3_policy
+    assert '"s3:DeleteObject"' in worker_s3_policy
 
 
 def test_nat_free_worker_vpc_endpoints_are_declared():
