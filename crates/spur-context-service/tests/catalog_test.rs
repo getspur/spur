@@ -313,6 +313,25 @@ fn incomplete_registry_does_not_advance_pointer() -> Result<()> {
 }
 
 #[test]
+fn orphan_ref_does_not_advance_pointer() -> Result<()> {
+    let conn = publication_catalog(&[complete_publication_row(7)])?;
+    conn.execute(
+        "INSERT INTO gold.refs VALUES (?, ?, ?, ?)",
+        params![SOURCE, PACKAGE, "orphan", "9.9.9"],
+    )?;
+    let store = complete_publication_store();
+    let previous = seed_pointer(&store, 6, SNAPSHOT_URI, SERVING_REGISTRY_URI);
+
+    let error = publish_generation(&store, &conn, publication_request(7))
+        .expect_err("a ref without a published package revision must fail closed");
+
+    assert_eq!(error.code(), "incomplete_serving_generation");
+    assert_eq!(store.object(POINTER_URI).unwrap().bytes, previous);
+    assert_eq!(store.pointer_write_count(), 0);
+    Ok(())
+}
+
+#[test]
 fn missing_lineage_on_unchanged_older_package_does_not_advance_pointer() -> Result<()> {
     let mut older = older_complete_publication_row(6);
     older.graph_manifest_uri = None;

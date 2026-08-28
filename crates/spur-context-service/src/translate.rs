@@ -2391,6 +2391,19 @@ mod tests {
     }
 
     #[test]
+    fn semantic_latest_prefers_stable_over_equal_prerelease() -> Result<()> {
+        assert_eq!(
+            semantic_latest_revision([
+                "0.99.0".to_owned(),
+                "1.0.0-alpha.1".to_owned(),
+                "1.0.0".to_owned(),
+            ])?,
+            Some("1.0.0".to_owned())
+        );
+        Ok(())
+    }
+
+    #[test]
     fn insert_from_source_fails_when_landed_delta_mismatches_source_count() -> Result<()> {
         let conn = Connection::open_in_memory().context("open in-memory duckdb")?;
         conn.execute_batch(

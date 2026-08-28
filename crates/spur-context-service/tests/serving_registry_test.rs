@@ -241,3 +241,41 @@ fn registry_rejects_one_ref_pointing_at_multiple_revisions() {
         "duplicate_package_ref"
     );
 }
+
+#[test]
+fn registry_loader_upgrades_v1_without_a_serving_outage() {
+    let generation = 7;
+    let mut prerelease = package(
+        "registry:crates-io",
+        "acme/widget",
+        "1.0.0-alpha.1",
+        generation,
+    );
+    prerelease.revision_kind = "semver".to_owned();
+    let mut stable = package("registry:crates-io", "acme/widget", "1.0.0", generation);
+    stable.revision_kind = "semver".to_owned();
+    stable.graph_manifest.sha256 = SHA_B.to_owned();
+
+    let mut encoded = serde_json::json!({
+        "schema_version": 1,
+        "generation": generation,
+        "packages": [prerelease, stable],
+    });
+    for package in encoded["packages"].as_array_mut().unwrap() {
+        package.as_object_mut().unwrap().remove("revision_kind");
+        package.as_object_mut().unwrap().remove("refs");
+    }
+
+    let bytes = serde_json::to_vec(&encoded).unwrap();
+    let registry = ServingRegistry::from_json_slice(&bytes).unwrap();
+
+    assert_eq!(registry.schema_version, SERVING_REGISTRY_SCHEMA_VERSION);
+    assert_eq!(
+        registry
+            .resolve_revision_or_ref("registry:crates-io", "acme/widget", "latest")
+            .unwrap()
+            .unwrap()
+            .revision,
+        "1.0.0"
+    );
+}
