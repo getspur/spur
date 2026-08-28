@@ -351,7 +351,7 @@ impl RepoQaAdapter {
             .zip(query_pass)
             .zip(resolutions)
             .map(|((record, query), resolution)| {
-                self.finish_translation(record, query, resolution, &model_targets)
+                self.finish_translation(record, query, &resolution, &model_targets)
             })
             .collect()
     }
@@ -360,29 +360,38 @@ impl RepoQaAdapter {
         &self,
         record: &RepoQaRecord,
         query: QueryPass,
-        resolution: TargetResolution,
+        resolution: &TargetResolution,
         model_targets: &BTreeMap<ModelGroupKey, Vec<RepoQaModelTarget>>,
     ) -> Result<RepoQaTranslation, RepoQaError> {
         let language = Language::new(record.language.clone())?;
         let capability = self.capabilities.get(record.language());
         let target_is_resolved = matches!(&resolution, TargetResolution::Resolved(_));
-        let (gold_evidence, resolution_reason) = match resolution {
+        let gold_evidence = match resolution {
             TargetResolution::Resolved(source) => {
-                (GoldEvidence::new(vec![source], Vec::new())?, None)
+                GoldEvidence::new(vec![source.clone()], Vec::new())?
             }
-            TargetResolution::Invalid(reason) => (
-                GoldEvidence::new(Vec::new(), vec![invalid_gold_identifier(record)])?,
-                Some(reason),
-            ),
+            TargetResolution::MissingSourceSymbol(_) | TargetResolution::Invalid(_) => {
+                GoldEvidence::new(Vec::new(), vec![invalid_gold_identifier(record)])?
+            }
         };
 
-        let status = if let Some(reason) = resolution_reason.or(query.invalid_reason) {
+        let status = if let Some(reason) = query.invalid_reason {
             CaseStatus::invalid(reason)?
         } else {
-            match capability {
-                Some(Capability::Supported) => CaseStatus::eligible(),
-                Some(Capability::Unsupported(reason)) => CaseStatus::unsupported(reason)?,
-                None => CaseStatus::invalid(format!(
+            match (resolution, capability) {
+                (TargetResolution::Resolved(_), Some(Capability::Supported)) => {
+                    CaseStatus::eligible()
+                }
+                (
+                    TargetResolution::Resolved(_) | TargetResolution::MissingSourceSymbol(_),
+                    Some(Capability::Unsupported(reason)),
+                ) => CaseStatus::unsupported(reason)?,
+                (
+                    TargetResolution::MissingSourceSymbol(reason)
+                    | TargetResolution::Invalid(reason),
+                    _,
+                ) => CaseStatus::invalid(reason.clone())?,
+                (TargetResolution::Resolved(_), None) => CaseStatus::invalid(format!(
                     "RepoQA language {:?} is absent from the pinned source capabilities",
                     record.language
                 ))?,
@@ -446,14 +455,11 @@ fn build_query_policy(record: &RepoQaRecord) -> Result<QueryPass, ContractError>
 }
 
 fn query_leakage_reason(record: &RepoQaRecord) -> Option<String> {
-    let query_key = canonical_leakage_key(record.description());
-    let target_key = canonical_leakage_key(target_leaf(record.name()));
-    if !target_key.is_empty() && query_key.contains(&target_key) {
+    if contains_identifier_word_sequence(record.description(), target_leaf(record.name())) {
         return Some("RepoQA description query leaks the target name".to_owned());
     }
 
-    let path_key = canonical_leakage_key(record.path());
-    let path_leaks = !path_key.is_empty() && query_key.contains(&path_key);
+    let path_leaks = contains_identifier_word_sequence(record.description(), record.path());
     let span_leaks = [
         format!("{}..{}", record.start_line(), record.end_line()),
         format!("{}:{}", record.start_line(), record.end_line()),
@@ -473,6 +479,32 @@ fn canonical_leakage_key(value: &str) -> String {
         .collect()
 }
 
+fn contains_identifier_word_sequence(value: &str, identifier: &str) -> bool {
+    let identifier = canonical_leakage_key(identifier);
+    if identifier.is_empty() {
+        return false;
+    }
+    let words = value
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .map(canonical_leakage_key)
+        .collect::<Vec<_>>();
+
+    (0..words.len()).any(|start| {
+        let mut candidate = String::new();
+        for word in &words[start..] {
+            candidate.push_str(word);
+            if candidate == identifier {
+                return true;
+            }
+            if candidate.len() >= identifier.len() {
+                break;
+            }
+        }
+        false
+    })
+}
+
 fn target_leaf(name: &str) -> &str {
     name.rsplit([':', '.', '/', '#'])
         .find(|part| !part.is_empty())
@@ -482,6 +514,7 @@ fn target_leaf(name: &str) -> &str {
 #[derive(Clone)]
 enum TargetResolution {
     Resolved(SourceIdentity),
+    MissingSourceSymbol(String),
     Invalid(String),
 }
 
@@ -541,7 +574,7 @@ fn resolve_target(
         .collect::<Vec<_>>();
     match exact.as_slice() {
         [symbol] => TargetResolution::Resolved(symbol.source().clone()),
-        [] if named.is_empty() => TargetResolution::Invalid(
+        [] if named.is_empty() => TargetResolution::MissingSourceSymbol(
             "RepoQA target did not resolve to a canonical SPUR source identity".to_owned(),
         ),
         [] if named.iter().any(|symbol| {

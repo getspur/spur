@@ -263,6 +263,58 @@ fn canonical_target_name_leakage_makes_the_case_invalid_and_query_safe() {
 }
 
 #[test]
+fn incidental_target_substring_does_not_count_as_query_leakage() {
+    let repository = FixtureRepository::new();
+    let records = records_with(|record| {
+        record["name"] = json!("crate::answer::cat");
+        record["description"] = json!("Concatenates the supplied values.");
+    });
+    let symbols = source_symbols(&repository, &records);
+
+    let translations = translate_fixture(&repository, &records, &symbols);
+    let translated = translation(&translations, RUST_BUILD_CASE);
+
+    assert!(matches!(translated.case().status(), CaseStatus::Eligible));
+    assert_eq!(
+        translated.case().query_policy().input(),
+        "Concatenates the supplied values."
+    );
+    assert!(translated.model_score_input().is_some());
+}
+
+#[test]
+fn unsupported_without_source_symbol_remains_visible_and_auditable() {
+    let repository = FixtureRepository::new();
+    let records = fixture_records();
+    let mut symbols = source_symbols(&repository, &records);
+    symbols.retain(|symbol| symbol.name() != "Repo.parseItem");
+
+    let translations = translate_fixture(&repository, &records, &symbols);
+    let translated = translation(&translations, "java::synthetic/repo::parse_item");
+
+    assert!(matches!(
+        translated.case().status(),
+        CaseStatus::Unsupported { .. }
+    ));
+    assert_eq!(
+        translated.case().status().reason(),
+        Some("SPUR has no Java language extractor in the pinned benchmark contract")
+    );
+    assert!(translated.case().is_denominator_visible());
+    assert!(translated.model_score_input().is_none());
+    assert!(translated.case().gold_evidence().sources().is_empty());
+    assert!(!translated
+        .case()
+        .gold_evidence()
+        .derived_identifiers()
+        .is_empty());
+    assert_eq!(
+        translated.case().raw_upstream()["upstream_extra"],
+        json!("retained-java-provenance")
+    );
+}
+
+#[test]
 fn unresolved_target_is_invalid_without_empty_gold() {
     let repository = FixtureRepository::new();
     let records = fixture_records();
