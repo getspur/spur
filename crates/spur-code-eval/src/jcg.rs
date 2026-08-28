@@ -108,7 +108,7 @@ impl JcgRecord {
 pub enum ExpectationKind {
     /// The caller must have a one-hop edge to the target.
     Direct,
-    /// The caller must reach the target through at least two one-hop edges.
+    /// The caller must reach the target through at least one one-hop edge.
     Indirect,
     /// The annotated one-hop caller-to-target edge must be absent.
     Prohibited,
@@ -400,10 +400,10 @@ impl ExpectationOutcome {
 
 /// Matches only pinned annotations against already-normalized evidence.
 ///
-/// Direct expectations use exactly one edge. Indirect expectations remove the
-/// same caller-to-target edge before searching, so a witness has at least two
-/// hops. Prohibited expectations inspect only the explicitly annotated direct
-/// edge. Unannotated targets never become false positives.
+/// Direct expectations use exactly one edge. Indirect expectations accept any
+/// non-empty caller-to-target path. Prohibited expectations inspect only the
+/// explicitly annotated direct edge. Unannotated targets never become false
+/// positives.
 #[must_use]
 pub fn match_expectations(
     call_sites: &[NormalizedCallSite],
@@ -426,12 +426,7 @@ pub fn match_expectations(
                     &edge_witnesses,
                 )
                 .map_or_else(
-                    || {
-                        missing_outcome(
-                            &expectation,
-                            "required indirect path of at least two edges is absent",
-                        )
-                    },
+                    || missing_outcome(&expectation, "required indirect path is absent"),
                     |witness| matched_outcome(&expectation, witness),
                 ),
                 ExpectationKind::Prohibited => edge_witnesses.get(&edge_key).map_or_else(
@@ -509,9 +504,6 @@ fn indirect_path(
     let mut visited = BTreeSet::from([caller.to_owned()]);
     while let Some((current, path)) = queue.pop_front() {
         for next in adjacency.get(&current).into_iter().flatten() {
-            if current == caller && next == target {
-                continue;
-            }
             let mut next_path = path.clone();
             let witness = witnesses.get(&(current.clone(), next.clone()))?;
             next_path.push(witness.clone());

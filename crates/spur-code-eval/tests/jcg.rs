@@ -163,6 +163,45 @@ fn direct_indirect_and_prohibited_expectations_have_distinct_audited_outcomes() 
 }
 
 #[test]
+fn pinned_indirect_matcher_accepts_a_directly_reachable_target() {
+    let record: JcgRecord = serde_json::from_value(json!({
+        "case_id": "javascript::pinned::directly-reachable-indirect",
+        "language": "javascript",
+        "prompt": "Match the pinned indirect annotation from frozen evidence.",
+        "repository_uri": "https://github.com/example/jcg-js",
+        "repository_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "materialization_hash":
+            "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "expectations": [
+            { "kind": "indirect", "caller": "source", "target": "target" }
+        ]
+    }))
+    .unwrap();
+    let frozen_call_sites: Vec<FrozenCallSiteEvidence> = serde_json::from_value(json!([{
+        "caller_method": "source",
+        "call_site_line": 1,
+        "declared_target": "target",
+        "resolved_targets": ["target"],
+        "source": {
+            "path": "src/pinned.js",
+            "byte_start": 0,
+            "byte_end": 6,
+            "symbol_id": "graph://symbol/pinned-direct-edge"
+        },
+        "source_kinds": ["exact_callees"],
+        "retrieval_rank": 1
+    }]))
+    .unwrap();
+
+    let evaluation = adapter().evaluate(&record, &frozen_call_sites).unwrap();
+    let outcome = &evaluation.audit().expectation_outcomes()[0];
+
+    assert_eq!(outcome.kind(), ExpectationKind::Indirect);
+    assert_eq!(outcome.result(), ExpectationResult::Matched);
+    assert_eq!(outcome.witness().len(), 1);
+}
+
+#[test]
 fn supported_languages_score_while_unsupported_java_stays_denominator_visible() {
     let mut fixtures = fixtures();
     let javascript = fixtures.remove(0);
