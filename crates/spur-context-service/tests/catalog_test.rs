@@ -330,6 +330,33 @@ fn missing_lineage_on_unchanged_older_package_does_not_advance_pointer() -> Resu
 }
 
 #[test]
+fn fully_legacy_unlineaged_package_does_not_block_current_registry() -> Result<()> {
+    let mut legacy = older_complete_publication_row(6);
+    legacy.graph_manifest_uri = None;
+    legacy.graph_manifest_sha256 = None;
+    legacy.graph_manifest_bytes = None;
+    legacy.source_sidecar_uri = None;
+    legacy.source_sidecar_sha256 = None;
+    legacy.source_sidecar_bytes = None;
+    let conn = publication_catalog(&[legacy, complete_publication_row(7)])?;
+    let store = complete_publication_store();
+
+    publish_generation(&store, &conn, publication_request(7))?;
+
+    let registry: ServingRegistry = serde_json::from_slice(
+        &store
+            .object(SERVING_REGISTRY_URI)
+            .context("serving registry was not written")?
+            .bytes,
+    )?;
+    assert_eq!(registry.generation, 7);
+    assert_eq!(registry.packages.len(), 1);
+    assert_eq!(registry.packages[0].package, PACKAGE);
+    assert_eq!(registry.packages[0].generation, 7);
+    Ok(())
+}
+
+#[test]
 fn null_generation_on_current_package_does_not_advance_pointer() -> Result<()> {
     let mut legacy = older_complete_publication_row(6);
     legacy.generation = None;
