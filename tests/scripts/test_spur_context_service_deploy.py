@@ -835,6 +835,30 @@ def test_deploy_builds_named_serving_lambdas_from_exact_feature_closures():
     assert "build --features lambda --release" not in script
 
 
+def test_code_lambda_defaults_to_independent_256_mb_memory():
+    variables_tf = (INFRA_DIR / "variables.tf").read_text()
+    main_tf = (INFRA_DIR / "main.tf").read_text()
+
+    assert 'variable "code_lambda_memory_mb"' in variables_tf
+    code_memory = variables_tf.split(
+        'variable "code_lambda_memory_mb"', 1
+    )[1].split('variable "', 1)[0]
+    shared_memory = variables_tf.split(
+        'variable "lambda_memory_mb"', 1
+    )[1].split('variable "', 1)[0]
+    code_lambda = main_tf.split(
+        'resource "aws_lambda_function" "code"', 1
+    )[1].split('resource "aws_lambda_function" "knowledge"', 1)[0]
+    knowledge_lambda = main_tf.split(
+        'resource "aws_lambda_function" "knowledge"', 1
+    )[1]
+
+    assert "default     = 256" in code_memory
+    assert "default     = 1024" in shared_memory
+    assert "memory_size = var.code_lambda_memory_mb" in code_lambda
+    assert "memory_size = var.lambda_memory_mb" in knowledge_lambda
+
+
 def test_deploy_preserves_worker_builds_while_splitting_serving_lambdas():
     script = DEPLOY_SH.read_text()
 
