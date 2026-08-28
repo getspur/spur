@@ -9099,7 +9099,9 @@ dependencies = [
 name = "spur-code-eval"
 version = "1.21.0"
 dependencies = [
+ "clap",
  "flate2",
+ "futures 0.3.32",
  "serde",
  "serde_json",
  "sha2 0.10.9",

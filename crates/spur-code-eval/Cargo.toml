@@ -14,7 +14,9 @@ dist = false
 bench = false
 
 [dependencies]
+clap.workspace = true
 flate2 = "1"
+futures.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

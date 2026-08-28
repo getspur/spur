@@ -14,6 +14,7 @@ pub mod model;
 mod query;
 pub mod repoqa;
 pub mod report;
+pub mod runner;
 mod sources;
 
 pub use artifacts::{
@@ -32,6 +33,7 @@ pub use query::{
     EvidenceIssueKind, GoldCallEdge, LeakageKind, LeakagePolicy, QueryBackend, QueryBackendFuture,
     QueryError, RetrievalRequest, RetrievalResult, SourceKind, SpurQueryBackend, Staleness,
 };
+pub use runner::{Cli, Command, Runner, RunnerError};
 pub use sources::{
     validate_bytes, LanguageCapability, SchemaEvidence, SourceError, SourceFormat, SourceManifest,
     SourceSpec, ValidatedSource, SOURCE_ADAPTER_CONTRACT_VERSION, SOURCE_MANIFEST_VERSION,
