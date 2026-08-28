@@ -1221,6 +1221,16 @@ def test_terraform_uses_partial_s3_backend_and_environment_files():
         assert "vpc_id" in var_file.read_text()
 
 
+def test_terraform_requires_cross_variable_validation_compatible_cli():
+    versions_tf = VERSIONS_TF.read_text()
+    required_version = re.search(
+        r'required_version\s*=\s*"([^"]+)"', versions_tf
+    )
+
+    assert required_version is not None
+    assert required_version.group(1) == ">= 1.9, < 2.0"
+
+
 def test_deploy_passes_backend_config_and_var_file_to_terraform():
     script = DEPLOY_SH.read_text()
 
