@@ -603,6 +603,7 @@ fn handle_knowledge_context_without_catalog(args: &Value) -> Result<Value, McpHa
         supporting_docs: Vec::new(),
         confidence: "low".to_owned(),
         answerable: false,
+        catalog_generation: None,
         graph_content_hash: None,
         candidates: knowledge::KnowledgeCandidateSummary {
             total: 0,
