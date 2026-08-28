@@ -49,7 +49,7 @@ resource "aws_lambda_function" "worker" {
   depends_on = [
     aws_iam_role_policy_attachment.lambda_basic,
     aws_iam_role_policy_attachment.lambda_vpc_access,
-    aws_iam_role_policy.lambda_catalog_secret,
+    aws_iam_role_policy.shared_lambda_catalog_secret,
     aws_cloudwatch_log_group.worker_lambda,
   ]
 }

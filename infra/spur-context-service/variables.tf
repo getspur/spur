@@ -751,8 +751,8 @@ variable "concurrent_warm_instances" {
   default     = 0
 
   validation {
-    condition     = var.concurrent_warm_instances >= 0 && floor(var.concurrent_warm_instances) == var.concurrent_warm_instances
-    error_message = "concurrent_warm_instances must be a non-negative integer."
+    condition     = var.concurrent_warm_instances >= 0 && var.concurrent_warm_instances <= 1 && floor(var.concurrent_warm_instances) == var.concurrent_warm_instances
+    error_message = "concurrent_warm_instances must be either 0 or 1."
   }
 }
 

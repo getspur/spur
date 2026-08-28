@@ -199,9 +199,21 @@ resource "aws_cloudwatch_log_group" "knowledge_lambda" {
   retention_in_days = 14
 }
 
-# Kept under the legacy Terraform address until Task 14 switches deploy.sh to
-# pass the distinct Knowledge ZIP path explicitly.
+# Retained under its legacy address so the versioned object remains owned until
+# the compatibility serving Lambda is removed in a separately reviewed apply.
 resource "aws_s3_object" "lambda_zip" {
+  bucket      = aws_s3_bucket.data.bucket
+  key         = "lambda/spur-context-service-${filemd5(var.lambda_zip_path)}.zip"
+  source      = var.lambda_zip_path
+  source_hash = filemd5(var.lambda_zip_path)
+
+  lifecycle {
+    prevent_destroy = true
+    ignore_changes  = all
+  }
+}
+
+resource "aws_s3_object" "knowledge_lambda_zip" {
   bucket      = aws_s3_bucket.data.bucket
   key         = "lambda/spur-context-knowledge-${filemd5(local.knowledge_lambda_zip_path)}.zip"
   source      = local.knowledge_lambda_zip_path
@@ -300,7 +312,7 @@ resource "aws_lambda_function" "code" {
     aws_iam_role_policy.code_lambda_dynamodb,
     aws_iam_role_policy.code_lambda_sfn,
     aws_cloudwatch_log_group.code_lambda,
-    aws_iam_role_policy.api_key_management,
+    aws_iam_role_policy.code_api_key_management,
     # Do not advertise the custom API/OAuth endpoints until their API mapping
     # and DNS aliases exist. This also keeps the login facade unavailable during
     # a partial certificate/domain activation apply.
@@ -342,10 +354,9 @@ resource "aws_lambda_function" "knowledge" {
   function_name = "spur-context-knowledge"
   description   = "Frozen DuckLake external knowledge context service"
 
-  # Knowledge retains the extension-bearing compatibility package until Task
-  # 14 supplies its named binary ZIP.
+  # Knowledge serves only its isolated extension-bearing package.
   s3_bucket        = aws_s3_bucket.data.bucket
-  s3_key           = aws_s3_object.lambda_zip.key
+  s3_key           = aws_s3_object.knowledge_lambda_zip.key
   source_code_hash = filebase64sha256(local.knowledge_lambda_zip_path)
 
   runtime       = "provided.al2023"
@@ -940,7 +951,7 @@ resource "aws_budgets_budget" "cognito" {
   }
 }
 
-resource "aws_lambda_permission" "apigw" {
+resource "aws_lambda_permission" "apigw_knowledge" {
   statement_id  = "apigateway-invocation"
   action        = "lambda:InvokeFunction"
   function_name = aws_lambda_function.knowledge.function_name
@@ -957,7 +968,7 @@ resource "aws_lambda_permission" "apigw_code" {
   source_arn    = "${aws_apigatewayv2_api.http.execution_arn}/*/*"
 }
 
-resource "aws_lambda_permission" "eventbridge_drainer" {
+resource "aws_lambda_permission" "eventbridge_code" {
   statement_id  = "eventbridge-index-queue-drainer"
   action        = "lambda:InvokeFunction"
   function_name = aws_lambda_function.code.function_name

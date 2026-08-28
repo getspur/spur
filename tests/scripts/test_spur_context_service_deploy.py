@@ -19,10 +19,14 @@ STAGING_SMOKE_ENTRYPOINT = INFRA_DIR / "smoke-staging-e2e.sh"
 REMOVED_ROUTE_ADDRESS = re.compile(
     r"\baws_apigatewayv2_route\.(?:default|oauth)(?![A-Za-z0-9_])"
 )
+REMOVED_ROUTE_RESOURCE = re.compile(
+    r'^\s*resource\s+"aws_apigatewayv2_route"\s+"(?:default|oauth)"'
+)
 
 
 def terraform_resource_block(text, resource_type, resource_name):
     marker = f'resource "{resource_type}" "{resource_name}"'
+    assert marker in text, f"missing Terraform resource: {marker}"
     start = text.index(marker)
     brace = text.index("{", start)
     depth = 0
@@ -108,8 +112,8 @@ def test_main_module_route_contracts_drop_removed_addresses_and_unsuffixed_paths
     for path in contract_files:
         for line_number, line in enumerate(path.read_text().splitlines(), start=1):
             reasons = []
-            if REMOVED_ROUTE_ADDRESS.search(line):
-                reasons.append("removed route address")
+            if REMOVED_ROUTE_RESOURCE.search(line):
+                reasons.append("removed route resource")
             if unsuffixed_serving_route.search(line):
                 reasons.append("unsuffixed serving route")
             if "$default" in line and not (
@@ -404,7 +408,7 @@ def test_direct_routes_have_expected_auth_and_unique_terminal_integrations():
         problems.append("a serving Lambda role can invoke another Lambda")
 
     knowledge_permission = terraform_resource_block(
-        main_tf, "aws_lambda_permission", "apigw"
+        main_tf, "aws_lambda_permission", "apigw_knowledge"
     )
     code_permission = terraform_resource_block(
         main_tf, "aws_lambda_permission", "apigw_code"
@@ -424,17 +428,25 @@ def test_direct_routes_have_expected_auth_and_unique_terminal_integrations():
     assert not problems, "\n".join(problems)
 
 
-def test_serving_compute_correction_removes_deleted_service_addresses_and_routes_code_compatibility():
-    address_pattern = re.compile(r"aws_lambda_(?:function|alias)\.service\b")
-    dangling = []
-    for path in terraform_module_contract_files():
-        for line_number, line in enumerate(path.read_text().splitlines(), start=1):
-            if address_pattern.search(line):
-                dangling.append(f"{path.relative_to(ROOT)}:{line_number}: {line.strip()}")
-
+def test_serving_compute_correction_retains_legacy_service_without_routing_to_it():
     main_tf = (INFRA_DIR / "main.tf").read_text()
     api_keys_tf = (INFRA_DIR / "api_keys.tf").read_text()
-    problems = [f"deleted serving address remains: {entry}" for entry in dangling]
+    compatibility_path = INFRA_DIR / "legacy_compatibility.tf"
+    assert compatibility_path.exists(), "missing legacy compatibility Terraform"
+    compatibility_tf = compatibility_path.read_text()
+    problems = []
+
+    legacy_service_marker = 'resource "aws_lambda_function" "service"'
+    if legacy_service_marker not in compatibility_tf:
+        problems.append("missing retained legacy serving resource")
+    else:
+        legacy_service = terraform_resource_block(
+            compatibility_tf, "aws_lambda_function", "service"
+        )
+        if "prevent_destroy = true" not in legacy_service:
+            problems.append("legacy serving resource is not protected from destroy")
+        if "ignore_changes  = all" not in legacy_service:
+            problems.append("legacy serving resource is not frozen for compatibility")
 
     code_integration_marker = 'resource "aws_apigatewayv2_integration" "code"'
     if code_integration_marker not in main_tf:
@@ -461,6 +473,9 @@ def test_serving_compute_correction_removes_deleted_service_addresses_and_routes
     if "integration_uri        = aws_lambda_function.code.invoke_arn" not in api_key_integration:
         problems.append("API-key integration does not invoke Code")
 
+    if "aws_lambda_function.service" in main_tf + api_keys_tf:
+        problems.append("active split routes or integrations still target legacy serving")
+
     code_permission_marker = 'resource "aws_lambda_permission" "apigw_code"'
     if code_permission_marker not in main_tf:
         problems.append("missing API Gateway permission for the Code integration")
@@ -485,7 +500,9 @@ def test_serving_compute_correction_attaches_knowledge_warm_pool_to_alias_traffi
     integration = terraform_resource_block(
         main_tf, "aws_apigatewayv2_integration", "lambda"
     )
-    permission = terraform_resource_block(main_tf, "aws_lambda_permission", "apigw")
+    permission = terraform_resource_block(
+        main_tf, "aws_lambda_permission", "apigw_knowledge"
+    )
     problems = []
 
     if not re.search(r"\bpublish\s*=\s*true\b", knowledge):
@@ -658,7 +675,7 @@ def test_serving_compute_roles_are_least_privilege_and_backend_specific():
         assert required in code_role_resources
 
     api_key_management = terraform_resource_block(
-        iam_tf, "aws_iam_role_policy", "api_key_management"
+        iam_tf, "aws_iam_role_policy", "code_api_key_management"
     )
     assert "role = aws_iam_role.code_lambda.id" in api_key_management
 
@@ -673,7 +690,7 @@ def test_serving_compute_drainer_and_warm_pool_target_the_owning_backends():
     assert "arn       = aws_lambda_function.code.arn" in drainer
     assert 'operation = "drain_queued_jobs"' in drainer
     drainer_permission = terraform_resource_block(
-        main_tf, "aws_lambda_permission", "eventbridge_drainer"
+        main_tf, "aws_lambda_permission", "eventbridge_code"
     )
     assert (
         "function_name = aws_lambda_function.code.function_name"

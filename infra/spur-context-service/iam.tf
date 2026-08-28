@@ -293,6 +293,27 @@ resource "aws_iam_role_policy" "source_fetcher_lambda" {
 
 resource "aws_iam_role_policy" "lambda_catalog_secret" {
   name = "CatalogSecretAccess"
+  role = aws_iam_role.worker_lambda.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Action = [
+        "secretsmanager:GetSecretValue"
+      ]
+      Resource = local.aurora_master_secret_arn
+    }]
+  })
+
+  lifecycle {
+    prevent_destroy = true
+    ignore_changes  = all
+  }
+}
+
+resource "aws_iam_role_policy" "shared_lambda_catalog_secret" {
+  name = "SharedLambdaCatalogSecretAccess"
   role = aws_iam_role.lambda.id
 
   policy = jsonencode({
@@ -328,6 +349,11 @@ resource "aws_iam_role_policy" "s3_access" {
       ]
     }]
   })
+
+  lifecycle {
+    prevent_destroy = true
+    ignore_changes  = all
+  }
 }
 
 resource "aws_iam_role_policy" "lambda_dynamodb" {
@@ -415,6 +441,36 @@ resource "aws_iam_role_policy" "api_key_management" {
   count = var.api_key_auth_enabled ? 1 : 0
 
   name = "ApiKeyManagementAccess"
+  role = aws_iam_role.lambda.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid      = "KeyAndOwnerCounterTransactions"
+        Effect   = "Allow"
+        Action   = local.api_key_management_dynamodb_actions
+        Resource = aws_dynamodb_table.api_keys[0].arn
+      },
+      {
+        Sid      = "OwnKeyListing"
+        Effect   = "Allow"
+        Action   = local.api_key_management_query_actions
+        Resource = "${aws_dynamodb_table.api_keys[0].arn}/index/${var.api_key_owner_gsi_name}"
+      }
+    ]
+  })
+
+  lifecycle {
+    prevent_destroy = true
+    ignore_changes  = all
+  }
+}
+
+resource "aws_iam_role_policy" "code_api_key_management" {
+  count = var.api_key_auth_enabled ? 1 : 0
+
+  name = "CodeApiKeyManagementAccess"
   role = aws_iam_role.code_lambda.id
 
   policy = jsonencode({
