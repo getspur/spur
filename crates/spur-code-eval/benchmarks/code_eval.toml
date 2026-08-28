@@ -1,0 +1,157 @@
+manifest_version = 1
+
+[[sources]]
+suite = "repo_qa"
+uri = "https://github.com/evalplus/repoqa_release/releases/download/2024-06-23/repoqa-2024-06-23.json.gz"
+revision = "e3a571033de99d0b9dcaccd25577a75d4b1c70b1"
+sha256 = "c050a2ad90a7df89d9dc1f1c3b3b20683edd20a56293b35fcaae43dec115d681"
+licenses = ["Apache-2.0"]
+expected_record_count = 600
+format = "gzip_repo_qa_json"
+adapter_contract_version = "code-eval-source-v1"
+
+[[sources.languages]]
+language = "python"
+supported = true
+expected_record_count = 100
+
+[[sources.languages]]
+language = "cpp"
+supported = true
+expected_record_count = 100
+
+[[sources.languages]]
+language = "java"
+supported = false
+reason = "SPUR has no Java language extractor in the pinned benchmark contract"
+expected_record_count = 100
+
+[[sources.languages]]
+language = "typescript"
+supported = true
+expected_record_count = 100
+
+[[sources.languages]]
+language = "rust"
+supported = true
+expected_record_count = 100
+
+[[sources.languages]]
+language = "go"
+supported = true
+expected_record_count = 100
+
+[[sources.evidence]]
+external_package = "repoqa_release"
+external_source = "git:github.com/evalplus/repoqa_release"
+revision = "e3a571033de99d0b9dcaccd25577a75d4b1c70b1"
+index_job_id = "04dba3c3-435d-4a4f-8033-afbeb27abf7e"
+selectors = []
+observation = "The exact release-data revision indexed successfully but exposed zero text symbols because its benchmark payload is gzip-compressed; the release asset bytes contain 600 needles across six language keys."
+
+[[sources.evidence]]
+external_package = "repoqa"
+external_source = "git:github.com/evalplus/repoqa"
+revision = "ae876deb1365dbf5a15b0533723c8ed123eee586"
+index_job_id = "b3c5fccc-29b1-4936-a797-b67212ab9103"
+selectors = [
+  "pkg:repoqa@ae876deb1365dbf5a15b0533723c8ed123eee586::_get_repoqa_data_ready_path",
+  "pkg:repoqa@ae876deb1365dbf5a15b0533723c8ed123eee586::get_repoqa_data",
+  "pkg:repoqa@ae876deb1365dbf5a15b0533723c8ed123eee586::evaluate_model",
+]
+observation = "The loader downloads repoqa-2024-06-23.json.gz, json.load returns an object keyed by language, and evaluate_model emits one task per repository needles entry."
+
+[[sources]]
+suite = "cross_code_eval"
+uri = "https://raw.githubusercontent.com/amazon-science/cceval/40c68d2b7ca2a8eae95d901ac80e6a540a84a53d/data/crosscodeeval_data.tar.xz"
+revision = "40c68d2b7ca2a8eae95d901ac80e6a540a84a53d"
+sha256 = "d65c0316f63df3434deac3b67ae95478cbe00c706c14ff1a91e1173619962b88"
+licenses = [
+  "ANTLR-PD",
+  "Apache-2.0",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "CC-BY-3.0",
+  "CC-BY-SA-4.0",
+  "CC0-1.0",
+  "ISC",
+  "MIT",
+  "MIT-0",
+  "PSF-2.0",
+  "Unlicense",
+  "WTFPL",
+  "X11",
+]
+expected_record_count = 9928
+format = "tar_xz_cross_code_eval"
+adapter_contract_version = "code-eval-source-v1"
+
+[[sources.languages]]
+language = "python"
+supported = true
+expected_record_count = 2665
+
+[[sources.languages]]
+language = "typescript"
+supported = true
+expected_record_count = 3356
+
+[[sources.languages]]
+language = "java"
+supported = false
+reason = "Java extraction is outside the first full CrossCodeEval lane"
+expected_record_count = 2139
+
+[[sources.languages]]
+language = "csharp"
+supported = false
+reason = "SPUR has no C# language extractor in the pinned benchmark contract"
+expected_record_count = 1768
+
+[[sources.evidence]]
+external_package = "cceval"
+external_source = "git:github.com/amazon-science/cceval"
+revision = "40c68d2b7ca2a8eae95d901ac80e6a540a84a53d"
+index_job_id = "86e17f6a-5c67-4941-9a98-8d57743b549c"
+selectors = [
+  "pkg:cceval@40c68d2b7ca2a8eae95d901ac80e6a540a84a53d::build_datasets",
+]
+observation = "build_datasets uses load_dataset(json) and metadata.task_id; the pinned archive canonical line_completion.jsonl files contain 2665 Python, 3356 TypeScript, 2139 Java, and 1768 C# records."
+
+[[sources]]
+suite = "jcg"
+uri = "https://codeload.github.com/opalj/JCG/tar.gz/4737aac8c2652acded1c4505961b6af52d06ceeb"
+revision = "4737aac8c2652acded1c4505961b6af52d06ceeb"
+sha256 = "db109e8628f4279d2847d803c0c922a07d64b5c6c242cbe9f92c474555f4b4f8"
+licenses = ["BSD-2-Clause"]
+expected_record_count = 238
+format = "tar_gzip_jcg_markdown"
+adapter_contract_version = "code-eval-source-v1"
+
+[[sources.languages]]
+language = "javascript"
+supported = true
+expected_record_count = 62
+
+[[sources.languages]]
+language = "python"
+supported = true
+expected_record_count = 64
+
+[[sources.languages]]
+language = "java"
+supported = false
+reason = "Java extraction is outside the first full JCG lane"
+expected_record_count = 112
+
+[[sources.evidence]]
+external_package = "JCG"
+external_source = "git:github.com/opalj/JCG"
+revision = "4737aac8c2652acded1c4505961b6af52d06ceeb"
+index_job_id = "a090fc68-d1d6-4616-a91a-eef4080b6609"
+selectors = [
+  "pkg:JCG@4737aac8c2652acded1c4505961b6af52d06ceeb::Judging Call Graphs (JCG) ![JCGLogo](JCGIcon.png)::Annotating Test Expectations",
+  "pkg-symbol://git:github.com%2Fopalj%2FJCG/JCG/4737aac8c2652acded1c4505961b6af52d06ceeb/436f428a723d6cce",
+  "pkg-symbol://git:github.com%2Fopalj%2FJCG/JCG/4737aac8c2652acded1c4505961b6af52d06ceeb/e1773ef713a4b423",
+]
+observation = "JCG stores each language testcase as a second-level Markdown section containing a JSON directLinks/indirectLinks expectation block; the pinned tree has 62 JavaScript, 64 Python, and 112 Java sections."

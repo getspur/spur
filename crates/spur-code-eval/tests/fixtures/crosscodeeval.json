@@ -1,0 +1,32 @@
+[
+  {
+    "language": "typescript",
+    "prompt": "export function renderWidget() {\n  ",
+    "groundtruth": "helper_one(); helper_two(); missing_helper();\n}",
+    "metadata": {
+      "task_id": "typescript::example/repo::render-widget",
+      "repository": "example/repo",
+      "file": "src/current.ts",
+      "upstream_partition": "line_completion"
+    },
+    "repository_uri": "https://github.com/example/repo",
+    "repository_commit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "materialization_hash": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "upstream_unknown": {
+      "retained": true
+    }
+  },
+  {
+    "language": "java",
+    "prompt": "class Widget { void render() {\n  ",
+    "groundtruth": "java_helper();\n} }",
+    "metadata": {
+      "task_id": "java::example/repo::render-widget",
+      "repository": "example/repo",
+      "file": "src/Current.java"
+    },
+    "repository_uri": "https://github.com/example/repo",
+    "repository_commit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "materialization_hash": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+  }
+]

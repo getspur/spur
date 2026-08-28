@@ -1,0 +1,58 @@
+[
+  {
+    "case_id": "rust::synthetic/repo::build_answer",
+    "language": "rust",
+    "repo": "synthetic/repo",
+    "repository_uri": "https://example.invalid/synthetic/repo.git",
+    "repository_commit": "1111111111111111111111111111111111111111",
+    "materialization_hash": "sha256:synthetic-repo",
+    "path": "src/build-answer.rs",
+    "name": "crate::answer::build_answer",
+    "start_line": 0,
+    "end_line": 3,
+    "description": "Returns the numeric input incremented by one.",
+    "upstream_extra": "retained-rust-provenance"
+  },
+  {
+    "case_id": "rust::synthetic/repo::format_value",
+    "language": "rust",
+    "repo": "synthetic/repo",
+    "repository_uri": "https://example.invalid/synthetic/repo.git",
+    "repository_commit": "1111111111111111111111111111111111111111",
+    "materialization_hash": "sha256:synthetic-repo",
+    "path": "src/format.value.rs",
+    "name": "crate::answer::format_value",
+    "start_line": 0,
+    "end_line": 3,
+    "description": "Produces a prefixed textual representation for the supplied integer.",
+    "upstream_extra": "retained-second-rust-provenance"
+  },
+  {
+    "case_id": "typescript::synthetic/repo::render_widget",
+    "language": "typescript",
+    "repo": "synthetic/repo",
+    "repository_uri": "https://example.invalid/synthetic/repo.git",
+    "repository_commit": "1111111111111111111111111111111111111111",
+    "materialization_hash": "sha256:synthetic-repo",
+    "path": "web/render-widget.ts",
+    "name": "widget.renderWidget",
+    "start_line": 0,
+    "end_line": 3,
+    "description": "Wraps the supplied label in angle brackets.",
+    "upstream_extra": "retained-typescript-provenance"
+  },
+  {
+    "case_id": "java::synthetic/repo::parse_item",
+    "language": "java",
+    "repo": "synthetic/repo",
+    "repository_uri": "https://example.invalid/synthetic/repo.git",
+    "repository_commit": "1111111111111111111111111111111111111111",
+    "materialization_hash": "sha256:synthetic-repo",
+    "path": "java/parse.item.java",
+    "name": "Repo.parseItem",
+    "start_line": 0,
+    "end_line": 3,
+    "description": "Returns the supplied number unchanged.",
+    "upstream_extra": "retained-java-provenance"
+  }
+]
