@@ -909,6 +909,14 @@ fn serving_registry_for_generation(
             source_sidecar_sha256,
             source_sidecar_bytes
         FROM {table}
+        WHERE NOT (
+            graph_manifest_uri IS NULL
+            AND graph_manifest_sha256 IS NULL
+            AND graph_manifest_bytes IS NULL
+            AND source_sidecar_uri IS NULL
+            AND source_sidecar_sha256 IS NULL
+            AND source_sidecar_bytes IS NULL
+        )
         ORDER BY source, package, revision
         "
     );
