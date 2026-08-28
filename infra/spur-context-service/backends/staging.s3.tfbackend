@@ -4,7 +4,7 @@
 # `terraform init -backend-config=backends/staging.s3.tfbackend`.
 # The S3 bucket stores state; the DynamoDB table provides state locking.
 bucket         = "wiilearn-spur-tfstate-apse5"
-key            = "spur-context-service/staging/terraform.tfstate"
+key            = "spur-context-service/default/terraform.tfstate"
 region         = "ap-southeast-5"
 dynamodb_table = "wiilearn-spur-tflocks"
 encrypt        = true

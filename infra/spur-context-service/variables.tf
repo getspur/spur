@@ -11,9 +11,33 @@ variable "bucket_name" {
 }
 
 variable "lambda_zip_path" {
-  description = "Local path to the Lambda deployment zip"
+  description = "Legacy serving Lambda zip path used only while both distinct serving ZIP overrides are omitted"
   type        = string
   default     = "../../target/lambda/spur-context-service.zip"
+}
+
+variable "code_lambda_zip_path" {
+  description = "Optional local path to the DuckDB-free Code Lambda zip; Task 14 supplies it together with knowledge_lambda_zip_path"
+  type        = string
+  default     = null
+  nullable    = true
+
+  validation {
+    condition     = var.code_lambda_zip_path == null ? true : length(trimspace(var.code_lambda_zip_path)) > 0
+    error_message = "code_lambda_zip_path must be null or a non-empty path."
+  }
+}
+
+variable "knowledge_lambda_zip_path" {
+  description = "Optional local path to the extension-bearing Knowledge Lambda zip; Task 14 supplies it together with code_lambda_zip_path"
+  type        = string
+  default     = null
+  nullable    = true
+
+  validation {
+    condition     = var.knowledge_lambda_zip_path == null ? true : length(trimspace(var.knowledge_lambda_zip_path)) > 0
+    error_message = "knowledge_lambda_zip_path must be null or a non-empty path."
+  }
 }
 
 variable "catalog_s3_uri" {
@@ -29,7 +53,7 @@ variable "allow_anonymous_mutations" {
 }
 
 variable "api_authorization_type" {
-  description = "Authorization for the HTTP API $default route. AWS_IAM (SigV4, secure default) or NONE (public, unauthenticated — use only for demo/eval stacks). Valid: NONE, AWS_IAM, JWT, CUSTOM."
+  description = "Authorization for the direct POST /mcp/code and POST /mcp/knowledge compatibility routes. AWS_IAM (SigV4, secure default) or NONE (public, unauthenticated — use only for demo/eval stacks). Valid: NONE, AWS_IAM, JWT, CUSTOM."
   type        = string
   default     = "AWS_IAM"
 
@@ -45,7 +69,7 @@ variable "api_authorization_type" {
 # committed to tfvars, or exposed through an output.
 
 variable "cognito_auth_enabled" {
-  description = "Enable the additive Cognito Lite user pool, JWT authorizer, and exact POST /mcp/oauth route. Disabled by default so existing $default behavior is unchanged."
+  description = "Enable the additive Cognito Lite user pool, JWT authorizer, and exact POST /mcp/oauth/code and POST /mcp/oauth/knowledge routes. Disabled by default so the direct compatibility-route behavior is unchanged."
   type        = bool
   default     = false
 }
@@ -68,7 +92,7 @@ variable "disable_execute_api_endpoint" {
 }
 
 # ─── Additive personal API-key ingress ───────────────────────────────────────
-# API-key resources are independent of the legacy $default and OAuth routes and
+# API-key resources are independent of the direct compatibility and OAuth routes and
 # are omitted entirely unless this feature is explicitly enabled.
 
 variable "api_key_auth_enabled" {
@@ -710,10 +734,26 @@ variable "lambda_max_concurrency" {
   default     = 4
 }
 
+variable "code_lambda_ephemeral_storage_mb" {
+  description = "Code Lambda /tmp capacity in MiB. Fixed to AWS Lambda's 512 MiB platform minimum; cache bytes are derived exactly with no separate reserve."
+  type        = number
+  default     = 512
+
+  validation {
+    condition     = var.code_lambda_ephemeral_storage_mb == 512
+    error_message = "code_lambda_ephemeral_storage_mb must remain at the AWS Lambda platform minimum of 512 MiB."
+  }
+}
+
 variable "concurrent_warm_instances" {
-  description = "Provisioned concurrency (0 = disabled, eliminates cold start when > 0)"
+  description = "Existing billable provisioned-concurrency budget, attached only to Knowledge (0 disables the warm pool)"
   type        = number
   default     = 0
+
+  validation {
+    condition     = var.concurrent_warm_instances >= 0 && var.concurrent_warm_instances <= 1 && floor(var.concurrent_warm_instances) == var.concurrent_warm_instances
+    error_message = "concurrent_warm_instances must be either 0 or 1."
+  }
 }
 
 # ─── Public API Abuse Controls ────────────────────────────────────────────────

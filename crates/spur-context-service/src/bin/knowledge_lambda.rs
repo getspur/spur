@@ -10,10 +10,6 @@ async fn main() -> Result<(), Error> {
         std::env::set_var("HOME", "/tmp");
     }
 
-    // AWS_LAMBDA_MAX_CONCURRENCY > 1 enables concurrent in-process invocations;
-    // unset or <= 1 retains the runtime's sequential behavior.
-    // Temporary compatibility binary: legacy deployments remain pinned to the
-    // frozen-snapshot Knowledge backend until packaging selects the named bin.
     lambda_runtime::run_concurrent(lambda_runtime::service_fn(|event| {
         lambda::handler_for(BackendKind::Knowledge, event)
     }))
@@ -26,8 +22,8 @@ fn copy_bundled_extensions() {
     if !std::path::Path::new(src).exists() {
         return;
     }
-    if let Err(e) = copy_dir_recursive(src, dst) {
-        eprintln!("extension copy warning: {e}");
+    if let Err(error) = copy_dir_recursive(src, dst) {
+        eprintln!("extension copy warning: {error}");
     }
 }
 

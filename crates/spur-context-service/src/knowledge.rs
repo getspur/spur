@@ -94,6 +94,8 @@ pub struct KnowledgeContextResult {
     pub supporting_docs: Vec<KnowledgeEvidence>,
     pub confidence: String,
     pub answerable: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub catalog_generation: Option<i64>,
     pub graph_content_hash: Option<String>,
     pub candidates: KnowledgeCandidateSummary,
 }
@@ -184,6 +186,7 @@ pub fn query_knowledge_context(
         supporting_docs,
         confidence,
         answerable,
+        catalog_generation: query_catalog_generation(db, opts),
         graph_content_hash: query_graph_content_hash(db, opts),
         candidates: KnowledgeCandidateSummary {
             total: ranked.len(),
@@ -193,6 +196,18 @@ pub fn query_knowledge_context(
             total_docs,
         },
     })
+}
+
+fn query_catalog_generation(db: &Connection, _opts: &KnowledgeContextOptions) -> Option<i64> {
+    let tables = KnowledgeTables::load(db).ok()?;
+    let sql = format!(
+        r"
+        SELECT MAX(generation)::BIGINT
+        FROM {package_catalog}
+        ",
+        package_catalog = tables.package_catalog
+    );
+    db.query_row(&sql, [], |row| row.get(0)).ok()
 }
 
 fn query_bm25_candidates(

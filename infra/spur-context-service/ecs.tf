@@ -103,4 +103,9 @@ resource "aws_ecs_task_definition" "worker" {
       ]
     }
   ])
+
+  lifecycle {
+    prevent_destroy = true
+    ignore_changes  = all
+  }
 }

@@ -36,7 +36,7 @@ const TOOL_NAMES: [&str; 8] = [
 /// Secret-bearing variants intentionally redact their debug representation.
 #[derive(Clone)]
 pub enum ContextServiceAuth {
-    /// Send no authentication header and preserve the configured legacy URL.
+    /// Send no authentication header to the unauthenticated MCP routes.
     None,
     /// Send a bearer token to the exact OAuth MCP route.
     OAuthBearer(SecretString),
@@ -73,13 +73,6 @@ impl AuthenticatedServiceOrigin {
         }
         Ok(Self(url))
     }
-
-    fn endpoint(&self, route: &str) -> Result<String, ContextServiceClientError> {
-        self.0
-            .join(route.trim_start_matches('/'))
-            .map(|url| url.to_string())
-            .map_err(|_error| ContextServiceClientError::InvalidAuthenticatedOrigin)
-    }
 }
 
 /// Construction failure for an authenticated context-service proxy.
@@ -96,7 +89,8 @@ pub enum ContextServiceClientError {
 #[derive(Clone)]
 pub struct ContextServiceClient {
     client: reqwest::Client,
-    endpoint: String,
+    code_endpoint: String,
+    knowledge_endpoint: String,
     auth: ContextServiceAuth,
 }
 
@@ -104,7 +98,8 @@ impl fmt::Debug for ContextServiceClient {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("ContextServiceClient")
-            .field("endpoint", &"[REDACTED URL]")
+            .field("code_endpoint", &"[REDACTED URL]")
+            .field("knowledge_endpoint", &"[REDACTED URL]")
             .field("auth", &self.auth)
             .finish_non_exhaustive()
     }
@@ -117,23 +112,38 @@ impl ContextServiceClient {
         auth: ContextServiceAuth,
     ) -> Result<Self, ContextServiceClientError> {
         let base_url = base_url.into();
-        match auth {
-            ContextServiceAuth::None => Ok(Self::legacy(base_url, ContextServiceAuth::None)),
-            auth @ (ContextServiceAuth::OAuthBearer(_) | ContextServiceAuth::ApiKey(_)) => {
+        let (origin, route, client) = match &auth {
+            ContextServiceAuth::None => {
+                let origin = reqwest::Url::parse(&base_url)
+                    .map_err(|_error| ContextServiceClientError::InvalidAuthenticatedOrigin)?;
+                let client = reqwest::Client::builder()
+                    .timeout(REQUEST_TIMEOUT)
+                    .build()
+                    .expect("reqwest client with static timeout configuration should build");
+                (origin, "mcp", client)
+            }
+            ContextServiceAuth::OAuthBearer(_) | ContextServiceAuth::ApiKey(_) => {
                 let origin = AuthenticatedServiceOrigin::parse(&base_url)?;
-                let route = match auth {
+                let route = match &auth {
                     ContextServiceAuth::OAuthBearer(_) => "mcp/oauth",
                     ContextServiceAuth::ApiKey(_) => "mcp/api-key",
                     ContextServiceAuth::None => unreachable!("authenticated variants matched"),
                 };
-                let client = hardened_http_client()?;
-                Ok(Self {
-                    client,
-                    endpoint: origin.endpoint(route)?,
-                    auth,
-                })
+                (origin.0, route, hardened_http_client()?)
             }
-        }
+        };
+        Ok(Self {
+            client,
+            code_endpoint: origin
+                .join(&format!("{route}/code"))
+                .map(|url| url.to_string())
+                .map_err(|_error| ContextServiceClientError::InvalidAuthenticatedOrigin)?,
+            knowledge_endpoint: origin
+                .join(&format!("{route}/knowledge"))
+                .map(|url| url.to_string())
+                .map_err(|_error| ContextServiceClientError::InvalidAuthenticatedOrigin)?,
+            auth,
+        })
     }
 
     /// Compatibility constructor for legacy optional bearer configuration.
@@ -142,27 +152,11 @@ impl ContextServiceClient {
         bearer_token: Option<String>,
     ) -> Result<Self, ContextServiceClientError> {
         let base_url = base_url.into();
-        let Some(token) = normalize_secret(bearer_token) else {
-            return Ok(Self::legacy(base_url, ContextServiceAuth::None));
+        let auth = match normalize_secret(bearer_token) {
+            Some(token) => ContextServiceAuth::OAuthBearer(token),
+            None => ContextServiceAuth::None,
         };
-        let endpoint = parse_authenticated_endpoint(&base_url)?.to_string();
-        Ok(Self {
-            client: hardened_http_client()?,
-            endpoint,
-            auth: ContextServiceAuth::OAuthBearer(token),
-        })
-    }
-
-    fn legacy(base_url: String, auth: ContextServiceAuth) -> Self {
-        let client = reqwest::Client::builder()
-            .timeout(REQUEST_TIMEOUT)
-            .build()
-            .expect("reqwest client with static timeout configuration should build");
-        Self {
-            client,
-            endpoint: base_url,
-            auth,
-        }
+        Self::new(base_url, auth)
     }
 
     pub fn from_env() -> Option<Self> {
@@ -177,9 +171,10 @@ impl ContextServiceClient {
 
     /// Calls one context-service tool and returns its decoded JSON payload.
     pub(crate) async fn call_value(&self, name: &str, args: Value) -> Result<Value, McpError> {
+        let endpoint = self.endpoint_for(name)?;
         let mut request = self
             .client
-            .post(&self.endpoint)
+            .post(endpoint)
             .json(&json!({ "tool": name, "args": args }));
         match &self.auth {
             ContextServiceAuth::None => {}
@@ -215,6 +210,23 @@ impl ContextServiceClient {
         }
 
         Ok(value)
+    }
+
+    fn endpoint_for(&self, name: &str) -> Result<&str, McpError> {
+        match name {
+            EXTERNAL_CATALOG
+            | EXTERNAL_CODE_SEARCH
+            | EXTERNAL_CODE_READ
+            | EXTERNAL_CODE_CALLERS
+            | EXTERNAL_CODE_CALLEES
+            | EXTERNAL_INDEX
+            | EXTERNAL_INDEX_STATUS => Ok(&self.code_endpoint),
+            EXTERNAL_KNOWLEDGE_CONTEXT => Ok(&self.knowledge_endpoint),
+            _ => Err(McpError::invalid_params(
+                format!("unknown context service tool `{name}`"),
+                None,
+            )),
+        }
     }
 }
 
@@ -617,6 +629,12 @@ mod tests {
         observed: Arc<Mutex<Option<oneshot::Sender<ObservedRequest>>>>,
     }
 
+    #[derive(Clone)]
+    struct CountingMockService {
+        response: Value,
+        observed_paths: Arc<Mutex<Vec<String>>>,
+    }
+
     #[derive(Debug)]
     struct ObservedRequest {
         authorization: Option<String>,
@@ -684,7 +702,7 @@ mod tests {
         });
 
         let redirect_app = Router::new().route(
-            "/mcp/api-key",
+            "/mcp/api-key/code",
             post(move || async move {
                 (
                     StatusCode::TEMPORARY_REDIRECT,
@@ -732,7 +750,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn legacy_bearer_does_not_follow_redirects_and_keeps_configured_path() {
+    async fn optional_bearer_does_not_follow_redirects_on_direct_route() {
         let (target_tx, target_rx) = oneshot::channel();
         let target_sender = Arc::new(Mutex::new(Some(target_tx)));
         let target_app = Router::new().fallback(any({
@@ -764,7 +782,7 @@ mod tests {
         });
 
         let redirect_app = Router::new().route(
-            "/custom-route",
+            "/mcp/oauth/code",
             post(move || async move {
                 (
                     StatusCode::TEMPORARY_REDIRECT,
@@ -785,7 +803,7 @@ mod tests {
         });
 
         let client = ContextServiceClient::with_optional_token(
-            format!("http://{redirect_addr}/custom-route"),
+            format!("http://{redirect_addr}"),
             Some("legacy-secret".to_owned()),
         )
         .expect("loopback legacy bearer endpoint");
@@ -852,7 +870,7 @@ mod tests {
             Some("Bearer secret-token")
         );
         assert_eq!(observed.api_key, None);
-        assert_eq!(observed.path, "/mcp/oauth");
+        assert_eq!(observed.path, "/mcp/oauth/code");
         assert_eq!(
             observed.body,
             json!({
@@ -889,7 +907,7 @@ mod tests {
         let observed = observed.await.expect("mock service should receive request");
         assert_eq!(observed.authorization, None);
         assert_eq!(observed.api_key.as_deref(), Some("spur_test_public_secret"));
-        assert_eq!(observed.path, "/mcp/api-key");
+        assert_eq!(observed.path, "/mcp/api-key/code");
     }
 
     #[tokio::test]
@@ -919,7 +937,74 @@ mod tests {
         let observed = observed.await.expect("mock service should receive request");
         assert_eq!(observed.authorization, None);
         assert_eq!(observed.api_key, None);
-        assert_eq!(observed.path, "/");
+        assert_eq!(observed.path, "/mcp/code");
+    }
+
+    #[tokio::test]
+    async fn context_service_routes_external_tools_directly() {
+        let (base_url, observed_paths) = spawn_counting_mock_service(json!({})).await;
+        let tool_routes = [
+            (EXTERNAL_CATALOG, "code"),
+            (EXTERNAL_CODE_SEARCH, "code"),
+            (EXTERNAL_CODE_READ, "code"),
+            (EXTERNAL_CODE_CALLERS, "code"),
+            (EXTERNAL_CODE_CALLEES, "code"),
+            (EXTERNAL_KNOWLEDGE_CONTEXT, "knowledge"),
+            (EXTERNAL_INDEX, "code"),
+            (EXTERNAL_INDEX_STATUS, "code"),
+        ];
+        let auth_routes = [
+            (
+                ContextServiceAuth::OAuthBearer("oauth-secret".to_owned().into()),
+                "/mcp/oauth",
+            ),
+            (
+                ContextServiceAuth::ApiKey("api-key-secret".to_owned().into()),
+                "/mcp/api-key",
+            ),
+            (ContextServiceAuth::None, "/mcp"),
+        ];
+        let expected_request_count = auth_routes.len() * tool_routes.len();
+        let mut expected_paths = Vec::new();
+
+        for (auth, auth_route) in auth_routes {
+            let client = ContextServiceClient::new(base_url.clone(), auth)
+                .expect("loopback context-service origin");
+            for (tool, service) in tool_routes {
+                client
+                    .call_value(tool, json!({}))
+                    .await
+                    .expect("direct external-tool request should succeed");
+                expected_paths.push(format!("{auth_route}/{service}"));
+            }
+        }
+
+        let observed_paths = observed_paths
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert_eq!(*observed_paths, expected_paths);
+        assert_eq!(observed_paths.len(), expected_request_count);
+    }
+
+    #[tokio::test]
+    async fn context_service_rejects_unknown_external_tool_without_post() {
+        let (base_url, observed_paths) = spawn_counting_mock_service(json!({})).await;
+        let client = ContextServiceClient::new(
+            base_url,
+            ContextServiceAuth::OAuthBearer("oauth-secret".to_owned().into()),
+        )
+        .expect("loopback context-service origin");
+
+        let error = client
+            .call_value("external_future_tool", json!({}))
+            .await
+            .expect_err("the closed route classifier must reject unknown tools");
+
+        assert_eq!(error.code, ErrorCode(-32602));
+        assert!(observed_paths
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_empty());
     }
 
     #[tokio::test]
@@ -960,7 +1045,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn legacy_optional_bearer_preserves_configured_route() {
+    async fn optional_bearer_uses_direct_oauth_code_route() {
         let (base_url, observed) = spawn_mock_service(json!({ "matches": [] })).await;
         let client =
             ContextServiceClient::with_optional_token(base_url, Some("legacy-secret".to_owned()))
@@ -978,7 +1063,7 @@ mod tests {
             .expect("legacy request should succeed");
 
         let observed = observed.await.expect("mock service should receive request");
-        assert_eq!(observed.path, "/");
+        assert_eq!(observed.path, "/mcp/oauth/code");
         assert_eq!(
             observed.authorization.as_deref(),
             Some("Bearer legacy-secret")
@@ -1078,9 +1163,12 @@ mod tests {
             observed: Arc::new(Mutex::new(Some(tx))),
         };
         let app = Router::new()
-            .route("/", post(mock_handler))
-            .route("/mcp/oauth", post(mock_handler))
-            .route("/mcp/api-key", post(mock_handler))
+            .route("/mcp/code", post(mock_handler))
+            .route("/mcp/knowledge", post(mock_handler))
+            .route("/mcp/oauth/code", post(mock_handler))
+            .route("/mcp/oauth/knowledge", post(mock_handler))
+            .route("/mcp/api-key/code", post(mock_handler))
+            .route("/mcp/api-key/knowledge", post(mock_handler))
             .with_state(state);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -1092,6 +1180,35 @@ mod tests {
                 .expect("serve mock context service");
         });
         (format!("http://{addr}"), rx)
+    }
+
+    async fn spawn_counting_mock_service(response: Value) -> (String, Arc<Mutex<Vec<String>>>) {
+        let observed_paths = Arc::new(Mutex::new(Vec::new()));
+        let state = CountingMockService {
+            response,
+            observed_paths: Arc::clone(&observed_paths),
+        };
+        let app = Router::new()
+            .route("/", post(counting_mock_handler))
+            .route("/mcp/oauth", post(counting_mock_handler))
+            .route("/mcp/api-key", post(counting_mock_handler))
+            .route("/mcp/code", post(counting_mock_handler))
+            .route("/mcp/knowledge", post(counting_mock_handler))
+            .route("/mcp/oauth/code", post(counting_mock_handler))
+            .route("/mcp/oauth/knowledge", post(counting_mock_handler))
+            .route("/mcp/api-key/code", post(counting_mock_handler))
+            .route("/mcp/api-key/knowledge", post(counting_mock_handler))
+            .with_state(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind counting mock context service");
+        let addr = listener.local_addr().expect("counting mock local addr");
+        tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve counting mock context service");
+        });
+        (format!("http://{addr}"), observed_paths)
     }
 
     async fn mock_handler(
@@ -1121,6 +1238,18 @@ mod tests {
                 body,
             });
         }
+        Json(state.response)
+    }
+
+    async fn counting_mock_handler(
+        State(state): State<CountingMockService>,
+        OriginalUri(uri): OriginalUri,
+    ) -> Json<Value> {
+        state
+            .observed_paths
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(uri.path().to_owned());
         Json(state.response)
     }
 

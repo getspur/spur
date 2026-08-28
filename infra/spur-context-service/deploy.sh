@@ -5,7 +5,8 @@
 #   ./deploy.sh                    # build Lambda + worker, terraform apply
 #   ./deploy.sh --env prod         # deploy with prod backend + var file
 #   ./deploy.sh --backend-config backends/prod.s3.tfbackend --var-file env/prod.tfvars
-#   ./deploy.sh --local-zip path   # skip Lambda build, use existing zip
+#   ./deploy.sh --local-code-zip path --local-knowledge-zip path
+#                                  # skip serving Lambda builds, use existing zips
 #   ./deploy.sh --skip-worker      # skip worker image build/push
 #   ./deploy.sh --skip-worker --package-only # build Lambda zip, skip terraform
 #   ./deploy.sh --worker-image-only # build/push worker/fetcher images, print ECS image URI
@@ -37,6 +38,18 @@ EXT_PLATFORM="linux_arm64"
 # worker cannot download (no egress to extensions.duckdb.org from its VPC) and
 # times out ~60s per sidecar, silently skipping embeddings/section vectors.
 EXTENSIONS=("httpfs" "ducklake" "postgres_scanner" "sqlite_scanner" "aws" "parquet" "json" "lance")
+# SHA-256 digests of the uncompressed DuckDB v1.5.4 linux_arm64 extension
+# artifacts. Keep this list in the same order as EXTENSIONS.
+EXTENSION_SHA256=(
+    "6d30a487968cbe5553b7272fd5bad0e4485c4117db96e21fd1e5e2a225a5a538"
+    "f73ec9ab68a6de5c3c190cd1ecbba553a5791bf5821a991d70ea65abc5e45562"
+    "102f71e6d2e603b1056407410f981c7ec141375e1edd16f2cb61e901e9c6d617"
+    "81135f8c3b4064bc5031c3bc08473a7224851461fa9a2b645ea8f851eba4a621"
+    "8244ac8560925c3caf71f2087b45e3e37aa84a8a79712b9b8f3312524bd3f483"
+    "d1aa523e5ae55731da2f67fca02ea1460e35fe4f8d824627fb565019e3eece1c"
+    "10ce8205acd23bfbc98c934803d69f1e6768fe9bfcb4c7958406144a1ea898bd"
+    "81a9f544f9f56be18db46060baf596ab973e17b50785a1eb1edd4885908b2158"
+)
 # shellcheck disable=SC2034
 WORKER_DUCKDB_EXTENSION_DIR="/opt/duckdb/extensions"
 
@@ -72,6 +85,95 @@ log() { echo "[deploy] $*" >&2; }
 # shellcheck source=infra/spur-context-service/graviton2-baseline.sh
 source "$SCRIPT_DIR/graviton2-baseline.sh"
 
+assert_ecr_exclusion_filter_support() {
+    local capability_output
+
+    if ! capability_output="$(aws ecr put-image-tag-mutability \
+        --repository-name spur-capability-preflight \
+        --image-tag-mutability IMMUTABLE_WITH_EXCLUSION \
+        --image-tag-mutability-exclusion-filters \
+            filterType=WILDCARD,filter="$LATEST_IMAGE_TAG" \
+        --generate-cli-skeleton output 2>&1)"; then
+        log "AWS CLI capability preflight failed: ECR immutable tag exclusions are unavailable; no ECR repository was changed"
+        log "Upgrade AWS CLI v2 to a release that supports put-image-tag-mutability --image-tag-mutability-exclusion-filters"
+        log "$capability_output"
+        exit 2
+    fi
+}
+
+assert_selected_aws_region() {
+    local configured_region
+    local selected_region
+
+    configured_region="$(aws configure get region 2>/dev/null || true)"
+    selected_region="${AWS_REGION:-${AWS_DEFAULT_REGION:-$configured_region}}"
+
+    if [[ -z "$selected_region" ]]; then
+        log "AWS region preflight failed: no CLI or environment region is selected"
+        exit 2
+    fi
+    if [[ "$selected_region" != "$AWS_REGION_VAL" ]]; then
+        log "AWS region preflight failed: selected '$selected_region', Terraform expects '$AWS_REGION_VAL'"
+        exit 2
+    fi
+
+    # Child deployment scripts invoke the AWS CLI too. Keep their effective
+    # region pinned to the Terraform-selected region after the assertion.
+    export AWS_REGION="$AWS_REGION_VAL"
+    export AWS_DEFAULT_REGION="$AWS_REGION_VAL"
+    log "AWS region preflight passed: $AWS_REGION_VAL"
+}
+
+ensure_ecr_repository() {
+    local repo="$1"
+    local repository_exists="$2"
+
+    if [[ "$repository_exists" != "true" ]]; then
+        aws ecr create-repository \
+            --repository-name "$repo" \
+            --image-scanning-configuration scanOnPush=true \
+            --image-tag-mutability IMMUTABLE_WITH_EXCLUSION \
+            --image-tag-mutability-exclusion-filters \
+                filterType=WILDCARD,filter="$LATEST_IMAGE_TAG" \
+            --region "$AWS_REGION_VAL" >/dev/null
+    fi
+
+    # Reconcile existing repositories too; create-time settings alone would
+    # leave older mutable/unscanned repositories unchanged.
+    aws ecr put-image-scanning-configuration \
+        --repository-name "$repo" \
+        --image-scanning-configuration scanOnPush=true \
+        --region "$AWS_REGION_VAL" >/dev/null
+    aws ecr put-image-tag-mutability \
+        --repository-name "$repo" \
+        --image-tag-mutability IMMUTABLE_WITH_EXCLUSION \
+        --image-tag-mutability-exclusion-filters \
+            filterType=WILDCARD,filter="$LATEST_IMAGE_TAG" \
+        --region "$AWS_REGION_VAL" >/dev/null
+}
+
+ensure_ecr_repositories() {
+    local repository_exists
+
+    repository_exists=false
+    if aws ecr describe-repositories --repository-names "$WORKER_ECR_REPO" --region "$AWS_REGION_VAL" >/dev/null 2>&1; then
+        repository_exists=true
+    fi
+    ensure_ecr_repository "$WORKER_ECR_REPO" "$repository_exists"
+
+    repository_exists=false
+    if aws ecr describe-repositories --repository-names "$WORKER_LAMBDA_ECR_REPO" --region "$AWS_REGION_VAL" >/dev/null 2>&1; then
+        repository_exists=true
+    fi
+    ensure_ecr_repository "$WORKER_LAMBDA_ECR_REPO" "$repository_exists"
+
+    repository_exists=false
+    if aws ecr describe-repositories --repository-names "$SOURCE_FETCHER_LAMBDA_ECR_REPO" --region "$AWS_REGION_VAL" >/dev/null 2>&1; then
+        repository_exists=true
+    fi
+    ensure_ecr_repository "$SOURCE_FETCHER_LAMBDA_ECR_REPO" "$repository_exists"
+}
+
 aws_account_id() {
     if [[ -z "${AWS_ACCOUNT_ID:-}" ]]; then
         AWS_ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
@@ -90,11 +192,24 @@ ecr_latest_image_tag() {
     ecr_image_tag "$repo" "$LATEST_IMAGE_TAG"
 }
 
+ecr_image_digest() {
+    local repo="$1"
+    local image_tag="$2"
+    aws ecr batch-get-image \
+        --repository-name "$repo" \
+        --image-ids "imageTag=$image_tag" \
+        --region "$AWS_REGION_VAL" \
+        --query 'images[0].imageId.imageDigest' \
+        --output text
+}
+
 tag_ecr_image_as_latest() {
     local repo="$1"
     local image_tag="$2"
     local latest_tag
     local image_manifest
+    local source_digest
+    local latest_digest
 
     latest_tag="$(ecr_latest_image_tag "$repo")"
     image_manifest="$(aws ecr batch-get-image \
@@ -107,6 +222,17 @@ tag_ecr_image_as_latest() {
     if [[ -z "$image_manifest" || "$image_manifest" == "None" ]]; then
         log "failed to resolve ECR image manifest for $repo:$image_tag"
         exit 1
+    fi
+
+    source_digest="$(ecr_image_digest "$repo" "$image_tag")"
+    if [[ -z "$source_digest" || "$source_digest" == "None" ]]; then
+        log "failed to resolve ECR image digest for $repo:$image_tag"
+        exit 1
+    fi
+    latest_digest="$(ecr_image_digest "$repo" "$LATEST_IMAGE_TAG")"
+    if [[ "$latest_digest" == "$source_digest" ]]; then
+        log "latest image pointer already current: $latest_tag"
+        return 0
     fi
 
     aws ecr put-image \
@@ -171,14 +297,16 @@ RUN mkdir -p /mnt/cargo/rust-lld-driver \
 WORKDIR /workspace
 COPY . .
 
-RUN scripts/spur-cargo --workdir crates/spur-context-service build --features lambda --release
+RUN scripts/spur-cargo --workdir crates/spur-context-service build --no-default-features --features code-lambda --bin spur-context-code-lambda --release
+RUN scripts/spur-cargo --workdir crates/spur-context-service build --no-default-features --features knowledge-lambda --bin spur-context-knowledge-lambda --release
 RUN scripts/spur-cargo --workdir crates/spur-context-service build --features worker --release
 RUN scripts/spur-cargo --workdir crates/spur-context-service build --features worker-lambda --release
 RUN scripts/spur-cargo build -p spur-context-fetcher --release
 RUN scripts/spur-cargo build -p spur-cli --release --no-default-features --features worker-no-embed
 
 RUN mkdir -p /out \
-    && cp crates/spur-context-service/target/release/spur-context-service /out/bootstrap \
+    && cp crates/spur-context-service/target/release/spur-context-code-lambda /out/spur-context-code-lambda \
+    && cp crates/spur-context-service/target/release/spur-context-knowledge-lambda /out/spur-context-knowledge-lambda \
     && cp crates/spur-context-service/target/release/spur-context-worker /out/spur-context-worker \
     && cp crates/spur-context-service/target/release/spur-context-worker-lambda /out/spur-context-worker-lambda \
     && cp target/release/spur-context-fetcher-lambda /out/spur-context-fetcher-lambda \
@@ -292,15 +420,53 @@ fetch_remote_target_file() {
     fetch_remote_file "$(remote_target_path "$remote_rel_path")" "$local_dest"
 }
 
+sha256_file() {
+    local path="$1"
+
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$path" | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$path" | awk '{print $1}'
+    else
+        log "SHA-256 verification requires sha256sum or shasum"
+        exit 1
+    fi
+}
+
 download_extensions() {
     local ext_dir="$BUILD_DIR/.duckdb/extensions/v${DUCKDB_VERSION}/${EXT_PLATFORM}"
+    local i
     mkdir -p "$ext_dir"
-    for ext in "${EXTENSIONS[@]}"; do
+    for i in "${!EXTENSIONS[@]}"; do
+        local ext="${EXTENSIONS[$i]}"
+        local expected_sha="${EXTENSION_SHA256[$i]}"
         local url="https://extensions.duckdb.org/v${DUCKDB_VERSION}/${EXT_PLATFORM}/${ext}.duckdb_extension.gz"
         local dest="$ext_dir/${ext}.duckdb_extension"
+        local candidate="$dest"
+        local actual_sha
+
         if [[ ! -f "$dest" ]]; then
             log "downloading $ext..."
-            curl -sL "$url" | gunzip > "$dest"
+            candidate="${dest}.download"
+            rm -f "$candidate"
+            if ! curl --fail --silent --show-error --location "$url" | gunzip > "$candidate"; then
+                rm -f "$candidate"
+                log "failed to download DuckDB extension: $ext"
+                exit 1
+            fi
+        fi
+
+        actual_sha="$(sha256_file "$candidate")"
+        if [[ "$actual_sha" != "$expected_sha" ]]; then
+            if [[ "$candidate" != "$dest" ]]; then
+                rm -f "$candidate"
+            fi
+            log "SHA-256 mismatch for DuckDB extension $ext: expected $expected_sha, got $actual_sha"
+            exit 1
+        fi
+
+        if [[ "$candidate" != "$dest" ]]; then
+            mv "$candidate" "$dest"
         fi
     done
 }
@@ -312,21 +478,29 @@ copy_worker_extensions() {
     cp -R "$BUILD_DIR/.duckdb/extensions/." "$dest/"
 }
 
-build_binary() {
+build_serving_binaries() {
+    local code_dir="$BUILD_DIR/code-lambda"
+    local knowledge_dir="$BUILD_DIR/knowledge-lambda"
+    mkdir -p "$code_dir" "$knowledge_dir"
+
     if [[ "${BUILD_MODE:-remote}" == "self-contained" ]]; then
         ensure_self_contained_artifacts
-        cp "$SELF_CONTAINED_EXPORT_DIR/bootstrap" "$BUILD_DIR/bootstrap"
-        chmod +x "$BUILD_DIR/bootstrap"
+        cp "$SELF_CONTAINED_EXPORT_DIR/spur-context-code-lambda" "$code_dir/bootstrap"
+        cp "$SELF_CONTAINED_EXPORT_DIR/spur-context-knowledge-lambda" "$knowledge_dir/bootstrap"
+        chmod +x "$code_dir/bootstrap" "$knowledge_dir/bootstrap"
         return
     fi
 
-    log "building on remote Graviton4 VM (portable arm64 for Lambda: neoverse-n1)..."
+    log "building serving Lambdas on remote Graviton4 VM (portable arm64: neoverse-n1)..."
     cd "$REPO_ROOT"
     # spur-context-service is excluded from the workspace (standalone Cargo.toml
     # with duckdb 1.5.4). Build from the crate directory directly.
-    run_graviton2_safe_cargo "serving Lambda bootstrap" \
-        --workdir crates/spur-context-service build --features lambda --release
-    fetch_remote_target_file release/spur-context-service "$BUILD_DIR/bootstrap"
+    run_graviton2_safe_cargo "Code Lambda bootstrap" \
+        --workdir crates/spur-context-service build --no-default-features --features code-lambda --bin spur-context-code-lambda --release
+    fetch_remote_target_file release/spur-context-code-lambda "$BUILD_DIR/code-lambda/bootstrap"
+    run_graviton2_safe_cargo "Knowledge Lambda bootstrap" \
+        --workdir crates/spur-context-service build --no-default-features --features knowledge-lambda --bin spur-context-knowledge-lambda --release
+    fetch_remote_target_file release/spur-context-knowledge-lambda "$BUILD_DIR/knowledge-lambda/bootstrap"
 }
 
 build_spur_cli() {
@@ -341,16 +515,30 @@ build_spur_cli() {
         build -p spur-cli --release --no-default-features --features worker-no-embed
 }
 
-package_zip() {
+copy_knowledge_extensions() {
+    local knowledge_dir="$BUILD_DIR/knowledge-lambda"
+    rm -rf "$knowledge_dir/.duckdb"
+    cp -R "$BUILD_DIR/.duckdb" "$knowledge_dir/.duckdb"
+}
+
+package_code_zip() {
     local zip_path="$1"
-    log "packaging Lambda zip..."
-    cd "$BUILD_DIR"
+    log "packaging Code Lambda zip..."
+    cd "$BUILD_DIR/code-lambda"
+    zip -r "$zip_path" bootstrap
+    log "Code Lambda zip size: $(du -h "$zip_path" | cut -f1)"
+}
+
+package_knowledge_zip() {
+    local zip_path="$1"
+    log "packaging Knowledge Lambda zip..."
+    cd "$BUILD_DIR/knowledge-lambda"
     # Exclude lance from the SERVING zip: serving reads gold DuckLake tables
     # (embeddings are native FLOAT[]) and never loads lance, and bundling it
     # pushes the zip past Lambda's 250 MB unzipped limit. lance stays bundled in
     # the worker images (copy_worker_extensions) where translate needs it.
     zip -r "$zip_path" bootstrap .duckdb/ -x "*.gz" -x "*/lance.duckdb_extension"
-    log "zip size: $(du -h "$zip_path" | cut -f1)"
+    log "Knowledge Lambda zip size: $(du -h "$zip_path" | cut -f1)"
 }
 
 build_worker() {
@@ -484,13 +672,6 @@ build_local_worker_images() {
     write_source_fetcher_lambda_image_dockerfile "$source_fetcher_dockerfile"
 
     if [[ "$PUSH_IMAGES" == "true" ]]; then
-        aws ecr describe-repositories --repository-names "$WORKER_ECR_REPO" --region "$AWS_REGION_VAL" 2>/dev/null \
-            || aws ecr create-repository --repository-name "$WORKER_ECR_REPO" --region "$AWS_REGION_VAL" >/dev/null
-        aws ecr describe-repositories --repository-names "$WORKER_LAMBDA_ECR_REPO" --region "$AWS_REGION_VAL" 2>/dev/null \
-            || aws ecr create-repository --repository-name "$WORKER_LAMBDA_ECR_REPO" --region "$AWS_REGION_VAL" >/dev/null
-        aws ecr describe-repositories --repository-names "$SOURCE_FETCHER_LAMBDA_ECR_REPO" --region "$AWS_REGION_VAL" 2>/dev/null \
-            || aws ecr create-repository --repository-name "$SOURCE_FETCHER_LAMBDA_ECR_REPO" --region "$AWS_REGION_VAL" >/dev/null
-
         WORKER_IMAGE_URI="$(ecr_image_tag "$WORKER_ECR_REPO")"
         WORKER_LAMBDA_IMAGE_URI="$(ecr_image_tag "$WORKER_LAMBDA_ECR_REPO")"
         SOURCE_FETCHER_LAMBDA_IMAGE_URI="$(ecr_image_tag "$SOURCE_FETCHER_LAMBDA_ECR_REPO")"
@@ -558,10 +739,6 @@ build_local_worker_images() {
 build_and_push_worker_image() {
     log "building Docker image for spur-context-worker (remote Docker build on VM)..."
 
-    # Ensure ECR repo exists.
-    aws ecr describe-repositories --repository-names "$WORKER_ECR_REPO" --region "$AWS_REGION_VAL" 2>/dev/null \
-        || aws ecr create-repository --repository-name "$WORKER_ECR_REPO" --region "$AWS_REGION_VAL" >/dev/null
-
     local full_tag
     full_tag="$(ecr_image_tag "$WORKER_ECR_REPO")"
     local worker_context="$BUILD_DIR/worker-image-context"
@@ -593,9 +770,6 @@ build_and_push_worker_image() {
 build_and_push_worker_lambda_image() {
     log "building Docker image for spur-context-worker Lambda (remote Docker build on VM)..."
 
-    aws ecr describe-repositories --repository-names "$WORKER_LAMBDA_ECR_REPO" --region "$AWS_REGION_VAL" 2>/dev/null \
-        || aws ecr create-repository --repository-name "$WORKER_LAMBDA_ECR_REPO" --region "$AWS_REGION_VAL" >/dev/null
-
     local full_tag
     full_tag="$(ecr_image_tag "$WORKER_LAMBDA_ECR_REPO")"
     local worker_lambda_context="$BUILD_DIR/worker-lambda-image-context"
@@ -620,9 +794,6 @@ build_and_push_worker_lambda_image() {
 
 build_and_push_source_fetcher_lambda_image() {
     log "building Docker image for spur-context-source-fetcher Lambda (remote Docker build on VM)..."
-
-    aws ecr describe-repositories --repository-names "$SOURCE_FETCHER_LAMBDA_ECR_REPO" --region "$AWS_REGION_VAL" 2>/dev/null \
-        || aws ecr create-repository --repository-name "$SOURCE_FETCHER_LAMBDA_ECR_REPO" --region "$AWS_REGION_VAL" >/dev/null
 
     local full_tag
     full_tag="$(ecr_image_tag "$SOURCE_FETCHER_LAMBDA_ECR_REPO")"
@@ -689,9 +860,12 @@ EOF
 }
 
 main() {
-    local zip_path="$REPO_ROOT/target/lambda/spur-context-service.zip"
-    local tf_zip_path="../../target/lambda/spur-context-service.zip"
-    local local_zip=""
+    local code_zip_path="$REPO_ROOT/target/lambda/spur-context-code-lambda.zip"
+    local knowledge_zip_path="$REPO_ROOT/target/lambda/spur-context-knowledge-lambda.zip"
+    local tf_code_zip_path="../../target/lambda/spur-context-code-lambda.zip"
+    local tf_knowledge_zip_path="../../target/lambda/spur-context-knowledge-lambda.zip"
+    local local_code_zip=""
+    local local_knowledge_zip=""
     local skip_worker=false
     local worker_image_only=false
     local package_only=false
@@ -708,7 +882,8 @@ main() {
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --local-zip)   local_zip="$2"; shift 2 ;;
+            --local-code-zip) local_code_zip="$2"; shift 2 ;;
+            --local-knowledge-zip|--local-zip) local_knowledge_zip="$2"; shift 2 ;;
             --skip-worker) skip_worker=true; shift ;;
             --worker-image-only) worker_image_only=true; shift ;;
             --package-only) package_only=true; shift ;;
@@ -732,13 +907,33 @@ main() {
         exit 2
     fi
 
+    if [[ -n "$local_code_zip" || -n "$local_knowledge_zip" ]]; then
+        if [[ -z "$local_code_zip" || -z "$local_knowledge_zip" ]]; then
+            log "--local-code-zip and --local-knowledge-zip must be provided together"
+            exit 2
+        fi
+        if [[ "$local_code_zip" == "$local_knowledge_zip" ]]; then
+            log "Code and Knowledge Lambda zip paths must be distinct"
+            exit 2
+        fi
+    fi
+
     if [[ "$BUILD_MODE" == "remote" && "$PUSH_IMAGES" != "true" && "$skip_worker" == "false" ]]; then
         log "--no-push requires --build-mode self-contained for worker image builds"
         exit 2
     fi
 
+    if [[ "$PUSH_IMAGES" == "true" && "$skip_worker" == "false" ]] \
+        || [[ "$worker_image_only" == "false" && "$package_only" == "false" ]]; then
+        assert_ecr_exclusion_filter_support
+        assert_selected_aws_region
+    fi
+
     # Build + push worker container image (unless --skip-worker).
     if [[ "$skip_worker" == "false" ]]; then
+        if [[ "$PUSH_IMAGES" == "true" ]]; then
+            ensure_ecr_repositories
+        fi
         download_extensions
         build_spur_cli
         build_worker
@@ -768,21 +963,25 @@ main() {
         exit 0
     fi
 
-    # Build or reuse Lambda zip.
-    if [[ -n "$local_zip" ]]; then
-        zip_path="$local_zip"
-        tf_zip_path="$local_zip"
+    # Build or reuse the two serving Lambda zips.
+    if [[ -n "$local_code_zip" ]]; then
+        code_zip_path="$local_code_zip"
+        knowledge_zip_path="$local_knowledge_zip"
+        tf_code_zip_path="$local_code_zip"
+        tf_knowledge_zip_path="$local_knowledge_zip"
     else
-        mkdir -p "$(dirname "$zip_path")"
-        rm -f "$zip_path"
+        mkdir -p "$(dirname "$code_zip_path")"
+        rm -f "$code_zip_path" "$knowledge_zip_path"
         download_extensions
-        build_binary
-        package_zip "$zip_path"
+        build_serving_binaries
+        copy_knowledge_extensions
+        package_code_zip "$code_zip_path"
+        package_knowledge_zip "$knowledge_zip_path"
     fi
 
     if [[ "$package_only" == "true" ]]; then
         log "package-only requested; skipping terraform"
-        echo "$zip_path"
+        printf '%s\n%s\n' "$code_zip_path" "$knowledge_zip_path"
         exit 0
     fi
 
@@ -799,7 +998,7 @@ main() {
 
     terraform init -upgrade -backend-config="$backend_config"
 
-    local tf_vars=(-var-file="$var_file" -var "lambda_zip_path=$tf_zip_path")
+    local tf_vars=(-var-file="$var_file" -var "code_lambda_zip_path=$tf_code_zip_path" -var "knowledge_lambda_zip_path=$tf_knowledge_zip_path")
     if [[ -n "$worker_image_uri" ]]; then
         tf_vars+=(-var "worker_ecr_image=$worker_image_uri")
     else

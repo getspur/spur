@@ -13,6 +13,10 @@ use thiserror::Error;
 
 use crate::abuse::{self, SourceKind, ValidateOptions};
 use crate::catalog::{readable_table, CatalogResolver, ResolvedRevision};
+use crate::code_backend::{
+    CatalogRequest, CodeBackend, CodeBackendError, CodeEdgesRequest, CodeReadRequest,
+    CodeSearchRequest,
+};
 use crate::jobs::{
     BacklogOwner, CreateJobRequest, EnqueueOutcome, JobRecord, JobStatus, JobStore, JobsError,
     QueueConfig,
@@ -215,6 +219,169 @@ pub fn handle_tool_without_catalog(name: &str, args: &Value) -> Result<Value, Mc
         other => Err(McpHandlerError::InvalidParams(format!(
             "unknown context-service MCP tool: {other}"
         ))),
+    }
+}
+
+/// Routes the immutable Parquet-backed subset of the MCP surface.
+pub async fn handle_tool_with_code_backend(
+    name: &str,
+    args: &Value,
+    backend: &CodeBackend,
+) -> Result<Value, McpHandlerError> {
+    match name {
+        "external_catalog" => {
+            let args: CatalogArgs = parse_args(args)?;
+            args.validate()?;
+            if args.package.is_none()
+                && (args.revision.is_some() || args.ref_name.is_some() || args.path.is_some())
+            {
+                return Err(McpHandlerError::InvalidParams(
+                    "field 'package' is required when using revision, ref, or path".to_owned(),
+                ));
+            }
+            if args.package.is_some() && args.revision_ref().is_none() && args.path.is_some() {
+                return Err(McpHandlerError::InvalidParams(
+                    "field 'path' requires revision or ref".to_owned(),
+                ));
+            }
+            let request = CatalogRequest {
+                source: args.source().to_owned(),
+                package: args.package.clone(),
+                revision_or_ref: args.revision_ref().map(str::to_owned),
+                path: args.path.clone(),
+                name_filter: args.name_filter.clone(),
+                limit: args.limit(),
+                cursor: args.cursor.clone(),
+            };
+            backend.catalog(request).await.map_err(code_backend_error)
+        }
+        "external_code_search" => {
+            let args: CodeSearchArgs = parse_args(args)?;
+            args.validate()?;
+            let request = CodeSearchRequest {
+                source: args.source().to_owned(),
+                package: args.package.clone(),
+                revision_or_ref: args.revision_ref().map(str::to_owned),
+                query: args.query.clone(),
+                symbol_kind: args.symbol_kind.clone(),
+                limit: args.limit.unwrap_or(20).clamp(1, 200),
+            };
+            backend.search(request).await.map_err(code_backend_error)
+        }
+        "external_code_read" => {
+            let args: CodeReadArgs = parse_args(args)?;
+            backend
+                .read(CodeReadRequest {
+                    source: args.source().to_owned(),
+                    selector: args.selector,
+                    context_lines: args.context_lines.unwrap_or(0),
+                })
+                .await
+                .map_err(|error| code_backend_tool_error("external_code_read failed", error))
+        }
+        "external_code_callers" => {
+            let args: CodeCallersArgs = parse_args(args)?;
+            backend
+                .callers(CodeEdgesRequest {
+                    source: args.source().to_owned(),
+                    selector: args.selector,
+                    include_unresolved: args.include_unresolved.unwrap_or(false),
+                })
+                .await
+                .map_err(|error| code_backend_tool_error("external_code_callers failed", error))
+        }
+        "external_code_callees" => {
+            let args: CodeCalleesArgs = parse_args(args)?;
+            backend
+                .callees(CodeEdgesRequest {
+                    source: args.source().to_owned(),
+                    selector: args.selector,
+                    include_unresolved: args.include_unresolved.unwrap_or(false),
+                })
+                .await
+                .map_err(|error| code_backend_tool_error("external_code_callees failed", error))
+        }
+        "external_index" => handle_index_with_code_backend(args, backend).await,
+        "external_index_status" => {
+            let args: ExternalIndexStatusArgs = parse_args(args)?;
+            args.validate()?;
+            backend
+                .index_status(&args.job_id)
+                .await
+                .map_err(code_backend_error)
+        }
+        _ => handle_tool_without_catalog(name, args),
+    }
+}
+
+async fn handle_index_with_code_backend(
+    args: &Value,
+    backend: &CodeBackend,
+) -> Result<Value, McpHandlerError> {
+    let parsed_args: ExternalIndexArgs = parse_args(args)?;
+    parsed_args.validate()?;
+    let parsed_url = match abuse::validate(parsed_args.source_url.trim(), &index_validate_options())
+    {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            return Ok(json!({
+                "status": "rejected",
+                "reason": format!("source_url: {error}")
+            }));
+        }
+    };
+    let identity = match ExternalIndexIdentity::canonicalize(&parsed_args, &parsed_url) {
+        Ok(identity) => identity,
+        Err(reason) => return Ok(json!({ "status": "rejected", "reason": reason })),
+    };
+    if parsed_args.force.unwrap_or(false) {
+        return handle_index_requires_lambda(args);
+    }
+    if let Some(response) = backend
+        .warm_index(&identity.source, &identity.package, &identity.revision)
+        .await
+        .map_err(code_backend_error)?
+    {
+        return Ok(response);
+    }
+    if let Some(legacy_source) = identity.legacy_warm_source.as_deref() {
+        if let Some(response) = backend
+            .warm_index(legacy_source, &identity.package, &identity.revision)
+            .await
+            .map_err(code_backend_error)?
+        {
+            return Ok(response);
+        }
+    }
+    handle_index_requires_lambda(args)
+}
+
+fn code_backend_error(error: CodeBackendError) -> McpHandlerError {
+    match error {
+        CodeBackendError::PackageUnavailable => {
+            McpHandlerError::NotFound("package revision not found".to_owned())
+        }
+        CodeBackendError::InvalidCursor => {
+            McpHandlerError::InvalidParams("invalid catalog cursor".to_owned())
+        }
+        error => McpHandlerError::Internal(format!(
+            "code backend temporarily unavailable: {} (retryable={})",
+            error.code(),
+            error.is_retryable()
+        )),
+    }
+}
+
+fn code_backend_tool_error(context: &'static str, error: CodeBackendError) -> McpHandlerError {
+    match error {
+        CodeBackendError::InvalidSelector(message) => McpHandlerError::InvalidParams(message),
+        CodeBackendError::AmbiguousSelector { .. } => {
+            McpHandlerError::InvalidParams(format!("{context}: {error}"))
+        }
+        CodeBackendError::SymbolNotFound(selector) => {
+            McpHandlerError::NotFound(format!("symbol not found: {selector}"))
+        }
+        error => code_backend_error(error),
     }
 }
 
@@ -436,6 +603,7 @@ fn handle_knowledge_context_without_catalog(args: &Value) -> Result<Value, McpHa
         supporting_docs: Vec::new(),
         confidence: "low".to_owned(),
         answerable: false,
+        catalog_generation: None,
         graph_content_hash: None,
         candidates: knowledge::KnowledgeCandidateSummary {
             total: 0,

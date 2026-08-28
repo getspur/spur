@@ -1,5 +1,8 @@
 import json
+import os
 import re
+import subprocess
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -13,6 +16,754 @@ VERSIONS_TF = INFRA_DIR / "versions.tf"
 CONTEXT_SERVICE_WORKFLOW = ROOT / ".github" / "workflows" / "context-service.yml"
 STAGING_SMOKE = INFRA_DIR / "smoke-staging-e2e.py"
 STAGING_SMOKE_ENTRYPOINT = INFRA_DIR / "smoke-staging-e2e.sh"
+REMOVED_ROUTE_ADDRESS = re.compile(
+    r"\baws_apigatewayv2_route\.(?:default|oauth)(?![A-Za-z0-9_])"
+)
+REMOVED_ROUTE_RESOURCE = re.compile(
+    r'^\s*resource\s+"aws_apigatewayv2_route"\s+"(?:default|oauth)"'
+)
+
+
+def terraform_resource_block(text, resource_type, resource_name):
+    marker = f'resource "{resource_type}" "{resource_name}"'
+    assert marker in text, f"missing Terraform resource: {marker}"
+    start = text.index(marker)
+    brace = text.index("{", start)
+    depth = 0
+    for offset, character in enumerate(text[brace:], start=brace):
+        if character == "{":
+            depth += 1
+        elif character == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start : offset + 1]
+    raise AssertionError(f"unterminated Terraform resource: {marker}")
+
+
+def terraform_resource_blocks(text, resource_type):
+    return {
+        resource_name: terraform_resource_block(text, resource_type, resource_name)
+        for resource_name in re.findall(
+            rf'resource\s+"{re.escape(resource_type)}"\s+"([^"]+)"', text
+        )
+    }
+
+
+def terraform_output_block(text, output_name):
+    marker = f'output "{output_name}"'
+    start = text.index(marker)
+    brace = text.index("{", start)
+    depth = 0
+    for offset, character in enumerate(text[brace:], start=brace):
+        if character == "{":
+            depth += 1
+        elif character == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start : offset + 1]
+    raise AssertionError(f"unterminated Terraform output: {marker}")
+
+
+def terraform_assignment(block, name):
+    match = re.search(rf"^\s*{re.escape(name)}\s*=\s*(.+)$", block, re.MULTILINE)
+    return match.group(1).strip() if match else None
+
+
+def terraform_module_contract_files():
+    return sorted(
+        path
+        for pattern in ("*.tf", "*.tftest.hcl", "*.md")
+        for path in INFRA_DIR.rglob(pattern)
+        if ".terraform" not in path.parts
+    )
+
+
+def shell_function(source, name):
+    match = re.search(
+        rf"(?ms)^{re.escape(name)}\(\) \{{\n(.*?)(?=^[a-zA-Z_][a-zA-Z0-9_]*\(\) \{{|\Z)",
+        source,
+    )
+    assert match is not None, f"missing shell function: {name}"
+    return match.group(1)
+
+
+def write_executable(path, source):
+    path.write_text(source)
+    path.chmod(0o755)
+
+
+def test_main_module_route_contracts_drop_removed_addresses_and_unsuffixed_paths():
+    contract_files = sorted(
+        {
+            *INFRA_DIR.glob("*.tf"),
+            *INFRA_DIR.glob("tests/*.tftest.hcl"),
+            INFRA_DIR / "env" / "default.tfvars",
+            INFRA_DIR / "README.md",
+        }
+    )
+    assert all("poc" not in path.relative_to(INFRA_DIR).parts for path in contract_files)
+
+    unsuffixed_serving_route = re.compile(
+        r'^\s*route_key\s*=\s*"POST /mcp/(?:oauth|api-key)"\s*$'
+    )
+    valid_default_stage_name = re.compile(r'^\s*name\s*=\s*"\$default"\s*$')
+    stale_contracts = []
+
+    for path in contract_files:
+        for line_number, line in enumerate(path.read_text().splitlines(), start=1):
+            reasons = []
+            if REMOVED_ROUTE_RESOURCE.search(line):
+                reasons.append("removed route resource")
+            if unsuffixed_serving_route.search(line):
+                reasons.append("unsuffixed serving route")
+            if "$default" in line and not (
+                path == INFRA_DIR / "main.tf" and valid_default_stage_name.fullmatch(line)
+            ):
+                reasons.append("removed catch-all route contract")
+            if reasons:
+                stale_contracts.append(
+                    f"{path.relative_to(ROOT)}:{line_number}: "
+                    f"{', '.join(reasons)}: {line.strip()}"
+                )
+
+    assert not stale_contracts, "\n".join(stale_contracts)
+
+
+def test_second_route_correction_restores_direct_and_exact_output_contracts():
+    api_key_static = (INFRA_DIR / "tests" / "api_key_static.tftest.hcl").read_text()
+    cognito_static = (INFRA_DIR / "tests" / "cognito_static.tftest.hcl").read_text()
+    outputs_tf = (INFRA_DIR / "outputs.tf").read_text()
+    readme = (INFRA_DIR / "README.md").read_text()
+    problems = []
+
+    for address in (
+        "aws_apigatewayv2_route.api_key_mcp",
+        "aws_apigatewayv2_route.oauth_code",
+        "aws_apigatewayv2_route.oauth_knowledge",
+        "aws_apigatewayv2_route.api_key_mcp_knowledge",
+    ):
+        if REMOVED_ROUTE_ADDRESS.search(address):
+            problems.append(f"stale-address guard rejects valid route {address}")
+    for address in (
+        "aws_apigatewayv2_route.default",
+        "aws_apigatewayv2_route.oauth",
+    ):
+        if not REMOVED_ROUTE_ADDRESS.search(address):
+            problems.append(f"stale-address guard allows removed route {address}")
+
+    direct_api_key_assertions = (
+        "length(aws_apigatewayv2_route.api_key_mcp) == 0",
+        'aws_apigatewayv2_route.api_key_mcp[0].route_key == "POST /mcp/api-key/code"',
+        'aws_apigatewayv2_route.api_key_mcp[0].authorization_type == "CUSTOM"',
+        "aws_apigatewayv2_route.api_key_mcp[0].authorizer_id == aws_apigatewayv2_authorizer.api_key[0].id",
+        'aws_apigatewayv2_route.api_key_mcp[0].target == "integrations/${aws_apigatewayv2_integration.api_key[0].id}"',
+    )
+    for assertion in direct_api_key_assertions:
+        if assertion not in api_key_static:
+            problems.append(f"API-key Terraform test lacks direct assertion: {assertion}")
+    if 'strcontains(file("${path.module}/api_keys.tf")' in api_key_static:
+        problems.append("API-key Terraform test still uses source-text route assertions")
+
+    output_contracts = {
+        "oauth_api_urls": (
+            "var.cognito_auth_enabled",
+            "/mcp/oauth/code",
+            "/mcp/oauth/knowledge",
+        ),
+        "api_key_mcp_urls": (
+            "var.api_key_auth_enabled",
+            "/mcp/api-key/code",
+            "/mcp/api-key/knowledge",
+        ),
+    }
+    for output_name, required_fragments in output_contracts.items():
+        try:
+            block = terraform_output_block(outputs_tf, output_name)
+        except ValueError:
+            problems.append(f'outputs.tf lacks output "{output_name}"')
+            continue
+        for fragment in required_fragments:
+            if fragment not in block:
+                problems.append(f"{output_name} lacks {fragment}")
+        if ": null" not in block:
+            problems.append(f"{output_name} does not become null when disabled")
+
+    for output_name in ("oauth_api_url", "api_key_mcp_url"):
+        block = terraform_output_block(outputs_tf, output_name).lower()
+        if "deprecated" not in block or "not directly callable" not in block:
+            problems.append(
+                f"{output_name} is not described as a deprecated, non-callable prefix"
+            )
+
+    terraform_output_assertions = (
+        (cognito_static, "oauth_api_url", 2),
+        (cognito_static, "oauth_api_urls", 2),
+        (api_key_static, "api_key_mcp_url", 2),
+        (api_key_static, "api_key_mcp_urls", 2),
+    )
+    for test_source, output_name, minimum in terraform_output_assertions:
+        count = len(re.findall(rf"\boutput\.{output_name}\b", test_source))
+        if count < minimum:
+            problems.append(
+                f"Terraform tests assert output.{output_name} {count} time(s), "
+                f"need execute-api and custom-domain coverage"
+            )
+
+    for output_name in ("oauth_api_urls", "api_key_mcp_urls"):
+        if output_name not in readme:
+            problems.append(f"README does not direct operators to {output_name}")
+    for output_name in ("oauth_api_url", "api_key_mcp_url"):
+        if not re.search(
+            rf"(?is)(?:deprecated.{{0,200}}{output_name}|{output_name}.{{0,200}}deprecated)",
+            readme,
+        ):
+            problems.append(f"README does not mark {output_name} deprecated")
+
+    assert not problems, "\n".join(problems)
+
+
+def test_direct_routes_have_expected_auth_and_unique_terminal_integrations():
+    main_tf = (INFRA_DIR / "main.tf").read_text()
+    api_keys_tf = (INFRA_DIR / "api_keys.tf").read_text()
+    iam_tf = (INFRA_DIR / "iam.tf").read_text()
+    problems = []
+
+    integration_blocks = {
+        **terraform_resource_blocks(main_tf, "aws_apigatewayv2_integration"),
+        **terraform_resource_blocks(api_keys_tf, "aws_apigatewayv2_integration"),
+    }
+    expected_integrations = {
+        "code": ("code", "aws_lambda_function.code.invoke_arn"),
+        "lambda": ("knowledge", "aws_lambda_alias.knowledge_live.invoke_arn"),
+        "api_key": ("code", "aws_lambda_function.code.invoke_arn"),
+        "api_key_knowledge": (
+            "knowledge",
+            "aws_lambda_alias.knowledge_live.invoke_arn",
+        ),
+    }
+    if set(integration_blocks) != set(expected_integrations):
+        problems.append(
+            "serving integrations differ: "
+            f"expected {sorted(expected_integrations)}, got {sorted(integration_blocks)}"
+        )
+
+    integration_backends = {}
+    for integration_name, (backend, expected_uri) in expected_integrations.items():
+        block = integration_blocks.get(integration_name)
+        if block is None:
+            continue
+        terminal_uris = re.findall(
+            r"integration_uri\s*=\s*"
+            r"(aws_lambda_(?:function|alias)\.[A-Za-z0-9_]+(?:\[0\])?\.invoke_arn)",
+            block,
+        )
+        if terminal_uris != [expected_uri]:
+            problems.append(
+                f"{integration_name} must have one terminal URI {expected_uri}; "
+                f"got {terminal_uris}"
+            )
+        integration_backends[integration_name] = backend
+
+    for integration_name in ("api_key", "api_key_knowledge"):
+        block = integration_blocks.get(integration_name)
+        if block is not None and (
+            '"remove:header.X-SPUR-API-Key" = "\'\'"' not in block
+        ):
+            problems.append(
+                f"{integration_name} does not remove X-SPUR-API-Key before serving"
+            )
+
+    expected_routes = {
+        "POST /mcp/code": ("code", "var.api_authorization_type", None, None),
+        "POST /mcp/knowledge": (
+            "knowledge",
+            "var.api_authorization_type",
+            None,
+            None,
+        ),
+        "POST /mcp/oauth/code": (
+            "code",
+            '"JWT"',
+            "aws_apigatewayv2_authorizer.cognito[0].id",
+            "local.cognito_custom_scopes",
+        ),
+        "POST /mcp/oauth/knowledge": (
+            "knowledge",
+            '"JWT"',
+            "aws_apigatewayv2_authorizer.cognito[0].id",
+            "local.cognito_custom_scopes",
+        ),
+        "POST /mcp/api-key/code": (
+            "code",
+            '"CUSTOM"',
+            "aws_apigatewayv2_authorizer.api_key[0].id",
+            None,
+        ),
+        "POST /mcp/api-key/knowledge": (
+            "knowledge",
+            '"CUSTOM"',
+            "aws_apigatewayv2_authorizer.api_key[0].id",
+            None,
+        ),
+        "GET /.well-known/spur-context-service": ("code", '"NONE"', None, None),
+        "GET /auth/login": ("code", '"NONE"', None, None),
+        "POST /auth/api-keys": (
+            "code",
+            '"JWT"',
+            "aws_apigatewayv2_authorizer.cognito[0].id",
+            "[local.api_key_management_scope]",
+        ),
+        "GET /auth/api-keys": (
+            "code",
+            '"JWT"',
+            "aws_apigatewayv2_authorizer.cognito[0].id",
+            "[local.api_key_management_scope]",
+        ),
+        "DELETE /auth/api-keys/{key_id}": (
+            "code",
+            '"JWT"',
+            "aws_apigatewayv2_authorizer.cognito[0].id",
+            "[local.api_key_management_scope]",
+        ),
+    }
+
+    route_entries = []
+    route_blocks = {
+        **terraform_resource_blocks(main_tf, "aws_apigatewayv2_route"),
+        **terraform_resource_blocks(api_keys_tf, "aws_apigatewayv2_route"),
+    }
+    for resource_name, block in route_blocks.items():
+        route_key_assignment = terraform_assignment(block, "route_key")
+        if route_key_assignment == "each.value":
+            for_each = re.search(r"for_each\s*=.*?toset\(\[(.*?)\]\)", block, re.DOTALL)
+            route_keys = (
+                re.findall(r'"((?:GET|POST|DELETE) [^"]+)"', for_each.group(1))
+                if for_each
+                else []
+            )
+        elif route_key_assignment and route_key_assignment.startswith('"'):
+            route_keys = [route_key_assignment.strip('"')]
+        else:
+            route_keys = []
+
+        target = terraform_assignment(block, "target") or ""
+        target_integrations = re.findall(
+            r"aws_apigatewayv2_integration\.([A-Za-z0-9_]+)"
+            r"(?:\[0\])?\.id",
+            target,
+        )
+        if len(target_integrations) != 1:
+            problems.append(
+                f"route resource {resource_name} must name one integration; "
+                f"got {target_integrations}"
+            )
+            integration_name = None
+        else:
+            integration_name = target_integrations[0]
+
+        for route_key in route_keys:
+            route_entries.append(
+                (
+                    route_key,
+                    integration_name,
+                    terraform_assignment(block, "authorization_type"),
+                    terraform_assignment(block, "authorizer_id"),
+                    terraform_assignment(block, "authorization_scopes"),
+                )
+            )
+
+    route_keys = [entry[0] for entry in route_entries]
+    duplicate_route_keys = sorted(
+        route_key for route_key in set(route_keys) if route_keys.count(route_key) != 1
+    )
+    if duplicate_route_keys:
+        problems.append(f"duplicate route keys: {duplicate_route_keys}")
+    if set(route_keys) != set(expected_routes):
+        problems.append(
+            "route table differs: "
+            f"missing {sorted(set(expected_routes) - set(route_keys))}; "
+            f"unexpected {sorted(set(route_keys) - set(expected_routes))}"
+        )
+
+    for route_key, integration_name, auth_type, authorizer_id, scopes in route_entries:
+        expected = expected_routes.get(route_key)
+        if expected is None:
+            continue
+        expected_backend, expected_auth, expected_authorizer, expected_scopes = expected
+        actual_backend = integration_backends.get(integration_name)
+        actual = (actual_backend, auth_type, authorizer_id, scopes)
+        if actual != expected:
+            problems.append(f"{route_key}: expected {expected}, got {actual}")
+
+    serving_role_policies = [
+        block
+        for block in terraform_resource_blocks(
+            iam_tf, "aws_iam_role_policy"
+        ).values()
+        if re.search(
+            r"role\s*=\s*aws_iam_role\.(?:code|knowledge)_lambda\.id", block
+        )
+    ]
+    if any("lambda:InvokeFunction" in block for block in serving_role_policies):
+        problems.append("a serving Lambda role can invoke another Lambda")
+
+    knowledge_permission = terraform_resource_block(
+        main_tf, "aws_lambda_permission", "apigw_knowledge"
+    )
+    code_permission = terraform_resource_block(
+        main_tf, "aws_lambda_permission", "apigw_code"
+    )
+    if "function_name = aws_lambda_function.knowledge.function_name" not in knowledge_permission:
+        problems.append("Knowledge API Gateway permission changed function")
+    if "qualifier     = aws_lambda_alias.knowledge_live.name" not in knowledge_permission:
+        problems.append("Knowledge API Gateway permission lost alias qualifier")
+    if "function_name = aws_lambda_function.code.function_name" not in code_permission:
+        problems.append("Code API Gateway permission changed function")
+    if any(
+        'principal     = "apigateway.amazonaws.com"' not in permission
+        for permission in (knowledge_permission, code_permission)
+    ):
+        problems.append("serving Lambda permission principal changed")
+
+    assert not problems, "\n".join(problems)
+
+
+def test_serving_compute_correction_retains_legacy_service_without_routing_to_it():
+    main_tf = (INFRA_DIR / "main.tf").read_text()
+    api_keys_tf = (INFRA_DIR / "api_keys.tf").read_text()
+    compatibility_path = INFRA_DIR / "legacy_compatibility.tf"
+    assert compatibility_path.exists(), "missing legacy compatibility Terraform"
+    compatibility_tf = compatibility_path.read_text()
+    problems = []
+
+    legacy_service_marker = 'resource "aws_lambda_function" "service"'
+    if legacy_service_marker not in compatibility_tf:
+        problems.append("missing retained legacy serving resource")
+    else:
+        legacy_service = terraform_resource_block(
+            compatibility_tf, "aws_lambda_function", "service"
+        )
+        if "prevent_destroy = true" not in legacy_service:
+            problems.append("legacy serving resource is not protected from destroy")
+        if "ignore_changes  = all" not in legacy_service:
+            problems.append("legacy serving resource is not frozen for compatibility")
+
+    code_integration_marker = 'resource "aws_apigatewayv2_integration" "code"'
+    if code_integration_marker not in main_tf:
+        problems.append("missing stable Code compatibility integration")
+    else:
+        code_integration = terraform_resource_block(
+            main_tf, "aws_apigatewayv2_integration", "code"
+        )
+        if "integration_uri        = aws_lambda_function.code.invoke_arn" not in code_integration:
+            problems.append("Code compatibility integration does not invoke Code")
+
+    for text, resource_name in (
+        (api_keys_tf, "api_key_discovery"),
+        (api_keys_tf, "api_key_management"),
+        (main_tf, "login_redirect"),
+    ):
+        route = terraform_resource_block(text, "aws_apigatewayv2_route", resource_name)
+        if "aws_apigatewayv2_integration.code.id" not in route:
+            problems.append(f"{resource_name} does not target the Code integration")
+
+    api_key_integration = terraform_resource_block(
+        api_keys_tf, "aws_apigatewayv2_integration", "api_key"
+    )
+    if "integration_uri        = aws_lambda_function.code.invoke_arn" not in api_key_integration:
+        problems.append("API-key integration does not invoke Code")
+
+    if "aws_lambda_function.service" in main_tf + api_keys_tf:
+        problems.append("active split routes or integrations still target legacy serving")
+
+    code_permission_marker = 'resource "aws_lambda_permission" "apigw_code"'
+    if code_permission_marker not in main_tf:
+        problems.append("missing API Gateway permission for the Code integration")
+    else:
+        code_permission = terraform_resource_block(
+            main_tf, "aws_lambda_permission", "apigw_code"
+        )
+        if "function_name = aws_lambda_function.code.function_name" not in code_permission:
+            problems.append("Code API permission names a different function")
+
+    assert not problems, "\n".join(problems)
+
+
+def test_serving_compute_correction_attaches_knowledge_warm_pool_to_alias_traffic():
+    main_tf = (INFRA_DIR / "main.tf").read_text()
+    knowledge = terraform_resource_block(main_tf, "aws_lambda_function", "knowledge")
+    warm = terraform_resource_block(
+        main_tf,
+        "aws_lambda_provisioned_concurrency_config",
+        "knowledge_warm",
+    )
+    integration = terraform_resource_block(
+        main_tf, "aws_apigatewayv2_integration", "lambda"
+    )
+    permission = terraform_resource_block(
+        main_tf, "aws_lambda_permission", "apigw_knowledge"
+    )
+    problems = []
+
+    if not re.search(r"\bpublish\s*=\s*true\b", knowledge):
+        problems.append("Knowledge does not publish immutable versions")
+
+    alias_marker = 'resource "aws_lambda_alias" "knowledge_live"'
+    if alias_marker not in main_tf:
+        problems.append("missing stable Knowledge alias")
+    else:
+        alias = terraform_resource_block(main_tf, "aws_lambda_alias", "knowledge_live")
+        if "function_name    = aws_lambda_function.knowledge.function_name" not in alias:
+            problems.append("Knowledge alias does not name the Knowledge function")
+        if "function_version = aws_lambda_function.knowledge.version" not in alias:
+            problems.append("Knowledge alias does not track the published version")
+
+    if "qualifier                         = aws_lambda_alias.knowledge_live.name" not in warm:
+        problems.append("Knowledge provisioned concurrency does not qualify the alias")
+    if 'qualifier                         = "$LATEST"' in warm:
+        problems.append("Knowledge provisioned concurrency still uses $LATEST")
+    if "integration_uri        = aws_lambda_alias.knowledge_live.invoke_arn" not in integration:
+        problems.append("Knowledge API integration does not invoke the alias")
+    if "function_name = aws_lambda_function.knowledge.function_name" not in permission:
+        problems.append("Knowledge API permission names a different function")
+    if "qualifier     = aws_lambda_alias.knowledge_live.name" not in permission:
+        problems.append("Knowledge API permission does not match the alias qualifier")
+
+    assert not problems, "\n".join(problems)
+
+
+def test_serving_compute_correction_removes_unused_eni_permissions_without_vpc_config():
+    main_tf = (INFRA_DIR / "main.tf").read_text()
+    iam_tf = (INFRA_DIR / "iam.tf").read_text()
+    problems = []
+
+    for function_name in ("code", "knowledge"):
+        function = terraform_resource_block(
+            main_tf, "aws_lambda_function", function_name
+        )
+        runtime = terraform_resource_block(
+            iam_tf, "aws_iam_role_policy", f"{function_name}_lambda_runtime"
+        )
+        if "vpc_config" in function:
+            problems.append(f"{function_name} unexpectedly has vpc_config")
+        eni_actions = sorted(set(re.findall(r'"(ec2:[^"]+)"', runtime)))
+        if eni_actions:
+            problems.append(
+                f"{function_name} has unused EC2 ENI permissions: {', '.join(eni_actions)}"
+            )
+
+    assert not problems, "\n".join(problems)
+
+
+def test_serving_compute_correction_removes_unused_knowledge_catalog_secret_contract():
+    main_tf = (INFRA_DIR / "main.tf").read_text()
+    iam_tf = (INFRA_DIR / "iam.tf").read_text()
+    knowledge = terraform_resource_block(main_tf, "aws_lambda_function", "knowledge")
+    problems = []
+
+    if 'resource "aws_iam_role_policy" "knowledge_catalog_secret"' in iam_tf:
+        problems.append("unused knowledge_catalog_secret IAM policy remains")
+    if "aws_iam_role_policy.knowledge_catalog_secret" in knowledge:
+        problems.append("Knowledge still depends on knowledge_catalog_secret")
+    if "SPUR_CATALOG_SECRET_ARN" in knowledge:
+        problems.append("Knowledge unexpectedly declares SPUR_CATALOG_SECRET_ARN")
+    if "secretsmanager:" in knowledge:
+        problems.append("Knowledge environment unexpectedly embeds secret access")
+
+    assert not problems, "\n".join(problems)
+
+
+def test_serving_compute_defines_exactly_code_and_knowledge_with_isolated_envs():
+    main_tf = (INFRA_DIR / "main.tf").read_text()
+    variables_tf = (INFRA_DIR / "variables.tf").read_text()
+
+    serving_resources = set(
+        re.findall(r'resource\s+"aws_lambda_function"\s+"([^"]+)"', main_tf)
+    )
+    assert serving_resources == {"code", "knowledge"}
+
+    code = terraform_resource_block(main_tf, "aws_lambda_function", "code")
+    knowledge = terraform_resource_block(
+        main_tf, "aws_lambda_function", "knowledge"
+    )
+    assert 'function_name = "spur-context-code"' in code
+    assert "role        = aws_iam_role.code_lambda.arn" in code
+    assert 'function_name = "spur-context-knowledge"' in knowledge
+    assert "role        = aws_iam_role.knowledge_lambda.arn" in knowledge
+
+    assert "SPUR_CONTEXT_CODE_CACHE_BYTES" in code
+    assert (
+        "tostring(local.code_lambda_ephemeral_storage_bytes)" in code
+    )
+    assert "size = var.code_lambda_ephemeral_storage_mb" in code
+    assert "SPUR_CONTEXT_DUCKDB_EXTENSION_DIR" not in code
+    assert "SPUR_CATALOG_DSN" not in code
+    assert "HOME" not in code
+
+    assert "SPUR_CATALOG_S3_URI" in knowledge
+    assert "SPUR_CONTEXT_DUCKDB_EXTENSION_DIR" in knowledge
+    assert re.search(r'\bHOME\s*=\s*"/tmp"', knowledge)
+    for code_only_env in (
+        "SPUR_CONTEXT_CODE_CACHE_BYTES",
+        "SPUR_INDEX_STATE_MACHINE_ARN",
+        "SPUR_INDEX_JOBS_TABLE",
+        "SPUR_CONTEXT_API_KEYS_TABLE",
+    ):
+        assert code_only_env not in knowledge
+
+    ephemeral_variable = variables_tf.split(
+        'variable "code_lambda_ephemeral_storage_mb"', 1
+    )[1].split("\n}", 1)[0]
+    assert "default     = 512" in ephemeral_variable
+    assert "var.code_lambda_ephemeral_storage_mb == 512" in ephemeral_variable
+    assert (
+        "code_lambda_ephemeral_storage_bytes = "
+        "var.code_lambda_ephemeral_storage_mb * 1024 * 1024"
+    ) in main_tf
+
+
+def test_serving_compute_roles_are_least_privilege_and_backend_specific():
+    iam_tf = (INFRA_DIR / "iam.tf").read_text()
+
+    assert 'resource "aws_iam_role" "code_lambda"' in iam_tf
+    assert 'resource "aws_iam_role" "knowledge_lambda"' in iam_tf
+
+    code_s3 = terraform_resource_block(
+        iam_tf, "aws_iam_role_policy", "code_s3_read"
+    )
+    assert "role = aws_iam_role.code_lambda.id" in code_s3
+    assert '"s3:GetObject"' in code_s3
+    assert '"${aws_s3_bucket.data.arn}/${local.catalog_s3_key}"' in code_s3
+    assert "serving-registry.json" in code_s3
+    assert '"${aws_s3_bucket.data.arn}/silver/*"' in code_s3
+    for forbidden in (
+        "s3:PutObject",
+        "s3:DeleteObject",
+        "s3:AbortMultipartUpload",
+        "secretsmanager:",
+    ):
+        assert forbidden not in code_s3
+
+    knowledge_s3 = terraform_resource_block(
+        iam_tf, "aws_iam_role_policy", "knowledge_s3_read"
+    )
+    assert "role = aws_iam_role.knowledge_lambda.id" in knowledge_s3
+    assert '"s3:GetObject"' in knowledge_s3
+    assert '"s3:GetObjectVersion"' in knowledge_s3
+    assert '"s3:ListBucket"' in knowledge_s3
+    assert "s3:PutObject" not in knowledge_s3
+    assert "s3:DeleteObject" not in knowledge_s3
+
+    assert 'resource "aws_iam_role_policy" "knowledge_catalog_secret"' not in iam_tf
+
+    code_role_resources = "\n".join(
+        terraform_resource_block(iam_tf, resource_type, resource_name)
+        for resource_type, resource_name in re.findall(
+            r'resource\s+"(aws_iam_[^"]+)"\s+"([^"]+)"', iam_tf
+        )
+        if "role = aws_iam_role.code_lambda" in terraform_resource_block(
+            iam_tf, resource_type, resource_name
+        )
+    )
+    assert "secretsmanager:" not in code_role_resources
+    for required in (
+        "dynamodb:",
+        "states:",
+        "logs:",
+        "xray:",
+    ):
+        assert required in code_role_resources
+
+    api_key_management = terraform_resource_block(
+        iam_tf, "aws_iam_role_policy", "code_api_key_management"
+    )
+    assert "role = aws_iam_role.code_lambda.id" in api_key_management
+
+
+def test_serving_compute_drainer_and_warm_pool_target_the_owning_backends():
+    main_tf = (INFRA_DIR / "main.tf").read_text()
+    variables_tf = (INFRA_DIR / "variables.tf").read_text()
+
+    drainer = terraform_resource_block(
+        main_tf, "aws_cloudwatch_event_target", "index_queue_drainer"
+    )
+    assert "arn       = aws_lambda_function.code.arn" in drainer
+    assert 'operation = "drain_queued_jobs"' in drainer
+    drainer_permission = terraform_resource_block(
+        main_tf, "aws_lambda_permission", "eventbridge_code"
+    )
+    assert (
+        "function_name = aws_lambda_function.code.function_name"
+        in drainer_permission
+    )
+
+    warm_resources = re.findall(
+        r'resource\s+"aws_lambda_provisioned_concurrency_config"\s+"([^"]+)"',
+        main_tf,
+    )
+    assert warm_resources == ["knowledge_warm"]
+    knowledge_warm = terraform_resource_block(
+        main_tf,
+        "aws_lambda_provisioned_concurrency_config",
+        "knowledge_warm",
+    )
+    assert re.search(
+        r"function_name\s*=\s*aws_lambda_function\.knowledge\.function_name",
+        knowledge_warm,
+    )
+    assert "qualifier                         = aws_lambda_alias.knowledge_live.name" in knowledge_warm
+    assert (
+        "provisioned_concurrent_executions = var.concurrent_warm_instances"
+        in knowledge_warm
+    )
+    assert "local.code_warm_instances == 0" in knowledge_warm
+    assert (
+        "local.total_serving_warm_instances == var.concurrent_warm_instances"
+        in knowledge_warm
+    )
+
+    serving_tf = main_tf + variables_tf
+    assert "reserved_concurrent_executions" not in serving_tf
+    assert 'variable "serving_reserved_concurrency"' not in serving_tf
+    # Reserved concurrency only bounds capacity. Provisioned concurrency is the
+    # billable pre-initialized pool, so the existing warm budget stays on
+    # Knowledge and Code deliberately has none.
+    assert "Reserved concurrency bounds capacity" in main_tf
+    assert "provisioned concurrency is the billable warm pool" in main_tf
+
+
+def test_serving_compute_outputs_and_preconditions_fail_closed():
+    main_tf = (INFRA_DIR / "main.tf").read_text()
+    outputs_tf = (INFRA_DIR / "outputs.tf").read_text()
+
+    code = terraform_resource_block(main_tf, "aws_lambda_function", "code")
+    knowledge = terraform_resource_block(
+        main_tf, "aws_lambda_function", "knowledge"
+    )
+    assert "local.serving_assignment_count == 2" in code
+    assert "local.serving_zip_paths_are_consistent" in code
+    assert "local.catalog_s3_path_is_consistent" in code
+    assert "local.catalog_s3_path_is_consistent" in knowledge
+
+    for output_name, resource_name in (
+        ("code_lambda_function_name", "code"),
+        ("code_lambda_function_arn", "code"),
+        ("knowledge_lambda_function_name", "knowledge"),
+        ("knowledge_lambda_function_arn", "knowledge"),
+    ):
+        output = outputs_tf.split(f'output "{output_name}"', 1)[1].split(
+            "\n}", 1
+        )[0]
+        assert f"aws_lambda_function.{resource_name}." in output
+
+    legacy_name = outputs_tf.split('output "lambda_function_name"', 1)[1].split(
+        "\n}", 1
+    )[0]
+    legacy_arn = outputs_tf.split('output "lambda_function_arn"', 1)[1].split(
+        "\n}", 1
+    )[0]
+    assert "aws_lambda_function.knowledge.function_name" in legacy_name
+    assert "aws_lambda_function.knowledge.arn" in legacy_arn
 
 
 def render_index_build_asl():
@@ -52,19 +803,45 @@ def render_index_build_asl():
     return json.loads(rendered)
 
 
-def test_deploy_builds_standalone_context_service_from_crate_workdir():
+def test_deploy_builds_named_serving_lambdas_from_exact_feature_closures():
+    script = DEPLOY_SH.read_text()
+    cargo_toml = (ROOT / "crates" / "spur-context-service" / "Cargo.toml").read_text()
+
+    code_command = (
+        "--workdir crates/spur-context-service build --no-default-features "
+        "--features code-lambda --bin spur-context-code-lambda --release"
+    )
+    knowledge_command = (
+        "--workdir crates/spur-context-service build --no-default-features "
+        "--features knowledge-lambda --bin spur-context-knowledge-lambda --release"
+    )
+
+    assert 'name = "spur-context-code-lambda"' in cargo_toml
+    assert 'required-features = ["code-lambda"]' in cargo_toml
+    assert 'name = "spur-context-knowledge-lambda"' in cargo_toml
+    assert 'required-features = ["knowledge-lambda"]' in cargo_toml
+    assert script.count(code_command) == 2
+    assert script.count(knowledge_command) == 2
+    assert 'run_graviton2_safe_cargo "Code Lambda bootstrap"' in script
+    assert 'run_graviton2_safe_cargo "Knowledge Lambda bootstrap"' in script
+    assert (
+        'fetch_remote_target_file release/spur-context-code-lambda '
+        '"$BUILD_DIR/code-lambda/bootstrap"'
+    ) in script
+    assert (
+        'fetch_remote_target_file release/spur-context-knowledge-lambda '
+        '"$BUILD_DIR/knowledge-lambda/bootstrap"'
+    ) in script
+    assert "build --features lambda --release" not in script
+
+
+def test_deploy_preserves_worker_builds_while_splitting_serving_lambdas():
     script = DEPLOY_SH.read_text()
 
-    assert 'run_graviton2_safe_cargo "serving Lambda bootstrap"' in script
-    assert "--workdir crates/spur-context-service build --features lambda --release" in script
     assert 'run_graviton2_safe_cargo "Fargate worker binary"' in script
     assert "--workdir crates/spur-context-service build --features worker --release" in script
     assert 'run_graviton2_safe_cargo "spur CLI worker image dependency"' in script
     assert "build -p spur-cli --release" in script
-    assert (
-        'fetch_remote_target_file release/spur-context-service '
-        '"$BUILD_DIR/bootstrap"'
-    ) in script
     assert (
         '--remote-binary "$(remote_target_path release/spur-context-worker)"'
     ) in script
@@ -79,6 +856,33 @@ def test_deploy_builds_standalone_context_service_from_crate_workdir():
     assert 'worker_image_uri="$(build_and_push_worker_image)"' not in script
     assert "scripts/spur-cargo run --workdir crates/spur-context-service" not in script
     assert "scripts/spur-cargo build -p spur-context-service" not in script
+
+
+def test_serving_zip_packagers_isolate_code_and_verify_knowledge_before_copy():
+    script = DEPLOY_SH.read_text()
+    code_package = shell_function(script, "package_code_zip")
+    knowledge_copy = shell_function(script, "copy_knowledge_extensions")
+    knowledge_package = shell_function(script, "package_knowledge_zip")
+    main = shell_function(script, "main")
+
+    assert 'zip -r "$zip_path" bootstrap' in code_package
+    for forbidden in (
+        ".duckdb",
+        "duckdb_extension",
+        "ducklake",
+        "httpfs",
+        "aws.duckdb_extension",
+        "catalog",
+        "spur-context-knowledge-lambda",
+    ):
+        assert forbidden not in code_package
+
+    assert 'cp -R "$BUILD_DIR/.duckdb" "$knowledge_dir/.duckdb"' in knowledge_copy
+    assert 'zip -r "$zip_path" bootstrap .duckdb/' in knowledge_package
+    assert '"*/lance.duckdb_extension"' in knowledge_package
+    assert main.index("download_extensions") < main.index(
+        "copy_knowledge_extensions"
+    )
 
 
 def test_deploy_has_selectable_self_contained_buildx_path_with_baseline_flags():
@@ -217,18 +1021,39 @@ def test_deploy_builds_source_fetcher_lambda_image_and_passes_to_terraform():
     assert 'output "source_fetcher_lambda_image_uri"' in outputs_tf
 
 
-def test_deploy_rebuilds_lambda_zip_by_default():
+def test_deploy_rebuilds_distinct_serving_lambda_zips_by_default():
     script = DEPLOY_SH.read_text()
     main_tf = (INFRA_DIR / "main.tf").read_text()
 
-    assert 'local tf_zip_path="../../target/lambda/spur-context-service.zip"' in script
-    assert 'tf_zip_path="$local_zip"' in script
-    assert 'tf_vars=(-var-file="$var_file" -var "lambda_zip_path=$tf_zip_path")' in script
-    assert 'elif [[ ! -f "$zip_path" ]]' not in script
-    assert 'rm -f "$zip_path"' in script
+    code_zip = "../../target/lambda/spur-context-code-lambda.zip"
+    knowledge_zip = "../../target/lambda/spur-context-knowledge-lambda.zip"
+    assert code_zip != knowledge_zip
+    assert f'local tf_code_zip_path="{code_zip}"' in script
+    assert f'local tf_knowledge_zip_path="{knowledge_zip}"' in script
+    assert 'tf_code_zip_path="$local_code_zip"' in script
+    assert 'tf_knowledge_zip_path="$local_knowledge_zip"' in script
+    assert '-var "code_lambda_zip_path=$tf_code_zip_path"' in script
+    assert '-var "knowledge_lambda_zip_path=$tf_knowledge_zip_path"' in script
+    assert 'elif [[ ! -f "$code_zip_path" ]]' not in script
+    assert 'elif [[ ! -f "$knowledge_zip_path" ]]' not in script
+    assert 'rm -f "$code_zip_path" "$knowledge_zip_path"' in script
     lambda_zip = main_tf.split('resource "aws_s3_object" "lambda_zip"', 1)[1]
-    assert "source_hash = filemd5(var.lambda_zip_path)" in lambda_zip
+    assert "source_hash = filemd5(local.knowledge_lambda_zip_path)" in lambda_zip
+    assert "source_code_hash = filebase64sha256(local.knowledge_lambda_zip_path)" in main_tf
     assert "etag   = filemd5(var.lambda_zip_path)" not in lambda_zip
+    code_lambda_zip = terraform_resource_block(
+        main_tf, "aws_s3_object", "code_lambda_zip"
+    )
+    assert "source_hash = filemd5(local.code_lambda_zip_path)" in code_lambda_zip
+    assert "source_code_hash = filebase64sha256(local.code_lambda_zip_path)" in main_tf
+    assert (
+        "knowledge_lambda_zip_path = coalesce("
+        "var.knowledge_lambda_zip_path, var.lambda_zip_path)"
+    ) in main_tf
+    assert (
+        "code_lambda_zip_path      = coalesce("
+        "var.code_lambda_zip_path, var.lambda_zip_path)"
+    ) in main_tf
 
 
 def test_deploy_can_package_lambda_without_terraform_apply():
@@ -239,6 +1064,158 @@ def test_deploy_can_package_lambda_without_terraform_apply():
     assert "--package-only) package_only=true" in script
     assert 'if [[ "$package_only" == "true" ]]' in script
     assert script.index('if [[ "$package_only" == "true" ]]') < script.index("terraform init")
+
+
+def test_package_only_builds_two_isolated_zip_manifests_with_stubbed_tools(tmp_path):
+    repo_root = tmp_path / "repo"
+    script_dir = repo_root / "infra" / "spur-context-service"
+    script_dir.mkdir(parents=True)
+    deploy = script_dir / "deploy.sh"
+    deploy.write_text(DEPLOY_SH.read_text())
+    deploy.chmod(0o755)
+    (script_dir / "graviton2-baseline.sh").write_text(
+        (DEPLOY_SH.parent / "graviton2-baseline.sh").read_text()
+    )
+
+    tool_dir = tmp_path / "bin"
+    tool_dir.mkdir()
+    aws_marker = tmp_path / "aws-called"
+    terraform_marker = tmp_path / "terraform-mutations"
+
+    write_executable(
+        tool_dir / "terraform",
+        """#!/usr/bin/env bash
+if [[ "$*" == "output -raw aws_region" ]]; then
+    echo ap-southeast-5
+else
+    printf '%s\n' "$*" >> "$TERRAFORM_MARKER"
+    exit 97
+fi
+""",
+    )
+    write_executable(
+        tool_dir / "aws",
+        """#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$AWS_MARKER"
+exit 98
+""",
+    )
+    write_executable(
+        tool_dir / "git",
+        """#!/usr/bin/env bash
+case "$*" in
+    *"rev-parse --short HEAD"*) echo deadbeef ;;
+    *"status --porcelain"*) ;;
+    *"archive --format=tar HEAD"*) /usr/bin/tar -cf - --files-from /dev/null ;;
+    *) echo "unexpected git call: $*" >&2; exit 96 ;;
+esac
+""",
+    )
+    write_executable(
+        tool_dir / "docker",
+        """#!/usr/bin/env bash
+output=""
+while [[ $# -gt 0 ]]; do
+    if [[ "$1" == "--output" ]]; then
+        output="$2"
+        shift 2
+    else
+        shift
+    fi
+done
+dest="${output#type=local,dest=}"
+mkdir -p "$dest"
+printf code-binary > "$dest/spur-context-code-lambda"
+printf knowledge-binary > "$dest/spur-context-knowledge-lambda"
+printf worker > "$dest/spur-context-worker"
+printf worker-lambda > "$dest/spur-context-worker-lambda"
+printf fetcher > "$dest/spur-context-fetcher-lambda"
+printf spur > "$dest/spur"
+""",
+    )
+    write_executable(
+        tool_dir / "curl",
+        """#!/usr/bin/env bash
+printf extension-payload
+""",
+    )
+    write_executable(tool_dir / "gunzip", "#!/usr/bin/env bash\ncat\n")
+    write_executable(
+        tool_dir / "sha256sum",
+        """#!/usr/bin/env bash
+case "$1" in
+    *httpfs.duckdb_extension*) sha=6d30a487968cbe5553b7272fd5bad0e4485c4117db96e21fd1e5e2a225a5a538 ;;
+    *ducklake.duckdb_extension*) sha=f73ec9ab68a6de5c3c190cd1ecbba553a5791bf5821a991d70ea65abc5e45562 ;;
+    *postgres_scanner.duckdb_extension*) sha=102f71e6d2e603b1056407410f981c7ec141375e1edd16f2cb61e901e9c6d617 ;;
+    *sqlite_scanner.duckdb_extension*) sha=81135f8c3b4064bc5031c3bc08473a7224851461fa9a2b645ea8f851eba4a621 ;;
+    *aws.duckdb_extension*) sha=8244ac8560925c3caf71f2087b45e3e37aa84a8a79712b9b8f3312524bd3f483 ;;
+    *parquet.duckdb_extension*) sha=d1aa523e5ae55731da2f67fca02ea1460e35fe4f8d824627fb565019e3eece1c ;;
+    *json.duckdb_extension*) sha=10ce8205acd23bfbc98c934803d69f1e6768fe9bfcb4c7958406144a1ea898bd ;;
+    *lance.duckdb_extension*) sha=81a9f544f9f56be18db46060baf596ab973e17b50785a1eb1edd4885908b2158 ;;
+    *) exit 95 ;;
+esac
+printf '%s  %s\n' "$sha" "$1"
+""",
+    )
+
+    result = subprocess.run(
+        [
+            "bash",
+            str(deploy),
+            "--skip-worker",
+            "--package-only",
+            "--build-mode",
+            "self-contained",
+            "--no-push",
+        ],
+        cwd=repo_root,
+        env={
+            **os.environ,
+            "PATH": f"{tool_dir}:{os.environ['PATH']}",
+            "AWS_MARKER": str(aws_marker),
+            "TERRAFORM_MARKER": str(terraform_marker),
+        },
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert not aws_marker.exists()
+    assert not terraform_marker.exists()
+
+    code_zip = repo_root / "target" / "lambda" / "spur-context-code-lambda.zip"
+    knowledge_zip = (
+        repo_root / "target" / "lambda" / "spur-context-knowledge-lambda.zip"
+    )
+    assert code_zip != knowledge_zip
+    assert code_zip.read_bytes() != knowledge_zip.read_bytes()
+
+    with zipfile.ZipFile(code_zip) as archive:
+        assert archive.namelist() == ["bootstrap"]
+        assert archive.read("bootstrap") == b"code-binary"
+        assert all(
+            forbidden not in name.lower()
+            for name in archive.namelist()
+            for forbidden in ("duckdb", "ducklake", "httpfs", "aws", "catalog", "knowledge")
+        )
+
+    with zipfile.ZipFile(knowledge_zip) as archive:
+        files = {name for name in archive.namelist() if not name.endswith("/")}
+        extension_root = ".duckdb/extensions/v1.5.4/linux_arm64"
+        assert files == {
+            "bootstrap",
+            *(f"{extension_root}/{name}.duckdb_extension" for name in (
+                "httpfs",
+                "ducklake",
+                "postgres_scanner",
+                "sqlite_scanner",
+                "aws",
+                "parquet",
+                "json",
+            )),
+        }
+        assert archive.read("bootstrap") == b"knowledge-binary"
 
 
 def test_terraform_uses_partial_s3_backend_and_environment_files():
@@ -261,6 +1238,16 @@ def test_terraform_uses_partial_s3_backend_and_environment_files():
         assert "vpc_id" in var_file.read_text()
 
 
+def test_terraform_requires_cross_variable_validation_compatible_cli():
+    versions_tf = VERSIONS_TF.read_text()
+    required_version = re.search(
+        r'required_version\s*=\s*"([^"]+)"', versions_tf
+    )
+
+    assert required_version is not None
+    assert required_version.group(1) == ">= 1.9, < 2.0"
+
+
 def test_deploy_passes_backend_config_and_var_file_to_terraform():
     script = DEPLOY_SH.read_text()
 
@@ -271,7 +1258,8 @@ def test_deploy_passes_backend_config_and_var_file_to_terraform():
     assert 'backend_config="${backend_config:-backends/${environment}.s3.tfbackend}"' in script
     assert 'var_file="${var_file:-env/${environment}.tfvars}"' in script
     assert 'terraform init -upgrade -backend-config="$backend_config"' in script
-    assert 'tf_vars=(-var-file="$var_file" -var "lambda_zip_path=$tf_zip_path")' in script
+    assert '-var "code_lambda_zip_path=$tf_code_zip_path"' in script
+    assert '-var "knowledge_lambda_zip_path=$tf_knowledge_zip_path"' in script
     assert 'terraform plan "${tf_vars[@]}"' in script
     assert 'terraform apply "${tf_vars[@]}" -auto-approve' in script
 
@@ -374,8 +1362,9 @@ def test_context_service_workflow_releases_serving_lambda_on_main_push():
 
     # Code-only rollout through the canonical deploy path: worker images pushed
     # from the VM (immutable tag + latest pointer), zip packaged from the
-    # fetched serving binary, then update-function-code on the serving Lambda,
-    # which API Gateway invokes unqualified ($LATEST).
+    # fetched legacy serving binary, then update-function-code on the staging
+    # function. Task 14 owns publishing the named packages and advancing the
+    # Knowledge alias; this guard deliberately does not model that later cutover.
     assert "infra/spur-context-service/build-and-push-remote.sh" in release
     assert (
         "infra/spur-context-service/deploy.sh --skip-worker --package-only"
@@ -663,14 +1652,15 @@ def test_lambda_worker_resource_is_configured_for_fast_start_mvp():
     lambda_tf = (INFRA_DIR / "lambda_worker.tf").read_text()
     variables_tf = (INFRA_DIR / "variables.tf").read_text()
     outputs_tf = (INFRA_DIR / "outputs.tf").read_text()
-    iam_tf = (INFRA_DIR / "iam.tf").read_text()
+    iam_tf = "\n".join(path.read_text() for path in sorted(INFRA_DIR.glob("*.tf")))
 
-    assert 'resource "aws_lambda_function" "worker"' in lambda_tf
-    assert 'package_type  = "Image"' in lambda_tf
-    assert "image_uri     = var.worker_lambda_image" in lambda_tf
-    assert "timeout       = var.worker_lambda_timeout_sec" in lambda_tf
-    assert "memory_size   = var.worker_lambda_memory_mb" in lambda_tf
-    assert "ephemeral_storage" in lambda_tf
+    worker = terraform_resource_block(lambda_tf, "aws_lambda_function", "worker")
+    assert 'package_type  = "Image"' in worker
+    assert "image_uri     = var.worker_lambda_image" in worker
+    assert "timeout       = var.worker_lambda_timeout_sec" in worker
+    assert "memory_size   = var.worker_lambda_memory_mb" in worker
+    assert "ephemeral_storage" in worker
+    assert terraform_assignment(worker, "role") == "aws_iam_role.worker_lambda.arn"
     assert "AWS_REGION" not in lambda_tf
     assert "worker_lambda_memory_mb" in variables_tf
     assert "default     = 3008" in variables_tf
@@ -678,8 +1668,12 @@ def test_lambda_worker_resource_is_configured_for_fast_start_mvp():
     assert 'output "worker_image_uri"' in outputs_tf
     assert 'output "worker_lambda_image_uri"' in outputs_tf
     assert 'output "worker_lambda_function_name"' in outputs_tf
-    lambda_s3_policy = iam_tf.split('resource "aws_iam_role_policy" "s3_access"', 1)[1]
-    assert '"s3:DeleteObject"' in lambda_s3_policy
+    worker_s3_policy = terraform_resource_block(
+        iam_tf, "aws_iam_role_policy", "worker_lambda_s3"
+    )
+    assert terraform_assignment(worker_s3_policy, "role") == "aws_iam_role.worker_lambda.id"
+    assert "prevent_destroy = true" in worker_s3_policy
+    assert "ignore_changes  = all" in worker_s3_policy
 
 
 def test_nat_free_worker_vpc_endpoints_are_declared():

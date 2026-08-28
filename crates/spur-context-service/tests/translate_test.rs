@@ -7,6 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result};
 use duckdb::{params, Connection};
+use sha2::Digest as _;
 use spur_context_service::catalog::{
     compact_gold_and_export_snapshot, CatalogResolver, FrozenSnapshotManifest,
     SnapshotCleanupOptions,
@@ -167,6 +168,8 @@ fn translate_publishes_schema_qualified_gold_generation_with_lineage_and_snapsho
     let data_path = data_path.display().to_string();
     initialize_catalog(&catalog_dsn, &data_path)?;
     write_artifact_fixture(&artifact_dir)?;
+    let manifest = silver_manifest_for_fixture();
+    let lineage = translate_lineage(&manifest);
 
     let stats = translate_artifact_to_ducklake(&TranslateOptions {
         source: SOURCE.to_owned(),
@@ -174,10 +177,10 @@ fn translate_publishes_schema_qualified_gold_generation_with_lineage_and_snapsho
         revision: REVISION.to_owned(),
         revision_kind: "semver".to_owned(),
         artifact_dir,
-        artifact_manifest: None,
+        artifact_manifest: Some(manifest),
         source_root: Some(source_root),
         catalog_dsn: catalog_dsn.clone(),
-        lineage: Some(translate_lineage()),
+        lineage: Some(lineage),
         allow_missing_embeddings: false,
     })?;
 
@@ -265,6 +268,139 @@ fn translate_publishes_schema_qualified_gold_generation_with_lineage_and_snapsho
     )?
     .context("snapshot should serve translated symbol")?;
     assert_eq!(source.file_path, "src/lib.rs");
+    Ok(())
+}
+
+#[test]
+fn package_catalog_records_serving_artifacts() -> Result<()> {
+    let root = unique_temp_dir("package-catalog-serving-artifacts")?;
+    let artifact_dir = root.join("artifact");
+    let source_root = root.join("source");
+    let data_path = root.join("data");
+    fs::create_dir_all(&artifact_dir).context("create artifact dir")?;
+    fs::create_dir_all(source_root.join("src")).context("create source src dir")?;
+    fs::create_dir_all(&data_path).context("create ducklake data dir")?;
+    fs::write(source_root.join("src/lib.rs"), "pub fn alpha() {}\n")
+        .context("write source file")?;
+
+    let catalog_dsn = format!("sqlite:{}", root.join("catalog.sqlite").display());
+    let data_path = data_path.display().to_string();
+    initialize_catalog(&catalog_dsn, &data_path)?;
+    write_artifact_fixture(&artifact_dir)?;
+    let manifest = silver_manifest_for_fixture();
+    let lineage = translate_lineage(&manifest);
+    let expected = (
+        lineage.graph_manifest_uri.clone(),
+        lineage.graph_manifest_sha256.clone(),
+        lineage.graph_manifest_bytes,
+        lineage.source_sidecar_uri.clone(),
+        lineage.source_sidecar_sha256.clone(),
+        lineage.source_sidecar_bytes,
+    );
+
+    translate_artifact_to_ducklake(&TranslateOptions {
+        source: SOURCE.to_owned(),
+        package: PACKAGE.to_owned(),
+        revision: REVISION.to_owned(),
+        revision_kind: "semver".to_owned(),
+        artifact_dir,
+        artifact_manifest: Some(manifest),
+        source_root: Some(source_root),
+        catalog_dsn: catalog_dsn.clone(),
+        lineage: Some(lineage),
+        allow_missing_embeddings: false,
+    })?;
+
+    let conn = attach_ducklake(&catalog_dsn, &data_path)?;
+    let actual: (String, String, u64, String, String, u64) = conn.query_row(
+        r"
+        SELECT
+            graph_manifest_uri,
+            graph_manifest_sha256,
+            graph_manifest_bytes,
+            source_sidecar_uri,
+            source_sidecar_sha256,
+            source_sidecar_bytes
+        FROM gold.package_catalog
+        WHERE source = ? AND package = ? AND revision = ?
+        ",
+        params![SOURCE, PACKAGE, REVISION],
+        |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+            ))
+        },
+    )?;
+
+    assert_eq!(actual, expected);
+    Ok(())
+}
+
+#[test]
+fn package_catalog_records_null_serving_artifacts_when_lineage_absent() -> Result<()> {
+    let root = unique_temp_dir("package-catalog-null-serving-artifacts")?;
+    let artifact_dir = root.join("artifact");
+    let data_path = root.join("data");
+    fs::create_dir_all(&artifact_dir).context("create artifact dir")?;
+    fs::create_dir_all(&data_path).context("create ducklake data dir")?;
+
+    let catalog_dsn = format!("sqlite:{}", root.join("catalog.sqlite").display());
+    let data_path = data_path.display().to_string();
+    initialize_catalog(&catalog_dsn, &data_path)?;
+    write_artifact_fixture(&artifact_dir)?;
+
+    translate_artifact_to_ducklake(&TranslateOptions {
+        source: SOURCE.to_owned(),
+        package: PACKAGE.to_owned(),
+        revision: REVISION.to_owned(),
+        revision_kind: "semver".to_owned(),
+        artifact_dir,
+        artifact_manifest: None,
+        source_root: None,
+        catalog_dsn: catalog_dsn.clone(),
+        lineage: None,
+        allow_missing_embeddings: false,
+    })?;
+
+    let conn = attach_ducklake(&catalog_dsn, &data_path)?;
+    let actual: (
+        Option<String>,
+        Option<String>,
+        Option<u64>,
+        Option<String>,
+        Option<String>,
+        Option<u64>,
+    ) = conn.query_row(
+        r"
+        SELECT
+            graph_manifest_uri,
+            graph_manifest_sha256,
+            graph_manifest_bytes,
+            source_sidecar_uri,
+            source_sidecar_sha256,
+            source_sidecar_bytes
+        FROM gold.package_catalog
+        WHERE source = ? AND package = ? AND revision = ?
+        ",
+        params![SOURCE, PACKAGE, REVISION],
+        |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+            ))
+        },
+    )?;
+
+    assert_eq!(actual, (None, None, None, None, None, None));
     Ok(())
 }
 
@@ -430,7 +566,7 @@ fn failed_republish_leaves_previous_gold_generation_readable() -> Result<()> {
         artifact_manifest: None,
         source_root: None,
         catalog_dsn: catalog_dsn.clone(),
-        lineage: Some(translate_lineage()),
+        lineage: None,
         allow_missing_embeddings: false,
     })
     .expect_err("invalid sidecar must reject the new generation");
@@ -475,7 +611,7 @@ fn exported_snapshot_serves_after_compaction_cleanup_fence_cycle() -> Result<()>
         artifact_manifest: None,
         source_root: Some(source_root),
         catalog_dsn: catalog_dsn.clone(),
-        lineage: Some(translate_lineage()),
+        lineage: None,
         allow_missing_embeddings: false,
     })?;
 
@@ -1032,13 +1168,27 @@ fn seed_published_gold_symbol(conn: &Connection, generation: i64) -> Result<()> 
     .context("seed published gold generation")
 }
 
-fn translate_lineage() -> TranslateLineage {
+fn translate_lineage(manifest: &SilverManifest) -> TranslateLineage {
+    let graph_prefix_uri = "s3://silver-test/silver/demo/1.2.3/builder-v1/";
+    let manifest_bytes = serde_json::to_vec_pretty(manifest).expect("encode Silver manifest");
+    let source_sidecar = manifest
+        .files
+        .iter()
+        .find(|file| file.path == "source_files.parquet")
+        .expect("fixture manifest must contain source_files.parquet");
     TranslateLineage {
         bronze_content_sha256: "bronze-sha256".to_owned(),
         silver_graph_content_hash: "graph-hash-123".to_owned(),
         builder_version: "builder-v1".to_owned(),
         translate_schema_version: "translate-v1".to_owned(),
         embed_text_version: EMBED_TEXT_VERSION.to_owned(),
+        graph_prefix_uri: graph_prefix_uri.to_owned(),
+        graph_manifest_uri: format!("{graph_prefix_uri}manifest.json"),
+        graph_manifest_sha256: format!("{:x}", sha2::Sha256::digest(&manifest_bytes)),
+        graph_manifest_bytes: manifest_bytes.len() as u64,
+        source_sidecar_uri: format!("{graph_prefix_uri}source_files.parquet"),
+        source_sidecar_sha256: source_sidecar.sha256.clone(),
+        source_sidecar_bytes: source_sidecar.size_bytes,
     }
 }
 
@@ -1064,6 +1214,7 @@ fn silver_manifest_for_fixture() -> SilverManifest {
             "edges_unresolved.parquet",
             "files.parquet",
             "file_manifests.parquet",
+            "source_files.parquet",
             "code_symbols.parquet",
             "sections.parquet",
         ]
@@ -1072,6 +1223,7 @@ fn silver_manifest_for_fixture() -> SilverManifest {
             path: path.to_owned(),
             size_bytes: 1,
             etag: format!("\"{path}\""),
+            sha256: "0".repeat(64),
         })
         .collect(),
     }

@@ -17,9 +17,11 @@ GitHub Actions without adding Python package dependencies.
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import os
 import pathlib
+import re
 import shutil
 import subprocess
 import sys
@@ -45,6 +47,9 @@ DEFAULT_POINTER_KEY = "gold/catalog-snapshot/current.json"
 VECTOR_DIMENSIONS = 768
 BRONZE_SOURCE_KEY_TEMPLATE = "bronze/{source}/{package}/{revision}/source.tar.gz"
 SILVER_MANIFEST_KEY_TEMPLATE = (
+    "silver/{source}/{package}/{revision}/{builder_version}/silver-manifest.json"
+)
+GRAPH_MANIFEST_KEY_TEMPLATE = (
     "silver/{source}/{package}/{revision}/{builder_version}/manifest.json"
 )
 
@@ -58,7 +63,10 @@ class SmokeConfig:
     region: str
     source_bucket: str
     data_bucket: str
-    lambda_name: str
+    code_lambda_name: str
+    knowledge_lambda_name: str
+    code_log_group: str
+    knowledge_log_group: str
     source: str
     revision: str
     s3_prefix: str
@@ -105,6 +113,8 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
 def load_config(args: argparse.Namespace) -> SmokeConfig:
     region = env("AWS_REGION", env("AWS_DEFAULT_REGION", DEFAULT_REGION))
     source_bucket = require_env("SPUR_CONTEXT_SMOKE_SOURCE_BUCKET")
+    code_lambda_name = require_env("SPUR_CONTEXT_SMOKE_CODE_LAMBDA")
+    knowledge_lambda_name = require_env("SPUR_CONTEXT_SMOKE_KNOWLEDGE_LAMBDA")
     run_id = env("SPUR_CONTEXT_SMOKE_RUN_ID", uuid.uuid4().hex[:12])
     if args.github_source:
         mode = "github"
@@ -128,7 +138,15 @@ def load_config(args: argparse.Namespace) -> SmokeConfig:
         region=region,
         source_bucket=source_bucket,
         data_bucket=env("SPUR_CONTEXT_SMOKE_DATA_BUCKET", source_bucket),
-        lambda_name=require_env("SPUR_CONTEXT_SMOKE_LAMBDA"),
+        code_lambda_name=code_lambda_name,
+        knowledge_lambda_name=knowledge_lambda_name,
+        code_log_group=env(
+            "SPUR_CONTEXT_SMOKE_CODE_LOG_GROUP", f"/aws/lambda/{code_lambda_name}"
+        ),
+        knowledge_log_group=env(
+            "SPUR_CONTEXT_SMOKE_KNOWLEDGE_LOG_GROUP",
+            f"/aws/lambda/{knowledge_lambda_name}",
+        ),
         source=source,
         revision=revision,
         s3_prefix=env("SPUR_CONTEXT_SMOKE_S3_PREFIX", "smoke/context-service"),
@@ -157,16 +175,21 @@ def normalize_pointer_key(pointer_key: str) -> str:
 
 
 def run_preflight(config: SmokeConfig) -> int:
-    print(f"[context-smoke] preflight lambda={config.lambda_name} region={config.region}")
+    print(
+        "[context-smoke] preflight "
+        f"code_lambda={config.code_lambda_name} "
+        f"knowledge_lambda={config.knowledge_lambda_name} region={config.region}"
+    )
     print(f"[context-smoke] source_bucket={config.source_bucket} data_bucket={config.data_bucket}")
     caller_arn = caller_identity_arn(config.region)
-    print(f"[context-smoke] aws caller={caller_arn}")
-    verify_serving_uses_frozen_s3_catalog(
-        config.lambda_name,
-        config.region,
-        config.pointer_key,
-        allow_non_pointer_snapshot=False,
-    )
+    print(f"[context-smoke] aws caller={sanitize_aws_identity(caller_arn)}")
+    for lambda_name in (config.code_lambda_name, config.knowledge_lambda_name):
+        verify_serving_uses_frozen_s3_catalog(
+            lambda_name,
+            config.region,
+            config.pointer_key,
+            allow_non_pointer_snapshot=False,
+        )
     print("[context-smoke] preflight ok")
     return 0
 
@@ -174,19 +197,30 @@ def run_preflight(config: SmokeConfig) -> int:
 def run_full_smoke(config: SmokeConfig) -> int:
     print(f"[context-smoke] run_id={config.run_id}")
     print(f"[context-smoke] package={config.package} revision={config.revision}")
-    print(f"[context-smoke] lambda={config.lambda_name} region={config.region}")
+    print(
+        f"[context-smoke] code_lambda={config.code_lambda_name} "
+        f"knowledge_lambda={config.knowledge_lambda_name} region={config.region}"
+    )
     print(f"[context-smoke] mode={config.mode}")
 
-    verify_serving_uses_frozen_s3_catalog(
-        config.lambda_name,
-        config.region,
-        config.pointer_key,
-        allow_non_pointer_snapshot=env("SPUR_CONTEXT_SMOKE_ALLOW_NON_POINTER_SNAPSHOT", "0")
-        == "1",
-    )
+    for lambda_name in (config.code_lambda_name, config.knowledge_lambda_name):
+        verify_serving_uses_frozen_s3_catalog(
+            lambda_name,
+            config.region,
+            config.pointer_key,
+            allow_non_pointer_snapshot=env(
+                "SPUR_CONTEXT_SMOKE_ALLOW_NON_POINTER_SNAPSHOT", "0"
+            )
+            == "1",
+        )
     caller_arn = env("SPUR_CONTEXT_SMOKE_CALLER_ARN", caller_identity_arn(config.region))
     invoker = LambdaInvoker(
-        lambda_name=config.lambda_name, region=config.region, caller_arn=caller_arn
+        code_lambda_name=config.code_lambda_name,
+        knowledge_lambda_name=config.knowledge_lambda_name,
+        code_log_group=config.code_log_group,
+        knowledge_log_group=config.knowledge_log_group,
+        region=config.region,
+        caller_arn=caller_arn,
     )
 
     if config.mode == "github":
@@ -208,17 +242,15 @@ def run_presigned_s3_tarball_smoke(config: SmokeConfig, invoker: "LambdaInvoker"
         )
         source_url = presign_fixture_source(config.source_bucket, source_key, config.region)
 
-        index_response = invoker.call_tool(
-            "external_index",
-            {
-                "source": config.source,
-                "package": config.package,
-                "revision": config.revision,
-                "source_url": source_url,
-                "source_kind": config.source_kind,
-                "force": True,
-            },
-        )
+        index_args = {
+            "source": config.source,
+            "package": config.package,
+            "revision": config.revision,
+            "source_url": source_url,
+            "source_kind": config.source_kind,
+            "force": True,
+        }
+        index_response = invoker.call_tool("external_index", index_args)
         if index_response.get("status") == "complete":
             raise SmokeFailure("external_index returned a warm catalog hit; expected real worker")
         job_id = require_json_string(index_response, "job_id")
@@ -230,6 +262,7 @@ def run_presigned_s3_tarball_smoke(config: SmokeConfig, invoker: "LambdaInvoker"
             timeout_seconds=config.timeout_seconds,
             poll_seconds=config.poll_seconds,
         )
+        assert_idempotent_index(invoker, index_args)
         assert_row_counts(status, expect_embeddings=config.expect_embeddings)
         assert_medallion_objects(
             bucket=config.data_bucket,
@@ -266,17 +299,15 @@ def run_presigned_s3_tarball_smoke(config: SmokeConfig, invoker: "LambdaInvoker"
 
 def run_github_source_smoke(config: SmokeConfig, invoker: "LambdaInvoker") -> int:
     print(f"[context-smoke] github_source_url={config.source_url}")
-    index_response = invoker.call_tool(
-        "external_index",
-        {
-            "source": config.source,
-            "package": config.package,
-            "revision": config.revision,
-            "source_url": config.source_url,
-            "source_kind": "git",
-            "force": True,
-        },
-    )
+    index_args = {
+        "source": config.source,
+        "package": config.package,
+        "revision": config.revision,
+        "source_url": config.source_url,
+        "source_kind": "git",
+        "force": True,
+    }
+    index_response = invoker.call_tool("external_index", index_args)
     if index_response.get("status") == "complete":
         raise SmokeFailure("external_index returned a warm catalog hit; expected FetchSource path")
     job_id = require_json_string(index_response, "job_id")
@@ -288,6 +319,7 @@ def run_github_source_smoke(config: SmokeConfig, invoker: "LambdaInvoker") -> in
         timeout_seconds=config.timeout_seconds,
         poll_seconds=config.poll_seconds,
     )
+    assert_idempotent_index(invoker, index_args)
     execution_arn = require_json_string(status, "execution_arn")
     assert_stepfunctions_visited_state(execution_arn, "FetchSource", config.region)
     assert_row_counts(status, expect_embeddings=config.expect_embeddings)
@@ -313,18 +345,75 @@ def run_github_source_smoke(config: SmokeConfig, invoker: "LambdaInvoker") -> in
     return 0
 
 
+CODE_SERVING_TOOLS = frozenset(
+    {
+        "external_catalog",
+        "external_index",
+        "external_index_status",
+        "external_code_search",
+        "external_code_read",
+        "external_code_callers",
+        "external_code_callees",
+    }
+)
+
+
+def serving_backend_for_tool(tool: str) -> str:
+    if tool in CODE_SERVING_TOOLS:
+        return "code"
+    if tool == "external_knowledge_context":
+        return "knowledge"
+    raise SmokeFailure(f"no serving backend is defined for tool {tool}")
+
+
+def lambda_request_id_from_log_tail(encoded_log_tail: str) -> str:
+    try:
+        log_tail = base64.b64decode(encoded_log_tail, validate=True).decode("utf-8")
+    except (ValueError, UnicodeDecodeError) as error:
+        raise SmokeFailure("Lambda log tail is not valid base64 UTF-8") from error
+    request_ids = re.findall(
+        r"^START RequestId:\s+([0-9a-fA-F-]{36})\s+Version:",
+        log_tail,
+        flags=re.MULTILINE,
+    )
+    if len(request_ids) != 1:
+        raise SmokeFailure(
+            f"expected exactly one Lambda START in invocation log tail, got {len(request_ids)}"
+        )
+    return request_ids[0]
+
+
 class LambdaInvoker:
     """Invoke the deployed Lambda handler with an API Gateway-like event.
 
     The script uses `aws lambda invoke` rather than importing boto3.
     """
 
-    def __init__(self, *, lambda_name: str, region: str, caller_arn: str) -> None:
-        self.lambda_name = lambda_name
+    def __init__(
+        self,
+        *,
+        code_lambda_name: str,
+        knowledge_lambda_name: str,
+        code_log_group: str,
+        knowledge_log_group: str,
+        region: str,
+        caller_arn: str,
+    ) -> None:
+        self.lambda_names = {
+            "code": code_lambda_name,
+            "knowledge": knowledge_lambda_name,
+        }
+        self.log_groups = {
+            "code": code_log_group,
+            "knowledge": knowledge_log_group,
+        }
         self.region = region
         self.caller_arn = caller_arn
+        self.invocation_traces: list[dict[str, Any]] = []
 
     def call_tool(self, tool: str, args: dict[str, Any]) -> dict[str, Any]:
+        backend = serving_backend_for_tool(tool)
+        lambda_name = self.lambda_names[backend]
         body = json.dumps({"tool": tool, "args": args}, separators=(",", ":"))
         event = {
             "body": body,
@@ -341,13 +430,16 @@ class LambdaInvoker:
         with tempfile.NamedTemporaryFile(prefix=f"{tool}-", suffix=".json", delete=False) as out:
             out_path = pathlib.Path(out.name)
         try:
+            started_at_ms = int(time.time() * 1000)
             metadata = run_json(
                 [
                     "aws",
                     "lambda",
                     "invoke",
                     "--function-name",
-                    self.lambda_name,
+                    lambda_name,
+                    "--log-type",
+                    "Tail",
                     "--cli-binary-format",
                     "raw-in-base64-out",
                     "--payload",
@@ -357,9 +449,28 @@ class LambdaInvoker:
                     self.region,
                 ]
             )
+            ended_at_ms = int(time.time() * 1000)
             if metadata.get("FunctionError"):
                 payload = out_path.read_text()
                 raise SmokeFailure(f"Lambda FunctionError for {tool}: {payload}")
+            request_id = lambda_request_id_from_log_tail(
+                require_json_string(metadata, "LogResult")
+            )
+            self.invocation_traces.append(
+                {
+                    "tool": tool,
+                    "backend": backend,
+                    "lambda_name": lambda_name,
+                    "log_group": self.log_groups[backend],
+                    "request_id": request_id,
+                    "started_at_ms": started_at_ms,
+                    "ended_at_ms": ended_at_ms,
+                }
+            )
+            print(
+                f"[context-smoke] tool={tool} backend={backend} "
+                f"request_id={request_id} log_group={self.log_groups[backend]}"
+            )
             envelope = json.loads(out_path.read_text())
             status_code = int(envelope.get("statusCode", 0))
             response_body = json.loads(envelope.get("body") or "{}")
@@ -438,6 +549,13 @@ def caller_identity_arn(region: str) -> str:
             region,
         ]
     )
+
+
+def sanitize_aws_identity(caller_arn: str) -> str:
+    parts = caller_arn.split(":", 5)
+    if len(parts) != 6 or parts[0] != "arn":
+        return "<configured-aws-identity>"
+    return f"arn:{parts[1]}:{parts[2]}:<redacted-identity>"
 
 
 def write_fixture_tarball(root: pathlib.Path, package: str, revision: str) -> pathlib.Path:
@@ -538,6 +656,20 @@ def wait_for_complete_job(
     raise SmokeFailure(f"timed out waiting for job {job_id}: {json.dumps(last_status)}")
 
 
+def assert_idempotent_index(
+    invoker: LambdaInvoker, index_args: dict[str, Any]
+) -> None:
+    retry_args = dict(index_args)
+    retry_args["force"] = False
+    response = invoker.call_tool("external_index", retry_args)
+    if response.get("status") != "complete":
+        raise SmokeFailure(
+            "idempotent external_index did not return the completed catalog entry: "
+            + json.dumps(response, sort_keys=True)
+        )
+    print("[context-smoke] external_index idempotency confirmed")
+
+
 def assert_row_counts(status: dict[str, Any], *, expect_embeddings: bool) -> None:
     row_counts = status.get("row_counts") or {}
     if expect_embeddings:
@@ -592,22 +724,39 @@ def assert_silver_artifact_manifest(
     region: str,
 ) -> None:
     keys = list_s3_keys(bucket, silver_prefix, region)
+    manifests_by_builder: dict[str, set[str]] = {}
     for key in keys:
         if not key.startswith(silver_prefix):
             continue
         relative = key[len(silver_prefix) :]
         parts = relative.split("/")
-        if len(parts) == 2 and parts[0] and parts[1] == "manifest.json":
-            print(f"[context-smoke] silver manifest=s3://{bucket}/{key}")
+        if len(parts) == 2 and parts[0] and parts[1] in {
+            "silver-manifest.json",
+            "manifest.json",
+        }:
+            manifests_by_builder.setdefault(parts[0], set()).add(parts[1])
+    for builder_version, basenames in manifests_by_builder.items():
+        if basenames == {"silver-manifest.json", "manifest.json"}:
+            print(
+                "[context-smoke] silver bundle="
+                f"s3://{bucket}/{silver_prefix}{builder_version}/"
+            )
             return
-    expected = SILVER_MANIFEST_KEY_TEMPLATE.format(
+    expected_root = SILVER_MANIFEST_KEY_TEMPLATE.format(
+        source=source,
+        package=package,
+        revision=revision,
+        builder_version="<builder-version>",
+    )
+    expected_graph = GRAPH_MANIFEST_KEY_TEMPLATE.format(
         source=source,
         package=package,
         revision=revision,
         builder_version="<builder-version>",
     )
     raise SmokeFailure(
-        f"expected silver artifact manifest at s3://{bucket}/{expected}; "
+        "expected complete Silver bundle objects at "
+        f"s3://{bucket}/{expected_root} and s3://{bucket}/{expected_graph}; "
         f"found {json.dumps(keys[:10])}"
     )
 
@@ -650,6 +799,24 @@ def assert_serving_queries(
     *,
     expect_embeddings: bool = True,
 ) -> None:
+    catalog = invoker.call_tool(
+        "external_catalog",
+        {
+            "source": source,
+            "package": package,
+            "limit": 20,
+        },
+    )
+    catalog_generation = require_json_int(catalog, "catalog_generation")
+    catalog_revisions = {
+        str(row.get("revision") or "") for row in catalog.get("rows") or []
+    }
+    if revision not in catalog_revisions:
+        raise SmokeFailure(
+            f"external_catalog did not contain revision {revision}: "
+            + json.dumps(catalog, sort_keys=True)
+        )
+
     search = invoker.call_tool(
         "external_code_search",
         {
@@ -661,10 +828,19 @@ def assert_serving_queries(
             "limit": 5,
         },
     )
+    assert_catalog_generation(search, catalog_generation, "external_code_search")
     candidates = search.get("candidates") or []
     if not candidates:
         raise SmokeFailure(f"external_code_search returned no candidates: {json.dumps(search)}")
-    selector = require_json_string(candidates[0], "uri")
+    candidate = candidates[0]
+    selector = require_json_string(candidate, "uri")
+    stable_symbol_id = require_json_string(candidate, "stable_symbol_id")
+    canonical_selector = require_json_string(candidate, "selector")
+    if candidate.get("package") != package or candidate.get("revision") != revision:
+        raise SmokeFailure(
+            "external_code_search returned a candidate for the wrong package revision: "
+            + json.dumps(candidate, sort_keys=True)
+        )
 
     source_response = invoker.call_tool(
         "external_code_read",
@@ -674,40 +850,92 @@ def assert_serving_queries(
             "context_lines": 0,
         },
     )
+    assert_catalog_generation(source_response, catalog_generation, "external_code_read")
+    if (
+        source_response.get("stable_symbol_id") != stable_symbol_id
+        or source_response.get("selector") != canonical_selector
+        or source_response.get("package") != package
+        or source_response.get("revision") != revision
+    ):
+        raise SmokeFailure(
+            "external_code_read did not preserve the chained search identity: "
+            + json.dumps(source_response, sort_keys=True)
+        )
     if symbol_query not in str(source_response.get("source") or ""):
         raise SmokeFailure(f"external_code_read returned unexpected source: {source_response}")
 
-    if not expect_embeddings:
-        # No-embed deployment: no vectors exist, so the hybrid/vector-backed
-        # evidence path is not exercised. The structural search + read above
-        # already proves the gold snapshot serves correctly.
-        print(
-            "[context-smoke] no-embed mode: serving structural queries returned "
-            "expected symbol (vector-backed evidence check skipped)"
-        )
-        return
+    callers = invoker.call_tool(
+        "external_code_callers",
+        {"source": source, "selector": selector, "include_unresolved": True},
+    )
+    callees = invoker.call_tool(
+        "external_code_callees",
+        {"source": source, "selector": selector, "include_unresolved": False},
+    )
+    for tool, response, rows_key in (
+        ("external_code_callers", callers, "callers"),
+        ("external_code_callees", callees, "callees"),
+    ):
+        assert_catalog_generation(response, catalog_generation, tool)
+        if response.get("stable_symbol_id") != stable_symbol_id:
+            raise SmokeFailure(
+                f"{tool} did not preserve the chained search identity: "
+                + json.dumps(response, sort_keys=True)
+            )
+        if not isinstance(response.get(rows_key), list) or not isinstance(
+            response.get("counts_by_kind"), dict
+        ):
+            raise SmokeFailure(f"{tool} returned an invalid edge response shape")
 
-    query_vec = [0.0] * VECTOR_DIMENSIONS
-    query_vec[0] = 1.0
+    knowledge_args: dict[str, Any] = {
+        "source": source,
+        "package": package,
+        "revision": revision,
+        "query": symbol_query,
+        "scope": "code",
+        "limit": 3,
+    }
+    if expect_embeddings:
+        query_vec = [0.0] * VECTOR_DIMENSIONS
+        query_vec[0] = 1.0
+        knowledge_args["query"] = f"vector-only-{run_id}"
+        knowledge_args["query_vec"] = query_vec
     knowledge = invoker.call_tool(
         "external_knowledge_context",
-        {
-            "source": source,
-            "package": package,
-            "revision": revision,
-            "query": f"vector-only-{run_id}",
-            "scope": "code",
-            "limit": 3,
-            "query_vec": query_vec,
-        },
+        knowledge_args,
     )
+    assert_catalog_generation(knowledge, catalog_generation, "external_knowledge_context")
     evidence = knowledge.get("primary_evidence") or []
-    if not any(str(item.get("grounding", "")).startswith("hybrid") for item in evidence):
+    matching_evidence = [
+        item for item in evidence if item.get("stable_symbol_id") == stable_symbol_id
+    ]
+    if not matching_evidence:
+        raise SmokeFailure(
+            "external_knowledge_context did not preserve the chained symbol identity: "
+            + json.dumps(knowledge, sort_keys=True)
+        )
+    if expect_embeddings and not any(
+        str(item.get("grounding", "")).startswith("hybrid")
+        for item in matching_evidence
+    ):
         raise SmokeFailure(
             "external_knowledge_context did not return vector-backed evidence: "
             + json.dumps(knowledge, sort_keys=True)
         )
-    print("[context-smoke] serving queries returned expected symbol and hybrid evidence")
+    print(
+        "[context-smoke] catalog/search/read/callers/callees/knowledge preserved "
+        f"generation={catalog_generation} stable_symbol_id={stable_symbol_id}"
+    )
+
+
+def assert_catalog_generation(
+    response: dict[str, Any], expected: int, tool: str
+) -> None:
+    actual = require_json_int(response, "catalog_generation")
+    if actual != expected:
+        raise SmokeFailure(
+            f"{tool} catalog_generation changed from {expected} to {actual}"
+        )
 
 
 def assert_s3_object(bucket: str, key: str, region: str) -> None:
@@ -758,6 +986,13 @@ def require_json_string(value: dict[str, Any], key: str) -> str:
     return result
 
 
+def require_json_int(value: dict[str, Any], key: str) -> int:
+    result = value.get(key)
+    if isinstance(result, bool) or not isinstance(result, int):
+        raise SmokeFailure(f"expected integer field `{key}` in {json.dumps(value)}")
+    return result
+
+
 def run_json(args: list[str]) -> dict[str, Any]:
     output = run(args)
     try:
@@ -767,7 +1002,7 @@ def run_json(args: list[str]) -> dict[str, Any]:
 
 
 def run(args: list[str]) -> str:
-    printable = " ".join(args)
+    printable = sanitized_command(args)
     completed = subprocess.run(args, text=True, capture_output=True, check=False)
     if completed.returncode != 0:
         raise SmokeFailure(
@@ -776,6 +1011,20 @@ def run(args: list[str]) -> str:
             f"stderr:\n{completed.stderr}"
         )
     return completed.stdout.strip()
+
+
+def sanitized_command(args: list[str]) -> str:
+    sanitized: list[str] = []
+    redact_next = False
+    for arg in args:
+        if redact_next:
+            sanitized.append("<redacted>")
+            redact_next = False
+            continue
+        sanitized.append(arg)
+        if arg in {"--payload"}:
+            redact_next = True
+    return " ".join(sanitized)
 
 
 def require_env(name: str) -> str:

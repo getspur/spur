@@ -14,13 +14,33 @@ output "api_invoke_policy_arn" {
 }
 
 output "lambda_function_name" {
-  description = "Lambda function name"
-  value       = aws_lambda_function.service.function_name
+  description = "Legacy serving Lambda function name (Knowledge until direct route/packaging migration completes)"
+  value       = aws_lambda_function.knowledge.function_name
 }
 
 output "lambda_function_arn" {
-  description = "Lambda function ARN"
-  value       = aws_lambda_function.service.arn
+  description = "Legacy serving Lambda function ARN (Knowledge until direct route/packaging migration completes)"
+  value       = aws_lambda_function.knowledge.arn
+}
+
+output "code_lambda_function_name" {
+  description = "Code serving Lambda function name"
+  value       = aws_lambda_function.code.function_name
+}
+
+output "code_lambda_function_arn" {
+  description = "Code serving Lambda function ARN"
+  value       = aws_lambda_function.code.arn
+}
+
+output "knowledge_lambda_function_name" {
+  description = "Knowledge serving Lambda function name"
+  value       = aws_lambda_function.knowledge.function_name
+}
+
+output "knowledge_lambda_function_arn" {
+  description = "Knowledge serving Lambda function ARN"
+  value       = aws_lambda_function.knowledge.arn
 }
 
 output "s3_bucket_name" {
@@ -69,8 +89,18 @@ output "worker_checkpoint_uri_template" {
 }
 
 output "cloudwatch_log_group" {
-  description = "CloudWatch log group for Lambda"
-  value       = aws_cloudwatch_log_group.lambda.name
+  description = "Legacy CloudWatch log-group output for the Knowledge Lambda"
+  value       = aws_cloudwatch_log_group.knowledge_lambda.name
+}
+
+output "code_cloudwatch_log_group" {
+  description = "CloudWatch log group for the Code Lambda"
+  value       = aws_cloudwatch_log_group.code_lambda.name
+}
+
+output "knowledge_cloudwatch_log_group" {
+  description = "CloudWatch log group for the Knowledge Lambda"
+  value       = aws_cloudwatch_log_group.knowledge_lambda.name
 }
 
 output "state_machine_arn" {
@@ -179,8 +209,16 @@ output "cognito_resource_server_identifier" {
 }
 
 output "oauth_api_url" {
-  description = "Exact JWT-protected OAuth API URL, or null when Cognito is disabled."
+  description = "Deprecated OAuth route prefix retained for compatibility; not directly callable. Null when Cognito is disabled."
   value       = var.cognito_auth_enabled ? "${local.context_service_base_url}/mcp/oauth" : null
+}
+
+output "oauth_api_urls" {
+  description = "Exact JWT-protected OAuth API URLs for the Code and Knowledge routes, or null when Cognito is disabled."
+  value = var.cognito_auth_enabled ? {
+    code      = "${local.context_service_base_url}/mcp/oauth/code"
+    knowledge = "${local.context_service_base_url}/mcp/oauth/knowledge"
+  } : null
 }
 
 # API-key outputs deliberately expose discovery metadata only. Raw keys,
@@ -196,8 +234,16 @@ output "api_key_table_name" {
 }
 
 output "api_key_mcp_url" {
-  description = "Exact CUSTOM-authorized personal API-key MCP URL, or null when API-key auth is disabled."
+  description = "Deprecated personal API-key route prefix retained for compatibility; not directly callable. Null when API-key auth is disabled."
   value       = var.api_key_auth_enabled ? "${local.context_service_base_url}/mcp/api-key" : null
+}
+
+output "api_key_mcp_urls" {
+  description = "Exact CUSTOM-authorized personal API-key MCP URLs for the Code and Knowledge routes, or null when API-key auth is disabled."
+  value = var.api_key_auth_enabled ? {
+    code      = "${local.context_service_base_url}/mcp/api-key/code"
+    knowledge = "${local.context_service_base_url}/mcp/api-key/knowledge"
+  } : null
 }
 
 output "api_key_management_url" {

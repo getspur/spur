@@ -1,12 +1,20 @@
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context as _, Result};
+use aws_sdk_s3::error::SdkError;
+use aws_sdk_s3::operation::get_object::GetObjectError;
+use aws_sdk_s3::operation::put_object::PutObjectError;
 use aws_sdk_s3::primitives::ByteStream;
 use duckdb::{params, Connection};
 use sha2::{Digest, Sha256};
+
+use crate::serving_registry::{
+    ArtifactRef, ServingCatalogRow, ServingRegistry, ServingRegistryError,
+};
 
 pub(crate) const DUCKLAKE_DATA_PATH_ENV: &str = "SPUR_CONTEXT_DUCKLAKE_DATA_PATH";
 pub(crate) const DUCKDB_EXTENSION_DIR_ENV: &str = "SPUR_CONTEXT_DUCKDB_EXTENSION_DIR";
@@ -21,6 +29,7 @@ const SNAPSHOT_POINTER_RELATIVE_PATH: &str = "gold/catalog-snapshot/current.json
 const SNAPSHOT_GENERATIONS_RELATIVE_DIR: &str = "gold/catalog-snapshot/generations";
 const SNAPSHOT_FILE_NAME: &str = "spur_context.ducklake";
 const SNAPSHOT_MANIFEST_FILE_NAME: &str = "manifest.json";
+const SERVING_REGISTRY_FILE_NAME: &str = "serving-registry.json";
 const SNAPSHOT_MANIFEST_SCHEMA_VERSION: u32 = 1;
 const SNAPSHOT_PUBLISHED_STATUS: &str = "published";
 const SNAPSHOT_INDEXES: &[(&str, &str, &str)] = &[
@@ -139,6 +148,12 @@ pub struct FrozenSnapshotManifest {
     pub data_path: String,
     pub sha256: String,
     pub bytes: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub serving_registry_uri: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub serving_registry_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub serving_registry_bytes: Option<u64>,
     pub status: String,
 }
 
@@ -157,6 +172,29 @@ impl FrozenSnapshotManifest {
             data_path,
             sha256,
             bytes,
+            serving_registry_uri: None,
+            serving_registry_sha256: None,
+            serving_registry_bytes: None,
+            status: SNAPSHOT_PUBLISHED_STATUS.to_owned(),
+        }
+    }
+
+    fn published_with_registry(
+        generation: i64,
+        snapshot: ArtifactRef,
+        data_path: String,
+        registry: ArtifactRef,
+    ) -> Self {
+        Self {
+            schema_version: SNAPSHOT_MANIFEST_SCHEMA_VERSION,
+            generation,
+            snapshot_uri: snapshot.uri,
+            data_path,
+            sha256: snapshot.sha256,
+            bytes: snapshot.bytes,
+            serving_registry_uri: Some(registry.uri),
+            serving_registry_sha256: Some(registry.sha256),
+            serving_registry_bytes: Some(registry.bytes),
             status: SNAPSHOT_PUBLISHED_STATUS.to_owned(),
         }
     }
@@ -190,6 +228,26 @@ impl FrozenSnapshotManifest {
         Ok(())
     }
 
+    fn ensure_serving_published(&self) -> Result<()> {
+        self.ensure_published()?;
+        validate_strong_ref("snapshot", &self.snapshot_uri, &self.sha256, self.bytes)?;
+        validate_strong_ref(
+            "serving_registry",
+            self.serving_registry_uri
+                .as_deref()
+                .ok_or_else(|| anyhow!("published pointer is missing serving_registry_uri"))?,
+            self.serving_registry_sha256
+                .as_deref()
+                .ok_or_else(|| anyhow!("published pointer is missing serving_registry_sha256"))?,
+            self.serving_registry_bytes
+                .ok_or_else(|| anyhow!("published pointer is missing serving_registry_bytes"))?,
+        )
+    }
+
+    fn same_serving_identity(&self, other: &Self) -> bool {
+        self == other
+    }
+
     pub fn from_json_slice(bytes: &[u8]) -> Result<Self> {
         let manifest: Self =
             serde_json::from_slice(bytes).context("failed to parse frozen snapshot manifest")?;
@@ -205,6 +263,138 @@ impl FrozenSnapshotManifest {
         Ok(bytes)
     }
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GenerationPublication {
+    pub generation: i64,
+    pub data_path: String,
+    pub snapshot_uri: String,
+    pub snapshot_bytes: Vec<u8>,
+    pub snapshot_manifest_uri: String,
+    pub serving_registry_uri: String,
+    pub pointer_uri: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublicationObject {
+    pub bytes: Vec<u8>,
+    pub etag: String,
+    pub version_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PointerPrecondition {
+    Absent,
+    Matches { etag: String },
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum PublicationStoreError {
+    #[error("conditional object-write precondition failed")]
+    PreconditionFailed,
+    #[error("publication storage operation failed")]
+    Storage,
+}
+
+impl PublicationStoreError {
+    pub const fn code(&self) -> &'static str {
+        match self {
+            Self::PreconditionFailed => "conditional_precondition_failed",
+            Self::Storage => "storage_error",
+        }
+    }
+}
+
+pub trait PublicationStore {
+    fn read_object(
+        &self,
+        uri: &str,
+    ) -> std::result::Result<Option<PublicationObject>, PublicationStoreError>;
+
+    fn put_immutable_object(
+        &self,
+        uri: &str,
+        bytes: &[u8],
+        content_type: &str,
+    ) -> std::result::Result<(), PublicationStoreError>;
+
+    fn compare_and_swap_pointer(
+        &self,
+        uri: &str,
+        bytes: &[u8],
+        content_type: &str,
+        precondition: &PointerPrecondition,
+    ) -> std::result::Result<(), PublicationStoreError>;
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum GenerationPublicationError {
+    #[error("serving registry validation failed ({code})")]
+    Registry { code: &'static str },
+    #[error("catalog publication query failed")]
+    Catalog,
+    #[error("invalid generation publication request")]
+    InvalidPublication,
+    #[error("publication generation {requested} does not match catalog generation {current}")]
+    CatalogGenerationMismatch { requested: i64, current: i64 },
+    #[error("required {kind} publication artifact is missing")]
+    MissingArtifact { kind: &'static str },
+    #[error("{kind} publication artifact SHA-256 mismatch")]
+    ArtifactHashMismatch { kind: &'static str },
+    #[error("{kind} publication artifact byte-length mismatch")]
+    ArtifactByteMismatch { kind: &'static str },
+    #[error("cannot publish stale generation {requested}; live pointer is generation {current}")]
+    StaleGeneration { requested: i64, current: i64 },
+    #[error("live pointer already contains a conflicting publication for generation {generation}")]
+    SameGenerationConflict { generation: i64 },
+    #[error("live pointer changed after it was observed; retry from the new pointer")]
+    StalePointer,
+    #[error("live pointer is invalid")]
+    InvalidPointer,
+    #[error("required immutable {kind} publication output is missing")]
+    MissingImmutableOutput { kind: &'static str },
+    #[error("immutable {kind} publication output does not match the live pointer")]
+    ImmutableOutputMismatch { kind: &'static str },
+    #[error(transparent)]
+    Store(#[from] PublicationStoreError),
+}
+
+impl From<ServingRegistryError> for GenerationPublicationError {
+    fn from(error: ServingRegistryError) -> Self {
+        Self::Registry { code: error.code() }
+    }
+}
+
+impl GenerationPublicationError {
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::Registry { code } => code,
+            Self::Catalog => "catalog_error",
+            Self::InvalidPublication => "invalid_publication",
+            Self::CatalogGenerationMismatch { .. } => "catalog_generation_mismatch",
+            Self::MissingArtifact { kind, .. } if *kind == "source_sidecar" => {
+                "missing_source_sidecar"
+            }
+            Self::MissingArtifact { kind, .. } if *kind == "graph_manifest" => {
+                "missing_graph_manifest"
+            }
+            Self::MissingArtifact { .. } => "missing_artifact",
+            Self::ArtifactHashMismatch { .. } => "artifact_hash_mismatch",
+            Self::ArtifactByteMismatch { .. } => "artifact_byte_mismatch",
+            Self::StaleGeneration { .. } => "stale_generation",
+            Self::SameGenerationConflict { .. } => "same_generation_conflict",
+            Self::StalePointer => "stale_pointer",
+            Self::InvalidPointer => "invalid_pointer",
+            Self::MissingImmutableOutput { .. } => "missing_immutable_output",
+            Self::ImmutableOutputMismatch { .. } => "immutable_output_mismatch",
+            Self::Store(PublicationStoreError::PreconditionFailed) => "stale_pointer",
+            Self::Store(PublicationStoreError::Storage) => "storage_error",
+        }
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct S3PublicationStore;
 
 impl CatalogResolver {
     pub fn new(catalog_dsn: &str) -> Result<Self> {
@@ -478,18 +668,9 @@ pub(crate) fn export_frozen_snapshot(
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create snapshot dir `{}`", parent.display()))?;
     }
-    if location.s3_uri.is_some() {
-        if let Ok(manifest) = read_snapshot_manifest(&location) {
-            if manifest.generation != generation || manifest.snapshot_uri != location.snapshot_uri {
-                bail!(
-                    "existing S3 frozen snapshot manifest does not match generation {generation}: `{}`",
-                    location.local_manifest_path.display()
-                );
-            }
-            publish_snapshot_pointer_if_current_not_newer(&location, &manifest)?;
-            return Ok(location.local_path);
-        }
-    } else if location.local_path.exists() || location.local_manifest_path.exists() {
+    if location.s3_uri.is_none()
+        && (location.local_path.exists() || location.local_manifest_path.exists())
+    {
         if location.local_path.is_file() && location.local_manifest_path.is_file() {
             let manifest = read_snapshot_manifest(&location)?;
             if manifest.generation != generation || manifest.snapshot_uri != location.snapshot_uri {
@@ -521,6 +702,39 @@ pub(crate) fn export_frozen_snapshot(
     validate_snapshot_attaches(&location.local_staging_path, data_path)?;
     verify_snapshot_referenced_files_exist(&location.local_staging_path, data_path)?;
 
+    if location.s3_uri.is_some() {
+        let snapshot_bytes = fs::read(&location.local_staging_path).with_context(|| {
+            format!(
+                "failed to read frozen snapshot `{}`",
+                location.local_staging_path.display()
+            )
+        })?;
+        let frozen = connect_frozen_snapshot(&location.local_staging_path, data_path)?;
+        publish_generation(
+            &S3PublicationStore,
+            &frozen,
+            GenerationPublication {
+                generation,
+                data_path: data_path.to_owned(),
+                snapshot_uri: location.snapshot_uri.clone(),
+                snapshot_bytes,
+                snapshot_manifest_uri: location
+                    .s3_manifest_uri
+                    .clone()
+                    .ok_or_else(|| anyhow!("S3 snapshot manifest URI is missing"))?,
+                serving_registry_uri: location
+                    .s3_serving_registry_uri
+                    .clone()
+                    .ok_or_else(|| anyhow!("S3 serving registry URI is missing"))?,
+                pointer_uri: location
+                    .s3_pointer_uri
+                    .clone()
+                    .ok_or_else(|| anyhow!("S3 live pointer URI is missing"))?,
+            },
+        )?;
+        return Ok(location.local_path);
+    }
+
     let (sha256, bytes) = file_sha256_and_len(&location.local_staging_path)?;
     let manifest = FrozenSnapshotManifest::published(
         generation,
@@ -537,17 +751,453 @@ pub(crate) fn export_frozen_snapshot(
     Ok(location.local_path)
 }
 
+pub fn publish_generation<S: PublicationStore>(
+    store: &S,
+    catalog: &Connection,
+    publication: GenerationPublication,
+) -> std::result::Result<FrozenSnapshotManifest, GenerationPublicationError> {
+    validate_publication_request(&publication)?;
+
+    let registry = serving_registry_for_generation(catalog, publication.generation)?;
+    let registry_bytes = registry.to_canonical_json()?;
+    validate_registry_artifacts(store, &registry)?;
+
+    let snapshot_ref = ArtifactRef {
+        uri: publication.snapshot_uri.clone(),
+        sha256: sha256_bytes(&publication.snapshot_bytes),
+        bytes: publication.snapshot_bytes.len() as u64,
+    };
+    let registry_ref = ArtifactRef {
+        uri: publication.serving_registry_uri.clone(),
+        sha256: sha256_bytes(&registry_bytes),
+        bytes: registry_bytes.len() as u64,
+    };
+    let manifest = FrozenSnapshotManifest::published_with_registry(
+        publication.generation,
+        snapshot_ref,
+        publication.data_path.clone(),
+        registry_ref,
+    );
+    manifest
+        .ensure_serving_published()
+        .map_err(|_| GenerationPublicationError::InvalidPublication)?;
+    let manifest_bytes = manifest
+        .to_json_bytes()
+        .map_err(|_| GenerationPublicationError::InvalidPublication)?;
+
+    let precondition = match observe_live_pointer(store, &publication.pointer_uri, &manifest)? {
+        PointerDecision::AlreadyPublished(live_pointer) => {
+            verify_already_published_outputs(
+                store,
+                &publication,
+                &manifest,
+                &manifest_bytes,
+                &registry_bytes,
+                &live_pointer,
+            )?;
+            return Ok(manifest);
+        }
+        PointerDecision::Publish(precondition) => precondition,
+    };
+
+    put_immutable_exact(
+        store,
+        &publication.snapshot_uri,
+        &publication.snapshot_bytes,
+        "application/octet-stream",
+    )?;
+    put_immutable_exact(
+        store,
+        &publication.snapshot_manifest_uri,
+        &manifest_bytes,
+        "application/json",
+    )?;
+    put_immutable_exact(
+        store,
+        &publication.serving_registry_uri,
+        &registry_bytes,
+        "application/json",
+    )?;
+    match store.compare_and_swap_pointer(
+        &publication.pointer_uri,
+        &manifest_bytes,
+        "application/json",
+        &precondition,
+    ) {
+        Ok(()) => Ok(manifest),
+        Err(PublicationStoreError::PreconditionFailed) => {
+            Err(GenerationPublicationError::StalePointer)
+        }
+        Err(error) => Err(GenerationPublicationError::Store(error)),
+    }
+}
+
+fn validate_publication_request(
+    publication: &GenerationPublication,
+) -> std::result::Result<(), GenerationPublicationError> {
+    if publication.generation <= 0 {
+        return Err(GenerationPublicationError::InvalidPublication);
+    }
+    if publication.snapshot_bytes.is_empty() {
+        return Err(GenerationPublicationError::InvalidPublication);
+    }
+    for (name, uri) in [
+        ("data_path", publication.data_path.as_str()),
+        ("snapshot_uri", publication.snapshot_uri.as_str()),
+        (
+            "snapshot_manifest_uri",
+            publication.snapshot_manifest_uri.as_str(),
+        ),
+        (
+            "serving_registry_uri",
+            publication.serving_registry_uri.as_str(),
+        ),
+        ("pointer_uri", publication.pointer_uri.as_str()),
+    ] {
+        let _ = name;
+        parse_s3_uri(uri).map_err(|_| GenerationPublicationError::InvalidPublication)?;
+    }
+    let generation_segment = format!("/{:020}/", publication.generation);
+    for (name, uri) in [
+        ("snapshot_uri", publication.snapshot_uri.as_str()),
+        (
+            "snapshot_manifest_uri",
+            publication.snapshot_manifest_uri.as_str(),
+        ),
+        (
+            "serving_registry_uri",
+            publication.serving_registry_uri.as_str(),
+        ),
+    ] {
+        if !uri.contains(&generation_segment) {
+            let _ = name;
+            return Err(GenerationPublicationError::InvalidPublication);
+        }
+    }
+    Ok(())
+}
+
+fn serving_registry_for_generation(
+    catalog: &Connection,
+    generation: i64,
+) -> std::result::Result<ServingRegistry, GenerationPublicationError> {
+    let table = readable_table(catalog, "package_catalog")
+        .map_err(|_| GenerationPublicationError::Catalog)?;
+    let max_sql = format!("SELECT MAX(generation)::BIGINT FROM {table}");
+    let current_generation = catalog
+        .query_row(&max_sql, [], |row| row.get::<_, Option<i64>>(0))
+        .map_err(|_| GenerationPublicationError::Catalog)?
+        .filter(|current| *current > 0)
+        .ok_or(GenerationPublicationError::Catalog)?;
+    if generation != current_generation {
+        return Err(GenerationPublicationError::CatalogGenerationMismatch {
+            requested: generation,
+            current: current_generation,
+        });
+    }
+    let sql = format!(
+        r"
+        SELECT
+            source,
+            package,
+            revision,
+            revision_kind,
+            generation,
+            index_status,
+            graph_manifest_uri,
+            graph_manifest_sha256,
+            graph_manifest_bytes,
+            source_sidecar_uri,
+            source_sidecar_sha256,
+            source_sidecar_bytes
+        FROM {table}
+        WHERE NOT (
+            graph_manifest_uri IS NULL
+            AND graph_manifest_sha256 IS NULL
+            AND graph_manifest_bytes IS NULL
+            AND source_sidecar_uri IS NULL
+            AND source_sidecar_sha256 IS NULL
+            AND source_sidecar_bytes IS NULL
+        )
+        ORDER BY source, package, revision
+        "
+    );
+    let mut stmt = catalog
+        .prepare(&sql)
+        .map_err(|_| GenerationPublicationError::Catalog)?;
+    let mut rows = stmt
+        .query_map([], |row| {
+            let graph_manifest_bytes = row
+                .get::<_, Option<i64>>(8)?
+                .and_then(|bytes| u64::try_from(bytes).ok());
+            let source_sidecar_bytes = row
+                .get::<_, Option<i64>>(11)?
+                .and_then(|bytes| u64::try_from(bytes).ok());
+            Ok(ServingCatalogRow {
+                source: row.get(0)?,
+                package: row.get(1)?,
+                revision: row.get(2)?,
+                revision_kind: row.get(3)?,
+                refs: Vec::new(),
+                generation: row.get::<_, Option<i64>>(4)?,
+                index_status: row.get(5)?,
+                graph_manifest_uri: row.get(6)?,
+                graph_manifest_sha256: row.get(7)?,
+                graph_manifest_bytes,
+                source_sidecar_uri: row.get(9)?,
+                source_sidecar_sha256: row.get(10)?,
+                source_sidecar_bytes,
+            })
+        })
+        .map_err(|_| GenerationPublicationError::Catalog)?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|_| GenerationPublicationError::Catalog)?;
+
+    let refs_table =
+        readable_table(catalog, "refs").map_err(|_| GenerationPublicationError::Catalog)?;
+    let refs_sql = format!(
+        r"
+        SELECT source, package, revision, ref_name
+        FROM {refs_table}
+        ORDER BY source, package, revision, ref_name
+        "
+    );
+    let mut refs_stmt = catalog
+        .prepare(&refs_sql)
+        .map_err(|_| GenerationPublicationError::Catalog)?;
+    let refs = refs_stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })
+        .map_err(|_| GenerationPublicationError::Catalog)?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|_| GenerationPublicationError::Catalog)?;
+    let identities_sql = format!("SELECT source, package, revision FROM {table}");
+    let mut identities_stmt = catalog
+        .prepare(&identities_sql)
+        .map_err(|_| GenerationPublicationError::Catalog)?;
+    let identities = identities_stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })
+        .map_err(|_| GenerationPublicationError::Catalog)?
+        .collect::<std::result::Result<BTreeSet<_>, _>>()
+        .map_err(|_| GenerationPublicationError::Catalog)?;
+    let mut refs_by_revision = BTreeMap::<(String, String, String), Vec<String>>::new();
+    for (source, package, revision, reference) in refs {
+        if !identities.contains(&(source.clone(), package.clone(), revision.clone())) {
+            return Err(ServingRegistryError::IncompleteServingGeneration {
+                generation,
+                reason: "a package ref targets an absent package revision".to_owned(),
+            }
+            .into());
+        }
+        refs_by_revision
+            .entry((source, package, revision))
+            .or_default()
+            .push(reference);
+    }
+    for row in &mut rows {
+        row.refs = refs_by_revision
+            .remove(&(
+                row.source.clone(),
+                row.package.clone(),
+                row.revision.clone(),
+            ))
+            .unwrap_or_default();
+    }
+    ServingRegistry::from_current_rows(generation, rows).map_err(Into::into)
+}
+
+fn validate_registry_artifacts<S: PublicationStore>(
+    store: &S,
+    registry: &ServingRegistry,
+) -> std::result::Result<(), GenerationPublicationError> {
+    registry.validate()?;
+    for package in &registry.packages {
+        validate_publication_artifact(store, "graph_manifest", &package.graph_manifest)?;
+        validate_publication_artifact(store, "source_sidecar", &package.source_sidecar)?;
+    }
+    Ok(())
+}
+
+fn validate_publication_artifact<S: PublicationStore>(
+    store: &S,
+    kind: &'static str,
+    artifact: &ArtifactRef,
+) -> std::result::Result<(), GenerationPublicationError> {
+    let object = store
+        .read_object(&artifact.uri)?
+        .ok_or_else(|| GenerationPublicationError::MissingArtifact { kind })?;
+    let actual_bytes = object.bytes.len() as u64;
+    if actual_bytes != artifact.bytes {
+        return Err(GenerationPublicationError::ArtifactByteMismatch { kind });
+    }
+    let actual_hash = sha256_bytes(&object.bytes);
+    if actual_hash != artifact.sha256 {
+        return Err(GenerationPublicationError::ArtifactHashMismatch { kind });
+    }
+    Ok(())
+}
+
+enum PointerDecision {
+    AlreadyPublished(PublicationObject),
+    Publish(PointerPrecondition),
+}
+
+fn observe_live_pointer<S: PublicationStore>(
+    store: &S,
+    pointer_uri: &str,
+    manifest: &FrozenSnapshotManifest,
+) -> std::result::Result<PointerDecision, GenerationPublicationError> {
+    let Some(object) = store.read_object(pointer_uri)? else {
+        return Ok(PointerDecision::Publish(PointerPrecondition::Absent));
+    };
+    let current = FrozenSnapshotManifest::from_json_slice(&object.bytes)
+        .map_err(|_| GenerationPublicationError::InvalidPointer)?;
+    if current.generation > manifest.generation {
+        return Err(GenerationPublicationError::StaleGeneration {
+            requested: manifest.generation,
+            current: current.generation,
+        });
+    }
+    if current.generation == manifest.generation {
+        return if current.same_serving_identity(manifest) {
+            Ok(PointerDecision::AlreadyPublished(object))
+        } else {
+            Err(GenerationPublicationError::SameGenerationConflict {
+                generation: manifest.generation,
+            })
+        };
+    }
+    if object.etag.trim().is_empty() {
+        return Err(GenerationPublicationError::InvalidPointer);
+    }
+    Ok(PointerDecision::Publish(PointerPrecondition::Matches {
+        etag: object.etag,
+    }))
+}
+
+fn verify_already_published_outputs<S: PublicationStore>(
+    store: &S,
+    publication: &GenerationPublication,
+    manifest: &FrozenSnapshotManifest,
+    manifest_bytes: &[u8],
+    registry_bytes: &[u8],
+    live_pointer: &PublicationObject,
+) -> std::result::Result<(), GenerationPublicationError> {
+    if live_pointer.bytes != manifest_bytes {
+        return Err(GenerationPublicationError::ImmutableOutputMismatch {
+            kind: "generation_manifest",
+        });
+    }
+
+    verify_immutable_output(
+        store,
+        "snapshot",
+        &manifest.snapshot_uri,
+        &manifest.sha256,
+        manifest.bytes,
+        &publication.snapshot_bytes,
+    )?;
+
+    let stored_manifest = store
+        .read_object(&publication.snapshot_manifest_uri)?
+        .ok_or(GenerationPublicationError::MissingImmutableOutput {
+            kind: "generation_manifest",
+        })?;
+    let decoded_manifest = FrozenSnapshotManifest::from_json_slice(&stored_manifest.bytes)
+        .map_err(|_| GenerationPublicationError::ImmutableOutputMismatch {
+            kind: "generation_manifest",
+        })?;
+    if stored_manifest.bytes != live_pointer.bytes
+        || stored_manifest.bytes != manifest_bytes
+        || decoded_manifest != *manifest
+    {
+        return Err(GenerationPublicationError::ImmutableOutputMismatch {
+            kind: "generation_manifest",
+        });
+    }
+
+    verify_immutable_output(
+        store,
+        "serving_registry",
+        manifest
+            .serving_registry_uri
+            .as_deref()
+            .ok_or(GenerationPublicationError::InvalidPointer)?,
+        manifest
+            .serving_registry_sha256
+            .as_deref()
+            .ok_or(GenerationPublicationError::InvalidPointer)?,
+        manifest
+            .serving_registry_bytes
+            .ok_or(GenerationPublicationError::InvalidPointer)?,
+        registry_bytes,
+    )
+}
+
+fn verify_immutable_output<S: PublicationStore>(
+    store: &S,
+    kind: &'static str,
+    uri: &str,
+    expected_sha256: &str,
+    expected_bytes: u64,
+    canonical_bytes: &[u8],
+) -> std::result::Result<(), GenerationPublicationError> {
+    let object = store
+        .read_object(uri)?
+        .ok_or(GenerationPublicationError::MissingImmutableOutput { kind })?;
+    if object.bytes.len() as u64 != expected_bytes
+        || sha256_bytes(&object.bytes) != expected_sha256
+        || object.bytes != canonical_bytes
+    {
+        return Err(GenerationPublicationError::ImmutableOutputMismatch { kind });
+    }
+    Ok(())
+}
+
+fn put_immutable_exact<S: PublicationStore>(
+    store: &S,
+    uri: &str,
+    bytes: &[u8],
+    content_type: &str,
+) -> std::result::Result<(), GenerationPublicationError> {
+    match store.put_immutable_object(uri, bytes, content_type) {
+        Ok(()) => Ok(()),
+        Err(error) => match store.read_object(uri) {
+            Ok(Some(existing)) if existing.bytes == bytes => Ok(()),
+            Ok(Some(_)) => Err(GenerationPublicationError::ImmutableOutputMismatch {
+                kind: "immutable_write",
+            }),
+            _ => Err(GenerationPublicationError::Store(error)),
+        },
+    }
+}
+
 pub fn rollback_frozen_snapshot_pointer(
     data_path: &str,
     generation: i64,
 ) -> Result<FrozenSnapshotManifest> {
     let location = SnapshotLocation::for_data_path_and_generation(data_path, generation)?;
+    if location.s3_uri.is_some() {
+        bail!(
+            "stale_generation: shared S3 live-pointer rollback is forbidden; retain the current complete generation"
+        );
+    }
     let manifest = read_snapshot_manifest(&location)?;
     manifest.ensure_published()?;
 
-    if let Some(uri) = &location.s3_uri {
-        head_s3_object(uri)?;
-    } else if !location.local_path.is_file() {
+    if !location.local_path.is_file() {
         bail!(
             "cannot roll back to missing frozen snapshot `{}`",
             location.local_path.display()
@@ -770,6 +1420,7 @@ struct SnapshotLocation {
     snapshot_uri: String,
     s3_uri: Option<String>,
     s3_manifest_uri: Option<String>,
+    s3_serving_registry_uri: Option<String>,
     s3_pointer_uri: Option<String>,
 }
 
@@ -783,6 +1434,7 @@ impl SnapshotLocation {
         if data_path.starts_with("s3://") {
             let uri = snapshot_s3_uri(data_path, generation);
             let manifest_uri = snapshot_manifest_s3_uri(data_path, generation);
+            let serving_registry_uri = snapshot_serving_registry_s3_uri(data_path, generation);
             let pointer_uri = snapshot_pointer_s3_uri(data_path);
             let mut local_path = std::env::temp_dir();
             local_path.push(format!(
@@ -799,6 +1451,7 @@ impl SnapshotLocation {
                 snapshot_uri: uri.clone(),
                 s3_uri: Some(uri),
                 s3_manifest_uri: Some(manifest_uri),
+                s3_serving_registry_uri: Some(serving_registry_uri),
                 s3_pointer_uri: Some(pointer_uri),
             })
         } else {
@@ -820,6 +1473,7 @@ impl SnapshotLocation {
                 local_pointer_path,
                 s3_uri: None,
                 s3_manifest_uri: None,
+                s3_serving_registry_uri: None,
                 s3_pointer_uri: None,
             })
         }
@@ -843,6 +1497,16 @@ fn snapshot_manifest_s3_uri(data_path: &str, generation: i64) -> String {
         SNAPSHOT_GENERATIONS_RELATIVE_DIR,
         generation,
         SNAPSHOT_MANIFEST_FILE_NAME
+    )
+}
+
+fn snapshot_serving_registry_s3_uri(data_path: &str, generation: i64) -> String {
+    format!(
+        "{}/{}/{:020}/{}",
+        snapshot_base_uri(data_path).trim_end_matches('/'),
+        SNAPSHOT_GENERATIONS_RELATIVE_DIR,
+        generation,
+        SERVING_REGISTRY_FILE_NAME
     )
 }
 
@@ -952,10 +1616,9 @@ fn publish_snapshot_pointer_if_current_not_newer(
 
 fn read_snapshot_pointer(location: &SnapshotLocation) -> Result<Option<FrozenSnapshotManifest>> {
     let bytes = if let Some(uri) = &location.s3_pointer_uri {
-        match get_s3_object_bytes(uri) {
-            Ok(bytes) => bytes,
-            Err(error) if is_s3_not_found_error(&error) => return Ok(None),
-            Err(error) => return Err(error),
+        match get_s3_object_bytes_optional(uri)? {
+            Some(bytes) => bytes,
+            None => return Ok(None),
         }
     } else {
         match fs::read(&location.local_pointer_path) {
@@ -972,14 +1635,6 @@ fn read_snapshot_pointer(location: &SnapshotLocation) -> Result<Option<FrozenSna
         }
     };
     FrozenSnapshotManifest::from_json_slice(&bytes).map(Some)
-}
-
-pub(crate) fn is_s3_not_found_error(error: &anyhow::Error) -> bool {
-    let message = format!("{error:#}");
-    message.contains("NoSuchKey")
-        || message.contains("NotFound")
-        || message.contains("Not Found")
-        || message.contains("404")
 }
 
 fn read_snapshot_manifest(location: &SnapshotLocation) -> Result<FrozenSnapshotManifest> {
@@ -1042,14 +1697,28 @@ fn write_json_file_atomic(path: &Path, bytes: &[u8], overwrite: bool) -> Result<
 fn file_sha256_and_len(path: &Path) -> Result<(String, u64)> {
     let bytes =
         fs::read(path).with_context(|| format!("failed to read snapshot `{}`", path.display()))?;
+    Ok((sha256_bytes(&bytes), bytes.len() as u64))
+}
+
+fn sha256_bytes(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(&bytes);
+    hasher.update(bytes);
     let digest = hasher.finalize();
-    let sha256 = digest
+    digest
         .iter()
         .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
-    Ok((sha256, bytes.len() as u64))
+        .collect::<String>()
+}
+
+fn validate_strong_ref(name: &str, uri: &str, sha256: &str, bytes: u64) -> Result<()> {
+    parse_s3_uri(uri).with_context(|| format!("{name} URI is not an S3 object URI"))?;
+    if sha256.len() != 64 || !sha256.as_bytes().iter().all(u8::is_ascii_hexdigit) {
+        bail!("{name} SHA-256 must be 64 ASCII hexadecimal characters");
+    }
+    if bytes == 0 {
+        bail!("{name} byte length must be positive");
+    }
+    Ok(())
 }
 
 fn copy_ducklake_metadata_tables(catalog_dsn: &str, snapshot_path: &Path) -> Result<()> {
@@ -1290,6 +1959,159 @@ fn join_uri_path(base: &str, child: &str) -> String {
     )
 }
 
+impl PublicationStore for S3PublicationStore {
+    fn read_object(
+        &self,
+        uri: &str,
+    ) -> std::result::Result<Option<PublicationObject>, PublicationStoreError> {
+        get_s3_publication_object(uri)
+    }
+
+    fn put_immutable_object(
+        &self,
+        uri: &str,
+        bytes: &[u8],
+        content_type: &str,
+    ) -> std::result::Result<(), PublicationStoreError> {
+        put_s3_publication_object(
+            uri,
+            bytes.to_vec(),
+            content_type,
+            PointerPrecondition::Absent,
+        )
+    }
+
+    fn compare_and_swap_pointer(
+        &self,
+        uri: &str,
+        bytes: &[u8],
+        content_type: &str,
+        precondition: &PointerPrecondition,
+    ) -> std::result::Result<(), PublicationStoreError> {
+        put_s3_publication_object(uri, bytes.to_vec(), content_type, precondition.clone())
+    }
+}
+
+fn s3_get_is_not_found(error: &SdkError<GetObjectError>) -> bool {
+    let modeled_code = error
+        .as_service_error()
+        .and_then(|service_error| service_error.meta().code());
+    let status = error
+        .raw_response()
+        .map(|response| response.status().as_u16());
+    is_s3_get_not_found(modeled_code, status)
+}
+
+pub(crate) fn is_s3_get_not_found(modeled_code: Option<&str>, status: Option<u16>) -> bool {
+    matches!(modeled_code, Some("NoSuchKey" | "NotFound")) || status == Some(404)
+}
+
+#[allow(dead_code)] // Used by the Lambda feature's typed SDK error seam.
+pub(crate) fn is_s3_not_found_error(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<SdkError<GetObjectError>>()
+        .is_some_and(s3_get_is_not_found)
+}
+
+fn s3_conditional_write_is_stale(error: &SdkError<PutObjectError>) -> bool {
+    let modeled_code = error
+        .as_service_error()
+        .and_then(|service_error| service_error.meta().code());
+    let status = error
+        .raw_response()
+        .map(|response| response.status().as_u16());
+    is_s3_conditional_write_stale(modeled_code, status)
+}
+
+pub(crate) fn is_s3_conditional_write_stale(
+    modeled_code: Option<&str>,
+    status: Option<u16>,
+) -> bool {
+    matches!(
+        modeled_code,
+        Some("PreconditionFailed" | "ConditionalRequestConflict" | "NoSuchKey" | "NotFound")
+    ) || matches!(status, Some(404 | 409 | 412))
+}
+
+fn get_s3_publication_object(
+    uri: &str,
+) -> std::result::Result<Option<PublicationObject>, PublicationStoreError> {
+    let parsed = parse_s3_uri(uri).map_err(|_| PublicationStoreError::Storage)?;
+    run_s3_publication_blocking(move |client| async move {
+        let output = match client
+            .get_object()
+            .bucket(parsed.bucket)
+            .key(parsed.key)
+            .send()
+            .await
+        {
+            Ok(output) => output,
+            Err(error) if s3_get_is_not_found(&error) => return Ok(None),
+            Err(_) => return Err(PublicationStoreError::Storage),
+        };
+        let etag = output.e_tag().unwrap_or_default().to_owned();
+        let version_id = output.version_id().map(str::to_owned);
+        let bytes = output
+            .body
+            .collect()
+            .await
+            .map_err(|_| PublicationStoreError::Storage)?;
+        Ok(Some(PublicationObject {
+            bytes: bytes.into_bytes().to_vec(),
+            etag,
+            version_id,
+        }))
+    })
+}
+
+fn put_s3_publication_object(
+    uri: &str,
+    bytes: Vec<u8>,
+    content_type: &str,
+    precondition: PointerPrecondition,
+) -> std::result::Result<(), PublicationStoreError> {
+    let parsed = parse_s3_uri(uri).map_err(|_| PublicationStoreError::Storage)?;
+    let content_type = content_type.to_owned();
+    run_s3_publication_blocking(move |client| async move {
+        let request = client
+            .put_object()
+            .bucket(parsed.bucket)
+            .key(parsed.key)
+            .content_type(content_type)
+            .body(ByteStream::from(bytes));
+        let request = match precondition {
+            PointerPrecondition::Absent => request.if_none_match("*"),
+            PointerPrecondition::Matches { etag } => request.if_match(etag),
+        };
+        match request.send().await {
+            Ok(_) => Ok(()),
+            Err(error) if s3_conditional_write_is_stale(&error) => {
+                Err(PublicationStoreError::PreconditionFailed)
+            }
+            Err(_) => Err(PublicationStoreError::Storage),
+        }
+    })
+}
+
+fn run_s3_publication_blocking<T, F, Fut>(f: F) -> std::result::Result<T, PublicationStoreError>
+where
+    F: FnOnce(aws_sdk_s3::Client) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = std::result::Result<T, PublicationStoreError>>
+        + Send
+        + 'static,
+    T: Send + 'static,
+{
+    thread::spawn(move || {
+        let runtime = tokio::runtime::Runtime::new().map_err(|_| PublicationStoreError::Storage)?;
+        runtime.block_on(async move {
+            let client = s3_client_from_env();
+            f(client).await
+        })
+    })
+    .join()
+    .map_err(|_| PublicationStoreError::Storage)?
+}
+
 fn upload_file_to_s3(local_path: &Path, uri: &str) -> Result<()> {
     let bytes = fs::read(local_path)
         .with_context(|| format!("failed to read snapshot `{}`", local_path.display()))?;
@@ -1339,23 +2161,13 @@ fn head_s3_object(uri: &str) -> Result<()> {
 }
 
 fn get_s3_object_bytes(uri: &str) -> Result<Vec<u8>> {
-    let parsed = parse_s3_uri(uri)?;
-    let uri = uri.to_owned();
-    run_s3_blocking(move |client| async move {
-        let output = client
-            .get_object()
-            .bucket(parsed.bucket)
-            .key(parsed.key)
-            .send()
-            .await
-            .with_context(|| format!("failed to read S3 object `{uri}`"))?;
-        let bytes = output
-            .body
-            .collect()
-            .await
-            .with_context(|| format!("failed to read S3 object body `{uri}`"))?;
-        Ok(bytes.into_bytes().to_vec())
-    })
+    get_s3_object_bytes_optional(uri)?.ok_or_else(|| anyhow!("required S3 object is missing"))
+}
+
+fn get_s3_object_bytes_optional(uri: &str) -> Result<Option<Vec<u8>>> {
+    get_s3_publication_object(uri)
+        .map(|object| object.map(|object| object.bytes))
+        .map_err(|_| anyhow!("S3 object read failed"))
 }
 
 fn run_s3_blocking<T, F, Fut>(f: F) -> Result<T>
@@ -1686,6 +2498,9 @@ mod tests {
             data_path: root.join("data").display().to_string(),
             sha256: "abc123".to_owned(),
             bytes: 12,
+            serving_registry_uri: None,
+            serving_registry_sha256: None,
+            serving_registry_bytes: None,
             status: "staging".to_owned(),
         };
 
@@ -1974,19 +2789,23 @@ mod tests {
     }
 
     #[test]
-    fn s3_not_found_classifier_does_not_swallow_permission_errors() {
-        assert!(is_s3_not_found_error(&anyhow!(
-            "service error: NoSuchKey: key gold/catalog-snapshot/current.json does not exist"
-        )));
-        assert!(is_s3_not_found_error(&anyhow!(
-            "service error: Not Found (status 404)"
-        )));
-        assert!(!is_s3_not_found_error(&anyhow!(
-            "service error: AccessDenied: missing s3:GetObject permission"
-        )));
-        assert!(!is_s3_not_found_error(&anyhow!(
-            "service error: SlowDown: please reduce your request rate"
-        )));
+    fn s3_status_classifiers_use_modeled_codes_and_raw_statuses() {
+        assert!(is_s3_get_not_found(Some("NoSuchKey"), None));
+        assert!(is_s3_get_not_found(None, Some(404)));
+        assert!(!is_s3_get_not_found(Some("AccessDenied"), Some(403)));
+        assert!(!is_s3_get_not_found(Some("SlowDown"), Some(503)));
+
+        for status in [404, 409, 412] {
+            assert!(is_s3_conditional_write_stale(None, Some(status)));
+        }
+        assert!(is_s3_conditional_write_stale(
+            Some("PreconditionFailed"),
+            None
+        ));
+        assert!(!is_s3_conditional_write_stale(
+            Some("AccessDenied"),
+            Some(403)
+        ));
     }
 
     #[test]

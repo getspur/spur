@@ -18,7 +18,7 @@ resource "aws_lambda_function" "worker" {
   package_type  = "Image"
   image_uri     = var.worker_lambda_image
   architectures = ["arm64"]
-  role          = aws_iam_role.lambda.arn
+  role          = aws_iam_role.worker_lambda.arn
   timeout       = var.worker_lambda_timeout_sec
   memory_size   = var.worker_lambda_memory_mb
   publish       = true
@@ -49,7 +49,7 @@ resource "aws_lambda_function" "worker" {
   depends_on = [
     aws_iam_role_policy_attachment.lambda_basic,
     aws_iam_role_policy_attachment.lambda_vpc_access,
-    aws_iam_role_policy.lambda_catalog_secret,
+    aws_iam_role_policy.shared_lambda_catalog_secret,
     aws_cloudwatch_log_group.worker_lambda,
   ]
 }

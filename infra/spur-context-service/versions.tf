@@ -1,5 +1,5 @@
 terraform {
-  required_version = ">= 1.5"
+  required_version = ">= 1.9, < 2.0"
 
   # Partial config; real values supplied via -backend-config=backends/<env>.s3.tfbackend
   backend "s3" {}

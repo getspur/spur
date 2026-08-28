@@ -16,6 +16,9 @@ pub(crate) const LOGIN_PATH: &str = "/auth/login";
 pub(crate) const API_KEY_MCP_PATH: &str = "/mcp/api-key";
 pub(crate) const API_KEY_MANAGEMENT_PATH: &str = "/auth/api-keys";
 
+const OAUTH_SPLIT_PATHS: [&str; 2] = ["/mcp/oauth/code", "/mcp/oauth/knowledge"];
+const API_KEY_SPLIT_PATHS: [&str; 2] = ["/mcp/api-key/code", "/mcp/api-key/knowledge"];
+
 const EXTERNAL_TOOL_SCOPE_SUFFIXES: [(&str, &str); 8] = [
     ("external_catalog", "external.read"),
     ("external_code_search", "external.read"),
@@ -77,6 +80,8 @@ pub(crate) fn classify_route(path: Option<&str>, method: Option<&str>) -> Reques
     };
     match (method, path) {
         ("POST", OAUTH_PATH) => RequestRoute::OAuth,
+        ("POST", path) if OAUTH_SPLIT_PATHS.contains(&path) => RequestRoute::OAuth,
+        (_, path) if path.starts_with("/mcp/oauth/") => RequestRoute::ReservedUnavailable,
         ("GET", DISCOVERY_PATH) => RequestRoute::Discovery,
         (_, DISCOVERY_PATH) => RequestRoute::ReservedUnavailable,
         (_, path) if path.starts_with("/.well-known/spur-context-service/") => {
@@ -86,6 +91,7 @@ pub(crate) fn classify_route(path: Option<&str>, method: Option<&str>) -> Reques
         (_, LOGIN_PATH) => RequestRoute::ReservedUnavailable,
         (_, path) if path.starts_with("/auth/login/") => RequestRoute::ReservedUnavailable,
         ("POST", API_KEY_MCP_PATH) => RequestRoute::ApiKeyMcp,
+        ("POST", path) if API_KEY_SPLIT_PATHS.contains(&path) => RequestRoute::ApiKeyMcp,
         (_, API_KEY_MCP_PATH) => RequestRoute::ReservedUnavailable,
         (_, path) if path.starts_with("/mcp/api-key/") => RequestRoute::ReservedUnavailable,
         ("POST", API_KEY_MANAGEMENT_PATH) => RequestRoute::ApiKeyCreate,
@@ -104,19 +110,21 @@ pub(crate) fn classify_route(path: Option<&str>, method: Option<&str>) -> Reques
 }
 
 fn is_reserved_route_namespace(path: &str) -> bool {
-    [
-        DISCOVERY_PATH,
-        LOGIN_PATH,
-        API_KEY_MCP_PATH,
-        API_KEY_MANAGEMENT_PATH,
-    ]
-    .into_iter()
-    .any(|prefix| {
-        path == prefix
-            || path
-                .strip_prefix(prefix)
-                .is_some_and(|rest| rest.starts_with('/'))
-    })
+    path.strip_prefix(OAUTH_PATH)
+        .is_some_and(|rest| rest.starts_with('/'))
+        || [
+            DISCOVERY_PATH,
+            LOGIN_PATH,
+            API_KEY_MCP_PATH,
+            API_KEY_MANAGEMENT_PATH,
+        ]
+        .into_iter()
+        .any(|prefix| {
+            path == prefix
+                || path
+                    .strip_prefix(prefix)
+                    .is_some_and(|rest| rest.starts_with('/'))
+        })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -749,7 +757,7 @@ mod tests {
     }
 
     #[test]
-    fn exact_post_oauth_path_is_classified_separately_from_legacy_traffic() {
+    fn exact_post_oauth_path_is_classified_and_its_child_namespace_is_reserved() {
         assert_eq!(
             classify_route(Some("/mcp/oauth"), Some("POST")),
             RequestRoute::OAuth
@@ -760,8 +768,68 @@ mod tests {
         );
         assert_eq!(
             classify_route(Some("/mcp/oauth/"), Some("POST")),
-            RequestRoute::Legacy
+            RequestRoute::ReservedUnavailable
         );
+    }
+
+    #[test]
+    fn exact_post_oauth_split_paths_use_oauth_classification() {
+        for path in ["/mcp/oauth/code", "/mcp/oauth/knowledge"] {
+            assert_eq!(
+                classify_route(Some(path), Some("POST")),
+                RequestRoute::OAuth,
+                "OAuth split path {path} must retain OAuth classification"
+            );
+        }
+    }
+
+    #[test]
+    fn exact_post_api_key_split_paths_use_api_key_classification() {
+        for path in ["/mcp/api-key/code", "/mcp/api-key/knowledge"] {
+            assert_eq!(
+                classify_route(Some(path), Some("POST")),
+                RequestRoute::ApiKeyMcp,
+                "API-key split path {path} must retain API-key classification"
+            );
+        }
+    }
+
+    #[test]
+    fn authenticated_split_paths_fail_closed_for_wrong_methods() {
+        for path in [
+            "/mcp/oauth/code",
+            "/mcp/oauth/knowledge",
+            "/mcp/api-key/code",
+            "/mcp/api-key/knowledge",
+        ] {
+            for method in [None, Some("GET"), Some("PUT"), Some("DELETE")] {
+                assert_eq!(
+                    classify_route(Some(path), method),
+                    RequestRoute::ReservedUnavailable,
+                    "authenticated split path {path} must fail closed for method {method:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn authenticated_namespaces_reject_unknown_and_extra_suffixes() {
+        for path in [
+            "/mcp/oauth/unknown",
+            "/mcp/oauth/code/extra",
+            "/mcp/oauth/knowledge/extra",
+            "/mcp/api-key/unknown",
+            "/mcp/api-key/code/extra",
+            "/mcp/api-key/knowledge/extra",
+        ] {
+            for method in [Some("POST"), Some("GET")] {
+                assert_eq!(
+                    classify_route(Some(path), method),
+                    RequestRoute::ReservedUnavailable,
+                    "authenticated namespace path {path} must fail closed for method {method:?}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -811,6 +879,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "service")]
     #[test]
     fn scope_policy_fails_closed_when_the_mcp_external_surface_drifts() {
         let policy_tools = external_tool_scopes()

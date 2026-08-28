@@ -1,11 +1,12 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::future::Future;
+use std::io::Cursor;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
-    Mutex, MutexGuard,
+    Arc, Mutex, MutexGuard,
 };
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -13,23 +14,45 @@ use anyhow::{Context as _, Result};
 use async_trait::async_trait;
 use duckdb::{params, Connection};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
+use spur_context_service::artifact_cache::{
+    ArtifactCache, ArtifactFetchError, ArtifactFetcher, ArtifactStream,
+};
 use spur_context_service::catalog::{
     compact_gold_and_export_snapshot, connect_frozen_snapshot, CatalogResolver,
     FrozenSnapshotManifest, SnapshotCleanupOptions,
 };
+use spur_context_service::code_backend::CodeBackend;
 use spur_context_service::jobs::{
     BacklogOwner, BacklogOwnerKind, CreateJobOutcome, CreateJobRequest, EnqueueOutcome, JobKey,
     JobRecord, JobStatus, JobStore, JobsError, QueueConfig,
 };
 use spur_context_service::mcp::{
-    handle_tool, handle_tool_without_catalog, index_drainer_limits, index_queue_config,
-    route_index, route_index_status, route_index_status_for_caller, route_index_warm_lookup,
-    route_index_without_catalog, tool_definitions, ExecutionOutcome, ExecutionOutcomeStatus,
-    ExecutionStatusChecker, IndexExecutionRequest, IndexExecutionStarter, McpHandlerError,
+    handle_tool, handle_tool_with_code_backend, handle_tool_without_catalog, index_drainer_limits,
+    index_queue_config, route_index, route_index_status, route_index_status_for_caller,
+    route_index_warm_lookup, route_index_without_catalog, tool_definitions, ExecutionOutcome,
+    ExecutionOutcomeStatus, ExecutionStatusChecker, IndexExecutionRequest, IndexExecutionStarter,
+    McpHandlerError,
+};
+use spur_context_service::medallion::{
+    SilverManifest, SilverManifestFile, SILVER_MANIFEST_FILENAME,
+};
+use spur_context_service::serving_registry::{
+    ArtifactRef, ServingPackage, ServingRegistry, SERVING_REGISTRY_SCHEMA_VERSION,
 };
 
 const PACKAGE: &str = "demo";
 const REVISION: &str = "1.0.0";
+const PARQUET_SOURCE: &str = concat!(
+    "pub fn alpha() {\n",
+    "    beta();\n",
+    "    external::Thing::new();\n",
+    "}\n",
+    "\n",
+    "pub fn beta() {\n",
+    "}\n",
+);
+const PARQUET_SOURCE_OID: &str = "398807d495e9b32290c673280be0312ba07fc1dc";
 const SOURCE_URL: &str = "https://1.1.1.1/example/demo";
 const CRATES_IO_SOURCE_URL: &str = "https://crates.io/api/v1/crates/demo/1.0.0/download";
 const GIT_SOURCE: &str = "git:github.com/example/demo";
@@ -221,6 +244,994 @@ async fn external_code_search_resolves_latest_and_returns_candidates() -> Result
     );
     assert_eq!(response["candidates"][0]["revision"], REVISION);
     Ok(())
+}
+
+#[tokio::test]
+async fn parquet_backend_matches_catalog_and_search_contracts() -> Result<()> {
+    let fixture = ParquetBackendFixture::new("parquet-backend-contracts")?;
+
+    let catalog = call_parquet_backend(&fixture, "external_catalog", &json!({})).await?;
+    assert_eq!(
+        catalog,
+        json!({
+            "level": "packages",
+            "rows": [{
+                "source": "registry:crates-io",
+                "package": PACKAGE,
+                "latest_revision": REVISION,
+                "revision_count": 1,
+                "indexed_at": ""
+            }],
+            "total_matches": 1,
+            "truncated": false,
+            "next_cursor": null,
+            "catalog_generation": ParquetBackendFixture::GENERATION
+        })
+    );
+
+    let search = call_parquet_backend(
+        &fixture,
+        "external_code_search",
+        &json!({
+            "query": "bet",
+            "package": PACKAGE,
+            "revision": REVISION,
+            "symbol_kind": "function",
+            "limit": 20
+        }),
+    )
+    .await?;
+    assert_eq!(
+        search,
+        json!({
+            "candidates": [{
+                "selector": "pkg:demo@1.0.0::demo::beta",
+                "uri": "pkg-symbol://registry:crates-io/demo/1.0.0/bbbbbbbbbbbbbbbb",
+                "id": "bbbbbbbbbbbbbbbb",
+                "stable_symbol_id": "bbbbbbbbbbbbbbbb",
+                "source": "registry:crates-io",
+                "package": PACKAGE,
+                "revision": REVISION,
+                "entity_name": "beta",
+                "qualified_name": "demo::beta",
+                "file_path": "src/lib.rs",
+                "line_range": [6, 7],
+                "symbol_kind": "function",
+                "enclosing_scope": null
+            }],
+            "total_matches": 1,
+            "truncated": false,
+            "catalog_generation": ParquetBackendFixture::GENERATION
+        })
+    );
+
+    let empty = call_parquet_backend(
+        &fixture,
+        "external_code_search",
+        &json!({
+            "query": "does_not_exist",
+            "package": PACKAGE,
+            "revision": REVISION
+        }),
+    )
+    .await?;
+    assert_eq!(
+        empty,
+        json!({
+            "candidates": [],
+            "total_matches": 0,
+            "truncated": false,
+            "catalog_generation": ParquetBackendFixture::GENERATION
+        })
+    );
+
+    let selector_args = json!({
+        "query": "bet",
+        "package": PACKAGE,
+        "revision": REVISION,
+        "ref": "latest"
+    });
+    let expected_selector_error =
+        handle_tool_without_catalog("external_code_search", &selector_args)
+            .expect_err("revision and ref together must remain invalid");
+    let actual_selector_error =
+        call_parquet_backend(&fixture, "external_code_search", &selector_args)
+            .await
+            .expect_err("Parquet backend must preserve selector validation");
+    assert_eq!(
+        actual_selector_error.json_rpc_code(),
+        expected_selector_error.json_rpc_code()
+    );
+    assert_eq!(
+        actual_selector_error.to_string(),
+        expected_selector_error.to_string()
+    );
+
+    let warm = call_parquet_backend(
+        &fixture,
+        "external_index",
+        &json!({
+            "package": PACKAGE,
+            "revision": REVISION,
+            "source_url": SOURCE_URL,
+            "source": "registry:crates-io"
+        }),
+    )
+    .await?;
+    assert_eq!(
+        warm,
+        json!({
+            "status": "complete",
+            "snapshot_id": ParquetBackendFixture::GENERATION,
+            "revision": REVISION
+        })
+    );
+
+    let status = call_parquet_backend(
+        &fixture,
+        "external_index_status",
+        &json!({ "job_id": "pkg:demo@1.0.0" }),
+    )
+    .await?;
+    assert_eq!(status["status"], "complete");
+    assert_eq!(status["snapshot_id"], ParquetBackendFixture::GENERATION);
+    assert_eq!(status["revision"], REVISION);
+
+    let missing_root = ParquetBackendFixture::new("parquet-missing-root")?;
+    missing_root.remove_object(&missing_root.root_uri());
+    assert_retryable_backend_error(
+        call_parquet_backend(&missing_root, "external_catalog", &json!({})).await,
+        "artifact_unavailable",
+    );
+
+    let mut invalid_root = ParquetBackendFixture::new("parquet-invalid-root-version")?;
+    invalid_root.replace_silver_root(serde_json::to_vec(&json!({
+        "schema_version": 2,
+        "schema_hash": "sha256:test-schema",
+        "files": []
+    }))?);
+    assert_retryable_backend_error(
+        call_parquet_backend(&invalid_root, "external_catalog", &json!({})).await,
+        "invalid_artifact_identity",
+    );
+
+    let mut missing_graph_manifest = ParquetBackendFixture::new("parquet-missing-graph-manifest")?;
+    missing_graph_manifest.remove_declared_member("manifest.json")?;
+    assert_retryable_backend_error(
+        call_parquet_backend(&missing_graph_manifest, "external_catalog", &json!({})).await,
+        "invalid_artifact_identity",
+    );
+
+    let missing_member = ParquetBackendFixture::new("parquet-missing-member")?;
+    missing_member.remove_object(&missing_member.member_uri("nodes.parquet"));
+    assert_retryable_backend_error(
+        call_parquet_backend(
+            &missing_member,
+            "external_code_search",
+            &json!({
+                "query": "bet",
+                "package": PACKAGE,
+                "revision": REVISION
+            }),
+        )
+        .await,
+        "artifact_unavailable",
+    );
+
+    let corrupt_graph_manifest = ParquetBackendFixture::new("parquet-corrupt-graph-manifest")?;
+    corrupt_graph_manifest.replace_object(
+        &corrupt_graph_manifest.member_uri("manifest.json"),
+        b"corrupt graph manifest".to_vec(),
+    );
+    assert_retryable_backend_error(
+        call_parquet_backend(&corrupt_graph_manifest, "external_catalog", &json!({})).await,
+        "artifact_integrity_mismatch",
+    );
+
+    let corrupt_member = ParquetBackendFixture::new("parquet-corrupt-member")?;
+    corrupt_member.replace_object(
+        &corrupt_member.member_uri("nodes.parquet"),
+        b"corrupt parquet member".to_vec(),
+    );
+    assert_retryable_backend_error(
+        call_parquet_backend(
+            &corrupt_member,
+            "external_code_search",
+            &json!({
+                "query": "bet",
+                "package": PACKAGE,
+                "revision": REVISION
+            }),
+        )
+        .await,
+        "artifact_integrity_mismatch",
+    );
+
+    let mut stale = ParquetBackendFixture::new("parquet-stale-generation")?;
+    stale.registry.packages[0].generation -= 1;
+    assert_retryable_backend_error(
+        call_parquet_backend(&stale, "external_catalog", &json!({})).await,
+        "invalid_serving_registry",
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn parquet_backend_resolves_semantic_latest_and_named_refs_from_registry() -> Result<()> {
+    let mut fixture = ParquetBackendFixture::new("parquet-registry-ref-contracts")?;
+    fixture.expand_cache_capacity(2)?;
+    let mut revision_9 = fixture.registry.packages[0].clone();
+    revision_9.revision = "9.0.0".to_owned();
+    revision_9.refs.clear();
+    let mut revision_10 = fixture.registry.packages[0].clone();
+    revision_10.revision = "10.0.0".to_owned();
+    revision_10.refs = vec!["latest".to_owned(), "stable".to_owned()];
+    fixture.registry.packages = vec![revision_9, revision_10];
+
+    let packages = call_parquet_backend(&fixture, "external_catalog", &json!({})).await?;
+    assert_eq!(packages["rows"][0]["latest_revision"], "10.0.0");
+
+    let revisions =
+        call_parquet_backend(&fixture, "external_catalog", &json!({ "package": PACKAGE })).await?;
+    let latest_row = revisions["rows"]
+        .as_array()
+        .context("revision rows")?
+        .iter()
+        .find(|row| row["revision"] == "10.0.0")
+        .context("latest semantic revision")?;
+    assert_eq!(latest_row["revision_kind"], "semver");
+    assert_eq!(latest_row["refs"], json!(["latest", "stable"]));
+
+    for reference in ["latest", "stable"] {
+        let search = call_parquet_backend(
+            &fixture,
+            "external_code_search",
+            &json!({
+                "query": "bet",
+                "package": PACKAGE,
+                "ref": reference
+            }),
+        )
+        .await?;
+        assert_eq!(search["candidates"][0]["revision"], "10.0.0");
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn parquet_backend_matches_read_and_edge_contracts() -> Result<()> {
+    let fixture = ParquetBackendFixture::new("parquet-read-edge-contracts")?;
+    let beta_byte_range = byte_range_for_lines(PARQUET_SOURCE, 6, 7)?;
+
+    let read = call_parquet_backend(
+        &fixture,
+        "external_code_read",
+        &json!({
+            "selector": "pkg:demo@latest::demo::beta",
+            "context_lines": 0
+        }),
+    )
+    .await?;
+    assert_eq!(
+        read,
+        json!({
+            "selector": "pkg:demo@1.0.0::demo::beta",
+            "stable_symbol_id": "bbbbbbbbbbbbbbbb",
+            "package_source": "registry:crates-io",
+            "package": PACKAGE,
+            "revision": REVISION,
+            "file_path": "src/lib.rs",
+            "byte_range": beta_byte_range,
+            "line_range": [6, 7],
+            "source": "pub fn beta() {\n}\n",
+            "catalog_generation": ParquetBackendFixture::GENERATION
+        })
+    );
+
+    let callers = call_parquet_backend(
+        &fixture,
+        "external_code_callers",
+        &json!({
+            "selector": "pkg:demo@1.0.0::demo::beta",
+            "include_unresolved": true
+        }),
+    )
+    .await?;
+    assert_eq!(
+        callers,
+        json!({
+            "callers": [
+                resolved_edge_row("caller", "calls", "calls", "syntax_exact"),
+                resolved_edge_row("caller", "calls", "calls_dyn", "heuristic"),
+                resolved_edge_row("caller", "references", "references_hof", "syntax_exact"),
+                resolved_edge_row("caller", "references", "references_other", "syntax_exact")
+            ],
+            "counts_by_kind": {
+                "calls": 1,
+                "calls_dyn": 1,
+                "references_hof": 1,
+                "references_other": 1,
+                "unresolved": 0
+            },
+            "unresolved_sample": [],
+            "stable_symbol_id": "bbbbbbbbbbbbbbbb",
+            "catalog_generation": ParquetBackendFixture::GENERATION
+        })
+    );
+
+    let callees = call_parquet_backend(
+        &fixture,
+        "external_code_callees",
+        &json!({
+            "selector": "pkg:demo@1.0.0::demo::alpha",
+            "include_unresolved": true
+        }),
+    )
+    .await?;
+    assert_eq!(
+        callees,
+        json!({
+            "callees": [
+                resolved_edge_row("callee", "calls", "calls", "syntax_exact"),
+                resolved_edge_row("callee", "calls", "calls_dyn", "heuristic"),
+                resolved_edge_row("callee", "references", "references_hof", "syntax_exact"),
+                resolved_edge_row("callee", "references", "references_other", "syntax_exact"),
+                unresolved_callee_row()
+            ],
+            "counts_by_kind": {
+                "calls": 2,
+                "calls_dyn": 1,
+                "references_hof": 1,
+                "references_other": 1,
+                "unresolved": 1
+            },
+            "unresolved_sample": ["external::Thing"],
+            "stable_symbol_id": "aaaaaaaaaaaaaaaa",
+            "catalog_generation": ParquetBackendFixture::GENERATION
+        })
+    );
+
+    let invalid_selector = call_parquet_backend(
+        &fixture,
+        "external_code_read",
+        &json!({ "selector": "graph://symbol/bbbbbbbbbbbbbbbb" }),
+    )
+    .await
+    .expect_err("worktree selectors must remain invalid on the external surface");
+    assert_eq!(invalid_selector.json_rpc_code(), -32602);
+    assert_eq!(
+        invalid_selector.to_string(),
+        "invalid params: external selector must start with 'pkg:': graph://symbol/bbbbbbbbbbbbbbbb"
+    );
+
+    let missing_symbol = call_parquet_backend(
+        &fixture,
+        "external_code_read",
+        &json!({ "selector": "pkg:demo@1.0.0::demo::missing" }),
+    )
+    .await
+    .expect_err("missing read selector must remain not found");
+    assert_eq!(missing_symbol.json_rpc_code(), -32004);
+    assert_eq!(
+        missing_symbol.to_string(),
+        "not found: symbol not found: pkg:demo@1.0.0::demo::missing"
+    );
+
+    let ambiguous = call_parquet_backend(
+        &fixture,
+        "external_code_read",
+        &json!({ "selector": "pkg:demo@1.0.0::overloaded" }),
+    )
+    .await
+    .expect_err("ambiguous selector must not pick a symbol");
+    assert_eq!(ambiguous.json_rpc_code(), -32602);
+    assert_eq!(
+        ambiguous.to_string(),
+        concat!(
+            "invalid params: external_code_read failed: ambiguous external selector ",
+            "`pkg:demo@1.0.0::overloaded`; candidates: ",
+            "pkg-symbol://registry:crates-io/demo/1.0.0/1111111111111111, ",
+            "pkg-symbol://registry:crates-io/demo/1.0.0/2222222222222222"
+        )
+    );
+
+    let mut missing_text = ParquetBackendFixture::new("parquet-missing-source-text")?;
+    missing_text.replace_source_sidecar(None)?;
+    assert_retryable_backend_error(
+        call_parquet_backend(
+            &missing_text,
+            "external_code_read",
+            &json!({ "selector": "pkg:demo@1.0.0::demo::beta" }),
+        )
+        .await,
+        "source_text_unavailable",
+    );
+
+    let mut oid_mismatch = ParquetBackendFixture::new("parquet-source-oid-mismatch")?;
+    oid_mismatch.replace_source_sidecar(Some((
+        "src/lib.rs",
+        "0000000000000000000000000000000000000000",
+        PARQUET_SOURCE,
+    )))?;
+    assert_retryable_backend_error(
+        call_parquet_backend(
+            &oid_mismatch,
+            "external_code_read",
+            &json!({ "selector": "pkg:demo@1.0.0::demo::beta" }),
+        )
+        .await,
+        "source_content_oid_mismatch",
+    );
+
+    let corrupt_sidecar = ParquetBackendFixture::new("parquet-corrupt-sidecar")?;
+    corrupt_sidecar.replace_object(
+        &corrupt_sidecar.member_uri("source_files.parquet"),
+        b"corrupt source sidecar".to_vec(),
+    );
+    assert_retryable_backend_error(
+        call_parquet_backend(
+            &corrupt_sidecar,
+            "external_code_read",
+            &json!({ "selector": "pkg:demo@1.0.0::demo::beta" }),
+        )
+        .await,
+        "artifact_integrity_mismatch",
+    );
+
+    let mut stale = ParquetBackendFixture::new("parquet-read-stale-generation")?;
+    stale.registry.packages[0].generation -= 1;
+    assert_retryable_backend_error(
+        call_parquet_backend(
+            &stale,
+            "external_code_read",
+            &json!({ "selector": "pkg:demo@1.0.0::demo::beta" }),
+        )
+        .await,
+        "invalid_serving_registry",
+    );
+
+    let mut mixed = ParquetBackendFixture::new("parquet-read-mixed-generation")?;
+    mixed.registry.packages[0].source_sidecar.uri = mixed.registry.packages[0]
+        .source_sidecar
+        .uri
+        .replace("generation-42", "generation-41");
+    assert_retryable_backend_error(
+        call_parquet_backend(
+            &mixed,
+            "external_code_read",
+            &json!({ "selector": "pkg:demo@1.0.0::demo::beta" }),
+        )
+        .await,
+        "invalid_artifact_identity",
+    );
+
+    Ok(())
+}
+
+#[derive(Clone, Default)]
+struct ParquetTestFetcher {
+    objects: Arc<Mutex<HashMap<String, Vec<u8>>>>,
+}
+
+#[async_trait]
+impl ArtifactFetcher for ParquetTestFetcher {
+    async fn fetch(&self, uri: &str) -> Result<ArtifactStream, ArtifactFetchError> {
+        let body = self
+            .objects
+            .lock()
+            .expect("Parquet test object mutex should not be poisoned")
+            .get(uri)
+            .cloned()
+            .ok_or_else(|| ArtifactFetchError::new("missing Parquet test object"))?;
+        Ok(Box::pin(Cursor::new(body)))
+    }
+}
+
+struct ParquetBackendFixture {
+    registry: ServingRegistry,
+    cache: ArtifactCache,
+    fetcher: ParquetTestFetcher,
+    graph_prefix: String,
+    declared_members: HashMap<String, Vec<u8>>,
+    root: PathBuf,
+}
+
+impl ParquetBackendFixture {
+    const GENERATION: i64 = 42;
+
+    fn new(name: &str) -> Result<Self> {
+        let root = unique_temp_dir(name)?;
+        let graph_dir = root.join("published-graph");
+        fs::create_dir_all(&graph_dir).context("create Parquet fixture directory")?;
+        write_graph_compatible_parquet_fixture(&graph_dir)?;
+
+        let mut declared_members = HashMap::new();
+        for path in [
+            "manifest.json",
+            "nodes.parquet",
+            "edges.parquet",
+            "edges_unresolved.parquet",
+            "files.parquet",
+            "file_manifests.parquet",
+            "source_files.parquet",
+        ] {
+            declared_members.insert(
+                path.to_owned(),
+                fs::read(graph_dir.join(path))
+                    .with_context(|| format!("read Parquet fixture member {path}"))?,
+            );
+        }
+
+        let graph_prefix = format!(
+            "s3://artifacts/silver/crates.io/{PACKAGE}/{REVISION}/generation-{}/",
+            Self::GENERATION
+        );
+        let root_uri = format!("{graph_prefix}{SILVER_MANIFEST_FILENAME}");
+        let root_bytes = silver_root_for_members(&declared_members)?;
+        let fetcher = ParquetTestFetcher::default();
+        {
+            let mut objects = fetcher
+                .objects
+                .lock()
+                .expect("Parquet test object mutex should not be poisoned");
+            objects.insert(root_uri.clone(), root_bytes.clone());
+            for (path, body) in &declared_members {
+                objects.insert(format!("{graph_prefix}{path}"), body.clone());
+            }
+        }
+
+        let graph_manifest = artifact_ref(root_uri, &root_bytes);
+        let source_sidecar_bytes = declared_members
+            .get("source_files.parquet")
+            .context("source sidecar fixture member")?;
+        let source_sidecar = artifact_ref(
+            format!("{graph_prefix}source_files.parquet"),
+            source_sidecar_bytes,
+        );
+        let registry = ServingRegistry {
+            schema_version: SERVING_REGISTRY_SCHEMA_VERSION,
+            generation: Self::GENERATION,
+            packages: vec![ServingPackage {
+                source: "registry:crates-io".to_owned(),
+                package: PACKAGE.to_owned(),
+                revision: REVISION.to_owned(),
+                revision_kind: "semver".to_owned(),
+                refs: vec!["latest".to_owned(), "stable".to_owned()],
+                generation: Self::GENERATION,
+                graph_prefix_uri: graph_prefix.clone(),
+                graph_manifest,
+                source_sidecar,
+            }],
+        };
+        registry
+            .validate()
+            .context("validate Parquet fixture registry")?;
+
+        let capacity = root_bytes.len() as u64
+            + declared_members
+                .values()
+                .map(|body| body.len() as u64)
+                .sum::<u64>();
+        let cache = ArtifactCache::new(root.join("cache"), capacity, Arc::new(fetcher.clone()))
+            .map_err(|error| anyhow::anyhow!(error))?;
+
+        Ok(Self {
+            registry,
+            cache,
+            fetcher,
+            graph_prefix,
+            declared_members,
+            root,
+        })
+    }
+
+    fn root_uri(&self) -> String {
+        format!("{}{SILVER_MANIFEST_FILENAME}", self.graph_prefix)
+    }
+
+    fn expand_cache_capacity(&mut self, bundle_count: u64) -> Result<()> {
+        let root_bytes = silver_root_for_members(&self.declared_members)?;
+        let one_bundle = root_bytes.len() as u64
+            + self
+                .declared_members
+                .values()
+                .map(|body| body.len() as u64)
+                .sum::<u64>();
+        self.cache = ArtifactCache::new(
+            self.root.join(format!("cache-{bundle_count}")),
+            one_bundle * bundle_count,
+            Arc::new(self.fetcher.clone()),
+        )
+        .map_err(|error| anyhow::anyhow!(error))?;
+        Ok(())
+    }
+
+    fn member_uri(&self, path: &str) -> String {
+        format!("{}{path}", self.graph_prefix)
+    }
+
+    fn remove_object(&self, uri: &str) {
+        self.fetcher
+            .objects
+            .lock()
+            .expect("Parquet test object mutex should not be poisoned")
+            .remove(uri);
+    }
+
+    fn replace_object(&self, uri: &str, body: Vec<u8>) {
+        self.fetcher
+            .objects
+            .lock()
+            .expect("Parquet test object mutex should not be poisoned")
+            .insert(uri.to_owned(), body);
+    }
+
+    fn replace_silver_root(&mut self, body: Vec<u8>) {
+        self.replace_object(&self.root_uri(), body.clone());
+        self.registry.packages[0].graph_manifest = artifact_ref(self.root_uri(), &body);
+    }
+
+    fn remove_declared_member(&mut self, path: &str) -> Result<()> {
+        self.declared_members.remove(path);
+        let root = silver_root_for_members(&self.declared_members)?;
+        self.replace_silver_root(root);
+        Ok(())
+    }
+
+    fn replace_source_sidecar(&mut self, row: Option<(&str, &str, &str)>) -> Result<()> {
+        let replacement = self.root.join("source_files.parquet");
+        write_source_sidecar_fixture(&replacement, row)?;
+        let body = fs::read(&replacement).context("read replacement source sidecar")?;
+        self.declared_members
+            .insert("source_files.parquet".to_owned(), body.clone());
+        self.replace_object(&self.member_uri("source_files.parquet"), body.clone());
+        self.registry.packages[0].source_sidecar =
+            artifact_ref(self.member_uri("source_files.parquet"), &body);
+        let root = silver_root_for_members(&self.declared_members)?;
+        self.replace_silver_root(root);
+        Ok(())
+    }
+}
+
+impl Drop for ParquetBackendFixture {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.root);
+    }
+}
+
+async fn call_parquet_backend(
+    fixture: &ParquetBackendFixture,
+    name: &str,
+    args: &Value,
+) -> Result<Value, McpHandlerError> {
+    let backend = CodeBackend::new(fixture.registry.clone(), fixture.cache.clone())
+        .map_err(|error| retryable_backend_error(error.code()))?;
+    handle_tool_with_code_backend(name, args, &backend).await
+}
+
+fn retryable_backend_error(code: &'static str) -> McpHandlerError {
+    McpHandlerError::Internal(format!(
+        "code backend temporarily unavailable: {code} (retryable=true)"
+    ))
+}
+
+fn assert_retryable_backend_error(result: Result<Value, McpHandlerError>, expected_code: &str) {
+    let error = result.expect_err("invalid immutable artifact must fail closed");
+    assert_eq!(error.json_rpc_code(), -32603);
+    let message = error.to_string();
+    assert!(
+        message.contains(expected_code),
+        "unexpected error: {message}"
+    );
+    assert!(
+        message.contains("retryable=true"),
+        "unexpected error: {message}"
+    );
+    assert!(!message.contains("s3://"), "artifact URI leaked: {message}");
+}
+
+fn silver_root_for_members(members: &HashMap<String, Vec<u8>>) -> Result<Vec<u8>> {
+    let mut files = members
+        .iter()
+        .map(|(path, body)| SilverManifestFile {
+            path: path.clone(),
+            size_bytes: body.len() as u64,
+            etag: format!("etag-{path}"),
+            sha256: sha256_bytes(body),
+        })
+        .collect::<Vec<_>>();
+    files.sort_by(|left, right| left.path.cmp(&right.path));
+    Ok(serde_json::to_vec(&SilverManifest {
+        schema_hash: "sha256:test-schema".to_owned(),
+        files,
+    })?)
+}
+
+fn artifact_ref(uri: String, body: &[u8]) -> ArtifactRef {
+    ArtifactRef {
+        uri,
+        sha256: sha256_bytes(body),
+        bytes: body.len() as u64,
+    }
+}
+
+fn sha256_bytes(body: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(body))
+}
+
+fn write_graph_compatible_parquet_fixture(graph_dir: &std::path::Path) -> Result<()> {
+    let nodes_path = escape_sql_literal(&graph_dir.join("nodes.parquet").display().to_string());
+    let edges_path = escape_sql_literal(&graph_dir.join("edges.parquet").display().to_string());
+    let unresolved_edges_path = escape_sql_literal(
+        &graph_dir
+            .join("edges_unresolved.parquet")
+            .display()
+            .to_string(),
+    );
+    let files_path = escape_sql_literal(&graph_dir.join("files.parquet").display().to_string());
+    let file_manifests_path = escape_sql_literal(
+        &graph_dir
+            .join("file_manifests.parquet")
+            .display()
+            .to_string(),
+    );
+    let alpha_byte_range = byte_range_for_lines(PARQUET_SOURCE, 1, 4)?;
+    let beta_byte_range = byte_range_for_lines(PARQUET_SOURCE, 6, 7)?;
+    let content_oid = PARQUET_SOURCE_OID.to_owned();
+    let conn = Connection::open_in_memory().context("open Parquet fixture DuckDB")?;
+    conn.execute_batch(&format!(
+        r#"
+        CREATE TABLE nodes (
+            stable_symbol_id VARCHAR NOT NULL,
+            node_id BIGINT NOT NULL,
+            file_path VARCHAR NOT NULL,
+            byte_range_start BIGINT NOT NULL,
+            byte_range_end BIGINT NOT NULL,
+            line_start INTEGER NOT NULL,
+            line_end INTEGER NOT NULL,
+            entity_name VARCHAR NOT NULL,
+            qualified_name VARCHAR NOT NULL,
+            symbol_kind VARCHAR NOT NULL,
+            anchor_hash VARCHAR NOT NULL,
+            enclosing_scope VARCHAR
+        );
+        INSERT INTO nodes VALUES
+            ('aaaaaaaaaaaaaaaa', 1, 'src/lib.rs', {alpha_start}, {alpha_end}, 1, 4,
+             'alpha', 'demo::alpha', 'function', 'anchor-alpha', NULL),
+            ('bbbbbbbbbbbbbbbb', 2, 'src/lib.rs', {beta_start}, {beta_end}, 6, 7,
+             'beta', 'demo::beta', 'function', 'anchor-beta', NULL),
+            ('1111111111111111', 3, 'src/lib.rs', 0, 1, 1, 1,
+             'overloaded', 'demo::one::overloaded', 'function', 'anchor-overload-one', NULL),
+            ('2222222222222222', 4, 'src/lib.rs', 0, 1, 1, 1,
+             'overloaded', 'demo::two::overloaded', 'function', 'anchor-overload-two', NULL);
+        COPY nodes TO '{nodes_path}' (FORMAT PARQUET, COMPRESSION ZSTD);
+
+        CREATE TABLE edges (
+            source_stable_id VARCHAR NOT NULL,
+            target_stable_id VARCHAR NOT NULL,
+            src_id BIGINT NOT NULL,
+            dst_id BIGINT NOT NULL,
+            target_label VARCHAR,
+            relation VARCHAR NOT NULL,
+            confidence VARCHAR NOT NULL,
+            confidence_score FLOAT NOT NULL,
+            edge_kind VARCHAR,
+            bind_method VARCHAR,
+            import_path VARCHAR,
+            receiver_text VARCHAR,
+            scope_text VARCHAR
+        );
+        INSERT INTO edges VALUES
+            ('aaaaaaaaaaaaaaaa', 'bbbbbbbbbbbbbbbb', 1, 2, NULL,
+             'calls', 'syntax_exact', 1.0, 'calls', NULL, NULL, NULL, NULL),
+            ('aaaaaaaaaaaaaaaa', 'bbbbbbbbbbbbbbbb', 1, 2, NULL,
+             'calls', 'heuristic', 1.0, 'calls_dyn', NULL, NULL, NULL, NULL),
+            ('aaaaaaaaaaaaaaaa', 'bbbbbbbbbbbbbbbb', 1, 2, NULL,
+             'references', 'syntax_exact', 1.0, 'references_hof', NULL, NULL, NULL, NULL),
+            ('aaaaaaaaaaaaaaaa', 'bbbbbbbbbbbbbbbb', 1, 2, NULL,
+             'references', 'syntax_exact', 1.0, 'references_other', NULL, NULL, NULL, NULL);
+        COPY edges TO '{edges_path}' (FORMAT PARQUET, COMPRESSION ZSTD);
+
+        CREATE TABLE edges_unresolved (
+            source_stable_id VARCHAR NOT NULL,
+            src_id BIGINT NOT NULL,
+            target_label VARCHAR,
+            relation VARCHAR NOT NULL,
+            confidence VARCHAR NOT NULL,
+            confidence_score FLOAT NOT NULL,
+            edge_kind VARCHAR,
+            bind_method VARCHAR,
+            import_path VARCHAR,
+            receiver_text VARCHAR,
+            scope_text VARCHAR
+        );
+        INSERT INTO edges_unresolved VALUES
+            ('aaaaaaaaaaaaaaaa', 1, 'external::Thing', 'calls', 'syntax_exact', 1.0,
+             'calls', NULL, NULL, NULL, NULL);
+        COPY edges_unresolved TO '{unresolved_edges_path}' (FORMAT PARQUET, COMPRESSION ZSTD);
+
+        CREATE TABLE files (
+            stable_file_id VARCHAR NOT NULL,
+            node_id BIGINT NOT NULL,
+            file_path VARCHAR NOT NULL
+        );
+        INSERT INTO files VALUES ('file-demo-lib', 5, 'src/lib.rs');
+        COPY files TO '{files_path}' (FORMAT PARQUET, COMPRESSION ZSTD);
+
+        CREATE TABLE file_manifests (
+            stable_file_id VARCHAR NOT NULL,
+            path VARCHAR NOT NULL,
+            content_oid VARCHAR NOT NULL,
+            node_ids BIGINT[] NOT NULL
+        );
+        INSERT INTO file_manifests VALUES
+            ('file-demo-lib', 'src/lib.rs', '{content_oid}', [1, 2, 3, 4]::BIGINT[]);
+        COPY file_manifests TO '{file_manifests_path}' (FORMAT PARQUET, COMPRESSION ZSTD);
+        "#,
+        alpha_start = alpha_byte_range[0],
+        alpha_end = alpha_byte_range[1],
+        beta_start = beta_byte_range[0],
+        beta_end = beta_byte_range[1],
+    ))
+    .context("write graph-compatible Parquet fixture")?;
+
+    write_source_sidecar_fixture(
+        &graph_dir.join("source_files.parquet"),
+        Some(("src/lib.rs", &content_oid, PARQUET_SOURCE)),
+    )?;
+
+    fs::write(
+        graph_dir.join("manifest.json"),
+        serde_json::to_vec(&json!({
+            "graph_index_version": "test-temporal-v1",
+            "schema_version": "test-schema-v1",
+            "manifest_version": "test-manifest-v1",
+            "graph_content_hash": "test-graph-content-hash",
+            "indexed_commit_oid": null,
+            "extractor_version": "test-extractor",
+            "complete": true,
+            "row_counts": {
+                "nodes": 4,
+                "edges": 4,
+                "edges_by_dst": null,
+                "edges_unresolved": 1,
+                "files": 1,
+                "file_manifests": 1,
+                "tombstones": 0,
+                "commits": 0,
+                "symbol_snapshots": 0,
+                "temporal_edges": 0,
+                "diagnostics": 0
+            },
+            "sidecar_complete": false,
+            "sidecar_row_counts": {
+                "section_bodies": 0,
+                "code_symbols": 0
+            },
+            "parquet_writer": {
+                "compression": "zstd-3",
+                "row_group_size": 16384
+            },
+            "edges_by_dst_present": false,
+            "temporal_shards": []
+        }))?,
+    )
+    .context("write graph fixture manifest")?;
+    Ok(())
+}
+
+fn write_source_sidecar_fixture(
+    path: &std::path::Path,
+    row: Option<(&str, &str, &str)>,
+) -> Result<()> {
+    let conn = Connection::open_in_memory().context("open source sidecar fixture DuckDB")?;
+    conn.execute_batch(
+        "CREATE TABLE source_sidecar (\
+         file_path VARCHAR NOT NULL, \
+         content_oid VARCHAR NOT NULL, \
+         source_text VARCHAR NOT NULL)",
+    )?;
+    if let Some((file_path, content_oid, source_text)) = row {
+        conn.execute(
+            "INSERT INTO source_sidecar VALUES ($1, $2, $3)",
+            params![file_path, content_oid, source_text],
+        )?;
+    }
+    let path = escape_sql_literal(&path.display().to_string());
+    conn.execute_batch(&format!(
+        "COPY source_sidecar TO '{path}' (FORMAT PARQUET, COMPRESSION ZSTD)"
+    ))?;
+    Ok(())
+}
+
+fn byte_range_for_lines(source: &str, line_start: usize, line_end: usize) -> Result<[usize; 2]> {
+    let mut starts = vec![0];
+    starts.extend(
+        source
+            .bytes()
+            .enumerate()
+            .filter_map(|(index, byte)| (byte == b'\n').then_some(index + 1)),
+    );
+    let start = *starts
+        .get(line_start.saturating_sub(1))
+        .context("fixture line start")?;
+    let end = starts.get(line_end).copied().unwrap_or(source.len());
+    Ok([start, end])
+}
+
+fn resolved_edge_row(direction: &str, relation: &str, edge_kind: &str, confidence: &str) -> Value {
+    let candidate = if direction == "caller" {
+        json!({
+            "selector": "pkg:demo@1.0.0::demo::alpha",
+            "uri": "pkg-symbol://registry:crates-io/demo/1.0.0/aaaaaaaaaaaaaaaa",
+            "id": "aaaaaaaaaaaaaaaa",
+            "stable_symbol_id": "aaaaaaaaaaaaaaaa",
+            "source": "registry:crates-io",
+            "package": PACKAGE,
+            "revision": REVISION,
+            "entity_name": "alpha",
+            "qualified_name": "demo::alpha",
+            "file_path": "src/lib.rs",
+            "line_range": [1, 4],
+            "symbol_kind": "function",
+            "enclosing_scope": null
+        })
+    } else {
+        json!({
+            "selector": "pkg:demo@1.0.0::demo::beta",
+            "uri": "pkg-symbol://registry:crates-io/demo/1.0.0/bbbbbbbbbbbbbbbb",
+            "id": "bbbbbbbbbbbbbbbb",
+            "stable_symbol_id": "bbbbbbbbbbbbbbbb",
+            "source": "registry:crates-io",
+            "package": PACKAGE,
+            "revision": REVISION,
+            "entity_name": "beta",
+            "qualified_name": "demo::beta",
+            "file_path": "src/lib.rs",
+            "line_range": [6, 7],
+            "symbol_kind": "function",
+            "enclosing_scope": null
+        })
+    };
+    let edge = json!({
+            "source_stable_id": "aaaaaaaaaaaaaaaa",
+            "target_stable_id": "bbbbbbbbbbbbbbbb",
+            "target_label": null,
+            "target_package": null,
+            "relation": relation,
+            "edge_kind": edge_kind,
+            "confidence": confidence,
+            "confidence_score": 1.0,
+            "bind_method": null,
+            "receiver_text": null,
+            "scope_text": null
+    });
+    if direction == "caller" {
+        json!({ "caller": candidate, "edge": edge, "resolved": true })
+    } else {
+        json!({ "callee": candidate, "edge": edge, "resolved": true })
+    }
+}
+
+fn unresolved_callee_row() -> Value {
+    json!({
+        "callee": null,
+        "edge": {
+            "source_stable_id": "aaaaaaaaaaaaaaaa",
+            "target_stable_id": null,
+            "target_label": "external::Thing",
+            "target_package": null,
+            "relation": "calls",
+            "edge_kind": "calls",
+            "confidence": "syntax_exact",
+            "confidence_score": 1.0,
+            "bind_method": null,
+            "receiver_text": null,
+            "scope_text": null
+        },
+        "resolved": false
+    })
 }
 
 #[tokio::test]
@@ -695,6 +1706,10 @@ async fn external_knowledge_context_resolves_ref_and_returns_evidence_pack() -> 
     .await?;
 
     assert_eq!(response["answerable"], true);
+    assert_eq!(
+        response["catalog_generation"], 9,
+        "Knowledge must report the frozen catalog's global generation, not the selected package row's older generation"
+    );
     assert_eq!(response["graph_content_hash"], "fixture-hash");
     assert!(response["primary_evidence"]
         .as_array()
@@ -1187,6 +2202,7 @@ async fn external_index_status_for_caller_hides_jobs_owned_by_other_callers() ->
     Ok(())
 }
 
+#[cfg(feature = "lambda")]
 #[tokio::test]
 async fn lambda_index_status_route_does_not_require_catalog_initialization() -> Result<()> {
     let jobs = FakeJobStore::default();
