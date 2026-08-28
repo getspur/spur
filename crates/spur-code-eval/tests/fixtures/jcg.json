@@ -1,0 +1,137 @@
+[
+  {
+    "record": {
+      "case_id": "javascript::containers::CO1",
+      "language": "javascript",
+      "prompt": "Containers: track a function selected from an array without using annotated targets.",
+      "repository_uri": "https://github.com/example/jcg-js",
+      "repository_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "materialization_hash": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "expectations": [
+        { "kind": "prohibited", "caller": "<global>", "target": "CO1.forbidden" },
+        { "kind": "indirect", "caller": "<global>", "target": "CO1.target" },
+        { "kind": "direct", "caller": "<global>", "target": "CO1.bridge" }
+      ],
+      "upstream_section": "Containers::CO1"
+    },
+    "frozen_call_sites": [
+      {
+        "caller_method": "<module>",
+        "call_site_line": 18,
+        "declared_target": "invoke",
+        "resolved_targets": ["CO1::bridge", "CO1::bridge"],
+        "source": {
+          "path": "co/CO1.js",
+          "byte_start": 160,
+          "byte_end": 167,
+          "symbol_id": "graph://symbol/co1-call"
+        },
+        "source_kinds": ["exact_callees"],
+        "retrieval_rank": 2
+      },
+      {
+        "caller_method": "CO1.bridge",
+        "call_site_line": 7,
+        "declared_target": "target",
+        "resolved_targets": ["CO1/target"],
+        "source": {
+          "path": "co/CO1.js",
+          "byte_start": 48,
+          "byte_end": 56,
+          "symbol_id": "graph://symbol/co1-bridge-call"
+        },
+        "source_kinds": ["exact_callers"],
+        "retrieval_rank": 3
+      },
+      {
+        "caller_method": "<global>",
+        "call_site_line": 18,
+        "declared_target": "invoke",
+        "resolved_targets": ["CO1.bridge"],
+        "source": {
+          "path": "co/CO1.js",
+          "byte_start": 160,
+          "byte_end": 167,
+          "symbol_id": "graph://symbol/co1-call"
+        },
+        "source_kinds": ["semantic_knowledge_pack"],
+        "retrieval_rank": 1
+      },
+      {
+        "caller_method": "<global>",
+        "call_site_line": 20,
+        "declared_target": "unknown",
+        "resolved_targets": [],
+        "source": {
+          "path": "co/CO1.js",
+          "byte_start": 180,
+          "byte_end": 189,
+          "symbol_id": null
+        },
+        "source_kinds": ["exact_callees"],
+        "retrieval_rank": 5,
+        "unresolved_reason": "dynamic target remained unresolved in frozen evidence"
+      },
+      {
+        "caller_method": "<global>",
+        "call_site_line": 19,
+        "declared_target": "forbidden",
+        "resolved_targets": ["CO1.forbidden", "CO1.extra"],
+        "source": {
+          "path": "co/CO1.js",
+          "byte_start": 168,
+          "byte_end": 179,
+          "symbol_id": "graph://symbol/co1-forbidden-call"
+        },
+        "source_kinds": ["exact_callees"],
+        "retrieval_rank": 4
+      }
+    ]
+  },
+  {
+    "record": {
+      "case_id": "python::higher_order::HOF1",
+      "language": "python",
+      "prompt": "Higher-order call through a function argument; score only the frozen call-site evidence.",
+      "repository_uri": "https://github.com/example/jcg-python",
+      "repository_commit": "cccccccccccccccccccccccccccccccccccccccc",
+      "materialization_hash": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "expectations": [
+        { "kind": "direct", "caller": "HOF1.foo", "target": "HOF1.bar" },
+        { "kind": "prohibited", "caller": "HOF1.foo", "target": "HOF1.baz" }
+      ],
+      "upstream_section": "Higher Order Functions::HOF1"
+    },
+    "frozen_call_sites": [
+      {
+        "caller_method": "HOF1::foo",
+        "call_site_line": 6,
+        "declared_target": "f",
+        "resolved_targets": ["HOF1::bar"],
+        "source": {
+          "path": "hof/HOF1.py",
+          "byte_start": 24,
+          "byte_end": 28,
+          "symbol_id": "graph://symbol/hof1-call"
+        },
+        "source_kinds": ["exact_callees", "semantic_knowledge_pack"],
+        "retrieval_rank": 1
+      }
+    ]
+  },
+  {
+    "record": {
+      "case_id": "java::reflection::TR1",
+      "language": "java",
+      "prompt": "Reflection call-site fixture retained for denominator accounting.",
+      "repository_uri": "https://github.com/example/jcg-java",
+      "repository_commit": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "materialization_hash": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "expectations": [
+        { "kind": "indirect", "caller": "TR1.main", "target": "TR1.target" }
+      ],
+      "upstream_section": "Reflection::TR1"
+    },
+    "frozen_call_sites": []
+  }
+]
