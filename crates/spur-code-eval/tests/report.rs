@@ -4,12 +4,15 @@ use serde_json::{json, Value};
 use spur_code_eval::{
     content_sha256,
     metrics::{
-        CrossCodeEvalMetrics, Denominators, ExactRatio, JcgMetrics, MetricSuite, RetrievalMetrics,
+        aggregate_metrics, CaseKey, CaseMetricInput, CaseStatus, CrossCodeEvalInput,
+        CrossCodeEvalMetrics, Denominators, ExactRatio, JcgInput, JcgMetrics, MetricSuite,
+        OperationalFlags, OperationalInput, OperationalSignal, PublishedMetrics, RankedEvidence,
+        RetrievalInput, RetrievalMetrics, SuiteCaseInput,
     },
     model::{
         run_model_lane, ContextVariant, EncoderIndexUsage, FrozenContext, ModelBackend,
-        ModelBackendError, ModelOutput, ModelRequest, ModelRunConfig, ModelUsage, RequestBudget,
-        ZeroMemAccounting, ZeroMemOperation,
+        ModelBackendError, ModelOutput, ModelRecord, ModelRequest, ModelRunConfig, ModelUsage,
+        RequestBudget, ZeroMemAccounting, ZeroMemOperation,
     },
     report::{
         AdvisoryModelReport, BenchmarkReport, DeterministicReport, ReleaseInputs, ReleaseStatus,
@@ -36,23 +39,118 @@ fn retrieval_metrics() -> RetrievalMetrics {
     }
 }
 
-fn denominators() -> Denominators {
+fn denominators(answered: u64, unresolved: u64, ambiguous: u64, stale: u64) -> Denominators {
     Denominators {
         total: 3,
         eligible: 1,
         unsupported: 1,
         invalid: 1,
-        answered: 1,
-        unresolved: 0,
-        ambiguous: 0,
-        stale: 0,
+        answered,
+        unresolved,
+        ambiguous,
+        stale,
     }
 }
 
+fn repoqa_denominators() -> Denominators {
+    denominators(1, 0, 0, 0)
+}
+
+fn crosscodeeval_denominators() -> Denominators {
+    denominators(1, 1, 0, 1)
+}
+
+fn jcg_denominators() -> Denominators {
+    denominators(0, 0, 1, 0)
+}
+
+fn metric_key(case_id: &str, suite: MetricSuite) -> CaseKey {
+    CaseKey::new(case_id, suite, "acceptance", "rust", "repo-a").unwrap()
+}
+
+fn operational(
+    latency_micros: u64,
+    evidence_bytes: u64,
+    evidence_tokens: u64,
+    signals: &[OperationalSignal],
+) -> OperationalInput {
+    OperationalInput::new(
+        latency_micros,
+        evidence_bytes,
+        evidence_tokens,
+        OperationalFlags::from_signals(signals),
+    )
+}
+
+fn ranked_evidence() -> Vec<RankedEvidence> {
+    vec![RankedEvidence::new(1.0, true).unwrap()]
+}
+
+fn published_metrics() -> PublishedMetrics {
+    let repoqa = CaseMetricInput::eligible(
+        metric_key("repoqa-eligible", MetricSuite::RepoQa),
+        SuiteCaseInput::RepoQa(RetrievalInput::new(ranked_evidence(), 1).unwrap()),
+        operational(10, 100, 10, &[OperationalSignal::Answered]),
+    )
+    .unwrap();
+    let crosscodeeval = CaseMetricInput::eligible(
+        metric_key("crosscodeeval-eligible", MetricSuite::CrossCodeEval),
+        SuiteCaseInput::CrossCodeEval(
+            CrossCodeEvalInput::new(
+                RetrievalInput::new(ranked_evidence(), 1).unwrap(),
+                1,
+                1,
+                1,
+                1,
+            )
+            .unwrap(),
+        ),
+        operational(
+            20,
+            200,
+            20,
+            &[
+                OperationalSignal::Answered,
+                OperationalSignal::Unresolved,
+                OperationalSignal::Stale,
+            ],
+        ),
+    )
+    .unwrap();
+    let jcg = CaseMetricInput::eligible(
+        metric_key("jcg-eligible", MetricSuite::Jcg),
+        SuiteCaseInput::Jcg(JcgInput::new(1, 1, Some((1, 1)), 0).unwrap()),
+        operational(30, 300, 30, &[OperationalSignal::Ambiguous]),
+    )
+    .unwrap();
+    let mut cases = vec![repoqa, crosscodeeval, jcg];
+    for suite in [
+        MetricSuite::RepoQa,
+        MetricSuite::CrossCodeEval,
+        MetricSuite::Jcg,
+    ] {
+        cases.push(
+            CaseMetricInput::excluded(
+                metric_key(&format!("{suite:?}-unsupported"), suite),
+                CaseStatus::Unsupported,
+            )
+            .unwrap(),
+        );
+        cases.push(
+            CaseMetricInput::excluded(
+                metric_key(&format!("{suite:?}-invalid"), suite),
+                CaseStatus::Invalid,
+            )
+            .unwrap(),
+        );
+    }
+    aggregate_metrics(&cases).unwrap()
+}
+
 fn deterministic_report() -> DeterministicReport {
-    let repoqa = SuiteReport::new(denominators(), Some(retrieval_metrics())).unwrap();
+    let repoqa = SuiteReport::new(repoqa_denominators(), Some(retrieval_metrics())).unwrap();
     let crosscodeeval = SuiteReport::new(
-        denominators(),
+        crosscodeeval_denominators(),
         Some(CrossCodeEvalMetrics {
             retrieval: retrieval_metrics(),
             context_coverage: ratio(3, 4),
@@ -61,7 +159,7 @@ fn deterministic_report() -> DeterministicReport {
     )
     .unwrap();
     let jcg = SuiteReport::new(
-        denominators(),
+        jcg_denominators(),
         Some(JcgMetrics {
             expectations_passed: 3,
             expectations_total: 4,
@@ -73,7 +171,7 @@ fn deterministic_report() -> DeterministicReport {
         }),
     )
     .unwrap();
-    DeterministicReport::new(repoqa, crosscodeeval, jcg)
+    DeterministicReport::new(repoqa, crosscodeeval, jcg, published_metrics())
 }
 
 fn artifact_record(kind: ArtifactKind, payload: &[u8]) -> ArtifactRecord {
@@ -132,9 +230,9 @@ fn reproducibility() -> ReproducibilityMetadata {
             ("repoqa".to_owned(), "adapter-v1".to_owned()),
         ]),
         suite_denominators: BTreeMap::from([
-            (MetricSuite::RepoQa, denominators()),
-            (MetricSuite::CrossCodeEval, denominators()),
-            (MetricSuite::Jcg, denominators()),
+            (MetricSuite::RepoQa, repoqa_denominators()),
+            (MetricSuite::CrossCodeEval, crosscodeeval_denominators()),
+            (MetricSuite::Jcg, jcg_denominators()),
         ]),
         artifact_records: BTreeMap::from([(
             ArtifactKind::Metrics,
@@ -149,6 +247,28 @@ fn payloads() -> BTreeMap<ArtifactKind, Vec<u8>> {
 
 fn release_inputs(model_complete: bool, model_pass: bool) -> ReleaseInputs {
     ReleaseInputs::new(true, true, true, model_complete, model_pass)
+}
+
+fn completed_model_record() -> ModelRecord {
+    let context = FrozenContext::new(
+        "model-record",
+        ContextVariant::ZeroMemSeparatedKnowledgePack,
+        "frozen separated knowledge pack",
+    )
+    .unwrap();
+    let config = ModelRunConfig::new(
+        "provider",
+        "model",
+        "prompt",
+        "tokenizer",
+        7,
+        RequestBudget::new(1_024, 256),
+    )
+    .unwrap();
+    run_model_lane(&mut CompleteBackend, &config, &[context], &[])
+        .into_iter()
+        .next()
+        .unwrap()
 }
 
 #[test]
@@ -171,6 +291,18 @@ fn release_policy_matches_all_32_boolean_inputs() {
             "unexpected release status for input mask {mask:05b}"
         );
     }
+}
+
+#[test]
+fn direct_serde_serialization_cannot_bypass_artifact_payload_validation() {
+    struct SerializeImplemented;
+    trait AmbiguousIfSerialize<Marker> {
+        fn assert_not_serialize() {}
+    }
+    impl<T: ?Sized> AmbiguousIfSerialize<()> for T {}
+    impl<T: ?Sized + serde::Serialize> AmbiguousIfSerialize<SerializeImplemented> for T {}
+
+    <BenchmarkReport as AmbiguousIfSerialize<_>>::assert_not_serialize();
 }
 
 #[test]
@@ -243,6 +375,100 @@ fn render_rejects_missing_and_mismatched_artifact_payloads() {
             kind: ArtifactKind::Rankings
         })
     ));
+}
+
+#[test]
+fn full_release_rejects_a_deserialized_completed_record_with_no_output() {
+    let mut serialized = serde_json::to_value(completed_model_record()).unwrap();
+    serialized["status"] = json!({"status": "completed"});
+    serialized["output"] = Value::Null;
+    let tampered = serde_json::from_value(serialized).unwrap();
+
+    let result = AdvisoryModelReport::new(vec![tampered], ZeroMemAccounting::default()).and_then(
+        |advisory| {
+            BenchmarkReport::new(
+                release_inputs(true, true),
+                reproducibility(),
+                deterministic_report(),
+                Some(advisory),
+            )
+        },
+    );
+
+    assert!(
+        result.is_err(),
+        "publish_full accepted a completed record without output"
+    );
+}
+
+#[test]
+fn full_release_rejects_a_deserialized_record_with_tampered_identity() {
+    let mut serialized = serde_json::to_value(completed_model_record()).unwrap();
+    serialized["identity"]["cache_identity"] = "0".repeat(64).into();
+    let tampered = serde_json::from_value(serialized).unwrap();
+
+    let result = AdvisoryModelReport::new(vec![tampered], ZeroMemAccounting::default()).and_then(
+        |advisory| {
+            BenchmarkReport::new(
+                release_inputs(true, true),
+                reproducibility(),
+                deterministic_report(),
+                Some(advisory),
+            )
+        },
+    );
+
+    assert!(
+        result.is_err(),
+        "publish_full accepted a record with a tampered cache identity"
+    );
+}
+
+#[test]
+fn rendered_report_contains_operational_acceptance_metrics() {
+    let report = BenchmarkReport::new(
+        release_inputs(false, false),
+        reproducibility(),
+        deterministic_report(),
+        None,
+    )
+    .unwrap();
+
+    let bytes = report.render_json(&payloads()).unwrap();
+    let json: Value = serde_json::from_slice(&bytes).unwrap();
+    let published = &json["deterministic"]["published_metrics"];
+    let operational = &published["dashboard"]["operational"];
+
+    assert_eq!(operational["latency_micros"], json!({"p50": 20, "p95": 30}));
+    assert_eq!(
+        operational["evidence_bytes"],
+        json!({"p50": 200, "p95": 300})
+    );
+    assert_eq!(
+        operational["evidence_tokens"],
+        json!({"p50": 20, "p95": 30})
+    );
+    assert_eq!(
+        operational["answer_rate"],
+        json!({"numerator": 2, "denominator": 3})
+    );
+    assert_eq!(
+        operational["staleness_rate"],
+        json!({"numerator": 1, "denominator": 3})
+    );
+    assert_eq!(
+        published["per_case"][0]["operational"]["latency_micros"],
+        10
+    );
+    assert_eq!(
+        published["per_case"][0]["operational"]["evidence_bytes"],
+        100
+    );
+    assert_eq!(
+        published["per_case"][0]["operational"]["evidence_tokens"],
+        10
+    );
+    assert_eq!(published["per_case"][0]["operational"]["flags"], 1);
 }
 
 #[derive(Debug)]

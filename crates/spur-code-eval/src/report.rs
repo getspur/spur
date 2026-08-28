@@ -32,8 +32,13 @@ use thiserror::Error;
 
 use crate::{
     content_sha256,
-    metrics::{CrossCodeEvalMetrics, Denominators, JcgMetrics, MetricSuite, RetrievalMetrics},
-    model::{ModelCaseStatus, ModelRecord, ModelUsage, ZeroMemAccounting},
+    metrics::{
+        CrossCodeEvalMetrics, Denominators, JcgMetrics, MetricSuite, PublishedMetrics,
+        RetrievalMetrics,
+    },
+    model::{
+        ModelCaseStatus, ModelRecord, ModelRecordValidationError, ModelUsage, ZeroMemAccounting,
+    },
     ArtifactKind, ArtifactRecord, ContentPin, RepositoryPin,
 };
 
@@ -151,6 +156,7 @@ pub struct DeterministicReport {
     repoqa: SuiteReport<RetrievalMetrics>,
     crosscodeeval: SuiteReport<CrossCodeEvalMetrics>,
     jcg: SuiteReport<JcgMetrics>,
+    published_metrics: PublishedMetrics,
 }
 
 impl DeterministicReport {
@@ -160,11 +166,13 @@ impl DeterministicReport {
         repoqa: SuiteReport<RetrievalMetrics>,
         crosscodeeval: SuiteReport<CrossCodeEvalMetrics>,
         jcg: SuiteReport<JcgMetrics>,
+        published_metrics: PublishedMetrics,
     ) -> Self {
         Self {
             repoqa,
             crosscodeeval,
             jcg,
+            published_metrics,
         }
     }
 
@@ -184,6 +192,12 @@ impl DeterministicReport {
     #[must_use]
     pub const fn jcg(&self) -> &SuiteReport<JcgMetrics> {
         &self.jcg
+    }
+
+    /// Returns the typed per-case and operational publication payload.
+    #[must_use]
+    pub const fn published_metrics(&self) -> &PublishedMetrics {
+        &self.published_metrics
     }
 
     const fn denominators(&self, suite: MetricSuite) -> Denominators {
@@ -256,6 +270,14 @@ impl AdvisoryModelReport {
         mut records: Vec<ModelRecord>,
         zero_mem_accounting: ZeroMemAccounting,
     ) -> Result<Self, ReportError> {
+        for record in &records {
+            record
+                .validate()
+                .map_err(|source| ReportError::InvalidAdvisoryModelRecord {
+                    case_id: record.identity().context().case_id().to_owned(),
+                    source,
+                })?;
+        }
         records.sort_by(|left, right| {
             left.identity()
                 .context()
@@ -364,7 +386,21 @@ pub struct ReproducibilityMetadata {
 }
 
 /// One immutable, non-blended benchmark report.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+///
+/// Report bytes can only be produced by [`BenchmarkReport::render_json`],
+/// which requires the exact frozen artifact payloads. Direct serde
+/// serialization is intentionally unavailable:
+///
+/// ```compile_fail
+/// use spur_code_eval::report::BenchmarkReport;
+///
+/// fn direct_serde_serialization_cannot_bypass_artifact_payload_validation(
+///     report: &BenchmarkReport,
+/// ) {
+///     let _bytes = serde_json::to_vec(report).unwrap();
+/// }
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BenchmarkReport {
     schema_version: u32,
     release_inputs: ReleaseInputs,
@@ -372,6 +408,16 @@ pub struct BenchmarkReport {
     reproducibility: ReproducibilityMetadata,
     deterministic: DeterministicReport,
     advisory_model: Option<AdvisoryModelReport>,
+}
+
+#[derive(Serialize)]
+struct BenchmarkReportWire<'a> {
+    schema_version: u32,
+    release_inputs: &'a ReleaseInputs,
+    release_status: ReleaseStatus,
+    reproducibility: &'a ReproducibilityMetadata,
+    deterministic: &'a DeterministicReport,
+    advisory_model: Option<&'a AdvisoryModelReport>,
 }
 
 impl BenchmarkReport {
@@ -429,7 +475,15 @@ impl BenchmarkReport {
         artifact_payloads: &BTreeMap<ArtifactKind, Vec<u8>>,
     ) -> Result<Vec<u8>, ReportError> {
         validate_artifacts(&self.reproducibility.artifact_records, artifact_payloads)?;
-        let mut bytes = serde_json::to_vec_pretty(self)?;
+        let wire = BenchmarkReportWire {
+            schema_version: self.schema_version,
+            release_inputs: &self.release_inputs,
+            release_status: self.release_status,
+            reproducibility: &self.reproducibility,
+            deterministic: &self.deterministic,
+            advisory_model: self.advisory_model.as_ref(),
+        };
+        let mut bytes = serde_json::to_vec_pretty(&wire)?;
         bytes.push(b'\n');
         Ok(bytes)
     }
@@ -470,6 +524,15 @@ pub enum ReportError {
     DuplicateModelRecord {
         /// Duplicated case identity.
         case_id: String,
+    },
+    /// A deserialized advisory record violated model-layer invariants.
+    #[error("invalid advisory model record for case {case_id:?}: {source}")]
+    InvalidAdvisoryModelRecord {
+        /// Invalid case identity, when one was available.
+        case_id: String,
+        /// Exact model-layer validation failure.
+        #[source]
+        source: ModelRecordValidationError,
     },
     /// A referenced checksum had no supplied in-memory payload.
     #[error("artifact {kind:?} has no supplied payload")]

@@ -6,7 +6,8 @@ use std::collections::{BTreeSet, VecDeque};
 use model::{
     run_model_lane, ContextVariant, EncoderIndexUsage, FrozenContext, ModelBackend,
     ModelBackendError, ModelCaseStatus, ModelFailureReason, ModelOutput, ModelPendingReason,
-    ModelRequest, ModelRunConfig, ModelUsage, RequestBudget, ZeroMemAccounting, ZeroMemOperation,
+    ModelRecord, ModelRequest, ModelRunConfig, ModelUsage, RequestBudget, ZeroMemAccounting,
+    ZeroMemOperation,
 };
 
 #[derive(Debug, Default)]
@@ -53,6 +54,20 @@ fn config(prompt: &str) -> ModelRunConfig {
 
 fn complete(answer: &str) -> ModelOutput {
     ModelOutput::complete(answer, ModelUsage::new(1, 32, 8))
+}
+
+fn completed_record() -> ModelRecord {
+    let contexts = [FrozenContext::new(
+        "validated-record",
+        ContextVariant::ZeroMemSeparatedKnowledgePack,
+        "frozen knowledge pack",
+    )
+    .unwrap()];
+    let mut backend = FakeBackend::with_script([Ok(complete("answer"))]);
+    run_model_lane(&mut backend, &config("prompt-v1"), &contexts, &[])
+        .into_iter()
+        .next()
+        .unwrap()
 }
 
 #[test]
@@ -251,4 +266,23 @@ fn zero_mem_memory_operations_have_zero_llm_usage_and_separate_encoder_index_cou
         .memory_records()
         .iter()
         .all(|record| record.llm_usage() == ModelUsage::ZERO));
+}
+
+#[test]
+fn deserialized_model_record_validation_rejects_completed_without_output() {
+    let mut serialized = serde_json::to_value(completed_record()).unwrap();
+    serialized["status"] = serde_json::json!({"status": "completed"});
+    serialized["output"] = serde_json::Value::Null;
+    let tampered: ModelRecord = serde_json::from_value(serialized).unwrap();
+
+    assert!(tampered.validate().is_err());
+}
+
+#[test]
+fn deserialized_model_record_validation_rejects_tampered_identity() {
+    let mut serialized = serde_json::to_value(completed_record()).unwrap();
+    serialized["identity"]["request_checksum"] = "f".repeat(64).into();
+    let tampered: ModelRecord = serde_json::from_value(serialized).unwrap();
+
+    assert!(tampered.validate().is_err());
 }

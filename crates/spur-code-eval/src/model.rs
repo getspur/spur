@@ -260,6 +260,15 @@ impl ModelRequestIdentity {
     }
 
     fn is_valid(&self) -> bool {
+        if self.provider.trim().is_empty()
+            || self.model.trim().is_empty()
+            || self.prompt.trim().is_empty()
+            || self.tokenizer.trim().is_empty()
+            || self.context.case_id.trim().is_empty()
+            || !is_sha256(&self.context.checksum)
+        {
+            return false;
+        }
         let config = ModelRunConfig {
             provider: self.provider.clone(),
             model: self.model.clone(),
@@ -494,6 +503,18 @@ pub enum ModelCaseStatus {
     ModelFailed(ModelFailureReason),
 }
 
+/// A deserialized model record violated its construction invariants.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+#[non_exhaustive]
+pub enum ModelRecordValidationError {
+    /// A pinned request checksum or cache identity was inconsistent.
+    #[error("model record has an invalid pinned request or cache identity")]
+    InvalidIdentity,
+    /// The normalized status and optional output disagreed.
+    #[error("model record status and output are inconsistent")]
+    StatusOutputMismatch,
+}
+
 /// One owned advisory record suitable for model-record serialization.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelRecord {
@@ -522,11 +543,41 @@ impl ModelRecord {
     }
 
     fn is_complete(&self) -> bool {
-        matches!(self.status, ModelCaseStatus::Completed)
-            && self
-                .output
-                .as_deref()
-                .is_some_and(|output| !output.trim().is_empty())
+        matches!(self.status, ModelCaseStatus::Completed) && self.validate().is_ok()
+    }
+
+    /// Revalidates all invariants that deserialization cannot enforce.
+    ///
+    /// This recomputes the pinned request checksum and cache identity, then
+    /// verifies that the normalized status agrees with output presence.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ModelRecordValidationError::InvalidIdentity`] for a tampered
+    /// request or cache pin, and
+    /// [`ModelRecordValidationError::StatusOutputMismatch`] when status and
+    /// output are inconsistent.
+    pub fn validate(&self) -> Result<(), ModelRecordValidationError> {
+        if !self.identity.is_valid() {
+            return Err(ModelRecordValidationError::InvalidIdentity);
+        }
+        let output_is_nonempty = self
+            .output
+            .as_deref()
+            .is_some_and(|output| !output.trim().is_empty());
+        let status_matches_output = match &self.status {
+            ModelCaseStatus::Completed => output_is_nonempty,
+            ModelCaseStatus::ModelFailed(ModelFailureReason::IncompleteOutput) => {
+                self.output.is_some()
+            }
+            ModelCaseStatus::ModelPending(_) | ModelCaseStatus::ModelFailed(_) => {
+                self.output.is_none()
+            }
+        };
+        if !status_matches_output {
+            return Err(ModelRecordValidationError::StatusOutputMismatch);
+        }
+        Ok(())
     }
 
     /// Returns the request and cache identity.
@@ -826,4 +877,11 @@ fn hash_text(hasher: &mut Sha256, value: &str) {
 
 fn sha256(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
+}
+
+fn is_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
