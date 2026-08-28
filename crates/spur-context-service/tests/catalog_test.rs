@@ -353,6 +353,8 @@ fn fully_legacy_unlineaged_package_does_not_block_current_registry() -> Result<(
     assert_eq!(registry.packages.len(), 1);
     assert_eq!(registry.packages[0].package, PACKAGE);
     assert_eq!(registry.packages[0].generation, 7);
+    assert_eq!(registry.packages[0].revision_kind, "semver");
+    assert_eq!(registry.packages[0].refs, ["latest", "stable"]);
     Ok(())
 }
 
@@ -734,6 +736,8 @@ struct PublicationCatalogRow {
     source: String,
     package: String,
     revision: String,
+    revision_kind: String,
+    refs: Vec<String>,
     generation: Option<i64>,
     index_status: String,
     graph_manifest_uri: Option<String>,
@@ -749,6 +753,8 @@ fn complete_publication_row(generation: i64) -> PublicationCatalogRow {
         source: SOURCE.to_owned(),
         package: PACKAGE.to_owned(),
         revision: "1.0.194".to_owned(),
+        revision_kind: "semver".to_owned(),
+        refs: vec!["latest".to_owned(), "stable".to_owned()],
         generation: Some(generation),
         index_status: "complete".to_owned(),
         graph_manifest_uri: Some(GRAPH_MANIFEST_URI.to_owned()),
@@ -783,6 +789,7 @@ fn publication_catalog(rows: &[PublicationCatalogRow]) -> Result<Connection> {
             source VARCHAR,
             package VARCHAR,
             revision VARCHAR,
+            revision_kind VARCHAR,
             generation BIGINT,
             index_status VARCHAR,
             graph_manifest_uri VARCHAR,
@@ -792,17 +799,24 @@ fn publication_catalog(rows: &[PublicationCatalogRow]) -> Result<Connection> {
             source_sidecar_sha256 VARCHAR,
             source_sidecar_bytes BIGINT
         );
+        CREATE TABLE gold.refs (
+            source VARCHAR,
+            package VARCHAR,
+            ref_name VARCHAR,
+            revision VARCHAR
+        );
         "#,
     )?;
     for row in rows {
         conn.execute(
             r#"
-            INSERT INTO gold.package_catalog VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO gold.package_catalog VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             "#,
             params![
                 row.source,
                 row.package,
                 row.revision,
+                row.revision_kind,
                 row.generation,
                 row.index_status,
                 row.graph_manifest_uri,
@@ -813,6 +827,12 @@ fn publication_catalog(rows: &[PublicationCatalogRow]) -> Result<Connection> {
                 row.source_sidecar_bytes,
             ],
         )?;
+        for reference in &row.refs {
+            conn.execute(
+                "INSERT INTO gold.refs VALUES (?, ?, ?, ?)",
+                params![row.source, row.package, reference, row.revision],
+            )?;
+        }
     }
     Ok(conn)
 }

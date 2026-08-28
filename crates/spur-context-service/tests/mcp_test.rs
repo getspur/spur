@@ -473,8 +473,14 @@ async fn parquet_backend_resolves_semantic_latest_and_named_refs_from_registry()
 
     let revisions =
         call_parquet_backend(&fixture, "external_catalog", &json!({ "package": PACKAGE })).await?;
-    assert_eq!(revisions["rows"][0]["revision_kind"], "semver");
-    assert_eq!(revisions["rows"][1]["refs"], json!(["latest", "stable"]));
+    let latest_row = revisions["rows"]
+        .as_array()
+        .context("revision rows")?
+        .iter()
+        .find(|row| row["revision"] == "10.0.0")
+        .context("latest semantic revision")?;
+    assert_eq!(latest_row["revision_kind"], "semver");
+    assert_eq!(latest_row["refs"], json!(["latest", "stable"]));
 
     for reference in ["latest", "stable"] {
         let search = call_parquet_backend(
