@@ -201,6 +201,7 @@ impl CodeBackend {
                 limit: request.limit,
             })
             .map_err(|_| CodeBackendError::ArtifactQuery)?;
+        let catalog_generation = opened.package.generation;
         let candidates = result
             .candidates
             .into_iter()
@@ -241,6 +242,7 @@ impl CodeBackend {
             "candidates": candidates,
             "total_matches": result.total_matches,
             "truncated": result.truncated,
+            "catalog_generation": catalog_generation,
         }))
     }
 
@@ -269,6 +271,7 @@ impl CodeBackend {
             request.context_lines,
         )?;
         let selector_name = symbol_selector_name(&symbol);
+        let catalog_generation = opened.package.generation;
         Ok(json!({
             "selector": format!(
                 "pkg:{}@{}::{selector_name}",
@@ -282,6 +285,7 @@ impl CodeBackend {
             "byte_range": symbol.byte_range,
             "line_range": line_range,
             "source": source,
+            "catalog_generation": catalog_generation,
         }))
     }
 
@@ -290,7 +294,7 @@ impl CodeBackend {
             .resolve_external_selector(&request.source, &request.selector)
             .await?;
         let Some(symbol) = symbol else {
-            return Ok(empty_edges("callers"));
+            return Ok(empty_edges("callers", opened.package.generation));
         };
         let records = opened
             .client
@@ -308,7 +312,7 @@ impl CodeBackend {
             .resolve_external_selector(&request.source, &request.selector)
             .await?;
         let Some(symbol) = symbol else {
-            return Ok(empty_edges("callees"));
+            return Ok(empty_edges("callees", opened.package.generation));
         };
         let records = opened
             .client
@@ -771,7 +775,7 @@ fn caller_response(
         })
         .collect::<Vec<_>>();
     sort_edge_rows(&mut rows, "caller");
-    edge_response("callers", rows)
+    edge_response("callers", rows, package.generation)
 }
 
 fn callee_response(
@@ -796,7 +800,7 @@ fn callee_response(
         })
         .collect::<Vec<_>>();
     sort_edge_rows(&mut rows, "callee");
-    edge_response("callees", rows)
+    edge_response("callees", rows, package.generation)
 }
 
 fn sort_edge_rows(rows: &mut [Value], direction: &str) {
@@ -815,7 +819,7 @@ fn sort_edge_rows(rows: &mut [Value], direction: &str) {
     });
 }
 
-fn edge_response(direction: &str, rows: Vec<Value>) -> Value {
+fn edge_response(direction: &str, rows: Vec<Value>, catalog_generation: i64) -> Value {
     let mut calls = 0;
     let mut calls_dyn = 0;
     let mut references_hof = 0;
@@ -854,13 +858,14 @@ fn edge_response(direction: &str, rows: Vec<Value>) -> Value {
             "unresolved": unresolved,
         },
         "unresolved_sample": unresolved_sample,
+        "catalog_generation": catalog_generation,
     });
     response[direction] = Value::Array(rows);
     response
 }
 
-fn empty_edges(direction: &str) -> Value {
-    edge_response(direction, Vec::new())
+fn empty_edges(direction: &str, catalog_generation: i64) -> Value {
+    edge_response(direction, Vec::new(), catalog_generation)
 }
 
 fn slice_symbol_source(
