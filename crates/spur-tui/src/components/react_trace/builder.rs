@@ -139,6 +139,17 @@ impl ReactTrace {
                         }
                     }
                     lines.push(Line::from(spans));
+                    let payload = match status {
+                        ActStatus::InProgress {
+                            partial: Some(payload),
+                        }
+                        | ActStatus::Completed(Some(payload))
+                        | ActStatus::Failed(Some(payload)) => Some(payload),
+                        _ => None,
+                    };
+                    if let Some(payload) = payload {
+                        lines.extend(observe_payload_lines(theme, payload, true));
+                    }
                     lines.push(Line::from(""));
                     i += 1;
                     continue;
@@ -991,6 +1002,19 @@ impl ReactTrace {
                         Some(0..entry.text.len()),
                         Line::from(spans),
                     );
+                    let payload = match status {
+                        ActStatus::InProgress {
+                            partial: Some(payload),
+                        }
+                        | ActStatus::Completed(Some(payload))
+                        | ActStatus::Failed(Some(payload)) => Some(payload),
+                        _ => None,
+                    };
+                    if let Some(payload) = payload {
+                        for line in observe_payload_lines(theme, payload, true) {
+                            push_wrapped(&mut rows, &mut byte_ranges, None, line);
+                        }
+                    }
                     push_wrapped(&mut rows, &mut byte_ranges, None, Line::from(""));
                     i += 1;
                     continue;

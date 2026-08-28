@@ -1680,6 +1680,10 @@ fn build_display_lines_completed_shows_outcome_glyph() {
         .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref().to_string()))
         .collect();
     assert!(joined.contains("✓"), "expected success glyph: {joined}");
+    assert!(
+        joined.contains("hi"),
+        "collapsed display lines must preview command output: {joined}"
+    );
     for f in spinner::BRAILLE {
         assert!(
             !joined.contains(f),
@@ -1730,6 +1734,10 @@ fn virtual_rows_collapsed_completed_act_shows_outcome_no_spinner() {
     assert!(
         txt.contains("✓"),
         "virtual rows must contain outcome: {txt}"
+    );
+    assert!(
+        txt.contains("hi"),
+        "collapsed virtual rows must preview command output: {txt}"
     );
 }
 
