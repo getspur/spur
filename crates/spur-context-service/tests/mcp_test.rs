@@ -513,6 +513,7 @@ async fn parquet_backend_matches_read_and_edge_contracts() -> Result<()> {
                 "unresolved": 0
             },
             "unresolved_sample": [],
+            "stable_symbol_id": "bbbbbbbbbbbbbbbb",
             "catalog_generation": ParquetBackendFixture::GENERATION
         })
     );
@@ -544,6 +545,7 @@ async fn parquet_backend_matches_read_and_edge_contracts() -> Result<()> {
                 "unresolved": 1
             },
             "unresolved_sample": ["external::Thing"],
+            "stable_symbol_id": "aaaaaaaaaaaaaaaa",
             "catalog_generation": ParquetBackendFixture::GENERATION
         })
     );
