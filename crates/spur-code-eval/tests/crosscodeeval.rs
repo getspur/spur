@@ -14,9 +14,9 @@ use std::{
 
 pub use spur_code_eval::{
     retrieve, BackendCall, BackendResponse, CaseStatus, CodeEvalCase, ContentPin, ContractError,
-    GoldEvidence, Language, LeakageKind, LeakagePolicy, QueryBackend, QueryBackendFuture,
-    QueryError, QueryPolicy, RepositoryPin, RetrievalRequest, RetrievalResult, SourceFormat,
-    SourceIdentity, SourceKind, SourceSpec, Suite,
+    EvidenceHit, GoldEvidence, Language, LeakageKind, LeakagePolicy, QueryBackend,
+    QueryBackendFuture, QueryError, QueryPolicy, RepositoryPin, RetrievalRequest, RetrievalResult,
+    SourceFormat, SourceIdentity, SourceKind, SourceSpec, Suite,
 };
 
 #[path = "../src/crosscodeeval.rs"]
@@ -152,6 +152,14 @@ fn evidence(path: &str, symbol_id: &str, score: f64) -> Value {
     })
 }
 
+fn named_evidence(path: &str, symbol_id: &str, name_field: &str, name: &str, score: f64) -> Value {
+    let mut row = evidence(path, symbol_id, score);
+    row.as_object_mut()
+        .expect("evidence row is an object")
+        .insert(name_field.to_owned(), json!(name));
+    row
+}
+
 fn resolved_backend(rows: impl IntoIterator<Item = Value>) -> RecordingBackend {
     let rows = rows.into_iter().collect::<Vec<_>>();
     RecordingBackend::with_responses([
@@ -249,6 +257,51 @@ fn prompt_only_retrieval_then_resolves_two_cross_file_spans_with_complete_trace(
 }
 
 #[test]
+fn opaque_stable_ids_resolve_from_title_and_entity_name() {
+    let repository = FixtureRepository::new();
+    let record = fixture_record(0);
+    let backend = resolved_backend(vec![
+        json!({
+            "file": "src/helper-one.ts",
+            "stable_symbol_id": "graph://symbol/6f75d71b394fbd73",
+            "title": "helper_one",
+            "score": 0.9,
+            "line_range": [1, 1]
+        }),
+        json!({
+            "file": "src/helper-two.ts",
+            "stable_symbol_id": "graph://symbol/08a860fdacdb4c19",
+            "entity_name": "helper_two",
+            "score": 0.8,
+            "line_range": [1, 1]
+        }),
+    ]);
+
+    let frozen =
+        block_on(adapter().retrieval_case(&backend, &record, repository.path(), 10, 3)).unwrap();
+    let translation = derive_evidence_after_retrieval(frozen, record.scoring_input()).unwrap();
+
+    assert_eq!(translation.audit().positive_spans().len(), 2);
+    assert_eq!(
+        translation
+            .audit()
+            .positive_spans()
+            .iter()
+            .filter_map(SourceIdentity::symbol_id)
+            .collect::<Vec<_>>(),
+        vec![
+            "graph://symbol/6f75d71b394fbd73",
+            "graph://symbol/08a860fdacdb4c19",
+        ]
+    );
+    assert_eq!(
+        translation.audit().unresolved_identifiers(),
+        ["missing_helper"]
+    );
+    assert!(matches!(translation.case().status(), CaseStatus::Eligible));
+}
+
+#[test]
 fn hidden_completion_leakage_is_invalid_with_zero_backend_calls() {
     let repository = FixtureRepository::new();
     let record = record_with(0, |value| {
@@ -302,14 +355,50 @@ fn duplicate_and_shuffled_evidence_produces_identical_canonical_audits() {
     let repository = FixtureRepository::new();
     let record = fixture_record(0);
     let first = resolved_backend(vec![
-        evidence("src/helper-two.ts", "helper_two", 0.8),
-        evidence("src/helper-one.ts", "helper_one", 0.7),
-        evidence("src/helper-one.ts", "helper_one", 0.9),
+        named_evidence(
+            "src/helper-two.ts",
+            "08a860fdacdb4c19",
+            "title",
+            "helper_two",
+            0.8,
+        ),
+        named_evidence(
+            "src/helper-one.ts",
+            "6f75d71b394fbd73",
+            "entity_name",
+            "helper_one",
+            0.7,
+        ),
+        named_evidence(
+            "src/helper-one.ts",
+            "6f75d71b394fbd73",
+            "title",
+            "helper_one",
+            0.9,
+        ),
     ]);
     let second = resolved_backend(vec![
-        evidence("src/helper-one.ts", "helper_one", 0.9),
-        evidence("src/helper-two.ts", "helper_two", 0.8),
-        evidence("src/helper-one.ts", "helper_one", 0.7),
+        named_evidence(
+            "src/helper-one.ts",
+            "6f75d71b394fbd73",
+            "title",
+            "helper_one",
+            0.9,
+        ),
+        named_evidence(
+            "src/helper-two.ts",
+            "08a860fdacdb4c19",
+            "title",
+            "helper_two",
+            0.8,
+        ),
+        named_evidence(
+            "src/helper-one.ts",
+            "6f75d71b394fbd73",
+            "entity_name",
+            "helper_one",
+            0.7,
+        ),
     ]);
 
     let first_frozen =
@@ -321,10 +410,53 @@ fn duplicate_and_shuffled_evidence_produces_identical_canonical_audits() {
     let second_translation = derive_evidence_after_retrieval(second_frozen, scoring).unwrap();
 
     assert_eq!(first_translation.audit(), second_translation.audit());
+    assert_eq!(first_translation.audit().positive_spans().len(), 2);
+    assert!(matches!(
+        first_translation.case().status(),
+        CaseStatus::Eligible
+    ));
     assert_eq!(
         serde_json::to_vec(first_translation.audit()).unwrap(),
         serde_json::to_vec(second_translation.audit()).unwrap()
     );
+}
+
+#[test]
+fn malformed_and_empty_symbol_names_cannot_resolve_opaque_ids() {
+    let repository = FixtureRepository::new();
+    let record = fixture_record(0);
+    let backend = resolved_backend(vec![
+        json!({
+            "file": "src/helper-one.ts",
+            "stable_symbol_id": "graph://symbol/6f75d71b394fbd73",
+            "title": "bad\nname",
+            "entity_name": ["helper_one"],
+            "score": 0.9,
+            "line_range": [1, 1]
+        }),
+        json!({
+            "file": "src/helper-two.ts",
+            "stable_symbol_id": "graph://symbol/08a860fdacdb4c19",
+            "title": "   ",
+            "entity_name": null,
+            "score": 0.8,
+            "line_range": [1, 1]
+        }),
+    ]);
+
+    let frozen =
+        block_on(adapter().retrieval_case(&backend, &record, repository.path(), 10, 3)).unwrap();
+    let translation = derive_evidence_after_retrieval(frozen, record.scoring_input()).unwrap();
+
+    assert!(translation.audit().positive_spans().is_empty());
+    assert_eq!(
+        translation.audit().unresolved_identifiers(),
+        ["helper_one", "helper_two", "missing_helper"]
+    );
+    assert!(matches!(
+        translation.case().status(),
+        CaseStatus::Invalid { .. }
+    ));
 }
 
 #[test]
@@ -374,6 +506,29 @@ fn unsupported_language_without_extractor_remains_visible_without_dispatch() {
         ["java_helper"]
     );
     assert!(!translation.scoring_eligible());
+}
+
+#[test]
+fn unsupported_language_does_not_gain_case_insensitive_leakage_semantics() {
+    let repository = FixtureRepository::new();
+    let record = record_with(1, |value| {
+        value["prompt"] = json!("class Widget { void render() { JAVA_HELPER");
+    });
+    let backend = RecordingBackend::default();
+
+    let frozen =
+        block_on(adapter().retrieval_case(&backend, &record, repository.path(), 10, 3)).unwrap();
+    let translation = derive_evidence_after_retrieval(frozen, record.scoring_input()).unwrap();
+
+    assert_eq!(backend.call_count(), 0);
+    assert!(matches!(
+        translation.case().status(),
+        CaseStatus::Unsupported { .. }
+    ));
+    assert_eq!(
+        translation.audit().unresolved_identifiers(),
+        ["java_helper"]
+    );
 }
 
 #[test]

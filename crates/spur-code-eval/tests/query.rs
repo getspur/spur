@@ -354,6 +354,109 @@ fn duplicate_hits_merge_public_source_kinds() {
 }
 
 #[test]
+fn duplicate_and_shuffled_symbol_names_are_canonical() {
+    let root = TestRoot::new("canonical-symbol-names", "pub fn alpha() {}\n");
+    let first_rows = [
+        evidence_with_name(
+            "src/lib.rs",
+            "graph://symbol/opaque-alpha",
+            [1, 1],
+            0.8,
+            "title",
+            " module::alpha ",
+        ),
+        evidence_with_name(
+            "src/lib.rs",
+            "graph://symbol/opaque-alpha",
+            [1, 1],
+            0.9,
+            "entity_name",
+            "alpha",
+        ),
+        evidence_with_name(
+            "src/lib.rs",
+            "graph://symbol/opaque-alpha",
+            [1, 1],
+            0.7,
+            "title",
+            "alpha",
+        ),
+    ];
+    let second_rows = [
+        first_rows[2].clone(),
+        first_rows[0].clone(),
+        first_rows[1].clone(),
+    ];
+
+    let first = retrieve_rows(root.path(), first_rows);
+    let second = retrieve_rows(root.path(), second_rows);
+    let first_json = serde_json::to_value(&first).unwrap();
+    let second_json = serde_json::to_value(&second).unwrap();
+
+    assert_eq!(
+        first_json["hits"][0]["symbol_names"],
+        json!(["alpha", "module::alpha"])
+    );
+    assert_eq!(
+        second_json["hits"][0]["symbol_names"],
+        first_json["hits"][0]["symbol_names"]
+    );
+}
+
+#[test]
+fn malformed_and_empty_symbol_names_are_ignored() {
+    let root = TestRoot::new("malformed-symbol-names", "pub fn alpha() {}\n");
+    let rows = [
+        json!({
+            "file": "src/lib.rs",
+            "stable_symbol_id": "graph://symbol/opaque-alpha",
+            "line_range": [1, 1],
+            "score": 0.9,
+            "entity_name": ["alpha"],
+            "title": "bad\nname"
+        }),
+        json!({
+            "file": "src/lib.rs",
+            "stable_symbol_id": "graph://symbol/opaque-alpha",
+            "line_range": [1, 1],
+            "score": 0.8,
+            "entity_name": null,
+            "title": "   "
+        }),
+    ];
+
+    let result = retrieve_rows(root.path(), rows);
+    let serialized = serde_json::to_value(&result).unwrap();
+
+    assert_eq!(serialized["hits"][0]["symbol_names"], json!([]));
+    assert!(result.issues().is_empty());
+}
+
+#[test]
+fn evidence_hit_deserializes_legacy_snapshots_without_symbol_names() {
+    let root = TestRoot::new("legacy-symbol-names", "pub fn alpha() {}\n");
+    let result = retrieve_rows(
+        root.path(),
+        [evidence(
+            "src/lib.rs",
+            "graph://symbol/opaque-alpha",
+            [1, 1],
+            0.9,
+        )],
+    );
+    let mut legacy = serde_json::to_value(result).unwrap();
+    legacy["hits"][0]
+        .as_object_mut()
+        .expect("serialized hit is an object")
+        .remove("symbol_names");
+
+    let reopened: spur_code_eval::RetrievalResult = serde_json::from_value(legacy).unwrap();
+    let reserialized = serde_json::to_value(reopened).unwrap();
+
+    assert_eq!(reserialized["hits"][0]["symbol_names"], json!([]));
+}
+
+#[test]
 fn malformed_and_unsafe_evidence_remains_typed_and_denominator_visible() {
     let root = TestRoot::new("invalid-evidence", "pub fn alpha() {}\npub fn beta() {}\n");
     let backend = RecordingBackend::with_responses([
@@ -498,6 +601,20 @@ fn ranked_ids(
         .collect()
 }
 
+fn retrieve_rows(
+    source_root: &Path,
+    rows: impl IntoIterator<Item = serde_json::Value>,
+) -> spur_code_eval::RetrievalResult {
+    let backend = RecordingBackend::with_responses([
+        BackendResponse::new(
+            json!({"primary_evidence": rows.into_iter().collect::<Vec<_>>() }),
+            Duration::ZERO,
+        ),
+        BackendResponse::new(json!({"candidates": []}), Duration::ZERO),
+    ]);
+    block_on(retrieve(&backend, &safe_request(source_root, 5, 3))).expect("retrieval succeeds")
+}
+
 fn safe_request(source_root: &Path, top_k: usize, exact_followup_limit: usize) -> RetrievalRequest {
     RetrievalRequest::new(
         source_root,
@@ -534,6 +651,21 @@ fn evidence(
         "line_range": line_range,
         "score": score
     })
+}
+
+fn evidence_with_name(
+    file_path: &str,
+    symbol_id: &str,
+    line_range: [u64; 2],
+    score: impl serde::Serialize,
+    name_field: &str,
+    name: &str,
+) -> serde_json::Value {
+    let mut row = evidence(file_path, symbol_id, line_range, score);
+    row.as_object_mut()
+        .expect("evidence row is an object")
+        .insert(name_field.to_owned(), json!(name));
+    row
 }
 
 struct TestRoot {

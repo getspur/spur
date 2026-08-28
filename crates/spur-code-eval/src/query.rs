@@ -2,9 +2,9 @@
 //!
 //! Duplicate observations are merged deterministically by canonical
 //! [`SourceIdentity`]: the highest finite score wins, source kinds are united,
-//! per-observation costs take their maximum, ambiguity flags are combined, and
-//! the worst staleness state wins. Result-level costs still aggregate every
-//! dispatch.
+//! canonical symbol names are sorted and deduplicated, per-observation costs
+//! take their maximum, ambiguity flags are combined, and the worst staleness
+//! state wins. Result-level costs still aggregate every dispatch.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -121,6 +121,8 @@ impl EvidenceIssue {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EvidenceHit {
     identity: SourceIdentity,
+    #[serde(default)]
+    symbol_names: Vec<String>,
     score: f64,
     source_kinds: Vec<SourceKind>,
     latency_micros: u64,
@@ -136,6 +138,15 @@ impl EvidenceHit {
     #[must_use]
     pub const fn identity(&self) -> &SourceIdentity {
         &self.identity
+    }
+
+    /// Returns sorted, deduplicated canonical names reported for this symbol.
+    ///
+    /// The list is empty when the backend omitted a name or an older frozen
+    /// result is deserialized.
+    #[must_use]
+    pub fn symbol_names(&self) -> &[String] {
+        &self.symbol_names
     }
 
     /// Returns the finite backend score used for ranking.
@@ -898,6 +909,7 @@ fn normalize_response(
     };
 
     for row in rows {
+        let symbol_names = canonical_symbol_names(row);
         let score = match evidence_score(row, source_kind) {
             Ok(score) => score,
             Err((kind, message)) => {
@@ -925,6 +937,7 @@ fn normalize_response(
         }
         hits.push(EvidenceHit {
             identity,
+            symbol_names,
             score,
             source_kinds: vec![source_kind],
             latency_micros: metadata.latency_micros,
@@ -935,6 +948,21 @@ fn normalize_response(
             answer_status: AnswerStatus::Answered,
         });
     }
+}
+
+fn canonical_symbol_names(row: &Value) -> Vec<String> {
+    let mut names = ["entity_name", "title"]
+        .into_iter()
+        .filter_map(|field| row.get(field).and_then(Value::as_str))
+        .filter_map(|name| {
+            let trimmed = name.trim();
+            (!trimmed.is_empty() && !trimmed.chars().any(char::is_control))
+                .then(|| trimmed.to_owned())
+        })
+        .collect::<Vec<_>>();
+    names.sort();
+    names.dedup();
+    names
 }
 
 fn response_rows(source_kind: SourceKind, body: &Value) -> Result<Vec<&Value>, String> {
@@ -1135,6 +1163,9 @@ fn byte_span_for_lines(
 
 fn merge_duplicate_hit(existing: &mut EvidenceHit, duplicate: EvidenceHit) {
     existing.score = existing.score.max(duplicate.score);
+    existing.symbol_names.extend(duplicate.symbol_names);
+    existing.symbol_names.sort();
+    existing.symbol_names.dedup();
     existing.source_kinds.extend(duplicate.source_kinds);
     existing.source_kinds.sort_unstable();
     existing.source_kinds.dedup();

@@ -16,8 +16,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use crate::{
-    retrieve, CaseStatus, CodeEvalCase, ContentPin, ContractError, GoldEvidence, Language,
-    LeakageKind, LeakagePolicy, QueryBackend, QueryError, QueryPolicy, RepositoryPin,
+    retrieve, CaseStatus, CodeEvalCase, ContentPin, ContractError, EvidenceHit, GoldEvidence,
+    Language, LeakageKind, LeakagePolicy, QueryBackend, QueryError, QueryPolicy, RepositoryPin,
     RetrievalRequest, RetrievalResult, SourceFormat, SourceIdentity, SourceKind, SourceSpec, Suite,
 };
 
@@ -670,7 +670,7 @@ impl IdentifierResolver<'_> {
         let mut matched_target_file = false;
         if let Some(result) = self.retrieval_result {
             for (index, hit) in result.hits().iter().enumerate() {
-                if identity_matches_identifier(hit.identity(), &identifier) {
+                if evidence_hit_matches_identifier(hit, &identifier) {
                     if same_path(hit.identity().path(), self.record.metadata.file()) {
                         matched_target_file = true;
                         continue;
@@ -773,11 +773,16 @@ const fn leakage_kind_reason(kind: LeakageKind) -> &'static str {
     }
 }
 
-fn identity_matches_identifier(identity: &SourceIdentity, identifier: &str) -> bool {
-    identity
-        .symbol_id()
-        .into_iter()
-        .chain(std::iter::once(identity.path()))
+fn evidence_hit_matches_identifier(hit: &EvidenceHit, identifier: &str) -> bool {
+    hit.symbol_names()
+        .iter()
+        .map(String::as_str)
+        .chain(
+            hit.identity()
+                .symbol_id()
+                .into_iter()
+                .chain(std::iter::once(hit.identity().path())),
+        )
         .flat_map(identifier_tokens)
         .any(|token| token == identifier)
 }
