@@ -4076,6 +4076,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "nltk-porter"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3ae1d11f98838ac2dc9ca188e86eda22ed083f79eaebf5a41ecacf59228d2e0c"
+
+[[package]]
 name = "nom"
 version = "7.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5567,14 +5573,17 @@ dependencies = [
  "base64",
  "blake3",
  "chrono",
+ "clap",
  "fs2",
  "gix",
  "globset",
  "ignore",
  "indicatif",
+ "nltk-porter",
  "notify",
  "parquet",
  "petgraph",
+ "reqwest 0.12.28",
  "serde",
  "serde_json",
  "sha1 0.10.7",
