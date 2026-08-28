@@ -19,6 +19,8 @@ fn package(source: &str, package: &str, revision: &str, generation: i64) -> Serv
         source: source.to_owned(),
         package: package.to_owned(),
         revision: revision.to_owned(),
+        revision_kind: "git_sha".to_owned(),
+        refs: Vec::new(),
         generation,
         graph_prefix_uri: format!("{artifact_prefix}/graph/"),
         graph_manifest: artifact(
@@ -206,5 +208,36 @@ fn resolution_never_falls_back_across_a_mixed_generation() {
             .unwrap_err()
             .code(),
         "generation_mismatch"
+    );
+}
+
+#[test]
+fn resolution_supports_named_refs_without_guessing_revision_order() {
+    let mut registry = complete_registry(7);
+    registry.packages[0].refs = vec!["latest".to_owned(), "stable".to_owned()];
+
+    for reference in ["latest", "stable"] {
+        assert_eq!(
+            registry
+                .resolve_revision_or_ref("github", "acme/widget", reference)
+                .unwrap()
+                .unwrap()
+                .revision,
+            "rev-a"
+        );
+    }
+}
+
+#[test]
+fn registry_rejects_one_ref_pointing_at_multiple_revisions() {
+    let mut registry = complete_registry(7);
+    registry.packages[0].refs = vec!["latest".to_owned()];
+    registry.packages[1].source = registry.packages[0].source.clone();
+    registry.packages[1].package = registry.packages[0].package.clone();
+    registry.packages[1].refs = vec!["latest".to_owned()];
+
+    assert_eq!(
+        registry.validate().unwrap_err().code(),
+        "duplicate_package_ref"
     );
 }

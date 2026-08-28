@@ -1,4 +1,5 @@
 import re
+import subprocess
 from pathlib import Path
 
 
@@ -17,6 +18,49 @@ def shell_function(source: str, name: str) -> str:
     )
     assert match is not None, f"missing shell function: {name}"
     return match.group(1)
+
+
+def run_latest_tag_harness(*, source_digest: str, latest_digest: str, put_exit: int):
+    source = deploy_source()
+    functions = "\n".join(
+        f"{name}() {{\n{shell_function(source, name)}"
+        for name in (
+            "aws_account_id",
+            "ecr_image_tag",
+            "ecr_latest_image_tag",
+            "tag_ecr_image_as_latest",
+        )
+    )
+    harness = f"""
+set -euo pipefail
+AWS_REGION_VAL=ap-southeast-5
+LATEST_IMAGE_TAG=latest
+put_calls=0
+log() {{ :; }}
+aws() {{
+    if [[ "$1 $2" == "sts get-caller-identity" ]]; then
+        printf '%s\\n' '123456789012'
+    elif [[ "$1 $2" == "ecr batch-get-image" && "$*" == *"imageManifest"* ]]; then
+        printf '%s\\n' '{{"schemaVersion":2}}'
+    elif [[ "$1 $2" == "ecr batch-get-image" && "$*" == *"imageDigest"* ]]; then
+        if [[ "$*" == *"imageTag=build-123"* ]]; then
+            printf '%s\\n' '{source_digest}'
+        else
+            printf '%s\\n' '{latest_digest}'
+        fi
+    elif [[ "$1 $2" == "ecr put-image" ]]; then
+        put_calls=$((put_calls + 1))
+        return {put_exit}
+    else
+        printf '%s\\n' "unexpected aws invocation: $*" >&2
+        return 99
+    fi
+}}
+{functions}
+tag_ecr_image_as_latest spur-context-worker build-123
+printf 'put_calls=%s\\n' "$put_calls"
+"""
+    return subprocess.run(["bash", "-c", harness], text=True, capture_output=True)
 
 
 def test_all_ecr_repositories_are_reconciled_with_scanning_enabled():
@@ -49,6 +93,28 @@ def test_build_tags_are_immutable_and_only_latest_is_excluded():
         "IMMUTABLE_WITH_EXCLUSION",
         "IMMUTABLE_WITH_EXCLUSION",
     ]
+
+
+def test_republishing_identical_latest_digest_is_a_successful_noop():
+    digest = "sha256:" + "a" * 64
+    result = run_latest_tag_harness(
+        source_digest=digest,
+        latest_digest=digest,
+        put_exit=254,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "put_calls=0" in result.stdout
+
+
+def test_latest_retag_still_fails_closed_when_put_image_fails():
+    result = run_latest_tag_harness(
+        source_digest="sha256:" + "a" * 64,
+        latest_digest="sha256:" + "b" * 64,
+        put_exit=77,
+    )
+
+    assert result.returncode != 0
 
 
 def test_region_preflight_precedes_ecr_and_terraform_mutations():

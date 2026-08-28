@@ -458,6 +458,41 @@ async fn parquet_backend_matches_catalog_and_search_contracts() -> Result<()> {
 }
 
 #[tokio::test]
+async fn parquet_backend_resolves_semantic_latest_and_named_refs_from_registry() -> Result<()> {
+    let mut fixture = ParquetBackendFixture::new("parquet-registry-ref-contracts")?;
+    let mut revision_9 = fixture.registry.packages[0].clone();
+    revision_9.revision = "9.0.0".to_owned();
+    revision_9.refs.clear();
+    let mut revision_10 = fixture.registry.packages[0].clone();
+    revision_10.revision = "10.0.0".to_owned();
+    revision_10.refs = vec!["latest".to_owned(), "stable".to_owned()];
+    fixture.registry.packages = vec![revision_9, revision_10];
+
+    let packages = call_parquet_backend(&fixture, "external_catalog", &json!({})).await?;
+    assert_eq!(packages["rows"][0]["latest_revision"], "10.0.0");
+
+    let revisions =
+        call_parquet_backend(&fixture, "external_catalog", &json!({ "package": PACKAGE })).await?;
+    assert_eq!(revisions["rows"][0]["revision_kind"], "semver");
+    assert_eq!(revisions["rows"][1]["refs"], json!(["latest", "stable"]));
+
+    for reference in ["latest", "stable"] {
+        let search = call_parquet_backend(
+            &fixture,
+            "external_code_search",
+            &json!({
+                "query": "bet",
+                "package": PACKAGE,
+                "ref": reference
+            }),
+        )
+        .await?;
+        assert_eq!(search["candidates"][0]["revision"], "10.0.0");
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn parquet_backend_matches_read_and_edge_contracts() -> Result<()> {
     let fixture = ParquetBackendFixture::new("parquet-read-edge-contracts")?;
     let beta_byte_range = byte_range_for_lines(PARQUET_SOURCE, 6, 7)?;
@@ -754,6 +789,8 @@ impl ParquetBackendFixture {
                 source: "registry:crates-io".to_owned(),
                 package: PACKAGE.to_owned(),
                 revision: REVISION.to_owned(),
+                revision_kind: "semver".to_owned(),
+                refs: vec!["latest".to_owned(), "stable".to_owned()],
                 generation: Self::GENERATION,
                 graph_prefix_uri: graph_prefix.clone(),
                 graph_manifest,
@@ -1645,7 +1682,10 @@ async fn external_knowledge_context_resolves_ref_and_returns_evidence_pack() -> 
     .await?;
 
     assert_eq!(response["answerable"], true);
-    assert_eq!(response["catalog_generation"], 7);
+    assert_eq!(
+        response["catalog_generation"], 9,
+        "Knowledge must report the frozen catalog's global generation, not the selected package row's older generation"
+    );
     assert_eq!(response["graph_content_hash"], "fixture-hash");
     assert!(response["primary_evidence"]
         .as_array()
