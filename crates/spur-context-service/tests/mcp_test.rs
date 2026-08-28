@@ -1645,6 +1645,7 @@ async fn external_knowledge_context_resolves_ref_and_returns_evidence_pack() -> 
     .await?;
 
     assert_eq!(response["answerable"], true);
+    assert_eq!(response["catalog_generation"], 7);
     assert_eq!(response["graph_content_hash"], "fixture-hash");
     assert!(response["primary_evidence"]
         .as_array()
