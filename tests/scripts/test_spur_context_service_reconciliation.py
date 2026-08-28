@@ -10,6 +10,68 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 INFRA_DIR = ROOT / "infra" / "spur-context-service"
 
+REVIEWED_NON_NOOP_ACTIONS = {
+    "aws_apigatewayv2_integration.api_key[0]": ("update",),
+    "aws_apigatewayv2_integration.api_key_knowledge[0]": ("create",),
+    "aws_apigatewayv2_integration.code": ("create",),
+    "aws_apigatewayv2_integration.lambda": ("update",),
+    "aws_apigatewayv2_route.api_key_discovery[0]": ("update",),
+    'aws_apigatewayv2_route.api_key_management["DELETE /auth/api-keys/{key_id}"]': (
+        "update",
+    ),
+    'aws_apigatewayv2_route.api_key_management["GET /auth/api-keys"]': (
+        "update",
+    ),
+    'aws_apigatewayv2_route.api_key_management["POST /auth/api-keys"]': (
+        "update",
+    ),
+    "aws_apigatewayv2_route.api_key_mcp[0]": ("update",),
+    "aws_apigatewayv2_route.api_key_mcp_knowledge[0]": ("create",),
+    "aws_apigatewayv2_route.compatibility_code": ("create",),
+    "aws_apigatewayv2_route.compatibility_knowledge": ("update",),
+    "aws_apigatewayv2_route.login_redirect[0]": ("update",),
+    "aws_apigatewayv2_route.oauth_code[0]": ("create",),
+    "aws_apigatewayv2_route.oauth_knowledge[0]": ("update",),
+    "aws_cloudwatch_event_target.index_queue_drainer": ("update",),
+    "aws_cloudwatch_log_group.code_lambda": ("create",),
+    "aws_cloudwatch_log_group.knowledge_lambda": ("create",),
+    "aws_cloudwatch_log_metric_filter.api_key_route_5xx[0]": ("update",),
+    "aws_cloudwatch_log_metric_filter.oauth_route_5xx[0]": ("update",),
+    "aws_cloudwatch_metric_alarm.api_key_route_5xx[0]": ("update",),
+    "aws_cloudwatch_metric_alarm.oauth_route_5xx[0]": ("update",),
+    "aws_iam_role.code_lambda": ("create",),
+    "aws_iam_role.knowledge_lambda": ("create",),
+    "aws_iam_role_policy.api_key_authorizer[0]": ("update",),
+    "aws_iam_role_policy.api_key_cleanup[0]": ("update",),
+    "aws_iam_role_policy.code_api_key_management[0]": ("create",),
+    "aws_iam_role_policy.code_lambda_dynamodb": ("create",),
+    "aws_iam_role_policy.code_lambda_runtime": ("create",),
+    "aws_iam_role_policy.code_lambda_sfn": ("create",),
+    "aws_iam_role_policy.code_s3_read": ("create",),
+    "aws_iam_role_policy.knowledge_lambda_runtime": ("create",),
+    "aws_iam_role_policy.knowledge_s3_read": ("create",),
+    "aws_iam_role_policy.lambda_dynamodb": ("update",),
+    "aws_iam_role_policy.shared_lambda_catalog_secret": ("create",),
+    "aws_iam_role_policy.source_fetcher_lambda": ("update",),
+    "aws_iam_role_policy_attachment.lambda_vpc_access": ("create",),
+    "aws_lambda_alias.api_key_authorizer[0]": ("update",),
+    "aws_lambda_alias.knowledge_live": ("create",),
+    "aws_lambda_alias.source_fetcher_live": ("update",),
+    "aws_lambda_alias.worker_live": ("update",),
+    "aws_lambda_function.api_key_authorizer[0]": ("update",),
+    "aws_lambda_function.api_key_cleanup[0]": ("update",),
+    "aws_lambda_function.code": ("create",),
+    "aws_lambda_function.knowledge": ("create",),
+    "aws_lambda_function.source_fetcher": ("update",),
+    "aws_lambda_function.worker": ("update",),
+    "aws_lambda_permission.apigw_code": ("create",),
+    "aws_lambda_permission.apigw_knowledge": ("create",),
+    "aws_lambda_permission.eventbridge_code": ("create",),
+    "aws_s3_object.code_lambda_zip": ("create",),
+    "aws_s3_object.knowledge_lambda_zip": ("create",),
+    "aws_sfn_state_machine.index_build": ("update",),
+}
+
 
 def terraform_files():
     return sorted(INFRA_DIR.glob("*.tf"))
@@ -79,6 +141,15 @@ def saved_plan_action_matrix(plan):
     )
 
 
+def reviewed_non_noop_plan():
+    return {
+        "resource_changes": [
+            {"address": address, "change": {"actions": list(actions)}}
+            for address, actions in REVIEWED_NON_NOOP_ACTIONS.items()
+        ]
+    }
+
+
 def assert_saved_plan_is_non_destructive(plan):
     destructive = destructive_plan_changes(plan)
     if destructive:
@@ -86,6 +157,67 @@ def assert_saved_plan_is_non_destructive(plan):
             f"{address}={'/'.join(actions)}" for address, actions in destructive
         )
         raise AssertionError(f"saved plan contains delete or replacement actions: {summary}")
+
+    resource_changes = plan.get("resource_changes", [])
+    addresses = [
+        resource_change.get("address", "<unknown>")
+        for resource_change in resource_changes
+    ]
+    duplicates = sorted(
+        address for address, count in Counter(addresses).items() if count > 1
+    )
+    if duplicates:
+        raise AssertionError(f"saved plan contains duplicate addresses: {', '.join(duplicates)}")
+
+    actual_actions = {
+        resource_change.get("address", "<unknown>"): tuple(
+            resource_change.get("change", {}).get("actions", [])
+        )
+        for resource_change in resource_changes
+    }
+    changed = sorted(
+        address
+        for address, expected in REVIEWED_NON_NOOP_ACTIONS.items()
+        if address in actual_actions and actual_actions[address] != expected
+    )
+    missing = sorted(REVIEWED_NON_NOOP_ACTIONS.keys() - actual_actions.keys())
+    unexpected = sorted(
+        address
+        for address, actions in actual_actions.items()
+        if actions not in {("no-op",), ("read",)}
+        and address not in REVIEWED_NON_NOOP_ACTIONS
+    )
+
+    mismatches = []
+    if changed:
+        mismatches.append(
+            "action-changed non-no-op rows: "
+            + ", ".join(
+                f"{address} expected={'/'.join(REVIEWED_NON_NOOP_ACTIONS[address])} "
+                f"actual={'/'.join(actual_actions[address])}"
+                for address in changed
+            )
+        )
+    if missing:
+        mismatches.append(
+            "missing reviewed non-no-op rows: "
+            + ", ".join(
+                f"{address}={'/'.join(REVIEWED_NON_NOOP_ACTIONS[address])}"
+                for address in missing
+            )
+        )
+    if unexpected:
+        mismatches.append(
+            "unexpected non-no-op rows: "
+            + ", ".join(
+                f"{address}={'/'.join(actual_actions[address])}"
+                for address in unexpected
+            )
+        )
+    if mismatches:
+        raise AssertionError(
+            "saved plan non-no-op allowlist mismatch: " + "; ".join(mismatches)
+        )
 
 
 def test_staging_backend_keeps_the_versioned_legacy_key_canonical():
@@ -268,22 +400,102 @@ def test_saved_plan_guard_rejects_delete_and_replacement_sequences(actions):
 
 
 def test_saved_plan_guard_accepts_non_destructive_action_matrix():
-    plan = {
-        "resource_changes": [
+    plan = reviewed_non_noop_plan()
+    plan["resource_changes"].extend(
+        [
             {"address": "aws_example.keep", "change": {"actions": ["no-op"]}},
-            {"address": "aws_example.new", "change": {"actions": ["create"]}},
-            {"address": "aws_example.adjust", "change": {"actions": ["update"]}},
             {"address": "data.aws_example.read", "change": {"actions": ["read"]}},
         ]
-    }
+    )
 
     assert_saved_plan_is_non_destructive(plan)
     assert saved_plan_action_matrix(plan) == {
         ("no-op",): 1,
-        ("create",): 1,
-        ("update",): 1,
+        ("create",): 26,
+        ("update",): 27,
         ("read",): 1,
     }
+
+
+def test_reviewed_non_noop_allowlist_has_expected_action_counts():
+    assert Counter(REVIEWED_NON_NOOP_ACTIONS.values()) == {
+        ("create",): 26,
+        ("update",): 27,
+    }
+
+
+def test_saved_plan_guard_rejects_unexpected_create_address():
+    plan = reviewed_non_noop_plan()
+    plan["resource_changes"].append(
+        {
+            "address": "aws_example.unexpected_create",
+            "change": {"actions": ["create"]},
+        }
+    )
+
+    with pytest.raises(
+        AssertionError,
+        match=r"unexpected.*aws_example\.unexpected_create=create",
+    ):
+        assert_saved_plan_is_non_destructive(plan)
+
+
+def test_saved_plan_guard_rejects_unexpected_update_address():
+    plan = reviewed_non_noop_plan()
+    plan["resource_changes"].append(
+        {
+            "address": "aws_example.unexpected_update",
+            "change": {"actions": ["update"]},
+        }
+    )
+
+    with pytest.raises(
+        AssertionError,
+        match=r"unexpected.*aws_example\.unexpected_update=update",
+    ):
+        assert_saved_plan_is_non_destructive(plan)
+
+
+def test_saved_plan_guard_rejects_reviewed_address_with_changed_action():
+    plan = reviewed_non_noop_plan()
+    changed_address = "aws_apigatewayv2_integration.api_key_knowledge[0]"
+    for resource_change in plan["resource_changes"]:
+        if resource_change["address"] == changed_address:
+            resource_change["change"]["actions"] = ["update"]
+            break
+
+    with pytest.raises(
+        AssertionError,
+        match=r"action-changed.*api_key_knowledge\[0\].*expected=create actual=update",
+    ):
+        assert_saved_plan_is_non_destructive(plan)
+
+
+def test_saved_plan_guard_rejects_missing_reviewed_non_noop_address():
+    plan = reviewed_non_noop_plan()
+    missing_address = "aws_apigatewayv2_integration.api_key_knowledge[0]"
+    plan["resource_changes"] = [
+        resource_change
+        for resource_change in plan["resource_changes"]
+        if resource_change["address"] != missing_address
+    ]
+
+    with pytest.raises(
+        AssertionError,
+        match=r"missing.*api_key_knowledge\[0\]=create",
+    ):
+        assert_saved_plan_is_non_destructive(plan)
+
+
+def test_saved_plan_guard_rejects_duplicate_address():
+    plan = reviewed_non_noop_plan()
+    plan["resource_changes"].append(plan["resource_changes"][0].copy())
+
+    with pytest.raises(
+        AssertionError,
+        match=r"duplicate.*aws_apigatewayv2_integration\.api_key\[0\]",
+    ):
+        assert_saved_plan_is_non_destructive(plan)
 
 
 if __name__ == "__main__":
