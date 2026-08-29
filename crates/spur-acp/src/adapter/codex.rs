@@ -1,4 +1,4 @@
-use agent_client_protocol::schema::v1::ToolCall;
+use agent_client_protocol::schema::v1::{SessionMode, ToolCall};
 use serde_json::Value;
 
 use super::{BadgeColor, ModeBadge, ObservePayload, ToolFamily, ToolInputDisplay};
@@ -6,17 +6,45 @@ use super::{BadgeColor, ModeBadge, ObservePayload, ToolFamily, ToolInputDisplay}
 /// Refine the base `ToolFamily` for Codex-family agents.
 ///
 /// Rules:
-/// 1. `mcp__*` titles → `Mcp` (always).
+/// 1. Legacy `mcp__*` and Codex ACP v1.7 `mcp.*.*` titles → `Mcp`.
 /// 2. If base is `Unknown` and title is `plan_update` → `Plan`.
 /// 3. Otherwise return `base` unchanged.
 pub fn refine(title: &str, base: ToolFamily) -> ToolFamily {
-    if title.starts_with("mcp__") {
+    if title.starts_with("mcp__") || is_v1_7_mcp_title(title) {
         return ToolFamily::Mcp;
     }
     if matches!(base, ToolFamily::Unknown) && title == "plan_update" {
         return ToolFamily::Plan;
     }
     base
+}
+
+/// Refine a complete Codex tool call, including v1.7 presentation metadata.
+pub fn refine_tool_call(tc: &ToolCall, base: ToolFamily) -> ToolFamily {
+    if matches!(base, ToolFamily::Unknown)
+        && tc.tool_call_id.0.as_ref().starts_with("subagent:")
+        && tc.title.starts_with("Subagent: ")
+    {
+        return ToolFamily::Subagent;
+    }
+    let is_mcp = tc
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.get("is_mcp_tool_call"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if is_mcp {
+        ToolFamily::Mcp
+    } else {
+        refine(&tc.title, base)
+    }
+}
+
+fn is_v1_7_mcp_title(title: &str) -> bool {
+    let mut parts = title.split('.');
+    matches!(parts.next(), Some("mcp"))
+        && parts.next().is_some_and(|part| !part.is_empty())
+        && parts.next().is_some_and(|part| !part.is_empty())
 }
 
 /// Try to parse Codex's tool input shapes.
@@ -138,6 +166,31 @@ pub fn mode_badge(mode_id: &str) -> Option<ModeBadge> {
     }
 }
 
+/// Map Codex ACP v1.7 semantic mode metadata to a badge. Unknown or absent
+/// metadata falls back to the legacy stable-ID mapping.
+pub fn mode_badge_with_metadata(mode: &SessionMode) -> Option<ModeBadge> {
+    let semantic_kind = mode
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.get("kind"))
+        .and_then(Value::as_str);
+    match semantic_kind {
+        Some("standard") => Some(ModeBadge {
+            short: "ASK",
+            color: BadgeColor::Neutral,
+        }),
+        Some("auto_review") => Some(ModeBadge {
+            short: "AUTO",
+            color: BadgeColor::Amber,
+        }),
+        Some("full_access") => Some(ModeBadge {
+            short: "FULL",
+            color: BadgeColor::Red,
+        }),
+        _ => mode_badge(mode.id.0.as_ref()),
+    }
+}
+
 /// Codex `_meta` extractor stub.
 ///
 /// Live ACP re-probe (2026-07-13, codex-acp 1.1.2) and in-tree tool-call
@@ -150,4 +203,56 @@ pub fn mode_badge(mode_id: &str) -> Option<ModeBadge> {
 /// `.spur/logs/reprobe-20260713/schema-inventory-20260713T023432.md`.
 pub fn extract_tool_meta(_tc: &ToolCall) -> super::SpurToolMeta {
     super::SpurToolMeta::default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn mode(id: &str, name: &str, kind: &str) -> SessionMode {
+        let mut meta = serde_json::Map::new();
+        meta.insert("kind".to_string(), Value::String(kind.to_string()));
+        SessionMode::new(id.to_owned(), name.to_owned()).meta(meta)
+    }
+
+    #[test]
+    fn v1_7_mode_kind_drives_semantic_badges() {
+        let cases = [
+            (mode("read-only", "Ask for approval", "standard"), "ASK"),
+            (mode("agent", "Agent", "auto_review"), "AUTO"),
+            (
+                mode("agent-full-access", "Agent (full access)", "full_access"),
+                "FULL",
+            ),
+        ];
+
+        for (mode, expected) in cases {
+            assert_eq!(
+                mode_badge_with_metadata(&mode).map(|badge| badge.short),
+                Some(expected),
+                "mode={mode:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn v1_7_native_subagent_has_a_semantic_tool_family() {
+        let call = ToolCall::new("subagent:child", "Subagent: researcher")
+            .kind(agent_client_protocol::schema::v1::ToolKind::Other);
+
+        assert_eq!(
+            refine_tool_call(&call, ToolFamily::Unknown),
+            ToolFamily::Subagent
+        );
+    }
+
+    #[test]
+    fn subagent_identity_does_not_override_a_typed_tool_family() {
+        let call = ToolCall::new("subagent:child", "Subagent: researcher")
+            .kind(agent_client_protocol::schema::v1::ToolKind::Execute);
+
+        assert_eq!(
+            refine_tool_call(&call, ToolFamily::Execute),
+            ToolFamily::Execute
+        );
+    }
 }

@@ -11,7 +11,7 @@ pub use types::{ActStatus, TraceEntry, TraceKind};
 pub(crate) use types::{Segment, VirtualRow};
 
 use spur_acp::{
-    adapter::{mode_badge, ToolInputDisplay},
+    adapter::{mode_badge_with_metadata, ToolInputDisplay},
     AgentKind, ToolCallId,
 };
 
@@ -84,6 +84,8 @@ pub struct ReactTrace {
     pub(super) agent_kind: AgentKind,
     /// Current session mode, if known (e.g. "plan", "acceptEdits").
     pub(super) current_mode: Option<String>,
+    /// Full advertised mode records used for semantic v1.7 badge rendering.
+    pub(super) mode_catalog: Vec<spur_acp::SessionMode>,
     /// When true (default), Observe entries show a truncated preview.
     pub(super) observe_collapsed: bool,
     /// When true, `render_compact` will be the authoritative entry
@@ -255,6 +257,7 @@ impl ReactTrace {
             mermaid_enabled: true,
             agent_kind: AgentKind::Generic,
             current_mode: None,
+            mode_catalog: Vec::new(),
             observe_collapsed: true,
             compact: false,
             generation: 0,
@@ -309,6 +312,11 @@ impl ReactTrace {
     /// Store the current session mode id (e.g. "plan", "acceptEdits").
     pub fn set_mode(&mut self, mode: Option<String>) {
         self.current_mode = mode;
+        self.invalidate_cache();
+    }
+
+    pub fn set_mode_catalog(&mut self, modes: Vec<spur_acp::SessionMode>) {
+        self.mode_catalog = modes;
         self.invalidate_cache();
     }
 
@@ -425,7 +433,11 @@ impl ReactTrace {
             ),
         };
         let mut title = if let Some(mode_id) = &self.current_mode {
-            if let Some(badge) = mode_badge(mode_id, self.agent_kind) {
+            let mode = self
+                .mode_catalog
+                .iter()
+                .find(|mode| mode.id.0.as_ref() == mode_id);
+            if let Some(badge) = mode_badge_with_metadata(mode_id, self.agent_kind, mode) {
                 format!("{}· {} ", base_title, badge.short)
             } else {
                 base_title.to_string()
@@ -1348,11 +1360,11 @@ impl ReactTrace {
                     if *pending {
                         if *countdown > 0 {
                             lines.push(format!(
-                                "   [y]es [n]o [a]lways  (auto-deny in {}s)",
+                                "   Select an advertised option (auto-cancel in {}s)",
                                 countdown
                             ));
                         } else {
-                            lines.push("   [y]es [n]o [a]lways".to_string());
+                            lines.push("   Select an advertised option".to_string());
                         }
                     }
                     for text_line in entry.text.lines() {

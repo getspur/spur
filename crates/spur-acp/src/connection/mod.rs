@@ -54,6 +54,9 @@ use crate::types::AgentHealth;
 pub struct AcpSessionModeSnapshot {
     pub current_mode_id: Option<SessionModeId>,
     pub available_modes: Vec<SessionModeId>,
+    /// Full ACP presentation records, including names and additive `_meta`.
+    /// Empty for transports that only expose legacy mode IDs.
+    pub mode_details: Vec<agent_client_protocol::schema::v1::SessionMode>,
 }
 
 impl AcpSessionModeSnapshot {
@@ -64,6 +67,7 @@ impl AcpSessionModeSnapshot {
         Self {
             current_mode_id,
             available_modes,
+            mode_details: Vec::new(),
         }
     }
 
@@ -75,6 +79,7 @@ impl AcpSessionModeSnapshot {
                 .iter()
                 .map(|mode| mode.id.clone())
                 .collect(),
+            mode_details: modes.available_modes.clone(),
         }
     }
 }

@@ -273,6 +273,7 @@ fn extract_text(chunk: &ContentChunk) -> Option<&str> {
 fn extract_tool_call_text(content: &[spur_acp::ToolCallContent]) -> Option<String> {
     use spur_acp::ToolCallContent;
     let mut out = String::new();
+    let mut has_diff = false;
     for c in content {
         match c {
             ToolCallContent::Content(cb) => match &cb.content {
@@ -285,16 +286,33 @@ fn extract_tool_call_text(content: &[spur_acp::ToolCallContent]) -> Option<Strin
                 }
                 _ => {}
             },
-            ToolCallContent::Diff(diff) => match protocol_diff_to_input(diff) {
-                adapter::ToolInputDisplay::Diff { diff, .. } => out.push_str(&diff),
-                adapter::ToolInputDisplay::Path(path) => out.push_str(&path),
-                _ => {}
-            },
+            ToolCallContent::Diff(_) => has_diff = true,
             ToolCallContent::Terminal(term) => {
                 out.push_str(&format!("[terminal: {}]", term.terminal_id));
             }
             _ => {
                 // ToolCallContent is #[non_exhaustive]; ignore unknown variants.
+            }
+        }
+    }
+    if has_diff {
+        if let Some(adapter::ToolInputDisplay::FileChanges(changes)) = protocol_diff_input(content)
+        {
+            let mut omitted_lines = 0usize;
+            for change in changes {
+                if !change.diff.is_empty() {
+                    if !out.is_empty() && !out.ends_with('\n') {
+                        out.push('\n');
+                    }
+                    out.push_str(&change.diff);
+                }
+                omitted_lines = omitted_lines.saturating_add(change.omitted_lines);
+            }
+            if omitted_lines > 0 {
+                if !out.is_empty() && !out.ends_with('\n') {
+                    out.push('\n');
+                }
+                out.push_str(&format!("[… {omitted_lines} diff lines omitted]"));
             }
         }
     }
@@ -306,23 +324,64 @@ fn extract_tool_call_text(content: &[spur_acp::ToolCallContent]) -> Option<Strin
 }
 
 fn protocol_diff_input(content: &[spur_acp::ToolCallContent]) -> Option<adapter::ToolInputDisplay> {
-    content.iter().find_map(|item| match item {
-        spur_acp::ToolCallContent::Diff(diff) => Some(protocol_diff_to_input(diff)),
-        _ => None,
-    })
+    let mut changes = content
+        .iter()
+        .filter_map(|item| match item {
+            spur_acp::ToolCallContent::Diff(diff) => Some(protocol_diff_to_display(diff)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    bound_file_change_previews(
+        &mut changes,
+        crate::components::trace_format::DIFF_PREVIEW_LINES,
+    );
+    (!changes.is_empty()).then_some(adapter::ToolInputDisplay::FileChanges(changes))
 }
 
-fn protocol_diff_to_input(diff: &spur_acp::Diff) -> adapter::ToolInputDisplay {
+fn bound_file_change_previews(changes: &mut [adapter::FileChangeDisplay], max_lines: usize) {
+    let mut remaining = max_lines;
+    for change in changes {
+        let total = change.diff.lines().count();
+        if total <= remaining {
+            remaining -= total;
+            continue;
+        }
+        let shown = remaining;
+        change.diff = change
+            .diff
+            .lines()
+            .take(shown)
+            .collect::<Vec<_>>()
+            .join("\n");
+        change.omitted_lines = change.omitted_lines.saturating_add(total - shown);
+        remaining = 0;
+    }
+}
+
+fn protocol_diff_to_display(diff: &spur_acp::Diff) -> adapter::FileChangeDisplay {
     let path = diff.path.display().to_string();
-    let Some(old_text) = diff.old_text.as_deref() else {
-        // With only path + full contents, a Write is indistinguishable from a
-        // create. Avoid painting the whole file as a synthetic all-added diff.
-        return adapter::ToolInputDisplay::Path(path);
-    };
-    let unified = adapter::unified_edit_diff(&path, old_text, &diff.new_text, 3);
-    adapter::ToolInputDisplay::Diff {
+    let kind = diff
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.get("kind"))
+        .and_then(serde_json::Value::as_str)
+        .and_then(|kind| match kind {
+            "add" => Some(adapter::FileChangeKind::Added),
+            "update" => Some(adapter::FileChangeKind::Updated),
+            "delete" => Some(adapter::FileChangeKind::Deleted),
+            _ => None,
+        })
+        .unwrap_or_else(|| match diff.old_text.as_deref() {
+            None => adapter::FileChangeKind::Added,
+            Some(_) if diff.new_text.is_empty() => adapter::FileChangeKind::Deleted,
+            Some(_) => adapter::FileChangeKind::Updated,
+        });
+    let old_text = diff.old_text.as_deref().unwrap_or_default();
+    adapter::FileChangeDisplay {
+        kind,
+        diff: adapter::unified_edit_diff(&path, old_text, &diff.new_text, 3),
         path,
-        diff: unified,
+        omitted_lines: 0,
     }
 }
 
@@ -476,6 +535,18 @@ mod tests {
         ToolCallContent::Diff(diff)
     }
 
+    fn protocol_diff_kind(path: &str, old: Option<&str>, new: &str, kind: &str) -> ToolCallContent {
+        let ToolCallContent::Diff(diff) = protocol_diff(path, old, new) else {
+            unreachable!("protocol_diff always returns Diff content");
+        };
+        let mut meta = serde_json::Map::new();
+        meta.insert(
+            "kind".to_string(),
+            serde_json::Value::String(kind.to_string()),
+        );
+        ToolCallContent::Diff(diff.meta(meta))
+    }
+
     fn ctx_for<'a>(
         tool_depth: &'a mut HashMap<String, u8>,
         agent_kind: AgentKind,
@@ -560,14 +631,150 @@ mod tests {
         let TraceKind::Act { input, .. } = &entries[0].kind else {
             panic!("expected Act entry");
         };
-        let adapter::ToolInputDisplay::Diff { path, diff } = input else {
+        let adapter::ToolInputDisplay::FileChanges(changes) = input else {
             panic!("protocol Diff must replace weak path input, got {input:?}");
         };
-        assert_eq!(path, "src/lib.rs");
-        assert_eq!(diff, &adapter::unified_edit_diff("src/lib.rs", old, new, 3));
-        assert_eq!(&entries[0].text, diff);
-        assert!(!diff.contains(" one\n"));
-        assert!(!diff.contains(" eleven\n"));
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].path, "src/lib.rs");
+        assert_eq!(changes[0].kind, adapter::FileChangeKind::Updated);
+        assert_eq!(
+            changes[0].diff,
+            adapter::unified_edit_diff("src/lib.rs", old, new, 3)
+        );
+        assert_eq!(&entries[0].text, &changes[0].diff);
+        assert!(!changes[0].diff.contains(" one\n"));
+        assert!(!changes[0].diff.contains(" eleven\n"));
+    }
+
+    #[test]
+    fn codex_native_subagent_reaches_semantic_trace_presentation() {
+        let call = ToolCall::new("subagent:child", "Subagent: researcher")
+            .kind(ToolKind::Other)
+            .raw_input(serde_json::json!({"task": "inspect Cargo.toml"}));
+        let mut trace = ReactTrace::new();
+        let mut tool_depth = HashMap::new();
+        let mut ctx = ctx_for(&mut tool_depth, AgentKind::CodexAcp);
+
+        dispatch_session_update(&mut trace, &SessionUpdate::ToolCall(call), &mut ctx);
+
+        let entries = trace.entries_for_test();
+        let TraceKind::Act { family, .. } = &entries[0].kind else {
+            panic!("expected Act entry");
+        };
+        assert_eq!(*family, adapter::ToolFamily::Subagent);
+        assert_eq!(
+            crate::components::trace_format::family_glyph(crate::theme::fallback_theme(), *family)
+                .0,
+            "→ subagent"
+        );
+    }
+
+    #[test]
+    fn tool_call_preserves_every_typed_file_change_in_wire_order() {
+        let call = ToolCall::new("edit-many", "Edit")
+            .kind(ToolKind::Edit)
+            .content(vec![
+                protocol_diff_kind("src/new.rs", None, "fn new_file() {}\n", "add"),
+                protocol_diff_kind(
+                    "src/lib.rs",
+                    Some("fn old() {}\n"),
+                    "fn updated() {}\n",
+                    "update",
+                ),
+                protocol_diff_kind("src/old.rs", Some("fn old() {}\n"), "", "delete"),
+            ])
+            .raw_input(serde_json::json!({"path": "wrong/raw-input.rs"}));
+        let mut trace = ReactTrace::new();
+        let mut tool_depth = HashMap::new();
+        let mut ctx = ctx(&mut tool_depth);
+
+        dispatch_session_update(&mut trace, &SessionUpdate::ToolCall(call), &mut ctx);
+
+        let entries = trace.entries_for_test();
+        let TraceKind::Act { input, .. } = &entries[0].kind else {
+            panic!("expected Act entry");
+        };
+        let rendered = crate::components::trace_format::input_display_lines(
+            crate::theme::fallback_theme(),
+            input,
+        )
+        .iter()
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>();
+
+        let headers = rendered
+            .iter()
+            .filter(|line| line.contains(" · src/"))
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(
+            headers,
+            [
+                "   added · src/new.rs",
+                "   updated · src/lib.rs",
+                "   deleted · src/old.rs",
+            ],
+            "every typed Diff must survive normalization in wire order: {rendered:?}"
+        );
+        assert!(rendered.iter().any(|line| line.contains("+fn new_file")));
+        assert!(rendered.iter().any(|line| line.contains("-fn old")));
+        assert!(
+            !rendered.iter().any(|line| line.contains("wrong/raw-input")),
+            "typed ACP content must continue to outrank rawInput"
+        );
+    }
+
+    #[test]
+    fn multi_file_diff_preview_has_one_aggregate_budget() {
+        let content = (0..20)
+            .map(|index| {
+                protocol_diff_kind(
+                    &format!("src/file-{index}.rs"),
+                    None,
+                    &"line\n".repeat(20),
+                    "add",
+                )
+            })
+            .collect::<Vec<_>>();
+        let call = ToolCall::new("edit-many", "Edit")
+            .kind(ToolKind::Edit)
+            .content(content);
+        let mut trace = ReactTrace::new();
+        let mut tool_depth = HashMap::new();
+        let mut ctx = ctx(&mut tool_depth);
+
+        dispatch_session_update(&mut trace, &SessionUpdate::ToolCall(call), &mut ctx);
+
+        let entries = trace.entries_for_test();
+        let TraceKind::Act { input, .. } = &entries[0].kind else {
+            panic!("expected Act entry");
+        };
+        let adapter::ToolInputDisplay::FileChanges(changes) = input else {
+            panic!("expected bounded FileChanges input");
+        };
+        assert_eq!(changes.len(), 20, "every file identity must be retained");
+        assert!(
+            changes
+                .iter()
+                .map(|change| change.diff.lines().count())
+                .sum::<usize>()
+                <= 16,
+            "stored diff preview must use one aggregate line budget"
+        );
+        assert!(changes.iter().any(|change| change.omitted_lines > 0));
+
+        let rendered = crate::components::trace_format::input_display_lines(
+            crate::theme::fallback_theme(),
+            input,
+        );
+        assert!(rendered.len() <= 16, "rendered={rendered:?}");
+        assert!(entries[0].text.lines().count() <= 17);
+        assert!(entries[0].text.contains("diff lines omitted"));
     }
 
     #[test]
@@ -597,14 +804,14 @@ mod tests {
         assert!(matches!(
             &entries[0].kind,
             TraceKind::Act {
-                input: adapter::ToolInputDisplay::Diff { diff, .. },
+                input: adapter::ToolInputDisplay::FileChanges(changes),
                 ..
-            } if diff.contains("-beta\n+BETA\n")
+            } if changes.len() == 1 && changes[0].diff.contains("-beta\n+BETA\n")
         ));
     }
 
     #[test]
-    fn write_without_old_text_stays_a_path_instead_of_a_fake_full_file_diff() {
+    fn write_without_old_text_is_presented_as_an_added_file() {
         let call = ToolCall::new("write-1", "Write")
             .kind(ToolKind::Edit)
             .content(vec![protocol_diff(
@@ -626,12 +833,14 @@ mod tests {
         assert!(matches!(
             &entries[0].kind,
             TraceKind::Act {
-                input: adapter::ToolInputDisplay::Path(path),
+                input: adapter::ToolInputDisplay::FileChanges(changes),
                 ..
-            } if path == "src/new.rs"
+            } if changes.len() == 1
+                && changes[0].path == "src/new.rs"
+                && changes[0].kind == adapter::FileChangeKind::Added
+                && changes[0].diff.contains("+fn one() {}")
         ));
-        assert_eq!(entries[0].text, "src/new.rs");
-        assert!(!entries[0].text.contains("+fn one"));
+        assert!(entries[0].text.contains("+fn one() {}"));
     }
 
     #[test]

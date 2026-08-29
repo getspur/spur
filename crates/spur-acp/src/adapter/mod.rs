@@ -33,6 +33,8 @@ pub enum ToolFamily {
     // TUI-specific refinements produced by per-kind `refine(title, base)`:
     /// e.g. Claude TodoWrite, Codex plan_update
     Plan,
+    /// Codex ACP native child-session lifecycle normalized as a tool call.
+    Subagent,
     /// title starts with "mcp__" (MCP tool passthrough)
     Mcp,
     /// maps from ACP `Other` with no per-kind refinement
@@ -65,6 +67,10 @@ pub enum ToolInputDisplay {
         path: String,
         diff: String,
     },
+    /// Ordered file changes supplied as typed ACP `ToolCallContent::Diff`
+    /// values. This remains distinct from adapter-derived [`Self::Diff`] so
+    /// clients can preserve every wire item and its presentation metadata.
+    FileChanges(Vec<FileChangeDisplay>),
     Command {
         cmd: String,
         cwd: Option<String>,
@@ -83,6 +89,35 @@ pub enum ToolInputDisplay {
     Text(String),
     /// Nothing meaningful to show — callers fall back to `TraceEntry.text`.
     Empty,
+}
+
+/// Presentation semantics for one typed ACP file change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileChangeKind {
+    Added,
+    Updated,
+    Deleted,
+}
+
+impl FileChangeKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Added => "added",
+            Self::Updated => "updated",
+            Self::Deleted => "deleted",
+        }
+    }
+}
+
+/// One normalized file change, retained in ACP wire order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileChangeDisplay {
+    pub path: String,
+    pub kind: FileChangeKind,
+    /// Bounded unified-diff preview retained for this file.
+    pub diff: String,
+    /// Diff lines omitted from `diff` by the aggregate tool-call budget.
+    pub omitted_lines: usize,
 }
 
 /// Max content lines kept for [`ToolInputDisplay::Json`] after pretty-print.
@@ -140,7 +175,12 @@ pub enum BadgeColor {
 /// ToolFamily` (via `From`), then per-kind `refine(title, base)` which may
 /// upgrade `Unknown` → `Plan`/`Mcp`. Never panics.
 pub fn classify_tool(tc: &ToolCall, kind: AgentKind) -> ToolFamily {
-    classify_tool_parts(&tc.title, tc.kind, kind)
+    let base = ToolFamily::from(tc.kind);
+    if kind == AgentKind::CodexAcp {
+        codex::refine_tool_call(tc, base)
+    } else {
+        classify_tool_parts(&tc.title, tc.kind, kind)
+    }
 }
 
 pub fn classify_tool_parts(title: &str, tool_kind: ToolKind, kind: AgentKind) -> ToolFamily {
@@ -240,6 +280,20 @@ pub fn mode_badge(mode_id: &str, kind: AgentKind) -> Option<ModeBadge> {
         AgentKind::Kiro => kiro::mode_badge(mode_id),
         AgentKind::OpenCode | AgentKind::Grok | AgentKind::Generic => None,
     }
+}
+
+/// Translate a mode with its full ACP presentation record when available.
+pub fn mode_badge_with_metadata(
+    mode_id: &str,
+    kind: AgentKind,
+    mode: Option<&agent_client_protocol::schema::v1::SessionMode>,
+) -> Option<ModeBadge> {
+    if kind == AgentKind::CodexAcp {
+        if let Some(mode) = mode {
+            return codex::mode_badge_with_metadata(mode);
+        }
+    }
+    mode_badge(mode_id, kind)
 }
 
 /// Normalized view of vendor-specific `_meta` extensions on a ToolCall.

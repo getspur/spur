@@ -64,6 +64,8 @@ impl SessionDetailView {
             agent_cfg,
             react_trace: brain_chat_trace(agent_kind),
             input_bar: InputBar::new(),
+            pending_permission_option_count: 0,
+            pending_permission_number: String::new(),
             cost: 0.0,
             agent_reported_cost: None,
             started_at: Instant::now(),
@@ -157,6 +159,8 @@ impl SessionDetailView {
             )),
             react_trace: brain_chat_trace(spur_acp::AgentKind::Generic),
             input_bar: crate::components::input_bar::InputBar::new(),
+            pending_permission_option_count: 0,
+            pending_permission_number: String::new(),
             cost: 0.0,
             agent_reported_cost: None,
             started_at: std::time::Instant::now(),
@@ -262,6 +266,8 @@ impl SessionDetailView {
             agent_cfg,
             react_trace: brain_chat_trace(spur_acp::AgentKind::Generic),
             input_bar: InputBar::new(),
+            pending_permission_option_count: 0,
+            pending_permission_number: String::new(),
             cost: 0.0,
             agent_reported_cost: None,
             started_at: std::time::Instant::now(),
@@ -662,6 +668,12 @@ impl SessionDetailView {
     /// sessions resumed before M9 wires `LoadSessionResponse` into
     /// `SpurAgentCaps`. `None` is treated as permissive on read paths.
     pub fn set_spur_agent_caps(&mut self, caps: Option<std::sync::Arc<spur_acp::SpurAgentCaps>>) {
+        let modes = caps
+            .as_ref()
+            .and_then(|caps| caps.modes.as_ref())
+            .map(|modes| modes.available_modes.clone())
+            .unwrap_or_default();
+        self.react_trace.set_mode_catalog(modes);
         self.spur_agent_caps = caps;
     }
 
@@ -1005,6 +1017,8 @@ impl SessionDetailView {
 
     pub fn resolve_pending_permissions(&mut self) {
         self.react_trace.resolve_pending_permissions();
+        self.pending_permission_option_count = 0;
+        self.pending_permission_number.clear();
     }
 
     #[cfg(feature = "markdown")]
@@ -1097,13 +1111,25 @@ impl SessionDetailView {
     }
 
     pub fn push_permission(&mut self, description: &str, countdown: u8) {
+        self.push_permission_with_details(description, "", countdown, 1);
+    }
+
+    pub fn push_permission_with_details(
+        &mut self,
+        description: &str,
+        details: &str,
+        countdown: u8,
+        option_count: usize,
+    ) {
+        self.pending_permission_option_count = option_count;
+        self.pending_permission_number.clear();
         self.react_trace.push(TraceEntry {
             kind: TraceKind::Permission {
                 description: description.to_string(),
                 pending: true,
                 countdown,
             },
-            text: String::new(),
+            text: details.to_string(),
             timestamp: Self::now_stamp(),
             #[cfg(feature = "markdown")]
             markdown: None,

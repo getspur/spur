@@ -447,6 +447,135 @@ fn kiro_execute_response_renders_as_system_note() {
 }
 
 #[test]
+fn air_file_change_reports_render_bounded_completeness_notes() {
+    use spur_acp::{SessionId, SpurEvent, SpurEventBody};
+    use spur_tui::views::View;
+
+    let sid = SessionId("air-report-session".to_string());
+    let mut view = spur_tui::views::session_detail::SessionDetailView::new(
+        sid.clone(),
+        "codex".to_string(),
+        "brain".to_string(),
+        std::path::PathBuf::from("."),
+        spur_tui::test_support::default_agent_config("codex"),
+        Vec::new(),
+    );
+
+    for report in [
+        serde_json::json!({
+            "version": 1,
+            "requestId": "report-17",
+            "status": "reported",
+            "paths": ["src/lib.rs", "src/main.rs"],
+            "declaredComplete": true,
+            "truncated": false
+        }),
+        serde_json::json!({
+            "version": 1,
+            "requestId": "report-18",
+            "status": "unavailable"
+        }),
+        serde_json::json!({
+            "version": 1,
+            "requestId": "report-19",
+            "status": "reported",
+            "paths": ["src/large.rs"],
+            "declaredComplete": true,
+            "truncated": true
+        }),
+        serde_json::json!({
+            "version": 1,
+            "requestId": "report-20",
+            "status": "reported",
+            "paths": [],
+            "declaredComplete": false,
+            "truncated": false
+        }),
+    ] {
+        view.handle_spur_event(
+            &SpurEvent::now(SpurEventBody::AgentExtNotification {
+                session: sid.clone(),
+                method: "_jetbrains.air/agent_file_change_report".to_string(),
+                params: serde_json::json!({"sessionId": sid.0, "report": report}),
+            }),
+            &test_ctx(),
+        );
+    }
+
+    let trace = view.trace_snapshot_for_test();
+    assert!(
+        trace
+            .iter()
+            .any(|line| line == "AIR file-change report: 2 paths · complete"),
+        "reported completeness note missing: {trace:?}"
+    );
+    assert!(
+        trace
+            .iter()
+            .any(|line| line == "AIR file-change report unavailable"),
+        "unavailable note missing: {trace:?}"
+    );
+    assert!(
+        trace
+            .iter()
+            .any(|line| line == "AIR file-change report: 1 path · truncated"),
+        "truncated completeness note missing: {trace:?}"
+    );
+    assert!(
+        trace
+            .iter()
+            .any(|line| line == "AIR file-change report: 0 paths · partial"),
+        "partial completeness note missing: {trace:?}"
+    );
+    assert!(
+        trace.iter().all(|line| !line.contains("src/lib.rs")),
+        "the downstream note must remain count-only and bounded: {trace:?}"
+    );
+}
+
+#[test]
+fn configured_air_response_binding_suppresses_the_default_note() {
+    use spur_acp::{ResponseBinding, ResponseRenderKind, SessionId, SpurEvent, SpurEventBody};
+    use spur_tui::views::View;
+
+    let sid = SessionId("air-response-binding".to_string());
+    let mut cfg = spur_acp::AgentConfig::with_defaults("codex");
+    cfg.commands.response.push(ResponseBinding {
+        method: "_jetbrains.air/agent_file_change_report".to_string(),
+        render: ResponseRenderKind::SystemNote,
+    });
+    let mut view = spur_tui::views::session_detail::SessionDetailView::new(
+        sid.clone(),
+        "codex".to_string(),
+        "brain".to_string(),
+        std::path::PathBuf::from("."),
+        std::sync::Arc::new(cfg),
+        Vec::new(),
+    );
+
+    view.handle_spur_event(
+        &SpurEvent::now(SpurEventBody::AgentExtNotification {
+            session: sid.clone(),
+            method: "_jetbrains.air/agent_file_change_report".to_string(),
+            params: serde_json::json!({
+                "sessionId": sid.0,
+                "report": {"version": 1, "status": "unavailable"}
+            }),
+        }),
+        &test_ctx(),
+    );
+
+    let trace = view.trace_snapshot_for_test();
+    assert_eq!(
+        trace.len(),
+        1,
+        "response binding and fallback duplicated: {trace:?}"
+    );
+    assert!(trace[0].contains("⟨codex⟩ response:"), "trace={trace:?}");
+    assert_ne!(trace[0], "AIR file-change report unavailable");
+}
+
+#[test]
 fn vendor_exec_on_cleared_view_returns_none() {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use spur_acp::{SessionId, SpurEvent, SpurEventBody};

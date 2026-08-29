@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Probe codex-acp 1.1.2: speak ACP wire protocol over stdio, capture every
+// Probe codex-acp 1.7.0: speak ACP wire protocol over stdio, capture every
 // frame the agent sends so we can confirm what v1 (model/effort) and v2
 // (review-branch input + _meta) look like in practice.
 //
@@ -17,7 +17,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { resolve as resolvePath } from "node:path";
 import { stderr, stdout, exit } from "node:process";
 
-const CODEX_ACP_PACKAGE = "@agentclientprotocol/codex-acp@1.1.2";
+const CODEX_ACP_PACKAGE = "@agentclientprotocol/codex-acp@1.7.0";
 const CODEX_VERSION_NODE_SCRIPT = String.raw`
 const fs = require("node:fs");
 const path = require("node:path");

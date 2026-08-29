@@ -66,20 +66,20 @@ class AcpSubagentProbeTests(unittest.TestCase):
 
         self.assertEqual(
             probe.agent_command(args),
-            ["npx", "--yes", "@agentclientprotocol/codex-acp@1.1.2"],
+            ["npx", "--yes", "@agentclientprotocol/codex-acp@1.7.0"],
         )
 
-    def test_codex_cli_default_uses_agentclientprotocol_adapter_1_1_2(self):
+    def test_codex_cli_default_uses_agentclientprotocol_adapter_1_7_0(self):
         self.assertEqual(
             probe.DEFAULT_CODEX_PACKAGE,
-            "@agentclientprotocol/codex-acp@1.1.2",
+            "@agentclientprotocol/codex-acp@1.7.0",
         )
 
-    def test_codex_mjs_probe_default_uses_agentclientprotocol_adapter_1_1_2(self):
+    def test_codex_mjs_probe_default_uses_agentclientprotocol_adapter_1_7_0(self):
         source = Path(__file__).with_name("probe-codex-acp.mjs").read_text()
 
         self.assertIn(
-            'const CODEX_ACP_PACKAGE = "@agentclientprotocol/codex-acp@1.1.2";',
+            'const CODEX_ACP_PACKAGE = "@agentclientprotocol/codex-acp@1.7.0";',
             source,
         )
 

@@ -14,6 +14,8 @@ const ANALYST_EXTENSIONS: &[(&str, bool)] = &[
     ("onager", true),
     ("fts", false),
     ("icu", false),
+    ("parquet", false),
+    ("json", false),
 ];
 
 // duckpgq is distributed via DuckDB's community repo (not the core repo) and is
@@ -191,6 +193,8 @@ mod tests {
         assert!(!sql.contains("LOAD lance;"));
         assert!(sql.contains("LOAD fts;"));
         assert!(sql.contains("LOAD icu;"));
+        assert!(sql.contains("LOAD parquet;"));
+        assert!(sql.contains("LOAD json;"));
     }
 
     #[test]

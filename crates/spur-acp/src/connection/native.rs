@@ -35,7 +35,7 @@
 //! | `shutdown()` | Close stdin (drop the SDK connection), SIGTERM the process group, then SIGKILL if needed |
 //! | `health()` | Return cached `AgentHealth` |
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -52,22 +52,27 @@ use tokio::sync::{mpsc, oneshot};
 use agent_client_protocol::schema::v1::{
     AgentNotification, AuthenticateRequest, AuthenticateResponse, CancelNotification,
     ClientCapabilities, ClientRequest, CloseSessionRequest, CloseSessionResponse, ContentBlock,
-    ContentChunk, CreateTerminalRequest, CreateTerminalResponse, DeleteSessionRequest,
-    DeleteSessionResponse, ExtRequest, ExtResponse, FileSystemCapabilities, InitializeRequest,
-    InitializeResponse, KillTerminalRequest, KillTerminalResponse, ListSessionsRequest,
-    ListSessionsResponse, LoadSessionRequest, LoadSessionResponse, McpServer, NewSessionRequest,
-    NewSessionResponse, PermissionOptionId, PermissionOptionKind, PromptRequest, PromptResponse,
-    ReadTextFileRequest, ReadTextFileResponse, ReleaseTerminalRequest, ReleaseTerminalResponse,
-    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
-    ResumeSessionRequest, ResumeSessionResponse, SelectedPermissionOutcome, SessionCapabilities,
-    SessionConfigId, SessionConfigOption, SessionConfigValueId, SessionId, SessionModeId,
-    SessionModeState, SessionNotification, SessionUpdate, SetSessionConfigOptionRequest,
+    ContentChunk, CreateElicitationRequest, CreateElicitationResponse, CreateTerminalRequest,
+    CreateTerminalResponse, DeleteSessionRequest, DeleteSessionResponse, ElicitationAcceptAction,
+    ElicitationAction, ElicitationCapabilities, ElicitationMode, ElicitationUrlCapabilities,
+    ExtRequest, ExtResponse, FileSystemCapabilities, InitializeRequest, InitializeResponse,
+    KillTerminalRequest, KillTerminalResponse, ListSessionsRequest, ListSessionsResponse,
+    LoadSessionRequest, LoadSessionResponse, McpServer, NewSessionRequest, NewSessionResponse,
+    PromptRequest, PromptResponse, ReadTextFileRequest, ReadTextFileResponse,
+    ReleaseTerminalRequest, ReleaseTerminalResponse, RequestPermissionOutcome,
+    RequestPermissionRequest, RequestPermissionResponse, ResumeSessionRequest,
+    ResumeSessionResponse, SelectedPermissionOutcome, SessionCapabilities, SessionConfigId,
+    SessionConfigOption, SessionConfigValueId, SessionId, SessionModeId, SessionModeState,
+    SessionNotification, SessionUpdate, SetSessionConfigOptionRequest,
     SetSessionConfigOptionResponse, SetSessionModeRequest, SetSessionModeResponse,
-    TerminalExitStatus, TerminalId, TerminalOutputRequest, TerminalOutputResponse, Usage,
-    UsageUpdate, WaitForTerminalExitRequest, WaitForTerminalExitResponse, WriteTextFileRequest,
+    TerminalExitStatus, TerminalId, TerminalOutputRequest, TerminalOutputResponse, ToolCall,
+    ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind, Usage, UsageUpdate,
+    WaitForTerminalExitRequest, WaitForTerminalExitResponse, WriteTextFileRequest,
     WriteTextFileResponse,
 };
-use agent_client_protocol::{Agent, ByteStreams, Client, ConnectionTo, Handled, UntypedMessage};
+use agent_client_protocol::{
+    Agent, ByteStreams, Client, ConnectionTo, Handled, JsonRpcMessage, UntypedMessage,
+};
 
 use crate::config::LogConfig;
 use crate::connection::child_stderr_bridge::ChildStderrBridge;
@@ -81,6 +86,9 @@ use crate::types::{AgentHealth, AgentKind};
 
 const NATIVE_SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
 const NATIVE_SHUTDOWN_POLL: std::time::Duration = std::time::Duration::from_millis(10);
+const SESSION_NOTIFICATION_CAPACITY: usize = 4096;
+const PENDING_NEW_SESSION_MAX_NOTIFICATIONS: usize = SESSION_NOTIFICATION_CAPACITY;
+const PENDING_NEW_SESSION_MAX_BYTES: usize = 8 * 1024 * 1024;
 
 type TelemetryOutcome = spur_telemetry::tier1_events::Outcome;
 
@@ -135,12 +143,22 @@ fn emit_acp_request_result<T, E: std::fmt::Display>(started_at: Instant, result:
 pub fn spur_client_capabilities() -> ClientCapabilities {
     let mut meta = serde_json::Map::new();
     meta.insert("terminal_output".to_string(), serde_json::Value::Bool(true));
+    meta.insert(
+        "jetbrains".to_string(),
+        serde_json::json!({
+            "air": {
+                "version": 1,
+                "capabilities": ["nativeSubagentSessions", "agentFileChangeReport"]
+            }
+        }),
+    );
 
     ClientCapabilities::new()
         .fs(FileSystemCapabilities::new()
             .read_text_file(true)
             .write_text_file(true))
         .terminal(true)
+        .elicitation(ElicitationCapabilities::new().url(ElicitationUrlCapabilities::new()))
         .meta(meta)
 }
 
@@ -281,6 +299,8 @@ pub struct NativeAcpConnection {
     /// `load_session`. Task 4 rewires `session_notification` onto this;
     /// today it's only plumbed.
     session_notif_tx: tokio::sync::broadcast::Sender<SessionNotification>,
+    /// ACP session IDs whose `session/close` request completed successfully.
+    closed_sessions: Arc<Mutex<HashSet<String>>>,
     /// Last ACP-visible session mode state keyed by ACP session id. Populated
     /// from `NewSessionResponse` / `LoadSessionResponse` and
     /// `SessionUpdate::CurrentModeUpdate` so policy code can gate
@@ -610,6 +630,516 @@ fn cache_session_notification_mode_update(
     }
 }
 
+fn should_forward_session_notification(
+    closed_sessions: &Arc<Mutex<HashSet<String>>>,
+    notification: &SessionNotification,
+) -> bool {
+    closed_sessions
+        .lock()
+        .is_ok_and(|closed| !closed.contains(notification.session_id.0.as_ref()))
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SessionOpenRollback {
+    was_root: bool,
+    was_closed: bool,
+}
+
+fn begin_session_open(
+    root_sessions: &Arc<Mutex<HashSet<String>>>,
+    closed_sessions: &Arc<Mutex<HashSet<String>>>,
+    session_id: &str,
+) -> SessionOpenRollback {
+    let was_root = root_sessions
+        .lock()
+        .map(|mut roots| !roots.insert(session_id.to_owned()))
+        .unwrap_or(false);
+    let was_closed = closed_sessions
+        .lock()
+        .map(|mut closed| closed.remove(session_id))
+        .unwrap_or(false);
+    SessionOpenRollback {
+        was_root,
+        was_closed,
+    }
+}
+
+fn rollback_session_open(
+    root_sessions: &Arc<Mutex<HashSet<String>>>,
+    closed_sessions: &Arc<Mutex<HashSet<String>>>,
+    session_id: &str,
+    rollback: SessionOpenRollback,
+) {
+    if !rollback.was_root {
+        if let Ok(mut roots) = root_sessions.lock() {
+            roots.remove(session_id);
+        }
+    }
+    if rollback.was_closed {
+        if let Ok(mut closed) = closed_sessions.lock() {
+            closed.insert(session_id.to_owned());
+        }
+    }
+}
+
+fn is_known_session_id(
+    session_id: &str,
+    root_sessions: &Arc<Mutex<HashSet<String>>>,
+    active_subagents: &Arc<Mutex<HashMap<String, String>>>,
+) -> bool {
+    root_sessions
+        .lock()
+        .is_ok_and(|roots| roots.contains(session_id))
+        || active_subagents
+            .lock()
+            .is_ok_and(|active| active.contains_key(session_id))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SessionNotificationRoute {
+    Forward,
+    BufferUntilNewSession,
+    Drop,
+}
+
+fn route_session_notification(
+    notification: &SessionNotification,
+    root_sessions: &Arc<Mutex<HashSet<String>>>,
+    active_subagents: &Arc<Mutex<HashMap<String, String>>>,
+    new_session_in_flight: bool,
+) -> SessionNotificationRoute {
+    if is_known_session_id(
+        notification.session_id.0.as_ref(),
+        root_sessions,
+        active_subagents,
+    ) {
+        SessionNotificationRoute::Forward
+    } else if new_session_in_flight {
+        SessionNotificationRoute::BufferUntilNewSession
+    } else {
+        SessionNotificationRoute::Drop
+    }
+}
+
+#[derive(Default)]
+struct PendingNewSessionUpdates {
+    notifications: Vec<SessionNotification>,
+    bytes: usize,
+    overflowed: bool,
+}
+
+type PendingNewSessionUpdateBuffer = Arc<Mutex<PendingNewSessionUpdates>>;
+
+fn buffer_new_session_update(
+    pending: &PendingNewSessionUpdateBuffer,
+    notification: SessionNotification,
+    encoded_bytes: usize,
+) -> bool {
+    let Ok(mut pending) = pending.lock() else {
+        return false;
+    };
+    if pending.overflowed
+        || pending.notifications.len() >= PENDING_NEW_SESSION_MAX_NOTIFICATIONS
+        || pending
+            .bytes
+            .checked_add(encoded_bytes)
+            .is_none_or(|bytes| bytes > PENDING_NEW_SESSION_MAX_BYTES)
+    {
+        pending.notifications.clear();
+        pending.bytes = 0;
+        pending.overflowed = true;
+        return false;
+    }
+    pending.notifications.push(notification);
+    pending.bytes += encoded_bytes;
+    true
+}
+
+fn take_matching_new_session_updates(
+    pending: &PendingNewSessionUpdateBuffer,
+    session_id: &str,
+) -> Vec<SessionNotification> {
+    let Ok(mut pending) = pending.lock() else {
+        return Vec::new();
+    };
+    if pending.overflowed {
+        *pending = PendingNewSessionUpdates::default();
+        return Vec::new();
+    }
+    let matching = pending
+        .notifications
+        .drain(..)
+        .filter(|notification| notification.session_id.0.as_ref() == session_id)
+        .collect();
+    pending.bytes = 0;
+    matching
+}
+
+fn clear_pending_new_session_updates(pending: &PendingNewSessionUpdateBuffer) {
+    if let Ok(mut pending) = pending.lock() {
+        *pending = PendingNewSessionUpdates::default();
+    }
+}
+
+fn remove_subagent_descendants(
+    active_subagents: &Arc<Mutex<HashMap<String, String>>>,
+    root_session_id: &str,
+) {
+    let Ok(mut active) = active_subagents.lock() else {
+        return;
+    };
+    let mut removed_parents = HashSet::from([root_session_id.to_owned()]);
+    loop {
+        let descendants = active
+            .iter()
+            .filter(|(_, parent)| removed_parents.contains(parent.as_str()))
+            .map(|(child, _)| child.clone())
+            .collect::<Vec<_>>();
+        if descendants.is_empty() {
+            break;
+        }
+        for child in descendants {
+            active.remove(&child);
+            removed_parents.insert(child);
+        }
+    }
+}
+
+/// Normalize codex-acp v1.7's temporary native-subagent update variants into
+/// ordinary ACP tool lifecycle events on the immediate parent session.
+///
+/// The Rust ACP SDK does not yet contain the draft `subagent_spawned` and
+/// `subagent_state_update` variants. Keeping the compatibility shim here lets
+/// every downstream consumer continue handling provider-neutral
+/// `SessionNotification`s. A child is removed on its first terminal update, so
+/// duplicate or out-of-order terminal notifications cannot reopen the trace.
+fn normalize_session_notification(
+    raw: serde_json::Value,
+    active_subagents: &Arc<Mutex<HashMap<String, String>>>,
+    root_sessions: &Arc<Mutex<HashSet<String>>>,
+    closed_sessions: &Arc<Mutex<HashSet<String>>>,
+) -> anyhow::Result<Option<SessionNotification>> {
+    let update_kind = raw
+        .get("update")
+        .and_then(|update| update.get("sessionUpdate"))
+        .and_then(serde_json::Value::as_str);
+
+    match update_kind {
+        Some("subagent_spawned") => {
+            let parent_session_id = required_string(&raw, &["sessionId"])?;
+            let parent_is_open = closed_sessions
+                .lock()
+                .is_ok_and(|closed| !closed.contains(parent_session_id));
+            if !parent_is_open
+                || !is_known_session_id(parent_session_id, root_sessions, active_subagents)
+            {
+                return Ok(None);
+            }
+            let update = raw
+                .get("update")
+                .ok_or_else(|| anyhow::anyhow!("subagent spawn is missing update"))?;
+            let child_session_id = required_string(update, &["subagentSessionId"])?;
+            let name = required_string(update, &["name"])?;
+            let task = required_string(update, &["task"])?;
+            let capabilities = update
+                .get("capabilities")
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!({}));
+
+            let inserted = {
+                let mut active = active_subagents
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("native subagent state lock poisoned"))?;
+                if active.contains_key(child_session_id) {
+                    false
+                } else {
+                    active.insert(child_session_id.to_owned(), parent_session_id.to_owned());
+                    true
+                }
+            };
+            if !inserted {
+                return Ok(None);
+            }
+
+            let tool_call = ToolCall::new(
+                subagent_tool_call_id(child_session_id),
+                format!("Subagent: {name}"),
+            )
+            .kind(ToolKind::Other)
+            .status(ToolCallStatus::InProgress)
+            .raw_input(serde_json::json!({
+                "task": task,
+                "sessionId": child_session_id,
+                "capabilities": capabilities,
+            }));
+            Ok(Some(SessionNotification::new(
+                parent_session_id.to_owned(),
+                SessionUpdate::ToolCall(tool_call),
+            )))
+        }
+        Some("subagent_state_update") => {
+            let reported_parent = required_string(&raw, &["sessionId"])?;
+            let update = raw
+                .get("update")
+                .ok_or_else(|| anyhow::anyhow!("subagent state is missing update"))?;
+            let child_session_id = required_string(update, &["subagentSessionId"])?;
+            let state = required_string(update, &["state"])?;
+
+            let parent_session_id = {
+                let mut active = active_subagents
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("native subagent state lock poisoned"))?;
+                match active.get(child_session_id) {
+                    Some(parent) if parent == reported_parent => {
+                        active.remove(child_session_id).expect("entry was present")
+                    }
+                    _ => return Ok(None),
+                }
+            };
+            let status = match state {
+                "completed" => ToolCallStatus::Completed,
+                "failed" | "cancelled" | "disconnected" => ToolCallStatus::Failed,
+                other => {
+                    tracing::warn!(state = other, "ignoring unknown native subagent state");
+                    return Ok(None);
+                }
+            };
+            let fields = ToolCallUpdateFields::new()
+                .status(status)
+                .raw_output(serde_json::json!({"state": state}));
+            Ok(Some(SessionNotification::new(
+                parent_session_id,
+                SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+                    subagent_tool_call_id(child_session_id),
+                    fields,
+                )),
+            )))
+        }
+        _ => {
+            let notification: SessionNotification =
+                serde_json::from_value(raw).map_err(|error| {
+                    anyhow::anyhow!("failed to deserialize session/update: {error}")
+                })?;
+            Ok(Some(notification))
+        }
+    }
+}
+
+fn required_string<'a>(value: &'a serde_json::Value, path: &[&str]) -> anyhow::Result<&'a str> {
+    let mut current = value;
+    for key in path {
+        current = current
+            .get(*key)
+            .ok_or_else(|| anyhow::anyhow!("missing required field {key}"))?;
+    }
+    current
+        .as_str()
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "required field {} must be a non-empty string",
+                path.join(".")
+            )
+        })
+}
+
+fn subagent_tool_call_id(session_id: &str) -> String {
+    format!("subagent:{session_id}")
+}
+
+/// Add a versioned AIR file-change report request without disturbing other
+/// prompt metadata. Codex returns the terminal report in a
+/// `session_info_update`; correlation is enforced by
+/// [`correlated_air_file_change_report`].
+fn attach_air_file_change_report_request(request: &mut PromptRequest, request_id: &str) {
+    let meta = request.meta.get_or_insert_default();
+    let jetbrains = meta
+        .entry("jetbrains".to_string())
+        .or_insert_with(|| serde_json::json!({}));
+    if !jetbrains.is_object() {
+        *jetbrains = serde_json::json!({});
+    }
+    let jetbrains = jetbrains.as_object_mut().expect("object assigned above");
+    let air = jetbrains
+        .entry("air".to_string())
+        .or_insert_with(|| serde_json::json!({}));
+    if !air.is_object() {
+        *air = serde_json::json!({});
+    }
+    air.as_object_mut().expect("object assigned above").insert(
+        "agentFileChangeReportRequest".to_string(),
+        serde_json::json!({"version": 1, "requestId": request_id}),
+    );
+}
+
+type PendingAirReportRequests = Arc<Mutex<HashMap<String, String>>>;
+
+fn register_pending_air_report(
+    pending: &PendingAirReportRequests,
+    session_id: &str,
+    request_id: &str,
+) {
+    if let Ok(mut pending) = pending.lock() {
+        pending.insert(session_id.to_owned(), request_id.to_owned());
+    }
+}
+
+fn clear_pending_air_report(pending: &PendingAirReportRequests, session_id: &str) {
+    if let Ok(mut pending) = pending.lock() {
+        pending.remove(session_id);
+    }
+}
+
+/// Return a valid AIR report only when its request id is currently pending.
+/// Removing the id on success provides both request/response correlation and
+/// duplicate-terminal suppression.
+fn correlated_air_file_change_report(
+    notification: &SessionNotification,
+    pending_requests: &PendingAirReportRequests,
+) -> Option<serde_json::Value> {
+    let SessionUpdate::SessionInfoUpdate(info) = &notification.update else {
+        return None;
+    };
+    let report = info
+        .meta
+        .as_ref()?
+        .get("jetbrains")?
+        .get("air")?
+        .get("agentFileChangeReport")?;
+    let report_object = report.as_object()?;
+    if report_object
+        .get("version")
+        .and_then(serde_json::Value::as_u64)
+        != Some(1)
+    {
+        return None;
+    }
+    let request_id = report_object
+        .get("requestId")
+        .and_then(serde_json::Value::as_str)?;
+    match report_object
+        .get("status")
+        .and_then(serde_json::Value::as_str)
+    {
+        Some("reported" | "unavailable") => {}
+        _ => return None,
+    }
+    let session_id = notification.session_id.0.as_ref();
+    let mut pending = pending_requests.lock().ok()?;
+    let matches = pending
+        .get(session_id)
+        .is_some_and(|pending_id| pending_id == request_id);
+    if matches {
+        pending.remove(session_id);
+        Some(report.clone())
+    } else {
+        None
+    }
+}
+
+#[derive(Clone)]
+struct SessionNotificationSink {
+    closed_sessions: Arc<Mutex<HashSet<String>>>,
+    standardizer: Arc<Mutex<crate::adapter::SessionEventStandardizer>>,
+    pending_air_report_requests: PendingAirReportRequests,
+    ext_notification_tx: mpsc::UnboundedSender<ExtNotificationPayload>,
+    session_modes: Arc<Mutex<HashMap<String, AcpSessionModeSnapshot>>>,
+    grok_session_models: Arc<Mutex<HashMap<String, String>>>,
+    session_efforts: Arc<Mutex<HashMap<String, String>>>,
+    last_prompt_usage: Arc<Mutex<Option<Usage>>>,
+    session_notif_tx: tokio::sync::broadcast::Sender<SessionNotification>,
+}
+
+impl SessionNotificationSink {
+    fn forward(&self, args: SessionNotification) {
+        if !should_forward_session_notification(&self.closed_sessions, &args) {
+            tracing::debug!(
+                session = %args.session_id,
+                "dropping ACP notification for closed session"
+            );
+            return;
+        }
+        let args = self.standardizer.lock().unwrap().standardize(args);
+        if let Some(report) =
+            correlated_air_file_change_report(&args, &self.pending_air_report_requests)
+        {
+            let _ = self.ext_notification_tx.send(ExtNotificationPayload {
+                method: "_jetbrains.air/agent_file_change_report".to_string(),
+                params: serde_json::json!({
+                    "sessionId": args.session_id.to_string(),
+                    "report": report,
+                }),
+            });
+        }
+        cache_session_notification_mode_update(&self.session_modes, &args);
+        cache_session_notification_config_options(
+            &self.grok_session_models,
+            &self.session_efforts,
+            &args,
+        );
+        // sol_55e2f7194a224bba phase B: when PromptResponse.usage is absent,
+        // accept observed token fields from UsageUpdate.meta only.
+        maybe_fill_usage_from_session_update(&self.last_prompt_usage, &args.update);
+        let variant = session_update_variant_name(&args.update);
+        let text_len = match &args.update {
+            SessionUpdate::AgentMessageChunk(c)
+            | SessionUpdate::AgentThoughtChunk(c)
+            | SessionUpdate::UserMessageChunk(c) => content_chunk_text_len(c),
+            _ => 0,
+        };
+        let session = args.session_id.to_string();
+        // The orchestrator pre-subscribes before creating/loading a session.
+        // An error therefore means the connection is tearing down.
+        let send_result = self.session_notif_tx.send(args);
+        let send_result_str = if send_result.is_ok() { "ok" } else { "err" };
+        tracing::debug!(
+            streaming_probe = true,
+            site = "A_session_notification",
+            variant,
+            text_len,
+            session = %session,
+            send_result = send_result_str,
+            "ACP session_notification (broadcast)"
+        );
+    }
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "session/new completion atomically orders all shared lifecycle caches"
+)]
+fn complete_new_session(
+    response: &NewSessionResponse,
+    root_sessions: &Arc<Mutex<HashSet<String>>>,
+    closed_sessions: &Arc<Mutex<HashSet<String>>>,
+    new_session_in_flight: &Arc<AtomicBool>,
+    pending_updates: &PendingNewSessionUpdateBuffer,
+    notification_sink: &SessionNotificationSink,
+    session_modes: &Arc<Mutex<HashMap<String, AcpSessionModeSnapshot>>>,
+    grok_session_models: &Arc<Mutex<HashMap<String, String>>>,
+    session_efforts: &Arc<Mutex<HashMap<String, String>>>,
+) {
+    let session_id = response.session_id.0.as_ref();
+    begin_session_open(root_sessions, closed_sessions, session_id);
+
+    // The response is the baseline. Notifications emitted before the response
+    // are temporally newer and must be replayed after these snapshots.
+    cache_session_modes(session_modes, &response.session_id, response.modes.as_ref());
+    if let Some(ref options) = response.config_options {
+        cache_config_options_model_effort(
+            grok_session_models,
+            session_efforts,
+            session_id,
+            options,
+        );
+    }
+
+    new_session_in_flight.store(false, Ordering::Release);
+    for notification in take_matching_new_session_updates(pending_updates, session_id) {
+        notification_sink.forward(notification);
+    }
+}
+
 fn session_capability_advertised(
     session_capabilities: &Arc<Mutex<Option<SessionCapabilities>>>,
     supports: impl FnOnce(&SessionCapabilities) -> bool,
@@ -774,7 +1304,7 @@ impl NativeAcpConnection {
         // bursty history replay from `load_session` can produce O(hundreds)
         // of notifications in rapid succession, and the floor was established
         // empirically under 20 workers × 80 evt/s load.
-        let (session_notif_tx, _) = tokio::sync::broadcast::channel(4096);
+        let (session_notif_tx, _) = tokio::sync::broadcast::channel(SESSION_NOTIFICATION_CAPACITY);
         Self {
             agent_name: agent_name.into(),
             agent_kind,
@@ -792,6 +1322,7 @@ impl NativeAcpConnection {
             agent_client_request_rx: Some(agent_client_request_rx),
             agent_client_request_tx,
             session_notif_tx,
+            closed_sessions: Arc::new(Mutex::new(HashSet::new())),
             session_modes: Arc::new(Mutex::new(HashMap::new())),
             grok_session_models: Arc::new(Mutex::new(HashMap::new())),
             session_efforts: Arc::new(Mutex::new(HashMap::new())),
@@ -967,6 +1498,7 @@ impl AgentConnection for NativeAcpConnection {
         let ext_tx = self.ext_notification_tx.clone();
         let agent_client_request_tx = self.agent_client_request_tx.clone();
         let session_notif_tx_for_thread = self.session_notif_tx.clone();
+        let closed_sessions = self.closed_sessions.clone();
         let session_modes = self.session_modes.clone();
         let grok_session_models = self.grok_session_models.clone();
         let session_efforts = self.session_efforts.clone();
@@ -990,6 +1522,7 @@ impl AgentConnection for NativeAcpConnection {
                     ext_tx,
                     agent_client_request_tx,
                     session_notif_tx_for_thread,
+                    closed_sessions,
                     session_modes,
                     grok_session_models,
                     session_efforts,
@@ -1715,6 +2248,7 @@ fn acp_thread_main(
     ext_notification_tx: mpsc::UnboundedSender<ExtNotificationPayload>,
     agent_client_request_tx: mpsc::UnboundedSender<AgentClientRequestPayload>,
     session_notif_tx: tokio::sync::broadcast::Sender<SessionNotification>,
+    closed_sessions: Arc<Mutex<HashSet<String>>>,
     session_modes: Arc<Mutex<HashMap<String, AcpSessionModeSnapshot>>>,
     grok_session_models: Arc<Mutex<HashMap<String, String>>>,
     session_efforts: Arc<Mutex<HashMap<String, String>>>,
@@ -1941,6 +2475,26 @@ fn acp_thread_main(
             Arc::new(Mutex::new(
                 crate::adapter::SessionEventStandardizer::for_agent(agent_kind),
             ));
+        let active_subagents: Arc<Mutex<HashMap<String, String>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let root_sessions: Arc<Mutex<HashSet<String>>> =
+            Arc::new(Mutex::new(HashSet::new()));
+        let new_session_in_flight = Arc::new(AtomicBool::new(false));
+        let pending_new_session_updates: PendingNewSessionUpdateBuffer =
+            Arc::new(Mutex::new(PendingNewSessionUpdates::default()));
+        let pending_air_report_requests: PendingAirReportRequests =
+            Arc::new(Mutex::new(HashMap::new()));
+        let session_notification_sink = SessionNotificationSink {
+            closed_sessions: closed_sessions.clone(),
+            standardizer: session_event_standardizer.clone(),
+            pending_air_report_requests: pending_air_report_requests.clone(),
+            ext_notification_tx: ext_notification_tx.clone(),
+            session_modes: session_modes.clone(),
+            grok_session_models: grok_session_models.clone(),
+            session_efforts: session_efforts.clone(),
+            last_prompt_usage: last_prompt_usage.clone(),
+            session_notif_tx: session_notif_tx.clone(),
+        };
 
         // !Send slots used to ferry oneshot replies between the connect_with
         // closure (which is allowed to be !Send) and the post-connection
@@ -1961,14 +2515,16 @@ fn acp_thread_main(
             // sender it needs.
             let perm_tx_h = permission_tx.clone();
             let perm_stamp_h = permission_stamp.clone();
-            let session_notif_tx_h = session_notif_tx.clone();
             let ext_notification_tx_h = ext_notification_tx.clone();
             let agent_client_request_tx_h = agent_client_request_tx.clone();
             let agent_name_request_h = agent_name.clone();
-            let session_event_standardizer_h = session_event_standardizer.clone();
-            let session_modes_h = session_modes.clone();
+            let active_subagents_h = active_subagents.clone();
+            let root_sessions_h = root_sessions.clone();
+            let closed_sessions_h = closed_sessions.clone();
+            let new_session_in_flight_h = new_session_in_flight.clone();
+            let pending_new_session_updates_h = pending_new_session_updates.clone();
+            let session_notification_sink_h = session_notification_sink.clone();
             let grok_session_models_h = grok_session_models.clone();
-            let session_efforts_h = session_efforts.clone();
             // For UsageUpdate → last_prompt_usage fill (phase B) during notify.
             let last_prompt_usage_h = last_prompt_usage.clone();
             let last_num_turns_h = last_num_turns.clone();
@@ -1990,6 +2546,8 @@ fn acp_thread_main(
             let init_reply_slot_loop = init_reply_slot.clone();
             let shutdown_reply_slot_loop = shutdown_reply_slot.clone();
             let last_prompt_usage_loop = last_prompt_usage.clone();
+            let pending_air_report_requests_loop = pending_air_report_requests.clone();
+            let session_notification_sink_loop = session_notification_sink.clone();
 
             Client
                 .builder()
@@ -2003,6 +2561,13 @@ fn acp_thread_main(
                             &agent_client_request_tx_h,
                             &agent_name_request_h,
                         )
+                    },
+                    agent_client_protocol::on_receive_request!(),
+                )
+                // ── elicitation/create (URL only) ────────────────────────
+                .on_receive_request(
+                    async move |req: CreateElicitationRequest, responder, _cx| {
+                        responder.respond(handle_create_elicitation(req))
                     },
                     agent_client_protocol::on_receive_request!(),
                 )
@@ -2333,56 +2898,76 @@ fn acp_thread_main(
                 )
                 // ── notifications: session/update + extension ────────────
                 .on_receive_notification(
-                    async move |notif: AgentNotification, _cx| {
+                    async move |notif: UntypedMessage, _cx| {
+                        let (notif, encoded_update_bytes) = if notif.method == "session/update" {
+                            let encoded_bytes = serde_json::to_vec(&notif.params)
+                                .map(|bytes| bytes.len())
+                                .unwrap_or(PENDING_NEW_SESSION_MAX_BYTES.saturating_add(1));
+                            match normalize_session_notification(
+                                notif.params,
+                                &active_subagents_h,
+                                &root_sessions_h,
+                                &closed_sessions_h,
+                            ) {
+                                Ok(Some(notification)) => {
+                                    (
+                                        AgentNotification::SessionNotification(notification),
+                                        Some(encoded_bytes),
+                                    )
+                                }
+                                Ok(None) => return Ok(()),
+                                Err(error) => {
+                                    tracing::warn!(
+                                        %error,
+                                        "dropping malformed ACP session/update notification"
+                                    );
+                                    return Ok(());
+                                }
+                            }
+                        } else {
+                            match AgentNotification::parse_message(&notif.method, &notif.params) {
+                                Ok(notification) => (notification, None),
+                                Err(error) => {
+                                    tracing::warn!(
+                                        method = %notif.method,
+                                        %error,
+                                        "dropping malformed ACP agent notification"
+                                    );
+                                    return Ok(());
+                                }
+                            }
+                        };
                         match notif {
                             AgentNotification::SessionNotification(args) => {
-                                let args = session_event_standardizer_h
-                                    .lock()
-                                    .unwrap()
-                                    .standardize(args);
-                                cache_session_notification_mode_update(&session_modes_h, &args);
-                                cache_session_notification_config_options(
-                                    &grok_session_models_h,
-                                    &session_efforts_h,
+                                match route_session_notification(
                                     &args,
-                                );
-                                // sol_55e2f7194a224bba phase B: when PromptResponse.usage is
-                                // absent, accept *observed* token fields from UsageUpdate.meta
-                                // only (never invent from used/size context-window fields).
-                                maybe_fill_usage_from_session_update(
-                                    &last_prompt_usage_h,
-                                    &args.update,
-                                );
-                                let variant = session_update_variant_name(&args.update);
-                                let text_len = match &args.update {
-                                    SessionUpdate::AgentMessageChunk(c)
-                                    | SessionUpdate::AgentThoughtChunk(c)
-                                    | SessionUpdate::UserMessageChunk(c) => {
-                                        content_chunk_text_len(c)
+                                    &root_sessions_h,
+                                    &active_subagents_h,
+                                    new_session_in_flight_h.load(Ordering::Acquire),
+                                ) {
+                                    SessionNotificationRoute::Forward => {
+                                        session_notification_sink_h.forward(args);
                                     }
-                                    _ => 0,
-                                };
-                                let session = args.session_id.to_string();
-                                // `broadcast::Sender::send` returns `Err(SendError)` only when every
-                                // receiver has been dropped. The orchestrator pre-subscribes before
-                                // calling `new_session` / `load_session` (see `create_brain_session`
-                                // and `load_brain_session` in `spur-core/src/orchestrator.rs`) and
-                                // holds the receiver for the lifetime of the BrainSession — so
-                                // `Err` here indicates the connection is tearing down and we can
-                                // safely ignore it. If this starts producing `err` in logs under
-                                // normal operation, the pre-subscribe ordering has regressed.
-                                let send_result = session_notif_tx_h.send(args);
-                                let send_result_str =
-                                    if send_result.is_ok() { "ok" } else { "err" };
-                                tracing::debug!(
-                                    streaming_probe = true,
-                                    site = "A_session_notification",
-                                    variant = variant,
-                                    text_len = text_len,
-                                    session = %session,
-                                    send_result = send_result_str,
-                                    "ACP session_notification (broadcast)"
-                                );
+                                    SessionNotificationRoute::BufferUntilNewSession => {
+                                        if !buffer_new_session_update(
+                                            &pending_new_session_updates_h,
+                                            args,
+                                            encoded_update_bytes.unwrap_or(0),
+                                        ) {
+                                            tracing::warn!(
+                                                max_notifications = PENDING_NEW_SESSION_MAX_NOTIFICATIONS,
+                                                max_bytes = PENDING_NEW_SESSION_MAX_BYTES,
+                                                "dropping all buffered session/new updates after capacity overflow"
+                                            );
+                                        }
+                                    }
+                                    SessionNotificationRoute::Drop => {
+                                        tracing::debug!(
+                                            session = %args.session_id,
+                                            "dropping ACP notification for unknown session"
+                                        );
+                                    }
+                                }
                             }
                             AgentNotification::ExtNotification(args) => {
                                 // The SDK already stripped the leading `_` from
@@ -2417,6 +3002,12 @@ fn acp_thread_main(
                                     method,
                                     params,
                                 });
+                            }
+                            AgentNotification::CompleteElicitationNotification(args) => {
+                                tracing::debug!(
+                                    elicitation_id = %args.elicitation_id,
+                                    "ACP URL elicitation completed"
+                                );
                             }
                             _ => {
                                 // `AgentNotification` is `#[non_exhaustive]`;
@@ -2469,6 +3060,8 @@ fn acp_thread_main(
                             }
                             AcpCommand::NewSession { request, reply } => {
                                 *cwd_loop.lock().unwrap() = request.cwd.clone();
+                                clear_pending_new_session_updates(&pending_new_session_updates);
+                                new_session_in_flight.store(true, Ordering::Release);
                                 let request_started_at = Instant::now();
                                 // Kiro (and Grok) still emit a top-level `models`
                                 // plane on session/new, but ACP schema 1.1 drops
@@ -2514,19 +3107,20 @@ fn acp_thread_main(
                                 };
                                 emit_acp_request_result(request_started_at, &result);
                                 if let Ok(response) = &result {
-                                    cache_session_modes(
+                                    complete_new_session(
+                                        response,
+                                        &root_sessions,
+                                        &closed_sessions,
+                                        &new_session_in_flight,
+                                        &pending_new_session_updates,
+                                        &session_notification_sink_loop,
                                         &session_modes,
-                                        &response.session_id,
-                                        response.modes.as_ref(),
+                                        &grok_session_models,
+                                        &session_efforts,
                                     );
-                                    if let Some(ref opts) = response.config_options {
-                                        cache_config_options_model_effort(
-                                            &grok_session_models,
-                                            &session_efforts,
-                                            response.session_id.0.as_ref(),
-                                            opts,
-                                        );
-                                    }
+                                } else {
+                                    new_session_in_flight.store(false, Ordering::Release);
+                                    clear_pending_new_session_updates(&pending_new_session_updates);
                                 }
                                 let _ = reply.send(result.map_err(|e| {
                                     anyhow::anyhow!(
@@ -2536,7 +3130,7 @@ fn acp_thread_main(
                                 }));
                             }
                             AcpCommand::Prompt {
-                                request,
+                                mut request,
                                 reply,
                                 terminal_reply,
                             } => {
@@ -2550,6 +3144,19 @@ fn acp_thread_main(
                                     mpsc::unbounded_channel::<SessionNotification>();
                                 let _ = reply.send(Ok(rx_empty));
                                 let mut terminal_reply = Some(terminal_reply);
+                                if agent_kind == AgentKind::CodexAcp {
+                                    let request_id =
+                                        format!("spur-{}", uuid::Uuid::new_v4());
+                                    attach_air_file_change_report_request(
+                                        &mut request,
+                                        &request_id,
+                                    );
+                                    register_pending_air_report(
+                                        &pending_air_report_requests_loop,
+                                        request.session_id.0.as_ref(),
+                                        &request_id,
+                                    );
+                                }
                                 let session_id_for_probe = request.session_id.clone();
                                 // Multiplex command intake against the in-flight prompt
                                 // future so `Cancel` and `Shutdown` can be serviced while
@@ -2593,6 +3200,10 @@ fn acp_thread_main(
                                         }
                                         prompt_result = &mut prompt_fut => {
                                             emit_acp_request_result(request_started_at, &prompt_result);
+                                            clear_pending_air_report(
+                                                &pending_air_report_requests_loop,
+                                                session_id_for_probe.0.as_ref(),
+                                            );
                                             let terminal_result = match prompt_result {
                                                 Ok(response) => {
                                                     // H6: PromptResponse.usage wins when
@@ -2656,6 +3267,11 @@ fn acp_thread_main(
                                 let (tx_empty, rx_empty) =
                                     mpsc::unbounded_channel::<SessionNotification>();
                                 let session_id_for_probe = request.session_id.clone();
+                                let open_rollback = begin_session_open(
+                                    &root_sessions,
+                                    &closed_sessions,
+                                    session_id_for_probe.0.as_ref(),
+                                );
                                 // Multiplex command intake against the in-flight
                                 // `session/load` future so cancel/shutdown can be
                                 // serviced while history replay is in progress.
@@ -2767,6 +3383,12 @@ fn acp_thread_main(
                                                     let _ = reply.send(Ok((response, rx_empty)));
                                                 }
                                                 Err(e) => {
+                                                    rollback_session_open(
+                                                        &root_sessions,
+                                                        &closed_sessions,
+                                                        session_id_for_probe.0.as_ref(),
+                                                        open_rollback,
+                                                    );
                                                     tracing::warn!(
                                                         agent = %agent_name_loop,
                                                         session = %session_id_for_probe,
@@ -2787,6 +3409,11 @@ fn acp_thread_main(
                             AcpCommand::ResumeSession { request, reply } => {
                                 *cwd_loop.lock().unwrap() = request.cwd.clone();
                                 let session_id = request.session_id.clone();
+                                let open_rollback = begin_session_open(
+                                    &root_sessions,
+                                    &closed_sessions,
+                                    session_id.0.as_ref(),
+                                );
                                 let request_started_at = Instant::now();
                                 let result = cx.send_request(request).block_task().await;
                                 emit_acp_request_result(request_started_at, &result);
@@ -2804,6 +3431,13 @@ fn acp_thread_main(
                                             opts,
                                         );
                                     }
+                                } else {
+                                    rollback_session_open(
+                                        &root_sessions,
+                                        &closed_sessions,
+                                        session_id.0.as_ref(),
+                                        open_rollback,
+                                    );
                                 }
                                 let _ = reply.send(result.map_err(|e| {
                                     anyhow::anyhow!(
@@ -2835,9 +3469,27 @@ fn acp_thread_main(
                                 }));
                             }
                             AcpCommand::CloseSession { request, reply } => {
+                                let session_id = request.session_id.0.to_string();
+                                if closed_sessions
+                                    .lock()
+                                    .is_ok_and(|closed| closed.contains(&session_id))
+                                {
+                                    let _ = reply.send(Ok(CloseSessionResponse::new()));
+                                    continue;
+                                }
                                 let request_started_at = Instant::now();
                                 let result = cx.send_request(request).block_task().await;
                                 emit_acp_request_result(request_started_at, &result);
+                                if result.is_ok() {
+                                    if let Ok(mut closed) = closed_sessions.lock() {
+                                        closed.insert(session_id.clone());
+                                    }
+                                    remove_subagent_descendants(&active_subagents, &session_id);
+                                    clear_pending_air_report(
+                                        &pending_air_report_requests_loop,
+                                        &session_id,
+                                    );
+                                }
                                 let _ = reply.send(result.map_err(|e| {
                                     anyhow::anyhow!(
                                         "NativeAcpConnection '{}': close_session failed: {e}",
@@ -3064,7 +3716,18 @@ async fn handle_request_permission(
 
     match tokio::time::timeout(std::time::Duration::from_secs(60), reply_rx).await {
         Ok(Ok(response)) => {
-            let option_id = PermissionOptionId::new(response.option_id);
+            let Some(option) = args
+                .options
+                .iter()
+                .find(|option| option.option_id.0.as_ref() == response.option_id)
+            else {
+                tracing::warn!(
+                    option = %response.option_id,
+                    "NativeAcpConnection: permission response was not advertised; cancelling"
+                );
+                return Ok(cancelled_permission_response());
+            };
+            let option_id = option.option_id.clone();
             tracing::debug!(option = %option_id, "NativeAcpConnection: permission responded");
             Ok(RequestPermissionResponse::new(
                 RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(option_id)),
@@ -3079,6 +3742,38 @@ async fn handle_request_permission(
             auto_deny(&args)
         }
     }
+}
+
+fn handle_create_elicitation(request: CreateElicitationRequest) -> CreateElicitationResponse {
+    let ElicitationMode::Url(url_mode) = request.mode else {
+        return CreateElicitationResponse::new(ElicitationAction::Cancel);
+    };
+    let action = if open_elicitation_url(&url_mode.url) {
+        ElicitationAction::Accept(ElicitationAcceptAction::new())
+    } else {
+        ElicitationAction::Cancel
+    };
+    CreateElicitationResponse::new(action)
+}
+
+fn open_elicitation_url(url: &str) -> bool {
+    if !(url.starts_with("https://") || url.starts_with("http://")) {
+        tracing::warn!(url, "refusing non-HTTP elicitation URL");
+        return false;
+    }
+
+    #[cfg(target_os = "macos")]
+    let mut command = std::process::Command::new("open");
+    #[cfg(target_os = "windows")]
+    let mut command = {
+        let mut command = std::process::Command::new("cmd");
+        command.args(["/C", "start", ""]);
+        command
+    };
+    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+    let mut command = std::process::Command::new("xdg-open");
+
+    command.arg(url).spawn().is_ok()
 }
 
 // ─── Terminal state ─────────────────────────────────────────────────────────
@@ -3127,29 +3822,11 @@ fn content_chunk_text_len(chunk: &ContentChunk) -> usize {
 // ─── Permission helpers ─────────────────────────────────────────────────────
 
 fn auto_approve(
-    args: &RequestPermissionRequest,
+    _args: &RequestPermissionRequest,
 ) -> agent_client_protocol::Result<RequestPermissionResponse> {
-    // Prefer an explicitly allow-class option. Falls back to the first
-    // option (historical behavior) if no allow-class is present, and to
-    // a hardcoded "allow" id if the options list is empty.
-    //
-    // `PermissionOptionKind` is `#[non_exhaustive]`, so the match below
-    // uses a `_` arm to stay forward-compatible with future variants.
-    let option_id = args
-        .options
-        .iter()
-        .find(|o| {
-            matches!(
-                o.kind,
-                PermissionOptionKind::AllowAlways | PermissionOptionKind::AllowOnce
-            )
-        })
-        .map(|o| o.option_id.clone())
-        .or_else(|| args.options.first().map(|o| o.option_id.clone()))
-        .unwrap_or_else(|| PermissionOptionId::new("allow"));
-    Ok(RequestPermissionResponse::new(
-        RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(option_id)),
-    ))
+    // Without a user-selected opaque option ID there is no protocol-safe way
+    // to infer authorization from presentation order, label, kind, or metadata.
+    Ok(cancelled_permission_response())
 }
 
 /// Test-only re-export of the private `auto_approve` helper so
@@ -3164,16 +3841,13 @@ pub fn __test_auto_approve(
 }
 
 fn auto_deny(
-    args: &RequestPermissionRequest,
+    _args: &RequestPermissionRequest,
 ) -> agent_client_protocol::Result<RequestPermissionResponse> {
-    let option_id = args
-        .options
-        .last()
-        .map(|o| o.option_id.clone())
-        .unwrap_or_else(|| PermissionOptionId::new("deny"));
-    Ok(RequestPermissionResponse::new(
-        RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(option_id)),
-    ))
+    Ok(cancelled_permission_response())
+}
+
+fn cancelled_permission_response() -> RequestPermissionResponse {
+    RequestPermissionResponse::new(RequestPermissionOutcome::Cancelled)
 }
 
 // ─── Terminal helpers ────────────────────────────────────────────────────────
@@ -3380,6 +4054,35 @@ mod client_capabilities_tests {
         );
     }
 
+    #[test]
+    fn spur_client_capabilities_advertises_only_supported_url_elicitation() {
+        let json = serde_json::to_value(spur_client_capabilities()).expect("serialize caps");
+        assert_eq!(json["elicitation"]["url"], serde_json::json!({}));
+        assert!(
+            json["elicitation"].get("form").is_none(),
+            "Spur must not advertise form elicitation before it has a form renderer"
+        );
+    }
+
+    #[test]
+    fn spur_client_capabilities_advertises_native_subagent_sessions() {
+        let json = serde_json::to_value(spur_client_capabilities()).expect("serialize caps");
+        assert_eq!(json["_meta"]["jetbrains"]["air"]["version"], 1);
+        assert!(json["_meta"]["jetbrains"]["air"]["capabilities"]
+            .as_array()
+            .expect("AIR capabilities array")
+            .contains(&serde_json::json!("nativeSubagentSessions")),);
+    }
+
+    #[test]
+    fn spur_client_capabilities_advertises_agent_file_change_reports() {
+        let json = serde_json::to_value(spur_client_capabilities()).expect("serialize caps");
+        assert!(json["_meta"]["jetbrains"]["air"]["capabilities"]
+            .as_array()
+            .expect("AIR capabilities array")
+            .contains(&serde_json::json!("agentFileChangeReport")),);
+    }
+
     /// The constructed `InitializeRequest` is what spur actually sends on
     /// the wire. Serialize the full thing and confirm the negotiated
     /// `clientCapabilities` shape includes the gate codex looks for.
@@ -3413,10 +4116,12 @@ mod native_helper_tests {
     use super::*;
     use agent_client_protocol::role::UntypedRole;
     use agent_client_protocol::schema::v1::{
-        AuthMethodId, PermissionOption, TextContent, ToolCallUpdate, ToolCallUpdateFields,
+        AuthMethodId, CurrentModeUpdate, PermissionOption, PermissionOptionId,
+        PermissionOptionKind, SessionMode, TextContent, ToolCallUpdate, ToolCallUpdateFields,
     };
     use agent_client_protocol::schema::ProtocolVersion;
     use agent_client_protocol::Channel;
+    use std::collections::HashSet;
     use std::sync::atomic::Ordering;
     use std::time::Duration;
     use tokio::sync::mpsc::error::TryRecvError;
@@ -3748,6 +4453,419 @@ mod native_helper_tests {
         RequestPermissionRequest::new("session", tool_call, options)
     }
 
+    #[test]
+    fn session_notification_gate_drops_updates_after_close() {
+        let closed_sessions = Arc::new(Mutex::new(HashSet::new()));
+        let notification = SessionNotification::new(
+            SessionId::new("closed-session"),
+            SessionUpdate::AgentMessageChunk(ContentChunk::new(ContentBlock::Text(
+                TextContent::new("too late"),
+            ))),
+        );
+
+        assert!(should_forward_session_notification(
+            &closed_sessions,
+            &notification
+        ));
+        closed_sessions
+            .lock()
+            .expect("closed-session set")
+            .insert("closed-session".to_string());
+        assert!(!should_forward_session_notification(
+            &closed_sessions,
+            &notification
+        ));
+    }
+
+    #[test]
+    fn reopening_session_clears_closed_marker_and_restores_updates() {
+        let closed_sessions = Arc::new(Mutex::new(HashSet::from(["closed-session".to_string()])));
+        let root_sessions = Arc::new(Mutex::new(HashSet::new()));
+        let notification = SessionNotification::new(
+            SessionId::new("closed-session"),
+            SessionUpdate::AgentMessageChunk(ContentChunk::new(ContentBlock::Text(
+                TextContent::new("visible again"),
+            ))),
+        );
+
+        begin_session_open(&root_sessions, &closed_sessions, "closed-session");
+
+        assert!(should_forward_session_notification(
+            &closed_sessions,
+            &notification
+        ));
+        assert!(root_sessions
+            .lock()
+            .expect("root-session set")
+            .contains("closed-session"));
+    }
+
+    #[test]
+    fn child_output_is_gated_until_spawn_is_observed() {
+        let roots = Arc::new(Mutex::new(HashSet::from(["parent".to_string()])));
+        let active = Arc::new(Mutex::new(HashMap::new()));
+        let closed = Arc::new(Mutex::new(HashSet::new()));
+        let child_output = serde_json::json!({
+            "sessionId": "child",
+            "update": {
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": "child output"}
+            }
+        });
+
+        let before_spawn =
+            normalize_session_notification(child_output.clone(), &active, &roots, &closed)
+                .expect("ordinary child output should parse")
+                .expect("ordinary output should reach the session router");
+        assert_eq!(
+            route_session_notification(&before_spawn, &roots, &active, false),
+            SessionNotificationRoute::Drop
+        );
+
+        normalize_session_notification(
+            serde_json::json!({
+                "sessionId": "parent",
+                "update": {
+                    "sessionUpdate": "subagent_spawned",
+                    "subagentSessionId": "child",
+                    "name": "researcher",
+                    "task": "inspect Cargo.toml",
+                    "capabilities": {}
+                }
+            }),
+            &active,
+            &roots,
+            &closed,
+        )
+        .expect("spawn update should parse")
+        .expect("spawn update should be emitted");
+
+        let after_spawn = normalize_session_notification(child_output, &active, &roots, &closed)
+            .expect("spawned child output should parse")
+            .expect("spawned child output should reach the session router");
+        assert_eq!(
+            route_session_notification(&after_spawn, &roots, &active, false),
+            SessionNotificationRoute::Forward
+        );
+    }
+
+    #[test]
+    fn early_new_session_updates_are_buffered_and_replayed_only_for_returned_root() {
+        let roots = Arc::new(Mutex::new(HashSet::new()));
+        let active = Arc::new(Mutex::new(HashMap::new()));
+        let closed = Arc::new(Mutex::new(HashSet::new()));
+        let early_root = normalize_session_notification(
+            serde_json::json!({
+                "sessionId": "returned-root",
+                "update": {
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": {"type": "text", "text": "ready"}
+                }
+            }),
+            &active,
+            &roots,
+            &closed,
+        )
+        .expect("early root update should parse")
+        .expect("ordinary updates must survive until routing");
+        let unrelated = SessionNotification::new(
+            SessionId::new("unrelated"),
+            SessionUpdate::AgentMessageChunk(ContentChunk::new(ContentBlock::Text(
+                TextContent::new("not this session"),
+            ))),
+        );
+
+        assert_eq!(
+            route_session_notification(&early_root, &roots, &active, true),
+            SessionNotificationRoute::BufferUntilNewSession
+        );
+        let pending = Arc::new(Mutex::new(PendingNewSessionUpdates::default()));
+        assert!(buffer_new_session_update(&pending, early_root, 128));
+        assert!(buffer_new_session_update(&pending, unrelated, 128));
+        begin_session_open(
+            &roots,
+            &Arc::new(Mutex::new(HashSet::new())),
+            "returned-root",
+        );
+        let replay = take_matching_new_session_updates(&pending, "returned-root");
+
+        assert_eq!(replay.len(), 1);
+        assert_eq!(replay[0].session_id.0.as_ref(), "returned-root");
+        assert_eq!(
+            route_session_notification(&replay[0], &roots, &active, false),
+            SessionNotificationRoute::Forward
+        );
+        assert!(pending
+            .lock()
+            .expect("pending updates")
+            .notifications
+            .is_empty());
+    }
+
+    #[test]
+    fn early_new_session_buffer_fails_closed_at_count_or_byte_limit() {
+        let notification = || {
+            SessionNotification::new(
+                SessionId::new("returned-root"),
+                SessionUpdate::AgentMessageChunk(ContentChunk::new(ContentBlock::Text(
+                    TextContent::new("ready"),
+                ))),
+            )
+        };
+        let pending = Arc::new(Mutex::new(PendingNewSessionUpdates::default()));
+
+        for _ in 0..PENDING_NEW_SESSION_MAX_NOTIFICATIONS {
+            assert!(buffer_new_session_update(&pending, notification(), 1));
+        }
+        assert!(!buffer_new_session_update(&pending, notification(), 1));
+        {
+            let pending = pending.lock().expect("pending updates");
+            assert!(pending.overflowed);
+            assert!(pending.notifications.is_empty());
+            assert_eq!(pending.bytes, 0);
+        }
+        assert!(take_matching_new_session_updates(&pending, "returned-root").is_empty());
+
+        assert!(!buffer_new_session_update(
+            &pending,
+            notification(),
+            PENDING_NEW_SESSION_MAX_BYTES + 1,
+        ));
+        assert!(pending.lock().expect("pending updates").overflowed);
+    }
+
+    #[test]
+    fn response_mode_baseline_precedes_replayed_early_mode_update() {
+        let roots = Arc::new(Mutex::new(HashSet::new()));
+        let closed = Arc::new(Mutex::new(HashSet::new()));
+        let in_flight = Arc::new(AtomicBool::new(true));
+        let pending = Arc::new(Mutex::new(PendingNewSessionUpdates::default()));
+        assert!(buffer_new_session_update(
+            &pending,
+            SessionNotification::new(
+                SessionId::new("returned-root"),
+                SessionUpdate::CurrentModeUpdate(CurrentModeUpdate::new("early-update")),
+            ),
+            128,
+        ));
+        let session_modes = Arc::new(Mutex::new(HashMap::new()));
+        let models = Arc::new(Mutex::new(HashMap::new()));
+        let efforts = Arc::new(Mutex::new(HashMap::new()));
+        let (ext_tx, _ext_rx) = mpsc::unbounded_channel();
+        let (session_tx, _session_rx) = tokio::sync::broadcast::channel(8);
+        let sink = SessionNotificationSink {
+            closed_sessions: closed.clone(),
+            standardizer: Arc::new(Mutex::new(
+                crate::adapter::SessionEventStandardizer::for_agent(AgentKind::CodexAcp),
+            )),
+            pending_air_report_requests: Arc::new(Mutex::new(HashMap::new())),
+            ext_notification_tx: ext_tx,
+            session_modes: session_modes.clone(),
+            grok_session_models: models.clone(),
+            session_efforts: efforts.clone(),
+            last_prompt_usage: Arc::new(Mutex::new(None)),
+            session_notif_tx: session_tx,
+        };
+        let response =
+            NewSessionResponse::new(SessionId::new("returned-root")).modes(SessionModeState::new(
+                SessionModeId::new("response-baseline"),
+                vec![SessionMode::new(
+                    SessionModeId::new("early-update"),
+                    "Early update",
+                )],
+            ));
+
+        complete_new_session(
+            &response,
+            &roots,
+            &closed,
+            &in_flight,
+            &pending,
+            &sink,
+            &session_modes,
+            &models,
+            &efforts,
+        );
+
+        assert_eq!(
+            session_modes
+                .lock()
+                .expect("session modes")
+                .get("returned-root")
+                .and_then(|snapshot| snapshot.current_mode_id.as_ref())
+                .map(|id| id.0.as_ref()),
+            Some("early-update"),
+        );
+    }
+
+    #[test]
+    fn closing_root_retires_all_subagent_descendants() {
+        let roots = Arc::new(Mutex::new(HashSet::from(["root".to_string()])));
+        let closed = Arc::new(Mutex::new(HashSet::from(["root".to_string()])));
+        let active = Arc::new(Mutex::new(HashMap::from([
+            ("child".to_string(), "root".to_string()),
+            ("grandchild".to_string(), "child".to_string()),
+            ("other-child".to_string(), "other-root".to_string()),
+        ])));
+
+        remove_subagent_descendants(&active, "root");
+
+        let active_guard = active.lock().expect("active subagents");
+        assert!(!active_guard.contains_key("child"));
+        assert!(!active_guard.contains_key("grandchild"));
+        assert!(active_guard.contains_key("other-child"));
+        drop(active_guard);
+
+        let late_child = SessionNotification::new(
+            SessionId::new("child"),
+            SessionUpdate::AgentMessageChunk(ContentChunk::new(ContentBlock::Text(
+                TextContent::new("too late"),
+            ))),
+        );
+        assert_eq!(
+            route_session_notification(&late_child, &roots, &active, false),
+            SessionNotificationRoute::Drop
+        );
+        assert!(normalize_session_notification(
+            serde_json::json!({
+                "sessionId": "root",
+                "update": {
+                    "sessionUpdate": "subagent_spawned",
+                    "subagentSessionId": "late-child",
+                    "name": "late",
+                    "task": "must stay closed"
+                }
+            }),
+            &active,
+            &roots,
+            &closed,
+        )
+        .expect("late spawn should be structurally valid")
+        .is_none());
+        assert!(!active
+            .lock()
+            .expect("active subagents")
+            .contains_key("late-child"));
+    }
+
+    #[test]
+    fn v1_7_subagent_updates_become_one_parent_tool_lifecycle() {
+        let active = Arc::new(Mutex::new(HashMap::new()));
+        let roots = Arc::new(Mutex::new(HashSet::from(["parent".to_string()])));
+        let closed = Arc::new(Mutex::new(HashSet::new()));
+        let spawned = normalize_session_notification(
+            serde_json::json!({
+                "sessionId": "parent",
+                "update": {
+                    "sessionUpdate": "subagent_spawned",
+                    "subagentSessionId": "child",
+                    "name": "researcher",
+                    "task": "inspect Cargo.toml",
+                    "capabilities": {"cancel": true, "close": true}
+                }
+            }),
+            &active,
+            &roots,
+            &closed,
+        )
+        .expect("spawn update should parse")
+        .expect("first spawn should be emitted");
+
+        assert_eq!(spawned.session_id.0.as_ref(), "parent");
+        let SessionUpdate::ToolCall(tool_call) = spawned.update else {
+            panic!("spawn must normalize to ToolCall")
+        };
+        assert_eq!(tool_call.tool_call_id.0.as_ref(), "subagent:child");
+        assert_eq!(tool_call.title, "Subagent: researcher");
+        assert_eq!(tool_call.status, ToolCallStatus::InProgress);
+
+        let terminal_json = serde_json::json!({
+            "sessionId": "parent",
+            "update": {
+                "sessionUpdate": "subagent_state_update",
+                "subagentSessionId": "child",
+                "state": "completed"
+            }
+        });
+        let terminal =
+            normalize_session_notification(terminal_json.clone(), &active, &roots, &closed)
+                .expect("state update should parse")
+                .expect("first terminal update should be emitted");
+        let SessionUpdate::ToolCallUpdate(update) = terminal.update else {
+            panic!("terminal state must normalize to ToolCallUpdate")
+        };
+        assert_eq!(update.tool_call_id.0.as_ref(), "subagent:child");
+        assert_eq!(update.fields.status, Some(ToolCallStatus::Completed));
+
+        assert!(
+            normalize_session_notification(terminal_json, &active, &roots, &closed)
+                .expect("duplicate state update should be valid but ignored")
+                .is_none(),
+            "a child session must emit at most one terminal parent update"
+        );
+    }
+
+    #[test]
+    fn air_file_change_report_requires_matching_request_id_once() {
+        let pending = Arc::new(Mutex::new(HashMap::from([(
+            "parent".to_string(),
+            "report-17".to_string(),
+        )])));
+        let notification: SessionNotification = serde_json::from_value(serde_json::json!({
+            "sessionId": "parent",
+            "update": {
+                "sessionUpdate": "session_info_update",
+                "_meta": {
+                    "jetbrains": {
+                        "air": {
+                            "version": 1,
+                            "agentFileChangeReport": {
+                                "version": 1,
+                                "requestId": "report-17",
+                                "status": "reported",
+                                "paths": ["src/lib.rs"],
+                                "declaredComplete": true,
+                                "truncated": false
+                            }
+                        }
+                    }
+                }
+            }
+        }))
+        .expect("AIR report fixture should be a valid SessionNotification");
+
+        let report = correlated_air_file_change_report(&notification, &pending)
+            .expect("matching report should be forwarded");
+        assert_eq!(report["requestId"], "report-17");
+        assert_eq!(report["paths"], serde_json::json!(["src/lib.rs"]));
+        assert!(
+            correlated_air_file_change_report(&notification, &pending).is_none(),
+            "duplicate terminal reports must be suppressed"
+        );
+    }
+
+    #[test]
+    fn pending_air_report_is_bounded_to_one_request_per_session() {
+        let pending = Arc::new(Mutex::new(HashMap::new()));
+
+        register_pending_air_report(&pending, "session-1", "report-1");
+        register_pending_air_report(&pending, "session-1", "report-2");
+        register_pending_air_report(&pending, "session-2", "report-3");
+
+        assert_eq!(
+            pending.lock().expect("pending AIR map").clone(),
+            HashMap::from([
+                ("session-1".to_string(), "report-2".to_string()),
+                ("session-2".to_string(), "report-3".to_string()),
+            ])
+        );
+        clear_pending_air_report(&pending, "session-1");
+        assert!(!pending
+            .lock()
+            .expect("pending AIR map")
+            .contains_key("session-1"));
+    }
+
     fn selected_option_id(response: RequestPermissionResponse) -> String {
         match response.outcome {
             RequestPermissionOutcome::Selected(SelectedPermissionOutcome { option_id, .. }) => {
@@ -3757,8 +4875,15 @@ mod native_helper_tests {
         }
     }
 
+    fn assert_cancelled(response: RequestPermissionResponse) {
+        assert!(matches!(
+            response.outcome,
+            RequestPermissionOutcome::Cancelled
+        ));
+    }
+
     #[tokio::test]
-    async fn handle_request_permission_without_channel_auto_approves_allow_option() {
+    async fn handle_request_permission_without_channel_cancels_without_user_choice() {
         let args = permission_request(vec![
             permission_option("reject_once", PermissionOptionKind::RejectOnce),
             permission_option("allow_once", PermissionOptionKind::AllowOnce),
@@ -3768,7 +4893,7 @@ mod native_helper_tests {
             .await
             .expect("auto approve should succeed");
 
-        assert_eq!(selected_option_id(response), "allow_once");
+        assert_cancelled(response);
     }
 
     #[tokio::test]
@@ -3797,7 +4922,7 @@ mod native_helper_tests {
         request
             .reply_tx
             .send(crate::types::PermissionResponse {
-                option_id: "chosen".to_string(),
+                option_id: "allow_once".to_string(),
             })
             .expect("permission handler should still be awaiting the reply");
 
@@ -3806,14 +4931,13 @@ mod native_helper_tests {
             .expect("permission handler should finish")
             .expect("permission task should not panic")
             .expect("permission handler should return a response");
-        assert_eq!(selected_option_id(response), "chosen");
+        assert_eq!(selected_option_id(response), "allow_once");
     }
 
     #[tokio::test]
     async fn handle_request_permission_auto_denies_when_channel_closed() {
         let (permission_tx, permission_rx) = mpsc::unbounded_channel();
         drop(permission_rx);
-        // auto_deny selects the last option (reject-class preferred at end).
         let args = permission_request(vec![
             permission_option("allow_once", PermissionOptionKind::AllowOnce),
             permission_option("reject_once", PermissionOptionKind::RejectOnce),
@@ -3823,7 +4947,7 @@ mod native_helper_tests {
             .await
             .expect("closed channel fallback should succeed");
 
-        assert_eq!(selected_option_id(response), "reject_once");
+        assert_cancelled(response);
     }
 
     #[tokio::test]
@@ -3860,7 +4984,7 @@ mod native_helper_tests {
             .expect("permission handler should finish")
             .expect("permission task should not panic")
             .expect("permission handler should return auto-deny response");
-        assert_eq!(selected_option_id(response), "reject_once");
+        assert_cancelled(response);
     }
 
     #[tokio::test]
@@ -3883,7 +5007,7 @@ mod native_helper_tests {
             .expect("permission handler should finish after reply drop")
             .expect("permission task should not panic")
             .expect("permission handler should return auto-deny response");
-        assert_eq!(selected_option_id(response), "reject_once");
+        assert_cancelled(response);
     }
 
     #[test]

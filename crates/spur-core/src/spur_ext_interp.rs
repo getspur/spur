@@ -126,8 +126,62 @@ pub fn interpret(
                 params: payload.params,
             });
         }
+        "_jetbrains.air/agent_file_change_report" => {
+            let Some(report) = payload.params.get("report") else {
+                tracing::warn!("AIR file-change report is missing its report payload");
+                return;
+            };
+            if report.get("version").and_then(serde_json::Value::as_u64) != Some(1) {
+                tracing::warn!("ignoring unsupported AIR file-change report version");
+                return;
+            }
+            match report.get("status").and_then(serde_json::Value::as_str) {
+                Some("reported") => {}
+                Some("unavailable") => {
+                    tracing::debug!(
+                        reason = ?report.get("reason"),
+                        "AIR file-change report unavailable"
+                    );
+                    funnel.emit(SpurEventBody::AgentExtNotification {
+                        session: spur_acp::types::SessionId(executor_id),
+                        method: payload.method,
+                        params: payload.params,
+                    });
+                    return;
+                }
+                _ => {
+                    tracing::warn!("ignoring malformed AIR file-change report status");
+                    return;
+                }
+            }
+            let Some(paths) = report.get("paths").and_then(serde_json::Value::as_array) else {
+                tracing::warn!("reported AIR file-change report is missing paths");
+                return;
+            };
+            for path in paths
+                .iter()
+                .take(1_024)
+                .filter_map(serde_json::Value::as_str)
+                .filter(|path| !path.is_empty() && path.len() <= 4_096)
+            {
+                funnel.emit(SpurEventBody::WorkerFileTouched {
+                    brain_session_id: brain_session_id.clone(),
+                    executor_id: executor_id.clone(),
+                    path: std::path::PathBuf::from(path),
+                    kind: FileTouchKind::Write,
+                });
+            }
+            funnel.emit(SpurEventBody::AgentExtNotification {
+                session: spur_acp::types::SessionId(executor_id),
+                method: payload.method,
+                params: payload.params,
+            });
+        }
         other => {
-            tracing::debug!(method = other, "ignoring unknown _spur/* method");
+            tracing::debug!(
+                method = other,
+                "ignoring unknown ACP extension notification"
+            );
         }
     }
 }
@@ -403,6 +457,95 @@ mod tests {
             }
             other => panic!("unexpected: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn air_file_change_report_emits_write_touches_for_reported_paths() {
+        let (h, mut rx) = harness();
+        interpret(
+            ExtNotificationPayload {
+                method: "_jetbrains.air/agent_file_change_report".into(),
+                params: json!({
+                    "sessionId": "acp-session",
+                    "report": {
+                        "version": 1,
+                        "requestId": "report-17",
+                        "status": "reported",
+                        "paths": ["src/lib.rs", "src/main.rs"],
+                        "declaredComplete": true,
+                        "truncated": false
+                    }
+                }),
+            },
+            test_brain(),
+            "exec-1".into(),
+            &h,
+        );
+
+        for expected in ["src/lib.rs", "src/main.rs"] {
+            let event = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+                .await
+                .expect("AIR report event should not time out")
+                .expect("one touch per reported path");
+            match event.body {
+                SpurEventBody::WorkerFileTouched {
+                    brain_session_id,
+                    executor_id,
+                    path,
+                    kind,
+                } => {
+                    assert_eq!(brain_session_id, test_brain());
+                    assert_eq!(executor_id, "exec-1");
+                    assert_eq!(path, std::path::PathBuf::from(expected));
+                    assert_eq!(kind, FileTouchKind::Write);
+                }
+                other => panic!("unexpected: {other:?}"),
+            }
+        }
+
+        let status = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+            .await
+            .expect("AIR report status should not time out")
+            .expect("reported AIR status should be retained");
+        let SpurEventBody::AgentExtNotification { method, params, .. } = status.body else {
+            panic!("expected retained AIR report status")
+        };
+        assert_eq!(method, "_jetbrains.air/agent_file_change_report");
+        assert_eq!(params["report"]["declaredComplete"], true);
+        assert_eq!(params["report"]["truncated"], false);
+    }
+
+    #[tokio::test]
+    async fn air_unavailable_report_is_retained_for_downstream_state() {
+        let (h, mut rx) = harness();
+        interpret(
+            ExtNotificationPayload {
+                method: "_jetbrains.air/agent_file_change_report".into(),
+                params: json!({
+                    "sessionId": "acp-session",
+                    "report": {
+                        "version": 1,
+                        "requestId": "report-18",
+                        "status": "unavailable",
+                        "reason": "audit-not-ready"
+                    }
+                }),
+            },
+            test_brain(),
+            "exec-1".into(),
+            &h,
+        );
+
+        let status = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+            .await
+            .expect("AIR unavailable status should not time out")
+            .expect("AIR unavailable status should be retained");
+        let SpurEventBody::AgentExtNotification { method, params, .. } = status.body else {
+            panic!("expected retained AIR unavailable status")
+        };
+        assert_eq!(method, "_jetbrains.air/agent_file_change_report");
+        assert_eq!(params["report"]["status"], "unavailable");
+        assert_eq!(params["report"]["reason"], "audit-not-ready");
     }
 
     #[tokio::test]

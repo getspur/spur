@@ -8,6 +8,48 @@ use spur_acp::{
 
 use super::{LoadState, SessionDetailView};
 
+const AIR_FILE_CHANGE_REPORT_METHOD: &str = "_jetbrains.air/agent_file_change_report";
+
+fn air_file_change_report_note(method: &str, params: &serde_json::Value) -> Option<String> {
+    if method != AIR_FILE_CHANGE_REPORT_METHOD {
+        return None;
+    }
+    let report = params.get("report")?;
+    if report.get("version").and_then(serde_json::Value::as_u64) != Some(1) {
+        return None;
+    }
+
+    match report.get("status").and_then(serde_json::Value::as_str)? {
+        "reported" => {
+            let path_count = report
+                .get("paths")
+                .and_then(serde_json::Value::as_array)
+                .map_or(0, Vec::len);
+            let path_label = if path_count == 1 { "path" } else { "paths" };
+            let completeness = if report
+                .get("truncated")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            {
+                "truncated"
+            } else if report
+                .get("declaredComplete")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            {
+                "complete"
+            } else {
+                "partial"
+            };
+            Some(format!(
+                "AIR file-change report: {path_count} {path_label} · {completeness}"
+            ))
+        }
+        "unavailable" => Some("AIR file-change report unavailable".to_string()),
+        _ => None,
+    }
+}
+
 impl SessionDetailView {
     /// Update `load_state` from a milestone event scoped to this view's
     /// session id. Intended for tests that exercise the pre-ready load
@@ -400,10 +442,12 @@ impl SessionDetailView {
                 }
 
                 // Response bindings: render the payload according to `render` kind.
+                let mut rendered_by_binding = false;
                 for binding in &cfg.commands.response {
                     if &binding.method != method {
                         continue;
                     }
+                    rendered_by_binding = true;
                     match binding.render {
                         ResponseRenderKind::SystemNote => {
                             let handle = self.agent_handle_for_commands();
@@ -412,6 +456,16 @@ impl SessionDetailView {
                                 params
                             ));
                         }
+                    }
+                }
+
+                // AIR reports are a negotiated peripheral signal, distinct
+                // from typed ACP Diff content. Keep the default presentation
+                // count-only so a report with many paths cannot flood the
+                // trace; an explicit response binding overrides this fallback.
+                if !rendered_by_binding {
+                    if let Some(note) = air_file_change_report_note(method, params) {
+                        self.push_system_note(note);
                     }
                 }
             }

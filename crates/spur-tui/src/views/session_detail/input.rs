@@ -313,18 +313,56 @@ impl SessionDetailView {
 
                 // Permission handling when a permission is pending.
                 if self.react_trace.has_pending_permission() {
-                    use crate::action::PermissionChoice;
-                    match key.code {
-                        KeyCode::Char('y') => {
-                            return Some(Action::PermissionGrant(PermissionChoice::Allow));
+                    let option_count = self.pending_permission_option_count;
+                    if option_count <= 9 {
+                        if let KeyCode::Char(key) = key.code {
+                            if let Some(index) = key
+                                .to_digit(10)
+                                .and_then(|digit| digit.checked_sub(1))
+                                .map(|index| index as usize)
+                                .filter(|index| *index < option_count)
+                            {
+                                return Some(Action::PermissionGrant(
+                                    crate::action::PermissionChoice::SelectIndex(index),
+                                ));
+                            }
                         }
-                        KeyCode::Char('n') => {
-                            return Some(Action::PermissionGrant(PermissionChoice::Deny));
+                    } else {
+                        match key.code {
+                            KeyCode::Char(digit)
+                                if digit.is_ascii_digit() && key.modifiers.is_empty() =>
+                            {
+                                let max_digits = option_count.to_string().len();
+                                if self.pending_permission_number.len() < max_digits {
+                                    self.pending_permission_number.push(digit);
+                                }
+                                return None;
+                            }
+                            KeyCode::Backspace => {
+                                self.pending_permission_number.pop();
+                                return None;
+                            }
+                            KeyCode::Enter => {
+                                let selected = self
+                                    .pending_permission_number
+                                    .parse::<usize>()
+                                    .ok()
+                                    .and_then(|number| number.checked_sub(1))
+                                    .filter(|index| *index < option_count);
+                                self.pending_permission_number.clear();
+                                if let Some(index) = selected {
+                                    return Some(Action::PermissionGrant(
+                                        crate::action::PermissionChoice::SelectIndex(index),
+                                    ));
+                                }
+                                return None;
+                            }
+                            KeyCode::Esc if !self.pending_permission_number.is_empty() => {
+                                self.pending_permission_number.clear();
+                                return None;
+                            }
+                            _ => {}
                         }
-                        KeyCode::Char('a') => {
-                            return Some(Action::PermissionGrant(PermissionChoice::AlwaysAllow));
-                        }
-                        _ => {}
                     }
                 }
 
@@ -395,11 +433,28 @@ impl SessionDetailView {
         }
     }
 
+    fn permission_key_owned(&self, key: &KeyEvent) -> bool {
+        if !self.react_trace.has_pending_permission() {
+            return false;
+        }
+        let option_count = self.pending_permission_option_count;
+        if option_count <= 9 {
+            matches!(key.code, KeyCode::Char(digit)
+                if key.modifiers.is_empty()
+                    && digit.to_digit(10)
+                        .and_then(|value| value.checked_sub(1))
+                        .is_some_and(|index| (index as usize) < option_count))
+        } else {
+            matches!(key.code, KeyCode::Char(digit)
+                if key.modifiers.is_empty() && digit.is_ascii_digit())
+                || matches!(key.code, KeyCode::Backspace | KeyCode::Enter)
+                || (matches!(key.code, KeyCode::Esc) && !self.pending_permission_number.is_empty())
+        }
+    }
+
     fn key_owner(&self, key: &KeyEvent) -> KeyOwner {
         // Pending permission keys outrank even an open picker shell.
-        if self.react_trace.has_pending_permission()
-            && matches!(key.code, KeyCode::Char('y' | 'n' | 'a'))
-        {
+        if self.permission_key_owned(key) {
             KeyOwner::View
         } else if self.completion.is_active() {
             let is_trigger_driven = self.completion.is_trigger_driven();
@@ -445,8 +500,7 @@ impl SessionDetailView {
                 KeyOwner::View
             } else {
                 // Pending permission keys are never Composer-owned.
-                let is_permission_key = self.react_trace.has_pending_permission()
-                    && matches!(key.code, KeyCode::Char('y' | 'n' | 'a'));
+                let is_permission_key = self.permission_key_owned(key);
                 let is_tab_owned_by_composer = !self.input_bar.is_empty()
                     && matches!(key.code, KeyCode::Tab | KeyCode::BackTab);
                 let is_composer_editing = (matches!(

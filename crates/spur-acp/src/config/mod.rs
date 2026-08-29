@@ -1400,7 +1400,7 @@ mod tests {
     }
 
     #[test]
-    fn seed_template_codex_uses_agentclientprotocol_adapter_1_1_2() {
+    fn seed_template_codex_uses_agentclientprotocol_adapter_1_7_0() {
         let seeds = load_seed_template();
         let codex = seeds
             .entries
@@ -1412,7 +1412,7 @@ mod tests {
             codex.effective_args(),
             vec![
                 "--yes".to_owned(),
-                "@agentclientprotocol/codex-acp@1.1.2".to_owned(),
+                "@agentclientprotocol/codex-acp@1.7.0".to_owned(),
             ]
         );
     }

@@ -20,9 +20,7 @@ fn query_csv(db_path: &Path, sql: &str) -> String {
         for idx in 0..column_count {
             fields.push(match row.get_ref(idx).expect("read column") {
                 duckdb::types::ValueRef::Null => String::new(),
-                duckdb::types::ValueRef::Text(value) => {
-                    String::from_utf8_lossy(value).into_owned()
-                }
+                duckdb::types::ValueRef::Text(value) => String::from_utf8_lossy(value).into_owned(),
                 other => format!("{other:?}"),
             });
         }

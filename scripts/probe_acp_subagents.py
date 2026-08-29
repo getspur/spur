@@ -41,7 +41,7 @@ from typing import Any, Optional
 
 JsonRpcId = str | int
 TERMINAL_DRAIN_TIMEOUT = 2.0
-DEFAULT_CODEX_PACKAGE = "@agentclientprotocol/codex-acp@1.1.2"
+DEFAULT_CODEX_PACKAGE = "@agentclientprotocol/codex-acp@1.7.0"
 MALFORMED_ROLE_WARNING = "Ignoring malformed agent role definition"
 CODEX_PROFILE_NAME = "spur-profile-probe-primary"
 CODEX_CHILD_ROLE_NAME = "spur-profile-probe-child"

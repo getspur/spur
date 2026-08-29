@@ -30,6 +30,7 @@ const BASES: &[ToolFamily] = &[
     ToolFamily::Fetch,
     ToolFamily::SwitchMode,
     ToolFamily::Plan,
+    ToolFamily::Subagent,
     ToolFamily::Mcp,
     ToolFamily::Unknown,
 ];

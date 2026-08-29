@@ -26,6 +26,30 @@ fn mcp_title_classifies_as_mcp() {
 }
 
 #[test]
+fn codex_v1_7_dotted_mcp_title_classifies_as_mcp() {
+    let tc = ToolCall::new("tc-codex-mcp-title", "mcp.github.search").kind(ToolKind::Other);
+    assert_eq!(
+        adapter::classify_tool(&tc, AgentKind::CodexAcp),
+        ToolFamily::Mcp
+    );
+}
+
+#[test]
+fn codex_v1_7_mcp_metadata_classifies_as_mcp_independent_of_title() {
+    let meta = json!({"is_mcp_tool_call": true})
+        .as_object()
+        .expect("object")
+        .clone();
+    let tc = ToolCall::new("tc-codex-mcp-meta", "GitHub search")
+        .kind(ToolKind::Other)
+        .meta(meta);
+    assert_eq!(
+        adapter::classify_tool(&tc, AgentKind::CodexAcp),
+        ToolFamily::Mcp
+    );
+}
+
+#[test]
 fn todo_write_title_classifies_as_plan() {
     let tc = ToolCall::new("tc-3", "TodoWrite").kind(ToolKind::Other);
     assert_eq!(

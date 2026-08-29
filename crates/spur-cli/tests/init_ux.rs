@@ -47,7 +47,7 @@ fn install_hints_cover_all_seed_agents() {
 
 #[test]
 fn codex_onboarding_pins_current_acp_adapter() {
-    const ADAPTER: &str = "@agentclientprotocol/codex-acp@1.1.2";
+    const ADAPTER: &str = "@agentclientprotocol/codex-acp@1.7.0";
     let init_source = include_str!("../src/commands/init.rs");
     let cookbook = include_str!("../../../docs/spur/agent-onboarding-cookbook.md");
 

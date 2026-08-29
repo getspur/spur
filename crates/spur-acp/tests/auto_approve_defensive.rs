@@ -1,10 +1,9 @@
-//! Defensive selection: `auto_approve` must prefer an allow-class option
-//! even when it is not the first entry in the list. Exercised via a
-//! `#[doc(hidden)] pub` re-export from spur_acp::connection::native.
+//! Defensive selection: without an explicit user choice, permission handling
+//! never derives authorization from option order, labels, kinds, or metadata.
 
 use agent_client_protocol::schema::v1::{
     PermissionOption, PermissionOptionId, PermissionOptionKind, RequestPermissionOutcome,
-    RequestPermissionRequest, SelectedPermissionOutcome, ToolCallUpdate, ToolCallUpdateFields,
+    RequestPermissionRequest, ToolCallUpdate, ToolCallUpdateFields,
 };
 
 fn mk_request(options: Vec<PermissionOption>) -> RequestPermissionRequest {
@@ -13,7 +12,7 @@ fn mk_request(options: Vec<PermissionOption>) -> RequestPermissionRequest {
 }
 
 #[test]
-fn auto_approve_prefers_allow_always_when_not_first() {
+fn auto_approve_without_user_choice_cancels_mixed_options() {
     let opts = vec![
         PermissionOption::new(
             PermissionOptionId::new("reject_once"),
@@ -33,16 +32,11 @@ fn auto_approve_prefers_allow_always_when_not_first() {
     ];
     let req = mk_request(opts);
     let resp = spur_acp::connection::native::__test_auto_approve(&req).expect("ok");
-    match resp.outcome {
-        RequestPermissionOutcome::Selected(SelectedPermissionOutcome { option_id, .. }) => {
-            assert_eq!(option_id.0.as_ref(), "allow_always");
-        }
-        other => panic!("expected Selected, got {other:?}"),
-    }
+    assert!(matches!(resp.outcome, RequestPermissionOutcome::Cancelled));
 }
 
 #[test]
-fn auto_approve_prefers_allow_once_when_no_allow_always() {
+fn auto_approve_without_user_choice_does_not_infer_from_kind() {
     let opts = vec![
         PermissionOption::new(
             PermissionOptionId::new("reject_once"),
@@ -57,19 +51,11 @@ fn auto_approve_prefers_allow_once_when_no_allow_always() {
     ];
     let req = mk_request(opts);
     let resp = spur_acp::connection::native::__test_auto_approve(&req).expect("ok");
-    match resp.outcome {
-        RequestPermissionOutcome::Selected(SelectedPermissionOutcome { option_id, .. }) => {
-            assert_eq!(option_id.0.as_ref(), "allow_once");
-        }
-        other => panic!("expected Selected, got {other:?}"),
-    }
+    assert!(matches!(resp.outcome, RequestPermissionOutcome::Cancelled));
 }
 
 #[test]
-fn auto_approve_falls_back_to_first_when_no_allow_kind() {
-    // Degenerate case: only reject-class options. Preserves the historical
-    // "options.first()" fallback — caller sees an auto-reject, which is
-    // still defensible as a fail-safe.
+fn auto_approve_without_user_choice_cancels_all_reject_options() {
     let opts = vec![
         PermissionOption::new(
             PermissionOptionId::new("reject_once"),
@@ -84,22 +70,15 @@ fn auto_approve_falls_back_to_first_when_no_allow_kind() {
     ];
     let req = mk_request(opts);
     let resp = spur_acp::connection::native::__test_auto_approve(&req).expect("ok");
-    match resp.outcome {
-        RequestPermissionOutcome::Selected(SelectedPermissionOutcome { option_id, .. }) => {
-            assert_eq!(option_id.0.as_ref(), "reject_once");
-        }
-        other => panic!("expected Selected, got {other:?}"),
-    }
+    assert!(matches!(resp.outcome, RequestPermissionOutcome::Cancelled));
 }
 
 #[test]
-fn auto_approve_empty_options_uses_allow_default() {
+fn auto_approve_empty_options_cancels_instead_of_inventing_an_id() {
     let req = mk_request(vec![]);
     let resp = spur_acp::connection::native::__test_auto_approve(&req).expect("ok");
     match resp.outcome {
-        RequestPermissionOutcome::Selected(SelectedPermissionOutcome { option_id, .. }) => {
-            assert_eq!(option_id.0.as_ref(), "allow");
-        }
-        other => panic!("expected Selected, got {other:?}"),
+        RequestPermissionOutcome::Cancelled => {}
+        other => panic!("expected Cancelled, got {other:?}"),
     }
 }

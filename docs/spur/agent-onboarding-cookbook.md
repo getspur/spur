@@ -34,7 +34,7 @@ kind = "claude-code-acp"   # or one of the values below
 |---|---|
 | Claude Code via `claude -p --output-format stream-json` | `"claude-stream-json"` |
 | Claude Code via `@agentclientprotocol/claude-agent-acp` | `"claude-code-acp"` |
-| Codex via `@agentclientprotocol/codex-acp@1.1.2` (global install or npx) | `"codex-acp"` |
+| Codex via `@agentclientprotocol/codex-acp@1.7.0` (global install or npx) | `"codex-acp"` |
 | Kiro CLI (`kiro-cli acp`) | `"kiro"` |
 | Gemini CLI (`gemini --acp`) | `"gemini"` |
 | xAI Grok Build CLI (`grok agent stdio`) | `"grok"` |

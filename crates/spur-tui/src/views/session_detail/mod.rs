@@ -73,6 +73,11 @@ pub struct SessionDetailView {
     agent_cfg: std::sync::Arc<spur_acp::AgentConfig>,
     react_trace: ReactTrace,
     input_bar: InputBar,
+    /// Number of authoritative ACP permission options currently displayed.
+    pending_permission_option_count: usize,
+    /// Decimal option number being entered when a request has more than nine
+    /// choices. Bounded by the digit width of `pending_permission_option_count`.
+    pending_permission_number: String,
     cost: f64,
     /// Agent-reported cumulative session cost from `UsageUpdate::cost`.
     /// Kept separate from SPUR's own token-based estimate in `cost`.
@@ -1770,7 +1775,7 @@ mod composer_routing_tests {
         v.input_bar_mut_for_test().set_text("hello".into(), 5);
         v.push_permission("allow file write?", 60);
 
-        let act = press(&mut v, KeyCode::Char('y'));
+        let act = press(&mut v, KeyCode::Char('1'));
 
         assert_eq!(
             v.input_bar_text_for_test(),
@@ -1781,11 +1786,31 @@ mod composer_routing_tests {
             matches!(
                 act,
                 Some(Action::PermissionGrant(
-                    crate::action::PermissionChoice::Allow
+                    crate::action::PermissionChoice::SelectIndex(0)
                 ))
             ),
-            "expected PermissionGrant(Allow), got {:?}",
+            "expected PermissionGrant(SelectIndex(0)), got {:?}",
             act
+        );
+    }
+
+    #[test]
+    fn permission_option_ten_is_selectable_by_number_then_enter() {
+        let mut v = make_view();
+        v.push_permission_with_details("choose", "", 60, 12);
+
+        assert!(press(&mut v, KeyCode::Char('1')).is_none());
+        assert!(press(&mut v, KeyCode::Char('0')).is_none());
+        let act = press(&mut v, KeyCode::Enter);
+
+        assert!(
+            matches!(
+                act,
+                Some(Action::PermissionGrant(
+                    crate::action::PermissionChoice::SelectIndex(9)
+                ))
+            ),
+            "expected PermissionGrant(SelectIndex(9)), got {act:?}"
         );
     }
 

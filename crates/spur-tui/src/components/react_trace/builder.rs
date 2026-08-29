@@ -434,9 +434,12 @@ impl ReactTrace {
                     ]));
                     if *pending {
                         let hint_text = if *countdown > 0 {
-                            format!("   [y]es [n]o [a]lways  (auto-deny in {}s)", countdown)
+                            format!(
+                                "   Select an advertised option (auto-cancel in {}s)",
+                                countdown
+                            )
                         } else {
-                            "   [y]es [n]o [a]lways".to_string()
+                            "   Select an advertised option".to_string()
                         };
                         lines.push(Line::from(vec![Span::styled(
                             hint_text,
@@ -1459,9 +1462,12 @@ impl ReactTrace {
                     );
                     if *pending {
                         let hint_text = if *countdown > 0 {
-                            format!("   [y]es [n]o [a]lways  (auto-deny in {}s)", countdown)
+                            format!(
+                                "   Select an advertised option (auto-cancel in {}s)",
+                                countdown
+                            )
                         } else {
-                            "   [y]es [n]o [a]lways".to_string()
+                            "   Select an advertised option".to_string()
                         };
                         push_wrapped(
                             &mut rows,

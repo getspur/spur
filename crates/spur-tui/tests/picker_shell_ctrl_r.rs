@@ -175,7 +175,7 @@ fn pending_permission_y_outranks_history_picker() {
     v.push_permission("allow file write?", 60);
 
     // Press plain 'y' — must emit PermissionGrant(Allow), not reach picker.
-    let act = press(&mut v, KeyCode::Char('y'));
+    let act = press(&mut v, KeyCode::Char('1'));
 
     assert_eq!(
         v.input_bar_text_for_test(),
@@ -183,7 +183,10 @@ fn pending_permission_y_outranks_history_picker() {
         "permission key must not type into bar"
     );
     assert!(
-        matches!(act, Some(Action::PermissionGrant(PermissionChoice::Allow))),
+        matches!(
+            act,
+            Some(Action::PermissionGrant(PermissionChoice::SelectIndex(0)))
+        ),
         "expected PermissionGrant(Allow) while picker is open, got {:?}",
         act
     );

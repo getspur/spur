@@ -63,7 +63,7 @@ session_mode = "bypassPermissions"
 
 # ── codex-bin (via agentclientprotocol/codex-acp, direct binary) ──────
 # Executable that bridges the OpenAI Codex runtime with ACP over stdio.
-# Install: npm install -g @agentclientprotocol/codex-acp@1.1.2
+# Install: npm install -g @agentclientprotocol/codex-acp@1.7.0
 # Or use the version-pinned npx entry below.
 [[agents.entries]]
 name = "codex-bin"
@@ -87,7 +87,7 @@ dispatch = "prompt_text"
 [[agents.entries]]
 name = "codex"
 command = "npx"
-args = ["--yes", "@agentclientprotocol/codex-acp@1.1.2"]
+args = ["--yes", "@agentclientprotocol/codex-acp@1.7.0"]
 transport = "acp"
 kind = "codex-acp"
 role = "both"

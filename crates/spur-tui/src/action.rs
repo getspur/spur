@@ -331,12 +331,9 @@ pub enum Action {
 /// Which permission option the user selected.
 #[derive(Debug, Clone)]
 pub enum PermissionChoice {
-    /// [y] — select the first (allow) option
-    Allow,
-    /// [a] — select the always-allow option
-    AlwaysAllow,
-    /// [n] — deny (drop the reply channel)
-    Deny,
+    /// Select the option at this zero-based position in the authoritative ACP
+    /// `options` array. The app resolves it to that option's opaque ID.
+    SelectIndex(usize),
 }
 
 /// Identifies which view is active.

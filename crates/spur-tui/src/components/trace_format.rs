@@ -124,6 +124,7 @@ pub(crate) fn family_glyph(theme: &Theme, f: ToolFamily) -> (&'static str, Color
         ToolFamily::Fetch => ("↯ fetch", token(theme, "tool.family.fetch")),
         ToolFamily::SwitchMode => ("⇄ mode", token(theme, "tool.family.switch_mode")),
         ToolFamily::Plan => ("▸ plan", token(theme, "tool.family.task")),
+        ToolFamily::Subagent => ("→ subagent", token(theme, "tool.family.task")),
         ToolFamily::Mcp => ("⧉ mcp", token(theme, "tool.family.mcp")),
         ToolFamily::Unknown => ("🔧 ACT", token(theme, "tool.family.unknown")),
     }
@@ -162,6 +163,11 @@ pub(crate) fn input_summary(input: &ToolInputDisplay, tool: &str) -> String {
     match input {
         ToolInputDisplay::Path(p) => p.clone(),
         ToolInputDisplay::Diff { path, .. } => path.clone(),
+        ToolInputDisplay::FileChanges(changes) => match changes.as_slice() {
+            [] => tool.to_string(),
+            [change] => change.path.clone(),
+            [first, rest @ ..] => format!("{} +{} files", first.path, rest.len()),
+        },
         ToolInputDisplay::Command { cmd, .. } => cmd.clone(),
         ToolInputDisplay::Query(q) => format!("\"{}\"", q),
         ToolInputDisplay::Text(t) => t
@@ -244,7 +250,7 @@ pub(crate) fn observe_compact(
 
 // ─── Line builders ──────────────────────────────────────────────────
 
-const DIFF_PREVIEW_LINES: usize = 16;
+pub(crate) const DIFF_PREVIEW_LINES: usize = 16;
 
 /// Build display lines for a `ToolInputDisplay` value (3-space indented).
 pub(crate) fn input_display_lines(theme: &Theme, input: &ToolInputDisplay) -> Vec<Line<'static>> {
@@ -288,6 +294,60 @@ pub(crate) fn input_display_lines(theme: &Theme, input: &ToolInputDisplay) -> Ve
                     Span::raw("   "),
                     Span::styled(
                         format!("[… {} more]", total - DIFF_PREVIEW_LINES),
+                        Style::default().fg(subtle),
+                    ),
+                ]));
+            }
+        }
+        ToolInputDisplay::FileChanges(changes) => {
+            let stored_diff_lines = changes
+                .iter()
+                .map(|change| change.diff.lines().count())
+                .sum::<usize>();
+            let has_omitted_diff_lines = changes.iter().any(|change| change.omitted_lines > 0);
+            let mut rendered_files = 0usize;
+            let mut rendered_diff_lines = 0usize;
+            for change in changes {
+                if lines.len() >= DIFF_PREVIEW_LINES {
+                    break;
+                }
+                lines.push(Line::from(vec![
+                    Span::raw("   "),
+                    Span::styled(
+                        terminal_safe_text(&format!("{} · {}", change.kind.label(), change.path)),
+                        Style::default().fg(subtle).add_modifier(Modifier::BOLD),
+                    ),
+                ]));
+                rendered_files += 1;
+                for dl in change.diff.lines() {
+                    if lines.len() >= DIFF_PREVIEW_LINES {
+                        break;
+                    }
+                    let color = if dl.starts_with('+') {
+                        diff_add
+                    } else if dl.starts_with('-') {
+                        diff_del
+                    } else {
+                        subtle
+                    };
+                    lines.push(Line::from(vec![
+                        Span::raw("   "),
+                        Span::styled(terminal_safe_text(dl), Style::default().fg(color)),
+                    ]));
+                    rendered_diff_lines += 1;
+                }
+            }
+            let truncated = rendered_files < changes.len()
+                || rendered_diff_lines < stored_diff_lines
+                || has_omitted_diff_lines;
+            if truncated {
+                if lines.len() >= DIFF_PREVIEW_LINES {
+                    lines.pop();
+                }
+                lines.push(Line::from(vec![
+                    Span::raw("   "),
+                    Span::styled(
+                        "[… file-change preview truncated]",
                         Style::default().fg(subtle),
                     ),
                 ]));
