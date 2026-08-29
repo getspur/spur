@@ -74,8 +74,9 @@ fn command_array_to_display(command: &Value) -> Option<String> {
 
 /// Try to parse Codex's tool output into an `ObservePayload`.
 ///
-/// Recognised shape: any object containing at least one of
-/// `exit_code`, `stdout`, `stderr`.  Missing fields default to empty / None.
+/// Recognised shape: any object containing at least one of `exit_code`,
+/// `stdout`, `stderr`, or Codex ACP's `formatted_output`. Missing fields
+/// default to empty / None.
 pub fn try_extract_observe(raw: &Value) -> Option<ObservePayload> {
     let obj = raw.as_object()?;
 
@@ -86,7 +87,9 @@ pub fn try_extract_observe(raw: &Value) -> Option<ObservePayload> {
     let stdout = obj
         .get("stdout")
         .and_then(|v| v.as_str())
-        .unwrap_or("")
+        .filter(|value| !value.is_empty())
+        .or_else(|| obj.get("formatted_output").and_then(|v| v.as_str()))
+        .unwrap_or_default()
         .to_owned();
     let stderr = obj
         .get("stderr")
