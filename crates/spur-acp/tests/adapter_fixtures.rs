@@ -97,6 +97,27 @@ fn codex_exec_output_extracts_as_command_output() {
 }
 
 #[test]
+fn codex_formatted_exec_output_extracts_as_command_output() {
+    let n = load("codex-acp/tool_update_exec_formatted_exit0.json");
+    let SessionUpdate::ToolCallUpdate(tcu) = &n.update else {
+        panic!("expected ToolCallUpdate");
+    };
+    let raw = tcu.fields.raw_output.as_ref().expect("raw_output present");
+    let p = adapter::extract_observe(raw, AgentKind::CodexAcp);
+    match p {
+        ObservePayload::CommandOutput {
+            exit_code: Some(0),
+            ref stdout,
+            ref stderr,
+        } => {
+            assert_eq!(stdout, "done\n");
+            assert_eq!(stderr, "");
+        }
+        other => panic!("expected CommandOutput exit 0, got {:?}", other),
+    }
+}
+
+#[test]
 fn codex_apply_patch_classifies_as_edit() {
     let n = load("codex-acp/tool_call_apply_patch.json");
     let SessionUpdate::ToolCall(tc) = &n.update else {
