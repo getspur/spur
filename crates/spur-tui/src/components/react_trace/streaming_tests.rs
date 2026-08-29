@@ -1681,8 +1681,8 @@ fn build_display_lines_completed_shows_outcome_glyph() {
         .collect();
     assert!(joined.contains("✓"), "expected success glyph: {joined}");
     assert!(
-        joined.contains("hi"),
-        "collapsed display lines must preview command output: {joined}"
+        !joined.contains("hi"),
+        "collapsed display lines must remain summary-only: {joined}"
     );
     for f in spinner::BRAILLE {
         assert!(
@@ -1736,8 +1736,8 @@ fn virtual_rows_collapsed_completed_act_shows_outcome_no_spinner() {
         "virtual rows must contain outcome: {txt}"
     );
     assert!(
-        txt.contains("hi"),
-        "collapsed virtual rows must preview command output: {txt}"
+        !txt.contains("hi"),
+        "collapsed virtual rows must remain summary-only: {txt}"
     );
 }
 
