@@ -56,6 +56,158 @@ pub struct DelegationDescriptor {
     pub inherit_defaults: bool,
 }
 
+#[cfg(test)]
+mod mcp_servers_config_tests {
+    use super::*;
+
+    fn http_entry(name: &str) -> McpServerEntry {
+        McpServerEntry {
+            name: name.to_owned(),
+            enabled: true,
+            transport: McpServerTransport::Http {
+                url: "https://mcp.example.com/sse".to_owned(),
+                headers: std::collections::HashMap::new(),
+            },
+        }
+    }
+
+    fn stdio_entry(name: &str) -> McpServerEntry {
+        McpServerEntry {
+            name: name.to_owned(),
+            enabled: true,
+            transport: McpServerTransport::Stdio {
+                command: "npx".to_owned(),
+                args: vec![
+                    "-y".to_owned(),
+                    "@modelcontextprotocol/server-github".to_owned(),
+                ],
+                env: std::collections::HashMap::new(),
+            },
+        }
+    }
+
+    #[test]
+    fn toml_round_trip_preserves_entries() {
+        let src = r#"
+[[mcp_servers.entries]]
+name = "github"
+enabled = false
+
+[mcp_servers.entries.transport]
+transport = "stdio"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-github"]
+
+[mcp_servers.entries.transport.env]
+GITHUB_TOKEN = "tok"
+"#;
+        let cfg: SpurConfig = toml::from_str(src).expect("parse");
+        assert_eq!(cfg.mcp_servers.entries.len(), 1);
+        let entry = &cfg.mcp_servers.entries[0];
+        assert_eq!(entry.name, "github");
+        assert!(!entry.enabled);
+        let out = toml::to_string(&cfg).expect("serialize");
+        let back: SpurConfig = toml::from_str(&out).expect("re-parse");
+        assert_eq!(back.mcp_servers, cfg.mcp_servers);
+    }
+
+    #[test]
+    fn both_transport_blocks_is_deserialize_error() {
+        let src = r#"
+[[mcp_servers.entries]]
+name = "bad"
+
+[mcp_servers.entries.transport]
+transport = "stdio"
+command = "npx"
+url = "https://x"
+"#;
+        assert!(toml::from_str::<SpurConfig>(src).is_err());
+    }
+
+    #[test]
+    fn validate_rejects_reserved_and_empty() {
+        let mut entry = http_entry("spur-mcp");
+        assert!(entry.validate().is_err(), "reserved name");
+        entry = http_entry("notebook");
+        assert!(entry.validate().is_err());
+        entry = http_entry("spur-worker-mcp");
+        assert!(entry.validate().is_err());
+        entry.name = "  ".to_owned();
+        assert!(entry.validate().is_err(), "empty name");
+    }
+
+    #[test]
+    fn validate_rejects_empty_payloads() {
+        let mut entry = stdio_entry("s1");
+        if let McpServerTransport::Stdio { command, .. } = &mut entry.transport {
+            *command = "   ".to_owned();
+        }
+        assert!(entry.validate().is_err(), "empty command");
+
+        let mut http = http_entry("h1");
+        if let McpServerTransport::Http { url, .. } = &mut http.transport {
+            *url = "ftp://nope".to_owned();
+        }
+        assert!(http.validate().is_err(), "non-http scheme");
+        if let McpServerTransport::Http { url, .. } = &mut http.transport {
+            *url = String::new();
+        }
+        assert!(http.validate().is_err(), "empty url");
+    }
+
+    #[test]
+    fn upsert_replaces_in_place_and_remove_missing_errors() {
+        let mut cfg = SpurConfig::default();
+        ConfigPatch::McpServerUpsert {
+            entry: http_entry("a"),
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        ConfigPatch::McpServerUpsert {
+            entry: stdio_entry("b"),
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        let replaced = stdio_entry("a");
+        ConfigPatch::McpServerUpsert { entry: replaced }
+            .apply(&mut cfg)
+            .unwrap();
+        assert_eq!(
+            cfg.mcp_servers.entries.len(),
+            2,
+            "upsert replaces, never duplicates"
+        );
+        assert_eq!(cfg.mcp_servers.entries[0].name, "a");
+        assert!(matches!(
+            cfg.mcp_servers.entries[0].transport,
+            McpServerTransport::Stdio { .. }
+        ));
+
+        let err = ConfigPatch::McpServerRemove { name: "zzz".into() }.apply(&mut cfg);
+        assert!(err.is_err(), "remove missing name must fail");
+        ConfigPatch::McpServerRemove { name: "b".into() }
+            .apply(&mut cfg)
+            .unwrap();
+        assert_eq!(cfg.mcp_servers.entries.len(), 1);
+    }
+
+    #[test]
+    fn patch_section_id_is_mcp() {
+        assert_eq!(
+            ConfigPatch::McpServerUpsert {
+                entry: http_entry("x")
+            }
+            .section_id(),
+            "mcp"
+        );
+        assert_eq!(
+            ConfigPatch::McpServerRemove { name: "x".into() }.section_id(),
+            "mcp"
+        );
+    }
+}
+
 impl Default for DelegationDescriptor {
     fn default() -> Self {
         Self {
@@ -536,6 +688,86 @@ impl SkillsConfig {
     }
 }
 
+/// Names users may not assign to configured MCP servers. Colliding with a
+/// SPUR-managed entry would shadow the fixed injection set.
+pub const RESERVED_MCP_SERVER_NAMES: &[&str] = &["spur-mcp", "notebook", "spur-worker-mcp"];
+
+/// User-configured MCP servers (`/configure mcp`). Injected into brain
+/// sessions only; workers keep the curated `spur-worker-mcp` catalog.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct McpServersConfig {
+    pub entries: Vec<McpServerEntry>,
+}
+
+impl McpServersConfig {
+    pub fn is_default(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct McpServerEntry {
+    /// Unique, non-reserved identifier (`RESERVED_MCP_SERVER_NAMES`).
+    pub name: String,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    pub transport: McpServerTransport,
+}
+
+/// Exactly one transport per entry. The enum makes both transports
+/// unrepresentable in Rust, while serde rejects fields from another variant.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "transport", rename_all = "lowercase", deny_unknown_fields)]
+pub enum McpServerTransport {
+    Stdio {
+        command: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        args: Vec<String>,
+        #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+        env: std::collections::HashMap<String, String>,
+    },
+    Http {
+        url: String,
+        #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+        headers: std::collections::HashMap<String, String>,
+    },
+}
+
+impl McpServerEntry {
+    /// Enforces the `MCP-ENTRY-VALIDATION` payload gate. Name uniqueness is
+    /// enforced by upsert-replace in [`ConfigPatch::apply`].
+    pub fn validate(&self) -> anyhow::Result<()> {
+        let name = self.name.trim();
+        anyhow::ensure!(!name.is_empty(), "mcp server name must not be empty");
+        anyhow::ensure!(
+            !RESERVED_MCP_SERVER_NAMES.contains(&name),
+            "mcp server name '{name}' is reserved"
+        );
+        match &self.transport {
+            McpServerTransport::Stdio { command, .. } => anyhow::ensure!(
+                !command.trim().is_empty(),
+                "mcp server '{}' stdio command must not be empty",
+                self.name
+            ),
+            McpServerTransport::Http { url, .. } => {
+                let url = url.trim();
+                anyhow::ensure!(
+                    !url.is_empty(),
+                    "mcp server '{}' http url must not be empty",
+                    self.name
+                );
+                anyhow::ensure!(
+                    url.starts_with("http://") || url.starts_with("https://"),
+                    "mcp server '{}' http url must use http(s)",
+                    self.name
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SpurConfig {
     #[serde(default)]
@@ -578,6 +810,9 @@ pub struct SpurConfig {
     /// configs visually unchanged.
     #[serde(default, skip_serializing_if = "TuiConfig::is_default")]
     pub tui: TuiConfig,
+    /// User-configured MCP servers injected into brain sessions.
+    #[serde(default, skip_serializing_if = "McpServersConfig::is_default")]
+    pub mcp_servers: McpServersConfig,
     /// Code-graph / embedding sidecar knobs.
     #[serde(default, skip_serializing_if = "GraphConfig::is_default")]
     pub graph: GraphConfig,
@@ -629,6 +864,10 @@ impl GraphConfig {
 pub const GRAPH_EMBEDDING_ALIASES: &[&str] = &["nomic", "coderank", "jina-code"];
 
 /// One-section mutation for persist-then-apply `/configure` saves (`SAVE-APPLY`).
+#[expect(
+    clippy::large_enum_variant,
+    reason = "boxing the existing Agent variant requires a cross-crate API change"
+)]
 #[derive(Debug, Clone)]
 pub enum ConfigPatch {
     Agent {
@@ -643,6 +882,12 @@ pub enum ConfigPatch {
     TuiTheme(String),
     TuiDisablePasteBurst(bool),
     SkillsProjectionMode(SkillsProjectionMode),
+    McpServerUpsert {
+        entry: McpServerEntry,
+    },
+    McpServerRemove {
+        name: String,
+    },
 }
 
 impl ConfigPatch {
@@ -652,6 +897,7 @@ impl ConfigPatch {
             Self::GraphEmbeddingModel { .. } | Self::GraphOverlayFsmonitor(_) => "graph",
             Self::TuiEditMode(_) | Self::TuiTheme(_) | Self::TuiDisablePasteBurst(_) => "tui",
             Self::SkillsProjectionMode(_) => "skills",
+            Self::McpServerUpsert { .. } | Self::McpServerRemove { .. } => "mcp",
         }
     }
 
@@ -668,6 +914,26 @@ impl ConfigPatch {
             Self::TuiTheme(name) => cfg.tui.theme = name.clone(),
             Self::TuiDisablePasteBurst(v) => cfg.tui.disable_paste_burst = *v,
             Self::SkillsProjectionMode(mode) => cfg.skills.projection_mode = *mode,
+            Self::McpServerUpsert { entry } => {
+                entry.validate()?;
+                match cfg
+                    .mcp_servers
+                    .entries
+                    .iter_mut()
+                    .find(|configured| configured.name == entry.name)
+                {
+                    Some(slot) => slot.clone_from(entry),
+                    None => cfg.mcp_servers.entries.push(entry.clone()),
+                }
+            }
+            Self::McpServerRemove { name } => {
+                let before = cfg.mcp_servers.entries.len();
+                cfg.mcp_servers.entries.retain(|entry| entry.name != *name);
+                anyhow::ensure!(
+                    cfg.mcp_servers.entries.len() < before,
+                    "mcp server '{name}' is not configured"
+                );
+            }
             Self::Agent {
                 name,
                 updated_entry,
