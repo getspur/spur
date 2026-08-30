@@ -8,11 +8,15 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph, Wrap},
     Frame,
 };
-use spur_acp::{config::GraphConfig, AgentConfig, ProfileConfig, SpurEvent};
+use spur_acp::{
+    config::{GraphConfig, McpServersConfig},
+    AgentConfig, ProfileConfig, SpurEvent,
+};
 
 use crate::action::Action;
 use crate::configure_section::{parse_configure_arg, ConfigureSection};
 
+use super::mcp_servers_tui::McpServersPane;
 use super::settings_graph::GraphPane;
 use super::settings_skills::SkillsPane;
 use super::settings_tui::TuiPane;
@@ -49,6 +53,7 @@ enum BrowserPane {
     Sections,
     Agents,
     Fields,
+    Mcp,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -245,6 +250,7 @@ pub struct AgentConfigBrowserView {
     graph_pane: GraphPane,
     tui_pane: TuiPane,
     skills_pane: SkillsPane,
+    mcp_pane: McpServersPane,
     draft: Option<AgentConfigDraft>,
     edit_buffer: Option<String>,
     validation_error: Option<DraftValidationError>,
@@ -262,6 +268,7 @@ impl AgentConfigBrowserView {
             graph_pane: GraphPane::new(None, Default::default()),
             tui_pane: TuiPane::new(),
             skills_pane: SkillsPane::new(),
+            mcp_pane: McpServersPane::new(),
             draft: None,
             edit_buffer: None,
             validation_error: None,
@@ -285,6 +292,10 @@ impl AgentConfigBrowserView {
 
     pub fn set_graph_config(&mut self, graph: &GraphConfig) {
         self.graph_pane = GraphPane::new(graph.embedding_model.as_deref(), graph.overlay_fsmonitor);
+    }
+
+    pub fn set_mcp_config(&mut self, mcp: &McpServersConfig) {
+        self.mcp_pane.set_mcp_config(mcp);
     }
 
     pub fn replace_agent_config(&mut self, name: &str, updated: AgentConfig) {
@@ -350,7 +361,10 @@ impl AgentConfigBrowserView {
             .unwrap_or(0);
         self.pane = match section {
             ConfigureSection::Agents => BrowserPane::Agents,
-            _ => BrowserPane::Fields,
+            ConfigureSection::Mcp => BrowserPane::Mcp,
+            ConfigureSection::Graph | ConfigureSection::Tui | ConfigureSection::Skills => {
+                BrowserPane::Fields
+            }
         };
         self.apply_preselect(agent.as_deref());
     }
@@ -364,7 +378,10 @@ impl AgentConfigBrowserView {
         self.section = ConfigureSection::ALL[self.selected_section];
         self.pane = match self.section {
             ConfigureSection::Agents => BrowserPane::Agents,
-            _ => BrowserPane::Fields,
+            ConfigureSection::Mcp => BrowserPane::Mcp,
+            ConfigureSection::Graph | ConfigureSection::Tui | ConfigureSection::Skills => {
+                BrowserPane::Fields
+            }
         };
     }
 
@@ -374,10 +391,16 @@ impl AgentConfigBrowserView {
                 BrowserPane::Sections => BrowserPane::Agents,
                 BrowserPane::Agents => BrowserPane::Fields,
                 BrowserPane::Fields => BrowserPane::Sections,
+                BrowserPane::Mcp => BrowserPane::Sections,
             };
         } else {
+            let content_pane = if self.section == ConfigureSection::Mcp {
+                BrowserPane::Mcp
+            } else {
+                BrowserPane::Fields
+            };
             self.pane = match self.pane {
-                BrowserPane::Sections => BrowserPane::Fields,
+                BrowserPane::Sections => content_pane,
                 _ => BrowserPane::Sections,
             };
         }
@@ -389,6 +412,7 @@ impl AgentConfigBrowserView {
             ConfigureSection::Graph => self.graph_pane.handle_key(key),
             ConfigureSection::Tui => self.tui_pane.handle_key(key),
             ConfigureSection::Skills => self.skills_pane.handle_key(key),
+            ConfigureSection::Mcp => self.mcp_pane.handle_key(key),
         }
     }
 
@@ -509,6 +533,7 @@ impl AgentConfigBrowserView {
                 ConfigureSection::Graph => self.graph_pane.render(frame, panes.detail),
                 ConfigureSection::Tui => self.tui_pane.render(frame, panes.detail),
                 ConfigureSection::Skills => self.skills_pane.render(frame, panes.detail),
+                ConfigureSection::Mcp => self.mcp_pane.render(frame, panes.detail),
                 ConfigureSection::Agents => {}
             }
         }
@@ -727,6 +752,9 @@ impl View for AgentConfigBrowserView {
     fn handle_key(&mut self, key: KeyEvent, _ctx: &ViewContext) -> Option<Action> {
         if self.edit_buffer.is_some() {
             return self.handle_editing_key(key);
+        }
+        if self.section == ConfigureSection::Mcp && self.mcp_pane.form_active() {
+            return self.mcp_pane.handle_key(key);
         }
 
         match key.code {
@@ -985,6 +1013,40 @@ mod tests {
             view.section_for_test(),
             crate::configure_section::ConfigureSection::Graph
         );
+    }
+
+    #[test]
+    fn mcp_token_focuses_mcp_section_and_routes_keys_to_the_pane() {
+        let lineage = spur_core::ExecutorLineage::new();
+        let ctx = test_ctx(&lineage);
+        let mut view = AgentConfigBrowserView::new(vec![configured_agent()], Some("mcp".into()));
+        view.set_mcp_config(&spur_acp::config::McpServersConfig {
+            entries: vec![spur_acp::config::McpServerEntry {
+                name: "github".into(),
+                enabled: false,
+                transport: spur_acp::config::McpServerTransport::Http {
+                    url: "https://example.test/mcp".into(),
+                    headers: Default::default(),
+                },
+            }],
+        });
+
+        assert_eq!(
+            view.section_for_test(),
+            crate::configure_section::ConfigureSection::Mcp
+        );
+        assert!(matches!(
+            view.handle_key(key(KeyCode::Char(' ')), &ctx),
+            Some(Action::ConfigSaveRequested {
+                patch: spur_acp::config::ConfigPatch::McpServerUpsert {
+                    entry: spur_acp::config::McpServerEntry {
+                        ref name,
+                        enabled: true,
+                        ..
+                    }
+                }
+            }) if name == "github"
+        ));
     }
 
     #[test]

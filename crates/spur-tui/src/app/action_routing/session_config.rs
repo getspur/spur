@@ -85,6 +85,11 @@ impl App {
             ConfigPatch::GraphEmbeddingModel { .. }
             | ConfigPatch::GraphOverlayFsmonitor(_)
             | ConfigPatch::SkillsProjectionMode(_) => {}
+            ConfigPatch::McpServerUpsert { .. } | ConfigPatch::McpServerRemove { .. } => {
+                if let Some(browser) = self.agent_config_browser.as_mut() {
+                    browser.set_mcp_config(&self.config.mcp_servers);
+                }
+            }
         }
         self.dirty = true;
     }
@@ -239,7 +244,9 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use spur_acp::config::{ConfigPatch, EditorMode, OverlayFsmonitorMode};
+    use spur_acp::config::{
+        ConfigPatch, EditorMode, McpServerEntry, McpServerTransport, OverlayFsmonitorMode,
+    };
     use tokio::sync::mpsc;
 
     fn app_with_agent(tx: Option<mpsc::Sender<UserInput>>) -> App {
@@ -462,6 +469,119 @@ mod tests {
             app.config.graph.overlay_fsmonitor,
             OverlayFsmonitorMode::Auto
         );
+    }
+
+    fn mcp_entry(name: &str, enabled: bool) -> McpServerEntry {
+        McpServerEntry {
+            name: name.into(),
+            enabled,
+            transport: McpServerTransport::Http {
+                url: "https://example.test/mcp".into(),
+                headers: Default::default(),
+            },
+        }
+    }
+
+    #[test]
+    fn mcp_upsert_refreshes_open_browser_after_persist_ok() {
+        let (tx, mut rx) = mpsc::channel(8);
+        let mut app = App::new(Some(tx), false);
+        app.process_nav(Action::NavigateTo(ViewId::AgentConfigBrowser {
+            preselect: Some("mcp".into()),
+        }));
+        app.process_action(Action::ConfigSaveRequested {
+            patch: ConfigPatch::McpServerUpsert {
+                entry: mcp_entry("github", false),
+            },
+        });
+        assert!(app.config.mcp_servers.entries.is_empty());
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(UserInput::UpdateConfig {
+                patch: ConfigPatch::McpServerUpsert { .. }
+            })
+        ));
+
+        app.handle_spur_event(SpurEvent::now(SpurEventBody::ConfigUpdateResult {
+            section: "mcp".into(),
+            ok: true,
+            message: "saved - applies to next session".into(),
+        }));
+
+        assert_eq!(app.config.mcp_servers.entries.len(), 1);
+        let lineage = spur_core::ExecutorLineage::new();
+        let ctx = crate::views::ViewContext::test_ctx(&lineage);
+        let browser = app.agent_config_browser.as_mut().expect("open browser");
+        assert!(matches!(
+            crate::views::View::handle_key(browser, crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Char(' '),
+                crossterm::event::KeyModifiers::NONE,
+            ), &ctx),
+            Some(Action::ConfigSaveRequested {
+                patch: ConfigPatch::McpServerUpsert {
+                    entry: McpServerEntry {
+                        ref name,
+                        enabled: true,
+                        ..
+                    }
+                }
+            }) if name == "github"
+        ));
+    }
+
+    #[test]
+    fn mcp_remove_refreshes_open_browser_after_persist_ok() {
+        let (tx, _rx) = mpsc::channel(8);
+        let mut config = spur_acp::SpurConfig::default();
+        config.mcp_servers.entries = vec![mcp_entry("github", true), mcp_entry("linear", false)];
+        let mut app = App::new_with_config(
+            Some(tx),
+            false,
+            std::sync::Arc::new(config),
+            crate::landing::LandingDecision::ShowDashboard,
+        );
+        app.process_nav(Action::NavigateTo(ViewId::AgentConfigBrowser {
+            preselect: Some("mcp".into()),
+        }));
+        app.process_action(Action::ConfigSaveRequested {
+            patch: ConfigPatch::McpServerRemove {
+                name: "github".into(),
+            },
+        });
+
+        app.handle_spur_event(SpurEvent::now(SpurEventBody::ConfigUpdateResult {
+            section: "mcp".into(),
+            ok: true,
+            message: "saved - applies to next session".into(),
+        }));
+
+        assert_eq!(
+            app.config
+                .mcp_servers
+                .entries
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["linear"]
+        );
+        let lineage = spur_core::ExecutorLineage::new();
+        let ctx = crate::views::ViewContext::test_ctx(&lineage);
+        let browser = app.agent_config_browser.as_mut().expect("open browser");
+        assert!(matches!(
+            crate::views::View::handle_key(browser, crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Char(' '),
+                crossterm::event::KeyModifiers::NONE,
+            ), &ctx),
+            Some(Action::ConfigSaveRequested {
+                patch: ConfigPatch::McpServerUpsert {
+                    entry: McpServerEntry {
+                        ref name,
+                        enabled: true,
+                        ..
+                    }
+                }
+            }) if name == "linear"
+        ));
     }
 
     #[test]

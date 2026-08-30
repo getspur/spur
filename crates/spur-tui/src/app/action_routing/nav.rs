@@ -32,6 +32,7 @@ impl App {
             Action::NavigateTo(ViewId::AgentConfigBrowser { preselect }) => {
                 let entries = self.config.agents.entries.clone();
                 let graph = self.config.graph.clone();
+                let mcp = self.config.mcp_servers.clone();
                 if let Some(view) = self.agent_config_browser.as_mut() {
                     view.set_entries(entries, preselect.clone());
                 } else {
@@ -40,6 +41,7 @@ impl App {
                 }
                 if let Some(view) = self.agent_config_browser.as_mut() {
                     view.set_graph_config(&graph);
+                    view.set_mcp_config(&mcp);
                 }
                 self.navigate_to(ViewId::AgentConfigBrowser { preselect });
                 None
@@ -146,7 +148,7 @@ mod tests {
     use super::*;
     use crate::views::{View, ViewContext};
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-    use spur_acp::config::{ConfigPatch, OverlayFsmonitorMode};
+    use spur_acp::config::{ConfigPatch, McpServerEntry, McpServerTransport, OverlayFsmonitorMode};
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
@@ -178,6 +180,47 @@ mod tests {
             Some(Action::ConfigSaveRequested {
                 patch: ConfigPatch::GraphOverlayFsmonitor(OverlayFsmonitorMode::Auto)
             })
+        ));
+    }
+
+    #[test]
+    fn configure_mcp_reopen_refreshes_confirmed_entries() {
+        let mut app = App::new(None, false);
+        app.process_nav(Action::NavigateTo(ViewId::AgentConfigBrowser {
+            preselect: Some("mcp".into()),
+        }));
+
+        std::sync::Arc::make_mut(&mut app.config)
+            .mcp_servers
+            .entries = vec![McpServerEntry {
+            name: "github".into(),
+            enabled: false,
+            transport: McpServerTransport::Http {
+                url: "https://example.test/mcp".into(),
+                headers: Default::default(),
+            },
+        }];
+        app.process_nav(Action::NavigateTo(ViewId::AgentConfigBrowser {
+            preselect: Some("mcp".into()),
+        }));
+
+        let lineage = spur_core::ExecutorLineage::new();
+        let ctx = ViewContext::test_ctx(&lineage);
+        let browser = app
+            .agent_config_browser
+            .as_mut()
+            .expect("configure browser should be open");
+        assert!(matches!(
+            browser.handle_key(key(KeyCode::Char(' ')), &ctx),
+            Some(Action::ConfigSaveRequested {
+                patch: ConfigPatch::McpServerUpsert {
+                    entry: McpServerEntry {
+                        ref name,
+                        enabled: true,
+                        ..
+                    }
+                }
+            }) if name == "github"
         ));
     }
 }
