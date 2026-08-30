@@ -6,10 +6,17 @@ pub enum ConfigureSection {
     Graph,
     Tui,
     Skills,
+    Mcp,
 }
 
 impl ConfigureSection {
-    pub const ALL: [Self; 4] = [Self::Agents, Self::Graph, Self::Tui, Self::Skills];
+    pub const ALL: [Self; 5] = [
+        Self::Agents,
+        Self::Graph,
+        Self::Tui,
+        Self::Skills,
+        Self::Mcp,
+    ];
 
     pub fn parse_token(token: &str) -> Option<Self> {
         match token.trim().to_ascii_lowercase().as_str() {
@@ -17,6 +24,7 @@ impl ConfigureSection {
             "graph" => Some(Self::Graph),
             "tui" => Some(Self::Tui),
             "skills" | "skill" => Some(Self::Skills),
+            "mcp" => Some(Self::Mcp),
             _ => None,
         }
     }
@@ -27,6 +35,7 @@ impl ConfigureSection {
             Self::Graph => "graph",
             Self::Tui => "tui",
             Self::Skills => "skills",
+            Self::Mcp => "mcp",
         }
     }
 
@@ -36,6 +45,7 @@ impl ConfigureSection {
             Self::Graph => "Graph",
             Self::Tui => "TUI",
             Self::Skills => "Skills",
+            Self::Mcp => "MCP Servers",
         }
     }
 }
@@ -94,5 +104,14 @@ mod tests {
         assert_eq!(ConfigureSection::Graph.list_label(), "Graph");
         assert_eq!(ConfigureSection::Tui.list_label(), "TUI");
         assert_eq!(ConfigureSection::Skills.list_label(), "Skills");
+    }
+
+    #[test]
+    fn mcp_token_focuses_mcp_section() {
+        assert_eq!(parse_configure_arg("mcp"), (ConfigureSection::Mcp, None));
+        assert_eq!(ConfigureSection::Mcp.as_str(), "mcp");
+        assert_eq!(ConfigureSection::Mcp.list_label(), "MCP Servers");
+        assert!(ConfigureSection::ALL.contains(&ConfigureSection::Mcp));
+        assert_eq!(ConfigureSection::ALL.len(), 5);
     }
 }

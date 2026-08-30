@@ -5,6 +5,7 @@ pub mod explore;
 pub mod insights;
 pub mod issue_browser;
 pub mod loop_browser;
+pub mod mcp_servers_tui;
 #[cfg(feature = "markdown")]
 pub mod mermaid_viewer;
 pub mod plan_browser;

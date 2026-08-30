@@ -84,9 +84,12 @@ fn stable_notebook_nonce_differs_across_repos() {
 #[test]
 #[cfg(not(feature = "disable-notebook-mcp"))]
 fn brain_mcp_servers_preinclude_notebook_stdio_proxy_on_nonce_socket() {
-    let servers =
-        spur_core::notebook::brain_mcp_servers("http://127.0.0.1:3939/mcp", "fixture-nonce")
-            .expect("brain MCP servers");
+    let servers = spur_core::notebook::brain_mcp_servers(
+        "http://127.0.0.1:3939/mcp",
+        "fixture-nonce",
+        &spur_acp::config::McpServersConfig::default(),
+    )
+    .expect("brain MCP servers");
 
     assert!(servers.iter().any(|server| match server {
         McpServer::Http(http) => http.name == "spur-mcp",
@@ -108,9 +111,12 @@ fn brain_mcp_servers_preinclude_notebook_stdio_proxy_on_nonce_socket() {
 #[test]
 #[cfg(feature = "disable-notebook-mcp")]
 fn brain_mcp_servers_omits_notebook_when_feature_disabled() {
-    let servers =
-        spur_core::notebook::brain_mcp_servers("http://127.0.0.1:3939/mcp", "fixture-nonce")
-            .expect("brain MCP servers");
+    let servers = spur_core::notebook::brain_mcp_servers(
+        "http://127.0.0.1:3939/mcp",
+        "fixture-nonce",
+        &spur_acp::config::McpServersConfig::default(),
+    )
+    .expect("brain MCP servers");
 
     assert!(servers.iter().any(|server| match server {
         McpServer::Http(http) => http.name == "spur-mcp",
@@ -123,6 +129,94 @@ fn brain_mcp_servers_omits_notebook_when_feature_disabled() {
         )),
         "notebook stdio MCP must be absent with disable-notebook-mcp"
     );
+}
+
+#[cfg(not(feature = "disable-notebook-mcp"))]
+fn user_cfg(entries: &[spur_acp::config::McpServerEntry]) -> spur_acp::config::McpServersConfig {
+    spur_acp::config::McpServersConfig {
+        entries: entries.to_vec(),
+    }
+}
+
+#[test]
+#[cfg(not(feature = "disable-notebook-mcp"))]
+fn brain_mcp_servers_appends_enabled_user_entries_after_fixed() {
+    use spur_acp::config::{McpServerEntry, McpServerTransport};
+
+    let mut github = McpServerEntry {
+        name: "github".to_owned(),
+        enabled: true,
+        transport: McpServerTransport::Stdio {
+            command: "npx".to_owned(),
+            args: vec![
+                "-y".to_owned(),
+                "@modelcontextprotocol/server-github".to_owned(),
+            ],
+            env: [("GITHUB_TOKEN".to_owned(), "tok".to_owned())]
+                .into_iter()
+                .collect(),
+        },
+    };
+    let remote = McpServerEntry {
+        name: "remote".to_owned(),
+        enabled: false,
+        transport: McpServerTransport::Http {
+            url: "https://mcp.example.com/sse".to_owned(),
+            headers: [("Authorization".to_owned(), "Bearer x".to_owned())]
+                .into_iter()
+                .collect(),
+        },
+    };
+
+    let servers = spur_core::notebook::brain_mcp_servers(
+        "http://127.0.0.1:3939/mcp",
+        "fixture-nonce",
+        &user_cfg(&[github.clone(), remote]),
+    )
+    .expect("assemble");
+
+    assert_eq!(servers.len(), 3);
+    match &servers[0] {
+        McpServer::Http(http) => assert_eq!(http.name, "spur-mcp"),
+        other => panic!("expected fixed spur-mcp HTTP server first, got {other:?}"),
+    }
+    match &servers[1] {
+        McpServer::Stdio(stdio) => assert_eq!(stdio.name, "notebook"),
+        other => panic!("expected fixed notebook stdio server second, got {other:?}"),
+    }
+    match &servers[2] {
+        McpServer::Stdio(stdio) => {
+            assert_eq!(stdio.name, "github");
+            assert_eq!(stdio.command, PathBuf::from("npx"));
+            assert_eq!(
+                stdio.args,
+                vec![
+                    "-y".to_owned(),
+                    "@modelcontextprotocol/server-github".to_owned(),
+                ]
+            );
+            assert_eq!(stdio.env.len(), 1);
+            assert_eq!(stdio.env[0].name, "GITHUB_TOKEN");
+        }
+        other => panic!("expected configured stdio server, got {other:?}"),
+    }
+
+    let baseline = spur_core::notebook::brain_mcp_servers(
+        "http://127.0.0.1:3939/mcp",
+        "fixture-nonce",
+        &user_cfg(&[]),
+    )
+    .expect("baseline");
+    assert_eq!(baseline.len(), 2);
+
+    github.enabled = false;
+    let all_disabled = spur_core::notebook::brain_mcp_servers(
+        "http://127.0.0.1:3939/mcp",
+        "fixture-nonce",
+        &user_cfg(&[github]),
+    )
+    .expect("all disabled");
+    assert_eq!(all_disabled.len(), 2);
 }
 
 #[tokio::test]
