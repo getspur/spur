@@ -397,8 +397,11 @@ pub fn notebook_mcp_server(socket_nonce: &str) -> Result<McpServer, NotebookReso
     ))
 }
 
-fn user_mcp_server(entry: &McpServerEntry) -> McpServer {
-    match &entry.transport {
+fn user_mcp_server(
+    entry: &McpServerEntry,
+    socket_nonce: &str,
+) -> Result<McpServer, NotebookResolverError> {
+    let server = match &entry.transport {
         McpServerTransport::Stdio { command, args, env } => McpServer::Stdio(
             McpServerStdio::new(entry.name.clone(), command.clone())
                 .args(args.clone())
@@ -416,7 +419,17 @@ fn user_mcp_server(entry: &McpServerEntry) -> McpServer {
                     .collect(),
             ),
         ),
-    }
+        McpServerTransport::JuteDebug => {
+            let selection = notebook_launch_selection()?;
+            McpServer::Stdio(
+                McpServerStdio::new(entry.name.clone(), selection.path).args(vec![
+                    "--debug-mcp-proxy".to_string(),
+                    control_socket_path(socket_nonce).display().to_string(),
+                ]),
+            )
+        }
+    };
+    Ok(server)
 }
 
 /// MCP servers injected into every brain session.
@@ -448,12 +461,17 @@ pub fn brain_mcp_servers(
     #[cfg(not(feature = "disable-notebook-mcp"))]
     let mut servers = vec![spur_mcp, notebook_mcp_server(socket_nonce)?];
 
-    servers.extend(
-        user.entries
-            .iter()
-            .filter(|entry| entry.enabled)
-            .map(user_mcp_server),
-    );
+    let user_servers = user
+        .entries
+        .iter()
+        .filter(|entry| {
+            entry.enabled
+                && (!cfg!(feature = "disable-notebook-mcp")
+                    || !matches!(&entry.transport, McpServerTransport::JuteDebug))
+        })
+        .map(|entry| user_mcp_server(entry, socket_nonce))
+        .collect::<Result<Vec<_>, _>>()?;
+    servers.extend(user_servers);
     Ok(servers)
 }
 
