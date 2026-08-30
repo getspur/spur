@@ -18,6 +18,7 @@
 pub mod events;
 pub mod git;
 pub mod local_projects;
+pub mod probe;
 pub mod registry;
 pub mod response;
 pub mod server;
@@ -29,6 +30,10 @@ pub use events::McpEventSink;
 pub use local_projects::{
     LocalProjectAccess, LocalProjectCatalogMcpModule, LocalProjectCatalogStore,
     LocalProjectResolver,
+};
+pub use probe::{
+    probe_server, probe_server_with_timeout, ProbeOutcome, ProbeReport, ProbedTool,
+    DEFAULT_PROBE_TIMEOUT,
 };
 pub use registry::{
     ServerKind, ToolAuthority, ToolCallContext, ToolModule, ToolRegistry, ToolRegistryBuilder,
