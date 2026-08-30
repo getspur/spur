@@ -177,7 +177,7 @@ fn css_extraction_emits_low_noise_symbols_and_relations() {
 }
 ```
 
-Add companion assertions for source spans, `Contains`/`Defines`, nearest-containing-symbol edge origins, stylesheet attribute order, unquoted HTML attributes, CSS unquoted `url(...)`, empty/data URL rejection, fragment preservation, and malformed HTML/CSS file-node retention. Keep HTML and CSS as separately filterable test names.
+Add companion assertions for source spans, `Contains`/`Defines`, nearest-containing-symbol edge origins, stylesheet attribute order, unquoted HTML attributes, CSS unquoted simple `url(...)` targets plus quoted relative paths, empty/data URL rejection, fragment preservation, and malformed HTML/CSS file-node retention. Keep HTML and CSS as separately filterable test names. `tree-sitter-css 0.25.0` parses `url(../path)` through error-recovery nodes rather than `call_expression`; do not add a brittle multipart capture protocol for that unsupported shape.
 
 - [ ] **Step 3: Run the tests and record the expected RED failures**
 
@@ -278,6 +278,7 @@ git commit -m "feat(spur-graph): grammar-deps add HTML CSS parsers"
 - [ ] Configs use `LANGUAGE.into()`, declare both `tags` and `spur-edges`, and map only the approved existing node kinds.
 - [ ] `symbol_query_policy` exhaustively reuses tags for both languages.
 - [ ] The generic adapter recognizes parent capture `@link` with child `@link.name` and emits `RelationKind::Links` from the nearest extracted definition or file node.
+- [ ] Explicit CSS `string_content` captures named `import.name`, `import.path`, or `link.name` survive the generic string-content suppression used to avoid noisy literal captures.
 - [ ] Gate helpers recognize the `link` channel and expect HTML/CSS definition and relation rows.
 - [ ] Routing tests pass; semantic/query tests remain intentionally RED until their language query task lands.
 
@@ -377,6 +378,8 @@ Use the existing matcher/descriptor pattern. Extend `tree_sitter_language`, `con
 ```
 
 Add `"link" => Some(RelationKind::Links)` to the gate's capture-to-relation mirror. Do not overload `@reexport`: that path records re-export bookkeeping and is not a link.
+
+Extend the existing explicit string-content capture exception so CSS `string_content` nodes carrying `import.name`, `import.path`, or `link.name` reach edge emission. Keep the exception capture-driven and language-neutral; do not add a CSS-specialized extractor.
 
 - [ ] **Step 4: Verify routing GREEN and semantic contracts still RED for the expected reason**
 
@@ -508,7 +511,7 @@ git commit -m "feat(spur-graph): html-queries extract sections imports links"
 **Acceptance Criteria:**
 - [ ] Every `rule_set` emits `definition.section` named by its full `selectors` source, with boundary trimming only.
 - [ ] `keyframes_statement/keyframes_name` emits `definition.function`.
-- [ ] `declaration` and `last_declaration` property names beginning `--` emit `definition.constant`; ordinary properties do not.
+- [ ] `declaration` property names beginning `--` emit `definition.constant`; the grammar aliases `last_declaration` to `declaration`, so the same pattern covers an unterminated final declaration; ordinary properties do not.
 - [ ] `import_statement` supports quoted strings and `url(...)` targets as `@import`.
 - [ ] Other `url(...)` calls emit `@link`; quoted and unquoted targets are quote-free.
 - [ ] Empty/data URLs are rejected by the shared adapter and fragment targets are preserved as evidence.
@@ -545,12 +548,9 @@ Expected: FAIL due missing CSS captures/facts.
    (property_name) @name) @definition.constant
  (#match? @name "^--"))
 
-((last_declaration
-   (property_name) @name) @definition.constant
- (#match? @name "^--"))
 ```
 
-Do not capture individual class/id selector fragments or ordinary property names.
+Do not query `last_declaration`: it is not a named query node in `tree-sitter-css 0.25.0`. Do not capture individual class/id selector fragments or ordinary property names.
 
 - [ ] **Step 3: Implement import and URL patterns**
 
@@ -565,7 +565,7 @@ Use `import_statement`, `string_value/string_content`, `call_expression/function
  (#eq? @_function "url"))
 ```
 
-Adapt the unquoted argument node to the exact grammar node exposed by the fixture; keep the capture contract unchanged.
+Adapt the unquoted argument node to the exact grammar node exposed by the fixture; keep the capture contract unchanged. Simple unquoted values such as `url(card.png)` are supported. Relative paths containing `../` must be quoted because this grammar exposes the unquoted form only as error-recovery nodes.
 
 - [ ] **Step 4: Verify CSS GREEN**
 

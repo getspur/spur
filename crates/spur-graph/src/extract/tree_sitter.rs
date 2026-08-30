@@ -4066,12 +4066,77 @@ mod tests {
     }
 
     #[test]
+    fn html_id_sections_cover_self_closing_script_and_style_elements() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let source = r#"<img id="hero" />
+<script id=loader></script>
+<style id='theme'></style>
+"#;
+        fs::write(dir.path().join("index.html"), source).expect("write HTML fixture");
+
+        let (facts, _) = build_facts(dir.path(), None).expect("extract HTML");
+        assert_eq!(
+            extracted_definition_set(&facts),
+            BTreeSet::from([
+                "section:hero".to_owned(),
+                "section:loader".to_owned(),
+                "section:theme".to_owned(),
+            ])
+        );
+        assert_node_span_matches(
+            &facts,
+            node_with_label(&facts, "hero"),
+            source,
+            "<img id=\"hero\" />",
+        );
+        assert_node_span_matches(
+            &facts,
+            node_with_label(&facts, "loader"),
+            source,
+            "<script id=loader></script>",
+        );
+        assert_node_span_matches(
+            &facts,
+            node_with_label(&facts, "theme"),
+            source,
+            "<style id='theme'></style>",
+        );
+    }
+
+    #[test]
+    fn html_media_links_reject_similar_attributes_and_non_stylesheet_links() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::write(
+            dir.path().join("index.html"),
+            r#"<source src=stream.webm>
+<audio src="song.mp3"></audio>
+<video src=movie.mp4 poster='poster.jpg'></video>
+<img data-src=lazy.png>
+<a href-lang=en>Language</a>
+<link rel=icon href=favicon.ico>
+"#,
+        )
+        .expect("write HTML fixture");
+
+        let (facts, _) = build_facts(dir.path(), None).expect("extract HTML");
+        assert_eq!(
+            web_relation_set(&facts),
+            BTreeSet::from([
+                "links:movie.mp4".to_owned(),
+                "links:poster.jpg".to_owned(),
+                "links:song.mp3".to_owned(),
+                "links:stream.webm".to_owned(),
+            ])
+        );
+    }
+
+    #[test]
     fn css_extraction_normalizes_urls_and_rejects_noise() {
         let dir = tempfile::tempdir().expect("tempdir");
         fs::write(
             dir.path().join("site.css"),
             r##".hero {
-  background: url(../img/hero.png);
+  background: url("../img/hero.png");
   mask: url("#mask");
   empty-quoted: url("");
   empty-bare: url();
@@ -4089,6 +4154,31 @@ mod tests {
         );
         assert_relation_source(&facts, RelationKind::Links, "../img/hero.png", hero.node_id);
         assert_relation_source(&facts, RelationKind::Links, "#mask", hero.node_id);
+    }
+
+    #[test]
+    fn css_import_url_is_an_import_without_a_duplicate_link() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::write(dir.path().join("site.css"), r#"@import url("theme.css");"#)
+            .expect("write CSS fixture");
+
+        let (facts, _) = build_facts(dir.path(), None).expect("extract CSS");
+        assert_eq!(
+            web_relation_set(&facts),
+            BTreeSet::from(["imports:theme.css".to_owned()])
+        );
+    }
+
+    #[test]
+    fn css_custom_property_without_trailing_semicolon_is_a_constant() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let source = ":root { --brand: #f00 }\n";
+        fs::write(dir.path().join("site.css"), source).expect("write CSS fixture");
+
+        let (facts, _) = build_facts(dir.path(), None).expect("extract CSS");
+        let brand = node_with_label(&facts, "--brand");
+        assert_eq!(brand.kind, NodeKind::Constant);
+        assert_node_span_matches(&facts, brand, source, "--brand: #f00");
     }
 
     #[test]
