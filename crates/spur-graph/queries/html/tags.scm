@@ -8,7 +8,7 @@
        [(attribute_value) @name
         (quoted_attribute_value
           (attribute_value) @name)]))) @definition.section
- (#eq? @_attribute "id"))
+ (#match? @_attribute "^[iI][dD]$"))
 
 ; Self-closing elements use a distinct tag node in tree-sitter-html.
 ((element
@@ -18,7 +18,7 @@
        [(attribute_value) @name
         (quoted_attribute_value
           (attribute_value) @name)]))) @definition.section
- (#eq? @_attribute "id"))
+ (#match? @_attribute "^[iI][dD]$"))
 
 ; Script and style elements are distinct grammar nodes whose specialized start
 ; tags are aliased to start_tag in the public syntax tree.
@@ -29,7 +29,7 @@
        [(attribute_value) @name
         (quoted_attribute_value
           (attribute_value) @name)]))) @definition.section
- (#eq? @_attribute "id"))
+ (#match? @_attribute "^[iI][dD]$"))
 
 ((style_element
    (start_tag
@@ -38,4 +38,4 @@
        [(attribute_value) @name
         (quoted_attribute_value
           (attribute_value) @name)]))) @definition.section
- (#eq? @_attribute "id"))
+ (#match? @_attribute "^[iI][dD]$"))

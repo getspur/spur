@@ -1,7 +1,8 @@
 ; CSS imports written as a quoted string.
-(import_statement
-  (string_value
-    (string_content) @import.name @import.path)) @import
+((import_statement
+   (string_value
+     (string_content) @import.name @import.path)) @import
+ (#not-match? @import.name "^[[:space:]]*[dD][aA][tT][aA]:"))
 
 ; CSS imports written as url(...), quoted or simple-unquoted.
 ((import_statement
@@ -11,7 +12,8 @@
        . [(plain_value) @import.name @import.path
           (string_value
             (string_content) @import.name @import.path)] .))) @import
- (#eq? @_import_function "url"))
+ (#match? @_import_function "^[uU][rR][lL]$")
+ (#not-match? @import.name "^[[:space:]]*[dD][aA][tT][aA]:"))
 
 ; Asset URLs. Every call has an immediate named parent; rejecting an
 ; import-statement parent prevents @import url(...) from also becoming Links.
@@ -24,6 +26,6 @@
           (color_value) @link.name
           (string_value
             (string_content) @link.name)] .)) @link) @_url_parent
- (#eq? @_function "url")
- (#not-match? @_url_parent "^@import([[:space:]]|$)")
- (#not-match? @link.name "^[dD][aA][tT][aA]:"))
+ (#match? @_function "^[uU][rR][lL]$")
+ (#not-match? @_url_parent "^@[iI][mM][pP][oO][rR][tT]([[:space:]]|$)")
+ (#not-match? @link.name "^[[:space:]]*[dD][aA][tT][aA]:"))

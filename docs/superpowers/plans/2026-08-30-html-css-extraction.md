@@ -9,7 +9,7 @@
 
 **Goal:** Add standalone, low-noise HTML and CSS extraction to `spur-graph` for `.html`, `.htm`, and `.css` files.
 
-**Architecture:** Extend the existing registry-driven tree-sitter pipeline with two grammar-backed `Language` variants and SPUR-owned query sets. Add one generic `@link` capture channel beside the existing `@import` channel so a language can emit both `Imports` and `Links` without a specialized extractor; all definitions, containment, stable IDs, pending-edge resolution, and batch failure behavior remain shared.
+**Architecture:** Extend the existing registry-driven tree-sitter pipeline with two grammar-backed `Language` variants and SPUR-owned query sets. Add one generic `@link` capture channel beside the existing `@import` channel so a language can emit both `Imports` and `Links` without a specialized extractor; all definitions, containment, stable IDs, pending-edge resolution, and batch failure behavior remain shared. Web imports use a bounded URL-path resolver to bind existing workspace files, while Links stay unresolved URL evidence rather than entering bare-symbol lookup.
 
 **Tech Stack:** Rust 2021, `tree-sitter 0.25`, `tree-sitter-html 0.23.2`, `tree-sitter-css 0.25.0`, tree-sitter query files, existing `spur-graph` test helpers, `scripts/spur-cargo`.
 
@@ -23,6 +23,7 @@
 | `Cargo.lock` | Lock compatible transitive versions. |
 | `crates/spur-graph/src/extract/languages.rs` | Add language variants, grammar/config routing, registry rows, definition/relation contracts, the generic `@link` adapter, and focused tests. |
 | `crates/spur-graph/src/extract/tree_sitter.rs` | Extend the exhaustive symbol-query policy and add end-to-end extraction fixtures. |
+| `crates/spur-graph/src/store/build.rs` | Include the new query bytes in manifest invalidation and preserve workspace-file import bindings in artifacts. |
 | `crates/spur-graph/queries/html/tags.scm` | Capture ID-bearing HTML regions as sections. |
 | `crates/spur-graph/queries/html/spur-edges.scm` | Capture HTML imports and links. |
 | `crates/spur-graph/queries/css/tags.scm` | Capture CSS rule sets, keyframes, and custom properties. |
@@ -605,9 +606,22 @@ git commit -m "feat(spur-graph): css-queries extract rules imports links"
 **Suggested Worker:** claude-code-acp
 
 **Scope Boundary:**
-- IN scope: coverage README and read-only full-suite verification.
-- OUT of scope: changing Rust/query behavior to make a failing test green.
-- If the merged implementation fails, emit `risk` with the exact command/output and leave the README change uncommitted until the brain re-plans the owning task.
+- IN scope: coverage README, read-only full-suite verification, and review-driven
+  corrections required to make the merged semantic contract safe at the
+  extractor/artifact boundary.
+- Review-driven correction scope is limited to
+  `src/extract/tree_sitter.rs`, `src/store/build.rs`, the four HTML/CSS query
+  files, their focused regression tests, and this plan/README.
+- Any broader failure must be reported with the exact command/output rather
+  than expanding into unrelated crate behavior.
+
+The integrated review specifically gates manifest invalidation, local web
+import file binding, collision-safe unresolved Links, self-closing/token-list
+stylesheet links, and ASCII-case-insensitive HTML names/CSS `url` functions.
+The post-fix review additionally requires data imports to be omitted before
+artifact binding and forbids guessing that a root-relative URL is relative to
+the repository root; fragment-only and root-relative imports remain unresolved
+until a configured web document root exists.
 
 **Implementation:**
 

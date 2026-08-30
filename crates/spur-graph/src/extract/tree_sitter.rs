@@ -669,7 +669,11 @@ impl<'a> FactBuilder<'a> {
         let mut phantom_blocked_references = 0usize;
         let mut phantom_blocked_calls = 0usize;
         for edge in pending {
-            if edge.edge_kind == Some(GraphEdgeKind::CallsDyn) {
+            if edge.relation == RelationKind::Links {
+                // URL text is evidence, not a symbol name. A later dedicated
+                // URL/file resolver may bind it, but bare-symbol lookup must not.
+                self.add_pending_edge(&edge, None);
+            } else if edge.edge_kind == Some(GraphEdgeKind::CallsDyn) {
                 let mut candidates = Vec::new();
                 if let Some(indexed) = self.qualified_symbol_index.get(&edge.target_name) {
                     candidates.extend(indexed.iter().copied());
@@ -1018,6 +1022,27 @@ fn resolve_bare_pending_edge(
     }
 
     if edge.relation == RelationKind::Imports {
+        if let Some(source_file) = indexes.file_by_id.get(&edge.source).copied() {
+            if is_web_import_source_file(source_file) {
+                let target = edge
+                    .import_path
+                    .as_deref()
+                    .and_then(|path| web_import_target_path(source_file, path))
+                    .and_then(|path| indexes.files_by_label.get(&path).copied())
+                    .filter(|target| *target != edge.source);
+                if let Some(target) = target {
+                    builder.add_pending_edge_with_bind_method(
+                        edge,
+                        Some(target),
+                        Some("import_path"),
+                    );
+                } else {
+                    builder.add_pending_edge(edge, None);
+                }
+                return;
+            }
+        }
+
         let python_bare_import_path = is_python_bare_import_path(edge, indexes);
         if !python_bare_import_path {
             let path_candidates = module_path_resolution_candidates(builder, edge, indexes);
@@ -2211,6 +2236,71 @@ enum ImportLanguageFamily {
     Javascript,
 }
 
+pub(crate) fn is_web_import_source_file(path: &str) -> bool {
+    Path::new(path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            matches!(
+                extension.to_ascii_lowercase().as_str(),
+                "html" | "htm" | "css"
+            )
+        })
+}
+
+fn is_local_web_import_path(import_path: &str) -> bool {
+    let import_path = import_path.trim();
+    if import_path.is_empty() || import_path.starts_with("//") {
+        return false;
+    }
+    if import_path.starts_with('#') {
+        return true;
+    }
+    let Some((scheme, _)) = import_path.split_once(':') else {
+        return true;
+    };
+    !scheme.starts_with(|character: char| character.is_ascii_alphabetic())
+        || !scheme.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '+' | '-' | '.')
+        })
+}
+
+pub(crate) fn web_import_target_path(source_file: &str, import_path: &str) -> Option<String> {
+    if !is_web_import_source_file(source_file) || !is_local_web_import_path(import_path) {
+        return None;
+    }
+
+    let import_path = import_path.trim();
+    // A leading slash is document-root-relative, not repository-root-relative.
+    // Without a configured web root there is no sound workspace file binding.
+    if import_path.starts_with('/') {
+        return None;
+    }
+    let import_path = import_path.split(['?', '#']).next().unwrap_or_default();
+    if import_path.is_empty() {
+        return None;
+    }
+    let path = Path::new(source_file)
+        .parent()
+        .unwrap_or_else(|| Path::new(""))
+        .join(import_path);
+
+    let mut normalized = Vec::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::Normal(segment) => {
+                normalized.push(segment.to_string_lossy().into_owned())
+            }
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                normalized.pop()?;
+            }
+            std::path::Component::RootDir | std::path::Component::Prefix(_) => return None,
+        }
+    }
+    (!normalized.is_empty()).then(|| normalized.join("/"))
+}
+
 fn import_path_language_family_allows(source_file: &str, target_file: &str) -> bool {
     let Some(source_family) = import_language_family(source_file) else {
         return false;
@@ -2239,6 +2329,15 @@ pub(crate) fn classify_import_origin(
     workspace_index: &ImportWorkspaceIndex,
 ) -> ImportOriginClassification {
     let import_path = import_path.trim();
+    if is_web_import_source_file(source_file) {
+        return if import_path.to_ascii_lowercase().starts_with("data:")
+            || is_local_web_import_path(import_path)
+        {
+            ImportOriginClassification::Internal
+        } else {
+            external_import_origin(import_path, import_path, import_path)
+        };
+    }
     match import_language_family(source_file) {
         Some(ImportLanguageFamily::Rust) => {
             classify_rust_import_origin(import_path, workspace_index)
@@ -4069,6 +4168,34 @@ mod tests {
     }
 
     #[test]
+    fn html_extraction_handles_case_insensitive_names_and_stylesheet_tokens() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::write(
+            dir.path().join("index.html"),
+            r#"<DIV ID=app>
+  <A HREF=guide>Guide</A>
+  <IMG SRC=hero.png />
+  <LINK HREF=theme.css REL="alternate StyleSheet" />
+</DIV>"#,
+        )
+        .expect("write HTML fixture");
+
+        let (facts, _) = build_facts(dir.path(), None).expect("extract HTML");
+        assert_eq!(
+            extracted_definition_set(&facts),
+            BTreeSet::from(["section:app".to_owned()])
+        );
+        assert_eq!(
+            web_relation_set(&facts),
+            BTreeSet::from([
+                "imports:theme.css".to_owned(),
+                "links:guide".to_owned(),
+                "links:hero.png".to_owned(),
+            ])
+        );
+    }
+
+    #[test]
     fn html_id_sections_cover_self_closing_script_and_style_elements() {
         let dir = tempfile::tempdir().expect("tempdir");
         let source = r#"<img id="hero" />
@@ -4170,6 +4297,53 @@ mod tests {
             web_relation_set(&facts),
             BTreeSet::from(["imports:theme.css".to_owned()])
         );
+    }
+
+    #[test]
+    fn css_url_function_name_is_case_insensitive() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::write(
+            dir.path().join("site.css"),
+            ".hero { background: URL(hero.png); }\n@import UrL(\"theme.css\");\n",
+        )
+        .expect("write CSS fixture");
+
+        let (facts, _) = build_facts(dir.path(), None).expect("extract CSS");
+        assert_eq!(
+            web_relation_set(&facts),
+            BTreeSet::from(["imports:theme.css".to_owned(), "links:hero.png".to_owned(),])
+        );
+    }
+
+    #[test]
+    fn links_remain_unresolved_when_their_labels_collide_with_symbols() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::write(
+            dir.path().join("index.html"),
+            r#"<section id="guide"><a href="guide">Guide</a></section>"#,
+        )
+        .expect("write HTML fixture");
+        fs::write(
+            dir.path().join("site.css"),
+            "@keyframes fade { from { opacity: 0; } }\n.hero { background: url(fade); }\n",
+        )
+        .expect("write CSS fixture");
+
+        let (facts, _) = build_facts(dir.path(), None).expect("extract web files");
+        for target in ["guide", "fade"] {
+            let edge = facts
+                .edges
+                .iter()
+                .find(|edge| {
+                    edge.relation == RelationKind::Links
+                        && edge.target_label.as_deref() == Some(target)
+                })
+                .unwrap_or_else(|| panic!("missing link to {target}"));
+            assert_eq!(
+                edge.target_node_id, None,
+                "link target {target} must not bind through symbol lookup"
+            );
+        }
     }
 
     #[test]
@@ -4408,6 +4582,54 @@ mod tests {
                 "{import_path} should classify as external"
             );
         }
+    }
+
+    #[test]
+    fn classify_web_imports_and_resolve_workspace_paths() {
+        let workspace_index = ImportWorkspaceIndex::default();
+        for (source_file, import_path) in [
+            ("web/index.html", "./app.js"),
+            ("web/index.htm", "theme.css?v=2"),
+            ("web/index.html", "/theme.css"),
+            ("web/index.html", "#bootstrap"),
+            ("web/index.html", "data:text/javascript;base64,AAAA"),
+            ("web/styles/site.css", "../base.css"),
+        ] {
+            assert_eq!(
+                classify_import_origin(import_path, source_file, &workspace_index),
+                ImportOriginClassification::Internal,
+                "{source_file} import {import_path} should be workspace-local"
+            );
+        }
+        assert_eq!(
+            classify_import_origin(
+                "https://cdn.example/app.js",
+                "web/index.html",
+                &workspace_index
+            ),
+            external_import(
+                "https://cdn.example/app.js",
+                "https://cdn.example/app.js",
+                "https://cdn.example/app.js"
+            )
+        );
+
+        assert_eq!(
+            web_import_target_path("web/pages/index.html", "../app.js?v=2#boot").as_deref(),
+            Some("web/app.js")
+        );
+        assert_eq!(
+            web_import_target_path("web/styles/site.css", "/theme.css#screen"),
+            None
+        );
+        assert_eq!(
+            web_import_target_path("web/index.html", "https://cdn.example/app.js"),
+            None
+        );
+        assert_eq!(
+            web_import_target_path("web/index.html", "../../outside.css"),
+            None
+        );
     }
 
     #[test]
