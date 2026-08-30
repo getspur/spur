@@ -38,6 +38,8 @@ pub enum Language {
     Toml,
     Yaml,
     Mermaid,
+    Html,
+    Css,
 }
 
 /// Precision heuristic for common C runtime calls, not an exhaustive builtin list.
@@ -345,6 +347,8 @@ impl Language {
             Self::Toml => tree_sitter_toml_ng::LANGUAGE.into(),
             Self::Yaml => tree_sitter_yaml::LANGUAGE.into(),
             Self::Mermaid => tree_sitter_mermaid::LANGUAGE.into(),
+            Self::Html => tree_sitter_html::LANGUAGE.into(),
+            Self::Css => tree_sitter_css::LANGUAGE.into(),
         }
     }
 
@@ -369,6 +373,8 @@ impl Language {
             Self::Toml => toml_config(),
             Self::Yaml => yaml_config(),
             Self::Mermaid => mermaid_config(),
+            Self::Html => html_config(),
+            Self::Css => css_config(),
         }
     }
 
@@ -391,7 +397,9 @@ impl Language {
             | Self::Json
             | Self::Toml
             | Self::Yaml
-            | Self::Mermaid => &[],
+            | Self::Mermaid
+            | Self::Html
+            | Self::Css => &[],
         }
     }
 
@@ -416,6 +424,8 @@ impl Language {
             Self::Toml => "toml",
             Self::Yaml => "yaml",
             Self::Mermaid => "mermaid",
+            Self::Html => "html",
+            Self::Css => "css",
         }
     }
 }
@@ -836,6 +846,50 @@ fn mermaid_config() -> LanguageConfig {
     }
 }
 
+const HTML_DEFINITION_KIND_MAP: &[(&str, NodeKind)] = &[("definition.section", NodeKind::Section)];
+
+const CSS_DEFINITION_KIND_MAP: &[(&str, NodeKind)] = &[
+    ("definition.section", NodeKind::Section),
+    ("definition.function", NodeKind::Function),
+    ("definition.constant", NodeKind::Constant),
+];
+
+fn html_config() -> LanguageConfig {
+    LanguageConfig {
+        language: tree_sitter_html::LANGUAGE.into(),
+        inline_language: None,
+        queries: &[
+            ("tags", include_str!("../../queries/html/tags.scm")),
+            (
+                "spur-edges",
+                include_str!("../../queries/html/spur-edges.scm"),
+            ),
+        ],
+        definition_kind_map: HTML_DEFINITION_KIND_MAP,
+        relation_kind_map: None,
+        preserve_bare_import_path: true,
+        is_method: None,
+    }
+}
+
+fn css_config() -> LanguageConfig {
+    LanguageConfig {
+        language: tree_sitter_css::LANGUAGE.into(),
+        inline_language: None,
+        queries: &[
+            ("tags", include_str!("../../queries/css/tags.scm")),
+            (
+                "spur-edges",
+                include_str!("../../queries/css/spur-edges.scm"),
+            ),
+        ],
+        definition_kind_map: CSS_DEFINITION_KIND_MAP,
+        relation_kind_map: None,
+        preserve_bare_import_path: true,
+        is_method: None,
+    }
+}
+
 pub(crate) fn markdown_config() -> LanguageConfig {
     LanguageConfig {
         language: tree_sitter_md::LANGUAGE.into(),
@@ -1020,6 +1074,30 @@ fn mermaid_matcher(path: &std::path::Path) -> bool {
         })
 }
 
+const HTML_EXTENSIONS: &[&str] = &["html", "htm"];
+
+fn html_matcher(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            HTML_EXTENSIONS
+                .iter()
+                .any(|candidate| extension.eq_ignore_ascii_case(candidate))
+        })
+}
+
+const CSS_EXTENSIONS: &[&str] = &["css"];
+
+fn css_matcher(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            CSS_EXTENSIONS
+                .iter()
+                .any(|candidate| extension.eq_ignore_ascii_case(candidate))
+        })
+}
+
 pub(crate) fn language_registry() -> &'static [LanguageDescriptor] {
     &[
         LanguageDescriptor {
@@ -1154,6 +1232,20 @@ pub(crate) fn language_registry() -> &'static [LanguageDescriptor] {
             language: Language::Mermaid,
             label: "mermaid",
             extensions: &["mmd", "mermaid"],
+        },
+        LanguageDescriptor {
+            matcher: html_matcher,
+            factory: html_config,
+            language: Language::Html,
+            label: "html",
+            extensions: HTML_EXTENSIONS,
+        },
+        LanguageDescriptor {
+            matcher: css_matcher,
+            factory: css_config,
+            language: Language::Css,
+            label: "css",
+            extensions: CSS_EXTENSIONS,
         },
     ]
 }
@@ -1293,6 +1385,24 @@ pub(crate) fn emit_edges(
                             config.preserve_bare_import_path,
                         ),
                         relation,
+                        edge_kind: None,
+                        origin: crate::extract::tree_sitter::CallOrigin::Expression,
+                        receiver_text: None,
+                        scope_text: None,
+                    });
+                }
+            }
+            "link" => {
+                let source_id = nearest_parent(file_node_id, definitions, capture.node).node_id;
+                for target in contained_capture_text(capture, source, captures, "link.name") {
+                    if target.is_empty() || target.to_ascii_lowercase().starts_with("data:") {
+                        continue;
+                    }
+                    builder.pending_edges.push(PendingEdge {
+                        source: source_id,
+                        target_name: target,
+                        import_path: None,
+                        relation: RelationKind::Links,
                         edge_kind: None,
                         origin: crate::extract::tree_sitter::CallOrigin::Expression,
                         receiver_text: None,
@@ -2646,6 +2756,7 @@ mod gate_contract {
                 "reexport",
                 RelationKind::Imports,
             )),
+            "link" => Some(RelationKind::Links),
             "call" | "jsx_call" | "macro_call" => Some(RelationKind::Calls),
             "implements" => Some(RelationKind::Implements),
             "extends" => Some(RelationKind::Extends),
@@ -2807,6 +2918,14 @@ mod gate_contract {
                 relation_set(&["contains", "defines"]),
             ),
             (
+                Language::Html.label(),
+                relation_set(&["imports", "links", "contains", "defines"]),
+            ),
+            (
+                Language::Css.label(),
+                relation_set(&["imports", "links", "contains", "defines"]),
+            ),
+            (
                 Language::Markdown.label(),
                 // README's Markdown `imports` cell is `Y(links)`: the
                 // @import capture channel is remapped to RelationKind::Links.
@@ -2940,6 +3059,12 @@ mod gate_contract {
                 "definition.constant",
             ],
             Language::Mermaid => &["definition.module"],
+            Language::Html => &["definition.section"],
+            Language::Css => &[
+                "definition.constant",
+                "definition.function",
+                "definition.section",
+            ],
         }
     }
 

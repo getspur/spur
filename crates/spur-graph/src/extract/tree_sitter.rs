@@ -120,6 +120,8 @@ fn symbol_query_policy(language: Language) -> SymbolQueryPolicy {
         | Language::Toml
         | Language::Yaml
         | Language::Mermaid
+        | Language::Html
+        | Language::Css
         | Language::JupyterNotebook => SymbolQueryPolicy::ReuseTags,
         Language::Markdown => {
             SymbolQueryPolicy::Dedicated(include_str!("../../queries/markdown/symbols.scm"))
@@ -3589,7 +3591,7 @@ pub(crate) fn run_query<'tree>(
                 capture.node,
                 &mut string_context_by_node_id,
                 &mut string_context_ancestor_path,
-            ) && !is_string_content_import_capture(name, capture.node)
+            ) && !is_explicit_string_content_edge_capture(name, capture.node)
             {
                 continue;
             }
@@ -3604,16 +3606,17 @@ pub(crate) fn run_query<'tree>(
     hits
 }
 
-/// Go import paths grammatically live inside string literals, so their
-/// quote-free content captures must survive the string-context suppression.
-/// Scoped to Go's content node kinds so C/C++ `#include "..."` string_literal
-/// captures keep their historical suppression.
-fn is_string_content_import_capture(name: &str, node: Node<'_>) -> bool {
-    matches!(name, "import.name" | "import.path")
-        && matches!(
-            node.kind(),
-            "interpreted_string_literal_content" | "raw_string_literal_content"
-        )
+/// Some grammars expose quote-free import or link targets only as a named
+/// content node inside a string literal. Explicit edge captures on those
+/// content nodes must survive the general string-context noise suppression.
+fn is_explicit_string_content_edge_capture(name: &str, node: Node<'_>) -> bool {
+    match node.kind() {
+        "interpreted_string_literal_content" | "raw_string_literal_content" => {
+            matches!(name, "import.name" | "import.path")
+        }
+        "string_content" => matches!(name, "import.name" | "import.path" | "link.name"),
+        _ => false,
+    }
 }
 
 fn is_string_literal_context(
