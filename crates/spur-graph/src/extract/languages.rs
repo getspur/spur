@@ -2235,6 +2235,67 @@ mod gate_contract {
     use super::*;
 
     #[test]
+    fn html_paths_route_to_html_language() {
+        for path in ["index.html", "fragment.htm", "UPPER.HTML"] {
+            let language = Language::from_path(Path::new(path));
+            assert_eq!(language.map(Language::label), Some("html"), "{path}");
+        }
+        for path in ["theme.scss", "theme.less", "view.vue", "view.svelte"] {
+            assert_eq!(Language::from_path(Path::new(path)), None, "{path}");
+        }
+    }
+
+    #[test]
+    fn css_paths_route_to_css_language() {
+        for path in ["site.css", "UPPER.CSS"] {
+            let language = Language::from_path(Path::new(path));
+            assert_eq!(language.map(Language::label), Some("css"), "{path}");
+        }
+    }
+
+    fn assert_path_query_contract(
+        path: &str,
+        expected_definitions: &[&str],
+        expected_relations: &[&'static str],
+    ) {
+        let language = Language::from_path(Path::new(path)).expect("language must be registered");
+        let config = language.config();
+        assert_eq!(
+            compiled_definition_captures(language.label(), &config),
+            expected_definitions
+                .iter()
+                .map(|value| (*value).to_owned())
+                .collect()
+        );
+        assert_eq!(
+            compiled_relation_predicates(language, language.label(), &config),
+            relation_set(expected_relations)
+        );
+    }
+
+    #[test]
+    fn html_query_contract_is_complete() {
+        assert_path_query_contract(
+            "index.html",
+            &["definition.section"],
+            &["contains", "defines", "imports", "links"],
+        );
+    }
+
+    #[test]
+    fn css_query_contract_is_complete() {
+        assert_path_query_contract(
+            "site.css",
+            &[
+                "definition.constant",
+                "definition.function",
+                "definition.section",
+            ],
+            &["contains", "defines", "imports", "links"],
+        );
+    }
+
+    #[test]
     fn javascript_files_route_to_javascript_language() {
         for path in [
             "a.js", "b.jsx", "c.mjs", "d.cjs", "e.JS", "f.JSX", "g.MJS", "h.CJS",

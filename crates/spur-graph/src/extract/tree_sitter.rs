@@ -3786,7 +3786,336 @@ pub(crate) fn relative_path(root: &Path, path: &Path) -> anyhow::Result<String> 
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use super::*;
+
+    fn extracted_definition_set(facts: &GraphFacts) -> BTreeSet<String> {
+        facts
+            .nodes
+            .iter()
+            .filter(|node| {
+                !matches!(
+                    node.kind,
+                    NodeKind::File | NodeKind::External | NodeKind::McpTool
+                )
+            })
+            .map(|node| format!("{}:{}", node.kind.discriminator(), node.label))
+            .collect()
+    }
+
+    fn web_relation_set(facts: &GraphFacts) -> BTreeSet<String> {
+        facts
+            .edges
+            .iter()
+            .filter_map(|edge| {
+                let relation = match edge.relation {
+                    RelationKind::Imports => "imports",
+                    RelationKind::Links => "links",
+                    _ => return None,
+                };
+                edge.target_label
+                    .as_deref()
+                    .map(|target| format!("{relation}:{target}"))
+            })
+            .collect()
+    }
+
+    fn node_with_label<'a>(facts: &'a GraphFacts, label: &str) -> &'a GraphNode {
+        facts
+            .nodes
+            .iter()
+            .find(|node| node.label == label)
+            .unwrap_or_else(|| panic!("missing node `{label}`"))
+    }
+
+    fn file_node<'a>(facts: &'a GraphFacts, label: &str) -> &'a GraphNode {
+        facts
+            .nodes
+            .iter()
+            .find(|node| node.kind == NodeKind::File && node.label == label)
+            .unwrap_or_else(|| panic!("missing file node `{label}`"))
+    }
+
+    fn assert_node_span_matches(
+        facts: &GraphFacts,
+        node: &GraphNode,
+        source: &str,
+        expected_source: &str,
+    ) {
+        let span_id = node.source_span_id.expect("node source span");
+        let span = facts
+            .spans
+            .iter()
+            .find(|span| span.span_id == span_id)
+            .expect("source span record");
+        let start = source.find(expected_source).unwrap_or_else(|| {
+            panic!(
+                "expected source fragment for `{}` was not found",
+                node.label
+            )
+        });
+        let end = start + expected_source.len();
+        let line_at = |offset: usize| {
+            source.as_bytes()[..offset]
+                .iter()
+                .filter(|byte| **byte == b'\n')
+                .count() as u32
+                + 1
+        };
+
+        assert_eq!(span.start_byte, start as u32, "{} start byte", node.label);
+        assert_eq!(span.end_byte, end as u32, "{} end byte", node.label);
+        assert_eq!(span.start_line, line_at(start), "{} start line", node.label);
+        assert_eq!(span.end_line, line_at(end), "{} end line", node.label);
+    }
+
+    fn assert_graph_edge(
+        facts: &GraphFacts,
+        source: NodeId,
+        target: NodeId,
+        relation: RelationKind,
+    ) {
+        assert!(
+            facts.edges.iter().any(|edge| {
+                edge.source_node_id == source
+                    && edge.target_node_id == Some(target)
+                    && edge.relation == relation
+            }),
+            "missing {relation:?} edge from {source:?} to {target:?}"
+        );
+    }
+
+    fn assert_relation_source(
+        facts: &GraphFacts,
+        relation: RelationKind,
+        target: &str,
+        expected_source: NodeId,
+    ) {
+        let edge = facts
+            .edges
+            .iter()
+            .find(|edge| edge.relation == relation && edge.target_label.as_deref() == Some(target))
+            .unwrap_or_else(|| panic!("missing {relation:?} edge to `{target}`"));
+        assert_eq!(edge.source_node_id, expected_source, "edge to `{target}`");
+    }
+
+    #[test]
+    fn html_extraction_emits_low_noise_symbols_and_relations() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::write(
+            dir.path().join("index.html"),
+            r#"<main id="app">
+  <script src="app.js">function embedded() {}</script>
+  <link href="theme.css" rel="stylesheet">
+  <a href="/docs/start.html">Docs</a>
+  <img src="hero.png" class="hero">
+  <div class="not-a-symbol">content</div>
+  <style>.embedded { color: red; }</style>
+</main>
+"#,
+        )
+        .expect("write HTML fixture");
+
+        let (facts, _) = build_facts(dir.path(), None).expect("extract HTML");
+        assert_eq!(
+            extracted_definition_set(&facts),
+            BTreeSet::from(["section:app".to_owned()])
+        );
+        assert_eq!(
+            web_relation_set(&facts),
+            BTreeSet::from([
+                "imports:app.js".to_owned(),
+                "imports:theme.css".to_owned(),
+                "links:/docs/start.html".to_owned(),
+                "links:hero.png".to_owned(),
+            ])
+        );
+    }
+
+    #[test]
+    fn css_extraction_emits_low_noise_symbols_and_relations() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::write(
+            dir.path().join("site.css"),
+            r#"@import "base.css";
+@keyframes fade { from { opacity: 0; } to { opacity: 1; } }
+:root { --brand: #f00; color: red; }
+.card > img { background-image: url("../img/card.png"); }
+"#,
+        )
+        .expect("write CSS fixture");
+
+        let (facts, _) = build_facts(dir.path(), None).expect("extract CSS");
+        assert_eq!(
+            extracted_definition_set(&facts),
+            BTreeSet::from([
+                "constant:--brand".to_owned(),
+                "function:fade".to_owned(),
+                "section:.card > img".to_owned(),
+                "section::root".to_owned(),
+            ])
+        );
+        assert_eq!(
+            web_relation_set(&facts),
+            BTreeSet::from([
+                "imports:base.css".to_owned(),
+                "links:../img/card.png".to_owned(),
+            ])
+        );
+    }
+
+    #[test]
+    fn html_extraction_preserves_spans_containment_and_nearest_owner_edges() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let source = "<main id=\"app\">\n  <section id=\"panel\"><img src=\"panel.png\"></section>\n  <img src=\"hero.png\">\n</main>\n<img src=\"root.png\">\n";
+        fs::write(dir.path().join("index.html"), source).expect("write HTML fixture");
+
+        let (facts, _) = build_facts(dir.path(), None).expect("extract HTML");
+        let file = file_node(&facts, "index.html");
+        let app = node_with_label(&facts, "app");
+        let panel = node_with_label(&facts, "panel");
+
+        assert_node_span_matches(
+            &facts,
+            app,
+            source,
+            "<main id=\"app\">\n  <section id=\"panel\"><img src=\"panel.png\"></section>\n  <img src=\"hero.png\">\n</main>",
+        );
+        assert_node_span_matches(
+            &facts,
+            panel,
+            source,
+            "<section id=\"panel\"><img src=\"panel.png\"></section>",
+        );
+        assert_graph_edge(&facts, file.node_id, app.node_id, RelationKind::Contains);
+        assert_graph_edge(&facts, app.node_id, panel.node_id, RelationKind::Contains);
+        assert_graph_edge(&facts, app.node_id, panel.node_id, RelationKind::Defines);
+        assert!(!facts.edges.iter().any(|edge| {
+            edge.source_node_id == file.node_id
+                && edge.target_node_id == Some(app.node_id)
+                && edge.relation == RelationKind::Defines
+        }));
+        assert_relation_source(&facts, RelationKind::Links, "panel.png", panel.node_id);
+        assert_relation_source(&facts, RelationKind::Links, "hero.png", app.node_id);
+        assert_relation_source(&facts, RelationKind::Links, "root.png", file.node_id);
+    }
+
+    #[test]
+    fn css_extraction_preserves_spans_containment_and_nearest_owner_edges() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let source = ":root {\n  --brand: #f00;\n  background-image: url(root.png);\n}\n.card { background: url(card.png); }\n@import \"base.css\";\n";
+        fs::write(dir.path().join("site.css"), source).expect("write CSS fixture");
+
+        let (facts, _) = build_facts(dir.path(), None).expect("extract CSS");
+        let file = file_node(&facts, "site.css");
+        let root = node_with_label(&facts, ":root");
+        let brand = node_with_label(&facts, "--brand");
+        let card = node_with_label(&facts, ".card");
+
+        assert_node_span_matches(
+            &facts,
+            root,
+            source,
+            ":root {\n  --brand: #f00;\n  background-image: url(root.png);\n}",
+        );
+        assert_node_span_matches(&facts, brand, source, "--brand: #f00;");
+        assert_graph_edge(&facts, file.node_id, root.node_id, RelationKind::Contains);
+        assert_graph_edge(&facts, root.node_id, brand.node_id, RelationKind::Contains);
+        assert_graph_edge(&facts, root.node_id, brand.node_id, RelationKind::Defines);
+        assert_relation_source(&facts, RelationKind::Links, "root.png", root.node_id);
+        assert_relation_source(&facts, RelationKind::Links, "card.png", card.node_id);
+        assert_relation_source(&facts, RelationKind::Imports, "base.css", file.node_id);
+    }
+
+    #[test]
+    fn html_extraction_handles_attribute_order_and_unquoted_values() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::write(
+            dir.path().join("index.html"),
+            r#"<link href=first.css rel=stylesheet>
+<link rel="stylesheet" href="second.css">
+<script src=app.js></script>
+<a href=/docs/start.html>Docs</a>
+<img src=hero.png>
+"#,
+        )
+        .expect("write HTML fixture");
+
+        let (facts, _) = build_facts(dir.path(), None).expect("extract HTML");
+        let file = file_node(&facts, "index.html");
+        assert_eq!(
+            web_relation_set(&facts),
+            BTreeSet::from([
+                "imports:app.js".to_owned(),
+                "imports:first.css".to_owned(),
+                "imports:second.css".to_owned(),
+                "links:/docs/start.html".to_owned(),
+                "links:hero.png".to_owned(),
+            ])
+        );
+        for (relation, target) in [
+            (RelationKind::Imports, "app.js"),
+            (RelationKind::Imports, "first.css"),
+            (RelationKind::Imports, "second.css"),
+            (RelationKind::Links, "/docs/start.html"),
+            (RelationKind::Links, "hero.png"),
+        ] {
+            assert_relation_source(&facts, relation, target, file.node_id);
+        }
+    }
+
+    #[test]
+    fn css_extraction_normalizes_urls_and_rejects_noise() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::write(
+            dir.path().join("site.css"),
+            r##".hero {
+  background: url(../img/hero.png);
+  mask: url("#mask");
+  empty-quoted: url("");
+  empty-bare: url();
+  inline: url(data:image/png,AAAA);
+}
+"##,
+        )
+        .expect("write CSS fixture");
+
+        let (facts, _) = build_facts(dir.path(), None).expect("extract CSS");
+        let hero = node_with_label(&facts, ".hero");
+        assert_eq!(
+            web_relation_set(&facts),
+            BTreeSet::from(["links:#mask".to_owned(), "links:../img/hero.png".to_owned(),])
+        );
+        assert_relation_source(&facts, RelationKind::Links, "../img/hero.png", hero.node_id);
+        assert_relation_source(&facts, RelationKind::Links, "#mask", hero.node_id);
+    }
+
+    #[test]
+    fn malformed_html_retains_file_node() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::write(
+            dir.path().join("broken.html"),
+            "<main id=\"kept\"><div><a href=\"broken.html\">",
+        )
+        .expect("write malformed HTML fixture");
+
+        let (facts, _) = build_facts(dir.path(), None).expect("extract malformed HTML");
+        file_node(&facts, "broken.html");
+    }
+
+    #[test]
+    fn malformed_css_retains_file_node() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::write(
+            dir.path().join("broken.css"),
+            ".card { color: red; background: url(\"broken.png\");",
+        )
+        .expect("write malformed CSS fixture");
+
+        let (facts, _) = build_facts(dir.path(), None).expect("extract malformed CSS");
+        file_node(&facts, "broken.css");
+    }
 
     #[test]
     fn run_query_compresses_shared_string_context_ancestor_paths() {
