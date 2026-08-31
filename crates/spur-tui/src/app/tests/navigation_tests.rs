@@ -684,4 +684,57 @@ mod view_history_tests {
             "Esc from PlanBrowser must return to SessionDetail"
         );
     }
+
+    #[test]
+    fn state_transform_new_session_resets_cross_session_history() {
+        let mut app = App::new_for_tests();
+        seed_session(&mut app, "brain-1");
+        app.process_action(Action::NavigateTo(ViewId::PlanBrowser));
+        assert_eq!(app.current_view, ViewId::PlanBrowser);
+
+        seed_session(&mut app, "brain-2");
+
+        assert_eq!(
+            app.current_view,
+            ViewId::SessionDetail(SessionId("brain-2".into()))
+        );
+        assert_eq!(
+            app.view_history,
+            vec![ViewId::Dashboard],
+            "a new session must become a fresh navigation root"
+        );
+
+        app.process_action(Action::NavigateBack);
+        assert_eq!(app.current_view, ViewId::Dashboard);
+    }
+
+    #[test]
+    fn state_transform_explore_escape_returns_to_previous_view() {
+        let mut app = App::new_for_tests();
+        seed_session(&mut app, "brain-1");
+        app.process_action(Action::NavigateTo(ViewId::ExploreBrowser));
+        assert_eq!(app.current_view, ViewId::ExploreBrowser);
+
+        app.handle_crossterm_event_for_test(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+        assert_eq!(
+            app.current_view,
+            ViewId::SessionDetail(SessionId("brain-1".into())),
+            "Explore Esc must consume the navigation stack instead of jumping to Dashboard"
+        );
+    }
+
+    #[cfg(not(feature = "analytics"))]
+    #[test]
+    fn state_transform_unavailable_insights_preserves_current_view() {
+        let mut app = App::new_for_tests();
+
+        app.process_action(Action::OpenInsights);
+
+        assert_eq!(
+            app.current_view,
+            ViewId::Dashboard,
+            "a build without analytics must not enter the non-rendering Insights view"
+        );
+    }
 }
