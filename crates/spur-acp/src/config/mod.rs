@@ -229,6 +229,83 @@ transport = "jute_debug"
     }
 }
 
+#[cfg(test)]
+mod builtin_mcp_overrides_tests {
+    use super::*;
+
+    #[test]
+    fn builtin_overrides_default_all_true() {
+        let cfg = SpurConfig::default();
+        let overrides = &cfg.mcp_servers.builtin_overrides;
+
+        assert!(overrides.spur_mcp_enabled);
+        assert!(overrides.notebook_enabled);
+        assert!(overrides.worker_mcp_enabled);
+    }
+
+    #[test]
+    fn builtin_overrides_toml_round_trip_preserves_false_override() {
+        let src = r#"
+[mcp_servers.builtin_overrides]
+notebook_enabled = false
+"#;
+        let cfg: SpurConfig = toml::from_str(src).expect("parse builtin overrides");
+        let overrides = &cfg.mcp_servers.builtin_overrides;
+        assert!(overrides.spur_mcp_enabled);
+        assert!(!overrides.notebook_enabled);
+        assert!(overrides.worker_mcp_enabled);
+
+        let out = toml::to_string(&cfg).expect("serialize builtin overrides");
+        let back: SpurConfig = toml::from_str(&out).expect("re-parse builtin overrides");
+        assert_eq!(back.mcp_servers, cfg.mcp_servers);
+    }
+
+    #[test]
+    fn all_true_overrides_serialize_to_nothing() {
+        let cfg = SpurConfig::default();
+        let serialized = toml::to_string(&cfg).expect("serialize default config");
+
+        assert!(!serialized.contains("builtin_overrides"));
+    }
+
+    #[test]
+    fn builtin_toggle_applies_per_server() {
+        for server in [
+            BuiltinMcpServer::SpurMcp,
+            BuiltinMcpServer::Notebook,
+            BuiltinMcpServer::SpurWorkerMcp,
+        ] {
+            let mut cfg = SpurConfig::default();
+            let patch = ConfigPatch::BuiltinMcpToggle {
+                server,
+                enabled: false,
+            };
+
+            assert_eq!(patch.section_id(), "mcp");
+            patch.apply(&mut cfg).expect("apply builtin MCP toggle");
+
+            let overrides = &cfg.mcp_servers.builtin_overrides;
+            match server {
+                BuiltinMcpServer::SpurMcp => {
+                    assert!(!overrides.spur_mcp_enabled);
+                    assert!(overrides.notebook_enabled);
+                    assert!(overrides.worker_mcp_enabled);
+                }
+                BuiltinMcpServer::Notebook => {
+                    assert!(overrides.spur_mcp_enabled);
+                    assert!(!overrides.notebook_enabled);
+                    assert!(overrides.worker_mcp_enabled);
+                }
+                BuiltinMcpServer::SpurWorkerMcp => {
+                    assert!(overrides.spur_mcp_enabled);
+                    assert!(overrides.notebook_enabled);
+                    assert!(!overrides.worker_mcp_enabled);
+                }
+            }
+        }
+    }
+}
+
 impl Default for DelegationDescriptor {
     fn default() -> Self {
         Self {
@@ -713,17 +790,59 @@ impl SkillsConfig {
 /// SPUR-managed entry would shadow the fixed injection set.
 pub const RESERVED_MCP_SERVER_NAMES: &[&str] = &["spur-mcp", "notebook", "spur-worker-mcp"];
 
+/// SPUR-managed MCP server whose injection can be overridden for new sessions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BuiltinMcpServer {
+    /// The brain-facing SPUR tool server.
+    SpurMcp,
+    /// The local notebook MCP proxy.
+    Notebook,
+    /// The curated worker-facing SPUR tool server.
+    SpurWorkerMcp,
+}
+
+/// Per-server injection overrides for SPUR-managed MCP servers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BuiltinMcpOverridesConfig {
+    /// Whether new brain sessions receive `spur-mcp`.
+    pub spur_mcp_enabled: bool,
+    /// Whether new brain sessions receive the notebook MCP proxy.
+    pub notebook_enabled: bool,
+    /// Whether new worker sessions receive `spur-worker-mcp` by default.
+    pub worker_mcp_enabled: bool,
+}
+
+impl Default for BuiltinMcpOverridesConfig {
+    fn default() -> Self {
+        Self {
+            spur_mcp_enabled: true,
+            notebook_enabled: true,
+            worker_mcp_enabled: true,
+        }
+    }
+}
+
+impl BuiltinMcpOverridesConfig {
+    fn is_default(&self) -> bool {
+        self.spur_mcp_enabled && self.notebook_enabled && self.worker_mcp_enabled
+    }
+}
+
 /// User-configured MCP servers (`/configure mcp`). Injected into brain
 /// sessions only; workers keep the curated `spur-worker-mcp` catalog.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct McpServersConfig {
+    #[serde(default, skip_serializing_if = "BuiltinMcpOverridesConfig::is_default")]
+    pub builtin_overrides: BuiltinMcpOverridesConfig,
     pub entries: Vec<McpServerEntry>,
 }
 
 impl McpServersConfig {
     pub fn is_default(&self) -> bool {
-        self.entries.is_empty()
+        self.builtin_overrides.is_default() && self.entries.is_empty()
     }
 }
 
@@ -908,6 +1027,10 @@ pub enum ConfigPatch {
     TuiTheme(String),
     TuiDisablePasteBurst(bool),
     SkillsProjectionMode(SkillsProjectionMode),
+    BuiltinMcpToggle {
+        server: BuiltinMcpServer,
+        enabled: bool,
+    },
     McpServerUpsert {
         entry: McpServerEntry,
     },
@@ -923,7 +1046,9 @@ impl ConfigPatch {
             Self::GraphEmbeddingModel { .. } | Self::GraphOverlayFsmonitor(_) => "graph",
             Self::TuiEditMode(_) | Self::TuiTheme(_) | Self::TuiDisablePasteBurst(_) => "tui",
             Self::SkillsProjectionMode(_) => "skills",
-            Self::McpServerUpsert { .. } | Self::McpServerRemove { .. } => "mcp",
+            Self::BuiltinMcpToggle { .. }
+            | Self::McpServerUpsert { .. }
+            | Self::McpServerRemove { .. } => "mcp",
         }
     }
 
@@ -940,6 +1065,20 @@ impl ConfigPatch {
             Self::TuiTheme(name) => cfg.tui.theme = name.clone(),
             Self::TuiDisablePasteBurst(v) => cfg.tui.disable_paste_burst = *v,
             Self::SkillsProjectionMode(mode) => cfg.skills.projection_mode = *mode,
+            Self::BuiltinMcpToggle { server, enabled } => {
+                let target = match server {
+                    BuiltinMcpServer::SpurMcp => {
+                        &mut cfg.mcp_servers.builtin_overrides.spur_mcp_enabled
+                    }
+                    BuiltinMcpServer::Notebook => {
+                        &mut cfg.mcp_servers.builtin_overrides.notebook_enabled
+                    }
+                    BuiltinMcpServer::SpurWorkerMcp => {
+                        &mut cfg.mcp_servers.builtin_overrides.worker_mcp_enabled
+                    }
+                };
+                *target = *enabled;
+            }
             Self::McpServerUpsert { entry } => {
                 entry.validate()?;
                 match cfg
