@@ -1837,6 +1837,68 @@ mod composer_routing_tests {
     }
 
     #[test]
+    fn empty_vim_insert_types_view_navigation_chars() {
+        use crate::components::input_bar::{EditMode, VimMode};
+
+        for c in ['j', 'k', 'g', 'G', '?'] {
+            let mut v = make_view();
+            v.set_edit_mode(EditMode::Vim(VimMode::Insert));
+
+            let act = press(&mut v, KeyCode::Char(c));
+
+            assert!(act.is_none(), "Insert-mode {c:?} emitted {act:?}");
+            assert_eq!(v.input_bar_text_for_test(), c.to_string());
+            assert_eq!(v.input_bar.mode(), EditMode::Vim(VimMode::Insert));
+        }
+    }
+
+    #[test]
+    fn empty_vim_insert_esc_returns_to_normal_without_navigating() {
+        use crate::components::input_bar::{EditMode, VimMode};
+
+        let mut v = make_view();
+        v.set_edit_mode(EditMode::Vim(VimMode::Insert));
+
+        let act = press(&mut v, KeyCode::Esc);
+
+        assert!(act.is_none(), "Insert-mode Esc emitted {act:?}");
+        assert_eq!(v.input_bar.mode(), EditMode::Vim(VimMode::Normal));
+    }
+
+    #[test]
+    fn empty_vim_insert_tab_stays_in_composer() {
+        use crate::components::input_bar::{EditMode, VimMode};
+
+        for code in [KeyCode::Tab, KeyCode::BackTab] {
+            let mut v = make_view();
+            v.set_edit_mode(EditMode::Vim(VimMode::Insert));
+
+            let act = press(&mut v, code);
+
+            assert!(act.is_none(), "Insert-mode {code:?} emitted {act:?}");
+            assert!(
+                !v.input_bar_text_for_test().is_empty(),
+                "Insert-mode {code:?} did not insert a tab"
+            );
+        }
+    }
+
+    #[test]
+    fn empty_vim_insert_arrows_stay_in_composer() {
+        use crate::components::input_bar::{EditMode, VimMode};
+
+        for code in [KeyCode::Up, KeyCode::Down] {
+            let mut v = make_view();
+            v.set_edit_mode(EditMode::Vim(VimMode::Insert));
+
+            let act = press(&mut v, code);
+
+            assert!(act.is_none(), "Insert-mode {code:?} emitted {act:?}");
+            assert_eq!(v.input_bar.mode(), EditMode::Vim(VimMode::Insert));
+        }
+    }
+
+    #[test]
     fn alt_v_without_render_picker_does_not_type_literal_v() {
         let mut v = make_view();
         v.input_bar_mut_for_test().set_text("x".into(), 1);
