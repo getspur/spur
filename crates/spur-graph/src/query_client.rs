@@ -11,6 +11,8 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::fs::File;
 use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 use std::sync::{Arc, OnceLock};
 
 use anyhow::{anyhow, bail, Context as _};
@@ -930,6 +932,26 @@ const SYMBOL_COLUMNS: [&str; 11] = [
     "anchor_hash",
     "enclosing_scope",
 ];
+
+#[cfg(test)]
+static PARQUET_HOT_QUERY_INDEX_BUILDS_FOR_TEST: AtomicUsize = AtomicUsize::new(0);
+#[cfg(test)]
+static PARQUET_HOT_ADJACENCY_INDEX_BUILDS_FOR_TEST: AtomicUsize = AtomicUsize::new(0);
+
+#[cfg(test)]
+pub(crate) fn reset_parquet_hot_index_build_observations_for_test() {
+    PARQUET_HOT_QUERY_INDEX_BUILDS_FOR_TEST.store(0, AtomicOrdering::SeqCst);
+    PARQUET_HOT_ADJACENCY_INDEX_BUILDS_FOR_TEST.store(0, AtomicOrdering::SeqCst);
+}
+
+#[cfg(test)]
+pub(crate) fn parquet_hot_index_build_observations_for_test() -> (usize, usize) {
+    (
+        PARQUET_HOT_QUERY_INDEX_BUILDS_FOR_TEST.load(AtomicOrdering::SeqCst),
+        PARQUET_HOT_ADJACENCY_INDEX_BUILDS_FOR_TEST.load(AtomicOrdering::SeqCst),
+    )
+}
+
 pub struct ParquetClient {
     dir: PathBuf,
     manifest: GraphArtifactManifest,
@@ -1057,6 +1079,8 @@ impl ParquetClient {
             #[cfg(test)]
             self.hot_query_index_build_count
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            #[cfg(test)]
+            PARQUET_HOT_QUERY_INDEX_BUILDS_FOR_TEST.fetch_add(1, AtomicOrdering::SeqCst);
             (|| -> anyhow::Result<Arc<HotQueryIndex>> {
                 let symbol_batch = self.read_current_query_symbol_batch()?;
                 Ok(Arc::new(HotQueryIndex::new(symbol_batch)?))
@@ -1118,6 +1142,8 @@ impl ParquetClient {
             #[cfg(test)]
             self.hot_adjacency_index_build_count
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            #[cfg(test)]
+            PARQUET_HOT_ADJACENCY_INDEX_BUILDS_FOR_TEST.fetch_add(1, AtomicOrdering::SeqCst);
             (|| -> anyhow::Result<Arc<HotAdjacencyIndex>> {
                 let symbols = self.hot_query_index()?;
                 let edges = read_current_query_edges_parquet(&self.dir)?;

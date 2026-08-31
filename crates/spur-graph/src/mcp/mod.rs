@@ -7,7 +7,7 @@ use std::process::Command;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::Context as _;
 use chrono::{DateTime, SecondsFormat, Utc};
@@ -27,12 +27,13 @@ use crate::temporal::{
 use crate::{
     artifact_from_facts, bounded_subgraph_with_budget, build_facts, edge_kind, load_artifact,
     read_artifact_parquet, resolve_artifact_location, resolve_selector, resolve_worktree_root_from,
-    CandidateRow, CommitIndexArtifact, GraphArtifactManifest, GraphEdgeArtifact, GraphEdgeKind,
-    GraphIndexArtifact, GraphIndexPointer, GraphQueryClient, GraphSymbolArtifact, InMemoryClient,
-    OverlayClient, OverlayFinalizationMeasurements, OverlayGeneration, OverlayGenerationIdentity,
-    OverlayPathState as GenerationPathState, OwnedCalleeRecord, OwnedCallerRecord, ParquetClient,
-    SearchFilters, SearchMode, SearchOptions, SearchResult, SearchSymbol, SelectorResolution,
-    SnapshotKey, SubgraphBudget, CODE_SYMBOL_URI_PREFIX,
+    write_artifact_parquet, CandidateRow, CommitIndexArtifact, GraphArtifactManifest,
+    GraphEdgeArtifact, GraphEdgeKind, GraphIndexArtifact, GraphIndexPointer, GraphQueryClient,
+    GraphSymbolArtifact, InMemoryClient, OverlayClient, OverlayFinalizationMeasurements,
+    OverlayGeneration, OverlayGenerationIdentity, OverlayPathState as GenerationPathState,
+    OwnedCalleeRecord, OwnedCallerRecord, ParquetClient, SearchFilters, SearchMode, SearchOptions,
+    SearchResult, SearchSymbol, SelectorResolution, SnapshotKey, SubgraphBudget, WriteOptions,
+    CODE_SYMBOL_URI_PREFIX,
 };
 
 pub use spur_mcp::tools::McpHandlerError;
@@ -1048,6 +1049,7 @@ use rebuild_singleflight::RebuildKey;
 
 static SHARED_REBUILD_COORDINATOR: OnceLock<Arc<RebuildCoordinator>> = OnceLock::new();
 static CANONICAL_OVERLAY_IDENTITIES: OnceLock<Mutex<CanonicalOverlayIdentities>> = OnceLock::new();
+static REBUILT_PARQUET_RESPONSE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 const CANONICAL_OVERLAY_IDENTITY_CAPACITY: usize = 8;
 
@@ -2117,6 +2119,7 @@ async fn attempt_refresh(
             }
         }
     }
+    let rebuild_started = Instant::now();
     let rebuild = match backend {
         CodeSearchBackend::Parquet(_) => {
             try_rebuild_artifact_from_worktree(Arc::clone(&rebuild_coordinator), rebuild_candidate)
@@ -2133,31 +2136,127 @@ async fn attempt_refresh(
         }
     };
     match rebuild {
-        RebuildAttempt::Fresh(rebuilt_artifact) => {
-            let client = InMemoryClient::new(Arc::clone(&rebuilt_artifact));
-            match handler(args, &client) {
-                Ok(mut fresh_body) => {
-                    let fresh_files = response_file_set_from_body(&rebuilt_artifact, &fresh_body);
-                    GraphResponseMetadata::analyze_artifact_with_files(
-                        &rebuilt_artifact,
-                        &fresh_files,
-                    )
-                    .await
-                    .metadata
-                    .with_rebuild_status(RebuildStatus::Fresh)
-                    .insert_into_for_format(&mut fresh_body, response_format);
-                    RefreshOutcome::Fresh(fresh_body)
-                }
-                Err(error) => {
-                    RefreshOutcome::Errored(error.with_artifact_metadata(&rebuilt_artifact))
+        RebuildAttempt::Fresh(rebuilt_artifact) => match backend {
+            CodeSearchBackend::Parquet(_) => {
+                rebuilt_parquet_refresh_outcome(
+                    rebuilt_artifact,
+                    rebuild_started,
+                    args,
+                    response_format,
+                    &handler,
+                )
+                .await
+            }
+            CodeSearchBackend::InMemory { .. } => {
+                let client = InMemoryClient::new(Arc::clone(&rebuilt_artifact));
+                match handler(args, &client) {
+                    Ok(mut fresh_body) => {
+                        let fresh_files =
+                            response_file_set_from_body(&rebuilt_artifact, &fresh_body);
+                        GraphResponseMetadata::analyze_artifact_with_files(
+                            &rebuilt_artifact,
+                            &fresh_files,
+                        )
+                        .await
+                        .metadata
+                        .with_rebuild_status(RebuildStatus::Fresh)
+                        .insert_into_for_format(&mut fresh_body, response_format);
+                        RefreshOutcome::Fresh(fresh_body)
+                    }
+                    Err(error) => {
+                        RefreshOutcome::Errored(error.with_artifact_metadata(&rebuilt_artifact))
+                    }
                 }
             }
-        }
+        },
         RebuildAttempt::StaleBudgetExceeded => {
             RefreshOutcome::NotRefreshed(RebuildStatus::StaleBudgetExceeded)
         }
         RebuildAttempt::StaleRebuildFailed => {
             RefreshOutcome::NotRefreshed(RebuildStatus::StaleRebuildFailed)
+        }
+    }
+}
+
+async fn rebuilt_parquet_refresh_outcome(
+    rebuilt_artifact: Arc<GraphIndexArtifact>,
+    rebuild_started: Instant,
+    args: &Value,
+    response_format: ResponseFormat,
+    handler: &(impl Fn(&Value, &dyn GraphQueryClient) -> CodeGraphResult + Send + Sync),
+) -> RefreshOutcome {
+    let Some(remaining_budget) = remaining_graph_rebuild_budget(rebuild_started) else {
+        return RefreshOutcome::NotRefreshed(RebuildStatus::StaleBudgetExceeded);
+    };
+    let mut task =
+        tokio::task::spawn_blocking(move || RebuiltParquetGraph::from_artifact(&rebuilt_artifact));
+
+    let rebuilt_graph = match tokio::time::timeout(remaining_budget, &mut task).await {
+        Ok(Ok(Ok(rebuilt_graph))) => rebuilt_graph,
+        Ok(Ok(Err(error))) => {
+            tracing::warn!(
+                target: "spur_graph::mcp",
+                error = %error,
+                "rebuilt code graph Parquet bind failed; serving stale response"
+            );
+            return RefreshOutcome::NotRefreshed(RebuildStatus::StaleRebuildFailed);
+        }
+        Ok(Err(error)) => {
+            tracing::warn!(
+                target: "spur_graph::mcp",
+                error = %error,
+                "rebuilt code graph Parquet bind task failed; serving stale response"
+            );
+            return RefreshOutcome::NotRefreshed(RebuildStatus::StaleRebuildFailed);
+        }
+        Err(_) => {
+            tokio::spawn(async move {
+                match task.await {
+                    Ok(Ok(_rebuilt_graph)) => {}
+                    Ok(Err(error)) => {
+                        tracing::warn!(
+                            target: "spur_graph::mcp",
+                            error = %error,
+                            "rebuilt code graph Parquet bind failed after response budget elapsed"
+                        );
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            target: "spur_graph::mcp",
+                            error = %error,
+                            "rebuilt code graph Parquet bind task failed after response budget elapsed"
+                        );
+                    }
+                }
+            });
+            return RefreshOutcome::NotRefreshed(RebuildStatus::StaleBudgetExceeded);
+        }
+    };
+
+    let client = rebuilt_graph.client();
+    let source = GraphMetadataSource::from_parquet_manifest(client.manifest());
+    let response = match handler(args, client) {
+        Ok(fresh_body) => response_file_set_from_client(client, &fresh_body)
+            .map(|fresh_files| (fresh_body, fresh_files))
+            .map_err(CodeGraphError::from),
+        Err(error) => Err(error),
+    };
+    drop(rebuilt_graph);
+
+    match response {
+        Ok((mut fresh_body, fresh_files)) => {
+            GraphResponseMetadata::analyze_source_inner(source, Some(&fresh_files), None)
+                .await
+                .metadata
+                .with_rebuild_status(RebuildStatus::Fresh)
+                .insert_into_for_format(&mut fresh_body, response_format);
+            RefreshOutcome::Fresh(fresh_body)
+        }
+        Err(error) => {
+            let metadata = GraphResponseMetadata::from_source(source)
+                .await
+                .with_rebuild_status(RebuildStatus::Fresh);
+            RefreshOutcome::Errored(error.with_response_metadata(metadata))
         }
     }
 }
@@ -4618,6 +4717,70 @@ enum RebuildAttempt {
     StaleRebuildFailed,
 }
 
+struct RebuiltParquetGraph {
+    dir: PathBuf,
+    client: ParquetClient,
+}
+
+impl RebuiltParquetGraph {
+    fn from_artifact(artifact: &GraphIndexArtifact) -> anyhow::Result<Self> {
+        let dir = rebuilt_parquet_response_dir(&artifact.graph_content_hash);
+        let written =
+            match write_artifact_parquet(artifact, &dir, WriteOptions::default(), Vec::new()) {
+                Ok(written) => written,
+                Err(error) => {
+                    let _ = fs::remove_dir_all(&dir);
+                    return Err(error);
+                }
+            };
+        let client = match ParquetClient::open(&written) {
+            Ok(client) => client,
+            Err(error) => {
+                let _ = fs::remove_dir_all(&written);
+                return Err(error);
+            }
+        };
+        Ok(Self {
+            dir: written,
+            client,
+        })
+    }
+
+    fn client(&self) -> &ParquetClient {
+        &self.client
+    }
+}
+
+impl Drop for RebuiltParquetGraph {
+    fn drop(&mut self) {
+        if let Err(error) = fs::remove_dir_all(&self.dir) {
+            if error.kind() != ErrorKind::NotFound {
+                tracing::debug!(
+                    target: "spur_graph::mcp",
+                    path = %self.dir.display(),
+                    error = %error,
+                    "failed to remove request-local rebuilt Parquet graph"
+                );
+            }
+        }
+    }
+}
+
+fn rebuilt_parquet_response_dir(graph_content_hash: &str) -> PathBuf {
+    let counter = REBUILT_PARQUET_RESPONSE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let since_epoch = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let digest = blake3::hash(graph_content_hash.as_bytes());
+    let digest_hex = digest.to_hex();
+    std::env::temp_dir().join(format!(
+        "spur-graph-rebuilt-parquet-{}-{since_epoch}-{counter}-{}",
+        std::process::id(),
+        &digest_hex.as_str()[..16]
+    ))
+}
+
 fn graph_rebuild_latency_budget() -> Duration {
     #[cfg(any(test, feature = "test-support"))]
     {
@@ -4627,6 +4790,12 @@ fn graph_rebuild_latency_budget() -> Duration {
         }
     }
     DEFAULT_GRAPH_REBUILD_LATENCY_BUDGET
+}
+
+fn remaining_graph_rebuild_budget(rebuild_started: Instant) -> Option<Duration> {
+    graph_rebuild_latency_budget()
+        .checked_sub(rebuild_started.elapsed())
+        .filter(|remaining| !remaining.is_zero())
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -8160,6 +8329,10 @@ mod tests {
     use std::sync::{Arc, Mutex, OnceLock};
     use std::time::{Duration, Instant};
 
+    use crate::query_client::{
+        parquet_hot_index_build_observations_for_test,
+        reset_parquet_hot_index_build_observations_for_test,
+    };
     use crate::{
         ChangeKind, CommitArtifact, Confidence, EdgeEndpoint, GraphFileArtifact,
         GraphFileManifestEntry, GraphIndexHeader, NodeId, RelationKind, RenamePrev,
@@ -8329,6 +8502,10 @@ mod tests {
                 })
             }
         }
+    }
+
+    fn test_internal_error(message: impl Into<String>) -> CodeGraphError {
+        CodeGraphError::without_metadata(McpHandlerError::Internal(message.into()))
     }
 
     #[tokio::test]
@@ -10197,6 +10374,113 @@ mod tests {
             violations.is_empty(),
             "request replay cardinality/equivalence violations:\n{}",
             violations.join("\n")
+        );
+    }
+
+    #[tokio::test]
+    async fn rebuild_only_refresh_rebinds_rebuilt_graph_to_parquet_hot_indices() {
+        let _rebuild_guard = rebuild_test_guard().await;
+        let _budget = set_graph_rebuild_latency_budget_for_test(Duration::from_secs(30));
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        init_git_repo(root);
+        let artifact = artifact_from_source(root, "pub fn stale_base() {}\n");
+        run_git_test(root, &["add", "src/lib.rs"]);
+        run_git_test(root, &["commit", "-q", "-m", "index stale base"]);
+        write_current_artifact(root, &artifact);
+        fs::write(
+            root.join("src/lib.rs"),
+            "pub fn fresh_caller() { fresh_target(); }\n\
+             pub fn fresh_target() {}\n",
+        )
+        .expect("dirty source");
+        reset_parquet_hot_index_build_observations_for_test();
+
+        let body = SCOPED_CODE_GRAPH_WORKTREE_ROOT
+            .scope(root.to_path_buf(), async {
+                code_graph_backend_response_rebuild_only(
+                    &json!({}),
+                    Arc::new(RebuildCoordinator::new()),
+                    |_, client| {
+                        let search = client
+                            .search_symbols(&SearchOptions {
+                                query: "fresh_".to_owned(),
+                                mode: SearchMode::Prefix,
+                                filters: SearchFilters::default(),
+                                limit: 20,
+                            })
+                            .map_err(|error| test_internal_error(format!("search: {error:#}")))?;
+                        let target = search
+                            .candidates
+                            .iter()
+                            .find(|symbol| symbol.entity_name == "fresh_target")
+                            .ok_or_else(|| test_internal_error("fresh target missing"))?;
+                        let caller = search
+                            .candidates
+                            .iter()
+                            .find(|symbol| symbol.entity_name == "fresh_caller")
+                            .ok_or_else(|| test_internal_error("fresh caller missing"))?;
+                        let mut search_names = search
+                            .candidates
+                            .iter()
+                            .map(|symbol| symbol.entity_name.clone())
+                            .collect::<Vec<_>>();
+                        search_names.sort();
+                        let mut caller_names = client
+                            .find_caller_edges(&target.stable_symbol_id)
+                            .into_iter()
+                            .map(|record| match record {
+                                OwnedCallerRecord::Resolved { caller, .. }
+                                | OwnedCallerRecord::Unresolved { caller, .. } => {
+                                    caller.entity_name
+                                }
+                            })
+                            .collect::<Vec<_>>();
+                        caller_names.sort();
+                        let mut callee_names = client
+                            .find_callee_edges(&caller.stable_symbol_id)
+                            .into_iter()
+                            .filter_map(|record| match record {
+                                OwnedCalleeRecord::Resolved { symbol, .. } => {
+                                    Some(symbol.entity_name)
+                                }
+                                OwnedCalleeRecord::Unresolved { .. } => None,
+                            })
+                            .collect::<Vec<_>>();
+                        callee_names.sort();
+                        Ok(json!({
+                            "search_total": search.total_matches,
+                            "search_names": search_names,
+                            "caller_names": caller_names,
+                            "callee_names": callee_names,
+                        }))
+                    },
+                )
+                .await
+            })
+            .await
+            .expect("fresh rebuild response");
+        let (query_builds, adjacency_builds) = parquet_hot_index_build_observations_for_test();
+
+        eprintln!(
+            "rebuild SoA hot-index evidence query_builds={query_builds} \
+             adjacency_builds={adjacency_builds} body={body:#}"
+        );
+        assert_eq!(body["rebuild_status"], "fresh", "{body:#}");
+        assert_eq!(body["search_total"], 2, "{body:#}");
+        assert_eq!(
+            body["search_names"],
+            json!(["fresh_caller", "fresh_target"])
+        );
+        assert_eq!(body["caller_names"], json!(["fresh_caller"]));
+        assert_eq!(body["callee_names"], json!(["fresh_target"]));
+        assert_eq!(
+            query_builds, 1,
+            "rebuilt graph search/caller/callee must build the Parquet-backed RecordBatch hot index"
+        );
+        assert_eq!(
+            adjacency_builds, 1,
+            "rebuilt graph caller/callee must build integer-coded HotAdjacencyIndex"
         );
     }
 
