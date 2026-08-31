@@ -88,6 +88,9 @@ async fn probe_inner(entry: &McpServerEntry) -> anyhow::Result<Vec<ProbedTool>> 
     match &entry.transport {
         McpServerTransport::Stdio { command, args, env } => probe_stdio(command, args, env).await,
         McpServerTransport::Http { url, headers } => probe_http(url, headers).await,
+        McpServerTransport::JuteDebug => Err(anyhow::anyhow!(
+            "jute-debug transport is synthesized at injection time and cannot be probed directly"
+        )),
     }
 }
 

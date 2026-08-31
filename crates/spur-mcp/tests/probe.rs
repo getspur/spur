@@ -108,3 +108,22 @@ async fn sleeping_fixture_times_out() {
 
     assert!(matches!(report.outcome, ProbeOutcome::Timeout));
 }
+
+#[tokio::test]
+async fn jute_debug_transport_is_connect_error() {
+    let entry = McpServerEntry {
+        name: "jute-debug".into(),
+        enabled: true,
+        transport: McpServerTransport::JuteDebug,
+    };
+    let report = probe_server_with_timeout(&entry, Duration::from_secs(1)).await;
+    match report.outcome {
+        ProbeOutcome::ConnectError(msg) => {
+            assert!(
+                msg.contains("jute-debug"),
+                "reason should name the transport: {msg}"
+            );
+        }
+        other => panic!("expected ConnectError, got {other:?}"),
+    }
+}
