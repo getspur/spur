@@ -501,7 +501,9 @@ impl SessionDetailView {
             } else {
                 // Pending permission keys are never Composer-owned.
                 let is_permission_key = self.permission_key_owned(key);
-                let is_tab_owned_by_composer = !self.input_bar.is_empty()
+                let composer_owns_empty_input = self.input_bar.wants_esc();
+                let is_tab_owned_by_composer = (!self.input_bar.is_empty()
+                    || composer_owns_empty_input)
                     && matches!(key.code, KeyCode::Tab | KeyCode::BackTab);
                 let is_composer_editing = (matches!(
                     key.code,
@@ -516,13 +518,14 @@ impl SessionDetailView {
                         | KeyCode::Up
                         | KeyCode::Down
                 ) || is_tab_owned_by_composer
-                    || (key.code == KeyCode::Esc && self.input_bar.wants_esc()))
+                    || (key.code == KeyCode::Esc && composer_owns_empty_input))
                     && !is_permission_key;
 
                 if is_composer_editing {
                     // Empty-bar nav chars (j/k/g/G) and Up/Down/Esc are
                     // View-owned scroll/nav keys — no rescue block needed.
                     if self.input_bar.is_empty()
+                        && !composer_owns_empty_input
                         && (matches!(key.code, KeyCode::Char('j' | 'k' | 'g' | 'G'))
                             || (matches!(key.code, KeyCode::Char('?')) && key.modifiers.is_empty())
                             || matches!(key.code, KeyCode::Up | KeyCode::Down | KeyCode::Esc))
