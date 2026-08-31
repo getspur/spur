@@ -2186,6 +2186,8 @@ mod tests {
         SearchFilters, SearchMode, SnapshotKey, SymbolSnapshotArtifact, TemporalEdgeArtifact,
         WalkStrategy, WriteOptions, GRAPH_INDEX_VERSION_TEMPORAL,
     };
+    use arrow_array::ArrayRef;
+    use arrow_schema::{DataType, Field, Schema};
     use parquet::arrow::arrow_reader::{ArrowReaderMetadata, ArrowReaderOptions};
     use parquet::file::metadata::PageIndexPolicy;
     use std::collections::BTreeMap;
@@ -2337,6 +2339,65 @@ mod tests {
             .iter()
             .map(|symbol| symbol.stable_symbol_id.clone())
             .collect()
+    }
+
+    fn graph_symbol_batch() -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("stable_symbol_id", DataType::Utf8, false),
+            Field::new("file_path", DataType::Utf8, false),
+            Field::new("byte_range_start", DataType::Int64, false),
+            Field::new("byte_range_end", DataType::Int64, false),
+            Field::new("line_start", DataType::Int32, false),
+            Field::new("line_end", DataType::Int32, false),
+            Field::new("entity_name", DataType::Utf8, false),
+            Field::new("qualified_name", DataType::Utf8, false),
+            Field::new("symbol_kind", DataType::Utf8, false),
+            Field::new("anchor_hash", DataType::Utf8, false),
+            Field::new("enclosing_scope", DataType::Utf8, true),
+        ]));
+        let columns: Vec<ArrayRef> = vec![
+            Arc::new(StringArray::from(vec!["s1", "s2", "s3"])),
+            Arc::new(StringArray::from(vec!["src/a.rs", "src/b.rs", "src/c.rs"])),
+            Arc::new(Int64Array::from(vec![0, 10, 20])),
+            Arc::new(Int64Array::from(vec![9, 19, 29])),
+            Arc::new(Int32Array::from(vec![1, 5, 9])),
+            Arc::new(Int32Array::from(vec![2, 6, 10])),
+            Arc::new(StringArray::from(vec!["alpha", "beta", "gamma"])),
+            Arc::new(StringArray::from(vec![
+                "crate::alpha",
+                "crate::beta",
+                "crate::gamma",
+            ])),
+            Arc::new(StringArray::from(vec!["function", "struct", "method"])),
+            Arc::new(StringArray::from(vec!["hash-a", "hash-b", "hash-c"])),
+            Arc::new(StringArray::from(vec![
+                Some("crate"),
+                None,
+                Some("crate::nested"),
+            ])),
+        ];
+
+        RecordBatch::try_new(schema, columns).expect("symbol batch is valid")
+    }
+
+    #[test]
+    fn symbol_from_batch_row_matches_bulk_conversion_for_every_row() {
+        let batch = graph_symbol_batch();
+        let expected = symbols_from_batch(&batch).expect("bulk conversion succeeds");
+
+        assert_eq!(expected.len(), batch.num_rows());
+        for (row, expected_symbol) in expected.into_iter().enumerate() {
+            let actual = symbol_from_batch_row(&batch, row).expect("row conversion succeeds");
+            assert_eq!(actual, expected_symbol);
+        }
+    }
+
+    #[test]
+    fn symbol_from_batch_row_rejects_out_of_range_row() {
+        let batch = graph_symbol_batch();
+
+        symbol_from_batch_row(&batch, batch.num_rows())
+            .expect_err("out-of-range row must return an error");
     }
 
     #[test]
