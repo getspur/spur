@@ -120,6 +120,8 @@ fn symbol_query_policy(language: Language) -> SymbolQueryPolicy {
         | Language::Toml
         | Language::Yaml
         | Language::Mermaid
+        | Language::Html
+        | Language::Css
         | Language::JupyterNotebook => SymbolQueryPolicy::ReuseTags,
         Language::Markdown => {
             SymbolQueryPolicy::Dedicated(include_str!("../../queries/markdown/symbols.scm"))
@@ -667,7 +669,11 @@ impl<'a> FactBuilder<'a> {
         let mut phantom_blocked_references = 0usize;
         let mut phantom_blocked_calls = 0usize;
         for edge in pending {
-            if edge.edge_kind == Some(GraphEdgeKind::CallsDyn) {
+            if edge.relation == RelationKind::Links {
+                // URL text is evidence, not a symbol name. A later dedicated
+                // URL/file resolver may bind it, but bare-symbol lookup must not.
+                self.add_pending_edge(&edge, None);
+            } else if edge.edge_kind == Some(GraphEdgeKind::CallsDyn) {
                 let mut candidates = Vec::new();
                 if let Some(indexed) = self.qualified_symbol_index.get(&edge.target_name) {
                     candidates.extend(indexed.iter().copied());
@@ -1016,6 +1022,27 @@ fn resolve_bare_pending_edge(
     }
 
     if edge.relation == RelationKind::Imports {
+        if let Some(source_file) = indexes.file_by_id.get(&edge.source).copied() {
+            if is_web_import_source_file(source_file) {
+                let target = edge
+                    .import_path
+                    .as_deref()
+                    .and_then(|path| web_import_target_path(source_file, path))
+                    .and_then(|path| indexes.files_by_label.get(&path).copied())
+                    .filter(|target| *target != edge.source);
+                if let Some(target) = target {
+                    builder.add_pending_edge_with_bind_method(
+                        edge,
+                        Some(target),
+                        Some("import_path"),
+                    );
+                } else {
+                    builder.add_pending_edge(edge, None);
+                }
+                return;
+            }
+        }
+
         let python_bare_import_path = is_python_bare_import_path(edge, indexes);
         if !python_bare_import_path {
             let path_candidates = module_path_resolution_candidates(builder, edge, indexes);
@@ -2209,6 +2236,71 @@ enum ImportLanguageFamily {
     Javascript,
 }
 
+pub(crate) fn is_web_import_source_file(path: &str) -> bool {
+    Path::new(path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            matches!(
+                extension.to_ascii_lowercase().as_str(),
+                "html" | "htm" | "css"
+            )
+        })
+}
+
+fn is_local_web_import_path(import_path: &str) -> bool {
+    let import_path = import_path.trim();
+    if import_path.is_empty() || import_path.starts_with("//") {
+        return false;
+    }
+    if import_path.starts_with('#') {
+        return true;
+    }
+    let Some((scheme, _)) = import_path.split_once(':') else {
+        return true;
+    };
+    !scheme.starts_with(|character: char| character.is_ascii_alphabetic())
+        || !scheme.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '+' | '-' | '.')
+        })
+}
+
+pub(crate) fn web_import_target_path(source_file: &str, import_path: &str) -> Option<String> {
+    if !is_web_import_source_file(source_file) || !is_local_web_import_path(import_path) {
+        return None;
+    }
+
+    let import_path = import_path.trim();
+    // A leading slash is document-root-relative, not repository-root-relative.
+    // Without a configured web root there is no sound workspace file binding.
+    if import_path.starts_with('/') {
+        return None;
+    }
+    let import_path = import_path.split(['?', '#']).next().unwrap_or_default();
+    if import_path.is_empty() {
+        return None;
+    }
+    let path = Path::new(source_file)
+        .parent()
+        .unwrap_or_else(|| Path::new(""))
+        .join(import_path);
+
+    let mut normalized = Vec::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::Normal(segment) => {
+                normalized.push(segment.to_string_lossy().into_owned())
+            }
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                normalized.pop()?;
+            }
+            std::path::Component::RootDir | std::path::Component::Prefix(_) => return None,
+        }
+    }
+    (!normalized.is_empty()).then(|| normalized.join("/"))
+}
+
 fn import_path_language_family_allows(source_file: &str, target_file: &str) -> bool {
     let Some(source_family) = import_language_family(source_file) else {
         return false;
@@ -2237,6 +2329,15 @@ pub(crate) fn classify_import_origin(
     workspace_index: &ImportWorkspaceIndex,
 ) -> ImportOriginClassification {
     let import_path = import_path.trim();
+    if is_web_import_source_file(source_file) {
+        return if import_path.to_ascii_lowercase().starts_with("data:")
+            || is_local_web_import_path(import_path)
+        {
+            ImportOriginClassification::Internal
+        } else {
+            external_import_origin(import_path, import_path, import_path)
+        };
+    }
     match import_language_family(source_file) {
         Some(ImportLanguageFamily::Rust) => {
             classify_rust_import_origin(import_path, workspace_index)
@@ -3589,7 +3690,7 @@ pub(crate) fn run_query<'tree>(
                 capture.node,
                 &mut string_context_by_node_id,
                 &mut string_context_ancestor_path,
-            ) && !is_string_content_import_capture(name, capture.node)
+            ) && !is_explicit_string_content_edge_capture(name, capture.node)
             {
                 continue;
             }
@@ -3604,16 +3705,17 @@ pub(crate) fn run_query<'tree>(
     hits
 }
 
-/// Go import paths grammatically live inside string literals, so their
-/// quote-free content captures must survive the string-context suppression.
-/// Scoped to Go's content node kinds so C/C++ `#include "..."` string_literal
-/// captures keep their historical suppression.
-fn is_string_content_import_capture(name: &str, node: Node<'_>) -> bool {
-    matches!(name, "import.name" | "import.path")
-        && matches!(
-            node.kind(),
-            "interpreted_string_literal_content" | "raw_string_literal_content"
-        )
+/// Some grammars expose quote-free import or link targets only as a named
+/// content node inside a string literal. Explicit edge captures on those
+/// content nodes must survive the general string-context noise suppression.
+fn is_explicit_string_content_edge_capture(name: &str, node: Node<'_>) -> bool {
+    match node.kind() {
+        "interpreted_string_literal_content" | "raw_string_literal_content" => {
+            matches!(name, "import.name" | "import.path")
+        }
+        "string_content" => matches!(name, "import.name" | "import.path" | "link.name"),
+        _ => false,
+    }
 }
 
 fn is_string_literal_context(
@@ -3786,7 +3888,501 @@ pub(crate) fn relative_path(root: &Path, path: &Path) -> anyhow::Result<String> 
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use super::*;
+
+    fn extracted_definition_set(facts: &GraphFacts) -> BTreeSet<String> {
+        facts
+            .nodes
+            .iter()
+            .filter(|node| {
+                !matches!(
+                    node.kind,
+                    NodeKind::File | NodeKind::External | NodeKind::McpTool
+                )
+            })
+            .map(|node| format!("{}:{}", node.kind.discriminator(), node.label))
+            .collect()
+    }
+
+    fn web_relation_set(facts: &GraphFacts) -> BTreeSet<String> {
+        facts
+            .edges
+            .iter()
+            .filter_map(|edge| {
+                let relation = match edge.relation {
+                    RelationKind::Imports => "imports",
+                    RelationKind::Links => "links",
+                    _ => return None,
+                };
+                edge.target_label
+                    .as_deref()
+                    .map(|target| format!("{relation}:{target}"))
+            })
+            .collect()
+    }
+
+    fn node_with_label<'a>(facts: &'a GraphFacts, label: &str) -> &'a GraphNode {
+        facts
+            .nodes
+            .iter()
+            .find(|node| node.label == label)
+            .unwrap_or_else(|| panic!("missing node `{label}`"))
+    }
+
+    fn file_node<'a>(facts: &'a GraphFacts, label: &str) -> &'a GraphNode {
+        facts
+            .nodes
+            .iter()
+            .find(|node| node.kind == NodeKind::File && node.label == label)
+            .unwrap_or_else(|| panic!("missing file node `{label}`"))
+    }
+
+    fn assert_node_span_matches(
+        facts: &GraphFacts,
+        node: &GraphNode,
+        source: &str,
+        expected_source: &str,
+    ) {
+        let span_id = node.source_span_id.expect("node source span");
+        let span = facts
+            .spans
+            .iter()
+            .find(|span| span.span_id == span_id)
+            .expect("source span record");
+        let start = source.find(expected_source).unwrap_or_else(|| {
+            panic!(
+                "expected source fragment for `{}` was not found",
+                node.label
+            )
+        });
+        let end = start + expected_source.len();
+        let line_at = |offset: usize| {
+            source.as_bytes()[..offset]
+                .iter()
+                .filter(|byte| **byte == b'\n')
+                .count() as u32
+                + 1
+        };
+
+        assert_eq!(span.start_byte, start as u32, "{} start byte", node.label);
+        assert_eq!(span.end_byte, end as u32, "{} end byte", node.label);
+        assert_eq!(span.start_line, line_at(start), "{} start line", node.label);
+        assert_eq!(span.end_line, line_at(end), "{} end line", node.label);
+    }
+
+    fn assert_graph_edge(
+        facts: &GraphFacts,
+        source: NodeId,
+        target: NodeId,
+        relation: RelationKind,
+    ) {
+        assert!(
+            facts.edges.iter().any(|edge| {
+                edge.source_node_id == source
+                    && edge.target_node_id == Some(target)
+                    && edge.relation == relation
+            }),
+            "missing {relation:?} edge from {source:?} to {target:?}"
+        );
+    }
+
+    fn assert_relation_source(
+        facts: &GraphFacts,
+        relation: RelationKind,
+        target: &str,
+        expected_source: NodeId,
+    ) {
+        let edge = facts
+            .edges
+            .iter()
+            .find(|edge| edge.relation == relation && edge.target_label.as_deref() == Some(target))
+            .unwrap_or_else(|| panic!("missing {relation:?} edge to `{target}`"));
+        assert_eq!(edge.source_node_id, expected_source, "edge to `{target}`");
+    }
+
+    #[test]
+    fn html_extraction_emits_low_noise_symbols_and_relations() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::write(
+            dir.path().join("index.html"),
+            r#"<main id="app">
+  <script src="app.js">function embedded() {}</script>
+  <link href="theme.css" rel="stylesheet">
+  <a href="/docs/start.html">Docs</a>
+  <img src="hero.png" class="hero">
+  <div class="not-a-symbol">content</div>
+  <style>.embedded { color: red; }</style>
+</main>
+"#,
+        )
+        .expect("write HTML fixture");
+
+        let (facts, _) = build_facts(dir.path(), None).expect("extract HTML");
+        assert_eq!(
+            extracted_definition_set(&facts),
+            BTreeSet::from(["section:app".to_owned()])
+        );
+        assert_eq!(
+            web_relation_set(&facts),
+            BTreeSet::from([
+                "imports:app.js".to_owned(),
+                "imports:theme.css".to_owned(),
+                "links:/docs/start.html".to_owned(),
+                "links:hero.png".to_owned(),
+            ])
+        );
+    }
+
+    #[test]
+    fn css_extraction_emits_low_noise_symbols_and_relations() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::write(
+            dir.path().join("site.css"),
+            r#"@import "base.css";
+@keyframes fade { from { opacity: 0; } to { opacity: 1; } }
+:root { --brand: #f00; color: red; }
+.card > img { background-image: url("../img/card.png"); }
+"#,
+        )
+        .expect("write CSS fixture");
+
+        let (facts, _) = build_facts(dir.path(), None).expect("extract CSS");
+        assert_eq!(
+            extracted_definition_set(&facts),
+            BTreeSet::from([
+                "constant:--brand".to_owned(),
+                "function:fade".to_owned(),
+                "section:.card > img".to_owned(),
+                "section::root".to_owned(),
+            ])
+        );
+        assert_eq!(
+            web_relation_set(&facts),
+            BTreeSet::from([
+                "imports:base.css".to_owned(),
+                "links:../img/card.png".to_owned(),
+            ])
+        );
+    }
+
+    #[test]
+    fn html_extraction_preserves_spans_containment_and_nearest_owner_edges() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let source = "<main id=\"app\">\n  <section id=\"panel\"><img src=\"panel.png\"></section>\n  <img src=\"hero.png\">\n</main>\n<img src=\"root.png\">\n";
+        fs::write(dir.path().join("index.html"), source).expect("write HTML fixture");
+
+        let (facts, _) = build_facts(dir.path(), None).expect("extract HTML");
+        let file = file_node(&facts, "index.html");
+        let app = node_with_label(&facts, "app");
+        let panel = node_with_label(&facts, "panel");
+
+        assert_node_span_matches(
+            &facts,
+            app,
+            source,
+            "<main id=\"app\">\n  <section id=\"panel\"><img src=\"panel.png\"></section>\n  <img src=\"hero.png\">\n</main>",
+        );
+        assert_node_span_matches(
+            &facts,
+            panel,
+            source,
+            "<section id=\"panel\"><img src=\"panel.png\"></section>",
+        );
+        assert_graph_edge(&facts, file.node_id, app.node_id, RelationKind::Contains);
+        assert_graph_edge(&facts, app.node_id, panel.node_id, RelationKind::Contains);
+        assert_graph_edge(&facts, app.node_id, panel.node_id, RelationKind::Defines);
+        assert!(!facts.edges.iter().any(|edge| {
+            edge.source_node_id == file.node_id
+                && edge.target_node_id == Some(app.node_id)
+                && edge.relation == RelationKind::Defines
+        }));
+        assert_relation_source(&facts, RelationKind::Links, "panel.png", panel.node_id);
+        assert_relation_source(&facts, RelationKind::Links, "hero.png", app.node_id);
+        assert_relation_source(&facts, RelationKind::Links, "root.png", file.node_id);
+    }
+
+    #[test]
+    fn css_extraction_preserves_spans_containment_and_nearest_owner_edges() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let source = ":root {\n  --brand: #f00;\n  background-image: url(root.png);\n}\n.card { background: url(card.png); }\n@import \"base.css\";\n";
+        fs::write(dir.path().join("site.css"), source).expect("write CSS fixture");
+
+        let (facts, _) = build_facts(dir.path(), None).expect("extract CSS");
+        let file = file_node(&facts, "site.css");
+        let root = node_with_label(&facts, ":root");
+        let brand = node_with_label(&facts, "--brand");
+        let card = node_with_label(&facts, ".card");
+
+        assert_node_span_matches(
+            &facts,
+            root,
+            source,
+            ":root {\n  --brand: #f00;\n  background-image: url(root.png);\n}",
+        );
+        assert_node_span_matches(&facts, brand, source, "--brand: #f00;");
+        assert_graph_edge(&facts, file.node_id, root.node_id, RelationKind::Contains);
+        assert_graph_edge(&facts, root.node_id, brand.node_id, RelationKind::Contains);
+        assert_graph_edge(&facts, root.node_id, brand.node_id, RelationKind::Defines);
+        assert_relation_source(&facts, RelationKind::Links, "root.png", root.node_id);
+        assert_relation_source(&facts, RelationKind::Links, "card.png", card.node_id);
+        assert_relation_source(&facts, RelationKind::Imports, "base.css", file.node_id);
+    }
+
+    #[test]
+    fn html_extraction_handles_attribute_order_and_unquoted_values() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::write(
+            dir.path().join("index.html"),
+            r#"<link href=first.css rel=stylesheet>
+<link rel="stylesheet" href="second.css">
+<script src=app.js></script>
+<a href=/docs/start.html>Docs</a>
+<img src=hero.png>
+"#,
+        )
+        .expect("write HTML fixture");
+
+        let (facts, _) = build_facts(dir.path(), None).expect("extract HTML");
+        let file = file_node(&facts, "index.html");
+        assert_eq!(
+            web_relation_set(&facts),
+            BTreeSet::from([
+                "imports:app.js".to_owned(),
+                "imports:first.css".to_owned(),
+                "imports:second.css".to_owned(),
+                "links:/docs/start.html".to_owned(),
+                "links:hero.png".to_owned(),
+            ])
+        );
+        for (relation, target) in [
+            (RelationKind::Imports, "app.js"),
+            (RelationKind::Imports, "first.css"),
+            (RelationKind::Imports, "second.css"),
+            (RelationKind::Links, "/docs/start.html"),
+            (RelationKind::Links, "hero.png"),
+        ] {
+            assert_relation_source(&facts, relation, target, file.node_id);
+        }
+    }
+
+    #[test]
+    fn html_extraction_handles_case_insensitive_names_and_stylesheet_tokens() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::write(
+            dir.path().join("index.html"),
+            r#"<DIV ID=app>
+  <A HREF=guide>Guide</A>
+  <IMG SRC=hero.png />
+  <LINK HREF=theme.css REL="alternate StyleSheet" />
+</DIV>"#,
+        )
+        .expect("write HTML fixture");
+
+        let (facts, _) = build_facts(dir.path(), None).expect("extract HTML");
+        assert_eq!(
+            extracted_definition_set(&facts),
+            BTreeSet::from(["section:app".to_owned()])
+        );
+        assert_eq!(
+            web_relation_set(&facts),
+            BTreeSet::from([
+                "imports:theme.css".to_owned(),
+                "links:guide".to_owned(),
+                "links:hero.png".to_owned(),
+            ])
+        );
+    }
+
+    #[test]
+    fn html_id_sections_cover_self_closing_script_and_style_elements() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let source = r#"<img id="hero" />
+<script id=loader></script>
+<style id='theme'></style>
+"#;
+        fs::write(dir.path().join("index.html"), source).expect("write HTML fixture");
+
+        let (facts, _) = build_facts(dir.path(), None).expect("extract HTML");
+        assert_eq!(
+            extracted_definition_set(&facts),
+            BTreeSet::from([
+                "section:hero".to_owned(),
+                "section:loader".to_owned(),
+                "section:theme".to_owned(),
+            ])
+        );
+        assert_node_span_matches(
+            &facts,
+            node_with_label(&facts, "hero"),
+            source,
+            "<img id=\"hero\" />",
+        );
+        assert_node_span_matches(
+            &facts,
+            node_with_label(&facts, "loader"),
+            source,
+            "<script id=loader></script>",
+        );
+        assert_node_span_matches(
+            &facts,
+            node_with_label(&facts, "theme"),
+            source,
+            "<style id='theme'></style>",
+        );
+    }
+
+    #[test]
+    fn html_media_links_reject_similar_attributes_and_non_stylesheet_links() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::write(
+            dir.path().join("index.html"),
+            r#"<source src=stream.webm>
+<audio src="song.mp3"></audio>
+<video src=movie.mp4 poster='poster.jpg'></video>
+<img data-src=lazy.png>
+<a href-lang=en>Language</a>
+<link rel=icon href=favicon.ico>
+"#,
+        )
+        .expect("write HTML fixture");
+
+        let (facts, _) = build_facts(dir.path(), None).expect("extract HTML");
+        assert_eq!(
+            web_relation_set(&facts),
+            BTreeSet::from([
+                "links:movie.mp4".to_owned(),
+                "links:poster.jpg".to_owned(),
+                "links:song.mp3".to_owned(),
+                "links:stream.webm".to_owned(),
+            ])
+        );
+    }
+
+    #[test]
+    fn css_extraction_normalizes_urls_and_rejects_noise() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::write(
+            dir.path().join("site.css"),
+            r##".hero {
+  background: url("../img/hero.png");
+  mask: url("#mask");
+  empty-quoted: url("");
+  empty-bare: url();
+  inline: url(data:image/png,AAAA);
+}
+"##,
+        )
+        .expect("write CSS fixture");
+
+        let (facts, _) = build_facts(dir.path(), None).expect("extract CSS");
+        let hero = node_with_label(&facts, ".hero");
+        assert_eq!(
+            web_relation_set(&facts),
+            BTreeSet::from(["links:#mask".to_owned(), "links:../img/hero.png".to_owned(),])
+        );
+        assert_relation_source(&facts, RelationKind::Links, "../img/hero.png", hero.node_id);
+        assert_relation_source(&facts, RelationKind::Links, "#mask", hero.node_id);
+    }
+
+    #[test]
+    fn css_import_url_is_an_import_without_a_duplicate_link() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::write(dir.path().join("site.css"), r#"@import url("theme.css");"#)
+            .expect("write CSS fixture");
+
+        let (facts, _) = build_facts(dir.path(), None).expect("extract CSS");
+        assert_eq!(
+            web_relation_set(&facts),
+            BTreeSet::from(["imports:theme.css".to_owned()])
+        );
+    }
+
+    #[test]
+    fn css_url_function_name_is_case_insensitive() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::write(
+            dir.path().join("site.css"),
+            ".hero { background: URL(hero.png); }\n@import UrL(\"theme.css\");\n",
+        )
+        .expect("write CSS fixture");
+
+        let (facts, _) = build_facts(dir.path(), None).expect("extract CSS");
+        assert_eq!(
+            web_relation_set(&facts),
+            BTreeSet::from(["imports:theme.css".to_owned(), "links:hero.png".to_owned(),])
+        );
+    }
+
+    #[test]
+    fn links_remain_unresolved_when_their_labels_collide_with_symbols() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::write(
+            dir.path().join("index.html"),
+            r#"<section id="guide"><a href="guide">Guide</a></section>"#,
+        )
+        .expect("write HTML fixture");
+        fs::write(
+            dir.path().join("site.css"),
+            "@keyframes fade { from { opacity: 0; } }\n.hero { background: url(fade); }\n",
+        )
+        .expect("write CSS fixture");
+
+        let (facts, _) = build_facts(dir.path(), None).expect("extract web files");
+        for target in ["guide", "fade"] {
+            let edge = facts
+                .edges
+                .iter()
+                .find(|edge| {
+                    edge.relation == RelationKind::Links
+                        && edge.target_label.as_deref() == Some(target)
+                })
+                .unwrap_or_else(|| panic!("missing link to {target}"));
+            assert_eq!(
+                edge.target_node_id, None,
+                "link target {target} must not bind through symbol lookup"
+            );
+        }
+    }
+
+    #[test]
+    fn css_custom_property_without_trailing_semicolon_is_a_constant() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let source = ":root { --brand: #f00 }\n";
+        fs::write(dir.path().join("site.css"), source).expect("write CSS fixture");
+
+        let (facts, _) = build_facts(dir.path(), None).expect("extract CSS");
+        let brand = node_with_label(&facts, "--brand");
+        assert_eq!(brand.kind, NodeKind::Constant);
+        assert_node_span_matches(&facts, brand, source, "--brand: #f00");
+    }
+
+    #[test]
+    fn malformed_html_retains_file_node() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::write(
+            dir.path().join("broken.html"),
+            "<main id=\"kept\"><div><a href=\"broken.html\">",
+        )
+        .expect("write malformed HTML fixture");
+
+        let (facts, _) = build_facts(dir.path(), None).expect("extract malformed HTML");
+        file_node(&facts, "broken.html");
+    }
+
+    #[test]
+    fn malformed_css_retains_file_node() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::write(
+            dir.path().join("broken.css"),
+            ".card { color: red; background: url(\"broken.png\");",
+        )
+        .expect("write malformed CSS fixture");
+
+        let (facts, _) = build_facts(dir.path(), None).expect("extract malformed CSS");
+        file_node(&facts, "broken.css");
+    }
 
     #[test]
     fn run_query_compresses_shared_string_context_ancestor_paths() {
@@ -3986,6 +4582,54 @@ mod tests {
                 "{import_path} should classify as external"
             );
         }
+    }
+
+    #[test]
+    fn classify_web_imports_and_resolve_workspace_paths() {
+        let workspace_index = ImportWorkspaceIndex::default();
+        for (source_file, import_path) in [
+            ("web/index.html", "./app.js"),
+            ("web/index.htm", "theme.css?v=2"),
+            ("web/index.html", "/theme.css"),
+            ("web/index.html", "#bootstrap"),
+            ("web/index.html", "data:text/javascript;base64,AAAA"),
+            ("web/styles/site.css", "../base.css"),
+        ] {
+            assert_eq!(
+                classify_import_origin(import_path, source_file, &workspace_index),
+                ImportOriginClassification::Internal,
+                "{source_file} import {import_path} should be workspace-local"
+            );
+        }
+        assert_eq!(
+            classify_import_origin(
+                "https://cdn.example/app.js",
+                "web/index.html",
+                &workspace_index
+            ),
+            external_import(
+                "https://cdn.example/app.js",
+                "https://cdn.example/app.js",
+                "https://cdn.example/app.js"
+            )
+        );
+
+        assert_eq!(
+            web_import_target_path("web/pages/index.html", "../app.js?v=2#boot").as_deref(),
+            Some("web/app.js")
+        );
+        assert_eq!(
+            web_import_target_path("web/styles/site.css", "/theme.css#screen"),
+            None
+        );
+        assert_eq!(
+            web_import_target_path("web/index.html", "https://cdn.example/app.js"),
+            None
+        );
+        assert_eq!(
+            web_import_target_path("web/index.html", "../../outside.css"),
+            None
+        );
     }
 
     #[test]

@@ -16,8 +16,8 @@ use crate::extract::{
     languages::all_supported_extensions,
     tree_sitter::{
         classify_import_origin, function_singleton_safe,
-        is_import_resolution_fallback_candidate_kind, language_family, ImportOriginClassification,
-        ImportWorkspaceIndex,
+        is_import_resolution_fallback_candidate_kind, is_web_import_source_file, language_family,
+        web_import_target_path, ImportOriginClassification, ImportWorkspaceIndex,
     },
 };
 use crate::identity::{stable_symbol_id_for_external_path, EXTERNAL_FILE_PATH};
@@ -30,9 +30,9 @@ use crate::{
 };
 
 pub const SCHEMA_VERSION: &str = "spur-graph-schema-v10";
-pub const EXTRACTOR_VERSION: &str = "2026-06-05-import-path-capture-v1";
+pub const EXTRACTOR_VERSION: &str = "2026-08-30-html-css-extraction-v1";
 /// Bump when resolver semantics change without query, extractor, or schema changes.
-pub const RESOLVER_VERSION: &str = "2026-06-06-import-licensed-xcrate-supply-v18";
+pub const RESOLVER_VERSION: &str = "2026-08-30-web-edge-resolution-v1";
 
 #[derive(Debug, Clone, Copy)]
 struct ManifestQueryBytes<'a> {
@@ -196,6 +196,26 @@ const MANIFEST_QUERY_BYTES: &[ManifestQueryBytes<'static>] = &[
         language: "mermaid",
         query: "tags",
         bytes: include_bytes!("../../queries/mermaid/tags.scm"),
+    },
+    ManifestQueryBytes {
+        language: "html",
+        query: "tags",
+        bytes: include_bytes!("../../queries/html/tags.scm"),
+    },
+    ManifestQueryBytes {
+        language: "html",
+        query: "spur-edges",
+        bytes: include_bytes!("../../queries/html/spur-edges.scm"),
+    },
+    ManifestQueryBytes {
+        language: "css",
+        query: "tags",
+        bytes: include_bytes!("../../queries/css/tags.scm"),
+    },
+    ManifestQueryBytes {
+        language: "css",
+        query: "spur-edges",
+        bytes: include_bytes!("../../queries/css/spur-edges.scm"),
     },
 ];
 
@@ -1480,8 +1500,14 @@ fn rebind_cross_file_edges(buckets: &mut BTreeMap<String, FileBucket>) {
 fn current_symbol_ids_from_buckets(buckets: &BTreeMap<String, FileBucket>) -> HashSet<String> {
     buckets
         .values()
-        .flat_map(|bucket| bucket.symbols.iter())
-        .map(|symbol| symbol.stable_symbol_id.clone())
+        .flat_map(|bucket| {
+            std::iter::once(bucket.file.stable_file_id.clone()).chain(
+                bucket
+                    .symbols
+                    .iter()
+                    .map(|symbol| symbol.stable_symbol_id.clone()),
+            )
+        })
         .collect()
 }
 
@@ -1517,6 +1543,16 @@ fn rebind_import_edges(
     current_symbol_ids: &mut HashSet<String>,
 ) -> (FileImportIndex, usize) {
     let workspace_targets_by_stable_id = workspace_targets_by_stable_id(symbols_by_entity_name);
+    let workspace_files_by_path = buckets
+        .values()
+        .filter(|bucket| bucket.file.file_path != EXTERNAL_FILE_PATH)
+        .map(|bucket| {
+            (
+                bucket.file.file_path.clone(),
+                bucket.file.stable_file_id.clone(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
     let mut file_import_index = FileImportIndex::new();
     let mut ambiguous_unresolved = 0usize;
 
@@ -1529,6 +1565,27 @@ fn rebind_import_edges(
             let Some(target_label) = edge.target_label.clone() else {
                 continue;
             };
+            if is_web_import_source_file(source_file_path) {
+                let workspace_file = edge
+                    .import_path
+                    .as_deref()
+                    .and_then(|path| web_import_target_path(source_file_path, path))
+                    .and_then(|path| workspace_files_by_path.get(&path));
+                if let Some(stable_file_id) = workspace_file {
+                    edge.target_stable_symbol_id = Some(stable_file_id.clone());
+                    edge.bind_method = Some("import_path".to_owned());
+                } else if !bind_external_import_edge(
+                    edge,
+                    source_file_path,
+                    workspace_index,
+                    external_imports,
+                    current_symbol_ids,
+                ) {
+                    edge.target_stable_symbol_id = None;
+                    edge.bind_method = None;
+                }
+                continue;
+            }
             let resolution_is_stamped = resolution_is_stamped(edge);
             let skip_rebind = edge.edge_kind == Some(GraphEdgeKind::CallsDyn)
                 || target_label.contains("::")
@@ -1646,6 +1703,11 @@ fn rebind_remaining_edges(
             if edge.relation == RelationKind::Imports {
                 continue;
             }
+            if edge.relation == RelationKind::Links {
+                edge.target_stable_symbol_id = None;
+                edge.bind_method = None;
+                continue;
+            }
             let Some(target_label) = edge.target_label.clone() else {
                 continue;
             };
@@ -1669,9 +1731,6 @@ fn rebind_remaining_edges(
                     );
                 }
                 drop_dangling_stamped_target(edge, current_symbol_ids);
-                continue;
-            }
-            if edge.relation == RelationKind::Links {
                 continue;
             }
             if edge.edge_kind == Some(GraphEdgeKind::ReferencesAddress) {
@@ -2753,7 +2812,7 @@ mod tests {
         manifest_version_from_query_bytes, rebind_cross_file_edges, rebind_import_edges,
         rebind_remaining_edges, symbols_by_entity_name_from_buckets, BuildMode, CurrentFileEntry,
         ExternalImportRegistry, FileBucket, FileImportIndex, ManifestQueryBytes, RebindTarget,
-        GRAPH_INDEX_VERSION_TEMPORAL,
+        GRAPH_INDEX_VERSION_TEMPORAL, MANIFEST_QUERY_BYTES,
     };
     use crate::content_hash::{compute_graph_content_hash, git_blob_oid};
     use crate::extract::{build_facts, build_facts_for_paths, GraphFacts};
@@ -2767,6 +2826,114 @@ mod tests {
     use tracing::field::{Field, Visit};
     use tracing::span::{Attributes, Record};
     use tracing::{Event, Id, Metadata, Subscriber};
+
+    #[test]
+    fn manifest_includes_html_and_css_query_bytes() {
+        let included = MANIFEST_QUERY_BYTES
+            .iter()
+            .map(|query| (query.language, query.query))
+            .collect::<BTreeSet<_>>();
+
+        for expected in [
+            ("html", "tags"),
+            ("html", "spur-edges"),
+            ("css", "tags"),
+            ("css", "spur-edges"),
+        ] {
+            assert!(
+                included.contains(&expected),
+                "manifest hash must include {expected:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn web_imports_bind_to_workspace_files_instead_of_external_nodes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::write(
+            root.join("index.html"),
+            r##"<script src="app.js"></script>
+<script src="data:text/javascript;base64,AAAA"></script>
+<script src=" DATA:text/javascript;base64,BBBB"></script>
+<script src="#bootstrap"></script>
+<link rel="stylesheet" href="theme.css">
+<link rel="stylesheet" href="/theme.css">"##,
+        )
+        .expect("write html");
+        fs::write(root.join("app.js"), "export const app = true;\n").expect("write js");
+        fs::write(
+            root.join("theme.css"),
+            "@import \"base.css\";\n@import \"data:text/css,body{}\";\n@import \" DATA:text/css,p{}\";\n@import \"#print\";\n@import \"/base.css\";\n",
+        )
+        .expect("write css");
+        fs::write(root.join("base.css"), ":root { --brand: red; }\n").expect("write css");
+
+        let facts = build_facts(root, None).expect("extract web files").0;
+        let artifact = artifact_from_facts(&facts, root).expect("build artifact");
+        let file_ids = artifact
+            .files
+            .iter()
+            .map(|file| (file.file_path.as_str(), file.stable_file_id.as_str()))
+            .collect::<BTreeMap<_, _>>();
+
+        for (source, target) in [
+            ("index.html", "app.js"),
+            ("index.html", "theme.css"),
+            ("theme.css", "base.css"),
+        ] {
+            let edge = artifact
+                .edges
+                .iter()
+                .find(|edge| {
+                    edge.relation == RelationKind::Imports
+                        && edge.target_label.as_deref() == Some(target)
+                        && edge.source_stable_symbol_id == file_ids[source]
+                })
+                .unwrap_or_else(|| panic!("missing {source} import of {target}"));
+            assert_eq!(
+                edge.target_stable_symbol_id.as_deref(),
+                Some(file_ids[target])
+            );
+            assert_eq!(edge.bind_method.as_deref(), Some("import_path"));
+        }
+
+        assert!(
+            artifact.edges.iter().all(|edge| {
+                !edge
+                    .target_label
+                    .as_deref()
+                    .is_some_and(|target| target.to_ascii_lowercase().starts_with("data:"))
+            }),
+            "data imports must be omitted before artifact binding"
+        );
+        for (source, target) in [
+            ("index.html", "#bootstrap"),
+            ("index.html", "/theme.css"),
+            ("theme.css", "#print"),
+            ("theme.css", "/base.css"),
+        ] {
+            let edge = artifact
+                .edges
+                .iter()
+                .find(|edge| {
+                    edge.relation == RelationKind::Imports
+                        && edge.target_label.as_deref() == Some(target)
+                        && edge.source_stable_symbol_id == file_ids[source]
+                })
+                .unwrap_or_else(|| panic!("missing unresolved {source} import of {target}"));
+            assert_eq!(edge.target_stable_symbol_id, None, "{source} -> {target}");
+            assert_eq!(edge.bind_method, None, "{source} -> {target}");
+        }
+
+        assert!(
+            artifact
+                .symbols
+                .iter()
+                .all(|symbol| symbol.symbol_kind != "external"),
+            "workspace web imports must not create external nodes"
+        );
+    }
 
     #[test]
     fn import_rebind_fallback_candidate_kind_agrees_with_node_kind_discriminators() {

@@ -126,6 +126,27 @@ url = "https://x"
     }
 
     #[test]
+    fn jute_debug_transport_round_trips_without_user_managed_process_fields() {
+        let src = r#"
+[[mcp_servers.entries]]
+name = "jute-debug"
+enabled = true
+
+[mcp_servers.entries.transport]
+transport = "jute_debug"
+"#;
+        let cfg: SpurConfig = toml::from_str(src).expect("parse jute debug transport");
+        let entry = &cfg.mcp_servers.entries[0];
+        assert!(matches!(entry.transport, McpServerTransport::JuteDebug));
+        entry.validate().expect("managed transport is valid");
+
+        let out = toml::to_string(&cfg).expect("serialize");
+        assert!(out.contains("transport = \"jute_debug\""), "{out}");
+        let back: SpurConfig = toml::from_str(&out).expect("re-parse");
+        assert_eq!(back.mcp_servers, cfg.mcp_servers);
+    }
+
+    #[test]
     fn validate_rejects_reserved_and_empty() {
         let mut entry = http_entry("spur-mcp");
         assert!(entry.validate().is_err(), "reserved name");
@@ -715,7 +736,7 @@ pub struct McpServerEntry {
     pub transport: McpServerTransport,
 }
 
-/// Exactly one transport per entry. The enum makes both transports
+/// Exactly one transport per entry. The enum makes multiple transports
 /// unrepresentable in Rust, while serde rejects fields from another variant.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "transport", rename_all = "lowercase", deny_unknown_fields)]
@@ -732,6 +753,10 @@ pub enum McpServerTransport {
         #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
         headers: std::collections::HashMap<String, String>,
     },
+    /// Managed read-only diagnostics served by the live Jute daemon. SPUR
+    /// resolves the notebook binary and per-workspace socket at session start.
+    #[serde(rename = "jute_debug")]
+    JuteDebug,
 }
 
 impl McpServerEntry {
@@ -763,6 +788,7 @@ impl McpServerEntry {
                     self.name
                 );
             }
+            McpServerTransport::JuteDebug => {}
         }
         Ok(())
     }

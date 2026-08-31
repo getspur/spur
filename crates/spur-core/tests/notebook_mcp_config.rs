@@ -109,6 +109,44 @@ fn brain_mcp_servers_preinclude_notebook_stdio_proxy_on_nonce_socket() {
 }
 
 #[test]
+#[cfg(not(feature = "disable-notebook-mcp"))]
+fn brain_mcp_servers_resolves_enabled_jute_debug_transport() {
+    use spur_acp::config::{McpServerEntry, McpServerTransport, McpServersConfig};
+
+    let servers = spur_core::notebook::brain_mcp_servers(
+        "http://127.0.0.1:3939/mcp",
+        "fixture-nonce",
+        &McpServersConfig {
+            entries: vec![McpServerEntry {
+                name: "jute-debug".to_owned(),
+                enabled: true,
+                transport: McpServerTransport::JuteDebug,
+            }],
+        },
+    )
+    .expect("brain MCP servers");
+
+    let notebook = servers
+        .iter()
+        .find_map(|server| match server {
+            McpServer::Stdio(stdio) if stdio.name == "notebook" => Some(stdio),
+            _ => None,
+        })
+        .expect("fixed notebook MCP server");
+    let debug = servers
+        .iter()
+        .find_map(|server| match server {
+            McpServer::Stdio(stdio) if stdio.name == "jute-debug" => Some(stdio),
+            _ => None,
+        })
+        .expect("configured Jute debug MCP server");
+
+    assert_eq!(debug.command, notebook.command);
+    assert_eq!(debug.args[0], "--debug-mcp-proxy");
+    assert_eq!(debug.args[1], notebook.args[1]);
+}
+
+#[test]
 #[cfg(feature = "disable-notebook-mcp")]
 fn brain_mcp_servers_omits_notebook_when_feature_disabled() {
     let servers = spur_core::notebook::brain_mcp_servers(

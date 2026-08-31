@@ -42,6 +42,7 @@ enum Form {
     None,
     Stdio,
     Http,
+    JuteDebug,
 }
 
 impl Form {
@@ -50,6 +51,7 @@ impl Form {
             Self::None => "",
             Self::Stdio => "stdio",
             Self::Http => "http",
+            Self::JuteDebug => "jute-debug",
         }
     }
 
@@ -58,6 +60,7 @@ impl Form {
             Self::None => 0,
             Self::Stdio => 6,
             Self::Http => 5,
+            Self::JuteDebug => 3,
         }
     }
 }
@@ -104,6 +107,7 @@ impl McpServerDraft {
                 draft.url.clone_from(url);
                 draft.headers = format_pairs(headers);
             }
+            McpServerTransport::JuteDebug => {}
         }
         draft
     }
@@ -119,6 +123,7 @@ impl McpServerDraft {
                 url: self.url,
                 headers: parse_pairs(&self.headers),
             },
+            Form::JuteDebug => McpServerTransport::JuteDebug,
             Form::None => unreachable!("a draft is saved only from an active form"),
         };
         McpServerEntry {
@@ -218,7 +223,7 @@ impl McpServersPane {
         }
         match self.form {
             Form::None => self.handle_list_key(key),
-            Form::Stdio | Form::Http => self.handle_form_key(key),
+            Form::Stdio | Form::Http | Form::JuteDebug => self.handle_form_key(key),
         }
     }
 
@@ -371,6 +376,7 @@ impl McpServersPane {
         self.form = match &entry.transport {
             McpServerTransport::Stdio { .. } => Form::Stdio,
             McpServerTransport::Http { .. } => Form::Http,
+            McpServerTransport::JuteDebug => Form::JuteDebug,
         };
         self.draft = McpServerDraft::from_entry(&entry);
         self.selected_field = 0;
@@ -404,7 +410,8 @@ impl McpServersPane {
             2 => {
                 self.form = match self.form {
                     Form::Stdio => Form::Http,
-                    Form::Http => Form::Stdio,
+                    Form::Http => Form::JuteDebug,
+                    Form::JuteDebug => Form::Stdio,
                     Form::None => Form::None,
                 };
             }
@@ -529,6 +536,7 @@ impl McpServersPane {
                 let transport = match &entry.transport {
                     McpServerTransport::Stdio { .. } => "stdio",
                     McpServerTransport::Http { .. } => "http",
+                    McpServerTransport::JuteDebug => "jute-debug",
                 };
                 let enabled = if entry.enabled { "enabled" } else { "disabled" };
                 let status = match self.probe_states.get(&entry.name) {
@@ -596,6 +604,7 @@ impl McpServersPane {
                 ("url", self.draft.url.clone()),
                 ("headers", self.draft.headers.clone()),
             ]),
+            Form::JuteDebug => {}
             Form::None => {}
         }
         rows.extend(
@@ -1024,6 +1033,32 @@ mod tests {
                 && url == "https://example.test/mcp"
                 && headers.get("Authorization").map(String::as_str) == Some("Bearer test")
                 && headers.get("X-Test").map(String::as_str) == Some("yes")
+        ));
+    }
+
+    #[test]
+    fn jute_debug_add_form_saves_managed_transport() {
+        let mut pane = McpServersPane::new();
+        pane.handle_key(key(KeyCode::Char('a')));
+        enter_text(&mut pane, "jute-debug");
+        pane.handle_key(key(KeyCode::Down));
+        pane.handle_key(key(KeyCode::Down));
+        pane.handle_key(key(KeyCode::Enter));
+        pane.handle_key(key(KeyCode::Enter));
+
+        let text = pane.render_snapshot();
+        assert!(text.contains("transport: jute-debug"), "{text}");
+        assert!(matches!(
+            pane.handle_key(key(KeyCode::Char('s'))),
+            Some(Action::ConfigSaveRequested {
+                patch: ConfigPatch::McpServerUpsert {
+                    entry: McpServerEntry {
+                        ref name,
+                        transport: McpServerTransport::JuteDebug,
+                        ..
+                    }
+                }
+            }) if name == "jute-debug"
         ));
     }
 

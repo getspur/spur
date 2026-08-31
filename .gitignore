@@ -12,6 +12,8 @@ coverage/
 *.ducklake
 .spur/worktrees/
 .worktrees/
+# Benchmark runs materialize third-party source trees for code evaluation.
+/.spur/bench-evidence/
 *.db
 .idea/
 .DS_Store

@@ -80,6 +80,8 @@ Legend:
 | Yaml | Y | - | - | - | - | - | - | - | - | - | - | Y | - | Y | - | - |
 | Markdown | - | - | - | - | - | - | - | - | - | - | - | - | Y | - | - | - |
 | JupyterNotebook | - | - | - | - | - | - | - | - | - | - | - | - | - | - | - | - |
+| Html | - | - | - | - | - | - | - | - | - | - | - | - | Y | - | - | - |
+| Css | - | Y | - | - | - | - | - | - | - | - | - | - | Y | Y | - | - |
 
 Notes:
 
@@ -152,6 +154,17 @@ Notes:
   `NodeKind::Constant`. `tree-sitter-sequel` 0.3 exposes no
   `create_procedure` node, so `CREATE PROCEDURE` remains a grammar-blocked
   TODO.
+- Html and Css are parsed as standalone files only. Html ID-bearing normal,
+  self-closing, script, and style elements become sections; script/style raw
+  content stays opaque and is not recursively parsed. Template-component
+  formats and preprocessors such as Vue, Svelte, Scss, and Less are not
+  claimed by these language matchers.
+- Css rule sections retain the selector source text with boundary trimming
+  only; selector whitespace is not canonicalized. Keyframes become functions,
+  and custom properties become constants. The grammar supports quoted URL
+  paths and simple unquoted targets such as `url(card.png)`; relative targets
+  containing `../` must be quoted because the unquoted form is exposed only
+  through error-recovery nodes in `tree-sitter-css 0.25.0`.
 
 ## Relation Coverage Matrix
 
@@ -160,21 +173,21 @@ This table is the relation-level analogue of the Definition Coverage Matrix and 
 seed of the Tier-0 ontology realization contract
 (`docs/superpowers/specs/2026-06-04-code-graph-ontology-tier0-design.ipynb`).
 
-| Predicate | Rust | Python | TypeScript | Tsx | JavaScript | C | Cpp | Go | Hcl | Terraform | Lua | Shell | Sql | Json | Toml | Yaml | Markdown | JupyterNotebook |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| imports | Y | Y | Y | Y | Y | Y | Y | Y | — | — | Y | Y | — | — | — | — | Y(links) | — |
-| calls | Y | Y | Y | Y | Y | Y | Y | Y | — | — | Y | Y | Y | — | — | — | — | — |
-| constructs | Y | Y | Y | Y | Y | Y | Y | Y | — | — | — | — | Y | — | — | — | — | — |
-| contains | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y |
-| produces | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | Y |
-| consumes | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | Y |
-| binds | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | Y |
-| emits | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | Y |
-| defines | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y | — | — |
-| references (HOF/notebook/address) | Y | Y | Y | Y | Y | — | Y | — | Y | Y | — | — | Y | — | — | — | — | Y |
-| links | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | Y | — |
-| implements | Y | Y | Y | Y | Y | — | — | — | — | — | — | — | — | — | — | — | — | — |
-| extends | Y | Y | Y | Y | Y | — | Y | — | — | — | — | — | — | — | — | — | — | — |
+| Predicate | Rust | Python | TypeScript | Tsx | JavaScript | C | Cpp | Go | Hcl | Terraform | Lua | Shell | Sql | Json | Toml | Yaml | Markdown | JupyterNotebook | Html | Css |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| imports | Y | Y | Y | Y | Y | Y | Y | Y | — | — | Y | Y | — | — | — | — | Y(links) | — | Y | Y |
+| calls | Y | Y | Y | Y | Y | Y | Y | Y | — | — | Y | Y | Y | — | — | — | — | — | — | — |
+| constructs | Y | Y | Y | Y | Y | Y | Y | Y | — | — | — | — | Y | — | — | — | — | — | — | — |
+| contains | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y |
+| produces | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | Y | — | — |
+| consumes | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | Y | — | — |
+| binds | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | Y | — | — |
+| emits | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | Y | — | — |
+| defines | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y | — | — | Y | Y |
+| references (HOF/notebook/address) | Y | Y | Y | Y | Y | — | Y | — | Y | Y | — | — | Y | — | — | — | — | Y | — | — |
+| links | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | Y | — | Y | Y |
+| implements | Y | Y | Y | Y | Y | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — |
+| extends | Y | Y | Y | Y | Y | — | Y | — | — | — | — | — | — | — | — | — | — | — | — | — |
 
 Python `implements` is realized after resolution: `@extends` captures targeting
 local classes declared with `Protocol`, `ABC`, or `abc.ABC` bases are
@@ -203,6 +216,24 @@ Markdown `links` covers inline links plus full, collapsed, and shortcut
 reference-style links. Reference definitions map labels to normalized
 destinations; missing labels remain unresolved link edges labeled by the
 normalized reference label.
+
+Html `imports` covers script `src` values and stylesheet-link `href` values;
+stylesheet detection treats `rel` as an ASCII-case-insensitive token list and
+accepts normal or self-closing link tags. Html tag and attribute matching is
+ASCII-case-insensitive. Html `links` covers anchor destinations plus
+`img`/`source`/`audio`/`video` sources and video posters; similarly named
+attributes and non-stylesheet `link` elements are intentionally ignored. Css
+`imports` covers quoted and `url(...)` import targets, while other URL calls
+become `links`; the `url` function name is ASCII-case-insensitive. Empty and
+data URLs are ignored, fragment URLs are preserved, and import URLs are not
+emitted again as Links.
+
+Relative Html/Css imports bind to matching workspace files after lexical path
+normalization; missing local files, fragments, and root-relative paths stay
+unresolved because no web document root is configured. URI and
+protocol-relative imports remain external, while data imports are omitted.
+`links` are deliberately kept as unresolved URL evidence instead of entering
+bare-symbol resolution.
 
 Hcl/Terraform `references` are address references
 (`GraphEdgeKind::ReferencesAddress`): each `variable_expr` + `get_attr` chain
