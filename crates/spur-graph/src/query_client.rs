@@ -28,10 +28,9 @@ use parquet::schema::types::SchemaDescriptor;
 use crate::query_hot_index::{HotAdjacencyIndex, HotQueryIndex};
 use crate::schema::GRAPH_INDEX_VERSION_TEMPORAL;
 use crate::store::parquet::{
-    read_current_query_edges_parquet, read_current_query_symbols_parquet,
-    read_filtered_projected_batches, read_projected_batches, read_temporal_artifact_parquet,
-    read_temporal_artifact_parquet_for_symbol_history_with_cache, ParquetMetadataCache,
-    StringPruningPredicate, PARQUET_ROW_GROUP_SIZE,
+    read_current_query_edges_parquet, read_filtered_projected_batches, read_projected_batches,
+    read_temporal_artifact_parquet, read_temporal_artifact_parquet_for_symbol_history_with_cache,
+    ParquetMetadataCache, StringPruningPredicate, PARQUET_ROW_GROUP_SIZE,
 };
 use crate::temporal::{symbol_history_indexed, GitSha, TemporalIndex};
 use crate::{
@@ -1059,14 +1058,53 @@ impl ParquetClient {
             self.hot_query_index_build_count
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             (|| -> anyhow::Result<Arc<HotQueryIndex>> {
-                let symbols = read_current_query_symbols_parquet(&self.dir)?;
-                Ok(Arc::new(HotQueryIndex::new(symbols)))
+                let symbol_batch = self.read_current_query_symbol_batch()?;
+                Ok(Arc::new(HotQueryIndex::new(symbol_batch)?))
             })()
             .map_err(SharedHotQueryIndexError::new)
         }) {
             Ok(index) => Ok(Arc::clone(index)),
             Err(error) => Err(anyhow::Error::new(error.clone())),
         }
+    }
+
+    fn read_current_query_symbol_batch(&self) -> anyhow::Result<RecordBatch> {
+        let nodes_path = self.dir.join("nodes.parquet");
+        let file = File::open(&nodes_path)
+            .with_context(|| format!("failed to open `{}`", nodes_path.display()))?;
+        let builder =
+            ParquetRecordBatchReaderBuilder::new_with_metadata(file, self.nodes_metadata.clone());
+        let projection = ProjectionMask::columns(builder.parquet_schema(), SYMBOL_COLUMNS);
+        let builder = builder
+            .with_batch_size(self.manifest.row_counts.nodes.max(1))
+            .with_projection(projection);
+        let schema = builder.schema().clone();
+        let mut reader = builder.build().with_context(|| {
+            format!(
+                "failed to build Arrow reader for `{}`",
+                nodes_path.display()
+            )
+        })?;
+
+        let Some(batch) = reader
+            .next()
+            .transpose()
+            .with_context(|| format!("failed to decode `{}`", nodes_path.display()))?
+        else {
+            return Ok(RecordBatch::new_empty(schema));
+        };
+        if reader
+            .next()
+            .transpose()
+            .with_context(|| format!("failed to decode `{}`", nodes_path.display()))?
+            .is_some()
+        {
+            bail!(
+                "expected one current-symbol RecordBatch for `{}`, but reader produced multiple batches",
+                nodes_path.display()
+            );
+        }
+        Ok(batch)
     }
 
     #[cfg(test)]
@@ -1267,7 +1305,7 @@ impl ParquetClient {
         let Some(target_symbol) = symbols.symbol_by_id(target_sid) else {
             return Ok(Vec::new());
         };
-        let unresolved_labels = unresolved_target_labels_for_symbol(target_symbol);
+        let unresolved_labels = unresolved_target_labels_for_symbol(&target_symbol);
         let index = self.hot_adjacency_index()?;
         Ok(index.caller_records(target_sid, &unresolved_labels))
     }
