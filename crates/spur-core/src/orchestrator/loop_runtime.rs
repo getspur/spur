@@ -274,6 +274,7 @@ struct ProjectLoopRuntimeDeps {
     fault_injection_hooks: super::FaultInjectionHooks,
     dispatch_lease_duration: Duration,
     dispatch_lease_heartbeat: Duration,
+    worker_mcp_default: bool,
     worker_mcp_servers:
         Arc<dashmap::DashMap<spur_acp::BrainSessionId, Arc<crate::worker_server::WorkerMcpServer>>>,
     outcome_store: Arc<dyn spur_blob_store::OutcomeStore>,
@@ -337,6 +338,11 @@ impl ProjectLoopRuntimeDeps {
             dispatch_lease_heartbeat: Duration::from_secs(
                 orchestrator.config.spur.dispatch_lease_heartbeat_secs,
             ),
+            worker_mcp_default: orchestrator
+                .config
+                .mcp_servers
+                .builtin_overrides
+                .worker_mcp_enabled,
             worker_mcp_servers: Arc::clone(&orchestrator.worker_mcp_servers),
             outcome_store: Arc::clone(&orchestrator.outcome_store),
             context_service_config: orchestrator.config.context_service.clone(),
@@ -409,6 +415,7 @@ impl ProjectLoopRuntimeDeps {
             self.fault_injection_hooks.clone(),
             self.dispatch_lease_duration,
             self.dispatch_lease_heartbeat,
+            self.worker_mcp_default,
             worker_mcp_fetcher,
             self.normalize_bypass_hooks,
             delegation_shutdown,

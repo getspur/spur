@@ -1,5 +1,6 @@
 use super::peer_mailbox::drain_peer_acks_with_timeout;
 use super::*;
+use crate::orchestrator::worker_mcp::resolve_worker_mcp_enabled;
 
 pub(crate) fn resolve_effective_model_effort(
     request_model: Option<&str>,
@@ -81,6 +82,7 @@ pub(crate) async fn execute_delegation(
     dispatched_base_oid_tx: Option<tokio::sync::watch::Sender<Option<String>>>,
     fault_injection_hooks: FaultInjectionHooks,
     enable_worker_mcp: Option<bool>,
+    worker_mcp_default: bool,
     worker_mcp_fetcher: WorkerMcpFetcher,
     pm_service: Option<Arc<PmService>>,
     feature_gate: Arc<spur_license::FeatureGate>,
@@ -167,12 +169,12 @@ pub(crate) async fn execute_delegation(
         resolve_effective_model_effort(model.as_deref(), effort.as_deref(), profile_def.as_ref());
 
     // Phase 5 / Task 26 — resolve the worker `mcp_servers` vec ONCE per
-    // delegation. The worker MCP server is default-on: only an explicit
-    // `enable_worker_mcp = Some(false)` returns an empty vec. For
-    // `None` (omitted) or `Some(true)`, the per-`BrainSession` worker
-    // MCP server is ensured (lazy boot via `WorkerMcpFetcher::ensure`)
-    // and a 1-hour HMAC token is minted; the token rides ONLY in the
-    // structured `mcp_servers` URL — never in argv or env.
+    // delegation. An explicit per-delegation setting takes precedence;
+    // omitted settings inherit the configured built-in default.
+    let enable_worker_mcp = Some(resolve_worker_mcp_enabled(
+        enable_worker_mcp,
+        worker_mcp_default,
+    ));
     let worker_mcp_dispatch_vec = match build_worker_mcp_servers_with(enable_worker_mcp, || {
         worker_mcp_fetcher.fetch_url_token(&brain_session_id, &request_id)
     })

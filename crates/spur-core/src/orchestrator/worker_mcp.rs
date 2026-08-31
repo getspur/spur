@@ -133,7 +133,10 @@ impl WorkerMcpFetcher {
 /// `extract_query_token`). Dual delivery is required for Codex
 /// (`sol_9c4300ee48ee42e9` proves query-only unsat; `sol_496a02a85819450c`
 /// proves dual sat).
-fn resolve_worker_mcp_enabled(enable_worker_mcp: Option<bool>, builtin_default: bool) -> bool {
+pub(super) fn resolve_worker_mcp_enabled(
+    enable_worker_mcp: Option<bool>,
+    builtin_default: bool,
+) -> bool {
     enable_worker_mcp.unwrap_or(builtin_default)
 }
 
@@ -579,9 +582,32 @@ mod worker_mcp_dispatch_tests {
     }
 
     #[tokio::test]
-    async fn flag_none_defaults_on_and_runs_fetch() {
+    async fn flag_none_with_default_off_emits_zero_entries_and_skips_fetch() {
         let mut fetch_called = false;
-        let result = build_worker_mcp_servers_with(None, || {
+        let enabled = resolve_worker_mcp_enabled(None, false);
+        let result = build_worker_mcp_servers_with(Some(enabled), || {
+            fetch_called = true;
+            async {
+                Ok::<_, DelegationDispatchError>((
+                    "http://127.0.0.1:54321/mcp".into(),
+                    "tok-default-off".into(),
+                ))
+            }
+        })
+        .await
+        .expect("None flag with default off must succeed");
+        assert!(result.is_empty());
+        assert!(
+            !fetch_called,
+            "fetch closure must not run when default is off"
+        );
+    }
+
+    #[tokio::test]
+    async fn flag_none_with_default_on_emits_one_entry_and_runs_fetch() {
+        let mut fetch_called = false;
+        let enabled = resolve_worker_mcp_enabled(None, true);
+        let result = build_worker_mcp_servers_with(Some(enabled), || {
             fetch_called = true;
             async {
                 Ok::<_, DelegationDispatchError>((
@@ -591,7 +617,7 @@ mod worker_mcp_dispatch_tests {
             }
         })
         .await
-        .expect("None flag must succeed");
+        .expect("None flag with default on must succeed");
         assert_eq!(
             result.len(),
             1,

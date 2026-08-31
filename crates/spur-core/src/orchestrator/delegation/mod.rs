@@ -87,6 +87,7 @@ pub(crate) async fn handle_delegations(
     fault_injection_hooks: FaultInjectionHooks,
     dispatch_lease_duration: std::time::Duration,
     dispatch_lease_heartbeat: std::time::Duration,
+    worker_mcp_default: bool,
     worker_mcp_fetcher: WorkerMcpFetcher,
     normalize_bypass_hooks: bool,
     shutdown: tokio_util::sync::CancellationToken,
@@ -391,6 +392,7 @@ pub(crate) async fn handle_delegations(
                     dispatched_base_oid_tx,
                     fault_injection_hooks,
                     enable_worker_mcp,
+                    worker_mcp_default,
                     worker_mcp_fetcher,
                     pm_service.clone(),
                     feature_gate,
@@ -685,6 +687,11 @@ mod tests {
             hooks,
             std::time::Duration::from_secs(60),
             std::time::Duration::from_secs(10),
+            orchestrator
+                .config
+                .mcp_servers
+                .builtin_overrides
+                .worker_mcp_enabled,
             worker_mcp_fetcher,
             false,
             tokio_util::sync::CancellationToken::new(),
@@ -747,6 +754,11 @@ mod tests {
             hooks,
             std::time::Duration::from_secs(60),
             std::time::Duration::from_secs(10),
+            orchestrator
+                .config
+                .mcp_servers
+                .builtin_overrides
+                .worker_mcp_enabled,
             worker_mcp_fetcher,
             false,
             shutdown.clone(),

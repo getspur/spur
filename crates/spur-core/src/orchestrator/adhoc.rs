@@ -223,6 +223,7 @@ impl Orchestrator {
                 self.fault_injection_hooks.clone(),
                 std::time::Duration::from_secs(self.config.spur.dispatch_lease_secs),
                 std::time::Duration::from_secs(self.config.spur.dispatch_lease_heartbeat_secs),
+                self.config.mcp_servers.builtin_overrides.worker_mcp_enabled,
                 self.worker_mcp_fetcher_for(Arc::clone(&mcp_server)),
                 self.config.delegation.normalize.bypass_hooks,
                 tokio_util::sync::CancellationToken::new(),
