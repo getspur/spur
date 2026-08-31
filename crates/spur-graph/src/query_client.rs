@@ -1302,7 +1302,8 @@ impl ParquetClient {
         )?;
         let mut symbols = HashMap::new();
         for batch in batches {
-            for symbol in symbols_from_batch(&batch)? {
+            for row in 0..batch.num_rows() {
+                let symbol = symbol_from_batch_row(&batch, row)?;
                 symbols.insert(symbol.stable_symbol_id.clone(), symbol);
             }
         }
@@ -2021,42 +2022,84 @@ fn search_symbols_from_batch(batch: &RecordBatch) -> anyhow::Result<Vec<SearchSy
     Ok(symbols)
 }
 
-fn symbols_from_batch(batch: &RecordBatch) -> anyhow::Result<Vec<GraphSymbolArtifact>> {
-    let stable_symbol_id = string_array_by_name(batch, "stable_symbol_id")?;
-    let file_path = string_array_by_name(batch, "file_path")?;
-    let byte_range_start = i64_array_by_name(batch, "byte_range_start")?;
-    let byte_range_end = i64_array_by_name(batch, "byte_range_end")?;
-    let line_start = i32_array_by_name(batch, "line_start")?;
-    let line_end = i32_array_by_name(batch, "line_end")?;
-    let entity_name = string_array_by_name(batch, "entity_name")?;
-    let qualified_name = string_array_by_name(batch, "qualified_name")?;
-    let symbol_kind = string_array_by_name(batch, "symbol_kind")?;
-    let anchor_hash = string_array_by_name(batch, "anchor_hash")?;
-    let enclosing_scope = string_array_by_name(batch, "enclosing_scope")?;
+pub(crate) fn symbol_from_batch_row(
+    batch: &RecordBatch,
+    row: usize,
+) -> anyhow::Result<GraphSymbolArtifact> {
+    if row >= batch.num_rows() {
+        bail!(
+            "symbol row {row} out of range for batch with {} rows",
+            batch.num_rows()
+        );
+    }
+    SymbolBatchColumns::new(batch)?.symbol_at(row)
+}
 
+fn symbols_from_batch(batch: &RecordBatch) -> anyhow::Result<Vec<GraphSymbolArtifact>> {
+    let columns = SymbolBatchColumns::new(batch)?;
     let mut symbols = Vec::with_capacity(batch.num_rows());
     for row in 0..batch.num_rows() {
-        symbols.push(GraphSymbolArtifact {
-            stable_symbol_id: required_string_value(stable_symbol_id, row, "stable_symbol_id")?
-                .to_owned(),
-            file_path: required_string_value(file_path, row, "file_path")?.to_owned(),
-            byte_range: [
-                i64_to_usize(byte_range_start.value(row), "byte_range_start")?,
-                i64_to_usize(byte_range_end.value(row), "byte_range_end")?,
-            ],
-            line_range: [
-                i32_to_usize(line_start.value(row), "line_start")?,
-                i32_to_usize(line_end.value(row), "line_end")?,
-            ],
-            entity_name: required_string_value(entity_name, row, "entity_name")?.to_owned(),
-            qualified_name: required_string_value(qualified_name, row, "qualified_name")?
-                .to_owned(),
-            symbol_kind: required_string_value(symbol_kind, row, "symbol_kind")?.to_owned(),
-            anchor_hash: required_string_value(anchor_hash, row, "anchor_hash")?.to_owned(),
-            enclosing_scope: optional_string_value(enclosing_scope, row),
-        });
+        symbols.push(columns.symbol_at(row)?);
     }
     Ok(symbols)
+}
+
+struct SymbolBatchColumns<'a> {
+    stable_symbol_id: &'a StringArray,
+    file_path: &'a StringArray,
+    byte_range_start: &'a Int64Array,
+    byte_range_end: &'a Int64Array,
+    line_start: &'a Int32Array,
+    line_end: &'a Int32Array,
+    entity_name: &'a StringArray,
+    qualified_name: &'a StringArray,
+    symbol_kind: &'a StringArray,
+    anchor_hash: &'a StringArray,
+    enclosing_scope: &'a StringArray,
+}
+
+impl<'a> SymbolBatchColumns<'a> {
+    fn new(batch: &'a RecordBatch) -> anyhow::Result<Self> {
+        Ok(Self {
+            stable_symbol_id: string_array_by_name(batch, "stable_symbol_id")?,
+            file_path: string_array_by_name(batch, "file_path")?,
+            byte_range_start: i64_array_by_name(batch, "byte_range_start")?,
+            byte_range_end: i64_array_by_name(batch, "byte_range_end")?,
+            line_start: i32_array_by_name(batch, "line_start")?,
+            line_end: i32_array_by_name(batch, "line_end")?,
+            entity_name: string_array_by_name(batch, "entity_name")?,
+            qualified_name: string_array_by_name(batch, "qualified_name")?,
+            symbol_kind: string_array_by_name(batch, "symbol_kind")?,
+            anchor_hash: string_array_by_name(batch, "anchor_hash")?,
+            enclosing_scope: string_array_by_name(batch, "enclosing_scope")?,
+        })
+    }
+
+    fn symbol_at(&self, row: usize) -> anyhow::Result<GraphSymbolArtifact> {
+        Ok(GraphSymbolArtifact {
+            stable_symbol_id: required_string_value(
+                self.stable_symbol_id,
+                row,
+                "stable_symbol_id",
+            )?
+            .to_owned(),
+            file_path: required_string_value(self.file_path, row, "file_path")?.to_owned(),
+            byte_range: [
+                i64_to_usize(self.byte_range_start.value(row), "byte_range_start")?,
+                i64_to_usize(self.byte_range_end.value(row), "byte_range_end")?,
+            ],
+            line_range: [
+                i32_to_usize(self.line_start.value(row), "line_start")?,
+                i32_to_usize(self.line_end.value(row), "line_end")?,
+            ],
+            entity_name: required_string_value(self.entity_name, row, "entity_name")?.to_owned(),
+            qualified_name: required_string_value(self.qualified_name, row, "qualified_name")?
+                .to_owned(),
+            symbol_kind: required_string_value(self.symbol_kind, row, "symbol_kind")?.to_owned(),
+            anchor_hash: required_string_value(self.anchor_hash, row, "anchor_hash")?.to_owned(),
+            enclosing_scope: optional_string_value(self.enclosing_scope, row),
+        })
+    }
 }
 
 fn file_manifests_from_batches(
