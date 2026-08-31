@@ -133,6 +133,10 @@ impl WorkerMcpFetcher {
 /// `extract_query_token`). Dual delivery is required for Codex
 /// (`sol_9c4300ee48ee42e9` proves query-only unsat; `sol_496a02a85819450c`
 /// proves dual sat).
+fn resolve_worker_mcp_enabled(enable_worker_mcp: Option<bool>, builtin_default: bool) -> bool {
+    enable_worker_mcp.unwrap_or(builtin_default)
+}
+
 pub(super) async fn build_worker_mcp_servers_with<F, Fut>(
     enable_worker_mcp: Option<bool>,
     fetch: F,
@@ -141,7 +145,7 @@ where
     F: FnOnce() -> Fut,
     Fut: std::future::Future<Output = Result<(String, String), DelegationDispatchError>>,
 {
-    if !enable_worker_mcp.unwrap_or(true) {
+    if !resolve_worker_mcp_enabled(enable_worker_mcp, true) {
         return Ok(Vec::new());
     }
     let (url, token) = fetch().await?;
@@ -526,7 +530,9 @@ mod worker_mcp_dispatch_tests {
     //! PlanResolver to boot). The contract under test is the gating
     //! logic and URL assembly.
 
-    use super::{assemble_worker_mcp_http_entry, build_worker_mcp_servers_with};
+    use super::{
+        assemble_worker_mcp_http_entry, build_worker_mcp_servers_with, resolve_worker_mcp_enabled,
+    };
     use spur_acp::DelegationDispatchError;
     use spur_acp::McpServer;
 
@@ -562,6 +568,14 @@ mod worker_mcp_dispatch_tests {
         // sol_496a02a85819450c — dual delivery is the preferred feasible model.
         let entry = assemble_worker_mcp_http_entry("http://127.0.0.1:54321/mcp", "tok-dual-xyz");
         assert_dual_token_delivery(&entry, "tok-dual-xyz");
+    }
+
+    #[test]
+    fn builtin_default_applies_only_when_delegation_flag_is_omitted() {
+        assert!(!resolve_worker_mcp_enabled(None, false));
+        assert!(resolve_worker_mcp_enabled(None, true));
+        assert!(resolve_worker_mcp_enabled(Some(true), false));
+        assert!(!resolve_worker_mcp_enabled(Some(false), true));
     }
 
     #[tokio::test]

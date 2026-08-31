@@ -434,32 +434,40 @@ fn user_mcp_server(
 
 /// MCP servers injected into every brain session.
 ///
-/// Always includes HTTP `spur-mcp`. Unless built with
-/// `--features disable-notebook-mcp`, also includes the notebook stdio proxy
-/// (`SpurLab` / `spur-notebook --mcp-proxy`). Enabled user-configured servers
-/// follow the fixed entries in configuration order.
+/// Includes HTTP `spur-mcp` when its built-in override is enabled. The notebook
+/// stdio proxy (`SpurLab` / `spur-notebook --mcp-proxy`) is included only when
+/// its runtime override is enabled and the crate was not built with
+/// `--features disable-notebook-mcp`. Enabled user-configured servers follow
+/// the built-in entries in configuration order.
 pub fn brain_mcp_servers(
     spur_mcp_url: &str,
     socket_nonce: &str,
     user: &McpServersConfig,
 ) -> Result<Vec<McpServer>, NotebookResolverError> {
-    let spur_mcp = McpServer::Http(McpServerHttp::new("spur-mcp", spur_mcp_url));
+    let mut servers = Vec::new();
+    if user.builtin_overrides.spur_mcp_enabled {
+        servers.push(McpServer::Http(McpServerHttp::new(
+            "spur-mcp",
+            spur_mcp_url,
+        )));
+    }
 
     // Feature `disable-notebook-mcp`: compile out notebook stdio MCP so the
     // brain never spawns SpurLab/spur-notebook --mcp-proxy (macOS SIGTTIN
     // isolation / recovery builds).
     #[cfg(feature = "disable-notebook-mcp")]
-    let mut servers = {
+    {
         let _ = socket_nonce;
         tracing::warn!(
             "notebook MCP disabled at compile time (feature disable-notebook-mcp); \
              brain sessions will not inject SpurLab/spur-notebook --mcp-proxy"
         );
-        vec![spur_mcp]
-    };
+    }
 
     #[cfg(not(feature = "disable-notebook-mcp"))]
-    let mut servers = vec![spur_mcp, notebook_mcp_server(socket_nonce)?];
+    if user.builtin_overrides.notebook_enabled {
+        servers.push(notebook_mcp_server(socket_nonce)?);
+    }
 
     let user_servers = user
         .entries

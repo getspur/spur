@@ -83,7 +83,7 @@ fn stable_notebook_nonce_differs_across_repos() {
 
 #[test]
 #[cfg(not(feature = "disable-notebook-mcp"))]
-fn brain_mcp_servers_preinclude_notebook_stdio_proxy_on_nonce_socket() {
+fn brain_mcp_servers_defaults_to_builtin_spur_and_notebook_servers() {
     let servers = spur_core::notebook::brain_mcp_servers(
         "http://127.0.0.1:3939/mcp",
         "fixture-nonce",
@@ -91,10 +91,7 @@ fn brain_mcp_servers_preinclude_notebook_stdio_proxy_on_nonce_socket() {
     )
     .expect("brain MCP servers");
 
-    assert!(servers.iter().any(|server| match server {
-        McpServer::Http(http) => http.name == "spur-mcp",
-        _ => false,
-    }));
+    assert_eq!(server_names(&servers), ["spur-mcp", "notebook"]);
 
     let notebook = servers
         .iter()
@@ -117,6 +114,7 @@ fn brain_mcp_servers_resolves_enabled_jute_debug_transport() {
         "http://127.0.0.1:3939/mcp",
         "fixture-nonce",
         &McpServersConfig {
+            builtin_overrides: Default::default(),
             entries: vec![McpServerEntry {
                 name: "jute-debug".to_owned(),
                 enabled: true,
@@ -147,6 +145,38 @@ fn brain_mcp_servers_resolves_enabled_jute_debug_transport() {
 }
 
 #[test]
+#[cfg(not(feature = "disable-notebook-mcp"))]
+fn brain_mcp_servers_skips_spur_mcp_when_runtime_override_is_off() {
+    let mut config = spur_acp::config::McpServersConfig::default();
+    config.builtin_overrides.spur_mcp_enabled = false;
+
+    let servers = spur_core::notebook::brain_mcp_servers(
+        "http://127.0.0.1:3939/mcp",
+        "fixture-nonce",
+        &config,
+    )
+    .expect("brain MCP servers");
+
+    assert_eq!(server_names(&servers), ["notebook"]);
+}
+
+#[test]
+#[cfg(not(feature = "disable-notebook-mcp"))]
+fn brain_mcp_servers_skips_notebook_when_runtime_override_is_off() {
+    let mut config = spur_acp::config::McpServersConfig::default();
+    config.builtin_overrides.notebook_enabled = false;
+
+    let servers = spur_core::notebook::brain_mcp_servers(
+        "http://127.0.0.1:3939/mcp",
+        "fixture-nonce",
+        &config,
+    )
+    .expect("brain MCP servers");
+
+    assert_eq!(server_names(&servers), ["spur-mcp"]);
+}
+
+#[test]
 #[cfg(feature = "disable-notebook-mcp")]
 fn brain_mcp_servers_omits_notebook_when_feature_disabled() {
     let servers = spur_core::notebook::brain_mcp_servers(
@@ -156,24 +186,42 @@ fn brain_mcp_servers_omits_notebook_when_feature_disabled() {
     )
     .expect("brain MCP servers");
 
-    assert!(servers.iter().any(|server| match server {
-        McpServer::Http(http) => http.name == "spur-mcp",
-        _ => false,
-    }));
-    assert!(
-        !servers.iter().any(|server| matches!(
-            server,
-            McpServer::Stdio(stdio) if stdio.name == "notebook"
-        )),
-        "notebook stdio MCP must be absent with disable-notebook-mcp"
-    );
+    assert_eq!(server_names(&servers), ["spur-mcp"]);
+}
+
+#[test]
+#[cfg(feature = "disable-notebook-mcp")]
+fn brain_mcp_servers_omits_notebook_when_runtime_and_compile_flags_are_off() {
+    let mut config = spur_acp::config::McpServersConfig::default();
+    config.builtin_overrides.notebook_enabled = false;
+
+    let servers = spur_core::notebook::brain_mcp_servers(
+        "http://127.0.0.1:3939/mcp",
+        "fixture-nonce",
+        &config,
+    )
+    .expect("brain MCP servers");
+
+    assert_eq!(server_names(&servers), ["spur-mcp"]);
 }
 
 #[cfg(not(feature = "disable-notebook-mcp"))]
 fn user_cfg(entries: &[spur_acp::config::McpServerEntry]) -> spur_acp::config::McpServersConfig {
     spur_acp::config::McpServersConfig {
         entries: entries.to_vec(),
+        ..Default::default()
     }
+}
+
+fn server_names(servers: &[McpServer]) -> Vec<&str> {
+    servers
+        .iter()
+        .map(|server| match server {
+            McpServer::Http(http) => http.name.as_str(),
+            McpServer::Stdio(stdio) => stdio.name.as_str(),
+            other => panic!("unexpected MCP server variant: {other:?}"),
+        })
+        .collect()
 }
 
 #[test]
