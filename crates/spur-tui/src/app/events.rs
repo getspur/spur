@@ -478,6 +478,10 @@ impl App {
                 // supplies the real agent configuration. Otherwise, only
                 // replace when the session changed; replacing unconditionally
                 // would wipe a user message just pushed to the trace.
+                let session_changed = self
+                    .session_detail
+                    .as_ref()
+                    .is_some_and(|detail| detail.session_id() != session);
                 let needs_new = match &self.session_detail {
                     Some(detail) => {
                         detail.session_id() != session || detail.is_optimistic_placeholder()
@@ -561,21 +565,22 @@ impl App {
                     detail.set_disable_paste_burst(self.config.tui.disable_paste_burst);
                 }
 
-                // Always land on SessionDetail(new_session). When already on
-                // SessionDetail for a *different* id, update current_view in
-                // place — do not `navigate_to` (that would push the retired
-                // session onto the back stack and reintroduce ViewId drift
-                // on navigate_back). Same-id stays a no-op.
+                // A different session is a fresh navigation root. Retaining
+                // session-scoped browsers in history would let navigate_back
+                // re-enter views bound to the retired session id.
                 let target = ViewId::SessionDetail(session.clone());
-                match &self.current_view {
-                    ViewId::SessionDetail(existing) if existing != session => {
-                        self.current_view = target;
-                        self.emit_view_opened();
-                        self.dirty = true;
-                    }
-                    ViewId::SessionDetail(_) => {}
-                    _ => {
-                        self.navigate_to(target);
+                if session_changed {
+                    self.view_history.clear();
+                    self.push_history(ViewId::Dashboard);
+                    self.current_view = target;
+                    self.emit_view_opened();
+                    self.dirty = true;
+                } else {
+                    match &self.current_view {
+                        ViewId::SessionDetail(_) => {}
+                        _ => {
+                            self.navigate_to(target);
+                        }
                     }
                 }
             }

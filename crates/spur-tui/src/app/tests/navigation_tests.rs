@@ -736,5 +736,9 @@ mod view_history_tests {
             ViewId::Dashboard,
             "a build without analytics must not enter the non-rendering Insights view"
         );
+        assert_eq!(
+            app.transient_hint_for_test().map(|hint| hint.text.as_str()),
+            Some("Analytics unavailable in this build")
+        );
     }
 }
