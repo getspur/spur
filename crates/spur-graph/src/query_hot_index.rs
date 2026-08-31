@@ -1,18 +1,23 @@
+use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 use std::sync::Arc;
 
-use arrow_array::RecordBatch;
-use globset::Glob;
+use arrow_array::{Array as _, Int32Array, RecordBatch, StringArray};
+use globset::{Glob, GlobMatcher};
 
 use crate::query_client::symbol_from_batch_row;
 use crate::search::{
-    compare_symbols, limited_search_result, matches_filters, matches_query,
-    INTERNAL_SEARCH_UNBOUNDED, PUBLIC_SEARCH_LIMIT,
+    compare_symbols, limited_search_result, INTERNAL_SEARCH_UNBOUNDED, PUBLIC_SEARCH_LIMIT,
 };
 use crate::{
     GraphEdgeArtifact, GraphSymbolArtifact, OwnedCalleeRecord, OwnedCallerRecord, RelationKind,
-    SearchOptions, SearchResult, SearchSymbol,
+    SearchFilters, SearchMode, SearchOptions, SearchResult, SearchSymbol,
 };
+
+#[cfg(test)]
+static SEARCH_SYMBOL_MATERIALIZATIONS: AtomicUsize = AtomicUsize::new(0);
 
 /// Immutable, cache-resident projection for repeated current-graph queries.
 ///
@@ -57,21 +62,26 @@ impl HotQueryIndex {
 
         let limit = (options.limit != INTERNAL_SEARCH_UNBOUNDED)
             .then(|| options.limit.clamp(1, PUBLIC_SEARCH_LIMIT));
+        let columns = SearchSymbolColumns::new(&self.symbol_batch);
         let mut candidates = Vec::new();
         let mut total_matches = 0usize;
 
         for row in 0..self.symbol_batch.num_rows() {
-            let symbol = SearchSymbol::from(&self.symbol_at(row));
-            if !matches_query(&symbol, options)
-                || !matches_filters(&symbol, &options.filters, glob.as_ref())
+            let symbol = columns.symbol_at(row);
+            if !matches_query_row(&symbol, options)
+                || !matches_filters_row(&symbol, &options.filters, glob.as_ref())
             {
                 continue;
             }
 
             total_matches += 1;
-            Self::push_candidate(&mut candidates, symbol, limit, options);
+            Self::push_candidate_row(&mut candidates, symbol, limit, options);
         }
 
+        let mut candidates = candidates
+            .into_iter()
+            .map(|symbol| SearchSymbol::from(&self.symbol_at(symbol.row)))
+            .collect::<Vec<_>>();
         candidates.sort_by(|left, right| compare_symbols(left, right, options));
         limited_search_result(candidates, total_matches, options.limit)
     }
@@ -82,9 +92,9 @@ impl HotQueryIndex {
             .map(|index| self.symbol_at(*index))
     }
 
-    fn push_candidate(
-        candidates: &mut Vec<SearchSymbol>,
-        symbol: SearchSymbol,
+    fn push_candidate_row<'a>(
+        candidates: &mut Vec<SearchSymbolRow<'a>>,
+        symbol: SearchSymbolRow<'a>,
         limit: Option<usize>,
         options: &SearchOptions,
     ) {
@@ -100,19 +110,203 @@ impl HotQueryIndex {
         let Some((worst_index, worst)) = candidates
             .iter()
             .enumerate()
-            .max_by(|(_, left), (_, right)| compare_symbols(left, right, options))
+            .max_by(|(_, left), (_, right)| compare_symbol_rows(left, right, options))
         else {
             return;
         };
-        if compare_symbols(&symbol, worst, options).is_lt() {
+        if compare_symbol_rows(&symbol, worst, options).is_lt() {
             candidates[worst_index] = symbol;
         }
     }
 
     fn symbol_at(&self, row: usize) -> GraphSymbolArtifact {
+        #[cfg(test)]
+        SEARCH_SYMBOL_MATERIALIZATIONS.fetch_add(1, AtomicOrdering::Relaxed);
+
         symbol_from_batch_row(&self.symbol_batch, row).unwrap_or_else(|error| {
             panic!("validated HotQueryIndex symbol row {row} failed to materialize: {error:#}")
         })
+    }
+}
+
+struct SearchSymbolColumns<'a> {
+    stable_symbol_id: &'a StringArray,
+    file_path: &'a StringArray,
+    line_start: &'a Int32Array,
+    line_end: &'a Int32Array,
+    entity_name: &'a StringArray,
+    qualified_name: &'a StringArray,
+    symbol_kind: &'a StringArray,
+}
+
+impl<'a> SearchSymbolColumns<'a> {
+    fn new(batch: &'a RecordBatch) -> Self {
+        Self {
+            stable_symbol_id: string_array_by_name(batch, "stable_symbol_id"),
+            file_path: string_array_by_name(batch, "file_path"),
+            line_start: i32_array_by_name(batch, "line_start"),
+            line_end: i32_array_by_name(batch, "line_end"),
+            entity_name: string_array_by_name(batch, "entity_name"),
+            qualified_name: string_array_by_name(batch, "qualified_name"),
+            symbol_kind: string_array_by_name(batch, "symbol_kind"),
+        }
+    }
+
+    fn symbol_at(&self, row: usize) -> SearchSymbolRow<'a> {
+        SearchSymbolRow {
+            row,
+            stable_symbol_id: self.stable_symbol_id.value(row),
+            entity_name: self.entity_name.value(row),
+            qualified_name: self.qualified_name.value(row),
+            file_path: self.file_path.value(row),
+            line_range: [
+                nonnegative_usize(self.line_start.value(row), "line_start", row),
+                nonnegative_usize(self.line_end.value(row), "line_end", row),
+            ],
+            symbol_kind: self.symbol_kind.value(row),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct SearchSymbolRow<'a> {
+    row: usize,
+    stable_symbol_id: &'a str,
+    entity_name: &'a str,
+    qualified_name: &'a str,
+    file_path: &'a str,
+    line_range: [usize; 2],
+    symbol_kind: &'a str,
+}
+
+fn matches_query_row(symbol: &SearchSymbolRow<'_>, options: &SearchOptions) -> bool {
+    let query = options.query.as_str();
+    match options.mode {
+        SearchMode::Exact => symbol.entity_name == query || symbol.qualified_name == query,
+        SearchMode::Prefix => symbol.entity_name.starts_with(query),
+        SearchMode::Substring => symbol.entity_name.contains(query),
+    }
+}
+
+fn matches_filters_row(
+    symbol: &SearchSymbolRow<'_>,
+    filters: &SearchFilters,
+    glob: Option<&GlobMatcher>,
+) -> bool {
+    if filters
+        .symbol_kind
+        .as_deref()
+        .is_some_and(|symbol_kind| symbol.symbol_kind != symbol_kind)
+    {
+        return false;
+    }
+
+    if filters
+        .file
+        .as_deref()
+        .is_some_and(|file| symbol.file_path != file)
+    {
+        return false;
+    }
+
+    if filters.file_glob.is_some() && !glob.is_some_and(|glob| glob.is_match(symbol.file_path)) {
+        return false;
+    }
+
+    true
+}
+
+fn compare_symbol_rows(
+    left: &SearchSymbolRow<'_>,
+    right: &SearchSymbolRow<'_>,
+    options: &SearchOptions,
+) -> Ordering {
+    match options.mode {
+        SearchMode::Exact => compare_exact_rows(left, right, options.query.as_str()),
+        SearchMode::Prefix => compare_prefix_rows(left, right),
+        SearchMode::Substring => compare_substring_rows(left, right, options.query.as_str()),
+    }
+}
+
+fn compare_exact_rows(
+    left: &SearchSymbolRow<'_>,
+    right: &SearchSymbolRow<'_>,
+    query: &str,
+) -> Ordering {
+    let left_rank = exact_row_rank(left, query);
+    let right_rank = exact_row_rank(right, query);
+    left_rank
+        .cmp(&right_rank)
+        .then_with(|| compare_row_location(left, right))
+}
+
+fn exact_row_rank(symbol: &SearchSymbolRow<'_>, query: &str) -> u8 {
+    u8::from(symbol.entity_name != query)
+}
+
+fn compare_prefix_rows(left: &SearchSymbolRow<'_>, right: &SearchSymbolRow<'_>) -> Ordering {
+    left.entity_name
+        .len()
+        .cmp(&right.entity_name.len())
+        .then_with(|| compare_row_location(left, right))
+}
+
+fn compare_substring_rows(
+    left: &SearchSymbolRow<'_>,
+    right: &SearchSymbolRow<'_>,
+    query: &str,
+) -> Ordering {
+    let left_position = left
+        .entity_name
+        .find(query)
+        .expect("substring comparator only receives matches");
+    let right_position = right
+        .entity_name
+        .find(query)
+        .expect("substring comparator only receives matches");
+
+    left_position
+        .cmp(&right_position)
+        .then_with(|| left.entity_name.len().cmp(&right.entity_name.len()))
+        .then_with(|| compare_row_location(left, right))
+}
+
+fn compare_row_location(left: &SearchSymbolRow<'_>, right: &SearchSymbolRow<'_>) -> Ordering {
+    left.file_path
+        .cmp(right.file_path)
+        .then_with(|| left.line_range[0].cmp(&right.line_range[0]))
+        .then_with(|| left.line_range[1].cmp(&right.line_range[1]))
+        .then_with(|| left.stable_symbol_id.cmp(right.stable_symbol_id))
+}
+
+fn string_array_by_name<'a>(batch: &'a RecordBatch, name: &str) -> &'a StringArray {
+    let index = batch.schema().index_of(name).unwrap_or_else(|error| {
+        panic!("validated HotQueryIndex batch missing string column `{name}`: {error}")
+    });
+    batch
+        .column(index)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap_or_else(|| panic!("validated HotQueryIndex column `{name}` is not Utf8"))
+}
+
+fn i32_array_by_name<'a>(batch: &'a RecordBatch, name: &str) -> &'a Int32Array {
+    let index = batch.schema().index_of(name).unwrap_or_else(|error| {
+        panic!("validated HotQueryIndex batch missing int32 column `{name}`: {error}")
+    });
+    batch
+        .column(index)
+        .as_any()
+        .downcast_ref::<Int32Array>()
+        .unwrap_or_else(|| panic!("validated HotQueryIndex column `{name}` is not Int32"))
+}
+
+fn nonnegative_usize(value: i32, column: &str, row: usize) -> usize {
+    match usize::try_from(value) {
+        Ok(value) => value,
+        Err(_) => {
+            panic!("validated HotQueryIndex row {row} has negative `{column}` value {value}")
+        }
     }
 }
 
@@ -291,6 +485,31 @@ mod tests {
     use crate::search::PUBLIC_SEARCH_LIMIT;
     use crate::{SearchFilters, SearchMode};
 
+    fn reset_search_symbol_materializations() {
+        SEARCH_SYMBOL_MATERIALIZATIONS.store(0, AtomicOrdering::Relaxed);
+    }
+
+    fn search_symbol_materializations() -> usize {
+        SEARCH_SYMBOL_MATERIALIZATIONS.load(AtomicOrdering::Relaxed)
+    }
+
+    fn search_options(query: &str, mode: SearchMode) -> SearchOptions {
+        SearchOptions {
+            query: query.to_owned(),
+            mode,
+            filters: SearchFilters::default(),
+            limit: PUBLIC_SEARCH_LIMIT,
+        }
+    }
+
+    fn result_ids(result: &SearchResult) -> Vec<String> {
+        result
+            .candidates
+            .iter()
+            .map(|symbol| symbol.stable_symbol_id.clone())
+            .collect()
+    }
+
     struct TestSymbol {
         stable_symbol_id: String,
         file_path: String,
@@ -321,6 +540,21 @@ mod tests {
 
         fn with_scope(mut self, enclosing_scope: impl Into<String>) -> Self {
             self.enclosing_scope = Some(enclosing_scope.into());
+            self
+        }
+
+        fn with_file_path(mut self, file_path: impl Into<String>) -> Self {
+            self.file_path = file_path.into();
+            self
+        }
+
+        fn with_qualified_name(mut self, qualified_name: impl Into<String>) -> Self {
+            self.qualified_name = qualified_name.into();
+            self
+        }
+
+        fn with_symbol_kind(mut self, symbol_kind: impl Into<String>) -> Self {
+            self.symbol_kind = symbol_kind.into();
             self
         }
     }
@@ -471,22 +705,86 @@ mod tests {
     }
 
     #[test]
+    fn hot_query_index_search_preserves_modes_filters_and_ranking() {
+        let rows = vec![
+            TestSymbol::new(0, "helper")
+                .with_qualified_name("target")
+                .with_file_path("src/exact_b.rs"),
+            TestSymbol::new(1, "target")
+                .with_qualified_name("module::target")
+                .with_file_path("src/exact_a.rs"),
+            TestSymbol::new(2, "targetish"),
+            TestSymbol::new(3, "submit_plan"),
+            TestSymbol::new(4, "submitter"),
+            TestSymbol::new(5, "submit"),
+            TestSymbol::new(6, "alpha_def"),
+            TestSymbol::new(7, "zdeflong"),
+            TestSymbol::new(8, "adef"),
+            TestSymbol::new(9, "def"),
+            TestSymbol::new(10, "run_query")
+                .with_file_path("crates/foo/src/lib.rs")
+                .with_symbol_kind("function"),
+            TestSymbol::new(11, "run_query")
+                .with_file_path("crates/foo/src/nested/mod.rs")
+                .with_symbol_kind("mcp_tool"),
+            TestSymbol::new(12, "run_query")
+                .with_file_path("crates/bar/src/lib.rs")
+                .with_symbol_kind("mcp_tool"),
+        ];
+        let index = HotQueryIndex::new(symbol_batch(&rows)).expect("batch-backed hot index");
+
+        let exact = index.search_symbols(&search_options("target", SearchMode::Exact));
+        assert_eq!(result_ids(&exact), vec!["sid-001", "sid-000"]);
+
+        let prefix = index.search_symbols(&search_options("sub", SearchMode::Prefix));
+        assert_eq!(result_ids(&prefix), vec!["sid-005", "sid-004", "sid-003"]);
+
+        let substring = index.search_symbols(&search_options("def", SearchMode::Substring));
+        assert_eq!(
+            result_ids(&substring),
+            vec!["sid-009", "sid-008", "sid-007", "sid-006"]
+        );
+
+        let mut file_options = search_options("run", SearchMode::Substring);
+        file_options.filters.file = Some("crates/bar/src/lib.rs".to_owned());
+        let file_filtered = index.search_symbols(&file_options);
+        assert_eq!(result_ids(&file_filtered), vec!["sid-012"]);
+
+        let mut kind_glob_options = search_options("run", SearchMode::Substring);
+        kind_glob_options.filters.symbol_kind = Some("mcp_tool".to_owned());
+        kind_glob_options.filters.file_glob = Some("crates/foo/**/*.rs".to_owned());
+        let kind_glob_filtered = index.search_symbols(&kind_glob_options);
+        assert_eq!(result_ids(&kind_glob_filtered), vec!["sid-011"]);
+    }
+
+    #[test]
     fn hot_query_index_search_materializes_only_public_result_window() {
         let rows = (0..PUBLIC_SEARCH_LIMIT + 5)
             .map(|index| TestSymbol::new(index, format!("target_{index:03}")))
             .collect::<Vec<_>>();
         let index = HotQueryIndex::new(symbol_batch(&rows)).expect("batch-backed hot index");
 
+        reset_search_symbol_materializations();
         let result = index.search_symbols(&SearchOptions {
             query: "target_".to_owned(),
             mode: SearchMode::Prefix,
             filters: SearchFilters::default(),
             limit: PUBLIC_SEARCH_LIMIT + 50,
         });
+        let materializations = search_symbol_materializations();
 
         assert_eq!(result.total_matches, PUBLIC_SEARCH_LIMIT + 5);
         assert_eq!(result.candidates.len(), PUBLIC_SEARCH_LIMIT);
         assert!(result.truncated);
+        assert_eq!(
+            materializations,
+            result.candidates.len(),
+            "search should materialize only selected public result rows"
+        );
+        assert!(
+            materializations <= PUBLIC_SEARCH_LIMIT,
+            "search materialized {materializations} rows, exceeding PUBLIC_SEARCH_LIMIT"
+        );
         assert!(result
             .candidates
             .iter()
