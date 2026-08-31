@@ -1,10 +1,11 @@
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
+use std::hash::BuildHasher;
 #[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 use std::sync::Arc;
 
-use arrow_array::{Array as _, Int32Array, RecordBatch, StringArray};
+use arrow_array::{Array as _, Int32Array, Int64Array, RecordBatch, StringArray};
 use globset::{Glob, GlobMatcher};
 
 use crate::query_client::symbol_from_batch_row;
@@ -16,9 +17,6 @@ use crate::{
     SearchFilters, SearchMode, SearchOptions, SearchResult, SearchSymbol,
 };
 
-#[cfg(test)]
-static SEARCH_SYMBOL_MATERIALIZATIONS: AtomicUsize = AtomicUsize::new(0);
-
 /// Immutable, cache-resident projection for repeated current-graph queries.
 ///
 /// Parquet remains the source of truth. This projection contains only current
@@ -26,7 +24,9 @@ static SEARCH_SYMBOL_MATERIALIZATIONS: AtomicUsize = AtomicUsize::new(0);
 /// paths so edge corruption cannot poison symbol-only search.
 pub(crate) struct HotQueryIndex {
     symbol_batch: RecordBatch,
-    symbol_by_id: HashMap<String, usize>,
+    symbol_rows_by_hash: HashMap<u64, SymbolIdRows>,
+    #[cfg(test)]
+    search_symbol_materializations: AtomicUsize,
 }
 
 /// Immutable adjacency projection sharing symbols with [`HotQueryIndex`].
@@ -41,14 +41,22 @@ pub(crate) struct HotAdjacencyIndex {
 
 impl HotQueryIndex {
     pub(crate) fn new(symbol_batch: RecordBatch) -> anyhow::Result<Self> {
-        let mut symbol_by_id = HashMap::with_capacity(symbol_batch.num_rows());
+        let mut symbol_rows_by_hash =
+            HashMap::<u64, SymbolIdRows>::with_capacity(symbol_batch.num_rows());
+        let columns = HotSymbolColumns::new(&symbol_batch)?;
         for row in 0..symbol_batch.num_rows() {
-            let symbol = symbol_from_batch_row(&symbol_batch, row)?;
-            symbol_by_id.insert(symbol.stable_symbol_id, row);
+            let stable_symbol_id = columns.validate_row(row)?;
+            let hash = symbol_id_hash(symbol_rows_by_hash.hasher(), stable_symbol_id);
+            symbol_rows_by_hash
+                .entry(hash)
+                .and_modify(|rows| rows.push(row))
+                .or_insert(SymbolIdRows::One(row));
         }
         Ok(Self {
             symbol_batch,
-            symbol_by_id,
+            symbol_rows_by_hash,
+            #[cfg(test)]
+            search_symbol_materializations: AtomicUsize::new(0),
         })
     }
 
@@ -80,16 +88,19 @@ impl HotQueryIndex {
 
         let mut candidates = candidates
             .into_iter()
-            .map(|symbol| SearchSymbol::from(&self.symbol_at(symbol.row)))
+            .map(|symbol| SearchSymbol::from(&self.search_symbol_at(symbol.row)))
             .collect::<Vec<_>>();
         candidates.sort_by(|left, right| compare_symbols(left, right, options));
         limited_search_result(candidates, total_matches, options.limit)
     }
 
     pub(crate) fn symbol_by_id(&self, stable_symbol_id: &str) -> Option<GraphSymbolArtifact> {
-        self.symbol_by_id
-            .get(stable_symbol_id)
-            .map(|index| self.symbol_at(*index))
+        let hash = symbol_id_hash(self.symbol_rows_by_hash.hasher(), stable_symbol_id);
+        let stable_symbol_ids = string_array_by_name(&self.symbol_batch, "stable_symbol_id");
+        self.symbol_rows_by_hash
+            .get(&hash)?
+            .matching_row(|row| stable_symbol_ids.value(row) == stable_symbol_id)
+            .map(|row| self.symbol_at(row))
     }
 
     fn push_candidate_row<'a>(
@@ -119,13 +130,107 @@ impl HotQueryIndex {
         }
     }
 
-    fn symbol_at(&self, row: usize) -> GraphSymbolArtifact {
+    fn search_symbol_at(&self, row: usize) -> GraphSymbolArtifact {
         #[cfg(test)]
-        SEARCH_SYMBOL_MATERIALIZATIONS.fetch_add(1, AtomicOrdering::Relaxed);
+        self.search_symbol_materializations
+            .fetch_add(1, AtomicOrdering::Relaxed);
 
+        self.symbol_at(row)
+    }
+
+    fn symbol_at(&self, row: usize) -> GraphSymbolArtifact {
         symbol_from_batch_row(&self.symbol_batch, row).unwrap_or_else(|error| {
             panic!("validated HotQueryIndex symbol row {row} failed to materialize: {error:#}")
         })
+    }
+
+    #[cfg(test)]
+    fn reset_search_symbol_materializations(&self) {
+        self.search_symbol_materializations
+            .store(0, AtomicOrdering::Relaxed);
+    }
+
+    #[cfg(test)]
+    fn search_symbol_materializations(&self) -> usize {
+        self.search_symbol_materializations
+            .load(AtomicOrdering::Relaxed)
+    }
+}
+
+enum SymbolIdRows {
+    One(usize),
+    Many(Vec<usize>),
+}
+
+impl SymbolIdRows {
+    fn push(&mut self, row: usize) {
+        match self {
+            Self::One(existing) => {
+                *self = Self::Many(vec![*existing, row]);
+            }
+            Self::Many(rows) => rows.push(row),
+        }
+    }
+
+    fn matching_row(&self, mut predicate: impl FnMut(usize) -> bool) -> Option<usize> {
+        match self {
+            Self::One(row) => predicate(*row).then_some(*row),
+            Self::Many(rows) => rows.iter().rev().copied().find(|row| predicate(*row)),
+        }
+    }
+}
+
+fn symbol_id_hash(hash_builder: &impl BuildHasher, stable_symbol_id: &str) -> u64 {
+    hash_builder.hash_one(stable_symbol_id)
+}
+
+struct HotSymbolColumns<'a> {
+    stable_symbol_id: &'a StringArray,
+    file_path: &'a StringArray,
+    byte_range_start: &'a Int64Array,
+    byte_range_end: &'a Int64Array,
+    line_start: &'a Int32Array,
+    line_end: &'a Int32Array,
+    entity_name: &'a StringArray,
+    qualified_name: &'a StringArray,
+    symbol_kind: &'a StringArray,
+    anchor_hash: &'a StringArray,
+    enclosing_scope: &'a StringArray,
+}
+
+impl<'a> HotSymbolColumns<'a> {
+    fn new(batch: &'a RecordBatch) -> anyhow::Result<Self> {
+        Ok(Self {
+            stable_symbol_id: try_string_array_by_name(batch, "stable_symbol_id")?,
+            file_path: try_string_array_by_name(batch, "file_path")?,
+            byte_range_start: try_i64_array_by_name(batch, "byte_range_start")?,
+            byte_range_end: try_i64_array_by_name(batch, "byte_range_end")?,
+            line_start: try_i32_array_by_name(batch, "line_start")?,
+            line_end: try_i32_array_by_name(batch, "line_end")?,
+            entity_name: try_string_array_by_name(batch, "entity_name")?,
+            qualified_name: try_string_array_by_name(batch, "qualified_name")?,
+            symbol_kind: try_string_array_by_name(batch, "symbol_kind")?,
+            anchor_hash: try_string_array_by_name(batch, "anchor_hash")?,
+            enclosing_scope: try_string_array_by_name(batch, "enclosing_scope")?,
+        })
+    }
+
+    fn validate_row(&self, row: usize) -> anyhow::Result<&'a str> {
+        let stable_symbol_id =
+            try_required_string_value(self.stable_symbol_id, row, "stable_symbol_id")?;
+        try_required_string_value(self.file_path, row, "file_path")?;
+        try_i64_to_usize(self.byte_range_start.value(row), "byte_range_start")?;
+        try_i64_to_usize(self.byte_range_end.value(row), "byte_range_end")?;
+        try_i32_to_usize(self.line_start.value(row), "line_start")?;
+        try_i32_to_usize(self.line_end.value(row), "line_end")?;
+        try_required_string_value(self.entity_name, row, "entity_name")?;
+        try_required_string_value(self.qualified_name, row, "qualified_name")?;
+        try_required_string_value(self.symbol_kind, row, "symbol_kind")?;
+        try_required_string_value(self.anchor_hash, row, "anchor_hash")?;
+        if !self.enclosing_scope.is_null(row) {
+            self.enclosing_scope.value(row);
+        }
+        Ok(stable_symbol_id)
     }
 }
 
@@ -288,6 +393,57 @@ fn string_array_by_name<'a>(batch: &'a RecordBatch, name: &str) -> &'a StringArr
         .as_any()
         .downcast_ref::<StringArray>()
         .unwrap_or_else(|| panic!("validated HotQueryIndex column `{name}` is not Utf8"))
+}
+
+fn try_string_array_by_name<'a>(
+    batch: &'a RecordBatch,
+    name: &str,
+) -> anyhow::Result<&'a StringArray> {
+    let index = batch.schema().index_of(name)?;
+    batch
+        .column(index)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .ok_or_else(|| anyhow::anyhow!("validated HotQueryIndex column `{name}` is not Utf8"))
+}
+
+fn try_i32_array_by_name<'a>(batch: &'a RecordBatch, name: &str) -> anyhow::Result<&'a Int32Array> {
+    let index = batch.schema().index_of(name)?;
+    batch
+        .column(index)
+        .as_any()
+        .downcast_ref::<Int32Array>()
+        .ok_or_else(|| anyhow::anyhow!("validated HotQueryIndex column `{name}` is not Int32"))
+}
+
+fn try_i64_array_by_name<'a>(batch: &'a RecordBatch, name: &str) -> anyhow::Result<&'a Int64Array> {
+    let index = batch.schema().index_of(name)?;
+    batch
+        .column(index)
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .ok_or_else(|| anyhow::anyhow!("validated HotQueryIndex column `{name}` is not Int64"))
+}
+
+fn try_required_string_value<'a>(
+    array: &'a StringArray,
+    row: usize,
+    name: &str,
+) -> anyhow::Result<&'a str> {
+    if array.is_null(row) {
+        anyhow::bail!("missing required string column `{name}`");
+    }
+    Ok(array.value(row))
+}
+
+fn try_i32_to_usize(value: i32, name: &str) -> anyhow::Result<usize> {
+    usize::try_from(value)
+        .map_err(|_| anyhow::anyhow!("column `{name}` has negative value {value}"))
+}
+
+fn try_i64_to_usize(value: i64, name: &str) -> anyhow::Result<usize> {
+    usize::try_from(value)
+        .map_err(|_| anyhow::anyhow!("column `{name}` has negative value {value}"))
 }
 
 fn i32_array_by_name<'a>(batch: &'a RecordBatch, name: &str) -> &'a Int32Array {
@@ -485,14 +641,6 @@ mod tests {
     use crate::search::PUBLIC_SEARCH_LIMIT;
     use crate::{SearchFilters, SearchMode};
 
-    fn reset_search_symbol_materializations() {
-        SEARCH_SYMBOL_MATERIALIZATIONS.store(0, AtomicOrdering::Relaxed);
-    }
-
-    fn search_symbol_materializations() -> usize {
-        SEARCH_SYMBOL_MATERIALIZATIONS.load(AtomicOrdering::Relaxed)
-    }
-
     fn search_options(query: &str, mode: SearchMode) -> SearchOptions {
         SearchOptions {
             query: query.to_owned(),
@@ -663,6 +811,10 @@ mod tests {
             !source.contains("Vec<GraphSymbolArtifact>"),
             "HotQueryIndex must not retain GraphSymbolArtifact vectors"
         );
+        assert!(
+            !source.contains("HashMap<String"),
+            "HotQueryIndex must not retain an owned String-key lookup table"
+        );
     }
 
     #[test]
@@ -689,10 +841,13 @@ mod tests {
             TestSymbol::new(0, "alpha"),
             TestSymbol::new(1, "beta").with_scope("impl Owner"),
         ];
-        let index = HotQueryIndex::new(symbol_batch(&rows)).expect("batch-backed hot index");
+        let batch = symbol_batch(&rows);
+        let expected = symbol_from_batch_row(&batch, 1).expect("p0 helper symbol");
+        let index = HotQueryIndex::new(batch).expect("batch-backed hot index");
 
         let symbol = index.symbol_by_id("sid-001").expect("indexed symbol");
 
+        assert_eq!(symbol, expected);
         assert_eq!(symbol.stable_symbol_id, "sid-001");
         assert_eq!(symbol.entity_name, "beta");
         assert_eq!(symbol.qualified_name, "module::beta");
@@ -702,6 +857,7 @@ mod tests {
         assert_eq!(symbol.symbol_kind, "function");
         assert_eq!(symbol.anchor_hash, "anchor-001");
         assert_eq!(symbol.enclosing_scope.as_deref(), Some("impl Owner"));
+        assert!(index.symbol_by_id("sid-missing").is_none());
     }
 
     #[test]
@@ -764,14 +920,14 @@ mod tests {
             .collect::<Vec<_>>();
         let index = HotQueryIndex::new(symbol_batch(&rows)).expect("batch-backed hot index");
 
-        reset_search_symbol_materializations();
+        index.reset_search_symbol_materializations();
         let result = index.search_symbols(&SearchOptions {
             query: "target_".to_owned(),
             mode: SearchMode::Prefix,
             filters: SearchFilters::default(),
             limit: PUBLIC_SEARCH_LIMIT + 50,
         });
-        let materializations = search_symbol_materializations();
+        let materializations = index.search_symbol_materializations();
 
         assert_eq!(result.total_matches, PUBLIC_SEARCH_LIMIT + 5);
         assert_eq!(result.candidates.len(), PUBLIC_SEARCH_LIMIT);
