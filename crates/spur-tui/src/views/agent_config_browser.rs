@@ -753,7 +753,7 @@ impl View for AgentConfigBrowserView {
         if self.edit_buffer.is_some() {
             return self.handle_editing_key(key);
         }
-        if self.section == ConfigureSection::Mcp && self.mcp_pane.form_active() {
+        if self.section == ConfigureSection::Mcp && self.mcp_pane.modal_active() {
             return self.mcp_pane.handle_key(key);
         }
 
@@ -1021,6 +1021,7 @@ mod tests {
         let ctx = test_ctx(&lineage);
         let mut view = AgentConfigBrowserView::new(vec![configured_agent()], Some("mcp".into()));
         view.set_mcp_config(&spur_acp::config::McpServersConfig {
+            builtin_overrides: Default::default(),
             entries: vec![spur_acp::config::McpServerEntry {
                 name: "github".into(),
                 enabled: false,

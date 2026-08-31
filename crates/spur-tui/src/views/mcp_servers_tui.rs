@@ -8,23 +8,64 @@ use std::{
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     layout::{Constraint, Layout, Rect},
+    style::{Modifier, Style},
     text::Line,
     widgets::{Block, Borders, Paragraph, Wrap},
     Frame,
 };
-use spur_acp::config::{ConfigPatch, McpServerEntry, McpServerTransport, McpServersConfig};
+use spur_acp::config::{
+    BuiltinMcpOverridesConfig, BuiltinMcpServer, ConfigPatch, McpServerEntry, McpServerTransport,
+    McpServersConfig,
+};
 use spur_mcp::probe::{probe_server, ProbeOutcome, ProbeReport};
 use tokio::task::JoinHandle;
 
-use crate::action::Action;
+use crate::{action::Action, views::builtin_confirm::BuiltinConfirmPane};
 
 const NEXT_SESSION_NOTICE: &str = "MCP config applies to next session";
+const BUILTIN_SERVERS: [BuiltinMcpServer; 3] = [
+    BuiltinMcpServer::SpurMcp,
+    BuiltinMcpServer::Notebook,
+    BuiltinMcpServer::SpurWorkerMcp,
+];
 
 /// Future returned by an injectable MCP probe runner.
 pub type ProbeFuture = Pin<Box<dyn Future<Output = ProbeReport> + Send + 'static>>;
 
 /// Injectable runner used to keep pane tests independent of MCP I/O.
 pub type ProbeHook = Arc<dyn Fn(McpServerEntry) -> ProbeFuture + Send + Sync + 'static>;
+
+/// Resolved notebook executable and the nonce-specific control socket it uses.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NotebookMcpRuntimeSource {
+    /// Resolved `SpurLab` or `spur-notebook` executable path.
+    pub command: String,
+    /// Control socket path passed to `--mcp-proxy`.
+    pub socket_path: String,
+}
+
+/// Live worker MCP endpoint and its delegation-scoped bearer token.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkerMcpRuntimeSource {
+    /// Live worker MCP base URL.
+    pub url: String,
+    /// Token delivered through both the URL query and Authorization header.
+    pub token: String,
+}
+
+/// Runtime-only sources used to describe and probe built-in MCP servers.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BuiltinMcpRuntimeSources {
+    /// Brain-facing `spur-mcp` callback URL, when visible to the pane owner.
+    pub spur_mcp_url: Option<String>,
+    /// Resolved notebook proxy launch data, when visible to the pane owner.
+    pub notebook: Option<NotebookMcpRuntimeSource>,
+    /// Live worker server data, when a worker MCP server is running.
+    pub worker: Option<WorkerMcpRuntimeSource>,
+}
+
+/// Injectable snapshot provider for runtime-only built-in MCP endpoints.
+pub type BuiltinSourceProvider = Arc<dyn Fn() -> BuiltinMcpRuntimeSources + Send + Sync + 'static>;
 
 /// Awaitable pane task whose output carries the initiating server name.
 pub type ProbeTask = JoinHandle<(String, ProbeReport)>;
@@ -137,11 +178,15 @@ impl McpServerDraft {
 /// `/configure mcp` list and editor pane.
 pub struct McpServersPane {
     entries: Vec<McpServerEntry>,
+    builtin_overrides: BuiltinMcpOverridesConfig,
+    builtin_source_provider: BuiltinSourceProvider,
+    builtin_confirm: BuiltinConfirmPane,
     probe_states: HashMap<String, ProbeState>,
     expanded_probe_entries: HashSet<String>,
     probe_hook: ProbeHook,
     pending_probe_tasks: VecDeque<ProbeTask>,
     selected_entry: usize,
+    entries_initialized: bool,
     form: Form,
     draft: McpServerDraft,
     selected_field: usize,
@@ -153,18 +198,30 @@ pub struct McpServersPane {
 impl McpServersPane {
     /// Creates an empty pane; live config is supplied by [`Self::set_mcp_config`].
     pub fn new() -> Self {
-        Self::with_probe_hook(default_probe_hook())
+        Self::with_hooks(default_probe_hook(), default_builtin_source_provider())
     }
 
     /// Creates an empty pane using `probe_hook` for on-demand server probes.
     pub fn with_probe_hook(probe_hook: ProbeHook) -> Self {
+        Self::with_hooks(probe_hook, default_builtin_source_provider())
+    }
+
+    /// Creates an empty pane with injectable probe and built-in source hooks.
+    pub fn with_hooks(
+        probe_hook: ProbeHook,
+        builtin_source_provider: BuiltinSourceProvider,
+    ) -> Self {
         Self {
             entries: Vec::new(),
+            builtin_overrides: BuiltinMcpOverridesConfig::default(),
+            builtin_source_provider,
+            builtin_confirm: BuiltinConfirmPane::default(),
             probe_states: HashMap::new(),
             expanded_probe_entries: HashSet::new(),
             probe_hook,
             pending_probe_tasks: VecDeque::new(),
             selected_entry: 0,
+            entries_initialized: false,
             form: Form::None,
             draft: McpServerDraft::default(),
             selected_field: 0,
@@ -176,28 +233,37 @@ impl McpServersPane {
 
     /// Replaces the displayed entries while preserving selection by name.
     pub fn set_entries(&mut self, entries: Vec<McpServerEntry>) {
-        let selected_name = self
-            .entries
-            .get(self.selected_entry)
-            .map(|entry| entry.name.clone());
-        self.probe_states
-            .retain(|name, _| entries.iter().any(|entry| entry.name == *name));
-        self.expanded_probe_entries
-            .retain(|name| entries.iter().any(|entry| entry.name == *name));
+        let first_load = !self.entries_initialized;
+        let entries_were_empty = self.entries.is_empty();
+        let selected_name = self.selected_user_entry().map(|entry| entry.name.clone());
+        self.probe_states.retain(|name, _| {
+            builtin_server_by_name(name).is_some()
+                || entries.iter().any(|entry| entry.name == *name)
+        });
+        self.expanded_probe_entries.retain(|name| {
+            builtin_server_by_name(name).is_some()
+                || entries.iter().any(|entry| entry.name == *name)
+        });
         for entry in &entries {
             self.probe_states.entry(entry.name.clone()).or_default();
         }
         self.entries = entries;
         self.selected_entry = selected_name
             .and_then(|name| self.entries.iter().position(|entry| entry.name == name))
+            .map(|index| BUILTIN_SERVERS.len() + index)
             .unwrap_or_else(|| {
-                self.selected_entry
-                    .min(self.entries.len().saturating_sub(1))
+                if (first_load || entries_were_empty) && !self.entries.is_empty() {
+                    BUILTIN_SERVERS.len()
+                } else {
+                    self.selected_entry.min(self.row_count().saturating_sub(1))
+                }
             });
+        self.entries_initialized = true;
     }
 
     /// Loads the confirmed MCP config snapshot.
     pub fn set_mcp_config(&mut self, config: &McpServersConfig) {
+        self.builtin_overrides = config.builtin_overrides.clone();
         self.set_entries(config.entries.clone());
     }
 
@@ -206,7 +272,15 @@ impl McpServersPane {
         let lines = self
             .content_rows()
             .into_iter()
-            .map(Line::from)
+            .map(|row| {
+                let dimmed = self.is_disabled_builtin_row(&row);
+                let line = Line::from(row);
+                if dimmed {
+                    line.style(Style::default().add_modifier(Modifier::DIM))
+                } else {
+                    line
+                }
+            })
             .collect::<Vec<_>>();
         frame.render_widget(
             Paragraph::new(lines)
@@ -215,9 +289,13 @@ impl McpServersPane {
             regions[0],
         );
         frame.render_widget(Paragraph::new(NEXT_SESSION_NOTICE), regions[1]);
+        self.builtin_confirm.render(frame, regions[0]);
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> Option<Action> {
+        if self.builtin_confirm.is_open() {
+            return self.builtin_confirm.handle_key(key);
+        }
         if self.edit_buffer.is_some() {
             return self.handle_editing_key(key);
         }
@@ -231,6 +309,11 @@ impl McpServersPane {
         self.form != Form::None
     }
 
+    /// Returns whether an editor or confirmation pane must receive all keys.
+    pub fn modal_active(&self) -> bool {
+        self.form_active() || self.builtin_confirm.is_open()
+    }
+
     /// Transitions `server_name` to probing and starts its injected runner.
     ///
     /// The returned handle is the pane-local completion seam: await it, then
@@ -241,11 +324,7 @@ impl McpServersPane {
     ///
     /// Panics when called without an active Tokio runtime.
     pub fn handle_probe_started(&mut self, server_name: &str) -> Option<ProbeTask> {
-        let entry = self
-            .entries
-            .iter()
-            .find(|entry| entry.name == server_name)?
-            .clone();
+        let entry = self.probe_entry(server_name)?;
         if matches!(
             self.probe_states.get(server_name),
             Some(ProbeState::Probing)
@@ -309,7 +388,8 @@ impl McpServersPane {
                 None
             }
             KeyCode::Char(' ') => self.toggle_selected_action(),
-            KeyCode::Delete | KeyCode::Char('d') => self.remove_selected_action(),
+            KeyCode::Delete => self.remove_selected_action(),
+            KeyCode::Char('d') => self.toggle_or_remove_selected_action(),
             _ => None,
         }
     }
@@ -370,7 +450,7 @@ impl McpServersPane {
     }
 
     fn begin_edit(&mut self) {
-        let Some(entry) = self.entries.get(self.selected_entry).cloned() else {
+        let Some(entry) = self.selected_user_entry().cloned() else {
             return;
         };
         self.form = match &entry.transport {
@@ -394,9 +474,7 @@ impl McpServersPane {
     }
 
     fn move_entry(&mut self, delta: isize) {
-        if !self.entries.is_empty() {
-            self.selected_entry = offset_index(self.selected_entry, self.entries.len(), delta);
-        }
+        self.selected_entry = offset_index(self.selected_entry, self.row_count(), delta);
     }
 
     fn move_field(&mut self, delta: isize) {
@@ -461,24 +539,34 @@ impl McpServersPane {
     }
 
     fn toggle_selected_action(&self) -> Option<Action> {
-        let mut entry = self.entries.get(self.selected_entry)?.clone();
+        let mut entry = self.selected_user_entry()?.clone();
         entry.enabled = !entry.enabled;
         Some(self.save_action_for(entry))
     }
 
     fn remove_selected_action(&self) -> Option<Action> {
-        let name = self.entries.get(self.selected_entry)?.name.clone();
+        let name = self.selected_user_entry()?.name.clone();
         Some(Action::ConfigSaveRequested {
             patch: ConfigPatch::McpServerRemove { name },
         })
     }
 
+    fn toggle_or_remove_selected_action(&mut self) -> Option<Action> {
+        let Some(server) = self.selected_builtin_server() else {
+            return self.remove_selected_action();
+        };
+        let enabled = !self.builtin_enabled(server);
+        if server == BuiltinMcpServer::SpurMcp && !enabled {
+            self.builtin_confirm.open();
+            return None;
+        }
+        Some(Action::ConfigSaveRequested {
+            patch: ConfigPatch::BuiltinMcpToggle { server, enabled },
+        })
+    }
+
     fn start_selected_probe(&mut self) {
-        let Some(server_name) = self
-            .entries
-            .get(self.selected_entry)
-            .map(|entry| entry.name.clone())
-        else {
+        let Some(server_name) = self.selected_server_name().map(str::to_string) else {
             return;
         };
         if let Some(task) = self.handle_probe_started(&server_name) {
@@ -487,11 +575,7 @@ impl McpServersPane {
     }
 
     fn toggle_selected_probe_schema(&mut self) {
-        let Some(server_name) = self
-            .entries
-            .get(self.selected_entry)
-            .map(|entry| entry.name.clone())
-        else {
+        let Some(server_name) = self.selected_server_name().map(str::to_string) else {
             return;
         };
         if !matches!(
@@ -506,6 +590,129 @@ impl McpServersPane {
         if !self.expanded_probe_entries.remove(&server_name) {
             self.expanded_probe_entries.insert(server_name);
         }
+    }
+
+    fn row_count(&self) -> usize {
+        BUILTIN_SERVERS.len() + self.entries.len()
+    }
+
+    fn selected_builtin_server(&self) -> Option<BuiltinMcpServer> {
+        BUILTIN_SERVERS.get(self.selected_entry).copied()
+    }
+
+    fn selected_user_entry(&self) -> Option<&McpServerEntry> {
+        self.selected_entry
+            .checked_sub(BUILTIN_SERVERS.len())
+            .and_then(|index| self.entries.get(index))
+    }
+
+    fn selected_server_name(&self) -> Option<&str> {
+        self.selected_builtin_server()
+            .map(builtin_server_name)
+            .or_else(|| self.selected_user_entry().map(|entry| entry.name.as_str()))
+    }
+
+    fn builtin_enabled(&self, server: BuiltinMcpServer) -> bool {
+        match server {
+            BuiltinMcpServer::SpurMcp => self.builtin_overrides.spur_mcp_enabled,
+            BuiltinMcpServer::Notebook => self.builtin_overrides.notebook_enabled,
+            BuiltinMcpServer::SpurWorkerMcp => self.builtin_overrides.worker_mcp_enabled,
+        }
+    }
+
+    fn probe_entry(&self, server_name: &str) -> Option<McpServerEntry> {
+        if let Some(server) = builtin_server_by_name(server_name) {
+            return self.builtin_probe_entry(server);
+        }
+        self.entries
+            .iter()
+            .find(|entry| entry.name == server_name)
+            .cloned()
+    }
+
+    fn builtin_probe_entry(&self, server: BuiltinMcpServer) -> Option<McpServerEntry> {
+        let sources = (self.builtin_source_provider)();
+        let transport = match server {
+            BuiltinMcpServer::SpurMcp => McpServerTransport::Http {
+                url: sources.spur_mcp_url?,
+                headers: HashMap::new(),
+            },
+            BuiltinMcpServer::Notebook => {
+                let notebook = sources.notebook?;
+                McpServerTransport::Stdio {
+                    command: notebook.command,
+                    args: vec!["--mcp-proxy".into(), notebook.socket_path],
+                    env: HashMap::new(),
+                }
+            }
+            BuiltinMcpServer::SpurWorkerMcp => {
+                let WorkerMcpRuntimeSource {
+                    url: base_url,
+                    token,
+                } = sources.worker?;
+                let url = format!("{base_url}?token={token}");
+                let headers = HashMap::from([("Authorization".into(), format!("Bearer {token}"))]);
+                McpServerTransport::Http { url, headers }
+            }
+        };
+        Some(McpServerEntry {
+            name: builtin_server_name(server).into(),
+            enabled: self.builtin_enabled(server),
+            transport,
+        })
+    }
+
+    fn probe_status(&self, server_name: &str) -> String {
+        match self.probe_states.get(server_name) {
+            Some(ProbeState::Probing) => " — probing…".to_string(),
+            Some(ProbeState::Done(ProbeReport {
+                outcome: ProbeOutcome::ToolsListed(tools),
+                ..
+            })) => format!(" — {} tools", tools.len()),
+            Some(ProbeState::Done(ProbeReport {
+                outcome: ProbeOutcome::ConnectError(message),
+                ..
+            })) => format!(" — connect error: {message}"),
+            Some(ProbeState::Done(ProbeReport {
+                outcome: ProbeOutcome::Timeout,
+                ..
+            })) => " — timeout after 10s".to_string(),
+            Some(ProbeState::Idle) | None => String::new(),
+        }
+    }
+
+    fn append_probe_tool_rows(&self, rows: &mut Vec<String>, server_name: &str) {
+        let Some(ProbeState::Done(ProbeReport {
+            outcome: ProbeOutcome::ToolsListed(tools),
+            ..
+        })) = self.probe_states.get(server_name)
+        else {
+            return;
+        };
+        let expanded = self.expanded_probe_entries.contains(server_name);
+        for tool in tools {
+            let description = tool
+                .description
+                .as_deref()
+                .map(one_line)
+                .filter(|description| !description.is_empty())
+                .unwrap_or_else(|| "(no description)".into());
+            rows.push(format!("    {} — {description}", tool.name));
+            if expanded {
+                rows.push(format!("      schema: {}", tool.input_schema_json));
+            }
+        }
+    }
+
+    fn is_disabled_builtin_row(&self, row: &str) -> bool {
+        let Some(row) = row.strip_prefix("> ").or_else(|| row.strip_prefix("  ")) else {
+            return false;
+        };
+        BUILTIN_SERVERS.iter().copied().any(|server| {
+            row.strip_prefix(builtin_server_name(server))
+                .is_some_and(|suffix| suffix.starts_with(' '))
+                && !self.builtin_enabled(server)
+        })
     }
 
     fn save_action_for(&self, entry: McpServerEntry) -> Action {
@@ -523,12 +730,38 @@ impl McpServersPane {
     }
 
     fn list_rows(&self) -> Vec<String> {
-        let mut rows = vec!["a add  e edit  Space toggle  d remove  t probe  x schemas".into()];
+        let mut rows = vec![
+            "a add  e edit  Space toggle custom  d toggle/remove  t probe  x schemas".into(),
+            "Built-in servers".into(),
+        ];
+        let sources = (self.builtin_source_provider)();
+        for (index, server) in BUILTIN_SERVERS.iter().copied().enumerate() {
+            let marker = if index == self.selected_entry {
+                ">"
+            } else {
+                " "
+            };
+            let state = if self.builtin_enabled(server) {
+                "enabled"
+            } else {
+                "disabled"
+            };
+            let name = builtin_server_name(server);
+            let kind = builtin_transport_kind(server);
+            let source = builtin_source_label(server, &sources);
+            let status = self.probe_status(name);
+            rows.push(format!(
+                "{marker} {name} [{kind}] {source} [{state}]{status}"
+            ));
+            self.append_probe_tool_rows(&mut rows, name);
+        }
+
+        rows.push("Configured servers".into());
         if self.entries.is_empty() {
             rows.push("No configured MCP servers".into());
         } else {
             for (index, entry) in self.entries.iter().enumerate() {
-                let marker = if index == self.selected_entry {
+                let marker = if BUILTIN_SERVERS.len() + index == self.selected_entry {
                     ">"
                 } else {
                     " "
@@ -539,46 +772,12 @@ impl McpServersPane {
                     McpServerTransport::JuteDebug => "jute-debug",
                 };
                 let enabled = if entry.enabled { "enabled" } else { "disabled" };
-                let status = match self.probe_states.get(&entry.name) {
-                    Some(ProbeState::Probing) => " — probing…".to_string(),
-                    Some(ProbeState::Done(ProbeReport {
-                        outcome: ProbeOutcome::ToolsListed(tools),
-                        ..
-                    })) => format!(" — {} tools", tools.len()),
-                    Some(ProbeState::Done(ProbeReport {
-                        outcome: ProbeOutcome::ConnectError(message),
-                        ..
-                    })) => format!(" — connect error: {message}"),
-                    Some(ProbeState::Done(ProbeReport {
-                        outcome: ProbeOutcome::Timeout,
-                        ..
-                    })) => " — timeout after 10s".to_string(),
-                    Some(ProbeState::Idle) | None => String::new(),
-                };
+                let status = self.probe_status(&entry.name);
                 rows.push(format!(
                     "{marker} {} [{transport}] {enabled}{status}",
                     entry.name
                 ));
-
-                if let Some(ProbeState::Done(ProbeReport {
-                    outcome: ProbeOutcome::ToolsListed(tools),
-                    ..
-                })) = self.probe_states.get(&entry.name)
-                {
-                    let expanded = self.expanded_probe_entries.contains(&entry.name);
-                    for tool in tools {
-                        let description = tool
-                            .description
-                            .as_deref()
-                            .map(one_line)
-                            .filter(|description| !description.is_empty())
-                            .unwrap_or_else(|| "(no description)".into());
-                        rows.push(format!("    {} — {description}", tool.name));
-                        if expanded {
-                            rows.push(format!("      schema: {}", tool.input_schema_json));
-                        }
-                    }
-                }
+                self.append_probe_tool_rows(&mut rows, &entry.name);
             }
         }
         rows
@@ -632,7 +831,11 @@ impl McpServersPane {
     }
 
     pub fn render_snapshot(&self) -> String {
-        let mut rows = self.content_rows();
+        let mut rows = if self.builtin_confirm.is_open() {
+            self.builtin_confirm.snapshot_rows()
+        } else {
+            self.content_rows()
+        };
         rows.push(NEXT_SESSION_NOTICE.into());
         rows.join("\n")
     }
@@ -643,6 +846,49 @@ fn default_probe_hook() -> ProbeHook {
         let future: ProbeFuture = Box::pin(async move { probe_server(&entry).await });
         future
     })
+}
+
+fn default_builtin_source_provider() -> BuiltinSourceProvider {
+    Arc::new(BuiltinMcpRuntimeSources::default)
+}
+
+fn builtin_server_name(server: BuiltinMcpServer) -> &'static str {
+    match server {
+        BuiltinMcpServer::SpurMcp => "spur-mcp",
+        BuiltinMcpServer::Notebook => "notebook",
+        BuiltinMcpServer::SpurWorkerMcp => "spur-worker-mcp",
+    }
+}
+
+fn builtin_server_by_name(name: &str) -> Option<BuiltinMcpServer> {
+    BUILTIN_SERVERS
+        .iter()
+        .copied()
+        .find(|server| builtin_server_name(*server) == name)
+}
+
+fn builtin_transport_kind(server: BuiltinMcpServer) -> &'static str {
+    match server {
+        BuiltinMcpServer::Notebook => "stdio",
+        BuiltinMcpServer::SpurMcp | BuiltinMcpServer::SpurWorkerMcp => "http",
+    }
+}
+
+fn builtin_source_label(server: BuiltinMcpServer, sources: &BuiltinMcpRuntimeSources) -> String {
+    match server {
+        BuiltinMcpServer::SpurMcp => sources.spur_mcp_url.as_deref().map_or_else(
+            || "source unavailable".into(),
+            |url| format!("runtime: {url}"),
+        ),
+        BuiltinMcpServer::Notebook => sources.notebook.as_ref().map_or_else(
+            || "source unavailable".into(),
+            |notebook| format!("resolved: {}", notebook.command),
+        ),
+        BuiltinMcpServer::SpurWorkerMcp => sources.worker.as_ref().map_or_else(
+            || "not running".into(),
+            |worker| format!("live: {}", worker.url),
+        ),
+    }
 }
 
 fn one_line(value: &str) -> String {
@@ -695,20 +941,26 @@ fn offset_index(index: usize, len: usize, delta: isize) -> usize {
 #[cfg(test)]
 mod tests {
     use std::{
-        collections::HashMap,
+        collections::{HashMap, HashSet},
         sync::{
             atomic::{AtomicUsize, Ordering},
-            Arc,
+            Arc, Mutex,
         },
     };
 
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-    use spur_acp::config::{ConfigPatch, McpServerEntry, McpServerTransport, McpServersConfig};
+    use ratatui::{backend::TestBackend, style::Modifier, Terminal};
+    use spur_acp::config::{
+        BuiltinMcpServer, ConfigPatch, McpServerEntry, McpServerTransport, McpServersConfig,
+    };
     use spur_mcp::probe::{ProbeOutcome, ProbeReport, ProbedTool};
 
     use crate::action::Action;
 
-    use super::{McpServersPane, ProbeFuture, ProbeHook};
+    use super::{
+        BuiltinMcpRuntimeSources, BuiltinSourceProvider, McpServersPane, NotebookMcpRuntimeSource,
+        ProbeFuture, ProbeHook, WorkerMcpRuntimeSource,
+    };
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
@@ -720,6 +972,28 @@ mod tests {
             assert!(pane.handle_key(key(KeyCode::Char(ch))).is_none());
         }
         assert!(pane.handle_key(key(KeyCode::Enter)).is_none());
+    }
+
+    fn focus_entry(pane: &mut McpServersPane, name: &str) {
+        let mut seen = HashSet::new();
+        loop {
+            let snapshot = pane.render_snapshot();
+            let selected = snapshot
+                .lines()
+                .find(|line| line.starts_with("> "))
+                .unwrap_or_else(|| panic!("pane has no focused row:\n{snapshot}"));
+            let selected_name = selected
+                .strip_prefix("> ")
+                .and_then(|line| line.split_whitespace().next());
+            if selected_name == Some(name) {
+                return;
+            }
+            assert!(
+                seen.insert(selected.to_string()),
+                "could not focus `{name}`:\n{snapshot}"
+            );
+            assert!(pane.handle_key(key(KeyCode::Down)).is_none());
+        }
     }
 
     fn test_http_entry(name: &str) -> McpServerEntry {
@@ -783,6 +1057,179 @@ mod tests {
         }
     }
 
+    #[test]
+    fn builtin_block_renders_transport_sources_and_state_badges() {
+        let mut config = McpServersConfig::default();
+        config.builtin_overrides.notebook_enabled = false;
+        let mut pane = McpServersPane::new();
+        pane.set_mcp_config(&config);
+
+        let text = pane.render_snapshot();
+
+        assert!(text.contains("Built-in servers"), "{text}");
+        assert!(
+            text.lines().any(|line| {
+                line.contains("spur-mcp")
+                    && line.contains("[http]")
+                    && line.contains("source unavailable")
+                    && line.contains("[enabled]")
+            }),
+            "{text}"
+        );
+        assert!(
+            text.lines().any(|line| {
+                line.contains("notebook")
+                    && line.contains("[stdio]")
+                    && line.contains("source unavailable")
+                    && line.contains("[disabled]")
+            }),
+            "{text}"
+        );
+        assert!(
+            text.lines().any(|line| {
+                line.contains("spur-worker-mcp")
+                    && line.contains("[http]")
+                    && line.contains("not running")
+                    && line.contains("[enabled]")
+            }),
+            "{text}"
+        );
+        assert!(text.contains("applies to next session"), "{text}");
+    }
+
+    #[test]
+    fn disabled_builtin_row_renders_dimmed() {
+        let mut config = McpServersConfig::default();
+        config.builtin_overrides.notebook_enabled = false;
+        let mut pane = McpServersPane::new();
+        pane.set_mcp_config(&config);
+        let snapshot = pane.render_snapshot();
+        let width = snapshot
+            .lines()
+            .map(str::chars)
+            .map(Iterator::count)
+            .max()
+            .unwrap_or_default()
+            .saturating_add(2)
+            .try_into()
+            .expect("snapshot width should fit u16");
+        let height = snapshot
+            .lines()
+            .count()
+            .saturating_add(2)
+            .try_into()
+            .expect("snapshot height should fit u16");
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).expect("test terminal should initialize");
+        terminal
+            .draw(|frame| pane.render(frame, frame.area()))
+            .expect("pane should render");
+        let buffer = terminal.backend().buffer();
+        let notebook_start = buffer
+            .content
+            .windows("notebook".len())
+            .position(|cells| {
+                cells.iter().map(|cell| cell.symbol()).collect::<String>() == "notebook"
+            })
+            .expect("notebook row should render");
+        let notebook_cell = &buffer.content[notebook_start];
+
+        assert!(
+            notebook_cell.modifier.contains(Modifier::DIM),
+            "notebook row should be dimmed"
+        );
+    }
+
+    #[test]
+    fn spur_mcp_reenable_emits_builtin_toggle_without_confirmation() {
+        let mut config = McpServersConfig::default();
+        config.builtin_overrides.spur_mcp_enabled = false;
+        let mut pane = McpServersPane::new();
+        pane.set_mcp_config(&config);
+        focus_entry(&mut pane, "spur-mcp");
+
+        assert!(matches!(
+            pane.handle_key(key(KeyCode::Char('d'))),
+            Some(Action::ConfigSaveRequested {
+                patch: ConfigPatch::BuiltinMcpToggle {
+                    server: BuiltinMcpServer::SpurMcp,
+                    enabled: true,
+                }
+            })
+        ));
+    }
+
+    #[test]
+    fn notebook_disable_emits_builtin_toggle_without_confirmation() {
+        let mut pane = McpServersPane::new();
+        pane.set_mcp_config(&McpServersConfig::default());
+        focus_entry(&mut pane, "notebook");
+
+        assert!(matches!(
+            pane.handle_key(key(KeyCode::Char('d'))),
+            Some(Action::ConfigSaveRequested {
+                patch: ConfigPatch::BuiltinMcpToggle {
+                    server: BuiltinMcpServer::Notebook,
+                    enabled: false,
+                }
+            })
+        ));
+        assert!(!pane.render_snapshot().contains("Disable spur-mcp"));
+    }
+
+    #[test]
+    fn worker_disable_emits_builtin_toggle_without_confirmation() {
+        let mut pane = McpServersPane::new();
+        pane.set_mcp_config(&McpServersConfig::default());
+        focus_entry(&mut pane, "spur-worker-mcp");
+
+        assert!(matches!(
+            pane.handle_key(key(KeyCode::Char('d'))),
+            Some(Action::ConfigSaveRequested {
+                patch: ConfigPatch::BuiltinMcpToggle {
+                    server: BuiltinMcpServer::SpurWorkerMcp,
+                    enabled: false,
+                }
+            })
+        ));
+        assert!(!pane.render_snapshot().contains("Disable spur-mcp"));
+    }
+
+    #[test]
+    fn spur_mcp_disable_requires_confirmation_before_emitting_patch() {
+        let mut pane = McpServersPane::new();
+        pane.set_mcp_config(&McpServersConfig::default());
+        focus_entry(&mut pane, "spur-mcp");
+
+        assert!(pane.handle_key(key(KeyCode::Char('d'))).is_none());
+        let dialog = pane.render_snapshot();
+        assert!(dialog.contains("Disable spur-mcp"), "{dialog}");
+        assert!(dialog.contains("delegation/plan/solve tools"), "{dialog}");
+        assert!(dialog.contains("applies to next session"), "{dialog}");
+        assert!(matches!(
+            pane.handle_key(key(KeyCode::Enter)),
+            Some(Action::ConfigSaveRequested {
+                patch: ConfigPatch::BuiltinMcpToggle {
+                    server: BuiltinMcpServer::SpurMcp,
+                    enabled: false,
+                }
+            })
+        ));
+    }
+
+    #[test]
+    fn spur_mcp_disable_confirmation_cancel_emits_no_patch() {
+        let mut pane = McpServersPane::new();
+        pane.set_mcp_config(&McpServersConfig::default());
+        focus_entry(&mut pane, "spur-mcp");
+
+        assert!(pane.handle_key(key(KeyCode::Char('d'))).is_none());
+        assert!(pane.render_snapshot().contains("Disable spur-mcp"));
+        assert!(pane.handle_key(key(KeyCode::Esc)).is_none());
+        assert!(!pane.render_snapshot().contains("Disable spur-mcp"));
+        assert!(pane.handle_key(key(KeyCode::Enter)).is_none());
+    }
+
     #[tokio::test]
     async fn probe_key_renders_probing_until_completion_is_applied() {
         let calls = Arc::new(AtomicUsize::new(0));
@@ -792,6 +1239,7 @@ mod tests {
         );
         let mut pane = McpServersPane::with_probe_hook(hook);
         pane.set_entries(vec![test_http_entry("a")]);
+        focus_entry(&mut pane, "a");
 
         assert!(pane.handle_key(key(KeyCode::Char('t'))).is_none());
         assert!(pane.render_snapshot().contains("probing…"));
@@ -809,6 +1257,81 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn builtin_probe_uses_transient_entries_from_runtime_provider() {
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let captured_for_hook = Arc::clone(&captured);
+        let hook: ProbeHook = Arc::new(move |entry: McpServerEntry| {
+            captured_for_hook
+                .lock()
+                .expect("capture lock should be available")
+                .push(entry.clone());
+            let future: ProbeFuture = Box::pin(async move {
+                ProbeReport {
+                    server_name: entry.name,
+                    outcome: ProbeOutcome::ToolsListed(Vec::new()),
+                }
+            });
+            future
+        });
+        let sources: BuiltinSourceProvider = Arc::new(|| BuiltinMcpRuntimeSources {
+            spur_mcp_url: Some("http://127.0.0.1:7000/mcp".into()),
+            notebook: Some(NotebookMcpRuntimeSource {
+                command: "/opt/spur-notebook".into(),
+                socket_path: "/tmp/spur-notebook-test.sock".into(),
+            }),
+            worker: Some(WorkerMcpRuntimeSource {
+                url: "http://127.0.0.1:7777/mcp".into(),
+                token: "worker-secret".into(),
+            }),
+        });
+        let mut pane = McpServersPane::with_hooks(hook, sources);
+        pane.set_mcp_config(&McpServersConfig::default());
+
+        for name in ["spur-mcp", "notebook", "spur-worker-mcp"] {
+            focus_entry(&mut pane, name);
+            assert!(pane.handle_key(key(KeyCode::Char('t'))).is_none());
+            pane.take_probe_task()
+                .expect("built-in probe task should be queued")
+                .await
+                .expect("built-in probe task should join");
+        }
+
+        let entries = captured.lock().expect("capture lock should be available");
+        assert!(matches!(
+            &entries[0],
+            McpServerEntry {
+                name,
+                transport: McpServerTransport::Http { url, headers },
+                ..
+            } if name == "spur-mcp"
+                && url == "http://127.0.0.1:7000/mcp"
+                && headers.is_empty()
+        ));
+        assert!(matches!(
+            &entries[1],
+            McpServerEntry {
+                name,
+                transport: McpServerTransport::Stdio { command, args, env },
+                ..
+            } if name == "notebook"
+                && command == "/opt/spur-notebook"
+                && args == &["--mcp-proxy", "/tmp/spur-notebook-test.sock"]
+                && env.is_empty()
+        ));
+        assert!(matches!(
+            &entries[2],
+            McpServerEntry {
+                name,
+                transport: McpServerTransport::Http { url, headers },
+                ..
+            } if name == "spur-worker-mcp"
+                && url == "http://127.0.0.1:7777/mcp?token=worker-secret"
+                && headers.get("Authorization").map(String::as_str)
+                    == Some("Bearer worker-secret")
+        ));
+    }
+
+    #[tokio::test]
     async fn successful_probe_renders_tools_and_toggles_schemas() {
         let hook = fake_probe_hook(
             Arc::new(AtomicUsize::new(0)),
@@ -816,6 +1339,7 @@ mod tests {
         );
         let mut pane = McpServersPane::with_probe_hook(hook);
         pane.set_entries(vec![test_http_entry("a")]);
+        focus_entry(&mut pane, "a");
         pane.handle_key(key(KeyCode::Char('t')));
         pane.apply_probe_result("a", report("a", tools_outcome()));
 
@@ -844,13 +1368,14 @@ mod tests {
         );
         let mut pane = McpServersPane::with_probe_hook(hook);
         pane.set_entries(vec![test_http_entry("a"), test_http_entry("b")]);
+        focus_entry(&mut pane, "a");
 
         pane.handle_key(key(KeyCode::Char('t')));
         pane.apply_probe_result(
             "a",
             report("a", ProbeOutcome::ConnectError("refused".into())),
         );
-        pane.handle_key(key(KeyCode::Down));
+        focus_entry(&mut pane, "b");
         pane.handle_key(key(KeyCode::Char('t')));
         pane.apply_probe_result("b", report("b", ProbeOutcome::Timeout));
 
@@ -868,6 +1393,7 @@ mod tests {
         );
         let mut pane = McpServersPane::with_probe_hook(hook);
         pane.set_entries(vec![test_http_entry("a")]);
+        focus_entry(&mut pane, "a");
 
         pane.handle_key(key(KeyCode::Char('t')));
         pane.handle_key(key(KeyCode::Char('t')));
@@ -888,9 +1414,10 @@ mod tests {
         );
         let mut pane = McpServersPane::with_probe_hook(hook);
         pane.set_entries(vec![test_http_entry("a"), test_http_entry("b")]);
+        focus_entry(&mut pane, "a");
 
         pane.handle_key(key(KeyCode::Char('t')));
-        pane.handle_key(key(KeyCode::Down));
+        focus_entry(&mut pane, "b");
         pane.handle_key(key(KeyCode::Char('t')));
         pane.apply_probe_result("a", report("a", tools_outcome()));
 
@@ -930,6 +1457,7 @@ mod tests {
     fn disabled_entry_renders_with_marker_and_next_session_notice() {
         let mut pane = McpServersPane::new();
         pane.set_entries(vec![disabled_entry("ghost")]);
+        focus_entry(&mut pane, "ghost");
 
         let text = pane.render_snapshot();
 
@@ -942,6 +1470,7 @@ mod tests {
     fn list_toggle_and_remove_emit_existing_config_patches() {
         let mut pane = McpServersPane::new();
         pane.set_entries(vec![disabled_entry("ghost")]);
+        focus_entry(&mut pane, "ghost");
 
         assert!(matches!(
             pane.handle_key(key(KeyCode::Char(' '))),
@@ -1067,8 +1596,10 @@ mod tests {
         let entry = test_http_entry("github");
         let mut pane = McpServersPane::new();
         pane.set_mcp_config(&McpServersConfig {
+            builtin_overrides: Default::default(),
             entries: vec![entry.clone()],
         });
+        focus_entry(&mut pane, "github");
 
         pane.handle_key(key(KeyCode::Char('e')));
 

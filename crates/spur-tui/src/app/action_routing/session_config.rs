@@ -85,7 +85,9 @@ impl App {
             ConfigPatch::GraphEmbeddingModel { .. }
             | ConfigPatch::GraphOverlayFsmonitor(_)
             | ConfigPatch::SkillsProjectionMode(_) => {}
-            ConfigPatch::McpServerUpsert { .. } | ConfigPatch::McpServerRemove { .. } => {
+            ConfigPatch::BuiltinMcpToggle { .. }
+            | ConfigPatch::McpServerUpsert { .. }
+            | ConfigPatch::McpServerRemove { .. } => {
                 if let Some(browser) = self.agent_config_browser.as_mut() {
                     browser.set_mcp_config(&self.config.mcp_servers);
                 }

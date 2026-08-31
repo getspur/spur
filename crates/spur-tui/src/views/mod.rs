@@ -1,4 +1,5 @@
 pub mod agent_config_browser;
+pub mod builtin_confirm;
 pub mod dashboard;
 pub mod explore;
 #[cfg(feature = "analytics")]
