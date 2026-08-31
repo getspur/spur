@@ -123,9 +123,17 @@ impl App {
             }
             Action::OpenInsights | Action::NavigateTo(ViewId::Insights) => {
                 #[cfg(feature = "analytics")]
-                self.start_insights_init();
-                self.navigate_to(ViewId::Insights);
-                None
+                {
+                    self.start_insights_init();
+                    self.navigate_to(ViewId::Insights);
+                    None
+                }
+                #[cfg(not(feature = "analytics"))]
+                {
+                    Some(Action::FlashHint {
+                        message: "Analytics unavailable in this build".into(),
+                    })
+                }
             }
             #[cfg(feature = "markdown")]
             Action::NavigateTo(ViewId::MermaidOverlay(session)) => {

@@ -20,7 +20,7 @@ use spur_core::explore::{
     store,
 };
 
-use crate::action::{Action, ViewId};
+use crate::action::Action;
 use crate::components::line_wrap::wrap_line_to_width;
 
 use super::{View, ViewContext};
@@ -272,7 +272,7 @@ impl ExploreBrowserView {
                 self.open_gate();
                 None
             }
-            KeyCode::Esc if key.modifiers.is_empty() => Some(Action::NavigateTo(ViewId::Dashboard)),
+            KeyCode::Esc if key.modifiers.is_empty() => Some(Action::NavigateBack),
             _ => None,
         }
     }
