@@ -1346,6 +1346,10 @@ impl ParquetClient {
     }
 
     fn symbol_by_stable_id(&self, sid: &str) -> anyhow::Result<Option<GraphSymbolArtifact>> {
+        if let Some(Ok(index)) = self.hot_query_index.get() {
+            return Ok(index.symbol_by_id(sid));
+        }
+
         let ids = HashSet::from([sid.to_owned()]);
         Ok(self.symbols_by_ids(&ids)?.remove(sid))
     }
@@ -2108,7 +2112,7 @@ fn symbols_from_batch(batch: &RecordBatch) -> anyhow::Result<Vec<GraphSymbolArti
     Ok(symbols)
 }
 
-struct SymbolBatchColumns<'a> {
+pub(crate) struct SymbolBatchColumns<'a> {
     stable_symbol_id: &'a StringArray,
     file_path: &'a StringArray,
     byte_range_start: &'a Int64Array,
@@ -2123,7 +2127,7 @@ struct SymbolBatchColumns<'a> {
 }
 
 impl<'a> SymbolBatchColumns<'a> {
-    fn new(batch: &'a RecordBatch) -> anyhow::Result<Self> {
+    pub(crate) fn new(batch: &'a RecordBatch) -> anyhow::Result<Self> {
         Ok(Self {
             stable_symbol_id: string_array_by_name(batch, "stable_symbol_id")?,
             file_path: string_array_by_name(batch, "file_path")?,
@@ -2139,7 +2143,7 @@ impl<'a> SymbolBatchColumns<'a> {
         })
     }
 
-    fn symbol_at(&self, row: usize) -> anyhow::Result<GraphSymbolArtifact> {
+    pub(crate) fn symbol_at(&self, row: usize) -> anyhow::Result<GraphSymbolArtifact> {
         Ok(GraphSymbolArtifact {
             stable_symbol_id: required_string_value(
                 self.stable_symbol_id,
@@ -2774,6 +2778,32 @@ mod tests {
     }
 
     #[test]
+    fn parquet_symbol_lookup_reuses_ready_hot_query_index() -> anyhow::Result<()> {
+        let tempdir = tempfile::tempdir()?;
+        let mut graph = artifact(vec![symbol("sym-a", "alpha_target")]);
+        graph.symbol_node_ids = vec![NodeId(1)];
+        let parquet_dir =
+            write_artifact_parquet(&graph, tempdir.path(), WriteOptions::default(), Vec::new())?;
+        let client = ParquetClient::open(&parquet_dir)?;
+
+        client.search_symbols(&SearchOptions {
+            query: "alpha".to_owned(),
+            mode: SearchMode::Prefix,
+            filters: SearchFilters::default(),
+            limit: 20,
+        })?;
+        assert_eq!(client.hot_query_index_build_count(), 1);
+        std::fs::remove_file(parquet_dir.join("nodes.parquet"))?;
+
+        let symbol = client.symbol_by_id("sym-a")?.expect("cached symbol");
+
+        assert_eq!(symbol.stable_symbol_id, "sym-a");
+        assert_eq!(symbol.entity_name, "alpha_target");
+        assert_eq!(client.hot_query_index_build_count(), 1);
+        Ok(())
+    }
+
+    #[test]
     fn parquet_hot_symbol_search_does_not_depend_on_edge_shards() -> anyhow::Result<()> {
         let tempdir = tempfile::tempdir()?;
         let mut graph = artifact(vec![symbol("sym-a", "alpha_target")]);
@@ -3134,6 +3164,15 @@ mod tests {
                 .expect("column chunk size fits usize")
         ])?;
         file.sync_all()?;
+
+        client
+            .search_symbols(&SearchOptions {
+                query: "m-target".to_owned(),
+                mode: SearchMode::Prefix,
+                filters: SearchFilters::default(),
+                limit: 20,
+            })
+            .expect_err("full hot-index scan should observe corrupt non-matching data");
 
         let actual = client
             .symbol_by_id(&target)?

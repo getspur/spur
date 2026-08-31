@@ -8,7 +8,9 @@ use std::sync::Arc;
 use arrow_array::{Array as _, Int32Array, Int64Array, RecordBatch, StringArray};
 use globset::{Glob, GlobMatcher};
 
+#[cfg(test)]
 use crate::query_client::symbol_from_batch_row;
+use crate::query_client::SymbolBatchColumns;
 use crate::search::{
     compare_symbols, limited_search_result, INTERNAL_SEARCH_UNBOUNDED, PUBLIC_SEARCH_LIMIT,
 };
@@ -27,10 +29,31 @@ pub(crate) struct HotQueryIndex {
     symbol_rows_by_hash: HashMap<u64, SymbolIdRows>,
     #[cfg(test)]
     search_symbol_materializations: AtomicUsize,
+    #[cfg(test)]
+    symbol_row_lookups: AtomicUsize,
+    #[cfg(test)]
+    symbol_column_projections: AtomicUsize,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct SymbolRowCode(usize);
+
+#[derive(Clone, Copy)]
+struct EdgeSymbolRows {
+    source: SymbolRowCode,
+    target: SymbolRowCode,
+}
+
+impl EdgeSymbolRows {
+    const MISSING: SymbolRowCode = SymbolRowCode(usize::MAX);
+
+    const fn missing() -> Self {
+        Self {
+            source: Self::MISSING,
+            target: Self::MISSING,
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct UnresolvedLabelCode(usize);
@@ -39,6 +62,7 @@ struct UnresolvedLabelCode(usize);
 pub(crate) struct HotAdjacencyIndex {
     symbols: Arc<HotQueryIndex>,
     edges: Vec<GraphEdgeArtifact>,
+    edge_symbol_rows: Vec<EdgeSymbolRows>,
     unresolved_label_codes: UnresolvedLabelCodes,
     resolved_by_source: HashMap<SymbolRowCode, Vec<usize>>,
     resolved_by_target: HashMap<SymbolRowCode, Vec<usize>>,
@@ -64,6 +88,10 @@ impl HotQueryIndex {
             symbol_rows_by_hash,
             #[cfg(test)]
             search_symbol_materializations: AtomicUsize::new(0),
+            #[cfg(test)]
+            symbol_row_lookups: AtomicUsize::new(0),
+            #[cfg(test)]
+            symbol_column_projections: AtomicUsize::new(0),
         })
     }
 
@@ -77,25 +105,38 @@ impl HotQueryIndex {
 
         let limit = (options.limit != INTERNAL_SEARCH_UNBOUNDED)
             .then(|| options.limit.clamp(1, PUBLIC_SEARCH_LIMIT));
-        let columns = SearchSymbolColumns::new(&self.symbol_batch);
-        let mut candidates = Vec::new();
-        let mut total_matches = 0usize;
+        let search_columns = SearchSymbolColumns::new(&self.symbol_batch);
+        let mut matching_rows = Vec::new();
 
         for row in 0..self.symbol_batch.num_rows() {
-            let symbol = columns.symbol_at(row);
+            let symbol = search_columns.symbol_at(row);
             if !matches_query_row(&symbol, options)
                 || !matches_filters_row(&symbol, &options.filters, glob.as_ref())
             {
                 continue;
             }
 
-            total_matches += 1;
-            Self::push_candidate_row(&mut candidates, symbol, limit, options);
+            matching_rows.push(row);
         }
 
-        let mut candidates = candidates
+        let total_matches = matching_rows.len();
+        if let Some(limit) = limit {
+            if matching_rows.len() > limit {
+                matching_rows.select_nth_unstable_by(limit, |left, right| {
+                    compare_symbol_rows(
+                        &search_columns.symbol_at(*left),
+                        &search_columns.symbol_at(*right),
+                        options,
+                    )
+                });
+                matching_rows.truncate(limit);
+            }
+        }
+
+        let symbol_columns = self.symbol_columns();
+        let mut candidates = matching_rows
             .into_iter()
-            .map(|symbol| SearchSymbol::from(&self.search_symbol_at(symbol.row)))
+            .map(|row| SearchSymbol::from(&self.search_symbol_at(&symbol_columns, row)))
             .collect::<Vec<_>>();
         candidates.sort_by(|left, right| compare_symbols(left, right, options));
         limited_search_result(candidates, total_matches, options.limit)
@@ -103,10 +144,15 @@ impl HotQueryIndex {
 
     pub(crate) fn symbol_by_id(&self, stable_symbol_id: &str) -> Option<GraphSymbolArtifact> {
         let row = self.symbol_row_by_id(stable_symbol_id)?;
-        self.symbol_by_row_code(row)
+        let columns = self.symbol_columns();
+        self.symbol_by_row_code(&columns, row)
     }
 
     fn symbol_row_by_id(&self, stable_symbol_id: &str) -> Option<SymbolRowCode> {
+        #[cfg(test)]
+        self.symbol_row_lookups
+            .fetch_add(1, AtomicOrdering::Relaxed);
+
         let stable_symbol_ids = string_array_by_name(&self.symbol_batch, "stable_symbol_id");
         self.symbol_row_by_id_from(stable_symbol_ids, stable_symbol_id)
     }
@@ -123,47 +169,38 @@ impl HotQueryIndex {
             .map(SymbolRowCode)
     }
 
-    fn symbol_by_row_code(&self, row: SymbolRowCode) -> Option<GraphSymbolArtifact> {
-        (row.0 < self.symbol_batch.num_rows()).then(|| self.symbol_at(row.0))
+    fn symbol_by_row_code(
+        &self,
+        columns: &SymbolBatchColumns<'_>,
+        row: SymbolRowCode,
+    ) -> Option<GraphSymbolArtifact> {
+        (row.0 < self.symbol_batch.num_rows()).then(|| self.symbol_at(columns, row.0))
     }
 
-    fn push_candidate_row<'a>(
-        candidates: &mut Vec<SearchSymbolRow<'a>>,
-        symbol: SearchSymbolRow<'a>,
-        limit: Option<usize>,
-        options: &SearchOptions,
-    ) {
-        let Some(limit) = limit else {
-            candidates.push(symbol);
-            return;
-        };
-        if candidates.len() < limit {
-            candidates.push(symbol);
-            return;
-        }
-
-        let Some((worst_index, worst)) = candidates
-            .iter()
-            .enumerate()
-            .max_by(|(_, left), (_, right)| compare_symbol_rows(left, right, options))
-        else {
-            return;
-        };
-        if compare_symbol_rows(&symbol, worst, options).is_lt() {
-            candidates[worst_index] = symbol;
-        }
-    }
-
-    fn search_symbol_at(&self, row: usize) -> GraphSymbolArtifact {
+    fn search_symbol_at(
+        &self,
+        columns: &SymbolBatchColumns<'_>,
+        row: usize,
+    ) -> GraphSymbolArtifact {
         #[cfg(test)]
         self.search_symbol_materializations
             .fetch_add(1, AtomicOrdering::Relaxed);
 
-        self.symbol_at(row)
+        self.symbol_at(columns, row)
     }
 
-    fn symbol_at(&self, row: usize) -> GraphSymbolArtifact {
-        symbol_from_batch_row(&self.symbol_batch, row).unwrap_or_else(|error| {
+    fn symbol_columns(&self) -> SymbolBatchColumns<'_> {
+        #[cfg(test)]
+        self.symbol_column_projections
+            .fetch_add(1, AtomicOrdering::Relaxed);
+
+        SymbolBatchColumns::new(&self.symbol_batch).unwrap_or_else(|error| {
+            panic!("validated HotQueryIndex columns failed to project: {error:#}")
+        })
+    }
+
+    fn symbol_at(&self, columns: &SymbolBatchColumns<'_>, row: usize) -> GraphSymbolArtifact {
+        columns.symbol_at(row).unwrap_or_else(|error| {
             panic!("validated HotQueryIndex symbol row {row} failed to materialize: {error:#}")
         })
     }
@@ -178,6 +215,27 @@ impl HotQueryIndex {
     fn search_symbol_materializations(&self) -> usize {
         self.search_symbol_materializations
             .load(AtomicOrdering::Relaxed)
+    }
+
+    #[cfg(test)]
+    fn reset_symbol_row_lookups(&self) {
+        self.symbol_row_lookups.store(0, AtomicOrdering::Relaxed);
+    }
+
+    #[cfg(test)]
+    fn symbol_row_lookups(&self) -> usize {
+        self.symbol_row_lookups.load(AtomicOrdering::Relaxed)
+    }
+
+    #[cfg(test)]
+    fn reset_symbol_column_projections(&self) {
+        self.symbol_column_projections
+            .store(0, AtomicOrdering::Relaxed);
+    }
+
+    #[cfg(test)]
+    fn symbol_column_projections(&self) -> usize {
+        self.symbol_column_projections.load(AtomicOrdering::Relaxed)
     }
 }
 
@@ -318,7 +376,6 @@ impl<'a> SearchSymbolColumns<'a> {
 
     fn symbol_at(&self, row: usize) -> SearchSymbolRow<'a> {
         SearchSymbolRow {
-            row,
             stable_symbol_id: self.stable_symbol_id.value(row),
             entity_name: self.entity_name.value(row),
             qualified_name: self.qualified_name.value(row),
@@ -334,7 +391,6 @@ impl<'a> SearchSymbolColumns<'a> {
 
 #[derive(Clone, Copy)]
 struct SearchSymbolRow<'a> {
-    row: usize,
     stable_symbol_id: &'a str,
     entity_name: &'a str,
     qualified_name: &'a str,
@@ -532,6 +588,7 @@ impl HotAdjacencyIndex {
         let mut resolved_by_target = HashMap::<SymbolRowCode, Vec<usize>>::new();
         let mut unresolved_by_source = HashMap::<SymbolRowCode, Vec<usize>>::new();
         let mut unresolved_by_label = HashMap::<UnresolvedLabelCode, Vec<usize>>::new();
+        let mut edge_symbol_rows = vec![EdgeSymbolRows::missing(); edges.len()];
         let stable_symbol_ids = string_array_by_name(&symbols.symbol_batch, "stable_symbol_id");
         for (index, edge) in edges.iter().enumerate() {
             let Some(source) =
@@ -539,12 +596,14 @@ impl HotAdjacencyIndex {
             else {
                 continue;
             };
+            edge_symbol_rows[index].source = source;
 
             if let Some(target_id) = edge.target_stable_symbol_id.as_deref() {
                 let Some(target) = symbols.symbol_row_by_id_from(stable_symbol_ids, target_id)
                 else {
                     continue;
                 };
+                edge_symbol_rows[index].target = target;
                 resolved_by_source.entry(source).or_default().push(index);
                 resolved_by_target.entry(target).or_default().push(index);
             } else {
@@ -558,6 +617,7 @@ impl HotAdjacencyIndex {
         Self {
             symbols,
             edges,
+            edge_symbol_rows,
             unresolved_label_codes,
             resolved_by_source,
             resolved_by_target,
@@ -579,12 +639,16 @@ impl HotAdjacencyIndex {
         let resolved = resolved.into_iter().flatten().copied();
         let unresolved = self.edge_indices_for_labels(unresolved_labels);
         let mut records = Vec::with_capacity(resolved_count + unresolved.len());
+        let symbol_columns = self.symbols.symbol_columns();
         for edge_index in resolved {
             let edge = &self.edges[edge_index];
             if !is_caller_relation(edge.relation) {
                 continue;
             }
-            if let Some(caller) = self.symbol_by_id(&edge.source_stable_symbol_id) {
+            if let Some(caller) = self
+                .symbols
+                .symbol_by_row_code(&symbol_columns, self.edge_symbol_rows[edge_index].source)
+            {
                 records.push(OwnedCallerRecord::Resolved {
                     caller,
                     edge: edge.clone(),
@@ -596,7 +660,10 @@ impl HotAdjacencyIndex {
             if !is_caller_relation(edge.relation) {
                 continue;
             }
-            if let Some(caller) = self.symbol_by_id(&edge.source_stable_symbol_id) {
+            if let Some(caller) = self
+                .symbols
+                .symbol_by_row_code(&symbol_columns, self.edge_symbol_rows[edge_index].source)
+            {
                 records.push(OwnedCallerRecord::Unresolved {
                     caller,
                     target_label: edge.target_label.clone().unwrap_or_default(),
@@ -611,6 +678,7 @@ impl HotAdjacencyIndex {
         &self,
         target_labels: &HashSet<String>,
     ) -> Vec<OwnedCallerRecord> {
+        let symbol_columns = self.symbols.symbol_columns();
         self.edge_indices_for_labels(target_labels)
             .into_iter()
             .filter_map(|edge_index| {
@@ -618,7 +686,10 @@ impl HotAdjacencyIndex {
                 if !is_caller_relation(edge.relation) {
                     return None;
                 }
-                let caller = self.symbol_by_id(&edge.source_stable_symbol_id)?;
+                let caller = self.symbols.symbol_by_row_code(
+                    &symbol_columns,
+                    self.edge_symbol_rows[edge_index].source,
+                )?;
                 Some(OwnedCallerRecord::Unresolved {
                     caller,
                     target_label: edge.target_label.clone().unwrap_or_default(),
@@ -632,28 +703,22 @@ impl HotAdjacencyIndex {
         let Some(source) = self.symbols.symbol_row_by_id(source_symbol_id) else {
             return Vec::new();
         };
-        let resolved = self
-            .resolved_by_source
-            .get(&source)
-            .into_iter()
-            .flatten()
-            .copied();
-        let unresolved = self
-            .unresolved_by_source
-            .get(&source)
-            .into_iter()
-            .flatten()
-            .copied();
-        let mut records = Vec::new();
+        let resolved = self.resolved_by_source.get(&source);
+        let resolved_count = resolved.map_or(0, Vec::len);
+        let resolved = resolved.into_iter().flatten().copied();
+        let unresolved = self.unresolved_by_source.get(&source);
+        let unresolved_count = unresolved.map_or(0, Vec::len);
+        let unresolved = unresolved.into_iter().flatten().copied();
+        let mut records = Vec::with_capacity(resolved_count + unresolved_count);
+        let symbol_columns = self.symbols.symbol_columns();
         for edge_index in resolved {
             let edge = &self.edges[edge_index];
             if !is_caller_relation(edge.relation) {
                 continue;
             }
-            if let Some(symbol) = edge
-                .target_stable_symbol_id
-                .as_deref()
-                .and_then(|target| self.symbol_by_id(target))
+            if let Some(symbol) = self
+                .symbols
+                .symbol_by_row_code(&symbol_columns, self.edge_symbol_rows[edge_index].target)
             {
                 records.push(OwnedCalleeRecord::Resolved {
                     symbol,
@@ -687,10 +752,6 @@ impl HotAdjacencyIndex {
         indices.sort_unstable();
         indices.dedup();
         indices
-    }
-
-    fn symbol_by_id(&self, stable_symbol_id: &str) -> Option<GraphSymbolArtifact> {
-        self.symbols.symbol_by_id(stable_symbol_id)
     }
 }
 
@@ -872,6 +933,17 @@ mod tests {
         let end = source[start..]
             .find("impl HotQueryIndex")
             .expect("HotQueryIndex impl marker");
+        &source[start..start + end]
+    }
+
+    fn hot_query_index_search_source() -> &'static str {
+        let source = include_str!("query_hot_index.rs");
+        let start = source
+            .find("pub(crate) fn search_symbols(&self")
+            .expect("HotQueryIndex::search_symbols source");
+        let end = source[start..]
+            .find("pub(crate) fn symbol_by_id")
+            .expect("HotQueryIndex::symbol_by_id marker");
         &source[start..start + end]
     }
 
@@ -1079,6 +1151,56 @@ mod tests {
     }
 
     #[test]
+    fn hot_adjacency_materializes_adjacent_rows_without_per_result_id_lookups() {
+        let rows = vec![
+            TestSymbol::new(0, "source_fn"),
+            TestSymbol::new(1, "target_fn"),
+            TestSymbol::new(2, "unresolved_caller"),
+        ];
+        let symbols = Arc::new(HotQueryIndex::new(symbol_batch(&rows)).expect("symbols index"));
+        let edges = vec![
+            edge(
+                "sid-000",
+                Some("sid-001"),
+                Some("target_fn"),
+                RelationKind::Calls,
+            ),
+            edge("sid-002", None, Some("target_fn"), RelationKind::Calls),
+            edge(
+                "sid-000",
+                None,
+                Some("external_target"),
+                RelationKind::Calls,
+            ),
+        ];
+        let index = HotAdjacencyIndex::new(Arc::clone(&symbols), edges);
+        let target_labels = HashSet::from(["target_fn".to_owned()]);
+        symbols.reset_symbol_row_lookups();
+        symbols.reset_symbol_column_projections();
+
+        let callers = index.caller_records("sid-001", &target_labels);
+        let callees = index.callee_records("sid-000");
+
+        assert_eq!(callers.len(), 2);
+        assert_eq!(callees.len(), 2);
+        assert_eq!(
+            callees.capacity(),
+            callees.len(),
+            "callee queries should reserve the known adjacency result count"
+        );
+        assert_eq!(
+            symbols.symbol_row_lookups(),
+            2,
+            "caller/callee queries should resolve only their input symbol IDs"
+        );
+        assert_eq!(
+            symbols.symbol_column_projections(),
+            2,
+            "caller/callee queries should project Arrow columns once per query"
+        );
+    }
+
+    #[test]
     fn hot_query_index_search_preserves_modes_filters_and_ranking() {
         let rows = vec![
             TestSymbol::new(0, "helper")
@@ -1129,6 +1251,20 @@ mod tests {
         kind_glob_options.filters.file_glob = Some("crates/foo/**/*.rs".to_owned());
         let kind_glob_filtered = index.search_symbols(&kind_glob_options);
         assert_eq!(result_ids(&kind_glob_filtered), vec!["sid-011"]);
+    }
+
+    #[test]
+    fn hot_query_index_search_partitions_matching_rows_without_window_rescans() {
+        let source = hot_query_index_search_source();
+
+        assert!(
+            source.contains("select_nth_unstable_by"),
+            "bounded Arrow search should partition matching row codes once"
+        );
+        assert!(
+            !source.contains("push_candidate_row"),
+            "bounded Arrow search must not rescan the candidate window for every match"
+        );
     }
 
     #[test]
