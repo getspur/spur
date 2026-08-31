@@ -577,7 +577,12 @@ impl App {
                     self.dirty = true;
                 } else {
                     match &self.current_view {
-                        ViewId::SessionDetail(_) => {}
+                        ViewId::SessionDetail(existing) if existing == session => {}
+                        ViewId::SessionDetail(_) => {
+                            self.current_view = target;
+                            self.emit_view_opened();
+                            self.dirty = true;
+                        }
                         _ => {
                             self.navigate_to(target);
                         }
