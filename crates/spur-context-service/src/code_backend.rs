@@ -1,6 +1,7 @@
 //! Immutable Parquet-backed MCP code surface.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use serde_json::{json, Value};
 use spur_graph::{
@@ -9,6 +10,7 @@ use spur_graph::{
     SearchFilters, SearchMode, SearchOptions,
 };
 use thiserror::Error;
+use tokio::sync::{Mutex, OnceCell};
 
 #[allow(
     dead_code,
@@ -134,6 +136,8 @@ impl CodeBackendError {
 pub struct CodeBackend {
     registry: ServingRegistry,
     cache: ArtifactCache,
+    generation_active: Arc<OnceCell<()>>,
+    opened: Arc<Mutex<Option<Arc<OpenedPackage>>>>,
 }
 
 struct OpenedPackage {
@@ -147,7 +151,12 @@ impl CodeBackend {
         registry
             .validate()
             .map_err(|_| CodeBackendError::InvalidRegistry)?;
-        Ok(Self { registry, cache })
+        Ok(Self {
+            registry,
+            cache,
+            generation_active: Arc::new(OnceCell::new()),
+            opened: Arc::new(Mutex::new(None)),
+        })
     }
 
     pub fn generation(&self) -> i64 {
@@ -484,7 +493,7 @@ impl CodeBackend {
         source: &str,
         package: &str,
         revision_or_ref: Option<&str>,
-    ) -> Result<OpenedPackage, CodeBackendError> {
+    ) -> Result<Arc<OpenedPackage>, CodeBackendError> {
         let selected = self
             .registry
             .resolve_revision_or_ref(source, package, revision_or_ref.unwrap_or("latest"))
@@ -498,7 +507,7 @@ impl CodeBackend {
         &self,
         default_source: &str,
         selector: &str,
-    ) -> Result<(OpenedPackage, Option<GraphSymbolArtifact>), CodeBackendError> {
+    ) -> Result<(Arc<OpenedPackage>, Option<GraphSymbolArtifact>), CodeBackendError> {
         match parse_external_selector(selector, default_source)? {
             ExternalSelector::Stable {
                 source,
@@ -570,7 +579,7 @@ impl CodeBackend {
             .map_err(|_| CodeBackendError::InvalidRegistry)
     }
 
-    async fn open(&self, package: ServingPackage) -> Result<OpenedPackage, CodeBackendError> {
+    async fn open(&self, package: ServingPackage) -> Result<Arc<OpenedPackage>, CodeBackendError> {
         let expected_source_sidecar_uri =
             format!("{}{SOURCE_SIDECAR_FILENAME}", package.graph_prefix_uri);
         if package.source_sidecar.uri != expected_source_sidecar_uri {
@@ -578,9 +587,23 @@ impl CodeBackend {
                 ArtifactCacheError::InvalidIdentity,
             ));
         }
-        self.cache
-            .activate_generation(self.registry.generation)
+        self.generation_active
+            .get_or_try_init(|| async {
+                self.cache
+                    .activate_generation(self.registry.generation)
+                    .await
+            })
             .await?;
+        if let Some(opened) = self
+            .opened
+            .lock()
+            .await
+            .as_ref()
+            .filter(|opened| opened.package == package)
+            .cloned()
+        {
+            return Ok(opened);
+        }
         let identity = ArtifactBundleIdentity {
             root: ArtifactIdentity {
                 generation: package.generation,
@@ -594,11 +617,20 @@ impl CodeBackend {
         let bundle = self.cache.materialize_bundle(&identity).await?;
         let client =
             ParquetClient::open(bundle.path()).map_err(|_| CodeBackendError::ArtifactOpen)?;
-        Ok(OpenedPackage {
+        let opened = Arc::new(OpenedPackage {
             package,
             client,
             _bundle: bundle,
-        })
+        });
+        let mut cached = self.opened.lock().await;
+        if let Some(current) = cached
+            .as_ref()
+            .filter(|current| current.package == opened.package)
+        {
+            return Ok(Arc::clone(current));
+        }
+        *cached = Some(Arc::clone(&opened));
+        Ok(opened)
     }
 }
 

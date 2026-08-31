@@ -8,7 +8,7 @@ use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
     Arc, Mutex, MutexGuard,
 };
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result};
 use async_trait::async_trait;
@@ -458,6 +458,123 @@ async fn parquet_backend_matches_catalog_and_search_contracts() -> Result<()> {
 }
 
 #[tokio::test]
+async fn parquet_backend_reuses_warm_client_across_distinct_queries() -> Result<()> {
+    let fixture = ParquetBackendFixture::new("parquet-warm-client-reuse")?;
+    let backend = CodeBackend::new(fixture.registry.clone(), fixture.cache.clone())
+        .map_err(|error| anyhow::anyhow!(error))?;
+
+    let first = handle_tool_with_code_backend(
+        "external_code_search",
+        &json!({
+            "query": "alpha",
+            "package": PACKAGE,
+            "revision": REVISION
+        }),
+        &backend,
+    )
+    .await?;
+    assert_eq!(first["candidates"][0]["entity_name"], "alpha");
+
+    let cached_nodes = find_cached_file(&fixture.root.join("cache"), "nodes.parquet")?;
+    fixture.remove_object(&fixture.member_uri("nodes.parquet"));
+    fs::remove_file(cached_nodes).context("remove materialized nodes after warming client")?;
+
+    let second = handle_tool_with_code_backend(
+        "external_code_search",
+        &json!({
+            "query": "beta",
+            "package": PACKAGE,
+            "revision": REVISION
+        }),
+        &backend,
+    )
+    .await?;
+    assert_eq!(second["candidates"][0]["entity_name"], "beta");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn parquet_backend_reuses_warm_client_across_distinct_edge_queries() -> Result<()> {
+    let fixture = ParquetBackendFixture::new("parquet-warm-adjacency-reuse")?;
+    let backend = CodeBackend::new(fixture.registry.clone(), fixture.cache.clone())
+        .map_err(|error| anyhow::anyhow!(error))?;
+
+    let callers = handle_tool_with_code_backend(
+        "external_code_callers",
+        &json!({
+            "selector": "pkg:demo@1.0.0::demo::beta",
+            "include_unresolved": true
+        }),
+        &backend,
+    )
+    .await?;
+    assert_eq!(callers["counts_by_kind"]["calls"], 1);
+
+    let cached_edges = find_cached_file(&fixture.root.join("cache"), "edges.parquet")?;
+    fixture.remove_object(&fixture.member_uri("edges.parquet"));
+    fs::remove_file(cached_edges).context("remove materialized edges after warming client")?;
+
+    let callees = handle_tool_with_code_backend(
+        "external_code_callees",
+        &json!({
+            "selector": "pkg:demo@1.0.0::demo::alpha",
+            "include_unresolved": true
+        }),
+        &backend,
+    )
+    .await?;
+    assert_eq!(callees["counts_by_kind"]["calls"], 2);
+    assert_eq!(callees["counts_by_kind"]["unresolved"], 1);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn parquet_backend_replaces_warm_client_for_different_package_identity() -> Result<()> {
+    let mut fixture = ParquetBackendFixture::new("parquet-warm-client-replacement")?;
+    fixture.expand_cache_capacity(2)?;
+    let mut revision_1 = fixture.registry.packages[0].clone();
+    revision_1.refs.clear();
+    let mut revision_2 = revision_1.clone();
+    revision_2.revision = "2.0.0".to_owned();
+    revision_2.refs = vec!["latest".to_owned()];
+    fixture.registry.packages = vec![revision_1, revision_2];
+    let backend = CodeBackend::new(fixture.registry.clone(), fixture.cache.clone())
+        .map_err(|error| anyhow::anyhow!(error))?;
+
+    let first = handle_tool_with_code_backend(
+        "external_code_search",
+        &json!({
+            "query": "alpha",
+            "package": PACKAGE,
+            "revision": REVISION
+        }),
+        &backend,
+    )
+    .await?;
+    assert_eq!(first["candidates"][0]["revision"], REVISION);
+
+    let second = tokio::time::timeout(
+        Duration::from_secs(2),
+        handle_tool_with_code_backend(
+            "external_code_search",
+            &json!({
+                "query": "beta",
+                "package": PACKAGE,
+                "revision": "2.0.0"
+            }),
+            &backend,
+        ),
+    )
+    .await
+    .context("switching package identity must not deadlock generation activation")??;
+    assert_eq!(second["candidates"][0]["revision"], "2.0.0");
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn parquet_backend_resolves_semantic_latest_and_named_refs_from_registry() -> Result<()> {
     let mut fixture = ParquetBackendFixture::new("parquet-registry-ref-contracts")?;
     fixture.expand_cache_capacity(2)?;
@@ -898,6 +1015,27 @@ impl Drop for ParquetBackendFixture {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.root);
     }
+}
+
+fn find_cached_file(root: &std::path::Path, name: &str) -> Result<PathBuf> {
+    let mut directories = vec![root.to_path_buf()];
+    while let Some(directory) = directories.pop() {
+        for entry in fs::read_dir(&directory)
+            .with_context(|| format!("read cache directory {}", directory.display()))?
+        {
+            let entry = entry.context("read cache directory entry")?;
+            let path = entry.path();
+            if path.is_dir() {
+                directories.push(path);
+            } else if path.file_name().is_some_and(|candidate| candidate == name) {
+                return Ok(path);
+            }
+        }
+    }
+    anyhow::bail!(
+        "cached file {name:?} was not materialized below {}",
+        root.display()
+    )
 }
 
 async fn call_parquet_backend(
