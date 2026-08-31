@@ -2414,6 +2414,28 @@ mod tests {
         }
     }
 
+    fn edge(
+        source_stable_symbol_id: &str,
+        target_stable_symbol_id: Option<&str>,
+        target_label: Option<&str>,
+        relation: RelationKind,
+    ) -> GraphEdgeArtifact {
+        GraphEdgeArtifact {
+            source_stable_symbol_id: source_stable_symbol_id.to_owned(),
+            target_stable_symbol_id: target_stable_symbol_id.map(str::to_owned),
+            target_label: target_label.map(str::to_owned),
+            import_path: None,
+            relation,
+            confidence: Confidence::SyntaxExact,
+            confidence_score: 1.0,
+            change_kind: None,
+            edge_kind: None,
+            bind_method: None,
+            receiver_text: None,
+            scope_text: None,
+        }
+    }
+
     fn ids(result: &SearchResult) -> Vec<String> {
         result
             .candidates
@@ -2877,6 +2899,73 @@ mod tests {
         assert_eq!(callees.len(), 1);
         assert_eq!(client.hot_query_index_build_count(), 1);
         assert_eq!(client.hot_adjacency_index_build_count(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn parquet_hot_adjacency_matches_in_memory_caller_callee_records() -> anyhow::Result<()> {
+        let tempdir = tempfile::tempdir()?;
+        let mut graph = artifact(vec![
+            symbol("sym-source", "source_fn"),
+            symbol("sym-target", "target_fn"),
+            symbol("sym-unresolved-caller", "unresolved_caller"),
+            symbol("sym-stable-label-caller", "stable_label_caller"),
+        ]);
+        graph.symbol_node_ids = vec![NodeId(1), NodeId(2), NodeId(3), NodeId(4)];
+        graph.edges = vec![
+            edge(
+                "sym-source",
+                Some("sym-target"),
+                Some("target_fn"),
+                RelationKind::Calls,
+            ),
+            edge(
+                "sym-source",
+                None,
+                Some("external_target"),
+                RelationKind::Calls,
+            ),
+            edge(
+                "sym-unresolved-caller",
+                None,
+                Some("target_fn"),
+                RelationKind::Calls,
+            ),
+            edge(
+                "sym-stable-label-caller",
+                None,
+                Some("sym-target"),
+                RelationKind::References,
+            ),
+            edge(
+                "sym-source",
+                Some("sym-target"),
+                Some("target_fn"),
+                RelationKind::Contains,
+            ),
+        ];
+        let oracle = InMemoryClient::new(Arc::new(graph.clone()));
+        let parquet_dir =
+            write_artifact_parquet(&graph, tempdir.path(), WriteOptions::default(), Vec::new())?;
+        let client = ParquetClient::open(&parquet_dir)?;
+        let target_labels = HashSet::from([
+            "target_fn".to_owned(),
+            "crate::target_fn".to_owned(),
+            "sym-target".to_owned(),
+        ]);
+
+        assert_eq!(
+            client.try_find_caller_edges("sym-target")?,
+            oracle.find_caller_edges("sym-target")
+        );
+        assert_eq!(
+            client.try_find_callee_edges("sym-source")?,
+            oracle.find_callee_edges("sym-source")
+        );
+        assert_eq!(
+            client.find_unresolved_caller_edges_by_labels(&target_labels),
+            oracle.find_unresolved_caller_edges_by_labels(&target_labels)
+        );
         Ok(())
     }
 

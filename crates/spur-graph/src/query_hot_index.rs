@@ -29,14 +29,21 @@ pub(crate) struct HotQueryIndex {
     search_symbol_materializations: AtomicUsize,
 }
 
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct SymbolRowCode(usize);
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct UnresolvedLabelCode(usize);
+
 /// Immutable adjacency projection sharing symbols with [`HotQueryIndex`].
 pub(crate) struct HotAdjacencyIndex {
     symbols: Arc<HotQueryIndex>,
     edges: Vec<GraphEdgeArtifact>,
-    resolved_by_source: HashMap<String, Vec<usize>>,
-    resolved_by_target: HashMap<String, Vec<usize>>,
-    unresolved_by_source: HashMap<String, Vec<usize>>,
-    unresolved_by_label: HashMap<String, Vec<usize>>,
+    unresolved_label_codes: UnresolvedLabelCodes,
+    resolved_by_source: HashMap<SymbolRowCode, Vec<usize>>,
+    resolved_by_target: HashMap<SymbolRowCode, Vec<usize>>,
+    unresolved_by_source: HashMap<SymbolRowCode, Vec<usize>>,
+    unresolved_by_label: HashMap<UnresolvedLabelCode, Vec<usize>>,
 }
 
 impl HotQueryIndex {
@@ -95,12 +102,29 @@ impl HotQueryIndex {
     }
 
     pub(crate) fn symbol_by_id(&self, stable_symbol_id: &str) -> Option<GraphSymbolArtifact> {
-        let hash = symbol_id_hash(self.symbol_rows_by_hash.hasher(), stable_symbol_id);
+        let row = self.symbol_row_by_id(stable_symbol_id)?;
+        self.symbol_by_row_code(row)
+    }
+
+    fn symbol_row_by_id(&self, stable_symbol_id: &str) -> Option<SymbolRowCode> {
         let stable_symbol_ids = string_array_by_name(&self.symbol_batch, "stable_symbol_id");
+        self.symbol_row_by_id_from(stable_symbol_ids, stable_symbol_id)
+    }
+
+    fn symbol_row_by_id_from(
+        &self,
+        stable_symbol_ids: &StringArray,
+        stable_symbol_id: &str,
+    ) -> Option<SymbolRowCode> {
+        let hash = symbol_id_hash(self.symbol_rows_by_hash.hasher(), stable_symbol_id);
         self.symbol_rows_by_hash
             .get(&hash)?
             .matching_row(|row| stable_symbol_ids.value(row) == stable_symbol_id)
-            .map(|row| self.symbol_at(row))
+            .map(SymbolRowCode)
+    }
+
+    fn symbol_by_row_code(&self, row: SymbolRowCode) -> Option<GraphSymbolArtifact> {
+        (row.0 < self.symbol_batch.num_rows()).then(|| self.symbol_at(row.0))
     }
 
     fn push_candidate_row<'a>(
@@ -180,8 +204,43 @@ impl SymbolIdRows {
     }
 }
 
+#[derive(Default)]
+struct UnresolvedLabelCodes {
+    labels: Vec<String>,
+    codes_by_hash: HashMap<u64, SymbolIdRows>,
+}
+
+impl UnresolvedLabelCodes {
+    fn code_for(&mut self, label: &str) -> UnresolvedLabelCode {
+        if let Some(code) = self.find(label) {
+            return code;
+        }
+
+        let code = UnresolvedLabelCode(self.labels.len());
+        let hash = string_hash(self.codes_by_hash.hasher(), label);
+        self.labels.push(label.to_owned());
+        self.codes_by_hash
+            .entry(hash)
+            .and_modify(|rows| rows.push(code.0))
+            .or_insert(SymbolIdRows::One(code.0));
+        code
+    }
+
+    fn find(&self, label: &str) -> Option<UnresolvedLabelCode> {
+        let hash = string_hash(self.codes_by_hash.hasher(), label);
+        self.codes_by_hash
+            .get(&hash)?
+            .matching_row(|code| self.labels.get(code).is_some_and(|value| value == label))
+            .map(UnresolvedLabelCode)
+    }
+}
+
 fn symbol_id_hash(hash_builder: &impl BuildHasher, stable_symbol_id: &str) -> u64 {
-    hash_builder.hash_one(stable_symbol_id)
+    string_hash(hash_builder, stable_symbol_id)
+}
+
+fn string_hash(hash_builder: &impl BuildHasher, value: &str) -> u64 {
+    hash_builder.hash_one(value)
 }
 
 struct HotSymbolColumns<'a> {
@@ -468,36 +527,38 @@ fn nonnegative_usize(value: i32, column: &str, row: usize) -> usize {
 
 impl HotAdjacencyIndex {
     pub(crate) fn new(symbols: Arc<HotQueryIndex>, edges: Vec<GraphEdgeArtifact>) -> Self {
-        let mut resolved_by_source = HashMap::<String, Vec<usize>>::new();
-        let mut resolved_by_target = HashMap::<String, Vec<usize>>::new();
-        let mut unresolved_by_source = HashMap::<String, Vec<usize>>::new();
-        let mut unresolved_by_label = HashMap::<String, Vec<usize>>::new();
+        let mut unresolved_label_codes = UnresolvedLabelCodes::default();
+        let mut resolved_by_source = HashMap::<SymbolRowCode, Vec<usize>>::new();
+        let mut resolved_by_target = HashMap::<SymbolRowCode, Vec<usize>>::new();
+        let mut unresolved_by_source = HashMap::<SymbolRowCode, Vec<usize>>::new();
+        let mut unresolved_by_label = HashMap::<UnresolvedLabelCode, Vec<usize>>::new();
+        let stable_symbol_ids = string_array_by_name(&symbols.symbol_batch, "stable_symbol_id");
         for (index, edge) in edges.iter().enumerate() {
-            if let Some(target) = edge.target_stable_symbol_id.as_ref() {
-                resolved_by_source
-                    .entry(edge.source_stable_symbol_id.clone())
-                    .or_default()
-                    .push(index);
-                resolved_by_target
-                    .entry(target.clone())
-                    .or_default()
-                    .push(index);
+            let Some(source) =
+                symbols.symbol_row_by_id_from(stable_symbol_ids, &edge.source_stable_symbol_id)
+            else {
+                continue;
+            };
+
+            if let Some(target_id) = edge.target_stable_symbol_id.as_deref() {
+                let Some(target) = symbols.symbol_row_by_id_from(stable_symbol_ids, target_id)
+                else {
+                    continue;
+                };
+                resolved_by_source.entry(source).or_default().push(index);
+                resolved_by_target.entry(target).or_default().push(index);
             } else {
-                unresolved_by_source
-                    .entry(edge.source_stable_symbol_id.clone())
-                    .or_default()
-                    .push(index);
-                if let Some(label) = edge.target_label.as_ref() {
-                    unresolved_by_label
-                        .entry(label.clone())
-                        .or_default()
-                        .push(index);
+                unresolved_by_source.entry(source).or_default().push(index);
+                if let Some(label) = edge.target_label.as_deref() {
+                    let label = unresolved_label_codes.code_for(label);
+                    unresolved_by_label.entry(label).or_default().push(index);
                 }
             }
         }
         Self {
             symbols,
             edges,
+            unresolved_label_codes,
             resolved_by_source,
             resolved_by_target,
             unresolved_by_source,
@@ -510,7 +571,10 @@ impl HotAdjacencyIndex {
         target_symbol_id: &str,
         unresolved_labels: &HashSet<String>,
     ) -> Vec<OwnedCallerRecord> {
-        let resolved = self.resolved_by_target.get(target_symbol_id);
+        let resolved = self
+            .symbols
+            .symbol_row_by_id(target_symbol_id)
+            .and_then(|target| self.resolved_by_target.get(&target));
         let resolved_count = resolved.map_or(0, Vec::len);
         let resolved = resolved.into_iter().flatten().copied();
         let unresolved = self.edge_indices_for_labels(unresolved_labels);
@@ -565,15 +629,18 @@ impl HotAdjacencyIndex {
     }
 
     pub(crate) fn callee_records(&self, source_symbol_id: &str) -> Vec<OwnedCalleeRecord> {
+        let Some(source) = self.symbols.symbol_row_by_id(source_symbol_id) else {
+            return Vec::new();
+        };
         let resolved = self
             .resolved_by_source
-            .get(source_symbol_id)
+            .get(&source)
             .into_iter()
             .flatten()
             .copied();
         let unresolved = self
             .unresolved_by_source
-            .get(source_symbol_id)
+            .get(&source)
             .into_iter()
             .flatten()
             .copied();
@@ -612,7 +679,8 @@ impl HotAdjacencyIndex {
     fn edge_indices_for_labels(&self, labels: &HashSet<String>) -> Vec<usize> {
         let mut indices = labels
             .iter()
-            .filter_map(|label| self.unresolved_by_label.get(label))
+            .filter_map(|label| self.unresolved_label_codes.find(label))
+            .filter_map(|label| self.unresolved_by_label.get(&label))
             .flatten()
             .copied()
             .collect::<Vec<_>>();
@@ -632,6 +700,7 @@ fn is_caller_relation(relation: RelationKind) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
     use std::sync::Arc;
 
     use arrow_array::{ArrayRef, Int32Array, Int64Array, RecordBatch, StringArray};
@@ -639,7 +708,7 @@ mod tests {
 
     use super::*;
     use crate::search::PUBLIC_SEARCH_LIMIT;
-    use crate::{SearchFilters, SearchMode};
+    use crate::{Confidence, SearchFilters, SearchMode};
 
     fn search_options(query: &str, mode: SearchMode) -> SearchOptions {
         SearchOptions {
@@ -795,6 +864,39 @@ mod tests {
         &source[start..start + end]
     }
 
+    fn hot_adjacency_index_struct_source() -> &'static str {
+        let source = include_str!("query_hot_index.rs");
+        let start = source
+            .find("pub(crate) struct HotAdjacencyIndex")
+            .expect("HotAdjacencyIndex struct source");
+        let end = source[start..]
+            .find("impl HotQueryIndex")
+            .expect("HotQueryIndex impl marker");
+        &source[start..start + end]
+    }
+
+    fn edge(
+        source_stable_symbol_id: &str,
+        target_stable_symbol_id: Option<&str>,
+        target_label: Option<&str>,
+        relation: RelationKind,
+    ) -> GraphEdgeArtifact {
+        GraphEdgeArtifact {
+            source_stable_symbol_id: source_stable_symbol_id.to_owned(),
+            target_stable_symbol_id: target_stable_symbol_id.map(str::to_owned),
+            target_label: target_label.map(str::to_owned),
+            import_path: None,
+            relation,
+            confidence: Confidence::SyntaxExact,
+            confidence_score: 1.0,
+            change_kind: None,
+            edge_kind: None,
+            bind_method: None,
+            receiver_text: None,
+            scope_text: None,
+        }
+    }
+
     #[test]
     fn hot_query_index_stores_one_record_batch_without_aos_vectors() {
         let source = hot_query_index_struct_source();
@@ -814,6 +916,39 @@ mod tests {
         assert!(
             !source.contains("HashMap<String"),
             "HotQueryIndex must not retain an owned String-key lookup table"
+        );
+    }
+
+    #[test]
+    fn hot_adjacency_index_keys_adjacency_by_compact_codes() {
+        let source = hot_adjacency_index_struct_source();
+
+        for field in [
+            "resolved_by_source",
+            "resolved_by_target",
+            "unresolved_by_source",
+            "unresolved_by_label",
+        ] {
+            assert!(
+                source.contains(field),
+                "HotAdjacencyIndex must retain `{field}` for caller/callee lookups"
+            );
+        }
+        assert!(
+            source.contains("HashMap<SymbolRowCode, Vec<usize>>"),
+            "resolved and unresolved source/target adjacency must be keyed by symbol row codes"
+        );
+        assert!(
+            source.contains("HashMap<UnresolvedLabelCode, Vec<usize>>"),
+            "unresolved-label adjacency must be keyed by compact label codes"
+        );
+        assert!(
+            !source.contains("HashMap<String"),
+            "HotAdjacencyIndex must not retain String-keyed adjacency maps"
+        );
+        assert!(
+            !source.contains("RecordBatch"),
+            "HotAdjacencyIndex must not add a second long-lived edge RecordBatch"
         );
     }
 
@@ -858,6 +993,89 @@ mod tests {
         assert_eq!(symbol.anchor_hash, "anchor-001");
         assert_eq!(symbol.enclosing_scope.as_deref(), Some("impl Owner"));
         assert!(index.symbol_by_id("sid-missing").is_none());
+    }
+
+    #[test]
+    fn hot_adjacency_index_preserves_resolved_and_unresolved_records() {
+        let rows = vec![
+            TestSymbol::new(0, "source_fn").with_qualified_name("crate::source_fn"),
+            TestSymbol::new(1, "target_fn").with_qualified_name("crate::target_fn"),
+            TestSymbol::new(2, "unresolved_caller").with_qualified_name("crate::unresolved_caller"),
+        ];
+        let symbols = Arc::new(HotQueryIndex::new(symbol_batch(&rows)).expect("symbols index"));
+        let source = symbols.symbol_by_id("sid-000").expect("source symbol");
+        let target = symbols.symbol_by_id("sid-001").expect("target symbol");
+        let unresolved_caller = symbols
+            .symbol_by_id("sid-002")
+            .expect("unresolved caller symbol");
+        let edges = vec![
+            edge(
+                "sid-000",
+                Some("sid-001"),
+                Some("target_fn"),
+                RelationKind::Calls,
+            ),
+            edge(
+                "sid-002",
+                None,
+                Some("crate::target_fn"),
+                RelationKind::Calls,
+            ),
+            edge(
+                "sid-000",
+                None,
+                Some("external_target"),
+                RelationKind::Calls,
+            ),
+            edge(
+                "sid-002",
+                Some("sid-001"),
+                Some("target_fn"),
+                RelationKind::Contains,
+            ),
+        ];
+        let index = HotAdjacencyIndex::new(Arc::clone(&symbols), edges.clone());
+        let target_labels = HashSet::from([
+            "target_fn".to_owned(),
+            "crate::target_fn".to_owned(),
+            "sid-001".to_owned(),
+        ]);
+
+        assert_eq!(
+            index.caller_records("sid-001", &target_labels),
+            vec![
+                OwnedCallerRecord::Resolved {
+                    caller: source.clone(),
+                    edge: edges[0].clone(),
+                },
+                OwnedCallerRecord::Unresolved {
+                    caller: unresolved_caller.clone(),
+                    target_label: "crate::target_fn".to_owned(),
+                    edge: edges[1].clone(),
+                },
+            ]
+        );
+        assert_eq!(
+            index.unresolved_caller_records(&target_labels),
+            vec![OwnedCallerRecord::Unresolved {
+                caller: unresolved_caller,
+                target_label: "crate::target_fn".to_owned(),
+                edge: edges[1].clone(),
+            }]
+        );
+        assert_eq!(
+            index.callee_records("sid-000"),
+            vec![
+                OwnedCalleeRecord::Resolved {
+                    symbol: target,
+                    edge: edges[0].clone(),
+                },
+                OwnedCalleeRecord::Unresolved {
+                    edge: edges[2].clone(),
+                    target_label: "external_target".to_owned(),
+                },
+            ]
+        );
     }
 
     #[test]
