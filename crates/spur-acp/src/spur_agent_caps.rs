@@ -13,15 +13,484 @@
 //! `AgentCapabilities`.
 
 use agent_client_protocol::schema::v1::{
-    AgentCapabilities, InitializeResponse, LoadSessionResponse, NewSessionResponse,
+    AgentCapabilities, InitializeResponse, LoadSessionResponse, Meta, NewSessionResponse,
     SessionConfigKind, SessionConfigOption, SessionConfigOptionCategory,
     SessionConfigSelectOptions, SessionModeState,
 };
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::adapter::grok_session_display::{extract_grok_session_display, GrokSessionDisplay};
 use crate::adapter::kiro_session_display::{extract_kiro_session_display, KiroSessionDisplay};
+use crate::capability_evidence::{
+    reduce_capability, CapabilityChoice, CapabilityKey, CapabilityKind, CliIdentity, DispatchRoute,
+    EvidenceClaim, EvidenceEpoch, EvidenceEpochId, EvidenceProvenance, EvidenceRecord,
+    EvidenceSessionScope, ObservationTime, RawEvidenceDigest, ReducedCapability,
+};
 use crate::types::AgentKind;
+
+pub(crate) const CAPABILITY_EVIDENCE_META_KEY: &str = "spur.capabilityEvidenceV1";
+
+/// Immutable evidence epoch plus its provider-neutral reduced compatibility view.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapabilityEvidenceSnapshot {
+    epoch: EvidenceEpoch,
+    reduced: Vec<ReducedCapability>,
+    shadow_diffs: Vec<CapabilityShadowDiff>,
+}
+
+impl CapabilityEvidenceSnapshot {
+    #[must_use]
+    pub fn from_epoch(epoch: EvidenceEpoch, current_identity: &CliIdentity) -> Self {
+        let keys = epoch
+            .records()
+            .iter()
+            .map(|record| record.key.clone())
+            .collect::<BTreeSet<_>>();
+        let reduced = keys
+            .iter()
+            .map(|key| reduce_capability(&epoch, current_identity, key))
+            .collect();
+        Self {
+            epoch,
+            reduced,
+            shadow_diffs: Vec::new(),
+        }
+    }
+
+    #[must_use]
+    pub fn epoch(&self) -> &EvidenceEpoch {
+        &self.epoch
+    }
+
+    #[must_use]
+    pub fn reduced_capabilities(&self) -> &[ReducedCapability] {
+        &self.reduced
+    }
+
+    #[must_use]
+    pub fn shadow_diffs(&self) -> &[CapabilityShadowDiff] {
+        &self.shadow_diffs
+    }
+
+    pub fn unexplained_shadow_diffs(&self) -> impl Iterator<Item = &CapabilityShadowDiff> {
+        self.shadow_diffs.iter().filter(|diff| diff.unexplained)
+    }
+}
+
+/// One bounded comparison between the existing facade route and the reducer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapabilityShadowDiff {
+    pub key: CapabilityKey,
+    pub legacy_route: DispatchRoute,
+    pub reduced_route: DispatchRoute,
+    pub reason: String,
+    pub unexplained: bool,
+}
+
+#[derive(Serialize, Deserialize)]
+struct CapabilityEvidenceSnapshotWire {
+    epoch: EvidenceEpochWire,
+    #[serde(default)]
+    reduced: Vec<ReducedCapabilityWire>,
+    #[serde(default)]
+    shadow_diffs: Vec<CapabilityShadowDiffWire>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct EvidenceEpochWire {
+    id: u64,
+    identity: CliIdentityWire,
+    records: Vec<EvidenceRecordWire>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct CliIdentityWire {
+    resolved_executable: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    upstream_version: Option<String>,
+    argv_fingerprint: String,
+    environment_fingerprint: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct EvidenceRecordWire {
+    key: CapabilityKeyWire,
+    claim: String,
+    provenance: String,
+    observed_at: u64,
+    raw_digest: String,
+    session_scope: EvidenceSessionScopeWire,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    choices: Vec<CapabilityChoiceWire>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct CapabilityKeyWire {
+    kind: String,
+    upstream_id: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct CapabilityChoiceWire {
+    id: String,
+    label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum EvidenceSessionScopeWire {
+    Global,
+    Session { id: String },
+    IsolatedProbe,
+}
+
+#[derive(Serialize, Deserialize)]
+struct ReducedCapabilityWire {
+    key: CapabilityKeyWire,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    choices: Vec<CapabilityChoiceWire>,
+    confidence: String,
+    route: String,
+    sources: EvidenceSourceSummaryWire,
+    evidence_epoch: u64,
+}
+
+#[derive(Serialize, Deserialize)]
+struct EvidenceSourceSummaryWire {
+    record_count: usize,
+    provenances: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct CapabilityShadowDiffWire {
+    key: CapabilityKeyWire,
+    legacy_route: String,
+    reduced_route: String,
+    reason: String,
+    unexplained: bool,
+}
+
+impl From<&CliIdentity> for CliIdentityWire {
+    fn from(identity: &CliIdentity) -> Self {
+        Self {
+            resolved_executable: identity.resolved_executable.clone(),
+            upstream_version: identity.upstream_version.clone(),
+            argv_fingerprint: identity.argv_fingerprint.clone(),
+            environment_fingerprint: identity.environment_fingerprint.clone(),
+        }
+    }
+}
+
+impl From<CliIdentityWire> for CliIdentity {
+    fn from(identity: CliIdentityWire) -> Self {
+        Self {
+            resolved_executable: identity.resolved_executable,
+            upstream_version: identity.upstream_version,
+            argv_fingerprint: identity.argv_fingerprint,
+            environment_fingerprint: identity.environment_fingerprint,
+        }
+    }
+}
+
+fn capability_kind_name(kind: &CapabilityKind) -> String {
+    match kind {
+        CapabilityKind::Model => "model".to_owned(),
+        CapabilityKind::Effort => "effort".to_owned(),
+        CapabilityKind::Mode => "mode".to_owned(),
+        CapabilityKind::Command => "command".to_owned(),
+        CapabilityKind::Custom(kind) => format!("custom:{kind}"),
+    }
+}
+
+fn capability_kind_from_name(name: String) -> CapabilityKind {
+    match name.as_str() {
+        "model" => CapabilityKind::Model,
+        "effort" => CapabilityKind::Effort,
+        "mode" => CapabilityKind::Mode,
+        "command" => CapabilityKind::Command,
+        _ => CapabilityKind::Custom(
+            name.strip_prefix("custom:")
+                .unwrap_or(name.as_str())
+                .to_owned(),
+        ),
+    }
+}
+
+impl From<&CapabilityKey> for CapabilityKeyWire {
+    fn from(key: &CapabilityKey) -> Self {
+        Self {
+            kind: capability_kind_name(&key.kind),
+            upstream_id: key.upstream_id.clone(),
+        }
+    }
+}
+
+impl From<CapabilityKeyWire> for CapabilityKey {
+    fn from(key: CapabilityKeyWire) -> Self {
+        Self {
+            kind: capability_kind_from_name(key.kind),
+            upstream_id: key.upstream_id,
+        }
+    }
+}
+
+impl From<&CapabilityChoice> for CapabilityChoiceWire {
+    fn from(choice: &CapabilityChoice) -> Self {
+        Self {
+            id: choice.id.clone(),
+            label: choice.label.clone(),
+            description: choice.description.clone(),
+        }
+    }
+}
+
+impl From<CapabilityChoiceWire> for CapabilityChoice {
+    fn from(choice: CapabilityChoiceWire) -> Self {
+        Self {
+            id: choice.id,
+            label: choice.label,
+            description: choice.description,
+        }
+    }
+}
+
+fn claim_name(claim: EvidenceClaim) -> &'static str {
+    match claim {
+        EvidenceClaim::CandidateObserved => "candidate_observed",
+        EvidenceClaim::NativeVerified => "native_verified",
+        EvidenceClaim::Rejected => "rejected",
+        EvidenceClaim::Inconclusive => "inconclusive",
+        EvidenceClaim::Unknown => "unknown",
+        EvidenceClaim::NativeFailed => "native_failed",
+    }
+}
+
+fn claim_from_name(name: &str) -> Option<EvidenceClaim> {
+    match name {
+        "candidate_observed" => Some(EvidenceClaim::CandidateObserved),
+        "native_verified" => Some(EvidenceClaim::NativeVerified),
+        "rejected" => Some(EvidenceClaim::Rejected),
+        "inconclusive" => Some(EvidenceClaim::Inconclusive),
+        "unknown" => Some(EvidenceClaim::Unknown),
+        "native_failed" => Some(EvidenceClaim::NativeFailed),
+        _ => None,
+    }
+}
+
+fn provenance_name(provenance: EvidenceProvenance) -> &'static str {
+    match provenance {
+        EvidenceProvenance::StandardAdvertisement => "standard_advertisement",
+        EvidenceProvenance::VendorAdvertisement => "vendor_advertisement",
+        EvidenceProvenance::AcceptedActiveProbe => "accepted_active_probe",
+        EvidenceProvenance::RejectedActiveProbe => "rejected_active_probe",
+        EvidenceProvenance::ObservedNotification => "observed_notification",
+        EvidenceProvenance::PromptFallback => "prompt_fallback",
+        EvidenceProvenance::InconclusiveFailure => "inconclusive_failure",
+        EvidenceProvenance::NativeDispatch => "native_dispatch",
+    }
+}
+
+fn provenance_from_name(name: &str) -> Option<EvidenceProvenance> {
+    match name {
+        "standard_advertisement" => Some(EvidenceProvenance::StandardAdvertisement),
+        "vendor_advertisement" => Some(EvidenceProvenance::VendorAdvertisement),
+        "accepted_active_probe" => Some(EvidenceProvenance::AcceptedActiveProbe),
+        "rejected_active_probe" => Some(EvidenceProvenance::RejectedActiveProbe),
+        "observed_notification" => Some(EvidenceProvenance::ObservedNotification),
+        "prompt_fallback" => Some(EvidenceProvenance::PromptFallback),
+        "inconclusive_failure" => Some(EvidenceProvenance::InconclusiveFailure),
+        "native_dispatch" => Some(EvidenceProvenance::NativeDispatch),
+        _ => None,
+    }
+}
+
+fn route_name(route: DispatchRoute) -> &'static str {
+    match route {
+        DispatchRoute::Hidden => "hidden",
+        DispatchRoute::PromptOnly => "prompt_only",
+        DispatchRoute::NativePreferred => "native_preferred",
+    }
+}
+
+fn route_from_name(name: &str) -> Option<DispatchRoute> {
+    match name {
+        "hidden" => Some(DispatchRoute::Hidden),
+        "prompt_only" => Some(DispatchRoute::PromptOnly),
+        "native_preferred" => Some(DispatchRoute::NativePreferred),
+        _ => None,
+    }
+}
+
+impl From<&EvidenceSessionScope> for EvidenceSessionScopeWire {
+    fn from(scope: &EvidenceSessionScope) -> Self {
+        match scope {
+            EvidenceSessionScope::Global => Self::Global,
+            EvidenceSessionScope::Session(id) => Self::Session { id: id.clone() },
+            EvidenceSessionScope::IsolatedProbe => Self::IsolatedProbe,
+        }
+    }
+}
+
+impl From<EvidenceSessionScopeWire> for EvidenceSessionScope {
+    fn from(scope: EvidenceSessionScopeWire) -> Self {
+        match scope {
+            EvidenceSessionScopeWire::Global => Self::Global,
+            EvidenceSessionScopeWire::Session { id } => Self::Session(id),
+            EvidenceSessionScopeWire::IsolatedProbe => Self::IsolatedProbe,
+        }
+    }
+}
+
+impl From<&ReducedCapability> for ReducedCapabilityWire {
+    fn from(reduced: &ReducedCapability) -> Self {
+        Self {
+            key: (&reduced.key).into(),
+            choices: reduced.choices.iter().map(Into::into).collect(),
+            confidence: match reduced.confidence {
+                crate::capability_evidence::CapabilityConfidence::Hidden => "hidden",
+                crate::capability_evidence::CapabilityConfidence::PromptOnly => "prompt_only",
+                crate::capability_evidence::CapabilityConfidence::NativePreferred => {
+                    "native_preferred"
+                }
+            }
+            .to_owned(),
+            route: route_name(reduced.route).to_owned(),
+            sources: EvidenceSourceSummaryWire {
+                record_count: reduced.sources.record_count,
+                provenances: reduced
+                    .sources
+                    .provenances
+                    .iter()
+                    .map(|source| provenance_name(*source).to_owned())
+                    .collect(),
+            },
+            evidence_epoch: reduced.evidence_epoch.0,
+        }
+    }
+}
+
+impl From<&CapabilityShadowDiff> for CapabilityShadowDiffWire {
+    fn from(diff: &CapabilityShadowDiff) -> Self {
+        Self {
+            key: (&diff.key).into(),
+            legacy_route: route_name(diff.legacy_route).to_owned(),
+            reduced_route: route_name(diff.reduced_route).to_owned(),
+            reason: diff.reason.clone(),
+            unexplained: diff.unexplained,
+        }
+    }
+}
+
+impl TryFrom<CapabilityShadowDiffWire> for CapabilityShadowDiff {
+    type Error = String;
+
+    fn try_from(diff: CapabilityShadowDiffWire) -> Result<Self, Self::Error> {
+        Ok(Self {
+            key: diff.key.into(),
+            legacy_route: route_from_name(&diff.legacy_route)
+                .ok_or_else(|| format!("unknown legacy route {}", diff.legacy_route))?,
+            reduced_route: route_from_name(&diff.reduced_route)
+                .ok_or_else(|| format!("unknown reduced route {}", diff.reduced_route))?,
+            reason: diff.reason,
+            unexplained: diff.unexplained,
+        })
+    }
+}
+
+impl From<&CapabilityEvidenceSnapshot> for CapabilityEvidenceSnapshotWire {
+    fn from(snapshot: &CapabilityEvidenceSnapshot) -> Self {
+        let identity = snapshot.epoch.identity();
+        Self {
+            epoch: EvidenceEpochWire {
+                id: snapshot.epoch.id().0,
+                identity: identity.into(),
+                records: snapshot
+                    .epoch
+                    .records()
+                    .iter()
+                    .map(|record| EvidenceRecordWire {
+                        key: (&record.key).into(),
+                        claim: claim_name(record.claim).to_owned(),
+                        provenance: provenance_name(record.provenance).to_owned(),
+                        observed_at: record.observed_at.0,
+                        raw_digest: record.raw_digest.0.clone(),
+                        session_scope: (&record.session_scope).into(),
+                        choices: record.choices.iter().map(Into::into).collect(),
+                    })
+                    .collect(),
+            },
+            reduced: snapshot.reduced.iter().map(Into::into).collect(),
+            shadow_diffs: snapshot.shadow_diffs.iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl TryFrom<CapabilityEvidenceSnapshotWire> for CapabilityEvidenceSnapshot {
+    type Error = String;
+
+    fn try_from(wire: CapabilityEvidenceSnapshotWire) -> Result<Self, Self::Error> {
+        let identity: CliIdentity = wire.epoch.identity.into();
+        let records = wire
+            .epoch
+            .records
+            .into_iter()
+            .map(|record| {
+                Ok(EvidenceRecord {
+                    key: record.key.into(),
+                    claim: claim_from_name(&record.claim)
+                        .ok_or_else(|| format!("unknown evidence claim {}", record.claim))?,
+                    provenance: provenance_from_name(&record.provenance).ok_or_else(|| {
+                        format!("unknown evidence provenance {}", record.provenance)
+                    })?,
+                    identity: identity.clone(),
+                    observed_at: ObservationTime(record.observed_at),
+                    raw_digest: RawEvidenceDigest(record.raw_digest),
+                    session_scope: record.session_scope.into(),
+                    choices: record.choices.into_iter().map(Into::into).collect(),
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        let epoch = EvidenceEpoch::new(EvidenceEpochId(wire.epoch.id), identity.clone(), records)
+            .map_err(|error| {
+            format!(
+                "evidence record {} has mismatched identity",
+                error.record_index
+            )
+        })?;
+        let mut snapshot = Self::from_epoch(epoch, &identity);
+        snapshot.shadow_diffs = wire
+            .shadow_diffs
+            .into_iter()
+            .map(TryInto::try_into)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(snapshot)
+    }
+}
+
+impl Serialize for CapabilityEvidenceSnapshot {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        CapabilityEvidenceSnapshotWire::from(self).serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for CapabilityEvidenceSnapshot {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        CapabilityEvidenceSnapshotWire::deserialize(deserializer)?
+            .try_into()
+            .map_err(serde::de::Error::custom)
+    }
+}
 
 /// What the agent told spur during `initialize` + `session/new` or `session/load`.
 /// Captured at create/load time. ACP 0.12 has no protocol affordance for
@@ -50,6 +519,10 @@ pub struct SpurAgentCaps {
     /// for other agent kinds; never implies `session/set_config_option`.
     #[serde(default)]
     pub kiro_display: Option<KiroSessionDisplay>,
+    /// Provider-neutral evidence captured before typed ACP projection.
+    /// Legacy gates remain authoritative during bounded shadow migration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capability_evidence: Option<CapabilityEvidenceSnapshot>,
 }
 
 impl SpurAgentCaps {
@@ -66,14 +539,24 @@ impl SpurAgentCaps {
             new_session.meta.as_ref(),
         );
         let kiro_display = extract_kiro_session_display(agent_kind, new_session.meta.as_ref());
-        Self {
+        let mut caps = Self {
             agent: initialize.agent_capabilities.clone(),
             modes: new_session.modes.clone(),
             config_options: new_session.config_options.clone().unwrap_or_default(),
             agent_kind,
             grok_display,
             kiro_display,
-        }
+            capability_evidence: embedded_evidence_epoch(
+                initialize.meta.as_ref(),
+                new_session.meta.as_ref(),
+            )
+            .map(|epoch| {
+                let identity = epoch.identity().clone();
+                CapabilityEvidenceSnapshot::from_epoch(epoch, &identity)
+            }),
+        };
+        caps.refresh_evidence_shadow_diffs();
+        caps
     }
 
     /// Build from `initialize` plus the per-session state returned by
@@ -90,13 +573,112 @@ impl SpurAgentCaps {
             load_session.meta.as_ref(),
         );
         let kiro_display = extract_kiro_session_display(agent_kind, load_session.meta.as_ref());
-        Self {
+        let mut caps = Self {
             agent: initialize.agent_capabilities.clone(),
             modes: load_session.modes.clone(),
             config_options: load_session.config_options.clone().unwrap_or_default(),
             agent_kind,
             grok_display,
             kiro_display,
+            capability_evidence: embedded_evidence_epoch(
+                initialize.meta.as_ref(),
+                load_session.meta.as_ref(),
+            )
+            .map(|epoch| {
+                let identity = epoch.identity().clone();
+                CapabilityEvidenceSnapshot::from_epoch(epoch, &identity)
+            }),
+        };
+        caps.refresh_evidence_shadow_diffs();
+        caps
+    }
+
+    /// Replace the immutable evidence epoch and recompute shadow diagnostics.
+    /// This never changes the legacy routing methods on the facade.
+    pub fn apply_evidence_epoch(&mut self, epoch: EvidenceEpoch, current_identity: &CliIdentity) {
+        self.capability_evidence = Some(CapabilityEvidenceSnapshot::from_epoch(
+            epoch,
+            current_identity,
+        ));
+        self.refresh_evidence_shadow_diffs();
+    }
+
+    /// Current provider-neutral reduced capability snapshots.
+    #[must_use]
+    pub fn reduced_capabilities(&self) -> &[ReducedCapability] {
+        self.capability_evidence
+            .as_ref()
+            .map_or(&[], CapabilityEvidenceSnapshot::reduced_capabilities)
+    }
+
+    /// One reduced capability by semantic key.
+    #[must_use]
+    pub fn reduced_capability(&self, key: &CapabilityKey) -> Option<&ReducedCapability> {
+        self.reduced_capabilities()
+            .iter()
+            .find(|capability| capability.key == *key)
+    }
+
+    /// Shadow-only route differences. These never change facade routing.
+    #[must_use]
+    pub fn capability_shadow_diffs(&self) -> &[CapabilityShadowDiff] {
+        self.capability_evidence
+            .as_ref()
+            .map_or(&[], CapabilityEvidenceSnapshot::shadow_diffs)
+    }
+
+    fn refresh_evidence_shadow_diffs(&mut self) {
+        let diffs = self
+            .capability_evidence
+            .as_ref()
+            .map(|snapshot| {
+                snapshot
+                    .reduced_capabilities()
+                    .iter()
+                    .filter_map(|reduced| {
+                        let legacy_route = legacy_route_for(self, &reduced.key)?;
+                        if legacy_route == reduced.route {
+                            return None;
+                        }
+
+                        let provenance_demotion =
+                            reduced.sources.provenances.iter().any(|source| {
+                                matches!(
+                                    source,
+                                    EvidenceProvenance::RejectedActiveProbe
+                                        | EvidenceProvenance::NativeDispatch
+                                )
+                            });
+                        let vendor_shadow = legacy_route == DispatchRoute::NativePreferred
+                            && reduced.route == DispatchRoute::PromptOnly
+                            && reduced
+                                .sources
+                                .provenances
+                                .contains(&EvidenceProvenance::VendorAdvertisement);
+                        let (reason, unexplained) = if provenance_demotion {
+                            ("provenance-aware reducer demotion".to_owned(), false)
+                        } else if vendor_shadow {
+                            ("bounded legacy native fallback".to_owned(), false)
+                        } else {
+                            (
+                                "unexplained legacy/reducer route difference".to_owned(),
+                                true,
+                            )
+                        };
+
+                        Some(CapabilityShadowDiff {
+                            key: reduced.key.clone(),
+                            legacy_route,
+                            reduced_route: reduced.route,
+                            reason,
+                            unexplained,
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        if let Some(snapshot) = self.capability_evidence.as_mut() {
+            snapshot.shadow_diffs = diffs;
         }
     }
 
@@ -324,6 +906,1114 @@ impl SpurAgentCaps {
     }
 }
 
+fn legacy_route_for(caps: &SpurAgentCaps, key: &CapabilityKey) -> Option<DispatchRoute> {
+    let native = match &key.kind {
+        CapabilityKind::Model => caps.supports_set_model() || caps.supports_direct_set_model(),
+        CapabilityKind::Effort => {
+            caps.config_options
+                .iter()
+                .find(|option| {
+                    category_matches(option.category.as_ref(), KnownConfigCategory::ThoughtLevel)
+                })
+                .is_some_and(has_select_choices)
+                || caps.grok_display.as_ref().is_some_and(|display| {
+                    display
+                        .models()
+                        .iter()
+                        .any(|model| !model.efforts.is_empty())
+                })
+        }
+        CapabilityKind::Mode => caps.supports_set_mode(),
+        CapabilityKind::Custom(kind) if kind == "session_method" => {
+            match key.upstream_id.as_str() {
+                "session/load" => caps.supports_load_session(),
+                "session/resume" => caps.supports_resume_session(),
+                "session/delete" => caps.supports_delete_session(),
+                "session/list" => caps.supports_list_sessions(),
+                "session/close" => caps.supports_close_session(),
+                _ => return None,
+            }
+        }
+        CapabilityKind::Command | CapabilityKind::Custom(_) => return None,
+    };
+    Some(if native {
+        DispatchRoute::NativePreferred
+    } else {
+        DispatchRoute::Hidden
+    })
+}
+
+pub(crate) fn inject_capability_evidence_epoch(meta: &mut Option<Meta>, epoch: &EvidenceEpoch) {
+    let snapshot = CapabilityEvidenceSnapshot::from_epoch(epoch.clone(), epoch.identity());
+    let Ok(value) = serde_json::to_value(CapabilityEvidenceSnapshotWire::from(&snapshot).epoch)
+    else {
+        return;
+    };
+    meta.get_or_insert_with(Meta::new)
+        .insert(CAPABILITY_EVIDENCE_META_KEY.to_owned(), value);
+}
+
+fn evidence_epoch_from_meta(meta: Option<&Meta>) -> Option<EvidenceEpoch> {
+    let wire: EvidenceEpochWire =
+        serde_json::from_value(meta?.get(CAPABILITY_EVIDENCE_META_KEY)?.clone()).ok()?;
+    let snapshot = CapabilityEvidenceSnapshot::try_from(CapabilityEvidenceSnapshotWire {
+        epoch: wire,
+        reduced: Vec::new(),
+        shadow_diffs: Vec::new(),
+    })
+    .ok()?;
+    Some(snapshot.epoch)
+}
+
+fn embedded_evidence_epoch(
+    initialize_meta: Option<&Meta>,
+    session_meta: Option<&Meta>,
+) -> Option<EvidenceEpoch> {
+    let initialize = evidence_epoch_from_meta(initialize_meta);
+    let session = evidence_epoch_from_meta(session_meta);
+    match (initialize, session) {
+        (Some(initialize), Some(session)) if initialize.id() > session.id() => Some(initialize),
+        (_, Some(session)) => Some(session),
+        (Some(initialize), None) => Some(initialize),
+        (None, None) => None,
+    }
+}
+
+pub(crate) fn build_capability_cli_identity(
+    command: &str,
+    extra_args: &[String],
+    launch_env: &BTreeMap<String, String>,
+) -> CliIdentity {
+    let resolved_executable = resolve_executable(command, launch_env);
+    let mut argv = Vec::with_capacity(extra_args.len().saturating_add(1));
+    argv.push(command.to_owned());
+    argv.extend(extra_args.iter().cloned());
+    let argv = redact_argv(argv);
+
+    let mut environment = BTreeMap::new();
+    for key in ["LANG", "LC_ALL", "LC_CTYPE", "PATH", "SHELL"] {
+        if let Some(value) = launch_env
+            .get(key)
+            .cloned()
+            .or_else(|| std::env::var(key).ok())
+        {
+            environment.insert(key, value);
+        }
+    }
+
+    CliIdentity {
+        resolved_executable,
+        upstream_version: None,
+        argv_fingerprint: json_digest(&serde_json::json!(argv)),
+        environment_fingerprint: json_digest(&serde_json::json!(environment)),
+    }
+}
+
+pub(crate) fn update_identity_from_initialize_frame(
+    identity: &mut CliIdentity,
+    frame: &serde_json::Value,
+) {
+    let result = frame.get("result").unwrap_or(frame);
+    identity.upstream_version = result
+        .get("agentInfo")
+        .or_else(|| result.get("agent_info"))
+        .and_then(|info| info.get("version"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+        .or_else(|| {
+            result
+                .get("agentVersion")
+                .or_else(|| result.get("agent_version"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        });
+}
+
+pub(crate) fn normalize_raw_acp_observation(
+    identity: &CliIdentity,
+    method: &str,
+    frame: &serde_json::Value,
+    session_scope: EvidenceSessionScope,
+) -> Vec<EvidenceRecord> {
+    let digest = RawEvidenceDigest(json_digest(&redact_json(frame)));
+    let observed_at = ObservationTime(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |duration| {
+                duration.as_millis().min(u64::MAX as u128) as u64
+            }),
+    );
+    let mut records = Vec::new();
+
+    if let Some(error) = frame.get("error") {
+        records.push(failure_record(
+            identity,
+            method,
+            error,
+            observed_at,
+            digest,
+            session_scope,
+        ));
+        return records;
+    }
+
+    let payload = if frame.get("method").is_some() {
+        frame.get("params").unwrap_or(&serde_json::Value::Null)
+    } else {
+        frame.get("result").unwrap_or(frame)
+    };
+
+    match method {
+        "initialize" => {
+            normalize_initialize_capabilities(
+                &mut records,
+                identity,
+                payload,
+                observed_at,
+                &digest,
+                &session_scope,
+            );
+            normalize_vendor_planes(
+                &mut records,
+                identity,
+                payload,
+                observed_at,
+                &digest,
+                &session_scope,
+            );
+            normalize_unknown_top_level_fields(
+                &mut records,
+                identity,
+                payload,
+                &[
+                    "protocolVersion",
+                    "protocol_version",
+                    "agentCapabilities",
+                    "agent_capabilities",
+                    "agentInfo",
+                    "agent_info",
+                    "authMethods",
+                    "auth_methods",
+                ],
+                EvidenceProvenance::VendorAdvertisement,
+                observed_at,
+                &digest,
+                &session_scope,
+            );
+        }
+        "session/new" | "session/load" => {
+            normalize_session_planes(
+                &mut records,
+                identity,
+                payload,
+                EvidenceClaim::NativeVerified,
+                EvidenceProvenance::StandardAdvertisement,
+                observed_at,
+                &digest,
+                &session_scope,
+            );
+            normalize_vendor_planes(
+                &mut records,
+                identity,
+                payload,
+                observed_at,
+                &digest,
+                &session_scope,
+            );
+            normalize_unknown_top_level_fields(
+                &mut records,
+                identity,
+                payload,
+                &[
+                    "sessionId",
+                    "session_id",
+                    "modes",
+                    "configOptions",
+                    "config_options",
+                ],
+                EvidenceProvenance::VendorAdvertisement,
+                observed_at,
+                &digest,
+                &session_scope,
+            );
+        }
+        "session/prompt" => records.push(make_record(
+            identity,
+            CapabilityKind::Command,
+            "session/prompt",
+            EvidenceClaim::CandidateObserved,
+            EvidenceProvenance::PromptFallback,
+            observed_at,
+            digest,
+            session_scope,
+            Vec::new(),
+        )),
+        _ if frame.get("method").is_some() => {
+            records.push(make_record(
+                identity,
+                CapabilityKind::Custom("notification".to_owned()),
+                method,
+                EvidenceClaim::CandidateObserved,
+                EvidenceProvenance::ObservedNotification,
+                observed_at,
+                digest.clone(),
+                session_scope.clone(),
+                Vec::new(),
+            ));
+            normalize_notification_choices(
+                &mut records,
+                identity,
+                payload,
+                observed_at,
+                &digest,
+                &session_scope,
+            );
+            normalize_unknown_top_level_fields(
+                &mut records,
+                identity,
+                payload,
+                &["sessionId", "session_id"],
+                EvidenceProvenance::ObservedNotification,
+                observed_at,
+                &digest,
+                &session_scope,
+            );
+        }
+        _ => {}
+    }
+
+    records
+}
+
+pub(crate) fn operational_failure_record(
+    identity: &CliIdentity,
+    method: &str,
+    error: &str,
+    session_scope: EvidenceSessionScope,
+) -> EvidenceRecord {
+    let redacted = redact_json(&serde_json::json!({"method": method, "error": error}));
+    failure_record(
+        identity,
+        method,
+        &redacted["error"],
+        ObservationTime(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_or(0, |duration| {
+                    duration.as_millis().min(u64::MAX as u128) as u64
+                }),
+        ),
+        RawEvidenceDigest(json_digest(&redacted)),
+        session_scope,
+    )
+}
+
+pub(crate) fn native_dispatch_failure_record(
+    identity: &CliIdentity,
+    key: CapabilityKey,
+    method: &str,
+    error: &str,
+    session_scope: EvidenceSessionScope,
+) -> EvidenceRecord {
+    let redacted = redact_json(&serde_json::json!({"method": method, "error": error}));
+    EvidenceRecord {
+        key,
+        claim: EvidenceClaim::NativeFailed,
+        provenance: EvidenceProvenance::NativeDispatch,
+        identity: identity.clone(),
+        observed_at: ObservationTime(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_or(0, |duration| {
+                    duration.as_millis().min(u64::MAX as u128) as u64
+                }),
+        ),
+        raw_digest: RawEvidenceDigest(json_digest(&redacted)),
+        session_scope,
+        choices: Vec::new(),
+    }
+}
+
+fn normalize_initialize_capabilities(
+    records: &mut Vec<EvidenceRecord>,
+    identity: &CliIdentity,
+    payload: &serde_json::Value,
+    observed_at: ObservationTime,
+    digest: &RawEvidenceDigest,
+    scope: &EvidenceSessionScope,
+) {
+    let capabilities = payload
+        .get("agentCapabilities")
+        .or_else(|| payload.get("agent_capabilities"));
+    let Some(capabilities) = capabilities else {
+        return;
+    };
+    if capabilities
+        .get("loadSession")
+        .or_else(|| capabilities.get("load_session"))
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
+    {
+        records.push(make_record(
+            identity,
+            CapabilityKind::Custom("session_method".to_owned()),
+            "session/load",
+            EvidenceClaim::NativeVerified,
+            EvidenceProvenance::StandardAdvertisement,
+            observed_at,
+            digest.clone(),
+            scope.clone(),
+            Vec::new(),
+        ));
+    }
+    let session = capabilities
+        .get("sessionCapabilities")
+        .or_else(|| capabilities.get("session_capabilities"));
+    for (field, method) in [
+        ("resume", "session/resume"),
+        ("delete", "session/delete"),
+        ("list", "session/list"),
+        ("close", "session/close"),
+    ] {
+        if session.and_then(|session| session.get(field)).is_some() {
+            records.push(make_record(
+                identity,
+                CapabilityKind::Custom("session_method".to_owned()),
+                method,
+                EvidenceClaim::NativeVerified,
+                EvidenceProvenance::StandardAdvertisement,
+                observed_at,
+                digest.clone(),
+                scope.clone(),
+                Vec::new(),
+            ));
+        }
+    }
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "evidence records preserve the full kernel contract"
+)]
+fn normalize_session_planes(
+    records: &mut Vec<EvidenceRecord>,
+    identity: &CliIdentity,
+    payload: &serde_json::Value,
+    claim: EvidenceClaim,
+    provenance: EvidenceProvenance,
+    observed_at: ObservationTime,
+    digest: &RawEvidenceDigest,
+    scope: &EvidenceSessionScope,
+) {
+    if let Some(options) = payload
+        .get("configOptions")
+        .or_else(|| payload.get("config_options"))
+        .and_then(serde_json::Value::as_array)
+    {
+        for option in options {
+            let upstream_id = option
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("config_choice");
+            let category = option
+                .get("category")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or(upstream_id);
+            let kind = match category {
+                "model" => CapabilityKind::Model,
+                "thought_level" | "reasoning_effort" | "effort" => CapabilityKind::Effort,
+                "mode" => CapabilityKind::Mode,
+                "command" => CapabilityKind::Command,
+                other => CapabilityKind::Custom(other.to_owned()),
+            };
+            let choices = option
+                .get("options")
+                .map(extract_choices)
+                .unwrap_or_default();
+            if !choices.is_empty() {
+                records.push(make_record(
+                    identity,
+                    kind,
+                    upstream_id,
+                    claim,
+                    provenance,
+                    observed_at,
+                    digest.clone(),
+                    scope.clone(),
+                    choices,
+                ));
+            }
+        }
+    }
+
+    let modes = payload.get("modes");
+    let available_modes = modes
+        .and_then(|modes| {
+            modes
+                .get("availableModes")
+                .or_else(|| modes.get("available_modes"))
+        })
+        .map(extract_choices)
+        .unwrap_or_default();
+    if !available_modes.is_empty() {
+        records.push(make_record(
+            identity,
+            CapabilityKind::Mode,
+            "mode",
+            claim,
+            provenance,
+            observed_at,
+            digest.clone(),
+            scope.clone(),
+            available_modes,
+        ));
+    }
+}
+
+fn normalize_vendor_planes(
+    records: &mut Vec<EvidenceRecord>,
+    identity: &CliIdentity,
+    payload: &serde_json::Value,
+    observed_at: ObservationTime,
+    digest: &RawEvidenceDigest,
+    scope: &EvidenceSessionScope,
+) {
+    let meta = payload.get("_meta").unwrap_or(&serde_json::Value::Null);
+    for models in [
+        payload.get("models"),
+        meta.get("modelState"),
+        meta.get("model_state"),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        let choices = models
+            .get("availableModels")
+            .or_else(|| models.get("available_models"))
+            .map(extract_model_choices)
+            .unwrap_or_default();
+        if !choices.is_empty() {
+            records.push(make_record(
+                identity,
+                CapabilityKind::Model,
+                "model",
+                EvidenceClaim::CandidateObserved,
+                EvidenceProvenance::VendorAdvertisement,
+                observed_at,
+                digest.clone(),
+                scope.clone(),
+                choices,
+            ));
+        }
+        let efforts = extract_reasoning_efforts(models);
+        if !efforts.is_empty() {
+            records.push(make_record(
+                identity,
+                CapabilityKind::Effort,
+                "reasoning_effort",
+                EvidenceClaim::CandidateObserved,
+                EvidenceProvenance::VendorAdvertisement,
+                observed_at,
+                digest.clone(),
+                scope.clone(),
+                efforts,
+            ));
+        }
+    }
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "unknown field evidence preserves the full kernel contract"
+)]
+fn normalize_unknown_top_level_fields(
+    records: &mut Vec<EvidenceRecord>,
+    identity: &CliIdentity,
+    payload: &serde_json::Value,
+    known_fields: &[&str],
+    provenance: EvidenceProvenance,
+    observed_at: ObservationTime,
+    digest: &RawEvidenceDigest,
+    scope: &EvidenceSessionScope,
+) {
+    let Some(object) = payload.as_object() else {
+        return;
+    };
+    let mut paths = BTreeSet::new();
+    for (field, value) in object {
+        if known_fields.contains(&field.as_str()) {
+            continue;
+        }
+        collect_sanitized_field_paths(&sanitize_field_path_segment(field), value, &mut paths);
+    }
+    for path in paths {
+        records.push(make_record(
+            identity,
+            CapabilityKind::Custom("unknown_acp_field".to_owned()),
+            &path,
+            EvidenceClaim::Unknown,
+            provenance,
+            observed_at,
+            digest.clone(),
+            scope.clone(),
+            Vec::new(),
+        ));
+    }
+}
+
+fn collect_sanitized_field_paths(
+    path: &str,
+    value: &serde_json::Value,
+    paths: &mut BTreeSet<String>,
+) {
+    paths.insert(path.to_owned());
+    match value {
+        serde_json::Value::Object(object) => {
+            for (field, value) in object {
+                let field = sanitize_field_path_segment(field);
+                collect_sanitized_field_paths(&format!("{path}.{field}"), value, paths);
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for value in values {
+                collect_sanitized_field_paths(path, value, paths);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn sanitize_field_path_segment(segment: &str) -> String {
+    let redacted = redact_text(segment);
+    if redacted == "<redacted>" {
+        return redacted;
+    }
+    let sanitized = redacted
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '_' | '-') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    if sanitized.is_empty() {
+        "<empty>".to_owned()
+    } else {
+        sanitized
+    }
+}
+
+fn normalize_notification_choices(
+    records: &mut Vec<EvidenceRecord>,
+    identity: &CliIdentity,
+    payload: &serde_json::Value,
+    observed_at: ObservationTime,
+    digest: &RawEvidenceDigest,
+    scope: &EvidenceSessionScope,
+) {
+    let update = payload.get("update").unwrap_or(payload);
+    let commands = update
+        .get("availableCommands")
+        .or_else(|| update.get("available_commands"))
+        .or_else(|| update.get("commands"))
+        .map(extract_command_choices)
+        .unwrap_or_default();
+    if !commands.is_empty() {
+        records.push(make_record(
+            identity,
+            CapabilityKind::Command,
+            "commands",
+            EvidenceClaim::CandidateObserved,
+            EvidenceProvenance::ObservedNotification,
+            observed_at,
+            digest.clone(),
+            scope.clone(),
+            commands,
+        ));
+    }
+
+    normalize_session_planes(
+        records,
+        identity,
+        update,
+        EvidenceClaim::CandidateObserved,
+        EvidenceProvenance::ObservedNotification,
+        observed_at,
+        digest,
+        scope,
+    );
+
+    let model_id = update
+        .get("model_id")
+        .or_else(|| update.get("modelId"))
+        .and_then(serde_json::Value::as_str);
+    if let Some(model_id) = model_id.filter(|id| !id.is_empty()) {
+        records.push(make_record(
+            identity,
+            CapabilityKind::Model,
+            "model",
+            EvidenceClaim::CandidateObserved,
+            EvidenceProvenance::ObservedNotification,
+            observed_at,
+            digest.clone(),
+            scope.clone(),
+            vec![CapabilityChoice {
+                id: model_id.to_owned(),
+                label: model_id.to_owned(),
+                description: None,
+            }],
+        ));
+    }
+}
+
+fn failure_record(
+    identity: &CliIdentity,
+    method: &str,
+    error: &serde_json::Value,
+    observed_at: ObservationTime,
+    digest: RawEvidenceDigest,
+    session_scope: EvidenceSessionScope,
+) -> EvidenceRecord {
+    let lowered = serde_json::to_string(error)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let authentication = method == "authenticate"
+        || [
+            "authentication required",
+            "unauthenticated",
+            "unauthorized",
+            "login required",
+            "not logged in",
+            "sign in required",
+        ]
+        .iter()
+        .any(|marker| lowered.contains(marker));
+    let timeout = lowered.contains("timed out") || lowered.contains("timeout");
+    let malformed = lowered.contains("malformed")
+        || lowered.contains("deserialize")
+        || lowered.contains("invalid json");
+    let code = error.get("code").and_then(serde_json::Value::as_i64);
+    let malformed = malformed
+        || code == Some(-32700)
+        || lowered.contains("parse error")
+        || lowered.contains("invalid request");
+    let rejected = matches!(code, Some(-32601 | -32602))
+        || lowered.contains("rejected")
+        || lowered.contains("method not found")
+        || lowered.contains("invalid params")
+        || lowered.contains("invalid parameters");
+    let (upstream_id, claim, provenance) = if authentication {
+        (
+            "authentication".to_owned(),
+            EvidenceClaim::Inconclusive,
+            EvidenceProvenance::InconclusiveFailure,
+        )
+    } else if timeout {
+        (
+            "timeout".to_owned(),
+            EvidenceClaim::Unknown,
+            EvidenceProvenance::InconclusiveFailure,
+        )
+    } else if malformed {
+        (
+            "malformed".to_owned(),
+            EvidenceClaim::Inconclusive,
+            EvidenceProvenance::InconclusiveFailure,
+        )
+    } else if rejected {
+        (
+            format!("rejected:{method}"),
+            EvidenceClaim::Rejected,
+            EvidenceProvenance::NativeDispatch,
+        )
+    } else {
+        (
+            format!("operational:{method}"),
+            EvidenceClaim::Unknown,
+            EvidenceProvenance::InconclusiveFailure,
+        )
+    };
+    make_record(
+        identity,
+        CapabilityKind::Custom("failure".to_owned()),
+        &upstream_id,
+        claim,
+        provenance,
+        observed_at,
+        digest,
+        session_scope,
+        Vec::new(),
+    )
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "evidence records preserve the full kernel contract"
+)]
+fn make_record(
+    identity: &CliIdentity,
+    kind: CapabilityKind,
+    upstream_id: &str,
+    claim: EvidenceClaim,
+    provenance: EvidenceProvenance,
+    observed_at: ObservationTime,
+    raw_digest: RawEvidenceDigest,
+    session_scope: EvidenceSessionScope,
+    choices: Vec<CapabilityChoice>,
+) -> EvidenceRecord {
+    EvidenceRecord {
+        key: CapabilityKey {
+            kind,
+            upstream_id: upstream_id.to_owned(),
+        },
+        claim,
+        provenance,
+        identity: identity.clone(),
+        observed_at,
+        raw_digest,
+        session_scope,
+        choices,
+    }
+}
+
+fn extract_choices(value: &serde_json::Value) -> Vec<CapabilityChoice> {
+    let mut choices = Vec::new();
+    visit_choice_values(value, &mut |item| {
+        let Some(id) = item
+            .get("value")
+            .or_else(|| item.get("id"))
+            .or_else(|| item.get("modeId"))
+            .or_else(|| item.get("modelId"))
+            .and_then(serde_json::Value::as_str)
+            .filter(|id| !id.is_empty())
+        else {
+            return;
+        };
+        let label = item
+            .get("name")
+            .or_else(|| item.get("label"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or(id);
+        let description = item
+            .get("description")
+            .and_then(serde_json::Value::as_str)
+            .map(redact_text);
+        choices.push(CapabilityChoice {
+            id: id.to_owned(),
+            label: redact_text(label),
+            description,
+        });
+    });
+    choices.sort();
+    choices.dedup_by(|left, right| left.id == right.id);
+    choices
+}
+
+fn extract_model_choices(value: &serde_json::Value) -> Vec<CapabilityChoice> {
+    extract_choices(value)
+}
+
+fn extract_command_choices(value: &serde_json::Value) -> Vec<CapabilityChoice> {
+    let mut choices = Vec::new();
+    visit_choice_values(value, &mut |item| {
+        let Some(id) = item
+            .get("name")
+            .or_else(|| item.get("id"))
+            .and_then(serde_json::Value::as_str)
+            .filter(|id| !id.is_empty())
+        else {
+            return;
+        };
+        choices.push(CapabilityChoice {
+            id: id.to_owned(),
+            label: item
+                .get("label")
+                .and_then(serde_json::Value::as_str)
+                .map_or_else(|| id.to_owned(), redact_text),
+            description: item
+                .get("description")
+                .and_then(serde_json::Value::as_str)
+                .map(redact_text),
+        });
+    });
+    choices.sort();
+    choices.dedup_by(|left, right| left.id == right.id);
+    choices
+}
+
+fn visit_choice_values(
+    value: &serde_json::Value,
+    visit: &mut impl FnMut(&serde_json::Map<String, serde_json::Value>),
+) {
+    match value {
+        serde_json::Value::Array(values) => {
+            for value in values {
+                visit_choice_values(value, visit);
+            }
+        }
+        serde_json::Value::Object(object) => {
+            if object.contains_key("value")
+                || object.contains_key("id")
+                || object.contains_key("modeId")
+                || object.contains_key("modelId")
+                || object.contains_key("name")
+            {
+                visit(object);
+            } else {
+                for value in object.values() {
+                    visit_choice_values(value, visit);
+                }
+            }
+        }
+        serde_json::Value::String(id) if !id.is_empty() => {
+            let mut object = serde_json::Map::new();
+            object.insert("id".to_owned(), serde_json::Value::String(id.clone()));
+            visit(&object);
+        }
+        _ => {}
+    }
+}
+
+fn extract_reasoning_efforts(models: &serde_json::Value) -> Vec<CapabilityChoice> {
+    let mut efforts = Vec::new();
+    let available = models
+        .get("availableModels")
+        .or_else(|| models.get("available_models"))
+        .and_then(serde_json::Value::as_array);
+    for model in available.into_iter().flatten() {
+        let effort_values = model
+            .get("_meta")
+            .and_then(|meta| {
+                meta.get("reasoningEfforts")
+                    .or_else(|| meta.get("reasoning_efforts"))
+            })
+            .unwrap_or(&serde_json::Value::Null);
+        efforts.extend(extract_choices(effort_values));
+    }
+    efforts.sort();
+    efforts.dedup_by(|left, right| left.id == right.id);
+    efforts
+}
+
+fn resolve_executable(command: &str, launch_env: &BTreeMap<String, String>) -> PathBuf {
+    let candidate = PathBuf::from(command);
+    if candidate.components().count() > 1 || candidate.is_absolute() {
+        return std::fs::canonicalize(&candidate).unwrap_or(candidate);
+    }
+    let path = launch_env
+        .get("PATH")
+        .cloned()
+        .or_else(|| std::env::var("PATH").ok());
+    if let Some(path) = path {
+        for directory in std::env::split_paths(&path) {
+            let candidate = directory.join(command);
+            if candidate.is_file() {
+                return std::fs::canonicalize(&candidate).unwrap_or(candidate);
+            }
+        }
+    }
+    candidate
+}
+
+fn redact_argv(argv: Vec<String>) -> Vec<String> {
+    let mut redacted = Vec::with_capacity(argv.len());
+    let mut redact_next = false;
+    for argument in argv {
+        if redact_next {
+            redacted.push("<redacted>".to_owned());
+            redact_next = false;
+            continue;
+        }
+        if let Some((flag, _)) = argument.split_once('=') {
+            if flag.starts_with('-') && secret_key(flag.trim_start_matches('-')) {
+                redacted.push(format!("{flag}=<redacted>"));
+                continue;
+            }
+        }
+        if argument.starts_with('-') && secret_key(argument.trim_start_matches('-')) {
+            redacted.push(argument);
+            redact_next = true;
+        } else {
+            redacted.push(redact_text(&argument));
+        }
+    }
+    redacted
+}
+
+fn redact_json(value: &serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Object(object) => serde_json::Value::Object(
+            object
+                .iter()
+                .map(|(key, value)| {
+                    (
+                        key.clone(),
+                        if secret_key(key) {
+                            serde_json::Value::String("<redacted>".to_owned())
+                        } else {
+                            redact_json(value)
+                        },
+                    )
+                })
+                .collect(),
+        ),
+        serde_json::Value::Array(values) => {
+            serde_json::Value::Array(values.iter().map(redact_json).collect())
+        }
+        serde_json::Value::String(value) => serde_json::Value::String(redact_text(value)),
+        _ => value.clone(),
+    }
+}
+
+fn secret_key(key: &str) -> bool {
+    let normalized = key
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect::<String>();
+    [
+        "secret",
+        "token",
+        "password",
+        "passphrase",
+        "authorization",
+        "cookie",
+        "credential",
+        "apikey",
+        "privatekey",
+        "clientsecret",
+    ]
+    .iter()
+    .any(|marker| normalized.contains(marker))
+}
+
+fn redact_text(value: &str) -> String {
+    let lowered = value.to_ascii_lowercase();
+    if [
+        "bearer ",
+        "basic ",
+        "token=",
+        "password=",
+        "passphrase=",
+        "secret=",
+        "authorization=",
+        "cookie=",
+        "api_key=",
+        "api-key=",
+        "client_secret=",
+    ]
+    .iter()
+    .any(|marker| lowered.contains(marker))
+    {
+        "<redacted>".to_owned()
+    } else {
+        value.to_owned()
+    }
+}
+
+fn json_digest(value: &serde_json::Value) -> String {
+    let bytes = serde_json::to_vec(value).unwrap_or_default();
+    let digest = sha256(&bytes);
+    let mut encoded = String::with_capacity(71);
+    encoded.push_str("sha256:");
+    for byte in digest {
+        use std::fmt::Write as _;
+        let _ = write!(encoded, "{byte:02x}");
+    }
+    encoded
+}
+
+fn sha256(input: &[u8]) -> [u8; 32] {
+    const INITIAL: [u32; 8] = [
+        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
+        0x5be0cd19,
+    ];
+    const ROUND: [u32; 64] = [
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
+        0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe,
+        0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f,
+        0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
+        0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc,
+        0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
+        0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116,
+        0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7,
+        0xc67178f2,
+    ];
+
+    let bit_len = (input.len() as u64).wrapping_mul(8);
+    let mut padded = input.to_vec();
+    padded.push(0x80);
+    while padded.len() % 64 != 56 {
+        padded.push(0);
+    }
+    padded.extend_from_slice(&bit_len.to_be_bytes());
+
+    let mut state = INITIAL;
+    for chunk in padded.chunks_exact(64) {
+        let mut words = [0_u32; 64];
+        for (index, word) in words.iter_mut().take(16).enumerate() {
+            let offset = index * 4;
+            *word = u32::from_be_bytes([
+                chunk[offset],
+                chunk[offset + 1],
+                chunk[offset + 2],
+                chunk[offset + 3],
+            ]);
+        }
+        for index in 16..64 {
+            let s0 = words[index - 15].rotate_right(7)
+                ^ words[index - 15].rotate_right(18)
+                ^ (words[index - 15] >> 3);
+            let s1 = words[index - 2].rotate_right(17)
+                ^ words[index - 2].rotate_right(19)
+                ^ (words[index - 2] >> 10);
+            words[index] = words[index - 16]
+                .wrapping_add(s0)
+                .wrapping_add(words[index - 7])
+                .wrapping_add(s1);
+        }
+
+        let [mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut h] = state;
+        for index in 0..64 {
+            let sum1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
+            let choose = (e & f) ^ ((!e) & g);
+            let temp1 = h
+                .wrapping_add(sum1)
+                .wrapping_add(choose)
+                .wrapping_add(ROUND[index])
+                .wrapping_add(words[index]);
+            let sum0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
+            let majority = (a & b) ^ (a & c) ^ (b & c);
+            let temp2 = sum0.wrapping_add(majority);
+            h = g;
+            g = f;
+            f = e;
+            e = d.wrapping_add(temp1);
+            d = c;
+            c = b;
+            b = a;
+            a = temp1.wrapping_add(temp2);
+        }
+        state[0] = state[0].wrapping_add(a);
+        state[1] = state[1].wrapping_add(b);
+        state[2] = state[2].wrapping_add(c);
+        state[3] = state[3].wrapping_add(d);
+        state[4] = state[4].wrapping_add(e);
+        state[5] = state[5].wrapping_add(f);
+        state[6] = state[6].wrapping_add(g);
+        state[7] = state[7].wrapping_add(h);
+    }
+
+    let mut digest = [0_u8; 32];
+    for (index, word) in state.into_iter().enumerate() {
+        digest[index * 4..index * 4 + 4].copy_from_slice(&word.to_be_bytes());
+    }
+    digest
+}
+
 fn model_option_from(options: &[SessionConfigOption]) -> Option<&SessionConfigOption> {
     option_by_category_or_absent_id(options, KnownConfigCategory::Model, "model")
 }
@@ -429,6 +2119,10 @@ mod tests {
     };
     use agent_client_protocol::schema::ProtocolVersion;
 
+    use super::{json_digest, normalize_raw_acp_observation};
+    use crate::capability_evidence::{
+        CliIdentity, EvidenceClaim, EvidenceProvenance, EvidenceSessionScope,
+    };
     use crate::spur_agent_caps::SpurAgentCaps;
     use crate::types::AgentKind;
 
@@ -438,6 +2132,108 @@ mod tests {
 
     fn empty_new_session_response() -> NewSessionResponse {
         NewSessionResponse::new(SessionId::new("test-empty"))
+    }
+
+    #[test]
+    fn evidence_digest_is_stable_sha256() {
+        assert_eq!(
+            json_digest(&serde_json::Value::Null),
+            "sha256:74234e98afe7498fb5daf1f36ac2d78acc339464f950703b8c019892f982b90b"
+        );
+    }
+
+    #[test]
+    fn raw_acp_errors_are_classified_conservatively() {
+        let identity = CliIdentity {
+            resolved_executable: "/usr/bin/test-acp".into(),
+            upstream_version: Some("1.0.0".to_owned()),
+            argv_fingerprint: "sha256:argv".to_owned(),
+            environment_fingerprint: "sha256:env".to_owned(),
+        };
+        let cases = [
+            (
+                "internal error",
+                "session/load",
+                -32603,
+                "Internal error",
+                EvidenceClaim::Unknown,
+                EvidenceProvenance::InconclusiveFailure,
+                "operational:session/load",
+            ),
+            (
+                "generic server error",
+                "session/load",
+                -32000,
+                "Server error",
+                EvidenceClaim::Unknown,
+                EvidenceProvenance::InconclusiveFailure,
+                "operational:session/load",
+            ),
+            (
+                "timeout",
+                "session/load",
+                -32000,
+                "request timeout",
+                EvidenceClaim::Unknown,
+                EvidenceProvenance::InconclusiveFailure,
+                "timeout",
+            ),
+            (
+                "authentication",
+                "authenticate",
+                -32001,
+                "authentication required",
+                EvidenceClaim::Inconclusive,
+                EvidenceProvenance::InconclusiveFailure,
+                "authentication",
+            ),
+            (
+                "malformed",
+                "session/load",
+                -32700,
+                "Parse error",
+                EvidenceClaim::Inconclusive,
+                EvidenceProvenance::InconclusiveFailure,
+                "malformed",
+            ),
+            (
+                "method not found",
+                "session/load",
+                -32601,
+                "Method not found",
+                EvidenceClaim::Rejected,
+                EvidenceProvenance::NativeDispatch,
+                "rejected:session/load",
+            ),
+            (
+                "invalid params",
+                "session/load",
+                -32602,
+                "Invalid params",
+                EvidenceClaim::Rejected,
+                EvidenceProvenance::NativeDispatch,
+                "rejected:session/load",
+            ),
+        ];
+
+        for (label, method, code, message, claim, provenance, upstream_id) in cases {
+            let frame = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "error": {"code": code, "message": message}
+            });
+            let records = normalize_raw_acp_observation(
+                &identity,
+                method,
+                &frame,
+                EvidenceSessionScope::Global,
+            );
+            assert_eq!(records.len(), 1, "{label}");
+            let record = &records[0];
+            assert_eq!(record.claim, claim, "{label}");
+            assert_eq!(record.provenance, provenance, "{label}");
+            assert_eq!(record.key.upstream_id, upstream_id, "{label}");
+        }
     }
 
     #[test]
