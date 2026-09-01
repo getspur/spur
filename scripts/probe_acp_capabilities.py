@@ -25,9 +25,12 @@ Use ``--prompt`` only when session/update evidence is worth a billed turn.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import threading
@@ -44,6 +47,21 @@ THOUGHT_FALLBACK_IDS = ("thought_level", "reasoning_effort", "effort")
 KNOWN_GROK_EFFORT_IDS = {"high", "medium", "low"}
 STANDARD_NOTIFICATION_METHODS = {"session/update"}
 DEFAULT_LOG_DIR = Path(".spur/logs")
+ARTIFACT_SCHEMA = "spur.acp-capability-probe"
+FIXTURE_SCHEMA = "spur.acp-capability-fixture"
+ARTIFACT_SCHEMA_VERSION = 1
+IDENTITY_ENV_KEYS = ("LANG", "LC_ALL", "LC_CTYPE", "PATH", "SHELL")
+REDACTED = "<redacted>"
+_SECRET_KEY_RE = re.compile(
+    r"(?:secret|token|password|passphrase|authorization|cookie|credential|"
+    r"api[-_]?key|private[-_]?key|client[-_]?secret)",
+    re.IGNORECASE,
+)
+_AUTH_VALUE_RE = re.compile(r"(?i)\b(bearer|basic)\s+[^\s,;\"']+")
+_SECRET_ASSIGNMENT_RE = re.compile(
+    r"(?i)\b(token|password|passphrase|secret|authorization|cookie|"
+    r"api[-_]?key|client[-_]?secret)(\s*[=:]\s*)[^\s,;\"']+"
+)
 
 
 class ProbeHardFailure(RuntimeError):
@@ -61,6 +79,89 @@ def utc_now_compact() -> str:
 def assemble_command(command: str, args_string: str) -> list[str]:
     """Build process argv from a binary and one shlex-compatible args string."""
     return [command, *shlex.split(args_string)]
+
+
+def _redact_text(value: str) -> str:
+    value = _AUTH_VALUE_RE.sub(lambda match: f"{match.group(1)} {REDACTED}", value)
+    return _SECRET_ASSIGNMENT_RE.sub(
+        lambda match: f"{match.group(1)}{match.group(2)}{REDACTED}", value
+    )
+
+
+def redact_json(value: Any) -> Any:
+    """Return a JSON-compatible copy with credential-bearing values removed."""
+    if isinstance(value, dict):
+        return {
+            str(key): (
+                REDACTED if _SECRET_KEY_RE.search(str(key)) else redact_json(item)
+            )
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [redact_json(item) for item in value]
+    if isinstance(value, tuple):
+        return [redact_json(item) for item in value]
+    if isinstance(value, str):
+        return _redact_text(value)
+    return value
+
+
+def _redact_argv(argv: list[str]) -> list[str]:
+    redacted: list[str] = []
+    redact_next = False
+    for argument in argv:
+        if redact_next:
+            redacted.append(REDACTED)
+            redact_next = False
+            continue
+        if argument.startswith("-"):
+            flag, separator, _value = argument.partition("=")
+            if _SECRET_KEY_RE.search(flag.lstrip("-")):
+                if separator:
+                    redacted.append(f"{flag}={REDACTED}")
+                else:
+                    redacted.append(argument)
+                    redact_next = True
+                continue
+        redacted.append(_redact_text(argument))
+    return redacted
+
+
+def _canonical_json(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+
+
+def _json_digest(value: Any) -> str:
+    return (
+        "sha256:" + hashlib.sha256(_canonical_json(value).encode("utf-8")).hexdigest()
+    )
+
+
+def build_cli_identity(
+    *,
+    cmd: list[str],
+    cwd: str,
+    version: Optional[str],
+    environment: Optional[dict[str, str]] = None,
+) -> JsonObject:
+    """Build a provider-neutral identity without retaining environment values."""
+    env = dict(os.environ if environment is None else environment)
+    safe_argv = _redact_argv(cmd)
+    executable = shutil.which(cmd[0], path=env.get("PATH")) if cmd else None
+    if executable is not None:
+        executable = str(Path(executable).resolve())
+    elif cmd:
+        candidate = Path(cmd[0]).expanduser()
+        if not candidate.is_absolute():
+            candidate = Path(cwd) / candidate
+        executable = str(candidate.resolve())
+    identity_environment = {key: env[key] for key in IDENTITY_ENV_KEYS if key in env}
+    return {
+        "resolved_executable": executable,
+        "upstream_version": redact_json(version),
+        "argv_fingerprint": _json_digest(safe_argv),
+        "environment_fingerprint": _json_digest(identity_environment),
+    }
 
 
 def _select_choices(option: JsonObject) -> list[JsonObject]:
@@ -217,8 +318,7 @@ def _session_config_ids(options: list[JsonObject], category: str) -> list[str]:
 
 def _set_model_succeeded(*result_sets: Optional[list[JsonObject]]) -> bool:
     return any(
-        result.get("method") == "session/set_model"
-        and result.get("status") == "ok"
+        result.get("method") == "session/set_model" and result.get("status") == "ok"
         for results in result_sets
         for result in (results or [])
         if isinstance(result, dict)
@@ -287,17 +387,14 @@ def predict_spur_slash_surfaces(
     models_plane_ids = _catalog_model_ids(session.get("models"))
     session_config_model_ids = _session_config_ids(session_options, "model")
     model_state_ids = _catalog_model_ids(model_state)
-    proprietary_model_ids = list(
-        dict.fromkeys([*models_plane_ids, *model_state_ids])
-    )
+    proprietary_model_ids = list(dict.fromkeys([*models_plane_ids, *model_state_ids]))
     has_direct_set_evidence = bool(
         session_config_model_ids
         or model_state_ids
         or _models_plane_uses_direct_ids(session.get("models"))
     )
     direct_set_model = bool(proprietary_model_ids) and (
-        has_direct_set_evidence
-        or _set_model_succeeded(set_results, vendor_rpc_results)
+        has_direct_set_evidence or _set_model_succeeded(set_results, vendor_rpc_results)
     )
 
     model_source = "config_option" if prediction["slash_model"] else "none"
@@ -379,8 +476,10 @@ def is_vendor_extension_method(method: Any) -> bool:
         return False
     if method in STANDARD_NOTIFICATION_METHODS:
         return False
-    if method.startswith("session/") or method.startswith("fs/") or method.startswith(
-        "terminal/"
+    if (
+        method.startswith("session/")
+        or method.startswith("fs/")
+        or method.startswith("terminal/")
     ):
         return False
     # ACP vendor extensions are conventionally underscore-prefixed on the wire
@@ -610,12 +709,16 @@ def build_matrix(
     rpc_errors = [
         (
             item.get("method"),
-            (item.get("error") or {}).get("code")
-            if isinstance(item.get("error"), dict)
-            else None,
-            (item.get("error") or {}).get("message")
-            if isinstance(item.get("error"), dict)
-            else item.get("status"),
+            (
+                (item.get("error") or {}).get("code")
+                if isinstance(item.get("error"), dict)
+                else None
+            ),
+            (
+                (item.get("error") or {}).get("message")
+                if isinstance(item.get("error"), dict)
+                else item.get("status")
+            ),
         )
         for item in rpc_results
         if item.get("status") not in (None, "ok")
@@ -740,6 +843,543 @@ def _meta_planes(sources: list[tuple[str, Any]]) -> list[JsonObject]:
     return planes
 
 
+def _session_scope(value: Any) -> Optional[str]:
+    if not isinstance(value, dict):
+        return None
+    for key in ("sessionId", "session_id"):
+        session_id = value.get(key)
+        if isinstance(session_id, str) and session_id:
+            return session_id
+    for key in ("params", "result", "response"):
+        nested = _session_scope(value.get(key))
+        if nested is not None:
+            return nested
+    return None
+
+
+def _raw_evidence(
+    *,
+    protocol_frames: list[JsonObject],
+    authentication: Optional[JsonObject],
+    set_results: list[JsonObject],
+    prompt_result: Optional[JsonObject],
+    vendor_rpc_results: list[JsonObject],
+    hard_failure: Optional[str],
+) -> tuple[JsonObject, list[tuple[str, Any, str]]]:
+    frames: list[JsonObject] = []
+    operational_outcomes: list[JsonObject] = []
+    payloads_by_digest: dict[str, Any] = {}
+    entries: list[tuple[str, Any, str]] = []
+
+    for frame in protocol_frames:
+        direction = frame.get("direction")
+        message = frame.get("message")
+        if direction not in ("send", "recv") or not isinstance(message, dict):
+            continue
+        sanitized = redact_json(message)
+        digest = _json_digest(sanitized)
+        frames.append(
+            {
+                "sequence": len(frames),
+                "direction": direction,
+                "digest": digest,
+                "message": sanitized,
+            }
+        )
+        payloads_by_digest.setdefault(digest, sanitized)
+
+    pending_requests: dict[JsonRpcId, tuple[str, JsonObject]] = {}
+    protocol_results: set[tuple[str, str]] = set()
+    for frame in frames:
+        direction = frame["direction"]
+        message = frame["message"]
+        digest = frame["digest"]
+        if direction == "send" and "method" in message and "id" in message:
+            method = message.get("method")
+            params = message.get("params")
+            if isinstance(method, str):
+                pending_requests[message["id"]] = (
+                    method,
+                    params if isinstance(params, dict) else {},
+                )
+            continue
+        if direction != "recv":
+            continue
+        if "method" in message:
+            if "id" not in message:
+                entries.append(("notification", message, digest))
+            continue
+        request_id = message.get("id")
+        request = pending_requests.pop(request_id, None)
+        if request is None:
+            continue
+        method, params = request
+        if method in ("initialize", "session/new"):
+            result = message.get("result")
+            if isinstance(result, dict):
+                source = "initialize" if method == "initialize" else "session_new"
+                entries.append((source, result, digest))
+            continue
+        if method == "authenticate":
+            source = "authentication"
+        elif method == "session/prompt":
+            source = "prompt_result"
+        elif method in (
+            "session/set_config_option",
+            "session/set_mode",
+            "session/set_model",
+        ):
+            source = "set_result"
+        else:
+            source = "vendor_rpc_result"
+        status = "error" if isinstance(message.get("error"), dict) else "ok"
+        record = {
+            "method": method,
+            "params": params,
+            "status": status,
+            "response": message,
+        }
+        entries.append((source, record, digest))
+        protocol_results.add((source, method))
+
+    def add_operational(source: str, payload: Any) -> None:
+        if not isinstance(payload, dict):
+            return
+        method = payload.get("method")
+        if (
+            isinstance(method, str)
+            and (source, method) in protocol_results
+            and payload.get("response") is not None
+        ):
+            return
+        if source != "hard_failure" and not _inconclusive_result(source, payload):
+            return
+        sanitized = redact_json(payload)
+        digest = _json_digest(sanitized)
+        operational_outcomes.append(
+            {"source": source, "digest": digest, "payload": sanitized}
+        )
+        payloads_by_digest.setdefault(digest, sanitized)
+        entries.append((source, sanitized, digest))
+
+    add_operational("authentication", authentication)
+    for result in set_results:
+        add_operational("set_result", result)
+    add_operational("prompt_result", prompt_result)
+    for result in vendor_rpc_results:
+        add_operational("vendor_rpc_result", result)
+    if hard_failure is not None:
+        add_operational("hard_failure", {"message": hard_failure})
+
+    return (
+        {
+            "digest_algorithm": "sha256",
+            "frames": frames,
+            "operational_outcomes": operational_outcomes,
+            "payloads_by_digest": {
+                digest: payloads_by_digest[digest]
+                for digest in sorted(payloads_by_digest)
+            },
+        },
+        entries,
+    )
+
+
+def _option_capability_kind(category: Any) -> str:
+    if category == "model":
+        return "model"
+    if category in ("thought_level", "reasoning_effort", "effort"):
+        return "effort"
+    if category == "mode":
+        return "mode"
+    if category == "command":
+        return "command"
+    return "config_choice"
+
+
+def _reasoning_effort_ids(models: Any) -> list[str]:
+    if not isinstance(models, dict):
+        return []
+    available = models.get("availableModels", models.get("available_models", []))
+    if not isinstance(available, list):
+        return []
+    effort_ids: list[str] = []
+    for model in available:
+        if not isinstance(model, dict):
+            continue
+        meta = model.get("_meta")
+        efforts = meta.get("reasoningEfforts") if isinstance(meta, dict) else None
+        if not isinstance(efforts, list):
+            continue
+        for effort in efforts:
+            if isinstance(effort, str) and effort:
+                effort_ids.append(effort)
+            elif isinstance(effort, dict):
+                effort_id = effort.get("id", effort.get("value"))
+                if isinstance(effort_id, str) and effort_id:
+                    effort_ids.append(effort_id)
+    return effort_ids
+
+
+def _result_choice_ids(record: JsonObject) -> tuple[str, list[str]]:
+    method = str(record.get("method") or "")
+    lowered = method.lower()
+    if "model" in lowered:
+        kind = "model"
+    elif any(token in lowered for token in ("effort", "reasoning", "thought")):
+        kind = "effort"
+    elif "mode" in lowered:
+        kind = "mode"
+    elif "command" in lowered:
+        kind = "command"
+    else:
+        kind = "choice"
+
+    response = record.get("response")
+    result = response.get("result") if isinstance(response, dict) else None
+    if isinstance(result, list):
+        raw_choices = result
+    elif isinstance(result, dict):
+        raw_choices = result.get("options", result.get("choices", []))
+    else:
+        raw_choices = []
+    if not isinstance(raw_choices, list):
+        return kind, []
+    choice_ids: list[str] = []
+    for choice in raw_choices:
+        if isinstance(choice, str) and choice:
+            choice_ids.append(choice)
+            continue
+        if not isinstance(choice, dict):
+            continue
+        choice_id = choice.get(
+            "value",
+            choice.get("id", choice.get("modelId", choice.get("modeId"))),
+        )
+        if isinstance(choice_id, str) and choice_id:
+            choice_ids.append(choice_id)
+    return kind, choice_ids
+
+
+def _inconclusive_result(source: str, record: JsonObject) -> bool:
+    status = str(record.get("status") or "").lower()
+    if status in ("timeout", "agent_exited", "transport_closed", "unknown"):
+        return True
+    if source == "authentication" and status != "ok":
+        return True
+    lowered = _canonical_json(record).lower()
+    return any(
+        marker in lowered
+        for marker in (
+            "authentication required",
+            "unauthenticated",
+            "unauthorized",
+            "login required",
+            "not logged in",
+            "sign in required",
+        )
+    )
+
+
+def _evidence_claims(
+    *, entries: list[tuple[str, Any, str]], observed_at: str
+) -> list[JsonObject]:
+    claims: list[JsonObject] = []
+    seen: set[tuple[str, str, str, str, str, str]] = set()
+
+    def add(
+        *,
+        source: str,
+        payload: Any,
+        digest: str,
+        kind: str,
+        capability_id: Any,
+        claim: str,
+        provenance: str,
+    ) -> None:
+        if not isinstance(capability_id, str) or not capability_id:
+            return
+        key = (source, kind, capability_id, claim, provenance, digest)
+        if key in seen:
+            return
+        seen.add(key)
+        record: JsonObject = {
+            "capability": {"kind": kind, "id": capability_id},
+            "claim": claim,
+            "provenance": provenance,
+            "source": source,
+            "observed_at": observed_at,
+            "raw_digest": digest,
+            "session_scope": _session_scope(payload),
+        }
+        claims.append(record)
+
+    def advertise_planes(
+        *,
+        source: str,
+        payload: JsonObject,
+        digest: str,
+        provenance: str,
+    ) -> None:
+        raw_options = payload.get("configOptions", payload.get("config_options", []))
+        if isinstance(raw_options, list):
+            for option in raw_options:
+                if not isinstance(option, dict):
+                    continue
+                kind = _option_capability_kind(option.get("category"))
+                for choice in _select_choices(option):
+                    add(
+                        source=source,
+                        payload=payload,
+                        digest=digest,
+                        kind=kind,
+                        capability_id=choice.get("value"),
+                        claim="advertised",
+                        provenance=provenance,
+                    )
+
+        for mode_id in _available_mode_ids(payload.get("modes")):
+            add(
+                source=source,
+                payload=payload,
+                digest=digest,
+                kind="mode",
+                capability_id=mode_id,
+                claim="advertised",
+                provenance=provenance,
+            )
+
+    def advertise_vendor_planes(
+        *, source: str, payload: JsonObject, digest: str
+    ) -> None:
+        models = payload.get("models")
+        for model_id in _model_ids_from_plane(models):
+            add(
+                source=source,
+                payload=payload,
+                digest=digest,
+                kind="model",
+                capability_id=model_id,
+                claim="advertised",
+                provenance="vendor_advertisement",
+            )
+        for effort_id in _reasoning_effort_ids(models):
+            add(
+                source=source,
+                payload=payload,
+                digest=digest,
+                kind="effort",
+                capability_id=effort_id,
+                claim="advertised",
+                provenance="vendor_advertisement",
+            )
+
+    def advertise_meta(*, source: str, payload: JsonObject, digest: str) -> None:
+        model_state = _model_state(payload)
+        for model_id in _model_ids_from_plane(model_state):
+            add(
+                source=source,
+                payload=payload,
+                digest=digest,
+                kind="model",
+                capability_id=model_id,
+                claim="advertised",
+                provenance="vendor_advertisement",
+            )
+        for effort_id in _reasoning_effort_ids(model_state):
+            add(
+                source=source,
+                payload=payload,
+                digest=digest,
+                kind="effort",
+                capability_id=effort_id,
+                claim="advertised",
+                provenance="vendor_advertisement",
+            )
+        for option in _session_config_options(_proprietary_session_config(payload)):
+            add(
+                source=source,
+                payload=payload,
+                digest=digest,
+                kind=_option_capability_kind(option.get("category")),
+                capability_id=option.get("id"),
+                claim="advertised",
+                provenance="vendor_advertisement",
+            )
+
+    for source, payload, digest in entries:
+        if not isinstance(payload, dict):
+            continue
+        if source in ("initialize", "session_new"):
+            advertise_planes(
+                source=source,
+                payload=payload,
+                digest=digest,
+                provenance="standard_advertisement",
+            )
+            advertise_vendor_planes(source=source, payload=payload, digest=digest)
+            advertise_meta(source=source, payload=payload, digest=digest)
+
+        if source == "notification":
+            method = payload.get("method")
+            add(
+                source=source,
+                payload=payload,
+                digest=digest,
+                kind="notification",
+                capability_id=method,
+                claim="observed",
+                provenance="observed_notification",
+            )
+            for command in _available_commands([payload]):
+                add(
+                    source=source,
+                    payload=payload,
+                    digest=digest,
+                    kind="command",
+                    capability_id=command.get("name"),
+                    claim="advertised",
+                    provenance="standard_advertisement",
+                )
+            harvest = harvest_vendor_notifications([payload])
+            for command in harvest.get("commands_catalog") or []:
+                if not isinstance(command, dict):
+                    continue
+                add(
+                    source=source,
+                    payload=payload,
+                    digest=digest,
+                    kind="command",
+                    capability_id=command.get("name"),
+                    claim="advertised",
+                    provenance="vendor_advertisement",
+                )
+
+        if source in ("authentication", "set_result", "vendor_rpc_result"):
+            method = payload.get("method")
+            status = str(payload.get("status") or "").lower()
+            if _inconclusive_result(source, payload):
+                claim = "inconclusive"
+                provenance = "inconclusive_failure"
+            elif status == "ok":
+                claim = "accepted"
+                provenance = "accepted_active_probe"
+            else:
+                claim = "rejected"
+                provenance = "rejected_active_probe"
+            add(
+                source=source,
+                payload=payload,
+                digest=digest,
+                kind="method",
+                capability_id=method,
+                claim=claim,
+                provenance=provenance,
+            )
+            if status == "ok":
+                choice_kind, choice_ids = _result_choice_ids(payload)
+                for choice_id in choice_ids:
+                    add(
+                        source=source,
+                        payload=payload,
+                        digest=digest,
+                        kind=choice_kind,
+                        capability_id=choice_id,
+                        claim="advertised",
+                        provenance="accepted_active_probe",
+                    )
+
+        if source == "prompt_result":
+            method = payload.get("method")
+            status = str(payload.get("status") or "").lower()
+            if _inconclusive_result(source, payload):
+                claim = "inconclusive"
+                provenance = "inconclusive_failure"
+            elif status == "ok":
+                claim = "prompt_fallback"
+                provenance = "prompt_fallback"
+            else:
+                claim = "rejected"
+                provenance = "prompt_fallback"
+            add(
+                source=source,
+                payload=payload,
+                digest=digest,
+                kind="method",
+                capability_id=method,
+                claim=claim,
+                provenance=provenance,
+            )
+
+        if source == "hard_failure":
+            add(
+                source=source,
+                payload=payload,
+                digest=digest,
+                kind="probe",
+                capability_id="probe",
+                claim="inconclusive",
+                provenance="inconclusive_failure",
+            )
+
+    return sorted(
+        claims,
+        key=lambda item: (
+            item["source"],
+            item["capability"]["kind"],
+            item["capability"]["id"],
+            item["claim"],
+            item["provenance"],
+            item["raw_digest"],
+        ),
+    )
+
+
+def _build_artifact(
+    *,
+    probed_at: str,
+    cmd: list[str],
+    cwd: str,
+    version: Optional[str],
+    protocol_frames: list[JsonObject],
+    authentication: Optional[JsonObject],
+    set_results: list[JsonObject],
+    prompt_result: Optional[JsonObject],
+    vendor_rpc_results: list[JsonObject],
+    hard_failure: Optional[str],
+) -> JsonObject:
+    cli_identity = build_cli_identity(cmd=cmd, cwd=cwd, version=version)
+    raw, entries = _raw_evidence(
+        protocol_frames=protocol_frames,
+        authentication=authentication,
+        set_results=set_results,
+        prompt_result=prompt_result,
+        vendor_rpc_results=vendor_rpc_results,
+        hard_failure=hard_failure,
+    )
+    claims = _evidence_claims(entries=entries, observed_at=probed_at)
+    fixture_claims = [
+        {key: value for key, value in claim.items() if key != "observed_at"}
+        for claim in claims
+    ]
+    fixture_base: JsonObject = {
+        "schema": FIXTURE_SCHEMA,
+        "version": ARTIFACT_SCHEMA_VERSION,
+        "cli_identity": cli_identity,
+        "raw": raw,
+        "claims": fixture_claims,
+    }
+    fixture = {**fixture_base, "digest": _json_digest(fixture_base)}
+    return {
+        "schema": ARTIFACT_SCHEMA,
+        "version": ARTIFACT_SCHEMA_VERSION,
+        "cli_identity": cli_identity,
+        "raw": raw,
+        "claims": claims,
+        "fixture": fixture,
+    }
+
+
 def build_report(
     *,
     probed_at: str,
@@ -754,6 +1394,7 @@ def build_report(
     prompt_result: Optional[JsonObject] = None,
     hard_failure: Optional[str] = None,
     vendor_rpc_results: Optional[list[JsonObject]] = None,
+    protocol_frames: Optional[list[JsonObject]] = None,
 ) -> JsonObject:
     session = session_new or {}
     raw_options = session.get("configOptions", session.get("config_options", []))
@@ -792,11 +1433,11 @@ def build_report(
         vendor_harvest=vendor_harvest,
         vendor_rpc_results=rpc_results,
     )
-    return {
+    report: JsonObject = {
         "probed_at": probed_at,
-        "cmd": cmd,
+        "cmd": _redact_argv(cmd),
         "cwd": cwd,
-        "version": version,
+        "version": redact_json(version),
         "initialize": initialize,
         "authentication": authentication,
         "session_new": session_new,
@@ -815,6 +1456,19 @@ def build_report(
         "matrix": matrix,
         "hard_failure": hard_failure,
     }
+    report["artifact"] = _build_artifact(
+        probed_at=probed_at,
+        cmd=cmd,
+        cwd=cwd,
+        version=version,
+        protocol_frames=protocol_frames or [],
+        authentication=authentication,
+        set_results=set_results,
+        prompt_result=prompt_result,
+        vendor_rpc_results=rpc_results,
+        hard_failure=hard_failure,
+    )
+    return redact_json(report)
 
 
 def _make_request(request_id: JsonRpcId, method: str, params: JsonObject) -> JsonObject:
@@ -849,6 +1503,7 @@ class AcpClient:
         self.responses: dict[JsonRpcId, JsonObject] = {}
         self.notifications: list[JsonObject] = []
         self.server_requests: list[JsonObject] = []
+        self.protocol_frames: list[JsonObject] = []
         self._condition = threading.Condition()
         self._log_lock = threading.Lock()
         self._log_file = log_path.open("w", encoding="utf-8")
@@ -857,16 +1512,28 @@ class AcpClient:
         self._reader.start()
         self._stderr_reader.start()
 
+    def _log_locked(self, direction: str, message: Any) -> None:
+        sanitized = redact_json(message)
+        if direction in ("send", "recv") and isinstance(sanitized, dict):
+            self.protocol_frames.append(
+                {
+                    "sequence": len(self.protocol_frames),
+                    "direction": direction,
+                    "message": sanitized,
+                }
+            )
+        self._log_file.write(
+            json.dumps(
+                {"ts": utc_now_iso(), "dir": direction, "msg": sanitized},
+                ensure_ascii=False,
+            )
+            + "\n"
+        )
+        self._log_file.flush()
+
     def _log(self, direction: str, message: Any) -> None:
         with self._log_lock:
-            self._log_file.write(
-                json.dumps(
-                    {"ts": utc_now_iso(), "dir": direction, "msg": message},
-                    ensure_ascii=False,
-                )
-                + "\n"
-            )
-            self._log_file.flush()
+            self._log_locked(direction, message)
 
     def _read_loop(self) -> None:
         for raw_line in self.stdout:
@@ -878,7 +1545,10 @@ class AcpClient:
             except json.JSONDecodeError:
                 self._log("stdout_unparsed", {"text": line})
                 if not self.quiet:
-                    print(f"[stdout] non-JSON: {line[:240]}", file=sys.stderr)
+                    print(
+                        f"[stdout] non-JSON: {_redact_text(line[:240])}",
+                        file=sys.stderr,
+                    )
                 continue
             self._log("recv", message)
             with self._condition:
@@ -895,18 +1565,22 @@ class AcpClient:
             line = raw_line.rstrip("\n")
             self._log("stderr", {"text": line})
             if line and not self.quiet:
-                print(f"[stderr] {line}", file=sys.stderr)
+                print(f"[stderr] {_redact_text(line)}", file=sys.stderr)
 
     def send(self, message: JsonObject) -> None:
         encoded = json.dumps(message, separators=(",", ":"), ensure_ascii=False)
-        try:
-            self.stdin.write(encoded + "\n")
-            self.stdin.flush()
-        except (BrokenPipeError, OSError) as exc:
-            raise ProbeHardFailure(f"agent stdin closed: {exc}") from exc
-        self._log("send", message)
+        with self._log_lock:
+            try:
+                self.stdin.write(encoded + "\n")
+                self.stdin.flush()
+            except (BrokenPipeError, OSError) as exc:
+                raise ProbeHardFailure(f"agent stdin closed: {exc}") from exc
+            self._log_locked("send", message)
         if not self.quiet:
-            print(f"[send] {encoded[:300]}")
+            safe_encoded = json.dumps(
+                redact_json(message), separators=(",", ":"), ensure_ascii=False
+            )
+            print(f"[send] {safe_encoded[:300]}")
 
     def request(
         self,
@@ -946,6 +1620,10 @@ class AcpClient:
             requests = self.server_requests[:]
             self.server_requests.clear()
         return requests
+
+    def protocol_frame_ledger(self) -> list[JsonObject]:
+        with self._log_lock:
+            return redact_json(self.protocol_frames)
 
     def close(self) -> tuple[Optional[int], bool]:
         forced = False
@@ -1221,6 +1899,7 @@ def run_probe(args: argparse.Namespace) -> int:
     notifications: list[JsonObject] = []
     set_results: list[JsonObject] = []
     vendor_rpc_results: list[JsonObject] = []
+    protocol_frames: list[JsonObject] = []
     hard_failure: Optional[str] = None
     handshake_complete = False
     client: Optional[AcpClient] = None
@@ -1344,7 +2023,7 @@ def run_probe(args: argparse.Namespace) -> int:
             notifications.extend(extra_notifs)
             if vendor_stop and not args.quiet:
                 print(
-                    f"[vendor-rpc] stopped early: {vendor_stop}",
+                    f"[vendor-rpc] stopped early: {_redact_text(vendor_stop)}",
                     file=sys.stderr,
                 )
 
@@ -1369,6 +2048,7 @@ def run_probe(args: argparse.Namespace) -> int:
     finally:
         if client is not None:
             return_code, forced = client.close()
+            protocol_frames = client.protocol_frame_ledger()
             if hard_failure is None and not handshake_complete:
                 hard_failure = process_close_failure(
                     return_code=return_code, forced=forced
@@ -1387,6 +2067,7 @@ def run_probe(args: argparse.Namespace) -> int:
         prompt_result=prompt_result,
         hard_failure=hard_failure,
         vendor_rpc_results=vendor_rpc_results,
+        protocol_frames=protocol_frames,
     )
     if client is None:
         out_path.write_text(
@@ -1405,7 +2086,7 @@ def run_probe(args: argparse.Namespace) -> int:
     print(f"jsonl={out_path}")
     print(f"report={report_path}")
     if hard_failure is not None:
-        print(f"[FAIL] {hard_failure}", file=sys.stderr)
+        print(f"[FAIL] {_redact_text(hard_failure)}", file=sys.stderr)
         return 1
     print(json.dumps(report["matrix"], indent=2, sort_keys=True))
     vendor = report.get("vendor_notifications") or {}

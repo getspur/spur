@@ -7,7 +7,7 @@ import io
 import unittest
 from contextlib import redirect_stderr
 
-import probe_acp_capabilities as probe
+from scripts import probe_acp_capabilities as probe
 
 
 def select_option(
@@ -170,7 +170,9 @@ class SlashSurfacePredictionTests(unittest.TestCase):
             ["auto", "claude-sonnet-4.5"],
         )
 
-    def test_grok_current_model_state_predicts_effort_without_session_mode(self) -> None:
+    def test_grok_current_model_state_predicts_effort_without_session_mode(
+        self,
+    ) -> None:
         prediction = probe.predict_spur_slash_surfaces(
             config_options=[],
             initialize={
@@ -255,9 +257,7 @@ class SlashSurfacePredictionTests(unittest.TestCase):
                         "availableModels": [
                             {
                                 "modelId": "grok-4.5",
-                                "_meta": {
-                                    "reasoningEfforts": [{"id": "high"}]
-                                },
+                                "_meta": {"reasoningEfforts": [{"id": "high"}]},
                             }
                         ],
                     }
@@ -280,9 +280,7 @@ class SlashSurfacePredictionTests(unittest.TestCase):
         self.assertEqual(prediction["model_source"], "config_option")
         self.assertEqual(prediction["effort_source"], "config_option")
         self.assertEqual(prediction["model_config_option_id"], "model")
-        self.assertEqual(
-            prediction["effort_config_option_id"], "reasoning_effort"
-        )
+        self.assertEqual(prediction["effort_config_option_id"], "reasoning_effort")
         self.assertTrue(prediction["supports_set_config_option"])
 
     def test_empty_session_predicts_no_slash_surfaces(self) -> None:
@@ -338,7 +336,9 @@ class CliTests(unittest.TestCase):
 
 class VendorHarvestTests(unittest.TestCase):
     def test_vendor_method_detection(self) -> None:
-        self.assertTrue(probe.is_vendor_extension_method("_kiro.dev/commands/available"))
+        self.assertTrue(
+            probe.is_vendor_extension_method("_kiro.dev/commands/available")
+        )
         self.assertTrue(probe.is_vendor_extension_method("_x.ai/sessionConfig/update"))
         self.assertFalse(probe.is_vendor_extension_method("session/update"))
         self.assertFalse(probe.is_vendor_extension_method("session/new"))
@@ -406,7 +406,9 @@ class VendorHarvestTests(unittest.TestCase):
         # Union of command names across frames; keep richest meta when present.
         names = [item["name"] for item in harvest["commands_catalog"]]
         self.assertEqual(names, ["/agent", "/compact", "/model"])
-        model = next(item for item in harvest["commands_catalog"] if item["name"] == "/model")
+        model = next(
+            item for item in harvest["commands_catalog"] if item["name"] == "/model"
+        )
         self.assertEqual(
             model["meta"]["optionsMethod"], "_kiro.dev/commands/model/options"
         )
@@ -454,9 +456,13 @@ class VendorHarvestTests(unittest.TestCase):
         self.assertIn("session/set_mode", methods)
         self.assertIn("session/set_model", methods)
         self.assertIn("_x.ai/sessionConfig/update", methods)
-        set_mode = next(item for item in targets if item["method"] == "session/set_mode")
+        set_mode = next(
+            item for item in targets if item["method"] == "session/set_mode"
+        )
         self.assertEqual(set_mode["params"]["modeId"], "kiro_planner")
-        set_model = next(item for item in targets if item["method"] == "session/set_model")
+        set_model = next(
+            item for item in targets if item["method"] == "session/set_model"
+        )
         self.assertEqual(set_model["params"]["modelId"], "claude-haiku-4.5")
 
     def test_matrix_includes_vendor_harvest_fields(self) -> None:
@@ -676,18 +682,14 @@ class ReportTests(unittest.TestCase):
                     initialize={"protocolVersion": 1},
                     session_new=session_new,
                     notifications=[],
-                    set_results=[
-                        {"method": "session/set_model", "status": "ok"}
-                    ],
+                    set_results=[{"method": "session/set_model", "status": "ok"}],
                 )
 
                 self.assertFalse(report["matrix"]["config_options_advertised"])
                 self.assertFalse(report["matrix"]["model_select_advertised"])
                 self.assertFalse(report["matrix"]["effort_select_advertised"])
                 self.assertTrue(report["matrix"]["spur_slash_model"])
-                self.assertEqual(
-                    report["matrix"]["spur_slash_effort"], slash_effort
-                )
+                self.assertEqual(report["matrix"]["spur_slash_effort"], slash_effort)
 
     def test_grouped_select_choices_are_counted(self) -> None:
         option = {
@@ -722,6 +724,510 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(
             args.vendor_method,
             ["_x.ai/sessionConfig/update", "_kiro.dev/metadata"],
+        )
+
+
+class EvidenceContractTests(unittest.TestCase):
+    def protocol_frames(self, arguments: dict) -> list[dict]:
+        frames: list[dict] = []
+
+        def add(direction: str, message: dict) -> None:
+            frames.append(
+                {
+                    "sequence": len(frames),
+                    "direction": direction,
+                    "message": message,
+                }
+            )
+
+        def add_request_result(source: str, index: int, record: dict) -> None:
+            method = record.get("method")
+            if not isinstance(method, str):
+                return
+            request_id = f"{source}-{index}"
+            add(
+                "send",
+                {
+                    "jsonrpc": "2.0",
+                    "id": request_id,
+                    "method": method,
+                    "params": record.get("params") or {},
+                },
+            )
+            response = record.get("response")
+            if isinstance(response, dict):
+                add("recv", {"jsonrpc": "2.0", "id": request_id, **response})
+
+        initialize = arguments.get("initialize")
+        if isinstance(initialize, dict):
+            add(
+                "send",
+                {
+                    "jsonrpc": "2.0",
+                    "id": "initialize",
+                    "method": "initialize",
+                    "params": {"protocolVersion": 1},
+                },
+            )
+            add(
+                "recv",
+                {"jsonrpc": "2.0", "id": "initialize", "result": initialize},
+            )
+        authentication = arguments.get("authentication")
+        if isinstance(authentication, dict):
+            add_request_result("authentication", 0, authentication)
+        session_new = arguments.get("session_new")
+        if isinstance(session_new, dict):
+            add(
+                "send",
+                {
+                    "jsonrpc": "2.0",
+                    "id": "session-new",
+                    "method": "session/new",
+                    "params": {"sessionId": "session-1"},
+                },
+            )
+            add(
+                "recv",
+                {"jsonrpc": "2.0", "id": "session-new", "result": session_new},
+            )
+        for notification in arguments.get("notifications") or []:
+            if isinstance(notification, dict):
+                add("recv", notification)
+        for index, result in enumerate(arguments.get("set_results") or []):
+            if isinstance(result, dict):
+                add_request_result("set", index, result)
+        prompt_result = arguments.get("prompt_result")
+        if isinstance(prompt_result, dict):
+            add_request_result("prompt", 0, prompt_result)
+        for index, result in enumerate(arguments.get("vendor_rpc_results") or []):
+            if isinstance(result, dict):
+                add_request_result("vendor", index, result)
+        return frames
+
+    def build_contract_report(self, **overrides: object) -> dict:
+        arguments = {
+            "probed_at": "2026-09-01T10:00:00+00:00",
+            "cmd": ["agent", "acp"],
+            "cwd": "/tmp/worktree",
+            "version": "agent 9.0.0",
+            "initialize": {"protocolVersion": 1},
+            "session_new": {"sessionId": "session-1"},
+            "notifications": [],
+            "set_results": [],
+        }
+        arguments.update(overrides)
+        if "protocol_frames" not in arguments:
+            arguments["protocol_frames"] = self.protocol_frames(arguments)
+        return probe.build_report(**arguments)
+
+    def artifact(self, report: dict) -> dict:
+        artifact = report.get("artifact")
+        self.assertIsInstance(artifact, dict)
+        assert isinstance(artifact, dict)
+        return artifact
+
+    def test_report_adds_versioned_identity_raw_claim_and_fixture_contract(
+        self,
+    ) -> None:
+        report = self.build_contract_report(
+            notifications=[
+                {
+                    "method": "session/update",
+                    "params": {
+                        "update": {
+                            "sessionUpdate": "available_commands_update",
+                            "availableCommands": [{"name": "future-command"}],
+                        }
+                    },
+                }
+            ]
+        )
+
+        artifact = self.artifact(report)
+        self.assertEqual(artifact["schema"], "spur.acp-capability-probe")
+        self.assertEqual(artifact["version"], 1)
+        self.assertEqual(
+            set(artifact["cli_identity"]),
+            {
+                "resolved_executable",
+                "upstream_version",
+                "argv_fingerprint",
+                "environment_fingerprint",
+            },
+        )
+        raw = artifact["raw"]
+        self.assertEqual(raw["digest_algorithm"], "sha256")
+        self.assertTrue(raw["frames"])
+        for frame in raw["frames"]:
+            digest = frame["digest"]
+            self.assertRegex(digest, r"^sha256:[0-9a-f]{64}$")
+            self.assertIn(digest, raw["payloads_by_digest"])
+            self.assertEqual(raw["payloads_by_digest"][digest], frame["message"])
+        for claim in artifact["claims"]:
+            self.assertIn(claim["raw_digest"], raw["payloads_by_digest"])
+        self.assertEqual(artifact["fixture"]["schema"], "spur.acp-capability-fixture")
+        self.assertEqual(artifact["fixture"]["version"], 1)
+        self.assertRegex(artifact["fixture"]["digest"], r"^sha256:[0-9a-f]{64}$")
+
+    def test_fixture_replays_interleaved_protocol_frames_in_exact_wire_order(
+        self,
+    ) -> None:
+        protocol_frames = [
+            {
+                "sequence": 0,
+                "direction": "send",
+                "message": {
+                    "jsonrpc": "2.0",
+                    "id": "initialize-1",
+                    "method": "initialize",
+                    "params": {"protocolVersion": 1},
+                },
+            },
+            {
+                "sequence": 1,
+                "direction": "recv",
+                "message": {
+                    "jsonrpc": "2.0",
+                    "id": "initialize-1",
+                    "result": {
+                        "configOptions": [
+                            select_option(
+                                "wire-model",
+                                category="model",
+                                values=("model-from-wire",),
+                            )
+                        ]
+                    },
+                },
+            },
+            {
+                "sequence": 2,
+                "direction": "recv",
+                "message": {
+                    "jsonrpc": "2.0",
+                    "method": "session/update",
+                    "params": {"update": {"sessionUpdate": "agent_message_chunk"}},
+                },
+            },
+            {
+                "sequence": 3,
+                "direction": "recv",
+                "message": {
+                    "jsonrpc": "2.0",
+                    "id": "permission-1",
+                    "method": "session/request_permission",
+                    "params": {"options": []},
+                },
+            },
+            {
+                "sequence": 4,
+                "direction": "send",
+                "message": {
+                    "jsonrpc": "2.0",
+                    "id": "permission-1",
+                    "result": {"outcome": {"outcome": "selected"}},
+                },
+            },
+        ]
+
+        fixture = self.artifact(
+            self.build_contract_report(protocol_frames=protocol_frames)
+        )["fixture"]
+        raw = fixture["raw"]
+
+        self.assertNotIn("observations", raw)
+        self.assertEqual(
+            [
+                (frame["sequence"], frame["direction"], frame["message"])
+                for frame in raw["frames"]
+            ],
+            [
+                (frame["sequence"], frame["direction"], frame["message"])
+                for frame in protocol_frames
+            ],
+        )
+        for frame in raw["frames"]:
+            self.assertEqual(
+                raw["payloads_by_digest"][frame["digest"]], frame["message"]
+            )
+        wire_claim = next(
+            claim
+            for claim in fixture["claims"]
+            if claim["capability"] == {"kind": "model", "id": "model-from-wire"}
+        )
+        self.assertEqual(wire_claim["raw_digest"], raw["frames"][1]["digest"])
+
+    def test_standard_and_vendor_session_planes_have_distinct_provenance(
+        self,
+    ) -> None:
+        report = self.build_contract_report(
+            session_new={
+                "sessionId": "session-1",
+                "configOptions": [
+                    select_option(
+                        "standard-model",
+                        category="model",
+                        values=("standard-model-id",),
+                    )
+                ],
+                "modes": {"availableModes": [{"id": "standard-mode-id"}]},
+                "models": {
+                    "availableModels": [{"modelId": "kiro-model-id"}]
+                },
+                "_meta": {
+                    "modelState": {
+                        "availableModels": [{"modelId": "meta-model-id"}]
+                    }
+                },
+            }
+        )
+
+        provenance = {
+            (claim["capability"]["kind"], claim["capability"]["id"]): claim[
+                "provenance"
+            ]
+            for claim in self.artifact(report)["claims"]
+            if claim["claim"] == "advertised"
+        }
+        self.assertEqual(
+            provenance[("model", "standard-model-id")], "standard_advertisement"
+        )
+        self.assertEqual(
+            provenance[("mode", "standard-mode-id")], "standard_advertisement"
+        )
+        self.assertEqual(
+            provenance[("model", "kiro-model-id")], "vendor_advertisement"
+        )
+        self.assertEqual(
+            provenance[("model", "meta-model-id")], "vendor_advertisement"
+        )
+
+    def test_recipe_existence_alone_does_not_claim_method_support(self) -> None:
+        options_method = "_vendor/commands/future-model/options"
+        report = self.build_contract_report(
+            notifications=[
+                {
+                    "method": "_vendor/commands/available",
+                    "params": {
+                        "commands": [
+                            {
+                                "name": "/future-model",
+                                "meta": {"optionsMethod": options_method},
+                            }
+                        ]
+                    },
+                }
+            ]
+        )
+
+        claims = self.artifact(report)["claims"]
+        recipe_claims = [
+            claim
+            for claim in claims
+            if claim["capability"] == {"kind": "method", "id": options_method}
+        ]
+        self.assertEqual(recipe_claims, [])
+        self.assertIn(
+            ("command", "/future-model", "advertised", "vendor_advertisement"),
+            {
+                (
+                    claim["capability"]["kind"],
+                    claim["capability"]["id"],
+                    claim["claim"],
+                    claim["provenance"],
+                )
+                for claim in claims
+            },
+        )
+
+    def test_dynamic_choice_ids_come_from_payload_evidence(self) -> None:
+        report = self.build_contract_report(
+            initialize={
+                "_meta": {
+                    "modelState": {
+                        "availableModels": [
+                            {
+                                "modelId": "model-from-init-payload",
+                                "_meta": {
+                                    "reasoningEfforts": [
+                                        {"id": "effort-from-init-payload"}
+                                    ]
+                                },
+                            }
+                        ]
+                    }
+                }
+            },
+            session_new={
+                "sessionId": "session-1",
+                "models": {
+                    "availableModels": [{"modelId": "model-from-session-payload"}]
+                },
+                "modes": {"availableModes": [{"id": "mode-from-session-payload"}]},
+                "configOptions": [
+                    select_option(
+                        "dynamic-effort",
+                        category="thought_level",
+                        values=("effort-from-config-payload",),
+                    )
+                ],
+            },
+            notifications=[
+                {
+                    "method": "session/update",
+                    "params": {
+                        "update": {
+                            "sessionUpdate": "available_commands_update",
+                            "availableCommands": [
+                                {"name": "command-from-notification-payload"}
+                            ],
+                        }
+                    },
+                }
+            ],
+        )
+
+        observed = {
+            (claim["capability"]["kind"], claim["capability"]["id"])
+            for claim in self.artifact(report)["claims"]
+            if claim["claim"] == "advertised"
+        }
+        self.assertTrue(
+            {
+                ("model", "model-from-init-payload"),
+                ("model", "model-from-session-payload"),
+                ("effort", "effort-from-init-payload"),
+                ("effort", "effort-from-config-payload"),
+                ("mode", "mode-from-session-payload"),
+                ("command", "command-from-notification-payload"),
+            }.issubset(observed)
+        )
+
+    def test_active_probe_outcomes_and_prompt_fallback_have_distinct_claims(
+        self,
+    ) -> None:
+        report = self.build_contract_report(
+            set_results=[
+                {
+                    "method": "session/set_model",
+                    "status": "ok",
+                    "response": {"result": {}},
+                },
+                {
+                    "method": "session/set_mode",
+                    "status": "error",
+                    "response": {"error": {"code": -32602, "message": "bad mode"}},
+                },
+            ],
+            prompt_result={
+                "method": "session/prompt",
+                "status": "ok",
+                "response": {"result": {}},
+            },
+        )
+
+        claims = {
+            (claim["capability"]["id"], claim["claim"], claim["provenance"])
+            for claim in self.artifact(report)["claims"]
+        }
+        self.assertIn(
+            ("session/set_model", "accepted", "accepted_active_probe"), claims
+        )
+        self.assertIn(("session/set_mode", "rejected", "rejected_active_probe"), claims)
+        self.assertIn(("session/prompt", "prompt_fallback", "prompt_fallback"), claims)
+
+    def test_authentication_and_timeout_are_inconclusive(self) -> None:
+        report = self.build_contract_report(
+            authentication={
+                "method": "authenticate",
+                "status": "error",
+                "response": {
+                    "error": {"code": -32001, "message": "Authentication required"}
+                },
+            },
+            set_results=[
+                {
+                    "method": "session/set_config_option",
+                    "status": "timeout",
+                    "response": None,
+                }
+            ],
+            hard_failure="transport closed while authentication was required",
+        )
+
+        inconclusive = {
+            (claim["source"], claim["capability"]["id"])
+            for claim in self.artifact(report)["claims"]
+            if claim["claim"] == "inconclusive"
+            and claim["provenance"] == "inconclusive_failure"
+        }
+        self.assertIn(("authentication", "authenticate"), inconclusive)
+        self.assertIn(("set_result", "session/set_config_option"), inconclusive)
+        self.assertIn(("hard_failure", "probe"), inconclusive)
+
+    def test_report_and_fixture_redact_secrets_before_digesting(self) -> None:
+        secrets = (
+            "cli-super-secret",
+            "header-super-secret",
+            "payload-super-secret",
+            "api-super-secret",
+            "message-super-secret",
+        )
+        report = self.build_contract_report(
+            cmd=[
+                "agent",
+                "--token",
+                secrets[0],
+                "--header",
+                f"Authorization: Bearer {secrets[1]}",
+            ],
+            initialize={
+                "token": secrets[2],
+                "nested": {
+                    "apiKey": secrets[3],
+                    "message": f"token={secrets[4]}",
+                },
+            },
+            hard_failure=f"authentication failed token={secrets[4]}",
+        )
+
+        encoded = probe.json.dumps(report, sort_keys=True)
+        for secret in secrets:
+            self.assertNotIn(secret, encoded)
+        self.assertIn("<redacted>", encoded)
+
+    def test_raw_frame_log_redacts_secrets(self) -> None:
+        client = object.__new__(probe.AcpClient)
+        client._log_lock = probe.threading.Lock()
+        client._log_file = io.StringIO()
+        client.protocol_frames = []
+
+        client._log(
+            "recv",
+            {
+                "authorization": "Bearer raw-frame-secret",
+                "message": "token=raw-message-secret",
+            },
+        )
+
+        logged = client._log_file.getvalue()
+        self.assertNotIn("raw-frame-secret", logged)
+        self.assertNotIn("raw-message-secret", logged)
+        self.assertIn("<redacted>", logged)
+        self.assertEqual(client.protocol_frames[0]["sequence"], 0)
+        self.assertEqual(client.protocol_frames[0]["direction"], "recv")
+        self.assertNotIn(
+            "raw-frame-secret", probe.json.dumps(client.protocol_frames)
+        )
+
+    def test_fixture_material_is_independent_of_probe_timestamp(self) -> None:
+        first = self.build_contract_report(probed_at="2026-09-01T10:00:00+00:00")
+        second = self.build_contract_report(probed_at="2026-09-01T11:00:00+00:00")
+
+        self.assertEqual(
+            self.artifact(first)["fixture"],
+            self.artifact(second)["fixture"],
         )
 
 
