@@ -1,7 +1,9 @@
 use spur_tui::action::Action;
 
 #[test]
-fn mode_toggle_action_exists() {
-    // Compiles ⇒ the variant exists. End-to-end wiring is smoke-tested manually.
-    let _ = Action::TogglePlanMode;
+fn set_session_mode_action_exists() {
+    // Compiles ⇒ the capability-derived mode action remains public.
+    let _ = Action::SetSessionMode {
+        mode_id: "agent".into(),
+    };
 }

@@ -97,7 +97,7 @@ pub fn render_tombstone_badge(
 /// already in progress.
 ///
 /// Key labels match real bindings:
-/// - `Alt-m` toggles plan mode
+/// - `Alt-m` cycles the agent's advertised session modes
 /// - `Alt-d` toggles the inline workers panel (not global `Alt-g` InspectWorkers)
 /// - `Ctrl-r` opens input history
 pub(crate) fn hint_for_session_detail(
@@ -105,9 +105,9 @@ pub(crate) fn hint_for_session_detail(
     esc_consumed_by_composer: bool,
 ) -> &'static str {
     if stream_in_flight && !esc_consumed_by_composer {
-        " [Enter]send [Esc]stop [j/k]scroll [Alt-m]plan [Alt-d]workers [Ctrl-r]history [?]help"
+        " [Enter]send [Esc]stop [j/k]scroll [Alt-m]mode [Alt-d]workers [Ctrl-r]history [?]help"
     } else {
-        " [Enter]send [Esc]back [j/k]scroll [Alt-m]plan [Alt-d]workers [Ctrl-r]history [?]help"
+        " [Enter]send [Esc]back [j/k]scroll [Alt-m]mode [Alt-d]workers [Ctrl-r]history [?]help"
     }
 }
 
@@ -119,9 +119,9 @@ pub(crate) fn hint_for_session_detail_compact(
     esc_consumed_by_composer: bool,
 ) -> &'static str {
     if stream_in_flight && !esc_consumed_by_composer {
-        " [Enter]send [Esc]stop [Alt-m]plan [Alt-d]workers [?]help"
+        " [Enter]send [Esc]stop [Alt-m]mode [Alt-d]workers [?]help"
     } else {
-        " [Enter]send [Esc]back [Alt-m]plan [Alt-d]workers [?]help"
+        " [Enter]send [Esc]back [Alt-m]mode [Alt-d]workers [?]help"
     }
 }
 

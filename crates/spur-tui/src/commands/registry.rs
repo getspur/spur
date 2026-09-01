@@ -5,6 +5,11 @@ use super::entry::{CommandEntry, CommandSource, Dispatch};
 use super::spur_local::SpurLocalSource;
 use spur_acp::{AgentConfig, SpurAgentCaps};
 
+/// Names whose behavior is owned by a capability-derived SPUR command.
+/// Agent prompt commands with these names stay hidden even before the
+/// capability catalog arrives, so they cannot bypass native validation.
+const CAPABILITY_OWNED_NAMES: &[&str] = &["mode"];
+
 /// Merges spur-local, static (config), and dynamic (runtime) slash
 /// commands.
 ///
@@ -133,6 +138,8 @@ impl CommandRegistry {
         // with agent entries of the same name (collision-display applies).
         let exclusive_names: HashSet<&str> =
             SpurLocalSource::exclusive_names().iter().copied().collect();
+        let capability_owned_names: HashSet<&str> =
+            CAPABILITY_OWNED_NAMES.iter().copied().collect();
 
         let mut entries = spur_local_entries;
 
@@ -141,7 +148,9 @@ impl CommandRegistry {
         // spur-local exclusive meta-command.
         for (handle, statics) in &self.static_commands {
             for s in statics {
-                if exclusive_names.contains(s.name.as_str()) {
+                if exclusive_names.contains(s.name.as_str())
+                    || capability_owned_names.contains(s.name.as_str())
+                {
                     continue;
                 }
                 if !dynamic_index.contains_key(&(handle.as_str(), s.name.as_str())) {
@@ -154,7 +163,9 @@ impl CommandRegistry {
         // exclusive meta-command.
         for (_handle, dyn_entries) in &self.dynamic_commands {
             for e in dyn_entries {
-                if exclusive_names.contains(e.name.as_str()) {
+                if exclusive_names.contains(e.name.as_str())
+                    || capability_owned_names.contains(e.name.as_str())
+                {
                     continue;
                 }
                 entries.push(e.clone());

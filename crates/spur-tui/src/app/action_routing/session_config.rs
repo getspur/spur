@@ -190,31 +190,6 @@ impl App {
                 None
             }
 
-            Action::TogglePlanMode => {
-                // Cycle between "plan" and "default". If mode is unknown, assume
-                // we're in "default" and jump to "plan".
-                let current = self
-                    .session_detail
-                    .as_ref()
-                    .and_then(|d| d.current_mode.as_deref());
-                let next = match current {
-                    Some("plan") => "default",
-                    _ => "plan",
-                };
-                if let Some(ref tx) = self.user_input_tx {
-                    let _ = tx.try_send(UserInput::SetSessionMode {
-                        mode_id: next.to_string(),
-                    });
-                }
-                // Optimistic update so the status bar reflects the toggle
-                // immediately; orchestrator will emit CurrentModeUpdate to
-                // reconcile if the agent rejects the mode id.
-                if let Some(ref mut detail) = self.session_detail {
-                    detail.set_current_mode(Some(next.to_string()));
-                }
-                None
-            }
-
             Action::ToggleVimMode => {
                 let next = match self.edit_mode {
                     EditMode::Emacs => EditorMode::Vim,

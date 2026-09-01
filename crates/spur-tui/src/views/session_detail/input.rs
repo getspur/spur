@@ -78,10 +78,27 @@ impl SessionDetailView {
             return None;
         }
 
-        // Alt-m → cycle session mode between "default" and "plan".
-        // Matched early so it works even while the input bar has focus.
+        // Alt-m → cycle through the active agent's advertised session modes.
+        // Matched early so it works even while the input bar has focus, but
+        // stays inert when the agent did not advertise a mode catalog.
         if matches!(key.code, KeyCode::Char('m')) && key.modifiers.contains(KeyModifiers::ALT) {
-            return Some(Action::TogglePlanMode);
+            let modes = &self
+                .spur_agent_caps
+                .as_ref()?
+                .modes
+                .as_ref()?
+                .available_modes;
+            if modes.is_empty() {
+                return None;
+            }
+            let next_index = self
+                .current_mode
+                .as_deref()
+                .and_then(|current| modes.iter().position(|mode| mode.id.0.as_ref() == current))
+                .map_or(0, |index| (index + 1) % modes.len());
+            return Some(Action::SetSessionMode {
+                mode_id: modes[next_index].id.0.to_string(),
+            });
         }
 
         // Alt+s → open session picker. Mirrored by the /sessions slash command.
