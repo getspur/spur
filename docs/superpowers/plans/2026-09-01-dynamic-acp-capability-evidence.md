@@ -2,7 +2,11 @@
 
 **Approved spec:** `docs/superpowers/specs/2026-09-01-dynamic-acp-capability-evidence-design.ipynb`  
 **Design epic:** `bd-j5kb` (closed)  
-**Implementation epic:** `bd-fh8n`  
+**Implementation source epic:** `bd-fh8n`
+
+**Execution epic:** `bd-2tck`
+
+**Execution plan:** `8a0b5d1c-97e8-45c2-bb38-05f3876fd663`
 **DAG label:** `spur:impl-dynamic-acp-v1`  
 **Worker routing:** user-selected `codex`, model `gpt-5.6-sol`, effort `xhigh`
 
@@ -26,12 +30,24 @@ The migration remains staged. Legacy behavior stays available as a bounded shado
 ## Dependency graph
 
 ```text
-bd-1tc4 probe contract ----+
-                            +--> bd-30s6 isolated cache --+
-bd-b61n evidence kernel ---+                             |
-        |                                                +--> bd-24no TUI routing --> bd-2f4b live replay
-        +----------------------> bd-3ah7 raw capture -----+
+bd-1tc4 probe contract ------------------------------+
+                                                       +--> bd-30s6 isolated cache --+
+bd-b61n evidence kernel --> bd-3ah7 raw capture ------+                              |
+                                |                                                     +--> bd-24no TUI routing --> bd-2f4b live replay
+                                +-----------------------------------------------------+
 ```
+
+The submitted plan materializes separate execution beads while retaining the
+stable task IDs used below:
+
+| Task ID | Execution bead |
+|---|---|
+| `bd-1tc4` | `bd-2ntt` |
+| `bd-b61n` | `bd-3196` |
+| `bd-3ah7` | `bd-2fb2` |
+| `bd-30s6` | `bd-2ixh` |
+| `bd-24no` | `bd-q9eg` |
+| `bd-2f4b` | `bd-331w` |
 
 ## Task 1 — `bd-1tc4`: Freeze provider-neutral probe and fixture contract
 
@@ -96,7 +112,7 @@ bd-b61n evidence kernel ---+                             |
 
 ## Task 4 — `bd-30s6`: Evolve the model catalog into an isolated evidence cache
 
-**Depends on:** `bd-1tc4`, `bd-b61n`
+**Depends on:** `bd-1tc4`, `bd-b61n`, `bd-3ah7`
 
 **Owned writes**
 
