@@ -881,9 +881,12 @@ terraform apply \
 The context-service GitHub Actions workflow lives at
 `.github/workflows/context-service.yml`.
 
-Pull requests and pushes that touch this service run:
+Pull requests and pushes that touch this service run both deployable serving
+feature closures independently (the Code closure deliberately excludes the
+DuckDB-bearing Knowledge/service closure):
 
-- `scripts/spur-cargo --workdir crates/spur-context-service test --all-features`
+- `scripts/spur-cargo --workdir crates/spur-context-service test --no-default-features --features code-lambda --lib`
+- `scripts/spur-cargo --workdir crates/spur-context-service test --no-default-features --features knowledge-lambda`
 - deploy-script guardrails in `tests/scripts/test_spur_context_service_deploy.py`
 - `infra/spur-context-service/test-graviton2-baseline.sh`
 
@@ -911,7 +914,8 @@ Required repository/environment configuration:
 |---|---|---|
 | `CONTEXT_SERVICE_AWS_ROLE_ARN` | secret | AWS role assumed by GitHub OIDC for ECR, Lambda, S3, and smoke access |
 | `CONTEXT_SERVICE_AWS_REGION` | variable | AWS region, defaults to `ap-southeast-5` |
-| `CONTEXT_SERVICE_STAGING_LAMBDA` | variable | Staging serving Lambda name for the smoke test |
+| `CONTEXT_SERVICE_STAGING_CODE_LAMBDA` | variable | Staging Code Lambda name, defaults to `spur-context-code` |
+| `CONTEXT_SERVICE_STAGING_KNOWLEDGE_LAMBDA` | variable | Staging Knowledge Lambda name, defaults to `spur-context-knowledge` |
 | `CONTEXT_SERVICE_STAGING_SOURCE_BUCKET` | variable | Bucket where the smoke uploads its tiny source tarball |
 | `CONTEXT_SERVICE_STAGING_DATA_BUCKET` | variable | Bucket containing bronze, silver, and gold medallion objects |
 
@@ -921,7 +925,8 @@ Run the staging smoke locally after authenticating to AWS:
 
 ```bash
 export AWS_REGION=ap-southeast-5
-export SPUR_CONTEXT_SMOKE_LAMBDA=spur-context-service
+export SPUR_CONTEXT_SMOKE_CODE_LAMBDA=spur-context-code
+export SPUR_CONTEXT_SMOKE_KNOWLEDGE_LAMBDA=spur-context-knowledge
 export SPUR_CONTEXT_SMOKE_SOURCE_BUCKET=spur-context-staging
 export SPUR_CONTEXT_SMOKE_DATA_BUCKET=spur-context-staging
 

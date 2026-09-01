@@ -47,8 +47,8 @@ env:
   AWS_DEFAULT_REGION: ${{ vars.CONTEXT_SERVICE_AWS_REGION || 'ap-southeast-5' }}
 
 jobs:
-  crate-all-features:
-    name: crate test --all-features
+  crate-serving-features:
+    name: crate test deployable serving features
     runs-on: ubuntu-24.04
     env:
       SPUR_REMOTE: "0"
@@ -63,14 +63,20 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           cache: false
+          # Preserve the repository lint levels. The action defaults to
+          # `-D warnings`, which breaks feature-specific dependency builds on
+          # intentional dead-code warnings before this job reaches its tests.
+          rustflags: ""
       - name: Cache ~/.cargo
         uses: Swatinem/rust-cache@v2
         with:
           cache-targets: false
           workspaces: crates/spur-context-service -> target
           shared-key: context-service
-      - name: Run context-service all-features suite
-        run: scripts/spur-cargo --workdir crates/spur-context-service test --all-features
+      - name: Test Code Lambda feature closure
+        run: scripts/spur-cargo --workdir crates/spur-context-service test --no-default-features --features code-lambda --lib
+      - name: Test Knowledge Lambda feature closure
+        run: scripts/spur-cargo --workdir crates/spur-context-service test --no-default-features --features knowledge-lambda
 
   script-guards:
     name: deploy + workflow guardrails
@@ -121,18 +127,18 @@ jobs:
           name: spur-context-service-worker-images
           path: target/lambda/*worker*image.tar
           if-no-files-found: error
-      - name: Upload serving Lambda zip
+      - name: Upload serving Lambda zips
         uses: actions/upload-artifact@v4
         with:
-          name: spur-context-service-lambda-zip
-          path: target/lambda/spur-context-service.zip
+          name: spur-context-service-lambda-zips
+          path: target/lambda/spur-context-*-lambda.zip
           if-no-files-found: error
 
   staging-smoke:
     name: staging medallion smoke
     runs-on: ubuntu-24.04
     needs:
-      - crate-all-features
+      - crate-serving-features
       - script-guards
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_staging_smoke }}
     environment: context-service-staging
@@ -140,7 +146,8 @@ jobs:
       contents: read
       id-token: write
     env:
-      SPUR_CONTEXT_SMOKE_LAMBDA: ${{ vars.CONTEXT_SERVICE_STAGING_LAMBDA }}
+      SPUR_CONTEXT_SMOKE_CODE_LAMBDA: ${{ vars.CONTEXT_SERVICE_STAGING_CODE_LAMBDA || 'spur-context-code' }}
+      SPUR_CONTEXT_SMOKE_KNOWLEDGE_LAMBDA: ${{ vars.CONTEXT_SERVICE_STAGING_KNOWLEDGE_LAMBDA || 'spur-context-knowledge' }}
       SPUR_CONTEXT_SMOKE_SOURCE_BUCKET: ${{ vars.CONTEXT_SERVICE_STAGING_SOURCE_BUCKET }}
       SPUR_CONTEXT_SMOKE_DATA_BUCKET: ${{ vars.CONTEXT_SERVICE_STAGING_DATA_BUCKET }}
       SPUR_CONTEXT_SMOKE_S3_PREFIX: ci/context-service-smoke/${{ github.run_id }}
@@ -179,10 +186,10 @@ jobs:
   #       whole job: EC2 describe/run/terminate + iam:PassRole on spur-builder
   #       + ssm:StartSession + S3 RW on the sccache bucket (the
   #       AWS_RELEASE_ROLE_ARN shape from release-dist.yml), plus
-  #       ecr:DescribeRepositories, lambda:UpdateFunctionCode /
-  #       GetFunctionConfiguration on the staging serving Lambda, and the
-  #       preflight's read access (data bucket + sts). MaxSessionDuration must
-  #       cover role-duration-seconds below.
+  #       ecr:DescribeRepositories, lambda:UpdateFunctionCode on Code,
+  #       lambda:GetFunctionConfiguration on both staging serving Lambdas, and
+  #       the preflight's read access (data bucket + sts). MaxSessionDuration
+  #       must cover role-duration-seconds below.
   #   vars.SPUR_BUILDER_AMI_ID — optional golden AMI for fast VM boots.
   release-staging:
     name: release serving Lambda to staging
@@ -190,7 +197,7 @@ jobs:
     timeout-minutes: 120
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     needs:
-      - crate-all-features
+      - crate-serving-features
       - script-guards
     environment: context-service-staging
     permissions:
@@ -216,7 +223,8 @@ jobs:
       # and any concurrent run, and makes teardown surgical.
       VM_NAME: spur-ctx-release-${{ github.run_id }}
       AWS_AMI_ID: ${{ vars.SPUR_BUILDER_AMI_ID }}
-      SPUR_CONTEXT_SMOKE_LAMBDA: ${{ vars.CONTEXT_SERVICE_STAGING_LAMBDA }}
+      SPUR_CONTEXT_SMOKE_CODE_LAMBDA: ${{ vars.CONTEXT_SERVICE_STAGING_CODE_LAMBDA || 'spur-context-code' }}
+      SPUR_CONTEXT_SMOKE_KNOWLEDGE_LAMBDA: ${{ vars.CONTEXT_SERVICE_STAGING_KNOWLEDGE_LAMBDA || 'spur-context-knowledge' }}
       SPUR_CONTEXT_SMOKE_SOURCE_BUCKET: ${{ vars.CONTEXT_SERVICE_STAGING_SOURCE_BUCKET }}
       SPUR_CONTEXT_SMOKE_DATA_BUCKET: ${{ vars.CONTEXT_SERVICE_STAGING_DATA_BUCKET }}
     steps:
@@ -261,30 +269,30 @@ jobs:
         run: scripts/cloud-build/spin.sh
       - name: Build and push worker images from the VM (immutable tag + latest pointer)
         run: infra/spur-context-service/build-and-push-remote.sh
-      - name: Package serving Lambda artifact
+      - name: Package serving Lambda artifacts
         run: infra/spur-context-service/deploy.sh --skip-worker --package-only
-      - name: Release serving Lambda code
+      - name: Release Code Lambda
         # The zip exceeds UpdateFunctionCode's ~70 MB inline payload limit, so
         # stage it in S3 first, reusing the content-addressed key shape of the
-        # Terraform deploy path (aws_s3_object.lambda_zip in main.tf).
+        # Terraform Code Lambda deploy path (aws_s3_object.code_lambda_zip).
         run: |
-          zip_path=target/lambda/spur-context-service.zip
+          zip_path=target/lambda/spur-context-code-lambda.zip
           zip_md5=$(md5sum "$zip_path" | cut -d' ' -f1)
-          s3_key="lambda/spur-context-service-${zip_md5}.zip"
-          aws s3 cp target/lambda/spur-context-service.zip "s3://$SPUR_CONTEXT_SMOKE_DATA_BUCKET/$s3_key"
+          s3_key="lambda/spur-context-code-${zip_md5}.zip"
+          aws s3 cp "$zip_path" "s3://$SPUR_CONTEXT_SMOKE_DATA_BUCKET/$s3_key"
           aws lambda update-function-code \
-            --function-name "$SPUR_CONTEXT_SMOKE_LAMBDA" \
+            --function-name "$SPUR_CONTEXT_SMOKE_CODE_LAMBDA" \
             --s3-bucket "$SPUR_CONTEXT_SMOKE_DATA_BUCKET" \
             --s3-key "$s3_key" \
             --publish > /tmp/update-function-code.json
           aws lambda wait function-updated-v2 \
-            --function-name "$SPUR_CONTEXT_SMOKE_LAMBDA"
+            --function-name "$SPUR_CONTEXT_SMOKE_CODE_LAMBDA"
           python3 -c 'import json; r = json.load(open("/tmp/update-function-code.json")); print("released", r["FunctionName"], "version", r["Version"], "sha256", r["CodeSha256"])'
-      - name: Upload released Lambda zip
+      - name: Upload released Code Lambda zip
         uses: actions/upload-artifact@v4
         with:
-          name: spur-context-service-release-zip
-          path: target/lambda/spur-context-service.zip
+          name: spur-context-code-release-zip
+          path: target/lambda/spur-context-code-lambda.zip
           if-no-files-found: error
       - name: Verify serving plane (non-ingesting preflight)
         run: python3 infra/spur-context-service/smoke-staging-e2e.py --preflight

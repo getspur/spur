@@ -13,6 +13,7 @@ DEPLOY_SH = ROOT / "infra" / "spur-context-service" / "deploy.sh"
 REMOTE_BUILD_SH = ROOT / "infra" / "spur-context-service" / "build-and-push-remote.sh"
 INFRA_DIR = ROOT / "infra" / "spur-context-service"
 VERSIONS_TF = INFRA_DIR / "versions.tf"
+GRAVITON_BASELINE_GUARD = INFRA_DIR / "test-graviton2-baseline.sh"
 CONTEXT_SERVICE_WORKFLOW = ROOT / ".github" / "workflows" / "context-service.yml"
 STAGING_SMOKE = INFRA_DIR / "smoke-staging-e2e.py"
 STAGING_SMOKE_ENTRYPOINT = INFRA_DIR / "smoke-staging-e2e.sh"
@@ -835,6 +836,14 @@ def test_deploy_builds_named_serving_lambdas_from_exact_feature_closures():
     assert "build --features lambda --release" not in script
 
 
+def test_graviton_guard_tracks_both_split_serving_lambdas():
+    guard = GRAVITON_BASELINE_GUARD.read_text()
+
+    assert 'run_graviton2_safe_cargo "Code Lambda bootstrap"' in guard
+    assert 'run_graviton2_safe_cargo "Knowledge Lambda bootstrap"' in guard
+    assert 'run_graviton2_safe_cargo "serving Lambda bootstrap"' not in guard
+
+
 def test_code_lambda_defaults_to_independent_256_mb_memory():
     variables_tf = (INFRA_DIR / "variables.tf").read_text()
     main_tf = (INFRA_DIR / "main.tf").read_text()
@@ -1317,11 +1326,27 @@ def test_remote_docker_build_accepts_multiple_remote_binaries():
 
 def test_context_service_workflow_runs_tests_and_gated_aws_artifacts():
     workflow = CONTEXT_SERVICE_WORKFLOW.read_text()
+    assert "crate-serving-features:" in workflow
+    crate_job = workflow.split("crate-serving-features:", 1)[1].split(
+        "script-guards:", 1
+    )[0]
+    code_test = (
+        "scripts/spur-cargo --workdir crates/spur-context-service test "
+        "--no-default-features --features code-lambda --lib"
+    )
+    knowledge_test = (
+        "scripts/spur-cargo --workdir crates/spur-context-service test "
+        "--no-default-features --features knowledge-lambda"
+    )
 
     assert "workflow_dispatch:" in workflow
     assert "build_aws_artifacts:" in workflow
     assert "run_staging_smoke:" in workflow
-    assert "scripts/spur-cargo --workdir crates/spur-context-service test --all-features" in workflow
+    assert code_test in crate_job
+    assert knowledge_test in crate_job
+    assert "--test mcp_test" not in crate_job
+    assert "test --all-features" not in crate_job
+    assert 'rustflags: ""' in crate_job
     assert 'SPUR_CONTEXT_SERVICE_BUILD_MODE: "self-contained"' in workflow
     assert 'SPUR_CONTEXT_SERVICE_PUSH_IMAGES: "0"' in workflow
     assert 'SPUR_REMOTE: "1"' not in workflow.split("build-aws-artifacts:", 1)[1].split("staging-smoke:", 1)[0]
@@ -1331,6 +1356,8 @@ def test_context_service_workflow_runs_tests_and_gated_aws_artifacts():
     assert "infra/spur-context-service/deploy.sh --skip-worker --package-only" in workflow
     assert "spur-context-service-worker-images" in workflow
     assert "target/lambda/*worker*image.tar" in workflow
+    assert "spur-context-service-lambda-zips" in workflow
+    assert "target/lambda/spur-context-*-lambda.zip" in workflow
     assert "infra/spur-context-service/smoke-staging-e2e.py" in workflow
     assert "CONTEXT_SERVICE_AWS_ROLE_ARN" in workflow
     assert "context-service-staging" in workflow
@@ -1349,7 +1376,7 @@ def test_context_service_workflow_releases_serving_lambda_on_main_push():
     # after the test and guardrail jobs, behind the staging environment.
     assert "github.event_name == 'push'" in release
     assert "github.ref == 'refs/heads/main'" in release
-    assert "crate-all-features" in release
+    assert "crate-serving-features" in release
     assert "script-guards" in release
     assert "environment: context-service-staging" in release
     assert "id-token: write" in release
@@ -1385,26 +1412,30 @@ def test_context_service_workflow_releases_serving_lambda_on_main_push():
     assert "setup-buildx-action" not in release
 
     # Code-only rollout through the canonical deploy path: worker images pushed
-    # from the VM (immutable tag + latest pointer), zip packaged from the
-    # fetched legacy serving binary, then update-function-code on the staging
-    # function. Task 14 owns publishing the named packages and advancing the
-    # Knowledge alias; this guard deliberately does not model that later cutover.
+    # from the VM (immutable tag + latest pointer), split serving zips packaged,
+    # then update-function-code deploys only the staging Code Lambda. Knowledge
+    # stays pinned because this release is for the Arrow-native code backend.
     assert "infra/spur-context-service/build-and-push-remote.sh" in release
     assert (
         "infra/spur-context-service/deploy.sh --skip-worker --package-only"
         in release
     )
-    assert "aws lambda update-function-code" in release
+    assert release.count("aws lambda update-function-code") == 1
     # The zip exceeds UpdateFunctionCode's ~70 MB inline payload cap, so the
     # rollout stages it in S3 first, reusing terraform's content-addressed
-    # key shape (aws_s3_object.lambda_zip in main.tf).
+    # key shape (aws_s3_object.code_lambda_zip in main.tf).
     assert "--zip-file" not in release
-    assert "aws s3 cp target/lambda/spur-context-service.zip" in release
-    assert "lambda/spur-context-service-" in release
+    assert "zip_path=target/lambda/spur-context-code-lambda.zip" in release
+    assert 'aws s3 cp "$zip_path"' in release
+    assert "lambda/spur-context-code-" in release
     assert "--s3-bucket" in release
     assert "--s3-key" in release
     assert "aws lambda wait function-updated-v2" in release
-    assert "CONTEXT_SERVICE_STAGING_LAMBDA" in release
+    assert "CONTEXT_SERVICE_STAGING_CODE_LAMBDA" in release
+    assert "CONTEXT_SERVICE_STAGING_KNOWLEDGE_LAMBDA" in release
+    assert '--function-name "$SPUR_CONTEXT_SMOKE_CODE_LAMBDA"' in release
+    assert '--function-name "$SPUR_CONTEXT_SMOKE_KNOWLEDGE_LAMBDA"' not in release
+    assert "SPUR_CONTEXT_SMOKE_LAMBDA" not in release
 
     # Worker/source-fetcher live aliases and the ECS taskdef stay pinned:
     # no alias repoint and no terraform from the release job.
@@ -1418,6 +1449,13 @@ def test_context_service_workflow_releases_serving_lambda_on_main_push():
 def test_staging_smoke_codifies_e1_real_worker_and_frozen_serving():
     script = STAGING_SMOKE.read_text()
     readme = (INFRA_DIR / "README.md").read_text()
+
+    assert "CONTEXT_SERVICE_STAGING_CODE_LAMBDA" in readme
+    assert "CONTEXT_SERVICE_STAGING_KNOWLEDGE_LAMBDA" in readme
+    assert "SPUR_CONTEXT_SMOKE_CODE_LAMBDA" in readme
+    assert "SPUR_CONTEXT_SMOKE_KNOWLEDGE_LAMBDA" in readme
+    assert "CONTEXT_SERVICE_STAGING_LAMBDA" not in readme
+    assert "SPUR_CONTEXT_SMOKE_LAMBDA" not in readme
 
     assert "argparse" in script
     assert "--preflight" in script

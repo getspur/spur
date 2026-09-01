@@ -79,8 +79,10 @@ done
 
 grep -q 'graviton2-baseline.sh' "$DEPLOY" \
     || fail "deploy.sh does not source the Graviton2 baseline helper"
-grep -q 'run_graviton2_safe_cargo "serving Lambda bootstrap"' "$DEPLOY" \
-    || fail "serving Lambda bootstrap build is not guarded"
+grep -q 'run_graviton2_safe_cargo "Code Lambda bootstrap"' "$DEPLOY" \
+    || fail "Code Lambda bootstrap build is not guarded"
+grep -q 'run_graviton2_safe_cargo "Knowledge Lambda bootstrap"' "$DEPLOY" \
+    || fail "Knowledge Lambda bootstrap build is not guarded"
 grep -q 'run_graviton2_safe_cargo "Fargate worker binary"' "$DEPLOY" \
     || fail "Fargate worker build is not guarded"
 grep -q 'run_graviton2_safe_cargo "worker Lambda image binary"' "$DEPLOY" \
