@@ -165,12 +165,10 @@ jobs:
   # touches the service (see the workflow paths filter) ships the serving-plane
   # code after the test and guardrail jobs pass.
   #
-  # Builds run on an ephemeral AWS Spot builder, not the runner: deploy.sh's
+  # Builds run on the shared AWS Spot builder pool, not the runner: deploy.sh's
   # default remote mode dispatches the Graviton2-safe compiles through
-  # scripts/spur-cargo to the per-run VM, builds the worker/fetcher images
-  # natively on arm64 there, and pushes them to ECR via the VM instance
-  # profile's spur-ecr-push policy. Only the serving binary is fetched back
-  # for zip packaging. No QEMU, no runner-side docker.
+  # scripts/spur-cargo and fetches the serving binaries back for zip packaging.
+  # No QEMU, runner-side docker, worker build, or ECR mutation is involved.
   #
   # Scope is deliberately code-only — no terraform runs from CI:
   #   - serving Lambda: API Gateway invokes the unqualified function ($LATEST),
@@ -180,13 +178,13 @@ jobs:
   #     Lambda/Fargate/serving skew mid-ingest.
   #
   # Required configuration:
-  #   vars.CONTEXT_SERVICE_RELEASE_ROLE_ARN — OIDC-assumable role covering the
-  #       whole job: shared-pool EC2 describe/run/start + iam:PassRole on spur-builder
-  #       + ssm:StartSession + S3 RW on the sccache bucket (the
-  #       AWS_RELEASE_ROLE_ARN shape from release-dist.yml), plus
-  #       lambda:UpdateFunctionCode on Code, lambda:GetFunctionConfiguration on
-  #       both staging serving Lambdas, and the preflight's read access (data
-  #       bucket + sts). MaxSessionDuration must cover role-duration-seconds.
+  #   vars.AWS_RELEASE_ROLE_ARN — shared-builder role from release-dist.yml,
+  #       covering EC2/SSM and the sccache artifact hop used for packaging.
+  #   vars.CONTEXT_SERVICE_RELEASE_ROLE_ARN — staging deployment role covering
+  #       the Code Lambda update, release zip S3 write, both serving Lambda
+  #       configuration reads, and non-ingesting preflight access. Keeping it
+  #       separate avoids granting the deployment role shared-builder control.
+  #       Both roles' MaxSessionDuration must cover role-duration-seconds.
   #   vars.SPUR_BUILDER_AMI_ID — optional golden AMI for fast VM boots.
   release-staging:
     name: release serving Lambda to staging
@@ -238,13 +236,12 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends zip gzip curl
-      - name: Configure AWS credentials
+      - name: Configure AWS builder credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ vars.CONTEXT_SERVICE_RELEASE_ROLE_ARN }}
+          role-to-assume: ${{ vars.AWS_RELEASE_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
-          # The whole job talks to AWS (SSM tunnel + ECR/Lambda mutations); a
-          # cold-cache remote build can outlive the default 1 h credentials.
+          # A cold-cache remote build can outlive the default 1 h credentials.
           role-duration-seconds: 7200
       - name: Restore cloud-build scripts (S3 bundle)
         # scripts/cloud-build is a symlink into the private sibling
@@ -272,6 +269,12 @@ jobs:
         run: scripts/cloud-build/spin.sh
       - name: Package serving Lambda artifacts
         run: infra/spur-context-service/deploy.sh --skip-worker --package-only
+      - name: Configure AWS deployment credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.CONTEXT_SERVICE_RELEASE_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-duration-seconds: 7200
       - name: Release Code Lambda
         # The zip exceeds UpdateFunctionCode's ~70 MB inline payload limit, so
         # stage it in S3 first, reusing the content-addressed key shape of the

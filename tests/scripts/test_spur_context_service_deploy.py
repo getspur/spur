@@ -1406,7 +1406,22 @@ def test_context_service_workflow_releases_serving_lambda_on_main_push():
     assert "session-manager-plugin" in release
     assert "scripts/cloud-build/spin.sh" in release
     assert "scripts/cloud-build/teardown.sh" not in release
+    assert "AWS_RELEASE_ROLE_ARN" in release
     assert "CONTEXT_SERVICE_RELEASE_ROLE_ARN" in release
+
+    # Packaging and deployment deliberately use separate least-privilege
+    # credentials: the shared-builder role owns SSM/EC2, while the context
+    # release role owns the staging S3/Lambda mutation and preflight reads.
+    builder_auth = release.index(
+        "role-to-assume: ${{ vars.AWS_RELEASE_ROLE_ARN }}"
+    )
+    package = release.index("Package serving Lambda artifacts")
+    deploy_auth = release.index(
+        "role-to-assume: ${{ vars.CONTEXT_SERVICE_RELEASE_ROLE_ARN }}"
+    )
+    code_release = release.index("Release Code Lambda")
+    assert builder_auth < package < deploy_auth < code_release
+    assert release.count("aws-actions/configure-aws-credentials@v4") == 2
 
     # The runner never cross-compiles or pushes images itself.
     assert "amazon-ecr-login" not in release
