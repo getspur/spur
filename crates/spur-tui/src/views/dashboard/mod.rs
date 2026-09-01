@@ -1841,6 +1841,9 @@ impl DashboardView {
                                     None
                                 }
                             }
+                            SubmitDecision::SetSessionMode { value } => self
+                                .session_attached
+                                .then_some(Action::SetSessionMode { mode_id: value }),
                         }
                     }
                     HandleOutcome::Key(intent) => {

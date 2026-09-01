@@ -249,6 +249,13 @@ impl SessionDetailView {
                                         })
                                     }
                                 }
+                                SubmitDecision::SetSessionMode { value } => {
+                                    if self.is_cleared() {
+                                        None
+                                    } else {
+                                        Some(Action::SetSessionMode { mode_id: value })
+                                    }
+                                }
                             };
                         }
                         None

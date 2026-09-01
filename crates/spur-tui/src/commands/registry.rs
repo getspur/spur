@@ -200,6 +200,8 @@ impl CommandRegistry {
     ///   `caps.supports_set_config_option()`.
     /// * `Dispatch::SetSessionConfigOption { config_id: _ }`
     ///   ⇒ require `caps.supports_set_config_option()`.
+    /// * `Dispatch::SetSessionMode`
+    ///   ⇒ require a non-empty advertised mode catalog.
     /// * `Dispatch::SpurLocal`, `Dispatch::PromptText`, `Dispatch::VendorExec`
     ///   ⇒ always allowed.
     pub fn available_commands_for_session(
@@ -218,6 +220,7 @@ impl CommandRegistry {
                 | Dispatch::VendorExec { .. }
                 | Dispatch::SetSessionModel
                 | Dispatch::SetSessionEffort => true,
+                Dispatch::SetSessionMode => caps.supports_set_mode(),
                 Dispatch::SetSessionConfigOption { config_id } => {
                     if config_id == "model" {
                         caps.supports_set_model() || caps.supports_set_config_option()

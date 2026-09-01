@@ -300,7 +300,7 @@ impl App {
     pub(super) fn query_to_action(&self, query: &str) -> Option<crate::action::Action> {
         use crate::action::Action;
         use crate::commands::registry::CommandRegistry;
-        use crate::commands::submit_router::{route, SubmitDecision};
+        use crate::commands::submit_router::{route_with_caps, SubmitDecision};
 
         // IMPORTANT — DO NOT "SIMPLIFY":
         // `owned_fallback` is declared on its own line BEFORE the match so its
@@ -309,6 +309,10 @@ impl App {
         // will NOT compile: the temporary returned by `CommandRegistry::new()`
         // would be dropped at the end of the arm, leaving a dangling reference.
         let owned_fallback;
+        let caps = self
+            .session_detail
+            .as_ref()
+            .and_then(|view| view.spur_agent_caps_cloned());
         let registry: &CommandRegistry = match self.session_detail.as_ref() {
             Some(view) => &view.command_registry,
             None => {
@@ -316,7 +320,7 @@ impl App {
                 &owned_fallback
             }
         };
-        match route(query, &[], &[], registry, false) {
+        match route_with_caps(query, &[], &[], registry, false, caps.as_deref()) {
             SubmitDecision::Local { action } => Some(action),
             SubmitDecision::Send { blocks, interrupt } => {
                 let session = self.current_acp_session_id()?;
@@ -344,6 +348,9 @@ impl App {
             SubmitDecision::SetSessionEffort { value } => {
                 let session_id = self.current_acp_session_id()?;
                 Some(Action::SetSessionEffort { session_id, value })
+            }
+            SubmitDecision::SetSessionMode { value } => {
+                Some(Action::SetSessionMode { mode_id: value })
             }
             SubmitDecision::Empty => None,
         }

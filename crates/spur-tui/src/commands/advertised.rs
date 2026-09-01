@@ -27,6 +27,7 @@ impl AdvertisedSource {
                 arg_picker_spec: Some(adv.arg_picker_spec),
             })
             .collect::<Vec<_>>();
+        entries.extend(mode_entries(handle, caps));
         entries.extend(grok_entries(handle, caps));
         entries.extend(kiro_entries(handle, caps));
         entries
@@ -51,6 +52,35 @@ impl AdvertisedSource {
             })
             .collect()
     }
+}
+
+fn mode_entries(handle: &str, caps: &SpurAgentCaps) -> Vec<CommandEntry> {
+    let Some(modes) = caps.modes.as_ref().filter(|_| caps.supports_set_mode()) else {
+        return Vec::new();
+    };
+    vec![CommandEntry {
+        name: "mode".to_string(),
+        description: "Switch agent session mode".to_string(),
+        hint: Some("[mode]".to_string()),
+        source: CommandSource::Advertised {
+            handle: handle.to_string(),
+        },
+        dispatch: Dispatch::SetSessionMode,
+        arg_picker_spec: Some(ArgPickerSpec {
+            free_text_hint: String::new(),
+            typed_hint: Some(ArgPickerHint::StaticChoices {
+                choices: modes
+                    .available_modes
+                    .iter()
+                    .map(|mode| ArgPickerChoice {
+                        value: mode.id.0.to_string(),
+                        label: mode.name.clone(),
+                        description: None,
+                    })
+                    .collect(),
+            }),
+        }),
+    }]
 }
 
 fn grok_entries(handle: &str, caps: &SpurAgentCaps) -> Vec<CommandEntry> {

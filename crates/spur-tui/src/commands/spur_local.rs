@@ -6,7 +6,7 @@
 //!
 //! - **Meta commands** (this file): operate on spur's view / session
 //!   lifecycle. Examples: `/clear`, `/sessions`, `/help`, `/quit`,
-//!   `/mode`, `/cost`, `/vim`. They are **client-owned**: spur
+//!   `/cost`, `/vim`. They are **client-owned**: spur
 //!   intercepts them before they ever reach the agent. Agent-advertised
 //!   entries with the same name are **shadowed** by these spur-local
 //!   entries (see `CommandRegistry::ensure_cache`).
@@ -71,14 +71,6 @@ impl SpurLocalSource {
                 hint: None,
                 source: CommandSource::Spur,
                 dispatch: Dispatch::SpurLocal(Action::ClearSession),
-                arg_picker_spec: None,
-            },
-            CommandEntry {
-                name: "mode".into(),
-                description: "Toggle Claude session mode (plan / default)".into(),
-                hint: Some("[plan|default]".into()),
-                source: CommandSource::Spur,
-                dispatch: Dispatch::SpurLocal(Action::TogglePlanMode),
                 arg_picker_spec: None,
             },
             CommandEntry {

@@ -155,6 +155,11 @@ pub enum Action {
         session_id: SessionId,
         value: String,
     },
+    /// Apply an ACP session mode selected from the active agent's advertised
+    /// `available_modes` catalog.
+    SetSessionMode {
+        mode_id: String,
+    },
     /// Move tree selection down by N rows.
     SelectNextBy(usize),
     /// Move tree selection up by N rows.

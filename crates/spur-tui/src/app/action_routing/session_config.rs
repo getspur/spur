@@ -178,6 +178,18 @@ impl App {
                 None
             }
 
+            Action::SetSessionMode { mode_id } => {
+                if let Some(ref tx) = self.user_input_tx {
+                    let _ = tx.try_send(UserInput::SetSessionMode {
+                        mode_id: mode_id.clone(),
+                    });
+                }
+                if let Some(ref mut detail) = self.session_detail {
+                    detail.set_current_mode(Some(mode_id));
+                }
+                None
+            }
+
             Action::TogglePlanMode => {
                 // Cycle between "plan" and "default". If mode is unknown, assume
                 // we're in "default" and jump to "plan".

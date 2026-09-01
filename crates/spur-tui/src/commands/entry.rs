@@ -66,4 +66,7 @@ pub enum Dispatch {
     /// Invoke Grok's effort adapter, which re-sends the current model via
     /// `session/set_model` plus `_meta.reasoningEffort`.
     SetSessionEffort,
+    /// Invoke ACP `session/set_mode` with an ID from the active session's
+    /// advertised `available_modes` catalog.
+    SetSessionMode,
 }

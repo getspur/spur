@@ -71,6 +71,10 @@ pub enum SubmitDecision {
     SetSessionEffort {
         value: String,
     },
+    /// ACP session mode selected from the active agent's advertised catalog.
+    SetSessionMode {
+        value: String,
+    },
     Empty,
 }
 
@@ -246,6 +250,14 @@ pub fn route_with_caps(
                         SubmitDecision::SetSessionEffort { value }
                     }
                 }
+                Dispatch::SetSessionMode => {
+                    let value = rest_after_first_token(text).trim().to_string();
+                    if value.is_empty() || !is_advertised_mode(caps, &value) {
+                        SubmitDecision::Empty
+                    } else {
+                        SubmitDecision::SetSessionMode { value }
+                    }
+                }
                 Dispatch::VendorExec {
                     method,
                     command,
@@ -276,6 +288,16 @@ pub fn route_with_caps(
     let blocks =
         assemble_blocks_with_prompt_caps(text, ranges, images, PromptBlockCaps::from_agent(caps));
     SubmitDecision::Send { blocks, interrupt }
+}
+
+fn is_advertised_mode(caps: Option<&SpurAgentCaps>, value: &str) -> bool {
+    caps.and_then(|caps| caps.modes.as_ref())
+        .is_some_and(|modes| {
+            modes
+                .available_modes
+                .iter()
+                .any(|mode| mode.id.0.as_ref() == value)
+        })
 }
 
 /// Prompt-type gates from the agent's advertised `promptCapabilities`.
@@ -1083,10 +1105,10 @@ mod sessions_slash_tests {
     fn slash_mode_routes_an_advertised_agent_mode() {
         let (registry, caps) = registry_and_caps_with_agent_modes();
         let decision = route_with_caps("/mode agent", &[], &[], &registry, false, Some(&caps));
-        assert_eq!(
-            format!("{decision:?}"),
-            "SetSessionMode { value: \"agent\" }"
-        );
+        assert!(matches!(
+            decision,
+            SubmitDecision::SetSessionMode { value } if value == "agent"
+        ));
     }
 
     #[test]
