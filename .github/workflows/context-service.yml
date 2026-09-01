@@ -219,9 +219,13 @@ jobs:
       AWS_INSTANCE_TYPE_FALLBACK: m8gd.2xlarge
       SPUR_BUILD_JOBS: "16"
       SPUR_NO_LOCAL_FALLBACK: "1"
-      # Per-run VM identity: isolates this release from the shared dev builder
-      # and any concurrent run, and makes teardown surgical.
-      VM_NAME: spur-ctx-release-${{ github.run_id }}
+      # Reuse the provider-approved shared pool contract from release-dist.yml.
+      # The queue selects overflow builders when needed, and each builder's
+      # VM-side idle service stops it after the release becomes inactive.
+      VM_NAME: spur-builder
+      SPUR_BUILD_POOL_NAME: spur-builder
+      SPUR_BUILD_MAX_BUILDERS: "3"
+      SPUR_BUILD_SLOTS_PER_VM: "3"
       AWS_AMI_ID: ${{ vars.SPUR_BUILDER_AMI_ID }}
       SPUR_CONTEXT_SMOKE_CODE_LAMBDA: ${{ vars.CONTEXT_SERVICE_STAGING_CODE_LAMBDA || 'spur-context-code' }}
       SPUR_CONTEXT_SMOKE_KNOWLEDGE_LAMBDA: ${{ vars.CONTEXT_SERVICE_STAGING_KNOWLEDGE_LAMBDA || 'spur-context-knowledge' }}
@@ -264,7 +268,7 @@ jobs:
           mkdir -p "$HOME/.ssh"
           ssh-keygen -t ed25519 -N "" -f "$HOME/.ssh/spur-ctx-release"
           echo "AWS_SSH_KEY=$HOME/.ssh/spur-ctx-release" >> "$GITHUB_ENV"
-      - name: Spin release VM
+      - name: Resume shared build pool
         # Fail fast on Spot capacity / IAM problems before paying for the build.
         run: scripts/cloud-build/spin.sh
       - name: Build and push worker images from the VM (immutable tag + latest pointer)
@@ -296,14 +300,3 @@ jobs:
           if-no-files-found: error
       - name: Verify serving plane (non-ingesting preflight)
         run: python3 infra/spur-context-service/smoke-staging-e2e.py --preflight
-      - name: Refresh AWS credentials for teardown
-        # Re-exchange OIDC so teardown works even when the job ran close to or
-        # past the original credential lifetime.
-        if: ${{ always() }}
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ vars.CONTEXT_SERVICE_RELEASE_ROLE_ARN }}
-          aws-region: ${{ env.AWS_REGION }}
-      - name: Terminate release VM
-        if: ${{ always() }}
-        run: scripts/cloud-build/teardown.sh

@@ -1390,20 +1390,23 @@ def test_context_service_workflow_releases_serving_lambda_on_main_push():
         in workflow
     )
 
-    # Release builds run on the ephemeral AWS Spot builder (release-dist.yml
-    # pattern), not on the runner: restore the cloud-build bundle, spin a
-    # per-run VM, compile through deploy.sh's remote mode (Graviton2-safe
-    # flags, native arm64 docker builds, ECR push via the VM instance
-    # profile), and always tear the VM down.
+    # Release builds use the provider-approved shared AWS Spot pool
+    # (release-dist.yml pattern), not the runner: restore the cloud-build
+    # bundle, compile through deploy.sh's remote mode (Graviton2-safe flags,
+    # native arm64 docker builds, ECR push via the VM instance profile), and
+    # leave pool shutdown to the VM-side idle service.
     assert 'SPUR_CONTEXT_SERVICE_BUILD_MODE: "remote"' in release
     assert 'SPUR_CONTEXT_SERVICE_PUSH_IMAGES: "1"' in release
     assert 'SPUR_NO_LOCAL_FALLBACK: "1"' in release
-    assert "VM_NAME: spur-ctx-release-${{ github.run_id }}" in release
+    assert "VM_NAME: spur-builder" in release
+    assert "SPUR_BUILD_POOL_NAME: spur-builder" in release
+    assert 'SPUR_BUILD_MAX_BUILDERS: "3"' in release
+    assert 'SPUR_BUILD_SLOTS_PER_VM: "3"' in release
+    assert "spur-ctx-release-${{ github.run_id }}" not in release
     assert "ci/cloud-build/bundle.tar.gz" in release
     assert "session-manager-plugin" in release
     assert "scripts/cloud-build/spin.sh" in release
-    assert "scripts/cloud-build/teardown.sh" in release
-    assert "if: ${{ always() }}" in release
+    assert "scripts/cloud-build/teardown.sh" not in release
     assert "CONTEXT_SERVICE_RELEASE_ROLE_ARN" in release
 
     # The runner never cross-compiles or pushes images itself.
