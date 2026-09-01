@@ -86,6 +86,22 @@ pub enum VimMode {
     Operator(char),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VimWordMotion {
+    WordForward,
+    WordBack,
+    WordEnd,
+    PreviousWordEnd,
+    PreviousBigWordEnd,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VimWordClass {
+    Whitespace,
+    Keyword,
+    Punctuation,
+}
+
 /// Maps the persisted TUI editor preference to the input bar's runtime mode.
 /// `Vim` always boots in `Normal` — Insert is reached via user action.
 impl From<EditorMode> for EditMode {
@@ -704,6 +720,23 @@ impl InputBar {
                     };
                     return HandleOutcome::Key(intent);
                 }
+                Key::Char('g')
+                    if matches!(input.key, Key::Char('e') | Key::Char('E')) && !input.ctrl =>
+                {
+                    let motion = if matches!(input.key, Key::Char('E')) {
+                        VimWordMotion::PreviousBigWordEnd
+                    } else {
+                        VimWordMotion::PreviousWordEnd
+                    };
+                    self.move_vim_word(motion, mode);
+                    let _ = self.vim_complete_operator(mode);
+                    let intent = match mode {
+                        VimMode::Operator('y') => IntentEvent::NoOp,
+                        VimMode::Operator('d') | VimMode::Operator('c') => IntentEvent::DeletedChar,
+                        _ => IntentEvent::MovedCursor,
+                    };
+                    return HandleOutcome::Key(intent);
+                }
                 Key::Char(op) if matches!(mode, VimMode::Operator(c) if c == op) => {
                     if let Key::Char(c) = input.key {
                         if c == op {
@@ -751,6 +784,11 @@ impl InputBar {
                 ..
             } => self.textarea.move_cursor(CursorMove::WordForward),
             Input {
+                key: Key::Char('W'),
+                ctrl: false,
+                ..
+            } => self.move_vim_word(VimWordMotion::WordForward, mode),
+            Input {
                 key: Key::Char('e'),
                 ctrl: false,
                 ..
@@ -761,12 +799,22 @@ impl InputBar {
                 }
             }
             Input {
+                key: Key::Char('E'),
+                ctrl: false,
+                ..
+            } => self.move_vim_word(VimWordMotion::WordEnd, mode),
+            Input {
                 key: Key::Char('b'),
                 ctrl: false,
                 ..
             } => {
                 self.textarea.move_cursor(CursorMove::WordBack);
             }
+            Input {
+                key: Key::Char('B'),
+                ctrl: false,
+                ..
+            } => self.move_vim_word(VimWordMotion::WordBack, mode),
             Input {
                 key: Key::Char('^'),
                 ..
@@ -1081,6 +1129,130 @@ impl InputBar {
             _ => IntentEvent::MovedCursor,
         };
         HandleOutcome::Key(intent)
+    }
+
+    fn vim_word_class(ch: char) -> VimWordClass {
+        if ch.is_whitespace() {
+            VimWordClass::Whitespace
+        } else if ch.is_alphanumeric() || ch == '_' {
+            VimWordClass::Keyword
+        } else {
+            VimWordClass::Punctuation
+        }
+    }
+
+    fn vim_word_target(text: &str, cursor: usize, motion: VimWordMotion) -> usize {
+        let chars: Vec<(usize, char)> = text.char_indices().collect();
+        let len = chars.len();
+        let cursor = cursor.min(text.len());
+        let mut index = chars.partition_point(|(byte, _)| *byte < cursor);
+
+        match motion {
+            VimWordMotion::WordForward => {
+                if index < len && !chars[index].1.is_whitespace() {
+                    while index < len && !chars[index].1.is_whitespace() {
+                        index += 1;
+                    }
+                }
+                while index < len && chars[index].1.is_whitespace() {
+                    index += 1;
+                }
+                chars.get(index).map_or(text.len(), |(byte, _)| *byte)
+            }
+            VimWordMotion::WordBack => {
+                if index == 0 {
+                    return 0;
+                }
+                index -= 1;
+                while index > 0 && chars[index].1.is_whitespace() {
+                    index -= 1;
+                }
+                while index > 0 && !chars[index - 1].1.is_whitespace() {
+                    index -= 1;
+                }
+                chars[index].0
+            }
+            VimWordMotion::WordEnd => {
+                if index >= len {
+                    return cursor;
+                }
+                if !chars[index].1.is_whitespace()
+                    && (index + 1 == len || chars[index + 1].1.is_whitespace())
+                {
+                    index += 1;
+                }
+                while index < len && chars[index].1.is_whitespace() {
+                    index += 1;
+                }
+                if index == len {
+                    return cursor;
+                }
+                while index + 1 < len && !chars[index + 1].1.is_whitespace() {
+                    index += 1;
+                }
+                chars[index].0
+            }
+            VimWordMotion::PreviousWordEnd | VimWordMotion::PreviousBigWordEnd => {
+                if index == 0 {
+                    return 0;
+                }
+                if index < len && !chars[index].1.is_whitespace() {
+                    let current_class = if motion == VimWordMotion::PreviousBigWordEnd {
+                        None
+                    } else {
+                        Some(Self::vim_word_class(chars[index].1))
+                    };
+                    while index > 0
+                        && !chars[index - 1].1.is_whitespace()
+                        && current_class
+                            .is_none_or(|class| Self::vim_word_class(chars[index - 1].1) == class)
+                    {
+                        index -= 1;
+                    }
+                }
+                while index > 0 && chars[index - 1].1.is_whitespace() {
+                    index -= 1;
+                }
+                if index == 0 {
+                    0
+                } else {
+                    chars[index - 1].0
+                }
+            }
+        }
+    }
+
+    fn move_vim_word(&mut self, motion: VimWordMotion, mode: VimMode) {
+        let cursor = self.cursor_to_byte();
+        let text = self.text();
+        let target = Self::vim_word_target(&text, cursor, motion);
+        let end_motion = matches!(
+            motion,
+            VimWordMotion::WordEnd
+                | VimWordMotion::PreviousWordEnd
+                | VimWordMotion::PreviousBigWordEnd
+        );
+        let backward = matches!(
+            motion,
+            VimWordMotion::PreviousWordEnd | VimWordMotion::PreviousBigWordEnd
+        );
+
+        if matches!(mode, VimMode::Operator(_)) && end_motion {
+            if backward && target < cursor {
+                self.textarea.cancel_selection();
+                self.textarea.move_cursor(CursorMove::Forward);
+                self.textarea.start_selection();
+                self.move_cursor_to_byte(target);
+                return;
+            }
+            self.move_cursor_to_byte(target);
+            if !backward {
+                self.textarea.move_cursor(CursorMove::Forward);
+            }
+            return;
+        }
+
+        self.move_cursor_to_byte(target);
     }
 
     /// Complete a pending operator (d/c/y) after a movement.
@@ -2643,6 +2815,173 @@ mod image_tests {
 
         assert_eq!(bar.images.len(), 1);
         assert_eq!(bar.images[&0].mime_type, "image/jpeg");
+    }
+}
+
+#[cfg(test)]
+mod vim_word_motion_tests {
+    use super::*;
+
+    fn key(c: char) -> KeyEvent {
+        let modifiers = if c.is_uppercase() {
+            KeyModifiers::SHIFT
+        } else {
+            KeyModifiers::NONE
+        };
+        KeyEvent::new(KeyCode::Char(c), modifiers)
+    }
+
+    fn normal_bar(text: &str, cursor: usize) -> InputBar {
+        let mut bar = InputBar::new();
+        bar.set_text(text.to_string(), cursor);
+        bar.set_mode(EditMode::Vim(VimMode::Normal));
+        bar
+    }
+
+    #[test]
+    fn vim_normal_word_motions_distinguish_words_and_words_with_unicode() {
+        const TEXT: &str = "αβ,γδ  next";
+        let mut bar = normal_bar(TEXT, 0);
+
+        assert_eq!(
+            bar.handle_key(key('W')),
+            HandleOutcome::Key(IntentEvent::MovedCursor)
+        );
+        assert_eq!(bar.cursor(), "αβ,γδ  ".len());
+
+        bar.set_text_cursor_for_test("αβ,γδ  ".len());
+        assert_eq!(
+            bar.handle_key(key('B')),
+            HandleOutcome::Key(IntentEvent::MovedCursor)
+        );
+        assert_eq!(bar.cursor(), 0);
+
+        assert_eq!(
+            bar.handle_key(key('E')),
+            HandleOutcome::Key(IntentEvent::MovedCursor)
+        );
+        assert_eq!(bar.cursor(), "αβ,γ".len());
+
+        bar.set_text_cursor_for_test("αβ,".len());
+        assert_eq!(
+            bar.handle_key(key('g')),
+            HandleOutcome::Key(IntentEvent::NoOp)
+        );
+        assert_eq!(
+            bar.handle_key(key('e')),
+            HandleOutcome::Key(IntentEvent::MovedCursor)
+        );
+        assert_eq!(bar.cursor(), "αβ".len());
+
+        bar.set_text_cursor_for_test("αβ,γδ  ".len());
+        assert_eq!(
+            bar.handle_key(key('g')),
+            HandleOutcome::Key(IntentEvent::NoOp)
+        );
+        assert_eq!(
+            bar.handle_key(key('E')),
+            HandleOutcome::Key(IntentEvent::MovedCursor)
+        );
+        assert_eq!(bar.cursor(), "αβ,γ".len());
+        assert_eq!(bar.mode(), EditMode::Vim(VimMode::Normal));
+    }
+
+    #[test]
+    fn vim_visual_word_motions_keep_visual_mode() {
+        const TEXT: &str = "one,two  three";
+        let mut bar = normal_bar(TEXT, 0);
+
+        let _ = bar.handle_key(key('v'));
+        let _ = bar.handle_key(key('W'));
+        assert_eq!(bar.cursor(), "one,two  ".len());
+        assert_eq!(bar.mode(), EditMode::Vim(VimMode::Visual));
+
+        let _ = bar.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        bar.set_text_cursor_for_test("one,".len());
+        let _ = bar.handle_key(key('v'));
+        let _ = bar.handle_key(key('g'));
+        let _ = bar.handle_key(key('e'));
+        assert_eq!(bar.cursor(), "one".len());
+        assert_eq!(bar.mode(), EditMode::Vim(VimMode::Visual));
+    }
+
+    #[test]
+    fn vim_d_upper_w_deletes_to_next_word_and_returns_to_normal() {
+        let mut bar = normal_bar("one,two   three", 0);
+
+        let _ = bar.handle_key(key('d'));
+        let outcome = bar.handle_key(key('W'));
+
+        assert_eq!(outcome, HandleOutcome::Key(IntentEvent::DeletedChar));
+        assert_eq!(bar.text(), "three");
+        assert_eq!(bar.mode(), EditMode::Vim(VimMode::Normal));
+    }
+
+    #[test]
+    fn vim_dge_is_inclusive_and_expands_partial_protected_ranges() {
+        let mut bar = InputBar::new();
+        bar.set_state(
+            InputStateSnapshot::new(
+                "ab@foo cd".to_string(),
+                vec![ProtectedRange {
+                    start: 2,
+                    end: 6,
+                    kind: RangeKind::Atom,
+                    uri: "file:///foo".into(),
+                    name: "foo".into(),
+                }],
+            ),
+            "ab@foo ".len(),
+        );
+        bar.set_mode(EditMode::Vim(VimMode::Normal));
+
+        let _ = bar.handle_key(key('d'));
+        let _ = bar.handle_key(key('g'));
+        let outcome = bar.handle_key(key('e'));
+
+        assert_eq!(outcome, HandleOutcome::Key(IntentEvent::DeletedChar));
+        assert_eq!(bar.text(), "abd");
+        assert!(bar.protected_ranges().is_empty());
+        assert_eq!(bar.mode(), EditMode::Vim(VimMode::Normal));
+    }
+
+    #[test]
+    fn vim_cg_upper_e_is_inclusive_and_enters_insert() {
+        let mut bar = normal_bar("one two", "one ".len());
+
+        let _ = bar.handle_key(key('c'));
+        let _ = bar.handle_key(key('g'));
+        let outcome = bar.handle_key(key('E'));
+
+        assert_eq!(outcome, HandleOutcome::Key(IntentEvent::DeletedChar));
+        assert_eq!(bar.text(), "onwo");
+        assert_eq!(bar.mode(), EditMode::Vim(VimMode::Insert));
+    }
+
+    #[test]
+    fn vim_yg_upper_e_is_inclusive_and_returns_to_normal() {
+        let mut bar = normal_bar("one two", "one ".len());
+
+        let _ = bar.handle_key(key('y'));
+        let _ = bar.handle_key(key('g'));
+        let outcome = bar.handle_key(key('E'));
+
+        assert_eq!(outcome, HandleOutcome::Key(IntentEvent::NoOp));
+        assert_eq!(bar.text(), "one two");
+        assert_eq!(bar.textarea.yank_text(), "e t");
+        assert_eq!(bar.mode(), EditMode::Vim(VimMode::Normal));
+    }
+
+    #[test]
+    fn vim_gg_still_moves_to_buffer_start() {
+        let mut bar = normal_bar("first\nsecond", "first\nsecond".len());
+
+        let _ = bar.handle_key(key('g'));
+        let outcome = bar.handle_key(key('g'));
+
+        assert_eq!(outcome, HandleOutcome::Key(IntentEvent::MovedCursor));
+        assert_eq!(bar.cursor(), "first".len());
+        assert_eq!(bar.mode(), EditMode::Vim(VimMode::Normal));
     }
 }
 
