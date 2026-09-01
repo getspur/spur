@@ -69,6 +69,19 @@ impl CapabilityEvidenceCacheKey {
             && self.argv_fingerprint == identity.argv_fingerprint
             && self.environment_fingerprint == identity.environment_fingerprint
     }
+
+    fn bind_observed_identity(&self, identity: &CliIdentity) -> Option<Self> {
+        let same_normalized_identity = self.resolved_executable == identity.resolved_executable
+            && self.argv_fingerprint == identity.argv_fingerprint
+            && self.environment_fingerprint == identity.environment_fingerprint;
+        let compatible_version = match (&self.upstream_version, &identity.upstream_version) {
+            (None, _) => true,
+            (Some(expected), Some(observed)) => expected == observed,
+            (Some(_), None) => false,
+        };
+        (same_normalized_identity && compatible_version)
+            .then(|| Self::new(identity, self.evidence_schema_version))
+    }
 }
 
 /// One complete immutable evidence epoch published by an isolated probe.
@@ -97,7 +110,7 @@ pub struct CapabilityEvidenceCacheV1 {
 pub struct CapabilityEvidenceCache {
     path: PathBuf,
     evidence_schema_version: u32,
-    gate: Arc<Mutex<()>>,
+    gate: Arc<Mutex<HashMap<CapabilityEvidenceCacheKey, CapabilityEvidenceCacheKey>>>,
 }
 
 impl CapabilityEvidenceCache {
@@ -106,7 +119,7 @@ impl CapabilityEvidenceCache {
         Self {
             path,
             evidence_schema_version,
-            gate: Arc::new(Mutex::new(())),
+            gate: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -121,12 +134,16 @@ impl CapabilityEvidenceCache {
         F: FnOnce() -> Fut,
         Fut: Future<Output = anyhow::Result<AgentModelCatalogProbe>>,
     {
-        let key = CapabilityEvidenceCacheKey::new(identity, self.evidence_schema_version);
-        if let Some(snapshot) = fresh_evidence_snapshot(&self.path, &key, now) {
+        let requested_key = CapabilityEvidenceCacheKey::new(identity, self.evidence_schema_version);
+        if let Some(snapshot) = fresh_evidence_snapshot(&self.path, &requested_key, now) {
             return Ok(snapshot);
         }
 
-        let _guard = self.gate.lock().await;
+        let mut observed_keys = self.gate.lock().await;
+        let key = observed_keys
+            .get(&requested_key)
+            .cloned()
+            .unwrap_or_else(|| requested_key.clone());
         if let Some(snapshot) = fresh_evidence_snapshot(&self.path, &key, now) {
             return Ok(snapshot);
         }
@@ -135,19 +152,25 @@ impl CapabilityEvidenceCache {
         let snapshot = probed.evidence.ok_or_else(|| {
             anyhow::anyhow!("isolated probe returned no complete capability evidence epoch")
         })?;
-        validate_publishable_snapshot(&key, &snapshot)?;
+        let published_key = validate_publishable_snapshot(&key, &snapshot)?;
 
         let mut cache = read_evidence_cache(&self.path).unwrap_or(CapabilityEvidenceCacheV1 {
             version: CAPABILITY_EVIDENCE_CACHE_VERSION,
             entries: Vec::new(),
         });
-        cache.entries.retain(|entry| entry.key != key);
+        cache.entries.retain(|entry| entry.key != published_key);
         cache.entries.push(CachedCapabilityEvidenceEpoch {
-            key,
+            key: published_key.clone(),
             probed_at: now,
             snapshot: snapshot.clone(),
         });
         write_evidence_cache(&self.path, &cache)?;
+        observed_keys.insert(requested_key, published_key.clone());
+        if published_key.upstream_version.is_some() {
+            let mut unversioned_key = published_key.clone();
+            unversioned_key.upstream_version = None;
+            observed_keys.insert(unversioned_key, published_key);
+        }
         Ok(snapshot)
     }
 }
@@ -326,19 +349,22 @@ fn fresh_evidence_snapshot(
 fn validate_publishable_snapshot(
     key: &CapabilityEvidenceCacheKey,
     snapshot: &CapabilityEvidenceSnapshot,
-) -> anyhow::Result<()> {
-    if !key.matches_identity(snapshot.epoch().identity()) {
-        anyhow::bail!("isolated probe evidence identity does not match cache identity");
-    }
+) -> anyhow::Result<CapabilityEvidenceCacheKey> {
+    let published_key = key
+        .bind_observed_identity(snapshot.epoch().identity())
+        .ok_or_else(|| {
+            anyhow::anyhow!("isolated probe evidence identity does not match cache identity")
+        })?;
     if !snapshot_is_complete_and_conclusive(snapshot) {
         anyhow::bail!("isolated probe evidence epoch is partial or inconclusive");
     }
-    Ok(())
+    Ok(published_key)
 }
 
 fn snapshot_is_complete_and_conclusive(snapshot: &CapabilityEvidenceSnapshot) -> bool {
     let records = snapshot.epoch().records();
-    !records.is_empty()
+    snapshot.is_complete()
+        && !records.is_empty()
         && records.iter().all(|record| {
             !matches!(
                 record.claim,

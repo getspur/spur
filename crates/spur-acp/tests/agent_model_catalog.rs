@@ -54,7 +54,26 @@ fn evidence_identity(version: &str) -> CliIdentity {
     }
 }
 
+fn unversioned_evidence_identity() -> CliIdentity {
+    CliIdentity {
+        upstream_version: None,
+        ..evidence_identity("ignored")
+    }
+}
+
 fn evidence_snapshot(
+    epoch_id: u64,
+    identity: &CliIdentity,
+    claim: EvidenceClaim,
+    provenance: EvidenceProvenance,
+) -> CapabilityEvidenceSnapshot {
+    let snapshot = incomplete_evidence_snapshot(epoch_id, identity, claim, provenance);
+    let mut encoded = serde_json::to_value(snapshot).expect("serialize evidence snapshot");
+    encoded["completeness"] = serde_json::json!("complete");
+    serde_json::from_value(encoded).expect("complete evidence snapshot")
+}
+
+fn incomplete_evidence_snapshot(
     epoch_id: u64,
     identity: &CliIdentity,
     claim: EvidenceClaim,
@@ -246,6 +265,119 @@ async fn evidence_cache_preserves_ttl_and_isolates_identity_and_schema_versions(
 }
 
 #[tokio::test]
+async fn evidence_cache_enriches_an_unversioned_probe_identity_once() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("capability-evidence.json");
+    let cache = CapabilityEvidenceCache::new(path.clone(), 1);
+    let requested_identity = unversioned_evidence_identity();
+    let observed_identity = evidence_identity("1.0.0");
+    let now = Utc.timestamp_opt(1_700_000_000, 0).single().unwrap();
+    let probes = Arc::new(AtomicUsize::new(0));
+
+    let first = cache
+        .get_or_probe(&requested_identity, now, {
+            let probes = Arc::clone(&probes);
+            let snapshot = evidence_snapshot(
+                5,
+                &observed_identity,
+                EvidenceClaim::NativeVerified,
+                EvidenceProvenance::AcceptedActiveProbe,
+            );
+            move || async move {
+                probes.fetch_add(1, Ordering::SeqCst);
+                Ok(completed_probe(snapshot))
+            }
+        })
+        .await
+        .expect("initialize may enrich a missing upstream version");
+    assert_eq!(first.epoch().identity(), &observed_identity);
+
+    let cached = cache
+        .get_or_probe(&requested_identity, now + Duration::hours(1), {
+            let probes = Arc::clone(&probes);
+            let snapshot = evidence_snapshot(
+                6,
+                &observed_identity,
+                EvidenceClaim::NativeVerified,
+                EvidenceProvenance::AcceptedActiveProbe,
+            );
+            move || async move {
+                probes.fetch_add(1, Ordering::SeqCst);
+                Ok(completed_probe(snapshot))
+            }
+        })
+        .await
+        .expect("enriched identity is coalesced for this cache handle");
+    assert_eq!(cached.epoch().id(), EvidenceEpochId(5));
+    assert_eq!(probes.load(Ordering::SeqCst), 1);
+
+    let persisted = read_evidence_cache(&path).expect("enriched cache entry");
+    assert_eq!(persisted.entries.len(), 1);
+    assert_eq!(
+        persisted.entries[0].key.upstream_version.as_deref(),
+        Some("1.0.0")
+    );
+    assert_eq!(
+        persisted.entries[0]
+            .snapshot
+            .epoch()
+            .identity()
+            .upstream_version
+            .as_deref(),
+        Some("1.0.0")
+    );
+}
+
+#[tokio::test]
+async fn evidence_cache_rejects_version_drift_after_identity_enrichment() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("capability-evidence.json");
+    let cache = CapabilityEvidenceCache::new(path.clone(), 1);
+    let requested_identity = unversioned_evidence_identity();
+    let old_identity = evidence_identity("1.0.0");
+    let new_identity = evidence_identity("2.0.0");
+    let now = Utc.timestamp_opt(1_700_000_000, 0).single().unwrap();
+
+    cache
+        .get_or_probe(&requested_identity, now, {
+            let snapshot = evidence_snapshot(
+                7,
+                &old_identity,
+                EvidenceClaim::NativeVerified,
+                EvidenceProvenance::AcceptedActiveProbe,
+            );
+            move || async move { Ok(completed_probe(snapshot)) }
+        })
+        .await
+        .expect("first version observation enriches identity");
+
+    let error = cache
+        .get_or_probe(&requested_identity, now + Duration::hours(24), {
+            let snapshot = evidence_snapshot(
+                8,
+                &new_identity,
+                EvidenceClaim::NativeVerified,
+                EvidenceProvenance::AcceptedActiveProbe,
+            );
+            move || async move { Ok(completed_probe(snapshot)) }
+        })
+        .await
+        .expect_err("later observed version drift must remain inconclusive");
+    assert!(error.to_string().contains("identity does not match"));
+
+    let persisted = read_evidence_cache(&path).expect("original epoch remains atomic");
+    assert_eq!(persisted.entries.len(), 1);
+    assert_eq!(
+        persisted.entries[0].snapshot.epoch().id(),
+        EvidenceEpochId(7)
+    );
+    assert_eq!(
+        persisted.entries[0].key.upstream_version.as_deref(),
+        Some("1.0.0")
+    );
+}
+
+#[tokio::test]
 async fn evidence_cache_coalesces_concurrent_misses_per_identity() {
     let dir = tempdir().expect("tempdir");
     let cache = Arc::new(CapabilityEvidenceCache::new(
@@ -391,8 +523,33 @@ async fn evidence_cache_atomically_publishes_only_complete_conclusive_epochs() {
         EvidenceEpochId(1)
     );
 
-    let replacement = evidence_snapshot(
+    let incomplete = incomplete_evidence_snapshot(
         3,
+        &identity,
+        EvidenceClaim::NativeVerified,
+        EvidenceProvenance::AcceptedActiveProbe,
+    );
+    assert!(!incomplete.is_complete());
+    assert_eq!(
+        incomplete.reduced_capabilities()[0].route,
+        DispatchRoute::NativePreferred
+    );
+    cache
+        .get_or_probe(&identity, expired, move || async move {
+            Ok(completed_probe(incomplete))
+        })
+        .await
+        .expect_err("conclusive-looking incomplete epoch must not publish");
+    assert_eq!(
+        read_evidence_cache(&path).unwrap().entries[0]
+            .snapshot
+            .epoch()
+            .id(),
+        EvidenceEpochId(1)
+    );
+
+    let replacement = evidence_snapshot(
+        4,
         &identity,
         EvidenceClaim::NativeVerified,
         EvidenceProvenance::AcceptedActiveProbe,
@@ -407,7 +564,7 @@ async fn evidence_cache_atomically_publishes_only_complete_conclusive_epochs() {
     assert_eq!(persisted.entries.len(), 1);
     assert_eq!(
         persisted.entries[0].snapshot.epoch().id(),
-        EvidenceEpochId(3)
+        EvidenceEpochId(4)
     );
 }
 
