@@ -932,7 +932,12 @@ def _raw_evidence(
             source = "set_result"
         else:
             source = "vendor_rpc_result"
-        status = "error" if isinstance(message.get("error"), dict) else "ok"
+        if message.get("error") is not None:
+            status = "error"
+        elif "result" in message:
+            status = "ok"
+        else:
+            status = "unknown"
         record = {
             "method": method,
             "params": params,
@@ -1061,6 +1066,78 @@ def _result_choice_ids(record: JsonObject) -> tuple[str, list[str]]:
     return kind, choice_ids
 
 
+def _bounded_projected_string(value: Any) -> Optional[str]:
+    if not isinstance(value, str) or not value or len(value) > 500:
+        return None
+    sanitized = redact_json(value)
+    if not isinstance(sanitized, str) or "<redacted>" in sanitized:
+        return None
+    return sanitized
+
+
+def _semantic_probe_binding(record: JsonObject) -> Optional[JsonObject]:
+    method = record.get("method")
+    raw_params = record.get("params")
+    if not isinstance(method, str) or not isinstance(raw_params, dict):
+        return None
+    params = redact_json(raw_params)
+    if not isinstance(params, dict):
+        return None
+
+    kind: Optional[str] = None
+    upstream_id: Optional[str] = None
+    choice_id: Optional[str] = None
+    if method == "session/set_model":
+        kind = "model"
+        upstream_id = "model"
+        choice_id = _bounded_projected_string(
+            params.get("modelId", params.get("model_id"))
+        )
+    elif method == "session/set_mode":
+        kind = "mode"
+        upstream_id = "mode"
+        choice_id = _bounded_projected_string(
+            params.get("modeId", params.get("mode_id"))
+        )
+    elif method == "session/set_config_option":
+        config_id = _bounded_projected_string(
+            params.get("configId", params.get("config_id"))
+        )
+        category = _bounded_projected_string(
+            params.get(
+                "category",
+                params.get("configCategory", params.get("config_category")),
+            )
+        )
+        inferred = _option_capability_kind(category or config_id)
+        if (
+            config_id is not None
+            and _SECRET_KEY_RE.search(config_id) is None
+            and inferred in ("model", "mode", "effort", "command")
+        ):
+            kind = inferred
+            upstream_id = config_id
+            choice_id = _bounded_projected_string(params.get("value"))
+
+    if kind is None or upstream_id is None or choice_id is None:
+        return None
+    return {
+        "kind": kind,
+        "upstream_id": upstream_id,
+        "choices": [{"id": choice_id, "label": choice_id}],
+    }
+
+
+def _paired_success(record: JsonObject) -> bool:
+    response = record.get("response")
+    return (
+        str(record.get("status") or "").lower() == "ok"
+        and isinstance(response, dict)
+        and "result" in response
+        and response.get("error") is None
+    )
+
+
 def _inconclusive_result(source: str, record: JsonObject) -> bool:
     status = str(record.get("status") or "").lower()
     if status in ("timeout", "agent_exited", "transport_closed", "unknown"):
@@ -1096,6 +1173,7 @@ def _evidence_claims(
         capability_id: Any,
         claim: str,
         provenance: str,
+        choices: Optional[list[JsonObject]] = None,
     ) -> None:
         if not isinstance(capability_id, str) or not capability_id:
             return
@@ -1112,6 +1190,8 @@ def _evidence_claims(
             "raw_digest": digest,
             "session_scope": _session_scope(payload),
         }
+        if choices:
+            record["choices"] = choices
         claims.append(record)
 
     def advertise_planes(
@@ -1258,10 +1338,13 @@ def _evidence_claims(
         if source in ("authentication", "set_result", "vendor_rpc_result"):
             method = payload.get("method")
             status = str(payload.get("status") or "").lower()
-            if _inconclusive_result(source, payload):
+            paired_success = _paired_success(payload)
+            if _inconclusive_result(source, payload) or (
+                status == "ok" and not paired_success
+            ):
                 claim = "inconclusive"
                 provenance = "inconclusive_failure"
-            elif status == "ok":
+            elif paired_success:
                 claim = "accepted"
                 provenance = "accepted_active_probe"
             else:
@@ -1276,7 +1359,19 @@ def _evidence_claims(
                 claim=claim,
                 provenance=provenance,
             )
-            if status == "ok":
+            if paired_success:
+                binding = _semantic_probe_binding(payload)
+                if binding is not None:
+                    add(
+                        source=source,
+                        payload=payload,
+                        digest=digest,
+                        kind=binding["kind"],
+                        capability_id=binding["upstream_id"],
+                        claim="native_verified",
+                        provenance="accepted_active_probe",
+                        choices=binding["choices"],
+                    )
                 choice_kind, choice_ids = _result_choice_ids(payload)
                 for choice_id in choice_ids:
                     add(
@@ -1740,7 +1835,11 @@ def _record_result(
         "status": (
             "timeout"
             if response is None
-            else ("error" if "error" in response else "ok")
+            else (
+                "error"
+                if response.get("error") is not None
+                else ("ok" if "result" in response else "unknown")
+            )
         ),
         "response": response,
     }

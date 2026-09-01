@@ -1082,11 +1082,118 @@ pub(crate) fn update_identity_from_initialize_frame(
         });
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct SemanticProbeProjection {
+    key: CapabilityKey,
+    choices: Vec<CapabilityChoice>,
+}
+
+impl SemanticProbeProjection {
+    pub(crate) fn retained_bytes(&self) -> usize {
+        let kind_bytes = match &self.key.kind {
+            CapabilityKind::Custom(kind) => kind.len(),
+            _ => 0,
+        };
+        kind_bytes
+            .saturating_add(self.key.upstream_id.len())
+            .saturating_add(
+                self.choices
+                    .iter()
+                    .map(|choice| {
+                        choice
+                            .id
+                            .len()
+                            .saturating_add(choice.label.len())
+                            .saturating_add(
+                                choice
+                                    .description
+                                    .as_ref()
+                                    .map_or(0, std::string::String::len),
+                            )
+                    })
+                    .sum::<usize>(),
+            )
+    }
+}
+
+fn projected_string(
+    params: &serde_json::Value,
+    camel_case: &str,
+    snake_case: &str,
+) -> Option<String> {
+    params
+        .get(camel_case)
+        .or_else(|| params.get(snake_case))
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty() && !value.contains("<redacted>"))
+        .map(str::to_owned)
+}
+
+fn semantic_config_kind(identifier: &str) -> Option<CapabilityKind> {
+    match identifier {
+        "model" => Some(CapabilityKind::Model),
+        "mode" => Some(CapabilityKind::Mode),
+        "thought_level" | "reasoning_effort" | "effort" => Some(CapabilityKind::Effort),
+        "command" => Some(CapabilityKind::Command),
+        _ => None,
+    }
+}
+
+pub(crate) fn project_semantic_probe(
+    method: &str,
+    raw_params: Option<&serde_json::Value>,
+) -> Option<SemanticProbeProjection> {
+    let params = redact_json(raw_params.unwrap_or(&serde_json::Value::Null));
+    let (kind, upstream_id, choice_id) = match method {
+        "session/set_model" => (
+            CapabilityKind::Model,
+            "model".to_owned(),
+            projected_string(&params, "modelId", "model_id")?,
+        ),
+        "session/set_mode" => (
+            CapabilityKind::Mode,
+            "mode".to_owned(),
+            projected_string(&params, "modeId", "mode_id")?,
+        ),
+        "session/set_config_option" => {
+            let config_id = projected_string(&params, "configId", "config_id")?;
+            if secret_key(&config_id) {
+                return None;
+            }
+            let category =
+                projected_string(&params, "configCategory", "config_category").or_else(|| {
+                    params
+                        .get("category")
+                        .and_then(serde_json::Value::as_str)
+                        .filter(|value| !value.is_empty())
+                        .map(str::to_owned)
+                });
+            let kind = semantic_config_kind(category.as_deref().unwrap_or(&config_id))?;
+            let choice_id = params
+                .get("value")
+                .and_then(serde_json::Value::as_str)
+                .filter(|value| !value.is_empty() && !value.contains("<redacted>"))
+                .map(str::to_owned)?;
+            (kind, config_id, choice_id)
+        }
+        _ => return None,
+    };
+    Some(SemanticProbeProjection {
+        key: CapabilityKey { kind, upstream_id },
+        choices: vec![CapabilityChoice {
+            id: choice_id.clone(),
+            label: choice_id,
+            description: None,
+        }],
+    })
+}
+
 pub(crate) fn normalize_raw_acp_observation(
     identity: &CliIdentity,
     method: &str,
     frame: &serde_json::Value,
     session_scope: EvidenceSessionScope,
+    probe_projection: Option<&SemanticProbeProjection>,
 ) -> Vec<EvidenceRecord> {
     let digest = RawEvidenceDigest(json_digest(&redact_json(frame)));
     let observed_at = ObservationTime(
@@ -1098,16 +1205,64 @@ pub(crate) fn normalize_raw_acp_observation(
     );
     let mut records = Vec::new();
 
-    if let Some(error) = frame.get("error") {
-        records.push(failure_record(
+    if let Some(error) = frame.get("error").filter(|error| !error.is_null()) {
+        let failure = failure_record(
             identity,
             method,
             error,
             observed_at,
+            digest.clone(),
+            session_scope.clone(),
+        );
+        let rejected = failure.claim == EvidenceClaim::Rejected;
+        records.push(failure);
+        if rejected {
+            if let Some(projection) = probe_projection {
+                records.push(make_record(
+                    identity,
+                    projection.key.kind.clone(),
+                    &projection.key.upstream_id,
+                    EvidenceClaim::Rejected,
+                    EvidenceProvenance::RejectedActiveProbe,
+                    observed_at,
+                    digest,
+                    session_scope,
+                    projection.choices.clone(),
+                ));
+            }
+        }
+        return records;
+    }
+
+    if frame.get("method").is_none() && frame.get("result").is_none() {
+        records.push(make_record(
+            identity,
+            CapabilityKind::Custom("failure".to_owned()),
+            &format!("operational:{method}"),
+            EvidenceClaim::Unknown,
+            EvidenceProvenance::InconclusiveFailure,
+            observed_at,
             digest,
             session_scope,
+            Vec::new(),
         ));
         return records;
+    }
+
+    if frame.get("method").is_none() {
+        if let Some(projection) = probe_projection {
+            records.push(make_record(
+                identity,
+                projection.key.kind.clone(),
+                &projection.key.upstream_id,
+                EvidenceClaim::NativeVerified,
+                EvidenceProvenance::AcceptedActiveProbe,
+                observed_at,
+                digest.clone(),
+                session_scope.clone(),
+                projection.choices.clone(),
+            ));
+        }
     }
 
     let payload = if frame.get("method").is_some() {
@@ -2280,6 +2435,7 @@ mod tests {
                 method,
                 &frame,
                 EvidenceSessionScope::Global,
+                None,
             );
             assert_eq!(records.len(), 1, "{label}");
             let record = &records[0];

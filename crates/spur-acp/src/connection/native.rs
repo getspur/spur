@@ -89,7 +89,8 @@ use crate::error::AcpError;
 use crate::spur_agent_caps::{
     build_capability_cli_identity, inject_capability_evidence_epoch,
     native_dispatch_failure_record, normalize_raw_acp_observation, operational_failure_record,
-    update_identity_from_initialize_frame, CapabilityEvidenceCompleteness, SpurAgentCaps,
+    project_semantic_probe, update_identity_from_initialize_frame, CapabilityEvidenceCompleteness,
+    SemanticProbeProjection, SpurAgentCaps,
 };
 use crate::types::{AgentHealth, AgentKind};
 
@@ -191,12 +192,49 @@ enum RawFrameDirection {
     Received,
 }
 
+struct PendingAcpRequest {
+    method: String,
+    scope: EvidenceSessionScope,
+    probe_projection: Option<SemanticProbeProjection>,
+    retained_bytes: usize,
+}
+
+impl PendingAcpRequest {
+    fn new(
+        request_id: &str,
+        method: String,
+        scope: EvidenceSessionScope,
+        probe_projection: Option<SemanticProbeProjection>,
+    ) -> Self {
+        let scope_bytes = match &scope {
+            EvidenceSessionScope::Global | EvidenceSessionScope::IsolatedProbe => 0,
+            EvidenceSessionScope::Session(session_id) => session_id.len(),
+        };
+        let retained_bytes = request_id
+            .len()
+            .saturating_add(method.len())
+            .saturating_add(scope_bytes)
+            .saturating_add(
+                probe_projection
+                    .as_ref()
+                    .map_or(0, SemanticProbeProjection::retained_bytes),
+            );
+        Self {
+            method,
+            scope,
+            probe_projection,
+            retained_bytes,
+        }
+    }
+}
+
 struct RawAcpFrameCapture {
     identity: CliIdentity,
     records: Vec<EvidenceRecord>,
     retained_bytes: usize,
     epoch_id: u64,
-    pending_requests: HashMap<String, (String, EvidenceSessionScope)>,
+    pending_requests: HashMap<String, PendingAcpRequest>,
+    pending_request_bytes: usize,
     sent_buffer: Vec<u8>,
     received_buffer: Vec<u8>,
     overflowed: bool,
@@ -213,6 +251,7 @@ impl RawAcpFrameCapture {
             retained_bytes: 0,
             epoch_id: 0,
             pending_requests: HashMap::new(),
+            pending_request_bytes: 0,
             sent_buffer: Vec::new(),
             received_buffer: Vec::new(),
             overflowed: false,
@@ -288,14 +327,37 @@ impl RawAcpFrameCapture {
             return;
         };
         let scope = evidence_scope(message.get("params"));
-        self.pending_requests.insert(id, (method.to_owned(), scope));
+        let pending = PendingAcpRequest::new(
+            &id,
+            method.to_owned(),
+            scope,
+            project_semantic_probe(method, message.get("params")),
+        );
+        if let Some(previous) = self.pending_requests.remove(&id) {
+            self.pending_request_bytes = self
+                .pending_request_bytes
+                .saturating_sub(previous.retained_bytes);
+        }
+        if self.pending_requests.len() == SESSION_NOTIFICATION_CAPACITY
+            || self
+                .pending_request_bytes
+                .saturating_add(pending.retained_bytes)
+                > PENDING_NEW_SESSION_MAX_BYTES
+        {
+            self.overflowed = true;
+            return;
+        }
+        self.pending_request_bytes = self
+            .pending_request_bytes
+            .saturating_add(pending.retained_bytes);
+        self.pending_requests.insert(id, pending);
     }
 
     fn observe_received(&mut self, message: &serde_json::Value) {
         if let Some(method) = message.get("method").and_then(serde_json::Value::as_str) {
             let scope = evidence_scope(message.get("params"));
             let identity = self.identity.clone();
-            let records = normalize_raw_acp_observation(&identity, method, message, scope);
+            let records = normalize_raw_acp_observation(&identity, method, message, scope, None);
             self.append_records(records);
             return;
         }
@@ -303,11 +365,25 @@ impl RawAcpFrameCapture {
         let Some(id) = message.get("id").and_then(json_rpc_id) else {
             return;
         };
-        let Some((method, pending_scope)) = self.pending_requests.remove(&id) else {
+        let Some(pending) = self.pending_requests.remove(&id) else {
             return;
         };
-        let succeeded = message.get("result").is_some() && message.get("error").is_none();
-        if message.get("error").is_some()
+        self.pending_request_bytes = self
+            .pending_request_bytes
+            .saturating_sub(pending.retained_bytes);
+        let PendingAcpRequest {
+            method,
+            scope: pending_scope,
+            probe_projection,
+            ..
+        } = pending;
+        let has_error = message.get("error").is_some_and(|error| !error.is_null());
+        let has_result = message.get("result").is_some();
+        let succeeded = has_result && !has_error;
+        if !has_result && !has_error {
+            self.invalidated = true;
+        }
+        if has_error
             && matches!(
                 method.as_str(),
                 "initialize" | "session/new" | "session/load" | "authenticate"
@@ -323,7 +399,13 @@ impl RawAcpFrameCapture {
         }
         let scope = evidence_scope(message.get("result")).or_session(pending_scope);
         let identity = self.identity.clone();
-        let records = normalize_raw_acp_observation(&identity, &method, message, scope);
+        let records = normalize_raw_acp_observation(
+            &identity,
+            &method,
+            message,
+            scope,
+            probe_projection.as_ref(),
+        );
         self.append_records(records);
         if succeeded {
             match method.as_str() {
@@ -371,6 +453,7 @@ impl RawAcpFrameCapture {
             && !self.invalidated
             && !self.overflowed
             && self.pending_requests.is_empty()
+            && self.pending_request_bytes == 0
             && self.sent_buffer.is_empty()
             && self.received_buffer.is_empty()
         {
