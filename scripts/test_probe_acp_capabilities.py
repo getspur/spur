@@ -1137,6 +1137,164 @@ class EvidenceContractTests(unittest.TestCase):
         self.assertIn(("session/set_mode", "rejected", "rejected_active_probe"), claims)
         self.assertIn(("session/prompt", "prompt_fallback", "prompt_fallback"), claims)
 
+    def test_successful_paired_set_model_binds_semantic_model_choice(self) -> None:
+        report = self.build_contract_report(
+            session_new={
+                "sessionId": "session-1",
+                "models": {
+                    "availableModels": [{"modelId": "grok-4.5"}],
+                    "currentModelId": "grok-4.5",
+                },
+            },
+            set_results=[
+                {
+                    "method": "session/set_model",
+                    "params": {
+                        "sessionId": "session-1",
+                        "modelId": "grok-4.5",
+                    },
+                    "status": "ok",
+                    "response": {"result": {}},
+                }
+            ],
+        )
+
+        semantic = [
+            claim
+            for claim in self.artifact(report)["claims"]
+            if claim["capability"] == {"kind": "model", "id": "model"}
+            and claim["claim"] == "native_verified"
+        ]
+        self.assertEqual(len(semantic), 1)
+        self.assertEqual(semantic[0]["provenance"], "accepted_active_probe")
+        self.assertEqual(
+            [choice["id"] for choice in semantic[0]["choices"]], ["grok-4.5"]
+        )
+        response_digest = next(
+            frame["digest"]
+            for frame in self.artifact(report)["raw"]["frames"]
+            if frame["direction"] == "recv" and frame["message"].get("id") == "set-0"
+        )
+        self.assertEqual(semantic[0]["raw_digest"], response_digest)
+        self.assertEqual(semantic[0]["session_scope"], "session-1")
+
+    def test_successful_paired_set_mode_binds_semantic_mode_choice(self) -> None:
+        report = self.build_contract_report(
+            set_results=[
+                {
+                    "method": "session/set_mode",
+                    "params": {
+                        "session_id": "session-1",
+                        "mode_id": "architect",
+                    },
+                    "status": "ok",
+                    "response": {"result": None},
+                }
+            ]
+        )
+
+        semantic = [
+            claim
+            for claim in self.artifact(report)["claims"]
+            if claim["capability"] == {"kind": "mode", "id": "mode"}
+            and claim["claim"] == "native_verified"
+        ]
+        self.assertEqual(len(semantic), 1)
+        self.assertEqual(semantic[0]["provenance"], "accepted_active_probe")
+        self.assertEqual(
+            [choice["id"] for choice in semantic[0]["choices"]], ["architect"]
+        )
+
+    def test_set_config_option_only_infers_safe_semantic_categories(self) -> None:
+        report = self.build_contract_report(
+            set_results=[
+                {
+                    "method": "session/set_config_option",
+                    "params": {
+                        "sessionId": "session-1",
+                        "configId": "reasoning_effort",
+                        "value": "high",
+                    },
+                    "status": "ok",
+                    "response": {"result": {}},
+                },
+                {
+                    "method": "session/set_config_option",
+                    "params": {
+                        "sessionId": "session-1",
+                        "configId": "vendor_api_token",
+                        "value": "must-not-become-a-model-choice",
+                    },
+                    "status": "ok",
+                    "response": {"result": {}},
+                },
+            ]
+        )
+
+        semantic = [
+            claim
+            for claim in self.artifact(report)["claims"]
+            if claim["claim"] == "native_verified"
+        ]
+        self.assertEqual(len(semantic), 1)
+        self.assertEqual(
+            semantic[0]["capability"],
+            {"kind": "effort", "id": "reasoning_effort"},
+        )
+        self.assertEqual([choice["id"] for choice in semantic[0]["choices"]], ["high"])
+
+    def test_set_response_without_result_is_inconclusive(self) -> None:
+        report = self.build_contract_report(
+            set_results=[
+                {
+                    "method": "session/set_model",
+                    "params": {
+                        "sessionId": "session-1",
+                        "modelId": "grok-4.5",
+                    },
+                    "status": "ok",
+                    "response": {},
+                }
+            ]
+        )
+
+        method_claim = next(
+            claim
+            for claim in self.artifact(report)["claims"]
+            if claim["capability"]
+            == {"kind": "method", "id": "session/set_model"}
+        )
+        self.assertEqual(method_claim["claim"], "inconclusive")
+        self.assertEqual(method_claim["provenance"], "inconclusive_failure")
+        self.assertFalse(
+            any(
+                claim["claim"] == "native_verified"
+                for claim in self.artifact(report)["claims"]
+            )
+        )
+
+    def test_options_method_rejection_does_not_reject_model_capability(self) -> None:
+        report = self.build_contract_report(
+            vendor_rpc_results=[
+                {
+                    "method": "vendor/optionsMethod",
+                    "params": {"modelId": "grok-4.5"},
+                    "status": "error",
+                    "response": {
+                        "error": {"code": -32601, "message": "Method not found"}
+                    },
+                }
+            ]
+        )
+
+        self.assertFalse(
+            any(
+                claim["capability"]["kind"] == "model"
+                and claim["claim"] == "rejected"
+                for claim in self.artifact(report)["claims"]
+            )
+        )
+
     def test_authentication_and_timeout_are_inconclusive(self) -> None:
         report = self.build_contract_report(
             authentication={

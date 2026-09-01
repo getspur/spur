@@ -381,6 +381,265 @@ impl RawAcpFrameCapture {
     }
 }
 
+#[cfg(test)]
+mod raw_acp_frame_capture_tests {
+    use super::{CapabilityEvidenceCompleteness, RawAcpFrameCapture, RawFrameDirection};
+    use crate::capability_evidence::{
+        reduce_capability, CapabilityKey, CapabilityKind, CliIdentity, DispatchRoute,
+        EvidenceClaim, EvidenceProvenance, EvidenceSessionScope,
+    };
+
+    fn feed(
+        capture: &mut RawAcpFrameCapture,
+        direction: RawFrameDirection,
+        value: serde_json::Value,
+    ) {
+        let mut bytes = serde_json::to_vec(&value).expect("test frame must serialize");
+        bytes.push(b'\n');
+        capture.feed(direction, &bytes);
+    }
+
+    fn initialized_capture() -> RawAcpFrameCapture {
+        let mut capture = RawAcpFrameCapture::new(CliIdentity {
+            resolved_executable: "/usr/bin/test-acp".into(),
+            upstream_version: None,
+            argv_fingerprint: "sha256:argv".to_owned(),
+            environment_fingerprint: "sha256:env".to_owned(),
+        });
+        feed(
+            &mut capture,
+            RawFrameDirection::Sent,
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": "initialize",
+                "method": "initialize",
+                "params": {"protocolVersion": 1}
+            }),
+        );
+        feed(
+            &mut capture,
+            RawFrameDirection::Received,
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": "initialize",
+                "result": {"agentInfo": {"version": "1.0.13"}}
+            }),
+        );
+        feed(
+            &mut capture,
+            RawFrameDirection::Sent,
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": "session-new",
+                "method": "session/new",
+                "params": {}
+            }),
+        );
+        feed(
+            &mut capture,
+            RawFrameDirection::Received,
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": "session-new",
+                "result": {
+                    "sessionId": "session-1",
+                    "models": {
+                        "availableModels": [{"modelId": "grok-4.5"}],
+                        "currentModelId": "grok-4.5"
+                    }
+                }
+            }),
+        );
+        capture
+    }
+
+    fn feed_request_response(
+        capture: &mut RawAcpFrameCapture,
+        id: &str,
+        method: &str,
+        params: serde_json::Value,
+        response: serde_json::Value,
+    ) {
+        feed(
+            capture,
+            RawFrameDirection::Sent,
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "method": method,
+                "params": params
+            }),
+        );
+        let mut response = response;
+        response["jsonrpc"] = serde_json::Value::String("2.0".to_owned());
+        response["id"] = serde_json::Value::String(id.to_owned());
+        feed(capture, RawFrameDirection::Received, response);
+    }
+
+    #[test]
+    fn paired_set_model_success_promotes_advertisement_to_native_preferred() {
+        let mut capture = initialized_capture();
+        let key = CapabilityKey {
+            kind: CapabilityKind::Model,
+            upstream_id: "model".to_owned(),
+        };
+        let advertised_epoch = capture.epoch().expect("advertisement epoch");
+        assert_eq!(
+            reduce_capability(&advertised_epoch, advertised_epoch.identity(), &key).route,
+            DispatchRoute::PromptOnly,
+            "vendor advertisement alone must stay prompt-only"
+        );
+
+        feed_request_response(
+            &mut capture,
+            "set-model",
+            "session/set_model",
+            serde_json::json!({
+                "sessionId": "session-1",
+                "modelId": "grok-4.5"
+            }),
+            serde_json::json!({"result": {}}),
+        );
+
+        let epoch = capture.epoch().expect("accepted-probe epoch");
+        let reduced = reduce_capability(&epoch, epoch.identity(), &key);
+        assert_eq!(reduced.route, DispatchRoute::NativePreferred);
+        assert_eq!(
+            reduced
+                .choices
+                .iter()
+                .map(|choice| choice.id.as_str())
+                .collect::<Vec<_>>(),
+            ["grok-4.5"]
+        );
+        let verified = epoch
+            .records()
+            .iter()
+            .find(|record| {
+                record.key == key
+                    && record.claim == EvidenceClaim::NativeVerified
+                    && record.provenance == EvidenceProvenance::AcceptedActiveProbe
+            })
+            .expect("paired success must emit semantic evidence");
+        assert_eq!(
+            verified.session_scope,
+            EvidenceSessionScope::Session("session-1".to_owned())
+        );
+    }
+
+    #[test]
+    fn paired_set_mode_and_known_config_success_bind_selected_choices() {
+        let cases = [
+            (
+                "session/set_mode",
+                serde_json::json!({"session_id": "session-1", "mode_id": "architect"}),
+                CapabilityKind::Mode,
+                "mode",
+                "architect",
+            ),
+            (
+                "session/set_config_option",
+                serde_json::json!({
+                    "sessionId": "session-1",
+                    "configId": "reasoning_effort",
+                    "value": "high"
+                }),
+                CapabilityKind::Effort,
+                "reasoning_effort",
+                "high",
+            ),
+        ];
+
+        for (index, (method, params, kind, upstream_id, choice_id)) in cases.into_iter().enumerate()
+        {
+            let mut capture = initialized_capture();
+            feed_request_response(
+                &mut capture,
+                &format!("set-{index}"),
+                method,
+                params,
+                serde_json::json!({"result": null}),
+            );
+            let epoch = capture.epoch().expect("accepted-probe epoch");
+            let record = epoch
+                .records()
+                .iter()
+                .find(|record| {
+                    record.key.kind == kind
+                        && record.key.upstream_id == upstream_id
+                        && record.claim == EvidenceClaim::NativeVerified
+                        && record.provenance == EvidenceProvenance::AcceptedActiveProbe
+                })
+                .expect("paired success must bind the semantic capability");
+            assert_eq!(
+                record
+                    .choices
+                    .iter()
+                    .map(|choice| choice.id.as_str())
+                    .collect::<Vec<_>>(),
+                [choice_id]
+            );
+        }
+    }
+
+    #[test]
+    fn rejected_set_model_is_semantic_but_options_method_rejection_is_not() {
+        let mut capture = initialized_capture();
+        feed_request_response(
+            &mut capture,
+            "set-model",
+            "session/set_model",
+            serde_json::json!({"sessionId": "session-1", "modelId": "grok-4.5"}),
+            serde_json::json!({
+                "error": {"code": -32602, "message": "Invalid params"}
+            }),
+        );
+        feed_request_response(
+            &mut capture,
+            "options",
+            "vendor/optionsMethod",
+            serde_json::json!({"modelId": "grok-4.5"}),
+            serde_json::json!({
+                "error": {"code": -32601, "message": "Method not found"}
+            }),
+        );
+
+        let epoch = capture.epoch().expect("rejected-probe epoch");
+        let model_rejections = epoch
+            .records()
+            .iter()
+            .filter(|record| {
+                record.key.kind == CapabilityKind::Model
+                    && record.claim == EvidenceClaim::Rejected
+                    && record.provenance == EvidenceProvenance::RejectedActiveProbe
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(model_rejections.len(), 1);
+        assert_eq!(model_rejections[0].key.upstream_id, "model");
+    }
+
+    #[test]
+    fn paired_response_without_result_invalidates_capture_without_native_evidence() {
+        let mut capture = initialized_capture();
+        feed_request_response(
+            &mut capture,
+            "set-model",
+            "session/set_model",
+            serde_json::json!({"sessionId": "session-1", "modelId": "grok-4.5"}),
+            serde_json::json!({}),
+        );
+
+        assert_eq!(
+            capture.completeness(),
+            CapabilityEvidenceCompleteness::Incomplete
+        );
+        assert!(!capture.records.iter().any(|record| {
+            record.key.kind == CapabilityKind::Model
+                && record.claim == EvidenceClaim::NativeVerified
+        }));
+    }
+}
+
 fn evidence_record_retained_bytes(record: &EvidenceRecord) -> usize {
     record
         .key
