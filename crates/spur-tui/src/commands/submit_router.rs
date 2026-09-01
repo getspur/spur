@@ -1055,6 +1055,54 @@ mod sessions_slash_tests {
         ));
     }
 
+    fn registry_and_caps_with_agent_modes() -> (CommandRegistry, SpurAgentCaps) {
+        use spur_acp::{
+            AgentKind, InitializeResponse, NewSessionResponse, ProtocolVersion, SessionMode,
+            SessionModeId, SessionModeState,
+        };
+
+        let init = InitializeResponse::new(ProtocolVersion::LATEST);
+        let mut new = NewSessionResponse::new(spur_acp::AcpSessionId::new("sid"));
+        new.modes = Some(SessionModeState::new(
+            SessionModeId::new("read-only"),
+            vec![
+                SessionMode::new(SessionModeId::new("read-only"), "Ask for approval"),
+                SessionMode::new(SessionModeId::new("agent"), "Agent"),
+            ],
+        ));
+        let caps = SpurAgentCaps::new(&init, &new, AgentKind::CodexAcp);
+        let mut registry = CommandRegistry::new();
+        registry.set_advertised_commands(
+            "codex",
+            crate::commands::advertised::AdvertisedSource::entries_from_caps("codex", &caps),
+        );
+        (registry, caps)
+    }
+
+    #[test]
+    fn slash_mode_routes_an_advertised_agent_mode() {
+        let (registry, caps) = registry_and_caps_with_agent_modes();
+        let decision = route_with_caps("/mode agent", &[], &[], &registry, false, Some(&caps));
+        assert_eq!(
+            format!("{decision:?}"),
+            "SetSessionMode { value: \"agent\" }"
+        );
+    }
+
+    #[test]
+    fn slash_mode_rejects_an_unadvertised_mode() {
+        let (registry, caps) = registry_and_caps_with_agent_modes();
+        let decision = route_with_caps(
+            "/mode bypassPermissions",
+            &[],
+            &[],
+            &registry,
+            false,
+            Some(&caps),
+        );
+        assert!(matches!(decision, SubmitDecision::Empty));
+    }
+
     /// Wave B.8: an agent-advertised command with Unstructured input (e.g.
     /// codex's /review-branch) routes free-text submits as PromptText so the
     /// agent receives the full canonical "/<cmd> <arg>" string.

@@ -588,6 +588,22 @@ mod tests {
         assert!(names.contains(&"model".to_string()));
     }
 
+    #[test]
+    fn available_commands_hide_mode_without_advertised_modes() {
+        use spur_acp::{InitializeResponse, NewSessionResponse, ProtocolVersion};
+
+        let init = InitializeResponse::new(ProtocolVersion::LATEST);
+        let new = NewSessionResponse::new(spur_acp::AcpSessionId::new("sid"));
+        let caps = spur_acp::SpurAgentCaps::new(&init, &new, spur_acp::AgentKind::Generic);
+        assert!(
+            !CommandRegistry::new()
+                .available_commands_for_session(Some(&caps))
+                .iter()
+                .any(|entry| entry.name == "mode"),
+            "/mode must not be exposed without an advertised mode catalog"
+        );
+    }
+
     /// Wave C.2: gemini-style caps (no set_config_option, no set_model)
     /// ⇒ /model and /effort are filtered out of the popup.
     #[test]

@@ -158,8 +158,26 @@ mod tests {
     use super::*;
     use spur_acp::{
         AgentKind, InitializeResponse, NewSessionResponse, ProtocolVersion, SessionConfigId,
-        SessionConfigOption, SessionConfigSelectOption, SpurAgentCaps,
+        SessionConfigOption, SessionConfigSelectOption, SessionMode, SessionModeId,
+        SessionModeState, SpurAgentCaps,
     };
+
+    fn caps_with_modes() -> SpurAgentCaps {
+        let init = InitializeResponse::new(ProtocolVersion::LATEST);
+        let mut new = NewSessionResponse::new(spur_acp::AcpSessionId::new("sid"));
+        new.modes = Some(SessionModeState::new(
+            SessionModeId::new("read-only"),
+            vec![
+                SessionMode::new(SessionModeId::new("read-only"), "Ask for approval"),
+                SessionMode::new(SessionModeId::new("agent"), "Agent"),
+                SessionMode::new(
+                    SessionModeId::new("agent-full-access"),
+                    "Agent (full access)",
+                ),
+            ],
+        ));
+        SpurAgentCaps::new(&init, &new, AgentKind::CodexAcp)
+    }
 
     #[test]
     fn empty_options_yield_empty_entries() {
@@ -208,6 +226,33 @@ mod tests {
         let entries = AdvertisedSource::entries_from_caps("gemini", &caps);
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].name, "model");
+    }
+
+    #[test]
+    fn agent_modes_yield_mode_entry_with_advertised_ids_and_labels() {
+        let entries = AdvertisedSource::entries_from_caps("codex", &caps_with_modes());
+        let mode = entries
+            .iter()
+            .find(|entry| entry.name == "mode")
+            .expect("advertised modes must synthesize /mode");
+        let spec = mode
+            .arg_picker_spec
+            .as_ref()
+            .expect("/mode must expose the agent mode catalog");
+        let Some(ArgPickerHint::StaticChoices { choices }) = spec.typed_hint.as_ref() else {
+            panic!("/mode must use static advertised choices");
+        };
+        assert_eq!(
+            choices
+                .iter()
+                .map(|choice| (choice.value.as_str(), choice.label.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("read-only", "Ask for approval"),
+                ("agent", "Agent"),
+                ("agent-full-access", "Agent (full access)"),
+            ]
+        );
     }
 
     fn grok_caps() -> SpurAgentCaps {
