@@ -1651,6 +1651,55 @@ mod composer_routing_tests {
         v.handle_key(KeyEvent::new(code, m), &test_ctx())
     }
 
+    fn install_agent_modes(view: &mut SessionDetailView) {
+        use spur_acp::{
+            AgentKind, InitializeResponse, NewSessionResponse, ProtocolVersion, SessionMode,
+            SessionModeId, SessionModeState, SpurAgentCaps,
+        };
+
+        let init = InitializeResponse::new(ProtocolVersion::LATEST);
+        let mut new = NewSessionResponse::new(spur_acp::AcpSessionId::new("sid"));
+        new.modes = Some(SessionModeState::new(
+            SessionModeId::new("read-only"),
+            vec![
+                SessionMode::new(SessionModeId::new("read-only"), "Ask for approval"),
+                SessionMode::new(SessionModeId::new("agent"), "Agent"),
+                SessionMode::new(
+                    SessionModeId::new("agent-full-access"),
+                    "Agent (full access)",
+                ),
+            ],
+        ));
+        view.set_spur_agent_caps(Some(std::sync::Arc::new(SpurAgentCaps::new(
+            &init,
+            &new,
+            AgentKind::CodexAcp,
+        ))));
+    }
+
+    #[test]
+    fn alt_m_cycles_through_advertised_agent_modes() {
+        let mut view = make_view();
+        install_agent_modes(&mut view);
+        view.set_current_mode(Some("read-only".into()));
+
+        assert!(matches!(
+            press_mod(
+                &mut view,
+                KeyCode::Char('m'),
+                KeyModifiers::ALT
+            ),
+            Some(Action::SetSessionMode { mode_id }) if mode_id == "agent"
+        ));
+    }
+
+    #[test]
+    fn alt_m_is_inert_without_advertised_agent_modes() {
+        let mut view = make_view();
+
+        assert!(press_mod(&mut view, KeyCode::Char('m'), KeyModifiers::ALT).is_none());
+    }
+
     fn test_ctx_with_plan() -> crate::views::ViewContext<'static> {
         static LINEAGE: std::sync::LazyLock<spur_core::lineage::projection::ExecutorLineage> =
             std::sync::LazyLock::new(spur_core::lineage::projection::ExecutorLineage::new);

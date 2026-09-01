@@ -396,6 +396,63 @@ mod tests {
     }
 
     #[test]
+    fn mode_is_hidden_until_an_agent_mode_catalog_is_available() {
+        let cfg = config_with_static("codex", "codex", vec!["mode"]);
+        let registry = CommandRegistry::from_configs(&[cfg]);
+
+        assert!(
+            registry.list().iter().all(|entry| entry.name != "mode"),
+            "agent prompt commands must not impersonate capability-owned /mode"
+        );
+    }
+
+    #[test]
+    fn synthesized_mode_wins_over_same_handle_agent_command() {
+        let cfg = config_with_static("codex", "codex", vec!["mode"]);
+        let mut registry = CommandRegistry::from_configs(&[cfg]);
+        registry.set_agent_commands(
+            "codex",
+            vec![CommandEntry {
+                name: "mode".into(),
+                description: "agent prompt mode".into(),
+                hint: None,
+                source: CommandSource::Agent {
+                    handle: "codex".into(),
+                },
+                dispatch: Dispatch::PromptText {
+                    normalized: "/mode".into(),
+                },
+                arg_picker_spec: None,
+            }],
+        );
+        registry.set_advertised_commands(
+            "codex",
+            vec![CommandEntry {
+                name: "mode".into(),
+                description: "Switch agent session mode".into(),
+                hint: Some("[mode]".into()),
+                source: CommandSource::Advertised {
+                    handle: "codex".into(),
+                },
+                dispatch: Dispatch::SetSessionMode,
+                arg_picker_spec: None,
+            }],
+        );
+
+        let modes = registry
+            .list()
+            .into_iter()
+            .filter(|entry| entry.name == "mode")
+            .collect::<Vec<_>>();
+        assert_eq!(modes.len(), 1);
+        assert!(matches!(modes[0].dispatch, Dispatch::SetSessionMode));
+        assert!(matches!(
+            registry.resolve("/mode agent").map(|entry| entry.dispatch),
+            Some(Dispatch::SetSessionMode)
+        ));
+    }
+
+    #[test]
     fn cross_agent_same_name_still_disambiguates_with_prefix() {
         // Use a command name that is NOT a spur-local meta-command so
         // both agent entries survive into the registry and collide.
