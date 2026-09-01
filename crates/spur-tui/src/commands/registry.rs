@@ -1,8 +1,10 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
+use super::advertised::{normalize_command_name, AdvertisedEntries, PinnedCapabilityRoute};
 use super::entry::{CommandEntry, CommandSource, Dispatch};
 use super::spur_local::SpurLocalSource;
+use spur_acp::capability_evidence::DispatchRoute;
 use spur_acp::{AgentConfig, SpurAgentCaps};
 
 /// Names whose behavior is owned by a capability-derived SPUR command.
@@ -25,7 +27,7 @@ pub struct CommandRegistry {
     /// Per-agent commands synthesized by spur from advertised data
     /// (e.g. NewSessionResponse.config_options). Shadowed by spur-local
     /// exclusive meta-commands; otherwise visible alongside dynamic.
-    advertised_commands: Vec<(String, Vec<CommandEntry>)>,
+    advertised_commands: Vec<(String, AdvertisedCommandSet)>,
     /// Lazy merged view. Rebuilt on any mutation.
     cache: RefCell<Option<CacheSnapshot>>,
 }
@@ -33,6 +35,42 @@ pub struct CommandRegistry {
 struct CacheSnapshot {
     entries: Vec<CommandEntry>,
     colliding: HashSet<String>,
+}
+
+struct AdvertisedCommandSet {
+    entries: Vec<CommandEntry>,
+    routes: std::collections::BTreeMap<String, PinnedCapabilityRoute>,
+}
+
+#[derive(Clone, Copy)]
+enum RegistryLayer {
+    Static,
+    Dynamic,
+    Advertised,
+}
+
+fn dispatch_matches_route(dispatch: &Dispatch, route: DispatchRoute) -> bool {
+    match route {
+        DispatchRoute::Hidden => false,
+        DispatchRoute::PromptOnly => matches!(dispatch, Dispatch::PromptText { .. }),
+        DispatchRoute::NativePreferred => matches!(
+            dispatch,
+            Dispatch::VendorExec { .. }
+                | Dispatch::SetSessionConfigOption { .. }
+                | Dispatch::SetSessionModel
+                | Dispatch::SetSessionEffort
+                | Dispatch::SetSessionMode
+        ),
+    }
+}
+
+fn reduced_layer_priority(layer: RegistryLayer, route: DispatchRoute) -> u8 {
+    match (route, layer) {
+        (DispatchRoute::PromptOnly, RegistryLayer::Dynamic)
+        | (DispatchRoute::NativePreferred, RegistryLayer::Advertised) => 3,
+        (_, RegistryLayer::Dynamic | RegistryLayer::Advertised) => 2,
+        (_, RegistryLayer::Static) => 1,
+    }
 }
 
 impl CommandRegistry {
@@ -86,15 +124,18 @@ impl CommandRegistry {
     /// Replace the full advertised (synthesized) command set for an agent
     /// handle. Entries are pre-built by the synthesizer in spur-acp from
     /// advertised session data such as `NewSessionResponse.config_options`.
-    pub fn set_advertised_commands(&mut self, handle: &str, entries: Vec<CommandEntry>) {
+    pub fn set_advertised_commands(&mut self, handle: &str, entries: impl Into<AdvertisedEntries>) {
+        let (entries, routes) = entries.into().into_parts();
+        let commands = AdvertisedCommandSet { entries, routes };
         if let Some(slot) = self
             .advertised_commands
             .iter_mut()
             .find(|(h, _)| h == handle)
         {
-            slot.1 = entries;
+            slot.1 = commands;
         } else {
-            self.advertised_commands.push((handle.to_string(), entries));
+            self.advertised_commands
+                .push((handle.to_string(), commands));
         }
         *self.cache.borrow_mut() = None;
     }
@@ -122,12 +163,23 @@ impl CommandRegistry {
         }
 
         // Build (handle, name) → dynamic-entry index for O(1) override lookup.
-        let mut dynamic_index: HashMap<(&str, &str), &CommandEntry> = HashMap::new();
+        let mut dynamic_index: HashMap<(&str, String), &CommandEntry> = HashMap::new();
         for (handle, entries) in &self.dynamic_commands {
             for e in entries {
-                dynamic_index.insert((handle.as_str(), e.name.as_str()), e);
+                dynamic_index.insert((handle.as_str(), normalize_command_name(&e.name)), e);
             }
         }
+
+        let reduced_routes = self
+            .advertised_commands
+            .iter()
+            .flat_map(|(handle, commands)| {
+                commands
+                    .routes
+                    .iter()
+                    .map(move |(name, pinned)| ((handle.clone(), name.clone()), *pinned))
+            })
+            .collect::<HashMap<_, _>>();
 
         let spur_local_entries = SpurLocalSource::entries();
 
@@ -142,18 +194,48 @@ impl CommandRegistry {
             CAPABILITY_OWNED_NAMES.iter().copied().collect();
 
         let mut entries = spur_local_entries;
+        let mut reduced_entries = Vec::<(u8, CommandEntry)>::new();
+        let mut reduced_index = HashMap::<(String, String), usize>::new();
+
+        let mut select_reduced = |handle: &str, entry: &CommandEntry, layer: RegistryLayer| {
+            let name = normalize_command_name(&entry.name);
+            let key = (handle.to_owned(), name);
+            let Some(pinned) = reduced_routes.get(&key) else {
+                return false;
+            };
+            if !dispatch_matches_route(&entry.dispatch, pinned.route) {
+                return true;
+            }
+            let priority = reduced_layer_priority(layer, pinned.route);
+            let mut normalized_entry = entry.clone();
+            normalized_entry.name = key.1.clone();
+            if let Some(index) = reduced_index.get(&key).copied() {
+                if priority > reduced_entries[index].0 {
+                    reduced_entries[index] = (priority, normalized_entry);
+                }
+            } else {
+                reduced_index.insert(key, reduced_entries.len());
+                reduced_entries.push((priority, normalized_entry));
+            }
+            true
+        };
 
         // Static entries — include only if not overridden by a dynamic
         // entry at the same (handle, name), AND not shadowed by a
         // spur-local exclusive meta-command.
         for (handle, statics) in &self.static_commands {
             for s in statics {
-                if exclusive_names.contains(s.name.as_str())
-                    || capability_owned_names.contains(s.name.as_str())
-                {
+                if exclusive_names.contains(s.name.as_str()) {
                     continue;
                 }
-                if !dynamic_index.contains_key(&(handle.as_str(), s.name.as_str())) {
+                if select_reduced(handle, s, RegistryLayer::Static) {
+                    continue;
+                }
+                if capability_owned_names.contains(s.name.as_str()) {
+                    continue;
+                }
+                let normalized = normalize_command_name(&s.name);
+                if !dynamic_index.contains_key(&(handle.as_str(), normalized)) {
                     entries.push(s.clone());
                 }
             }
@@ -161,11 +243,15 @@ impl CommandRegistry {
 
         // Dynamic entries — include only if not shadowed by a spur-local
         // exclusive meta-command.
-        for (_handle, dyn_entries) in &self.dynamic_commands {
+        for (handle, dyn_entries) in &self.dynamic_commands {
             for e in dyn_entries {
-                if exclusive_names.contains(e.name.as_str())
-                    || capability_owned_names.contains(e.name.as_str())
-                {
+                if exclusive_names.contains(e.name.as_str()) {
+                    continue;
+                }
+                if select_reduced(handle, e, RegistryLayer::Dynamic) {
+                    continue;
+                }
+                if capability_owned_names.contains(e.name.as_str()) {
                     continue;
                 }
                 entries.push(e.clone());
@@ -175,14 +261,19 @@ impl CommandRegistry {
         // Advertised entries (synthesized by spur from agent-advertised data
         // such as config_options). Same shadowing rule as dynamic: spur-local
         // exclusive meta-commands win.
-        for (_handle, adv_entries) in &self.advertised_commands {
-            for e in adv_entries {
+        for (handle, commands) in &self.advertised_commands {
+            for e in &commands.entries {
                 if exclusive_names.contains(e.name.as_str()) {
+                    continue;
+                }
+                if select_reduced(handle, e, RegistryLayer::Advertised) {
                     continue;
                 }
                 entries.push(e.clone());
             }
         }
+
+        entries.extend(reduced_entries.into_iter().map(|(_, entry)| entry));
 
         let mut seen: HashSet<String> = HashSet::new();
         let mut colliding: HashSet<String> = HashSet::new();
