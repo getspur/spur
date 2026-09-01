@@ -89,7 +89,7 @@ use crate::error::AcpError;
 use crate::spur_agent_caps::{
     build_capability_cli_identity, inject_capability_evidence_epoch,
     native_dispatch_failure_record, normalize_raw_acp_observation, operational_failure_record,
-    update_identity_from_initialize_frame, SpurAgentCaps,
+    update_identity_from_initialize_frame, CapabilityEvidenceCompleteness, SpurAgentCaps,
 };
 use crate::types::{AgentHealth, AgentKind};
 
@@ -200,6 +200,9 @@ struct RawAcpFrameCapture {
     sent_buffer: Vec<u8>,
     received_buffer: Vec<u8>,
     overflowed: bool,
+    initialize_succeeded: bool,
+    session_succeeded: bool,
+    invalidated: bool,
 }
 
 impl RawAcpFrameCapture {
@@ -213,6 +216,9 @@ impl RawAcpFrameCapture {
             sent_buffer: Vec::new(),
             received_buffer: Vec::new(),
             overflowed: false,
+            initialize_succeeded: false,
+            session_succeeded: false,
+            invalidated: false,
         }
     }
 
@@ -257,6 +263,7 @@ impl RawAcpFrameCapture {
         let message = match serde_json::from_slice::<serde_json::Value>(line) {
             Ok(message) => message,
             Err(error) => {
+                self.invalidated = true;
                 let identity = self.identity.clone();
                 self.append_records(vec![operational_failure_record(
                     &identity,
@@ -299,7 +306,16 @@ impl RawAcpFrameCapture {
         let Some((method, pending_scope)) = self.pending_requests.remove(&id) else {
             return;
         };
-        if method == "initialize" && message.get("result").is_some() {
+        let succeeded = message.get("result").is_some() && message.get("error").is_none();
+        if message.get("error").is_some()
+            && matches!(
+                method.as_str(),
+                "initialize" | "session/new" | "session/load" | "authenticate"
+            )
+        {
+            self.invalidated = true;
+        }
+        if method == "initialize" && succeeded {
             update_identity_from_initialize_frame(&mut self.identity, message);
             for record in &mut self.records {
                 record.identity.clone_from(&self.identity);
@@ -309,6 +325,15 @@ impl RawAcpFrameCapture {
         let identity = self.identity.clone();
         let records = normalize_raw_acp_observation(&identity, &method, message, scope);
         self.append_records(records);
+        if succeeded {
+            match method.as_str() {
+                "initialize" => self.initialize_succeeded = true,
+                "session/new" | "session/load" if self.initialize_succeeded => {
+                    self.session_succeeded = true;
+                }
+                _ => {}
+            }
+        }
     }
 
     fn append_records(&mut self, records: Vec<EvidenceRecord>) {
@@ -338,6 +363,21 @@ impl RawAcpFrameCapture {
             self.records.clone(),
         )
         .ok()
+    }
+
+    fn completeness(&self) -> CapabilityEvidenceCompleteness {
+        if self.initialize_succeeded
+            && self.session_succeeded
+            && !self.invalidated
+            && !self.overflowed
+            && self.pending_requests.is_empty()
+            && self.sent_buffer.is_empty()
+            && self.received_buffer.is_empty()
+        {
+            CapabilityEvidenceCompleteness::Complete
+        } else {
+            CapabilityEvidenceCompleteness::Incomplete
+        }
     }
 }
 
@@ -408,9 +448,12 @@ fn inject_latest_capability_evidence(
     meta: &mut Option<agent_client_protocol::schema::v1::Meta>,
     capture: &Arc<Mutex<RawAcpFrameCapture>>,
 ) {
-    let epoch = capture.lock().ok().and_then(|capture| capture.epoch());
-    if let Some(epoch) = epoch {
-        inject_capability_evidence_epoch(meta, &epoch);
+    let snapshot = capture
+        .lock()
+        .ok()
+        .and_then(|capture| capture.epoch().map(|epoch| (epoch, capture.completeness())));
+    if let Some((epoch, completeness)) = snapshot {
+        inject_capability_evidence_epoch(meta, &epoch, completeness);
     }
 }
 
@@ -423,6 +466,7 @@ fn record_operational_capability_failure(
     let Ok(mut capture) = capture.lock() else {
         return;
     };
+    capture.invalidated = true;
     let identity = capture.identity.clone();
     capture.append_records(vec![operational_failure_record(
         &identity,

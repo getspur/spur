@@ -33,10 +33,22 @@ use crate::types::AgentKind;
 
 pub(crate) const CAPABILITY_EVIDENCE_META_KEY: &str = "spur.capabilityEvidenceV1";
 
+/// Whether one evidence snapshot contains a fully captured ACP capability epoch.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CapabilityEvidenceCompleteness {
+    /// The capture cannot prove a successful, bounded initialize plus session lifecycle.
+    #[default]
+    Incomplete,
+    /// The capture contains a successful initialize plus new/load session lifecycle.
+    Complete,
+}
+
 /// Immutable evidence epoch plus its provider-neutral reduced compatibility view.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CapabilityEvidenceSnapshot {
     epoch: EvidenceEpoch,
+    completeness: CapabilityEvidenceCompleteness,
     reduced: Vec<ReducedCapability>,
     shadow_diffs: Vec<CapabilityShadowDiff>,
 }
@@ -44,6 +56,19 @@ pub struct CapabilityEvidenceSnapshot {
 impl CapabilityEvidenceSnapshot {
     #[must_use]
     pub fn from_epoch(epoch: EvidenceEpoch, current_identity: &CliIdentity) -> Self {
+        Self::from_epoch_with_completeness(
+            epoch,
+            current_identity,
+            CapabilityEvidenceCompleteness::Incomplete,
+        )
+    }
+
+    #[must_use]
+    pub(crate) fn from_epoch_with_completeness(
+        epoch: EvidenceEpoch,
+        current_identity: &CliIdentity,
+        completeness: CapabilityEvidenceCompleteness,
+    ) -> Self {
         let keys = epoch
             .records()
             .iter()
@@ -55,6 +80,7 @@ impl CapabilityEvidenceSnapshot {
             .collect();
         Self {
             epoch,
+            completeness,
             reduced,
             shadow_diffs: Vec::new(),
         }
@@ -63,6 +89,16 @@ impl CapabilityEvidenceSnapshot {
     #[must_use]
     pub fn epoch(&self) -> &EvidenceEpoch {
         &self.epoch
+    }
+
+    #[must_use]
+    pub fn completeness(&self) -> CapabilityEvidenceCompleteness {
+        self.completeness
+    }
+
+    #[must_use]
+    pub fn is_complete(&self) -> bool {
+        self.completeness == CapabilityEvidenceCompleteness::Complete
     }
 
     #[must_use]
@@ -94,6 +130,8 @@ pub struct CapabilityShadowDiff {
 struct CapabilityEvidenceSnapshotWire {
     epoch: EvidenceEpochWire,
     #[serde(default)]
+    completeness: CapabilityEvidenceCompleteness,
+    #[serde(default)]
     reduced: Vec<ReducedCapabilityWire>,
     #[serde(default)]
     shadow_diffs: Vec<CapabilityShadowDiffWire>,
@@ -104,6 +142,14 @@ struct EvidenceEpochWire {
     id: u64,
     identity: CliIdentityWire,
     records: Vec<EvidenceRecordWire>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct EmbeddedCapabilityEvidenceWire {
+    #[serde(flatten)]
+    epoch: EvidenceEpochWire,
+    #[serde(default)]
+    completeness: CapabilityEvidenceCompleteness,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -424,6 +470,7 @@ impl From<&CapabilityEvidenceSnapshot> for CapabilityEvidenceSnapshotWire {
                     })
                     .collect(),
             },
+            completeness: snapshot.completeness,
             reduced: snapshot.reduced.iter().map(Into::into).collect(),
             shadow_diffs: snapshot.shadow_diffs.iter().map(Into::into).collect(),
         }
@@ -462,7 +509,7 @@ impl TryFrom<CapabilityEvidenceSnapshotWire> for CapabilityEvidenceSnapshot {
                 error.record_index
             )
         })?;
-        let mut snapshot = Self::from_epoch(epoch, &identity);
+        let mut snapshot = Self::from_epoch_with_completeness(epoch, &identity, wire.completeness);
         snapshot.shadow_diffs = wire
             .shadow_diffs
             .into_iter()
@@ -546,14 +593,10 @@ impl SpurAgentCaps {
             agent_kind,
             grok_display,
             kiro_display,
-            capability_evidence: embedded_evidence_epoch(
+            capability_evidence: embedded_evidence_snapshot(
                 initialize.meta.as_ref(),
                 new_session.meta.as_ref(),
-            )
-            .map(|epoch| {
-                let identity = epoch.identity().clone();
-                CapabilityEvidenceSnapshot::from_epoch(epoch, &identity)
-            }),
+            ),
         };
         caps.refresh_evidence_shadow_diffs();
         caps
@@ -580,14 +623,10 @@ impl SpurAgentCaps {
             agent_kind,
             grok_display,
             kiro_display,
-            capability_evidence: embedded_evidence_epoch(
+            capability_evidence: embedded_evidence_snapshot(
                 initialize.meta.as_ref(),
                 load_session.meta.as_ref(),
-            )
-            .map(|epoch| {
-                let identity = epoch.identity().clone();
-                CapabilityEvidenceSnapshot::from_epoch(epoch, &identity)
-            }),
+            ),
         };
         caps.refresh_evidence_shadow_diffs();
         caps
@@ -943,36 +982,50 @@ fn legacy_route_for(caps: &SpurAgentCaps, key: &CapabilityKey) -> Option<Dispatc
     })
 }
 
-pub(crate) fn inject_capability_evidence_epoch(meta: &mut Option<Meta>, epoch: &EvidenceEpoch) {
-    let snapshot = CapabilityEvidenceSnapshot::from_epoch(epoch.clone(), epoch.identity());
-    let Ok(value) = serde_json::to_value(CapabilityEvidenceSnapshotWire::from(&snapshot).epoch)
-    else {
+pub(crate) fn inject_capability_evidence_epoch(
+    meta: &mut Option<Meta>,
+    epoch: &EvidenceEpoch,
+    completeness: CapabilityEvidenceCompleteness,
+) {
+    let wire = CapabilityEvidenceSnapshotWire::from(
+        &CapabilityEvidenceSnapshot::from_epoch_with_completeness(
+            epoch.clone(),
+            epoch.identity(),
+            completeness,
+        ),
+    );
+    let Ok(value) = serde_json::to_value(EmbeddedCapabilityEvidenceWire {
+        epoch: wire.epoch,
+        completeness: wire.completeness,
+    }) else {
         return;
     };
     meta.get_or_insert_with(Meta::new)
         .insert(CAPABILITY_EVIDENCE_META_KEY.to_owned(), value);
 }
 
-fn evidence_epoch_from_meta(meta: Option<&Meta>) -> Option<EvidenceEpoch> {
-    let wire: EvidenceEpochWire =
+fn evidence_snapshot_from_meta(meta: Option<&Meta>) -> Option<CapabilityEvidenceSnapshot> {
+    let wire: EmbeddedCapabilityEvidenceWire =
         serde_json::from_value(meta?.get(CAPABILITY_EVIDENCE_META_KEY)?.clone()).ok()?;
-    let snapshot = CapabilityEvidenceSnapshot::try_from(CapabilityEvidenceSnapshotWire {
-        epoch: wire,
+    CapabilityEvidenceSnapshot::try_from(CapabilityEvidenceSnapshotWire {
+        epoch: wire.epoch,
+        completeness: wire.completeness,
         reduced: Vec::new(),
         shadow_diffs: Vec::new(),
     })
-    .ok()?;
-    Some(snapshot.epoch)
+    .ok()
 }
 
-fn embedded_evidence_epoch(
+fn embedded_evidence_snapshot(
     initialize_meta: Option<&Meta>,
     session_meta: Option<&Meta>,
-) -> Option<EvidenceEpoch> {
-    let initialize = evidence_epoch_from_meta(initialize_meta);
-    let session = evidence_epoch_from_meta(session_meta);
+) -> Option<CapabilityEvidenceSnapshot> {
+    let initialize = evidence_snapshot_from_meta(initialize_meta);
+    let session = evidence_snapshot_from_meta(session_meta);
     match (initialize, session) {
-        (Some(initialize), Some(session)) if initialize.id() > session.id() => Some(initialize),
+        (Some(initialize), Some(session)) if initialize.epoch().id() > session.epoch().id() => {
+            Some(initialize)
+        }
         (_, Some(session)) => Some(session),
         (Some(initialize), None) => Some(initialize),
         (None, None) => None,

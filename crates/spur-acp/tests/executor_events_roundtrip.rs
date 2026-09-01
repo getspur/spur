@@ -105,6 +105,7 @@ fn dynamic_acp_evidence_failure_and_fallback_provenance_roundtrips() {
         serde_json::from_value(encoded).expect("evidence-bearing caps deserialize");
     let round = serde_json::to_value(round).expect("evidence-bearing caps reserialize");
     let evidence = &round["capability_evidence"];
+    assert_eq!(evidence["completeness"], "incomplete");
     let records = evidence["epoch"]["records"]
         .as_array()
         .expect("evidence records must round-trip");
@@ -140,6 +141,57 @@ fn dynamic_acp_evidence_failure_and_fallback_provenance_roundtrips() {
                     })
         })
     }));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn dynamic_acp_evidence_initialize_only_roundtrips_incomplete() {
+    use spur_acp::connection::native::NativeAcpConnection;
+    use spur_acp::connection::AgentConnection;
+    use spur_acp::{InitializeRequest, NewSessionResponse, ProtocolVersion};
+
+    const INITIALIZE_ONLY_AGENT: &str = r#"
+import json, sys
+for line in sys.stdin:
+    message = json.loads(line)
+    if message.get("method") == "initialize":
+        result = {
+            "protocolVersion": 1,
+            "agentInfo": {"name": "initialize-only", "version": "1.0.0"},
+            "agentCapabilities": {"promptCapabilities": {}},
+            "authMethods": []
+        }
+        print(json.dumps({"jsonrpc": "2.0", "id": message.get("id"), "result": result}), flush=True)
+"#;
+
+    let mut connection = NativeAcpConnection::new_with_kind(
+        "initialize-only",
+        "python3",
+        vec![
+            "-u".to_owned(),
+            "-c".to_owned(),
+            INITIALIZE_ONLY_AGENT.to_owned(),
+        ],
+        AgentKind::Generic,
+        None,
+    );
+    let initialize = connection
+        .initialize(InitializeRequest::new(ProtocolVersion::LATEST))
+        .await
+        .expect("mock initialize");
+    let caps = SpurAgentCaps::new(
+        &initialize,
+        &NewSessionResponse::new("session-not-started"),
+        AgentKind::Generic,
+    );
+    let encoded = serde_json::to_value(caps).expect("serialize initialize-only evidence");
+    assert_eq!(encoded["capability_evidence"]["completeness"], "incomplete");
+
+    let round: SpurAgentCaps =
+        serde_json::from_value(encoded).expect("initialize-only caps round-trip");
+    let round = serde_json::to_value(round).expect("reserialize initialize-only caps");
+    assert_eq!(round["capability_evidence"]["completeness"], "incomplete");
+
+    let _ = connection.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -236,6 +288,7 @@ for line in sys.stdin:
     let caps = SpurAgentCaps::from_loaded(&initialize, &loaded, AgentKind::Generic);
     let encoded = serde_json::to_value(&caps).expect("serialize evidence facade");
     let evidence = encoded["capability_evidence"].clone();
+    assert_eq!(evidence["completeness"], "complete");
     let records = evidence["epoch"]["records"]
         .as_array()
         .expect("raw evidence records");
@@ -304,6 +357,112 @@ for line in sys.stdin:
 
     let round: SpurAgentCaps = serde_json::from_value(encoded).expect("caps round-trip");
     let round = serde_json::to_value(round).expect("reserialize caps");
+    assert_eq!(round["capability_evidence"], evidence);
+
+    let _ = connection.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn dynamic_acp_evidence_later_overflow_roundtrips_incomplete() {
+    use spur_acp::connection::native::NativeAcpConnection;
+    use spur_acp::connection::AgentConnection;
+    use spur_acp::{InitializeRequest, LoadSessionRequest, ProtocolVersion};
+
+    const OVERFLOWING_AGENT: &str = r#"
+import json, sys
+for line in sys.stdin:
+    message = json.loads(line)
+    method = message.get("method")
+    request_id = message.get("id")
+    if method == "initialize":
+        result = {
+            "protocolVersion": 1,
+            "agentInfo": {"name": "overflowing-acp", "version": "1.0.0"},
+            "agentCapabilities": {"promptCapabilities": {}, "loadSession": True},
+            "authMethods": []
+        }
+        print(json.dumps({"jsonrpc": "2.0", "id": request_id, "result": result}), flush=True)
+    elif method == "session/new":
+        result = {
+            "sessionId": "complete-before-overflow",
+            "models": {
+                "currentModelId": "conclusive-model",
+                "availableModels": [{"modelId": "conclusive-model", "name": "Conclusive Model"}]
+            }
+        }
+        print(json.dumps({"jsonrpc": "2.0", "id": request_id, "result": result}), flush=True)
+    elif method == "session/load":
+        frames = []
+        for index in range(4100):
+            frames.append(json.dumps({
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": {
+                    "sessionId": "overflowed-session",
+                    "update": {
+                        "sessionUpdate": "available_commands_update",
+                        "availableCommands": [{"name": "command-" + str(index), "description": "bounded"}]
+                    }
+                }
+            }))
+        frames.append(json.dumps({
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "result": {"sessionId": "overflowed-session"}
+        }))
+        sys.stdout.write("\n".join(frames) + "\n")
+        sys.stdout.flush()
+"#;
+
+    let mut connection = NativeAcpConnection::new_with_kind(
+        "overflowing-acp",
+        "python3",
+        vec![
+            "-u".to_owned(),
+            "-c".to_owned(),
+            OVERFLOWING_AGENT.to_owned(),
+        ],
+        AgentKind::Generic,
+        None,
+    );
+    let initialize = connection
+        .initialize(InitializeRequest::new(ProtocolVersion::LATEST))
+        .await
+        .expect("mock initialize");
+    let session = connection
+        .new_session(std::env::current_dir().expect("cwd"), Vec::new())
+        .await
+        .expect("mock session/new");
+    let complete = SpurAgentCaps::new(&initialize, &session, AgentKind::Generic);
+    let complete = serde_json::to_value(complete).expect("serialize complete evidence");
+    assert_eq!(complete["capability_evidence"]["completeness"], "complete");
+
+    let (loaded, _) = connection
+        .load_session(LoadSessionRequest::new(
+            "overflowed-session".to_owned(),
+            std::env::current_dir().expect("load cwd"),
+        ))
+        .await
+        .expect("mock session/load after overflowing capture");
+    assert!(connection.capability_evidence_overflowed());
+
+    let caps = SpurAgentCaps::from_loaded(&initialize, &loaded, AgentKind::Generic);
+    let encoded = serde_json::to_value(caps).expect("serialize overflowed evidence");
+    let evidence = encoded["capability_evidence"].clone();
+    assert_eq!(evidence["completeness"], "incomplete");
+    assert!(evidence["epoch"]["records"]
+        .as_array()
+        .is_some_and(|records| records.iter().any(|record| {
+            record["key"]["kind"] == "model"
+                && record["choices"].as_array().is_some_and(|choices| {
+                    choices
+                        .iter()
+                        .any(|choice| choice["id"] == "conclusive-model")
+                })
+        })));
+
+    let round: SpurAgentCaps = serde_json::from_value(encoded).expect("overflowed caps round-trip");
+    let round = serde_json::to_value(round).expect("reserialize overflowed caps");
     assert_eq!(round["capability_evidence"], evidence);
 
     let _ = connection.shutdown().await;
