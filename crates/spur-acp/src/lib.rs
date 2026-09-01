@@ -71,6 +71,7 @@ pub mod adapter;
 pub mod agent_model_catalog;
 pub mod agent_quirks;
 pub mod agents;
+pub mod capability_evidence;
 pub mod config;
 pub mod connection;
 pub mod domain;
