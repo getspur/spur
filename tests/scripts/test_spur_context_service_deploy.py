@@ -1392,11 +1392,10 @@ def test_context_service_workflow_releases_serving_lambda_on_main_push():
 
     # Release builds use the provider-approved shared AWS Spot pool
     # (release-dist.yml pattern), not the runner: restore the cloud-build
-    # bundle, compile through deploy.sh's remote mode (Graviton2-safe flags,
-    # native arm64 docker builds, ECR push via the VM instance profile), and
-    # leave pool shutdown to the VM-side idle service.
+    # bundle, compile the Lambda zips through deploy.sh's remote mode with
+    # Graviton2-safe flags, and leave pool shutdown to the VM-side idle service.
     assert 'SPUR_CONTEXT_SERVICE_BUILD_MODE: "remote"' in release
-    assert 'SPUR_CONTEXT_SERVICE_PUSH_IMAGES: "1"' in release
+    assert 'SPUR_CONTEXT_SERVICE_PUSH_IMAGES: "0"' in release
     assert 'SPUR_NO_LOCAL_FALLBACK: "1"' in release
     assert "VM_NAME: spur-builder" in release
     assert "SPUR_BUILD_POOL_NAME: spur-builder" in release
@@ -1414,11 +1413,12 @@ def test_context_service_workflow_releases_serving_lambda_on_main_push():
     assert "setup-qemu-action" not in release
     assert "setup-buildx-action" not in release
 
-    # Code-only rollout through the canonical deploy path: worker images pushed
-    # from the VM (immutable tag + latest pointer), split serving zips packaged,
-    # then update-function-code deploys only the staging Code Lambda. Knowledge
-    # stays pinned because this release is for the Arrow-native code backend.
-    assert "infra/spur-context-service/build-and-push-remote.sh" in release
+    # Code-only rollout through the canonical deploy path: worker images stay
+    # pinned, split serving zips are packaged, then update-function-code deploys
+    # only the staging Code Lambda. Knowledge also stays pinned because this
+    # release is for the Arrow-native code backend.
+    assert "infra/spur-context-service/build-and-push-remote.sh" not in release
+    assert "--worker-image-only" not in release
     assert (
         "infra/spur-context-service/deploy.sh --skip-worker --package-only"
         in release
