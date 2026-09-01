@@ -30,7 +30,7 @@ use crate::mentions::code_graph::expansion::{expand, ExpandedMention, PER_PROMPT
 use spur_graph::{CodeMentionKind, CodeMentionPayload};
 
 use super::advertised::pinned_route_for_command;
-use super::entry::Dispatch;
+use super::entry::{CommandSource, Dispatch};
 use super::registry::CommandRegistry;
 
 /// What the controller should do with an Enter-submitted InputBar.
@@ -201,9 +201,12 @@ pub fn route_with_caps(
             // Snapshot the immutable evidence epoch and selected route before
             // producing a decision. The returned decision is irreversible: a
             // later capability refresh can only affect a later invocation.
-            let pinned_route = caps
-                .and_then(|caps| pinned_route_for_command(caps, &command_name))
-                .map(|pinned| (pinned.evidence_epoch, pinned.route));
+            let pinned_route = match &entry.source {
+                CommandSource::Agent { .. } | CommandSource::Advertised { .. } => caps
+                    .and_then(|caps| pinned_route_for_command(caps, &command_name))
+                    .map(|pinned| (pinned.evidence_epoch, pinned.route)),
+                CommandSource::Spur => None,
+            };
             if let Some((_evidence_epoch, route)) = pinned_route {
                 match route {
                     DispatchRoute::Hidden => return SubmitDecision::Empty,
@@ -1034,6 +1037,50 @@ mod sessions_slash_tests {
         caps
     }
 
+    fn prompt_only_command_caps(epoch_id: u64, command_name: &str) -> SpurAgentCaps {
+        use spur_acp::{AgentKind, InitializeResponse, NewSessionResponse, ProtocolVersion};
+
+        let identity = CliIdentity {
+            resolved_executable: std::path::PathBuf::from("/usr/bin/kiro-cli"),
+            upstream_version: Some("1.0.0".to_owned()),
+            argv_fingerprint: "argv".to_owned(),
+            environment_fingerprint: "env".to_owned(),
+        };
+        let record = EvidenceRecord {
+            key: CapabilityKey {
+                kind: CapabilityKind::Command,
+                upstream_id: "commands".to_owned(),
+            },
+            claim: EvidenceClaim::CandidateObserved,
+            provenance: EvidenceProvenance::PromptFallback,
+            identity: identity.clone(),
+            observed_at: ObservationTime(epoch_id),
+            raw_digest: RawEvidenceDigest(format!("sha256:command:{epoch_id}")),
+            session_scope: EvidenceSessionScope::Session("sid".to_owned()),
+            choices: vec![CapabilityChoice {
+                id: command_name.to_owned(),
+                label: format!("/{command_name}"),
+                description: None,
+            }],
+        };
+        let epoch = EvidenceEpoch::new(EvidenceEpochId(epoch_id), identity.clone(), vec![record])
+            .expect("test evidence must use one identity");
+        let snapshot = CapabilityEvidenceSnapshot::from_epoch(epoch, &identity);
+        let mut wire = serde_json::to_value(snapshot).expect("snapshot must serialize");
+        wire["completeness"] = serde_json::json!("complete");
+
+        let init = InitializeResponse::new(ProtocolVersion::LATEST);
+        let mut caps = SpurAgentCaps::new(
+            &init,
+            &NewSessionResponse::new(spur_acp::AcpSessionId::new("sid")),
+            AgentKind::Kiro,
+        );
+        caps.capability_evidence = Some(
+            serde_json::from_value(wire).expect("complete evidence snapshot must deserialize"),
+        );
+        caps
+    }
+
     fn registry_from_reduced_caps(caps: &SpurAgentCaps) -> CommandRegistry {
         let mut registry = CommandRegistry::new();
         registry.set_agent_commands(
@@ -1484,6 +1531,47 @@ mod sessions_slash_tests {
         assert!(matches!(
             &blocks[0],
             ContentBlock::Text(text) if text.text == "/model test-model"
+        ));
+    }
+
+    #[test]
+    fn review_prompt_only_agent_clear_does_not_hijack_spur_clear() {
+        let caps = prompt_only_command_caps(22, "clear");
+        let mut registry = CommandRegistry::new();
+        registry.set_agent_commands(
+            "kiro",
+            vec![crate::commands::entry::CommandEntry {
+                name: "clear".to_owned(),
+                description: "Kiro prompt clear".to_owned(),
+                hint: None,
+                source: crate::commands::entry::CommandSource::Agent {
+                    handle: "kiro".to_owned(),
+                },
+                dispatch: Dispatch::PromptText {
+                    normalized: "/clear".to_owned(),
+                },
+                arg_picker_spec: None,
+            }],
+        );
+        registry.set_advertised_commands(
+            "kiro",
+            crate::commands::advertised::AdvertisedSource::entries_from_caps("kiro", &caps),
+        );
+
+        let resolved = registry
+            .resolve("/clear")
+            .expect("SPUR /clear must resolve");
+        assert!(matches!(
+            resolved.source,
+            crate::commands::entry::CommandSource::Spur
+        ));
+
+        let decision = route_with_caps("/clear", &[], &[], &registry, false, Some(&caps));
+        assert!(matches!(
+            decision,
+            SubmitDecision::Local {
+                action: Action::ClearSession
+            }
         ));
     }
 
