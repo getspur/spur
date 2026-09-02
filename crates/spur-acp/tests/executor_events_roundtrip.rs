@@ -5,9 +5,694 @@ use spur_acp::{
     AgentKind, BrainInfo, Column, DatasourceEntry, DatasourceKind, IssueSummaryEvent,
     LoopDetailEvent, LoopRunRecordEvent, LoopSummaryEvent, PlanLifecycleEvent,
     PlanLoadWarningEvent, PlanLoopOriginEvent, PlanOwnerStateEvent, PlanSummaryCountsEvent,
-    PlanSummaryEvent, ReviewDecision, ReviewKind, ReviewPayload, Role, SessionId, SpurEvent,
-    SpurEventBody,
+    PlanSummaryEvent, ReviewDecision, ReviewKind, ReviewPayload, Role, SessionId, SpurAgentCaps,
+    SpurEvent, SpurEventBody,
 };
+
+#[test]
+fn dynamic_acp_evidence_failure_and_fallback_provenance_roundtrips() {
+    use spur_acp::{InitializeResponse, NewSessionResponse, ProtocolVersion};
+
+    let caps = SpurAgentCaps::new(
+        &InitializeResponse::new(ProtocolVersion::LATEST),
+        &NewSessionResponse::new("evidence-session"),
+        AgentKind::Generic,
+    );
+    let mut encoded = serde_json::to_value(caps).expect("serialize baseline caps");
+    encoded.as_object_mut().expect("caps object").insert(
+        "capability_evidence".to_owned(),
+        serde_json::json!({
+            "epoch": {
+                "id": 7,
+                "identity": {
+                    "resolved_executable": "/usr/bin/future-acp",
+                    "upstream_version": "9.1.0",
+                    "argv_fingerprint": "sha256:argv",
+                    "environment_fingerprint": "sha256:env"
+                },
+                "records": [
+                    {
+                        "key": {"kind": "model", "upstream_id": "model"},
+                        "claim": "candidate_observed",
+                        "provenance": "vendor_advertisement",
+                        "observed_at": 1,
+                        "raw_digest": "sha256:candidate",
+                        "session_scope": {"kind": "session", "id": "evidence-session"},
+                        "choices": [{"id": "future-model", "label": "Future Model"}]
+                    },
+                    {
+                        "key": {"kind": "model", "upstream_id": "model"},
+                        "claim": "native_verified",
+                        "provenance": "accepted_active_probe",
+                        "observed_at": 2,
+                        "raw_digest": "sha256:accepted",
+                        "session_scope": {"kind": "isolated_probe"},
+                        "choices": [{"id": "future-model", "label": "Future Model"}]
+                    },
+                    {
+                        "key": {"kind": "model", "upstream_id": "model"},
+                        "claim": "rejected",
+                        "provenance": "rejected_active_probe",
+                        "observed_at": 3,
+                        "raw_digest": "sha256:rejected",
+                        "session_scope": {"kind": "isolated_probe"},
+                        "choices": []
+                    },
+                    {
+                        "key": {"kind": "custom:failure", "upstream_id": "authentication"},
+                        "claim": "inconclusive",
+                        "provenance": "inconclusive_failure",
+                        "observed_at": 4,
+                        "raw_digest": "sha256:auth",
+                        "session_scope": {"kind": "global"},
+                        "choices": []
+                    },
+                    {
+                        "key": {"kind": "custom:failure", "upstream_id": "timeout"},
+                        "claim": "unknown",
+                        "provenance": "inconclusive_failure",
+                        "observed_at": 5,
+                        "raw_digest": "sha256:timeout",
+                        "session_scope": {"kind": "session", "id": "evidence-session"},
+                        "choices": []
+                    },
+                    {
+                        "key": {"kind": "custom:failure", "upstream_id": "malformed"},
+                        "claim": "inconclusive",
+                        "provenance": "inconclusive_failure",
+                        "observed_at": 6,
+                        "raw_digest": "sha256:malformed",
+                        "session_scope": {"kind": "global"},
+                        "choices": []
+                    },
+                    {
+                        "key": {"kind": "command", "upstream_id": "session/prompt"},
+                        "claim": "candidate_observed",
+                        "provenance": "prompt_fallback",
+                        "observed_at": 7,
+                        "raw_digest": "sha256:prompt",
+                        "session_scope": {"kind": "session", "id": "evidence-session"},
+                        "choices": []
+                    }
+                ]
+            },
+            "reduced": [],
+            "shadow_diffs": []
+        }),
+    );
+
+    let round: SpurAgentCaps =
+        serde_json::from_value(encoded).expect("evidence-bearing caps deserialize");
+    let round = serde_json::to_value(round).expect("evidence-bearing caps reserialize");
+    let evidence = &round["capability_evidence"];
+    assert_eq!(evidence["completeness"], "incomplete");
+    let records = evidence["epoch"]["records"]
+        .as_array()
+        .expect("evidence records must round-trip");
+
+    assert!(records.iter().any(|record| {
+        record["claim"] == "inconclusive"
+            && record["provenance"] == "inconclusive_failure"
+            && record["key"]["upstream_id"] == "authentication"
+    }));
+    assert!(records.iter().any(|record| {
+        record["claim"] == "candidate_observed" && record["provenance"] == "prompt_fallback"
+    }));
+    assert!(records.iter().any(|record| {
+        record["claim"] == "unknown"
+            && record["provenance"] == "inconclusive_failure"
+            && record["key"]["upstream_id"] == "timeout"
+    }));
+    assert!(records.iter().any(|record| {
+        record["claim"] == "inconclusive"
+            && record["provenance"] == "inconclusive_failure"
+            && record["key"]["upstream_id"] == "malformed"
+    }));
+    assert!(evidence["reduced"].as_array().is_some_and(|reduced| {
+        reduced.iter().any(|capability| {
+            capability["key"]["upstream_id"] == "model"
+                && capability["route"] == "prompt_only"
+                && capability["sources"]["provenances"]
+                    .as_array()
+                    .is_some_and(|sources| {
+                        sources
+                            .iter()
+                            .any(|source| source == "rejected_active_probe")
+                    })
+        })
+    }));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn dynamic_acp_evidence_initialize_only_roundtrips_incomplete() {
+    use spur_acp::connection::native::NativeAcpConnection;
+    use spur_acp::connection::AgentConnection;
+    use spur_acp::{InitializeRequest, NewSessionResponse, ProtocolVersion};
+
+    const INITIALIZE_ONLY_AGENT: &str = r#"
+import json, sys
+for line in sys.stdin:
+    message = json.loads(line)
+    if message.get("method") == "initialize":
+        result = {
+            "protocolVersion": 1,
+            "agentInfo": {"name": "initialize-only", "version": "1.0.0"},
+            "agentCapabilities": {"promptCapabilities": {}},
+            "authMethods": []
+        }
+        print(json.dumps({"jsonrpc": "2.0", "id": message.get("id"), "result": result}), flush=True)
+"#;
+
+    let mut connection = NativeAcpConnection::new_with_kind(
+        "initialize-only",
+        "python3",
+        vec![
+            "-u".to_owned(),
+            "-c".to_owned(),
+            INITIALIZE_ONLY_AGENT.to_owned(),
+        ],
+        AgentKind::Generic,
+        None,
+    );
+    let initialize = connection
+        .initialize(InitializeRequest::new(ProtocolVersion::LATEST))
+        .await
+        .expect("mock initialize");
+    let caps = SpurAgentCaps::new(
+        &initialize,
+        &NewSessionResponse::new("session-not-started"),
+        AgentKind::Generic,
+    );
+    let encoded = serde_json::to_value(caps).expect("serialize initialize-only evidence");
+    assert_eq!(encoded["capability_evidence"]["completeness"], "incomplete");
+
+    let round: SpurAgentCaps =
+        serde_json::from_value(encoded).expect("initialize-only caps round-trip");
+    let round = serde_json::to_value(round).expect("reserialize initialize-only caps");
+    assert_eq!(round["capability_evidence"]["completeness"], "incomplete");
+
+    let _ = connection.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn dynamic_acp_evidence_captures_raw_frames_before_typed_projection() {
+    use spur_acp::connection::native::NativeAcpConnection;
+    use spur_acp::connection::AgentConnection;
+    use spur_acp::{InitializeRequest, ProtocolVersion};
+
+    const MOCK_AGENT: &str = r#"
+import json, sys
+for line in sys.stdin:
+    message = json.loads(line)
+    method = message.get("method")
+    request_id = message.get("id")
+    if method == "initialize":
+        result = {
+            "protocolVersion": 1,
+            "agentInfo": {"name": "future-acp", "version": "9.1.0"},
+            "agentCapabilities": {"promptCapabilities": {}, "loadSession": True},
+            "authMethods": [],
+            "vendorPlane": {"apiToken": "must-not-survive"},
+            "futureCapabilityPlane": {
+                "availableFluxLevels": [{"id": "flux-9000", "label": "Flux 9000"}],
+                "privateToken": "future-plane-secret"
+            }
+        }
+        print(json.dumps({"jsonrpc": "2.0", "id": request_id, "result": result}), flush=True)
+    elif method == "session/new":
+        notification = {
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": {
+                "sessionId": "raw-session",
+                "update": {
+                    "sessionUpdate": "available_commands_update",
+                    "availableCommands": [{"name": "future-command", "description": "future"}]
+                }
+            }
+        }
+        print(json.dumps(notification), flush=True)
+        result = {
+            "sessionId": "raw-session",
+            "models": {
+                "currentModelId": "future-model",
+                "availableModels": [{
+                    "modelId": "future-model",
+                    "name": "Future Model",
+                    "apiKey": "must-not-survive",
+                    "_meta": {"reasoningEfforts": ["xhigh", "future-effort"]}
+                }]
+            }
+        }
+        print(json.dumps({"jsonrpc": "2.0", "id": request_id, "result": result}), flush=True)
+    elif method == "session/load":
+        result = {
+            "sessionId": "loaded-session",
+            "models": {
+                "currentModelId": "loaded-model",
+                "availableModels": [{"modelId": "loaded-model", "name": "Loaded Model"}]
+            }
+        }
+        print(json.dumps({"jsonrpc": "2.0", "id": request_id, "result": result}), flush=True)
+"#;
+
+    let temp = tempfile::tempdir().expect("temp repo root");
+    let mut connection = NativeAcpConnection::new_with_kind(
+        "future-acp",
+        "python3",
+        vec!["-u".to_owned(), "-c".to_owned(), MOCK_AGENT.to_owned()],
+        AgentKind::Generic,
+        None,
+    );
+    connection.set_repo_root(temp.path().to_path_buf());
+
+    let initialize = connection
+        .initialize(InitializeRequest::new(ProtocolVersion::LATEST))
+        .await
+        .expect("mock initialize");
+    let _session = connection
+        .new_session(std::env::current_dir().expect("cwd"), Vec::new())
+        .await
+        .expect("mock session/new");
+    let load = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        connection.load_session(spur_acp::LoadSessionRequest::new(
+            "loaded-session".to_owned(),
+            std::env::current_dir().expect("load cwd"),
+        )),
+    )
+    .await
+    .expect("mock session/load timeout")
+    .expect("mock session/load");
+    let (loaded, _) = load;
+    let caps = SpurAgentCaps::from_loaded(&initialize, &loaded, AgentKind::Generic);
+    let encoded = serde_json::to_value(&caps).expect("serialize evidence facade");
+    let evidence = encoded["capability_evidence"].clone();
+    assert_eq!(evidence["completeness"], "complete");
+    let records = evidence["epoch"]["records"]
+        .as_array()
+        .expect("raw evidence records");
+
+    assert!(records.iter().any(|record| {
+        record["key"]["kind"] == "model"
+            && record["choices"]
+                .as_array()
+                .is_some_and(|choices| choices.iter().any(|choice| choice["id"] == "future-model"))
+            && record["provenance"] == "vendor_advertisement"
+    }));
+    assert!(records.iter().any(|record| {
+        record["key"]["kind"] == "model"
+            && record["choices"]
+                .as_array()
+                .is_some_and(|choices| choices.iter().any(|choice| choice["id"] == "loaded-model"))
+            && record["provenance"] == "vendor_advertisement"
+    }));
+    assert!(records.iter().any(|record| {
+        record["key"]["kind"] == "effort"
+            && record["choices"]
+                .as_array()
+                .is_some_and(|choices| choices.iter().any(|choice| choice["id"] == "future-effort"))
+    }));
+    assert!(records.iter().any(|record| {
+        record["key"]["kind"] == "command"
+            && record["choices"].as_array().is_some_and(|choices| {
+                choices
+                    .iter()
+                    .any(|choice| choice["id"] == "future-command")
+            })
+            && record["provenance"] == "observed_notification"
+    }));
+    assert!(records.iter().any(|record| {
+        record["key"]["kind"] == "custom:unknown_acp_field"
+            && record["key"]["upstream_id"] == "futureCapabilityPlane.availableFluxLevels"
+            && record["claim"] == "unknown"
+            && record["provenance"] == "vendor_advertisement"
+    }));
+    assert!(records.iter().all(|record| {
+        record["raw_digest"]
+            .as_str()
+            .is_some_and(|digest| digest.starts_with("sha256:") && digest.len() == 71)
+    }));
+    assert!(!serde_json::to_string(&encoded)
+        .expect("encode evidence")
+        .contains("must-not-survive"));
+    assert!(!serde_json::to_string(&encoded)
+        .expect("encode evidence")
+        .contains("future-plane-secret"));
+    assert!(evidence["reduced"].as_array().is_some_and(|reduced| {
+        reduced.iter().any(|capability| {
+            capability["key"]["kind"] == "custom:unknown_acp_field"
+                && capability["key"]["upstream_id"] == "futureCapabilityPlane.availableFluxLevels"
+                && capability["route"] == "hidden"
+        })
+    }));
+    assert!(evidence["shadow_diffs"].as_array().is_some_and(|diffs| {
+        diffs.iter().any(|diff| {
+            diff["key"]["kind"] == "model"
+                && diff["legacy_route"] == "hidden"
+                && diff["reduced_route"] == "prompt_only"
+                && diff["unexplained"] == true
+        })
+    }));
+
+    let round: SpurAgentCaps = serde_json::from_value(encoded).expect("caps round-trip");
+    let round = serde_json::to_value(round).expect("reserialize caps");
+    assert_eq!(round["capability_evidence"], evidence);
+
+    let _ = connection.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn dynamic_acp_evidence_later_overflow_roundtrips_incomplete() {
+    use spur_acp::connection::native::NativeAcpConnection;
+    use spur_acp::connection::AgentConnection;
+    use spur_acp::{InitializeRequest, LoadSessionRequest, ProtocolVersion};
+
+    const OVERFLOWING_AGENT: &str = r#"
+import json, sys
+for line in sys.stdin:
+    message = json.loads(line)
+    method = message.get("method")
+    request_id = message.get("id")
+    if method == "initialize":
+        result = {
+            "protocolVersion": 1,
+            "agentInfo": {"name": "overflowing-acp", "version": "1.0.0"},
+            "agentCapabilities": {"promptCapabilities": {}, "loadSession": True},
+            "authMethods": []
+        }
+        print(json.dumps({"jsonrpc": "2.0", "id": request_id, "result": result}), flush=True)
+    elif method == "session/new":
+        result = {
+            "sessionId": "complete-before-overflow",
+            "models": {
+                "currentModelId": "conclusive-model",
+                "availableModels": [{"modelId": "conclusive-model", "name": "Conclusive Model"}]
+            }
+        }
+        print(json.dumps({"jsonrpc": "2.0", "id": request_id, "result": result}), flush=True)
+    elif method == "session/load":
+        frames = []
+        for index in range(4100):
+            frames.append(json.dumps({
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": {
+                    "sessionId": "overflowed-session",
+                    "update": {
+                        "sessionUpdate": "available_commands_update",
+                        "availableCommands": [{"name": "command-" + str(index), "description": "bounded"}]
+                    }
+                }
+            }))
+        frames.append(json.dumps({
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "result": {"sessionId": "overflowed-session"}
+        }))
+        sys.stdout.write("\n".join(frames) + "\n")
+        sys.stdout.flush()
+"#;
+
+    let mut connection = NativeAcpConnection::new_with_kind(
+        "overflowing-acp",
+        "python3",
+        vec![
+            "-u".to_owned(),
+            "-c".to_owned(),
+            OVERFLOWING_AGENT.to_owned(),
+        ],
+        AgentKind::Generic,
+        None,
+    );
+    let initialize = connection
+        .initialize(InitializeRequest::new(ProtocolVersion::LATEST))
+        .await
+        .expect("mock initialize");
+    let session = connection
+        .new_session(std::env::current_dir().expect("cwd"), Vec::new())
+        .await
+        .expect("mock session/new");
+    let complete = SpurAgentCaps::new(&initialize, &session, AgentKind::Generic);
+    let complete = serde_json::to_value(complete).expect("serialize complete evidence");
+    assert_eq!(complete["capability_evidence"]["completeness"], "complete");
+
+    let (loaded, _) = connection
+        .load_session(LoadSessionRequest::new(
+            "overflowed-session".to_owned(),
+            std::env::current_dir().expect("load cwd"),
+        ))
+        .await
+        .expect("mock session/load after overflowing capture");
+    assert!(connection.capability_evidence_overflowed());
+
+    let caps = SpurAgentCaps::from_loaded(&initialize, &loaded, AgentKind::Generic);
+    let encoded = serde_json::to_value(caps).expect("serialize overflowed evidence");
+    let evidence = encoded["capability_evidence"].clone();
+    assert_eq!(evidence["completeness"], "incomplete");
+    assert!(evidence["epoch"]["records"]
+        .as_array()
+        .is_some_and(|records| records.iter().any(|record| {
+            record["key"]["kind"] == "model"
+                && record["choices"].as_array().is_some_and(|choices| {
+                    choices
+                        .iter()
+                        .any(|choice| choice["id"] == "conclusive-model")
+                })
+        })));
+
+    let round: SpurAgentCaps = serde_json::from_value(encoded).expect("overflowed caps round-trip");
+    let round = serde_json::to_value(round).expect("reserialize overflowed caps");
+    assert_eq!(round["capability_evidence"], evidence);
+
+    let _ = connection.shutdown().await;
+}
+
+#[test]
+fn dynamic_acp_evidence_shadows_current_grok_and_kiro_routes_without_drift() {
+    use std::path::PathBuf;
+
+    use spur_acp::capability_evidence::{
+        CapabilityChoice, CapabilityKey, CapabilityKind, CliIdentity, DispatchRoute, EvidenceClaim,
+        EvidenceEpoch, EvidenceEpochId, EvidenceProvenance, EvidenceRecord, EvidenceSessionScope,
+        ObservationTime, RawEvidenceDigest,
+    };
+    use spur_acp::{InitializeResponse, NewSessionResponse, ProtocolVersion};
+
+    let identity = CliIdentity {
+        resolved_executable: PathBuf::from("/usr/bin/provider-acp"),
+        upstream_version: Some("1.0.0".to_owned()),
+        argv_fingerprint: "sha256:argv".to_owned(),
+        environment_fingerprint: "sha256:env".to_owned(),
+    };
+    let epoch = |id| {
+        EvidenceEpoch::new(
+            EvidenceEpochId(id),
+            identity.clone(),
+            vec![EvidenceRecord {
+                key: CapabilityKey {
+                    kind: CapabilityKind::Model,
+                    upstream_id: "model".to_owned(),
+                },
+                claim: EvidenceClaim::CandidateObserved,
+                provenance: EvidenceProvenance::VendorAdvertisement,
+                identity: identity.clone(),
+                observed_at: ObservationTime(id),
+                raw_digest: RawEvidenceDigest(format!("sha256:{id}")),
+                session_scope: EvidenceSessionScope::Session("shadow-session".to_owned()),
+                choices: vec![CapabilityChoice {
+                    id: "provider-model".to_owned(),
+                    label: "Provider Model".to_owned(),
+                    description: None,
+                }],
+            }],
+        )
+        .expect("identity-bound evidence epoch")
+    };
+
+    let mut grok_initialize = InitializeResponse::new(ProtocolVersion::LATEST);
+    grok_initialize.meta = serde_json::from_value(serde_json::json!({
+        "modelState": {
+            "currentModelId": "provider-model",
+            "availableModels": [{"modelId": "provider-model", "name": "Provider Model"}]
+        }
+    }))
+    .expect("Grok metadata");
+    let mut grok = SpurAgentCaps::new(
+        &grok_initialize,
+        &NewSessionResponse::new("shadow-session"),
+        AgentKind::Grok,
+    );
+    grok.apply_evidence_epoch(epoch(11), &identity);
+
+    let kiro_initialize = InitializeResponse::new(ProtocolVersion::LATEST);
+    let mut kiro_session = NewSessionResponse::new("shadow-session");
+    kiro_session.meta = serde_json::from_value(serde_json::json!({
+        "spur.recoveredModels": {
+            "currentModelId": "provider-model",
+            "availableModels": [{"modelId": "provider-model", "name": "Provider Model"}]
+        }
+    }))
+    .expect("Kiro metadata");
+    let mut kiro = SpurAgentCaps::new(&kiro_initialize, &kiro_session, AgentKind::Kiro);
+    kiro.apply_evidence_epoch(epoch(12), &identity);
+
+    for caps in [&grok, &kiro] {
+        assert!(caps.supports_direct_set_model());
+        assert!(caps.capability_shadow_diffs().iter().any(|diff| {
+            diff.key.kind == CapabilityKind::Model
+                && diff.legacy_route == DispatchRoute::NativePreferred
+                && diff.reduced_route == DispatchRoute::PromptOnly
+                && diff.reason == "bounded legacy native fallback"
+                && !diff.unexplained
+        }));
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn dynamic_acp_evidence_native_rejection_does_not_resend_prompt_same_action() {
+    use spur_acp::capability_evidence::{
+        CapabilityKind, DispatchRoute, EvidenceClaim, EvidenceProvenance,
+    };
+    use spur_acp::connection::native::NativeAcpConnection;
+    use spur_acp::connection::AgentConnection;
+    use spur_acp::{
+        AcpSessionId, AuthMethodId, AuthenticateRequest, InitializeRequest, LoadSessionRequest,
+        ProtocolVersion,
+    };
+
+    const REJECTING_AGENT: &str = r#"
+import json, sys
+log_path = sys.argv[1]
+for line in sys.stdin:
+    message = json.loads(line)
+    method = message.get("method")
+    with open(log_path, "a", encoding="utf-8") as log:
+        log.write(method + "\n")
+    request_id = message.get("id")
+    if method == "initialize":
+        result = {
+            "protocolVersion": 1,
+            "agentInfo": {"name": "grok-shadow", "version": "1.0.0"},
+            "agentCapabilities": {"promptCapabilities": {}},
+            "authMethods": [],
+            "_meta": {
+                "modelState": {
+                    "currentModelId": "grok-model",
+                    "availableModels": [{"modelId": "grok-model", "name": "Grok Model"}]
+                }
+            }
+        }
+        print(json.dumps({"jsonrpc": "2.0", "id": request_id, "result": result}), flush=True)
+    elif method == "session/new":
+        print(json.dumps({"jsonrpc": "2.0", "id": request_id, "result": {"sessionId": "reject-session"}}), flush=True)
+    elif method == "session/set_model":
+        print(json.dumps({"jsonrpc": "2.0", "id": request_id, "error": {"code": -32602, "message": "rejected native model"}}), flush=True)
+    elif method == "authenticate":
+        print(json.dumps({"jsonrpc": "2.0", "id": request_id, "error": {"code": -32001, "message": "authentication required"}}), flush=True)
+    elif method == "session/load":
+        print(json.dumps({"jsonrpc": "2.0", "id": request_id, "error": {"code": -32000, "message": "request timeout"}}), flush=True)
+    else:
+        print(json.dumps({"jsonrpc": "2.0", "id": request_id, "result": {}}), flush=True)
+"#;
+
+    let temp = tempfile::tempdir().expect("temp repo root");
+    let method_log = temp.path().join("methods.log");
+    let mut connection = NativeAcpConnection::new_with_kind(
+        "grok-shadow",
+        "python3",
+        vec![
+            "-u".to_owned(),
+            "-c".to_owned(),
+            REJECTING_AGENT.to_owned(),
+            method_log.display().to_string(),
+        ],
+        AgentKind::Grok,
+        None,
+    );
+    connection.set_repo_root(temp.path().to_path_buf());
+
+    let initialize = connection
+        .initialize(InitializeRequest::new(ProtocolVersion::LATEST))
+        .await
+        .expect("mock initialize");
+    let session = connection
+        .new_session(std::env::current_dir().expect("cwd"), Vec::new())
+        .await
+        .expect("mock session/new");
+    let mut caps = SpurAgentCaps::new(&initialize, &session, AgentKind::Grok);
+
+    let error = connection
+        .set_session_model(
+            AcpSessionId::new("reject-session"),
+            "grok-model".to_owned(),
+            &caps,
+        )
+        .await
+        .expect_err("native model rejection must surface");
+    assert!(error.to_string().contains("rejected native model"));
+
+    let auth_error = connection
+        .authenticate(AuthenticateRequest::new(AuthMethodId::new("test")))
+        .await
+        .expect_err("authentication failure must surface");
+    assert!(auth_error.to_string().contains("authentication required"));
+    let load_error = match connection
+        .load_session(LoadSessionRequest::new(
+            "timeout-session".to_owned(),
+            std::env::current_dir().expect("load cwd"),
+        ))
+        .await
+    {
+        Err(error) => error,
+        Ok(_) => panic!("timeout failure must surface"),
+    };
+    assert!(load_error.to_string().contains("request timeout"));
+
+    let methods = std::fs::read_to_string(&method_log).expect("method log");
+    assert_eq!(methods.matches("session/set_model\n").count(), 1);
+    assert!(!methods.contains("session/set_config_option"));
+    assert!(!methods.contains("session/prompt"));
+
+    let epoch = connection
+        .capability_evidence_epoch()
+        .expect("live evidence epoch");
+    let identity = epoch.identity().clone();
+    caps.apply_evidence_epoch(epoch, &identity);
+    assert!(caps.reduced_capabilities().iter().any(|reduced| {
+        reduced.key.kind == CapabilityKind::Model
+            && reduced.route == DispatchRoute::PromptOnly
+            && reduced.sources.record_count >= 2
+    }));
+    assert!(caps
+        .capability_evidence
+        .as_ref()
+        .expect("snapshot")
+        .epoch()
+        .records()
+        .iter()
+        .any(|record| {
+            record.key.kind == CapabilityKind::Model && record.claim == EvidenceClaim::NativeFailed
+        }));
+    let records = caps
+        .capability_evidence
+        .as_ref()
+        .expect("snapshot")
+        .epoch()
+        .records();
+    assert!(records.iter().any(|record| {
+        record.key.upstream_id == "authentication"
+            && record.claim == EvidenceClaim::Inconclusive
+            && record.provenance == EvidenceProvenance::InconclusiveFailure
+    }));
+    assert!(records.iter().any(|record| {
+        record.key.upstream_id == "timeout"
+            && record.claim == EvidenceClaim::Unknown
+            && record.provenance == EvidenceProvenance::InconclusiveFailure
+    }));
+
+    let _ = connection.shutdown().await;
+}
 
 #[test]
 fn executor_phase_changed_rejects_invalid_variant() {

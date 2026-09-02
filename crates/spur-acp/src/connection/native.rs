@@ -40,9 +40,10 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll};
 use std::time::Instant;
 
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, ReadBuf};
 
 use async_trait::async_trait;
 use futures::stream::unfold;
@@ -74,6 +75,10 @@ use agent_client_protocol::{
     Agent, ByteStreams, Client, ConnectionTo, Handled, JsonRpcMessage, UntypedMessage,
 };
 
+use crate::capability_evidence::{
+    CapabilityKey, CapabilityKind, CliIdentity, EvidenceEpoch, EvidenceEpochId, EvidenceRecord,
+    EvidenceSessionScope,
+};
 use crate::config::LogConfig;
 use crate::connection::child_stderr_bridge::ChildStderrBridge;
 use crate::connection::{
@@ -81,7 +86,12 @@ use crate::connection::{
     ExtNotificationPayload,
 };
 use crate::error::AcpError;
-use crate::spur_agent_caps::SpurAgentCaps;
+use crate::spur_agent_caps::{
+    build_capability_cli_identity, inject_capability_evidence_epoch,
+    native_dispatch_failure_record, normalize_raw_acp_observation, operational_failure_record,
+    project_semantic_probe, update_identity_from_initialize_frame, CapabilityEvidenceCompleteness,
+    SemanticProbeProjection, SpurAgentCaps,
+};
 use crate::types::{AgentHealth, AgentKind};
 
 const NATIVE_SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
@@ -174,6 +184,721 @@ pub fn spawn_native_worker_for_test(
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true)
         .spawn()
+}
+
+#[derive(Clone, Copy)]
+enum RawFrameDirection {
+    Sent,
+    Received,
+}
+
+struct PendingAcpRequest {
+    method: String,
+    scope: EvidenceSessionScope,
+    probe_projection: Option<SemanticProbeProjection>,
+    retained_bytes: usize,
+}
+
+impl PendingAcpRequest {
+    fn new(
+        request_id: &str,
+        method: String,
+        scope: EvidenceSessionScope,
+        probe_projection: Option<SemanticProbeProjection>,
+    ) -> Self {
+        let scope_bytes = match &scope {
+            EvidenceSessionScope::Global | EvidenceSessionScope::IsolatedProbe => 0,
+            EvidenceSessionScope::Session(session_id) => session_id.len(),
+        };
+        let retained_bytes = request_id
+            .len()
+            .saturating_add(method.len())
+            .saturating_add(scope_bytes)
+            .saturating_add(
+                probe_projection
+                    .as_ref()
+                    .map_or(0, SemanticProbeProjection::retained_bytes),
+            );
+        Self {
+            method,
+            scope,
+            probe_projection,
+            retained_bytes,
+        }
+    }
+}
+
+struct RawAcpFrameCapture {
+    identity: CliIdentity,
+    records: Vec<EvidenceRecord>,
+    retained_bytes: usize,
+    epoch_id: u64,
+    pending_requests: HashMap<String, PendingAcpRequest>,
+    pending_request_bytes: usize,
+    sent_buffer: Vec<u8>,
+    received_buffer: Vec<u8>,
+    overflowed: bool,
+    initialize_succeeded: bool,
+    session_succeeded: bool,
+    invalidated: bool,
+}
+
+impl RawAcpFrameCapture {
+    fn new(identity: CliIdentity) -> Self {
+        Self {
+            identity,
+            records: Vec::new(),
+            retained_bytes: 0,
+            epoch_id: 0,
+            pending_requests: HashMap::new(),
+            pending_request_bytes: 0,
+            sent_buffer: Vec::new(),
+            received_buffer: Vec::new(),
+            overflowed: false,
+            initialize_succeeded: false,
+            session_succeeded: false,
+            invalidated: false,
+        }
+    }
+
+    fn feed(&mut self, direction: RawFrameDirection, bytes: &[u8]) {
+        let buffer = match direction {
+            RawFrameDirection::Sent => &mut self.sent_buffer,
+            RawFrameDirection::Received => &mut self.received_buffer,
+        };
+        buffer.extend_from_slice(bytes);
+        if buffer.len() > PENDING_NEW_SESSION_MAX_BYTES {
+            buffer.clear();
+            self.overflowed = true;
+            let identity = self.identity.clone();
+            self.append_records(vec![operational_failure_record(
+                &identity,
+                "wire",
+                "malformed ACP frame exceeded the bounded capture size",
+                EvidenceSessionScope::Global,
+            )]);
+            return;
+        }
+
+        let mut lines = Vec::new();
+        while let Some(newline) = buffer.iter().position(|byte| *byte == b'\n') {
+            let mut line = buffer.drain(..=newline).collect::<Vec<_>>();
+            while line
+                .last()
+                .is_some_and(|byte| matches!(byte, b'\n' | b'\r'))
+            {
+                line.pop();
+            }
+            if !line.is_empty() {
+                lines.push(line);
+            }
+        }
+        for line in lines {
+            self.process_line(direction, &line);
+        }
+    }
+
+    fn process_line(&mut self, direction: RawFrameDirection, line: &[u8]) {
+        let message = match serde_json::from_slice::<serde_json::Value>(line) {
+            Ok(message) => message,
+            Err(error) => {
+                self.invalidated = true;
+                let identity = self.identity.clone();
+                self.append_records(vec![operational_failure_record(
+                    &identity,
+                    "wire",
+                    &format!("malformed ACP JSON: {error}"),
+                    EvidenceSessionScope::Global,
+                )]);
+                return;
+            }
+        };
+        match direction {
+            RawFrameDirection::Sent => self.observe_sent(&message),
+            RawFrameDirection::Received => self.observe_received(&message),
+        }
+    }
+
+    fn observe_sent(&mut self, message: &serde_json::Value) {
+        let Some(method) = message.get("method").and_then(serde_json::Value::as_str) else {
+            return;
+        };
+        let Some(id) = message.get("id").and_then(json_rpc_id) else {
+            return;
+        };
+        let scope = evidence_scope(message.get("params"));
+        let pending = PendingAcpRequest::new(
+            &id,
+            method.to_owned(),
+            scope,
+            project_semantic_probe(method, message.get("params")),
+        );
+        if let Some(previous) = self.pending_requests.remove(&id) {
+            self.pending_request_bytes = self
+                .pending_request_bytes
+                .saturating_sub(previous.retained_bytes);
+        }
+        if self.pending_requests.len() == SESSION_NOTIFICATION_CAPACITY
+            || self
+                .pending_request_bytes
+                .saturating_add(pending.retained_bytes)
+                > PENDING_NEW_SESSION_MAX_BYTES
+        {
+            self.overflowed = true;
+            return;
+        }
+        self.pending_request_bytes = self
+            .pending_request_bytes
+            .saturating_add(pending.retained_bytes);
+        self.pending_requests.insert(id, pending);
+    }
+
+    fn observe_received(&mut self, message: &serde_json::Value) {
+        if let Some(method) = message.get("method").and_then(serde_json::Value::as_str) {
+            let scope = evidence_scope(message.get("params"));
+            let identity = self.identity.clone();
+            let records = normalize_raw_acp_observation(&identity, method, message, scope, None);
+            self.append_records(records);
+            return;
+        }
+
+        let Some(id) = message.get("id").and_then(json_rpc_id) else {
+            return;
+        };
+        let Some(pending) = self.pending_requests.remove(&id) else {
+            return;
+        };
+        self.pending_request_bytes = self
+            .pending_request_bytes
+            .saturating_sub(pending.retained_bytes);
+        let PendingAcpRequest {
+            method,
+            scope: pending_scope,
+            probe_projection,
+            ..
+        } = pending;
+        let has_error = message.get("error").is_some_and(|error| !error.is_null());
+        let has_result = message.get("result").is_some();
+        let succeeded = has_result && !has_error;
+        if !has_result && !has_error {
+            self.invalidated = true;
+        }
+        if has_error
+            && matches!(
+                method.as_str(),
+                "initialize" | "session/new" | "session/load" | "authenticate"
+            )
+        {
+            self.invalidated = true;
+        }
+        if method == "initialize" && succeeded {
+            update_identity_from_initialize_frame(&mut self.identity, message);
+            for record in &mut self.records {
+                record.identity.clone_from(&self.identity);
+            }
+        }
+        let scope = evidence_scope(message.get("result")).or_session(pending_scope);
+        let identity = self.identity.clone();
+        let records = normalize_raw_acp_observation(
+            &identity,
+            &method,
+            message,
+            scope,
+            probe_projection.as_ref(),
+        );
+        self.append_records(records);
+        if succeeded {
+            match method.as_str() {
+                "initialize" => self.initialize_succeeded = true,
+                "session/new" | "session/load" if self.initialize_succeeded => {
+                    self.session_succeeded = true;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn append_records(&mut self, records: Vec<EvidenceRecord>) {
+        let before = self.records.len();
+        for record in records {
+            if self.records.len() == SESSION_NOTIFICATION_CAPACITY {
+                self.overflowed = true;
+                break;
+            }
+            let retained_bytes = evidence_record_retained_bytes(&record);
+            if self.retained_bytes.saturating_add(retained_bytes) > PENDING_NEW_SESSION_MAX_BYTES {
+                self.overflowed = true;
+                continue;
+            }
+            self.retained_bytes = self.retained_bytes.saturating_add(retained_bytes);
+            self.records.push(record);
+        }
+        if self.records.len() != before {
+            self.epoch_id = self.epoch_id.saturating_add(1);
+        }
+    }
+
+    fn epoch(&self) -> Option<EvidenceEpoch> {
+        EvidenceEpoch::new(
+            EvidenceEpochId(self.epoch_id),
+            self.identity.clone(),
+            self.records.clone(),
+        )
+        .ok()
+    }
+
+    fn completeness(&self) -> CapabilityEvidenceCompleteness {
+        if self.initialize_succeeded
+            && self.session_succeeded
+            && !self.invalidated
+            && !self.overflowed
+            && self.pending_requests.is_empty()
+            && self.pending_request_bytes == 0
+            && self.sent_buffer.is_empty()
+            && self.received_buffer.is_empty()
+        {
+            CapabilityEvidenceCompleteness::Complete
+        } else {
+            CapabilityEvidenceCompleteness::Incomplete
+        }
+    }
+}
+
+#[cfg(test)]
+mod raw_acp_frame_capture_tests {
+    use super::{CapabilityEvidenceCompleteness, RawAcpFrameCapture, RawFrameDirection};
+    use crate::capability_evidence::{
+        reduce_capability, CapabilityKey, CapabilityKind, CliIdentity, DispatchRoute,
+        EvidenceClaim, EvidenceProvenance, EvidenceSessionScope,
+    };
+
+    fn feed(
+        capture: &mut RawAcpFrameCapture,
+        direction: RawFrameDirection,
+        value: serde_json::Value,
+    ) {
+        let mut bytes = serde_json::to_vec(&value).expect("test frame must serialize");
+        bytes.push(b'\n');
+        capture.feed(direction, &bytes);
+    }
+
+    fn initialized_capture() -> RawAcpFrameCapture {
+        let mut capture = RawAcpFrameCapture::new(CliIdentity {
+            resolved_executable: "/usr/bin/test-acp".into(),
+            upstream_version: None,
+            argv_fingerprint: "sha256:argv".to_owned(),
+            environment_fingerprint: "sha256:env".to_owned(),
+        });
+        feed(
+            &mut capture,
+            RawFrameDirection::Sent,
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": "initialize",
+                "method": "initialize",
+                "params": {"protocolVersion": 1}
+            }),
+        );
+        feed(
+            &mut capture,
+            RawFrameDirection::Received,
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": "initialize",
+                "result": {"agentInfo": {"version": "1.0.13"}}
+            }),
+        );
+        feed(
+            &mut capture,
+            RawFrameDirection::Sent,
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": "session-new",
+                "method": "session/new",
+                "params": {}
+            }),
+        );
+        feed(
+            &mut capture,
+            RawFrameDirection::Received,
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": "session-new",
+                "result": {
+                    "sessionId": "session-1",
+                    "models": {
+                        "availableModels": [{"modelId": "grok-4.5"}],
+                        "currentModelId": "grok-4.5"
+                    }
+                }
+            }),
+        );
+        capture
+    }
+
+    fn feed_request_response(
+        capture: &mut RawAcpFrameCapture,
+        id: &str,
+        method: &str,
+        params: serde_json::Value,
+        response: serde_json::Value,
+    ) {
+        feed(
+            capture,
+            RawFrameDirection::Sent,
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "method": method,
+                "params": params
+            }),
+        );
+        let mut response = response;
+        response["jsonrpc"] = serde_json::Value::String("2.0".to_owned());
+        response["id"] = serde_json::Value::String(id.to_owned());
+        feed(capture, RawFrameDirection::Received, response);
+    }
+
+    #[test]
+    fn paired_set_model_success_promotes_advertisement_to_native_preferred() {
+        let mut capture = initialized_capture();
+        let key = CapabilityKey {
+            kind: CapabilityKind::Model,
+            upstream_id: "model".to_owned(),
+        };
+        let advertised_epoch = capture.epoch().expect("advertisement epoch");
+        assert_eq!(
+            reduce_capability(&advertised_epoch, advertised_epoch.identity(), &key).route,
+            DispatchRoute::PromptOnly,
+            "vendor advertisement alone must stay prompt-only"
+        );
+
+        feed_request_response(
+            &mut capture,
+            "set-model",
+            "session/set_model",
+            serde_json::json!({
+                "sessionId": "session-1",
+                "modelId": "grok-4.5"
+            }),
+            serde_json::json!({"result": {}}),
+        );
+
+        let epoch = capture.epoch().expect("accepted-probe epoch");
+        let reduced = reduce_capability(&epoch, epoch.identity(), &key);
+        assert_eq!(reduced.route, DispatchRoute::NativePreferred);
+        assert_eq!(
+            reduced
+                .choices
+                .iter()
+                .map(|choice| choice.id.as_str())
+                .collect::<Vec<_>>(),
+            ["grok-4.5"]
+        );
+        let verified = epoch
+            .records()
+            .iter()
+            .find(|record| {
+                record.key == key
+                    && record.claim == EvidenceClaim::NativeVerified
+                    && record.provenance == EvidenceProvenance::AcceptedActiveProbe
+            })
+            .expect("paired success must emit semantic evidence");
+        assert_eq!(
+            verified.session_scope,
+            EvidenceSessionScope::Session("session-1".to_owned())
+        );
+    }
+
+    #[test]
+    fn paired_set_mode_and_known_config_success_bind_selected_choices() {
+        let cases = [
+            (
+                "session/set_mode",
+                serde_json::json!({"session_id": "session-1", "mode_id": "architect"}),
+                CapabilityKind::Mode,
+                "mode",
+                "architect",
+            ),
+            (
+                "session/set_config_option",
+                serde_json::json!({
+                    "sessionId": "session-1",
+                    "configId": "reasoning_effort",
+                    "value": "high"
+                }),
+                CapabilityKind::Effort,
+                "reasoning_effort",
+                "high",
+            ),
+        ];
+
+        for (index, (method, params, kind, upstream_id, choice_id)) in cases.into_iter().enumerate()
+        {
+            let mut capture = initialized_capture();
+            feed_request_response(
+                &mut capture,
+                &format!("set-{index}"),
+                method,
+                params,
+                serde_json::json!({"result": null}),
+            );
+            let epoch = capture.epoch().expect("accepted-probe epoch");
+            let record = epoch
+                .records()
+                .iter()
+                .find(|record| {
+                    record.key.kind == kind
+                        && record.key.upstream_id == upstream_id
+                        && record.claim == EvidenceClaim::NativeVerified
+                        && record.provenance == EvidenceProvenance::AcceptedActiveProbe
+                })
+                .expect("paired success must bind the semantic capability");
+            assert_eq!(
+                record
+                    .choices
+                    .iter()
+                    .map(|choice| choice.id.as_str())
+                    .collect::<Vec<_>>(),
+                [choice_id]
+            );
+        }
+    }
+
+    #[test]
+    fn rejected_set_model_is_semantic_but_options_method_rejection_is_not() {
+        let mut capture = initialized_capture();
+        feed_request_response(
+            &mut capture,
+            "set-model",
+            "session/set_model",
+            serde_json::json!({"sessionId": "session-1", "modelId": "grok-4.5"}),
+            serde_json::json!({
+                "error": {"code": -32602, "message": "Invalid params"}
+            }),
+        );
+        feed_request_response(
+            &mut capture,
+            "options",
+            "vendor/optionsMethod",
+            serde_json::json!({"modelId": "grok-4.5"}),
+            serde_json::json!({
+                "error": {"code": -32601, "message": "Method not found"}
+            }),
+        );
+
+        let epoch = capture.epoch().expect("rejected-probe epoch");
+        let model_rejections = epoch
+            .records()
+            .iter()
+            .filter(|record| {
+                record.key.kind == CapabilityKind::Model
+                    && record.claim == EvidenceClaim::Rejected
+                    && record.provenance == EvidenceProvenance::RejectedActiveProbe
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(model_rejections.len(), 1);
+        assert_eq!(model_rejections[0].key.upstream_id, "model");
+    }
+
+    #[test]
+    fn paired_response_without_result_invalidates_capture_without_native_evidence() {
+        let mut capture = initialized_capture();
+        feed_request_response(
+            &mut capture,
+            "set-model",
+            "session/set_model",
+            serde_json::json!({"sessionId": "session-1", "modelId": "grok-4.5"}),
+            serde_json::json!({}),
+        );
+
+        assert_eq!(
+            capture.completeness(),
+            CapabilityEvidenceCompleteness::Incomplete
+        );
+        assert!(!capture.records.iter().any(|record| {
+            record.key.kind == CapabilityKind::Model
+                && record.claim == EvidenceClaim::NativeVerified
+        }));
+    }
+}
+
+fn evidence_record_retained_bytes(record: &EvidenceRecord) -> usize {
+    record
+        .key
+        .upstream_id
+        .len()
+        .saturating_add(record.raw_digest.0.len())
+        .saturating_add(
+            record
+                .choices
+                .iter()
+                .map(|choice| {
+                    choice
+                        .id
+                        .len()
+                        .saturating_add(choice.label.len())
+                        .saturating_add(
+                            choice
+                                .description
+                                .as_ref()
+                                .map_or(0, std::string::String::len),
+                        )
+                        .saturating_add(64)
+                })
+                .fold(0_usize, usize::saturating_add),
+        )
+        .saturating_add(256)
+}
+
+trait EvidenceScopeExt {
+    fn or_session(self, fallback: EvidenceSessionScope) -> EvidenceSessionScope;
+}
+
+impl EvidenceScopeExt for EvidenceSessionScope {
+    fn or_session(self, fallback: EvidenceSessionScope) -> EvidenceSessionScope {
+        match self {
+            EvidenceSessionScope::Global => fallback,
+            session => session,
+        }
+    }
+}
+
+fn evidence_scope(payload: Option<&serde_json::Value>) -> EvidenceSessionScope {
+    payload
+        .and_then(|payload| {
+            payload
+                .get("sessionId")
+                .or_else(|| payload.get("session_id"))
+        })
+        .and_then(serde_json::Value::as_str)
+        .filter(|session_id| !session_id.is_empty())
+        .map_or(EvidenceSessionScope::Global, |session_id| {
+            EvidenceSessionScope::Session(session_id.to_owned())
+        })
+}
+
+fn json_rpc_id(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::String(id) => Some(format!("s:{id}")),
+        serde_json::Value::Number(id) => Some(format!("n:{id}")),
+        _ => None,
+    }
+}
+
+fn inject_latest_capability_evidence(
+    meta: &mut Option<agent_client_protocol::schema::v1::Meta>,
+    capture: &Arc<Mutex<RawAcpFrameCapture>>,
+) {
+    let snapshot = capture
+        .lock()
+        .ok()
+        .and_then(|capture| capture.epoch().map(|epoch| (epoch, capture.completeness())));
+    if let Some((epoch, completeness)) = snapshot {
+        inject_capability_evidence_epoch(meta, &epoch, completeness);
+    }
+}
+
+fn record_operational_capability_failure(
+    capture: &Arc<Mutex<RawAcpFrameCapture>>,
+    method: &str,
+    error: &impl std::fmt::Display,
+    scope: EvidenceSessionScope,
+) {
+    let Ok(mut capture) = capture.lock() else {
+        return;
+    };
+    capture.invalidated = true;
+    let identity = capture.identity.clone();
+    capture.append_records(vec![operational_failure_record(
+        &identity,
+        method,
+        &error.to_string(),
+        scope,
+    )]);
+}
+
+fn record_native_dispatch_failure(
+    capture: &Arc<Mutex<RawAcpFrameCapture>>,
+    key: CapabilityKey,
+    method: &str,
+    error: &impl std::fmt::Display,
+    scope: EvidenceSessionScope,
+) {
+    let Ok(mut capture) = capture.lock() else {
+        return;
+    };
+    let identity = capture.identity.clone();
+    capture.append_records(vec![native_dispatch_failure_record(
+        &identity,
+        key,
+        method,
+        &error.to_string(),
+        scope,
+    )]);
+}
+
+pin_project_lite::pin_project! {
+    struct EvidenceCaptureReader<R> {
+        #[pin]
+        inner: R,
+        capture: Arc<Mutex<RawAcpFrameCapture>>,
+    }
+}
+
+impl<R: AsyncRead> AsyncRead for EvidenceCaptureReader<R> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+        buffer: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let this = self.project();
+        let before = buffer.filled().len();
+        match this.inner.poll_read(context, buffer) {
+            Poll::Ready(Ok(())) => {
+                if let Ok(mut capture) = this.capture.lock() {
+                    capture.feed(RawFrameDirection::Received, &buffer.filled()[before..]);
+                }
+                Poll::Ready(Ok(()))
+            }
+            other => other,
+        }
+    }
+}
+
+pin_project_lite::pin_project! {
+    struct EvidenceCaptureWriter<W> {
+        #[pin]
+        inner: W,
+        capture: Arc<Mutex<RawAcpFrameCapture>>,
+    }
+}
+
+impl<W: AsyncWrite> AsyncWrite for EvidenceCaptureWriter<W> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+        buffer: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        let this = self.project();
+        match this.inner.poll_write(context, buffer) {
+            Poll::Ready(Ok(written)) => {
+                if let Ok(mut capture) = this.capture.lock() {
+                    capture.feed(RawFrameDirection::Sent, &buffer[..written]);
+                }
+                Poll::Ready(Ok(written))
+            }
+            other => other,
+        }
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        self.project().inner.poll_flush(context)
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        self.project().inner.poll_shutdown(context)
+    }
 }
 
 // ─── Commands sent to the dedicated ACP thread ──────────────────────────────
@@ -270,6 +995,9 @@ pub struct NativeAcpConnection {
     extra_args: Vec<String>,
     /// Environment entries applied only to this subprocess launch.
     launch_env: BTreeMap<String, String>,
+    /// Bounded, redacted evidence ledger populated by the stdio tee before
+    /// the SDK projects raw ACP frames into typed responses.
+    capability_evidence: Arc<Mutex<RawAcpFrameCapture>>,
     /// Additional absolute workspace roots sent with ACP `session/new`.
     additional_directories: Vec<PathBuf>,
     /// Channel to send commands to the dedicated ACP thread.
@@ -1297,6 +2025,11 @@ impl NativeAcpConnection {
         agent_kind: AgentKind,
         permission_tx: Option<mpsc::UnboundedSender<crate::types::PermissionRequest>>,
     ) -> Self {
+        let command = command.into();
+        let launch_env = BTreeMap::new();
+        let capability_evidence = Arc::new(Mutex::new(RawAcpFrameCapture::new(
+            build_capability_cli_identity(&command, &extra_args, &launch_env),
+        )));
         let (ext_tx, ext_rx) = mpsc::unbounded_channel::<ExtNotificationPayload>();
         let (agent_client_request_tx, agent_client_request_rx) =
             mpsc::unbounded_channel::<AgentClientRequestPayload>();
@@ -1308,9 +2041,10 @@ impl NativeAcpConnection {
         Self {
             agent_name: agent_name.into(),
             agent_kind,
-            command: command.into(),
+            command,
             extra_args,
-            launch_env: BTreeMap::new(),
+            launch_env,
+            capability_evidence,
             additional_directories: Vec::new(),
             cmd_tx: None,
             thread_handle: None,
@@ -1359,6 +2093,32 @@ impl NativeAcpConnection {
     /// Configure environment entries applied only to the spawned ACP child.
     pub fn set_launch_env(&mut self, launch_env: BTreeMap<String, String>) {
         self.launch_env = launch_env;
+        if let Ok(mut capture) = self.capability_evidence.lock() {
+            let upstream_version = capture.identity.upstream_version.clone();
+            capture.identity =
+                build_capability_cli_identity(&self.command, &self.extra_args, &self.launch_env);
+            capture.identity.upstream_version = upstream_version;
+            let identity = capture.identity.clone();
+            for record in &mut capture.records {
+                record.identity.clone_from(&identity);
+            }
+        }
+    }
+
+    /// Latest immutable evidence epoch, including notifications observed after
+    /// session creation. Legacy facade routing remains authoritative.
+    #[must_use]
+    pub fn capability_evidence_epoch(&self) -> Option<EvidenceEpoch> {
+        self.capability_evidence.lock().ok()?.epoch()
+    }
+
+    /// Whether the bounded raw-frame ledger dropped data after reaching a
+    /// capture limit. This is diagnostic only and never changes ACP routing.
+    #[must_use]
+    pub fn capability_evidence_overflowed(&self) -> bool {
+        self.capability_evidence
+            .lock()
+            .is_ok_and(|capture| capture.overflowed)
     }
 
     /// Override the log configuration used by the spawn site (controls the
@@ -1504,6 +2264,7 @@ impl AgentConnection for NativeAcpConnection {
         let session_efforts = self.session_efforts.clone();
         let last_prompt_usage = self.last_prompt_usage.clone();
         let last_num_turns = self.last_num_turns.clone();
+        let capability_evidence = self.capability_evidence.clone();
         let child_pgid = self.child_pgid.clone();
         let repo_root = self.repo_root.clone();
         let log_config = self.log_config.clone();
@@ -1528,6 +2289,7 @@ impl AgentConnection for NativeAcpConnection {
                     session_efforts,
                     last_prompt_usage,
                     last_num_turns,
+                    capability_evidence,
                     child_pgid,
                     repo_root,
                     log_config,
@@ -2072,12 +2834,25 @@ impl AgentConnection for NativeAcpConnection {
                         "model id is not present in the advertised catalog: {model_id}"
                     )));
                 }
-                self.call_ext(
-                    "session/set_model",
-                    direct_set_model_params(&sid, &model_id, None),
-                )
-                .await
-                .map_err(AcpError::Transport)?;
+                let result = self
+                    .call_ext(
+                        "session/set_model",
+                        direct_set_model_params(&sid, &model_id, None),
+                    )
+                    .await;
+                if let Err(error) = &result {
+                    record_native_dispatch_failure(
+                        &self.capability_evidence,
+                        CapabilityKey {
+                            kind: CapabilityKind::Model,
+                            upstream_id: "model".to_owned(),
+                        },
+                        "session/set_model",
+                        error,
+                        EvidenceSessionScope::Session(sid.to_string()),
+                    );
+                }
+                result.map_err(AcpError::Transport)?;
                 if let Ok(mut guard) = self.grok_session_models.lock() {
                     guard.insert(sid.to_string(), model_id);
                 }
@@ -2129,13 +2904,25 @@ impl AgentConnection for NativeAcpConnection {
                 "Grok effort id is not available for model {model_id}: {effort_id}"
             )));
         }
-        self.call_ext(
-            "session/set_model",
-            direct_set_model_params(&sid, &model_id, Some(&effort_id)),
-        )
-        .await
-        .map(|_| ())
-        .map_err(AcpError::Transport)
+        let result = self
+            .call_ext(
+                "session/set_model",
+                direct_set_model_params(&sid, &model_id, Some(&effort_id)),
+            )
+            .await;
+        if let Err(error) = &result {
+            record_native_dispatch_failure(
+                &self.capability_evidence,
+                CapabilityKey {
+                    kind: CapabilityKind::Effort,
+                    upstream_id: "reasoning_effort".to_owned(),
+                },
+                "session/set_model",
+                error,
+                EvidenceSessionScope::Session(sid.to_string()),
+            );
+        }
+        result.map(|_| ()).map_err(AcpError::Transport)
     }
 
     // ─── authenticate ────────────────────────────────────────────────────
@@ -2254,6 +3041,7 @@ fn acp_thread_main(
     session_efforts: Arc<Mutex<HashMap<String, String>>>,
     last_prompt_usage: Arc<Mutex<Option<Usage>>>,
     last_num_turns: Arc<Mutex<Option<u64>>>,
+    capability_evidence: Arc<Mutex<RawAcpFrameCapture>>,
     child_pgid: Arc<Mutex<Option<i32>>>,
     repo_root: PathBuf,
     log_config: LogConfig,
@@ -2459,10 +3247,19 @@ fn acp_thread_main(
             }
         };
 
-        // Wrap tokio AsyncRead/Write into futures AsyncRead/Write using compat,
-        // then hand both halves to the SDK's `ByteStreams` transport.
-        let stdout_compat = tokio_util::compat::TokioAsyncReadCompatExt::compat(child_stdout);
-        let stdin_compat = tokio_util::compat::TokioAsyncWriteCompatExt::compat_write(child_stdin);
+        // Tee complete newline-delimited ACP frames before the SDK performs
+        // typed projection, then adapt Tokio I/O for the SDK transport.
+        let stdout_capture = EvidenceCaptureReader {
+            inner: child_stdout,
+            capture: capability_evidence.clone(),
+        };
+        let stdin_capture = EvidenceCaptureWriter {
+            inner: child_stdin,
+            capture: capability_evidence.clone(),
+        };
+        let stdout_compat = tokio_util::compat::TokioAsyncReadCompatExt::compat(stdout_capture);
+        let stdin_compat =
+            tokio_util::compat::TokioAsyncWriteCompatExt::compat_write(stdin_capture);
         let transport = ByteStreams::new(stdin_compat, stdout_compat);
 
         // Send-safe state shared between handler closures (which carry a
@@ -2548,6 +3345,7 @@ fn acp_thread_main(
             let last_prompt_usage_loop = last_prompt_usage.clone();
             let pending_air_report_requests_loop = pending_air_report_requests.clone();
             let session_notification_sink_loop = session_notification_sink.clone();
+            let capability_evidence_loop = capability_evidence.clone();
 
             Client
                 .builder()
@@ -3027,7 +3825,11 @@ fn acp_thread_main(
                     let init_outcome = cx.send_request(init_request).block_task().await;
                     emit_acp_request_result(init_started_at, &init_outcome);
                     match init_outcome {
-                        Ok(response) => {
+                        Ok(mut response) => {
+                            inject_latest_capability_evidence(
+                                &mut response.meta,
+                                &capability_evidence_loop,
+                            );
                             if let Some(reply) =
                                 init_reply_slot_loop.borrow_mut().take()
                             {
@@ -3035,6 +3837,12 @@ fn acp_thread_main(
                             }
                         }
                         Err(e) => {
+                            record_operational_capability_failure(
+                                &capability_evidence_loop,
+                                "initialize",
+                                &e,
+                                EvidenceSessionScope::Global,
+                            );
                             if let Some(reply) =
                                 init_reply_slot_loop.borrow_mut().take()
                             {
@@ -3067,7 +3875,7 @@ fn acp_thread_main(
                                 // plane on session/new, but ACP schema 1.1 drops
                                 // it on typed deserialize. Re-issue as ExtMethod
                                 // for Kiro so we can recover the catalog into meta.
-                                let result = if agent_kind == AgentKind::Kiro {
+                                let mut result = if agent_kind == AgentKind::Kiro {
                                     match serde_json::to_value(&request) {
                                         Ok(params) => {
                                             match serde_json::value::to_raw_value(&params) {
@@ -3106,7 +3914,11 @@ fn acp_thread_main(
                                     cx.send_request(request).block_task().await
                                 };
                                 emit_acp_request_result(request_started_at, &result);
-                                if let Ok(response) = &result {
+                                if let Ok(response) = &mut result {
+                                    inject_latest_capability_evidence(
+                                        &mut response.meta,
+                                        &capability_evidence_loop,
+                                    );
                                     complete_new_session(
                                         response,
                                         &root_sessions,
@@ -3119,6 +3931,14 @@ fn acp_thread_main(
                                         &session_efforts,
                                     );
                                 } else {
+                                    if let Err(error) = &result {
+                                        record_operational_capability_failure(
+                                            &capability_evidence_loop,
+                                            "session/new",
+                                            error,
+                                            EvidenceSessionScope::Global,
+                                        );
+                                    }
                                     new_session_in_flight.store(false, Ordering::Release);
                                     clear_pending_new_session_updates(&pending_new_session_updates);
                                 }
@@ -3361,7 +4181,11 @@ fn acp_thread_main(
                                                 .take()
                                                 .expect("LoadSession reply consumed only once");
                                             match load_result {
-                                                Ok(response) => {
+                                                Ok(mut response) => {
+                                                    inject_latest_capability_evidence(
+                                                        &mut response.meta,
+                                                        &capability_evidence_loop,
+                                                    );
                                                     cache_session_modes(
                                                         &session_modes,
                                                         &session_id_for_probe,
@@ -3383,6 +4207,14 @@ fn acp_thread_main(
                                                     let _ = reply.send(Ok((response, rx_empty)));
                                                 }
                                                 Err(e) => {
+                                                    record_operational_capability_failure(
+                                                        &capability_evidence_loop,
+                                                        "session/load",
+                                                        &e,
+                                                        EvidenceSessionScope::Session(
+                                                            session_id_for_probe.to_string(),
+                                                        ),
+                                                    );
                                                     rollback_session_open(
                                                         &root_sessions,
                                                         &closed_sessions,

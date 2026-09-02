@@ -17,6 +17,7 @@ use std::path::Path;
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use serde_json::Value;
+use spur_acp::capability_evidence::DispatchRoute;
 use spur_acp::{
     ContentBlock, EmbeddedResource, EmbeddedResourceResource, ResourceLink, SpurAgentCaps,
     TextContent, TextResourceContents,
@@ -28,7 +29,8 @@ use crate::components::query_source::RetrievalAccept;
 use crate::mentions::code_graph::expansion::{expand, ExpandedMention, PER_PROMPT_CAP_BYTES};
 use spur_graph::{CodeMentionKind, CodeMentionPayload};
 
-use super::entry::Dispatch;
+use super::advertised::pinned_route_for_command;
+use super::entry::{CommandSource, Dispatch};
 use super::registry::CommandRegistry;
 
 /// What the controller should do with an Enter-submitted InputBar.
@@ -196,6 +198,42 @@ pub fn route_with_caps(
     if text.starts_with('/') {
         if let Some(entry) = registry.resolve(text) {
             let command_name = entry.name;
+            // Snapshot the immutable evidence epoch and selected route before
+            // producing a decision. The returned decision is irreversible: a
+            // later capability refresh can only affect a later invocation.
+            let pinned_route = match &entry.source {
+                CommandSource::Agent { .. } | CommandSource::Advertised { .. } => caps
+                    .and_then(|caps| pinned_route_for_command(caps, &command_name))
+                    .map(|pinned| (pinned.evidence_epoch, pinned.route)),
+                CommandSource::Spur => None,
+            };
+            if let Some((_evidence_epoch, route)) = pinned_route {
+                match route {
+                    DispatchRoute::Hidden => return SubmitDecision::Empty,
+                    DispatchRoute::PromptOnly => {
+                        let normalized = match &entry.dispatch {
+                            Dispatch::PromptText { normalized } => normalized.clone(),
+                            _ => format!("/{command_name}"),
+                        };
+                        let rest = rest_after_first_token(text);
+                        let normalized_full = if rest.is_empty() {
+                            normalized
+                        } else {
+                            format!("{normalized} {rest}")
+                        };
+                        return SubmitDecision::Send {
+                            blocks: vec![ContentBlock::Text(TextContent::new(normalized_full))],
+                            interrupt,
+                        };
+                    }
+                    DispatchRoute::NativePreferred
+                        if matches!(&entry.dispatch, Dispatch::PromptText { .. }) =>
+                    {
+                        return SubmitDecision::Empty;
+                    }
+                    DispatchRoute::NativePreferred => {}
+                }
+            }
             return match entry.dispatch {
                 Dispatch::SpurLocal(action) => SubmitDecision::Local { action },
                 Dispatch::PromptText { normalized } => {
@@ -217,7 +255,10 @@ pub fn route_with_caps(
                     if value.is_empty() {
                         // No arg yet — picker should still be open. Treat as no-op.
                         SubmitDecision::Empty
-                    } else if config_id == "model" && caps.is_some_and(|c| c.supports_set_model()) {
+                    } else if pinned_route.is_none()
+                        && config_id == "model"
+                        && caps.is_some_and(|c| c.supports_set_model())
+                    {
                         // Wave B.4 / spec §6.3: prefer the dedicated
                         // `session/set_model` dispatch. Fallback when
                         // `set_model` is unavailable stays via the
@@ -748,6 +789,7 @@ mod image_block_tests {
             agent_kind: spur_acp::AgentKind::Generic,
             grok_display: None,
             kiro_display: None,
+            capability_evidence: None,
         }
     }
 
@@ -936,9 +978,131 @@ mod brain_slash_tests {
 mod sessions_slash_tests {
     use super::*;
     use crate::commands::registry::CommandRegistry;
+    use spur_acp::capability_evidence::{
+        CapabilityChoice, CapabilityKey, CapabilityKind, CliIdentity, EvidenceClaim, EvidenceEpoch,
+        EvidenceEpochId, EvidenceProvenance, EvidenceRecord, EvidenceSessionScope, ObservationTime,
+        RawEvidenceDigest,
+    };
+    use spur_acp::spur_agent_caps::CapabilityEvidenceSnapshot;
 
     fn build_registry_for_test() -> CommandRegistry {
         CommandRegistry::new()
+    }
+
+    fn model_route_caps(
+        epoch_id: u64,
+        claim: EvidenceClaim,
+        provenance: EvidenceProvenance,
+    ) -> SpurAgentCaps {
+        use spur_acp::{AgentKind, InitializeResponse, NewSessionResponse, ProtocolVersion};
+
+        let identity = CliIdentity {
+            resolved_executable: std::path::PathBuf::from("/usr/bin/test-acp"),
+            upstream_version: Some("1.0.0".to_owned()),
+            argv_fingerprint: "argv".to_owned(),
+            environment_fingerprint: "env".to_owned(),
+        };
+        let record = EvidenceRecord {
+            key: CapabilityKey {
+                kind: CapabilityKind::Model,
+                upstream_id: "model".to_owned(),
+            },
+            claim,
+            provenance,
+            identity: identity.clone(),
+            observed_at: ObservationTime(epoch_id),
+            raw_digest: RawEvidenceDigest(format!("sha256:model:{epoch_id}")),
+            session_scope: EvidenceSessionScope::Session("sid".to_owned()),
+            choices: vec![CapabilityChoice {
+                id: "test-model".to_owned(),
+                label: "Test Model".to_owned(),
+                description: None,
+            }],
+        };
+        let epoch = EvidenceEpoch::new(EvidenceEpochId(epoch_id), identity.clone(), vec![record])
+            .expect("test evidence must use one identity");
+        let snapshot = CapabilityEvidenceSnapshot::from_epoch(epoch, &identity);
+        let mut wire = serde_json::to_value(snapshot).expect("snapshot must serialize");
+        wire["completeness"] = serde_json::json!("complete");
+
+        let init = InitializeResponse::new(ProtocolVersion::LATEST);
+        let mut caps = SpurAgentCaps::new(
+            &init,
+            &NewSessionResponse::new(spur_acp::AcpSessionId::new("sid")),
+            AgentKind::Generic,
+        );
+        caps.capability_evidence = Some(
+            serde_json::from_value(wire).expect("complete evidence snapshot must deserialize"),
+        );
+        caps
+    }
+
+    fn prompt_only_command_caps(epoch_id: u64, command_name: &str) -> SpurAgentCaps {
+        use spur_acp::{AgentKind, InitializeResponse, NewSessionResponse, ProtocolVersion};
+
+        let identity = CliIdentity {
+            resolved_executable: std::path::PathBuf::from("/usr/bin/kiro-cli"),
+            upstream_version: Some("1.0.0".to_owned()),
+            argv_fingerprint: "argv".to_owned(),
+            environment_fingerprint: "env".to_owned(),
+        };
+        let record = EvidenceRecord {
+            key: CapabilityKey {
+                kind: CapabilityKind::Command,
+                upstream_id: "commands".to_owned(),
+            },
+            claim: EvidenceClaim::CandidateObserved,
+            provenance: EvidenceProvenance::PromptFallback,
+            identity: identity.clone(),
+            observed_at: ObservationTime(epoch_id),
+            raw_digest: RawEvidenceDigest(format!("sha256:command:{epoch_id}")),
+            session_scope: EvidenceSessionScope::Session("sid".to_owned()),
+            choices: vec![CapabilityChoice {
+                id: command_name.to_owned(),
+                label: format!("/{command_name}"),
+                description: None,
+            }],
+        };
+        let epoch = EvidenceEpoch::new(EvidenceEpochId(epoch_id), identity.clone(), vec![record])
+            .expect("test evidence must use one identity");
+        let snapshot = CapabilityEvidenceSnapshot::from_epoch(epoch, &identity);
+        let mut wire = serde_json::to_value(snapshot).expect("snapshot must serialize");
+        wire["completeness"] = serde_json::json!("complete");
+
+        let init = InitializeResponse::new(ProtocolVersion::LATEST);
+        let mut caps = SpurAgentCaps::new(
+            &init,
+            &NewSessionResponse::new(spur_acp::AcpSessionId::new("sid")),
+            AgentKind::Kiro,
+        );
+        caps.capability_evidence = Some(
+            serde_json::from_value(wire).expect("complete evidence snapshot must deserialize"),
+        );
+        caps
+    }
+
+    fn registry_from_reduced_caps(caps: &SpurAgentCaps) -> CommandRegistry {
+        let mut registry = CommandRegistry::new();
+        registry.set_agent_commands(
+            "agent",
+            vec![crate::commands::entry::CommandEntry {
+                name: "model".to_owned(),
+                description: "Agent prompt model".to_owned(),
+                hint: None,
+                source: crate::commands::entry::CommandSource::Agent {
+                    handle: "agent".to_owned(),
+                },
+                dispatch: Dispatch::PromptText {
+                    normalized: "/model".to_owned(),
+                },
+                arg_picker_spec: None,
+            }],
+        );
+        registry.set_advertised_commands(
+            "agent",
+            crate::commands::advertised::AdvertisedSource::entries_from_caps("agent", caps),
+        );
+        registry
     }
 
     #[test]
@@ -1092,7 +1256,45 @@ mod sessions_slash_tests {
                 SessionMode::new(SessionModeId::new("agent"), "Agent"),
             ],
         ));
-        let caps = SpurAgentCaps::new(&init, &new, AgentKind::CodexAcp);
+        let mut caps = SpurAgentCaps::new(&init, &new, AgentKind::CodexAcp);
+        let identity = CliIdentity {
+            resolved_executable: std::path::PathBuf::from("/usr/bin/test-acp"),
+            upstream_version: Some("1.0.0".to_owned()),
+            argv_fingerprint: "argv".to_owned(),
+            environment_fingerprint: "env".to_owned(),
+        };
+        let record = EvidenceRecord {
+            key: CapabilityKey {
+                kind: CapabilityKind::Mode,
+                upstream_id: "mode".to_owned(),
+            },
+            claim: EvidenceClaim::NativeVerified,
+            provenance: EvidenceProvenance::StandardAdvertisement,
+            identity: identity.clone(),
+            observed_at: ObservationTime(41),
+            raw_digest: RawEvidenceDigest("sha256:mode:41".to_owned()),
+            session_scope: EvidenceSessionScope::Session("sid".to_owned()),
+            choices: vec![
+                CapabilityChoice {
+                    id: "read-only".to_owned(),
+                    label: "Ask for approval".to_owned(),
+                    description: None,
+                },
+                CapabilityChoice {
+                    id: "agent".to_owned(),
+                    label: "Agent".to_owned(),
+                    description: None,
+                },
+            ],
+        };
+        let epoch = EvidenceEpoch::new(EvidenceEpochId(41), identity.clone(), vec![record])
+            .expect("mode evidence must use one identity");
+        let snapshot = CapabilityEvidenceSnapshot::from_epoch(epoch, &identity);
+        let mut wire = serde_json::to_value(snapshot).expect("snapshot must serialize");
+        wire["completeness"] = serde_json::json!("complete");
+        caps.capability_evidence = Some(
+            serde_json::from_value(wire).expect("complete evidence snapshot must deserialize"),
+        );
         let mut registry = CommandRegistry::new();
         registry.set_advertised_commands(
             "codex",
@@ -1295,6 +1497,159 @@ mod sessions_slash_tests {
             }
             other => panic!("expected SetSessionConfigOption fallback, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn prompt_only_model_dispatches_prompt_route_once() {
+        let caps = model_route_caps(
+            21,
+            EvidenceClaim::CandidateObserved,
+            EvidenceProvenance::PromptFallback,
+        );
+        let mut registry = CommandRegistry::new();
+        registry.set_advertised_commands(
+            "agent",
+            vec![crate::commands::entry::CommandEntry {
+                name: "model".to_owned(),
+                description: "Synthetic native model".to_owned(),
+                hint: None,
+                source: crate::commands::entry::CommandSource::Advertised {
+                    handle: "agent".to_owned(),
+                },
+                dispatch: Dispatch::SetSessionModel,
+                arg_picker_spec: None,
+            }],
+        );
+
+        let decision =
+            route_with_caps("/model test-model", &[], &[], &registry, false, Some(&caps));
+
+        let SubmitDecision::Send { blocks, .. } = decision else {
+            panic!("PromptOnly must dispatch one prompt route");
+        };
+        assert_eq!(blocks.len(), 1);
+        assert!(matches!(
+            &blocks[0],
+            ContentBlock::Text(text) if text.text == "/model test-model"
+        ));
+    }
+
+    #[test]
+    fn review_prompt_only_agent_clear_does_not_hijack_spur_clear() {
+        let caps = prompt_only_command_caps(22, "clear");
+        let mut registry = CommandRegistry::new();
+        registry.set_agent_commands(
+            "kiro",
+            vec![crate::commands::entry::CommandEntry {
+                name: "clear".to_owned(),
+                description: "Kiro prompt clear".to_owned(),
+                hint: None,
+                source: crate::commands::entry::CommandSource::Agent {
+                    handle: "kiro".to_owned(),
+                },
+                dispatch: Dispatch::PromptText {
+                    normalized: "/clear".to_owned(),
+                },
+                arg_picker_spec: None,
+            }],
+        );
+        registry.set_advertised_commands(
+            "kiro",
+            crate::commands::advertised::AdvertisedSource::entries_from_caps("kiro", &caps),
+        );
+
+        let resolved = registry
+            .resolve("/clear")
+            .expect("SPUR /clear must resolve");
+        assert!(matches!(
+            resolved.source,
+            crate::commands::entry::CommandSource::Spur
+        ));
+
+        let decision = route_with_caps("/clear", &[], &[], &registry, false, Some(&caps));
+        assert!(matches!(
+            decision,
+            SubmitDecision::Local {
+                action: Action::ClearSession
+            }
+        ));
+    }
+
+    #[test]
+    fn evidence_refresh_changes_only_the_next_model_action_route() {
+        let native_caps = model_route_caps(
+            31,
+            EvidenceClaim::NativeVerified,
+            EvidenceProvenance::AcceptedActiveProbe,
+        );
+        let native_registry = registry_from_reduced_caps(&native_caps);
+
+        let in_flight = route_with_caps(
+            "/model test-model",
+            &[],
+            &[],
+            &native_registry,
+            false,
+            Some(&native_caps),
+        );
+
+        let prompt_caps = model_route_caps(
+            32,
+            EvidenceClaim::NativeFailed,
+            EvidenceProvenance::NativeDispatch,
+        );
+        let mut prompt_caps = prompt_caps;
+        let identity = prompt_caps
+            .capability_evidence
+            .as_ref()
+            .expect("snapshot")
+            .epoch()
+            .identity()
+            .clone();
+        let mut records = prompt_caps
+            .capability_evidence
+            .as_ref()
+            .expect("snapshot")
+            .epoch()
+            .records()
+            .to_vec();
+        records.push(EvidenceRecord {
+            key: CapabilityKey {
+                kind: CapabilityKind::Model,
+                upstream_id: "model".to_owned(),
+            },
+            claim: EvidenceClaim::CandidateObserved,
+            provenance: EvidenceProvenance::PromptFallback,
+            identity: identity.clone(),
+            observed_at: ObservationTime(32),
+            raw_digest: RawEvidenceDigest("sha256:model:prompt".to_owned()),
+            session_scope: EvidenceSessionScope::Session("sid".to_owned()),
+            choices: vec![CapabilityChoice {
+                id: "test-model".to_owned(),
+                label: "Test Model".to_owned(),
+                description: None,
+            }],
+        });
+        let refreshed = EvidenceEpoch::new(EvidenceEpochId(32), identity.clone(), records)
+            .expect("refresh evidence must use one identity");
+        let snapshot = CapabilityEvidenceSnapshot::from_epoch(refreshed, &identity);
+        let mut wire = serde_json::to_value(snapshot).expect("snapshot must serialize");
+        wire["completeness"] = serde_json::json!("complete");
+        prompt_caps.capability_evidence = Some(
+            serde_json::from_value(wire).expect("complete evidence snapshot must deserialize"),
+        );
+        let prompt_registry = registry_from_reduced_caps(&prompt_caps);
+        let subsequent = route_with_caps(
+            "/model test-model",
+            &[],
+            &[],
+            &prompt_registry,
+            false,
+            Some(&prompt_caps),
+        );
+
+        assert!(matches!(in_flight, SubmitDecision::SetSessionModel { .. }));
+        assert!(matches!(subsequent, SubmitDecision::Send { .. }));
     }
 
     /// Bare `/theme` routes to `Action::ThemeCommand` with an empty arg

@@ -1,0 +1,4748 @@
+{
+  "claims": [
+    {
+      "capability": {
+        "id": "high",
+        "kind": "effort"
+      },
+      "claim": "advertised",
+      "provenance": "vendor_advertisement",
+      "raw_digest": "sha256:56446152008136984557def8d8994b332584b022e0ef1aa1cea83dd298d511a2",
+      "session_scope": null,
+      "source": "initialize"
+    },
+    {
+      "capability": {
+        "id": "low",
+        "kind": "effort"
+      },
+      "claim": "advertised",
+      "provenance": "vendor_advertisement",
+      "raw_digest": "sha256:56446152008136984557def8d8994b332584b022e0ef1aa1cea83dd298d511a2",
+      "session_scope": null,
+      "source": "initialize"
+    },
+    {
+      "capability": {
+        "id": "medium",
+        "kind": "effort"
+      },
+      "claim": "advertised",
+      "provenance": "vendor_advertisement",
+      "raw_digest": "sha256:56446152008136984557def8d8994b332584b022e0ef1aa1cea83dd298d511a2",
+      "session_scope": null,
+      "source": "initialize"
+    },
+    {
+      "capability": {
+        "id": "xhigh",
+        "kind": "effort"
+      },
+      "claim": "advertised",
+      "provenance": "vendor_advertisement",
+      "raw_digest": "sha256:56446152008136984557def8d8994b332584b022e0ef1aa1cea83dd298d511a2",
+      "session_scope": null,
+      "source": "initialize"
+    },
+    {
+      "capability": {
+        "id": "grok-4.5",
+        "kind": "model"
+      },
+      "claim": "advertised",
+      "provenance": "vendor_advertisement",
+      "raw_digest": "sha256:56446152008136984557def8d8994b332584b022e0ef1aa1cea83dd298d511a2",
+      "session_scope": null,
+      "source": "initialize"
+    },
+    {
+      "capability": {
+        "id": "grok-4.6",
+        "kind": "model"
+      },
+      "claim": "advertised",
+      "provenance": "vendor_advertisement",
+      "raw_digest": "sha256:56446152008136984557def8d8994b332584b022e0ef1aa1cea83dd298d511a2",
+      "session_scope": null,
+      "source": "initialize"
+    },
+    {
+      "capability": {
+        "id": "always-approve",
+        "kind": "command"
+      },
+      "claim": "advertised",
+      "provenance": "standard_advertisement",
+      "raw_digest": "sha256:13104f524f9b788dca93a852587c541081c76c407e1f9ccabf483165a91f4ec0",
+      "session_scope": "<session-2>",
+      "source": "notification"
+    },
+    {
+      "capability": {
+        "id": "always-approve",
+        "kind": "command"
+      },
+      "claim": "advertised",
+      "provenance": "standard_advertisement",
+      "raw_digest": "sha256:4df94364917589795696ae206ddbb64db83555c61ebe463d2f091d163c009296",
+      "session_scope": "<session-2>",
+      "source": "notification"
+    },
+    {
+      "capability": {
+        "id": "brainstorming",
+        "kind": "command"
+      },
+      "claim": "advertised",
+      "provenance": "standard_advertisement",
+      "raw_digest": "sha256:13104f524f9b788dca93a852587c541081c76c407e1f9ccabf483165a91f4ec0",
+      "session_scope": "<session-2>",
+      "source": "notification"
+    },
+    {
+      "capability": {
+        "id": "brainstorming",
+        "kind": "command"
+      },
+      "claim": "advertised",
+      "provenance": "standard_advertisement",
+      "raw_digest": "sha256:4df94364917589795696ae206ddbb64db83555c61ebe463d2f091d163c009296",
+      "session_scope": "<session-2>",
+      "source": "notification"
+    },
+    {
+      "capability": {
+        "id": "build-with-ai",
+        "kind": "command"
+      },
+      "claim": "advertised",
+      "provenance": "standard_advertisement",
+      "raw_digest": "sha256:13104f524f9b788dca93a852587c541081c76c407e1f9ccabf483165a91f4ec0",
+      "session_scope": "<session-2>",
+      "source": "notification"
+    },
+    {
+      "capability": {
+        "id": "build-with-ai",
+        "kind": "command"
+      },
+      "claim": "advertised",
+      "provenance": "standard_advertisement",
+      "raw_digest": "sha256:4df94364917589795696ae206ddbb64db83555c61ebe463d2f091d163c009296",
+      "session_scope": "<session-2>",
+      "source": "notification"
+    },
+    {
+      "capability": {
+        "id": "bundled:imagine",
+        "kind": "command"
+      },
+      "claim": "advertised",
+      "provenance": "standard_advertisement",
+      "raw_digest": "sha256:13104f524f9b788dca93a852587c541081c76c407e1f9ccabf483165a91f4ec0",
+      "session_scope": "<session-2>",
+      "source": "notification"
+    },
+    {
+      "capability": {
+        "id": "bundled:imagine",
+        "kind": "command"
+      },
+      "claim": "advertised",
+      "provenance": "standard_advertisement",
+      "raw_digest": "sha256:4df94364917589795696ae206ddbb64db83555c61ebe463d2f091d163c009296",
+      "session_scope": "<session-2>",
+      "source": "notification"
+    },
+    {
+      "capability": {
+        "id": "code-review",
+        "kind": "command"
+      },
+      "claim": "advertised",
+      "provenance": "standard_advertisement",
+      "raw_digest": "sha256:13104f524f9b788dca93a852587c541081c76c407e1f9ccabf483165a91f4ec0",
+      "session_scope": "<session-2>",
+      "source": "notification"
+    },
+    {
+      "capability": {
+        "id": "code-review",
+        "kind": "command"
+      },
+      "claim": "advertised",
+      "provenance": "standard_advertisement",
+      "raw_digest": "sha256:4df94364917589795696ae206ddbb64db83555c61ebe463d2f091d163c009296",
+      "session_scope": "<session-2>",
+      "source": "notification"
+    },
+    {
+      "capability": {
+        "id": "compact",
+        "kind": "command"
+      },
+      "claim": "advertised",
+      "provenance": "standard_advertisement",
+      "raw_digest": "sha256:13104f524f9b788dca93a852587c541081c76c407e1f9ccabf483165a91f4ec0",
+      "session_scope": "<session-2>",
+      "source": "notification"
+    },
+    {
+      "capability": {
+        "id": "compact",
+        "kind": "command"
+      },
+      "claim": "advertised",
+      "provenance": "standard_advertisement",
+      "raw_digest": "sha256:4df94364917589795696ae206ddbb64db83555c61ebe463d2f091d163c009296",
+      "session_scope": "<session-2>",
+      "source": "notification"
+    },
+    {
+      "capability": {
+        "id": "context",
+        "kind": "command"
+      },
+      "claim": "advertised",
+      "provenance": "standard_advertisement",
+      "raw_digest": "sha256:13104f524f9b788dca93a852587c541081c76c407e1f9ccabf483165a91f4ec0",
+      "session_scope": "<session-2>",
+      "source": "notification"
+    },
+    {
+      "capability": {
+        "id": "context",
+        "kind": "command"
+      },
+      "claim": "advertised",
+      "provenance": "standard_advertisement",
+      "raw_digest": "sha256:4df94364917589795696ae206ddbb64db83555c61ebe463d2f091d163c009296",
+      "session_scope": "<session-2>",
+      "source": "notification"
+    },
+    {
+      "capability": {
+        "id": "create-skill",
+        "kind": "command"
+      },
+      "claim": "advertised",
+      "provenance": "standard_advertisement",
+      "raw_digest": "sha256:13104f524f9b788dca93a852587c541081c76c407e1f9ccabf483165a91f4ec0",
+      "session_scope": "<session-2>",
+      "source": "notification"
+    },
+    {
+      "capability": {
+        "id": "create-skill",
+        "kind": "command"
+      },
+      "claim": "advertised",
+      "provenance": "standard_advertisement",
+      "raw_digest": "sha256:4df94364917589795696ae206ddbb64db83555c61ebe463d2f091d163c009296",
+      "session_scope": "<session-2>",
+      "source": "notification"
+    },
+    {
+      "capability": {
+        "id": "create-workflow",
+        "kind": "command"
+      },
+      "claim": "advertised",
+      "provenance": "standard_advertisement",
+      "raw_digest": "sha256:13104f524f9b788dca93a852587c541081c76c407e1f9ccabf483165a91f4ec0",
+      "session_scope": "<session-2>",
+      "source": "notification"
+    },
+    {
+      "capability": {
+        "id": "create-workflow",
+        "kind": "command"
+      },
+      "claim": "advertised",
+      "provenance": "standard_advertisement",
+      "raw_digest": "sha256:4df94364917589795696ae206ddbb64db83555c61ebe463d2f091d163c009296",
+      "session_scope": "<session-2>",
+      "source": "notification"
+    },
+    {
+      "capability": {
+        "id": "deep-research",
+        "kind": "command"
+      },
+      "claim": "advertised",
+      "provenance": "standard_advertisement",
+      "raw_digest": "sha256:13104f524f9b788dca93a852587c541081c76c407e1f9ccabf483165a91f4ec0",
+      "session_scope": "<session-2>",
+      "source": "notification"
+    },
+    {
+      "capability": {
+        "id": "deep-research",
+        "kind": "command"
+      },
+      "claim": "advertised",
+      "provenance": "standard_advertisement",
+      "raw_digest": "sha256:4df94364917589795696ae206ddbb64db83555c61ebe463d2f091d163c009296",
+      "session_scope": "<session-2>",
+      "source": "notification"
+    },
+    {
+      "capability": {
+        "id": "design",
+        "kind": "command"
+      },
+      "claim": "advertised",
+      "provenance": "standard_advertisement",
+      "raw_digest": "sha256:13104f524f9b788dca93a852587c541081c76c407e1f9ccabf483165a91f4ec0",
+      "session_scope": "<session-2>",
+      "source": "notification"
+    },
+    {
+      "capability": {
+        "id": "design",
+        "kind": "command"
+      },
+      "claim": "advertised",
+      "provenance": "standard_advertisement",
+      "raw_digest": "sha256:4df94364917589795696ae206ddbb64db83555c61ebe463d2f091d163c009296",
+      "session_scope": "<session-2>",
+      "source": "notification"
+    },
+    {
+      "capability": {
+        "id": "dispatching-parallel-agents",
+        "kind": "command"
+      },
+      "claim": "advertised",
+      "provenance": "standard_advertisement",
+      "raw_digest": "sha256:13104f524f9b788dca93a852587c541081c76c407e1f9ccabf483165a91f4ec0",
+      "session_scope": "<session-2>",
+      "source": "notification"
+    },
+    {
+      "capability": {
+        "id": "dispatching-parallel-agents",
+        "kind": "command"
+      },
+      "claim": "advertised",
+      "provenance": "standard_advertisement",
+      "raw_digest": "sha256:4df94364917589795696ae206ddbb64db83555c61ebe463d2f091d163c009296",
+      "session_scope": "<session-2>",
+      "source": "notification"
+    },
+    {
+      "capability": {
+        "id": "execute-plan",
+        "kind": "command"
+      },
+      "claim": "advertised",
+      "provenance": "standard_advertisement",
+      "raw_digest": "sha256:13104f524f9b788dca93a852587c541081c76c407e1f9ccabf483165a91f4ec0",
+      "session_scope": "<session-2>",
+      "source": "notification"
+    },
+    {
+      "capability": {
+        "id": "execute-plan",
+        "kind": "command"
+      },
+      "claim": "advertised",
+      "provenance": "standard_advertisement",
+      "raw_digest": "sha256:4df94364917589795696ae206ddbb64db83555c61ebe463d2f091d163c009296",
+      "session_scope": "<session-2>",
+      "source": "notification"
+    },
+    {
+      "capability": {
+        "id": "executing-plans",
+        "kind": "command"
+      },
+      "claim": "advertised",
+      "provenance": "standard_advertisement",
+      "raw_digest": "sha256:13104f524f9b788dca93a852587c541081c76c407e1f9ccabf483165a91f4ec0",
+      "session_scope": "<session-2>",
+      "source": "notification"
+    },
+    {
+      "capability": {
+        "id": "executing-plans",
+        "kind": "command"
+      },
+      "claim": "advertised",
+      "provenance": "standard_advertisement",
+      "raw_digest": "sha256:4df94364917589795696ae206ddbb64db83555c61ebe463d2f091d163c009296",
+      "session_scope": "<session-2>",
+      "source": "notification"
+    },
+    {
+      "capability": {
+        "id": "feedback",
+        "kind": "command"
+      },
+      "claim": "advertised",
+      "provenance": "standard_advertisement",
+      "raw_digest": "sha256:13104f524f9b788dca93a852587c541081c76c407e1f9ccabf483165a91f4ec0",
+      "session_scope": "<session-2>",
+      "source": "notification"
+    },
+    {
+      "capability": {
+        "id": "feedback",
+        "kind": "command"
+      },
+      "claim": "advertised",
+      "provenance": "standard_advertisement",
+      "raw_digest": "sha256:4df94364917589795696ae206ddbb64db83555c61ebe463d2f091d163c009296",
+      "session_scope": "<session-2>",
+      "source": "notification"
+    },
+    {
+      "capability": {
+        "id": "finishing-a-development-branch",
+        "kind": "command"
+      },
+      "claim": "advertised",
+      "provenance": "standard_advertisement",
+      "raw_digest": "sha256:13104f524f9b788dca93a852587c541081c76c407e1f9ccabf483165a91f4ec0",
+      "session_scope": "<session-2>",
+      "source": "notification"
+    },
+    {
+      "capability": {
+        "id": "finishing-a-development-branch",
+        "kind": "command"
+      },
+      "claim": "advertised",
+      "provenance": "standard_advertisement",
+      "raw_digest": "sha256:4df94364917589795696ae206ddbb64db83555c61ebe463d2f091d163c009296",
+      "session_scope": "<session-2>",
+      "source": "notification"
+    },
+    {
+      "capability": {
+        "id": "goal",
+        "kind": "command"
+      },
+      "claim": "advertised",
+      "provenance": "standard_advertisement",
+      "raw_digest": "sha256:13104f524f9b788dca93a852587c541081c76c407e1f9ccabf483165a91f4ec0",
+      "session_scope": "<session-2>",
+      "source": "notification"
+    },
+    {
+      "capability": {
+        "id": "goal",
+        "kind": "command"
+      },
+      "claim": "advertised",
+      "provenance": "standard_advertisement",
+      "raw_digest": "sha256:4df94364917589795696ae206ddbb64db83555c61ebe463d2f091d163c009296",
+      "session_scope": "<session-2>",
+      "source": "notification"
+    },
+    {
+      "capability": {
+        "id": "implement",
+        "kind": "command"
+      },
+      "claim": "advertised",
+      "provenance": "standard_advertisement",
+      "raw_digest": "sha256:13104f524f9b788dca93a852587c541081c76c407e1f9ccabf483165a91f4ec0",
+      "session_scope": "<session-2>",
+      "source": "notification"
+    },
+    {
+      "capability": {
+        "id": "implement",
+        "kind": "command"
+      },
+      "claim": "advertised",
+      "provenance": "standard_advertisement",
+      "raw_digest": "sha256:4df94364917589795696ae206ddbb64db83555c61ebe463d2f091d163c009296",
+      "session_scope": "<session-2>",
+      "source": "notification"
+    },
+    {
+      "capability": {
+        "id": "loop",
+        "kind": "command"
+      },
+      "claim": "advertised",
+      "provenance": "standard_advertisement",
+      "raw_digest": "sha256:13104f524f9b788dca93a852587c541081c76c407e1f9ccabf483165a91f4ec0",
+      "session_scope": "<session-2>",
+      "source": "notification"
+    },
+    {
+      "capability": {
+        "id": "loop",
+        "kind": "command"
+      },
+      "claim": "advertised",
+      "provenance": "standard_advertisement",
+      "raw_digest": "sha256:4df94364917589795696ae206ddbb64db83555c61ebe463d2f091d163c009296",
+      "session_scope": "<session-2>",
+      "source": "notification"
+    },
+    {
+      "capability": {
+        "id": "plugins",
+        "kind": "command"
+      },
+      "claim": "advertised",
+      "provenance": "standard_advertisement",
+      "raw_digest": "sha256:13104f524f9b788dca93a852587c541081c76c407e1f9ccabf483165a91f4ec0",
+      "session_scope": "<session-2>",
+      "source": "notification"
+    },
+    {
+      "capability": {
+        "id": "plugins",
+        "kind": "command"
+      },
+      "claim": "advertised",
+      "provenance": "standard_advertisement",
+      "raw_digest": "sha256:4df94364917589795696ae206ddbb64db83555c61ebe463d2f091d163c009296",
+      "session_scope": "<session-2>",
+      "source": "notification"
+    },
+    {
+      "capability": {
+        "id": "pr-babysit",
+        "kind": "command"
+      },
+      "claim": "advertised",
+      "provenance": "standard_advertisement",
+      "raw_digest": "sha256:13104f524f9b788dca93a852587c541081c76c407e1f9ccabf483165a91f4ec0",
+      "session_scope": "<session-2>",
+      "source": "notification"
+    },
+    {
+      "capability": {
+        "id": "pr-babysit",
+        "kind": "command"
+      },
+      "claim": "advertised",
+      "provenance": "standard_advertisement",
+      "raw_digest": "sha256:4df94364917589795696ae206ddbb64db83555c61ebe463d2f091d163c009296",
+      "session_scope": "<session-2>",
+      "source": "notification"
+    },
+    {
+      "capability": {
+        "id": "receiving-code-review",
+        "kind": "command"
+      },
+      "claim": "advertised",
+      "provenance": "standard_advertisement",
+      "raw_digest": "sha256:13104f524f9b788dca93a852587c541081c76c407e1f9ccabf483165a91f4ec0",
+      "session_scope": "<session-2>",
+      "source": "notification"
+    },
+    {
+      "capability": {
+        "id": "receiving-code-review",
+        "kind": "command"
+      },
+      "claim": "advertised",
+      "provenance": "standard_advertisement",
+      "raw_digest": "sha256:4df94364917589795696ae206ddbb64db83555c61ebe463d2f091d163c009296",
+      "session_scope": "<session-2>",
+      "source": "notification"
+    },
+    {
+      "capability": {
+        "id": "reload-plugins",
+        "kind": "command"
+      },
+      "claim": "advertised",
+      "provenance": "standard_advertisement",
+      "raw_digest": "sha256:13104f524f9b788dca93a852587c541081c76c407e1f9ccabf483165a91f4ec0",
+      "session_scope": "<session-2>",
+      "source": "notification"
+    },
+    {
+      "capability": {
+        "id": "reload-plugins",
+        "kind": "command"
+      },
+      "claim": "advertised",
+      "provenance": "standard_advertisement",
+      "raw_digest": "sha256:4df94364917589795696ae206ddbb64db83555c61ebe463d2f091d163c009296",
+      "session_scope": "<session-2>",
+      "source": "notification"
+    },
+    {
+      "capability": {
+        "id": "requesting-code-review",
+        "kind": "command"
+      },
+      "claim": "advertised",
+      "provenance": "standard_advertisement",
+      "raw_digest": "sha256:13104f524f9b788dca93a852587c541081c76c407e1f9ccabf483165a91f4ec0",
+      "session_scope": "<session-2>",
+      "source": "notification"
+    },
+    {
+      "capability": {
+        "id": "requesting-code-review",
+        "kind": "command"
+      },
+      "claim": "advertised",
+      "provenance": "standard_advertisement",
+      "raw_digest": "sha256:4df94364917589795696ae206ddbb64db83555c61ebe463d2f091d163c009296",
+      "session_scope": "<session-2>",
+      "source": "notification"
+    },
+    {
+      "capability": {
+        "id": "resume-claude",
+        "kind": "command"
+      },
+      "claim": "advertised",
+      "provenance": "standard_advertisement",
+      "raw_digest": "sha256:13104f524f9b788dca93a852587c541081c76c407e1f9ccabf483165a91f4ec0",
+      "session_scope": "<session-2>",
+      "source": "notification"
+    },
+    {
+      "capability": {
+        "id": "resume-claude",
+        "kind": "command"
+      },
+      "claim": "advertised",
+      "provenance": "standard_advertisement",
+      "raw_digest": "sha256:4df94364917589795696ae206ddbb64db83555c61ebe463d2f091d163c009296",
+      "session_scope": "<session-2>",
+      "source": "notification"
+    },
+    {
+      "capability": {
+        "id": "resume-codex",
+        "kind": "command"
+      },
+      "claim": "advertised",
+      "provenance": "standard_advertisement",
+      "raw_digest": "sha256:13104f524f9b788dca93a852587c541081c76c407e1f9ccabf483165a91f4ec0",
+      "session_scope": "<session-2>",
+      "source": "notification"
+    },
+    {
+      "capability": {
+        "id": "resume-codex",
+        "kind": "command"
+      },
+      "claim": "advertised",
+      "provenance": "standard_advertisement",
+      "raw_digest": "sha256:4df94364917589795696ae206ddbb64db83555c61ebe463d2f091d163c009296",
+      "session_scope": "<session-2>",
+      "source": "notification"
+    },
+    {
+      "capability": {
+        "id": "resume-cursor",
+        "kind": "command"
+      },
+      "claim": "advertised",
+      "provenance": "standard_advertisement",
+      "raw_digest": "sha256:13104f524f9b788dca93a852587c541081c76c407e1f9ccabf483165a91f4ec0",
+      "session_scope": "<session-2>",
+      "source": "notification"
+    },
+    {
+      "capability": {
+        "id": "resume-cursor",
+        "kind": "command"
+      },
+      "claim": "advertised",
+      "provenance": "standard_advertisement",
+      "raw_digest": "sha256:4df94364917589795696ae206ddbb64db83555c61ebe463d2f091d163c009296",
+      "session_scope": "<session-2>",
+      "source": "notification"
+    },
+    {
+      "capability": {
+        "id": "review",
+        "kind": "command"
+      },
+      "claim": "advertised",
+      "provenance": "standard_advertisement",
+      "raw_digest": "sha256:13104f524f9b788dca93a852587c541081c76c407e1f9ccabf483165a91f4ec0",
+      "session_scope": "<session-2>",
+      "source": "notification"
+    },
+    {
+      "capability": {
+        "id": "review",
+        "kind": "command"
+      },
+      "claim": "advertised",
+      "provenance": "standard_advertisement",
+      "raw_digest": "sha256:4df94364917589795696ae206ddbb64db83555c61ebe463d2f091d163c009296",
+      "session_scope": "<session-2>",
+      "source": "notification"
+    },
+    {
+      "capability": {
+        "id": "session-info",
+        "kind": "command"
+      },
+      "claim": "advertised",
+      "provenance": "standard_advertisement",
+      "raw_digest": "sha256:13104f524f9b788dca93a852587c541081c76c407e1f9ccabf483165a91f4ec0",
+      "session_scope": "<session-2>",
+      "source": "notification"
+    },
+    {
+      "capability": {
+        "id": "session-info",
+        "kind": "command"
+      },
+      "claim": "advertised",
+      "provenance": "standard_advertisement",
+      "raw_digest": "sha256:4df94364917589795696ae206ddbb64db83555c61ebe463d2f091d163c009296",
+      "session_scope": "<session-2>",
+      "source": "notification"
+    },
+    {
+      "capability": {
+        "id": "skill-design-principles",
+        "kind": "command"
+      },
+      "claim": "advertised",
+      "provenance": "standard_advertisement",
+      "raw_digest": "sha256:13104f524f9b788dca93a852587c541081c76c407e1f9ccabf483165a91f4ec0",
+      "session_scope": "<session-2>",
+      "source": "notification"
+    },
+    {
+      "capability": {
+        "id": "skill-design-principles",
+        "kind": "command"
+      },
+      "claim": "advertised",
+      "provenance": "standard_advertisement",
+      "raw_digest": "sha256:4df94364917589795696ae206ddbb64db83555c61ebe463d2f091d163c009296",
+      "session_scope": "<session-2>",
+      "source": "notification"
+    },
+    {
+      "capability": {
+        "id": "subagent-driven-development",
+        "kind": "command"
+      },
+      "claim": "advertised",
+      "provenance": "standard_advertisement",
+      "raw_digest": "sha256:13104f524f9b788dca93a852587c541081c76c407e1f9ccabf483165a91f4ec0",
+      "session_scope": "<session-2>",
+      "source": "notification"
+    },
+    {
+      "capability": {
+        "id": "subagent-driven-development",
+        "kind": "command"
+      },
+      "claim": "advertised",
+      "provenance": "standard_advertisement",
+      "raw_digest": "sha256:4df94364917589795696ae206ddbb64db83555c61ebe463d2f091d163c009296",
+      "session_scope": "<session-2>",
+      "source": "notification"
+    },
+    {
+      "capability": {
+        "id": "systematic-debugging",
+        "kind": "command"
+      },
+      "claim": "advertised",
+      "provenance": "standard_advertisement",
+      "raw_digest": "sha256:13104f524f9b788dca93a852587c541081c76c407e1f9ccabf483165a91f4ec0",
+      "session_scope": "<session-2>",
+      "source": "notification"
+    },
+    {
+      "capability": {
+        "id": "systematic-debugging",
+        "kind": "command"
+      },
+      "claim": "advertised",
+      "provenance": "standard_advertisement",
+      "raw_digest": "sha256:4df94364917589795696ae206ddbb64db83555c61ebe463d2f091d163c009296",
+      "session_scope": "<session-2>",
+      "source": "notification"
+    },
+    {
+      "capability": {
+        "id": "test-driven-development",
+        "kind": "command"
+      },
+      "claim": "advertised",
+      "provenance": "standard_advertisement",
+      "raw_digest": "sha256:13104f524f9b788dca93a852587c541081c76c407e1f9ccabf483165a91f4ec0",
+      "session_scope": "<session-2>",
+      "source": "notification"
+    },
+    {
+      "capability": {
+        "id": "test-driven-development",
+        "kind": "command"
+      },
+      "claim": "advertised",
+      "provenance": "standard_advertisement",
+      "raw_digest": "sha256:4df94364917589795696ae206ddbb64db83555c61ebe463d2f091d163c009296",
+      "session_scope": "<session-2>",
+      "source": "notification"
+    },
+    {
+      "capability": {
+        "id": "using-git-worktrees",
+        "kind": "command"
+      },
+      "claim": "advertised",
+      "provenance": "standard_advertisement",
+      "raw_digest": "sha256:13104f524f9b788dca93a852587c541081c76c407e1f9ccabf483165a91f4ec0",
+      "session_scope": "<session-2>",
+      "source": "notification"
+    },
+    {
+      "capability": {
+        "id": "using-git-worktrees",
+        "kind": "command"
+      },
+      "claim": "advertised",
+      "provenance": "standard_advertisement",
+      "raw_digest": "sha256:4df94364917589795696ae206ddbb64db83555c61ebe463d2f091d163c009296",
+      "session_scope": "<session-2>",
+      "source": "notification"
+    },
+    {
+      "capability": {
+        "id": "using-superpowers",
+        "kind": "command"
+      },
+      "claim": "advertised",
+      "provenance": "standard_advertisement",
+      "raw_digest": "sha256:13104f524f9b788dca93a852587c541081c76c407e1f9ccabf483165a91f4ec0",
+      "session_scope": "<session-2>",
+      "source": "notification"
+    },
+    {
+      "capability": {
+        "id": "using-superpowers",
+        "kind": "command"
+      },
+      "claim": "advertised",
+      "provenance": "standard_advertisement",
+      "raw_digest": "sha256:4df94364917589795696ae206ddbb64db83555c61ebe463d2f091d163c009296",
+      "session_scope": "<session-2>",
+      "source": "notification"
+    },
+    {
+      "capability": {
+        "id": "verification-before-completion",
+        "kind": "command"
+      },
+      "claim": "advertised",
+      "provenance": "standard_advertisement",
+      "raw_digest": "sha256:13104f524f9b788dca93a852587c541081c76c407e1f9ccabf483165a91f4ec0",
+      "session_scope": "<session-2>",
+      "source": "notification"
+    },
+    {
+      "capability": {
+        "id": "verification-before-completion",
+        "kind": "command"
+      },
+      "claim": "advertised",
+      "provenance": "standard_advertisement",
+      "raw_digest": "sha256:4df94364917589795696ae206ddbb64db83555c61ebe463d2f091d163c009296",
+      "session_scope": "<session-2>",
+      "source": "notification"
+    },
+    {
+      "capability": {
+        "id": "workflow",
+        "kind": "command"
+      },
+      "claim": "advertised",
+      "provenance": "standard_advertisement",
+      "raw_digest": "sha256:13104f524f9b788dca93a852587c541081c76c407e1f9ccabf483165a91f4ec0",
+      "session_scope": "<session-2>",
+      "source": "notification"
+    },
+    {
+      "capability": {
+        "id": "workflow",
+        "kind": "command"
+      },
+      "claim": "advertised",
+      "provenance": "standard_advertisement",
+      "raw_digest": "sha256:4df94364917589795696ae206ddbb64db83555c61ebe463d2f091d163c009296",
+      "session_scope": "<session-2>",
+      "source": "notification"
+    },
+    {
+      "capability": {
+        "id": "writing-plans",
+        "kind": "command"
+      },
+      "claim": "advertised",
+      "provenance": "standard_advertisement",
+      "raw_digest": "sha256:13104f524f9b788dca93a852587c541081c76c407e1f9ccabf483165a91f4ec0",
+      "session_scope": "<session-2>",
+      "source": "notification"
+    },
+    {
+      "capability": {
+        "id": "writing-plans",
+        "kind": "command"
+      },
+      "claim": "advertised",
+      "provenance": "standard_advertisement",
+      "raw_digest": "sha256:4df94364917589795696ae206ddbb64db83555c61ebe463d2f091d163c009296",
+      "session_scope": "<session-2>",
+      "source": "notification"
+    },
+    {
+      "capability": {
+        "id": "writing-skills",
+        "kind": "command"
+      },
+      "claim": "advertised",
+      "provenance": "standard_advertisement",
+      "raw_digest": "sha256:13104f524f9b788dca93a852587c541081c76c407e1f9ccabf483165a91f4ec0",
+      "session_scope": "<session-2>",
+      "source": "notification"
+    },
+    {
+      "capability": {
+        "id": "writing-skills",
+        "kind": "command"
+      },
+      "claim": "advertised",
+      "provenance": "standard_advertisement",
+      "raw_digest": "sha256:4df94364917589795696ae206ddbb64db83555c61ebe463d2f091d163c009296",
+      "session_scope": "<session-2>",
+      "source": "notification"
+    },
+    {
+      "capability": {
+        "id": "_x.ai/announcements/update",
+        "kind": "notification"
+      },
+      "claim": "observed",
+      "provenance": "observed_notification",
+      "raw_digest": "sha256:0b15260195705c3ee32b451202fa8826bb4bdbd637ebda95dc97e2da758f0b77",
+      "session_scope": null,
+      "source": "notification"
+    },
+    {
+      "capability": {
+        "id": "_x.ai/announcements/update",
+        "kind": "notification"
+      },
+      "claim": "observed",
+      "provenance": "observed_notification",
+      "raw_digest": "sha256:698cb27e5bae75c2e446a95276015bfa219915e33220b110e4daf28ef923ec50",
+      "session_scope": null,
+      "source": "notification"
+    },
+    {
+      "capability": {
+        "id": "_x.ai/announcements/update",
+        "kind": "notification"
+      },
+      "claim": "observed",
+      "provenance": "observed_notification",
+      "raw_digest": "sha256:8f9a080eb0934f573bc516390df3b41243c1493fb1dd35fc02813f7e4527c9a7",
+      "session_scope": null,
+      "source": "notification"
+    },
+    {
+      "capability": {
+        "id": "_x.ai/mcp/init_progress",
+        "kind": "notification"
+      },
+      "claim": "observed",
+      "provenance": "observed_notification",
+      "raw_digest": "sha256:c37939c73b4295f8ae2955385b9de190aea26eb67f988d8f49a231752e01f7e3",
+      "session_scope": "<session-2>",
+      "source": "notification"
+    },
+    {
+      "capability": {
+        "id": "_x.ai/mcp/init_progress",
+        "kind": "notification"
+      },
+      "claim": "observed",
+      "provenance": "observed_notification",
+      "raw_digest": "sha256:f3264b8e4ed2ca0cd1357f6298552b4938654009242ec9e3895a74a9e113d94a",
+      "session_scope": "<session-2>",
+      "source": "notification"
+    },
+    {
+      "capability": {
+        "id": "_x.ai/mcp/servers_updated",
+        "kind": "notification"
+      },
+      "claim": "observed",
+      "provenance": "observed_notification",
+      "raw_digest": "sha256:a3bee10ba3076cf9ea3736d00e69232aad20728640b80f9da72e241dc50ad401",
+      "session_scope": null,
+      "source": "notification"
+    },
+    {
+      "capability": {
+        "id": "_x.ai/mcp_initialized",
+        "kind": "notification"
+      },
+      "claim": "observed",
+      "provenance": "observed_notification",
+      "raw_digest": "sha256:7d4002fee019c68c40bc4c22f548343554d33fbad17125c257ea0dd1b25cd788",
+      "session_scope": "<session-2>",
+      "source": "notification"
+    },
+    {
+      "capability": {
+        "id": "_x.ai/models/update",
+        "kind": "notification"
+      },
+      "claim": "observed",
+      "provenance": "observed_notification",
+      "raw_digest": "sha256:df793fe5865940b80d83aebd6686fde5e71204e6fb3e829adb790958d0db73c5",
+      "session_scope": null,
+      "source": "notification"
+    },
+    {
+      "capability": {
+        "id": "_x.ai/session_notification",
+        "kind": "notification"
+      },
+      "claim": "observed",
+      "provenance": "observed_notification",
+      "raw_digest": "sha256:fcdf72f576cc2341a3bf7e94ada1f98613e6d14570cbcfe21e88e01a2df05c02",
+      "session_scope": "<session-2>",
+      "source": "notification"
+    },
+    {
+      "capability": {
+        "id": "_x.ai/session_notification",
+        "kind": "notification"
+      },
+      "claim": "observed",
+      "provenance": "observed_notification",
+      "raw_digest": "sha256:85758876a6919285e8bcb682ca71ac0819b2d263902eecf6b4c7e22e1999fb37",
+      "session_scope": "<session-2>",
+      "source": "notification"
+    },
+    {
+      "capability": {
+        "id": "_x.ai/settings/update",
+        "kind": "notification"
+      },
+      "claim": "observed",
+      "provenance": "observed_notification",
+      "raw_digest": "sha256:f69e42a26f72458090c6d0b27daa4efaa3529d407087cc4634fba79e08b19883",
+      "session_scope": null,
+      "source": "notification"
+    },
+    {
+      "capability": {
+        "id": "session/update",
+        "kind": "notification"
+      },
+      "claim": "observed",
+      "provenance": "observed_notification",
+      "raw_digest": "sha256:13104f524f9b788dca93a852587c541081c76c407e1f9ccabf483165a91f4ec0",
+      "session_scope": "<session-2>",
+      "source": "notification"
+    },
+    {
+      "capability": {
+        "id": "session/update",
+        "kind": "notification"
+      },
+      "claim": "observed",
+      "provenance": "observed_notification",
+      "raw_digest": "sha256:4df94364917589795696ae206ddbb64db83555c61ebe463d2f091d163c009296",
+      "session_scope": "<session-2>",
+      "source": "notification"
+    },
+    {
+      "capability": {
+        "id": "high",
+        "kind": "effort"
+      },
+      "claim": "advertised",
+      "provenance": "vendor_advertisement",
+      "raw_digest": "sha256:7a40c984212d76561854fd7016a3d1d1f75ef894569b4fe9bc426f14825d59f2",
+      "session_scope": "<session-2>",
+      "source": "session_new"
+    },
+    {
+      "capability": {
+        "id": "low",
+        "kind": "effort"
+      },
+      "claim": "advertised",
+      "provenance": "vendor_advertisement",
+      "raw_digest": "sha256:7a40c984212d76561854fd7016a3d1d1f75ef894569b4fe9bc426f14825d59f2",
+      "session_scope": "<session-2>",
+      "source": "session_new"
+    },
+    {
+      "capability": {
+        "id": "medium",
+        "kind": "effort"
+      },
+      "claim": "advertised",
+      "provenance": "vendor_advertisement",
+      "raw_digest": "sha256:7a40c984212d76561854fd7016a3d1d1f75ef894569b4fe9bc426f14825d59f2",
+      "session_scope": "<session-2>",
+      "source": "session_new"
+    },
+    {
+      "capability": {
+        "id": "xhigh",
+        "kind": "effort"
+      },
+      "claim": "advertised",
+      "provenance": "vendor_advertisement",
+      "raw_digest": "sha256:7a40c984212d76561854fd7016a3d1d1f75ef894569b4fe9bc426f14825d59f2",
+      "session_scope": "<session-2>",
+      "source": "session_new"
+    },
+    {
+      "capability": {
+        "id": "high",
+        "kind": "mode"
+      },
+      "claim": "advertised",
+      "provenance": "vendor_advertisement",
+      "raw_digest": "sha256:7a40c984212d76561854fd7016a3d1d1f75ef894569b4fe9bc426f14825d59f2",
+      "session_scope": "<session-2>",
+      "source": "session_new"
+    },
+    {
+      "capability": {
+        "id": "low",
+        "kind": "mode"
+      },
+      "claim": "advertised",
+      "provenance": "vendor_advertisement",
+      "raw_digest": "sha256:7a40c984212d76561854fd7016a3d1d1f75ef894569b4fe9bc426f14825d59f2",
+      "session_scope": "<session-2>",
+      "source": "session_new"
+    },
+    {
+      "capability": {
+        "id": "medium",
+        "kind": "mode"
+      },
+      "claim": "advertised",
+      "provenance": "vendor_advertisement",
+      "raw_digest": "sha256:7a40c984212d76561854fd7016a3d1d1f75ef894569b4fe9bc426f14825d59f2",
+      "session_scope": "<session-2>",
+      "source": "session_new"
+    },
+    {
+      "capability": {
+        "id": "xhigh",
+        "kind": "mode"
+      },
+      "claim": "advertised",
+      "provenance": "vendor_advertisement",
+      "raw_digest": "sha256:7a40c984212d76561854fd7016a3d1d1f75ef894569b4fe9bc426f14825d59f2",
+      "session_scope": "<session-2>",
+      "source": "session_new"
+    },
+    {
+      "capability": {
+        "id": "grok-4.5",
+        "kind": "model"
+      },
+      "claim": "advertised",
+      "provenance": "vendor_advertisement",
+      "raw_digest": "sha256:7a40c984212d76561854fd7016a3d1d1f75ef894569b4fe9bc426f14825d59f2",
+      "session_scope": "<session-2>",
+      "source": "session_new"
+    },
+    {
+      "capability": {
+        "id": "grok-4.6",
+        "kind": "model"
+      },
+      "claim": "advertised",
+      "provenance": "vendor_advertisement",
+      "raw_digest": "sha256:7a40c984212d76561854fd7016a3d1d1f75ef894569b4fe9bc426f14825d59f2",
+      "session_scope": "<session-2>",
+      "source": "session_new"
+    },
+    {
+      "capability": {
+        "id": "session/set_config_option",
+        "kind": "method"
+      },
+      "claim": "rejected",
+      "provenance": "rejected_active_probe",
+      "raw_digest": "sha256:4a26b65bbca33f0590b769d136dd09d70588ba6f4f13cde26c4523b49e184bf9",
+      "session_scope": "<session-2>",
+      "source": "set_result"
+    },
+    {
+      "capability": {
+        "id": "session/set_model",
+        "kind": "method"
+      },
+      "claim": "accepted",
+      "provenance": "accepted_active_probe",
+      "raw_digest": "sha256:f0e2e338858fd4afca6b108cf2daf8f5f2367d4571c478a5a168b40a05911dd2",
+      "session_scope": "<session-2>",
+      "source": "set_result"
+    },
+    {
+      "capability": {
+        "id": "session/set_model",
+        "kind": "method"
+      },
+      "claim": "accepted",
+      "provenance": "accepted_active_probe",
+      "raw_digest": "sha256:761bf5c00f582ff6053a101f0440c555a38f16944d0ff3fca0e0ad02e4577b39",
+      "session_scope": "<session-2>",
+      "source": "set_result"
+    },
+    {
+      "capability": {
+        "id": "model",
+        "kind": "model"
+      },
+      "choices": [
+        {
+          "id": "grok-4.6",
+          "label": "grok-4.6"
+        }
+      ],
+      "claim": "native_verified",
+      "provenance": "accepted_active_probe",
+      "raw_digest": "sha256:f0e2e338858fd4afca6b108cf2daf8f5f2367d4571c478a5a168b40a05911dd2",
+      "session_scope": "<session-2>",
+      "source": "set_result"
+    },
+    {
+      "capability": {
+        "id": "model",
+        "kind": "model"
+      },
+      "choices": [
+        {
+          "id": "grok-4.5",
+          "label": "grok-4.5"
+        }
+      ],
+      "claim": "native_verified",
+      "provenance": "accepted_active_probe",
+      "raw_digest": "sha256:761bf5c00f582ff6053a101f0440c555a38f16944d0ff3fca0e0ad02e4577b39",
+      "session_scope": "<session-2>",
+      "source": "set_result"
+    }
+  ],
+  "cli_identity": {
+    "argv_fingerprint": "sha256:c8bdc19a41a84d4c68b88cc40ea91cdab3108b0696aa6252a6ad15d1dba39aae",
+    "environment_fingerprint": "sha256:f9dd2bf1a4899e8fc2b52453c42f29d52deac23c92e0670cd4d290b99fbd0a36",
+    "resolved_executable": "<probe-wrapper>/grok",
+    "upstream_version": "grok 1.0.13 (5e9a58528b76) [stable]"
+  },
+  "digest": "sha256:5d8cfc7e6b5a219e6a237a310d149d5f7a1aa587601a6d4987e4b3774cc78845",
+  "raw": {
+    "digest_algorithm": "sha256",
+    "frames": [
+      {
+        "digest": "sha256:e38143b6e34efd1f73de8b61f7062930cd995124db00a6e00c60077a69785619",
+        "direction": "send",
+        "message": {
+          "id": "<uuid-1>",
+          "jsonrpc": "2.0",
+          "method": "initialize",
+          "params": {
+            "clientCapabilities": {
+              "fs": {
+                "readTextFile": true,
+                "writeTextFile": true
+              },
+              "session": {
+                "configOptions": {}
+              },
+              "terminal": true
+            },
+            "clientInfo": {
+              "name": "spur-acp-capability-probe",
+              "version": "0.1.0"
+            },
+            "protocolVersion": 1
+          }
+        },
+        "sequence": 0
+      },
+      {
+        "digest": "sha256:56446152008136984557def8d8994b332584b022e0ef1aa1cea83dd298d511a2",
+        "direction": "recv",
+        "message": {
+          "id": "<uuid-1>",
+          "jsonrpc": "2.0",
+          "result": {
+            "_meta": {
+              "agentId": "<uuid-2>",
+              "agentInstanceId": "<uuid-3>",
+              "agentVersion": "1.0.13",
+              "availableCommands": [
+                {
+                  "description": "Compress conversation history to save context window",
+                  "input": {
+                    "hint": "optional context about what to preserve"
+                  },
+                  "name": "compact"
+                },
+                {
+                  "description": "Toggle always-approve mode (skip all permission prompts)",
+                  "input": {
+                    "hint": "on|off"
+                  },
+                  "name": "always-approve"
+                },
+                {
+                  "description": "Show context window usage and session stats",
+                  "input": null,
+                  "name": "context"
+                },
+                {
+                  "description": "Show session details (model, turns, context usage)",
+                  "input": null,
+                  "name": "session-info"
+                },
+                {
+                  "description": "Research with bounded parallel agents, cross-check evidence, and write a cited report",
+                  "input": {
+                    "hint": "<query>"
+                  },
+                  "name": "deep-research"
+                },
+                {
+                  "description": "Launch a saved workflow, list runs, or manage a run (pause, resume, stop, save)",
+                  "input": {
+                    "hint": "<name> [--agent-budget N] [--effort LEVEL] [args] | runs | pause|resume|stop|save [name]"
+                  },
+                  "name": "workflow"
+                },
+                {
+                  "description": "Set, manage, or check an autonomous goal",
+                  "input": {
+                    "hint": "<objective> [--budget <tokens>] | status | pause | resume | clear"
+                  },
+                  "name": "goal"
+                }
+              ],
+              "cancelRewind": true,
+              "currentWorkingDirectory": "/private/tmp",
+              "defaultAuthMethodId": "cached_token",
+              "feedbackTraceOffer": false,
+              "grokShell": true,
+              "hostname": "Kevins-Mac-Studio.local",
+              "mcpApps": false,
+              "mcpServers": [],
+              "metadata": null,
+              "modelState": {
+                "availableModels": [
+                  {
+                    "_meta": {
+                      "agentType": "grok-build-plan",
+                      "reasoningEffort": "high",
+                      "reasoningEfforts": [
+                        {
+                          "default": false,
+                          "description": "Highest effort and reasoning level",
+                          "id": "xhigh",
+                          "label": "Extra High Effort",
+                          "value": "xhigh"
+                        },
+                        {
+                          "default": true,
+                          "description": "Higher implementation quality with extensive reasoning",
+                          "id": "high",
+                          "label": "High Effort",
+                          "value": "high"
+                        },
+                        {
+                          "default": false,
+                          "description": "Balanced effort with standard implementation and testing",
+                          "id": "medium",
+                          "label": "Medium Effort",
+                          "value": "medium"
+                        },
+                        {
+                          "default": false,
+                          "description": "Quick, fast implementations",
+                          "id": "low",
+                          "label": "Low Effort",
+                          "value": "low"
+                        }
+                      ],
+                      "supportsReasoningEffort": true,
+                      "totalContextTokens": "<redacted>"
+                    },
+                    "description": "SpaceXAI's latest frontier model",
+                    "modelId": "grok-4.6",
+                    "name": "Grok 4.6"
+                  },
+                  {
+                    "_meta": {
+                      "agentType": "grok-build-plan",
+                      "reasoningEffort": "high",
+                      "reasoningEfforts": [
+                        {
+                          "default": true,
+                          "description": "Highest implementation quality with extensive reasoning",
+                          "id": "high",
+                          "label": "High Effort",
+                          "value": "high"
+                        },
+                        {
+                          "default": false,
+                          "description": "Balanced effort with standard implementation and testing",
+                          "id": "medium",
+                          "label": "Medium Effort",
+                          "value": "medium"
+                        },
+                        {
+                          "default": false,
+                          "description": "Quick, fast implementations",
+                          "id": "low",
+                          "label": "Low Effort",
+                          "value": "low"
+                        }
+                      ],
+                      "supportsReasoningEffort": true,
+                      "totalContextTokens": "<redacted>"
+                    },
+                    "modelId": "grok-4.5",
+                    "name": "Grok 4.5"
+                  }
+                ],
+                "currentModelId": "grok-4.6"
+              },
+              "sessionRecap": true,
+              "voiceMode": true,
+              "x.ai/mcp/sdk": true,
+              "x.ai/pluginDirs": true
+            },
+            "agentCapabilities": {
+              "_meta": {
+                "x.ai/capabilities": {
+                  "toolOverrides": {
+                    "x_keyword_search": true,
+                    "x_semantic_search": true,
+                    "x_thread_fetch": false,
+                    "x_user_search": false
+                  }
+                },
+                "x.ai/fs_notify": true,
+                "x.ai/hooks": {
+                  "blockingEvents": [
+                    "pre_tool_use",
+                    "stop",
+                    "subagent_stop"
+                  ],
+                  "decisions": [
+                    "deny",
+                    "block"
+                  ],
+                  "stopSignals": [
+                    "continue",
+                    "stopReason",
+                    "additionalContext"
+                  ]
+                }
+              },
+              "auth": {},
+              "loadSession": true,
+              "mcpCapabilities": {
+                "http": true,
+                "sse": true
+              },
+              "promptCapabilities": {
+                "audio": false,
+                "embeddedContext": true,
+                "image": false
+              },
+              "sessionCapabilities": {
+                "close": {},
+                "list": {},
+                "resume": {}
+              }
+            },
+            "authMethods": [
+              {
+                "description": "Cached token from ~/.grok/auth.json",
+                "id": "cached_token",
+                "name": "cached_token"
+              },
+              {
+                "description": "Sign in with Grok",
+                "id": "grok.com",
+                "name": "Grok"
+              }
+            ],
+            "protocolVersion": 1
+          }
+        },
+        "sequence": 1
+      },
+      {
+        "digest": "sha256:d699f1f80a3675880b31d2f4e0c00bdb26c7a08d7f659271341ed697c295a535",
+        "direction": "send",
+        "message": {
+          "id": "<uuid-4>",
+          "jsonrpc": "2.0",
+          "method": "session/new",
+          "params": {
+            "cwd": "/private/tmp",
+            "mcpServers": [],
+            "sessionId": "<session-1>"
+          }
+        },
+        "sequence": 2
+      },
+      {
+        "digest": "sha256:a3bee10ba3076cf9ea3736d00e69232aad20728640b80f9da72e241dc50ad401",
+        "direction": "recv",
+        "message": {
+          "jsonrpc": "2.0",
+          "method": "_x.ai/mcp/servers_updated",
+          "params": {
+            "mcpServers": [
+              {
+                "args": [
+                  "-y",
+                  "@modelcontextprotocol/server-sequential-thinking"
+                ],
+                "command": "npx",
+                "name": "sequential-thinking",
+                "source": "local",
+                "type": "stdio"
+              }
+            ]
+          }
+        },
+        "sequence": 3
+      },
+      {
+        "digest": "sha256:c37939c73b4295f8ae2955385b9de190aea26eb67f988d8f49a231752e01f7e3",
+        "direction": "recv",
+        "message": {
+          "jsonrpc": "2.0",
+          "method": "_x.ai/mcp/init_progress",
+          "params": {
+            "connected": 0,
+            "sessionId": "<session-2>",
+            "total": 1
+          }
+        },
+        "sequence": 4
+      },
+      {
+        "digest": "sha256:df793fe5865940b80d83aebd6686fde5e71204e6fb3e829adb790958d0db73c5",
+        "direction": "recv",
+        "message": {
+          "jsonrpc": "2.0",
+          "method": "_x.ai/models/update",
+          "params": {
+            "availableModels": [
+              {
+                "_meta": {
+                  "agentType": "grok-build-plan",
+                  "reasoningEffort": "high",
+                  "reasoningEfforts": [
+                    {
+                      "default": false,
+                      "description": "Highest effort and reasoning level",
+                      "id": "xhigh",
+                      "label": "Extra High Effort",
+                      "value": "xhigh"
+                    },
+                    {
+                      "default": true,
+                      "description": "Higher implementation quality with extensive reasoning",
+                      "id": "high",
+                      "label": "High Effort",
+                      "value": "high"
+                    },
+                    {
+                      "default": false,
+                      "description": "Balanced effort with standard implementation and testing",
+                      "id": "medium",
+                      "label": "Medium Effort",
+                      "value": "medium"
+                    },
+                    {
+                      "default": false,
+                      "description": "Quick, fast implementations",
+                      "id": "low",
+                      "label": "Low Effort",
+                      "value": "low"
+                    }
+                  ],
+                  "supportsReasoningEffort": true,
+                  "totalContextTokens": "<redacted>"
+                },
+                "description": "SpaceXAI's latest frontier model",
+                "modelId": "grok-4.6",
+                "name": "Grok 4.6"
+              },
+              {
+                "_meta": {
+                  "agentType": "grok-build-plan",
+                  "reasoningEffort": "high",
+                  "reasoningEfforts": [
+                    {
+                      "default": true,
+                      "description": "Highest implementation quality with extensive reasoning",
+                      "id": "high",
+                      "label": "High Effort",
+                      "value": "high"
+                    },
+                    {
+                      "default": false,
+                      "description": "Balanced effort with standard implementation and testing",
+                      "id": "medium",
+                      "label": "Medium Effort",
+                      "value": "medium"
+                    },
+                    {
+                      "default": false,
+                      "description": "Quick, fast implementations",
+                      "id": "low",
+                      "label": "Low Effort",
+                      "value": "low"
+                    }
+                  ],
+                  "supportsReasoningEffort": true,
+                  "totalContextTokens": "<redacted>"
+                },
+                "modelId": "grok-4.5",
+                "name": "Grok 4.5"
+              }
+            ],
+            "currentModelId": "grok-4.6"
+          }
+        },
+        "sequence": 5
+      },
+      {
+        "digest": "sha256:f69e42a26f72458090c6d0b27daa4efaa3529d407087cc4634fba79e08b19883",
+        "direction": "recv",
+        "message": {
+          "jsonrpc": "2.0",
+          "method": "_x.ai/settings/update",
+          "params": {
+            "allow_access": true,
+            "announcements": [
+              {
+                "cta": null,
+                "dismissible": null,
+                "expires_at": null,
+                "id": "team",
+                "message": "Select 'Grok 4.6' under /model.",
+                "persistent": null,
+                "severity": "info",
+                "title": "Grok 4.6 is here!",
+                "updated_at": null
+              }
+            ],
+            "auto_permission_mode_enabled": null,
+            "campaigns": [
+              {
+                "id": "grok-4.6-launch",
+                "models": {
+                  "default": "grok-4.6"
+                }
+              }
+            ],
+            "collapsed_edit_blocks": null,
+            "consent_gate": null,
+            "gate_label": null,
+            "gate_message": null,
+            "gate_url": null,
+            "group_tool_verbs": null,
+            "permission_mode": null,
+            "privacy_banner_reshow_days": 0,
+            "privacy_notice_rollout": true,
+            "session_picker_grouped": null,
+            "sharing_enabled": false,
+            "show_resolved_model": false,
+            "slash_command_tags": null,
+            "subscription_tier_display": "SuperGrok Heavy",
+            "subscription_watch_interval_secs": 60,
+            "tips": [
+              "Use @ to attach files like @src/main.rs.",
+              "Use @! for hidden or ignored files: @!.github/workflows.",
+              "Press Ctrl+O to toggle auto-approve mode.",
+              "Use Shift+Tab to cycle between modes like Plan mode.",
+              "Run /compact [context] when chat gets long.",
+              "Press Ctrl+B to background a running terminal command.",
+              "Start Grok in a fresh worktree with `-w`; add `-r <session-id>` to resume an existing session there.",
+              "Use Ctrl+Enter to interject messages. Or just Enter to queue messages.",
+              "Run /dashboard (or Ctrl+\\) to see and manage all your agents in one place.",
+              "Try out workflows using /workflows."
+            ]
+          }
+        },
+        "sequence": 6
+      },
+      {
+        "digest": "sha256:698cb27e5bae75c2e446a95276015bfa219915e33220b110e4daf28ef923ec50",
+        "direction": "recv",
+        "message": {
+          "jsonrpc": "2.0",
+          "method": "_x.ai/announcements/update",
+          "params": {
+            "announcements": [
+              {
+                "cta": null,
+                "dismissible": null,
+                "expires_at": null,
+                "id": "team",
+                "message": "Select 'Grok 4.6' under /model.",
+                "persistent": null,
+                "severity": "info",
+                "title": "Grok 4.6 is here!",
+                "updated_at": null
+              }
+            ],
+            "gen": 1788299258
+          }
+        },
+        "sequence": 7
+      },
+      {
+        "digest": "sha256:f69e42a26f72458090c6d0b27daa4efaa3529d407087cc4634fba79e08b19883",
+        "direction": "recv",
+        "message": {
+          "jsonrpc": "2.0",
+          "method": "_x.ai/settings/update",
+          "params": {
+            "allow_access": true,
+            "announcements": [
+              {
+                "cta": null,
+                "dismissible": null,
+                "expires_at": null,
+                "id": "team",
+                "message": "Select 'Grok 4.6' under /model.",
+                "persistent": null,
+                "severity": "info",
+                "title": "Grok 4.6 is here!",
+                "updated_at": null
+              }
+            ],
+            "auto_permission_mode_enabled": null,
+            "campaigns": [
+              {
+                "id": "grok-4.6-launch",
+                "models": {
+                  "default": "grok-4.6"
+                }
+              }
+            ],
+            "collapsed_edit_blocks": null,
+            "consent_gate": null,
+            "gate_label": null,
+            "gate_message": null,
+            "gate_url": null,
+            "group_tool_verbs": null,
+            "permission_mode": null,
+            "privacy_banner_reshow_days": 0,
+            "privacy_notice_rollout": true,
+            "session_picker_grouped": null,
+            "sharing_enabled": false,
+            "show_resolved_model": false,
+            "slash_command_tags": null,
+            "subscription_tier_display": "SuperGrok Heavy",
+            "subscription_watch_interval_secs": 60,
+            "tips": [
+              "Use @ to attach files like @src/main.rs.",
+              "Use @! for hidden or ignored files: @!.github/workflows.",
+              "Press Ctrl+O to toggle auto-approve mode.",
+              "Use Shift+Tab to cycle between modes like Plan mode.",
+              "Run /compact [context] when chat gets long.",
+              "Press Ctrl+B to background a running terminal command.",
+              "Start Grok in a fresh worktree with `-w`; add `-r <session-id>` to resume an existing session there.",
+              "Use Ctrl+Enter to interject messages. Or just Enter to queue messages.",
+              "Run /dashboard (or Ctrl+\\) to see and manage all your agents in one place.",
+              "Try out workflows using /workflows."
+            ]
+          }
+        },
+        "sequence": 8
+      },
+      {
+        "digest": "sha256:8f9a080eb0934f573bc516390df3b41243c1493fb1dd35fc02813f7e4527c9a7",
+        "direction": "recv",
+        "message": {
+          "jsonrpc": "2.0",
+          "method": "_x.ai/announcements/update",
+          "params": {
+            "announcements": [
+              {
+                "cta": null,
+                "dismissible": null,
+                "expires_at": null,
+                "id": "team",
+                "message": "Select 'Grok 4.6' under /model.",
+                "persistent": null,
+                "severity": "info",
+                "title": "Grok 4.6 is here!",
+                "updated_at": null
+              }
+            ],
+            "gen": 1788299259
+          }
+        },
+        "sequence": 9
+      },
+      {
+        "digest": "sha256:f3264b8e4ed2ca0cd1357f6298552b4938654009242ec9e3895a74a9e113d94a",
+        "direction": "recv",
+        "message": {
+          "jsonrpc": "2.0",
+          "method": "_x.ai/mcp/init_progress",
+          "params": {
+            "connected": 1,
+            "sessionId": "<session-2>",
+            "total": 1
+          }
+        },
+        "sequence": 10
+      },
+      {
+        "digest": "sha256:7d4002fee019c68c40bc4c22f548343554d33fbad17125c257ea0dd1b25cd788",
+        "direction": "recv",
+        "message": {
+          "jsonrpc": "2.0",
+          "method": "_x.ai/mcp_initialized",
+          "params": {
+            "elapsedMs": 886,
+            "mcpToolCount": 1,
+            "sessionId": "<session-2>"
+          }
+        },
+        "sequence": 11
+      },
+      {
+        "digest": "sha256:13104f524f9b788dca93a852587c541081c76c407e1f9ccabf483165a91f4ec0",
+        "direction": "recv",
+        "message": {
+          "jsonrpc": "2.0",
+          "method": "session/update",
+          "params": {
+            "_meta": {
+              "agentTimestampMs": 1788299260300,
+              "eventId": "01a05ef1-2adf-74a3-8551-95f234127d0a-0",
+              "totalTokens": "<redacted>",
+              "updateParams": {
+                "commandsCount": 39
+              },
+              "updateType": "AvailableCommandsUpdate"
+            },
+            "sessionId": "<session-2>",
+            "update": {
+              "_meta": {
+                "tools": [
+                  "run_terminal_command",
+                  "read_file",
+                  "search_replace",
+                  "list_dir",
+                  "grep",
+                  "kill_command_or_subagent",
+                  "todo_write",
+                  "get_command_or_subagent_output",
+                  "spawn_subagent",
+                  "scheduler_create",
+                  "scheduler_delete",
+                  "scheduler_list",
+                  "monitor",
+                  "search_tool",
+                  "use_tool",
+                  "workflow",
+                  "enter_plan_mode",
+                  "exit_plan_mode",
+                  "ask_user_question",
+                  "web_search",
+                  "web_fetch",
+                  "image_gen",
+                  "image_edit",
+                  "image_to_video",
+                  "reference_to_video",
+                  "write",
+                  "sequential-thinking__sequentialthinking"
+                ]
+              },
+              "availableCommands": [
+                {
+                  "description": "Compress conversation history to save context window",
+                  "input": {
+                    "hint": "optional context about what to preserve"
+                  },
+                  "name": "compact"
+                },
+                {
+                  "description": "Toggle always-approve mode (skip all permission prompts)",
+                  "input": {
+                    "hint": "on|off"
+                  },
+                  "name": "always-approve"
+                },
+                {
+                  "description": "Show context window usage and session stats",
+                  "input": null,
+                  "name": "context"
+                },
+                {
+                  "description": "Manage plugins (list, reload, trust, add, remove)",
+                  "input": {
+                    "hint": "list | reload | trust <path> | add <path> | remove <path>"
+                  },
+                  "name": "plugins"
+                },
+                {
+                  "description": "Reload plugins from disk (alias for /plugins reload)",
+                  "input": null,
+                  "name": "reload-plugins"
+                },
+                {
+                  "description": "Show session details (model, turns, context usage)",
+                  "input": null,
+                  "name": "session-info"
+                },
+                {
+                  "description": "Send feedback about the current session",
+                  "input": {
+                    "hint": "feedback text"
+                  },
+                  "name": "feedback"
+                },
+                {
+                  "_meta": {
+                    "workflowPath": "<home>/actions-runner/_work/xai/xai/crates/codegen/xai-grok-shell/src/session/workflows/deep_research.rhai",
+                    "workflowSource": "builtin"
+                  },
+                  "description": "Research with bounded parallel agents, cross-check evidence, and write a cited report",
+                  "input": {
+                    "hint": "<query>"
+                  },
+                  "name": "deep-research"
+                },
+                {
+                  "description": "Launch a saved workflow, list runs, or manage a run (pause, resume, stop, save)",
+                  "input": {
+                    "hint": "<name> [--agent-budget N] [--effort LEVEL] [args] | runs | pause|resume|stop|save [name]"
+                  },
+                  "name": "workflow"
+                },
+                {
+                  "description": "Set, manage, or check an autonomous goal",
+                  "input": {
+                    "hint": "<objective> [--budget <tokens>] | status | pause | resume | clear"
+                  },
+                  "name": "goal"
+                },
+                {
+                  "description": "Run a prompt on a recurring interval",
+                  "input": {
+                    "hint": "[interval] <prompt>"
+                  },
+                  "name": "loop"
+                },
+                {
+                  "_meta": {
+                    "bareName": "build-with-ai",
+                    "path": "<home>/.grok/bundled/skills/build-with-ai/SKILL.md",
+                    "qualifiedName": "bundled:build-with-ai",
+                    "scope": "bundled"
+                  },
+                  "description": "Build AI apps on SpaceXAI (XAI_API_KEY + api.x.ai)",
+                  "input": {
+                    "hint": "<what you're building>"
+                  },
+                  "name": "build-with-ai"
+                },
+                {
+                  "_meta": {
+                    "bareName": "code-review",
+                    "path": "<home>/.grok/bundled/skills/code-review/SKILL.md",
+                    "qualifiedName": "bundled:code-review",
+                    "scope": "bundled"
+                  },
+                  "description": "Run an extremely strict maintainability review for abstraction quality, giant files, and spaghetti-condition growth. Use for a deep code quality audit or an especially harsh maintainability review.",
+                  "input": null,
+                  "name": "code-review"
+                },
+                {
+                  "_meta": {
+                    "bareName": "create-skill",
+                    "path": "<home>/.grok/bundled/skills/create-skill/SKILL.md",
+                    "qualifiedName": "bundled:create-skill",
+                    "scope": "bundled"
+                  },
+                  "description": "Create a new Grok skill",
+                  "input": null,
+                  "name": "create-skill"
+                },
+                {
+                  "_meta": {
+                    "bareName": "create-workflow",
+                    "path": "<home>/.grok/bundled/skills/create-workflow/SKILL.md",
+                    "qualifiedName": "bundled:create-workflow",
+                    "scope": "bundled"
+                  },
+                  "description": "Author a new multi-agent workflow",
+                  "input": null,
+                  "name": "create-workflow"
+                },
+                {
+                  "_meta": {
+                    "bareName": "design",
+                    "path": "<home>/.grok/bundled/skills/design/SKILL.md",
+                    "qualifiedName": "bundled:design",
+                    "scope": "bundled"
+                  },
+                  "description": "Run the full design-doc-writer and design-doc-reviewer loop until consensus. Produces a polished design document with a PR plan.",
+                  "input": {
+                    "hint": "<description of what to design>"
+                  },
+                  "name": "design"
+                },
+                {
+                  "_meta": {
+                    "bareName": "execute-plan",
+                    "path": "<home>/.grok/bundled/skills/execute-plan/SKILL.md",
+                    "qualifiedName": "bundled:execute-plan",
+                    "scope": "bundled"
+                  },
+                  "description": "Execute a PR Plan DAG from a design document. Parses the plan, topologically sorts it, implements PRs in parallel using worktree-isolated subagents, runs mandatory orchestrator-level review, and assembles either a Graphite PR stack or a plain-git branch stack depending on tool availability.",
+                  "input": {
+                    "hint": "<design-doc-path> [--effort N] [--concurrency N] [--dry-run] [--resume <PLAN_ID>] [--instructions \"...\"] [--no-graphite] [--auto-pr]"
+                  },
+                  "name": "execute-plan"
+                },
+                {
+                  "_meta": {
+                    "bareName": "imagine",
+                    "path": "<home>/.grok/bundled/skills/imagine/SKILL.md",
+                    "qualifiedName": "bundled:imagine",
+                    "scope": "bundled"
+                  },
+                  "description": "Prompting and workflow guidance for Imagine image tools",
+                  "input": null,
+                  "name": "bundled:imagine"
+                },
+                {
+                  "_meta": {
+                    "bareName": "implement",
+                    "path": "<home>/.grok/bundled/skills/implement/SKILL.md",
+                    "qualifiedName": "bundled:implement",
+                    "scope": "bundled"
+                  },
+                  "description": "Run the full implement-review-fix loop using implementer and reviewer personas. Supports effort-based multi-reviewer scaling (1-5 reviewers) with automatic specialization selection. Includes memory-based feedback loop that learns from past review patterns. Loops until all reviewers find 0 issues of any severity.",
+                  "input": {
+                    "hint": "[--effort N] <description of what to implement>"
+                  },
+                  "name": "implement"
+                },
+                {
+                  "_meta": {
+                    "bareName": "pr-babysit",
+                    "path": "<home>/.grok/bundled/skills/pr-babysit/SKILL.md",
+                    "qualifiedName": "bundled:pr-babysit",
+                    "scope": "bundled"
+                  },
+                  "description": "Monitor PRs, fix CI failures, address review comments, resolve merge conflicts, and restack stacks. Supports independent PRs, Graphite stacks, and GitHub stacked PRs (gh-stack).",
+                  "input": {
+                    "hint": "add <number> | remove <number> | list | check"
+                  },
+                  "name": "pr-babysit"
+                },
+                {
+                  "_meta": {
+                    "bareName": "resume-claude",
+                    "path": "<home>/.grok/bundled/skills/resume-claude/SKILL.md",
+                    "qualifiedName": "bundled:resume-claude",
+                    "scope": "bundled"
+                  },
+                  "description": "Continue from a recent Claude Code session",
+                  "input": {
+                    "hint": "[words describing the session | session id]"
+                  },
+                  "name": "resume-claude"
+                },
+                {
+                  "_meta": {
+                    "bareName": "resume-codex",
+                    "path": "<home>/.grok/bundled/skills/resume-codex/SKILL.md",
+                    "qualifiedName": "bundled:resume-codex",
+                    "scope": "bundled"
+                  },
+                  "description": "Continue from a recent Codex session",
+                  "input": {
+                    "hint": "[words describing the session | session id]"
+                  },
+                  "name": "resume-codex"
+                },
+                {
+                  "_meta": {
+                    "bareName": "resume-cursor",
+                    "path": "<home>/.grok/bundled/skills/resume-cursor/SKILL.md",
+                    "qualifiedName": "bundled:resume-cursor",
+                    "scope": "bundled"
+                  },
+                  "description": "Continue from a recent Cursor session",
+                  "input": {
+                    "hint": "[words describing the session | session id]"
+                  },
+                  "name": "resume-cursor"
+                },
+                {
+                  "_meta": {
+                    "bareName": "review",
+                    "path": "<home>/.grok/bundled/skills/review/SKILL.md",
+                    "qualifiedName": "bundled:review",
+                    "scope": "bundled"
+                  },
+                  "description": "Run a reviewer subagent against uncommitted local changes, a named branch, or a GitHub PR. Local and branch modes write a review file plus a summary to disk. PR mode posts the findings as a PENDING GitHub review for the user to inspect and submit through the UI.",
+                  "input": {
+                    "hint": "[--local | --branch <name> | --pr <number-or-url> | <auto-detect>]"
+                  },
+                  "name": "review"
+                },
+                {
+                  "_meta": {
+                    "bareName": "skill-design-principles",
+                    "path": "<home>/.grok/bundled/skills/skill-design-principles/SKILL.md",
+                    "qualifiedName": "bundled:skill-design-principles",
+                    "scope": "bundled"
+                  },
+                  "description": "Concise, high-signal principles for writing and editing skills well. Use whenever authoring or editing a skill.",
+                  "input": null,
+                  "name": "skill-design-principles"
+                },
+                {
+                  "_meta": {
+                    "bareName": "brainstorming",
+                    "path": "<home>/.claude/plugins/cache/claude-plugins-official/superpowers/5.1.0/skills/brainstorming/SKILL.md",
+                    "pluginName": "superpowers",
+                    "qualifiedName": "superpowers:brainstorming",
+                    "scope": "user"
+                  },
+                  "description": "You MUST use this before any creative work - creating features, building components, adding functionality, or modifying behavior. Explores user intent, requirements and design before implementation.",
+                  "input": null,
+                  "name": "brainstorming"
+                },
+                {
+                  "_meta": {
+                    "bareName": "dispatching-parallel-agents",
+                    "path": "<home>/.claude/plugins/cache/claude-plugins-official/superpowers/5.1.0/skills/dispatching-parallel-agents/SKILL.md",
+                    "pluginName": "superpowers",
+                    "qualifiedName": "superpowers:dispatching-parallel-agents",
+                    "scope": "user"
+                  },
+                  "description": "Use when facing 2+ independent tasks that can be worked on without shared state or sequential dependencies",
+                  "input": null,
+                  "name": "dispatching-parallel-agents"
+                },
+                {
+                  "_meta": {
+                    "bareName": "executing-plans",
+                    "path": "<home>/.claude/plugins/cache/claude-plugins-official/superpowers/5.1.0/skills/executing-plans/SKILL.md",
+                    "pluginName": "superpowers",
+                    "qualifiedName": "superpowers:executing-plans",
+                    "scope": "user"
+                  },
+                  "description": "Use when you have a written implementation plan to execute in a separate session with review checkpoints",
+                  "input": null,
+                  "name": "executing-plans"
+                },
+                {
+                  "_meta": {
+                    "bareName": "finishing-a-development-branch",
+                    "path": "<home>/.claude/plugins/cache/claude-plugins-official/superpowers/5.1.0/skills/finishing-a-development-branch/SKILL.md",
+                    "pluginName": "superpowers",
+                    "qualifiedName": "superpowers:finishing-a-development-branch",
+                    "scope": "user"
+                  },
+                  "description": "Use when implementation is complete, all tests pass, and you need to decide how to integrate the work - guides completion of development work by presenting structured options for merge, PR, or cleanup",
+                  "input": null,
+                  "name": "finishing-a-development-branch"
+                },
+                {
+                  "_meta": {
+                    "bareName": "receiving-code-review",
+                    "path": "<home>/.claude/plugins/cache/claude-plugins-official/superpowers/5.1.0/skills/receiving-code-review/SKILL.md",
+                    "pluginName": "superpowers",
+                    "qualifiedName": "superpowers:receiving-code-review",
+                    "scope": "user"
+                  },
+                  "description": "Use when receiving code review feedback, before implementing suggestions, especially if feedback seems unclear or technically questionable - requires technical rigor and verification, not performative agreement or blind implementation",
+                  "input": null,
+                  "name": "receiving-code-review"
+                },
+                {
+                  "_meta": {
+                    "bareName": "requesting-code-review",
+                    "path": "<home>/.claude/plugins/cache/claude-plugins-official/superpowers/5.1.0/skills/requesting-code-review/SKILL.md",
+                    "pluginName": "superpowers",
+                    "qualifiedName": "superpowers:requesting-code-review",
+                    "scope": "user"
+                  },
+                  "description": "Use when completing tasks, implementing major features, or before merging to verify work meets requirements",
+                  "input": null,
+                  "name": "requesting-code-review"
+                },
+                {
+                  "_meta": {
+                    "bareName": "subagent-driven-development",
+                    "path": "<home>/.claude/plugins/cache/claude-plugins-official/superpowers/5.1.0/skills/subagent-driven-development/SKILL.md",
+                    "pluginName": "superpowers",
+                    "qualifiedName": "superpowers:subagent-driven-development",
+                    "scope": "user"
+                  },
+                  "description": "Use when executing implementation plans with independent tasks in the current session",
+                  "input": null,
+                  "name": "subagent-driven-development"
+                },
+                {
+                  "_meta": {
+                    "bareName": "systematic-debugging",
+                    "path": "<home>/.claude/plugins/cache/claude-plugins-official/superpowers/5.1.0/skills/systematic-debugging/SKILL.md",
+                    "pluginName": "superpowers",
+                    "qualifiedName": "superpowers:systematic-debugging",
+                    "scope": "user"
+                  },
+                  "description": "Use when encountering any bug, test failure, or unexpected behavior, before proposing fixes",
+                  "input": null,
+                  "name": "systematic-debugging"
+                },
+                {
+                  "_meta": {
+                    "bareName": "test-driven-development",
+                    "path": "<home>/.claude/plugins/cache/claude-plugins-official/superpowers/5.1.0/skills/test-driven-development/SKILL.md",
+                    "pluginName": "superpowers",
+                    "qualifiedName": "superpowers:test-driven-development",
+                    "scope": "user"
+                  },
+                  "description": "Use when implementing any feature or bugfix, before writing implementation code",
+                  "input": null,
+                  "name": "test-driven-development"
+                },
+                {
+                  "_meta": {
+                    "bareName": "using-git-worktrees",
+                    "path": "<home>/.claude/plugins/cache/claude-plugins-official/superpowers/5.1.0/skills/using-git-worktrees/SKILL.md",
+                    "pluginName": "superpowers",
+                    "qualifiedName": "superpowers:using-git-worktrees",
+                    "scope": "user"
+                  },
+                  "description": "Use when starting feature work that needs isolation from current workspace or before executing implementation plans - ensures an isolated workspace exists via native tools or git worktree fallback",
+                  "input": null,
+                  "name": "using-git-worktrees"
+                },
+                {
+                  "_meta": {
+                    "bareName": "using-superpowers",
+                    "path": "<home>/.claude/plugins/cache/claude-plugins-official/superpowers/5.1.0/skills/using-superpowers/SKILL.md",
+                    "pluginName": "superpowers",
+                    "qualifiedName": "superpowers:using-superpowers",
+                    "scope": "user"
+                  },
+                  "description": "Use when starting any conversation - establishes how to find and use skills, requiring Skill tool invocation before ANY response including clarifying questions",
+                  "input": null,
+                  "name": "using-superpowers"
+                },
+                {
+                  "_meta": {
+                    "bareName": "verification-before-completion",
+                    "path": "<home>/.claude/plugins/cache/claude-plugins-official/superpowers/5.1.0/skills/verification-before-completion/SKILL.md",
+                    "pluginName": "superpowers",
+                    "qualifiedName": "superpowers:verification-before-completion",
+                    "scope": "user"
+                  },
+                  "description": "Use when about to claim work is complete, fixed, or passing, before committing or creating PRs - requires running verification commands and confirming output before making any success claims; evidence before assertions always",
+                  "input": null,
+                  "name": "verification-before-completion"
+                },
+                {
+                  "_meta": {
+                    "bareName": "writing-plans",
+                    "path": "<home>/.claude/plugins/cache/claude-plugins-official/superpowers/5.1.0/skills/writing-plans/SKILL.md",
+                    "pluginName": "superpowers",
+                    "qualifiedName": "superpowers:writing-plans",
+                    "scope": "user"
+                  },
+                  "description": "Use when you have a spec or requirements for a multi-step task, before touching code",
+                  "input": null,
+                  "name": "writing-plans"
+                },
+                {
+                  "_meta": {
+                    "bareName": "writing-skills",
+                    "path": "<home>/.claude/plugins/cache/claude-plugins-official/superpowers/5.1.0/skills/writing-skills/SKILL.md",
+                    "pluginName": "superpowers",
+                    "qualifiedName": "superpowers:writing-skills",
+                    "scope": "user"
+                  },
+                  "description": "Use when creating new skills, editing existing skills, or verifying skills work before deployment",
+                  "input": null,
+                  "name": "writing-skills"
+                }
+              ],
+              "sessionUpdate": "available_commands_update"
+            }
+          }
+        },
+        "sequence": 12
+      },
+      {
+        "digest": "sha256:4df94364917589795696ae206ddbb64db83555c61ebe463d2f091d163c009296",
+        "direction": "recv",
+        "message": {
+          "jsonrpc": "2.0",
+          "method": "session/update",
+          "params": {
+            "_meta": {
+              "agentTimestampMs": 1788299260302,
+              "eventId": "01a05ef1-2adf-74a3-8551-95f234127d0a-1",
+              "totalTokens": "<redacted>",
+              "updateParams": {
+                "commandsCount": 39
+              },
+              "updateType": "AvailableCommandsUpdate"
+            },
+            "sessionId": "<session-2>",
+            "update": {
+              "_meta": {
+                "tools": [
+                  "run_terminal_command",
+                  "read_file",
+                  "search_replace",
+                  "list_dir",
+                  "grep",
+                  "kill_command_or_subagent",
+                  "todo_write",
+                  "get_command_or_subagent_output",
+                  "spawn_subagent",
+                  "scheduler_create",
+                  "scheduler_delete",
+                  "scheduler_list",
+                  "monitor",
+                  "search_tool",
+                  "use_tool",
+                  "workflow",
+                  "enter_plan_mode",
+                  "exit_plan_mode",
+                  "ask_user_question",
+                  "web_search",
+                  "web_fetch",
+                  "image_gen",
+                  "image_edit",
+                  "image_to_video",
+                  "reference_to_video",
+                  "write",
+                  "sequential-thinking__sequentialthinking"
+                ]
+              },
+              "availableCommands": [
+                {
+                  "description": "Compress conversation history to save context window",
+                  "input": {
+                    "hint": "optional context about what to preserve"
+                  },
+                  "name": "compact"
+                },
+                {
+                  "description": "Toggle always-approve mode (skip all permission prompts)",
+                  "input": {
+                    "hint": "on|off"
+                  },
+                  "name": "always-approve"
+                },
+                {
+                  "description": "Show context window usage and session stats",
+                  "input": null,
+                  "name": "context"
+                },
+                {
+                  "description": "Manage plugins (list, reload, trust, add, remove)",
+                  "input": {
+                    "hint": "list | reload | trust <path> | add <path> | remove <path>"
+                  },
+                  "name": "plugins"
+                },
+                {
+                  "description": "Reload plugins from disk (alias for /plugins reload)",
+                  "input": null,
+                  "name": "reload-plugins"
+                },
+                {
+                  "description": "Show session details (model, turns, context usage)",
+                  "input": null,
+                  "name": "session-info"
+                },
+                {
+                  "description": "Send feedback about the current session",
+                  "input": {
+                    "hint": "feedback text"
+                  },
+                  "name": "feedback"
+                },
+                {
+                  "_meta": {
+                    "workflowPath": "<home>/actions-runner/_work/xai/xai/crates/codegen/xai-grok-shell/src/session/workflows/deep_research.rhai",
+                    "workflowSource": "builtin"
+                  },
+                  "description": "Research with bounded parallel agents, cross-check evidence, and write a cited report",
+                  "input": {
+                    "hint": "<query>"
+                  },
+                  "name": "deep-research"
+                },
+                {
+                  "description": "Launch a saved workflow, list runs, or manage a run (pause, resume, stop, save)",
+                  "input": {
+                    "hint": "<name> [--agent-budget N] [--effort LEVEL] [args] | runs | pause|resume|stop|save [name]"
+                  },
+                  "name": "workflow"
+                },
+                {
+                  "description": "Set, manage, or check an autonomous goal",
+                  "input": {
+                    "hint": "<objective> [--budget <tokens>] | status | pause | resume | clear"
+                  },
+                  "name": "goal"
+                },
+                {
+                  "description": "Run a prompt on a recurring interval",
+                  "input": {
+                    "hint": "[interval] <prompt>"
+                  },
+                  "name": "loop"
+                },
+                {
+                  "_meta": {
+                    "bareName": "build-with-ai",
+                    "path": "<home>/.grok/bundled/skills/build-with-ai/SKILL.md",
+                    "qualifiedName": "bundled:build-with-ai",
+                    "scope": "bundled"
+                  },
+                  "description": "Build AI apps on SpaceXAI (XAI_API_KEY + api.x.ai)",
+                  "input": {
+                    "hint": "<what you're building>"
+                  },
+                  "name": "build-with-ai"
+                },
+                {
+                  "_meta": {
+                    "bareName": "code-review",
+                    "path": "<home>/.grok/bundled/skills/code-review/SKILL.md",
+                    "qualifiedName": "bundled:code-review",
+                    "scope": "bundled"
+                  },
+                  "description": "Run an extremely strict maintainability review for abstraction quality, giant files, and spaghetti-condition growth. Use for a deep code quality audit or an especially harsh maintainability review.",
+                  "input": null,
+                  "name": "code-review"
+                },
+                {
+                  "_meta": {
+                    "bareName": "create-skill",
+                    "path": "<home>/.grok/bundled/skills/create-skill/SKILL.md",
+                    "qualifiedName": "bundled:create-skill",
+                    "scope": "bundled"
+                  },
+                  "description": "Create a new Grok skill",
+                  "input": null,
+                  "name": "create-skill"
+                },
+                {
+                  "_meta": {
+                    "bareName": "create-workflow",
+                    "path": "<home>/.grok/bundled/skills/create-workflow/SKILL.md",
+                    "qualifiedName": "bundled:create-workflow",
+                    "scope": "bundled"
+                  },
+                  "description": "Author a new multi-agent workflow",
+                  "input": null,
+                  "name": "create-workflow"
+                },
+                {
+                  "_meta": {
+                    "bareName": "design",
+                    "path": "<home>/.grok/bundled/skills/design/SKILL.md",
+                    "qualifiedName": "bundled:design",
+                    "scope": "bundled"
+                  },
+                  "description": "Run the full design-doc-writer and design-doc-reviewer loop until consensus. Produces a polished design document with a PR plan.",
+                  "input": {
+                    "hint": "<description of what to design>"
+                  },
+                  "name": "design"
+                },
+                {
+                  "_meta": {
+                    "bareName": "execute-plan",
+                    "path": "<home>/.grok/bundled/skills/execute-plan/SKILL.md",
+                    "qualifiedName": "bundled:execute-plan",
+                    "scope": "bundled"
+                  },
+                  "description": "Execute a PR Plan DAG from a design document. Parses the plan, topologically sorts it, implements PRs in parallel using worktree-isolated subagents, runs mandatory orchestrator-level review, and assembles either a Graphite PR stack or a plain-git branch stack depending on tool availability.",
+                  "input": {
+                    "hint": "<design-doc-path> [--effort N] [--concurrency N] [--dry-run] [--resume <PLAN_ID>] [--instructions \"...\"] [--no-graphite] [--auto-pr]"
+                  },
+                  "name": "execute-plan"
+                },
+                {
+                  "_meta": {
+                    "bareName": "imagine",
+                    "path": "<home>/.grok/bundled/skills/imagine/SKILL.md",
+                    "qualifiedName": "bundled:imagine",
+                    "scope": "bundled"
+                  },
+                  "description": "Prompting and workflow guidance for Imagine image tools",
+                  "input": null,
+                  "name": "bundled:imagine"
+                },
+                {
+                  "_meta": {
+                    "bareName": "implement",
+                    "path": "<home>/.grok/bundled/skills/implement/SKILL.md",
+                    "qualifiedName": "bundled:implement",
+                    "scope": "bundled"
+                  },
+                  "description": "Run the full implement-review-fix loop using implementer and reviewer personas. Supports effort-based multi-reviewer scaling (1-5 reviewers) with automatic specialization selection. Includes memory-based feedback loop that learns from past review patterns. Loops until all reviewers find 0 issues of any severity.",
+                  "input": {
+                    "hint": "[--effort N] <description of what to implement>"
+                  },
+                  "name": "implement"
+                },
+                {
+                  "_meta": {
+                    "bareName": "pr-babysit",
+                    "path": "<home>/.grok/bundled/skills/pr-babysit/SKILL.md",
+                    "qualifiedName": "bundled:pr-babysit",
+                    "scope": "bundled"
+                  },
+                  "description": "Monitor PRs, fix CI failures, address review comments, resolve merge conflicts, and restack stacks. Supports independent PRs, Graphite stacks, and GitHub stacked PRs (gh-stack).",
+                  "input": {
+                    "hint": "add <number> | remove <number> | list | check"
+                  },
+                  "name": "pr-babysit"
+                },
+                {
+                  "_meta": {
+                    "bareName": "resume-claude",
+                    "path": "<home>/.grok/bundled/skills/resume-claude/SKILL.md",
+                    "qualifiedName": "bundled:resume-claude",
+                    "scope": "bundled"
+                  },
+                  "description": "Continue from a recent Claude Code session",
+                  "input": {
+                    "hint": "[words describing the session | session id]"
+                  },
+                  "name": "resume-claude"
+                },
+                {
+                  "_meta": {
+                    "bareName": "resume-codex",
+                    "path": "<home>/.grok/bundled/skills/resume-codex/SKILL.md",
+                    "qualifiedName": "bundled:resume-codex",
+                    "scope": "bundled"
+                  },
+                  "description": "Continue from a recent Codex session",
+                  "input": {
+                    "hint": "[words describing the session | session id]"
+                  },
+                  "name": "resume-codex"
+                },
+                {
+                  "_meta": {
+                    "bareName": "resume-cursor",
+                    "path": "<home>/.grok/bundled/skills/resume-cursor/SKILL.md",
+                    "qualifiedName": "bundled:resume-cursor",
+                    "scope": "bundled"
+                  },
+                  "description": "Continue from a recent Cursor session",
+                  "input": {
+                    "hint": "[words describing the session | session id]"
+                  },
+                  "name": "resume-cursor"
+                },
+                {
+                  "_meta": {
+                    "bareName": "review",
+                    "path": "<home>/.grok/bundled/skills/review/SKILL.md",
+                    "qualifiedName": "bundled:review",
+                    "scope": "bundled"
+                  },
+                  "description": "Run a reviewer subagent against uncommitted local changes, a named branch, or a GitHub PR. Local and branch modes write a review file plus a summary to disk. PR mode posts the findings as a PENDING GitHub review for the user to inspect and submit through the UI.",
+                  "input": {
+                    "hint": "[--local | --branch <name> | --pr <number-or-url> | <auto-detect>]"
+                  },
+                  "name": "review"
+                },
+                {
+                  "_meta": {
+                    "bareName": "skill-design-principles",
+                    "path": "<home>/.grok/bundled/skills/skill-design-principles/SKILL.md",
+                    "qualifiedName": "bundled:skill-design-principles",
+                    "scope": "bundled"
+                  },
+                  "description": "Concise, high-signal principles for writing and editing skills well. Use whenever authoring or editing a skill.",
+                  "input": null,
+                  "name": "skill-design-principles"
+                },
+                {
+                  "_meta": {
+                    "bareName": "brainstorming",
+                    "path": "<home>/.claude/plugins/cache/claude-plugins-official/superpowers/5.1.0/skills/brainstorming/SKILL.md",
+                    "pluginName": "superpowers",
+                    "qualifiedName": "superpowers:brainstorming",
+                    "scope": "user"
+                  },
+                  "description": "You MUST use this before any creative work - creating features, building components, adding functionality, or modifying behavior. Explores user intent, requirements and design before implementation.",
+                  "input": null,
+                  "name": "brainstorming"
+                },
+                {
+                  "_meta": {
+                    "bareName": "dispatching-parallel-agents",
+                    "path": "<home>/.claude/plugins/cache/claude-plugins-official/superpowers/5.1.0/skills/dispatching-parallel-agents/SKILL.md",
+                    "pluginName": "superpowers",
+                    "qualifiedName": "superpowers:dispatching-parallel-agents",
+                    "scope": "user"
+                  },
+                  "description": "Use when facing 2+ independent tasks that can be worked on without shared state or sequential dependencies",
+                  "input": null,
+                  "name": "dispatching-parallel-agents"
+                },
+                {
+                  "_meta": {
+                    "bareName": "executing-plans",
+                    "path": "<home>/.claude/plugins/cache/claude-plugins-official/superpowers/5.1.0/skills/executing-plans/SKILL.md",
+                    "pluginName": "superpowers",
+                    "qualifiedName": "superpowers:executing-plans",
+                    "scope": "user"
+                  },
+                  "description": "Use when you have a written implementation plan to execute in a separate session with review checkpoints",
+                  "input": null,
+                  "name": "executing-plans"
+                },
+                {
+                  "_meta": {
+                    "bareName": "finishing-a-development-branch",
+                    "path": "<home>/.claude/plugins/cache/claude-plugins-official/superpowers/5.1.0/skills/finishing-a-development-branch/SKILL.md",
+                    "pluginName": "superpowers",
+                    "qualifiedName": "superpowers:finishing-a-development-branch",
+                    "scope": "user"
+                  },
+                  "description": "Use when implementation is complete, all tests pass, and you need to decide how to integrate the work - guides completion of development work by presenting structured options for merge, PR, or cleanup",
+                  "input": null,
+                  "name": "finishing-a-development-branch"
+                },
+                {
+                  "_meta": {
+                    "bareName": "receiving-code-review",
+                    "path": "<home>/.claude/plugins/cache/claude-plugins-official/superpowers/5.1.0/skills/receiving-code-review/SKILL.md",
+                    "pluginName": "superpowers",
+                    "qualifiedName": "superpowers:receiving-code-review",
+                    "scope": "user"
+                  },
+                  "description": "Use when receiving code review feedback, before implementing suggestions, especially if feedback seems unclear or technically questionable - requires technical rigor and verification, not performative agreement or blind implementation",
+                  "input": null,
+                  "name": "receiving-code-review"
+                },
+                {
+                  "_meta": {
+                    "bareName": "requesting-code-review",
+                    "path": "<home>/.claude/plugins/cache/claude-plugins-official/superpowers/5.1.0/skills/requesting-code-review/SKILL.md",
+                    "pluginName": "superpowers",
+                    "qualifiedName": "superpowers:requesting-code-review",
+                    "scope": "user"
+                  },
+                  "description": "Use when completing tasks, implementing major features, or before merging to verify work meets requirements",
+                  "input": null,
+                  "name": "requesting-code-review"
+                },
+                {
+                  "_meta": {
+                    "bareName": "subagent-driven-development",
+                    "path": "<home>/.claude/plugins/cache/claude-plugins-official/superpowers/5.1.0/skills/subagent-driven-development/SKILL.md",
+                    "pluginName": "superpowers",
+                    "qualifiedName": "superpowers:subagent-driven-development",
+                    "scope": "user"
+                  },
+                  "description": "Use when executing implementation plans with independent tasks in the current session",
+                  "input": null,
+                  "name": "subagent-driven-development"
+                },
+                {
+                  "_meta": {
+                    "bareName": "systematic-debugging",
+                    "path": "<home>/.claude/plugins/cache/claude-plugins-official/superpowers/5.1.0/skills/systematic-debugging/SKILL.md",
+                    "pluginName": "superpowers",
+                    "qualifiedName": "superpowers:systematic-debugging",
+                    "scope": "user"
+                  },
+                  "description": "Use when encountering any bug, test failure, or unexpected behavior, before proposing fixes",
+                  "input": null,
+                  "name": "systematic-debugging"
+                },
+                {
+                  "_meta": {
+                    "bareName": "test-driven-development",
+                    "path": "<home>/.claude/plugins/cache/claude-plugins-official/superpowers/5.1.0/skills/test-driven-development/SKILL.md",
+                    "pluginName": "superpowers",
+                    "qualifiedName": "superpowers:test-driven-development",
+                    "scope": "user"
+                  },
+                  "description": "Use when implementing any feature or bugfix, before writing implementation code",
+                  "input": null,
+                  "name": "test-driven-development"
+                },
+                {
+                  "_meta": {
+                    "bareName": "using-git-worktrees",
+                    "path": "<home>/.claude/plugins/cache/claude-plugins-official/superpowers/5.1.0/skills/using-git-worktrees/SKILL.md",
+                    "pluginName": "superpowers",
+                    "qualifiedName": "superpowers:using-git-worktrees",
+                    "scope": "user"
+                  },
+                  "description": "Use when starting feature work that needs isolation from current workspace or before executing implementation plans - ensures an isolated workspace exists via native tools or git worktree fallback",
+                  "input": null,
+                  "name": "using-git-worktrees"
+                },
+                {
+                  "_meta": {
+                    "bareName": "using-superpowers",
+                    "path": "<home>/.claude/plugins/cache/claude-plugins-official/superpowers/5.1.0/skills/using-superpowers/SKILL.md",
+                    "pluginName": "superpowers",
+                    "qualifiedName": "superpowers:using-superpowers",
+                    "scope": "user"
+                  },
+                  "description": "Use when starting any conversation - establishes how to find and use skills, requiring Skill tool invocation before ANY response including clarifying questions",
+                  "input": null,
+                  "name": "using-superpowers"
+                },
+                {
+                  "_meta": {
+                    "bareName": "verification-before-completion",
+                    "path": "<home>/.claude/plugins/cache/claude-plugins-official/superpowers/5.1.0/skills/verification-before-completion/SKILL.md",
+                    "pluginName": "superpowers",
+                    "qualifiedName": "superpowers:verification-before-completion",
+                    "scope": "user"
+                  },
+                  "description": "Use when about to claim work is complete, fixed, or passing, before committing or creating PRs - requires running verification commands and confirming output before making any success claims; evidence before assertions always",
+                  "input": null,
+                  "name": "verification-before-completion"
+                },
+                {
+                  "_meta": {
+                    "bareName": "writing-plans",
+                    "path": "<home>/.claude/plugins/cache/claude-plugins-official/superpowers/5.1.0/skills/writing-plans/SKILL.md",
+                    "pluginName": "superpowers",
+                    "qualifiedName": "superpowers:writing-plans",
+                    "scope": "user"
+                  },
+                  "description": "Use when you have a spec or requirements for a multi-step task, before touching code",
+                  "input": null,
+                  "name": "writing-plans"
+                },
+                {
+                  "_meta": {
+                    "bareName": "writing-skills",
+                    "path": "<home>/.claude/plugins/cache/claude-plugins-official/superpowers/5.1.0/skills/writing-skills/SKILL.md",
+                    "pluginName": "superpowers",
+                    "qualifiedName": "superpowers:writing-skills",
+                    "scope": "user"
+                  },
+                  "description": "Use when creating new skills, editing existing skills, or verifying skills work before deployment",
+                  "input": null,
+                  "name": "writing-skills"
+                }
+              ],
+              "sessionUpdate": "available_commands_update"
+            }
+          }
+        },
+        "sequence": 13
+      },
+      {
+        "digest": "sha256:fcdf72f576cc2341a3bf7e94ada1f98613e6d14570cbcfe21e88e01a2df05c02",
+        "direction": "recv",
+        "message": {
+          "jsonrpc": "2.0",
+          "method": "_x.ai/session_notification",
+          "params": {
+            "sessionId": "<session-2>",
+            "update": {
+              "model_id": "grok-4.6",
+              "reasoning_effort": "high",
+              "sessionUpdate": "model_changed"
+            }
+          }
+        },
+        "sequence": 14
+      },
+      {
+        "digest": "sha256:7a40c984212d76561854fd7016a3d1d1f75ef894569b4fe9bc426f14825d59f2",
+        "direction": "recv",
+        "message": {
+          "id": "<uuid-4>",
+          "jsonrpc": "2.0",
+          "result": {
+            "_meta": {
+              "codebaseIndexed": [],
+              "currentWorkingDirectory": "/private/tmp",
+              "feedbackEnabled": true,
+              "gitRoot": null,
+              "isGitRepo": false,
+              "showNonGitWarning": false,
+              "x.ai/schedulerBackgroundLoops": true,
+              "x.ai/sessionConfig": {
+                "options": [
+                  {
+                    "category": "model",
+                    "id": "grok-4.6",
+                    "label": "Grok 4.6",
+                    "selected": true
+                  },
+                  {
+                    "category": "model",
+                    "id": "grok-4.5",
+                    "label": "Grok 4.5",
+                    "selected": false
+                  },
+                  {
+                    "category": "mode",
+                    "description": "Highest effort and reasoning level",
+                    "id": "xhigh",
+                    "label": "Extra High Effort",
+                    "selected": false
+                  },
+                  {
+                    "category": "mode",
+                    "description": "Higher implementation quality with extensive reasoning",
+                    "id": "high",
+                    "label": "High Effort",
+                    "selected": true
+                  },
+                  {
+                    "category": "mode",
+                    "description": "Balanced effort with standard implementation and testing",
+                    "id": "medium",
+                    "label": "Medium Effort",
+                    "selected": false
+                  },
+                  {
+                    "category": "mode",
+                    "description": "Quick, fast implementations",
+                    "id": "low",
+                    "label": "Low Effort",
+                    "selected": false
+                  }
+                ]
+              },
+              "x.ai/sessionDetail": {
+                "currentModelId": "grok-4.6",
+                "cwd": "/private/tmp",
+                "kind": "build",
+                "sessionId": "<session-2>"
+              }
+            },
+            "models": {
+              "availableModels": [
+                {
+                  "_meta": {
+                    "agentType": "grok-build-plan",
+                    "reasoningEffort": "high",
+                    "reasoningEfforts": [
+                      {
+                        "default": false,
+                        "description": "Highest effort and reasoning level",
+                        "id": "xhigh",
+                        "label": "Extra High Effort",
+                        "value": "xhigh"
+                      },
+                      {
+                        "default": true,
+                        "description": "Higher implementation quality with extensive reasoning",
+                        "id": "high",
+                        "label": "High Effort",
+                        "value": "high"
+                      },
+                      {
+                        "default": false,
+                        "description": "Balanced effort with standard implementation and testing",
+                        "id": "medium",
+                        "label": "Medium Effort",
+                        "value": "medium"
+                      },
+                      {
+                        "default": false,
+                        "description": "Quick, fast implementations",
+                        "id": "low",
+                        "label": "Low Effort",
+                        "value": "low"
+                      }
+                    ],
+                    "supportsReasoningEffort": true,
+                    "totalContextTokens": "<redacted>"
+                  },
+                  "description": "SpaceXAI's latest frontier model",
+                  "modelId": "grok-4.6",
+                  "name": "Grok 4.6"
+                },
+                {
+                  "_meta": {
+                    "agentType": "grok-build-plan",
+                    "reasoningEffort": "high",
+                    "reasoningEfforts": [
+                      {
+                        "default": true,
+                        "description": "Highest implementation quality with extensive reasoning",
+                        "id": "high",
+                        "label": "High Effort",
+                        "value": "high"
+                      },
+                      {
+                        "default": false,
+                        "description": "Balanced effort with standard implementation and testing",
+                        "id": "medium",
+                        "label": "Medium Effort",
+                        "value": "medium"
+                      },
+                      {
+                        "default": false,
+                        "description": "Quick, fast implementations",
+                        "id": "low",
+                        "label": "Low Effort",
+                        "value": "low"
+                      }
+                    ],
+                    "supportsReasoningEffort": true,
+                    "totalContextTokens": "<redacted>"
+                  },
+                  "modelId": "grok-4.5",
+                  "name": "Grok 4.5"
+                }
+              ],
+              "currentModelId": "grok-4.6"
+            },
+            "sessionId": "<session-2>"
+          }
+        },
+        "sequence": 15
+      },
+      {
+        "digest": "sha256:0b15260195705c3ee32b451202fa8826bb4bdbd637ebda95dc97e2da758f0b77",
+        "direction": "recv",
+        "message": {
+          "jsonrpc": "2.0",
+          "method": "_x.ai/announcements/update",
+          "params": {
+            "announcements": [
+              {
+                "cta": null,
+                "dismissible": null,
+                "expires_at": null,
+                "id": "team",
+                "message": "Select 'Grok 4.6' under /model.",
+                "persistent": null,
+                "severity": "info",
+                "title": "Grok 4.6 is here!",
+                "updated_at": null
+              }
+            ],
+            "gen": 1788299260
+          }
+        },
+        "sequence": 16
+      },
+      {
+        "digest": "sha256:24aa18bdb922349f399c659cd6f80e31b7960c31b2820e5ab042b8a0485c694d",
+        "direction": "send",
+        "message": {
+          "id": "<uuid-5>",
+          "jsonrpc": "2.0",
+          "method": "session/set_config_option",
+          "params": {
+            "configId": "model",
+            "sessionId": "<session-2>",
+            "value": "spur-probe"
+          }
+        },
+        "sequence": 17
+      },
+      {
+        "digest": "sha256:4a26b65bbca33f0590b769d136dd09d70588ba6f4f13cde26c4523b49e184bf9",
+        "direction": "recv",
+        "message": {
+          "error": {
+            "code": -32601,
+            "message": "Method not found"
+          },
+          "id": "<uuid-5>",
+          "jsonrpc": "2.0"
+        },
+        "sequence": 18
+      },
+      {
+        "digest": "sha256:c0d53ca847d42449aa2223b5fe007829883283701f875e168f401e1e46c84969",
+        "direction": "send",
+        "message": {
+          "id": "<uuid-6>",
+          "jsonrpc": "2.0",
+          "method": "session/set_model",
+          "params": {
+            "modelId": "grok-4.6",
+            "sessionId": "<session-2>"
+          }
+        },
+        "sequence": 19
+      },
+      {
+        "digest": "sha256:f0e2e338858fd4afca6b108cf2daf8f5f2367d4571c478a5a168b40a05911dd2",
+        "direction": "recv",
+        "message": {
+          "id": "<uuid-6>",
+          "jsonrpc": "2.0",
+          "result": {
+            "_meta": {
+              "model": {
+                "Ok": "grok-4.6"
+              }
+            }
+          }
+        },
+        "sequence": 20
+      },
+      {
+        "digest": "sha256:fcdf72f576cc2341a3bf7e94ada1f98613e6d14570cbcfe21e88e01a2df05c02",
+        "direction": "recv",
+        "message": {
+          "jsonrpc": "2.0",
+          "method": "_x.ai/session_notification",
+          "params": {
+            "sessionId": "<session-2>",
+            "update": {
+              "model_id": "grok-4.6",
+              "reasoning_effort": "high",
+              "sessionUpdate": "model_changed"
+            }
+          }
+        },
+        "sequence": 21
+      },
+      {
+        "digest": "sha256:ec7d3ece0d2ae95fe23d602927abeba98e7849b1e6754917f9cfb0f72ba1b2c1",
+        "direction": "send",
+        "message": {
+          "id": "<uuid-7>",
+          "jsonrpc": "2.0",
+          "method": "session/set_model",
+          "params": {
+            "modelId": "grok-4.5",
+            "sessionId": "<session-2>"
+          }
+        },
+        "sequence": 22
+      },
+      {
+        "digest": "sha256:761bf5c00f582ff6053a101f0440c555a38f16944d0ff3fca0e0ad02e4577b39",
+        "direction": "recv",
+        "message": {
+          "id": "<uuid-7>",
+          "jsonrpc": "2.0",
+          "result": {
+            "_meta": {
+              "model": {
+                "Ok": "grok-4.5"
+              }
+            }
+          }
+        },
+        "sequence": 23
+      },
+      {
+        "digest": "sha256:85758876a6919285e8bcb682ca71ac0819b2d263902eecf6b4c7e22e1999fb37",
+        "direction": "recv",
+        "message": {
+          "jsonrpc": "2.0",
+          "method": "_x.ai/session_notification",
+          "params": {
+            "sessionId": "<session-2>",
+            "update": {
+              "model_id": "grok-4.5",
+              "reasoning_effort": "high",
+              "sessionUpdate": "model_changed"
+            }
+          }
+        },
+        "sequence": 24
+      }
+    ],
+    "operational_outcomes": [],
+    "payloads_by_digest": {
+      "sha256:0b15260195705c3ee32b451202fa8826bb4bdbd637ebda95dc97e2da758f0b77": {
+        "jsonrpc": "2.0",
+        "method": "_x.ai/announcements/update",
+        "params": {
+          "announcements": [
+            {
+              "cta": null,
+              "dismissible": null,
+              "expires_at": null,
+              "id": "team",
+              "message": "Select 'Grok 4.6' under /model.",
+              "persistent": null,
+              "severity": "info",
+              "title": "Grok 4.6 is here!",
+              "updated_at": null
+            }
+          ],
+          "gen": 1788299260
+        }
+      },
+      "sha256:13104f524f9b788dca93a852587c541081c76c407e1f9ccabf483165a91f4ec0": {
+        "jsonrpc": "2.0",
+        "method": "session/update",
+        "params": {
+          "_meta": {
+            "agentTimestampMs": 1788299260300,
+            "eventId": "01a05ef1-2adf-74a3-8551-95f234127d0a-0",
+            "totalTokens": "<redacted>",
+            "updateParams": {
+              "commandsCount": 39
+            },
+            "updateType": "AvailableCommandsUpdate"
+          },
+          "sessionId": "<session-2>",
+          "update": {
+            "_meta": {
+              "tools": [
+                "run_terminal_command",
+                "read_file",
+                "search_replace",
+                "list_dir",
+                "grep",
+                "kill_command_or_subagent",
+                "todo_write",
+                "get_command_or_subagent_output",
+                "spawn_subagent",
+                "scheduler_create",
+                "scheduler_delete",
+                "scheduler_list",
+                "monitor",
+                "search_tool",
+                "use_tool",
+                "workflow",
+                "enter_plan_mode",
+                "exit_plan_mode",
+                "ask_user_question",
+                "web_search",
+                "web_fetch",
+                "image_gen",
+                "image_edit",
+                "image_to_video",
+                "reference_to_video",
+                "write",
+                "sequential-thinking__sequentialthinking"
+              ]
+            },
+            "availableCommands": [
+              {
+                "description": "Compress conversation history to save context window",
+                "input": {
+                  "hint": "optional context about what to preserve"
+                },
+                "name": "compact"
+              },
+              {
+                "description": "Toggle always-approve mode (skip all permission prompts)",
+                "input": {
+                  "hint": "on|off"
+                },
+                "name": "always-approve"
+              },
+              {
+                "description": "Show context window usage and session stats",
+                "input": null,
+                "name": "context"
+              },
+              {
+                "description": "Manage plugins (list, reload, trust, add, remove)",
+                "input": {
+                  "hint": "list | reload | trust <path> | add <path> | remove <path>"
+                },
+                "name": "plugins"
+              },
+              {
+                "description": "Reload plugins from disk (alias for /plugins reload)",
+                "input": null,
+                "name": "reload-plugins"
+              },
+              {
+                "description": "Show session details (model, turns, context usage)",
+                "input": null,
+                "name": "session-info"
+              },
+              {
+                "description": "Send feedback about the current session",
+                "input": {
+                  "hint": "feedback text"
+                },
+                "name": "feedback"
+              },
+              {
+                "_meta": {
+                  "workflowPath": "<home>/actions-runner/_work/xai/xai/crates/codegen/xai-grok-shell/src/session/workflows/deep_research.rhai",
+                  "workflowSource": "builtin"
+                },
+                "description": "Research with bounded parallel agents, cross-check evidence, and write a cited report",
+                "input": {
+                  "hint": "<query>"
+                },
+                "name": "deep-research"
+              },
+              {
+                "description": "Launch a saved workflow, list runs, or manage a run (pause, resume, stop, save)",
+                "input": {
+                  "hint": "<name> [--agent-budget N] [--effort LEVEL] [args] | runs | pause|resume|stop|save [name]"
+                },
+                "name": "workflow"
+              },
+              {
+                "description": "Set, manage, or check an autonomous goal",
+                "input": {
+                  "hint": "<objective> [--budget <tokens>] | status | pause | resume | clear"
+                },
+                "name": "goal"
+              },
+              {
+                "description": "Run a prompt on a recurring interval",
+                "input": {
+                  "hint": "[interval] <prompt>"
+                },
+                "name": "loop"
+              },
+              {
+                "_meta": {
+                  "bareName": "build-with-ai",
+                  "path": "<home>/.grok/bundled/skills/build-with-ai/SKILL.md",
+                  "qualifiedName": "bundled:build-with-ai",
+                  "scope": "bundled"
+                },
+                "description": "Build AI apps on SpaceXAI (XAI_API_KEY + api.x.ai)",
+                "input": {
+                  "hint": "<what you're building>"
+                },
+                "name": "build-with-ai"
+              },
+              {
+                "_meta": {
+                  "bareName": "code-review",
+                  "path": "<home>/.grok/bundled/skills/code-review/SKILL.md",
+                  "qualifiedName": "bundled:code-review",
+                  "scope": "bundled"
+                },
+                "description": "Run an extremely strict maintainability review for abstraction quality, giant files, and spaghetti-condition growth. Use for a deep code quality audit or an especially harsh maintainability review.",
+                "input": null,
+                "name": "code-review"
+              },
+              {
+                "_meta": {
+                  "bareName": "create-skill",
+                  "path": "<home>/.grok/bundled/skills/create-skill/SKILL.md",
+                  "qualifiedName": "bundled:create-skill",
+                  "scope": "bundled"
+                },
+                "description": "Create a new Grok skill",
+                "input": null,
+                "name": "create-skill"
+              },
+              {
+                "_meta": {
+                  "bareName": "create-workflow",
+                  "path": "<home>/.grok/bundled/skills/create-workflow/SKILL.md",
+                  "qualifiedName": "bundled:create-workflow",
+                  "scope": "bundled"
+                },
+                "description": "Author a new multi-agent workflow",
+                "input": null,
+                "name": "create-workflow"
+              },
+              {
+                "_meta": {
+                  "bareName": "design",
+                  "path": "<home>/.grok/bundled/skills/design/SKILL.md",
+                  "qualifiedName": "bundled:design",
+                  "scope": "bundled"
+                },
+                "description": "Run the full design-doc-writer and design-doc-reviewer loop until consensus. Produces a polished design document with a PR plan.",
+                "input": {
+                  "hint": "<description of what to design>"
+                },
+                "name": "design"
+              },
+              {
+                "_meta": {
+                  "bareName": "execute-plan",
+                  "path": "<home>/.grok/bundled/skills/execute-plan/SKILL.md",
+                  "qualifiedName": "bundled:execute-plan",
+                  "scope": "bundled"
+                },
+                "description": "Execute a PR Plan DAG from a design document. Parses the plan, topologically sorts it, implements PRs in parallel using worktree-isolated subagents, runs mandatory orchestrator-level review, and assembles either a Graphite PR stack or a plain-git branch stack depending on tool availability.",
+                "input": {
+                  "hint": "<design-doc-path> [--effort N] [--concurrency N] [--dry-run] [--resume <PLAN_ID>] [--instructions \"...\"] [--no-graphite] [--auto-pr]"
+                },
+                "name": "execute-plan"
+              },
+              {
+                "_meta": {
+                  "bareName": "imagine",
+                  "path": "<home>/.grok/bundled/skills/imagine/SKILL.md",
+                  "qualifiedName": "bundled:imagine",
+                  "scope": "bundled"
+                },
+                "description": "Prompting and workflow guidance for Imagine image tools",
+                "input": null,
+                "name": "bundled:imagine"
+              },
+              {
+                "_meta": {
+                  "bareName": "implement",
+                  "path": "<home>/.grok/bundled/skills/implement/SKILL.md",
+                  "qualifiedName": "bundled:implement",
+                  "scope": "bundled"
+                },
+                "description": "Run the full implement-review-fix loop using implementer and reviewer personas. Supports effort-based multi-reviewer scaling (1-5 reviewers) with automatic specialization selection. Includes memory-based feedback loop that learns from past review patterns. Loops until all reviewers find 0 issues of any severity.",
+                "input": {
+                  "hint": "[--effort N] <description of what to implement>"
+                },
+                "name": "implement"
+              },
+              {
+                "_meta": {
+                  "bareName": "pr-babysit",
+                  "path": "<home>/.grok/bundled/skills/pr-babysit/SKILL.md",
+                  "qualifiedName": "bundled:pr-babysit",
+                  "scope": "bundled"
+                },
+                "description": "Monitor PRs, fix CI failures, address review comments, resolve merge conflicts, and restack stacks. Supports independent PRs, Graphite stacks, and GitHub stacked PRs (gh-stack).",
+                "input": {
+                  "hint": "add <number> | remove <number> | list | check"
+                },
+                "name": "pr-babysit"
+              },
+              {
+                "_meta": {
+                  "bareName": "resume-claude",
+                  "path": "<home>/.grok/bundled/skills/resume-claude/SKILL.md",
+                  "qualifiedName": "bundled:resume-claude",
+                  "scope": "bundled"
+                },
+                "description": "Continue from a recent Claude Code session",
+                "input": {
+                  "hint": "[words describing the session | session id]"
+                },
+                "name": "resume-claude"
+              },
+              {
+                "_meta": {
+                  "bareName": "resume-codex",
+                  "path": "<home>/.grok/bundled/skills/resume-codex/SKILL.md",
+                  "qualifiedName": "bundled:resume-codex",
+                  "scope": "bundled"
+                },
+                "description": "Continue from a recent Codex session",
+                "input": {
+                  "hint": "[words describing the session | session id]"
+                },
+                "name": "resume-codex"
+              },
+              {
+                "_meta": {
+                  "bareName": "resume-cursor",
+                  "path": "<home>/.grok/bundled/skills/resume-cursor/SKILL.md",
+                  "qualifiedName": "bundled:resume-cursor",
+                  "scope": "bundled"
+                },
+                "description": "Continue from a recent Cursor session",
+                "input": {
+                  "hint": "[words describing the session | session id]"
+                },
+                "name": "resume-cursor"
+              },
+              {
+                "_meta": {
+                  "bareName": "review",
+                  "path": "<home>/.grok/bundled/skills/review/SKILL.md",
+                  "qualifiedName": "bundled:review",
+                  "scope": "bundled"
+                },
+                "description": "Run a reviewer subagent against uncommitted local changes, a named branch, or a GitHub PR. Local and branch modes write a review file plus a summary to disk. PR mode posts the findings as a PENDING GitHub review for the user to inspect and submit through the UI.",
+                "input": {
+                  "hint": "[--local | --branch <name> | --pr <number-or-url> | <auto-detect>]"
+                },
+                "name": "review"
+              },
+              {
+                "_meta": {
+                  "bareName": "skill-design-principles",
+                  "path": "<home>/.grok/bundled/skills/skill-design-principles/SKILL.md",
+                  "qualifiedName": "bundled:skill-design-principles",
+                  "scope": "bundled"
+                },
+                "description": "Concise, high-signal principles for writing and editing skills well. Use whenever authoring or editing a skill.",
+                "input": null,
+                "name": "skill-design-principles"
+              },
+              {
+                "_meta": {
+                  "bareName": "brainstorming",
+                  "path": "<home>/.claude/plugins/cache/claude-plugins-official/superpowers/5.1.0/skills/brainstorming/SKILL.md",
+                  "pluginName": "superpowers",
+                  "qualifiedName": "superpowers:brainstorming",
+                  "scope": "user"
+                },
+                "description": "You MUST use this before any creative work - creating features, building components, adding functionality, or modifying behavior. Explores user intent, requirements and design before implementation.",
+                "input": null,
+                "name": "brainstorming"
+              },
+              {
+                "_meta": {
+                  "bareName": "dispatching-parallel-agents",
+                  "path": "<home>/.claude/plugins/cache/claude-plugins-official/superpowers/5.1.0/skills/dispatching-parallel-agents/SKILL.md",
+                  "pluginName": "superpowers",
+                  "qualifiedName": "superpowers:dispatching-parallel-agents",
+                  "scope": "user"
+                },
+                "description": "Use when facing 2+ independent tasks that can be worked on without shared state or sequential dependencies",
+                "input": null,
+                "name": "dispatching-parallel-agents"
+              },
+              {
+                "_meta": {
+                  "bareName": "executing-plans",
+                  "path": "<home>/.claude/plugins/cache/claude-plugins-official/superpowers/5.1.0/skills/executing-plans/SKILL.md",
+                  "pluginName": "superpowers",
+                  "qualifiedName": "superpowers:executing-plans",
+                  "scope": "user"
+                },
+                "description": "Use when you have a written implementation plan to execute in a separate session with review checkpoints",
+                "input": null,
+                "name": "executing-plans"
+              },
+              {
+                "_meta": {
+                  "bareName": "finishing-a-development-branch",
+                  "path": "<home>/.claude/plugins/cache/claude-plugins-official/superpowers/5.1.0/skills/finishing-a-development-branch/SKILL.md",
+                  "pluginName": "superpowers",
+                  "qualifiedName": "superpowers:finishing-a-development-branch",
+                  "scope": "user"
+                },
+                "description": "Use when implementation is complete, all tests pass, and you need to decide how to integrate the work - guides completion of development work by presenting structured options for merge, PR, or cleanup",
+                "input": null,
+                "name": "finishing-a-development-branch"
+              },
+              {
+                "_meta": {
+                  "bareName": "receiving-code-review",
+                  "path": "<home>/.claude/plugins/cache/claude-plugins-official/superpowers/5.1.0/skills/receiving-code-review/SKILL.md",
+                  "pluginName": "superpowers",
+                  "qualifiedName": "superpowers:receiving-code-review",
+                  "scope": "user"
+                },
+                "description": "Use when receiving code review feedback, before implementing suggestions, especially if feedback seems unclear or technically questionable - requires technical rigor and verification, not performative agreement or blind implementation",
+                "input": null,
+                "name": "receiving-code-review"
+              },
+              {
+                "_meta": {
+                  "bareName": "requesting-code-review",
+                  "path": "<home>/.claude/plugins/cache/claude-plugins-official/superpowers/5.1.0/skills/requesting-code-review/SKILL.md",
+                  "pluginName": "superpowers",
+                  "qualifiedName": "superpowers:requesting-code-review",
+                  "scope": "user"
+                },
+                "description": "Use when completing tasks, implementing major features, or before merging to verify work meets requirements",
+                "input": null,
+                "name": "requesting-code-review"
+              },
+              {
+                "_meta": {
+                  "bareName": "subagent-driven-development",
+                  "path": "<home>/.claude/plugins/cache/claude-plugins-official/superpowers/5.1.0/skills/subagent-driven-development/SKILL.md",
+                  "pluginName": "superpowers",
+                  "qualifiedName": "superpowers:subagent-driven-development",
+                  "scope": "user"
+                },
+                "description": "Use when executing implementation plans with independent tasks in the current session",
+                "input": null,
+                "name": "subagent-driven-development"
+              },
+              {
+                "_meta": {
+                  "bareName": "systematic-debugging",
+                  "path": "<home>/.claude/plugins/cache/claude-plugins-official/superpowers/5.1.0/skills/systematic-debugging/SKILL.md",
+                  "pluginName": "superpowers",
+                  "qualifiedName": "superpowers:systematic-debugging",
+                  "scope": "user"
+                },
+                "description": "Use when encountering any bug, test failure, or unexpected behavior, before proposing fixes",
+                "input": null,
+                "name": "systematic-debugging"
+              },
+              {
+                "_meta": {
+                  "bareName": "test-driven-development",
+                  "path": "<home>/.claude/plugins/cache/claude-plugins-official/superpowers/5.1.0/skills/test-driven-development/SKILL.md",
+                  "pluginName": "superpowers",
+                  "qualifiedName": "superpowers:test-driven-development",
+                  "scope": "user"
+                },
+                "description": "Use when implementing any feature or bugfix, before writing implementation code",
+                "input": null,
+                "name": "test-driven-development"
+              },
+              {
+                "_meta": {
+                  "bareName": "using-git-worktrees",
+                  "path": "<home>/.claude/plugins/cache/claude-plugins-official/superpowers/5.1.0/skills/using-git-worktrees/SKILL.md",
+                  "pluginName": "superpowers",
+                  "qualifiedName": "superpowers:using-git-worktrees",
+                  "scope": "user"
+                },
+                "description": "Use when starting feature work that needs isolation from current workspace or before executing implementation plans - ensures an isolated workspace exists via native tools or git worktree fallback",
+                "input": null,
+                "name": "using-git-worktrees"
+              },
+              {
+                "_meta": {
+                  "bareName": "using-superpowers",
+                  "path": "<home>/.claude/plugins/cache/claude-plugins-official/superpowers/5.1.0/skills/using-superpowers/SKILL.md",
+                  "pluginName": "superpowers",
+                  "qualifiedName": "superpowers:using-superpowers",
+                  "scope": "user"
+                },
+                "description": "Use when starting any conversation - establishes how to find and use skills, requiring Skill tool invocation before ANY response including clarifying questions",
+                "input": null,
+                "name": "using-superpowers"
+              },
+              {
+                "_meta": {
+                  "bareName": "verification-before-completion",
+                  "path": "<home>/.claude/plugins/cache/claude-plugins-official/superpowers/5.1.0/skills/verification-before-completion/SKILL.md",
+                  "pluginName": "superpowers",
+                  "qualifiedName": "superpowers:verification-before-completion",
+                  "scope": "user"
+                },
+                "description": "Use when about to claim work is complete, fixed, or passing, before committing or creating PRs - requires running verification commands and confirming output before making any success claims; evidence before assertions always",
+                "input": null,
+                "name": "verification-before-completion"
+              },
+              {
+                "_meta": {
+                  "bareName": "writing-plans",
+                  "path": "<home>/.claude/plugins/cache/claude-plugins-official/superpowers/5.1.0/skills/writing-plans/SKILL.md",
+                  "pluginName": "superpowers",
+                  "qualifiedName": "superpowers:writing-plans",
+                  "scope": "user"
+                },
+                "description": "Use when you have a spec or requirements for a multi-step task, before touching code",
+                "input": null,
+                "name": "writing-plans"
+              },
+              {
+                "_meta": {
+                  "bareName": "writing-skills",
+                  "path": "<home>/.claude/plugins/cache/claude-plugins-official/superpowers/5.1.0/skills/writing-skills/SKILL.md",
+                  "pluginName": "superpowers",
+                  "qualifiedName": "superpowers:writing-skills",
+                  "scope": "user"
+                },
+                "description": "Use when creating new skills, editing existing skills, or verifying skills work before deployment",
+                "input": null,
+                "name": "writing-skills"
+              }
+            ],
+            "sessionUpdate": "available_commands_update"
+          }
+        }
+      },
+      "sha256:24aa18bdb922349f399c659cd6f80e31b7960c31b2820e5ab042b8a0485c694d": {
+        "id": "<uuid-5>",
+        "jsonrpc": "2.0",
+        "method": "session/set_config_option",
+        "params": {
+          "configId": "model",
+          "sessionId": "<session-2>",
+          "value": "spur-probe"
+        }
+      },
+      "sha256:4a26b65bbca33f0590b769d136dd09d70588ba6f4f13cde26c4523b49e184bf9": {
+        "error": {
+          "code": -32601,
+          "message": "Method not found"
+        },
+        "id": "<uuid-5>",
+        "jsonrpc": "2.0"
+      },
+      "sha256:4df94364917589795696ae206ddbb64db83555c61ebe463d2f091d163c009296": {
+        "jsonrpc": "2.0",
+        "method": "session/update",
+        "params": {
+          "_meta": {
+            "agentTimestampMs": 1788299260302,
+            "eventId": "01a05ef1-2adf-74a3-8551-95f234127d0a-1",
+            "totalTokens": "<redacted>",
+            "updateParams": {
+              "commandsCount": 39
+            },
+            "updateType": "AvailableCommandsUpdate"
+          },
+          "sessionId": "<session-2>",
+          "update": {
+            "_meta": {
+              "tools": [
+                "run_terminal_command",
+                "read_file",
+                "search_replace",
+                "list_dir",
+                "grep",
+                "kill_command_or_subagent",
+                "todo_write",
+                "get_command_or_subagent_output",
+                "spawn_subagent",
+                "scheduler_create",
+                "scheduler_delete",
+                "scheduler_list",
+                "monitor",
+                "search_tool",
+                "use_tool",
+                "workflow",
+                "enter_plan_mode",
+                "exit_plan_mode",
+                "ask_user_question",
+                "web_search",
+                "web_fetch",
+                "image_gen",
+                "image_edit",
+                "image_to_video",
+                "reference_to_video",
+                "write",
+                "sequential-thinking__sequentialthinking"
+              ]
+            },
+            "availableCommands": [
+              {
+                "description": "Compress conversation history to save context window",
+                "input": {
+                  "hint": "optional context about what to preserve"
+                },
+                "name": "compact"
+              },
+              {
+                "description": "Toggle always-approve mode (skip all permission prompts)",
+                "input": {
+                  "hint": "on|off"
+                },
+                "name": "always-approve"
+              },
+              {
+                "description": "Show context window usage and session stats",
+                "input": null,
+                "name": "context"
+              },
+              {
+                "description": "Manage plugins (list, reload, trust, add, remove)",
+                "input": {
+                  "hint": "list | reload | trust <path> | add <path> | remove <path>"
+                },
+                "name": "plugins"
+              },
+              {
+                "description": "Reload plugins from disk (alias for /plugins reload)",
+                "input": null,
+                "name": "reload-plugins"
+              },
+              {
+                "description": "Show session details (model, turns, context usage)",
+                "input": null,
+                "name": "session-info"
+              },
+              {
+                "description": "Send feedback about the current session",
+                "input": {
+                  "hint": "feedback text"
+                },
+                "name": "feedback"
+              },
+              {
+                "_meta": {
+                  "workflowPath": "<home>/actions-runner/_work/xai/xai/crates/codegen/xai-grok-shell/src/session/workflows/deep_research.rhai",
+                  "workflowSource": "builtin"
+                },
+                "description": "Research with bounded parallel agents, cross-check evidence, and write a cited report",
+                "input": {
+                  "hint": "<query>"
+                },
+                "name": "deep-research"
+              },
+              {
+                "description": "Launch a saved workflow, list runs, or manage a run (pause, resume, stop, save)",
+                "input": {
+                  "hint": "<name> [--agent-budget N] [--effort LEVEL] [args] | runs | pause|resume|stop|save [name]"
+                },
+                "name": "workflow"
+              },
+              {
+                "description": "Set, manage, or check an autonomous goal",
+                "input": {
+                  "hint": "<objective> [--budget <tokens>] | status | pause | resume | clear"
+                },
+                "name": "goal"
+              },
+              {
+                "description": "Run a prompt on a recurring interval",
+                "input": {
+                  "hint": "[interval] <prompt>"
+                },
+                "name": "loop"
+              },
+              {
+                "_meta": {
+                  "bareName": "build-with-ai",
+                  "path": "<home>/.grok/bundled/skills/build-with-ai/SKILL.md",
+                  "qualifiedName": "bundled:build-with-ai",
+                  "scope": "bundled"
+                },
+                "description": "Build AI apps on SpaceXAI (XAI_API_KEY + api.x.ai)",
+                "input": {
+                  "hint": "<what you're building>"
+                },
+                "name": "build-with-ai"
+              },
+              {
+                "_meta": {
+                  "bareName": "code-review",
+                  "path": "<home>/.grok/bundled/skills/code-review/SKILL.md",
+                  "qualifiedName": "bundled:code-review",
+                  "scope": "bundled"
+                },
+                "description": "Run an extremely strict maintainability review for abstraction quality, giant files, and spaghetti-condition growth. Use for a deep code quality audit or an especially harsh maintainability review.",
+                "input": null,
+                "name": "code-review"
+              },
+              {
+                "_meta": {
+                  "bareName": "create-skill",
+                  "path": "<home>/.grok/bundled/skills/create-skill/SKILL.md",
+                  "qualifiedName": "bundled:create-skill",
+                  "scope": "bundled"
+                },
+                "description": "Create a new Grok skill",
+                "input": null,
+                "name": "create-skill"
+              },
+              {
+                "_meta": {
+                  "bareName": "create-workflow",
+                  "path": "<home>/.grok/bundled/skills/create-workflow/SKILL.md",
+                  "qualifiedName": "bundled:create-workflow",
+                  "scope": "bundled"
+                },
+                "description": "Author a new multi-agent workflow",
+                "input": null,
+                "name": "create-workflow"
+              },
+              {
+                "_meta": {
+                  "bareName": "design",
+                  "path": "<home>/.grok/bundled/skills/design/SKILL.md",
+                  "qualifiedName": "bundled:design",
+                  "scope": "bundled"
+                },
+                "description": "Run the full design-doc-writer and design-doc-reviewer loop until consensus. Produces a polished design document with a PR plan.",
+                "input": {
+                  "hint": "<description of what to design>"
+                },
+                "name": "design"
+              },
+              {
+                "_meta": {
+                  "bareName": "execute-plan",
+                  "path": "<home>/.grok/bundled/skills/execute-plan/SKILL.md",
+                  "qualifiedName": "bundled:execute-plan",
+                  "scope": "bundled"
+                },
+                "description": "Execute a PR Plan DAG from a design document. Parses the plan, topologically sorts it, implements PRs in parallel using worktree-isolated subagents, runs mandatory orchestrator-level review, and assembles either a Graphite PR stack or a plain-git branch stack depending on tool availability.",
+                "input": {
+                  "hint": "<design-doc-path> [--effort N] [--concurrency N] [--dry-run] [--resume <PLAN_ID>] [--instructions \"...\"] [--no-graphite] [--auto-pr]"
+                },
+                "name": "execute-plan"
+              },
+              {
+                "_meta": {
+                  "bareName": "imagine",
+                  "path": "<home>/.grok/bundled/skills/imagine/SKILL.md",
+                  "qualifiedName": "bundled:imagine",
+                  "scope": "bundled"
+                },
+                "description": "Prompting and workflow guidance for Imagine image tools",
+                "input": null,
+                "name": "bundled:imagine"
+              },
+              {
+                "_meta": {
+                  "bareName": "implement",
+                  "path": "<home>/.grok/bundled/skills/implement/SKILL.md",
+                  "qualifiedName": "bundled:implement",
+                  "scope": "bundled"
+                },
+                "description": "Run the full implement-review-fix loop using implementer and reviewer personas. Supports effort-based multi-reviewer scaling (1-5 reviewers) with automatic specialization selection. Includes memory-based feedback loop that learns from past review patterns. Loops until all reviewers find 0 issues of any severity.",
+                "input": {
+                  "hint": "[--effort N] <description of what to implement>"
+                },
+                "name": "implement"
+              },
+              {
+                "_meta": {
+                  "bareName": "pr-babysit",
+                  "path": "<home>/.grok/bundled/skills/pr-babysit/SKILL.md",
+                  "qualifiedName": "bundled:pr-babysit",
+                  "scope": "bundled"
+                },
+                "description": "Monitor PRs, fix CI failures, address review comments, resolve merge conflicts, and restack stacks. Supports independent PRs, Graphite stacks, and GitHub stacked PRs (gh-stack).",
+                "input": {
+                  "hint": "add <number> | remove <number> | list | check"
+                },
+                "name": "pr-babysit"
+              },
+              {
+                "_meta": {
+                  "bareName": "resume-claude",
+                  "path": "<home>/.grok/bundled/skills/resume-claude/SKILL.md",
+                  "qualifiedName": "bundled:resume-claude",
+                  "scope": "bundled"
+                },
+                "description": "Continue from a recent Claude Code session",
+                "input": {
+                  "hint": "[words describing the session | session id]"
+                },
+                "name": "resume-claude"
+              },
+              {
+                "_meta": {
+                  "bareName": "resume-codex",
+                  "path": "<home>/.grok/bundled/skills/resume-codex/SKILL.md",
+                  "qualifiedName": "bundled:resume-codex",
+                  "scope": "bundled"
+                },
+                "description": "Continue from a recent Codex session",
+                "input": {
+                  "hint": "[words describing the session | session id]"
+                },
+                "name": "resume-codex"
+              },
+              {
+                "_meta": {
+                  "bareName": "resume-cursor",
+                  "path": "<home>/.grok/bundled/skills/resume-cursor/SKILL.md",
+                  "qualifiedName": "bundled:resume-cursor",
+                  "scope": "bundled"
+                },
+                "description": "Continue from a recent Cursor session",
+                "input": {
+                  "hint": "[words describing the session | session id]"
+                },
+                "name": "resume-cursor"
+              },
+              {
+                "_meta": {
+                  "bareName": "review",
+                  "path": "<home>/.grok/bundled/skills/review/SKILL.md",
+                  "qualifiedName": "bundled:review",
+                  "scope": "bundled"
+                },
+                "description": "Run a reviewer subagent against uncommitted local changes, a named branch, or a GitHub PR. Local and branch modes write a review file plus a summary to disk. PR mode posts the findings as a PENDING GitHub review for the user to inspect and submit through the UI.",
+                "input": {
+                  "hint": "[--local | --branch <name> | --pr <number-or-url> | <auto-detect>]"
+                },
+                "name": "review"
+              },
+              {
+                "_meta": {
+                  "bareName": "skill-design-principles",
+                  "path": "<home>/.grok/bundled/skills/skill-design-principles/SKILL.md",
+                  "qualifiedName": "bundled:skill-design-principles",
+                  "scope": "bundled"
+                },
+                "description": "Concise, high-signal principles for writing and editing skills well. Use whenever authoring or editing a skill.",
+                "input": null,
+                "name": "skill-design-principles"
+              },
+              {
+                "_meta": {
+                  "bareName": "brainstorming",
+                  "path": "<home>/.claude/plugins/cache/claude-plugins-official/superpowers/5.1.0/skills/brainstorming/SKILL.md",
+                  "pluginName": "superpowers",
+                  "qualifiedName": "superpowers:brainstorming",
+                  "scope": "user"
+                },
+                "description": "You MUST use this before any creative work - creating features, building components, adding functionality, or modifying behavior. Explores user intent, requirements and design before implementation.",
+                "input": null,
+                "name": "brainstorming"
+              },
+              {
+                "_meta": {
+                  "bareName": "dispatching-parallel-agents",
+                  "path": "<home>/.claude/plugins/cache/claude-plugins-official/superpowers/5.1.0/skills/dispatching-parallel-agents/SKILL.md",
+                  "pluginName": "superpowers",
+                  "qualifiedName": "superpowers:dispatching-parallel-agents",
+                  "scope": "user"
+                },
+                "description": "Use when facing 2+ independent tasks that can be worked on without shared state or sequential dependencies",
+                "input": null,
+                "name": "dispatching-parallel-agents"
+              },
+              {
+                "_meta": {
+                  "bareName": "executing-plans",
+                  "path": "<home>/.claude/plugins/cache/claude-plugins-official/superpowers/5.1.0/skills/executing-plans/SKILL.md",
+                  "pluginName": "superpowers",
+                  "qualifiedName": "superpowers:executing-plans",
+                  "scope": "user"
+                },
+                "description": "Use when you have a written implementation plan to execute in a separate session with review checkpoints",
+                "input": null,
+                "name": "executing-plans"
+              },
+              {
+                "_meta": {
+                  "bareName": "finishing-a-development-branch",
+                  "path": "<home>/.claude/plugins/cache/claude-plugins-official/superpowers/5.1.0/skills/finishing-a-development-branch/SKILL.md",
+                  "pluginName": "superpowers",
+                  "qualifiedName": "superpowers:finishing-a-development-branch",
+                  "scope": "user"
+                },
+                "description": "Use when implementation is complete, all tests pass, and you need to decide how to integrate the work - guides completion of development work by presenting structured options for merge, PR, or cleanup",
+                "input": null,
+                "name": "finishing-a-development-branch"
+              },
+              {
+                "_meta": {
+                  "bareName": "receiving-code-review",
+                  "path": "<home>/.claude/plugins/cache/claude-plugins-official/superpowers/5.1.0/skills/receiving-code-review/SKILL.md",
+                  "pluginName": "superpowers",
+                  "qualifiedName": "superpowers:receiving-code-review",
+                  "scope": "user"
+                },
+                "description": "Use when receiving code review feedback, before implementing suggestions, especially if feedback seems unclear or technically questionable - requires technical rigor and verification, not performative agreement or blind implementation",
+                "input": null,
+                "name": "receiving-code-review"
+              },
+              {
+                "_meta": {
+                  "bareName": "requesting-code-review",
+                  "path": "<home>/.claude/plugins/cache/claude-plugins-official/superpowers/5.1.0/skills/requesting-code-review/SKILL.md",
+                  "pluginName": "superpowers",
+                  "qualifiedName": "superpowers:requesting-code-review",
+                  "scope": "user"
+                },
+                "description": "Use when completing tasks, implementing major features, or before merging to verify work meets requirements",
+                "input": null,
+                "name": "requesting-code-review"
+              },
+              {
+                "_meta": {
+                  "bareName": "subagent-driven-development",
+                  "path": "<home>/.claude/plugins/cache/claude-plugins-official/superpowers/5.1.0/skills/subagent-driven-development/SKILL.md",
+                  "pluginName": "superpowers",
+                  "qualifiedName": "superpowers:subagent-driven-development",
+                  "scope": "user"
+                },
+                "description": "Use when executing implementation plans with independent tasks in the current session",
+                "input": null,
+                "name": "subagent-driven-development"
+              },
+              {
+                "_meta": {
+                  "bareName": "systematic-debugging",
+                  "path": "<home>/.claude/plugins/cache/claude-plugins-official/superpowers/5.1.0/skills/systematic-debugging/SKILL.md",
+                  "pluginName": "superpowers",
+                  "qualifiedName": "superpowers:systematic-debugging",
+                  "scope": "user"
+                },
+                "description": "Use when encountering any bug, test failure, or unexpected behavior, before proposing fixes",
+                "input": null,
+                "name": "systematic-debugging"
+              },
+              {
+                "_meta": {
+                  "bareName": "test-driven-development",
+                  "path": "<home>/.claude/plugins/cache/claude-plugins-official/superpowers/5.1.0/skills/test-driven-development/SKILL.md",
+                  "pluginName": "superpowers",
+                  "qualifiedName": "superpowers:test-driven-development",
+                  "scope": "user"
+                },
+                "description": "Use when implementing any feature or bugfix, before writing implementation code",
+                "input": null,
+                "name": "test-driven-development"
+              },
+              {
+                "_meta": {
+                  "bareName": "using-git-worktrees",
+                  "path": "<home>/.claude/plugins/cache/claude-plugins-official/superpowers/5.1.0/skills/using-git-worktrees/SKILL.md",
+                  "pluginName": "superpowers",
+                  "qualifiedName": "superpowers:using-git-worktrees",
+                  "scope": "user"
+                },
+                "description": "Use when starting feature work that needs isolation from current workspace or before executing implementation plans - ensures an isolated workspace exists via native tools or git worktree fallback",
+                "input": null,
+                "name": "using-git-worktrees"
+              },
+              {
+                "_meta": {
+                  "bareName": "using-superpowers",
+                  "path": "<home>/.claude/plugins/cache/claude-plugins-official/superpowers/5.1.0/skills/using-superpowers/SKILL.md",
+                  "pluginName": "superpowers",
+                  "qualifiedName": "superpowers:using-superpowers",
+                  "scope": "user"
+                },
+                "description": "Use when starting any conversation - establishes how to find and use skills, requiring Skill tool invocation before ANY response including clarifying questions",
+                "input": null,
+                "name": "using-superpowers"
+              },
+              {
+                "_meta": {
+                  "bareName": "verification-before-completion",
+                  "path": "<home>/.claude/plugins/cache/claude-plugins-official/superpowers/5.1.0/skills/verification-before-completion/SKILL.md",
+                  "pluginName": "superpowers",
+                  "qualifiedName": "superpowers:verification-before-completion",
+                  "scope": "user"
+                },
+                "description": "Use when about to claim work is complete, fixed, or passing, before committing or creating PRs - requires running verification commands and confirming output before making any success claims; evidence before assertions always",
+                "input": null,
+                "name": "verification-before-completion"
+              },
+              {
+                "_meta": {
+                  "bareName": "writing-plans",
+                  "path": "<home>/.claude/plugins/cache/claude-plugins-official/superpowers/5.1.0/skills/writing-plans/SKILL.md",
+                  "pluginName": "superpowers",
+                  "qualifiedName": "superpowers:writing-plans",
+                  "scope": "user"
+                },
+                "description": "Use when you have a spec or requirements for a multi-step task, before touching code",
+                "input": null,
+                "name": "writing-plans"
+              },
+              {
+                "_meta": {
+                  "bareName": "writing-skills",
+                  "path": "<home>/.claude/plugins/cache/claude-plugins-official/superpowers/5.1.0/skills/writing-skills/SKILL.md",
+                  "pluginName": "superpowers",
+                  "qualifiedName": "superpowers:writing-skills",
+                  "scope": "user"
+                },
+                "description": "Use when creating new skills, editing existing skills, or verifying skills work before deployment",
+                "input": null,
+                "name": "writing-skills"
+              }
+            ],
+            "sessionUpdate": "available_commands_update"
+          }
+        }
+      },
+      "sha256:56446152008136984557def8d8994b332584b022e0ef1aa1cea83dd298d511a2": {
+        "id": "<uuid-1>",
+        "jsonrpc": "2.0",
+        "result": {
+          "_meta": {
+            "agentId": "<uuid-2>",
+            "agentInstanceId": "<uuid-3>",
+            "agentVersion": "1.0.13",
+            "availableCommands": [
+              {
+                "description": "Compress conversation history to save context window",
+                "input": {
+                  "hint": "optional context about what to preserve"
+                },
+                "name": "compact"
+              },
+              {
+                "description": "Toggle always-approve mode (skip all permission prompts)",
+                "input": {
+                  "hint": "on|off"
+                },
+                "name": "always-approve"
+              },
+              {
+                "description": "Show context window usage and session stats",
+                "input": null,
+                "name": "context"
+              },
+              {
+                "description": "Show session details (model, turns, context usage)",
+                "input": null,
+                "name": "session-info"
+              },
+              {
+                "description": "Research with bounded parallel agents, cross-check evidence, and write a cited report",
+                "input": {
+                  "hint": "<query>"
+                },
+                "name": "deep-research"
+              },
+              {
+                "description": "Launch a saved workflow, list runs, or manage a run (pause, resume, stop, save)",
+                "input": {
+                  "hint": "<name> [--agent-budget N] [--effort LEVEL] [args] | runs | pause|resume|stop|save [name]"
+                },
+                "name": "workflow"
+              },
+              {
+                "description": "Set, manage, or check an autonomous goal",
+                "input": {
+                  "hint": "<objective> [--budget <tokens>] | status | pause | resume | clear"
+                },
+                "name": "goal"
+              }
+            ],
+            "cancelRewind": true,
+            "currentWorkingDirectory": "/private/tmp",
+            "defaultAuthMethodId": "cached_token",
+            "feedbackTraceOffer": false,
+            "grokShell": true,
+            "hostname": "Kevins-Mac-Studio.local",
+            "mcpApps": false,
+            "mcpServers": [],
+            "metadata": null,
+            "modelState": {
+              "availableModels": [
+                {
+                  "_meta": {
+                    "agentType": "grok-build-plan",
+                    "reasoningEffort": "high",
+                    "reasoningEfforts": [
+                      {
+                        "default": false,
+                        "description": "Highest effort and reasoning level",
+                        "id": "xhigh",
+                        "label": "Extra High Effort",
+                        "value": "xhigh"
+                      },
+                      {
+                        "default": true,
+                        "description": "Higher implementation quality with extensive reasoning",
+                        "id": "high",
+                        "label": "High Effort",
+                        "value": "high"
+                      },
+                      {
+                        "default": false,
+                        "description": "Balanced effort with standard implementation and testing",
+                        "id": "medium",
+                        "label": "Medium Effort",
+                        "value": "medium"
+                      },
+                      {
+                        "default": false,
+                        "description": "Quick, fast implementations",
+                        "id": "low",
+                        "label": "Low Effort",
+                        "value": "low"
+                      }
+                    ],
+                    "supportsReasoningEffort": true,
+                    "totalContextTokens": "<redacted>"
+                  },
+                  "description": "SpaceXAI's latest frontier model",
+                  "modelId": "grok-4.6",
+                  "name": "Grok 4.6"
+                },
+                {
+                  "_meta": {
+                    "agentType": "grok-build-plan",
+                    "reasoningEffort": "high",
+                    "reasoningEfforts": [
+                      {
+                        "default": true,
+                        "description": "Highest implementation quality with extensive reasoning",
+                        "id": "high",
+                        "label": "High Effort",
+                        "value": "high"
+                      },
+                      {
+                        "default": false,
+                        "description": "Balanced effort with standard implementation and testing",
+                        "id": "medium",
+                        "label": "Medium Effort",
+                        "value": "medium"
+                      },
+                      {
+                        "default": false,
+                        "description": "Quick, fast implementations",
+                        "id": "low",
+                        "label": "Low Effort",
+                        "value": "low"
+                      }
+                    ],
+                    "supportsReasoningEffort": true,
+                    "totalContextTokens": "<redacted>"
+                  },
+                  "modelId": "grok-4.5",
+                  "name": "Grok 4.5"
+                }
+              ],
+              "currentModelId": "grok-4.6"
+            },
+            "sessionRecap": true,
+            "voiceMode": true,
+            "x.ai/mcp/sdk": true,
+            "x.ai/pluginDirs": true
+          },
+          "agentCapabilities": {
+            "_meta": {
+              "x.ai/capabilities": {
+                "toolOverrides": {
+                  "x_keyword_search": true,
+                  "x_semantic_search": true,
+                  "x_thread_fetch": false,
+                  "x_user_search": false
+                }
+              },
+              "x.ai/fs_notify": true,
+              "x.ai/hooks": {
+                "blockingEvents": [
+                  "pre_tool_use",
+                  "stop",
+                  "subagent_stop"
+                ],
+                "decisions": [
+                  "deny",
+                  "block"
+                ],
+                "stopSignals": [
+                  "continue",
+                  "stopReason",
+                  "additionalContext"
+                ]
+              }
+            },
+            "auth": {},
+            "loadSession": true,
+            "mcpCapabilities": {
+              "http": true,
+              "sse": true
+            },
+            "promptCapabilities": {
+              "audio": false,
+              "embeddedContext": true,
+              "image": false
+            },
+            "sessionCapabilities": {
+              "close": {},
+              "list": {},
+              "resume": {}
+            }
+          },
+          "authMethods": [
+            {
+              "description": "Cached token from ~/.grok/auth.json",
+              "id": "cached_token",
+              "name": "cached_token"
+            },
+            {
+              "description": "Sign in with Grok",
+              "id": "grok.com",
+              "name": "Grok"
+            }
+          ],
+          "protocolVersion": 1
+        }
+      },
+      "sha256:698cb27e5bae75c2e446a95276015bfa219915e33220b110e4daf28ef923ec50": {
+        "jsonrpc": "2.0",
+        "method": "_x.ai/announcements/update",
+        "params": {
+          "announcements": [
+            {
+              "cta": null,
+              "dismissible": null,
+              "expires_at": null,
+              "id": "team",
+              "message": "Select 'Grok 4.6' under /model.",
+              "persistent": null,
+              "severity": "info",
+              "title": "Grok 4.6 is here!",
+              "updated_at": null
+            }
+          ],
+          "gen": 1788299258
+        }
+      },
+      "sha256:761bf5c00f582ff6053a101f0440c555a38f16944d0ff3fca0e0ad02e4577b39": {
+        "id": "<uuid-7>",
+        "jsonrpc": "2.0",
+        "result": {
+          "_meta": {
+            "model": {
+              "Ok": "grok-4.5"
+            }
+          }
+        }
+      },
+      "sha256:7a40c984212d76561854fd7016a3d1d1f75ef894569b4fe9bc426f14825d59f2": {
+        "id": "<uuid-4>",
+        "jsonrpc": "2.0",
+        "result": {
+          "_meta": {
+            "codebaseIndexed": [],
+            "currentWorkingDirectory": "/private/tmp",
+            "feedbackEnabled": true,
+            "gitRoot": null,
+            "isGitRepo": false,
+            "showNonGitWarning": false,
+            "x.ai/schedulerBackgroundLoops": true,
+            "x.ai/sessionConfig": {
+              "options": [
+                {
+                  "category": "model",
+                  "id": "grok-4.6",
+                  "label": "Grok 4.6",
+                  "selected": true
+                },
+                {
+                  "category": "model",
+                  "id": "grok-4.5",
+                  "label": "Grok 4.5",
+                  "selected": false
+                },
+                {
+                  "category": "mode",
+                  "description": "Highest effort and reasoning level",
+                  "id": "xhigh",
+                  "label": "Extra High Effort",
+                  "selected": false
+                },
+                {
+                  "category": "mode",
+                  "description": "Higher implementation quality with extensive reasoning",
+                  "id": "high",
+                  "label": "High Effort",
+                  "selected": true
+                },
+                {
+                  "category": "mode",
+                  "description": "Balanced effort with standard implementation and testing",
+                  "id": "medium",
+                  "label": "Medium Effort",
+                  "selected": false
+                },
+                {
+                  "category": "mode",
+                  "description": "Quick, fast implementations",
+                  "id": "low",
+                  "label": "Low Effort",
+                  "selected": false
+                }
+              ]
+            },
+            "x.ai/sessionDetail": {
+              "currentModelId": "grok-4.6",
+              "cwd": "/private/tmp",
+              "kind": "build",
+              "sessionId": "<session-2>"
+            }
+          },
+          "models": {
+            "availableModels": [
+              {
+                "_meta": {
+                  "agentType": "grok-build-plan",
+                  "reasoningEffort": "high",
+                  "reasoningEfforts": [
+                    {
+                      "default": false,
+                      "description": "Highest effort and reasoning level",
+                      "id": "xhigh",
+                      "label": "Extra High Effort",
+                      "value": "xhigh"
+                    },
+                    {
+                      "default": true,
+                      "description": "Higher implementation quality with extensive reasoning",
+                      "id": "high",
+                      "label": "High Effort",
+                      "value": "high"
+                    },
+                    {
+                      "default": false,
+                      "description": "Balanced effort with standard implementation and testing",
+                      "id": "medium",
+                      "label": "Medium Effort",
+                      "value": "medium"
+                    },
+                    {
+                      "default": false,
+                      "description": "Quick, fast implementations",
+                      "id": "low",
+                      "label": "Low Effort",
+                      "value": "low"
+                    }
+                  ],
+                  "supportsReasoningEffort": true,
+                  "totalContextTokens": "<redacted>"
+                },
+                "description": "SpaceXAI's latest frontier model",
+                "modelId": "grok-4.6",
+                "name": "Grok 4.6"
+              },
+              {
+                "_meta": {
+                  "agentType": "grok-build-plan",
+                  "reasoningEffort": "high",
+                  "reasoningEfforts": [
+                    {
+                      "default": true,
+                      "description": "Highest implementation quality with extensive reasoning",
+                      "id": "high",
+                      "label": "High Effort",
+                      "value": "high"
+                    },
+                    {
+                      "default": false,
+                      "description": "Balanced effort with standard implementation and testing",
+                      "id": "medium",
+                      "label": "Medium Effort",
+                      "value": "medium"
+                    },
+                    {
+                      "default": false,
+                      "description": "Quick, fast implementations",
+                      "id": "low",
+                      "label": "Low Effort",
+                      "value": "low"
+                    }
+                  ],
+                  "supportsReasoningEffort": true,
+                  "totalContextTokens": "<redacted>"
+                },
+                "modelId": "grok-4.5",
+                "name": "Grok 4.5"
+              }
+            ],
+            "currentModelId": "grok-4.6"
+          },
+          "sessionId": "<session-2>"
+        }
+      },
+      "sha256:7d4002fee019c68c40bc4c22f548343554d33fbad17125c257ea0dd1b25cd788": {
+        "jsonrpc": "2.0",
+        "method": "_x.ai/mcp_initialized",
+        "params": {
+          "elapsedMs": 886,
+          "mcpToolCount": 1,
+          "sessionId": "<session-2>"
+        }
+      },
+      "sha256:85758876a6919285e8bcb682ca71ac0819b2d263902eecf6b4c7e22e1999fb37": {
+        "jsonrpc": "2.0",
+        "method": "_x.ai/session_notification",
+        "params": {
+          "sessionId": "<session-2>",
+          "update": {
+            "model_id": "grok-4.5",
+            "reasoning_effort": "high",
+            "sessionUpdate": "model_changed"
+          }
+        }
+      },
+      "sha256:8f9a080eb0934f573bc516390df3b41243c1493fb1dd35fc02813f7e4527c9a7": {
+        "jsonrpc": "2.0",
+        "method": "_x.ai/announcements/update",
+        "params": {
+          "announcements": [
+            {
+              "cta": null,
+              "dismissible": null,
+              "expires_at": null,
+              "id": "team",
+              "message": "Select 'Grok 4.6' under /model.",
+              "persistent": null,
+              "severity": "info",
+              "title": "Grok 4.6 is here!",
+              "updated_at": null
+            }
+          ],
+          "gen": 1788299259
+        }
+      },
+      "sha256:a3bee10ba3076cf9ea3736d00e69232aad20728640b80f9da72e241dc50ad401": {
+        "jsonrpc": "2.0",
+        "method": "_x.ai/mcp/servers_updated",
+        "params": {
+          "mcpServers": [
+            {
+              "args": [
+                "-y",
+                "@modelcontextprotocol/server-sequential-thinking"
+              ],
+              "command": "npx",
+              "name": "sequential-thinking",
+              "source": "local",
+              "type": "stdio"
+            }
+          ]
+        }
+      },
+      "sha256:c0d53ca847d42449aa2223b5fe007829883283701f875e168f401e1e46c84969": {
+        "id": "<uuid-6>",
+        "jsonrpc": "2.0",
+        "method": "session/set_model",
+        "params": {
+          "modelId": "grok-4.6",
+          "sessionId": "<session-2>"
+        }
+      },
+      "sha256:c37939c73b4295f8ae2955385b9de190aea26eb67f988d8f49a231752e01f7e3": {
+        "jsonrpc": "2.0",
+        "method": "_x.ai/mcp/init_progress",
+        "params": {
+          "connected": 0,
+          "sessionId": "<session-2>",
+          "total": 1
+        }
+      },
+      "sha256:d699f1f80a3675880b31d2f4e0c00bdb26c7a08d7f659271341ed697c295a535": {
+        "id": "<uuid-4>",
+        "jsonrpc": "2.0",
+        "method": "session/new",
+        "params": {
+          "cwd": "/private/tmp",
+          "mcpServers": [],
+          "sessionId": "<session-1>"
+        }
+      },
+      "sha256:df793fe5865940b80d83aebd6686fde5e71204e6fb3e829adb790958d0db73c5": {
+        "jsonrpc": "2.0",
+        "method": "_x.ai/models/update",
+        "params": {
+          "availableModels": [
+            {
+              "_meta": {
+                "agentType": "grok-build-plan",
+                "reasoningEffort": "high",
+                "reasoningEfforts": [
+                  {
+                    "default": false,
+                    "description": "Highest effort and reasoning level",
+                    "id": "xhigh",
+                    "label": "Extra High Effort",
+                    "value": "xhigh"
+                  },
+                  {
+                    "default": true,
+                    "description": "Higher implementation quality with extensive reasoning",
+                    "id": "high",
+                    "label": "High Effort",
+                    "value": "high"
+                  },
+                  {
+                    "default": false,
+                    "description": "Balanced effort with standard implementation and testing",
+                    "id": "medium",
+                    "label": "Medium Effort",
+                    "value": "medium"
+                  },
+                  {
+                    "default": false,
+                    "description": "Quick, fast implementations",
+                    "id": "low",
+                    "label": "Low Effort",
+                    "value": "low"
+                  }
+                ],
+                "supportsReasoningEffort": true,
+                "totalContextTokens": "<redacted>"
+              },
+              "description": "SpaceXAI's latest frontier model",
+              "modelId": "grok-4.6",
+              "name": "Grok 4.6"
+            },
+            {
+              "_meta": {
+                "agentType": "grok-build-plan",
+                "reasoningEffort": "high",
+                "reasoningEfforts": [
+                  {
+                    "default": true,
+                    "description": "Highest implementation quality with extensive reasoning",
+                    "id": "high",
+                    "label": "High Effort",
+                    "value": "high"
+                  },
+                  {
+                    "default": false,
+                    "description": "Balanced effort with standard implementation and testing",
+                    "id": "medium",
+                    "label": "Medium Effort",
+                    "value": "medium"
+                  },
+                  {
+                    "default": false,
+                    "description": "Quick, fast implementations",
+                    "id": "low",
+                    "label": "Low Effort",
+                    "value": "low"
+                  }
+                ],
+                "supportsReasoningEffort": true,
+                "totalContextTokens": "<redacted>"
+              },
+              "modelId": "grok-4.5",
+              "name": "Grok 4.5"
+            }
+          ],
+          "currentModelId": "grok-4.6"
+        }
+      },
+      "sha256:e38143b6e34efd1f73de8b61f7062930cd995124db00a6e00c60077a69785619": {
+        "id": "<uuid-1>",
+        "jsonrpc": "2.0",
+        "method": "initialize",
+        "params": {
+          "clientCapabilities": {
+            "fs": {
+              "readTextFile": true,
+              "writeTextFile": true
+            },
+            "session": {
+              "configOptions": {}
+            },
+            "terminal": true
+          },
+          "clientInfo": {
+            "name": "spur-acp-capability-probe",
+            "version": "0.1.0"
+          },
+          "protocolVersion": 1
+        }
+      },
+      "sha256:ec7d3ece0d2ae95fe23d602927abeba98e7849b1e6754917f9cfb0f72ba1b2c1": {
+        "id": "<uuid-7>",
+        "jsonrpc": "2.0",
+        "method": "session/set_model",
+        "params": {
+          "modelId": "grok-4.5",
+          "sessionId": "<session-2>"
+        }
+      },
+      "sha256:f0e2e338858fd4afca6b108cf2daf8f5f2367d4571c478a5a168b40a05911dd2": {
+        "id": "<uuid-6>",
+        "jsonrpc": "2.0",
+        "result": {
+          "_meta": {
+            "model": {
+              "Ok": "grok-4.6"
+            }
+          }
+        }
+      },
+      "sha256:f3264b8e4ed2ca0cd1357f6298552b4938654009242ec9e3895a74a9e113d94a": {
+        "jsonrpc": "2.0",
+        "method": "_x.ai/mcp/init_progress",
+        "params": {
+          "connected": 1,
+          "sessionId": "<session-2>",
+          "total": 1
+        }
+      },
+      "sha256:f69e42a26f72458090c6d0b27daa4efaa3529d407087cc4634fba79e08b19883": {
+        "jsonrpc": "2.0",
+        "method": "_x.ai/settings/update",
+        "params": {
+          "allow_access": true,
+          "announcements": [
+            {
+              "cta": null,
+              "dismissible": null,
+              "expires_at": null,
+              "id": "team",
+              "message": "Select 'Grok 4.6' under /model.",
+              "persistent": null,
+              "severity": "info",
+              "title": "Grok 4.6 is here!",
+              "updated_at": null
+            }
+          ],
+          "auto_permission_mode_enabled": null,
+          "campaigns": [
+            {
+              "id": "grok-4.6-launch",
+              "models": {
+                "default": "grok-4.6"
+              }
+            }
+          ],
+          "collapsed_edit_blocks": null,
+          "consent_gate": null,
+          "gate_label": null,
+          "gate_message": null,
+          "gate_url": null,
+          "group_tool_verbs": null,
+          "permission_mode": null,
+          "privacy_banner_reshow_days": 0,
+          "privacy_notice_rollout": true,
+          "session_picker_grouped": null,
+          "sharing_enabled": false,
+          "show_resolved_model": false,
+          "slash_command_tags": null,
+          "subscription_tier_display": "SuperGrok Heavy",
+          "subscription_watch_interval_secs": 60,
+          "tips": [
+            "Use @ to attach files like @src/main.rs.",
+            "Use @! for hidden or ignored files: @!.github/workflows.",
+            "Press Ctrl+O to toggle auto-approve mode.",
+            "Use Shift+Tab to cycle between modes like Plan mode.",
+            "Run /compact [context] when chat gets long.",
+            "Press Ctrl+B to background a running terminal command.",
+            "Start Grok in a fresh worktree with `-w`; add `-r <session-id>` to resume an existing session there.",
+            "Use Ctrl+Enter to interject messages. Or just Enter to queue messages.",
+            "Run /dashboard (or Ctrl+\\) to see and manage all your agents in one place.",
+            "Try out workflows using /workflows."
+          ]
+        }
+      },
+      "sha256:fcdf72f576cc2341a3bf7e94ada1f98613e6d14570cbcfe21e88e01a2df05c02": {
+        "jsonrpc": "2.0",
+        "method": "_x.ai/session_notification",
+        "params": {
+          "sessionId": "<session-2>",
+          "update": {
+            "model_id": "grok-4.6",
+            "reasoning_effort": "high",
+            "sessionUpdate": "model_changed"
+          }
+        }
+      }
+    }
+  },
+  "schema": "spur.acp-capability-fixture",
+  "version": 1
+}
