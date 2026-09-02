@@ -141,7 +141,11 @@ tag pushes were **cut over to `release-dist.yml`**:
   against SHA256SUMS, and a node bin shim execs it (lazy-installs under
   `--ignore-scripts`). Published by the workflow after the GitHub release
   exists via npm trusted publishing (OIDC) from `release-dist.yml`; no
-  `secrets.NPM_TOKEN`.
+  `secrets.NPM_TOKEN`. Trusted publisher on npmjs.com: GitHub Actions,
+  org `getspur`, repo `spur`, workflow filename `release-dist.yml`, no
+  Environment (do not add `environment:` to the dist job unless that
+  name is also set on npmjs.com). Revoke the GitHub `NPM_TOKEN` secret
+  after the first successful OIDC publish.
 - **Skills bundle shipped with dist (skills-init alignment).** Skills under
   `crates/spur-cli/assets/skills/` are embedded in the CLI binary and lazily
   materialized into a digest-keyed cache when no external tree exists.

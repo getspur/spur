@@ -45,8 +45,11 @@ npm-scope = "@getspur"
 github-releases-repo = "getspur/spur-releases"
 # Whether to produce an npm lockfile
 npm-shrinkwrap = true
-# Publish jobs to run in CI
-publish-jobs = ["npm"]
+# Publish jobs to run in CI. Empty: @getspur/spur-cli publishes from
+# release-dist.yml via npm trusted publishers (OIDC). Re-adding "npm"
+# and running `dist generate` would restore a NODE_AUTH_TOKEN job against
+# the wrong workflow filename (each package allows one trusted publisher).
+publish-jobs = []
 # Which actions to run on pull requests
 pr-run-mode = "plan"
 # release.yml carries intentional manual env injection for LicenseSeat builds.

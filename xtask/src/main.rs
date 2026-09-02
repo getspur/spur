@@ -2666,6 +2666,29 @@ tokio = { version = "1", features = ["full"] }
         );
     }
 
+    #[test]
+    fn cargo_dist_release_yml_does_not_token_publish() {
+        // npmjs.com allows one trusted publisher per package. Tag publishes go
+        // through release-dist.yml; cargo-dist must not keep a NODE_AUTH_TOKEN
+        // npm job that could republish @getspur/spur-cli.
+        let yaml = fs::read_to_string(workspace_root().join(".github/workflows/release.yml"))
+            .expect("release.yml");
+        assert!(
+            yaml.contains("on:\n  pull_request:"),
+            "cargo-dist release.yml must stay PR-plan-only after the release-dist cutover"
+        );
+        assert!(
+            !yaml.contains("NODE_AUTH_TOKEN:"),
+            "leftover cargo-dist npm publish must not set NODE_AUTH_TOKEN"
+        );
+        let dist = fs::read_to_string(workspace_root().join("dist-workspace.toml"))
+            .expect("dist-workspace.toml");
+        assert!(
+            !dist.contains("publish-jobs = [\"npm\"]"),
+            "cargo-dist must not generate npm publish jobs; trusted publishing lives in release-dist.yml"
+        );
+    }
+
     fn temp_test_dir(label: &str) -> PathBuf {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
