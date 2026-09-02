@@ -285,7 +285,7 @@ pub fn route_with_caps(
                 }
                 Dispatch::SetSessionEffort => {
                     let value = rest_after_first_token(text).trim().to_string();
-                    if value.is_empty() {
+                    if value.is_empty() || !is_advertised_effort(caps, &value) {
                         SubmitDecision::Empty
                     } else {
                         SubmitDecision::SetSessionEffort { value }
@@ -329,6 +329,17 @@ pub fn route_with_caps(
     let blocks =
         assemble_blocks_with_prompt_caps(text, ranges, images, PromptBlockCaps::from_agent(caps));
     SubmitDecision::Send { blocks, interrupt }
+}
+
+fn is_advertised_effort(caps: Option<&SpurAgentCaps>, value: &str) -> bool {
+    caps.and_then(|caps| caps.grok_display.as_ref())
+        .and_then(|display| {
+            display
+                .model_id
+                .as_deref()
+                .map(|model_id| display.efforts_for_model(model_id))
+        })
+        .is_some_and(|efforts| efforts.iter().any(|effort| effort.id == value))
 }
 
 fn is_advertised_mode(caps: Option<&SpurAgentCaps>, value: &str) -> bool {
@@ -1037,6 +1048,68 @@ mod sessions_slash_tests {
         caps
     }
 
+    fn grok_vendor_effort_caps(epoch_id: u64) -> SpurAgentCaps {
+        use spur_acp::{AgentKind, InitializeResponse, NewSessionResponse, ProtocolVersion};
+
+        let identity = CliIdentity {
+            resolved_executable: std::path::PathBuf::from("/usr/bin/grok"),
+            upstream_version: Some("1.0.13".to_owned()),
+            argv_fingerprint: "argv".to_owned(),
+            environment_fingerprint: "env".to_owned(),
+        };
+        let record = EvidenceRecord {
+            key: CapabilityKey {
+                kind: CapabilityKind::Effort,
+                upstream_id: "reasoning_effort".to_owned(),
+            },
+            claim: EvidenceClaim::CandidateObserved,
+            provenance: EvidenceProvenance::VendorAdvertisement,
+            identity: identity.clone(),
+            observed_at: ObservationTime(epoch_id),
+            raw_digest: RawEvidenceDigest(format!("sha256:effort:{epoch_id}")),
+            session_scope: EvidenceSessionScope::Session("sid".to_owned()),
+            choices: vec![CapabilityChoice {
+                id: "xhigh".to_owned(),
+                label: "Extra High Effort".to_owned(),
+                description: None,
+            }],
+        };
+        let epoch = EvidenceEpoch::new(EvidenceEpochId(epoch_id), identity.clone(), vec![record])
+            .expect("test evidence must use one identity");
+        let snapshot = CapabilityEvidenceSnapshot::from_epoch(epoch, &identity);
+        let mut wire = serde_json::to_value(snapshot).expect("snapshot must serialize");
+        wire["completeness"] = serde_json::json!("complete");
+
+        let mut init = InitializeResponse::new(ProtocolVersion::LATEST);
+        init.meta = serde_json::from_value(serde_json::json!({
+            "modelState": {
+                "currentModelId": "grok-4.6",
+                "availableModels": [{
+                    "modelId": "grok-4.6",
+                    "name": "Grok 4.6",
+                    "_meta": {
+                        "reasoningEffort": "high",
+                        "reasoningEfforts": [{
+                            "id": "xhigh",
+                            "label": "Extra High Effort"
+                        }],
+                        "supportsReasoningEffort": true
+                    }
+                }]
+            }
+        }))
+        .expect("Grok initialize metadata must deserialize");
+        let mut caps = SpurAgentCaps::new(
+            &init,
+            &NewSessionResponse::new(spur_acp::AcpSessionId::new("sid")),
+            AgentKind::Grok,
+        );
+        caps.capability_evidence = Some(
+            serde_json::from_value(wire).expect("complete evidence snapshot must deserialize"),
+        );
+        caps
+    }
+
     fn prompt_only_command_caps(epoch_id: u64, command_name: &str) -> SpurAgentCaps {
         use spur_acp::{AgentKind, InitializeResponse, NewSessionResponse, ProtocolVersion};
 
@@ -1216,7 +1289,7 @@ mod sessions_slash_tests {
     }
 
     #[test]
-    fn grok_effort_dispatch_routes_to_set_session_effort() {
+    fn grok_effort_without_caps_does_not_dispatch_natively() {
         use crate::commands::entry::{CommandEntry, CommandSource, Dispatch};
 
         let mut registry = CommandRegistry::new();
@@ -1235,10 +1308,38 @@ mod sessions_slash_tests {
         );
 
         let decision = route("/effort low", &[], &[], &registry, false);
+        assert!(matches!(decision, SubmitDecision::Empty));
+    }
+
+    #[test]
+    fn grok_vendor_advertised_xhigh_does_not_fall_back_to_prompt() {
+        let caps = grok_vendor_effort_caps(23);
+        let mut registry = CommandRegistry::new();
+        registry.set_advertised_commands(
+            "grok",
+            crate::commands::advertised::AdvertisedSource::entries_from_caps("grok", &caps),
+        );
+
+        let decision = route_with_caps("/effort xhigh", &[], &[], &registry, false, Some(&caps));
+
         assert!(matches!(
             decision,
-            SubmitDecision::SetSessionEffort { value } if value == "low"
+            SubmitDecision::SetSessionEffort { value } if value == "xhigh"
         ));
+    }
+
+    #[test]
+    fn grok_unadvertised_effort_does_not_dispatch_natively() {
+        let caps = grok_vendor_effort_caps(24);
+        let mut registry = CommandRegistry::new();
+        registry.set_advertised_commands(
+            "grok",
+            crate::commands::advertised::AdvertisedSource::entries_from_caps("grok", &caps),
+        );
+
+        let decision = route_with_caps("/effort bogus", &[], &[], &registry, false, Some(&caps));
+
+        assert!(matches!(decision, SubmitDecision::Empty));
     }
 
     fn registry_and_caps_with_agent_modes() -> (CommandRegistry, SpurAgentCaps) {
