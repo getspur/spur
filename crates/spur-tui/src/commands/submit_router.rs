@@ -1320,6 +1320,20 @@ mod sessions_slash_tests {
         ));
     }
 
+    #[test]
+    fn grok_unadvertised_effort_does_not_dispatch_natively() {
+        let caps = grok_vendor_effort_caps(24);
+        let mut registry = CommandRegistry::new();
+        registry.set_advertised_commands(
+            "grok",
+            crate::commands::advertised::AdvertisedSource::entries_from_caps("grok", &caps),
+        );
+
+        let decision = route_with_caps("/effort bogus", &[], &[], &registry, false, Some(&caps));
+
+        assert!(matches!(decision, SubmitDecision::Empty));
+    }
+
     fn registry_and_caps_with_agent_modes() -> (CommandRegistry, SpurAgentCaps) {
         use spur_acp::{
             AgentKind, InitializeResponse, NewSessionResponse, ProtocolVersion, SessionMode,
