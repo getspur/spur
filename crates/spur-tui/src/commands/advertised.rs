@@ -719,15 +719,17 @@ mod tests {
         init.meta = Some(
             serde_json::json!({
                 "modelState": {
-                    "currentModelId": "grok-4.5",
+                    "currentModelId": "grok-4.6",
                     "availableModels": [
                         {
-                            "modelId": "grok-4.5",
-                            "name": "Grok 4.5",
+                            "modelId": "grok-4.6",
+                            "name": "Grok 4.6",
                             "_meta": {
                                 "reasoningEffort": "high",
                                 "reasoningEfforts": [
+                                    {"id": "xhigh", "label": "Extra High Effort"},
                                     {"id": "high", "label": "High Effort"},
+                                    {"id": "medium", "label": "Medium Effort"},
                                     {"id": "low", "label": "Low Effort"}
                                 ]
                             }
@@ -761,7 +763,7 @@ mod tests {
                     EvidenceClaim::NativeVerified,
                     EvidenceProvenance::AcceptedActiveProbe,
                     &[
-                        ("grok-4.5", "Grok 4.5"),
+                        ("grok-4.6", "Grok 4.6"),
                         ("grok-composer-2.5-fast", "Grok Composer 2.5 Fast"),
                     ],
                 ),
@@ -771,7 +773,12 @@ mod tests {
                     "reasoning_effort",
                     EvidenceClaim::NativeVerified,
                     EvidenceProvenance::AcceptedActiveProbe,
-                    &[("high", "High Effort"), ("low", "Low Effort")],
+                    &[
+                        ("xhigh", "Extra High Effort"),
+                        ("high", "High Effort"),
+                        ("medium", "Medium Effort"),
+                        ("low", "Low Effort"),
+                    ],
                 ),
             ],
         )
@@ -800,7 +807,7 @@ mod tests {
             effort_spec.typed_hint.as_ref(),
             Some(spur_acp::adapter::arg_picker_hint::ArgPickerHint::StaticChoices { choices })
                 if choices.iter().map(|choice| choice.value.as_str()).collect::<Vec<_>>()
-                    == vec!["high", "low"]
+                    == vec!["xhigh", "high", "medium", "low"]
         ));
 
         let mut registry = crate::commands::CommandRegistry::new();

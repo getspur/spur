@@ -450,6 +450,45 @@ mod tests {
     }
 
     #[test]
+    fn advertised_reasoning_efforts_are_not_limited_to_known_ids() {
+        let initialize_meta = meta(json!({
+            "modelState": {
+                "currentModelId": "grok-4.6",
+                "availableModels": [{
+                    "modelId": "grok-4.6",
+                    "name": "Grok 4.6",
+                    "_meta": {
+                        "reasoningEffort": "xhigh",
+                        "reasoningEfforts": [
+                            {"id": "xhigh", "label": "Extra High Effort"},
+                            {"id": "high", "label": "High Effort"},
+                            {"id": "future-effort", "label": "Future Effort"}
+                        ]
+                    }
+                }]
+            }
+        }));
+
+        let display = extract_grok_session_display(AgentKind::Grok, Some(&initialize_meta), None)
+            .expect("Grok display should retain its advertised effort catalog");
+
+        assert_eq!(display.effort_id.as_deref(), Some("xhigh"));
+        assert_eq!(display.effort_label.as_deref(), Some("Extra High Effort"));
+        assert_eq!(
+            display
+                .efforts_for_model("grok-4.6")
+                .iter()
+                .map(|choice| (choice.id.as_str(), choice.label.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("xhigh", "Extra High Effort"),
+                ("high", "High Effort"),
+                ("future-effort", "Future Effort"),
+            ]
+        );
+    }
+
+    #[test]
     fn unselected_session_field_falls_back_to_model_state_independently() {
         let initialize_meta = meta(json!({
             "modelState": {
