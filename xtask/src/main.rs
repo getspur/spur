@@ -2603,6 +2603,69 @@ tokio = { version = "1", features = ["full"] }
         assert!(!should_strip_rustc_wrapper(false));
     }
 
+    #[test]
+    fn release_dist_npm_publish_uses_trusted_publisher_oidc() {
+        // Sat model sol_dbb5643359a94bb1 / sol_e8b89417bf904b3b: the live
+        // @getspur/spur-cli publish must use GitHub Actions OIDC (Node 24,
+        // id-token: write, GitHub-hosted runner) and must not set NODE_AUTH_TOKEN.
+        let yaml = fs::read_to_string(workspace_root().join(".github/workflows/release-dist.yml"))
+            .expect("release-dist.yml");
+
+        assert!(
+            yaml.contains("id-token: write"),
+            "npm trusted publishing requires permissions.id-token: write"
+        );
+        assert!(
+            yaml.contains("runs-on: ubuntu-24.04"),
+            "npm trusted publishing requires a GitHub-hosted runner; do not publish from the Spot VM"
+        );
+
+        let setup = yaml
+            .split("actions/setup-node@")
+            .nth(1)
+            .expect("setup-node step for npm publish")
+            .split("\n      - name:")
+            .next()
+            .expect("setup-node with: block");
+        assert!(
+            setup.contains("node-version: \"24\"") || setup.contains("node-version: '24'"),
+            "official trusted-publisher recipe pins Node 24 so bundled npm is >= 11.5.1; got:\n{setup}"
+        );
+        assert!(
+            setup.contains("package-manager-cache: false"),
+            "release publishes must disable setup-node package-manager cache; got:\n{setup}"
+        );
+        assert!(
+            setup.contains("registry-url: \"https://registry.npmjs.org\"")
+                || setup.contains("registry-url: 'https://registry.npmjs.org'"),
+            "setup-node must target registry.npmjs.org; got:\n{setup}"
+        );
+
+        let npm = yaml
+            .split("Publish npm package")
+            .nth(1)
+            .expect("Publish npm package step");
+        assert!(
+            npm.contains("npm publish --access public"),
+            "expected public npm publish of @getspur/spur-cli; got:\n{npm}"
+        );
+        let npm_env = npm
+            .split("env:")
+            .nth(1)
+            .expect("npm step env")
+            .split("run:")
+            .next()
+            .expect("env before run");
+        assert!(
+            !npm_env.contains("NODE_AUTH_TOKEN") && !npm_env.contains("NPM_TOKEN"),
+            "trusted publishing must not set NODE_AUTH_TOKEN; npm CLI uses OIDC. env:\n{npm_env}"
+        );
+        assert!(
+            !yaml.contains("secrets.NPM_TOKEN         —"),
+            "required-config comment must not list secrets.NPM_TOKEN as a publish credential"
+        );
+    }
+
     fn temp_test_dir(label: &str) -> PathBuf {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);

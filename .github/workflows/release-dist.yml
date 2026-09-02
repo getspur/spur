@@ -26,8 +26,10 @@
 #       provisioning (8-12 min, can brush the 15-min startup-wait ceiling).
 #   secrets.GH_RELEASES_TOKEN — only for publish=true; write access to
 #       getspur/spur-releases (same secret release.yml uses).
-#   secrets.NPM_TOKEN         — publish rights for @getspur/spur-cli (the
-#       wrapper package in npm/spur-cli, lineage continued from cargo-dist).
+#   npm trusted publisher     — @getspur/spur-cli publishes via OIDC from this
+#       workflow filename (release-dist.yml) on the GitHub-hosted runner after
+#       the GitHub release exists. Configure the publisher on npmjs.com
+#       (https://docs.npmjs.com/trusted-publishers); no long-lived NPM_TOKEN.
 #   S3 cloud-build bundle    — scripts/cloud-build is a git-tracked symlink
 #       into the sibling spur-notebook checkout, so the runner restores the
 #       scripts from s3://<sccache-bucket>/ci/cloud-build/bundle.tar.gz.
@@ -290,17 +292,19 @@ jobs:
       - uses: actions/setup-node@v6
         if: ${{ github.ref_type == 'tag' || inputs.publish }}
         with:
-          node-version: "22.x"
+          node-version: "24"
           registry-url: "https://registry.npmjs.org"
+          package-manager-cache: false
 
       - name: Publish npm package (@getspur/spur-cli)
         # The npm wrapper (npm/spur-cli) downloads this release's binaries at
         # postinstall, so it must publish AFTER the GitHub release exists.
         # Continues the package lineage the cargo-dist flow published through
         # 1.6.0 (npm install -g @getspur/spur-cli / npx @getspur/spur-cli).
+        # Auth is npm trusted publishing (OIDC): id-token: write + Node 24.
+        # Do not set NODE_AUTH_TOKEN / secrets.NPM_TOKEN on this step.
         if: ${{ github.ref_type == 'tag' || inputs.publish }}
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           INPUT_TAG: ${{ inputs.tag }}
         run: |
           tag="$INPUT_TAG"

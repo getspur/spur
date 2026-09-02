@@ -140,7 +140,8 @@ tag pushes were **cut over to `release-dist.yml`**:
   version's platform binary from `getspur/spur-releases`, verifies it
   against SHA256SUMS, and a node bin shim execs it (lazy-installs under
   `--ignore-scripts`). Published by the workflow after the GitHub release
-  exists; needs `secrets.NPM_TOKEN`.
+  exists via npm trusted publishing (OIDC) from `release-dist.yml`; no
+  `secrets.NPM_TOKEN`.
 - **Skills bundle shipped with dist (skills-init alignment).** Skills under
   `crates/spur-cli/assets/skills/` are embedded in the CLI binary and lazily
   materialized into a digest-keyed cache when no external tree exists.
