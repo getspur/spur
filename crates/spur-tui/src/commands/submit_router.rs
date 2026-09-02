@@ -285,7 +285,7 @@ pub fn route_with_caps(
                 }
                 Dispatch::SetSessionEffort => {
                     let value = rest_after_first_token(text).trim().to_string();
-                    if value.is_empty() {
+                    if value.is_empty() || !is_advertised_effort(caps, &value) {
                         SubmitDecision::Empty
                     } else {
                         SubmitDecision::SetSessionEffort { value }
@@ -329,6 +329,17 @@ pub fn route_with_caps(
     let blocks =
         assemble_blocks_with_prompt_caps(text, ranges, images, PromptBlockCaps::from_agent(caps));
     SubmitDecision::Send { blocks, interrupt }
+}
+
+fn is_advertised_effort(caps: Option<&SpurAgentCaps>, value: &str) -> bool {
+    caps.and_then(|caps| caps.grok_display.as_ref())
+        .and_then(|display| {
+            display
+                .model_id
+                .as_deref()
+                .map(|model_id| display.efforts_for_model(model_id))
+        })
+        .is_some_and(|efforts| efforts.iter().any(|effort| effort.id == value))
 }
 
 fn is_advertised_mode(caps: Option<&SpurAgentCaps>, value: &str) -> bool {
@@ -1278,7 +1289,7 @@ mod sessions_slash_tests {
     }
 
     #[test]
-    fn grok_effort_dispatch_routes_to_set_session_effort() {
+    fn grok_effort_without_caps_does_not_dispatch_natively() {
         use crate::commands::entry::{CommandEntry, CommandSource, Dispatch};
 
         let mut registry = CommandRegistry::new();
@@ -1297,10 +1308,7 @@ mod sessions_slash_tests {
         );
 
         let decision = route("/effort low", &[], &[], &registry, false);
-        assert!(matches!(
-            decision,
-            SubmitDecision::SetSessionEffort { value } if value == "low"
-        ));
+        assert!(matches!(decision, SubmitDecision::Empty));
     }
 
     #[test]
