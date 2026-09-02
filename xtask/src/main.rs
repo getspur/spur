@@ -2689,6 +2689,26 @@ tokio = { version = "1", features = ["full"] }
         );
     }
 
+    #[test]
+    fn npm_spur_cli_repository_matches_provenance_source_repo() {
+        // npm E422 on v1.22.0: Sigstore provenance is issued for getspur/spur
+        // (the Actions workflow repo). package.json repository.url must match.
+        let pkg = fs::read_to_string(workspace_root().join("npm/spur-cli/package.json"))
+            .expect("npm/spur-cli/package.json");
+        assert!(
+            pkg.contains("\"url\": \"git+https://github.com/getspur/spur.git\""),
+            "repository.url must be getspur/spur so npm provenance verifies; got:\n{pkg}"
+        );
+        assert!(
+            pkg.contains("\"homepage\": \"https://github.com/getspur/spur\""),
+            "homepage must match the provenance source repo; got:\n{pkg}"
+        );
+        assert!(
+            !pkg.contains("github.com/getspur/spur-releases.git"),
+            "repository.url must not point at the binary-hosting repo"
+        );
+    }
+
     fn temp_test_dir(label: &str) -> PathBuf {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);

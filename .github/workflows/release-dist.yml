@@ -285,9 +285,13 @@ jobs:
             ls -la dist/ >&2 || true
             exit 1
           fi
-          gh release create "$tag" --repo getspur/spur-releases \
-            --title "$tag" --notes "spur $tag (xtask dist: $PLATFORMS)" \
-            "${assets[@]}"
+          if gh release view "$tag" --repo getspur/spur-releases >/dev/null 2>&1; then
+            gh release upload "$tag" --repo getspur/spur-releases --clobber "${assets[@]}"
+          else
+            gh release create "$tag" --repo getspur/spur-releases \
+              --title "$tag" --notes "spur $tag (xtask dist: $PLATFORMS)" \
+              "${assets[@]}"
+          fi
 
       - uses: actions/setup-node@v6
         if: ${{ github.ref_type == 'tag' || inputs.publish }}

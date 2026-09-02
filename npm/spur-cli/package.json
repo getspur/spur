@@ -4,9 +4,9 @@
   "description": "Spur — terminal agent orchestrator. Installs the prebuilt spur binary and bundled skill assets from getspur/spur-releases.",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/getspur/spur-releases.git"
+    "url": "git+https://github.com/getspur/spur.git"
   },
-  "homepage": "https://github.com/getspur/spur-releases",
+  "homepage": "https://github.com/getspur/spur",
   "license": "GPL-3.0-only",
   "bin": {
     "spur": "run-spur.js"
