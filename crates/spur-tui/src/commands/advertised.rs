@@ -7,7 +7,8 @@ use std::ops::Deref;
 use spur_acp::adapter::arg_picker_hint::{ArgPickerChoice, ArgPickerHint, ArgPickerSpec};
 use spur_acp::adapter::config_options::{synthesize, synthesize_advertised, AdvertisedCommand};
 use spur_acp::capability_evidence::{
-    CapabilityChoice, CapabilityKind, DispatchRoute, EvidenceEpochId, ReducedCapability,
+    CapabilityChoice, CapabilityKind, DispatchRoute, EvidenceEpochId, EvidenceProvenance,
+    ReducedCapability,
 };
 use spur_acp::{SessionConfigOption, SpurAgentCaps};
 
@@ -239,7 +240,7 @@ fn reduced_commands(caps: &SpurAgentCaps) -> BTreeMap<String, ReducedCommand> {
             let pinned = PinnedCapabilityRoute {
                 evidence_epoch: capability.evidence_epoch,
                 route: if complete {
-                    capability.route
+                    effective_dispatch_route(caps, capability)
                 } else {
                     DispatchRoute::Hidden
                 },
@@ -259,6 +260,40 @@ fn reduced_commands(caps: &SpurAgentCaps) -> BTreeMap<String, ReducedCommand> {
         }
     }
     commands
+}
+
+fn effective_dispatch_route(caps: &SpurAgentCaps, capability: &ReducedCapability) -> DispatchRoute {
+    if capability.route != DispatchRoute::PromptOnly
+        || capability.key.kind != CapabilityKind::Effort
+        || capability.sources.provenances.as_slice() != [EvidenceProvenance::VendorAdvertisement]
+        || !caps.supports_grok_set_model()
+    {
+        return capability.route;
+    }
+
+    let Some(display) = caps.grok_display.as_ref() else {
+        return capability.route;
+    };
+    let Some(model_id) = display.model_id.as_deref() else {
+        return capability.route;
+    };
+    let advertised_efforts = display.efforts_for_model(model_id);
+    let has_matching_advertisement = !advertised_efforts.is_empty()
+        && capability.choices.iter().any(|choice| {
+            advertised_efforts
+                .iter()
+                .any(|effort| effort.id == choice.id)
+        });
+
+    if has_matching_advertisement {
+        // Grok's real, model-scoped effort catalog is also the contract used
+        // by its native `session/set_model` adapter. Permit the first native
+        // dispatch from that advertisement; any recorded native failure adds
+        // another provenance and therefore keeps subsequent routing prompt-only.
+        DispatchRoute::NativePreferred
+    } else {
+        capability.route
+    }
 }
 
 fn reduced_command_names(
