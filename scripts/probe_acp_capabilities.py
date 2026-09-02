@@ -106,6 +106,66 @@ def redact_json(value: Any) -> Any:
     return value
 
 
+class _ArtifactIdentifierTokenizer:
+    """Replace run-specific ACP identifiers while preserving their relationships."""
+
+    def __init__(self) -> None:
+        self._request_ids: dict[tuple[type[Any], JsonRpcId], str] = {}
+        self._session_ids: dict[tuple[type[Any], JsonRpcId], str] = {}
+
+    @staticmethod
+    def _key(value: Any) -> Optional[tuple[type[Any], JsonRpcId]]:
+        if isinstance(value, bool) or not isinstance(value, (str, int)):
+            return None
+        return (type(value), value)
+
+    def _token(
+        self,
+        value: Any,
+        *,
+        namespace: dict[tuple[type[Any], JsonRpcId], str],
+        prefix: str,
+    ) -> Any:
+        key = self._key(value)
+        if key is None:
+            return value
+        token = namespace.get(key)
+        if token is None:
+            token = f"<{prefix}-{len(namespace) + 1}>"
+            namespace[key] = token
+        return token
+
+    def tokenize(self, value: Any) -> Any:
+        """Return a deterministic copy with request and session namespaces tokenized."""
+        if isinstance(value, list):
+            return [self.tokenize(item) for item in value]
+        if isinstance(value, tuple):
+            return [self.tokenize(item) for item in value]
+        if not isinstance(value, dict):
+            return value
+
+        is_json_rpc = value.get("jsonrpc") == "2.0"
+        tokenized: JsonObject = {}
+        for key in sorted(value, key=str):
+            item = value[key]
+            normalized_key = str(key)
+            if normalized_key in ("sessionId", "session_id"):
+                tokenized[normalized_key] = self._token(
+                    item,
+                    namespace=self._session_ids,
+                    prefix="session",
+                )
+            elif normalized_key == "id" and is_json_rpc:
+                tokenized[normalized_key] = self._token(
+                    item,
+                    namespace=self._request_ids,
+                    prefix="uuid",
+                )
+            else:
+                tokenized[normalized_key] = self.tokenize(item)
+        return tokenized
+
+
 def _redact_argv(argv: list[str]) -> list[str]:
     redacted: list[str] = []
     redact_next = False
@@ -870,13 +930,14 @@ def _raw_evidence(
     operational_outcomes: list[JsonObject] = []
     payloads_by_digest: dict[str, Any] = {}
     entries: list[tuple[str, Any, str]] = []
+    identifier_tokenizer = _ArtifactIdentifierTokenizer()
 
     for frame in protocol_frames:
         direction = frame.get("direction")
         message = frame.get("message")
         if direction not in ("send", "recv") or not isinstance(message, dict):
             continue
-        sanitized = redact_json(message)
+        sanitized = identifier_tokenizer.tokenize(redact_json(message))
         digest = _json_digest(sanitized)
         frames.append(
             {
@@ -959,7 +1020,7 @@ def _raw_evidence(
             return
         if source != "hard_failure" and not _inconclusive_result(source, payload):
             return
-        sanitized = redact_json(payload)
+        sanitized = identifier_tokenizer.tokenize(redact_json(payload))
         digest = _json_digest(sanitized)
         operational_outcomes.append(
             {"source": source, "digest": digest, "payload": sanitized}

@@ -935,6 +935,11 @@ class EvidenceContractTests(unittest.TestCase):
             self.build_contract_report(protocol_frames=protocol_frames)
         )["fixture"]
         raw = fixture["raw"]
+        expected_frames = probe.json.loads(probe.json.dumps(protocol_frames))
+        expected_frames[0]["message"]["id"] = "<uuid-1>"
+        expected_frames[1]["message"]["id"] = "<uuid-1>"
+        expected_frames[3]["message"]["id"] = "<uuid-2>"
+        expected_frames[4]["message"]["id"] = "<uuid-2>"
 
         self.assertNotIn("observations", raw)
         self.assertEqual(
@@ -944,7 +949,7 @@ class EvidenceContractTests(unittest.TestCase):
             ],
             [
                 (frame["sequence"], frame["direction"], frame["message"])
-                for frame in protocol_frames
+                for frame in expected_frames
             ],
         )
         for frame in raw["frames"]:
@@ -1170,13 +1175,21 @@ class EvidenceContractTests(unittest.TestCase):
         self.assertEqual(
             [choice["id"] for choice in semantic[0]["choices"]], ["grok-4.5"]
         )
+        raw_frames = self.artifact(report)["raw"]["frames"]
+        request_id = next(
+            frame["message"]["id"]
+            for frame in raw_frames
+            if frame["direction"] == "send"
+            and frame["message"].get("method") == "session/set_model"
+        )
         response_digest = next(
             frame["digest"]
-            for frame in self.artifact(report)["raw"]["frames"]
-            if frame["direction"] == "recv" and frame["message"].get("id") == "set-0"
+            for frame in raw_frames
+            if frame["direction"] == "recv"
+            and frame["message"].get("id") == request_id
         )
         self.assertEqual(semantic[0]["raw_digest"], response_digest)
-        self.assertEqual(semantic[0]["session_scope"], "session-1")
+        self.assertEqual(semantic[0]["session_scope"], "<session-1>")
 
     def test_successful_paired_set_mode_binds_semantic_mode_choice(self) -> None:
         report = self.build_contract_report(
@@ -1479,7 +1492,7 @@ class EvidenceContractTests(unittest.TestCase):
             "session_new_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa2",
             "set_model_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa3",
             "permission_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa4",
-            "requested_session_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa5",
+            "requested_session_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa2",
             "active_session_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa6",
         }
         second_ids = {
@@ -1487,7 +1500,7 @@ class EvidenceContractTests(unittest.TestCase):
             "session_new_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb2",
             "set_model_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb3",
             "permission_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb4",
-            "requested_session_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb5",
+            "requested_session_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb2",
             "active_session_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb6",
         }
 
