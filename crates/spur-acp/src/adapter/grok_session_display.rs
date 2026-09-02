@@ -10,7 +10,6 @@ use serde_json::{Map, Value};
 use crate::types::AgentKind;
 
 const SESSION_CONFIG_KEY: &str = "x.ai/sessionConfig";
-const KNOWN_EFFORT_IDS: [&str; 3] = ["high", "medium", "low"];
 
 /// One Grok reasoning-effort choice supported by a specific model.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -87,10 +86,7 @@ impl GrokSessionDisplay {
             .or_else(|| Some(model_id.clone()));
         self.model_id = Some(model_id.clone());
 
-        let effort = update
-            .get("reasoning_effort")
-            .and_then(non_empty_string)
-            .filter(|effort| is_known_effort_id(effort));
+        let effort = update.get("reasoning_effort").and_then(non_empty_string);
         self.effort_label = effort.as_ref().map(|effort| {
             self.efforts_for_model(&model_id)
                 .iter()
@@ -105,8 +101,9 @@ impl GrokSessionDisplay {
 /// Extract read-only model and reasoning-effort labels from Grok ACP meta.
 ///
 /// Session configuration metadata takes precedence over initialize-time model
-/// state. Unknown `mode` options are deliberately ignored because Grok also
-/// uses that category for concepts unrelated to reasoning effort.
+/// state. A selected `mode` is treated as effort only when Grok's model state
+/// structurally advertises reasoning-effort support; effort ids themselves are
+/// never constrained by a Spur-owned allowlist.
 #[must_use]
 pub fn extract_grok_session_display(
     agent_kind: AgentKind,
@@ -117,17 +114,20 @@ pub fn extract_grok_session_display(
         return None;
     }
 
-    let session_model = selected_session_option(session_meta, "model");
-    let session_effort = selected_session_option(session_meta, "mode").filter(is_known_effort);
     let model_state = initialize_meta
         .and_then(|meta| meta.get("modelState"))
         .and_then(Value::as_object);
+    let session_model = selected_session_option(session_meta, "model");
+    let session_effort = model_state
+        .is_some_and(model_state_advertises_reasoning_effort)
+        .then(|| selected_session_option(session_meta, "mode"))
+        .flatten();
     let state_model = model_state.and_then(selected_model_from_state);
     let state_effort = model_state.and_then(selected_effort_from_state);
 
     let model = session_model.or(state_model);
     let effort = session_effort.or(state_effort);
-    let models = extract_model_catalog(model_state, session_meta, model.as_ref());
+    let models = extract_model_catalog(model_state, session_meta);
     let display = GrokSessionDisplay {
         model_label: model.as_ref().and_then(DisplayValue::preferred_label),
         effort_label: effort.as_ref().and_then(DisplayValue::preferred_label),
@@ -196,7 +196,6 @@ fn session_options(session_meta: Option<&Meta>, category: &str) -> Vec<DisplayVa
 fn extract_model_catalog(
     model_state: Option<&Map<String, Value>>,
     session_meta: Option<&Meta>,
-    selected_model: Option<&DisplayValue>,
 ) -> Vec<GrokModelChoice> {
     let state_models = model_state
         .and_then(|state| state.get("availableModels"))
@@ -248,21 +247,6 @@ fn extract_model_catalog(
         }
     }
 
-    if state_models.is_none() {
-        if let Some(selected_model_id) = selected_model.and_then(|model| model.id.as_deref()) {
-            let session_efforts = session_options(session_meta, "mode")
-                .into_iter()
-                .filter_map(effort_choice)
-                .collect::<Vec<_>>();
-            if let Some(model) = models
-                .iter_mut()
-                .find(|model| model.id == selected_model_id)
-            {
-                model.efforts = session_efforts;
-            }
-        }
-    }
-
     models
 }
 
@@ -281,9 +265,30 @@ fn efforts_from_model(model: &Map<String, Value>) -> Vec<GrokEffortChoice> {
 }
 
 fn effort_choice(value: DisplayValue) -> Option<GrokEffortChoice> {
-    let id = value.id.filter(|id| is_known_effort_id(id))?;
+    let id = value.id?;
     let label = value.label.unwrap_or_else(|| id.clone());
     Some(GrokEffortChoice { id, label })
+}
+
+fn model_state_advertises_reasoning_effort(model_state: &Map<String, Value>) -> bool {
+    model_state
+        .get("availableModels")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_object)
+        .filter_map(|model| model.get("_meta").and_then(Value::as_object))
+        .any(|meta| {
+            meta.get("supportsReasoningEffort").and_then(Value::as_bool) == Some(true)
+                || meta
+                    .get("reasoningEffort")
+                    .and_then(Value::as_str)
+                    .is_some_and(|value| !value.trim().is_empty())
+                || meta
+                    .get("reasoningEfforts")
+                    .and_then(Value::as_array)
+                    .is_some_and(|values| !values.is_empty())
+        })
 }
 
 fn selected_model_from_state(model_state: &Map<String, Value>) -> Option<DisplayValue> {
@@ -338,16 +343,6 @@ fn current_model<'a>(
         .iter()
         .filter_map(Value::as_object)
         .find(|model| model.get("modelId").and_then(Value::as_str) == Some(current_model_id))
-}
-
-fn is_known_effort(value: &DisplayValue) -> bool {
-    value.id.as_deref().is_some_and(is_known_effort_id)
-}
-
-fn is_known_effort_id(id: &str) -> bool {
-    KNOWN_EFFORT_IDS
-        .iter()
-        .any(|known| id.eq_ignore_ascii_case(known))
 }
 
 fn non_empty_string(value: &Value) -> Option<String> {

@@ -2578,7 +2578,7 @@ mod tests {
     }
 
     #[test]
-    fn grok_empty_config_options_use_frozen_meta_display_labels() {
+    fn grok_mode_without_reasoning_advertisement_is_not_effort() {
         let mut init = empty_init_response();
         init.meta = serde_json::from_value(serde_json::json!({
             "modelState": {
@@ -2609,7 +2609,7 @@ mod tests {
             caps.current_model_label().as_deref(),
             Some("Grok Composer 2.5 Fast")
         );
-        assert_eq!(caps.current_effort_label().as_deref(), Some("High Effort"));
+        assert_eq!(caps.current_effort_label(), None);
         assert!(caps.grok_display.is_some());
         assert!(!caps.supports_set_model());
         assert!(!caps.supports_set_config_option());
@@ -2662,7 +2662,7 @@ mod tests {
     }
 
     #[test]
-    fn loaded_grok_session_freezes_display_from_meta() {
+    fn loaded_grok_session_does_not_infer_effort_from_mode_alone() {
         let init = empty_init_response();
         let mut loaded = agent_client_protocol::schema::v1::LoadSessionResponse::new();
         loaded.meta = serde_json::from_value(serde_json::json!({
@@ -2688,10 +2688,7 @@ mod tests {
         let caps = SpurAgentCaps::from_loaded(&init, &loaded, AgentKind::Grok);
 
         assert_eq!(caps.current_model_label().as_deref(), Some("Grok 4.5"));
-        assert_eq!(
-            caps.current_effort_label().as_deref(),
-            Some("Medium Effort")
-        );
+        assert_eq!(caps.current_effort_label(), None);
     }
 
     #[test]

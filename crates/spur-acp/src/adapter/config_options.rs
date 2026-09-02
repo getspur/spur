@@ -611,7 +611,7 @@ mod tests {
     }
 
     #[test]
-    fn synthesize_advertised_ignores_grok_read_only_meta_display() {
+    fn synthesize_advertised_does_not_infer_effort_from_grok_mode_alone() {
         let init = InitializeResponse::new(ProtocolVersion::LATEST);
         let mut new = NewSessionResponse::new(SessionId::new("grok-read-only-display"));
         new.meta = serde_json::from_value(serde_json::json!({
@@ -636,7 +636,7 @@ mod tests {
         let caps = SpurAgentCaps::new(&init, &new, AgentKind::Grok);
 
         assert_eq!(caps.current_model_label().as_deref(), Some("Grok 4.5"));
-        assert_eq!(caps.current_effort_label().as_deref(), Some("High Effort"));
+        assert_eq!(caps.current_effort_label(), None);
         assert!(synthesize_advertised(&caps).is_empty());
     }
 
