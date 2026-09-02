@@ -1388,6 +1388,140 @@ class EvidenceContractTests(unittest.TestCase):
             self.artifact(second)["fixture"],
         )
 
+    def test_fixture_tokenizes_protocol_and_session_ids_deterministically(
+        self,
+    ) -> None:
+        def capture(
+            *,
+            initialize_id: str,
+            session_new_id: str,
+            set_model_id: str,
+            permission_id: str,
+            requested_session_id: str,
+            active_session_id: str,
+        ) -> list[dict]:
+            return [
+                {
+                    "direction": "send",
+                    "message": {
+                        "jsonrpc": "2.0",
+                        "id": initialize_id,
+                        "method": "initialize",
+                        "params": {"protocolVersion": 1},
+                    },
+                },
+                {
+                    "direction": "recv",
+                    "message": {
+                        "jsonrpc": "2.0",
+                        "id": initialize_id,
+                        "result": {"protocolVersion": 1},
+                    },
+                },
+                {
+                    "direction": "send",
+                    "message": {
+                        "jsonrpc": "2.0",
+                        "id": session_new_id,
+                        "method": "session/new",
+                        "params": {"sessionId": requested_session_id},
+                    },
+                },
+                {
+                    "direction": "recv",
+                    "message": {
+                        "jsonrpc": "2.0",
+                        "id": session_new_id,
+                        "result": {"sessionId": active_session_id},
+                    },
+                },
+                {
+                    "direction": "send",
+                    "message": {
+                        "jsonrpc": "2.0",
+                        "id": set_model_id,
+                        "method": "session/set_model",
+                        "params": {
+                            "sessionId": active_session_id,
+                            "modelId": "codex-model",
+                        },
+                    },
+                },
+                {
+                    "direction": "recv",
+                    "message": {
+                        "jsonrpc": "2.0",
+                        "id": set_model_id,
+                        "result": {},
+                    },
+                },
+                {
+                    "direction": "recv",
+                    "message": {
+                        "jsonrpc": "2.0",
+                        "id": permission_id,
+                        "method": "session/request_permission",
+                        "params": {"session_id": active_session_id},
+                    },
+                },
+                {
+                    "direction": "send",
+                    "message": {
+                        "jsonrpc": "2.0",
+                        "id": permission_id,
+                        "result": {"outcome": {"outcome": "selected"}},
+                    },
+                },
+            ]
+
+        first_ids = {
+            "initialize_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1",
+            "session_new_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa2",
+            "set_model_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa3",
+            "permission_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa4",
+            "requested_session_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa5",
+            "active_session_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa6",
+        }
+        second_ids = {
+            "initialize_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb1",
+            "session_new_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb2",
+            "set_model_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb3",
+            "permission_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb4",
+            "requested_session_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb5",
+            "active_session_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb6",
+        }
+
+        first = self.artifact(
+            self.build_contract_report(protocol_frames=capture(**first_ids))
+        )["fixture"]
+        second = self.artifact(
+            self.build_contract_report(protocol_frames=capture(**second_ids))
+        )["fixture"]
+
+        self.assertEqual(first, second)
+        encoded = probe.json.dumps(first, sort_keys=True)
+        for raw_id in (*first_ids.values(), *second_ids.values()):
+            self.assertNotIn(raw_id, encoded)
+
+        messages = [frame["message"] for frame in first["raw"]["frames"]]
+        self.assertEqual(messages[0]["id"], messages[1]["id"])
+        self.assertEqual(messages[2]["id"], messages[3]["id"])
+        self.assertEqual(messages[4]["id"], messages[5]["id"])
+        self.assertEqual(messages[6]["id"], messages[7]["id"])
+        self.assertEqual(messages[2]["params"]["sessionId"], "<session-1>")
+        self.assertEqual(messages[3]["result"]["sessionId"], "<session-2>")
+        self.assertEqual(messages[4]["params"]["sessionId"], "<session-2>")
+        self.assertEqual(messages[6]["params"]["session_id"], "<session-2>")
+        self.assertNotEqual(messages[0]["id"], messages[2]["params"]["sessionId"])
+
+        raw = first["raw"]
+        for frame in raw["frames"]:
+            self.assertEqual(
+                raw["payloads_by_digest"][frame["digest"]], frame["message"]
+            )
+        for claim in first["claims"]:
+            self.assertIn(claim["raw_digest"], raw["payloads_by_digest"])
+
 
 if __name__ == "__main__":
     unittest.main()
