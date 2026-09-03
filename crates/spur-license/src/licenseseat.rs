@@ -134,6 +134,10 @@ impl LicenseSeatProvider {
     pub fn new(api_key: String, product_slug: String) -> Self {
         let mut config = Config::new(api_key, product_slug);
         config.telemetry_enabled = false;
+        // 0 disables LicenseSeat SDK auto-heartbeat. Must pair with
+        // requires_heartbeat() == false so spawn_license_runtime does
+        // not busy-loop on a zero-duration sleep (sol_b3668432ffb24645).
+        config.heartbeat_interval = std::time::Duration::ZERO;
         config.app_version = Some(env!("CARGO_PKG_VERSION").into());
 
         let refresh_policy = RefreshPolicy {
@@ -266,11 +270,9 @@ impl LicenseProvider for LicenseSeatProvider {
     }
 
     fn requires_heartbeat(&self) -> bool {
-        // Upstream licenseseat 0.5.3 has no per-mode heartbeat policy;
-        // the SPUR-layer coarse gate (state.is_active() &&
-        // binding_mode != Unknown) drives suppression. See
-        // docs/rca/2026-04-19-licenseseat-emission-audit.md Gate 2.
-        true
+        // Declined: user policy excludes LicenseSeat heartbeat. SDK
+        // interval is also zeroed in `new` so auto-heartbeat stays off.
+        false
     }
 
     fn has_entitlement(&self, feature: &str) -> bool {
@@ -764,5 +766,29 @@ mod cross_method_race {
         }
 
         assert_eq!(*order.lock().unwrap(), vec![0, 1, 2]);
+    }
+}
+
+#[cfg(test)]
+mod heartbeat_policy {
+    use super::*;
+    use std::time::Duration;
+
+    /// Witness for sol_b3668432ffb24645: no_heartbeat_policy excludes
+    /// both runtime heartbeat and SDK auto-heartbeat; zero_interval is
+    /// selected only because requires_heartbeat is false (sol_562c8c8e9fd745f4
+    /// forbids the busy-loop pairing).
+    #[test]
+    fn licenseseat_provider_excludes_heartbeat() {
+        let provider = LicenseSeatProvider::new("test-key".to_owned(), "test-product".to_owned());
+        assert!(
+            !provider.requires_heartbeat(),
+            "LicenseSeatProvider must decline runtime heartbeat"
+        );
+        assert_eq!(
+            provider.refresh_policy().heartbeat_interval,
+            Duration::ZERO,
+            "heartbeat_interval must be zero so SDK auto-heartbeat is off"
+        );
     }
 }
