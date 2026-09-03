@@ -1,6 +1,6 @@
 use std::time::Instant;
 
-use spur_acp::SessionId;
+use spur_acp::{AgentKind, SessionId};
 
 use crate::action::Action;
 use crate::components::input_bar::{ActivityKind, EditMode, InputBar};
@@ -40,9 +40,22 @@ impl SessionDetailView {
         worker_snapshot: Vec<crate::mentions::WorkerMentionDescriptor>,
         issue_snapshot: Vec<spur_pm::IssueSummary>,
     ) -> Self {
-        let command_registry =
+        let mut command_registry =
             crate::commands::CommandRegistry::from_configs(std::slice::from_ref(&*agent_cfg));
         let agent_kind = agent_cfg.kind;
+        let resolved_cwd = spur_graph::resolve_worktree_root_from(cwd);
+        if agent_kind == AgentKind::Kiro {
+            let handle = agent_cfg.effective_handle();
+            let skill_entries = crate::commands::kiro_skills::maybe_merge_kiro_skills(
+                agent_kind,
+                &handle,
+                &agent_cfg.commands,
+                &resolved_cwd,
+                crate::commands::kiro_skills::default_global_skills_root().as_deref(),
+                Vec::new(),
+            );
+            command_registry.set_agent_commands(&handle, skill_entries);
+        }
         let known_worker_names: std::collections::HashSet<String> =
             worker_snapshot.iter().map(|d| d.name.clone()).collect();
         let mut mention_registry = if role == "brain" {
@@ -76,7 +89,7 @@ impl SessionDetailView {
             auth_error: None,
             completion: crate::components::input_completion::InputCompletionPort::new(),
             mention_registry: std::rc::Rc::new(std::cell::RefCell::new(mention_registry)),
-            cwd: spur_graph::resolve_worktree_root_from(cwd),
+            cwd: resolved_cwd,
             #[cfg(feature = "markdown")]
             mermaid_registry: std::collections::HashMap::new(),
             #[cfg(feature = "markdown")]
@@ -611,10 +624,18 @@ impl SessionDetailView {
     /// stores them in the registry.
     pub fn apply_available_commands(&mut self, commands: &[spur_acp::AvailableCommand]) {
         let handle = self.agent_handle_for_commands();
-        let entries: Vec<_> = commands
+        let advertised: Vec<_> = commands
             .iter()
             .map(|c| crate::agents::build_entry(&handle, &self.agent_cfg.commands, c))
             .collect();
+        let entries = crate::commands::kiro_skills::maybe_merge_kiro_skills(
+            self.agent_cfg.kind,
+            &handle,
+            &self.agent_cfg.commands,
+            &self.cwd,
+            crate::commands::kiro_skills::default_global_skills_root().as_deref(),
+            advertised,
+        );
         self.command_registry.set_agent_commands(&handle, entries);
     }
 

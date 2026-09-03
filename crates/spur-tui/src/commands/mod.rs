@@ -1,6 +1,7 @@
 pub mod advertised;
 pub mod entry;
 pub mod fuzzy;
+pub mod kiro_skills;
 pub mod registry;
 pub mod spur_local;
 pub mod submit_router;

@@ -1000,6 +1000,45 @@ mod static_command_seeding_tests {
             "static /compact should be visible at startup, got {names:?}"
         );
     }
+
+    #[test]
+    fn kiro_constructor_synthesizes_workspace_skill_slash_command() {
+        use spur_acp::AgentKind;
+        let tmp = tempfile::TempDir::new().expect("tmp");
+        let skill_dir = tmp.path().join(".kiro/skills/probe-kiwi-skill");
+        std::fs::create_dir_all(&skill_dir).expect("skill dir");
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: probe-kiwi-skill\ndescription: \"Probe-only skill.\"\n---\n# Hi\n",
+        )
+        .expect("skill md");
+
+        let mut cfg = AgentConfig::with_defaults("kiro");
+        cfg.kind = AgentKind::Kiro;
+        cfg.display.handle = Some("kiro".into());
+        cfg.commands = CommandsConfig {
+            dispatch: DispatchKind::PromptText,
+            ..Default::default()
+        };
+        let view = SessionDetailView::new(
+            SessionId("kiro-skill".into()),
+            "kiro".into(),
+            "brain".into(),
+            tmp.path().to_path_buf(),
+            Arc::new(cfg),
+            Vec::new(),
+        );
+        let names: Vec<_> = view
+            .command_registry
+            .list()
+            .iter()
+            .map(|e| e.name.clone())
+            .collect();
+        assert!(
+            names.contains(&"probe-kiwi-skill".to_string()),
+            "Kiro should surface workspace skill as slash command, got {names:?}"
+        );
+    }
 }
 
 #[cfg(test)]
