@@ -314,7 +314,7 @@ fn json_root_object(root: Node<'_>) -> Option<Node<'_>> {
         return Some(root);
     }
     (0..root.named_child_count()).find_map(|index| {
-        let child = root.named_child(index)?;
+        let child = root.named_child(index as u32)?;
         (child.kind() == "object").then_some(child)
     })
 }
@@ -348,7 +348,7 @@ fn yaml_unwrap_mapping(node: Node<'_>) -> Option<Node<'_>> {
     match node.kind() {
         "block_mapping" | "flow_mapping" => Some(node),
         "stream" | "document" | "block_node" | "flow_node" => (0..node.named_child_count())
-            .find_map(|index| node.named_child(index).and_then(yaml_unwrap_mapping)),
+            .find_map(|index| node.named_child(index as u32).and_then(yaml_unwrap_mapping)),
         _ => None,
     }
 }
@@ -409,7 +409,7 @@ fn yaml_scalar_string(node: Node<'_>, source: &str) -> Option<String> {
 fn yaml_scalar_leaf(node: Node<'_>) -> Option<Node<'_>> {
     match node.kind() {
         "flow_node" | "block_node" | "plain_scalar" => (0..node.named_child_count())
-            .find_map(|index| node.named_child(index).and_then(yaml_scalar_leaf))
+            .find_map(|index| node.named_child(index as u32).and_then(yaml_scalar_leaf))
             .or(Some(node)),
         _ => Some(node),
     }

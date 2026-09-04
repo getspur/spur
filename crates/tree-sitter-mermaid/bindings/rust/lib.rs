@@ -1,4 +1,4 @@
-//! Tree-sitter grammar for Mermaid, compiled against workspace `tree-sitter` 0.25.
+//! Tree-sitter grammar for Mermaid, compiled against workspace `tree-sitter` 0.26.
 //!
 //! C parser sources are vendored from [monaqa/tree-sitter-mermaid](https://github.com/monaqa/tree-sitter-mermaid)
 //! (MIT). This crate does not use crates.io `tree-sitter-mermaid` 0.1.0 (rust 1.95 / tree-sitter 0.26).

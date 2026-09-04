@@ -1598,7 +1598,7 @@ fn collect_typed_bindings(
     }
 
     for index in 0..node.named_child_count() {
-        if let Some(child) = node.named_child(index) {
+        if let Some(child) = node.named_child(index as u32) {
             collect_typed_bindings(root, child, source, bindings);
         }
     }
@@ -1711,7 +1711,7 @@ fn collect_dyn_trait_bindings(
     }
 
     for index in 0..node.named_child_count() {
-        if let Some(child) = node.named_child(index) {
+        if let Some(child) = node.named_child(index as u32) {
             collect_dyn_trait_bindings(root, child, source, bindings);
         }
     }
@@ -1757,7 +1757,7 @@ fn trait_name_from_dynamic_type(dynamic: Node<'_>, source: &str) -> Option<Strin
 
 fn direct_named_child_by_kind<'tree>(node: Node<'tree>, kind: &str) -> Option<Node<'tree>> {
     (0..node.named_child_count())
-        .filter_map(|index| node.named_child(index))
+        .filter_map(|index| node.named_child(index as u32))
         .find(|child| child.kind() == kind)
 }
 
@@ -1785,7 +1785,7 @@ fn collect_nodes_by_kind<'tree>(node: Node<'tree>, kind: &str, nodes: &mut Vec<N
         nodes.push(node);
     }
     for index in 0..node.named_child_count() {
-        if let Some(child) = node.named_child(index) {
+        if let Some(child) = node.named_child(index as u32) {
             collect_nodes_by_kind(child, kind, nodes);
         }
     }
@@ -1867,7 +1867,7 @@ fn python_protocol_like_class(node: Node<'_>, source: &str) -> bool {
     // worktrees. Recognizing the local class declaration lets subclasses target
     // the local Protocol/ABC-like class as an Interface after resolution.
     (0..superclasses.named_child_count())
-        .filter_map(|index| superclasses.named_child(index))
+        .filter_map(|index| superclasses.named_child(index as u32))
         .any(|base| {
             matches!(
                 child_text(base, source).trim(),
@@ -2024,7 +2024,7 @@ fn hcl_provider_address(
 fn hcl_provider_alias(block: Node<'_>, source: &str) -> Option<String> {
     let body = direct_named_child_by_kind(block, "body")?;
     for index in 0..body.named_child_count() {
-        let Some(attribute) = body.named_child(index) else {
+        let Some(attribute) = body.named_child(index as u32) else {
             continue;
         };
         if attribute.kind() != "attribute" {
@@ -2130,7 +2130,7 @@ fn go_method_receiver_scope(node: Node<'_>, source: &str) -> Option<String> {
 
 fn go_receiver_type_scope(mut node: Node<'_>, source: &str) -> String {
     while node.kind() == "pointer_type" {
-        let Some(child) = node.named_child(0) else {
+        let Some(child) = node.named_child(0u32) else {
             break;
         };
         node = child;
@@ -3125,7 +3125,7 @@ fn string_lit_text(node: Node<'_>, source: &str) -> Option<String> {
     }
     let mut literal = None;
     for index in 0..node.named_child_count() {
-        let child = node.named_child(index)?;
+        let child = node.named_child(index as u32)?;
         match child.kind() {
             "template_literal" if literal.is_none() => literal = Some(child),
             "quoted_template_start" | "quoted_template_end" => {}
