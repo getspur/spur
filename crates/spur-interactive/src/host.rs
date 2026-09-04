@@ -2,6 +2,8 @@ use anyhow::{bail, Result};
 use spur_core::InteractiveInput;
 use tokio::sync::mpsc;
 
+const INTERACTIVE_SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// Read-only PM queries dispatched on a separate channel from `InteractiveInput` so they cannot
 /// queue behind brain-stream traffic. See plan PR1 / docs.
 #[derive(Debug, Clone)]
@@ -208,33 +210,23 @@ impl InteractiveFrontendHost {
     }
 
     pub async fn shutdown(mut self) -> anyhow::Result<()> {
-        // Signal cancellation BEFORE silencing TUI-side reply channels. If
-        // permission_rx is dropped while the agent is mid-tool-call awaiting a
-        // permission decision, the round-trip becomes unanswerable and the
-        // orchestrator's connection.prompt().await never returns.
+        // Fence new work before dropping every frontend-side channel. A
+        // confirmed process exit intentionally does not preserve an in-flight
+        // permission or agent round-trip.
         self.shutdown_token.cancel();
         drop(self.handle);
+        drop(self.event_rx.take());
+        drop(self.permission_rx.take());
+        drop(self.data_rx.take());
+        drop(self.data_loop_handle.take());
         let mut handle = self.orch_handle;
 
-        // Bounded grace window with TUI reply channels still open so the
-        // orchestrator can flush a final permission / agent round-trip.
-        if tokio::time::timeout(std::time::Duration::from_secs(2), &mut handle)
-            .await
-            .is_ok()
-        {
-            return Ok(());
-        }
-
-        self.event_rx.take();
-        self.permission_rx.take();
-        self.data_rx.take();
-        self.data_loop_handle.take();
-
-        match tokio::time::timeout(std::time::Duration::from_secs(30), &mut handle).await {
+        match tokio::time::timeout(INTERACTIVE_SHUTDOWN_TIMEOUT, &mut handle).await {
             Ok(_) => Ok(()),
             Err(_) => {
                 handle.abort();
-                anyhow::bail!("interactive host shutdown timed out after 30s")
+                let _ = handle.await;
+                anyhow::bail!("interactive host shutdown timed out after 2s")
             }
         }
     }

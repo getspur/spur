@@ -2303,26 +2303,18 @@ impl Orchestrator {
         }
 
         // ── Cleanup ─────────────────────────────────────────────────────
-        if brain.is_some() {
-            self.shutdown_active_brain(
-                &mut brain,
-                &mut agent_connection,
-                &mut scheduler,
-                &overflow_continuations,
-            )
-            .await;
-        }
-        // Drop any pre-connected but unused connection.
-        if let Some(ActiveConnection {
-            transport: mut conn,
-            ..
-        }) = agent_connection.take()
-        {
-            let _ = conn.shutdown().await;
-        }
-        if let Some(runtime) = project_loop_runtime.as_mut() {
-            runtime.shutdown().await;
-        }
+        let brain_shutdown = self.shutdown_active_brain(
+            &mut brain,
+            &mut agent_connection,
+            &mut scheduler,
+            &overflow_continuations,
+        );
+        let project_runtime_shutdown = async {
+            if let Some(runtime) = project_loop_runtime.as_mut() {
+                runtime.shutdown_immediately().await;
+            }
+        };
+        tokio::join!(brain_shutdown, project_runtime_shutdown);
 
         info!("Interactive session ended");
         Ok(())

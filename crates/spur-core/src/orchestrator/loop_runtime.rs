@@ -125,6 +125,9 @@ impl ProjectLoopRuntimeSupervisor {
         self.state_rx.clone()
     }
 
+    /// Graceful supervisor retirement retained for leadership handoff tests
+    /// and non-process-exit callers.
+    #[allow(dead_code)]
     pub(crate) async fn shutdown(&mut self) {
         self.cancel.cancel();
         if let Some(handle) = self.handle.take() {
