@@ -51,6 +51,19 @@ where
     }
 }
 
+/// Await connection/session bootstrap with the process-exit fence selected
+/// first. Dropping the startup future on cancellation synchronously unwinds
+/// its transport and MCP abort-on-drop ownership before this returns.
+async fn await_brain_startup_or_shutdown<F>(
+    shutdown: &tokio_util::sync::CancellationToken,
+    startup: F,
+) -> Option<F::Output>
+where
+    F: std::future::Future,
+{
+    await_interactive_operation(shutdown, startup).await
+}
+
 fn take_rendered_batch(
     drained_batch: &mut Option<crate::scheduler::DrainedBatch>,
     render_outcome: &mut Option<crate::continuation_bridge::RenderOutcome>,
@@ -339,6 +352,7 @@ impl Orchestrator {
         permission_tx: &Option<
             tokio::sync::mpsc::UnboundedSender<spur_acp::types::PermissionRequest>,
         >,
+        shutdown_token: &tokio_util::sync::CancellationToken,
     ) {
         let Some(target) = name else {
             self.emit_brain_picker_open(active_brain_name);
@@ -378,10 +392,15 @@ impl Orchestrator {
         // Atomic name: commit `active_brain_name` only after spawn succeeds so
         // failed switch leaves identity aligned with the last live brain type
         // (still no live session until the next spawn/message).
-        match self
-            .spawn_brain_session(Some(target.as_str()), permission_tx.clone())
-            .await
-        {
+        let Some(spawn_result) = await_brain_startup_or_shutdown(
+            shutdown_token,
+            self.spawn_brain_session(Some(target.as_str()), permission_tx.clone()),
+        )
+        .await
+        else {
+            return;
+        };
+        match spawn_result {
             Ok(b) => {
                 *active_brain_name = target.clone();
                 let new_sid = Some(b.spur_session_id.clone().into());
@@ -519,6 +538,7 @@ impl Orchestrator {
                     &mut scheduler,
                     &overflow_continuations,
                     &permission_tx,
+                    &shutdown_token,
                 )
                 .await;
             }
@@ -590,10 +610,18 @@ impl Orchestrator {
                             brain: target_brain.clone(),
                         }));
 
-                        match self
-                            .connect_brain(Some(active_brain_name.as_str()), permission_tx.clone())
-                            .await
-                        {
+                        let Some(connect_result) = await_brain_startup_or_shutdown(
+                            &shutdown_token,
+                            self.connect_brain(
+                                Some(active_brain_name.as_str()),
+                                permission_tx.clone(),
+                            ),
+                        )
+                        .await
+                        else {
+                            break 'interactive;
+                        };
+                        match connect_result {
                             Ok((conn, brain_name, init_response)) => {
                                 agent_connection = Some(ActiveConnection {
                                     transport: conn,
@@ -666,6 +694,7 @@ impl Orchestrator {
                             &mut scheduler,
                             &overflow_continuations,
                             &permission_tx,
+                            &shutdown_token,
                         )
                         .await;
                         continue;
@@ -687,31 +716,38 @@ impl Orchestrator {
                             None,
                         )
                         .await;
-                        let result = match agent_connection.take() {
-                            Some(ActiveConnection {
-                                transport: connection,
-                                brain_name,
-                                attach_guard,
-                                fs_unsafe,
-                                init_response,
-                            }) => {
-                                self.create_brain_session(
-                                    connection,
-                                    brain_name,
-                                    permission_tx.clone(),
-                                    attach_guard,
-                                    fs_unsafe,
-                                    init_response,
-                                )
-                                .await
-                            }
-                            None => {
-                                self.spawn_brain_session(
-                                    Some(active_brain_name.as_str()),
-                                    permission_tx.clone(),
-                                )
-                                .await
-                            }
+                        let Some(result) =
+                            await_brain_startup_or_shutdown(&shutdown_token, async {
+                                match agent_connection.take() {
+                                    Some(ActiveConnection {
+                                        transport: connection,
+                                        brain_name,
+                                        attach_guard,
+                                        fs_unsafe,
+                                        init_response,
+                                    }) => {
+                                        self.create_brain_session(
+                                            connection,
+                                            brain_name,
+                                            permission_tx.clone(),
+                                            attach_guard,
+                                            fs_unsafe,
+                                            init_response,
+                                        )
+                                        .await
+                                    }
+                                    None => {
+                                        self.spawn_brain_session(
+                                            Some(active_brain_name.as_str()),
+                                            permission_tx.clone(),
+                                        )
+                                        .await
+                                    }
+                                }
+                            })
+                            .await
+                        else {
+                            break 'interactive;
                         };
                         match result {
                             Ok(b) => {
@@ -749,13 +785,18 @@ impl Orchestrator {
                         } = match agent_connection.take() {
                             Some(existing) => existing,
                             None => {
-                                match self
-                                    .connect_brain(
+                                let Some(connect_result) = await_brain_startup_or_shutdown(
+                                    &shutdown_token,
+                                    self.connect_brain(
                                         Some(active_brain_name.as_str()),
                                         permission_tx.clone(),
-                                    )
-                                    .await
-                                {
+                                    ),
+                                )
+                                .await
+                                else {
+                                    break 'interactive;
+                                };
+                                match connect_result {
                                     Ok((transport, brain_name, init_response)) => {
                                         ActiveConnection {
                                             transport,
@@ -857,13 +898,18 @@ impl Orchestrator {
                                     brain_name: self
                                         .selected_brain_name(Some(active_brain_name.as_str())),
                                 }));
-                                match self
-                                    .connect_brain(
+                                let Some(connect_result) = await_brain_startup_or_shutdown(
+                                    &shutdown_token,
+                                    self.connect_brain(
                                         Some(active_brain_name.as_str()),
                                         permission_tx.clone(),
-                                    )
-                                    .await
-                                {
+                                    ),
+                                )
+                                .await
+                                else {
+                                    break 'interactive;
+                                };
+                                match connect_result {
                                     Ok((transport, brain_name, init_response)) => {
                                         ActiveConnection {
                                             transport,
@@ -892,8 +938,9 @@ impl Orchestrator {
                         self.emit(SpurEvent::now(SpurEventBody::SessionLoading {
                             session: local_session_id.clone(),
                         }));
-                        match self
-                            .load_brain_session(
+                        let Some(load_result) = await_brain_startup_or_shutdown(
+                            &shutdown_token,
+                            self.load_brain_session(
                                 connection,
                                 brain_name,
                                 permission_tx.clone(),
@@ -903,9 +950,13 @@ impl Orchestrator {
                                 attach_guard,
                                 fs_unsafe,
                                 init_response,
-                            )
-                            .await
-                        {
+                            ),
+                        )
+                        .await
+                        else {
+                            break 'interactive;
+                        };
+                        match load_result {
                             Ok((session, mut history_stream, _load_outcome)) => {
                                 let spur_id = session.spur_session_id.clone();
                                 // Exactly one wire-history owner is active. Native
@@ -1906,36 +1957,37 @@ impl Orchestrator {
 
             // ── Lazy-spawn brain on first turn (or after crash) ─────────
             if brain.is_none() {
-                let Some(cached_connection) =
-                    admit_interactive_operation(&shutdown_token, || agent_connection.take())
-                else {
-                    break;
-                };
-                let result = match cached_connection {
-                    Some(ActiveConnection {
-                        transport: connection,
-                        brain_name,
-                        attach_guard,
-                        fs_unsafe,
-                        init_response,
-                    }) => {
-                        self.create_brain_session(
-                            connection,
+                let Some(result) = await_brain_startup_or_shutdown(&shutdown_token, async {
+                    match agent_connection.take() {
+                        Some(ActiveConnection {
+                            transport: connection,
                             brain_name,
-                            permission_tx.clone(),
                             attach_guard,
                             fs_unsafe,
                             init_response,
-                        )
-                        .await
+                        }) => {
+                            self.create_brain_session(
+                                connection,
+                                brain_name,
+                                permission_tx.clone(),
+                                attach_guard,
+                                fs_unsafe,
+                                init_response,
+                            )
+                            .await
+                        }
+                        None => {
+                            self.spawn_brain_session(
+                                Some(active_brain_name.as_str()),
+                                permission_tx.clone(),
+                            )
+                            .await
+                        }
                     }
-                    None => {
-                        self.spawn_brain_session(
-                            Some(active_brain_name.as_str()),
-                            permission_tx.clone(),
-                        )
-                        .await
-                    }
+                })
+                .await
+                else {
+                    break;
                 };
 
                 if shutdown_token.is_cancelled() {
