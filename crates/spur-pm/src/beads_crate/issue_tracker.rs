@@ -1,17 +1,20 @@
 //! `IssueTracker` trait impl for `BeadsCrateAdapter`.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
 
 use async_trait::async_trait;
 use beads_rust::model::EventType;
 use chrono::{DateTime, Utc};
-use rusqlite::params;
+use rusqlite::{params, OptionalExtension, ToSql, Transaction};
 
 use crate::adapter::IssueTracker;
 use crate::beads_crate::adapter::BeadsCrateAdapter;
 use crate::poll_cursor::{PollCursor, POLL_FETCH_LIMIT};
-use crate::types::{Issue, IssueCreate, IssueFilter, IssueSummary, IssueUpdate, PmEvent, PmSource};
+use crate::types::{
+    AtomicUpdateOutcome, AtomicUpdatePrecondition, Issue, IssueCreate, IssueFilter, IssueSummary,
+    IssueUpdate, PmEvent, PmSource,
+};
 
 fn validate_create_label(label: &str) -> anyhow::Result<()> {
     beads_rust::validation::LabelValidator::validate(label)
@@ -47,68 +50,301 @@ fn validate_added_labels<'a>(labels: impl IntoIterator<Item = &'a String>) -> an
     Ok(())
 }
 
-fn apply_label_comment_update(
-    storage: &mut beads_rust::storage::sqlite::SqliteStorage,
+const ATOMIC_UPDATE_KEY_PREFIX: &str = "spur:atomic-issue-update:";
+
+fn apply_field_update_in_transaction(
+    tx: &Transaction<'_>,
+    context: &mut beads_rust::storage::sqlite::MutationContext,
+    issue: &mut beads_rust::model::Issue,
+    issue_id: &str,
+    update: &IssueUpdate,
+) -> beads_rust::error::Result<bool> {
+    let has_field_update = update.status.is_some()
+        || update.priority.is_some()
+        || update.assignee.is_some()
+        || update.body.is_some()
+        || update.source_system.is_some()
+        || update.source_repo.is_some()
+        || update.external_ref.is_some();
+    if !has_field_update {
+        return Ok(false);
+    }
+
+    let mut set_clauses: Vec<String> = Vec::new();
+    let mut values: Vec<Box<dyn ToSql>> = Vec::new();
+    let mut add_update = |field: &str, value: Box<dyn ToSql>| {
+        set_clauses.push(format!("{field} = ?"));
+        values.push(value);
+    };
+
+    if let Some(status) = update.status.as_deref() {
+        let old_status = issue.status.as_str().to_string();
+        let parsed =
+            beads_rust::model::Status::from_str(status).unwrap_or(beads_rust::model::Status::Open);
+        issue.status = parsed.clone();
+        add_update("status", Box::new(parsed.as_str().to_string()));
+        context.record_field_change(
+            EventType::StatusChanged,
+            issue_id,
+            Some(old_status),
+            Some(parsed.as_str().to_string()),
+            None,
+        );
+
+        if parsed == beads_rust::model::Status::Closed {
+            context.record_event(EventType::Closed, issue_id, None);
+            if issue.closed_at.is_none() {
+                issue.closed_at = Some(Utc::now());
+            }
+        } else {
+            issue.closed_at = None;
+        }
+        add_update(
+            "closed_at",
+            Box::new(issue.closed_at.map(|closed_at| closed_at.to_rfc3339())),
+        );
+        context.invalidate_cache();
+    }
+
+    if let Some(priority) = update.priority {
+        let old_priority = issue.priority.0;
+        issue.priority = beads_rust::model::Priority(priority);
+        add_update("priority", Box::new(priority));
+        if priority != old_priority {
+            context.record_field_change(
+                EventType::PriorityChanged,
+                issue_id,
+                Some(old_priority.to_string()),
+                Some(priority.to_string()),
+                None,
+            );
+        }
+    }
+
+    if let Some(assignee) = update.assignee.as_ref() {
+        let old_assignee = issue.assignee.clone();
+        let new_assignee = (!assignee.is_empty()).then(|| assignee.clone());
+        issue.assignee.clone_from(&new_assignee);
+        add_update("assignee", Box::new(new_assignee.clone()));
+        if old_assignee != new_assignee {
+            context.record_field_change(
+                EventType::AssigneeChanged,
+                issue_id,
+                old_assignee,
+                new_assignee,
+                None,
+            );
+        }
+    }
+
+    if let Some(body) = update.body.as_ref() {
+        issue.description = Some(body.clone());
+        add_update("description", Box::new(body.clone()));
+    }
+
+    if let Some(source_system) = update.source_system.as_ref() {
+        issue.source_system.clone_from(source_system);
+        add_update("source_system", Box::new(source_system.clone()));
+    }
+
+    if let Some(source_repo) = update.source_repo.as_ref() {
+        issue.source_repo.clone_from(source_repo);
+        add_update("source_repo", Box::new(source_repo.clone()));
+    }
+
+    if let Some(external_ref) = update.external_ref.as_ref() {
+        issue.external_ref.clone_from(external_ref);
+        add_update("external_ref", Box::new(external_ref.clone()));
+    }
+
+    let now = Utc::now();
+    issue.updated_at = now;
+    add_update("updated_at", Box::new(now.to_rfc3339()));
+    add_update("content_hash", Box::new(issue.compute_content_hash()));
+    let sql = format!("UPDATE issues SET {} WHERE id = ?", set_clauses.join(", "));
+    values.push(Box::new(issue_id.to_string()));
+    let value_refs: Vec<&dyn ToSql> = values.iter().map(AsRef::as_ref).collect();
+    tx.execute(&sql, value_refs.as_slice())?;
+    context.mark_dirty(issue_id);
+    Ok(true)
+}
+
+fn apply_label_comment_update_in_transaction(
+    tx: &Transaction<'_>,
+    context: &mut beads_rust::storage::sqlite::MutationContext,
     issue_id: &str,
     actor: &str,
     add_labels: &[String],
     remove_labels: &[String],
     comment: Option<&str>,
-) -> anyhow::Result<()> {
-    storage.mutate("update_issue_labels_comment", actor, |tx, context| {
-        let mut changed = false;
+) -> beads_rust::error::Result<bool> {
+    let mut changed = false;
 
-        for label in add_labels {
-            let rows = tx.execute(
-                "INSERT OR IGNORE INTO labels (issue_id, label) VALUES (?, ?)",
-                params![issue_id, label],
-            )?;
-            if rows > 0 {
-                context.record_event(
-                    EventType::LabelAdded,
-                    issue_id,
-                    Some(format!("Added label {label}")),
-                );
-                changed = true;
-            }
-        }
-
-        for label in remove_labels {
-            let rows = tx.execute(
-                "DELETE FROM labels WHERE issue_id = ? AND label = ?",
-                params![issue_id, label],
-            )?;
-            if rows > 0 {
-                context.record_event(
-                    EventType::LabelRemoved,
-                    issue_id,
-                    Some(format!("Removed label {label}")),
-                );
-                changed = true;
-            }
-        }
-
-        if let Some(comment) = comment {
-            tx.execute(
-                "INSERT INTO comments (issue_id, author, text, created_at)
-                 VALUES (?, ?, ?, CURRENT_TIMESTAMP)",
-                params![issue_id, actor, comment],
-            )?;
-            context.record_event(EventType::Commented, issue_id, Some(comment.to_string()));
+    for label in add_labels {
+        let rows = tx.execute(
+            "INSERT OR IGNORE INTO labels (issue_id, label) VALUES (?, ?)",
+            params![issue_id, label],
+        )?;
+        if rows > 0 {
+            context.record_event(
+                EventType::LabelAdded,
+                issue_id,
+                Some(format!("Added label {label}")),
+            );
             changed = true;
         }
+    }
 
-        if changed {
-            tx.execute(
-                "UPDATE issues SET updated_at = ? WHERE id = ?",
-                params![Utc::now().to_rfc3339(), issue_id],
-            )?;
-            context.mark_dirty(issue_id);
+    for label in remove_labels {
+        let rows = tx.execute(
+            "DELETE FROM labels WHERE issue_id = ? AND label = ?",
+            params![issue_id, label],
+        )?;
+        if rows > 0 {
+            context.record_event(
+                EventType::LabelRemoved,
+                issue_id,
+                Some(format!("Removed label {label}")),
+            );
+            changed = true;
+        }
+    }
+
+    if let Some(comment) = comment {
+        tx.execute(
+            "INSERT INTO comments (issue_id, author, text, created_at)
+             VALUES (?, ?, ?, CURRENT_TIMESTAMP)",
+            params![issue_id, actor, comment],
+        )?;
+        context.record_event(EventType::Commented, issue_id, Some(comment.to_string()));
+        changed = true;
+    }
+
+    if changed {
+        tx.execute(
+            "UPDATE issues SET updated_at = ? WHERE id = ?",
+            params![Utc::now().to_rfc3339(), issue_id],
+        )?;
+        context.mark_dirty(issue_id);
+    }
+
+    Ok(changed)
+}
+
+fn apply_issue_updates_transaction(
+    storage: &mut beads_rust::storage::sqlite::SqliteStorage,
+    actor: &str,
+    idempotency_key: Option<&str>,
+    preconditions: &[AtomicUpdatePrecondition],
+    updates: &[(String, IssueUpdate)],
+) -> anyhow::Result<AtomicUpdateOutcome> {
+    if matches!(idempotency_key, Some("")) {
+        anyhow::bail!("atomic update idempotency key cannot be empty");
+    }
+    for (_, update) in updates {
+        validate_added_labels(&update.add_labels)?;
+    }
+    if idempotency_key.is_some() {
+        let update_issue_ids: HashSet<&str> = updates
+            .iter()
+            .map(|(issue_id, _)| issue_id.as_str())
+            .collect();
+        let precondition_issue_ids: HashSet<&str> = preconditions
+            .iter()
+            .map(|precondition| precondition.issue_id.as_str())
+            .collect();
+        anyhow::ensure!(
+            precondition_issue_ids.len() == preconditions.len(),
+            "atomic update preconditions contain duplicate issue IDs"
+        );
+        anyhow::ensure!(
+            update_issue_ids == precondition_issue_ids,
+            "atomic update requires exactly one precondition per updated issue"
+        );
+    }
+
+    // The adapter write lock is already held while this function runs. Load
+    // the hash inputs before opening the IMMEDIATE transaction, then keep this
+    // owned snapshot in step with every ordered field update below.
+    let mut issues = HashMap::new();
+    for (issue_id, _) in updates {
+        if issues.contains_key(issue_id) {
+            continue;
+        }
+        let issue = storage
+            .get_issue(issue_id)?
+            .ok_or_else(|| anyhow::anyhow!("issue not found: {issue_id}"))?;
+        issues.insert(issue_id.clone(), issue);
+    }
+
+    let marker_key = idempotency_key.map(|key| format!("{ATOMIC_UPDATE_KEY_PREFIX}{key}"));
+    // Preconditions describe the caller's observation, not the logical
+    // command identity. A later retry may observe post-commit counts and must
+    // still recognize the already-applied update payload.
+    let marker_value = serde_json::to_string(updates)?;
+    let outcome = storage.mutate("update_issues_atomically", actor, |tx, context| {
+        if let Some(marker_key) = marker_key.as_deref() {
+            let existing: Option<String> = tx
+                .query_row(
+                    "SELECT value FROM metadata WHERE key = ?",
+                    [marker_key],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if let Some(existing) = existing {
+                if existing != marker_value {
+                    return Err(beads_rust::error::BeadsError::validation(
+                        "idempotency_key",
+                        "atomic update key was reused with a different payload",
+                    ));
+                }
+                return Ok(AtomicUpdateOutcome::AlreadyApplied);
+            }
         }
 
-        Ok(())
+        for precondition in preconditions {
+            let actual: i64 = tx.query_row(
+                "SELECT COUNT(*) FROM comments WHERE issue_id = ?",
+                [&precondition.issue_id],
+                |row| row.get(0),
+            )?;
+            if actual as u64 != precondition.expected_comment_count {
+                return Err(beads_rust::error::BeadsError::validation(
+                    "preconditions",
+                    format!(
+                        "issue '{}' comment count changed (expected {}, found {})",
+                        precondition.issue_id, precondition.expected_comment_count, actual
+                    ),
+                ));
+            }
+        }
+
+        if let Some(marker_key) = marker_key.as_deref() {
+            tx.execute(
+                "INSERT INTO metadata (key, value) VALUES (?, ?)",
+                params![marker_key, marker_value],
+            )?;
+        }
+
+        for (issue_id, update) in updates {
+            let issue = issues
+                .get_mut(issue_id)
+                .expect("all atomic-update issues were loaded during preflight");
+            apply_field_update_in_transaction(tx, context, issue, issue_id, update)?;
+            apply_label_comment_update_in_transaction(
+                tx,
+                context,
+                issue_id,
+                actor,
+                &update.add_labels,
+                &update.remove_labels,
+                update.comment.as_deref(),
+            )?;
+        }
+
+        Ok(AtomicUpdateOutcome::Applied)
     })?;
-    Ok(())
+    Ok(outcome)
 }
 
 const CREATE_ISSUE_MAX_ATTEMPTS: usize = 5;
@@ -510,54 +746,28 @@ impl IssueTracker for BeadsCrateAdapter {
         let id = id.to_string();
         let actor = self.actor();
         self.write(move |s| {
-            validate_added_labels(&update.add_labels)?;
-            let has_field_update = update.status.is_some()
-                || update.priority.is_some()
-                || update.assignee.is_some()
-                || update.body.is_some()
-                || update.external_ref.is_some();
-
-            if has_field_update {
-                let mut br_update = beads_rust::storage::sqlite::IssueUpdate::default();
-                if let Some(status) = update.status.as_deref() {
-                    let parsed = beads_rust::model::Status::from_str(status)
-                        .unwrap_or(beads_rust::model::Status::Open);
-                    br_update.status = Some(parsed);
-                }
-                if let Some(p) = update.priority {
-                    br_update.priority = Some(beads_rust::model::Priority(p));
-                }
-                if let Some(ref a) = update.assignee {
-                    br_update.assignee = if a.is_empty() {
-                        Some(None)
-                    } else {
-                        Some(Some(a.clone()))
-                    };
-                }
-                if let Some(body) = update.body.as_deref() {
-                    br_update.description = Some(Some(body.to_string()));
-                }
-                if let Some(external_ref) = update.external_ref {
-                    br_update.external_ref = Some(external_ref);
-                }
-                s.update_issue(&id, &br_update, &actor)?;
-            }
-
-            if !update.add_labels.is_empty()
-                || !update.remove_labels.is_empty()
-                || update.comment.is_some()
-            {
-                apply_label_comment_update(
-                    s,
-                    &id,
-                    &actor,
-                    &update.add_labels,
-                    &update.remove_labels,
-                    update.comment.as_deref(),
-                )?;
-            }
-
+            apply_issue_updates_transaction(s, &actor, None, &[], &[(id, update)])?;
             Ok(())
+        })
+        .await
+    }
+
+    async fn update_issues_atomically(
+        &self,
+        idempotency_key: &str,
+        preconditions: Vec<AtomicUpdatePrecondition>,
+        updates: Vec<(String, IssueUpdate)>,
+    ) -> anyhow::Result<AtomicUpdateOutcome> {
+        let idempotency_key = idempotency_key.to_string();
+        let actor = self.actor();
+        self.write(move |storage| {
+            apply_issue_updates_transaction(
+                storage,
+                &actor,
+                Some(&idempotency_key),
+                &preconditions,
+                &updates,
+            )
         })
         .await
     }
@@ -582,14 +792,17 @@ impl IssueTracker for BeadsCrateAdapter {
 mod tests {
     use std::collections::HashSet;
 
-    use beads_rust::model::{Issue as BrIssue, IssueType, Priority, Status};
+    use beads_rust::model::{EventType, Issue as BrIssue, IssueType, Priority, Status};
     use chrono::{TimeZone, Timelike, Utc};
     use tempfile::TempDir;
 
-    use super::{create_issue_with_retry, generate_checked_issue_id};
+    use super::{create_issue_with_retry, generate_checked_issue_id, ATOMIC_UPDATE_KEY_PREFIX};
     use crate::adapter::IssueTracker;
     use crate::beads_crate::adapter::{AdapterConfig, BeadsCrateAdapter};
-    use crate::types::{IssueCreate, IssueFilter, IssueUpdate, PmEvent};
+    use crate::types::{
+        AtomicUpdateOutcome, AtomicUpdatePrecondition, IssueCreate, IssueFilter, IssueUpdate,
+        PmEvent,
+    };
 
     fn minimal_issue(id: &str, title: &str) -> BrIssue {
         let now = Utc::now();
@@ -1042,6 +1255,344 @@ mod tests {
         assert_eq!(events.len(), event_count_before);
         assert_eq!(updated_at_after, updated_at_before);
         assert!(!dirty_ids.contains(&id));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn combined_status_label_comment_update_rolls_back_after_comment_failure() {
+        let dir = TempDir::new().unwrap();
+        let adapter = BeadsCrateAdapter::open(dir.path(), AdapterConfig::default())
+            .await
+            .unwrap();
+
+        let id = adapter
+            .create_issue(IssueCreate {
+                title: "Review target".into(),
+                labels: vec!["ready-for-review".into()],
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        let dirty_issue_id = id.clone();
+        adapter
+            .write(move |storage| {
+                storage.clear_dirty_issues(&[dirty_issue_id])?;
+                storage.mutate("inject_terminal_audit_failure", "test", |tx, _ctx| {
+                    tx.execute_batch(
+                        "CREATE TRIGGER fail_terminal_audit_insert
+                         BEFORE INSERT ON comments
+                         WHEN NEW.text LIKE '[[spur-audit v1]]%'
+                         BEGIN
+                           SELECT RAISE(ABORT, 'injected terminal audit failure');
+                         END;",
+                    )?;
+                    Ok(())
+                })?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let baseline_issue_id = id.clone();
+        let (updated_at_before, event_count_before) = adapter
+            .read(move |storage| {
+                let issue = storage
+                    .get_issue(&baseline_issue_id)?
+                    .expect("created issue must exist");
+                let events = storage.get_events(&baseline_issue_id, 1_000)?;
+                Ok((issue.updated_at, events.len()))
+            })
+            .await
+            .unwrap();
+
+        let audit = "[[spur-audit v1]]\n{\"kind\":\"approval\"}";
+        let error = adapter
+            .update_issue(
+                &id,
+                IssueUpdate {
+                    status: Some("closed".into()),
+                    remove_labels: vec!["ready-for-review".into()],
+                    comment: Some(audit.into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect_err("injected audit failure must reject the complete review update");
+        assert!(error
+            .to_string()
+            .contains("injected terminal audit failure"));
+
+        let issue = adapter.get_issue(&id).await.unwrap();
+        let stored_issue_id = id.clone();
+        let (updated_at_after, comments, events, dirty_ids) = adapter
+            .read(move |storage| {
+                let issue = storage
+                    .get_issue(&stored_issue_id)?
+                    .expect("created issue must remain after rollback");
+                let comments = storage.get_comments(&stored_issue_id)?;
+                let events = storage.get_events(&stored_issue_id, 1_000)?;
+                let dirty_ids = storage.get_dirty_issue_ids()?;
+                Ok((issue.updated_at, comments, events, dirty_ids))
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(issue.status, "open", "status must roll back with audit");
+        assert!(issue.labels.contains(&"ready-for-review".to_string()));
+        assert!(comments.iter().all(|comment| comment.body != audit));
+        assert_eq!(events.len(), event_count_before);
+        assert_eq!(updated_at_after, updated_at_before);
+        assert!(!dirty_ids.contains(&id));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn atomic_multi_issue_update_rolls_back_late_failure_and_retries_idempotently() {
+        let dir = TempDir::new().unwrap();
+        let adapter = BeadsCrateAdapter::open(dir.path(), AdapterConfig::default())
+            .await
+            .unwrap();
+        let task_id = adapter
+            .create_issue(IssueCreate {
+                title: "Review target".into(),
+                labels: vec!["ready-for-review".into()],
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let epic_id = adapter
+            .create_issue(IssueCreate {
+                title: "Plan epic".into(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let ids = vec![task_id.clone(), epic_id.clone()];
+        adapter
+            .write(move |storage| {
+                storage.clear_dirty_issues(&ids)?;
+                storage.mutate("inject_late_review_failure", "test", |tx, _ctx| {
+                    tx.execute_batch(
+                        "CREATE TRIGGER fail_transition_audit_insert
+                         BEFORE INSERT ON comments
+                         WHEN NEW.text = 'transition audit'
+                         BEGIN
+                           SELECT RAISE(ABORT, 'injected transition audit failure');
+                         END;",
+                    )?;
+                    Ok(())
+                })?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let baseline_task_id = task_id.clone();
+        let task_event_cursor = adapter
+            .read(move |storage| {
+                Ok(storage
+                    .get_events(&baseline_task_id, 1_000)?
+                    .into_iter()
+                    .map(|event| event.id)
+                    .max()
+                    .unwrap_or_default())
+            })
+            .await
+            .unwrap();
+
+        let updates = vec![
+            (
+                task_id.clone(),
+                IssueUpdate {
+                    status: Some("closed".into()),
+                    remove_labels: vec!["ready-for-review".into()],
+                    comment: Some("Brain approved".into()),
+                    ..Default::default()
+                },
+            ),
+            (
+                task_id.clone(),
+                IssueUpdate {
+                    comment: Some("approval audit".into()),
+                    ..Default::default()
+                },
+            ),
+            (
+                epic_id.clone(),
+                IssueUpdate {
+                    comment: Some("transition audit".into()),
+                    ..Default::default()
+                },
+            ),
+        ];
+        let preconditions = vec![
+            AtomicUpdatePrecondition {
+                issue_id: task_id.clone(),
+                expected_comment_count: 0,
+            },
+            AtomicUpdatePrecondition {
+                issue_id: epic_id.clone(),
+                expected_comment_count: 0,
+            },
+        ];
+        let error = adapter
+            .update_issues_atomically("review-plan-task-1", preconditions.clone(), updates.clone())
+            .await
+            .expect_err("late audit failure must roll back the whole review transaction");
+        assert!(error
+            .to_string()
+            .contains("injected transition audit failure"));
+
+        let task = adapter.get_issue(&task_id).await.unwrap();
+        assert_eq!(task.status, "open");
+        assert!(task.labels.contains(&"ready-for-review".to_string()));
+        let inspect_task_id = task_id.clone();
+        let inspect_epic_id = epic_id.clone();
+        let (task_comments, epic_comments, dirty_ids, marker) = adapter
+            .read(move |storage| {
+                Ok((
+                    storage.get_comments(&inspect_task_id)?,
+                    storage.get_comments(&inspect_epic_id)?,
+                    storage.get_dirty_issue_ids()?,
+                    storage
+                        .get_metadata(&format!("{ATOMIC_UPDATE_KEY_PREFIX}review-plan-task-1"))?,
+                ))
+            })
+            .await
+            .unwrap();
+        assert!(task_comments.is_empty());
+        assert!(epic_comments.is_empty());
+        assert!(dirty_ids.is_empty());
+        assert!(
+            marker.is_none(),
+            "rolled-back transaction cannot claim its key"
+        );
+
+        adapter
+            .write(|storage| {
+                storage.mutate("remove_review_failure", "test", |tx, _ctx| {
+                    tx.execute_batch("DROP TRIGGER fail_transition_audit_insert")?;
+                    Ok(())
+                })?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(
+            adapter
+                .update_issues_atomically(
+                    "review-plan-task-1",
+                    preconditions.clone(),
+                    updates.clone(),
+                )
+                .await
+                .unwrap(),
+            AtomicUpdateOutcome::Applied
+        );
+        assert_eq!(
+            adapter
+                .update_issues_atomically(
+                    "review-plan-task-1",
+                    preconditions.clone(),
+                    updates.clone(),
+                )
+                .await
+                .unwrap(),
+            AtomicUpdateOutcome::AlreadyApplied
+        );
+
+        let competing_error = adapter
+            .update_issues_atomically(
+                "competing-review-plan-task-1",
+                vec![AtomicUpdatePrecondition {
+                    issue_id: task_id.clone(),
+                    expected_comment_count: 0,
+                }],
+                vec![(
+                    task_id.clone(),
+                    IssueUpdate {
+                        status: Some("open".into()),
+                        comment: Some("rejection audit".into()),
+                        ..Default::default()
+                    },
+                )],
+            )
+            .await
+            .expect_err("a stale competing review must fail its compare-and-set guard");
+        assert!(competing_error
+            .to_string()
+            .contains("comment count changed"));
+
+        let task = adapter.get_issue(&task_id).await.unwrap();
+        assert_eq!(task.status, "closed");
+        assert!(!task.labels.contains(&"ready-for-review".to_string()));
+        let inspect_task_id = task_id.clone();
+        let inspect_epic_id = epic_id.clone();
+        let (task_comments, epic_comments, mut task_event_types, hash_matches) = adapter
+            .read(move |storage| {
+                let stored_task = storage
+                    .get_issue(&inspect_task_id)?
+                    .expect("task exists after atomic review");
+                let expected_hash = stored_task.compute_content_hash();
+                let task_event_types: Vec<EventType> = storage
+                    .get_events(&inspect_task_id, 1_000)?
+                    .into_iter()
+                    .filter(|event| event.id > task_event_cursor)
+                    .map(|event| event.event_type)
+                    .collect();
+                Ok((
+                    storage.get_comments(&inspect_task_id)?,
+                    storage.get_comments(&inspect_epic_id)?,
+                    task_event_types,
+                    stored_task.content_hash.as_deref() == Some(expected_hash.as_str()),
+                ))
+            })
+            .await
+            .unwrap();
+        assert_eq!(task_comments.len(), 2);
+        assert_eq!(epic_comments.len(), 1);
+        task_event_types.reverse();
+        assert_eq!(
+            task_event_types,
+            vec![
+                EventType::StatusChanged,
+                EventType::Closed,
+                EventType::LabelRemoved,
+                EventType::Commented,
+                EventType::Commented,
+            ],
+            "the atomic path must preserve the native Beads event order"
+        );
+        assert!(
+            hash_matches,
+            "atomic field updates must refresh content_hash"
+        );
+
+        drop(adapter);
+        let reopened = BeadsCrateAdapter::open(dir.path(), AdapterConfig::default())
+            .await
+            .unwrap();
+        assert_eq!(
+            reopened
+                .update_issues_atomically(
+                    "review-plan-task-1",
+                    vec![
+                        AtomicUpdatePrecondition {
+                            issue_id: task_id,
+                            expected_comment_count: 2,
+                        },
+                        AtomicUpdatePrecondition {
+                            issue_id: epic_id,
+                            expected_comment_count: 1,
+                        },
+                    ],
+                    updates,
+                )
+                .await
+                .unwrap(),
+            AtomicUpdateOutcome::AlreadyApplied,
+            "the idempotency marker must survive adapter restart"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

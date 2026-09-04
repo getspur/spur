@@ -1086,6 +1086,17 @@ impl crate::plan::PmLike for ScriptedReadyPm {
         self.inner.update_issue(id, update).await
     }
 
+    async fn update_issues_atomically(
+        &self,
+        idempotency_key: &str,
+        preconditions: Vec<spur_pm::AtomicUpdatePrecondition>,
+        updates: Vec<(String, spur_pm::IssueUpdate)>,
+    ) -> anyhow::Result<spur_pm::AtomicUpdateOutcome> {
+        self.inner
+            .update_issues_atomically(idempotency_key, preconditions, updates)
+            .await
+    }
+
     async fn add_dependency(&self, issue_id: &str, depends_on_id: &str) -> anyhow::Result<()> {
         self.inner.add_dependency(issue_id, depends_on_id).await
     }
@@ -1309,6 +1320,16 @@ async fn close_mock_task_with_completion_cost(
     )
     .await
     .expect("completion audit");
+    adv.add_comment(
+        issue_id,
+        &crate::plan::audit_sentinel::encode_comment(
+            &crate::plan::audit_sentinel::AuditSentinelKind::Approval {
+                delegation_id: "del-budget-spent".to_string(),
+            },
+        ),
+    )
+    .await
+    .expect("approval audit");
     pm.update_issue(
         issue_id,
         spur_pm::IssueUpdate {
@@ -1716,6 +1737,17 @@ impl crate::plan::PmLike for FailFirstCompanionClosePm {
             anyhow::bail!("injected review companion close failure");
         }
         self.inner.update_issue(id, update).await
+    }
+
+    async fn update_issues_atomically(
+        &self,
+        idempotency_key: &str,
+        preconditions: Vec<spur_pm::AtomicUpdatePrecondition>,
+        updates: Vec<(String, spur_pm::IssueUpdate)>,
+    ) -> anyhow::Result<spur_pm::AtomicUpdateOutcome> {
+        self.inner
+            .update_issues_atomically(idempotency_key, preconditions, updates)
+            .await
     }
 
     async fn add_dependency(&self, issue_id: &str, depends_on_id: &str) -> anyhow::Result<()> {

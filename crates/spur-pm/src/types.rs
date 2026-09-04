@@ -143,6 +143,24 @@ pub struct IssueUpdate {
     pub external_ref: Option<Option<String>>,
 }
 
+/// Optimistic concurrency guard for an atomic issue-update transaction.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AtomicUpdatePrecondition {
+    /// Issue whose observed state must still match.
+    pub issue_id: String,
+    /// Exact number of comments observed before the transaction began.
+    pub expected_comment_count: u64,
+}
+
+/// Result of an idempotent atomic issue-update transaction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AtomicUpdateOutcome {
+    /// This call committed the update set.
+    Applied,
+    /// The same idempotency key and payload committed previously.
+    AlreadyApplied,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PrParams {
     pub title: String,

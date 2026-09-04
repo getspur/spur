@@ -27,13 +27,67 @@ pub struct MockPm {
     inner: Arc<Mutex<MockPmState>>,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct MockPmState {
     next_issue: u64,
     next_comment: u64,
     issues: HashMap<String, spur_pm::Issue>,
     comments: HashMap<String, Vec<spur_pm::Comment>>,
+    atomic_payloads: HashMap<String, String>,
     fail_create_issues_remaining: usize,
+}
+
+fn apply_issue_update_locked(
+    state: &mut MockPmState,
+    id: &str,
+    update: spur_pm::IssueUpdate,
+) -> anyhow::Result<()> {
+    {
+        let issue = state
+            .issues
+            .get_mut(id)
+            .with_context(|| format!("mock issue not found: {id}"))?;
+        if let Some(status) = update.status {
+            issue.status = status;
+        }
+        if let Some(body) = update.body {
+            issue.body = body;
+        }
+        if let Some(priority) = update.priority {
+            issue.priority = Some(priority);
+        }
+        if let Some(assignee) = update.assignee {
+            issue.assignee = if assignee.is_empty() {
+                None
+            } else {
+                Some(assignee)
+            };
+        }
+        if let Some(source_system) = update.source_system {
+            issue.source_system = source_system;
+        }
+        if let Some(source_repo) = update.source_repo {
+            issue.source_repo = source_repo;
+        }
+        if let Some(external_ref) = update.external_ref {
+            issue.external_ref = external_ref;
+        }
+        if !update.remove_labels.is_empty() {
+            let remove = update.remove_labels.into_iter().collect::<HashSet<_>>();
+            issue.labels.retain(|label| !remove.contains(label));
+        }
+        for label in update.add_labels {
+            if !issue.labels.contains(&label) {
+                issue.labels.push(label);
+            }
+        }
+        issue.labels.sort();
+        issue.updated_at = Utc::now();
+    }
+    if let Some(comment) = update.comment {
+        add_comment_locked(state, id, comment);
+    }
+    Ok(())
 }
 
 impl MockPm {
@@ -197,43 +251,48 @@ impl crate::plan::PmLike for MockPm {
 
     async fn update_issue(&self, id: &str, update: spur_pm::IssueUpdate) -> anyhow::Result<()> {
         let mut state = self.inner.lock().await;
-        {
-            let issue = state
-                .issues
-                .get_mut(id)
-                .with_context(|| format!("mock issue not found: {id}"))?;
-            if let Some(status) = update.status {
-                issue.status = status;
-            }
-            if let Some(body) = update.body {
-                issue.body = body;
-            }
-            if let Some(priority) = update.priority {
-                issue.priority = Some(priority);
-            }
-            if let Some(assignee) = update.assignee {
-                issue.assignee = if assignee.is_empty() {
-                    None
-                } else {
-                    Some(assignee)
-                };
-            }
-            if !update.remove_labels.is_empty() {
-                let remove = update.remove_labels.into_iter().collect::<HashSet<_>>();
-                issue.labels.retain(|label| !remove.contains(label));
-            }
-            for label in update.add_labels {
-                if !issue.labels.contains(&label) {
-                    issue.labels.push(label);
-                }
-            }
-            issue.labels.sort();
-            issue.updated_at = Utc::now();
+        apply_issue_update_locked(&mut state, id, update)
+    }
+
+    async fn update_issues_atomically(
+        &self,
+        idempotency_key: &str,
+        preconditions: Vec<spur_pm::AtomicUpdatePrecondition>,
+        updates: Vec<(String, spur_pm::IssueUpdate)>,
+    ) -> anyhow::Result<spur_pm::AtomicUpdateOutcome> {
+        let payload = serde_json::to_string(&updates)?;
+        let mut state = self.inner.lock().await;
+        if let Some(existing) = state.atomic_payloads.get(idempotency_key) {
+            anyhow::ensure!(
+                existing == &payload,
+                "mock atomic update key reused with a different payload"
+            );
+            return Ok(spur_pm::AtomicUpdateOutcome::AlreadyApplied);
         }
-        if let Some(comment) = update.comment {
-            add_comment_locked(&mut state, id, comment);
+
+        for precondition in &preconditions {
+            let actual = state
+                .comments
+                .get(&precondition.issue_id)
+                .map_or(0, Vec::len) as u64;
+            anyhow::ensure!(
+                actual == precondition.expected_comment_count,
+                "mock atomic precondition failed for '{}': expected {} comments, found {}",
+                precondition.issue_id,
+                precondition.expected_comment_count,
+                actual
+            );
         }
-        Ok(())
+
+        let mut candidate = state.clone();
+        for (issue_id, update) in updates {
+            apply_issue_update_locked(&mut candidate, &issue_id, update)?;
+        }
+        candidate
+            .atomic_payloads
+            .insert(idempotency_key.to_string(), payload);
+        *state = candidate;
+        Ok(spur_pm::AtomicUpdateOutcome::Applied)
     }
 
     async fn add_dependency(&self, issue_id: &str, depends_on_id: &str) -> anyhow::Result<()> {

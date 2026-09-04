@@ -22,6 +22,7 @@ struct FaultyReviewPm {
     calls: Mutex<usize>,
     fail_call: usize,
     comments: Mutex<BTreeMap<String, Vec<spur_pm::Comment>>>,
+    atomic_payloads: Mutex<BTreeMap<String, String>>,
 }
 
 impl FaultyReviewPm {
@@ -79,6 +80,53 @@ impl PmLike for FaultyReviewPm {
         Ok(())
     }
 
+    async fn update_issues_atomically(
+        &self,
+        idempotency_key: &str,
+        preconditions: Vec<spur_pm::AtomicUpdatePrecondition>,
+        updates: Vec<(String, spur_pm::IssueUpdate)>,
+    ) -> anyhow::Result<spur_pm::AtomicUpdateOutcome> {
+        let payload = serde_json::to_string(&updates)?;
+        let mut applied = self.atomic_payloads.lock().expect("atomic payloads lock");
+        if let Some(existing) = applied.get(idempotency_key) {
+            anyhow::ensure!(existing == &payload, "idempotency payload changed");
+            return Ok(spur_pm::AtomicUpdateOutcome::AlreadyApplied);
+        }
+
+        let mut comments = self.comments.lock().expect("comments lock");
+        for precondition in &preconditions {
+            let actual = comments.get(&precondition.issue_id).map_or(0, Vec::len) as u64;
+            anyhow::ensure!(
+                actual == precondition.expected_comment_count,
+                "atomic precondition failed for '{}'",
+                precondition.issue_id
+            );
+        }
+        let mut candidate = comments.clone();
+        for (id, update) in updates {
+            let call_no = {
+                let mut calls = self.calls.lock().expect("calls lock");
+                *calls += 1;
+                *calls
+            };
+            if call_no == self.fail_call {
+                anyhow::bail!("injected review write failure on call {call_no}");
+            }
+            if let Some(body) = update.comment {
+                let issue_comments = candidate.entry(id.clone()).or_default();
+                issue_comments.push(spur_pm::Comment {
+                    id: format!("{id}-{}", issue_comments.len() + 1),
+                    body,
+                    actor: "test".into(),
+                    created_at: chrono::Utc::now(),
+                });
+            }
+        }
+        applied.insert(idempotency_key.to_string(), payload);
+        *comments = candidate;
+        Ok(spur_pm::AtomicUpdateOutcome::Applied)
+    }
+
     fn closed_status(&self) -> &str {
         "closed"
     }
@@ -107,6 +155,15 @@ impl PmLike for FailingMockPm {
 
     async fn update_issue(&self, id: &str, _update: spur_pm::IssueUpdate) -> anyhow::Result<()> {
         anyhow::bail!("injected review write failure for {id}");
+    }
+
+    async fn update_issues_atomically(
+        &self,
+        _idempotency_key: &str,
+        _preconditions: Vec<spur_pm::AtomicUpdatePrecondition>,
+        _updates: Vec<(String, spur_pm::IssueUpdate)>,
+    ) -> anyhow::Result<spur_pm::AtomicUpdateOutcome> {
+        anyhow::bail!("injected atomic review write failure")
     }
 
     async fn add_dependency(&self, issue_id: &str, depends_on_id: &str) -> anyhow::Result<()> {

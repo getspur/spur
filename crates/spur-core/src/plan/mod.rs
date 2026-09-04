@@ -51,7 +51,7 @@ pub mod staging;
 #[doc(hidden)]
 pub mod test_util;
 
-use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -4574,6 +4574,14 @@ pub trait PmLike: Send + Sync + 'static {
         anyhow::bail!("PmLike::create_issue is not implemented for this test fake")
     }
     async fn update_issue(&self, id: &str, update: spur_pm::IssueUpdate) -> anyhow::Result<()>;
+    async fn update_issues_atomically(
+        &self,
+        _idempotency_key: &str,
+        _preconditions: Vec<spur_pm::AtomicUpdatePrecondition>,
+        _updates: Vec<(String, spur_pm::IssueUpdate)>,
+    ) -> anyhow::Result<spur_pm::AtomicUpdateOutcome> {
+        anyhow::bail!("PmLike::update_issues_atomically is not implemented for this test fake")
+    }
     async fn add_dependency(&self, _issue_id: &str, _depends_on_id: &str) -> anyhow::Result<()> {
         anyhow::bail!("PmLike::add_dependency is not implemented for this test fake")
     }
@@ -4623,6 +4631,15 @@ impl PmLike for spur_pm::PmService {
     async fn update_issue(&self, id: &str, update: spur_pm::IssueUpdate) -> anyhow::Result<()> {
         spur_pm::PmService::update_issue(self, id, update).await
     }
+    async fn update_issues_atomically(
+        &self,
+        idempotency_key: &str,
+        preconditions: Vec<spur_pm::AtomicUpdatePrecondition>,
+        updates: Vec<(String, spur_pm::IssueUpdate)>,
+    ) -> anyhow::Result<spur_pm::AtomicUpdateOutcome> {
+        spur_pm::PmService::update_issues_atomically(self, idempotency_key, preconditions, updates)
+            .await
+    }
     async fn add_dependency(&self, issue_id: &str, depends_on_id: &str) -> anyhow::Result<()> {
         spur_pm::PmService::add_dependency(self, issue_id, depends_on_id).await
     }
@@ -4668,8 +4685,26 @@ pub enum ReviewWriteMode {
     NonAdvisory,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-struct ReviewBeadsVersion(u64);
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ReviewBeadsVersion(BTreeMap<String, u64>);
+
+impl ReviewBeadsVersion {
+    fn total(&self) -> u64 {
+        self.0.values().sum()
+    }
+
+    fn preconditions(&self) -> Vec<spur_pm::AtomicUpdatePrecondition> {
+        self.0
+            .iter()
+            .map(
+                |(issue_id, expected_comment_count)| spur_pm::AtomicUpdatePrecondition {
+                    issue_id: issue_id.clone(),
+                    expected_comment_count: *expected_comment_count,
+                },
+            )
+            .collect()
+    }
+}
 
 const REVIEW_WRITE_BACKOFFS: [Duration; 3] = [
     Duration::from_millis(100),
@@ -5265,19 +5300,20 @@ async fn review_beads_version(
     let Some(advanced) = pm.advanced() else {
         return Err("non-advisory review writes require beads advanced read-back".to_string());
     };
-    let mut total = 0u64;
+    let mut counts = BTreeMap::new();
     for issue_id in issue_ids {
         let comments = advanced.list_comments(issue_id).await.map_err(|error| {
             format!("read-back comments for issue '{issue_id}' failed: {error}")
         })?;
-        total += comments.len() as u64;
+        counts.insert(issue_id.clone(), comments.len() as u64);
     }
-    Ok(ReviewBeadsVersion(total))
+    Ok(ReviewBeadsVersion(counts))
 }
 
 async fn apply_review_ops_nonadvisory(
     pm: &dyn PmLike,
     feature_gate: &spur_license::FeatureGate,
+    idempotency_key: &str,
     ops: Vec<PendingBeadsOp>,
 ) -> Result<(), String> {
     if ops.is_empty() {
@@ -5286,52 +5322,51 @@ async fn apply_review_ops_nonadvisory(
 
     let issue_ids: BTreeSet<String> = ops.iter().map(|op| op.issue_id.clone()).collect();
     let before = review_beads_version(pm, feature_gate, &issue_ids).await?;
+    let preconditions = before.preconditions();
     let mut last_error = String::new();
-    let mut succeeded = vec![false; ops.len()];
+    let updates: Vec<(String, spur_pm::IssueUpdate)> =
+        ops.into_iter().map(|op| (op.issue_id, op.update)).collect();
 
     for (attempt_idx, backoff) in REVIEW_WRITE_BACKOFFS.iter().enumerate() {
         let attempt_no = attempt_idx + 1;
-        let mut write_failed = false;
-        for (op_idx, op) in ops.iter().enumerate() {
-            if succeeded[op_idx] {
-                continue;
-            }
-            if let Err(error) = apply_issue_update(pm, &op.issue_id, op.update.clone()).await {
-                write_failed = true;
+        match pm
+            .update_issues_atomically(idempotency_key, preconditions.clone(), updates.clone())
+            .await
+        {
+            Err(error) => {
                 last_error = format!(
-                    "non-advisory review write attempt {attempt_no}/{} failed for issue '{}': {error}",
-                    REVIEW_WRITE_BACKOFFS.len(),
-                    op.issue_id
+                    "non-advisory atomic review write attempt {attempt_no}/{} failed: {error}",
+                    REVIEW_WRITE_BACKOFFS.len()
                 );
                 warn!("{last_error}");
-                break;
             }
-            // update_issue(comment=...) appends to beads. Track per-op success
-            // so retrying a later failure does not duplicate audit comments.
-            succeeded[op_idx] = true;
-        }
-
-        if !write_failed {
-            // INV-S1: only the caller may install `candidate_state` in the
-            // cache, and only after this read-back proves the substrate
-            // version advanced. INV-S4: the audit ops above are in the same
-            // bounded write batch as the task status/label mutation.
-            match review_beads_version(pm, feature_gate, &issue_ids).await {
-                Ok(after) if after > before => return Ok(()),
-                Ok(after) => {
-                    last_error = format!(
-                        "non-advisory review write attempt {attempt_no}/{} did not advance BeadsVersion (before: {before:?}, after: {after:?})",
-                        REVIEW_WRITE_BACKOFFS.len()
-                    );
-                }
-                Err(error) => {
-                    last_error = format!(
-                        "non-advisory review write attempt {attempt_no}/{} read-back failed: {error}",
-                        REVIEW_WRITE_BACKOFFS.len()
-                    );
-                }
+            Ok(spur_pm::AtomicUpdateOutcome::AlreadyApplied) => {
+                // Reading the durable marker in a later transaction proves
+                // that this exact payload committed on an earlier attempt.
+                return Ok(());
             }
-            warn!("{last_error}");
+            Ok(spur_pm::AtomicUpdateOutcome::Applied) => {
+                // INV-S1: only the caller may install `candidate_state` in
+                // cache after this post-commit substrate read-back. INV-S4:
+                // status, labels, human comments, and audit sentinels shared
+                // the atomic update above.
+                match review_beads_version(pm, feature_gate, &issue_ids).await {
+                    Ok(after) if after.total() > before.total() => return Ok(()),
+                    Ok(after) => {
+                        last_error = format!(
+                            "non-advisory atomic review write attempt {attempt_no}/{} did not advance BeadsVersion (before: {before:?}, after: {after:?})",
+                            REVIEW_WRITE_BACKOFFS.len()
+                        );
+                    }
+                    Err(error) => {
+                        last_error = format!(
+                            "non-advisory atomic review write attempt {attempt_no}/{} read-back failed: {error}",
+                            REVIEW_WRITE_BACKOFFS.len()
+                        );
+                    }
+                }
+                warn!("{last_error}");
+            }
         }
 
         if attempt_no < REVIEW_WRITE_BACKOFFS.len() {
@@ -5357,6 +5392,9 @@ pub async fn handle_review_task_with_write_mode(
     feature_gate: Arc<spur_license::FeatureGate>,
     write_mode: ReviewWriteMode,
 ) -> Result<serde_json::Value, String> {
+    if matches!(write_mode, ReviewWriteMode::NonAdvisory) && pm.is_none() {
+        return Err("non-advisory review writes require a PM backend".to_string());
+    }
     let pm_closed_status = pm.as_deref().map(|p| p.closed_status().to_string());
 
     // 1) Sync mutation under lock — no .await inside this block.
@@ -5379,6 +5417,17 @@ pub async fn handle_review_task_with_write_mode(
         )
         .map(|outcome| (outcome, candidate))
     }?; // lock released here.
+
+    if matches!(write_mode, ReviewWriteMode::NonAdvisory)
+        && candidate_state
+            .tasks
+            .iter()
+            .find(|entry| entry.spec.task_id == task_id)
+            .and_then(|entry| entry.spec.issue_id.as_deref())
+            .is_none()
+    {
+        return Err("non-advisory review writes require a durable task issue".to_string());
+    }
 
     // 2) Async beads I/O — outside the lock.
     if let Some(pm) = pm.as_deref() {
@@ -5403,7 +5452,30 @@ pub async fn handle_review_task_with_write_mode(
                         .into_iter()
                         .flat_map(|emit| emit.into_beads_ops(epic_id)),
                 );
-                apply_review_ops_nonadvisory(pm, feature_gate.as_ref(), ops).await?;
+                let attempt = candidate_state
+                    .tasks
+                    .iter()
+                    .find(|entry| entry.spec.task_id == task_id)
+                    .map_or(0, |entry| entry.attempt);
+                let maker_delegation_id = candidate_state
+                    .tasks
+                    .iter()
+                    .find(|entry| entry.spec.task_id == task_id)
+                    .and_then(|entry| entry.last_delegation_id.as_deref())
+                    .unwrap_or_default();
+                // All possible decisions for one maker attempt intentionally
+                // share a key. A competing terminal decision therefore
+                // conflicts instead of appending a contradictory audit.
+                let idempotency_key = serde_json::to_string(&(
+                    "review_task",
+                    plan_id,
+                    task_id,
+                    attempt,
+                    maker_delegation_id,
+                ))
+                .map_err(|error| format!("encode review transaction key failed: {error}"))?;
+                apply_review_ops_nonadvisory(pm, feature_gate.as_ref(), &idempotency_key, ops)
+                    .await?;
             }
         }
 
@@ -7900,6 +7972,12 @@ mod tests {
         comments: Mutex<std::collections::HashMap<String, Vec<String>>>,
         updates: Mutex<Vec<(String, spur_pm::IssueUpdate)>>,
         fail_updates_for: Mutex<Vec<String>>,
+        atomic_attempts: Mutex<Vec<(String, Vec<(String, spur_pm::IssueUpdate)>)>>,
+        applied_atomic_payloads: Mutex<std::collections::HashMap<String, String>>,
+        fail_atomic_updates: Mutex<usize>,
+        fail_after_atomic_commits: Mutex<usize>,
+        atomic_barrier: Mutex<Option<Arc<tokio::sync::Barrier>>>,
+        atomic_barrier_waits: std::sync::atomic::AtomicUsize,
     }
 
     impl ReviewWritePm {
@@ -7909,6 +7987,12 @@ mod tests {
                 comments: Mutex::new(std::collections::HashMap::new()),
                 updates: Mutex::new(Vec::new()),
                 fail_updates_for: Mutex::new(Vec::new()),
+                atomic_attempts: Mutex::new(Vec::new()),
+                applied_atomic_payloads: Mutex::new(std::collections::HashMap::new()),
+                fail_atomic_updates: Mutex::new(0),
+                fail_after_atomic_commits: Mutex::new(0),
+                atomic_barrier: Mutex::new(None),
+                atomic_barrier_waits: std::sync::atomic::AtomicUsize::new(0),
             }
         }
 
@@ -7924,6 +8008,25 @@ mod tests {
                 .lock()
                 .expect("fail updates lock")
                 .push(issue_id.to_string());
+        }
+
+        fn fail_next_atomic_update(&self) {
+            *self
+                .fail_atomic_updates
+                .lock()
+                .expect("fail atomic updates lock") += 1;
+        }
+
+        fn fail_after_next_atomic_commit(&self) {
+            *self
+                .fail_after_atomic_commits
+                .lock()
+                .expect("fail after atomic commits lock") += 1;
+        }
+
+        fn synchronize_first_two_atomic_calls(&self) {
+            *self.atomic_barrier.lock().expect("atomic barrier lock") =
+                Some(Arc::new(tokio::sync::Barrier::new(2)));
         }
 
         fn comments_for(&self, issue_id: &str) -> Vec<String> {
@@ -8004,6 +8107,86 @@ mod tests {
                     .push(comment);
             }
             Ok(())
+        }
+
+        async fn update_issues_atomically(
+            &self,
+            idempotency_key: &str,
+            preconditions: Vec<spur_pm::AtomicUpdatePrecondition>,
+            updates: Vec<(String, spur_pm::IssueUpdate)>,
+        ) -> anyhow::Result<spur_pm::AtomicUpdateOutcome> {
+            self.atomic_attempts
+                .lock()
+                .expect("atomic attempts lock")
+                .push((idempotency_key.to_string(), updates.clone()));
+
+            let barrier = self
+                .atomic_barrier
+                .lock()
+                .expect("atomic barrier lock")
+                .clone();
+            if let Some(barrier) = barrier {
+                let wait_index = self
+                    .atomic_barrier_waits
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if wait_index < 2 {
+                    barrier.wait().await;
+                }
+            }
+
+            let mut failures = self
+                .fail_atomic_updates
+                .lock()
+                .expect("fail atomic updates lock");
+            if *failures > 0 {
+                *failures -= 1;
+                anyhow::bail!("planned atomic update failure");
+            }
+            drop(failures);
+
+            let payload = serde_json::to_string(&updates)?;
+            let mut applied = self
+                .applied_atomic_payloads
+                .lock()
+                .expect("applied atomic payloads lock");
+            if let Some(existing) = applied.get(idempotency_key) {
+                anyhow::ensure!(
+                    existing == &payload,
+                    "atomic update key reused with a different payload"
+                );
+                return Ok(spur_pm::AtomicUpdateOutcome::AlreadyApplied);
+            }
+
+            let comments = self.comments.lock().expect("comments lock");
+            for precondition in &preconditions {
+                let actual = comments.get(&precondition.issue_id).map_or(0, Vec::len) as u64;
+                anyhow::ensure!(
+                    actual == precondition.expected_comment_count,
+                    "atomic precondition failed for '{}'",
+                    precondition.issue_id
+                );
+            }
+            drop(comments);
+
+            let mut comments = self.comments.lock().expect("comments lock");
+            for (issue_id, update) in updates {
+                if let Some(comment) = update.comment {
+                    comments.entry(issue_id).or_default().push(comment);
+                }
+            }
+            applied.insert(idempotency_key.to_string(), payload);
+            drop(comments);
+            drop(applied);
+
+            let mut failures = self
+                .fail_after_atomic_commits
+                .lock()
+                .expect("fail after atomic commits lock");
+            if *failures > 0 {
+                *failures -= 1;
+                anyhow::bail!("planned response loss after atomic commit");
+            }
+            Ok(spur_pm::AtomicUpdateOutcome::Applied)
         }
 
         fn closed_status(&self) -> &str {
@@ -8275,9 +8458,9 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn apply_review_ops_nonadvisory_retries_failed_suffix_without_duplicate_comments() {
+    async fn apply_review_ops_nonadvisory_retries_whole_atomic_transaction() {
         let pm = ReviewWritePm::with_advanced();
-        pm.fail_next_update_for("bd-2");
+        pm.fail_next_atomic_update();
         let ops = vec![
             PendingBeadsOp {
                 issue_id: "bd-1".into(),
@@ -8295,29 +8478,127 @@ mod tests {
             },
         ];
 
-        apply_review_ops_nonadvisory(&pm, pro_feature_gate().as_ref(), ops)
+        apply_review_ops_nonadvisory(&pm, pro_feature_gate().as_ref(), "review-key", ops)
             .await
             .expect("retry should succeed after read-back advances");
 
         assert_eq!(pm.comments_for("bd-1"), vec!["first audit".to_string()]);
         assert_eq!(pm.comments_for("bd-2"), vec!["second audit".to_string()]);
-        let updates = pm.updates.lock().expect("updates lock");
+        assert!(pm.updates.lock().expect("updates lock").is_empty());
+        let attempts = pm.atomic_attempts.lock().expect("atomic attempts lock");
+        assert_eq!(attempts.len(), 2, "the complete transaction should retry");
+        assert_eq!(attempts[0].0, "review-key");
+        assert_eq!(attempts[1].0, "review-key");
+        assert_eq!(attempts[0].1.len(), 2);
+        assert_eq!(attempts[1].1.len(), 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn apply_review_ops_nonadvisory_recovers_after_commit_response_is_lost() {
+        let pm = ReviewWritePm::with_advanced();
+        pm.fail_after_next_atomic_commit();
+        let ops = vec![PendingBeadsOp {
+            issue_id: "bd-1".into(),
+            update: spur_pm::IssueUpdate {
+                comment: Some("approval audit".into()),
+                ..Default::default()
+            },
+        }];
+
+        apply_review_ops_nonadvisory(
+            &pm,
+            pro_feature_gate().as_ref(),
+            "ambiguous-review-key",
+            ops,
+        )
+        .await
+        .expect("idempotent retry should observe the durable commit marker");
+
+        assert_eq!(pm.comments_for("bd-1"), vec!["approval audit".to_string()]);
         assert_eq!(
-            updates
-                .iter()
-                .filter(|(issue_id, _)| issue_id == "bd-1")
-                .count(),
-            1,
-            "successful prefix op must not be duplicated on retry"
+            pm.atomic_attempts
+                .lock()
+                .expect("atomic attempts lock")
+                .len(),
+            2
         );
-        assert_eq!(
-            updates
-                .iter()
-                .filter(|(issue_id, _)| issue_id == "bd-2")
-                .count(),
-            2,
-            "failed suffix op should be retried once"
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn concurrent_conflicting_reviews_commit_exactly_one_decision() {
+        let mut entry = test_entry(
+            "T1",
+            &[],
+            PlanTaskStatus::AwaitingReview {
+                summary: Some("done".into()),
+            },
         );
+        entry.spec.issue_id = Some("bd-1".into());
+        entry.last_delegation_id = Some("del-1".into());
+        let plan_arc = Arc::new(tokio::sync::Mutex::new(test_state(
+            "plan-conflicting-review",
+            vec![entry],
+        )));
+        let pm_impl = Arc::new(ReviewWritePm::with_advanced());
+        pm_impl.synchronize_first_two_atomic_calls();
+        let approve_pm: Arc<dyn PmLike> = pm_impl.clone();
+        let reject_pm: Arc<dyn PmLike> = pm_impl.clone();
+
+        let approve = handle_review_task_with_write_mode(
+            plan_arc.clone(),
+            "plan-conflicting-review",
+            "T1",
+            "approve",
+            Some("approve"),
+            false,
+            Some(approve_pm),
+            None,
+            None,
+            None,
+            pro_feature_gate(),
+            ReviewWriteMode::NonAdvisory,
+        );
+        let reject = handle_review_task_with_write_mode(
+            plan_arc.clone(),
+            "plan-conflicting-review",
+            "T1",
+            "reject",
+            Some("reject"),
+            false,
+            Some(reject_pm),
+            None,
+            None,
+            None,
+            pro_feature_gate(),
+            ReviewWriteMode::NonAdvisory,
+        );
+        let (approve_result, reject_result) = tokio::join!(approve, reject);
+
+        assert_ne!(
+            approve_result.is_ok(),
+            reject_result.is_ok(),
+            "exactly one competing decision must commit"
+        );
+        let comments = pm_impl.comments_for("bd-1");
+        let terminal_audits = comments
+            .iter()
+            .filter_map(|comment| crate::plan::audit_sentinel::parse_comment(comment))
+            .filter_map(Result::ok)
+            .filter(|audit| {
+                matches!(
+                    audit,
+                    crate::plan::audit_sentinel::AuditSentinelKind::Approval { .. }
+                        | crate::plan::audit_sentinel::AuditSentinelKind::Rejection { .. }
+                )
+            })
+            .count();
+        assert_eq!(terminal_audits, 1);
+
+        let state = plan_arc.lock().await;
+        assert!(matches!(
+            (&state.tasks[0].status, approve_result.is_ok()),
+            (PlanTaskStatus::Approved { .. }, true) | (PlanTaskStatus::Rejected { .. }, false)
+        ));
     }
 
     #[tokio::test]
@@ -8430,6 +8711,93 @@ mod tests {
         assert!(matches!(
             state.merge_state,
             PlanMergeState::Succeeded { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn handle_review_task_nonadvisory_rejects_missing_pm_without_mutating_cache() {
+        let mut entry = test_entry(
+            "T1",
+            &[],
+            PlanTaskStatus::AwaitingReview {
+                summary: Some("done".into()),
+            },
+        );
+        entry.spec.issue_id = Some("bd-1".into());
+        entry.last_delegation_id = Some("del-1".into());
+        let plan_arc = Arc::new(tokio::sync::Mutex::new(test_state(
+            "plan-nonadvisory-no-pm",
+            vec![entry],
+        )));
+
+        let err = handle_review_task_with_write_mode(
+            plan_arc.clone(),
+            "plan-nonadvisory-no-pm",
+            "T1",
+            "approve",
+            Some("looks good"),
+            false,
+            None,
+            None,
+            None,
+            None,
+            pro_feature_gate(),
+            ReviewWriteMode::NonAdvisory,
+        )
+        .await
+        .expect_err("non-advisory review cannot succeed without durable storage");
+
+        assert!(
+            err.contains("require a PM backend"),
+            "unexpected error: {err}"
+        );
+        let state = plan_arc.lock().await;
+        assert!(matches!(
+            state.tasks[0].status,
+            PlanTaskStatus::AwaitingReview { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn handle_review_task_nonadvisory_rejects_missing_issue_without_mutating_cache() {
+        let entry = test_entry(
+            "T1",
+            &[],
+            PlanTaskStatus::AwaitingReview {
+                summary: Some("done".into()),
+            },
+        );
+        let plan_arc = Arc::new(tokio::sync::Mutex::new(test_state(
+            "plan-nonadvisory-no-issue",
+            vec![entry],
+        )));
+        let pm: Arc<dyn PmLike> = Arc::new(ReviewWritePm::with_advanced());
+
+        let err = handle_review_task_with_write_mode(
+            plan_arc.clone(),
+            "plan-nonadvisory-no-issue",
+            "T1",
+            "approve",
+            Some("looks good"),
+            false,
+            Some(pm),
+            None,
+            None,
+            None,
+            pro_feature_gate(),
+            ReviewWriteMode::NonAdvisory,
+        )
+        .await
+        .expect_err("non-advisory review cannot succeed without a durable task issue");
+
+        assert!(
+            err.contains("require a durable task issue"),
+            "unexpected error: {err}"
+        );
+        let state = plan_arc.lock().await;
+        assert!(matches!(
+            state.tasks[0].status,
+            PlanTaskStatus::AwaitingReview { .. }
         ));
     }
 
