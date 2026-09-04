@@ -62,6 +62,7 @@ mod session_attach_guard_transfer_tests {
     use std::pin::Pin;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
+    use tokio::sync::Notify;
 
     struct NoopConnection;
 
@@ -105,6 +106,52 @@ mod session_attach_guard_transfer_tests {
 
     struct HangingShutdownConnection {
         dropped: Arc<AtomicBool>,
+    }
+
+    struct DropOrderProbe {
+        dropped: Arc<AtomicBool>,
+        dropped_notify: Arc<Notify>,
+    }
+
+    impl Drop for DropOrderProbe {
+        fn drop(&mut self) {
+            self.dropped.store(true, Ordering::SeqCst);
+            self.dropped_notify.notify_one();
+        }
+    }
+
+    #[tokio::test]
+    async fn transport_drop_precedes_held_cleanup_barrier() {
+        let dropped = Arc::new(AtomicBool::new(false));
+        let dropped_notify = Arc::new(Notify::new());
+        let cleanup_started = Arc::new(Notify::new());
+        let cleanup_release = Arc::new(Notify::new());
+        let task = tokio::spawn(drop_transport_ownership_then_join(
+            DropOrderProbe {
+                dropped: Arc::clone(&dropped),
+                dropped_notify: Arc::clone(&dropped_notify),
+            },
+            std::future::ready(()),
+            {
+                let cleanup_started = Arc::clone(&cleanup_started);
+                let cleanup_release = Arc::clone(&cleanup_release);
+                async move {
+                    cleanup_started.notify_one();
+                    cleanup_release.notified().await;
+                }
+            },
+        ));
+
+        dropped_notify.notified().await;
+        cleanup_started.notified().await;
+        assert!(dropped.load(Ordering::SeqCst));
+        assert!(!task.is_finished(), "cleanup returned before barrier ack");
+
+        cleanup_release.notify_one();
+        tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .expect("cleanup barrier did not acknowledge")
+            .expect("cleanup barrier task panicked");
     }
 
     impl Drop for HangingShutdownConnection {

@@ -3948,6 +3948,46 @@ mod cancel_stream_variant_tests {
 }
 
 #[cfg(test)]
+mod immediate_shutdown_ingress_tests {
+    use super::{admit_interactive_operation, await_interactive_operation};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use tokio_util::sync::CancellationToken;
+
+    #[test]
+    fn cancelled_token_fences_ready_scheduler_admission() {
+        let shutdown = CancellationToken::new();
+        shutdown.cancel();
+        let admitted = AtomicBool::new(false);
+
+        let result = admit_interactive_operation(&shutdown, || {
+            admitted.store(true, Ordering::SeqCst);
+            42
+        });
+
+        assert_eq!(result, None);
+        assert!(!admitted.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn cancelled_token_wins_over_ready_async_admission() {
+        let shutdown = CancellationToken::new();
+        shutdown.cancel();
+        let polled = Arc::new(AtomicBool::new(false));
+        let future_polled = Arc::clone(&polled);
+
+        let result = await_interactive_operation(&shutdown, async move {
+            future_polled.store(true, Ordering::SeqCst);
+            42
+        })
+        .await;
+
+        assert_eq!(result, None);
+        assert!(!polled.load(Ordering::SeqCst));
+    }
+}
+
+#[cfg(test)]
 mod base_spec_dispatch_tests {
     use super::delegation::base_spec::{
         emit_dispatch_overlay_applied, extract_overlays, resolve_base_branch,
