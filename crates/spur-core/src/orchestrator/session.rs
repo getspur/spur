@@ -1078,6 +1078,49 @@ mod session_attach_guard_transfer_tests {
         );
     }
 
+    #[tokio::test]
+    async fn partial_brain_startup_shutdown_joins_every_owned_resource() {
+        let transport_dropped = Arc::new(AtomicBool::new(false));
+        let transport_drop_notify = Arc::new(Notify::new());
+        let guard_dropped = Arc::new(AtomicBool::new(false));
+        let guard_drop_notify = Arc::new(Notify::new());
+        let guard_started = Arc::new(Notify::new());
+        let guard = AbortOnDropHandle::new(tokio::spawn({
+            let guard_dropped = Arc::clone(&guard_dropped);
+            let guard_drop_notify = Arc::clone(&guard_drop_notify);
+            let guard_started = Arc::clone(&guard_started);
+            async move {
+                let _drop_probe = DropOrderProbe {
+                    dropped: guard_dropped,
+                    dropped_notify: guard_drop_notify,
+                };
+                guard_started.notify_one();
+                std::future::pending::<()>().await;
+            }
+        }));
+        guard_started.notified().await;
+        let server = Arc::new(ImmediateMcpProbe::default());
+
+        shutdown_partial_brain_startup(
+            DropOrderProbe {
+                dropped: Arc::clone(&transport_dropped),
+                dropped_notify: transport_drop_notify,
+            },
+            Arc::clone(&server),
+            guard,
+        )
+        .await;
+
+        assert!(transport_dropped.load(Ordering::SeqCst));
+        assert!(server.marked_retiring.load(Ordering::SeqCst));
+        assert!(server.workers_cancelled.load(Ordering::SeqCst));
+        assert!(server.force_waited.load(Ordering::SeqCst));
+        assert!(
+            guard_dropped.load(Ordering::SeqCst),
+            "partial-startup cleanup returned before the root guard acknowledged abort"
+        );
+    }
+
     #[test]
     fn reconnect_already_attached_maps_to_attach_rejected_event() {
         let holder = spur_acp::session_lock::HolderInfo {
