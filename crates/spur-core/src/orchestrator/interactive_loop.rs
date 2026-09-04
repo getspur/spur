@@ -75,7 +75,7 @@ async fn drain_history_stream_or_shutdown<F>(
     mut on_notification: F,
 ) -> Option<bool>
 where
-    F: FnMut(spur_acp::SessionNotification),
+    F: FnMut(spur_acp::SessionNotification) + Send,
 {
     let mut delivered = false;
     loop {
@@ -1008,16 +1008,16 @@ impl Orchestrator {
                                     };
                                     settle.emitted > 0
                                 } else {
+                                    let history_funnel = self.funnel.clone();
+                                    let history_session = spur_id.clone();
                                     let Some(delivered) = drain_history_stream_or_shutdown(
                                         &shutdown_token,
                                         &mut history_stream,
-                                        |notification| {
-                                            self.emit(SpurEvent::now(
-                                                SpurEventBody::AgentNotification {
-                                                    session: spur_id.clone(),
-                                                    notification: Box::new(notification),
-                                                },
-                                            ));
+                                        move |notification| {
+                                            history_funnel.emit(SpurEventBody::AgentNotification {
+                                                session: history_session.clone(),
+                                                notification: Box::new(notification),
+                                            });
                                         },
                                     )
                                     .await
