@@ -1045,6 +1045,94 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn combined_status_label_comment_update_rolls_back_after_comment_failure() {
+        let dir = TempDir::new().unwrap();
+        let adapter = BeadsCrateAdapter::open(dir.path(), AdapterConfig::default())
+            .await
+            .unwrap();
+
+        let id = adapter
+            .create_issue(IssueCreate {
+                title: "Review target".into(),
+                labels: vec!["ready-for-review".into()],
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        let dirty_issue_id = id.clone();
+        adapter
+            .write(move |storage| {
+                storage.clear_dirty_issues(&[dirty_issue_id])?;
+                storage.mutate("inject_terminal_audit_failure", "test", |tx, _ctx| {
+                    tx.execute_batch(
+                        "CREATE TRIGGER fail_terminal_audit_insert
+                         BEFORE INSERT ON comments
+                         WHEN NEW.text LIKE '[[spur-audit v1]]%'
+                         BEGIN
+                           SELECT RAISE(ABORT, 'injected terminal audit failure');
+                         END;",
+                    )?;
+                    Ok(())
+                })?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let baseline_issue_id = id.clone();
+        let (updated_at_before, event_count_before) = adapter
+            .read(move |storage| {
+                let issue = storage
+                    .get_issue(&baseline_issue_id)?
+                    .expect("created issue must exist");
+                let events = storage.get_events(&baseline_issue_id, 1_000)?;
+                Ok((issue.updated_at, events.len()))
+            })
+            .await
+            .unwrap();
+
+        let audit = "[[spur-audit v1]]\n{\"kind\":\"approval\"}";
+        let error = adapter
+            .update_issue(
+                &id,
+                IssueUpdate {
+                    status: Some("closed".into()),
+                    remove_labels: vec!["ready-for-review".into()],
+                    comment: Some(audit.into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect_err("injected audit failure must reject the complete review update");
+        assert!(error
+            .to_string()
+            .contains("injected terminal audit failure"));
+
+        let issue = adapter.get_issue(&id).await.unwrap();
+        let stored_issue_id = id.clone();
+        let (updated_at_after, comments, events, dirty_ids) = adapter
+            .read(move |storage| {
+                let issue = storage
+                    .get_issue(&stored_issue_id)?
+                    .expect("created issue must remain after rollback");
+                let comments = storage.get_comments(&stored_issue_id)?;
+                let events = storage.get_events(&stored_issue_id, 1_000)?;
+                let dirty_ids = storage.get_dirty_issue_ids()?;
+                Ok((issue.updated_at, comments, events, dirty_ids))
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(issue.status, "open", "status must roll back with audit");
+        assert!(issue.labels.contains(&"ready-for-review".to_string()));
+        assert!(comments.iter().all(|comment| comment.body != audit));
+        assert_eq!(events.len(), event_count_before);
+        assert_eq!(updated_at_after, updated_at_before);
+        assert!(!dirty_ids.contains(&id));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn add_dependency_links_two_issues() {
         let dir = TempDir::new().unwrap();
         let adapter = BeadsCrateAdapter::open(dir.path(), AdapterConfig::default())
