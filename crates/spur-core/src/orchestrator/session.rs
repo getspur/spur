@@ -709,7 +709,7 @@ mod session_attach_guard_transfer_tests {
             spur_session_id: SessionId("spur-session".to_string()),
             notebook_socket_nonce: "test-nonce".to_string(),
             brain_name: "test-brain".to_string(),
-            delegation_handle: tokio::spawn(async {}),
+            delegation_handle: AbortOnDropHandle::new(tokio::spawn(async {})),
             mcp_server: None,
             mcp_guard: None,
             notification_pump_handle: None,
@@ -764,7 +764,7 @@ mod session_attach_guard_transfer_tests {
             spur_session_id: SessionId("spur-retired-session".to_string()),
             notebook_socket_nonce: "test-nonce".to_string(),
             brain_name: "test-brain".to_string(),
-            delegation_handle: tokio::spawn(async {}),
+            delegation_handle: AbortOnDropHandle::new(tokio::spawn(async {})),
             mcp_server: None,
             mcp_guard: None,
             notification_pump_handle: None,
@@ -825,7 +825,7 @@ mod session_attach_guard_transfer_tests {
             spur_session_id: SessionId("spur-retired-session".to_string()),
             notebook_socket_nonce: "test-nonce".to_string(),
             brain_name: "test-brain".to_string(),
-            delegation_handle: tokio::spawn(async {}),
+            delegation_handle: AbortOnDropHandle::new(tokio::spawn(async {})),
             mcp_server: None,
             mcp_guard: None,
             notification_pump_handle: None,
@@ -887,7 +887,7 @@ mod session_attach_guard_transfer_tests {
             spur_session_id: SessionId("spur-retired-session".to_string()),
             notebook_socket_nonce: "test-nonce".to_string(),
             brain_name: "test-brain".to_string(),
-            delegation_handle: tokio::spawn(async {}),
+            delegation_handle: AbortOnDropHandle::new(tokio::spawn(async {})),
             mcp_server: None,
             mcp_guard: None,
             notification_pump_handle: None,
@@ -993,10 +993,29 @@ mod session_attach_guard_transfer_tests {
 
         let retired_session = SessionId("shutdown-session".to_string());
         let dropped = Arc::new(AtomicBool::new(false));
+        let pump_dropped = Arc::new(AtomicBool::new(false));
+        let pump_drop_notify = Arc::new(Notify::new());
+        let pump_started = Arc::new(Notify::new());
+        let pump_task = tokio::spawn({
+            let pump_dropped = Arc::clone(&pump_dropped);
+            let pump_drop_notify = Arc::clone(&pump_drop_notify);
+            let pump_started = Arc::clone(&pump_started);
+            async move {
+                let _probe = DropOrderProbe {
+                    dropped: pump_dropped,
+                    dropped_notify: pump_drop_notify,
+                };
+                pump_started.notify_one();
+                std::future::pending::<()>().await;
+            }
+        });
+        pump_started.notified().await;
         let mut session = fixture_brain_session(retired_session.0.as_str());
         session.connection = Box::new(HangingShutdownConnection {
             dropped: Arc::clone(&dropped),
         });
+        session.notification_pump_handle =
+            Some(crate::notification_pump::SessionNotificationPump::from_task_for_test(pump_task));
         let mut brain = Some(session);
         let mut agent_connection = None;
         let mut scheduler = crate::scheduler::BrainScheduler::new(
@@ -1023,6 +1042,10 @@ mod session_attach_guard_transfer_tests {
         assert!(
             dropped.load(Ordering::SeqCst),
             "process-exit shutdown must drop transport ownership"
+        );
+        assert!(
+            pump_dropped.load(Ordering::SeqCst),
+            "process-exit shutdown must join the aborted notification pump"
         );
 
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
@@ -1123,7 +1146,7 @@ mod session_attach_guard_transfer_tests {
         let delegation_dropped = Arc::new(AtomicBool::new(false));
         let delegation_drop_notify = Arc::new(Notify::new());
         let delegation_started = Arc::new(Notify::new());
-        let delegation_handle = tokio::spawn({
+        let delegation_handle = AbortOnDropHandle::new(tokio::spawn({
             let delegation_dropped = Arc::clone(&delegation_dropped);
             let delegation_drop_notify = Arc::clone(&delegation_drop_notify);
             let delegation_started = Arc::clone(&delegation_started);
@@ -1135,7 +1158,7 @@ mod session_attach_guard_transfer_tests {
                 delegation_started.notify_one();
                 std::future::pending::<()>().await;
             }
-        });
+        }));
         delegation_started.notified().await;
         let mut brain = Some(BrainSession {
             connection: Box::new(HangingCancelConnection {
@@ -1280,7 +1303,7 @@ mod session_attach_guard_transfer_tests {
             spur_session_id: SessionId(session_id.to_string()),
             notebook_socket_nonce: "test-nonce".to_string(),
             brain_name: "test-brain".to_string(),
-            delegation_handle: tokio::spawn(async {}),
+            delegation_handle: AbortOnDropHandle::new(tokio::spawn(async {})),
             mcp_server: None,
             mcp_guard: None,
             notification_pump_handle: None,
@@ -1680,7 +1703,7 @@ mod session_attach_guard_transfer_tests {
             spur_session_id: SessionId("spur-x".to_string()),
             notebook_socket_nonce: "test-nonce".to_string(),
             brain_name: "test-brain".to_string(),
-            delegation_handle: tokio::spawn(async {}),
+            delegation_handle: AbortOnDropHandle::new(tokio::spawn(async {})),
             mcp_server: None,
             mcp_guard: None,
             notification_pump_handle: None,
@@ -1763,7 +1786,7 @@ mod session_attach_guard_transfer_tests {
             spur_session_id: SessionId("spur-x".to_string()),
             notebook_socket_nonce: "test-nonce".to_string(),
             brain_name: "test-brain".to_string(),
-            delegation_handle: tokio::spawn(async {}),
+            delegation_handle: AbortOnDropHandle::new(tokio::spawn(async {})),
             mcp_server: None,
             mcp_guard: None,
             notification_pump_handle: None,
@@ -2491,6 +2514,7 @@ pub(super) async fn shutdown_mcp_server<S: RetirableMcpServer + ?Sized>(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(dead_code)] // Retained as the directly tested graceful-retirement primitive.
 pub(super) async fn retire_brain_session<S: RetirableMcpServer + ?Sized>(
     funnel: &crate::event_funnel::FunnelHandle,
     session: &SessionId,
@@ -2677,15 +2701,18 @@ impl Orchestrator {
     /// retired ACP session id. Other transports no-op here because their
     /// `cancel()` implementations terminate the subprocess instead of freeing
     /// one cooperative ACP session.
-    async fn shutdown_taken_brain_immediately(
+    pub(super) async fn shutdown_taken_brain_immediately(
         &mut self,
         mut active_brain: BrainSession,
         agent_connection: &mut Option<ActiveConnection>,
     ) {
-        if let Some(pump) = active_brain.notification_pump_handle.take() {
-            pump.abort();
-            drop(pump);
-        }
+        self.self_held.remove(&spur_acp::BrainSessionId::from(
+            active_brain.spur_session_id.clone(),
+        ));
+        self.remove_notebook_socket(&spur_acp::BrainSessionId::from(
+            active_brain.spur_session_id.clone(),
+        ));
+        let notification_pump = active_brain.notification_pump_handle.take();
         active_brain.delegation_handle.abort();
         let delegation_handle = active_brain.delegation_handle;
 
@@ -2701,12 +2728,22 @@ impl Orchestrator {
         let delegation_shutdown = async move {
             let _ = delegation_handle.await;
         };
-        let resource_shutdown = shutdown_brain_resources_immediately(
-            &active_brain.spur_session_id,
-            &mut active_brain.mcp_server,
-            Some(&mut active_brain.mcp_guard),
-            &self.worker_mcp_servers,
-        );
+        let resource_shutdown = async {
+            let notification_shutdown = async move {
+                if let Some(pump) = notification_pump {
+                    let force = CancellationToken::new();
+                    force.cancel();
+                    let _ = pump.retire_until_forced(&force).await;
+                }
+            };
+            let mcp_shutdown = shutdown_brain_resources_immediately(
+                &active_brain.spur_session_id,
+                &mut active_brain.mcp_server,
+                Some(&mut active_brain.mcp_guard),
+                &self.worker_mcp_servers,
+            );
+            tokio::join!(notification_shutdown, mcp_shutdown);
+        };
         drop_transport_ownership_then_join(
             transport_ownership,
             delegation_shutdown,
@@ -3352,27 +3389,28 @@ impl Orchestrator {
                 None,
             );
         }
-        let delegation_handle = tokio::spawn(delegation::handle_delegations(
-            delegation_channel,
-            self.repo_root.clone(),
-            Arc::clone(&self.agent_configs),
-            max_concurrent,
-            self.config.worktree.clone(),
-            self.event_tx.clone(),
-            self.funnel.clone(),
-            self.review_sink.clone(),
-            self.pm_service.clone(),
-            self.mcp_feature_gate(),
-            self.cancellation_control.clone(),
-            self.peer_mailbox.clone(),
-            self.fault_injection_hooks.clone(),
-            std::time::Duration::from_secs(self.config.spur.dispatch_lease_secs),
-            std::time::Duration::from_secs(self.config.spur.dispatch_lease_heartbeat_secs),
-            self.config.mcp_servers.builtin_overrides.worker_mcp_enabled,
-            self.worker_mcp_fetcher_for(Arc::clone(&mcp_server)),
-            self.config.delegation.normalize.bypass_hooks,
-            tokio_util::sync::CancellationToken::new(),
-        ));
+        let delegation_handle =
+            AbortOnDropHandle::new(tokio::spawn(delegation::handle_delegations(
+                delegation_channel,
+                self.repo_root.clone(),
+                Arc::clone(&self.agent_configs),
+                max_concurrent,
+                self.config.worktree.clone(),
+                self.event_tx.clone(),
+                self.funnel.clone(),
+                self.review_sink.clone(),
+                self.pm_service.clone(),
+                self.mcp_feature_gate(),
+                self.cancellation_control.clone(),
+                self.peer_mailbox.clone(),
+                self.fault_injection_hooks.clone(),
+                std::time::Duration::from_secs(self.config.spur.dispatch_lease_secs),
+                std::time::Duration::from_secs(self.config.spur.dispatch_lease_heartbeat_secs),
+                self.config.mcp_servers.builtin_overrides.worker_mcp_enabled,
+                self.worker_mcp_fetcher_for(Arc::clone(&mcp_server)),
+                self.config.delegation.normalize.bypass_hooks,
+                tokio_util::sync::CancellationToken::new(),
+            )));
 
         // Spawn the vendor-extension notification pump (if the transport
         // supports it). Each payload becomes a `SpurEventBody::AgentExtNotification`
@@ -3819,27 +3857,28 @@ impl Orchestrator {
                 );
             }
         }
-        let delegation_handle = tokio::spawn(delegation::handle_delegations(
-            delegation_channel,
-            self.repo_root.clone(),
-            Arc::clone(&self.agent_configs),
-            max_concurrent,
-            self.config.worktree.clone(),
-            self.event_tx.clone(),
-            self.funnel.clone(),
-            self.review_sink.clone(),
-            self.pm_service.clone(),
-            self.mcp_feature_gate(),
-            self.cancellation_control.clone(),
-            self.peer_mailbox.clone(),
-            self.fault_injection_hooks.clone(),
-            std::time::Duration::from_secs(self.config.spur.dispatch_lease_secs),
-            std::time::Duration::from_secs(self.config.spur.dispatch_lease_heartbeat_secs),
-            self.config.mcp_servers.builtin_overrides.worker_mcp_enabled,
-            self.worker_mcp_fetcher_for(Arc::clone(&mcp_server)),
-            self.config.delegation.normalize.bypass_hooks,
-            tokio_util::sync::CancellationToken::new(),
-        ));
+        let delegation_handle =
+            AbortOnDropHandle::new(tokio::spawn(delegation::handle_delegations(
+                delegation_channel,
+                self.repo_root.clone(),
+                Arc::clone(&self.agent_configs),
+                max_concurrent,
+                self.config.worktree.clone(),
+                self.event_tx.clone(),
+                self.funnel.clone(),
+                self.review_sink.clone(),
+                self.pm_service.clone(),
+                self.mcp_feature_gate(),
+                self.cancellation_control.clone(),
+                self.peer_mailbox.clone(),
+                self.fault_injection_hooks.clone(),
+                std::time::Duration::from_secs(self.config.spur.dispatch_lease_secs),
+                std::time::Duration::from_secs(self.config.spur.dispatch_lease_heartbeat_secs),
+                self.config.mcp_servers.builtin_overrides.worker_mcp_enabled,
+                self.worker_mcp_fetcher_for(Arc::clone(&mcp_server)),
+                self.config.delegation.normalize.bypass_hooks,
+                tokio_util::sync::CancellationToken::new(),
+            )));
 
         // Pump vendor-extension notifications onto the event stream.
         if let Some(mut ext_rx) = connection.take_ext_notification_rx() {
@@ -3975,21 +4014,28 @@ impl Orchestrator {
             .remove(&spur_acp::BrainSessionId::from(spur_session_id.clone()));
         self.remove_notebook_socket(&spur_acp::BrainSessionId::from(spur_session_id.clone()));
 
-        if let Some(pump) = dead_brain.notification_pump_handle.take() {
-            pump.abort();
-            drop(pump);
-        }
+        let notification_pump = dead_brain.notification_pump_handle.take();
         dead_brain.delegation_handle.abort();
         let delegation_handle = dead_brain.delegation_handle;
         let delegation_shutdown = async move {
             let _ = delegation_handle.await;
         };
-        let resource_shutdown = shutdown_brain_resources_immediately(
-            &spur_session_id,
-            &mut dead_brain.mcp_server,
-            Some(&mut dead_brain.mcp_guard),
-            &self.worker_mcp_servers,
-        );
+        let resource_shutdown = async {
+            let notification_shutdown = async move {
+                if let Some(pump) = notification_pump {
+                    let force = CancellationToken::new();
+                    force.cancel();
+                    let _ = pump.retire_until_forced(&force).await;
+                }
+            };
+            let mcp_shutdown = shutdown_brain_resources_immediately(
+                &spur_session_id,
+                &mut dead_brain.mcp_server,
+                Some(&mut dead_brain.mcp_guard),
+                &self.worker_mcp_servers,
+            );
+            tokio::join!(notification_shutdown, mcp_shutdown);
+        };
 
         drop_transport_ownership_then_join(
             dead_brain.connection,

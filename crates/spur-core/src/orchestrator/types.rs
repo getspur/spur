@@ -5,7 +5,6 @@ use spur_acp::connection::AgentConnection;
 use spur_acp::session_lock::SessionAttachGuard;
 use spur_acp::{InitializeResponse, ProtocolVersion, SessionConfigOption};
 use spur_acp::{SessionId, SessionInfoCache, SpurAgentCaps};
-use tokio::task::JoinHandle;
 use tokio_util::task::AbortOnDropHandle;
 
 /// Options for `spur run`.
@@ -81,7 +80,9 @@ pub struct BrainSession {
     pub spur_session_id: SessionId,
     pub notebook_socket_nonce: String,
     pub brain_name: String,
-    pub delegation_handle: JoinHandle<()>,
+    /// Delegation parent. Abort-on-drop is the emergency backstop when the
+    /// interactive host must abort the owning orchestrator task.
+    pub delegation_handle: AbortOnDropHandle<()>,
     /// Phase 5: hold the server itself so retirement can invoke
     /// `mark_retiring` / `cancel_in_flight_workers` / `shutdown`.
     pub mcp_server: Option<Arc<McpCallbackServer>>,
@@ -149,7 +150,7 @@ impl BrainSession {
             spur_session_id,
             notebook_socket_nonce: String::new(),
             brain_name: brain_name.into(),
-            delegation_handle: tokio::spawn(async {}),
+            delegation_handle: AbortOnDropHandle::new(tokio::spawn(async {})),
             mcp_server: None,
             mcp_guard: None,
             notification_pump_handle: None,

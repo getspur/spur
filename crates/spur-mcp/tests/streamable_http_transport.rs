@@ -3,8 +3,11 @@ use rmcp::{
     ServerHandler,
 };
 use spur_mcp::server::{start_streamable_http_server, StreamableHttpTransportConfig};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::AsyncWriteExt;
+use tokio_util::task::AbortOnDropHandle;
 
 #[derive(Clone)]
 struct EmptyServer;
@@ -41,10 +44,19 @@ async fn streamable_http_transport_binds_mcp_path_and_shutdown_signal_finishes()
 
 #[tokio::test]
 async fn forced_shutdown_joins_an_accepted_half_read_connection() {
+    let callback_joined = Arc::new(AtomicBool::new(false));
+    let callback_joined_from_task = Arc::clone(&callback_joined);
+    let callback_child = AbortOnDropHandle::new(tokio::spawn(async {
+        std::future::pending::<()>().await;
+    }));
     let mut transport = start_streamable_http_server(
         || Ok(EmptyServer),
         StreamableHttpTransportConfig::default(),
-        async {},
+        async move {
+            callback_child.abort();
+            let _ = callback_child.await;
+            callback_joined_from_task.store(true, Ordering::SeqCst);
+        },
     )
     .await
     .expect("transport should bind a loopback listener");
@@ -60,23 +72,17 @@ async fn forced_shutdown_joins_an_accepted_half_read_connection() {
         .await
         .expect("client should connect");
     client
-        .write_all(
-            b"POST /mcp HTTP/1.1\r\nHost: localhost\r\nContent-Length: 128\r\n\r\n{",
-        )
+        .write_all(b"POST /mcp HTTP/1.1\r\nHost: localhost\r\nContent-Length: 128\r\n\r\n{")
         .await
         .expect("partial request should be admitted");
 
-    tokio::task::yield_now().await;
-    transport
-        .shutdown_tx
-        .send(())
-        .expect("graceful shutdown receiver should be alive");
-    assert!(
-        tokio::time::timeout(Duration::from_millis(25), &mut transport.root_handle)
-            .await
-            .is_err(),
-        "graceful shutdown must still own the half-read connection"
-    );
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while transport.connection_tasks.len() == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the connection should be admitted before shutdown");
 
     transport.force_shutdown.cancel();
     tokio::time::timeout(Duration::from_secs(1), &mut transport.root_handle)
@@ -87,4 +93,8 @@ async fn forced_shutdown_joins_an_accepted_half_read_connection() {
     tokio::time::timeout(Duration::from_secs(1), transport.connection_tasks.wait())
         .await
         .expect("forced shutdown should join every accepted connection");
+    assert!(
+        callback_joined.load(Ordering::SeqCst),
+        "forced root shutdown must join its server-specific child callback"
+    );
 }

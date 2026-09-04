@@ -71,6 +71,9 @@ pulldown-cmark = { version = "0.13", default-features = false }
 # HTTP
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 axum = "0.8"
+hyper = "1"
+hyper-util = { version = "0.1", features = ["server-auto", "service", "tokio"] }
+tower = { version = "0.5", features = ["util"] }
 rmcp = { version = "1.4", features = [
     "client",
     "server",

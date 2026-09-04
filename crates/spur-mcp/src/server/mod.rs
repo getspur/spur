@@ -6,7 +6,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use axum::Router;
+use axum::{body::Body, Router};
+use hyper::body::Incoming;
+use hyper_util::{
+    rt::{TokioExecutor, TokioIo},
+    server::conn::auto::Builder,
+    service::TowerToHyperService,
+};
 use rmcp::{
     self,
     service::{serve_server, RoleServer, Service},
@@ -17,6 +23,8 @@ use rmcp::{
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
+use tokio_util::{sync::CancellationToken, task::TaskTracker};
+use tower::ServiceExt as _;
 use tracing::debug;
 
 pub mod registry_server;
@@ -69,6 +77,12 @@ pub struct StreamableHttpServerTask {
     pub shutdown_tx: oneshot::Sender<()>,
     pub root_handle: JoinHandle<()>,
     pub done_rx: oneshot::Receiver<()>,
+    /// Cancels every admitted HTTP connection without waiting for protocol
+    /// graceful shutdown.
+    pub force_shutdown: CancellationToken,
+    /// Owns every accepted connection task. Once the root task has stopped
+    /// accepting, `close` + `wait` is a transitive shutdown barrier.
+    pub connection_tasks: TaskTracker,
 }
 
 pub struct BoundStreamableHttpServer {
@@ -116,15 +130,81 @@ where
 {
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     let (done_tx, done_rx) = oneshot::channel();
+    let graceful_shutdown = CancellationToken::new();
+    let force_shutdown = CancellationToken::new();
+    let connection_tasks = TaskTracker::new();
+    let graceful_shutdown_for_root = graceful_shutdown.clone();
+    let force_shutdown_for_root = force_shutdown.clone();
+    let connection_tasks_for_root = connection_tasks.clone();
     let root_handle = tokio::spawn(async move {
-        if let Err(error) = axum::serve(bound.listener, bound.router)
-            .with_graceful_shutdown(async move {
-                let _ = shutdown_rx.await;
-            })
-            .await
-        {
-            debug!(%error, "RMCP streamable HTTP server exited");
+        // If the root owner itself is aborted, force every independently
+        // spawned connection to drop its Hyper driver instead of detaching.
+        let _force_connections_on_drop = force_shutdown_for_root.clone().drop_guard();
+        let mut shutdown_rx = shutdown_rx;
+        let listener = bound.listener;
+        let router = bound.router;
+
+        let forced = loop {
+            tokio::select! {
+                biased;
+                _ = force_shutdown_for_root.cancelled() => break true,
+                _ = &mut shutdown_rx => break false,
+                accepted = listener.accept() => {
+                    let (stream, remote_addr) = match accepted {
+                        Ok(accepted) => accepted,
+                        Err(error) => {
+                            debug!(%error, "RMCP streamable HTTP accept failed");
+                            continue;
+                        }
+                    };
+                    let tower_service = router.clone().map_request(
+                        |request: hyper::Request<Incoming>| request.map(Body::new),
+                    );
+                    let graceful = graceful_shutdown_for_root.clone();
+                    let force = force_shutdown_for_root.clone();
+                    connection_tasks_for_root.spawn(async move {
+                        let io = TokioIo::new(stream);
+                        let hyper_service = TowerToHyperService::new(tower_service);
+                        let mut builder = Builder::new(TokioExecutor::new());
+                        builder.http2().enable_connect_protocol();
+                        let connection = builder
+                            .serve_connection_with_upgrades(io, hyper_service);
+                        tokio::pin!(connection);
+
+                        let result = tokio::select! {
+                            biased;
+                            _ = force.cancelled() => None,
+                            result = &mut connection => Some(result),
+                            _ = graceful.cancelled() => {
+                                connection.as_mut().graceful_shutdown();
+                                tokio::select! {
+                                    biased;
+                                    _ = force.cancelled() => None,
+                                    result = &mut connection => Some(result),
+                                }
+                            }
+                        };
+                        if let Some(Err(error)) = result {
+                            debug!(%error, ?remote_addr, "RMCP HTTP connection exited");
+                        }
+                    });
+                }
+            }
+        };
+
+        if forced {
+            force_shutdown_for_root.cancel();
+        } else {
+            graceful_shutdown_for_root.cancel();
         }
+        drop(listener);
+        drop(router);
+        connection_tasks_for_root.close();
+        connection_tasks_for_root.wait().await;
+
+        // The callback owns server-specific children (for example the root
+        // signal watcher) and must acknowledge their cancellation before the
+        // root task reports completion, including on force.
         on_server_stopped.await;
         let _ = done_tx.send(());
     });
@@ -134,6 +214,8 @@ where
         shutdown_tx,
         root_handle,
         done_rx,
+        force_shutdown,
+        connection_tasks,
     }
 }
 

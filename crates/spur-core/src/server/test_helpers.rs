@@ -159,7 +159,8 @@ impl McpCallbackServer {
     /// Test-only: install a synthetic root listener handle.
     #[doc(hidden)]
     pub fn __test_set_root_handle(&self, handle: JoinHandle<()>) {
-        *self.root_handle.lock().unwrap() = Some(handle);
+        *self.root_abort_handle.lock().unwrap() = Some(handle.abort_handle());
+        *self.root_handle.lock().unwrap() = Some(AbortOnDropHandle::new(handle));
     }
 
     /// Test-only: report whether the root listener handle has been taken.

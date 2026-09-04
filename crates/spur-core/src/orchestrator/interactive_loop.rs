@@ -522,7 +522,15 @@ impl Orchestrator {
 
         // Startup: parallel-fetch issues + graph alerts for TUI display.
         if let Some(pm) = &self.pm_service {
-            refresh_pm_state(pm, &self.funnel, None, false).await;
+            if await_interactive_operation(
+                &shutdown_token,
+                refresh_pm_state(pm, &self.funnel, None, false),
+            )
+            .await
+            .is_none()
+            {
+                return Ok(());
+            }
         }
 
         // Startup guidance: surface actionable install hints for missing PM tools.
@@ -552,6 +560,16 @@ impl Orchestrator {
             super::loop_runtime::ProjectLoopRuntimeSupervisor::start_for_orchestrator(&self)
         })
         .flatten();
+
+        macro_rules! await_or_shutdown {
+            ($label:lifetime, $operation:expr) => {{
+                let Some(output) = await_interactive_operation(&shutdown_token, $operation).await
+                else {
+                    break $label;
+                };
+                output
+            }};
+        }
 
         'interactive: loop {
             if shutdown_token.is_cancelled() {
@@ -868,12 +886,9 @@ impl Orchestrator {
                             }
                         };
 
-                        let sessions_result = match Self::list_sessions_from_rpc(
-                            &mut *conn,
-                            &self.repo_root,
-                        )
-                        .await
-                        {
+                        let sessions_result = match await_or_shutdown!('interactive,
+                            Self::list_sessions_from_rpc(&mut *conn, &self.repo_root)
+                        ) {
                             Ok(sessions) if !sessions.is_empty() => Ok(sessions),
                             Ok(_) => {
                                 // RPC succeeded but returned empty — try disk fallback.
@@ -1132,7 +1147,7 @@ impl Orchestrator {
                                 );
                             }
                             let brain_name_for_log = b.brain_name.clone();
-                            let call_result = b.connection.call_ext(&method, params).await;
+                            let call_result = await_or_shutdown!('interactive, b.connection.call_ext(&method, params));
                             match call_result {
                                 Ok(resp) => {
                                     self.emit(SpurEvent::now(
@@ -1193,7 +1208,9 @@ impl Orchestrator {
                                     mode_id.as_str(),
                                 )),
                             );
-                            if let Err(e) = b.connection.set_session_mode(req).await {
+                            if let Err(e) =
+                                await_or_shutdown!('interactive, b.connection.set_session_mode(req))
+                            {
                                 warn!(
                                     brain = %b.brain_name,
                                     session_id = %b.spur_session_id,
@@ -1222,7 +1239,10 @@ impl Orchestrator {
                                     value.as_str(),
                                 )),
                             );
-                            match b.connection.set_session_config_option(req).await {
+                            match await_or_shutdown!('interactive, b
+                                    .connection
+                                    .set_session_config_option(req))
+                            {
                                 Ok(resp) => {
                                     self.replace_session_config_options(b, resp.config_options);
                                 }
@@ -1302,7 +1322,10 @@ impl Orchestrator {
                     // ── SetSessionModel (M9 F-C) ──────────────────────────
                     InteractiveInput::SetSessionModel { value } => {
                         if let Some(b) = brain.as_mut() {
-                            match Orchestrator::dispatch_set_session_model(b, value.clone()).await {
+                            match await_or_shutdown!('interactive, Orchestrator::dispatch_set_session_model(
+                                b,
+                                value.clone()
+                            )) {
                                 Ok(config_options) => {
                                     self.replace_session_config_options(b, config_options);
                                 }
@@ -1327,9 +1350,9 @@ impl Orchestrator {
                     // ── SetSessionEffort (Grok vendor adapter) ───────────
                     InteractiveInput::SetSessionEffort { value } => {
                         if let Some(b) = brain.as_mut() {
-                            if let Err(e) =
-                                Orchestrator::dispatch_set_session_effort(b, value.clone()).await
-                            {
+                            if let Err(e) = await_or_shutdown!('interactive,
+                                Orchestrator::dispatch_set_session_effort(b, value.clone())
+                            ) {
                                 warn!(
                                     brain = %b.brain_name,
                                     session_id = %b.spur_session_id,
@@ -1357,7 +1380,12 @@ impl Orchestrator {
                     // ── RefreshIssues ─────────────────────────────────────
                     InteractiveInput::RefreshIssues => {
                         if let Some(pm) = &self.pm_service {
-                            refresh_pm_state(pm, &self.funnel, Some(1000), false).await;
+                            await_or_shutdown!('interactive, refresh_pm_state(
+                                pm,
+                                &self.funnel,
+                                Some(1000),
+                                false
+                            ));
                         } else {
                             self.funnel.emit(SpurEventBody::IssueCommandError {
                                 operation: "RefreshIssues".into(),
@@ -1371,7 +1399,10 @@ impl Orchestrator {
                     InteractiveInput::RefreshPlans => {
                         if let Some(pm) = &self.pm_service {
                             let current_session = brain.as_ref().map(|b| &b.spur_session_id);
-                            match load_plan_summaries(pm.as_ref(), current_session).await {
+                            match await_or_shutdown!('interactive, load_plan_summaries(
+                                pm.as_ref(),
+                                current_session
+                            )) {
                                 Ok(load) => {
                                     self.funnel.emit(SpurEventBody::PlansLoaded {
                                         plans: load.plans,
@@ -1397,18 +1428,19 @@ impl Orchestrator {
 
                     // ── RefreshLoops ──────────────────────────────────────
                     InteractiveInput::RefreshLoops => {
-                        Self::emit_loop_summaries(self.pm_service.clone(), self.funnel.clone())
-                            .await;
+                        await_or_shutdown!('interactive, Self::emit_loop_summaries(
+                            self.pm_service.clone(),
+                            self.funnel.clone()
+                        ));
                     }
 
                     // ── InspectLoop ───────────────────────────────────────
                     InteractiveInput::InspectLoop { loop_id } => {
-                        Self::emit_loop_detail(
+                        await_or_shutdown!('interactive, Self::emit_loop_detail(
                             self.pm_service.clone(),
                             self.funnel.clone(),
                             loop_id,
-                        )
-                        .await;
+                        ));
                     }
 
                     // ── PauseLoop ─────────────────────────────────────────
@@ -1418,13 +1450,13 @@ impl Orchestrator {
                             .and_then(|b| b.mcp_server.as_ref())
                             .map(Arc::clone);
                         if let Some(server) = server {
-                            match server.call_pause_loop(&loop_id).await {
+                            match await_or_shutdown!('interactive, server.call_pause_loop(&loop_id))
+                            {
                                 Ok(()) => {
-                                    Self::emit_loop_summaries(
+                                    await_or_shutdown!('interactive, Self::emit_loop_summaries(
                                         self.pm_service.clone(),
                                         self.funnel.clone(),
-                                    )
-                                    .await;
+                                    ));
                                 }
                                 Err(error) => {
                                     Self::emit_loop_command_error(
@@ -1452,13 +1484,13 @@ impl Orchestrator {
                             .and_then(|b| b.mcp_server.as_ref())
                             .map(Arc::clone);
                         if let Some(server) = server {
-                            match server.call_resume_loop(&loop_id).await {
+                            match await_or_shutdown!('interactive, server.call_resume_loop(&loop_id))
+                            {
                                 Ok(()) => {
-                                    Self::emit_loop_summaries(
+                                    await_or_shutdown!('interactive, Self::emit_loop_summaries(
                                         self.pm_service.clone(),
                                         self.funnel.clone(),
-                                    )
-                                    .await;
+                                    ));
                                 }
                                 Err(error) => {
                                     Self::emit_loop_command_error(
@@ -1486,13 +1518,13 @@ impl Orchestrator {
                             .and_then(|b| b.mcp_server.as_ref())
                             .map(Arc::clone);
                         if let Some(server) = server {
-                            match server.call_kill_loop(&loop_id).await {
+                            match await_or_shutdown!('interactive, server.call_kill_loop(&loop_id))
+                            {
                                 Ok(()) => {
-                                    Self::emit_loop_summaries(
+                                    await_or_shutdown!('interactive, Self::emit_loop_summaries(
                                         self.pm_service.clone(),
                                         self.funnel.clone(),
-                                    )
-                                    .await;
+                                    ));
                                 }
                                 Err(error) => {
                                     Self::emit_loop_command_error(
@@ -1520,7 +1552,9 @@ impl Orchestrator {
                             .and_then(|b| b.mcp_server.as_ref())
                             .map(Arc::clone);
                         if let Some(server) = server {
-                            if let Err(error) = server.call_claim_plan(&plan_id).await {
+                            if let Err(error) =
+                                await_or_shutdown!('interactive, server.call_claim_plan(&plan_id))
+                            {
                                 self.funnel.emit(SpurEventBody::PlanCommandError {
                                     operation: "ClaimPlan".into(),
                                     plan_id: Some(plan_id),
@@ -1528,7 +1562,10 @@ impl Orchestrator {
                                 });
                             } else if let Some(pm) = &self.pm_service {
                                 let current_session = brain.as_ref().map(|b| &b.spur_session_id);
-                                match load_plan_summaries(pm.as_ref(), current_session).await {
+                                match await_or_shutdown!('interactive, load_plan_summaries(
+                                    pm.as_ref(),
+                                    current_session
+                                )) {
                                     Ok(load) => {
                                         self.funnel.emit(SpurEventBody::PlansLoaded {
                                             plans: load.plans,
@@ -1565,7 +1602,8 @@ impl Orchestrator {
                             .and_then(|b| b.mcp_server.as_ref())
                             .map(Arc::clone);
                         if let Some(server) = server {
-                            if let Err(error) = server.call_force_reclaim_plan(&plan_id).await {
+                            if let Err(error) = await_or_shutdown!('interactive, server.call_force_reclaim_plan(&plan_id))
+                            {
                                 self.funnel.emit(SpurEventBody::PlanCommandError {
                                     operation: "ForceReclaimPlan".into(),
                                     plan_id: Some(plan_id),
@@ -1573,7 +1611,10 @@ impl Orchestrator {
                                 });
                             } else if let Some(pm) = &self.pm_service {
                                 let current_session = brain.as_ref().map(|b| &b.spur_session_id);
-                                match load_plan_summaries(pm.as_ref(), current_session).await {
+                                match await_or_shutdown!('interactive, load_plan_summaries(
+                                    pm.as_ref(),
+                                    current_session
+                                )) {
                                     Ok(load) => {
                                         self.funnel.emit(SpurEventBody::PlansLoaded {
                                             plans: load.plans,
@@ -1610,7 +1651,9 @@ impl Orchestrator {
                             .and_then(|b| b.mcp_server.as_ref())
                             .map(Arc::clone);
                         if let Some(server) = server {
-                            if let Err(error) = server.call_resume_plan(&plan_id).await {
+                            if let Err(error) =
+                                await_or_shutdown!('interactive, server.call_resume_plan(&plan_id))
+                            {
                                 self.funnel.emit(SpurEventBody::PlanCommandError {
                                     operation: "ResumePlan".into(),
                                     plan_id: Some(plan_id),
@@ -1636,13 +1679,10 @@ impl Orchestrator {
 
                     // ── CancelDelegation ─────────────────────────────────
                     InteractiveInput::CancelDelegation { delegation_id } => {
-                        let outcome = self
-                            .cancellation_control
-                            .cancel_with_reason(
-                                delegation_id.as_str(),
-                                "TUI user requested cancel".to_string(),
-                            )
-                            .await;
+                        let outcome = await_or_shutdown!('interactive, self.cancellation_control.cancel_with_reason(
+                            delegation_id.as_str(),
+                            "TUI user requested cancel".to_string(),
+                        ));
                         match outcome {
                             spur_acp::CancelOutcome::Cancelled => {
                                 tracing::info!(
@@ -1670,14 +1710,11 @@ impl Orchestrator {
                             .and_then(|b| b.mcp_server.as_ref())
                             .map(Arc::clone);
                         if let Some(server) = server {
-                            if let Err(error) = server
-                                .call_retry_plan_task(
-                                    plan_id.as_deref(),
-                                    &issue_id,
-                                    append_prompt.as_deref(),
-                                )
-                                .await
-                            {
+                            if let Err(error) = await_or_shutdown!('interactive, server.call_retry_plan_task(
+                                plan_id.as_deref(),
+                                &issue_id,
+                                append_prompt.as_deref(),
+                            )) {
                                 self.funnel.emit(SpurEventBody::PlanCommandError {
                                     operation: "RetryPlanTask".into(),
                                     plan_id,
@@ -1706,7 +1743,9 @@ impl Orchestrator {
                             .and_then(|b| b.mcp_server.as_ref())
                             .map(Arc::clone);
                         if let Some(server) = server {
-                            if let Err(error) = server.call_inspect_plan(&plan_id).await {
+                            if let Err(error) =
+                                await_or_shutdown!('interactive, server.call_inspect_plan(&plan_id))
+                            {
                                 self.funnel.emit(SpurEventBody::PlanCommandError {
                                     operation: "InspectPlan".into(),
                                     plan_id: Some(plan_id),
@@ -1745,20 +1784,23 @@ impl Orchestrator {
                         );
                         if let Some(pm) = &self.pm_service {
                             let pm_call_started = std::time::Instant::now();
-                            match pm.get_issue(&id).await {
+                            match await_or_shutdown!('interactive, pm.get_issue(&id)) {
                                 Ok(issue) => {
                                     let mut comments = match pm.advanced() {
-                                        Some(advanced) => match advanced.list_comments(&id).await {
-                                            Ok(comments) => comments,
-                                            Err(error) => {
-                                                tracing::warn!(
-                                                    issue_id = %id,
-                                                    error = %error,
-                                                    "failed to load issue comments; continuing with empty comments"
-                                                );
-                                                Vec::new()
+                                        Some(advanced) => {
+                                            match await_or_shutdown!('interactive, advanced.list_comments(&id))
+                                            {
+                                                Ok(comments) => comments,
+                                                Err(error) => {
+                                                    tracing::warn!(
+                                                        issue_id = %id,
+                                                        error = %error,
+                                                        "failed to load issue comments; continuing with empty comments"
+                                                    );
+                                                    Vec::new()
+                                                }
                                             }
-                                        },
+                                        }
                                         None => Vec::new(),
                                     };
                                     comments.sort_by_key(|comment| comment.created_at);
@@ -1810,13 +1852,18 @@ impl Orchestrator {
                             id = %id,
                             "GetIssueGraph handled via legacy user_rx path — TUI should be on data_rx",
                         );
-                        handle_get_issue_graph(self.pm_service.as_deref(), &self.funnel, id).await;
+                        await_or_shutdown!('interactive, handle_get_issue_graph(
+                            self.pm_service.as_deref(),
+                            &self.funnel,
+                            id
+                        ));
                     }
 
                     // ── UpdateIssue ───────────────────────────────────────
                     InteractiveInput::UpdateIssue { id, update } => {
                         if let Some(pm) = &self.pm_service {
-                            match pm.update_issue(&id, update.clone()).await {
+                            match await_or_shutdown!('interactive, pm.update_issue(&id, update.clone()))
+                            {
                                 Ok(()) => {
                                     self.funnel.emit(SpurEventBody::IssueUpdated {
                                         source: pm.source_str().into(),
@@ -1855,43 +1902,48 @@ impl Orchestrator {
                             }
                             match pm.advanced() {
                                 Some(advanced) => {
-                                    match advanced.add_comment(&issue_id, body.trim()).await {
-                                        Ok(_) => match pm.get_issue(&issue_id).await {
-                                            Ok(issue) => {
-                                                let mut comments = match advanced
-                                                    .list_comments(&issue_id)
-                                                    .await
-                                                {
-                                                    Ok(comments) => comments,
-                                                    Err(error) => {
-                                                        tracing::warn!(
-                                                            issue_id = %issue_id,
-                                                            error = %error,
-                                                            "failed to reload comments after add_comment; continuing with empty comments"
-                                                        );
-                                                        Vec::new()
-                                                    }
-                                                };
-                                                comments.sort_by_key(|comment| comment.created_at);
-                                                self.funnel.emit(
-                                                    SpurEventBody::IssueDetailFetched {
-                                                        requested_id: issue_id,
-                                                        issue: issue_to_detail_event(
-                                                            &issue, comments,
-                                                        ),
-                                                    },
-                                                );
+                                    match await_or_shutdown!('interactive,
+                                        advanced.add_comment(&issue_id, body.trim())
+                                    ) {
+                                        Ok(_) => {
+                                            match await_or_shutdown!('interactive, pm.get_issue(&issue_id))
+                                            {
+                                                Ok(issue) => {
+                                                    let mut comments = match await_or_shutdown!('interactive,
+                                                        advanced.list_comments(&issue_id)
+                                                    ) {
+                                                        Ok(comments) => comments,
+                                                        Err(error) => {
+                                                            tracing::warn!(
+                                                                issue_id = %issue_id,
+                                                                error = %error,
+                                                                "failed to reload comments after add_comment; continuing with empty comments"
+                                                            );
+                                                            Vec::new()
+                                                        }
+                                                    };
+                                                    comments
+                                                        .sort_by_key(|comment| comment.created_at);
+                                                    self.funnel.emit(
+                                                        SpurEventBody::IssueDetailFetched {
+                                                            requested_id: issue_id,
+                                                            issue: issue_to_detail_event(
+                                                                &issue, comments,
+                                                            ),
+                                                        },
+                                                    );
+                                                }
+                                                Err(error) => {
+                                                    self.funnel.emit(
+                                                        SpurEventBody::IssueCommandError {
+                                                            operation: "AddIssueComment".into(),
+                                                            error: error.to_string(),
+                                                            id: Some(issue_id),
+                                                        },
+                                                    );
+                                                }
                                             }
-                                            Err(error) => {
-                                                self.funnel.emit(
-                                                    SpurEventBody::IssueCommandError {
-                                                        operation: "AddIssueComment".into(),
-                                                        error: error.to_string(),
-                                                        id: Some(issue_id),
-                                                    },
-                                                );
-                                            }
-                                        },
+                                        }
                                         Err(error) => {
                                             self.funnel.emit(SpurEventBody::IssueCommandError {
                                                 operation: "AddIssueComment".into(),
@@ -2167,26 +2219,10 @@ impl Orchestrator {
                             session: spur_sid_for_log,
                             message: Self::auth_required_banner(),
                         }));
-                        let mut dead = brain.take().expect("brain.as_mut() just held it");
-                        dead.delegation_handle.abort();
-                        if let Some(h) = dead.notification_pump_handle.take() {
-                            h.abort();
-                        }
-                        self.self_held.remove(&spur_acp::BrainSessionId::from(
-                            dead.spur_session_id.clone(),
-                        ));
-                        retire_brain_session(
-                            &self.funnel,
-                            &dead.spur_session_id,
-                            &mut dead.mcp_server,
-                            Some(&mut dead.mcp_guard),
-                            &self.worker_mcp_servers,
-                            &mut scheduler,
-                            &overflow_continuations,
-                            None,
-                        )
-                        .await;
-                        let _ = dead.connection.shutdown().await;
+                        let dead = brain.take().expect("brain.as_mut() just held it");
+                        scheduler.note_session_swap(None, &overflow_continuations);
+                        self.shutdown_taken_brain_immediately(dead, &mut agent_connection)
+                            .await;
                         continue;
                     }
                     if is_connection_death(&e) {
@@ -2213,26 +2249,10 @@ impl Orchestrator {
                         session: spur_sid_for_log,
                         message: error_message,
                     }));
-                    let mut dead = brain.take().expect("brain.as_mut() just held it");
-                    dead.delegation_handle.abort();
-                    if let Some(h) = dead.notification_pump_handle.take() {
-                        h.abort();
-                    }
-                    self.self_held.remove(&spur_acp::BrainSessionId::from(
-                        dead.spur_session_id.clone(),
-                    ));
-                    retire_brain_session(
-                        &self.funnel,
-                        &dead.spur_session_id,
-                        &mut dead.mcp_server,
-                        Some(&mut dead.mcp_guard),
-                        &self.worker_mcp_servers,
-                        &mut scheduler,
-                        &overflow_continuations,
-                        None,
-                    )
-                    .await;
-                    let _ = dead.connection.shutdown().await;
+                    let dead = brain.take().expect("brain.as_mut() just held it");
+                    scheduler.note_session_swap(None, &overflow_continuations);
+                    self.shutdown_taken_brain_immediately(dead, &mut agent_connection)
+                        .await;
                     continue;
                 }
             };
@@ -2301,7 +2321,16 @@ impl Orchestrator {
                             match queued {
                                 InteractiveInput::Message { blocks: msg_blocks, interrupt: msg_interrupt } => {
                                     if msg_interrupt {
-                                        let _ = b.connection.cancel(&b.acp_session_id).await;
+                                        if await_interactive_operation(
+                                            &shutdown_token,
+                                            b.connection.cancel(&b.acp_session_id),
+                                        )
+                                        .await
+                                        .is_none()
+                                        {
+                                            stream_loop_shutdown = true;
+                                            break;
+                                        }
                                         arm_cancel_deadline(&mut cancel_deadline);
                                     }
                                     let queued_blocks = if msg_interrupt {
@@ -2316,7 +2345,16 @@ impl Orchestrator {
                                 }
                                 InteractiveInput::CancelStream { session } => {
                                     let _ = session;
-                                    let _ = b.connection.cancel(&b.acp_session_id).await;
+                                    if await_interactive_operation(
+                                        &shutdown_token,
+                                        b.connection.cancel(&b.acp_session_id),
+                                    )
+                                    .await
+                                    .is_none()
+                                    {
+                                        stream_loop_shutdown = true;
+                                        break;
+                                    }
                                     arm_cancel_deadline(&mut cancel_deadline);
                                 }
                                 InteractiveInput::ListBrains => {
@@ -2327,7 +2365,16 @@ impl Orchestrator {
                                     // the switch after the stream ends so
                                     // retire can run without a held borrow.
                                     pending_brain_switch = Some(name);
-                                    let _ = b.connection.cancel(&b.acp_session_id).await;
+                                    if await_interactive_operation(
+                                        &shutdown_token,
+                                        b.connection.cancel(&b.acp_session_id),
+                                    )
+                                    .await
+                                    .is_none()
+                                    {
+                                        stream_loop_shutdown = true;
+                                        break;
+                                    }
                                     arm_cancel_deadline(&mut cancel_deadline);
                                 }
                                 InteractiveInput::SystemContinuation { continuation, .. } => {
@@ -2392,12 +2439,19 @@ impl Orchestrator {
                     "Brain prompt did not terminate before cancel timeout"
                 ))
             } else {
-                brain
-                    .as_mut()
-                    .expect("brain remains active after prompt stream")
-                    .connection
-                    .wait_for_prompt_response()
-                    .await
+                let Some(result) = await_interactive_operation(
+                    &shutdown_token,
+                    brain
+                        .as_mut()
+                        .expect("brain remains active after prompt stream")
+                        .connection
+                        .wait_for_prompt_response(),
+                )
+                .await
+                else {
+                    break 'interactive;
+                };
+                result
             };
             if let Err(e) = terminal_result {
                 let error_message = format_error_chain(&e);
@@ -2407,26 +2461,10 @@ impl Orchestrator {
                         session: spur_sid_for_log,
                         message: Self::auth_required_banner(),
                     }));
-                    let mut dead = brain.take().expect("brain was active after prompt stream");
-                    dead.delegation_handle.abort();
-                    if let Some(h) = dead.notification_pump_handle.take() {
-                        h.abort();
-                    }
-                    self.self_held.remove(&spur_acp::BrainSessionId::from(
-                        dead.spur_session_id.clone(),
-                    ));
-                    retire_brain_session(
-                        &self.funnel,
-                        &dead.spur_session_id,
-                        &mut dead.mcp_server,
-                        Some(&mut dead.mcp_guard),
-                        &self.worker_mcp_servers,
-                        &mut scheduler,
-                        &overflow_continuations,
-                        None,
-                    )
-                    .await;
-                    let _ = dead.connection.shutdown().await;
+                    let dead = brain.take().expect("brain was active after prompt stream");
+                    scheduler.note_session_swap(None, &overflow_continuations);
+                    self.shutdown_taken_brain_immediately(dead, &mut agent_connection)
+                        .await;
                     continue;
                 }
                 if is_connection_death(&e) {
@@ -2453,26 +2491,10 @@ impl Orchestrator {
                     session: spur_sid_for_log,
                     message: error_message,
                 }));
-                let mut dead = brain.take().expect("brain was active after prompt stream");
-                dead.delegation_handle.abort();
-                if let Some(h) = dead.notification_pump_handle.take() {
-                    h.abort();
-                }
-                self.self_held.remove(&spur_acp::BrainSessionId::from(
-                    dead.spur_session_id.clone(),
-                ));
-                retire_brain_session(
-                    &self.funnel,
-                    &dead.spur_session_id,
-                    &mut dead.mcp_server,
-                    Some(&mut dead.mcp_guard),
-                    &self.worker_mcp_servers,
-                    &mut scheduler,
-                    &overflow_continuations,
-                    None,
-                )
-                .await;
-                let _ = dead.connection.shutdown().await;
+                let dead = brain.take().expect("brain was active after prompt stream");
+                scheduler.note_session_swap(None, &overflow_continuations);
+                self.shutdown_taken_brain_immediately(dead, &mut agent_connection)
+                    .await;
                 continue;
             }
 
@@ -2484,7 +2506,12 @@ impl Orchestrator {
                 .as_ref()
                 .and_then(|session| session.notification_pump_handle.as_ref())
             {
-                pump.settle_after_terminal().await;
+                if await_interactive_operation(&shutdown_token, pump.settle_after_terminal())
+                    .await
+                    .is_none()
+                {
+                    break 'interactive;
+                }
             }
 
             // Emit turn complete

@@ -174,8 +174,16 @@ mod retirement_state_tests {
             "force_abort must abort the stored root task"
         );
         assert!(
+            !server.__test_root_handle_is_none(),
+            "force_abort must retain the root handle for a later join acknowledgement"
+        );
+
+        tokio::time::timeout(Duration::from_millis(200), server.force_abort_and_wait())
+            .await
+            .expect("the retained force-aborted root must remain joinable");
+        assert!(
             server.__test_root_handle_is_none(),
-            "force_abort must take the root handle so repeated calls stay idempotent"
+            "force_abort_and_wait must consume the retained join ownership"
         );
     }
 

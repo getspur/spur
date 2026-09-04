@@ -1386,7 +1386,8 @@ mod tests {
             std::future::pending::<()>().await;
         });
         started_rx.await.expect("callback task started");
-        *runtime.server.root_handle.lock().unwrap() = Some(callback);
+        *runtime.server.root_handle.lock().unwrap() =
+            Some(tokio_util::task::AbortOnDropHandle::new(callback));
 
         let drain = Box::new(runtime).begin_shutdown(CancellationToken::new());
         drain.completion.await;

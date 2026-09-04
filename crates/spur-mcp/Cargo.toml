@@ -13,6 +13,8 @@ axum = { workspace = true }
 base64ct = { version = "1", features = ["alloc"] }
 fs2 = "0.4"
 hmac = "0.12"
+hyper = { workspace = true }
+hyper-util = { workspace = true }
 libc = "0.2"
 rmcp = { workspace = true }
 schemars = { workspace = true }
@@ -22,7 +24,9 @@ sha2 = { workspace = true }
 spur-acp = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
+tokio-util = { workspace = true }
 toml = { workspace = true }
+tower = { workspace = true }
 tracing = { workspace = true }
 
 [features]

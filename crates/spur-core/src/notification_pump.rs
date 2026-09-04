@@ -53,6 +53,15 @@ pub struct SessionNotificationPump {
 }
 
 impl SessionNotificationPump {
+    #[cfg(test)]
+    pub(crate) fn from_task_for_test(task: JoinHandle<()>) -> Self {
+        let (barrier_tx, _barrier_rx) = mpsc::unbounded_channel();
+        Self {
+            task: Some(task),
+            barrier_tx,
+        }
+    }
+
     /// Abort the background notification task.
     pub fn abort(&self) {
         if let Some(task) = self.task.as_ref() {

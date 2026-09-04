@@ -28,7 +28,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use tokio::sync::{mpsc, OnceCell};
-use tokio::task::JoinHandle;
+use tokio::task::{AbortHandle, JoinHandle};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::{AbortOnDropHandle, TaskTracker};
 use tracing::{debug, error, info};
@@ -97,12 +97,17 @@ async fn join_abort_on_drop_task_until_forced(
     }
 }
 
-async fn join_task_until_forced(
-    mut handle: JoinHandle<()>,
+async fn join_root_task_until_forced(
+    mut handle: AbortOnDropHandle<()>,
+    root_force_shutdown: Option<CancellationToken>,
     force_shutdown: &CancellationToken,
 ) -> bool {
     if force_shutdown.is_cancelled() {
-        handle.abort();
+        if let Some(force) = root_force_shutdown.as_ref() {
+            force.cancel();
+        } else {
+            handle.abort();
+        }
         let _ = handle.await;
         return true;
     }
@@ -110,11 +115,21 @@ async fn join_task_until_forced(
     tokio::select! {
         biased;
         _ = force_shutdown.cancelled() => {
-            handle.abort();
+            if let Some(force) = root_force_shutdown.as_ref() {
+                force.cancel();
+            } else {
+                handle.abort();
+            }
             let _ = handle.await;
             true
         }
-        _ = &mut handle => force_shutdown.is_cancelled(),
+        result = &mut handle => {
+            result.is_err()
+                || force_shutdown.is_cancelled()
+                || root_force_shutdown
+                    .as_ref()
+                    .is_some_and(CancellationToken::is_cancelled)
+        },
     }
 }
 
@@ -303,10 +318,18 @@ pub struct McpCallbackServer {
     pub(crate) retiring: Arc<AtomicBool>,
     /// v3-c: parent cancellation token for in-flight collector tasks.
     pub(crate) cancel_token: CancellationToken,
-    /// v3-c: handle to the root listener task so `force_abort` can stop it.
-    pub(crate) root_handle: Mutex<Option<JoinHandle<()>>>,
+    /// v3-c: abort-on-drop handle to the root listener task so cancellation of
+    /// an owning shutdown future cannot detach the HTTP accept tree.
+    pub(crate) root_handle: Mutex<Option<AbortOnDropHandle<()>>>,
+    /// Remote abort capability retained while a shutdown future owns the join
+    /// handle, so concurrent `force_abort` can still trigger escalation.
+    pub(crate) root_abort_handle: Mutex<Option<AbortHandle>>,
     /// Graceful-shutdown signal for the root listener task.
     pub(crate) root_shutdown_tx: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    /// Force signal and admitted-connection barrier owned by the generic HTTP
+    /// transport. These make root shutdown acknowledgement transitive.
+    pub(crate) root_force_shutdown: Mutex<Option<CancellationToken>>,
+    pub(crate) root_connection_tasks: Mutex<Option<TaskTracker>>,
     /// Handle to the optional beads reconciler task. It is enabled only after
     /// the orchestrator binds this server to a derived brain_session_id.
     pub(crate) reconciler_handle: Mutex<Option<ReconcilerTaskHandle>>,
@@ -464,7 +487,10 @@ impl McpCallbackServer {
             retiring: Arc::new(AtomicBool::new(false)),
             cancel_token: CancellationToken::new(),
             root_handle: Mutex::new(None),
+            root_abort_handle: Mutex::new(None),
             root_shutdown_tx: Mutex::new(None),
+            root_force_shutdown: Mutex::new(None),
+            root_connection_tasks: Mutex::new(None),
             reconciler_handle: Mutex::new(None),
             startup_recovery: Mutex::new(StartupRecoveryState::default()),
             awaiting_review_rediscovery_started: AtomicBool::new(false),
@@ -708,19 +734,27 @@ impl McpCallbackServer {
     pub fn force_abort(&self) {
         self.task_tracker.close();
         self.task_tracker.abort_all();
+        if let Some(force) = self.root_force_shutdown.lock().unwrap().as_ref() {
+            force.cancel();
+        }
+        if let Some(tasks) = self.root_connection_tasks.lock().unwrap().as_ref() {
+            tasks.close();
+        }
         self.root_shutdown_tx.lock().unwrap().take();
-        let startup_recovery_handle = {
+        {
             let mut state = self.startup_recovery.lock().unwrap();
             state.pending = false;
-            state.handle.take()
-        };
-        if let Some(handle) = startup_recovery_handle {
-            handle.abort();
+            if let Some(handle) = state.handle.as_ref() {
+                handle.handle.abort();
+            }
         }
-        if let Some(handle) = self.reconciler_handle.lock().unwrap().take() {
-            handle.abort();
+        if let Some(handle) = self.reconciler_handle.lock().unwrap().as_ref() {
+            handle.handle.abort();
         }
-        if let Some(handle) = self.root_handle.lock().unwrap().take() {
+        if let Some(abort) = self.root_abort_handle.lock().unwrap().as_ref() {
+            abort.abort();
+        }
+        if let Some(handle) = self.root_handle.lock().unwrap().as_ref() {
             handle.abort();
         }
     }
@@ -731,12 +765,15 @@ impl McpCallbackServer {
         self.task_tracker.close();
         self.task_tracker.abort_all();
         self.root_shutdown_tx.lock().unwrap().take();
+        let root_force_shutdown = self.root_force_shutdown.lock().unwrap().take();
+        let root_connection_tasks = self.root_connection_tasks.lock().unwrap().take();
         let startup_recovery_handle = {
             let mut state = self.startup_recovery.lock().unwrap();
             state.pending = false;
             state.handle.take()
         };
         let reconciler_handle = self.reconciler_handle.lock().unwrap().take();
+        self.root_abort_handle.lock().unwrap().take();
         let root_handle = self.root_handle.lock().unwrap().take();
 
         let startup = async move {
@@ -750,9 +787,19 @@ impl McpCallbackServer {
             }
         };
         let root = async move {
+            let cooperative_force = root_force_shutdown.is_some();
+            if let Some(force) = root_force_shutdown {
+                force.cancel();
+            }
             if let Some(handle) = root_handle {
-                handle.abort();
+                if !cooperative_force {
+                    handle.abort();
+                }
                 let _ = handle.await;
+            }
+            if let Some(tasks) = root_connection_tasks {
+                tasks.close();
+                tasks.wait().await;
             }
         };
         tokio::join!(startup, reconciler, root);
@@ -970,6 +1017,8 @@ impl McpCallbackServer {
         };
         let reconciler_handle = self.reconciler_handle.lock().unwrap().take();
         let root_handle = self.root_handle.lock().unwrap().take();
+        let root_force_shutdown = self.root_force_shutdown.lock().unwrap().take();
+        let root_connection_tasks = self.root_connection_tasks.lock().unwrap().take();
 
         let startup = async move {
             let Some(mut handle) = startup_recovery_handle else {
@@ -990,10 +1039,24 @@ impl McpCallbackServer {
             join_abort_on_drop_task_until_forced(handle.handle, force_shutdown).await
         };
         let root = async move {
-            match root_handle {
-                Some(handle) => join_task_until_forced(handle, force_shutdown).await,
-                None => false,
+            let forced = match root_handle {
+                Some(handle) => {
+                    join_root_task_until_forced(handle, root_force_shutdown, force_shutdown).await
+                }
+                None => {
+                    if let Some(force) = root_force_shutdown {
+                        if force_shutdown.is_cancelled() {
+                            force.cancel();
+                        }
+                    }
+                    false
+                }
+            };
+            if let Some(tasks) = root_connection_tasks {
+                tasks.close();
+                tasks.wait().await;
             }
+            forced
         };
         let tracked = async {
             if force_shutdown.is_cancelled() {
@@ -1017,6 +1080,7 @@ impl McpCallbackServer {
 
         let (startup_forced, reconciler_forced, root_forced, tracker_forced) =
             tokio::join!(startup, reconciler, root, tracked);
+        self.root_abort_handle.lock().unwrap().take();
         startup_forced
             || reconciler_forced
             || root_forced
@@ -1221,7 +1285,10 @@ impl McpCallbackServer {
         info!(url = %url, "MCP callback server listening (streamable HTTP)");
 
         *self.root_shutdown_tx.lock().unwrap() = Some(transport.shutdown_tx);
-        *self.root_handle.lock().unwrap() = Some(transport.root_handle);
+        *self.root_force_shutdown.lock().unwrap() = Some(transport.force_shutdown);
+        *self.root_connection_tasks.lock().unwrap() = Some(transport.connection_tasks);
+        *self.root_abort_handle.lock().unwrap() = Some(transport.root_handle.abort_handle());
+        *self.root_handle.lock().unwrap() = Some(AbortOnDropHandle::new(transport.root_handle));
         Arc::clone(&self).spawn_startup_recovery_if_ready();
 
         let server_for_drop = Arc::clone(&self);
@@ -1242,7 +1309,16 @@ impl McpCallbackServer {
                 if let Some(handle) = self.server.reconciler_handle.lock().unwrap().take() {
                     handle.abort();
                 }
+                if let Some(force) = self.server.root_force_shutdown.lock().unwrap().take() {
+                    force.cancel();
+                }
+                if let Some(tasks) = self.server.root_connection_tasks.lock().unwrap().take() {
+                    tasks.close();
+                }
                 self.server.root_shutdown_tx.lock().unwrap().take();
+                if let Some(abort) = self.server.root_abort_handle.lock().unwrap().take() {
+                    abort.abort();
+                }
                 if let Some(handle) = self.server.root_handle.lock().unwrap().take() {
                     handle.abort();
                 }
