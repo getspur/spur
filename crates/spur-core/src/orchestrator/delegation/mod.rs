@@ -835,6 +835,7 @@ mod tests {
         let (event_tx, _) = broadcast::channel(16);
         let (funnel, _events) = crate::event_funnel::test_channel();
         let worker_mcp_fetcher = test_worker_mcp_fetcher(repo.path().to_path_buf(), funnel.clone());
+        let cancellation_control = CancellationControl::new();
         let mut handle = tokio::spawn(handle_delegations(
             channel,
             repo.path().to_path_buf(),
@@ -846,7 +847,7 @@ mod tests {
             ReviewSink::new(),
             None,
             crate::server::community_feature_gate(),
-            CancellationControl::new(),
+            cancellation_control.clone(),
             None,
             hooks,
             std::time::Duration::from_secs(60),
@@ -861,6 +862,7 @@ mod tests {
             tokio_util::sync::CancellationToken::new(),
         ));
         let (request, mut result_rx) = delegation_request("worker");
+        let request_id = request.id.0.clone();
         let started_wait = started.notified();
         tx.send(request).await.expect("send delegation request");
         started_wait.await;
@@ -885,6 +887,11 @@ mod tests {
         assert!(
             !acknowledged_before_child_drop && result_rx.try_recv().is_ok(),
             "parent acknowledgement must wait for the nested delegation future's Drop"
+        );
+        assert_eq!(
+            cancellation_control.cancel(&request_id).await,
+            spur_acp::CancelOutcome::NotFound,
+            "parent acknowledgement must also prove cancellation registration cleanup"
         );
     }
 }
