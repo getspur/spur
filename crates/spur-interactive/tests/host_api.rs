@@ -3,19 +3,49 @@ use spur_interactive::{validate_frontend_command, ReviewSubmission};
 
 #[tokio::test]
 async fn shutdown_completes_promptly_even_with_outstanding_continuation_sender() {
-    let repo_root =
-        std::env::temp_dir().join(format!("spur-interactive-host-api-{}", std::process::id()));
-    std::fs::create_dir_all(&repo_root).unwrap();
-    let orch =
-        spur_core::Orchestrator::new(repo_root, spur_acp::config::SpurConfig::default(), None)
-            .unwrap();
-    let host = spur_interactive::InteractiveFrontendHost::spawn(orch, None);
+    struct DropAck(Option<tokio::sync::oneshot::Sender<()>>);
+
+    impl Drop for DropAck {
+        fn drop(&mut self) {
+            if let Some(tx) = self.0.take() {
+                let _ = tx.send(());
+            }
+        }
+    }
+
+    let (user_tx, _user_rx) = tokio::sync::mpsc::channel(1);
+    let (review_tx, _review_rx) = tokio::sync::mpsc::channel(1);
+    let (_event_tx, event_rx) = tokio::sync::broadcast::channel(4);
+    let (_perm_tx, perm_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+    let (drop_tx, drop_rx) = tokio::sync::oneshot::channel();
+    let orch_handle = tokio::spawn(async move {
+        let _drop_ack = DropAck(Some(drop_tx));
+        let _ = started_tx.send(());
+        std::future::pending::<()>().await;
+    });
+    started_rx.await.expect("stuck orchestrator task started");
+    let host = spur_interactive::InteractiveFrontendHost::from_parts_for_test(
+        user_tx,
+        review_tx,
+        event_rx,
+        perm_rx,
+        orch_handle,
+    );
     let _outstanding_handle = host.handle();
 
-    tokio::time::timeout(std::time::Duration::from_secs(2), host.shutdown())
+    let started = std::time::Instant::now();
+    let error = tokio::time::timeout(std::time::Duration::from_secs(3), host.shutdown())
         .await
-        .expect("shutdown should complete within 2 seconds")
-        .unwrap();
+        .expect("shutdown entered a second timeout window")
+        .expect_err("stuck orchestrator shutdown should report the emergency abort");
+
+    assert!(started.elapsed() < std::time::Duration::from_secs(3));
+    assert!(error.to_string().contains("timed out after 2s"));
+    tokio::time::timeout(std::time::Duration::from_millis(250), drop_rx)
+        .await
+        .expect("shutdown returned before aborted orchestrator acknowledged Drop")
+        .expect("orchestrator Drop acknowledgement sender disappeared");
 }
 
 #[test]
