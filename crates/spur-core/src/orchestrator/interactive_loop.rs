@@ -4023,7 +4023,9 @@ mod cancel_stream_variant_tests {
 
 #[cfg(test)]
 mod immediate_shutdown_ingress_tests {
-    use super::{admit_interactive_operation, await_interactive_operation};
+    use super::{
+        admit_interactive_operation, await_brain_startup_or_shutdown, await_interactive_operation,
+    };
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
     use tokio_util::sync::CancellationToken;
@@ -4058,6 +4060,46 @@ mod immediate_shutdown_ingress_tests {
 
         assert_eq!(result, None);
         assert!(!polled.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn shutdown_drops_polled_brain_startup_before_return() {
+        struct DropFlag(Arc<AtomicBool>);
+
+        impl Drop for DropFlag {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+
+        let shutdown = CancellationToken::new();
+        let task_shutdown = shutdown.clone();
+        let started = Arc::new(tokio::sync::Notify::new());
+        let started_for_task = Arc::clone(&started);
+        let dropped = Arc::new(AtomicBool::new(false));
+        let dropped_for_task = Arc::clone(&dropped);
+        let started_wait = started.notified();
+        let startup = tokio::spawn(async move {
+            await_brain_startup_or_shutdown(&task_shutdown, async move {
+                let _drop_flag = DropFlag(dropped_for_task);
+                started_for_task.notify_one();
+                std::future::pending::<usize>().await
+            })
+            .await
+        });
+        started_wait.await;
+
+        shutdown.cancel();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(1), startup)
+            .await
+            .expect("brain startup fence did not acknowledge cancellation")
+            .expect("brain startup task panicked");
+
+        assert_eq!(result, None);
+        assert!(
+            dropped.load(Ordering::SeqCst),
+            "startup RAII must unwind before cancellation is acknowledged"
+        );
     }
 }
 
