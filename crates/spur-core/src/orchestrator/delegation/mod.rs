@@ -21,6 +21,24 @@ pub(crate) use worker_attempt::{
     WorkerAttemptOutcome,
 };
 
+#[cfg(test)]
+struct TestDelegationDropBarrier {
+    started: Arc<std::sync::atomic::AtomicBool>,
+    release: Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[cfg(test)]
+impl Drop for TestDelegationDropBarrier {
+    fn drop(&mut self) {
+        use std::sync::atomic::Ordering;
+
+        self.started.store(true, Ordering::SeqCst);
+        while !self.release.load(Ordering::SeqCst) {
+            std::thread::yield_now();
+        }
+    }
+}
+
 fn maybe_spawn_dispatch_lease_heartbeat(
     pm_service: Option<Arc<PmService>>,
     issue_id: Option<String>,
@@ -206,6 +224,16 @@ pub(crate) async fn handle_delegations(
                     request_id: request_id.clone(),
                     disarmed: false,
                 };
+
+                #[cfg(test)]
+                let _drop_barrier = fault_injection_hooks
+                    .delegation_drop_started
+                    .as_ref()
+                    .zip(fault_injection_hooks.delegation_drop_release.as_ref())
+                    .map(|(started, release)| TestDelegationDropBarrier {
+                        started: Arc::clone(started),
+                        release: Arc::clone(release),
+                    });
 
                 #[cfg(test)]
                 {
@@ -774,5 +802,81 @@ mod tests {
             .expect("delegation handler did not join blocked child")
             .expect("delegation handler panicked");
         let _ = result_rx.await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn aborting_parent_acknowledges_nested_delegation_drop() {
+        let repo = TempDir::new().expect("temp repo");
+        std::fs::create_dir_all(repo.path().join(".spur")).expect("create .spur dir");
+        let orchestrator =
+            Orchestrator::new(repo.path().to_path_buf(), SpurConfig::default(), None)
+                .expect("orchestrator");
+        let started = Arc::new(tokio::sync::Notify::new());
+        let blocker = Arc::new(tokio::sync::Notify::new());
+        let drop_started = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let drop_release = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let hooks = FaultInjectionHooks {
+            delegation_started: Some(Arc::clone(&started)),
+            delegation_blocker: Some(blocker),
+            delegation_drop_started: Some(Arc::clone(&drop_started)),
+            delegation_drop_release: Some(Arc::clone(&drop_release)),
+            ..Default::default()
+        };
+        let (tx, request_rx) = tokio::sync::mpsc::channel(4);
+        let channel = DelegationChannel { request_rx };
+        let (event_tx, _) = broadcast::channel(16);
+        let (funnel, _events) = crate::event_funnel::test_channel();
+        let worker_mcp_fetcher = test_worker_mcp_fetcher(repo.path().to_path_buf(), funnel.clone());
+        let mut handle = tokio::spawn(handle_delegations(
+            channel,
+            repo.path().to_path_buf(),
+            Arc::clone(&orchestrator.agent_configs),
+            1,
+            orchestrator.config.worktree.clone(),
+            event_tx,
+            funnel,
+            ReviewSink::new(),
+            None,
+            crate::server::community_feature_gate(),
+            CancellationControl::new(),
+            None,
+            hooks,
+            std::time::Duration::from_secs(60),
+            std::time::Duration::from_secs(10),
+            orchestrator
+                .config
+                .mcp_servers
+                .builtin_overrides
+                .worker_mcp_enabled,
+            worker_mcp_fetcher,
+            false,
+            tokio_util::sync::CancellationToken::new(),
+        ));
+        let (request, mut result_rx) = delegation_request("worker");
+        let started_wait = started.notified();
+        tx.send(request).await.expect("send delegation request");
+        started_wait.await;
+
+        handle.abort();
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while !drop_started.load(std::sync::atomic::Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("nested delegation did not begin unwinding");
+        let acknowledged_before_child_drop =
+            tokio::time::timeout(std::time::Duration::from_millis(50), &mut handle)
+                .await
+                .is_ok();
+        drop_release.store(true, std::sync::atomic::Ordering::SeqCst);
+        if !acknowledged_before_child_drop {
+            let _ = handle.await;
+        }
+
+        assert!(
+            !acknowledged_before_child_drop && result_rx.try_recv().is_ok(),
+            "parent acknowledgement must wait for the nested delegation future's Drop"
+        );
     }
 }

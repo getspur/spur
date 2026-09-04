@@ -199,6 +199,10 @@ pub struct FaultInjectionHooks {
     pub delegation_started: Option<std::sync::Arc<tokio::sync::Notify>>,
     #[cfg(test)]
     pub delegation_blocker: Option<std::sync::Arc<tokio::sync::Notify>>,
+    #[cfg(test)]
+    pub delegation_drop_started: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    #[cfg(test)]
+    pub delegation_drop_release: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 #[cfg(not(any(test, feature = "fault-injection")))]

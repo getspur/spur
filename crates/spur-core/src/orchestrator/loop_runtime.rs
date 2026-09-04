@@ -1260,6 +1260,69 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn immediate_runtime_shutdown_sweeps_worker_server_inserted_during_parent_unwind() {
+        struct InsertWorkerOnDrop {
+            cache: Arc<
+                dashmap::DashMap<
+                    spur_acp::BrainSessionId,
+                    Arc<crate::worker_server::WorkerMcpServer>,
+                >,
+            >,
+            system_id: spur_acp::BrainSessionId,
+            server: Arc<crate::worker_server::WorkerMcpServer>,
+        }
+
+        impl Drop for InsertWorkerOnDrop {
+            fn drop(&mut self) {
+                self.cache
+                    .insert(self.system_id.clone(), Arc::clone(&self.server));
+            }
+        }
+
+        let (_repo, deps) = runtime_deps_fixture().await;
+        let (runtime_without_parent, system_id) = bare_runtime(&deps, None);
+        let late_server = worker_fetcher(&deps, &runtime_without_parent)
+            .ensure(&system_id)
+            .await
+            .expect("late worker MCP server fixture");
+        deps.worker_mcp_servers.remove(&system_id);
+
+        let cache = Arc::clone(&deps.worker_mcp_servers);
+        let system_id_for_drop = system_id.clone();
+        let server_for_drop = Arc::clone(&late_server);
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let parent = tokio::spawn(async move {
+            let _late_insert = InsertWorkerOnDrop {
+                cache,
+                system_id: system_id_for_drop,
+                server: server_for_drop,
+            };
+            let _ = started_tx.send(());
+            std::future::pending::<()>().await;
+        });
+        started_rx.await.expect("parent fixture started");
+        let mut runtime = runtime_without_parent;
+        runtime.delegation_handle = Some(parent);
+        let force_shutdown = CancellationToken::new();
+        force_shutdown.cancel();
+
+        let drain = Box::new(runtime).begin_shutdown(force_shutdown);
+        drain.completion.await;
+
+        let cache_empty = !deps.worker_mcp_servers.contains_key(&system_id);
+        let server_stopped = !late_server.is_running();
+        if let Some((_id, lingering)) = deps.worker_mcp_servers.remove(&system_id) {
+            lingering.shutdown_immediately().await;
+        } else if !server_stopped {
+            Arc::clone(&late_server).shutdown_immediately().await;
+        }
+        assert!(
+            cache_empty && server_stopped,
+            "late worker server must be swept after parent acknowledgement: cache_empty={cache_empty}, server_stopped={server_stopped}"
+        );
+    }
+
     #[tokio::test(start_paused = true)]
     async fn runtime_shutdown_awaits_aborted_child() {
         let (_repo, deps) = runtime_deps_fixture().await;
