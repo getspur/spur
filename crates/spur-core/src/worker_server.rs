@@ -4344,6 +4344,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn shutdown_immediately_closes_partially_read_accepted_connection() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let dir = TempDir::new().expect("tempdir");
+        let pm = pm_service_fixture(dir.path()).await;
+        let server = WorkerMcpServer::start(
+            "brain-A".into(),
+            worker_mcp_deps_fixture(
+                pm,
+                pro_feature_gate(),
+                Arc::new(RecordingWorkerSignalSink::default()),
+            ),
+        )
+        .await
+        .expect("start worker server");
+        let mut connection = tokio::net::TcpStream::connect(server.addr)
+            .await
+            .expect("connect raw client");
+        connection
+            .write_all(b"POST /mcp HTTP/1.1\r\nHost: localhost\r\nContent-Length: 100\r\n\r\nx")
+            .await
+            .expect("write partial request");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            Arc::clone(&server).shutdown_immediately(),
+        )
+        .await
+        .expect("immediate shutdown exceeded bound");
+
+        let mut byte = [0_u8; 1];
+        let peer_closed = matches!(
+            tokio::time::timeout(Duration::from_millis(100), connection.read(&mut byte)).await,
+            Ok(Ok(0) | Err(_))
+        );
+        assert!(
+            peer_closed,
+            "shutdown acknowledgement must include Axum's accepted connection task"
+        );
+    }
+
+    #[tokio::test]
     async fn shutdown_until_forced_preempts_graceful_handler_drain() {
         let dir = TempDir::new().expect("tempdir");
         let pm = pm_service_fixture(dir.path()).await;
