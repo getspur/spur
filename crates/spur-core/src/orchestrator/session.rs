@@ -288,6 +288,41 @@ mod session_attach_guard_transfer_tests {
         assert!(transport.is_none());
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn dropping_brain_session_aborts_delegation_parent() {
+        let delegation_dropped = Arc::new(AtomicBool::new(false));
+        let delegation_drop_notify = Arc::new(Notify::new());
+        let delegation_started = Arc::new(Notify::new());
+        let delegation_task = tokio::spawn({
+            let delegation_dropped = Arc::clone(&delegation_dropped);
+            let delegation_drop_notify = Arc::clone(&delegation_drop_notify);
+            let delegation_started = Arc::clone(&delegation_started);
+            async move {
+                let _probe = DropOrderProbe {
+                    dropped: delegation_dropped,
+                    dropped_notify: delegation_drop_notify,
+                };
+                delegation_started.notify_one();
+                std::future::pending::<()>().await;
+            }
+        });
+        delegation_started.notified().await;
+
+        let mut brain = BrainSession::for_test(
+            Box::new(NoopConnection),
+            "acp-session",
+            SessionId("spur-session".to_string()),
+            "test-brain",
+        );
+        brain.delegation_handle = AbortOnDropHandle::new(delegation_task);
+        drop(brain);
+
+        tokio::time::timeout(Duration::from_secs(1), delegation_drop_notify.notified())
+            .await
+            .expect("dropping BrainSession must abort its delegation parent");
+        assert!(delegation_dropped.load(Ordering::SeqCst));
+    }
+
     impl Drop for HangingShutdownConnection {
         fn drop(&mut self) {
             self.dropped.store(true, Ordering::SeqCst);
