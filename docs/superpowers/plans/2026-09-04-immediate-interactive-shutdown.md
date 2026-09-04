@@ -42,7 +42,7 @@ bd-1u6v  worker MCP immediate barrier
 
 ## Task 2 — `bd-3c55`: Add immediate project runtime shutdown mode
 
-**Depends on:** `bd-1u6v`  
+**Depends on:** `bd-1u6v`
 **Files:** `crates/spur-core/src/orchestrator/loop_runtime.rs`
 
 1. Pre-solve the two-mode workflow: graceful supervisor shutdown retains existing drain semantics; immediate shutdown fences first, then joins delegation, worker MCP, and root MCP aborts before releasing leadership.
@@ -56,7 +56,7 @@ bd-1u6v  worker MCP immediate barrier
 
 ## Task 3 — `bd-3mkg`: Force-stop active brain and MCP trees on process exit
 
-**Depends on:** `bd-1u6v`  
+**Depends on:** `bd-1u6v`
 **Files:** `crates/spur-core/src/orchestrator/session.rs` and focused session shutdown tests
 
 1. Pre-solve the active-brain fast path, requiring ownership removal and `BrainRetired` emission before transport drop/resource abort, with worker/root drains independent and joined before return.
@@ -71,7 +71,7 @@ bd-1u6v  worker MCP immediate barrier
 
 ## Task 4 — `bd-1lcd`: Wire one bounded interactive shutdown barrier
 
-**Depends on:** `bd-3c55`, `bd-3mkg`  
+**Depends on:** `bd-3c55`, `bd-3mkg`
 **Files:** `crates/spur-core/src/orchestrator/interactive_loop.rs`, `crates/spur-interactive/src/host.rs`, and focused integration tests
 
 1. Pre-solve schedule makespan for concurrent active-brain/preconnection and project-runtime shutdown followed by one host deadline; reject models containing subsystem grace waits or a second host window.
@@ -84,6 +84,70 @@ bd-1u6v  worker MCP immediate barrier
    `scripts/spur-cargo test -p spur-interactive`
    `scripts/spur-cargo test -p spur-core orchestrator::loop_runtime::tests`
 7. Post-solve the final schedule and safety workflow; record evidence and commit the fix.
+
+## Review remediation — `bd-2opm`: Harden runtime shutdown races
+
+Independent review found that cancellation could drop a partially-started project runtime and that a force request arriving after graceful drain selection could no longer preempt the grace window.
+
+- RED: `54f9574ae` added startup-cleanup, late-escalation, and worker-handler escalation tests.
+- GREEN: `4f8e16ab0` made runtime startup cancellation-aware, represented shutdown as one force-aware drain, fanned out delegation/worker/root teardown, and retained leadership through every acknowledgement.
+- Verification: all 15 loop-runtime tests and all 3 worker shutdown tests passed.
+- Solver evidence: pre-solve `sol_71d9fbbdfcbe4272`; post-solve `sol_d8427d8a21074937` passed all eight workflow bindings at horizon 3.
+
+## Review remediation — `bd-2hsw`: Fence Ctrl+C ingress and prove ordering
+
+Independent review also found that an already-cancelled interactive loop could win an unbiased ready-input branch and dispatch queued work, while the active-brain test did not prove that transport ownership dropped before the held cleanup barrier.
+
+- RED: `650dbfc6d` added cancellation-biased admission contracts and a held-barrier transport ordering test.
+- GREEN: `ea00de6b9` fenced overflow/scheduler/spawn/prompt admission, biased every shutdown select, placed `PromptDispatched` inside the admitted prompt future, and factored transport drop before the joined delegation/MCP barrier.
+- Verification: both ingress tests, the held-barrier test, and the existing active-brain retirement test passed.
+- Solver evidence: pre-solve `sol_8f45bd7f20a941c5`; post-solve `sol_b1cd7e65b64847a1` passed all eight workflow bindings at horizon 4.
+
+## Review remediation — `bd-1hgbf`: Make delegation shutdown transitive
+
+A second independent review found that aborting the top-level delegation driver did not prove that its per-delegation `JoinSet` children had been dropped, and that a worker server inserted while the parent unwound could survive the runtime's first cache sweep.
+
+- RED: `5540bc237` added a blocked child-drop probe and a late worker-server insertion race.
+- GREEN: `c0eb27696` structurally nested delegation futures under the parent task and added a final worker-server sweep after delegation, root MCP, and worker MCP teardown join.
+- Verification: all 3 focused delegation shutdown tests and all 16 loop-runtime tests passed.
+- Solver evidence: pre-solve `sol_5b4a909913644cfa`; post-solve `sol_324be3598a2b4e1a` passed the transitive shutdown workflow.
+
+## Review remediation — `bd-30h0e`: Make HTTP connection shutdown transitive
+
+The same review found that aborting Axum's outer `serve` future can detach already accepted connection tasks, allowing a partial HTTP request to survive the worker MCP shutdown acknowledgement.
+
+- RED: `90bd5e713` added a raw partial-HTTP connection that remained open after the old immediate shutdown path.
+- GREEN: `3e50eebab` introduced a cancellation-aware Axum listener/stream wrapper, tracked every accepted socket, rejected late accepts, and waited for connection guards before the final handler barrier.
+- Verification: all 4 worker MCP immediate/graceful shutdown tests passed, including closure of the accepted partial connection.
+- Integration evidence: the adapter was checked against the pinned Axum 0.8.9 `Listener` and `serve` implementation; Axum spawns each accepted connection, so the new SPUR-owned connection tracker supplies the missing transitive barrier.
+- Solver evidence: pre-solve `sol_d874dbb17d994229`; post-solve `sol_040ce41f8fbc42a0` passed the connection-barrier workflow.
+
+## Review remediation — `bd-bcyln`: Race brain startup against shutdown
+
+The review also found that warm-connect and lazy first-turn startup awaited agent bootstrap directly, so Ctrl+C could remain blocked behind a hung connect/session future even though ordinary prompt work was fenced.
+
+- RED: `2c4937779` added a polled pending-startup probe whose RAII drop must happen before shutdown acknowledgment.
+- GREEN: `21ccb04b5` applies shutdown-priority selection to warm-connect, brain switch, new session, list/resume connection, session load, and lazy first-turn startup.
+- Verification: all 3 shutdown-ingress tests plus 4 session milestone, correlation, and history-owner integration tests passed.
+- Solver evidence: pre-solve `sol_03e03b5fa2a84034`; post-solve `sol_7345b6ed9eb7432f` passed initial-state, transition, safety, and bounded-reachability rules at horizon 5.
+
+## Review remediation — `bd-itc99`: Preserve brain ownership across reconnect and history
+
+Final review found that automatic reconnect still owned the dead/replacement `BrainSession` inside uncancellable futures, and explicit resume kept its loaded session local while waiting for history. Either path could detach the plain delegation handle when the host emergency abort fired.
+
+- RED: `5412f7c3f` added pre-cancelled reconnect ownership and pending-history cancellation tests.
+- GREEN: `d17090b61` makes reconnect take the caller's `brain` slot, immediately and transitively retires the dead session, races only bootstrap-local ownership against shutdown, installs the replacement before history, and gives resume history waits shutdown priority. Rare startup futures are boxed to keep the interactive-loop frame bounded.
+- Verification: all 22 shutdown-filtered `spur-core` tests passed. Strict no-deps clippy reports only four known pre-existing findings and no new large-future warnings.
+- Solver evidence: pre-solve `sol_f77731ae250a4d2a`; post-solve `sol_632cc311148d44c3` passed initial-state, transition, safety, and bounded-reachability rules at horizon 8, excluding `DetachedBrain` and `HistoryWaitAfterShutdown`.
+
+## Review remediation — `bd-1n8gz`: Drop cancellation registrations structurally
+
+Final review also found that dropping a nested delegation skipped its async registry-removal tail, leaving one stale cancellation token per interrupted request even though no task or process remained alive.
+
+- RED: `ff5df26b8` strengthened the parent/child drop-acknowledgement test to require `CancelOutcome::NotFound` after the parent joins; the old path returned `Cancelled`.
+- GREEN: `74b0f9fab` gives each structural child a cancellation-registration RAII guard and provides a synchronous, Drop-safe registry removal primitive. Typed abort-reason work remains async and no synchronous lock is held across an await.
+- Verification: the exact structural-abort regression passed, as did all 3 cancellation-control behavior tests.
+- Solver evidence: pre-solve `sol_30ce22f9a02c4a0c`; post-solve `sol_f8fc56c7e464409c` passed the registration-drop-before-parent-ack workflow at horizon 5, excluding `ParentAckWithRegistration`.
 
 ## Final verification
 
