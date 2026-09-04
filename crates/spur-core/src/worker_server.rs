@@ -4220,6 +4220,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn shutdown_immediately_aborts_permanently_hung_call() {
+        let dir = TempDir::new().expect("tempdir");
+        let pm = pm_service_fixture(dir.path()).await;
+        let signal_sink = Arc::new(HangingWorkerSignalSink::default());
+        let signal_sink_trait: Arc<dyn WorkerSignalSink> = signal_sink.clone();
+        let server = WorkerMcpServer::start(
+            "brain-A".into(),
+            worker_mcp_deps_fixture(pm, pro_feature_gate(), signal_sink_trait),
+        )
+        .await
+        .expect("start worker server");
+        server.register_delegation(
+            "del-immediate".into(),
+            DelegationContext {
+                enable_worker_progress: true,
+            },
+        );
+        let token = server.issue_token("del-immediate", Duration::from_secs(60));
+        let call_server = Arc::clone(&server);
+        let call = tokio::spawn(async move {
+            call_report_progress(call_server.as_ref(), &token, "hang until aborted").await
+        });
+        signal_sink.entered.notified().await;
+        assert_eq!(server.active_count(), 1);
+
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            Arc::clone(&server).shutdown_immediately(),
+        )
+        .await
+        .expect("immediate shutdown entered a graceful drain window");
+
+        assert_eq!(server.active_count(), 0);
+        tokio::time::timeout(Duration::from_secs(1), call)
+            .await
+            .expect("aborted worker call did not acknowledge termination")
+            .expect("worker call task panicked");
+    }
+
+    #[tokio::test]
     async fn retirement_cancels_handler_registration_after_abort_all() {
         let registry = Arc::new(HandlerAbortRegistry::default());
         registry.abort_all();
