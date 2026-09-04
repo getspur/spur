@@ -234,8 +234,16 @@ pub(crate) async fn handle_delegations(
         let cancellation_control_for_shutdown = cancellation_control.clone();
         let request_id_for_shutdown = request_id.clone();
         let shutdown_for_task = shutdown.clone();
+        let cancellation_registration = CancellationRegistrationGuard {
+            control: cancellation_control.clone(),
+            request_id: request_id.clone(),
+        };
 
         delegation_tasks.push(Box::pin(std::panic::AssertUnwindSafe(async move {
+            // This guard is captured by the structural child future itself.
+            // It therefore unregisters even if the parent drops this future
+            // before the async cleanup tail can be polled.
+            let _cancellation_registration = cancellation_registration;
             let delegation = async move {
                 let mut guard = DelegationGuard {
                     funnel: funnel.clone(),
@@ -530,6 +538,18 @@ pub(crate) async fn handle_delegations(
                 .await;
         })
         .catch_unwind()));
+    }
+}
+
+/// Drop-safe ownership of one cancellation-registry entry.
+struct CancellationRegistrationGuard {
+    control: CancellationControl,
+    request_id: String,
+}
+
+impl Drop for CancellationRegistrationGuard {
+    fn drop(&mut self) {
+        self.control.remove_now(&self.request_id);
     }
 }
 

@@ -4,7 +4,6 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
 /// Typed identifier for a delegation request.
@@ -394,7 +393,10 @@ impl DelegationAbortHandle {
 /// routing through the normal `DelegationRequest` channel.
 #[derive(Clone, Default)]
 pub struct CancellationControl {
-    tokens: Arc<Mutex<HashMap<String, DelegationAbortHandle>>>,
+    // A synchronous mutex is intentional: structural task cancellation drops
+    // futures synchronously, so their RAII guards must be able to unregister
+    // without spawning a detached async cleanup task.
+    tokens: Arc<std::sync::Mutex<HashMap<String, DelegationAbortHandle>>>,
 }
 
 impl CancellationControl {
@@ -409,7 +411,10 @@ impl CancellationControl {
     pub async fn register(&self, request_id: String) -> CancellationToken {
         let token = CancellationToken::new();
         let handle = DelegationAbortHandle::new(token.clone());
-        self.tokens.lock().await.insert(request_id, handle);
+        self.tokens
+            .lock()
+            .expect("cancellation registry lock poisoned")
+            .insert(request_id, handle);
         token
     }
 
@@ -420,7 +425,10 @@ impl CancellationControl {
     ) -> (CancellationToken, DelegationAbortHandle) {
         let token = CancellationToken::new();
         let handle = DelegationAbortHandle::new(token.clone());
-        self.tokens.lock().await.insert(request_id, handle.clone());
+        self.tokens
+            .lock()
+            .expect("cancellation registry lock poisoned")
+            .insert(request_id, handle.clone());
         (token, handle)
     }
 
@@ -433,7 +441,12 @@ impl CancellationControl {
 
     /// Remove the token entry and cancel with a typed brain-requested reason.
     pub async fn cancel_with_reason(&self, request_id: &str, reason: String) -> CancelOutcome {
-        if let Some(handle) = self.tokens.lock().await.remove(request_id) {
+        let handle = self
+            .tokens
+            .lock()
+            .expect("cancellation registry lock poisoned")
+            .remove(request_id);
+        if let Some(handle) = handle {
             handle
                 .request_abort(DelegationAbortReason::BrainRequested { reason })
                 .await;
@@ -446,7 +459,20 @@ impl CancellationControl {
     /// Remove the token entry without cancelling (called after normal
     /// completion so stale entries don't accumulate).
     pub async fn remove(&self, request_id: &str) {
-        self.tokens.lock().await.remove(request_id);
+        self.remove_now(request_id);
+    }
+
+    /// Synchronously remove an entry during future unwinding.
+    ///
+    /// This is the Drop-safe counterpart to [`Self::remove`]. It must never
+    /// block on async work, because callers use it to make structural parent
+    /// acknowledgement imply registry cleanup.
+    pub fn remove_now(&self, request_id: &str) -> bool {
+        self.tokens
+            .lock()
+            .expect("cancellation registry lock poisoned")
+            .remove(request_id)
+            .is_some()
     }
 }
 
