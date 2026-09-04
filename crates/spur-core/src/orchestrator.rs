@@ -87,8 +87,8 @@ use pm_bridge::{handle_get_issue_graph, issue_to_detail_event, refresh_pm_state}
 use review::apply_decision_to_candidate;
 pub use review::{cleanup_cancelled_review, review_dispatcher_loop};
 use session::{
-    abort_mcp_handle, cleanup_mcp_on_err, retire_brain_session, ReconnectDisposition,
-    RetireDisposition,
+    abort_mcp_handle, cleanup_mcp_on_err, retire_brain_session, BrainStartupOutcome,
+    ReconnectDisposition, RetireDisposition,
 };
 use session_discovery::classify_sessions;
 pub use types::{
@@ -137,6 +137,12 @@ type LoadedBrainSessionBootstrap = (
     spur_acp::BrainSessionId,
     SessionId,
     String,
+);
+
+type LoadedBrainSession = (
+    BrainSession,
+    std::pin::Pin<Box<dyn futures::Stream<Item = spur_acp::SessionNotification> + Send>>,
+    spur_acp::LoadOutcome,
 );
 
 fn prompt_usage_to_token_usage(usage: &spur_acp::Usage) -> spur_cost::pricing::TokenUsage {

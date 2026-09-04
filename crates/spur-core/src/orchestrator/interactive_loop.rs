@@ -51,9 +51,9 @@ where
     }
 }
 
-/// Await connection/session bootstrap with the process-exit fence selected
-/// first. Dropping the startup future on cancellation synchronously unwinds
-/// its transport and MCP abort-on-drop ownership before this returns.
+/// Await connection-only bootstrap with the process-exit fence selected first.
+/// Resource-bearing MCP/session startup uses the cancellation-aware owner APIs
+/// instead, because dropping those futures cannot acknowledge async teardown.
 async fn await_brain_startup_or_shutdown<F>(
     shutdown: &tokio_util::sync::CancellationToken,
     startup: F,
@@ -422,16 +422,15 @@ impl Orchestrator {
         // Atomic name: commit `active_brain_name` only after spawn succeeds so
         // failed switch leaves identity aligned with the last live brain type
         // (still no live session until the next spawn/message).
-        let Some(spawn_result) = await_brain_startup_or_shutdown(
-            shutdown_token,
-            Box::pin(self.spawn_brain_session(Some(target.as_str()), permission_tx.clone())),
-        )
-        .await
-        else {
-            return RetireDisposition::Shutdown;
-        };
+        let spawn_result = self
+            .spawn_brain_session_until_shutdown(
+                Some(target.as_str()),
+                permission_tx.clone(),
+                shutdown_token,
+            )
+            .await;
         match spawn_result {
-            Ok(b) => {
+            Ok(BrainStartupOutcome::Ready(b)) => {
                 *active_brain_name = target.clone();
                 let new_sid = Some(b.spur_session_id.clone().into());
                 scheduler.note_session_swap(new_sid, overflow_continuations);
@@ -441,6 +440,7 @@ impl Orchestrator {
                     to: target,
                 }));
             }
+            Ok(BrainStartupOutcome::Shutdown) => return RetireDisposition::Shutdown,
             Err(e) => {
                 let error_message = format_error_chain(&e);
                 error!(
@@ -769,47 +769,41 @@ impl Orchestrator {
                         {
                             break 'interactive;
                         }
-                        let Some(result) = await_brain_startup_or_shutdown(
-                            &shutdown_token,
-                            Box::pin(async {
-                                match agent_connection.take() {
-                                    Some(ActiveConnection {
-                                        transport: connection,
-                                        brain_name,
-                                        attach_guard,
-                                        fs_unsafe,
-                                        init_response,
-                                    }) => {
-                                        self.create_brain_session(
-                                            connection,
-                                            brain_name,
-                                            permission_tx.clone(),
-                                            attach_guard,
-                                            fs_unsafe,
-                                            init_response,
-                                        )
-                                        .await
-                                    }
-                                    None => {
-                                        self.spawn_brain_session(
-                                            Some(active_brain_name.as_str()),
-                                            permission_tx.clone(),
-                                        )
-                                        .await
-                                    }
-                                }
-                            }),
-                        )
-                        .await
-                        else {
-                            break 'interactive;
+                        let result = match agent_connection.take() {
+                            Some(ActiveConnection {
+                                transport: connection,
+                                brain_name,
+                                attach_guard,
+                                fs_unsafe,
+                                init_response,
+                            }) => {
+                                self.create_brain_session_until_shutdown(
+                                    connection,
+                                    brain_name,
+                                    permission_tx.clone(),
+                                    attach_guard,
+                                    fs_unsafe,
+                                    init_response,
+                                    &shutdown_token,
+                                )
+                                .await
+                            }
+                            None => {
+                                self.spawn_brain_session_until_shutdown(
+                                    Some(active_brain_name.as_str()),
+                                    permission_tx.clone(),
+                                    &shutdown_token,
+                                )
+                                .await
+                            }
                         };
                         match result {
-                            Ok(b) => {
+                            Ok(BrainStartupOutcome::Ready(b)) => {
                                 let new_sid = Some(b.spur_session_id.clone().into());
                                 scheduler.note_session_swap(new_sid, &overflow_continuations);
                                 brain = Some(b);
                             }
+                            Ok(BrainStartupOutcome::Shutdown) => break 'interactive,
                             Err(e) => {
                                 let error_message = format_error_chain(&e);
                                 error!(error = %error_message, "NewSession: failed to spawn brain");
@@ -999,9 +993,8 @@ impl Orchestrator {
                         self.emit(SpurEvent::now(SpurEventBody::SessionLoading {
                             session: local_session_id.clone(),
                         }));
-                        let Some(load_result) = await_brain_startup_or_shutdown(
-                            &shutdown_token,
-                            Box::pin(self.load_brain_session(
+                        let load_result = self
+                            .load_brain_session_until_shutdown(
                                 connection,
                                 brain_name,
                                 permission_tx.clone(),
@@ -1011,14 +1004,15 @@ impl Orchestrator {
                                 attach_guard,
                                 fs_unsafe,
                                 init_response,
-                            )),
-                        )
-                        .await
-                        else {
-                            break 'interactive;
-                        };
+                                &shutdown_token,
+                            )
+                            .await;
                         match load_result {
-                            Ok((session, mut history_stream, _load_outcome)) => {
+                            Ok(BrainStartupOutcome::Ready((
+                                session,
+                                mut history_stream,
+                                _load_outcome,
+                            ))) => {
                                 let spur_id = session.spur_session_id.clone();
                                 // `load_brain_session` has already spawned delegation
                                 // and registered ownership. Install the session before
@@ -1103,6 +1097,7 @@ impl Orchestrator {
                                     session: spur_id,
                                 }));
                             }
+                            Ok(BrainStartupOutcome::Shutdown) => break 'interactive,
                             Err(LoadBrainSessionError::AlreadyAttached { acp_id, holder }) => {
                                 self.emit(SpurEvent::now(SpurEventBody::SessionAttachRejected {
                                     acp_session_id: acp_id,
@@ -2036,51 +2031,37 @@ impl Orchestrator {
 
             // ── Lazy-spawn brain on first turn (or after crash) ─────────
             if brain.is_none() {
-                let Some(result) = await_brain_startup_or_shutdown(
-                    &shutdown_token,
-                    Box::pin(async {
-                        match agent_connection.take() {
-                            Some(ActiveConnection {
-                                transport: connection,
-                                brain_name,
-                                attach_guard,
-                                fs_unsafe,
-                                init_response,
-                            }) => {
-                                self.create_brain_session(
-                                    connection,
-                                    brain_name,
-                                    permission_tx.clone(),
-                                    attach_guard,
-                                    fs_unsafe,
-                                    init_response,
-                                )
-                                .await
-                            }
-                            None => {
-                                self.spawn_brain_session(
-                                    Some(active_brain_name.as_str()),
-                                    permission_tx.clone(),
-                                )
-                                .await
-                            }
-                        }
-                    }),
-                )
-                .await
-                else {
-                    break;
+                let result = match agent_connection.take() {
+                    Some(ActiveConnection {
+                        transport: connection,
+                        brain_name,
+                        attach_guard,
+                        fs_unsafe,
+                        init_response,
+                    }) => {
+                        self.create_brain_session_until_shutdown(
+                            connection,
+                            brain_name,
+                            permission_tx.clone(),
+                            attach_guard,
+                            fs_unsafe,
+                            init_response,
+                            &shutdown_token,
+                        )
+                        .await
+                    }
+                    None => {
+                        self.spawn_brain_session_until_shutdown(
+                            Some(active_brain_name.as_str()),
+                            permission_tx.clone(),
+                            &shutdown_token,
+                        )
+                        .await
+                    }
                 };
 
-                if shutdown_token.is_cancelled() {
-                    if let Ok(spawned_brain) = result {
-                        brain = Some(spawned_brain);
-                    }
-                    break;
-                }
-
                 match result {
-                    Ok(b) => {
+                    Ok(BrainStartupOutcome::Ready(b)) => {
                         // Wire the new session into the scheduler.
                         //
                         // The scheduler keys `push_continuation` on the SPUR
@@ -2097,7 +2078,11 @@ impl Orchestrator {
                         let new_sid = Some(b.spur_session_id.clone().into());
                         scheduler.note_session_swap(new_sid, &overflow_continuations);
                         brain = Some(b);
+                        if shutdown_token.is_cancelled() {
+                            break;
+                        }
                     }
+                    Ok(BrainStartupOutcome::Shutdown) => break,
                     Err(e) => {
                         let error_message = format_error_chain(&e);
                         error!(error = %error_message, "Failed to spawn brain");

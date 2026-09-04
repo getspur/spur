@@ -15,6 +15,11 @@ pub(super) enum RetireDisposition {
     Shutdown,
 }
 
+pub(super) enum BrainStartupOutcome<T> {
+    Ready(T),
+    Shutdown,
+}
+
 struct ReconnectSeed {
     acp_session_id: String,
     brain_name_hint: String,
@@ -2204,6 +2209,26 @@ pub(super) async fn shutdown_mcp_server_immediately<S: RetirableMcpServer + ?Siz
     tokio::join!(server_shutdown, guard_shutdown);
 }
 
+/// Tear down a startup that has acquired a transport and started root MCP but
+/// has not yet published a [`BrainSession`]. Transport/process ownership is
+/// dropped first; root MCP and its guard are then force-aborted and joined.
+async fn shutdown_partial_brain_startup<T, S>(
+    transport_ownership: T,
+    server: Arc<S>,
+    guard: AbortOnDropHandle<()>,
+) where
+    S: RetirableMcpServer + ?Sized,
+{
+    let mut server = Some(server);
+    let mut guard = Some(guard);
+    drop_transport_ownership_then_join(
+        transport_ownership,
+        std::future::ready(()),
+        shutdown_mcp_server_immediately(&mut server, Some(&mut guard)),
+    )
+    .await;
+}
+
 /// Start with the normal bounded MCP drain, but retain every owned handle so
 /// process shutdown can switch the same operation to the force-abort barrier.
 /// `true` means the process shutdown token won at some point in the drain.
@@ -2952,8 +2977,41 @@ impl Orchestrator {
     ///
     /// Emits BrainSpawned, starts MCP callback server, logs session start,
     /// calls new_session, spawns delegation handler. Returns BrainSession.
+    #[allow(dead_code)] // Retained for non-interactive callers and unit tests.
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn create_brain_session(
+        &mut self,
+        connection: Box<dyn spur_acp::AgentConnection>,
+        brain_name: String,
+        permission_tx: Option<
+            tokio::sync::mpsc::UnboundedSender<spur_acp::types::PermissionRequest>,
+        >,
+        existing_attach_guard: Option<SessionAttachGuard>,
+        existing_fs_unsafe: bool,
+        init_response: spur_acp::InitializeResponse,
+    ) -> Result<BrainSession> {
+        let never_shutdown = CancellationToken::new();
+        match self
+            .create_brain_session_until_shutdown(
+                connection,
+                brain_name,
+                permission_tx,
+                existing_attach_guard,
+                existing_fs_unsafe,
+                init_response,
+                &never_shutdown,
+            )
+            .await?
+        {
+            BrainStartupOutcome::Ready(brain) => Ok(brain),
+            BrainStartupOutcome::Shutdown => {
+                unreachable!("an uncancelled brain startup cannot return Shutdown")
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) async fn create_brain_session_until_shutdown(
         &mut self,
         mut connection: Box<dyn spur_acp::AgentConnection>,
         brain_name: String,
@@ -2963,7 +3021,8 @@ impl Orchestrator {
         existing_attach_guard: Option<SessionAttachGuard>,
         existing_fs_unsafe: bool,
         init_response: spur_acp::InitializeResponse,
-    ) -> Result<BrainSession> {
+        shutdown: &CancellationToken,
+    ) -> Result<BrainStartupOutcome<BrainSession>> {
         // Start MCP callback server.
         let sink: Option<std::sync::Arc<dyn spur_mcp::McpEventSink>> =
             Some(std::sync::Arc::new(self.funnel.clone()));
@@ -3004,23 +3063,22 @@ impl Orchestrator {
         mcp_server.set_tool_registry(tool_registry);
 
         let mcp_server = Arc::new(mcp_server);
-        let (mcp_url, mcp_handle) = mcp_server
-            .clone()
-            .start()
-            .await
-            .context("Failed to start MCP callback server")?;
+        let start_result = tokio::select! {
+            biased;
+            _ = shutdown.cancelled() => None,
+            result = Arc::clone(&mcp_server).start() => Some(result),
+        };
+        let Some(start_result) = start_result else {
+            drop((connection, existing_attach_guard));
+            mcp_server.force_abort_and_wait().await;
+            return Ok(BrainStartupOutcome::Shutdown);
+        };
+        let (mcp_url, mcp_handle) = start_result.context("Failed to start MCP callback server")?;
 
-        let (
-            (
-                brain_cfg,
-                presub_notif_rx,
-                session_response,
-                brain_session_id,
-                session_id,
-                socket_nonce,
-            ),
-            mcp_handle,
-        ): McpGuarded<NewBrainSessionBootstrap> = cleanup_mcp_on_err(mcp_handle, async {
+        let bootstrap_result: Option<Result<NewBrainSessionBootstrap>> = tokio::select! {
+            biased;
+            _ = shutdown.cancelled() => None,
+            result = async {
             let socket_nonce = self.notebook_socket_nonce.clone();
             let mcp_servers = crate::notebook::brain_mcp_servers(
                 &mcp_url,
@@ -3074,35 +3132,48 @@ impl Orchestrator {
                 session_id,
                 socket_nonce,
             ))
-        })
-        .await?;
+            } => Some(result),
+        };
+        let (
+            brain_cfg,
+            presub_notif_rx,
+            session_response,
+            brain_session_id,
+            session_id,
+            socket_nonce,
+        ) = match bootstrap_result {
+            Some(Ok(bootstrap)) => bootstrap,
+            Some(Err(error)) => {
+                shutdown_partial_brain_startup(
+                    (connection, existing_attach_guard),
+                    mcp_server,
+                    mcp_handle,
+                )
+                .await;
+                return Err(error);
+            }
+            None => {
+                shutdown_partial_brain_startup(
+                    (connection, existing_attach_guard),
+                    mcp_server,
+                    mcp_handle,
+                )
+                .await;
+                return Ok(BrainStartupOutcome::Shutdown);
+            }
+        };
 
-        self.register_notebook_socket(brain_session_id.clone());
-
-        info!(brain = %brain_name, session = %session_id, "Creating brain session");
-        self.emit(SpurEvent::now(SpurEventBody::BrainSpawned {
-            agent: brain_name.clone(),
-            session: session_id.clone(),
-        }));
-
-        // Log session start.
-        if let Some(ref ct) = self.cost_tracker {
-            let _ = ct.start_session(
-                &session_id,
-                &brain_name,
-                "brain",
-                None,
-                "(interactive)",
-                self.config.project.as_ref().map(|p| p.name.as_str()),
-                None,
-            );
-        }
-
-        let (attach_guard, fs_unsafe) = self.acquire_attach_guard_for_existing_or_new(
+        let (attach_guard, fs_unsafe) = match self.acquire_attach_guard_for_existing_or_new(
             &session_response.session_id.to_string(),
             existing_attach_guard,
             existing_fs_unsafe,
-        )?;
+        ) {
+            Ok(ownership) => ownership,
+            Err(error) => {
+                shutdown_partial_brain_startup(connection, mcp_server, mcp_handle).await;
+                return Err(error);
+            }
+        };
 
         // Spawn delegation handler.
         let max_concurrent = self
@@ -3113,19 +3184,57 @@ impl Orchestrator {
             .map(|n| n as usize)
             .unwrap_or(self.config.worktree.max_concurrent);
         if let Some(bundle) = self.peer_mailbox.clone() {
-            *bundle.brain_session_id_slot.write().await = Some(brain_session_id.to_string());
             let drain_quiet_window =
                 std::time::Duration::from_millis(bundle.router.limits().drain_quiet_window_ms);
-            // Idempotent: safe to call across multiple session boundaries because
-            // run_startup_reconcile only emits WorkerPeerMailboxReconciled on Changed
-            // (bd-cpf.5b). Stage-2 may consolidate these into a single helper.
-            let _ = crate::peer_mailbox::reconciler::run_startup_reconcile(
-                bundle.ledger.clone(),
-                self.funnel.clone(),
-                brain_session_id.to_string(),
-                drain_quiet_window,
-            )
-            .await;
+            let peer_setup = async {
+                // Reconcile before publishing the new owner id. The slot write
+                // is deliberately the final await before the no-await publish
+                // tail below.
+                let _ = crate::peer_mailbox::reconciler::run_startup_reconcile(
+                    bundle.ledger.clone(),
+                    self.funnel.clone(),
+                    brain_session_id.to_string(),
+                    drain_quiet_window,
+                )
+                .await;
+                *bundle.brain_session_id_slot.write().await = Some(brain_session_id.to_string());
+            };
+            let peer_ready = tokio::select! {
+                biased;
+                _ = shutdown.cancelled() => false,
+                () = peer_setup => true,
+            };
+            if !peer_ready {
+                shutdown_partial_brain_startup((connection, attach_guard), mcp_server, mcp_handle)
+                    .await;
+                return Ok(BrainStartupOutcome::Shutdown);
+            }
+        }
+        if shutdown.is_cancelled() {
+            shutdown_partial_brain_startup((connection, attach_guard), mcp_server, mcp_handle)
+                .await;
+            return Ok(BrainStartupOutcome::Shutdown);
+        }
+
+        // All remaining work is synchronous/no-fail until ownership is
+        // returned as BrainSession, so cancellation can no longer strand a
+        // partially published MCP server.
+        self.register_notebook_socket(brain_session_id.clone());
+        info!(brain = %brain_name, session = %session_id, "Creating brain session");
+        self.emit(SpurEvent::now(SpurEventBody::BrainSpawned {
+            agent: brain_name.clone(),
+            session: session_id.clone(),
+        }));
+        if let Some(ref ct) = self.cost_tracker {
+            let _ = ct.start_session(
+                &session_id,
+                &brain_name,
+                "brain",
+                None,
+                "(interactive)",
+                self.config.project.as_ref().map(|p| p.name.as_str()),
+                None,
+            );
         }
         let delegation_handle = tokio::spawn(delegation::handle_delegations(
             delegation_channel,
@@ -3226,7 +3335,7 @@ impl Orchestrator {
 
         self.self_held.insert(brain_session_id.clone());
 
-        Ok(BrainSession {
+        Ok(BrainStartupOutcome::Ready(BrainSession {
             connection,
             acp_session_id: session_response.session_id.to_string(),
             spur_session_id: session_id,
@@ -3243,7 +3352,7 @@ impl Orchestrator {
             spur_agent_caps,
             session_info: None,
             init_response,
-        })
+        }))
     }
 
     /// Load an existing session and return a BrainSession + history stream.
@@ -3251,8 +3360,47 @@ impl Orchestrator {
     /// Similar to create_brain_session but calls load_session instead of new_session.
     /// The history stream delivers past session notifications (historical context).
     // TODO(tech-debt): refactor when extracting orchestrator into smaller types.
+    #[allow(dead_code)] // Retained for non-interactive callers and unit tests.
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn load_brain_session(
+        &mut self,
+        connection: Box<dyn spur_acp::AgentConnection>,
+        brain_name: String,
+        permission_tx: Option<
+            tokio::sync::mpsc::UnboundedSender<spur_acp::types::PermissionRequest>,
+        >,
+        acp_session_id: String,
+        is_reconnect: bool,
+        force_new_session: bool,
+        existing_attach_guard: Option<SessionAttachGuard>,
+        existing_fs_unsafe: bool,
+        init_response: spur_acp::InitializeResponse,
+    ) -> std::result::Result<LoadedBrainSession, LoadBrainSessionError> {
+        let never_shutdown = CancellationToken::new();
+        match self
+            .load_brain_session_until_shutdown(
+                connection,
+                brain_name,
+                permission_tx,
+                acp_session_id,
+                is_reconnect,
+                force_new_session,
+                existing_attach_guard,
+                existing_fs_unsafe,
+                init_response,
+                &never_shutdown,
+            )
+            .await?
+        {
+            BrainStartupOutcome::Ready(loaded) => Ok(loaded),
+            BrainStartupOutcome::Shutdown => {
+                unreachable!("an uncancelled brain load cannot return Shutdown")
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) async fn load_brain_session_until_shutdown(
         &mut self,
         mut connection: Box<dyn spur_acp::AgentConnection>,
         brain_name: String,
@@ -3265,14 +3413,8 @@ impl Orchestrator {
         existing_attach_guard: Option<SessionAttachGuard>,
         existing_fs_unsafe: bool,
         init_response: spur_acp::InitializeResponse,
-    ) -> std::result::Result<
-        (
-            BrainSession,
-            std::pin::Pin<Box<dyn futures::Stream<Item = spur_acp::SessionNotification> + Send>>,
-            spur_acp::LoadOutcome,
-        ),
-        LoadBrainSessionError,
-    > {
+        shutdown: &CancellationToken,
+    ) -> std::result::Result<BrainStartupOutcome<LoadedBrainSession>, LoadBrainSessionError> {
         let requested_acp_session_id = acp_session_id.clone();
 
         let (mut attach_guard, mut fs_unsafe) = if force_new_session {
@@ -3329,27 +3471,22 @@ impl Orchestrator {
         mcp_server.set_tool_registry(tool_registry);
 
         let mcp_server = Arc::new(mcp_server);
-        let (mcp_url, mcp_handle) = mcp_server
-            .clone()
-            .start()
-            .await
-            .context("Failed to start MCP callback server")?;
+        let start_result = tokio::select! {
+            biased;
+            _ = shutdown.cancelled() => None,
+            result = Arc::clone(&mcp_server).start() => Some(result),
+        };
+        let Some(start_result) = start_result else {
+            drop((connection, attach_guard));
+            mcp_server.force_abort_and_wait().await;
+            return Ok(BrainStartupOutcome::Shutdown);
+        };
+        let (mcp_url, mcp_handle) = start_result.context("Failed to start MCP callback server")?;
 
-        let (
-            (
-                brain_cfg,
-                presub_notif_rx,
-                final_acp_session_id,
-                history_stream,
-                resumed,
-                load_outcome,
-                wire_response,
-                brain_session_id,
-                session_id,
-                socket_nonce,
-            ),
-            mcp_handle,
-        ): McpGuarded<LoadedBrainSessionBootstrap> = cleanup_mcp_on_err(mcp_handle, async {
+        let bootstrap_result: Option<Result<LoadedBrainSessionBootstrap>> = tokio::select! {
+            biased;
+            _ = shutdown.cancelled() => None,
+            result = async {
             let socket_nonce = self.notebook_socket_nonce.clone();
             let mcp_servers = crate::notebook::brain_mcp_servers(
                 &mcp_url,
@@ -3465,36 +3602,41 @@ impl Orchestrator {
                 session_id,
                 socket_nonce,
             ))
-        })
-        .await?;
-
-        self.register_notebook_socket(brain_session_id.clone());
+            } => Some(result),
+        };
+        let (
+            brain_cfg,
+            presub_notif_rx,
+            final_acp_session_id,
+            history_stream,
+            resumed,
+            load_outcome,
+            wire_response,
+            brain_session_id,
+            session_id,
+            socket_nonce,
+        ) = match bootstrap_result {
+            Some(Ok(bootstrap)) => bootstrap,
+            Some(Err(error)) => {
+                shutdown_partial_brain_startup((connection, attach_guard), mcp_server, mcp_handle)
+                    .await;
+                return Err(LoadBrainSessionError::Other(error));
+            }
+            None => {
+                shutdown_partial_brain_startup((connection, attach_guard), mcp_server, mcp_handle)
+                    .await;
+                return Ok(BrainStartupOutcome::Shutdown);
+            }
+        };
 
         if final_acp_session_id != requested_acp_session_id {
             drop(attach_guard.take());
-            (attach_guard, fs_unsafe) = self.acquire_attach_guard_for_new(&final_acp_session_id)?;
-        }
-
-        info!(brain = %brain_name, session = %session_id, acp_session = %final_acp_session_id, "Loaded brain session");
-        if !is_reconnect {
-            self.emit(SpurEvent::now(SpurEventBody::BrainSpawned {
-                agent: brain_name.clone(),
-                session: session_id.clone(),
-            }));
-        }
-
-        // Log session start.
-        if !is_reconnect {
-            if let Some(ref ct) = self.cost_tracker {
-                let _ = ct.start_session(
-                    &session_id,
-                    &brain_name,
-                    "brain",
-                    None,
-                    "(resumed)",
-                    self.config.project.as_ref().map(|p| p.name.as_str()),
-                    None,
-                );
+            match self.acquire_attach_guard_for_new(&final_acp_session_id) {
+                Ok(ownership) => (attach_guard, fs_unsafe) = ownership,
+                Err(error) => {
+                    shutdown_partial_brain_startup(connection, mcp_server, mcp_handle).await;
+                    return Err(LoadBrainSessionError::Other(error));
+                }
             }
         }
 
@@ -3507,19 +3649,59 @@ impl Orchestrator {
             .map(|n| n as usize)
             .unwrap_or(self.config.worktree.max_concurrent);
         if let Some(bundle) = self.peer_mailbox.clone() {
-            *bundle.brain_session_id_slot.write().await = Some(brain_session_id.to_string());
             let drain_quiet_window =
                 std::time::Duration::from_millis(bundle.router.limits().drain_quiet_window_ms);
-            // Idempotent: safe to call across multiple session boundaries because
-            // run_startup_reconcile only emits WorkerPeerMailboxReconciled on Changed
-            // (bd-cpf.5b). Stage-2 may consolidate these into a single helper.
-            let _ = crate::peer_mailbox::reconciler::run_startup_reconcile(
-                bundle.ledger.clone(),
-                self.funnel.clone(),
-                brain_session_id.to_string(),
-                drain_quiet_window,
-            )
-            .await;
+            let peer_setup = async {
+                // Reconcile before publishing the new owner id. The slot write
+                // is deliberately the final await before the no-await publish
+                // tail below.
+                let _ = crate::peer_mailbox::reconciler::run_startup_reconcile(
+                    bundle.ledger.clone(),
+                    self.funnel.clone(),
+                    brain_session_id.to_string(),
+                    drain_quiet_window,
+                )
+                .await;
+                *bundle.brain_session_id_slot.write().await = Some(brain_session_id.to_string());
+            };
+            let peer_ready = tokio::select! {
+                biased;
+                _ = shutdown.cancelled() => false,
+                () = peer_setup => true,
+            };
+            if !peer_ready {
+                shutdown_partial_brain_startup((connection, attach_guard), mcp_server, mcp_handle)
+                    .await;
+                return Ok(BrainStartupOutcome::Shutdown);
+            }
+        }
+        if shutdown.is_cancelled() {
+            shutdown_partial_brain_startup((connection, attach_guard), mcp_server, mcp_handle)
+                .await;
+            return Ok(BrainStartupOutcome::Shutdown);
+        }
+
+        // All remaining work is synchronous/no-fail until ownership is
+        // returned as BrainSession, so cancellation can no longer strand a
+        // partially published MCP server.
+        self.register_notebook_socket(brain_session_id.clone());
+        info!(brain = %brain_name, session = %session_id, acp_session = %final_acp_session_id, "Loaded brain session");
+        if !is_reconnect {
+            self.emit(SpurEvent::now(SpurEventBody::BrainSpawned {
+                agent: brain_name.clone(),
+                session: session_id.clone(),
+            }));
+            if let Some(ref ct) = self.cost_tracker {
+                let _ = ct.start_session(
+                    &session_id,
+                    &brain_name,
+                    "brain",
+                    None,
+                    "(resumed)",
+                    self.config.project.as_ref().map(|p| p.name.as_str()),
+                    None,
+                );
+            }
         }
         let delegation_handle = tokio::spawn(delegation::handle_delegations(
             delegation_channel,
@@ -3651,7 +3833,11 @@ impl Orchestrator {
 
         self.self_held.insert(brain_session_id.clone());
 
-        Ok((brain_session, stream, load_outcome))
+        Ok(BrainStartupOutcome::Ready((
+            brain_session,
+            stream,
+            load_outcome,
+        )))
     }
 
     /// Retire a dead reconnect source without graceful drain delays. The
@@ -3721,31 +3907,27 @@ impl Orchestrator {
         >,
         brain_override: Option<&str>,
         force_new_session: bool,
-    ) -> std::result::Result<
-        (
-            BrainSession,
-            std::pin::Pin<Box<dyn futures::Stream<Item = spur_acp::SessionNotification> + Send>>,
-            spur_acp::LoadOutcome,
-        ),
-        ReconnectError,
-    > {
+        shutdown: &CancellationToken,
+    ) -> std::result::Result<BrainStartupOutcome<LoadedBrainSession>, ReconnectError> {
         // Fresh connection + reattach. init_response is plumbed into
         // load_brain_session for retention on the BrainSession (so the
         // retire path can move it back to ActiveConnection later); the
         // `set_*` caps stay None for resumed sessions until M9 wires the
         // LoadSessionResponse through.
-        let (connection, brain_name, init_response) = self
-            .connect_brain(brain_override, permission_tx.clone())
-            .await
-            .with_context(|| {
-                format!(
-                    "reconnect: connect_brain failed for '{}'",
-                    seed.brain_name_hint
-                )
-            })?;
+        let connect_result = tokio::select! {
+            biased;
+            _ = shutdown.cancelled() => return Ok(BrainStartupOutcome::Shutdown),
+            result = self.connect_brain(brain_override, permission_tx.clone()) => result,
+        };
+        let (connection, brain_name, init_response) = connect_result.with_context(|| {
+            format!(
+                "reconnect: connect_brain failed for '{}'",
+                seed.brain_name_hint
+            )
+        })?;
 
         match self
-            .load_brain_session(
+            .load_brain_session_until_shutdown(
                 connection,
                 brain_name,
                 permission_tx,
@@ -3755,6 +3937,7 @@ impl Orchestrator {
                 seed.attach_guard,
                 seed.fs_unsafe,
                 init_response,
+                shutdown,
             )
             .await
         {
@@ -3836,16 +4019,13 @@ impl Orchestrator {
             return ReconnectDisposition::Shutdown;
         }
 
-        let reconnect =
-            Box::pin(self.try_reconnect_brain(seed, permission_tx, brain_override, force_new));
-        let reconnect_result = tokio::select! {
-            biased;
-            _ = shutdown.cancelled() => return ReconnectDisposition::Shutdown,
-            result = reconnect => result,
-        };
+        let reconnect_result = self
+            .try_reconnect_brain(seed, permission_tx, brain_override, force_new, shutdown)
+            .await;
 
         let (new_brain, mut history_stream, outcome) = match reconnect_result {
-            Ok(result) => result,
+            Ok(BrainStartupOutcome::Ready(result)) => result,
+            Ok(BrainStartupOutcome::Shutdown) => return ReconnectDisposition::Shutdown,
             Err(e) => {
                 self.emit(SpurEvent::now(reconnect_failure_event(
                     spur_session_id,
@@ -3904,16 +4084,40 @@ impl Orchestrator {
             tokio::sync::mpsc::UnboundedSender<spur_acp::types::PermissionRequest>,
         >,
     ) -> Result<BrainSession> {
-        let (connection, brain_name, init_response) = self
-            .connect_brain(brain_override, permission_tx.clone())
-            .await?;
-        self.create_brain_session(
+        let never_shutdown = CancellationToken::new();
+        match self
+            .spawn_brain_session_until_shutdown(brain_override, permission_tx, &never_shutdown)
+            .await?
+        {
+            BrainStartupOutcome::Ready(brain) => Ok(brain),
+            BrainStartupOutcome::Shutdown => {
+                unreachable!("an uncancelled brain spawn cannot return Shutdown")
+            }
+        }
+    }
+
+    pub(super) async fn spawn_brain_session_until_shutdown(
+        &mut self,
+        brain_override: Option<&str>,
+        permission_tx: Option<
+            tokio::sync::mpsc::UnboundedSender<spur_acp::types::PermissionRequest>,
+        >,
+        shutdown: &CancellationToken,
+    ) -> Result<BrainStartupOutcome<BrainSession>> {
+        let connect_result = tokio::select! {
+            biased;
+            _ = shutdown.cancelled() => return Ok(BrainStartupOutcome::Shutdown),
+            result = self.connect_brain(brain_override, permission_tx.clone()) => result,
+        };
+        let (connection, brain_name, init_response) = connect_result?;
+        self.create_brain_session_until_shutdown(
             connection,
             brain_name,
             permission_tx,
             None,
             false,
             init_response,
+            shutdown,
         )
         .await
     }
