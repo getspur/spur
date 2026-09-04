@@ -23,6 +23,7 @@ use std::time::Duration;
 use tokio::sync::broadcast::{error::RecvError, error::TryRecvError, Receiver};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 
 use spur_acp::connection::{AgentClientRequestKind, AgentClientRequestPayload};
 use spur_acp::domain::events::SpurEventBody;
@@ -71,18 +72,32 @@ impl SessionNotificationPump {
         reply_rx.await.unwrap_or_default()
     }
 
-    /// Give a retiring session one final grace interval for the broadcast to
-    /// close naturally, then abort the still-live task.
-    pub(crate) async fn retire_with_grace(mut self) {
-        let Some(task) = self.task.take() else {
-            return;
+    /// Retire while retaining the taken task handle across force escalation.
+    /// Returns `true` when `force_shutdown` won the graceful wait.
+    pub(crate) async fn retire_until_forced(mut self, force_shutdown: &CancellationToken) -> bool {
+        let Some(mut task) = self.task.take() else {
+            return force_shutdown.is_cancelled();
         };
-        let abort = task.abort_handle();
-        if tokio::time::timeout(TRAILING_NOTIFICATION_GRACE, task)
-            .await
-            .is_err()
-        {
-            abort.abort();
+
+        if force_shutdown.is_cancelled() {
+            task.abort();
+            let _ = task.await;
+            return true;
+        }
+
+        tokio::select! {
+            biased;
+            _ = force_shutdown.cancelled() => {
+                task.abort();
+                let _ = task.await;
+                true
+            }
+            _ = tokio::time::sleep(TRAILING_NOTIFICATION_GRACE) => {
+                task.abort();
+                let _ = task.await;
+                force_shutdown.is_cancelled()
+            }
+            _ = &mut task => force_shutdown.is_cancelled(),
         }
     }
 }

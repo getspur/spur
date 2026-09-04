@@ -151,8 +151,22 @@ impl<S: RetirableMcpServer + ?Sized> super::session::RetirableMcpServer
     fn force_abort(&self) {
         self.0.force_abort();
     }
-    fn shutdown(&self) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
-        self.0.shutdown()
+    fn shutdown_until_forced<'a>(
+        &'a self,
+        force_shutdown: &'a tokio_util::sync::CancellationToken,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'a>> {
+        Box::pin(async move {
+            let shutdown = self.0.shutdown();
+            tokio::pin!(shutdown);
+            tokio::select! {
+                biased;
+                _ = force_shutdown.cancelled() => {
+                    self.0.force_abort();
+                    true
+                }
+                () = &mut shutdown => force_shutdown.is_cancelled(),
+            }
+        })
     }
 }
 

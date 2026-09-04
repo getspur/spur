@@ -41,6 +41,41 @@ async fn drop_transport_ownership_then_join<T, D, R>(
     tokio::join!(delegation_shutdown, resource_shutdown);
 }
 
+/// Keep a reusable transport only while teardown remains fully graceful.
+/// Force observation drops transport ownership immediately, but the cleanup
+/// future remains pinned and owned until every structural acknowledgement.
+async fn retain_transport_until_cleanup_or_force<T, F>(
+    transport: T,
+    cleanup: F,
+    force_shutdown: CancellationToken,
+) -> (Option<T>, bool)
+where
+    F: std::future::Future<Output = bool>,
+{
+    let mut transport = Some(transport);
+    tokio::pin!(cleanup);
+
+    let mut non_graceful = if force_shutdown.is_cancelled() {
+        drop(transport.take());
+        cleanup.await
+    } else {
+        tokio::select! {
+            biased;
+            _ = force_shutdown.cancelled() => {
+                drop(transport.take());
+                cleanup.await
+            }
+            result = &mut cleanup => result,
+        }
+    };
+
+    non_graceful |= force_shutdown.is_cancelled();
+    if non_graceful {
+        drop(transport.take());
+    }
+    (transport, non_graceful)
+}
+
 async fn retire_session_cost_write<T, F>(
     session_id: String,
     brain_id: String,
@@ -366,11 +401,16 @@ mod session_attach_guard_transfer_tests {
             Box::pin(std::future::ready(()))
         }
 
-        fn shutdown(&self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+        fn shutdown_until_forced<'a>(
+            &'a self,
+            force_shutdown: &'a CancellationToken,
+        ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
             let graceful_polled = Arc::clone(&self.graceful_polled);
             Box::pin(async move {
                 graceful_polled.store(true, Ordering::SeqCst);
-                std::future::pending::<()>().await;
+                force_shutdown.cancelled().await;
+                self.force_waited.store(true, Ordering::SeqCst);
+                true
             })
         }
     }
@@ -2201,7 +2241,10 @@ pub(super) trait RetirableMcpServer: Send + Sync {
         self.force_abort();
         Box::pin(std::future::ready(()))
     }
-    fn shutdown(&self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>;
+    fn shutdown_until_forced<'a>(
+        &'a self,
+        force_shutdown: &'a CancellationToken,
+    ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>>;
 }
 
 impl RetirableMcpServer for McpCallbackServer {
@@ -2221,8 +2264,14 @@ impl RetirableMcpServer for McpCallbackServer {
         Box::pin(McpCallbackServer::force_abort_and_wait(self))
     }
 
-    fn shutdown(&self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
-        Box::pin(McpCallbackServer::shutdown(self))
+    fn shutdown_until_forced<'a>(
+        &'a self,
+        force_shutdown: &'a CancellationToken,
+    ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+        Box::pin(McpCallbackServer::shutdown_until_forced(
+            self,
+            force_shutdown,
+        ))
     }
 }
 
@@ -2273,7 +2322,7 @@ async fn shutdown_partial_brain_startup<T, S>(
 
 /// Start with the normal bounded MCP drain, but retain every owned handle so
 /// process shutdown can switch the same operation to the force-abort barrier.
-/// `true` means the process shutdown token won at some point in the drain.
+/// `true` means graceful drain did not complete (process force or timeout).
 pub(super) async fn shutdown_mcp_server_until_forced<S: RetirableMcpServer + ?Sized>(
     funnel: &crate::event_funnel::FunnelHandle,
     session: &SessionId,
@@ -2295,17 +2344,33 @@ pub(super) async fn shutdown_mcp_server_until_forced<S: RetirableMcpServer + ?Si
             Forced,
         }
 
+        let local_force = CancellationToken::new();
+        if forced {
+            local_force.cancel();
+        }
+        let server_shutdown = server.shutdown_until_forced(&local_force);
+        tokio::pin!(server_shutdown);
         let outcome = if forced {
+            let _ = server_shutdown.await;
             DrainOutcome::Forced
         } else {
             tokio::select! {
                 biased;
-                _ = force_shutdown.cancelled() => DrainOutcome::Forced,
-                result = tokio::time::timeout(MCP_SHUTDOWN_TIMEOUT, server.shutdown()) => {
-                    if result.is_ok() {
-                        DrainOutcome::Clean
+                _ = force_shutdown.cancelled() => {
+                    local_force.cancel();
+                    let _ = server_shutdown.await;
+                    DrainOutcome::Forced
+                }
+                _ = tokio::time::sleep(MCP_SHUTDOWN_TIMEOUT) => {
+                    local_force.cancel();
+                    let _ = server_shutdown.await;
+                    DrainOutcome::TimedOut
+                }
+                internal_forced = &mut server_shutdown => {
+                    if internal_forced {
+                        DrainOutcome::Forced
                     } else {
-                        DrainOutcome::TimedOut
+                        DrainOutcome::Clean
                     }
                 }
             }
@@ -2316,6 +2381,7 @@ pub(super) async fn shutdown_mcp_server_until_forced<S: RetirableMcpServer + ?Si
                 info!(session = %session, "MCP server shutdown clean");
             }
             DrainOutcome::TimedOut => {
+                forced = true;
                 warn!(
                     session = %session,
                     timeout_ms = MCP_SHUTDOWN_TIMEOUT.as_millis() as u64,
@@ -2325,11 +2391,9 @@ pub(super) async fn shutdown_mcp_server_until_forced<S: RetirableMcpServer + ?Si
                     session: session.clone(),
                     timeout_ms: MCP_SHUTDOWN_TIMEOUT.as_millis() as u64,
                 });
-                server.force_abort_and_wait().await;
             }
             DrainOutcome::Forced => {
                 forced = true;
-                server.force_abort_and_wait().await;
             }
         }
     }
@@ -2359,6 +2423,7 @@ pub(super) async fn shutdown_mcp_server_until_forced<S: RetirableMcpServer + ?Si
             match outcome {
                 GuardOutcome::Clean => {}
                 GuardOutcome::TimedOut => {
+                    forced = true;
                     warn!(
                         session = %session,
                         timeout_ms = MCP_SHUTDOWN_TIMEOUT.as_millis() as u64,
@@ -2385,59 +2450,9 @@ pub(super) async fn shutdown_mcp_server<S: RetirableMcpServer + ?Sized>(
     mcp_server: &mut Option<Arc<S>>,
     mcp_guard: Option<&mut Option<AbortOnDropHandle<()>>>,
 ) {
-    let Some(server) = mcp_server.take() else {
-        if let Some(mcp_guard) = mcp_guard {
-            if let Some(guard) = mcp_guard.take() {
-                if tokio::time::timeout(MCP_SHUTDOWN_TIMEOUT, guard)
-                    .await
-                    .is_err()
-                {
-                    warn!(
-                        session = %session,
-                        timeout_ms = MCP_SHUTDOWN_TIMEOUT.as_millis() as u64,
-                        "MCP guard await exceeded timeout on early-return; aborting via drop"
-                    );
-                }
-            }
-        }
-        return;
-    };
-
-    server.mark_retiring();
-    server.cancel_in_flight_workers();
-
-    match tokio::time::timeout(MCP_SHUTDOWN_TIMEOUT, server.shutdown()).await {
-        Ok(_) => {
-            info!(session = %session, "MCP server shutdown clean");
-        }
-        Err(_timeout) => {
-            warn!(
-                session = %session,
-                timeout_ms = MCP_SHUTDOWN_TIMEOUT.as_millis() as u64,
-                "MCP server shutdown timed out — forcing abort"
-            );
-            funnel.emit(SpurEventBody::McpShutdownTimeout {
-                session: session.clone(),
-                timeout_ms: MCP_SHUTDOWN_TIMEOUT.as_millis() as u64,
-            });
-            server.force_abort();
-        }
-    }
-
-    if let Some(mcp_guard) = mcp_guard {
-        if let Some(guard) = mcp_guard.take() {
-            if tokio::time::timeout(MCP_SHUTDOWN_TIMEOUT, guard)
-                .await
-                .is_err()
-            {
-                warn!(
-                    session = %session,
-                    timeout_ms = MCP_SHUTDOWN_TIMEOUT.as_millis() as u64,
-                    "MCP guard await exceeded timeout post-shutdown; aborting via drop"
-                );
-            }
-        }
-    }
+    let never_force = CancellationToken::new();
+    let _ = shutdown_mcp_server_until_forced(funnel, session, mcp_server, mcp_guard, &never_force)
+        .await;
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2511,12 +2526,15 @@ async fn shutdown_brain_resources_until_forced<S: RetirableMcpServer + ?Sized>(
                     "Worker MCP server drain timed out; forcing shutdown"
                 );
             }
+            !outcome.drained
+        } else {
+            false
         }
     };
     let root_shutdown =
         shutdown_mcp_server_until_forced(funnel, session, mcp_server, mcp_guard, force_shutdown);
-    let ((), root_forced) = tokio::join!(worker_shutdown, root_shutdown);
-    root_forced || force_shutdown.is_cancelled()
+    let (worker_non_graceful, root_non_graceful) = tokio::join!(worker_shutdown, root_shutdown);
+    worker_non_graceful || root_non_graceful || force_shutdown.is_cancelled()
 }
 
 pub(super) async fn resume_orphaned_dispatch_session(
@@ -2836,12 +2854,7 @@ impl Orchestrator {
         //    last batch of notifications reaches the projection. On
         //    timeout, abort explicitly.
         if let Some(h) = b.notification_pump_handle.take() {
-            let pump_result = tokio::select! {
-                biased;
-                _ = force_shutdown.cancelled() => false,
-                () = h.retire_with_grace() => true,
-            };
-            if !pump_result {
+            if h.retire_until_forced(force_shutdown).await {
                 return self
                     .finish_forced_retirement(
                         b,
@@ -2859,44 +2872,70 @@ impl Orchestrator {
         //    may drop either future while it owns teardown handles.
         b.delegation_handle.abort();
         let delegation_handle = b.delegation_handle;
-        let delegation_shutdown = async move {
-            let _ = delegation_handle.await;
+        let transport_ownership = (b.connection, b.attach_guard.take(), agent_connection.take());
+        let cleanup = async {
+            let delegation_shutdown = async move {
+                let _ = delegation_handle.await;
+            };
+            let resource_shutdown = shutdown_brain_resources_until_forced(
+                &self.funnel,
+                &b.spur_session_id,
+                &mut b.mcp_server,
+                Some(&mut b.mcp_guard),
+                &self.worker_mcp_servers,
+                force_shutdown,
+            );
+            let ((), resource_non_graceful) = tokio::join!(delegation_shutdown, resource_shutdown);
+
+            // A delegation already completing WorkerMcpServer::start can
+            // insert after the first removal. Delegation acknowledgement
+            // makes this second sweep final.
+            if let Some((_session, late_worker_server)) = self
+                .worker_mcp_servers
+                .remove(&spur_acp::BrainSessionId::from(b.spur_session_id.clone()))
+            {
+                late_worker_server.shutdown_immediately().await;
+            }
+            resource_non_graceful
         };
-        let resource_shutdown = shutdown_brain_resources_until_forced(
-            &self.funnel,
-            &b.spur_session_id,
-            &mut b.mcp_server,
-            Some(&mut b.mcp_guard),
-            &self.worker_mcp_servers,
-            force_shutdown,
-        );
-        let ((), forced) = tokio::join!(delegation_shutdown, resource_shutdown);
+        let (transport_ownership, non_graceful) = retain_transport_until_cleanup_or_force(
+            transport_ownership,
+            cleanup,
+            force_shutdown.clone(),
+        )
+        .await;
         scheduler.note_session_swap(None, overflow);
 
-        // A delegation already completing WorkerMcpServer::start can insert
-        // after the first removal. Delegation acknowledgement makes this
-        // second sweep final.
-        if let Some((_session, late_worker_server)) = self
-            .worker_mcp_servers
-            .remove(&spur_acp::BrainSessionId::from(b.spur_session_id.clone()))
-        {
-            late_worker_server.shutdown_immediately().await;
+        if non_graceful || force_shutdown.is_cancelled() {
+            drop(transport_ownership);
+            self.emit(SpurEvent::now(SpurEventBody::SessionRetireComplete {
+                session: from_session,
+            }));
+            return if force_shutdown.is_cancelled() {
+                RetireDisposition::Shutdown
+            } else {
+                // A bounded root/worker drain timed out. The transport is not
+                // safe to reuse, but the interactive process may reconnect.
+                RetireDisposition::Retired
+            };
         }
 
-        if forced {
-            drop((b.connection, b.attach_guard.take(), agent_connection.take()));
+        // Graceful retirement succeeded, so preserve the initialized ACP
+        // connection for same-kind reuse.
+        let (connection, attach_guard, previous_connection) =
+            transport_ownership.expect("graceful retirement retains transport ownership");
+        drop(previous_connection);
+        if force_shutdown.is_cancelled() {
+            drop((connection, attach_guard));
             self.emit(SpurEvent::now(SpurEventBody::SessionRetireComplete {
                 session: from_session,
             }));
             return RetireDisposition::Shutdown;
         }
-
-        // Graceful retirement succeeded, so preserve the initialized ACP
-        // connection for same-kind reuse.
         *agent_connection = Some(ActiveConnection {
-            transport: b.connection,
+            transport: connection,
             brain_name: b.brain_name,
-            attach_guard: b.attach_guard.take(),
+            attach_guard,
             fs_unsafe: b.fs_unsafe,
             init_response: b.init_response,
         });

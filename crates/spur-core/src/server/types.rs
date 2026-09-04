@@ -192,13 +192,6 @@ impl ReconcilerTaskHandle {
         self.handle.abort();
     }
 
-    pub(crate) async fn shutdown(mut self) {
-        if let Some(tx) = self.cancel_tx.take() {
-            let _ = tx.send(());
-        }
-        let _ = self.handle.await;
-    }
-
     pub(crate) async fn abort_and_wait(mut self) {
         if let Some(tx) = self.cancel_tx.take() {
             let _ = tx.send(());
@@ -219,13 +212,6 @@ impl StartupRecoveryTaskHandle {
             let _ = tx.send(());
         }
         self.handle.abort();
-    }
-
-    pub(crate) async fn shutdown(mut self) {
-        if let Some(tx) = self.cancel_tx.take() {
-            let _ = tx.send(());
-        }
-        let _ = self.handle.await;
     }
 
     pub(crate) async fn abort_and_wait(mut self) {

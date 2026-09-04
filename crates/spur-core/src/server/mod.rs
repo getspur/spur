@@ -76,6 +76,48 @@ pub use types::*;
 
 pub const MCP_NOT_LICENSED_ERROR_CODE: i32 = -32041;
 
+async fn join_abort_on_drop_task_until_forced(
+    mut handle: AbortOnDropHandle<()>,
+    force_shutdown: &CancellationToken,
+) -> bool {
+    if force_shutdown.is_cancelled() {
+        handle.abort();
+        let _ = handle.await;
+        return true;
+    }
+
+    tokio::select! {
+        biased;
+        _ = force_shutdown.cancelled() => {
+            handle.abort();
+            let _ = handle.await;
+            true
+        }
+        _ = &mut handle => force_shutdown.is_cancelled(),
+    }
+}
+
+async fn join_task_until_forced(
+    mut handle: JoinHandle<()>,
+    force_shutdown: &CancellationToken,
+) -> bool {
+    if force_shutdown.is_cancelled() {
+        handle.abort();
+        let _ = handle.await;
+        return true;
+    }
+
+    tokio::select! {
+        biased;
+        _ = force_shutdown.cancelled() => {
+            handle.abort();
+            let _ = handle.await;
+            true
+        }
+        _ = &mut handle => force_shutdown.is_cancelled(),
+    }
+}
+
 pub fn require_feature(key: FeatureKey, feature_gate: &FeatureGate) -> Result<(), McpError> {
     if feature_gate.has(key) {
         return Ok(());
@@ -910,6 +952,13 @@ impl McpCallbackServer {
     /// Gracefully shut down the server: close the task tracker and wait
     /// for all in-flight result collectors to finish.
     pub async fn shutdown(&self) {
+        let never_force = CancellationToken::new();
+        let _ = self.shutdown_until_forced(&never_force).await;
+    }
+
+    /// Gracefully shut down while retaining every taken child handle across
+    /// force escalation. Returns `true` when force was observed.
+    pub(crate) async fn shutdown_until_forced(&self, force_shutdown: &CancellationToken) -> bool {
         self.task_tracker.close();
         if let Some(tx) = self.root_shutdown_tx.lock().unwrap().take() {
             let _ = tx.send(());
@@ -919,14 +968,60 @@ impl McpCallbackServer {
             state.pending = false;
             state.handle.take()
         };
-        if let Some(handle) = startup_recovery_handle {
-            handle.shutdown().await;
-        }
         let reconciler_handle = self.reconciler_handle.lock().unwrap().take();
-        if let Some(handle) = reconciler_handle {
-            handle.shutdown().await;
-        }
-        self.task_tracker.wait().await;
+        let root_handle = self.root_handle.lock().unwrap().take();
+
+        let startup = async move {
+            let Some(mut handle) = startup_recovery_handle else {
+                return false;
+            };
+            if let Some(tx) = handle.cancel_tx.take() {
+                let _ = tx.send(());
+            }
+            join_abort_on_drop_task_until_forced(handle.handle, force_shutdown).await
+        };
+        let reconciler = async move {
+            let Some(mut handle) = reconciler_handle else {
+                return false;
+            };
+            if let Some(tx) = handle.cancel_tx.take() {
+                let _ = tx.send(());
+            }
+            join_abort_on_drop_task_until_forced(handle.handle, force_shutdown).await
+        };
+        let root = async move {
+            match root_handle {
+                Some(handle) => join_task_until_forced(handle, force_shutdown).await,
+                None => false,
+            }
+        };
+        let tracked = async {
+            if force_shutdown.is_cancelled() {
+                self.task_tracker.abort_all();
+                self.task_tracker.wait().await;
+                return true;
+            }
+
+            let wait = self.task_tracker.wait();
+            tokio::pin!(wait);
+            tokio::select! {
+                biased;
+                _ = force_shutdown.cancelled() => {
+                    self.task_tracker.abort_all();
+                    wait.await;
+                    true
+                }
+                () = &mut wait => force_shutdown.is_cancelled(),
+            }
+        };
+
+        let (startup_forced, reconciler_forced, root_forced, tracker_forced) =
+            tokio::join!(startup, reconciler, root, tracked);
+        startup_forced
+            || reconciler_forced
+            || root_forced
+            || tracker_forced
+            || force_shutdown.is_cancelled()
     }
 
     /// Spawn the beads reconciler after the orchestrator has bound the derived

@@ -4842,6 +4842,26 @@ mod phase5_orchestrator_finalization_tests {
             self.force_calls.fetch_add(1, Ordering::SeqCst);
         }
 
+        fn shutdown_until_forced<'a>(
+            &'a self,
+            force_shutdown: &'a tokio_util::sync::CancellationToken,
+        ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+            Box::pin(async move {
+                let shutdown = self.shutdown();
+                tokio::pin!(shutdown);
+                tokio::select! {
+                    biased;
+                    _ = force_shutdown.cancelled() => {
+                        self.force_abort();
+                        true
+                    }
+                    () = &mut shutdown => force_shutdown.is_cancelled(),
+                }
+            })
+        }
+    }
+
+    impl MockRetiringServer {
         fn shutdown(&self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
             self.shutdown_calls.fetch_add(1, Ordering::SeqCst);
             match &self.shutdown_mode {
