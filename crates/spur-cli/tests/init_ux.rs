@@ -81,6 +81,7 @@ fn seed_agents_do_not_include_legacy_claude_stream_json() {
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
+use std::path::Path;
 use std::process::Command;
 use std::sync::Mutex;
 use tempfile::TempDir;
@@ -111,6 +112,17 @@ fn stub_which(dir: &std::path::Path) {
 
 fn controlled_path(dir: &std::path::Path) -> String {
     dir.display().to_string()
+}
+
+fn load_layered_with_home(repo: &Path, home: &Path) -> spur_acp::config::SpurConfig {
+    let original_home = std::env::var_os("HOME");
+    std::env::set_var("HOME", home);
+    let effective = spur_acp::config::load_layered(repo);
+    match original_home {
+        Some(value) => std::env::set_var("HOME", value),
+        None => std::env::remove_var("HOME"),
+    }
+    effective.unwrap()
 }
 
 fn seed_agent_commands() -> Vec<String> {
@@ -171,8 +183,22 @@ fn init_with_zero_agents_writes_no_config() {
 #[test]
 fn init_with_existing_config_merges_agents() {
     let _g = LOCK.lock().unwrap();
+    let home = TempDir::new().unwrap();
     let tmp = TempDir::new().unwrap();
     fs::create_dir_all(tmp.path().join(".spur")).unwrap();
+
+    // Make Claude Code a user-layer baseline entry. Project init may then
+    // legitimately omit it from the sparse project overlay.
+    let mut user_config = spur_acp::config::SpurConfig::default();
+    let claude_code = spur_acp::config::load_seed_template()
+        .entries
+        .into_iter()
+        .find(|agent| agent.name == "claude-code")
+        .expect("seed template should include claude-code");
+    user_config.agents.entries.push(claude_code);
+    let user_path = home.path().join(".spur/config.toml");
+    fs::create_dir_all(user_path.parent().unwrap()).unwrap();
+    fs::write(&user_path, toml::to_string_pretty(&user_config).unwrap()).unwrap();
 
     // Pre-existing config with custom brain and bot settings.
     let existing = r#"
@@ -189,35 +215,33 @@ operator_user_id = 12345
 
     let status = spur()
         .current_dir(tmp.path())
+        .env("HOME", home.path())
         .env("PATH", controlled_path(tmp.path()))
         .arg("init")
         .status()
         .expect("spawn spur init");
 
     assert!(status.success(), "merge init should exit 0");
-    let after = fs::read_to_string(tmp.path().join(".spur/config.toml")).unwrap();
+    let effective = load_layered_with_home(tmp.path(), home.path());
+    let agent_names: Vec<_> = effective
+        .agents
+        .entries
+        .iter()
+        .map(|agent| agent.name.as_str())
+        .collect();
 
-    // Should merge the discovered Claude Code agent.
     assert!(
-        after.contains(r#"name = "claude-code""#),
-        "should merge discovered agent; got:\n{after}"
-    );
-
-    // Should preserve existing bot config.
-    assert!(
-        after.contains("enabled = true"),
-        "should preserve bot config; got:\n{after}"
+        agent_names.contains(&"claude-code"),
+        "effective config should retain the baseline Claude Code agent; got {agent_names:?}"
     );
     assert!(
-        after.contains("operator_user_id = 12345"),
-        "should preserve bot operator; got:\n{after}"
+        agent_names.contains(&"codex"),
+        "effective config should merge the other agent discovered through npx; got {agent_names:?}"
     );
-
-    // Brain should be recomputed (kiro is not on PATH here, claude-code is).
-    assert!(
-        after.contains(r#"default = "claude-code""#),
-        "should recompute brain to discovered agent; got:\n{after}"
-    );
+    assert_eq!(effective.brain.default, "claude-code");
+    assert_eq!(effective.brain.fallback, ["codex"]);
+    assert!(effective.bot.telegram.enabled);
+    assert_eq!(effective.bot.telegram.operator_user_id, Some(12345));
 }
 
 #[test]
@@ -356,13 +380,7 @@ fn project_init_with_user_layer_writes_sparse_overlay() {
         "project layer must not duplicate user-layer agents:\n{raw}"
     );
 
-    let original_home = std::env::var_os("HOME");
-    std::env::set_var("HOME", home.path());
-    let effective = spur_acp::config::load_layered(repo.path()).unwrap();
-    match original_home {
-        Some(value) => std::env::set_var("HOME", value),
-        None => std::env::remove_var("HOME"),
-    }
+    let effective = load_layered_with_home(repo.path(), home.path());
     assert_eq!(
         effective.agents.entries.len(),
         spur_acp::config::load_seed_template().entries.len(),
