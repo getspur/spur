@@ -7,10 +7,13 @@
 //! per-delegation lifecycle guards remain in this module.
 
 use std::borrow::Cow;
+use std::future::Future;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::task::{Context as TaskContext, Poll};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
@@ -56,11 +59,13 @@ use rmcp::{
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tokio::net::TcpListener;
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
+use axum::serve::Listener;
 use axum::{
     body::Body,
     extract::State,
@@ -248,6 +253,8 @@ pub struct WorkerMcpServer {
     /// dispatcher hot path doesn't pay for the construction per request.
     deps: Arc<DispatcherDeps>,
     shutdown: CancellationToken,
+    connection_force_shutdown: CancellationToken,
+    connections: Arc<ConnectionTracker>,
     session_manager: Arc<LocalSessionManager>,
     session_contexts:
         Arc<parking_lot::Mutex<std::collections::HashMap<String, AuthenticatedWorkerContext>>>,
@@ -273,6 +280,182 @@ pub struct WorkerMcpServer {
     /// Claude allowlist names derived from the exact registry advertised by
     /// this server instance.
     worker_mcp_tool_names: Vec<String>,
+}
+
+#[derive(Default)]
+struct ConnectionTracker {
+    state: Mutex<ConnectionTrackerState>,
+    changed: tokio::sync::Notify,
+}
+
+#[derive(Default)]
+struct ConnectionTrackerState {
+    closing: bool,
+    active: usize,
+}
+
+struct ConnectionGuard {
+    tracker: Arc<ConnectionTracker>,
+}
+
+impl ConnectionTracker {
+    fn register(self: &Arc<Self>) -> (bool, ConnectionGuard) {
+        let mut state = self.state.lock();
+        state.active += 1;
+        let closing = state.closing;
+        drop(state);
+        (
+            closing,
+            ConnectionGuard {
+                tracker: Arc::clone(self),
+            },
+        )
+    }
+
+    fn begin_closing(&self) {
+        self.state.lock().closing = true;
+    }
+
+    async fn wait(&self) {
+        loop {
+            let changed = self.changed.notified();
+            if self.state.lock().active == 0 {
+                return;
+            }
+            changed.await;
+        }
+    }
+}
+
+impl Drop for ConnectionGuard {
+    fn drop(&mut self) {
+        let mut state = self.tracker.state.lock();
+        state.active = state.active.saturating_sub(1);
+        drop(state);
+        self.tracker.changed.notify_waiters();
+    }
+}
+
+struct TrackedTcpListener {
+    inner: TcpListener,
+    connections: Arc<ConnectionTracker>,
+    force_shutdown: CancellationToken,
+}
+
+impl Listener for TrackedTcpListener {
+    type Io = TrackedTcpStream;
+    type Addr = SocketAddr;
+
+    async fn accept(&mut self) -> (Self::Io, Self::Addr) {
+        loop {
+            match self.inner.accept().await {
+                Ok((stream, addr)) => {
+                    let (closing, guard) = self.connections.register();
+                    let force_shutdown = if closing {
+                        let rejected = CancellationToken::new();
+                        rejected.cancel();
+                        rejected
+                    } else {
+                        self.force_shutdown.clone()
+                    };
+                    return (TrackedTcpStream::new(stream, force_shutdown, guard), addr);
+                }
+                Err(error) => {
+                    tracing::error!(%error, "worker MCP accept error");
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+            }
+        }
+    }
+
+    fn local_addr(&self) -> std::io::Result<Self::Addr> {
+        self.inner.local_addr()
+    }
+}
+
+struct TrackedTcpStream {
+    inner: TcpStream,
+    force_shutdown: Pin<Box<tokio_util::sync::WaitForCancellationFutureOwned>>,
+    _guard: ConnectionGuard,
+}
+
+impl TrackedTcpStream {
+    fn new(inner: TcpStream, force_shutdown: CancellationToken, guard: ConnectionGuard) -> Self {
+        Self {
+            inner,
+            force_shutdown: Box::pin(force_shutdown.cancelled_owned()),
+            _guard: guard,
+        }
+    }
+
+    fn poll_forced(&mut self, cx: &mut TaskContext<'_>) -> bool {
+        self.force_shutdown.as_mut().poll(cx).is_ready()
+    }
+
+    fn forced_error() -> std::io::Error {
+        std::io::Error::new(
+            std::io::ErrorKind::ConnectionAborted,
+            "worker MCP connection force-closed",
+        )
+    }
+}
+
+impl AsyncRead for TrackedTcpStream {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        if self.poll_forced(cx) {
+            return Poll::Ready(Err(Self::forced_error()));
+        }
+        Pin::new(&mut self.inner).poll_read(cx, buf)
+    }
+}
+
+impl AsyncWrite for TrackedTcpStream {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        if self.poll_forced(cx) {
+            return Poll::Ready(Err(Self::forced_error()));
+        }
+        Pin::new(&mut self.inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<std::io::Result<()>> {
+        if self.poll_forced(cx) {
+            return Poll::Ready(Err(Self::forced_error()));
+        }
+        Pin::new(&mut self.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        mut self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        if self.poll_forced(cx) {
+            return Poll::Ready(Err(Self::forced_error()));
+        }
+        Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        self.inner.is_write_vectored()
+    }
+
+    fn poll_write_vectored(
+        mut self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+        bufs: &[std::io::IoSlice<'_>],
+    ) -> Poll<std::io::Result<usize>> {
+        if self.poll_forced(cx) {
+            return Poll::Ready(Err(Self::forced_error()));
+        }
+        Pin::new(&mut self.inner).poll_write_vectored(cx, bufs)
+    }
 }
 
 /// RAII guard that increments [`WorkerMcpServer::active_delegations`] on
@@ -2314,6 +2497,8 @@ impl WorkerMcpServer {
         });
 
         let shutdown = CancellationToken::new();
+        let connection_force_shutdown = CancellationToken::new();
+        let connections = Arc::new(ConnectionTracker::default());
         let session_manager = Arc::new(LocalSessionManager::default());
         let session_contexts = Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new()));
         let (handler, worker_mcp_tool_names) = WorkerToolHandler::new(
@@ -2329,6 +2514,8 @@ impl WorkerMcpServer {
             brain_session_id: brain_session_id.clone(),
             deps: Arc::clone(&dispatcher_deps),
             shutdown: shutdown.clone(),
+            connection_force_shutdown: connection_force_shutdown.clone(),
+            connections: Arc::clone(&connections),
             session_manager: Arc::clone(&session_manager),
             session_contexts: Arc::clone(&session_contexts),
             accept_loop_handle: Mutex::new(None),
@@ -2363,6 +2550,11 @@ impl WorkerMcpServer {
                     worker_auth_middleware,
                 ));
 
+        let listener = TrackedTcpListener {
+            inner: listener,
+            connections,
+            force_shutdown: connection_force_shutdown,
+        };
         let serve_shutdown = shutdown.clone();
         let accept_handle = tokio::spawn(async move {
             if let Err(error) = axum::serve(listener, router)
@@ -2754,8 +2946,12 @@ impl WorkerMcpServer {
     ) -> ShutdownOutcome {
         let drain_deadline = Instant::now() + deadline;
         self.deps.handler_aborts.begin_closing();
+        self.connections.begin_closing();
         self.shutdown.cancel();
         let mut forced = force_shutdown.is_cancelled();
+        if forced {
+            self.connection_force_shutdown.cancel();
+        }
         if !forced && !deadline.is_zero() {
             let close_sessions = self.close_all_sessions(deadline);
             tokio::pin!(close_sessions);
@@ -2795,16 +2991,22 @@ impl WorkerMcpServer {
 
         let accept_handle = self.accept_loop_handle.lock().take();
         let flusher_handle = self.flusher_handle.lock().take();
+        let connections = Arc::clone(&self.connections);
+        let connection_force_shutdown = self.connection_force_shutdown.clone();
         let background = async {
             let accept = async {
                 if let Some(handle) = accept_handle {
                     let wait = drain_deadline.saturating_duration_since(Instant::now());
-                    await_or_abort_background_task_until_forced(
+                    await_or_force_connection_tasks_until_forced(
                         handle,
                         wait,
                         force_shutdown.clone(),
+                        connection_force_shutdown,
+                        connections,
                     )
                     .await;
+                } else {
+                    connections.wait().await;
                 }
             };
             let flusher = async {
@@ -2832,11 +3034,21 @@ impl WorkerMcpServer {
                 biased;
                 _ = force_shutdown.cancelled() => {
                     forced = true;
+                    self.connection_force_shutdown.cancel();
                     let handlers = self.force_abort_handlers_and_wait();
                     tokio::join!(&mut background, handlers);
                 }
                 _ = &mut background => {}
             }
+        }
+        if force_shutdown.is_cancelled() {
+            forced = true;
+            self.connection_force_shutdown.cancel();
+        }
+        if forced {
+            // The connection barrier prevents any request from registering
+            // after this final handler snapshot.
+            self.force_abort_handlers_and_wait().await;
         }
         // Reference held only to keep the deps Arc alive until shutdown
         // completes; explicit drop documents intent.
@@ -2855,10 +3067,51 @@ impl WorkerMcpServer {
     }
 }
 
+impl Drop for WorkerMcpServer {
+    fn drop(&mut self) {
+        self.deps.handler_aborts.abort_all();
+        self.connections.begin_closing();
+        self.connection_force_shutdown.cancel();
+        self.shutdown.cancel();
+        if let Some(handle) = self.accept_loop_handle.lock().take() {
+            handle.abort();
+        }
+        if let Some(handle) = self.flusher_handle.lock().take() {
+            handle.abort();
+        }
+    }
+}
+
 /// How often [`WorkerMcpServer::shutdown`] re-checks `active_count` while
 /// draining. Bounded so the polling loop never busy-spins, small enough that
 /// a fast-completing dispatcher doesn't materially extend shutdown latency.
 const DRAIN_POLL_INTERVAL: Duration = Duration::from_millis(10);
+
+async fn await_or_force_connection_tasks_until_forced(
+    mut handle: JoinHandle<()>,
+    wait: Duration,
+    force_shutdown: CancellationToken,
+    connection_force_shutdown: CancellationToken,
+    connections: Arc<ConnectionTracker>,
+) {
+    let graceful = if wait.is_zero() || force_shutdown.is_cancelled() {
+        false
+    } else {
+        tokio::select! {
+            biased;
+            _ = force_shutdown.cancelled() => false,
+            _ = tokio::time::sleep(wait) => false,
+            _ = &mut handle => true,
+        }
+    };
+
+    if !graceful {
+        connection_force_shutdown.cancel();
+        handle.abort();
+        let _ = handle.await;
+    }
+    connections.wait().await;
+}
 
 async fn await_or_abort_background_task_until_forced(
     mut handle: JoinHandle<()>,
@@ -4366,7 +4619,13 @@ mod tests {
             .write_all(b"POST /mcp HTTP/1.1\r\nHost: localhost\r\nContent-Length: 100\r\n\r\nx")
             .await
             .expect("write partial request");
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while server.connections.state.lock().active == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("server did not accept raw connection");
 
         tokio::time::timeout(
             Duration::from_secs(1),
