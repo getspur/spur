@@ -211,6 +211,48 @@ mod session_attach_guard_transfer_tests {
             .expect("cleanup barrier task panicked");
     }
 
+    #[tokio::test]
+    async fn retirement_barrier_drops_transport_on_force_but_keeps_cleanup_owned() {
+        let transport_dropped = Arc::new(AtomicBool::new(false));
+        let transport_drop_notify = Arc::new(Notify::new());
+        let cleanup_started = Arc::new(Notify::new());
+        let cleanup_release = Arc::new(Notify::new());
+        let force = CancellationToken::new();
+        let task = tokio::spawn(retain_transport_until_cleanup_or_force(
+            DropOrderProbe {
+                dropped: Arc::clone(&transport_dropped),
+                dropped_notify: Arc::clone(&transport_drop_notify),
+            },
+            {
+                let cleanup_started = Arc::clone(&cleanup_started);
+                let cleanup_release = Arc::clone(&cleanup_release);
+                async move {
+                    cleanup_started.notify_one();
+                    cleanup_release.notified().await;
+                    false
+                }
+            },
+            force.clone(),
+        ));
+
+        cleanup_started.notified().await;
+        force.cancel();
+        transport_drop_notify.notified().await;
+        assert!(transport_dropped.load(Ordering::SeqCst));
+        assert!(
+            !task.is_finished(),
+            "force observation dropped the owned cleanup future"
+        );
+
+        cleanup_release.notify_one();
+        let (transport, forced) = tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .expect("retirement barrier did not acknowledge")
+            .expect("retirement barrier task panicked");
+        assert!(forced);
+        assert!(transport.is_none());
+    }
+
     impl Drop for HangingShutdownConnection {
         fn drop(&mut self) {
             self.dropped.store(true, Ordering::SeqCst);

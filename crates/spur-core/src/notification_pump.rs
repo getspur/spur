@@ -254,11 +254,56 @@ pub fn spawn_agent_client_request_pump(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
     use std::time::Duration;
 
     use tokio::sync::mpsc;
+    use tokio::sync::Notify;
+    use tokio_util::sync::CancellationToken;
 
     use super::*;
+
+    struct TaskDropProbe(Arc<AtomicBool>);
+
+    impl Drop for TaskDropProbe {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn retire_until_forced_aborts_and_joins_taken_task() {
+        let task_dropped = Arc::new(AtomicBool::new(false));
+        let task_started = Arc::new(Notify::new());
+        let task = tokio::spawn({
+            let task_dropped = Arc::clone(&task_dropped);
+            let task_started = Arc::clone(&task_started);
+            async move {
+                let _probe = TaskDropProbe(task_dropped);
+                task_started.notify_one();
+                std::future::pending::<()>().await;
+            }
+        });
+        task_started.notified().await;
+        let (barrier_tx, _barrier_rx) = mpsc::unbounded_channel();
+        let pump = SessionNotificationPump {
+            task: Some(task),
+            barrier_tx,
+        };
+        let force = CancellationToken::new();
+        force.cancel();
+
+        let forced = tokio::time::timeout(Duration::from_secs(1), pump.retire_until_forced(&force))
+            .await
+            .expect("forced pump retirement must acknowledge promptly");
+
+        assert!(forced);
+        assert!(
+            task_dropped.load(Ordering::SeqCst),
+            "pump retirement returned before its taken task acknowledged abort"
+        );
+    }
 
     #[tokio::test]
     async fn agent_client_request_pump_emits_auth_required_events() {
