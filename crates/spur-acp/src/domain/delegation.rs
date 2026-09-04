@@ -408,6 +408,7 @@ impl CancellationControl {
 
     /// Register a fresh token for `request_id`. Called by
     /// `handle_delegations` before spawning the delegation task.
+    #[allow(clippy::unused_async)] // Keep the established async control API after moving storage to a Drop-safe mutex.
     pub async fn register(&self, request_id: String) -> CancellationToken {
         let token = CancellationToken::new();
         let handle = DelegationAbortHandle::new(token.clone());
@@ -419,6 +420,7 @@ impl CancellationControl {
     }
 
     /// Register a fresh token plus its paired typed abort handle.
+    #[allow(clippy::unused_async)] // Keep the established async control API after moving storage to a Drop-safe mutex.
     pub async fn register_with_abort_handle(
         &self,
         request_id: String,
@@ -458,6 +460,7 @@ impl CancellationControl {
 
     /// Remove the token entry without cancelling (called after normal
     /// completion so stale entries don't accumulate).
+    #[allow(clippy::unused_async)] // Keep the established async control API after moving storage to a Drop-safe mutex.
     pub async fn remove(&self, request_id: &str) {
         self.remove_now(request_id);
     }
