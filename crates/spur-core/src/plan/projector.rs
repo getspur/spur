@@ -4,7 +4,9 @@ use std::sync::OnceLock;
 use spur_acp::{BrainSessionId, SessionId};
 
 use super::{PlanState, PlanTask, PlanTaskEntry, PlanTaskStatus};
-use crate::plan::audit_sentinel::{AuditSentinelKind, CompletionState, EpicCompletionOutcome};
+use crate::plan::audit_sentinel::{
+    AuditSentinelKind, CompletionState, EpicCompletionOutcome, SystemReviewDecision,
+};
 use crate::plan::shadow_projector::{shadow_project_plan_from_beads, TaskAuditLog};
 
 const LEGACY_DELEGATION_ID_PREFIX: &str = "delegation-id:";
@@ -361,6 +363,14 @@ pub fn project_status_from_audits(audits: &[AuditSentinelKind]) -> PlanTaskStatu
             AuditSentinelKind::Approval { .. } => {
                 status = PlanTaskStatus::Approved {
                     summary: summary.clone(),
+                };
+            }
+            AuditSentinelKind::SystemReviewVerdict { decision, .. } => {
+                status = match decision {
+                    SystemReviewDecision::Approve => PlanTaskStatus::Approved {
+                        summary: summary.clone(),
+                    },
+                    SystemReviewDecision::RequestChanges => PlanTaskStatus::Pending,
                 };
             }
             AuditSentinelKind::Rejection { feedback, .. } => {
@@ -1059,6 +1069,14 @@ pub fn project_closed_status(
                     .and_then(|(_, _, result_summary, _, _)| result_summary);
                 return PlanTaskStatus::Approved { summary };
             }
+            AuditSentinelKind::SystemReviewVerdict { decision, .. } => match decision {
+                SystemReviewDecision::Approve => {
+                    let summary = latest_completion_facts(audits)
+                        .and_then(|(_, _, result_summary, _, _)| result_summary);
+                    return PlanTaskStatus::Approved { summary };
+                }
+                SystemReviewDecision::RequestChanges => return PlanTaskStatus::Pending,
+            },
             AuditSentinelKind::Rejection { feedback, .. } => {
                 return PlanTaskStatus::Rejected {
                     feedback: Some(feedback.clone()),
@@ -1103,9 +1121,16 @@ pub fn project_closed_status(
     } else if has_review_rejected_label(&issue.labels) {
         PlanTaskStatus::Rejected { feedback: None }
     } else {
-        let summary =
-            latest_completion_facts(audits).and_then(|(_, _, result_summary, _, _)| result_summary);
-        PlanTaskStatus::Approved { summary }
+        tracing::error!(
+            target: "spur.plan.projector",
+            metric = "closed_task_missing_terminal_review_audit",
+            issue_id = %issue.id,
+            audit_count = audits.len(),
+            "closed task has no terminal review evidence; projecting as failed"
+        );
+        PlanTaskStatus::Failed {
+            error: "closed task missing terminal review audit".to_string(),
+        }
     }
 }
 
@@ -1593,7 +1618,7 @@ mod tests {
         AuditSentinelKind, BrainSessionId, CompletionState, PlanState, PlanTask, PlanTaskEntry,
         PlanTaskStatus, SessionId, TerminalAuditKind,
     };
-    use crate::plan::audit_sentinel::EpicCompletionOutcome;
+    use crate::plan::audit_sentinel::{EpicCompletionOutcome, SystemReviewDecision};
     use crate::plan::PlanMergeState;
 
     #[derive(Debug, Clone)]
@@ -2477,12 +2502,16 @@ mod tests {
     }
 
     #[test]
-    fn zero_audit_closed_task_derives_approved_without_dispatched_base_oid() {
+    fn zero_audit_closed_task_fails_closed_without_dispatched_base_oid() {
         let issue = issue("bd-42v", "closed", Vec::new(), Vec::new());
         let audits: Vec<AuditSentinelKind> = vec![];
 
         let status = super::project_status_for_issue(&issue, &audits, false, "closed");
-        assert!(matches!(status, PlanTaskStatus::Approved { summary: None }));
+        assert!(matches!(
+            status,
+            PlanTaskStatus::Failed { error }
+                if error == "closed task missing terminal review audit"
+        ));
 
         let dispatched_base_oid =
             super::latest_completion_facts(&audits).and_then(|(_, _, _, _, oid)| oid);
@@ -2490,7 +2519,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn project_plan_from_beads_does_not_panic_on_zero_audit_closed_task() {
+    async fn project_plan_from_beads_keeps_zero_audit_closed_task_non_mergeable() {
         let plan_id = "test-plan";
         let epic = issue(
             "bd-epic-1",
@@ -2533,11 +2562,54 @@ mod tests {
         assert!(
             plan_state.tasks.iter().any(|t| {
                 t.spec.task_id == "bd-42v"
-                    && matches!(t.status, PlanTaskStatus::Approved { summary: None })
+                    && matches!(
+                        &t.status,
+                        PlanTaskStatus::Failed { error }
+                            if error == "closed task missing terminal review audit"
+                    )
                     && t.dispatched_base_oid.is_none()
             }),
-            "degraded task must be preserved in PlanState with Approved{{summary:None}} status and dispatched_base_oid=None"
+            "degraded task must be preserved as a non-mergeable failure"
         );
+
+        let status = crate::plan::build_plan_status(plan_id, &plan_state);
+        assert_eq!(
+            status["progress"],
+            "0/1 reviewed, 0 running, 0 pending, 0 blocked, 1 failed"
+        );
+        assert_eq!(status["ready_to_merge"], false);
+    }
+
+    #[test]
+    fn closed_task_with_system_review_approval_projects_approved() {
+        let issue = issue("bd-42v", "closed", Vec::new(), Vec::new());
+        let audits = vec![
+            AuditSentinelKind::Completion {
+                delegation_id: "maker-del".into(),
+                completion_state: CompletionState::AwaitingReview,
+                superseded: false,
+                worker_branch: Some("spur/worker-maker".into()),
+                result_summary: Some("verified change".into()),
+                artifact_uri: None,
+                dispatched_base_oid: Some("base-oid".into()),
+                estimated_cost_micros: None,
+            },
+            AuditSentinelKind::SystemReviewVerdict {
+                maker_delegation_id: "maker-del".into(),
+                reviewer_delegation_id: "reviewer-del".into(),
+                review_issue_id: "bd-review".into(),
+                decision: SystemReviewDecision::Approve,
+                feedback: "approved by system reviewer".into(),
+                evidence: vec!["cargo test -p spur-core".into()],
+            },
+        ];
+
+        let status = super::project_closed_status(&issue, &audits);
+        assert!(matches!(
+            status,
+            PlanTaskStatus::Approved { summary }
+                if summary.as_deref() == Some("verified change")
+        ));
     }
 
     #[tokio::test]
