@@ -872,6 +872,43 @@ mod session_attach_guard_transfer_tests {
         );
     }
 
+    #[tokio::test]
+    async fn graceful_mcp_shutdown_escalates_in_place_when_shutdown_arrives() {
+        let probe = Arc::new(ImmediateMcpProbe::default());
+        let mut server = Some(Arc::clone(&probe));
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let session = SessionId("retire-escalation".to_string());
+        let (funnel, _events) = crate::event_funnel::test_channel();
+
+        let retirement = shutdown_mcp_server_until_forced(
+            &funnel,
+            &session,
+            &mut server,
+            None,
+            &shutdown,
+        );
+        tokio::pin!(retirement);
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !probe.graceful_polled.load(Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("graceful MCP shutdown was never polled");
+        shutdown.cancel();
+
+        let forced = tokio::time::timeout(Duration::from_secs(1), retirement)
+            .await
+            .expect("shutdown escalation did not acknowledge its force barrier");
+
+        assert!(forced, "retirement must report shutdown escalation");
+        assert!(server.is_none(), "the helper must retain and consume ownership");
+        assert!(probe.marked_retiring.load(Ordering::SeqCst));
+        assert!(probe.workers_cancelled.load(Ordering::SeqCst));
+        assert!(probe.force_waited.load(Ordering::SeqCst));
+    }
+
     #[test]
     fn reconnect_already_attached_maps_to_attach_rejected_event() {
         let holder = spur_acp::session_lock::HolderInfo {
