@@ -66,20 +66,20 @@ class AcpSubagentProbeTests(unittest.TestCase):
 
         self.assertEqual(
             probe.agent_command(args),
-            ["npx", "--yes", "@agentclientprotocol/codex-acp@1.7.0"],
+            ["npx", "--yes", "@agentclientprotocol/codex-acp@1.9.0"],
         )
 
-    def test_codex_cli_default_uses_agentclientprotocol_adapter_1_7_0(self):
+    def test_codex_cli_default_uses_agentclientprotocol_adapter_1_9_0(self):
         self.assertEqual(
             probe.DEFAULT_CODEX_PACKAGE,
-            "@agentclientprotocol/codex-acp@1.7.0",
+            "@agentclientprotocol/codex-acp@1.9.0",
         )
 
-    def test_codex_mjs_probe_default_uses_agentclientprotocol_adapter_1_7_0(self):
+    def test_codex_mjs_probe_default_uses_agentclientprotocol_adapter_1_9_0(self):
         source = Path(__file__).with_name("probe-codex-acp.mjs").read_text()
 
         self.assertIn(
-            'const CODEX_ACP_PACKAGE = "@agentclientprotocol/codex-acp@1.7.0";',
+            'const CODEX_ACP_PACKAGE = "@agentclientprotocol/codex-acp@1.9.0";',
             source,
         )
 
@@ -106,14 +106,14 @@ class AcpSubagentProbeTests(unittest.TestCase):
             (bin_dir / "codex-acp").write_text("")
             (adapter_dir / "package.json").write_text(
                 json.dumps(
-                    {"name": "@agentclientprotocol/codex-acp", "version": "1.1.2"}
+                    {"name": "@agentclientprotocol/codex-acp", "version": "1.9.0"}
                 )
             )
             (codex_package_dir / "package.json").write_text(
-                json.dumps({"name": "@openai/codex", "version": "0.144.1"})
+                json.dumps({"name": "@openai/codex", "version": "0.153.2"})
             )
             bundled_codex = bin_dir / "codex"
-            bundled_codex.write_text("#!/bin/sh\necho 'codex-cli 0.144.1'\n")
+            bundled_codex.write_text("#!/bin/sh\necho 'codex-cli 0.153.2'\n")
             bundled_codex.chmod(0o755)
             custom_codex = root / "custom-codex"
             custom_codex.write_text("#!/bin/sh\necho 'codex-cli 9.9.9'\n")
@@ -123,7 +123,12 @@ class AcpSubagentProbeTests(unittest.TestCase):
             env["CODEX_PATH"] = str(custom_codex)
 
             completed = subprocess.run(
-                ["node", "-e", probe.CODEX_VERSION_NODE_SCRIPT],
+                [
+                    "node",
+                    "-e",
+                    probe.CODEX_VERSION_NODE_SCRIPT,
+                    probe.DEFAULT_CODEX_PACKAGE,
+                ],
                 env=env,
                 capture_output=True,
                 text=True,
@@ -132,9 +137,54 @@ class AcpSubagentProbeTests(unittest.TestCase):
 
         self.assertEqual(completed.returncode, 0, completed.stderr)
         payload = json.loads(completed.stdout)
-        self.assertEqual(payload["codexPackageVersion"], "0.144.1")
+        self.assertEqual(payload["adapterVersion"], "1.9.0")
+        self.assertEqual(payload["codexPackageVersion"], "0.153.2")
         self.assertEqual(payload["codexCliOutput"], "codex-cli 9.9.9")
         self.assertEqual(payload["codexCliPath"], str(custom_codex))
+
+    def test_codex_version_script_rejects_inherited_adapter_mismatch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            node_modules = root / "node_modules"
+            bin_dir = node_modules / ".bin"
+            adapter_dir = node_modules / "@agentclientprotocol" / "codex-acp"
+            codex_package_dir = node_modules / "@openai" / "codex"
+            bin_dir.mkdir(parents=True)
+            adapter_dir.mkdir(parents=True)
+            codex_package_dir.mkdir(parents=True)
+            (bin_dir / "codex-acp").write_text("")
+            (adapter_dir / "package.json").write_text(
+                json.dumps(
+                    {"name": "@agentclientprotocol/codex-acp", "version": "1.7.0"}
+                )
+            )
+            (codex_package_dir / "package.json").write_text(
+                json.dumps({"name": "@openai/codex", "version": "0.144.1"})
+            )
+            bundled_codex = bin_dir / "codex"
+            bundled_codex.write_text("#!/bin/sh\necho 'codex-cli 0.144.1'\n")
+            bundled_codex.chmod(0o755)
+            env = os.environ.copy()
+            env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}"
+
+            completed = subprocess.run(
+                [
+                    "node",
+                    "-e",
+                    probe.CODEX_VERSION_NODE_SCRIPT,
+                    probe.DEFAULT_CODEX_PACKAGE,
+                ],
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn(
+            "resolved codex-acp version 1.7.0 does not match requested 1.9.0",
+            completed.stderr,
+        )
 
     def test_codex_profile_normalizes_relative_codex_path_once(self):
         self.assertTrue(
@@ -878,7 +928,15 @@ class AcpSubagentProbeTests(unittest.TestCase):
                 probe.initialize_codex_probe_workspace(workspace)
             self.assertEqual(existing_role.read_text(), 'name = "stale"\n')
 
-    def test_exact_version_label_requires_codex_cli_0_144_1(self):
+    def test_exact_version_label_requires_codex_cli_0_153_2(self):
+        self.assertEqual(
+            probe.codex_evidence_label("1.9.0", "0.153.2"),
+            "codex-0.153.2",
+        )
+        self.assertEqual(
+            probe.codex_evidence_label("1.9.0", "0.153.3"),
+            "codex-actual-0.153.3",
+        )
         self.assertEqual(
             probe.codex_evidence_label("1.1.2", "0.144.1"),
             "codex-0.144.1",

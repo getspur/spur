@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Probe codex-acp 1.7.0: speak ACP wire protocol over stdio, capture every
+// Probe codex-acp 1.9.0: speak ACP wire protocol over stdio, capture every
 // frame the agent sends so we can confirm what v1 (model/effort) and v2
 // (review-branch input + _meta) look like in practice.
 //
@@ -17,11 +17,16 @@ import { spawn, spawnSync } from "node:child_process";
 import { resolve as resolvePath } from "node:path";
 import { stderr, stdout, exit } from "node:process";
 
-const CODEX_ACP_PACKAGE = "@agentclientprotocol/codex-acp@1.7.0";
+const CODEX_ACP_PACKAGE = "@agentclientprotocol/codex-acp@1.9.0";
 const CODEX_VERSION_NODE_SCRIPT = String.raw`
 const fs = require("node:fs");
 const path = require("node:path");
 const { spawnSync } = require("node:child_process");
+const requestedPackage = process.argv[1] || "";
+const exactPackage = requestedPackage.match(
+    /^@agentclientprotocol\/codex-acp@(\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)$/
+);
+const expectedAdapterVersion = exactPackage && exactPackage[1];
 const adapterBin = process.platform === "win32" ? "codex-acp.cmd" : "codex-acp";
 const binDir = process.env.PATH.split(path.delimiter).find((candidate) =>
     fs.existsSync(path.join(candidate, adapterBin))
@@ -32,6 +37,12 @@ const adapterPackagePath = path.join(
     nodeModules, "@agentclientprotocol", "codex-acp", "package.json"
 );
 const adapterPackage = JSON.parse(fs.readFileSync(adapterPackagePath, "utf8"));
+if (expectedAdapterVersion && adapterPackage.version !== expectedAdapterVersion) {
+    throw new Error(
+        "resolved codex-acp version " + adapterPackage.version +
+        " does not match requested " + expectedAdapterVersion
+    );
+}
 const codexCandidates = [
     path.join(nodeModules, "@openai", "codex", "package.json"),
     path.join(
@@ -81,6 +92,7 @@ function reportResolvedVersions(env) {
             "node",
             "-e",
             CODEX_VERSION_NODE_SCRIPT,
+            CODEX_ACP_PACKAGE,
         ],
         { encoding: "utf8", env, shell: process.platform === "win32" },
     );

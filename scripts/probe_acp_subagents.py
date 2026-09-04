@@ -41,7 +41,7 @@ from typing import Any, Optional
 
 JsonRpcId = str | int
 TERMINAL_DRAIN_TIMEOUT = 2.0
-DEFAULT_CODEX_PACKAGE = "@agentclientprotocol/codex-acp@1.7.0"
+DEFAULT_CODEX_PACKAGE = "@agentclientprotocol/codex-acp@1.9.0"
 MALFORMED_ROLE_WARNING = "Ignoring malformed agent role definition"
 CODEX_PROFILE_NAME = "spur-profile-probe-primary"
 CODEX_CHILD_ROLE_NAME = "spur-profile-probe-child"
@@ -73,6 +73,11 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { spawnSync } = require("node:child_process");
 
+const requestedPackage = process.argv[1] || "";
+const exactPackage = requestedPackage.match(
+  /^@agentclientprotocol\/codex-acp@(\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)$/
+);
+const expectedAdapterVersion = exactPackage && exactPackage[1];
 const executable = process.platform === "win32" ? "codex-acp.cmd" : "codex-acp";
 const binDir = process.env.PATH.split(path.delimiter).find((candidate) =>
   fs.existsSync(path.join(candidate, executable))
@@ -87,6 +92,11 @@ const adapterPackagePath = path.join(
   "package.json",
 );
 const adapterPackage = JSON.parse(fs.readFileSync(adapterPackagePath, "utf8"));
+if (expectedAdapterVersion && adapterPackage.version !== expectedAdapterVersion) {
+  throw new Error(
+    `resolved codex-acp version ${adapterPackage.version} does not match requested ${expectedAdapterVersion}`
+  );
+}
 const codexCandidates = [
   path.join(nodeModules, "@openai", "codex", "package.json"),
   path.join(
@@ -746,6 +756,7 @@ def codex_version_command(package: str) -> list[str]:
         "node",
         "-e",
         CODEX_VERSION_NODE_SCRIPT,
+        package,
     ]
 
 
@@ -813,6 +824,8 @@ def resolve_codex_versions(
 
 
 def codex_evidence_label(adapter_version: str, codex_cli_version: str) -> str:
+    if adapter_version == "1.9.0" and codex_cli_version == "0.153.2":
+        return "codex-0.153.2"
     if adapter_version == "1.1.2" and codex_cli_version == "0.144.1":
         return "codex-0.144.1"
     return f"codex-actual-{codex_cli_version}"
