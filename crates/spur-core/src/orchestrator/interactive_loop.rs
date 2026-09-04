@@ -64,6 +64,30 @@ where
     await_interactive_operation(shutdown, startup).await
 }
 
+/// Drain compatibility history while giving process shutdown priority over a
+/// ready stream item. `None` means shutdown won; `Some` reports whether any
+/// notification was delivered before end-of-stream.
+async fn drain_history_stream_or_shutdown<F>(
+    shutdown: &tokio_util::sync::CancellationToken,
+    history_stream: &mut std::pin::Pin<
+        Box<dyn futures::Stream<Item = spur_acp::SessionNotification> + Send>,
+    >,
+    mut on_notification: F,
+) -> Option<bool>
+where
+    F: FnMut(spur_acp::SessionNotification),
+{
+    let mut delivered = false;
+    loop {
+        let notification = await_interactive_operation(shutdown, history_stream.next()).await?;
+        let Some(notification) = notification else {
+            return Some(delivered);
+        };
+        delivered = true;
+        on_notification(notification);
+    }
+}
+
 fn take_rendered_batch(
     drained_batch: &mut Option<crate::scheduler::DrainedBatch>,
     render_outcome: &mut Option<crate::continuation_bridge::RenderOutcome>,
@@ -394,7 +418,7 @@ impl Orchestrator {
         // (still no live session until the next spawn/message).
         let Some(spawn_result) = await_brain_startup_or_shutdown(
             shutdown_token,
-            self.spawn_brain_session(Some(target.as_str()), permission_tx.clone()),
+            Box::pin(self.spawn_brain_session(Some(target.as_str()), permission_tx.clone())),
         )
         .await
         else {
@@ -612,10 +636,10 @@ impl Orchestrator {
 
                         let Some(connect_result) = await_brain_startup_or_shutdown(
                             &shutdown_token,
-                            self.connect_brain(
+                            Box::pin(self.connect_brain(
                                 Some(active_brain_name.as_str()),
                                 permission_tx.clone(),
-                            ),
+                            )),
                         )
                         .await
                         else {
@@ -716,8 +740,9 @@ impl Orchestrator {
                             None,
                         )
                         .await;
-                        let Some(result) =
-                            await_brain_startup_or_shutdown(&shutdown_token, async {
+                        let Some(result) = await_brain_startup_or_shutdown(
+                            &shutdown_token,
+                            Box::pin(async {
                                 match agent_connection.take() {
                                     Some(ActiveConnection {
                                         transport: connection,
@@ -744,8 +769,9 @@ impl Orchestrator {
                                         .await
                                     }
                                 }
-                            })
-                            .await
+                            }),
+                        )
+                        .await
                         else {
                             break 'interactive;
                         };
@@ -787,10 +813,10 @@ impl Orchestrator {
                             None => {
                                 let Some(connect_result) = await_brain_startup_or_shutdown(
                                     &shutdown_token,
-                                    self.connect_brain(
+                                    Box::pin(self.connect_brain(
                                         Some(active_brain_name.as_str()),
                                         permission_tx.clone(),
-                                    ),
+                                    )),
                                 )
                                 .await
                                 else {
@@ -900,10 +926,10 @@ impl Orchestrator {
                                 }));
                                 let Some(connect_result) = await_brain_startup_or_shutdown(
                                     &shutdown_token,
-                                    self.connect_brain(
+                                    Box::pin(self.connect_brain(
                                         Some(active_brain_name.as_str()),
                                         permission_tx.clone(),
-                                    ),
+                                    )),
                                 )
                                 .await
                                 else {
@@ -940,7 +966,7 @@ impl Orchestrator {
                         }));
                         let Some(load_result) = await_brain_startup_or_shutdown(
                             &shutdown_token,
-                            self.load_brain_session(
+                            Box::pin(self.load_brain_session(
                                 connection,
                                 brain_name,
                                 permission_tx.clone(),
@@ -950,7 +976,7 @@ impl Orchestrator {
                                 attach_guard,
                                 fs_unsafe,
                                 init_response,
-                            ),
+                            )),
                         )
                         .await
                         else {
@@ -959,26 +985,47 @@ impl Orchestrator {
                         match load_result {
                             Ok((session, mut history_stream, _load_outcome)) => {
                                 let spur_id = session.spur_session_id.clone();
+                                // `load_brain_session` has already spawned delegation
+                                // and registered ownership. Install the session before
+                                // history awaits so cancellation always reaches the
+                                // final structural shutdown barrier.
+                                brain = Some(session);
                                 // Exactly one wire-history owner is active. Native
                                 // transports settle the pre-subscribed pump and never
                                 // poll the intentionally-empty compat stream. Other
                                 // transports have no pump and retain inline streaming.
-                                let wire_history_delivered =
-                                    if let Some(pump) = session.notification_pump_handle.as_ref() {
-                                        pump.settle_after_terminal().await.emitted > 0
-                                    } else {
-                                        let mut delivered = false;
-                                        while let Some(notification) = history_stream.next().await {
-                                            delivered = true;
+                                let wire_history_delivered = if let Some(pump) = brain
+                                    .as_ref()
+                                    .and_then(|session| session.notification_pump_handle.as_ref())
+                                {
+                                    let Some(settle) = await_interactive_operation(
+                                        &shutdown_token,
+                                        pump.settle_after_terminal(),
+                                    )
+                                    .await
+                                    else {
+                                        break 'interactive;
+                                    };
+                                    settle.emitted > 0
+                                } else {
+                                    let Some(delivered) = drain_history_stream_or_shutdown(
+                                        &shutdown_token,
+                                        &mut history_stream,
+                                        |notification| {
                                             self.emit(SpurEvent::now(
                                                 SpurEventBody::AgentNotification {
                                                     session: spur_id.clone(),
                                                     notification: Box::new(notification),
                                                 },
                                             ));
-                                        }
-                                        delivered
+                                        },
+                                    )
+                                    .await
+                                    else {
+                                        break 'interactive;
                                     };
+                                    delivered
+                                };
 
                                 if !wire_history_delivered {
                                     let entries =
@@ -994,8 +1041,6 @@ impl Orchestrator {
                                         }));
                                     }
                                 }
-
-                                brain = Some(session);
                                 // Register the resumed session with the scheduler so
                                 // future continuations target the correct session id.
                                 // No eviction emission here — the note_session_swap(None)
@@ -1076,23 +1121,22 @@ impl Orchestrator {
                                         "vendor exec call failed"
                                     );
                                     if is_connection_death(&e) {
-                                        if let Some(dead) = brain.take() {
-                                            let reason =
-                                                format!("vendor exec `{method}` died: {e}");
-                                            if let Some(new_brain) = self
-                                                .reconnect_with_events(
-                                                    dead,
-                                                    permission_tx.clone(),
-                                                    Some(active_brain_name.as_str()),
-                                                    reason,
-                                                    &mut reconnect_failures,
-                                                    RECONNECT_CIRCUIT_LIMIT,
-                                                    RECONNECT_CIRCUIT_WINDOW,
-                                                )
-                                                .await
-                                            {
-                                                brain = Some(new_brain);
-                                            }
+                                        let reason = format!("vendor exec `{method}` died: {e}");
+                                        if self
+                                            .reconnect_with_events(
+                                                &mut brain,
+                                                &shutdown_token,
+                                                permission_tx.clone(),
+                                                Some(active_brain_name.as_str()),
+                                                reason,
+                                                &mut reconnect_failures,
+                                                RECONNECT_CIRCUIT_LIMIT,
+                                                RECONNECT_CIRCUIT_WINDOW,
+                                            )
+                                            .await
+                                            == ReconnectDisposition::Shutdown
+                                        {
+                                            break 'interactive;
                                         }
                                     } else {
                                         self.emit(SpurEvent::now(SpurEventBody::BrainError {
@@ -1957,34 +2001,37 @@ impl Orchestrator {
 
             // ── Lazy-spawn brain on first turn (or after crash) ─────────
             if brain.is_none() {
-                let Some(result) = await_brain_startup_or_shutdown(&shutdown_token, async {
-                    match agent_connection.take() {
-                        Some(ActiveConnection {
-                            transport: connection,
-                            brain_name,
-                            attach_guard,
-                            fs_unsafe,
-                            init_response,
-                        }) => {
-                            self.create_brain_session(
-                                connection,
+                let Some(result) = await_brain_startup_or_shutdown(
+                    &shutdown_token,
+                    Box::pin(async {
+                        match agent_connection.take() {
+                            Some(ActiveConnection {
+                                transport: connection,
                                 brain_name,
-                                permission_tx.clone(),
                                 attach_guard,
                                 fs_unsafe,
                                 init_response,
-                            )
-                            .await
+                            }) => {
+                                self.create_brain_session(
+                                    connection,
+                                    brain_name,
+                                    permission_tx.clone(),
+                                    attach_guard,
+                                    fs_unsafe,
+                                    init_response,
+                                )
+                                .await
+                            }
+                            None => {
+                                self.spawn_brain_session(
+                                    Some(active_brain_name.as_str()),
+                                    permission_tx.clone(),
+                                )
+                                .await
+                            }
                         }
-                        None => {
-                            self.spawn_brain_session(
-                                Some(active_brain_name.as_str()),
-                                permission_tx.clone(),
-                            )
-                            .await
-                        }
-                    }
-                })
+                    }),
+                )
                 .await
                 else {
                     break;
@@ -2123,11 +2170,11 @@ impl Orchestrator {
                         continue;
                     }
                     if is_connection_death(&e) {
-                        let dead = brain.take().expect("brain.as_mut() just held it");
                         let reason = format!("prompt died: {e}");
-                        if let Some(new_brain) = self
+                        if self
                             .reconnect_with_events(
-                                dead,
+                                &mut brain,
+                                &shutdown_token,
                                 permission_tx.clone(),
                                 Some(active_brain_name.as_str()),
                                 reason,
@@ -2136,8 +2183,9 @@ impl Orchestrator {
                                 RECONNECT_CIRCUIT_WINDOW,
                             )
                             .await
+                            == ReconnectDisposition::Shutdown
                         {
-                            brain = Some(new_brain);
+                            break 'interactive;
                         }
                         continue;
                     }
@@ -2362,11 +2410,11 @@ impl Orchestrator {
                     continue;
                 }
                 if is_connection_death(&e) {
-                    let dead = brain.take().expect("brain was active after prompt stream");
                     let reason = format!("prompt died: {e}");
-                    if let Some(new_brain) = self
+                    if self
                         .reconnect_with_events(
-                            dead,
+                            &mut brain,
+                            &shutdown_token,
                             permission_tx.clone(),
                             Some(active_brain_name.as_str()),
                             reason,
@@ -2375,8 +2423,9 @@ impl Orchestrator {
                             RECONNECT_CIRCUIT_WINDOW,
                         )
                         .await
+                        == ReconnectDisposition::Shutdown
                     {
-                        brain = Some(new_brain);
+                        break 'interactive;
                     }
                     continue;
                 }

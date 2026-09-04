@@ -2,6 +2,20 @@ use super::*;
 
 const RETIRE_SESSION_COST_WRITE_TIMEOUT: Duration = Duration::from_secs(2);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ReconnectDisposition {
+    Reconnected,
+    Failed,
+    Shutdown,
+}
+
+struct ReconnectSeed {
+    acp_session_id: String,
+    brain_name_hint: String,
+    attach_guard: Option<SessionAttachGuard>,
+    fs_unsafe: bool,
+}
+
 /// Drop transport/process ownership synchronously, then wait for all owned
 /// asynchronous teardown acknowledgements as one barrier.
 async fn drop_transport_ownership_then_join<T, D, R>(
@@ -3152,51 +3166,81 @@ impl Orchestrator {
         Ok((brain_session, stream, load_outcome))
     }
 
-    /// Attempt to reconnect after a brain subprocess death. Drops the
-    /// dead `BrainSession` (closing its stdio and aborting its helper
-    /// tasks), spawns a fresh connection via `connect_brain`, then
-    /// reattaches via `load_brain_session` using the old
-    /// `acp_session_id`.
-    ///
-    /// On success returns the new `BrainSession` and the `LoadOutcome`
-    /// distinguishing "session/load restored state" from "we fell back
-    /// to a new session". On failure the caller must surface
-    /// `BrainReconnectFailed` and leave `brain = None`.
-    ///
-    /// The caller (not this helper) is responsible for emitting
-    /// `BrainReconnecting` BEFORE invoking this, and
-    /// `BrainReconnected` / `BrainReconnectFailed` after.
-    pub(super) async fn try_reconnect_brain(
+    /// Retire a dead reconnect source without graceful drain delays. The
+    /// delegation join and both MCP server shutdowns form one structural
+    /// barrier before a replacement process may be started.
+    async fn stop_dead_brain_for_reconnect(
         &mut self,
         mut dead_brain: BrainSession,
+    ) -> ReconnectSeed {
+        let seed = ReconnectSeed {
+            acp_session_id: dead_brain.acp_session_id.clone(),
+            brain_name_hint: dead_brain.brain_name.clone(),
+            attach_guard: dead_brain.attach_guard.take(),
+            fs_unsafe: dead_brain.fs_unsafe,
+        };
+        let spur_session_id = dead_brain.spur_session_id.clone();
+
+        self.self_held
+            .remove(&spur_acp::BrainSessionId::from(spur_session_id.clone()));
+        self.remove_notebook_socket(&spur_acp::BrainSessionId::from(spur_session_id.clone()));
+
+        if let Some(pump) = dead_brain.notification_pump_handle.take() {
+            pump.abort();
+            drop(pump);
+        }
+        dead_brain.delegation_handle.abort();
+        let delegation_handle = dead_brain.delegation_handle;
+        let delegation_shutdown = async move {
+            let _ = delegation_handle.await;
+        };
+        let resource_shutdown = shutdown_brain_resources_immediately(
+            &spur_session_id,
+            &mut dead_brain.mcp_server,
+            Some(&mut dead_brain.mcp_guard),
+            &self.worker_mcp_servers,
+        );
+
+        drop_transport_ownership_then_join(
+            dead_brain.connection,
+            delegation_shutdown,
+            resource_shutdown,
+        )
+        .await;
+
+        // A delegation may have inserted its worker server immediately before
+        // observing the parent abort. The joined delegation handle proves no
+        // later insertion can race this final sweep.
+        if let Some((_session, late_worker_server)) = self
+            .worker_mcp_servers
+            .remove(&spur_acp::BrainSessionId::from(spur_session_id))
+        {
+            late_worker_server.shutdown_immediately().await;
+        }
+
+        seed
+    }
+
+    /// Start and load a replacement after the old session has passed its
+    /// structural teardown barrier. There is deliberately no owned
+    /// `BrainSession` in this future, so dropping it at the shutdown fence is
+    /// safe: bootstrap-local transport and MCP guards unwind synchronously.
+    async fn try_reconnect_brain(
+        &mut self,
+        seed: ReconnectSeed,
         permission_tx: Option<
             tokio::sync::mpsc::UnboundedSender<spur_acp::types::PermissionRequest>,
         >,
         brain_override: Option<&str>,
         force_new_session: bool,
-    ) -> std::result::Result<(BrainSession, spur_acp::LoadOutcome), ReconnectError> {
-        let acp_session_id = dead_brain.acp_session_id.clone();
-        let brain_name_hint = dead_brain.brain_name.clone();
-        let existing_attach_guard = dead_brain.attach_guard.take();
-        let existing_fs_unsafe = dead_brain.fs_unsafe;
-
-        // Drop the dead session: abort helper tasks, close stdio.
-        dead_brain.delegation_handle.abort();
-        if let Some(h) = dead_brain.notification_pump_handle.take() {
-            h.abort();
-        }
-        self.self_held.remove(&spur_acp::BrainSessionId::from(
-            dead_brain.spur_session_id.clone(),
-        ));
-        shutdown_mcp_server(
-            &self.funnel,
-            &dead_brain.spur_session_id,
-            &mut dead_brain.mcp_server,
-            Some(&mut dead_brain.mcp_guard),
-        )
-        .await;
-        drop(dead_brain.connection);
-
+    ) -> std::result::Result<
+        (
+            BrainSession,
+            std::pin::Pin<Box<dyn futures::Stream<Item = spur_acp::SessionNotification> + Send>>,
+            spur_acp::LoadOutcome,
+        ),
+        ReconnectError,
+    > {
         // Fresh connection + reattach. init_response is plumbed into
         // load_brain_session for retention on the BrainSession (so the
         // retire path can move it back to ActiveConnection later); the
@@ -3205,55 +3249,47 @@ impl Orchestrator {
         let (connection, brain_name, init_response) = self
             .connect_brain(brain_override, permission_tx.clone())
             .await
-            .with_context(|| format!("reconnect: connect_brain failed for '{brain_name_hint}'"))?;
+            .with_context(|| {
+                format!(
+                    "reconnect: connect_brain failed for '{}'",
+                    seed.brain_name_hint
+                )
+            })?;
 
-        let (new_session, mut history_stream, outcome) = match self
+        match self
             .load_brain_session(
                 connection,
                 brain_name,
                 permission_tx,
-                acp_session_id,
+                seed.acp_session_id,
                 true,
                 force_new_session,
-                existing_attach_guard,
-                existing_fs_unsafe,
+                seed.attach_guard,
+                seed.fs_unsafe,
                 init_response,
             )
             .await
         {
-            Ok(result) => result,
+            Ok(result) => Ok(result),
             Err(LoadBrainSessionError::AlreadyAttached { acp_id, holder }) => {
-                return Err(ReconnectError::AlreadyAttached { acp_id, holder });
+                Err(ReconnectError::AlreadyAttached { acp_id, holder })
             }
-            Err(LoadBrainSessionError::Other(e)) => {
-                return Err(ReconnectError::Other(e.context(format!(
-                    "reconnect: load_brain_session failed for '{brain_name_hint}'"
-                ))));
-            }
-        };
-
-        // Keep reconnect milestones behind the active history owner. Native
-        // replay is already emitted by the pump; compatibility transports are
-        // drained inline without re-emitting because the TUI retained the
-        // pre-death transcript. The two branches are deliberately exclusive.
-        if let Some(pump) = new_session.notification_pump_handle.as_ref() {
-            pump.settle_after_terminal().await;
-        } else {
-            while let Some(_notification) = history_stream.next().await {}
+            Err(LoadBrainSessionError::Other(e)) => Err(ReconnectError::Other(e.context(format!(
+                "reconnect: load_brain_session failed for '{}'",
+                seed.brain_name_hint
+            )))),
         }
-
-        Ok((new_session, outcome))
     }
 
-    /// Wrap `try_reconnect_brain` with the three event emissions and
-    /// the circuit-breaker bookkeeping. Returns `Some(new_brain)` if
-    /// reconnect succeeded; `None` if the breaker is open or reconnect
-    /// failed (in which case `BrainReconnectFailed` was already
-    /// emitted).
+    /// Reconnect with shutdown-priority startup and history waits. The caller's
+    /// `brain` slot is the sole owner at both cancellation boundaries: a
+    /// pre-cancel leaves the old session installed, while a post-load cancel
+    /// leaves the replacement installed for the final shutdown barrier.
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn reconnect_with_events(
         &mut self,
-        dead_brain: BrainSession,
+        brain: &mut Option<BrainSession>,
+        shutdown: &CancellationToken,
         permission_tx: Option<
             tokio::sync::mpsc::UnboundedSender<spur_acp::types::PermissionRequest>,
         >,
@@ -3262,9 +3298,15 @@ impl Orchestrator {
         failures: &mut std::collections::VecDeque<std::time::Instant>,
         limit: usize,
         window: std::time::Duration,
-    ) -> Option<BrainSession> {
-        let spur_session_id = dead_brain.spur_session_id.clone();
-        let brain_name = dead_brain.brain_name.clone();
+    ) -> ReconnectDisposition {
+        if shutdown.is_cancelled() {
+            return ReconnectDisposition::Shutdown;
+        }
+        let Some(active_brain) = brain.as_ref() else {
+            return ReconnectDisposition::Failed;
+        };
+        let spur_session_id = active_brain.spur_session_id.clone();
+        let brain_name = active_brain.brain_name.clone();
 
         // Trim stale death timestamps and record this death.
         let now = std::time::Instant::now();
@@ -3300,32 +3342,70 @@ impl Orchestrator {
             reason: reconnecting_reason,
         }));
 
-        match self
-            .try_reconnect_brain(dead_brain, permission_tx, brain_override, force_new)
-            .await
-        {
-            Ok((new_brain, outcome)) => {
-                // Tier 1 success clears the window; Tier 2 success keeps the
-                // record so a quick re-death after escalation still trips.
-                if !escalate {
-                    failures.clear();
-                }
-                self.emit(SpurEvent::now(SpurEventBody::BrainReconnected {
-                    session: new_brain.spur_session_id.clone(),
-                    brain_name: new_brain.brain_name.clone(),
-                    outcome,
-                }));
-                Some(new_brain)
-            }
+        let dead_brain = brain.take().expect("active brain checked above");
+        let seed = self.stop_dead_brain_for_reconnect(dead_brain).await;
+        if shutdown.is_cancelled() {
+            return ReconnectDisposition::Shutdown;
+        }
+
+        let reconnect =
+            Box::pin(self.try_reconnect_brain(seed, permission_tx, brain_override, force_new));
+        let reconnect_result = tokio::select! {
+            biased;
+            _ = shutdown.cancelled() => return ReconnectDisposition::Shutdown,
+            result = reconnect => result,
+        };
+
+        let (new_brain, mut history_stream, outcome) = match reconnect_result {
+            Ok(result) => result,
             Err(e) => {
                 self.emit(SpurEvent::now(reconnect_failure_event(
                     spur_session_id,
                     brain_name,
                     e,
                 )));
-                None
+                return ReconnectDisposition::Failed;
+            }
+        };
+
+        // Install ownership before any further await. A cancellation-winning
+        // history wait therefore routes this fully started session through
+        // `shutdown_active_brain` instead of dropping a plain JoinHandle.
+        *brain = Some(new_brain);
+        if let Some(pump) = brain
+            .as_ref()
+            .and_then(|session| session.notification_pump_handle.as_ref())
+        {
+            tokio::select! {
+                biased;
+                _ = shutdown.cancelled() => return ReconnectDisposition::Shutdown,
+                _ = pump.settle_after_terminal() => {}
+            }
+        } else {
+            loop {
+                let next = tokio::select! {
+                    biased;
+                    _ = shutdown.cancelled() => return ReconnectDisposition::Shutdown,
+                    next = history_stream.next() => next,
+                };
+                if next.is_none() {
+                    break;
+                }
             }
         }
+
+        // Tier 1 success clears the window; Tier 2 success keeps the record so
+        // a quick re-death after escalation still trips.
+        if !escalate {
+            failures.clear();
+        }
+        let reconnected = brain.as_ref().expect("replacement installed above");
+        self.emit(SpurEvent::now(SpurEventBody::BrainReconnected {
+            session: reconnected.spur_session_id.clone(),
+            brain_name: reconnected.brain_name.clone(),
+            outcome,
+        }));
+        ReconnectDisposition::Reconnected
     }
 
     /// Spawn a brain agent session with MCP callback server and delegation handler.

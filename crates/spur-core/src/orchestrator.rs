@@ -86,7 +86,7 @@ use pm_bridge::{handle_get_issue_graph, issue_to_detail_event, refresh_pm_state}
 #[cfg(any(test, feature = "test-support"))]
 use review::apply_decision_to_candidate;
 pub use review::{cleanup_cancelled_review, review_dispatcher_loop};
-use session::{abort_mcp_handle, cleanup_mcp_on_err, retire_brain_session};
+use session::{abort_mcp_handle, cleanup_mcp_on_err, retire_brain_session, ReconnectDisposition};
 use session_discovery::classify_sessions;
 pub use types::{
     ActiveConnection, BrainSession, ExecOpts, FaultInjectionHooks, LoadBrainSessionError,
