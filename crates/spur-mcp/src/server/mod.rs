@@ -147,7 +147,7 @@ where
         let forced = loop {
             tokio::select! {
                 biased;
-                _ = force_shutdown_for_root.cancelled() => break true,
+                () = force_shutdown_for_root.cancelled() => break true,
                 _ = &mut shutdown_rx => break false,
                 accepted = listener.accept() => {
                     let (stream, remote_addr) = match accepted {
@@ -173,13 +173,13 @@ where
 
                         let result = tokio::select! {
                             biased;
-                            _ = force.cancelled() => None,
+                            () = force.cancelled() => None,
                             result = &mut connection => Some(result),
-                            _ = graceful.cancelled() => {
+                            () = graceful.cancelled() => {
                                 connection.as_mut().graceful_shutdown();
                                 tokio::select! {
                                     biased;
-                                    _ = force.cancelled() => None,
+                                    () = force.cancelled() => None,
                                     result = &mut connection => Some(result),
                                 }
                             }

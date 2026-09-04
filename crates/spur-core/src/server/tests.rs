@@ -17,8 +17,7 @@ impl Drop for ShutdownTaskDropProbe {
     }
 }
 
-#[tokio::test(flavor = "current_thread")]
-async fn shutdown_until_forced_joins_handles_taken_by_graceful_path() {
+fn test_callback_server() -> Arc<McpCallbackServer> {
     let brain_session_id = BrainSessionId::new(SessionId::new());
     let (server, _channel) = McpCallbackServer::new(
         Some(&brain_session_id),
@@ -32,6 +31,91 @@ async fn shutdown_until_forced_joins_handles_taken_by_graceful_path() {
             spur_license::policy::PolicyResolver::embedded(),
         )),
     );
+    Arc::new(server)
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn root_completion_guard_disarms_after_acknowledged_completion() {
+    let server = test_callback_server();
+    let root_force = CancellationToken::new();
+    *server.root_force_shutdown.lock().unwrap() = Some(root_force.clone());
+    let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+
+    let abort_on_drop = AbortRootOnDrop::new(Arc::clone(&server));
+    let waiter = tokio::spawn(await_root_completion(abort_on_drop, done_rx));
+    done_tx
+        .send(())
+        .expect("completion waiter must remain live");
+    waiter.await.expect("completion waiter must not panic");
+
+    assert!(
+        !root_force.is_cancelled(),
+        "acknowledged graceful completion must not be reclassified as forced"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn root_completion_guard_forces_children_when_waiter_is_aborted() {
+    let server = test_callback_server();
+    let root_force = CancellationToken::new();
+    *server.root_force_shutdown.lock().unwrap() = Some(root_force.clone());
+    let (_done_tx, done_rx) = tokio::sync::oneshot::channel();
+
+    let abort_on_drop = AbortRootOnDrop::new(Arc::clone(&server));
+    let waiter = tokio::spawn(await_root_completion(abort_on_drop, done_rx));
+    waiter.abort();
+    let _ = waiter.await;
+
+    assert!(
+        root_force.is_cancelled(),
+        "aborting the outer waiter must force the callback-server tree"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn graceful_root_completion_is_not_reported_as_forced() {
+    let server = test_callback_server();
+    let root_force = CancellationToken::new();
+    *server.root_force_shutdown.lock().unwrap() = Some(root_force.clone());
+    let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel();
+    server.__test_set_root_shutdown_tx(shutdown_tx);
+    let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+    let abort_on_drop = AbortRootOnDrop::new(Arc::clone(&server));
+    let completion_waiter = tokio::spawn(await_root_completion(abort_on_drop, done_rx));
+
+    server.__test_set_root_handle(tokio::spawn({
+        let root_force = root_force.clone();
+        async move {
+            tokio::select! {
+                biased;
+                _ = &mut shutdown_rx => {}
+                () = root_force.cancelled() => {}
+            }
+            done_tx
+                .send(())
+                .expect("outer completion waiter must remain live");
+            // Let the waiter process the acknowledgement before this root join
+            // resolves, making graceful/forced classification deterministic.
+            tokio::task::yield_now().await;
+        }
+    }));
+
+    let external_force = CancellationToken::new();
+    let forced = server.shutdown_until_forced(&external_force).await;
+    completion_waiter
+        .await
+        .expect("completion waiter must not panic");
+
+    assert!(!forced, "clean root retirement must remain graceful");
+    assert!(
+        !root_force.is_cancelled(),
+        "normal completion must disarm the outer force guard"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn shutdown_until_forced_joins_handles_taken_by_graceful_path() {
+    let server = test_callback_server();
     let task_dropped = Arc::new(AtomicBool::new(false));
     let task_started = Arc::new(Notify::new());
     let recovery_task = AbortOnDropHandle::new(tokio::spawn({
@@ -49,7 +133,6 @@ async fn shutdown_until_forced_joins_handles_taken_by_graceful_path() {
         handle: recovery_task,
     });
 
-    let server = Arc::new(server);
     let force = CancellationToken::new();
     let shutdown = tokio::spawn({
         let server = Arc::clone(&server);

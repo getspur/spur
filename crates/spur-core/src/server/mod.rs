@@ -388,6 +388,49 @@ pub struct McpCallbackServer {
     brain_model: Arc<RwLock<Option<String>>>,
 }
 
+/// Forces the callback-server tree only when its outer completion waiter is
+/// cancelled or observes the root task disappear without acknowledgement.
+/// A successful `done_rx` means the root already drained accepted connections
+/// and awaited its server-specific shutdown callback, so that path disarms the
+/// guard instead of turning a graceful retirement into a forced one.
+struct AbortRootOnDrop {
+    server: Arc<McpCallbackServer>,
+    armed: bool,
+}
+
+impl AbortRootOnDrop {
+    fn new(server: Arc<McpCallbackServer>) -> Self {
+        Self {
+            server,
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for AbortRootOnDrop {
+    fn drop(&mut self) {
+        if self.armed {
+            // Signal every child but leave join ownership in the server. A
+            // concurrent `force_abort_and_wait` must remain able to consume
+            // and acknowledge those handles.
+            self.server.force_abort();
+        }
+    }
+}
+
+async fn await_root_completion(
+    mut abort_on_drop: AbortRootOnDrop,
+    done_rx: tokio::sync::oneshot::Receiver<()>,
+) {
+    if done_rx.await.is_ok() {
+        abort_on_drop.disarm();
+    }
+}
+
 impl McpCallbackServer {
     /// Create a new MCP callback server.
     ///
@@ -734,9 +777,15 @@ impl McpCallbackServer {
     pub fn force_abort(&self) {
         self.task_tracker.close();
         self.task_tracker.abort_all();
-        if let Some(force) = self.root_force_shutdown.lock().unwrap().as_ref() {
-            force.cancel();
-        }
+        let cooperative_root = {
+            let root_force_shutdown = self.root_force_shutdown.lock().unwrap();
+            if let Some(force) = root_force_shutdown.as_ref() {
+                force.cancel();
+                true
+            } else {
+                false
+            }
+        };
         if let Some(tasks) = self.root_connection_tasks.lock().unwrap().as_ref() {
             tasks.close();
         }
@@ -751,11 +800,13 @@ impl McpCallbackServer {
         if let Some(handle) = self.reconciler_handle.lock().unwrap().as_ref() {
             handle.handle.abort();
         }
-        if let Some(abort) = self.root_abort_handle.lock().unwrap().as_ref() {
-            abort.abort();
-        }
-        if let Some(handle) = self.root_handle.lock().unwrap().as_ref() {
-            handle.abort();
+        if !cooperative_root {
+            if let Some(abort) = self.root_abort_handle.lock().unwrap().as_ref() {
+                abort.abort();
+            }
+            if let Some(handle) = self.root_handle.lock().unwrap().as_ref() {
+                handle.abort();
+            }
         }
     }
 
@@ -765,7 +816,12 @@ impl McpCallbackServer {
         self.task_tracker.close();
         self.task_tracker.abort_all();
         self.root_shutdown_tx.lock().unwrap().take();
-        let root_force_shutdown = self.root_force_shutdown.lock().unwrap().take();
+        // Retain the cooperative-force capability in the server while the
+        // root join is in progress. A concurrent owner-guard drop calls
+        // `force_abort`; it must still see this token and signal the root
+        // instead of aborting through `root_abort_handle` before the root's
+        // shutdown callback has acknowledged its children.
+        let root_force_shutdown = self.root_force_shutdown.lock().unwrap().as_ref().cloned();
         let root_connection_tasks = self.root_connection_tasks.lock().unwrap().take();
         let startup_recovery_handle = {
             let mut state = self.startup_recovery.lock().unwrap();
@@ -1017,7 +1073,9 @@ impl McpCallbackServer {
         };
         let reconciler_handle = self.reconciler_handle.lock().unwrap().take();
         let root_handle = self.root_handle.lock().unwrap().take();
-        let root_force_shutdown = self.root_force_shutdown.lock().unwrap().take();
+        // Keep this signal discoverable by concurrent force paths until the
+        // cooperative root has run its shutdown callback and joined.
+        let root_force_shutdown = self.root_force_shutdown.lock().unwrap().as_ref().cloned();
         let root_connection_tasks = self.root_connection_tasks.lock().unwrap().take();
 
         let startup = async move {
@@ -1291,47 +1349,14 @@ impl McpCallbackServer {
         *self.root_handle.lock().unwrap() = Some(AbortOnDropHandle::new(transport.root_handle));
         Arc::clone(&self).spawn_startup_recovery_if_ready();
 
-        let server_for_drop = Arc::clone(&self);
-        struct AbortRootOnDrop {
-            server: Arc<McpCallbackServer>,
-        }
-
-        impl Drop for AbortRootOnDrop {
-            fn drop(&mut self) {
-                let startup_recovery_handle = {
-                    let mut state = self.server.startup_recovery.lock().unwrap();
-                    state.pending = false;
-                    state.handle.take()
-                };
-                if let Some(handle) = startup_recovery_handle {
-                    handle.abort();
-                }
-                if let Some(handle) = self.server.reconciler_handle.lock().unwrap().take() {
-                    handle.abort();
-                }
-                if let Some(force) = self.server.root_force_shutdown.lock().unwrap().take() {
-                    force.cancel();
-                }
-                if let Some(tasks) = self.server.root_connection_tasks.lock().unwrap().take() {
-                    tasks.close();
-                }
-                self.server.root_shutdown_tx.lock().unwrap().take();
-                if let Some(abort) = self.server.root_abort_handle.lock().unwrap().take() {
-                    abort.abort();
-                }
-                if let Some(handle) = self.server.root_handle.lock().unwrap().take() {
-                    handle.abort();
-                }
-            }
-        }
-
-        let drop_guard = AbortRootOnDrop {
-            server: server_for_drop,
-        };
-        let handle = AbortOnDropHandle::new(tokio::spawn(async move {
-            let _guard = drop_guard;
-            let _ = transport.done_rx.await;
-        }));
+        // Construct the guard before spawning. If the returned task is aborted
+        // before its first poll, dropping its unpolled future must still force
+        // the already-running root tree.
+        let abort_on_drop = AbortRootOnDrop::new(Arc::clone(&self));
+        let handle = AbortOnDropHandle::new(tokio::spawn(await_root_completion(
+            abort_on_drop,
+            transport.done_rx,
+        )));
 
         Ok((url, handle))
     }
