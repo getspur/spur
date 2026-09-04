@@ -100,6 +100,13 @@ const SESSION_NOTIFICATION_CAPACITY: usize = 4096;
 const PENDING_NEW_SESSION_MAX_NOTIFICATIONS: usize = SESSION_NOTIFICATION_CAPACITY;
 const PENDING_NEW_SESSION_MAX_BYTES: usize = 8 * 1024 * 1024;
 
+fn forwardable_ext_notification(
+    method: String,
+    params: serde_json::Value,
+) -> Option<ExtNotificationPayload> {
+    (method != "_auth/status_update").then_some(ExtNotificationPayload { method, params })
+}
+
 type TelemetryOutcome = spur_telemetry::tier1_events::Outcome;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3796,10 +3803,11 @@ fn acp_thread_main(
                                     method = %method,
                                     "NativeAcpConnection: ext_notification"
                                 );
-                                let _ = ext_notification_tx_h.send(ExtNotificationPayload {
-                                    method,
-                                    params,
-                                });
+                                if let Some(payload) =
+                                    forwardable_ext_notification(method, params)
+                                {
+                                    let _ = ext_notification_tx_h.send(payload);
+                                }
                             }
                             AgentNotification::CompleteElicitationNotification(args) => {
                                 tracing::debug!(
@@ -4974,6 +4982,26 @@ mod native_helper_tests {
         let raw: Box<serde_json::value::RawValue> =
             serde_json::value::to_raw_value(&value).expect("test JSON should serialize");
         raw.into()
+    }
+
+    #[test]
+    fn auth_status_update_is_not_forwarded() {
+        let payload = forwardable_ext_notification(
+            "_auth/status_update".to_owned(),
+            serde_json::json!({"authStatus": {"account": {"email": "private@example.invalid"}}}),
+        );
+
+        assert!(payload.is_none());
+    }
+
+    #[test]
+    fn unrelated_extension_notification_is_forwarded_unchanged() {
+        let params = serde_json::json!({"sessionId": "s1", "value": 7});
+        let payload = forwardable_ext_notification("_vendor/update".to_owned(), params.clone())
+            .expect("unrelated extension should be forwarded");
+
+        assert_eq!(payload.method, "_vendor/update");
+        assert_eq!(payload.params, params);
     }
 
     fn assert_no_more_agent_client_requests(
