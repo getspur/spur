@@ -377,10 +377,10 @@ impl Orchestrator {
             tokio::sync::mpsc::UnboundedSender<spur_acp::types::PermissionRequest>,
         >,
         shutdown_token: &tokio_util::sync::CancellationToken,
-    ) {
+    ) -> RetireDisposition {
         let Some(target) = name else {
             self.emit_brain_picker_open(active_brain_name);
-            return;
+            return RetireDisposition::Retired;
         };
 
         let available = self.brain_capable_names();
@@ -389,26 +389,32 @@ impl Orchestrator {
                 name: target,
                 available,
             }));
-            return;
+            return RetireDisposition::Retired;
         }
 
         if target == *active_brain_name {
             self.emit(SpurEvent::now(SpurEventBody::BrainSwitchNoop {
                 name: target,
             }));
-            return;
+            return RetireDisposition::Retired;
         }
 
         let from = active_brain_name.clone();
-        self.retire_active_brain(
-            brain,
-            agent_connection,
-            scheduler,
-            overflow_continuations,
-            spur_acp::domain::events::BrainRetireReason::BrainSwitch,
-            None,
-        )
-        .await;
+        if self
+            .retire_active_brain(
+                brain,
+                agent_connection,
+                scheduler,
+                overflow_continuations,
+                spur_acp::domain::events::BrainRetireReason::BrainSwitch,
+                None,
+                shutdown_token,
+            )
+            .await
+            == RetireDisposition::Shutdown
+        {
+            return RetireDisposition::Shutdown;
+        }
         // Old brain kind's transport cannot be reused for a different kind.
         // retire_active_brain stashes it for same-kind reuse; drop it here.
         let _ = agent_connection.take();
@@ -422,7 +428,7 @@ impl Orchestrator {
         )
         .await
         else {
-            return;
+            return RetireDisposition::Shutdown;
         };
         match spawn_result {
             Ok(b) => {
@@ -456,6 +462,7 @@ impl Orchestrator {
                 }
             }
         }
+        RetireDisposition::Retired
     }
 
     fn emit_session_synopsis_seeds(&mut self, sessions: &[spur_acp::SessionInfo]) {
@@ -554,17 +561,22 @@ impl Orchestrator {
             // Mid-stream SwitchBrain sets this after cancel; apply on the next
             // top-of-loop pass so early-continue error paths still honor it.
             if let Some(name) = pending_brain_switch.take() {
-                self.handle_switch_brain(
-                    name,
-                    &mut active_brain_name,
-                    &mut brain,
-                    &mut agent_connection,
-                    &mut scheduler,
-                    &overflow_continuations,
-                    &permission_tx,
-                    &shutdown_token,
-                )
-                .await;
+                if self
+                    .handle_switch_brain(
+                        name,
+                        &mut active_brain_name,
+                        &mut brain,
+                        &mut agent_connection,
+                        &mut scheduler,
+                        &overflow_continuations,
+                        &permission_tx,
+                        &shutdown_token,
+                    )
+                    .await
+                    == RetireDisposition::Shutdown
+                {
+                    break 'interactive;
+                }
             }
 
             // ── (a) Drain overflow buffer so scheduler sees fresh state ──
@@ -691,15 +703,21 @@ impl Orchestrator {
                     }
                     // NewSessionWithMessage — retire brain, then push Message to scheduler.
                     InteractiveInput::NewSessionWithMessage { blocks, interrupt } => {
-                        self.retire_active_brain(
-                            &mut brain,
-                            &mut agent_connection,
-                            &mut scheduler,
-                            &overflow_continuations,
-                            spur_acp::domain::events::BrainRetireReason::UserClear,
-                            None,
-                        )
-                        .await;
+                        if self
+                            .retire_active_brain(
+                                &mut brain,
+                                &mut agent_connection,
+                                &mut scheduler,
+                                &overflow_continuations,
+                                spur_acp::domain::events::BrainRetireReason::UserClear,
+                                None,
+                                &shutdown_token,
+                            )
+                            .await
+                            == RetireDisposition::Shutdown
+                        {
+                            break 'interactive;
+                        }
                         if blocks.is_empty() {
                             info!("NewSessionWithMessage with empty blocks — spawn deferred to next Message");
                         } else {
@@ -710,17 +728,22 @@ impl Orchestrator {
                     // SwitchBrain — Scope A hot-swap: retire → drop old-kind
                     // transport → spawn target brain type.
                     InteractiveInput::SwitchBrain { name } => {
-                        self.handle_switch_brain(
-                            name,
-                            &mut active_brain_name,
-                            &mut brain,
-                            &mut agent_connection,
-                            &mut scheduler,
-                            &overflow_continuations,
-                            &permission_tx,
-                            &shutdown_token,
-                        )
-                        .await;
+                        if self
+                            .handle_switch_brain(
+                                name,
+                                &mut active_brain_name,
+                                &mut brain,
+                                &mut agent_connection,
+                                &mut scheduler,
+                                &overflow_continuations,
+                                &permission_tx,
+                                &shutdown_token,
+                            )
+                            .await
+                            == RetireDisposition::Shutdown
+                        {
+                            break 'interactive;
+                        }
                         continue;
                     }
                     InteractiveInput::ListBrains => {
@@ -731,15 +754,21 @@ impl Orchestrator {
                     // session with no first prompt so the TUI can land on the
                     // new SessionDetail (via the BrainSpawned auto-navigate).
                     InteractiveInput::NewSession => {
-                        self.retire_active_brain(
-                            &mut brain,
-                            &mut agent_connection,
-                            &mut scheduler,
-                            &overflow_continuations,
-                            spur_acp::domain::events::BrainRetireReason::UserClear,
-                            None,
-                        )
-                        .await;
+                        if self
+                            .retire_active_brain(
+                                &mut brain,
+                                &mut agent_connection,
+                                &mut scheduler,
+                                &overflow_continuations,
+                                spur_acp::domain::events::BrainRetireReason::UserClear,
+                                None,
+                                &shutdown_token,
+                            )
+                            .await
+                            == RetireDisposition::Shutdown
+                        {
+                            break 'interactive;
+                        }
                         let Some(result) = await_brain_startup_or_shutdown(
                             &shutdown_token,
                             Box::pin(async {
@@ -898,15 +927,21 @@ impl Orchestrator {
                             &spur_acp::SessionId(session_id.clone()),
                         )
                         .into_session_id();
-                        self.retire_active_brain(
-                            &mut brain,
-                            &mut agent_connection,
-                            &mut scheduler,
-                            &overflow_continuations,
-                            spur_acp::domain::events::BrainRetireReason::ResumeSwitch,
-                            Some(local_session_id.clone()),
-                        )
-                        .await;
+                        if self
+                            .retire_active_brain(
+                                &mut brain,
+                                &mut agent_connection,
+                                &mut scheduler,
+                                &overflow_continuations,
+                                spur_acp::domain::events::BrainRetireReason::ResumeSwitch,
+                                Some(local_session_id.clone()),
+                                &shutdown_token,
+                            )
+                            .await
+                            == RetireDisposition::Shutdown
+                        {
+                            break 'interactive;
+                        }
 
                         let ActiveConnection {
                             transport: connection,

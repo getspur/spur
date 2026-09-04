@@ -9,6 +9,12 @@ pub(super) enum ReconnectDisposition {
     Shutdown,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum RetireDisposition {
+    Retired,
+    Shutdown,
+}
+
 struct ReconnectSeed {
     acp_session_id: String,
     brain_name_hint: String,
@@ -40,14 +46,27 @@ where
     T: Send + 'static,
     F: FnOnce(&T) -> Result<()> + Send + 'static,
 {
-    let cost_result = tokio::time::timeout(
-        RETIRE_SESSION_COST_WRITE_TIMEOUT,
-        tokio::task::spawn_blocking(move || {
+    // A Tokio blocking task is joined when the runtime drops, even if this
+    // future has already been cancelled. Use a detached OS thread so a stuck
+    // best-effort ledger write can never hold process-exit shutdown open.
+    let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+    if let Err(spawn_error) = std::thread::Builder::new()
+        .name("spur-cost-retire".to_string())
+        .spawn(move || {
             let result = write(&resource);
-            (resource, result)
-        }),
-    )
-    .await;
+            let _ = result_tx.send((resource, result));
+        })
+    {
+        error!(
+            session_id = %session_id,
+            brain_id = %brain_id,
+            %spawn_error,
+            "failed to spawn cost db retirement writer"
+        );
+        return None;
+    }
+
+    let cost_result = tokio::time::timeout(RETIRE_SESSION_COST_WRITE_TIMEOUT, result_rx).await;
 
     match cost_result {
         Ok(Ok((resource, Ok(())))) => Some(resource),
@@ -60,12 +79,12 @@ where
             );
             Some(resource)
         }
-        Ok(Err(join_error)) => {
+        Ok(Err(channel_error)) => {
             error!(
                 session_id = %session_id,
                 brain_id = %brain_id,
-                %join_error,
-                "cost db spawn_blocking panicked during retire"
+                %channel_error,
+                "cost db retirement writer exited without returning its resource"
             );
             None
         }
@@ -136,6 +155,11 @@ mod session_attach_guard_transfer_tests {
         dropped: Arc<AtomicBool>,
     }
 
+    struct HangingCancelConnection {
+        cancel_started: Arc<Notify>,
+        dropped: Arc<AtomicBool>,
+    }
+
     struct DropOrderProbe {
         dropped: Arc<AtomicBool>,
         dropped_notify: Arc<Notify>,
@@ -185,6 +209,51 @@ mod session_attach_guard_transfer_tests {
     impl Drop for HangingShutdownConnection {
         fn drop(&mut self) {
             self.dropped.store(true, Ordering::SeqCst);
+        }
+    }
+
+    impl Drop for HangingCancelConnection {
+        fn drop(&mut self) {
+            self.dropped.store(true, Ordering::SeqCst);
+        }
+    }
+
+    #[async_trait]
+    impl AgentConnection for HangingCancelConnection {
+        async fn initialize(
+            &mut self,
+            _request: InitializeRequest,
+        ) -> anyhow::Result<spur_acp::InitializeResponse> {
+            panic!("HangingCancelConnection::initialize must not be called")
+        }
+
+        async fn new_session(
+            &mut self,
+            _cwd: PathBuf,
+            _mcp_servers: Vec<McpServer>,
+        ) -> anyhow::Result<spur_acp::NewSessionResponse> {
+            panic!("HangingCancelConnection::new_session must not be called")
+        }
+
+        async fn prompt(
+            &mut self,
+            _request: PromptRequest,
+        ) -> anyhow::Result<Pin<Box<dyn Stream<Item = spur_acp::SessionNotification> + Send>>>
+        {
+            Ok(Box::pin(futures::stream::empty()))
+        }
+
+        async fn cancel(&mut self, _session_id: &str) -> anyhow::Result<()> {
+            self.cancel_started.notify_one();
+            std::future::pending().await
+        }
+
+        async fn shutdown(&mut self) -> anyhow::Result<()> {
+            std::future::pending().await
+        }
+
+        fn health(&self) -> AgentHealth {
+            AgentHealth::Ready
         }
     }
 
@@ -546,6 +615,7 @@ mod session_attach_guard_transfer_tests {
                 &overflow,
                 spur_acp::domain::events::BrainRetireReason::Shutdown,
                 None,
+                &CancellationToken::new(),
             )
             .await;
 
@@ -600,6 +670,7 @@ mod session_attach_guard_transfer_tests {
                 &overflow,
                 spur_acp::domain::events::BrainRetireReason::UserClear,
                 None,
+                &CancellationToken::new(),
             )
             .await;
 
@@ -660,6 +731,7 @@ mod session_attach_guard_transfer_tests {
                 &overflow,
                 spur_acp::domain::events::BrainRetireReason::UserClear,
                 None,
+                &CancellationToken::new(),
             )
             .await;
 
@@ -721,6 +793,7 @@ mod session_attach_guard_transfer_tests {
                 &overflow,
                 spur_acp::domain::events::BrainRetireReason::UserClear,
                 None,
+                &CancellationToken::new(),
             )
             .await;
 
@@ -880,33 +953,129 @@ mod session_attach_guard_transfer_tests {
         let session = SessionId("retire-escalation".to_string());
         let (funnel, _events) = crate::event_funnel::test_channel();
 
-        let retirement = shutdown_mcp_server_until_forced(
-            &funnel,
-            &session,
-            &mut server,
-            None,
-            &shutdown,
-        );
-        tokio::pin!(retirement);
+        let forced = {
+            let retirement =
+                shutdown_mcp_server_until_forced(&funnel, &session, &mut server, None, &shutdown);
+            tokio::pin!(retirement);
 
-        tokio::time::timeout(Duration::from_secs(1), async {
-            while !probe.graceful_polled.load(Ordering::SeqCst) {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("graceful MCP shutdown was never polled");
-        shutdown.cancel();
-
-        let forced = tokio::time::timeout(Duration::from_secs(1), retirement)
+            tokio::time::timeout(Duration::from_secs(1), async {
+                tokio::select! {
+                    () = async {
+                        while !probe.graceful_polled.load(Ordering::SeqCst) {
+                            tokio::task::yield_now().await;
+                        }
+                    } => {}
+                    forced = &mut retirement => {
+                        panic!("graceful MCP shutdown returned before cancellation: {forced}");
+                    }
+                }
+            })
             .await
-            .expect("shutdown escalation did not acknowledge its force barrier");
+            .expect("graceful MCP shutdown was never polled");
+            shutdown.cancel();
+
+            tokio::time::timeout(Duration::from_secs(1), retirement)
+                .await
+                .expect("shutdown escalation did not acknowledge its force barrier")
+        };
 
         assert!(forced, "retirement must report shutdown escalation");
-        assert!(server.is_none(), "the helper must retain and consume ownership");
+        assert!(
+            server.is_none(),
+            "the helper must retain and consume ownership"
+        );
         assert!(probe.marked_retiring.load(Ordering::SeqCst));
         assert!(probe.workers_cancelled.load(Ordering::SeqCst));
         assert!(probe.force_waited.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn retire_active_brain_keeps_ownership_through_late_shutdown() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut config = SpurConfig::default();
+        config.cost.db_path = tmp.path().join("cost.db").display().to_string();
+        config.agents.entries = vec![spur_acp::AgentConfig::with_defaults("test-brain")];
+        let mut orchestrator = Orchestrator::new(tmp.path().to_path_buf(), config, None).unwrap();
+        let cancel_started = Arc::new(Notify::new());
+        let transport_dropped = Arc::new(AtomicBool::new(false));
+        let delegation_dropped = Arc::new(AtomicBool::new(false));
+        let delegation_drop_notify = Arc::new(Notify::new());
+        let delegation_started = Arc::new(Notify::new());
+        let delegation_handle = tokio::spawn({
+            let delegation_dropped = Arc::clone(&delegation_dropped);
+            let delegation_drop_notify = Arc::clone(&delegation_drop_notify);
+            let delegation_started = Arc::clone(&delegation_started);
+            async move {
+                let _drop_probe = DropOrderProbe {
+                    dropped: delegation_dropped,
+                    dropped_notify: delegation_drop_notify,
+                };
+                delegation_started.notify_one();
+                std::future::pending::<()>().await;
+            }
+        });
+        delegation_started.notified().await;
+        let mut brain = Some(BrainSession {
+            connection: Box::new(HangingCancelConnection {
+                cancel_started: Arc::clone(&cancel_started),
+                dropped: Arc::clone(&transport_dropped),
+            }),
+            acp_session_id: "late-shutdown-acp".to_string(),
+            spur_session_id: SessionId("late-shutdown-spur".to_string()),
+            notebook_socket_nonce: "test-nonce".to_string(),
+            brain_name: "test-brain".to_string(),
+            delegation_handle,
+            mcp_server: None,
+            mcp_guard: None,
+            notification_pump_handle: None,
+            attach_guard: None,
+            fs_unsafe: false,
+            started_at: std::time::Instant::now(),
+            config_options: Vec::new(),
+            spur_agent_caps: None,
+            session_info: None,
+            init_response: spur_acp::InitializeResponse::new(spur_acp::ProtocolVersion::LATEST),
+        });
+        let mut active = None;
+        let mut scheduler = crate::scheduler::BrainScheduler::new(
+            None,
+            std::sync::Arc::new(orchestrator.funnel.clone()),
+        );
+        let overflow =
+            std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::VecDeque::new()));
+        let shutdown = CancellationToken::new();
+
+        let disposition = {
+            let retirement = orchestrator.retire_active_brain(
+                &mut brain,
+                &mut active,
+                &mut scheduler,
+                &overflow,
+                spur_acp::domain::events::BrainRetireReason::UserClear,
+                None,
+                &shutdown,
+            );
+            tokio::pin!(retirement);
+            tokio::select! {
+                () = cancel_started.notified() => {}
+                disposition = &mut retirement => {
+                    panic!("retirement completed before shutdown: {disposition:?}");
+                }
+            }
+            shutdown.cancel();
+            tokio::time::timeout(Duration::from_secs(1), retirement)
+                .await
+                .expect("forced retirement did not acknowledge within one second")
+        };
+
+        assert_eq!(disposition, RetireDisposition::Shutdown);
+        assert!(brain.is_none());
+        assert!(active.is_none());
+        assert!(transport_dropped.load(Ordering::SeqCst));
+        assert!(
+            delegation_dropped.load(Ordering::SeqCst),
+            "retirement returned before delegation ownership unwound"
+        );
     }
 
     #[test]
@@ -1992,6 +2161,114 @@ pub(super) async fn shutdown_mcp_server_immediately<S: RetirableMcpServer + ?Siz
     tokio::join!(server_shutdown, guard_shutdown);
 }
 
+/// Start with the normal bounded MCP drain, but retain every owned handle so
+/// process shutdown can switch the same operation to the force-abort barrier.
+/// `true` means the process shutdown token won at some point in the drain.
+pub(super) async fn shutdown_mcp_server_until_forced<S: RetirableMcpServer + ?Sized>(
+    funnel: &crate::event_funnel::FunnelHandle,
+    session: &SessionId,
+    mcp_server: &mut Option<Arc<S>>,
+    mcp_guard: Option<&mut Option<AbortOnDropHandle<()>>>,
+    force_shutdown: &CancellationToken,
+) -> bool {
+    let server = mcp_server.take();
+    let mut guard = mcp_guard.and_then(|guard| guard.take());
+    let mut forced = force_shutdown.is_cancelled();
+
+    if let Some(server) = server.as_ref() {
+        server.mark_retiring();
+        server.cancel_in_flight_workers();
+
+        enum DrainOutcome {
+            Clean,
+            TimedOut,
+            Forced,
+        }
+
+        let outcome = if forced {
+            DrainOutcome::Forced
+        } else {
+            tokio::select! {
+                biased;
+                _ = force_shutdown.cancelled() => DrainOutcome::Forced,
+                result = tokio::time::timeout(MCP_SHUTDOWN_TIMEOUT, server.shutdown()) => {
+                    if result.is_ok() {
+                        DrainOutcome::Clean
+                    } else {
+                        DrainOutcome::TimedOut
+                    }
+                }
+            }
+        };
+
+        match outcome {
+            DrainOutcome::Clean => {
+                info!(session = %session, "MCP server shutdown clean");
+            }
+            DrainOutcome::TimedOut => {
+                warn!(
+                    session = %session,
+                    timeout_ms = MCP_SHUTDOWN_TIMEOUT.as_millis() as u64,
+                    "MCP server shutdown timed out — forcing abort barrier"
+                );
+                funnel.emit(SpurEventBody::McpShutdownTimeout {
+                    session: session.clone(),
+                    timeout_ms: MCP_SHUTDOWN_TIMEOUT.as_millis() as u64,
+                });
+                server.force_abort_and_wait().await;
+            }
+            DrainOutcome::Forced => {
+                forced = true;
+                server.force_abort_and_wait().await;
+            }
+        }
+    }
+
+    if let Some(mut guard_handle) = guard.take() {
+        if forced || force_shutdown.is_cancelled() {
+            forced = true;
+            guard_handle.abort();
+            let _ = guard_handle.await;
+        } else {
+            enum GuardOutcome {
+                Clean,
+                TimedOut,
+                Forced,
+            }
+            let outcome = tokio::select! {
+                biased;
+                _ = force_shutdown.cancelled() => GuardOutcome::Forced,
+                result = tokio::time::timeout(MCP_SHUTDOWN_TIMEOUT, &mut guard_handle) => {
+                    if result.is_ok() {
+                        GuardOutcome::Clean
+                    } else {
+                        GuardOutcome::TimedOut
+                    }
+                }
+            };
+            match outcome {
+                GuardOutcome::Clean => {}
+                GuardOutcome::TimedOut => {
+                    warn!(
+                        session = %session,
+                        timeout_ms = MCP_SHUTDOWN_TIMEOUT.as_millis() as u64,
+                        "MCP guard await exceeded timeout post-shutdown; aborting and joining"
+                    );
+                    guard_handle.abort();
+                    let _ = guard_handle.await;
+                }
+                GuardOutcome::Forced => {
+                    forced = true;
+                    guard_handle.abort();
+                    let _ = guard_handle.await;
+                }
+            }
+        }
+    }
+
+    forced || force_shutdown.is_cancelled()
+}
+
 pub(super) async fn shutdown_mcp_server<S: RetirableMcpServer + ?Sized>(
     funnel: &crate::event_funnel::FunnelHandle,
     session: &SessionId,
@@ -2099,6 +2376,39 @@ async fn shutdown_brain_resources_immediately<S: RetirableMcpServer + ?Sized>(
     tokio::join!(worker_shutdown, root_shutdown);
 }
 
+async fn shutdown_brain_resources_until_forced<S: RetirableMcpServer + ?Sized>(
+    funnel: &crate::event_funnel::FunnelHandle,
+    session: &SessionId,
+    mcp_server: &mut Option<Arc<S>>,
+    mcp_guard: Option<&mut Option<AbortOnDropHandle<()>>>,
+    worker_mcp_servers: &DashMap<spur_acp::BrainSessionId, Arc<WorkerMcpServer>>,
+    force_shutdown: &CancellationToken,
+) -> bool {
+    let worker_server = worker_mcp_servers
+        .remove(&spur_acp::BrainSessionId::from(session.clone()))
+        .map(|(_session, worker_server)| worker_server);
+    let worker_force = force_shutdown.clone();
+    let worker_shutdown = async move {
+        if let Some(worker_server) = worker_server {
+            let outcome = worker_server
+                .shutdown_until_forced(MCP_SHUTDOWN_TIMEOUT, worker_force)
+                .await;
+            if !outcome.drained {
+                warn!(
+                    session = %session,
+                    timeout_ms = MCP_SHUTDOWN_TIMEOUT.as_millis() as u64,
+                    active_at_deadline = outcome.active_at_deadline,
+                    "Worker MCP server drain timed out; forcing shutdown"
+                );
+            }
+        }
+    };
+    let root_shutdown =
+        shutdown_mcp_server_until_forced(funnel, session, mcp_server, mcp_guard, force_shutdown);
+    let ((), root_forced) = tokio::join!(worker_shutdown, root_shutdown);
+    root_forced || force_shutdown.is_cancelled()
+}
+
 pub(super) async fn resume_orphaned_dispatch_session(
     conn: &mut dyn AgentConnection,
     cfg: &spur_acp::config::AgentConfig,
@@ -2204,6 +2514,73 @@ impl Orchestrator {
     /// retired ACP session id. Other transports no-op here because their
     /// `cancel()` implementations terminate the subprocess instead of freeing
     /// one cooperative ACP session.
+    async fn shutdown_taken_brain_immediately(
+        &mut self,
+        mut active_brain: BrainSession,
+        agent_connection: &mut Option<ActiveConnection>,
+    ) {
+        if let Some(pump) = active_brain.notification_pump_handle.take() {
+            pump.abort();
+            drop(pump);
+        }
+        active_brain.delegation_handle.abort();
+        let delegation_handle = active_brain.delegation_handle;
+
+        // Dropping the transport is the immediate process-exit operation:
+        // native adapters synchronously kill their process group and Tokio
+        // child adapters use kill_on_drop.
+        let transport_ownership = (
+            active_brain.connection,
+            active_brain.attach_guard.take(),
+            agent_connection.take(),
+        );
+
+        let delegation_shutdown = async move {
+            let _ = delegation_handle.await;
+        };
+        let resource_shutdown = shutdown_brain_resources_immediately(
+            &active_brain.spur_session_id,
+            &mut active_brain.mcp_server,
+            Some(&mut active_brain.mcp_guard),
+            &self.worker_mcp_servers,
+        );
+        drop_transport_ownership_then_join(
+            transport_ownership,
+            delegation_shutdown,
+            resource_shutdown,
+        )
+        .await;
+
+        // A delegation that was already completing WorkerMcpServer::start
+        // may insert after the first resource sweep. Parent acknowledgement
+        // proves no later insertion can race this final removal.
+        if let Some((_session, late_worker_server)) =
+            self.worker_mcp_servers
+                .remove(&spur_acp::BrainSessionId::from(
+                    active_brain.spur_session_id.clone(),
+                ))
+        {
+            late_worker_server.shutdown_immediately().await;
+        }
+    }
+
+    async fn finish_forced_retirement(
+        &mut self,
+        brain: BrainSession,
+        agent_connection: &mut Option<ActiveConnection>,
+        scheduler: &mut crate::scheduler::BrainScheduler,
+        overflow: &crate::continuation_bridge::OverflowBuf,
+        from_session: SessionId,
+    ) -> RetireDisposition {
+        scheduler.note_session_swap(None, overflow);
+        self.shutdown_taken_brain_immediately(brain, agent_connection)
+            .await;
+        self.emit(SpurEvent::now(SpurEventBody::SessionRetireComplete {
+            session: from_session,
+        }));
+        RetireDisposition::Shutdown
+    }
+
     pub(super) async fn retire_active_brain(
         &mut self,
         brain: &mut Option<BrainSession>,
@@ -2212,7 +2589,12 @@ impl Orchestrator {
         overflow: &crate::continuation_bridge::OverflowBuf,
         reason: spur_acp::domain::events::BrainRetireReason,
         resume_target: Option<SessionId>,
-    ) {
+        force_shutdown: &CancellationToken,
+    ) -> RetireDisposition {
+        if force_shutdown.is_cancelled() {
+            return RetireDisposition::Shutdown;
+        }
+
         // Capture the current session id before taking the brain so we can
         // reference it in both the SessionRetireStart and SessionRetireComplete
         // events, regardless of whether a brain is actually held.
@@ -2232,8 +2614,9 @@ impl Orchestrator {
         let Some(mut b) = brain.take() else {
             // No active brain to retire — SessionRetireComplete is skipped
             // because there is no "old" session being retired.
-            return;
+            return RetireDisposition::Retired;
         };
+        let from_session = from_session.expect("taken brain must have a captured session id");
 
         // Remove from self_held before teardown. The Live probe catches the
         // gap if the lockfile persists in ActiveConnection beyond this point.
@@ -2254,12 +2637,26 @@ impl Orchestrator {
             .get(&b.brain_name)
             .is_some_and(|cfg| cancel_mode_for(cfg.transport) == CancelMode::AcpSoft)
         {
-            match tokio::time::timeout(
-                Duration::from_millis(10),
-                b.connection.cancel(&b.acp_session_id),
-            )
-            .await
-            {
+            let cancel_result = tokio::select! {
+                biased;
+                _ = force_shutdown.cancelled() => None,
+                result = tokio::time::timeout(
+                    Duration::from_millis(10),
+                    b.connection.cancel(&b.acp_session_id),
+                ) => Some(result),
+            };
+            let Some(cancel_result) = cancel_result else {
+                return self
+                    .finish_forced_retirement(
+                        b,
+                        agent_connection,
+                        scheduler,
+                        overflow,
+                        from_session,
+                    )
+                    .await;
+            };
+            match cancel_result {
                 Ok(Ok(())) => {
                     debug!(
                         session = %b.spur_session_id.0,
@@ -2299,11 +2696,27 @@ impl Orchestrator {
                 let session_id = b.spur_session_id.clone();
                 let session_id_for_log = session_id.0.clone();
                 let brain_id = b.brain_name.clone();
-                self.cost_tracker =
+                let cost_write =
                     retire_session_cost_write(session_id_for_log, brain_id, ct, move |ct| {
                         ct.end_session(&session_id, "retired", duration, cost_tier)
-                    })
-                    .await;
+                    });
+                let cost_result = tokio::select! {
+                    biased;
+                    _ = force_shutdown.cancelled() => None,
+                    result = cost_write => Some(result),
+                };
+                let Some(cost_result) = cost_result else {
+                    return self
+                        .finish_forced_retirement(
+                            b,
+                            agent_connection,
+                            scheduler,
+                            overflow,
+                            from_session,
+                        )
+                        .await;
+                };
+                self.cost_tracker = cost_result;
             } else {
                 self.cost_tracker = Some(ct);
             }
@@ -2313,22 +2726,63 @@ impl Orchestrator {
         //    last batch of notifications reaches the projection. On
         //    timeout, abort explicitly.
         if let Some(h) = b.notification_pump_handle.take() {
-            h.retire_with_grace().await;
+            let pump_result = tokio::select! {
+                biased;
+                _ = force_shutdown.cancelled() => false,
+                () = h.retire_with_grace() => true,
+            };
+            if !pump_result {
+                return self
+                    .finish_forced_retirement(
+                        b,
+                        agent_connection,
+                        scheduler,
+                        overflow,
+                        from_session,
+                    )
+                    .await;
+            }
         }
 
-        // 4. Abort remaining handles and stash connection for reuse.
+        // 4. Abort and join the delegation owner while the worker/root MCP
+        //    drain observes the same force token internally. No outer select
+        //    may drop either future while it owns teardown handles.
         b.delegation_handle.abort();
-        retire_brain_session(
+        let delegation_handle = b.delegation_handle;
+        let delegation_shutdown = async move {
+            let _ = delegation_handle.await;
+        };
+        let resource_shutdown = shutdown_brain_resources_until_forced(
             &self.funnel,
             &b.spur_session_id,
             &mut b.mcp_server,
             Some(&mut b.mcp_guard),
             &self.worker_mcp_servers,
-            scheduler,
-            overflow,
-            None,
-        )
-        .await;
+            force_shutdown,
+        );
+        let ((), forced) = tokio::join!(delegation_shutdown, resource_shutdown);
+        scheduler.note_session_swap(None, overflow);
+
+        // A delegation already completing WorkerMcpServer::start can insert
+        // after the first removal. Delegation acknowledgement makes this
+        // second sweep final.
+        if let Some((_session, late_worker_server)) = self
+            .worker_mcp_servers
+            .remove(&spur_acp::BrainSessionId::from(b.spur_session_id.clone()))
+        {
+            late_worker_server.shutdown_immediately().await;
+        }
+
+        if forced {
+            drop((b.connection, b.attach_guard.take(), agent_connection.take()));
+            self.emit(SpurEvent::now(SpurEventBody::SessionRetireComplete {
+                session: from_session,
+            }));
+            return RetireDisposition::Shutdown;
+        }
+
+        // Graceful retirement succeeded, so preserve the initialized ACP
+        // connection for same-kind reuse.
         *agent_connection = Some(ActiveConnection {
             transport: b.connection,
             brain_name: b.brain_name,
@@ -2338,13 +2792,10 @@ impl Orchestrator {
         });
 
         // 5. Emit SessionRetireComplete now that teardown is fully done.
-        //    `from_session` is guaranteed Some at this point (we would have
-        //    returned early above if brain was None).
-        if let Some(from) = from_session {
-            self.emit(SpurEvent::now(SpurEventBody::SessionRetireComplete {
-                session: from,
-            }));
-        }
+        self.emit(SpurEvent::now(SpurEventBody::SessionRetireComplete {
+            session: from_session,
+        }));
+        RetireDisposition::Retired
     }
 
     pub(super) async fn shutdown_active_brain(
@@ -2354,7 +2805,7 @@ impl Orchestrator {
         scheduler: &mut crate::scheduler::BrainScheduler,
         overflow: &crate::continuation_bridge::OverflowBuf,
     ) {
-        let Some(mut active_brain) = brain.take() else {
+        let Some(active_brain) = brain.take() else {
             drop(agent_connection.take());
             return;
         };
@@ -2370,51 +2821,8 @@ impl Orchestrator {
             reason: spur_acp::domain::events::BrainRetireReason::Shutdown,
         }));
         scheduler.note_session_swap(None, overflow);
-
-        if let Some(pump) = active_brain.notification_pump_handle.take() {
-            pump.abort();
-            drop(pump);
-        }
-        active_brain.delegation_handle.abort();
-        let delegation_handle = active_brain.delegation_handle;
-
-        // Dropping the transport is the immediate process-exit operation:
-        // native adapters synchronously kill their process group and Tokio
-        // child adapters use kill_on_drop.
-        let transport_ownership = (
-            active_brain.connection,
-            active_brain.attach_guard.take(),
-            agent_connection.take(),
-        );
-
-        let delegation_shutdown = async move {
-            let _ = delegation_handle.await;
-        };
-        let resource_shutdown = shutdown_brain_resources_immediately(
-            &active_brain.spur_session_id,
-            &mut active_brain.mcp_server,
-            Some(&mut active_brain.mcp_guard),
-            &self.worker_mcp_servers,
-        );
-        drop_transport_ownership_then_join(
-            transport_ownership,
-            delegation_shutdown,
-            resource_shutdown,
-        )
-        .await;
-
-        // A delegation that was already completing WorkerMcpServer::start
-        // may insert after the first resource sweep. Parent acknowledgement
-        // now proves every structurally nested delegation child has unwound,
-        // so no later insertion can race this final removal.
-        if let Some((_session, late_worker_server)) =
-            self.worker_mcp_servers
-                .remove(&spur_acp::BrainSessionId::from(
-                    active_brain.spur_session_id.clone(),
-                ))
-        {
-            late_worker_server.shutdown_immediately().await;
-        }
+        self.shutdown_taken_brain_immediately(active_brain, agent_connection)
+            .await;
     }
 
     fn acquire_attach_guard_for_load(
