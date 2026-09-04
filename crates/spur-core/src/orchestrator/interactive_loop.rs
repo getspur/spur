@@ -21,6 +21,36 @@ fn compute_first_last_user(entries: &[spur_acp::HistoryEntry]) -> (Option<String
     (first, last)
 }
 
+/// Admit synchronous interactive work only while the process-exit fence is
+/// open. Keeping the check and operation in one helper makes every call site
+/// explicit about work that must not start after shutdown is observable.
+fn admit_interactive_operation<T>(
+    shutdown: &tokio_util::sync::CancellationToken,
+    operation: impl FnOnce() -> T,
+) -> Option<T> {
+    if shutdown.is_cancelled() {
+        None
+    } else {
+        Some(operation())
+    }
+}
+
+/// Poll an asynchronous interactive operation with shutdown priority. A
+/// pre-cancelled token wins even when the operation is immediately ready.
+async fn await_interactive_operation<F>(
+    shutdown: &tokio_util::sync::CancellationToken,
+    operation: F,
+) -> Option<F::Output>
+where
+    F: std::future::Future,
+{
+    tokio::select! {
+        biased;
+        _ = shutdown.cancelled() => None,
+        output = operation => Some(output),
+    }
+}
+
 fn take_rendered_batch(
     drained_batch: &mut Option<crate::scheduler::DrainedBatch>,
     render_outcome: &mut Option<crate::continuation_bridge::RenderOutcome>,
@@ -468,10 +498,16 @@ impl Orchestrator {
             }
         }
 
-        let mut project_loop_runtime =
-            super::loop_runtime::ProjectLoopRuntimeSupervisor::start_for_orchestrator(&self);
+        let mut project_loop_runtime = admit_interactive_operation(&shutdown_token, || {
+            super::loop_runtime::ProjectLoopRuntimeSupervisor::start_for_orchestrator(&self)
+        })
+        .flatten();
 
-        loop {
+        'interactive: loop {
+            if shutdown_token.is_cancelled() {
+                break;
+            }
+
             // Mid-stream SwitchBrain sets this after cancel; apply on the next
             // top-of-loop pass so early-continue error paths still honor it.
             if let Some(name) = pending_brain_switch.take() {
@@ -489,15 +525,29 @@ impl Orchestrator {
 
             // ── (a) Drain overflow buffer so scheduler sees fresh state ──
             {
-                let mut over = overflow_continuations.lock().await;
+                let Some(mut over) =
+                    await_interactive_operation(&shutdown_token, overflow_continuations.lock())
+                        .await
+                else {
+                    break;
+                };
                 while let Some((_sid, c)) = over.pop_front() {
+                    if shutdown_token.is_cancelled() {
+                        break 'interactive;
+                    }
                     scheduler.push_continuation(c);
                 }
             }
 
             // ── (b) Ask scheduler what to do ────────────────────────────
             let now = std::time::Instant::now();
-            let action = scheduler.next(now);
+            let Some(action) = admit_interactive_operation(&shutdown_token, || scheduler.next(now))
+            else {
+                break;
+            };
+            if shutdown_token.is_cancelled() {
+                break;
+            }
 
             // ── (c) Idle: recv next input and dispatch immediately ───────
             if let crate::scheduler::ScheduledAction::IdleUntil { deadline } = action {
@@ -505,6 +555,7 @@ impl Orchestrator {
                     Some(deadline) => {
                         let deadline = tokio::time::Instant::from_std(deadline);
                         tokio::select! {
+                            biased;
                             _ = shutdown_token.cancelled() => break,
                             maybe = user_input_rx.recv() => match maybe {
                                 Some(input) => input,
@@ -514,6 +565,7 @@ impl Orchestrator {
                         }
                     }
                     None => tokio::select! {
+                        biased;
                         _ = shutdown_token.cancelled() => break,
                         maybe = user_input_rx.recv() => match maybe {
                             Some(i) => i,
@@ -521,6 +573,10 @@ impl Orchestrator {
                         },
                     },
                 };
+
+                if shutdown_token.is_cancelled() {
+                    break;
+                }
 
                 match raw {
                     InteractiveInput::WarmConnect => {
@@ -1850,7 +1906,12 @@ impl Orchestrator {
 
             // ── Lazy-spawn brain on first turn (or after crash) ─────────
             if brain.is_none() {
-                let result = match agent_connection.take() {
+                let Some(cached_connection) =
+                    admit_interactive_operation(&shutdown_token, || agent_connection.take())
+                else {
+                    break;
+                };
+                let result = match cached_connection {
                     Some(ActiveConnection {
                         transport: connection,
                         brain_name,
@@ -1876,6 +1937,13 @@ impl Orchestrator {
                         .await
                     }
                 };
+
+                if shutdown_token.is_cancelled() {
+                    if let Ok(spawned_brain) = result {
+                        brain = Some(spawned_brain);
+                    }
+                    break;
+                }
 
                 match result {
                     Ok(b) => {
@@ -1939,20 +2007,25 @@ impl Orchestrator {
                 spur_session = %spur_sid_for_log,
                 "orchestrator: dispatching session/prompt"
             );
-            // INV-C3 observable half: publish PromptDispatched on the funnel
-            // BEFORE the transport call. Pairs with upstream DelegationCompleted
-            // so subscribers can verify UI-before-model ordering via `seq`.
-            // Emitted for every dispatch (including `user_only`) so the event
-            // stream reflects every turn boundary.
-            self.funnel.emit(SpurEventBody::PromptDispatched {
-                session: spur_sid_for_log.clone(),
-                turn_kind: turn_kind.to_string(),
-                continuations_count,
-            });
-
             let _turn_guard = TurnGuard::arm(scheduler.turn_flag());
             let prompt_started_at = std::time::Instant::now();
-            let mut stream = match b.connection.prompt(prompt_request).await {
+            let prompt_result = await_interactive_operation(&shutdown_token, async {
+                // INV-C3 observable half: publish PromptDispatched on the
+                // funnel before the transport call. Keeping both inside the
+                // admitted future prevents either from starting after the
+                // shutdown fence closes.
+                self.funnel.emit(SpurEventBody::PromptDispatched {
+                    session: spur_sid_for_log.clone(),
+                    turn_kind: turn_kind.to_string(),
+                    continuations_count,
+                });
+                b.connection.prompt(prompt_request).await
+            })
+            .await;
+            let Some(prompt_result) = prompt_result else {
+                break 'interactive;
+            };
+            let mut stream = match prompt_result {
                 Ok(s) => {
                     if let Some((batch, outcome)) =
                         take_rendered_batch(&mut drained_batch, &mut render_outcome)
@@ -2053,6 +2126,7 @@ impl Orchestrator {
 
                 loop {
                     tokio::select! {
+                        biased;
                         _ = shutdown_token.cancelled() => {
                             stream_loop_shutdown = true;
                             break;

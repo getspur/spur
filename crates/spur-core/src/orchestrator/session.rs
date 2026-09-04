@@ -2,6 +2,20 @@ use super::*;
 
 const RETIRE_SESSION_COST_WRITE_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// Drop transport/process ownership synchronously, then wait for all owned
+/// asynchronous teardown acknowledgements as one barrier.
+async fn drop_transport_ownership_then_join<T, D, R>(
+    transport_ownership: T,
+    delegation_shutdown: D,
+    resource_shutdown: R,
+) where
+    D: std::future::Future<Output = ()>,
+    R: std::future::Future<Output = ()>,
+{
+    drop(transport_ownership);
+    tokio::join!(delegation_shutdown, resource_shutdown);
+}
+
 async fn retire_session_cost_write<T, F>(
     session_id: String,
     brain_id: String,
@@ -2277,9 +2291,11 @@ impl Orchestrator {
         // Dropping the transport is the immediate process-exit operation:
         // native adapters synchronously kill their process group and Tokio
         // child adapters use kill_on_drop.
-        drop(active_brain.connection);
-        drop(active_brain.attach_guard.take());
-        drop(agent_connection.take());
+        let transport_ownership = (
+            active_brain.connection,
+            active_brain.attach_guard.take(),
+            agent_connection.take(),
+        );
 
         let delegation_shutdown = async move {
             let _ = delegation_handle.await;
@@ -2290,7 +2306,12 @@ impl Orchestrator {
             Some(&mut active_brain.mcp_guard),
             &self.worker_mcp_servers,
         );
-        tokio::join!(delegation_shutdown, resource_shutdown);
+        drop_transport_ownership_then_join(
+            transport_ownership,
+            delegation_shutdown,
+            resource_shutdown,
+        )
+        .await;
     }
 
     fn acquire_attach_guard_for_load(
