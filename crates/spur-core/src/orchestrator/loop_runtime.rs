@@ -641,6 +641,39 @@ mod tests {
         }
     }
 
+    struct ModeSelectingRuntime {
+        graceful_calls: Arc<AtomicUsize>,
+        immediate_calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl ProjectLoopRuntimeInstance for ModeSelectingRuntime {
+        async fn shutdown(self: Box<Self>) -> ProjectLoopRuntimeDrain {
+            self.graceful_calls.fetch_add(1, Ordering::SeqCst);
+            std::future::pending().await
+        }
+
+        async fn shutdown_immediately(self: Box<Self>) -> ProjectLoopRuntimeDrain {
+            self.immediate_calls.fetch_add(1, Ordering::SeqCst);
+            ProjectLoopRuntimeDrain::completed()
+        }
+    }
+
+    struct ModeSelectingFactory {
+        graceful_calls: Arc<AtomicUsize>,
+        immediate_calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl ProjectLoopRuntimeFactory for ModeSelectingFactory {
+        async fn start(&self) -> anyhow::Result<Box<dyn ProjectLoopRuntimeInstance>> {
+            Ok(Box::new(ModeSelectingRuntime {
+                graceful_calls: Arc::clone(&self.graceful_calls),
+                immediate_calls: Arc::clone(&self.immediate_calls),
+            }))
+        }
+    }
+
     struct ControlledDrainRuntime {
         drain_started: Arc<Notify>,
         drain_release: Arc<Notify>,
@@ -788,6 +821,31 @@ mod tests {
         })
         .await
         .unwrap_or_else(|_| panic!("timed out waiting for {expected:?}"));
+    }
+
+    #[tokio::test]
+    async fn immediate_supervisor_shutdown_skips_graceful_runtime_drain() {
+        let dir = TempDir::new().expect("tempdir");
+        let graceful_calls = Arc::new(AtomicUsize::new(0));
+        let immediate_calls = Arc::new(AtomicUsize::new(0));
+        let factory = Arc::new(ModeSelectingFactory {
+            graceful_calls: Arc::clone(&graceful_calls),
+            immediate_calls: Arc::clone(&immediate_calls),
+        });
+        let mut supervisor = ProjectLoopRuntimeSupervisor::start_with(
+            dir.path().to_path_buf(),
+            factory,
+            filesystem_acquirer(),
+            Duration::from_millis(10),
+        );
+        wait_for_state(&supervisor, ProjectLoopRuntimeState::LeaderRunning).await;
+
+        tokio::time::timeout(Duration::from_secs(1), supervisor.shutdown_immediately())
+            .await
+            .expect("immediate supervisor shutdown selected the graceful drain");
+
+        assert_eq!(immediate_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(graceful_calls.load(Ordering::SeqCst), 0);
     }
 
     fn filesystem_acquirer() -> Arc<
