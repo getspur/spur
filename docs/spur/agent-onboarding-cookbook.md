@@ -34,7 +34,7 @@ kind = "claude-code-acp"   # or one of the values below
 |---|---|
 | Claude Code via `claude -p --output-format stream-json` | `"claude-stream-json"` |
 | Claude Code via `@agentclientprotocol/claude-agent-acp` | `"claude-code-acp"` |
-| Codex via `@agentclientprotocol/codex-acp@1.7.0` (global install or npx) | `"codex-acp"` |
+| Codex via `@agentclientprotocol/codex-acp@1.9.0` (global install or npx) | `"codex-acp"` |
 | Kiro CLI (`kiro-cli acp`) | `"kiro"` |
 | Gemini CLI (`gemini --acp`) | `"gemini"` |
 | xAI Grok Build CLI (`grok agent stdio`) | `"grok"` |
@@ -164,6 +164,38 @@ description = "Compact conversation history"
 ```
 
 Zero Rust. `/compact` appears in the popup immediately — submitting it sends `"/compact"` as a plain text prompt to codex.
+
+### Codex worker profile activation
+
+Codex ACP 1.9.0 advertises model, reasoning-effort, and collaboration options,
+but it does not advertise a profile option for the already-open primary
+session. A TUI `@worker` mention is advisory context for the brain, not an ACP
+request and not an automatic dispatch. For example:
+
+```text
+worker://codex?agent=reviewer&model=gpt-5.6-sol&effort=xhigh
+```
+
+maps to SPUR delegation arguments as follows:
+
+| Mention component | Delegation argument |
+|---|---|
+| Worker URI name `codex` | `agent = "codex"` |
+| URI query slot `agent=reviewer` | `profile = "reviewer"` |
+| `model=gpt-5.6-sol` | `model = "gpt-5.6-sol"` |
+| `effort=xhigh` | `effort = "xhigh"` |
+
+SPUR materializes the named profile for a fresh SPUR-managed worker and starts
+that worker with the requested model and effort. This does not mutate or switch
+the current brain session. To change the primary brain's startup profile, open
+a new connection/session with the desired startup configuration.
+
+Codex 0.153.2 can load role files for newly spawned Codex-native children, but
+the TUI mention does not invoke that native spawn path, and SPUR does not enable
+`multi_agent_v2` by default. Keeping mention activation on the SPUR-managed
+worker route preserves SPUR isolation and review semantics as well as the
+explicit model/effort request. The mention remains a preference, not an
+override: normal delegation suitability checks still apply.
 
 ## Worked example: Grok Build CLI
 

@@ -14,7 +14,7 @@ use crate::components::input_bar::ProtectedRange;
 #[derive(Clone, Eq, Ord, PartialEq, PartialOrd)]
 struct WorkerHint {
     name: String,
-    agent: Option<String>,
+    profile: Option<String>,
     model: Option<String>,
     effort: Option<String>,
 }
@@ -32,7 +32,7 @@ impl WorkerHint {
 
         let mut hint = Self {
             name: name.to_string(),
-            agent: None,
+            profile: None,
             model: None,
             effort: None,
         };
@@ -45,7 +45,7 @@ impl WorkerHint {
                     continue;
                 }
                 match key {
-                    "agent" => hint.agent = Some(value.to_string()),
+                    "agent" => hint.profile = Some(value.to_string()),
                     "model" => hint.model = Some(value.to_string()),
                     "effort" => hint.effort = Some(value.to_string()),
                     _ => {}
@@ -56,14 +56,18 @@ impl WorkerHint {
     }
 
     fn is_enriched(&self) -> bool {
-        self.agent.is_some() || self.model.is_some() || self.effort.is_some()
+        self.profile.is_some() || self.model.is_some() || self.effort.is_some()
     }
 
     fn render(&self) -> String {
-        let mut rendered = self.name.clone();
+        let mut rendered = if self.is_enriched() {
+            format!("agent={}", self.name)
+        } else {
+            self.name.clone()
+        };
         let mut params = Vec::new();
-        if let Some(agent) = &self.agent {
-            params.push(format!("agent={agent}"));
+        if let Some(profile) = &self.profile {
+            params.push(format!("profile={profile}"));
         }
         if let Some(model) = &self.model {
             params.push(format!("model={model}"));
@@ -82,7 +86,7 @@ impl WorkerHint {
 
 /// Builds the hint by collecting `worker://<name>` URIs from `ranges`,
 /// keeping only names present in `known_workers`, then sorting and
-/// deduplicating exact worker/agent/model/effort tuples (sort-then-dedup
+/// deduplicating exact worker/profile/model/effort tuples (sort-then-dedup
 /// is required because `Vec::dedup` only removes *consecutive*
 /// duplicates).
 ///
@@ -111,7 +115,10 @@ pub fn prepend_worker_hint(
         format!(
             "[UI hint] User-suggested workers for delegation this turn: {mentions} \
              (preference, not override; honor unless delegation.avoid_for clearly matches, \
-             or the task needs a different combination)."
+             or the task needs a different combination). Use SPUR worker delegation: \
+             worker maps to `agent`, agent selection maps to `profile`, and model/effort \
+             pass through unchanged; profile activation starts a fresh SPUR worker session \
+             and does not switch the current brain session."
         )
     } else {
         format!(
@@ -218,11 +225,9 @@ mod tests {
     }
 
     #[test]
-    fn enriched_worker_tuple_includes_selected_agent_model_and_effort() {
+    fn enriched_worker_hint_maps_worker_to_agent_and_preserves_model_and_effort() {
         let mut blocks: Vec<ContentBlock> = vec![ContentBlock::Text(TextContent::new("user text"))];
-        let ranges = vec![range(
-            "worker://codex?agent=spur-narrow-implementer&model=gpt-5.5&effort=low",
-        )];
+        let ranges = vec![range("worker://codex?model=gpt-5.6-sol&effort=xhigh")];
         let known = known(&["codex"]);
         let prepended = prepend_worker_hint(&mut blocks, &ranges, &known);
         assert!(prepended);
@@ -230,10 +235,35 @@ mod tests {
         assert_eq!(
             hint_text(&blocks),
             Some(
-                "[UI hint] User-suggested workers for delegation this turn: codex \
-                 (agent=spur-narrow-implementer, model=gpt-5.5, effort=low) \
+                "[UI hint] User-suggested workers for delegation this turn: agent=codex \
+                 (model=gpt-5.6-sol, effort=xhigh) \
                  (preference, not override; honor unless delegation.avoid_for clearly matches, \
-                 or the task needs a different combination)."
+                 or the task needs a different combination). Use SPUR worker delegation: \
+                 worker maps to `agent`, agent selection maps to `profile`, and model/effort \
+                 pass through unchanged; profile activation starts a fresh SPUR worker session \
+                 and does not switch the current brain session."
+            )
+        );
+    }
+
+    #[test]
+    fn enriched_worker_hint_explains_profile_activation_boundary() {
+        let mut blocks: Vec<ContentBlock> = vec![ContentBlock::Text(TextContent::new("user text"))];
+        let ranges = vec![range(
+            "worker://codex?agent=reviewer&model=gpt-5.6-sol&effort=xhigh",
+        )];
+        let known = known(&["codex"]);
+        assert!(prepend_worker_hint(&mut blocks, &ranges, &known));
+        assert_eq!(
+            hint_text(&blocks),
+            Some(
+                "[UI hint] User-suggested workers for delegation this turn: agent=codex \
+                 (profile=reviewer, model=gpt-5.6-sol, effort=xhigh) \
+                 (preference, not override; honor unless delegation.avoid_for clearly matches, \
+                 or the task needs a different combination). Use SPUR worker delegation: \
+                 worker maps to `agent`, agent selection maps to `profile`, and model/effort \
+                 pass through unchanged; profile activation starts a fresh SPUR worker session \
+                 and does not switch the current brain session."
             )
         );
     }
@@ -252,11 +282,14 @@ mod tests {
         assert_eq!(
             hint_text(&blocks),
             Some(
-                "[UI hint] User-suggested workers for delegation this turn: codex \
-                 (agent=spur-narrow-implementer), opencode \
+                "[UI hint] User-suggested workers for delegation this turn: agent=codex \
+                 (profile=spur-narrow-implementer), agent=opencode \
                  (model=claude-sonnet-4, effort=high) \
                  (preference, not override; honor unless delegation.avoid_for clearly matches, \
-                 or the task needs a different combination)."
+                 or the task needs a different combination). Use SPUR worker delegation: \
+                 worker maps to `agent`, agent selection maps to `profile`, and model/effort \
+                 pass through unchanged; profile activation starts a fresh SPUR worker session \
+                 and does not switch the current brain session."
             )
         );
     }
@@ -276,10 +309,13 @@ mod tests {
         assert_eq!(
             hint_text(&blocks),
             Some(
-                "[UI hint] User-suggested workers for delegation this turn: codex \
-                 (model=gpt-5.5, effort=high), codex (model=gpt-5.5, effort=low) \
+                "[UI hint] User-suggested workers for delegation this turn: agent=codex \
+                 (model=gpt-5.5, effort=high), agent=codex (model=gpt-5.5, effort=low) \
                  (preference, not override; honor unless delegation.avoid_for clearly matches, \
-                 or the task needs a different combination)."
+                 or the task needs a different combination). Use SPUR worker delegation: \
+                 worker maps to `agent`, agent selection maps to `profile`, and model/effort \
+                 pass through unchanged; profile activation starts a fresh SPUR worker session \
+                 and does not switch the current brain session."
             )
         );
     }
